@@ -9,7 +9,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
-import type { Reporter } from '@cupboard/reporter';
+import { type Reporter, type ResultPayload } from '@cupboard/reporter';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -31,6 +31,7 @@ import {
 	RootNameInvalidError,
 	UrlInputInvalidError
 } from '../errors.ts';
+import { publishReferenceTargets } from '../plan-reference.ts';
 import {
 	type Cohort,
 	joinRoot,
@@ -121,6 +122,43 @@ const baseOptions: PlanOptions = {
 };
 
 describe('planAction', () => {
+	it.each([
+		'https://other.example/t/acme',
+		'https://cupboard.example/t/other',
+		'https://cupboard.example/t/acme/reuse/other'
+	])('rejects reference source %s before any I/O', async (referenceSource) => {
+		const evaluator = vi.fn(() =>
+			Promise.reject(new Error('unexpected evaluation'))
+		);
+		const runner = vi.fn(() => Promise.resolve({ stdout: '', stderr: '' }));
+		const fetcher = vi.fn(() => Promise.resolve(new Response('{}')));
+		await expect(
+			planAction(
+				{
+					...baseOptions,
+					optimise: 'true',
+					referenceSource,
+					fallbackReadUser: 'reader',
+					fallbackReadPassword: 'private-source-password'
+				},
+				{ RUNNER_TEMP: '/tmp' },
+				undefined,
+				{
+					evaluator,
+					runner,
+					fetcher,
+					storeDirectory: storeDirectorySchema.parse('/nix/store'),
+					buildSettings: { systems: ['x86_64-linux'], features: [] }
+				}
+			)
+		).rejects.toMatchObject({ name: 'ReferenceSourceInvalidError' });
+		expect({
+			evaluations: evaluator.mock.calls,
+			runs: runner.mock.calls,
+			probes: fetcher.mock.calls
+		}).toStrictEqual({ evaluations: [], runs: [], probes: [] });
+	});
+
 	it.each([
 		{ optimise: 'true', remote: true, builders: undefined },
 		{ optimise: 'false', remote: true, builders: undefined },
@@ -994,6 +1032,9 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		permanent: false,
 		readUser: '',
 		readPassword: '',
+		referenceSource: '',
+		fallbackReadUser: '',
+		fallbackReadPassword: '',
 		audience: 'https://cupboard.example/t/acme',
 		cupboardPath: '/unused/cupboard',
 		planFile: '/unused/cupboard-publish-plan.json',
@@ -1204,6 +1245,49 @@ describe('cohortPreFilter', () => {
 	const developmentPath = storePath(`/nix/store/${'2'.repeat(32)}-dev`);
 	const changedPath = storePath(`/nix/store/${'3'.repeat(32)}-changed`);
 	const firstRoot = 'github:owner/repo/main/first';
+
+	it('keeps a duplicate-attribute cohort when one retention root is missing', async () => {
+		const first = evaluation('first', outPath);
+		const second: TargetEvaluation = {
+			...evaluation('second', developmentPath),
+			target: { ...first.target, rootSuffix: 'second', outputs: ['dev'] }
+		};
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([first, second])] },
+			[first, second],
+			preFilterRunner({
+				targetsByRoot: new Map([
+					[firstRoot, []],
+					['github:owner/repo/main/second', [developmentPath]]
+				]),
+				ensureRetainedRoots: new Set(['github:owner/repo/main/second'])
+			})
+		);
+		expect(decisions).toStrictEqual([{ key: 'cohort-first', pruned: false }]);
+	});
+
+	it('distinguishes selected outputs of the same component attribute under one root', async () => {
+		const initial = evaluation('first', developmentPath);
+		const first: TargetEvaluation = {
+			...initial,
+			target: { ...initial.target, outputs: ['dev'] }
+		};
+		const second: TargetEvaluation = {
+			...evaluation('first', outPath),
+			target: { ...first.target, outputs: ['out'] }
+		};
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([first, second])] },
+			[first, second],
+			preFilterRunner({
+				targetsByRoot: new Map([[firstRoot, [outPath]]]),
+				ensureRetainedRoots: new Set([firstRoot])
+			})
+		);
+		expect(decisions).toStrictEqual([{ key: 'cohort-first', pruned: false }]);
+	});
 
 	it('propagates cancellation instead of recording it as an advisory failure', async () => {
 		const first = evaluation('first', outPath);
@@ -2079,6 +2163,39 @@ describe('packingMeasurer', () => {
 		}
 	);
 
+	it.each([true, false])(
+		'skips ambiguous packing measurements for targets with the same attribute when both evaluated=%s',
+		async (bothEvaluated) => {
+			const first = evaluation('first', outPath);
+			const second: TargetEvaluation = {
+				...evaluation('second', developmentPath),
+				target: { ...first.target, rootSuffix: 'second', outputs: ['dev'] }
+			};
+			const runner = vi.fn(() => Promise.resolve({ stdout: '', stderr: '' }));
+			const warnings: string[] = [];
+			const measurer = packingMeasurer(
+				planInputs({ temporaryDirectory: directory }),
+				warningReporter(warnings),
+				runner
+			);
+			const measurements = await measurer(
+				[singleCohort([first, second])],
+				bothEvaluated ? [first, second] : [first]
+			);
+			expect({
+				measurements,
+				calls: runner.mock.calls,
+				warnings
+			}).toStrictEqual({
+				measurements: new Map(),
+				calls: [],
+				warnings: [
+					'Packing measurement skipped because multiple targets use the same attribute'
+				]
+			});
+		}
+	);
+
 	it('never runs the command when no cohort target has an evaluated installable', async () => {
 		const first = evaluation('first', outPath);
 		const measurer = packingMeasurer(
@@ -2126,6 +2243,583 @@ describe('packingMeasurer', () => {
 			measurements: new Map(),
 			warningCount: 1
 		});
+	});
+});
+
+describe('plan-job reference publication', () => {
+	it.each([
+		{
+			name: 'missing reference cache',
+			available: false,
+			fails: false,
+			status: 'unavailable',
+			fetchStatus: 404
+		},
+		{
+			name: 'served target',
+			available: true,
+			fails: false,
+			status: 'published'
+		},
+		{
+			name: 'missing target',
+			available: false,
+			fails: false,
+			status: 'unavailable'
+		},
+		{
+			name: 'failed publication',
+			available: true,
+			fails: true,
+			status: 'failed'
+		}
+	])(
+		'keeps an advisory receipt for $name',
+		async ({ available, fails, status, fetchStatus }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-plan-reference-')
+			);
+			const outputPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+			const inputs: PlanInputs = {
+				...resolvePlanInputs(baseOptions, { RUNNER_TEMP: directory }),
+				targets: [evaluation('app', outputPath).target],
+				referenceSource: 'https://cupboard.example/t/acme',
+				fallbackReadUser: '',
+				fallbackReadPassword: ''
+			};
+			const calls: {
+				root: string | undefined;
+				source: string | undefined;
+				paths: string;
+			}[] = [];
+			const runner: EnsureRunner = async (_command, arguments_) => {
+				calls.push({
+					root: arguments_[arguments_.indexOf('--root') + 1],
+					source: arguments_[arguments_.indexOf('--reference-source') + 1],
+					paths: await readFile(
+						arguments_[arguments_.indexOf('--reference-paths-file') + 1] ?? '',
+						'utf8'
+					)
+				});
+				if (fails) {
+					throw new Error('source changed');
+				}
+				const resultFile = arguments_[arguments_.indexOf('--result-file') + 1];
+				if (resultFile === undefined) {
+					throw new Error('result file missing');
+				}
+				await writeFile(
+					resultFile,
+					JSON.stringify({
+						kind: 'push-summary',
+						data: {
+							uploadedPaths: 0,
+							reusedBlobs: 1,
+							skipped: 0,
+							uploadedBytes: 0,
+							failures: [],
+							paths: [
+								{
+									storePathHash: '1'.repeat(32),
+									storePath: outputPath,
+									outcome: 'committed'
+								}
+							]
+						}
+					}) + '\n'
+				);
+				return { stdout: '', stderr: '' };
+			};
+			const outcomes = await publishReferenceTargets(
+				inputs,
+				[evaluation('app', outputPath)],
+				{
+					runner,
+					fetcher: () =>
+						Promise.resolve(
+							Response.json(
+								{ missingStorePathHashes: available ? [] : ['1'.repeat(32)] },
+								{ status: fetchStatus ?? 200 }
+							)
+						)
+				}
+			);
+			expect({ outcomes, calls }).toStrictEqual({
+				outcomes: [
+					{
+						attr: '.#app',
+						root: 'github:owner/repo/main/app',
+						source: inputs.referenceSource,
+						paths: [outputPath],
+						status,
+						...(fails && { reason: 'source changed' })
+					}
+				],
+				calls: available
+					? [
+							{
+								root: 'github:owner/repo/main/app',
+								source: inputs.referenceSource,
+								paths: outputPath + '\n'
+							}
+						]
+					: []
+			});
+		}
+	);
+
+	it.each([
+		{ build: 'rebuild', publish: 'outputs' },
+		{ build: 'missing', publish: 'built' },
+		{ build: 'missing', publish: 'closure' },
+		{ build: 'missing', publish: 'none' }
+	] as const)(
+		'does not prune with build=$build, publish=$publish',
+		async ({ build, publish }) => {
+			const runner = vi.fn(() => Promise.resolve({ stdout: '', stderr: '' }));
+			const fetcher = vi.fn(() => Promise.resolve(new Response('{}')));
+			const outputPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+			const inputs: PlanInputs = {
+				...resolvePlanInputs(baseOptions, { RUNNER_TEMP: '/tmp' }),
+				targets: [evaluation('app', outputPath).target],
+				referenceSource: 'https://cupboard.example/t/acme',
+				fallbackReadUser: '',
+				fallbackReadPassword: '',
+				build,
+				publish
+			};
+			const outcomes = await publishReferenceTargets(
+				inputs,
+				[evaluation('app', outputPath)],
+				{ runner, fetcher }
+			);
+			expect({
+				outcomes,
+				calls: runner.mock.calls,
+				probes: fetcher.mock.calls
+			}).toStrictEqual({ outcomes: [], calls: [], probes: [] });
+		}
+	);
+});
+
+it('keeps all components of a root when one component did not evaluate', async () => {
+	const pathValue = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+	const first = evaluation('app', pathValue);
+	const sibling = { ...first.target, attr: '.#other-component' };
+	const inputs = planInputs({
+		targets: [first.target, sibling],
+		referenceSource: 'https://cupboard.example/t/acme'
+	});
+	const runner = vi.fn(() => Promise.resolve({ stdout: '', stderr: '' }));
+	const fetcher = vi.fn(() =>
+		Promise.resolve(Response.json({ missingStorePathHashes: [] }))
+	);
+	const outcomes = await publishReferenceTargets(inputs, [first], {
+		runner,
+		fetcher
+	});
+	expect({
+		outcomes,
+		calls: runner.mock.calls,
+		probes: fetcher.mock.calls
+	}).toStrictEqual({ outcomes: [], calls: [], probes: [] });
+});
+
+it.each([
+	{ name: 'all targets served', duplicate: false, missingSecond: false },
+	{
+		name: 'same attribute with a missing output',
+		duplicate: true,
+		missingSecond: true
+	}
+])(
+	'prunes only successful reference targets from the matrix: $name',
+	async ({ duplicate, missingSecond }) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-plan-reference-integration-')
+		);
+		const firstPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+		const secondPath = storePath(`/nix/store/${'2'.repeat(32)}-dev`);
+		const targets = [
+			{ ...target, rootSuffix: 'app/out', outputs: ['out'] },
+			{
+				...target,
+				attr: duplicate ? target.attr : secondTarget.attr,
+				rootSuffix: 'app/dev',
+				outputs: ['dev']
+			}
+		];
+		const evaluator: NixEvaluator = () =>
+			Promise.resolve({
+				stdout: JSON.stringify({
+					derivations: {
+						[targetRootDrvPath]: {
+							env: { out: firstPath, dev: secondPath },
+							inputs: { drvs: {} },
+							outputs: {
+								out: { path: firstPath },
+								dev: { path: secondPath }
+							}
+						}
+					}
+				})
+			});
+		const results: ResultPayload[] = [];
+		const reporter = {
+			...warningReporter([]),
+			result: (payload: ResultPayload) => {
+				results.push(payload);
+			}
+		};
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			const resultFile = resultFileArgument(arguments_);
+			if (!arguments_.includes('push')) {
+				await writeFile(resultFile, rootTargetsResultLine([]));
+				return { stdout: '', stderr: '' };
+			}
+			const file = arguments_[arguments_.indexOf('--reference-paths-file') + 1];
+			if (file === undefined) {
+				throw new Error('reference paths file missing');
+			}
+			const pathText = await readFile(file, 'utf8');
+			const paths = pathText.trim().split('\n');
+			await writeFile(
+				resultFile,
+				JSON.stringify({
+					kind: 'push-summary',
+					data: {
+						uploadedPaths: 0,
+						uploadedBytes: 0,
+						reusedBlobs: paths.length,
+						skipped: 0,
+						failures: [],
+						paths: paths.map((storePathValue) => ({
+							storePathHash: storePathValue.split('/').at(-1)?.slice(0, 32),
+							storePath: storePathValue,
+							outcome: 'committed'
+						}))
+					}
+				}) + '\n'
+			);
+			return { stdout: '', stderr: '' };
+		};
+		const output = path.join(directory, 'output');
+		await planAction(
+			{
+				...baseOptions,
+				targets: JSON.stringify(targets),
+				cache: 'pr-cache',
+				optimise: 'true',
+				referenceSource: 'https://cupboard.example/t/acme'
+			},
+			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output },
+			reporter,
+			{
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				evaluator,
+				runner,
+				fetcher: (url) =>
+					Promise.resolve(
+						Response.json({
+							missingStorePathHashes: (typeof url === 'string'
+								? url
+								: url instanceof URL
+									? url.href
+									: url.url
+							).includes('/cache/pr-cache/')
+								? ['1'.repeat(32), '2'.repeat(32)]
+								: missingSecond
+									? ['2'.repeat(32)]
+									: []
+						})
+					),
+				createArtifactName: () => 'reference-plan-test'
+			}
+		);
+		const recorded = await readFile(output, 'utf8');
+		const matrixLine = recorded
+			.split('\n')
+			.find((line) => line.startsWith('cohort-matrix='));
+		const matrixValue: unknown = JSON.parse(
+			matrixLine?.slice('cohort-matrix='.length) ?? '{}'
+		);
+		const summary = results.find(
+			(result) => result.kind === 'publication-plan'
+		);
+		const summaryCommon = {
+			system: 'x86_64-linux',
+			runner: 'ubuntu-latest',
+			builder: 'remote builders',
+			bestEffort: false
+		};
+		expect({ matrix: matrixValue, summary: summary?.data }).toStrictEqual({
+			matrix: {
+				include: missingSecond
+					? [
+							{
+								key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+								name: 'app/dev on remote builders',
+								attrs: [target.attr],
+								installables: [`${target.attr}^dev`],
+								queryInstallables: [`${targetRootDrvPath}^dev`],
+								expectedPaths: [secondPath],
+								system: 'x86_64-linux',
+								os: 'ubuntu-latest',
+								remote: true,
+								bestEffort: false,
+								runsOn: 'ubuntu-latest',
+								roots: ['github:owner/repo/main/app/dev']
+							}
+						]
+					: []
+			},
+			summary: missingSecond
+				? [
+						{
+							...summaryCommon,
+							job: 'app/dev on remote builders',
+							attr: target.attr,
+							decision: 'cohort'
+						},
+						{
+							...summaryCommon,
+							job: 'None',
+							attr: target.attr,
+							decision: 'reference'
+						}
+					]
+				: [
+						{
+							...summaryCommon,
+							job: 'None',
+							attr: target.attr,
+							decision: 'reference'
+						},
+						{
+							...summaryCommon,
+							job: 'None',
+							attr: secondTarget.attr,
+							decision: 'reference'
+						}
+					]
+		});
+	}
+);
+
+it.each(['outputs', 'built'] as const)(
+	'keeps cached dependency publication in the cohort with publish=%s',
+	async (publish) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-plan-cached-dependencies-')
+		);
+		const appPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+		const toolDrvPath = storePath(`/nix/store/${'2'.repeat(32)}-tool.drv`);
+		const toolPath = storePath(`/nix/store/${'2'.repeat(32)}-tool`);
+		const referencePushes: string[][] = [];
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			if (!arguments_.includes('push')) {
+				await writeFile(
+					resultFileArgument(arguments_),
+					rootTargetsResultLine([])
+				);
+				return { stdout: '', stderr: '' };
+			}
+			referencePushes.push([
+				argumentAfter(arguments_, '--reference-source'),
+				await readFile(
+					argumentAfter(arguments_, '--reference-paths-file'),
+					'utf8'
+				)
+			]);
+			await writeFile(
+				resultFileArgument(arguments_),
+				JSON.stringify({
+					kind: 'push-summary',
+					data: {
+						uploadedPaths: 0,
+						uploadedBytes: 0,
+						reusedBlobs: 1,
+						skipped: 0,
+						failures: [],
+						paths: [
+							{
+								storePathHash: '1'.repeat(32),
+								storePath: appPath,
+								outcome: 'committed'
+							}
+						]
+					}
+				}) + '\n'
+			);
+			return { stdout: '', stderr: '' };
+		};
+		const output = path.join(directory, 'output');
+		await planAction(
+			{
+				...baseOptions,
+				cache: 'pr-cache',
+				optimise: 'true',
+				publish,
+				referenceSource: 'https://cupboard.example/t/acme'
+			},
+			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output },
+			warningReporter([]),
+			{
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				runner,
+				evaluator: () =>
+					Promise.resolve({
+						stdout: JSON.stringify({
+							derivations: {
+								[targetRootDrvPath]: {
+									env: { out: appPath },
+									inputs: {
+										drvs: {
+											[toolDrvPath]: { dynamicOutputs: {}, outputs: ['out'] }
+										}
+									},
+									outputs: { out: { path: appPath } }
+								},
+								[toolDrvPath]: {
+									env: { out: toolPath },
+									inputs: { drvs: {} },
+									outputs: { out: { path: toolPath } }
+								}
+							}
+						})
+					}),
+				fetcher: (input) => {
+					const url = input instanceof Request ? input.url : String(input);
+
+					return Promise.resolve(
+						Response.json({
+							missingStorePathHashes: url.includes('/cache/pr-cache/')
+								? ['1'.repeat(32)]
+								: []
+						})
+					);
+				},
+				createArtifactName: () => 'cached-dependency-plan-test'
+			}
+		);
+		const recorded = await readFile(output, 'utf8');
+		const matrix: unknown = JSON.parse(
+			recorded
+				.split('\n')
+				.find((line) => line.startsWith('cohort-matrix='))
+				?.slice('cohort-matrix='.length) ?? '{}'
+		);
+		expect({ matrix, referencePushes }).toStrictEqual({
+			matrix: {
+				include:
+					publish === 'outputs'
+						? []
+						: [
+								{
+									key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+									name: 'x86_64-linux/app on remote builders',
+									attrs: [target.attr],
+									installables: [`${target.attr}^out`],
+									queryInstallables: [`${targetRootDrvPath}^out`],
+									expectedPaths: [appPath],
+									system: 'x86_64-linux',
+									os: 'ubuntu-latest',
+									remote: true,
+									bestEffort: false,
+									runsOn: 'ubuntu-latest',
+									roots: ['github:owner/repo/main/x86_64-linux/app']
+								}
+							]
+			},
+			referencePushes:
+				publish === 'outputs'
+					? [['https://cupboard.example/t/acme', `${appPath}\n`]]
+					: []
+		});
+	}
+);
+
+it('keeps duplicate-attribute output paths when reference publication is unavailable', async () => {
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-plan-identity-')
+	);
+	const outPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+	const developmentPath = storePath(`/nix/store/${'2'.repeat(32)}-dev`);
+	const targets = ['out', 'dev'].map((output) => ({
+		...target,
+		remote: false,
+		cohort: 'shared',
+		rootSuffix: `app/${output}`,
+		outputs: [output]
+	}));
+	const evaluator: NixEvaluator = () =>
+		Promise.resolve({
+			stdout: JSON.stringify({
+				derivations: {
+					[targetRootDrvPath]: {
+						env: { out: outPath, dev: developmentPath },
+						inputs: { drvs: {} },
+						outputs: { out: { path: outPath }, dev: { path: developmentPath } }
+					}
+				}
+			})
+		});
+	const output = path.join(directory, 'output');
+	await planAction(
+		{
+			...baseOptions,
+			targets: JSON.stringify(targets),
+			cache: 'pr-cache',
+			optimise: 'true',
+			referenceSource: 'https://cupboard.example/t/acme'
+		},
+		{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output },
+		warningReporter([]),
+		{
+			storeDirectory: storeDirectorySchema.parse('/nix/store'),
+			evaluator,
+			runner: preFilterRunner({
+				targetsByRoot: new Map([
+					['github:owner/repo/main/app/dev', [developmentPath]]
+				]),
+				ensureRetainedRoots: new Set(['github:owner/repo/main/app/dev'])
+			}),
+			fetcher: () =>
+				Promise.resolve(
+					Response.json({ missingStorePathHashes: ['1'.repeat(32)] })
+				)
+		}
+	);
+	const recorded = await readFile(output, 'utf8');
+	const line = recorded
+		.split('\n')
+		.find((value) => value.startsWith('cohort-matrix='));
+	const matrix: unknown = JSON.parse(
+		line?.slice('cohort-matrix='.length) ?? '{}'
+	);
+	expect(matrix).toStrictEqual({
+		include: [
+			{
+				key: 'cohort-x86_64-linux-ubuntu-latest-local-87cfdb0b48babb63',
+				name: 'x86_64-linux on ubuntu-latest (2 targets)',
+				attrs: [target.attr, target.attr],
+				installables: [`${target.attr}^out`, `${target.attr}^dev`],
+				queryInstallables: [
+					`${targetRootDrvPath}^out`,
+					`${targetRootDrvPath}^dev`
+				],
+				expectedPaths: [outPath, developmentPath],
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: false,
+				bestEffort: false,
+				runsOn: 'ubuntu-latest',
+				roots: [
+					'github:owner/repo/main/app/out',
+					'github:owner/repo/main/app/dev'
+				]
+			}
+		]
 	});
 });
 

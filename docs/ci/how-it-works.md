@@ -76,6 +76,16 @@ presence does not decide whether to build. With `build: rebuild`, each requested
 output is built again on the configured builder, even if it is already
 available. Nix may still substitute dependencies.
 
+When a reference source is configured, the plan job also probes predictable
+single-output targets in that cache. With `build: missing` and
+`publish: outputs`, it publishes available targets by reference, sets their
+retention roots, and removes those targets from the cohort matrix. A shared
+component root is published only when every component is available. A failed
+probe or publication leaves the affected targets in their cohorts. The plan
+receipt and summary record the publications; a cohort with no remaining targets
+does not start. Each remaining cohort keeps its independent drift check and
+calculates its own build set.
+
 If you turn on `enable-packing`, the plan works differently. It measures the
 size of each target's closure, and packs small unlabelled cohorts into as few
 jobs as will fit within `pack-capacity` bytes of disk.

@@ -8,6 +8,16 @@ import {
 } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
+export class ReferenceSourceInvalidError extends UsageError {
+	constructor(cause?: unknown) {
+		super(
+			'reference-source must select a cache in the destination tenant and cannot be combined with reuse-view',
+			{ cause }
+		);
+		this.name = 'ReferenceSourceInvalidError';
+	}
+}
+
 export class MissingInputError extends UsageError {
 	constructor(public readonly input: string) {
 		super(`${input} is required`);
@@ -22,7 +32,7 @@ export class CacheNameInvalidError extends UsageError {
 	}
 }
 
-export type UrlInputName = 'cache-url' | 'url';
+export type UrlInputName = 'cache-url' | 'reference-source' | 'url';
 
 export class UrlInputInvalidError extends UsageError {
 	constructor(public readonly input: UrlInputName) {
@@ -1276,6 +1286,13 @@ export class DerivationNodeMissingError extends CodedError {
 			`Invalid derivation graph for ${attribute}: does not contain ${drvPath}`
 		);
 		this.name = 'DerivationNodeMissingError';
+	}
+}
+
+export class PlanReferencePublicationIncompleteError extends CodedError {
+	constructor(public readonly root: string) {
+		super(`Reference publication did not complete root ${root}`);
+		this.name = 'PlanReferencePublicationIncompleteError';
 	}
 }
 

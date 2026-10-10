@@ -5,6 +5,7 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { discoverNixStoreConfig, type NixBuildSettings } from '@cupboard/nix';
+import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import {
 	type CacheScope,
 	rootNameMaxLength,
@@ -58,6 +59,7 @@ import {
 	PublishTargetsSchemaError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
+	ReferenceSourceInvalidError,
 	RemoteOutputPathUnknownDuringPlanningError,
 	RetentionChoiceConflictError,
 	RootEnsureCommandError,
@@ -79,6 +81,10 @@ import {
 } from '../options.ts';
 import { packCohorts } from '../packing.ts';
 import {
+	type PlanReferenceOutcome,
+	publishReferenceTargets
+} from '../plan-reference.ts';
+import {
 	availableCachePaths,
 	cacheProbePaths,
 	type Cohort,
@@ -96,7 +102,8 @@ import {
 	type PublishTarget,
 	publishTargetsSchema,
 	type TargetCoverage,
-	type TargetEvaluation
+	type TargetEvaluation,
+	targetIdentityKey
 } from '../publish-plan.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
@@ -235,6 +242,9 @@ export interface PlanOptions {
 	readonly permanent?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
+	readonly referenceSource?: string;
+	readonly fallbackReadUser?: string;
+	readonly fallbackReadPassword?: string;
 	readonly audience?: string;
 	readonly cupboardPath?: string;
 	readonly planFile?: string;
@@ -257,6 +267,9 @@ export interface PlanInputs {
 	readonly permanent: boolean;
 	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
+	readonly referenceSource: string;
+	readonly fallbackReadUser: ReadUser | '';
+	readonly fallbackReadPassword: string;
 	readonly audience: string;
 	readonly cupboardPath: string;
 	readonly planFile: string;
@@ -332,6 +345,15 @@ export function registerPlanCommand(
 		)
 		.option('--read-user <user>', 'username for cache reads')
 		.option('--read-password <password>', 'password for cache reads')
+		.option(
+			'--reference-source <url>',
+			'cache URL to publish unchanged targets from'
+		)
+		.option('--fallback-read-user <user>', 'username for the reference source')
+		.option(
+			'--fallback-read-password <password>',
+			'password for the reference source'
+		)
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option('--plan-file <path>', 'destination for the detailed JSON plan')
 		.option(
@@ -389,6 +411,27 @@ export function resolvePlanInputs(
 		throw new MissingInputError('url');
 	}
 
+	const referenceSource = providedUrl(
+		'reference-source',
+		options.referenceSource
+	);
+	if (referenceSource !== undefined) {
+		try {
+			const source = parseTenantCacheUrl(referenceSource);
+			const destination = parseTenantCacheUrl(url);
+			if (
+				canonicalHref(source.tenantUrl) !== canonicalHref(destination.tenantUrl)
+			) {
+				throw new ReferenceSourceInvalidError();
+			}
+		} catch (error) {
+			if (error instanceof ReferenceSourceInvalidError) {
+				throw error;
+			}
+			throw new ReferenceSourceInvalidError(error);
+		}
+	}
+
 	const rootPrefix = provided(options.rootPrefix);
 
 	if (rootPrefix === undefined) {
@@ -418,6 +461,15 @@ export function resolvePlanInputs(
 		throw new ReadUserRequiredError();
 	}
 
+	const fallbackReadUser = providedReadUser(options.fallbackReadUser);
+	const fallbackReadPassword = options.fallbackReadPassword ?? '';
+	if (fallbackReadUser !== '' && fallbackReadPassword === '') {
+		throw new ReadPasswordRequiredError();
+	}
+	if (fallbackReadPassword !== '' && fallbackReadUser === '') {
+		throw new ReadUserRequiredError();
+	}
+
 	const temporaryDirectory = requireEnvironment(environment, 'RUNNER_TEMP');
 	const isPackingEnabled = isEnabled(
 		'enable-packing',
@@ -441,6 +493,10 @@ export function resolvePlanInputs(
 		permanent: isPermanent,
 		readUser,
 		readPassword,
+		referenceSource:
+			referenceSource === undefined ? '' : canonicalHref(referenceSource),
+		fallbackReadUser,
+		fallbackReadPassword,
 		audience: provided(options.audience) ?? '',
 		cupboardPath,
 		optimise: isEnabled('optimise', options.optimise, true),
@@ -599,9 +655,13 @@ export async function planAction(
 		throw new BuiltPublicationObservationUnsupportedError();
 	}
 
-	const { plan, evaluations } = inputs.optimise
+	const { plan, evaluations, referencePublications } = inputs.optimise
 		? await optimisedPlan(inputs, reporter, dependencies)
-		: { plan: unoptimisedPlan(inputs.targets), evaluations: [] };
+		: {
+				plan: unoptimisedPlan(inputs.targets),
+				evaluations: [],
+				referencePublications: []
+			};
 	// Only an optimised plan has the evaluated graph that the pre-filter needs.
 	// An unoptimised plan must keep every cohort in the matrix.
 	let cohortDecisions: readonly CohortPreFilterDecision[];
@@ -635,6 +695,7 @@ export async function planAction(
 		reporter,
 		plan,
 		cohortDecisions,
+		referencePublications,
 		evaluations,
 		dependencies.createArtifactName?.() ??
 			`cupboard-publish-plan-${randomUUID()}`,
@@ -655,6 +716,7 @@ async function optimisedPlan(
 ): Promise<{
 	readonly plan: PublishPlan;
 	readonly evaluations: readonly TargetEvaluation[];
+	readonly referencePublications: readonly PlanReferenceOutcome[];
 }> {
 	const { evaluations, unevaluated } = await evaluateTargets(
 		inputs.targets,
@@ -678,13 +740,65 @@ async function optimisedPlan(
 		evaluations,
 		dependencies
 	);
-	const plan = planPublish({
-		evaluations,
+	const referencePublications = await publishReferenceTargets(
+		inputs,
+		evaluations.filter(
+			(evaluation) => !retainedRoots.has(evaluation.target.rootSuffix)
+		),
+		{
+			runner: dependencies.runner ?? defaultEnsureRunner,
+			...(dependencies.fetcher !== undefined && {
+				fetcher: dependencies.fetcher
+			}),
+			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		}
+	);
+	for (const outcome of referencePublications) {
+		if (outcome.status === 'failed') {
+			reporter.warn(
+				`Plan-job reference publication for ${outcome.attr} failed: ${outcome.reason ?? 'unknown failure'}. The cohort will handle the target.`
+			);
+		}
+	}
+	const publishedRoots = new Set(
+		referencePublications
+			.filter((outcome) => outcome.status === 'published')
+			.map((outcome) => outcome.root)
+	);
+	const pendingPlan = planPublish({
+		evaluations: evaluations.filter(
+			(evaluation) =>
+				!publishedRoots.has(
+					joinRoot(inputs.rootPrefix, evaluation.target.rootSuffix)
+				)
+		),
 		retainedRoots,
 		unevaluated: unevaluated.map((failure) => failure.target)
 	});
 
-	return { plan, evaluations };
+	const plan = {
+		...pendingPlan,
+		retained: [
+			...pendingPlan.retained,
+			...evaluations
+				.filter((evaluation) =>
+					publishedRoots.has(
+						joinRoot(inputs.rootPrefix, evaluation.target.rootSuffix)
+					)
+				)
+				.map((evaluation) => evaluation.target)
+		]
+	};
+	return {
+		plan,
+		evaluations: evaluations.filter(
+			(evaluation) =>
+				!publishedRoots.has(
+					joinRoot(inputs.rootPrefix, evaluation.target.rootSuffix)
+				)
+		),
+		referencePublications
+	};
 }
 
 async function retainedRootsFor(
@@ -764,11 +878,16 @@ async function writePlan(
 	reporter: Reporter,
 	plan: PublishPlan,
 	cohortDecisions: readonly CohortPreFilterDecision[],
+	referencePublications: readonly PlanReferenceOutcome[],
 	evaluations: readonly TargetEvaluation[],
 	artifactName: string,
 	measurer: NonNullable<PlanDependencies['measurer']>
 ): Promise<void> {
-	const document = { ...plan, cohortPreFilter: cohortDecisions };
+	const document = {
+		...plan,
+		cohortPreFilter: cohortDecisions,
+		...(referencePublications.length > 0 && { referencePublications })
+	};
 
 	await mkdir(path.dirname(inputs.planFile), { recursive: true });
 	await writeFile(
@@ -810,7 +929,8 @@ async function writePlan(
 			inputs,
 			plan.retained,
 			packedCohorts,
-			plan.cohorts.filter((cohort) => prunedKeys.has(cohort.key))
+			plan.cohorts.filter((cohort) => prunedKeys.has(cohort.key)),
+			referencePublications
 		)
 	);
 }
@@ -822,12 +942,13 @@ interface PlannedTargetSummary {
 	readonly runner: string;
 	readonly builder: string;
 	readonly bestEffort: boolean;
-	readonly decision: 'retained' | 'cohort';
+	readonly decision: 'retained' | 'cohort' | 'reference';
 }
 
 const planDecisionText: Readonly<
 	Record<PlannedTargetSummary['decision'], string>
 > = {
+	reference: 'Published by reference in the plan job',
 	retained: 'Retained without building',
 	cohort: 'Checked by the cohort'
 };
@@ -836,9 +957,10 @@ function planSummary(
 	inputs: PlanInputs,
 	retained: readonly PublishTarget[],
 	jobCohorts: readonly Cohort[],
-	prunedCohorts: readonly Cohort[]
+	prunedCohorts: readonly Cohort[],
+	referencePublications: readonly PlanReferenceOutcome[]
 ): ResultPayload<readonly PlannedTargetSummary[]> {
-	const retainedAttributes = new Set(retained.map((target) => target.attr));
+	const retainedRoots = new Set(retained.map((target) => target.rootSuffix));
 	const summarise = (
 		job: string,
 		target: PublishTarget,
@@ -858,13 +980,25 @@ function planSummary(
 				summarise(
 					cohortName(inputs, cohort),
 					target,
-					retainedAttributes.has(target.attr)
+					retainedRoots.has(target.rootSuffix)
 				)
 			)
 		),
 		...prunedCohorts.flatMap((cohort) =>
 			cohort.targets.map((target) => summarise('None', target, true))
-		)
+		),
+		...retained
+			.filter((target) =>
+				referencePublications.some(
+					(outcome) =>
+						outcome.status === 'published' &&
+						outcome.root === joinRoot(inputs.rootPrefix, target.rootSuffix)
+				)
+			)
+			.map((target): PlannedTargetSummary => ({
+				...summarise('None', target, true),
+				decision: 'reference'
+			}))
 	];
 
 	return {
@@ -1123,12 +1257,12 @@ function rootTargetsResponse(
 
 async function targetCoverageOutcome(
 	target: PublishTarget,
-	evaluationByAttribute: ReadonlyMap<string, TargetEvaluation>,
+	evaluationByTarget: ReadonlyMap<string, TargetEvaluation>,
 	inputs: PlanInputs,
 	runner: EnsureRunner,
 	signal?: AbortSignal
 ): Promise<TargetCoverage> {
-	const evaluation = evaluationByAttribute.get(target.attr);
+	const evaluation = evaluationByTarget.get(targetIdentityKey(target));
 
 	if (evaluation?.targetPaths.length !== target.outputs.length) {
 		return { attr: target.attr, status: 'unknown-output' };
@@ -1190,28 +1324,32 @@ export async function cohortPreFilter(
 	runner: EnsureRunner = defaultEnsureRunner,
 	signal?: AbortSignal
 ): Promise<readonly CohortPreFilterDecision[]> {
-	const evaluationByAttribute = new Map(
-		evaluations.map((evaluation) => [evaluation.target.attr, evaluation])
+	const evaluationByTarget = new Map(
+		evaluations.map((evaluation) => [
+			targetIdentityKey(evaluation.target),
+			evaluation
+		])
 	);
 	const targets = plan.cohorts.flatMap((cohort) => cohort.targets);
 	const coverageEntries = await mapWithConcurrency(
 		targets,
 		maximumConcurrentRootEnsures,
-		(target) =>
-			targetCoverageOutcome(
-				target,
-				evaluationByAttribute,
-				inputs,
-				runner,
-				signal
-			)
+		async (target) =>
+			[
+				targetIdentityKey(target),
+				await targetCoverageOutcome(
+					target,
+					evaluationByTarget,
+					inputs,
+					runner,
+					signal
+				)
+			] as const
 	);
-	const coverageByAttribute = new Map(
-		coverageEntries.map((entry) => [entry.attr, entry])
-	);
+	const coverageByTarget = new Map(coverageEntries);
 
 	return plan.cohorts.map((cohort) =>
-		cohortPreFilterDecision(cohort, coverageByAttribute)
+		cohortPreFilterDecision(cohort, coverageByTarget)
 	);
 }
 
@@ -1240,8 +1378,11 @@ function cohortMatrix(
 	cohorts: readonly Cohort[],
 	evaluations: readonly TargetEvaluation[]
 ): readonly object[] {
-	const evaluationByAttribute = new Map(
-		evaluations.map((evaluation) => [evaluation.target.attr, evaluation])
+	const evaluationByTarget = new Map(
+		evaluations.map((evaluation) => [
+			targetIdentityKey(evaluation.target),
+			evaluation
+		])
 	);
 
 	return cohorts.map((cohort) => ({
@@ -1250,10 +1391,13 @@ function cohortMatrix(
 		attrs: cohort.targets.map((target) => target.attr),
 		installables: cohort.installables,
 		queryInstallables: cohort.targets.map((target) =>
-			queryInstallableFor(target, evaluationByAttribute.get(target.attr))
+			queryInstallableFor(
+				target,
+				evaluationByTarget.get(targetIdentityKey(target))
+			)
 		),
 		expectedPaths: cohort.targets.map((target) =>
-			expectedPathFor(target, evaluationByAttribute.get(target.attr))
+			expectedPathFor(target, evaluationByTarget.get(targetIdentityKey(target)))
 		),
 		system: cohort.system,
 		os: cohort.os,
@@ -1313,21 +1457,32 @@ export function packingMeasurer(
 	signal?: AbortSignal
 ): NonNullable<PlanDependencies['measurer']> {
 	return async (cohorts, evaluations) => {
-		const evaluationByAttribute = new Map(
-			evaluations.map((evaluation) => [evaluation.target.attr, evaluation])
+		const cohortTargets = cohorts.flatMap((cohort) => cohort.targets);
+		if (
+			new Set(cohortTargets.map((target) => target.attr)).size !==
+			cohortTargets.length
+		) {
+			reporter.warn(
+				'Packing measurement skipped because multiple targets use the same attribute'
+			);
+			return new Map();
+		}
+		const evaluationByTarget = new Map(
+			evaluations.map((evaluation) => [
+				targetIdentityKey(evaluation.target),
+				evaluation
+			])
 		);
-		const targets = cohorts.flatMap((cohort) =>
-			cohort.targets.flatMap((target): MeasurableTarget[] => {
-				const installable = queryInstallableFor(
-					target,
-					evaluationByAttribute.get(target.attr)
-				);
+		const targets = cohortTargets.flatMap((target): MeasurableTarget[] => {
+			const installable = queryInstallableFor(
+				target,
+				evaluationByTarget.get(targetIdentityKey(target))
+			);
 
-				return installable === undefined
-					? []
-					: [{ attr: target.attr, installable }];
-			})
-		);
+			return installable === undefined
+				? []
+				: [{ attr: target.attr, installable }];
+		});
 
 		if (targets.length === 0) {
 			return new Map();
