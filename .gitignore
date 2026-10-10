@@ -6,6 +6,7 @@ pnpm-lock.yaml.*
 .tmp-*
 dist
 !actions/build-paths/dist/
+!actions/evaluate-targets/dist/
 build
 
 .DS_Store

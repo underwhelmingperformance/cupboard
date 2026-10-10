@@ -7056,7 +7056,7 @@ measured delays are:
        cached answer. Confirm that Nix still writes the disk cache when both
        values are zero, and measure the time that `nix build` spends before its
        first build.
-3. [ ] Measure parallel evaluation of the manifest on the plan job, for example
+3. [x] Measure parallel evaluation of the manifest on the plan job, for example
        with `nix-eval-jobs` or one evaluation per target, and adopt it if it
        shortens the plan job materially.
 

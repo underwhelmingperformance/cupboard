@@ -10,7 +10,7 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-added-large-files
-        exclude: ^actions/build-paths/dist/(main|post|worker)\.cjs$
+        exclude: ^actions/(build-paths/dist/(main|post|worker)|evaluate-targets/dist/(main|worker))\.cjs$
       - id: check-case-conflict
       - id: check-json
       - id: check-merge-conflict

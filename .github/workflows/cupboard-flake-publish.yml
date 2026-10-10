@@ -557,42 +557,16 @@ jobs:
           "${CUPBOARD_PATH}" "${args[@]}"
 
       - name: Evaluate target manifest
+        uses: $/actions/evaluate-targets
         id: targets
-        env:
-          TARGETS: ${{ inputs.targets }}
-          PUBLISH: ${{ needs.configure.outputs.publish }}
-          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
-          READ_SESSION_TARGET: ${{ steps.setup.outputs.read-session-target }}
-          READ_SESSION_AUDIENCE:
-            ${{ steps.setup.outputs.read-session-audience }}
-          READ_SESSION_CACHES: ${{ steps.setup.outputs.read-session-caches }}
-          READ_SESSION_VIEW: ${{ steps.setup.outputs.read-session-view }}
-        run: |
-          set -euo pipefail
-          echo "::group::Evaluating target manifest"
-          trap 'echo "::endgroup::"' EXIT
-          evaluation=(nix eval --json "${TARGETS}")
-          if [[ "${PUBLISH}" == none ]]; then
-            evaluation+=(--apply 'targets: map (target: builtins.removeAttrs target ["rootDrvPath"]) targets')
-          fi
-          if [[ -n "${READ_SESSION_TARGET}" ]]; then
-            wrapper=("${CUPBOARD_PATH}" run "${READ_SESSION_TARGET}" --github-oidc)
-            if [[ -n "${READ_SESSION_AUDIENCE}" ]]; then
-              wrapper+=(--audience "${READ_SESSION_AUDIENCE}")
-            fi
-            cache_lines=$(node -e 'for (const url of JSON.parse(process.env.READ_SESSION_CACHES || "[]")) console.log(url)')
-            while IFS= read -r cache_url; do
-              if [[ -n "$cache_url" ]]; then wrapper+=(--read-cache "$cache_url"); fi
-            done <<< "$cache_lines"
-            if [[ -n "${READ_SESSION_VIEW}" ]]; then
-              wrapper+=(--reuse-view "${READ_SESSION_VIEW}")
-            fi
-            manifest=$("${wrapper[@]}" -- "${evaluation[@]}")
-          else
-            manifest=$("${evaluation[@]}")
-          fi
-          echo "Evaluated target manifest ${TARGETS}"
-          echo "manifest=${manifest}" >> "${GITHUB_OUTPUT}"
+        with:
+          targets: ${{ inputs.targets }}
+          publish: ${{ needs.configure.outputs.publish }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
 
       - uses: $/actions/plan
         id: plan

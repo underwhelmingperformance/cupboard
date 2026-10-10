@@ -37,6 +37,7 @@ const publicActions = [
 	'attest-attach'
 ] as const;
 const internalActions = [
+	'evaluate-targets',
 	'plan',
 	'build-cohort',
 	'attest-status',
