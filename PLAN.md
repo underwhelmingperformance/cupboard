@@ -5992,10 +5992,10 @@ remaining work.
         gives the derivation, estimate, free space and headroom, offers a larger
         or remote store or fewer concurrent builds, and states that no cohort
         split can go below one derivation's own live input closure.
-21. [ ] Publish the resolved `.drv` closure from the plan job so a cohort runner
-        can substitute the derivations and build `<drv>^out` without evaluating
-        the flake. With per-target cohorts the evaluation is currently paid once
-        per matrix entry, and the measured plan job took nearly eight minutes.
+21. [x] Superseded by the publication planning decisions below. Cohorts keep
+        their independent commit-to-derivation drift check. The plan job
+        publishes available targets by reference and prunes empty cohorts; it
+        does not replace cohort evaluation with a shipped derivation closure.
 22. [ ] Add a durable-upstreams policy: a configured list of upstreams whose
         retention is trusted, with content found at any other upstream adopted
         into the destination instead of left there. Adoption is a compressed
