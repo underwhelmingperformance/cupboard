@@ -7071,6 +7071,10 @@ measured delays are:
 
 ## Later features
 
+- [ ] Merge-queue verified publication: `merge_group` builds the commit that
+      will become the branch head without PR caches as substituters, into a
+      cache keyed by its SHA. A branch push for that SHA checks matching
+      provenance and reuses those outputs.
 - [ ] Import from an existing binary cache.
 - [ ] Strict uniform-pending privacy mode for high-sensitivity multi-tenant
       deployments, making new references wait through the same visible pending
@@ -7093,4 +7097,4 @@ access-checked reuse release is a prerequisite for this change.
       wrapper for a unique merged PR.
 - [x] D3: Update GitHub setup, checks and guided trust repair for both modes.
 - [x] D4: Document the trust direction and required upgrade choices.
-- [ ] D5: Record the future merge-queue verified publication mode.
+- [x] D5: Record the future merge-queue verified publication mode.
