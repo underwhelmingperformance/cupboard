@@ -786,6 +786,120 @@ describe('createGithubReporter', () => {
 		]);
 	});
 
+	it('writes throttled phase facts before the phase completes', async () => {
+		let clock = 0;
+		const finished = Promise.withResolvers<string>();
+		const report = Promise.withResolvers<(checked: string) => void>();
+		const pending = createGithubReporter({ now: () => clock }).phase(
+			'Checking tenant dependency metadata',
+			(phase) => {
+				phase.fact('source', 'https://cache.example/t/acme');
+				report.resolve((checked) => {
+					phase.fact('checked', checked);
+				});
+				return finished.promise;
+			}
+		);
+		const update = await report.promise;
+		clock = 1999;
+		update('1/3');
+		expect(written).toStrictEqual([
+			'::group::Checking tenant dependency metadata\n'
+		]);
+		clock = 2000;
+		update('2/3');
+		await Promise.resolve();
+		expect(written).toStrictEqual([
+			'::group::Checking tenant dependency metadata\n',
+			'source: https://cache.example/t/acme\n',
+			'checked: 2/3\n',
+			'Elapsed: 2.0s\n'
+		]);
+		clock = 2500;
+		update('3/3');
+		finished.resolve('done');
+		expect(await pending).toBe('done');
+		expect(written).toStrictEqual([
+			'::group::Checking tenant dependency metadata\n',
+			'source: https://cache.example/t/acme\n',
+			'checked: 2/3\n',
+			'Elapsed: 2.0s\n',
+			'source: https://cache.example/t/acme\n',
+			'checked: 3/3\n',
+			'::endgroup::\n'
+		]);
+	});
+
+	it('writes the complete synchronous progress snapshot before phase completion', async () => {
+		let clock = 0;
+		const finished = Promise.withResolvers<string>();
+		const initial = {
+			source: 'cache-a',
+			mode: 'discovering',
+			checked: '0/2',
+			found: 0
+		};
+		type SnapshotUpdate = (snapshot: typeof initial) => void;
+		const report = Promise.withResolvers<SnapshotUpdate>();
+		const pending = createGithubReporter({ now: () => clock }).phase(
+			'Checking tenant dependency metadata',
+			(phase) => {
+				const update = (snapshot: typeof initial): void => {
+					phase.fact('traceId', 'client-trace');
+					phase.fact('source', snapshot.source);
+					phase.fact('mode', snapshot.mode);
+					phase.fact('checked', snapshot.checked);
+					phase.fact('found', snapshot.found);
+					phase.fact('requests', snapshot.found + 1);
+				};
+				update(initial);
+				report.resolve(update);
+				return finished.promise;
+			}
+		);
+		const update = await report.promise;
+
+		clock = 2000;
+		update({ source: 'cache-b', mode: 'bulk', checked: '1/2', found: 1 });
+		await Promise.resolve();
+		expect(written).toStrictEqual([
+			'::group::Checking tenant dependency metadata\n',
+			'traceId: client-trace\n',
+			'source: cache-b\n',
+			'mode: bulk\n',
+			'checked: 1/2\n',
+			'found: 1\n',
+			'requests: 2\n',
+			'Elapsed: 2.0s\n'
+		]);
+
+		finished.resolve('done');
+		await pending;
+	});
+
+	it('cancels a queued progress snapshot when the phase throws synchronously', async () => {
+		let clock = 0;
+		const failure = new ReporterTestError('metadata-failed');
+
+		await expect(
+			createGithubReporter({ now: () => clock }).phase('Checking', (phase) => {
+				clock = 2000;
+				phase.fact('source', 'cache-a');
+				phase.fact('checked', '1/2');
+				throw failure;
+			})
+		).rejects.toBe(failure);
+		await Promise.resolve();
+
+		expect(normaliseErrors(written)).toStrictEqual([
+			'::group::Checking\n',
+			'source: cache-a\n',
+			'checked: 1/2\n',
+			'::error::\n',
+			'::endgroup::\n'
+		]);
+	});
+
 	it.each([
 		{
 			outcome: 'ok',

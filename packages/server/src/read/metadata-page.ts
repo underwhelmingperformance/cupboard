@@ -53,7 +53,8 @@ export async function parseCacheMetadataRequest(
 export async function cacheMetadataPageResponse(
 	scopeVersion: string,
 	requested: readonly StorePathString[],
-	source: AsyncIterable<CacheMetadataEntry> | Iterable<CacheMetadataEntry>
+	source: AsyncIterable<CacheMetadataEntry> | Iterable<CacheMetadataEntry>,
+	onPage?: (page: CacheMetadataResponse) => void
 ): Promise<Response> {
 	const entries: CacheMetadataEntry[] = [];
 	let isPartial = false;
@@ -114,5 +115,6 @@ export async function cacheMetadataPageResponse(
 		entries,
 		...(isPartial && { nextIndex: entries.length })
 	};
+	onPage?.(response);
 	return Response.json(response, { headers: { 'cache-control': 'no-store' } });
 }

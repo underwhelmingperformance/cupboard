@@ -79,6 +79,16 @@ These presentation options do not change JSON event fields, result files,
 automation manifests, exit statuses or how commands wait. Copyable public keys,
 credentials and configuration lines remain intact in narrow terminals.
 
+Dependency metadata checks report the current cache, completed paths, found
+paths, request attempts, requests in flight and elapsed time. GitHub output
+updates while requests complete and every ten seconds while a request remains
+pending. A request remains in flight until its response body finishes. Request
+attempts include retries, so their count can exceed the number of checked paths.
+
+The check also reports an OpenTelemetry trace ID. Requests to the selected
+tenant propagate W3C trace context. Requests to another tenant or an external
+cache do not propagate that context.
+
 ### Reading results as JSON
 
 In `json` mode, a command reports its result as an event with

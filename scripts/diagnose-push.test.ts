@@ -370,6 +370,168 @@ describe('parseSpanEvent', () => {
 		});
 	});
 
+	it.each(['legacy source text', ['unstructured']])(
+		'keeps span parsing compatible with non-object source %j',
+		(source) => {
+			expect(
+				parseSpanEvent({
+					timestamp: 1,
+					source,
+					$metadata: {
+						type: 'span',
+						traceId: 'native',
+						spanName: 'ordinary'
+					}
+				})
+			).toStrictEqual({
+				traceId: 'native',
+				spanId: undefined,
+				parentSpanId: undefined,
+				name: 'ordinary',
+				startMs: 1,
+				endMs: 1
+			});
+		}
+	);
+
+	it.each(['flat', 'nested'])(
+		'preserves only known probe fields from %s source',
+		(shape) => {
+			const attributes = {
+				'cupboard.upstream.trace_id': 'a'.repeat(32),
+				'cupboard.upstream.span_id': 'b'.repeat(16),
+				'cupboard.probe.requested_paths': 32,
+				'cupboard.probe.canonical_reads': 6,
+				'cupboard.probe.access': 'public',
+				'url.path': '/t/acme/cache/source/api/v1/path-info',
+				'cupboard.probe.found_paths': 4,
+				'cupboard.probe.missing_paths': 0,
+				'cupboard.probe.continuation': true,
+				'cupboard.probe.path_set_sha256': 'c'.repeat(64),
+				'cupboard.probe.outcome': 'continuation',
+				authorization: 'private-token',
+				'cupboard.probe.paths': ['/nix/store/private-path']
+			};
+			const source =
+				shape === 'flat'
+					? attributes
+					: {
+							cupboard: {
+								upstream: { trace_id: 'a'.repeat(32), span_id: 'b'.repeat(16) },
+								probe: {
+									requested_paths: 32,
+									canonical_reads: 6,
+									access: 'public',
+									found_paths: 4,
+									missing_paths: 0,
+									continuation: true,
+									path_set_sha256: 'c'.repeat(64),
+									outcome: 'continuation',
+									paths: ['/nix/store/private-path']
+								}
+							},
+							authorization: 'private-token',
+							url: { path: '/t/acme/cache/source/api/v1/path-info' }
+						};
+			expect(
+				parseSpanEvent({
+					timestamp: 1,
+					source,
+					$metadata: {
+						type: 'span',
+						traceId: 'native',
+						spanId: 'native-span',
+						spanName: 'cache-metadata-probe',
+						startTime: 1,
+						endTime: 10
+					}
+				})
+			).toStrictEqual({
+				traceId: 'native',
+				spanId: 'native-span',
+				parentSpanId: undefined,
+				name: 'cache-metadata-probe',
+				startMs: 1,
+				endMs: 10,
+				probe: {
+					clientTraceId: 'a'.repeat(32),
+					clientSpanId: 'b'.repeat(16),
+					requestedPaths: 32,
+					canonicalReads: 6,
+					access: 'public',
+					sourcePath: '/t/acme/cache/source/api/v1/path-info',
+					foundPaths: 4,
+					missingPaths: 0,
+					continuation: true,
+					pathSetSha256: 'c'.repeat(64),
+					outcome: 'continuation'
+				}
+			});
+		}
+	);
+
+	it.each(['found', 'missing'])(
+		'preserves the canonical narinfo %s outcome',
+		(outcome) => {
+			expect(
+				parseSpanEvent({
+					timestamp: 1,
+					source: {
+						'cupboard.probe.outcome': outcome,
+						'cupboard.probe.requested_paths': 1
+					},
+					$metadata: {
+						type: 'span',
+						traceId: 'native',
+						spanName: 'narinfo-read'
+					}
+				})
+			).toStrictEqual({
+				traceId: 'native',
+				spanId: undefined,
+				parentSpanId: undefined,
+				name: 'narinfo-read',
+				startMs: 1,
+				endMs: 1,
+				probe: { outcome, requestedPaths: 1 }
+			});
+		}
+	);
+
+	it('omits invalid probe values and arbitrary source fields', () => {
+		expect(
+			parseSpanEvent({
+				timestamp: 1,
+				source: {
+					'cupboard.upstream.trace_id': '0'.repeat(32),
+					'cupboard.upstream.span_id': 'bad',
+					'cupboard.probe.requested_paths': -1,
+					'cupboard.probe.canonical_reads': -1,
+					'cupboard.probe.access': 'private-token',
+					'url.path': '/api/v1/path-info?token=private-token',
+					'cupboard.probe.found_paths': 0.5,
+					'cupboard.probe.missing_paths': '0',
+					'cupboard.probe.continuation': 'false',
+					'cupboard.probe.path_set_sha256': 'private-token',
+					'cupboard.probe.outcome': 'private-token',
+					headers: { authorization: 'private-token' }
+				},
+				$metadata: {
+					type: 'span',
+					traceId: 'native',
+					spanName: 'cache-metadata-probe'
+				}
+			})
+		).toStrictEqual({
+			traceId: 'native',
+			spanId: undefined,
+			parentSpanId: undefined,
+			name: 'cache-metadata-probe',
+			startMs: 1,
+			endMs: 1
+		});
+	});
+
 	it.each([
 		['a log event (not a span)', { timestamp: 1, $metadata: { type: 'log' } }],
 		[
@@ -1499,6 +1661,278 @@ describe('renderAnalysis', () => {
 			{
 				title: 'Slowest invocations',
 				body: noteBody(slowestRows(analysis))
+			}
+		]);
+	});
+});
+
+describe('metadata probe diagnostics', () => {
+	const attributes = {
+		clientTraceId: 'a'.repeat(32),
+		clientSpanId: 'b'.repeat(16),
+		requestedPaths: 32,
+		canonicalReads: 6,
+		access: 'public' as const,
+		sourcePath: '/t/acme/cache/source/api/v1/path-info',
+		foundPaths: 4,
+		missingPaths: 0,
+		continuation: true,
+		pathSetSha256: 'c'.repeat(64),
+		outcome: 'continuation' as const
+	};
+	const spans: SpanEvent[] = [
+		{
+			traceId: 'native-1',
+			spanId: '1',
+			parentSpanId: undefined,
+			name: 'cache-metadata-probe',
+			startMs: 0,
+			endMs: 100,
+			probe: attributes
+		},
+		{
+			traceId: 'native-2',
+			spanId: '2',
+			parentSpanId: undefined,
+			name: 'cache-metadata-probe',
+			startMs: 50,
+			endMs: 150,
+			probe: attributes
+		},
+		{
+			traceId: 'native-3',
+			spanId: '3',
+			parentSpanId: undefined,
+			name: 'cache-metadata-probe',
+			startMs: 160,
+			endMs: 200,
+			probe: {
+				...attributes,
+				requestedPaths: 28,
+				canonicalReads: 27,
+				foundPaths: 27,
+				missingPaths: 1,
+				continuation: false,
+				pathSetSha256: 'd'.repeat(64),
+				outcome: 'complete'
+			}
+		},
+		{
+			traceId: 'native-4',
+			spanId: '4',
+			parentSpanId: undefined,
+			name: 'narinfo-read',
+			startMs: 0,
+			endMs: 100,
+			probe: attributes
+		}
+	];
+
+	it('groups page attempts by client trace without counting canonical narinfo spans again', () => {
+		const analysis = analyse('worker', { from: 0, to: 200 }, [], [], spans);
+		expect(analysis.metadataProbes).toStrictEqual([
+			{
+				clientTraceId: 'a'.repeat(32),
+				clientSpanIds: ['b'.repeat(16)],
+				attempts: 3,
+				requestedPathAttempts: 92,
+				canonicalReadAttempts: 39,
+				accessModes: ['public'],
+				foundPathResults: 35,
+				missingPathResults: 1,
+				continuationAttempts: 2,
+				summedServerMs: 240,
+				observedWallSpanMs: 200,
+				outcomes: {
+					complete: 1,
+					continuation: 2,
+					refused: 0,
+					error: 0,
+					unknown: 0
+				},
+				pathSets: [
+					{
+						sourcePath: '/t/acme/cache/source/api/v1/path-info',
+						sha256: 'c'.repeat(64),
+						attempts: 2,
+						requestedPathAttempts: 64,
+						canonicalReadAttempts: 12
+					},
+					{
+						sourcePath: '/t/acme/cache/source/api/v1/path-info',
+						sha256: 'd'.repeat(64),
+						attempts: 1,
+						requestedPathAttempts: 28,
+						canonicalReadAttempts: 27
+					}
+				]
+			}
+		]);
+		const { ui, captured } = fakeCliUi();
+		renderAnalysis(ui, ui.reporter(), 'json', analysis);
+		expect(captured.data).toStrictEqual([JSON.stringify(analysis)]);
+	});
+
+	it('separates client traces even when they request the same exact set', () => {
+		const other: SpanEvent = {
+			traceId: 'native-other',
+			spanId: 'other',
+			parentSpanId: undefined,
+			name: 'cache-metadata-probe',
+			startMs: 50,
+			endMs: 60,
+			probe: {
+				...attributes,
+				clientTraceId: 'e'.repeat(32),
+				clientSpanId: 'f'.repeat(16)
+			}
+		};
+		const first = analyse(
+			'worker',
+			{ from: 0, to: 200 },
+			[],
+			[],
+			spans
+		).metadataProbes;
+		const second = analyse(
+			'worker',
+			{ from: 0, to: 200 },
+			[],
+			[],
+			[other]
+		).metadataProbes;
+		expect(
+			analyse('worker', { from: 0, to: 200 }, [], [], [...spans, other])
+				.metadataProbes
+		).toStrictEqual([...(first ?? []), ...(second ?? [])]);
+	});
+
+	it('renders attempted counts, summed duration, observed wall span and repeated fingerprints', () => {
+		const analysis = analyse('worker', { from: 0, to: 200 }, [], [], spans);
+		const { ui, captured } = fakeCliUi();
+		renderAnalysis(ui, ui.reporter(), 'terminal', analysis);
+		expect(captured.notes).toStrictEqual([
+			{
+				title: `Metadata probes · client trace ${'a'.repeat(32)}`,
+				body: [
+					`Client span IDs\t${'b'.repeat(16)}`,
+					'Page attempts\t3',
+					'Canonical read attempts\t39',
+					'Access modes\tpublic',
+					'Requested path attempts\t92 (unique paths unknown)',
+					'Found/missing path results\t35/1',
+					'Continuation attempts\t2',
+					'Outcomes\tcomplete 1 · continuation 2 · refused 0 · error 0 · unknown 0',
+					'Summed server duration\t240ms (overlapping attempts add)',
+					'Observed probe wall span\t200ms',
+					`Path set ${'c'.repeat(64)} · /t/acme/cache/source/api/v1/path-info\t2 attempts · 64 requested path attempts · 12 canonical read attempts (repeated exact set)`,
+					`Path set ${'d'.repeat(64)} · /t/acme/cache/source/api/v1/path-info\t1 attempts · 28 requested path attempts · 27 canonical read attempts`
+				].join('\n')
+			}
+		]);
+	});
+
+	it.each(['/t/acme/cache/other/api/v1/path-info', undefined])(
+		'keeps repeated fingerprints separate for source %s',
+		(sourcePath) => {
+			const first = spans[0];
+			if (first === undefined) {
+				throw new Error('Missing first probe fixture');
+			}
+			const second = {
+				...first,
+				spanId: 'other',
+				startMs: 50,
+				endMs: 150,
+				probe: { ...attributes, sourcePath }
+			};
+			const analysis = analyse(
+				'worker',
+				{ from: 0, to: 200 },
+				[],
+				[],
+				[first, second]
+			);
+			expect(analysis.metadataProbes).toStrictEqual([
+				{
+					clientTraceId: 'a'.repeat(32),
+					clientSpanIds: ['b'.repeat(16)],
+					attempts: 2,
+					requestedPathAttempts: 64,
+					canonicalReadAttempts: 12,
+					accessModes: ['public'],
+					foundPathResults: 8,
+					missingPathResults: 0,
+					continuationAttempts: 2,
+					summedServerMs: 200,
+					observedWallSpanMs: 150,
+					outcomes: {
+						complete: 0,
+						continuation: 2,
+						refused: 0,
+						error: 0,
+						unknown: 0
+					},
+					pathSets: [
+						{
+							sourcePath: sourcePath ?? 'unknown',
+							sha256: 'c'.repeat(64),
+							attempts: 1,
+							requestedPathAttempts: 32,
+							canonicalReadAttempts: 6
+						},
+						{
+							sourcePath: '/t/acme/cache/source/api/v1/path-info',
+							sha256: 'c'.repeat(64),
+							attempts: 1,
+							requestedPathAttempts: 32,
+							canonicalReadAttempts: 6
+						}
+					].toSorted((a, b) => a.sourcePath.localeCompare(b.sourcePath))
+				}
+			]);
+		}
+	);
+
+	it('reports incomplete and uncorrelated telemetry without inventing zero counts', () => {
+		const analysis = analyse(
+			'worker',
+			{ from: 0, to: 10 },
+			[],
+			[],
+			[
+				{
+					traceId: 'native',
+					spanId: '1',
+					parentSpanId: undefined,
+					name: 'cache-metadata-probe',
+					startMs: 0,
+					endMs: 10,
+					probe: { outcome: 'error' }
+				}
+			]
+		);
+		expect(analysis.metadataProbes).toStrictEqual([
+			{
+				clientTraceId: 'uncorrelated',
+				clientSpanIds: [],
+				attempts: 1,
+				requestedPathAttempts: 'unknown',
+				canonicalReadAttempts: 'unknown',
+				accessModes: [],
+				foundPathResults: 'unknown',
+				missingPathResults: 'unknown',
+				continuationAttempts: 'unknown',
+				summedServerMs: 10,
+				observedWallSpanMs: 10,
+				outcomes: {
+					complete: 0,
+					continuation: 0,
+					refused: 0,
+					error: 1,
+					unknown: 0
+				},
+				pathSets: []
 			}
 		]);
 	});

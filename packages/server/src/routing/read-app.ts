@@ -14,6 +14,8 @@ import {
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestBody } from '../http/parse.ts';
+import { withSpan } from '../observability/span.ts';
+import { upstreamTraceAttributes } from '../observability/trace-context.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import {
 	guardScopedRead,
@@ -61,22 +63,43 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			return notFoundResponse();
 		}
 
-		const denied = await guardContentRead(context);
-
-		if (denied !== undefined) {
-			return denied;
-		}
-
-		return isCacheableRead(context)
-			? cachedTenantRead(context)
-			: serveNarInfo(
-					context.req.raw,
-					context.env,
-					context.get('tenant'),
-					context.get('readScope'),
-					storePathHash,
-					true
-				);
+		return withSpan(
+			'narinfo-read',
+			{
+				...upstreamTraceAttributes(context.req.raw.headers),
+				'cupboard.probe.requested_paths': 1
+			},
+			async (span) => {
+				try {
+					const denied = await guardContentRead(context);
+					const response: Response =
+						denied ??
+						(isCacheableRead(context)
+							? await cachedTenantRead(context)
+							: await serveNarInfo(
+									context.req.raw,
+									context.env,
+									context.get('tenant'),
+									context.get('readScope'),
+									storePathHash,
+									true
+								));
+					span.setAttribute('http.response.status_code', response.status);
+					span.setAttribute(
+						'cupboard.probe.outcome',
+						response.status === 404
+							? 'missing'
+							: response.ok
+								? 'found'
+								: 'refused'
+					);
+					return response;
+				} catch (error) {
+					span.setAttribute('cupboard.probe.outcome', 'error');
+					throw error;
+				}
+			}
+		);
 	});
 
 	app.get('/nar/:name', async (context) => {

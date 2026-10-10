@@ -68,6 +68,30 @@ wrangler tail cupboard
 wrangler tail cupboard-tenant
 ```
 
+Dependency metadata probes run in the control Worker. Their
+`cache-metadata-probe` spans record the upstream OpenTelemetry trace and span
+IDs, requested path count, found and missing counts, continuation status and
+outcome. Each probe also records the cache's public or private access and the
+number of canonical narinfo read attempts. A public page checks path authority
+in one database query and reads canonical narinfos only for present paths. The
+path-set fingerprint identifies repeated page requests without recording their
+request bodies. The diagnostic groups fingerprints by the cache request path, so
+checking the same paths in different caches produces separate groups. A repeated
+fingerprint can indicate a retry or another check of the same page; it does not
+prove a repeated build or upload.
+
+From a repository checkout, use the diagnostic script with a GitHub Actions job
+URL and `--worker cupboard` to inspect the control Worker's activity. Use
+`--worker cupboard-tenant` to inspect canonical narinfo reads and publication
+work. The diagnostic groups metadata pages by their upstream trace ID when the
+deployed spans include that attribute. It reports summed request durations and
+the observed wall-clock interval separately because requests can overlap.
+
+Cloudflare's native trace IDs remain separate from the upstream OpenTelemetry
+trace IDs. The upstream attributes connect the client check to the native Worker
+spans; they do not change Cloudflare's native span parentage. A job's time
+window alone cannot distinguish its requests from other concurrent jobs.
+
 ### Maintenance failures
 
 When a tenant's maintenance or removal fails, the failure is recorded in the D1

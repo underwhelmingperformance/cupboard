@@ -1,5 +1,5 @@
 import { type StorePathString } from '@cupboard/nix-store/scalars';
-import { StorePath } from '@cupboard/nix-store/store-path';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type CacheMetadataEntry,
 	cacheMetadataMaxNarInfoBytes
@@ -14,6 +14,7 @@ import {
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context } from 'hono';
 
+import { sha256Hex } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { maxOutgoingConnections } from '../do/bulk.ts';
 import {
@@ -22,6 +23,8 @@ import {
 	MetadataScopeChangedError,
 	SharedFactsUnavailableError
 } from '../errors.ts';
+import { withSpan } from '../observability/span.ts';
+import { upstreamTraceAttributes } from '../observability/trace-context.ts';
 import {
 	cacheMetadataPageResponse,
 	parseCacheMetadataRequest
@@ -30,6 +33,7 @@ import {
 	readCacheMetadata,
 	renderCacheMetadataEntry
 } from '../read/metadata-read.ts';
+import { authorisedNarInfoVersions } from '../read/read.ts';
 
 import { type WorkerHonoEnv } from './hono-env.ts';
 import {
@@ -118,11 +122,26 @@ async function publicEntry(
 
 async function* publicEntries(
 	context: Context<WorkerHonoEnv>,
-	paths: readonly StorePathString[]
+	paths: readonly StorePathString[],
+	onCanonicalRead: () => void
 ): AsyncGenerator<CacheMetadataEntry> {
+	const scope = context.get('readScope');
+	const versions = await authorisedNarInfoVersions(
+		drizzleD1(context.env.CUPBOARD_DB, { schema: d1Schema }),
+		context.get('tenant'),
+		scope.scope,
+		paths.map((storePath) => StorePath.hash(storePath))
+	);
 	for (const group of chunk(paths, maxOutgoingConnections)) {
 		const outcomes = await Promise.allSettled(
-			group.map((storePath) => publicEntry(context, storePath))
+			group.map((storePath): Promise<CacheMetadataEntry> => {
+				const current = versions.get(StorePath.hash(storePath));
+				if (current?.cacheGeneration !== scope.generation) {
+					return Promise.resolve({ storePath, status: 'missing' });
+				}
+				onCanonicalRead();
+				return publicEntry(context, storePath);
+			})
 		);
 		const failed = outcomes.find((outcome) => outcome.status === 'rejected');
 		if (failed !== undefined) {
@@ -141,37 +160,83 @@ export async function answerCacheMetadata(
 	context: Context<WorkerHonoEnv>
 ): Promise<Response> {
 	const request = await parseCacheMetadataRequest(context.req.raw);
-	const version = cacheReadScopeVersion(context);
-	if (
-		request.expectedScopeVersion !== undefined &&
-		request.expectedScopeVersion !== version
-	) {
-		throw new MetadataScopeChangedError();
-	}
-	const paths = request.storePaths;
-	const entries = context.get('isCacheDeleted')
-		? paths.map((storePath): CacheMetadataEntry => ({
-				storePath,
-				status: 'missing'
-			}))
-		: context.get('readScope').access === 'public'
-			? publicEntries(context, paths)
-			: readCacheMetadata(
-					context.env.BLOBS,
-					drizzleD1(context.env.CUPBOARD_DB, { schema: d1Schema }),
-					context.get('tenant'),
-					context.get('readScope'),
-					paths
+	return withSpan(
+		'cache-metadata-probe',
+		{
+			'url.path': context.req.path,
+			'cupboard.probe.access': context.get('readScope').access,
+			'cupboard.probe.canonical_reads': 0,
+			...upstreamTraceAttributes(context.req.raw.headers),
+			'cupboard.probe.requested_paths': request.storePaths.length
+		},
+		async (span) => {
+			let canonicalReads = 0;
+			const orderedPaths = request.storePaths.toSorted(byCodeUnit);
+			const fingerprint = await sha256Hex(JSON.stringify(orderedPaths));
+			span.setAttribute('cupboard.probe.path_set_sha256', fingerprint);
+			try {
+				const version = cacheReadScopeVersion(context);
+				if (
+					request.expectedScopeVersion !== undefined &&
+					request.expectedScopeVersion !== version
+				) {
+					throw new MetadataScopeChangedError();
+				}
+				const paths = request.storePaths;
+				const entries = context.get('isCacheDeleted')
+					? paths.map((storePath): CacheMetadataEntry => ({
+							storePath,
+							status: 'missing'
+						}))
+					: context.get('readScope').access === 'public'
+						? publicEntries(context, paths, () => {
+								canonicalReads += 1;
+								span.setAttribute(
+									'cupboard.probe.canonical_reads',
+									canonicalReads
+								);
+							})
+						: readCacheMetadata(
+								context.env.BLOBS,
+								drizzleD1(context.env.CUPBOARD_DB, { schema: d1Schema }),
+								context.get('tenant'),
+								context.get('readScope'),
+								paths
+							);
+				const response = await cacheMetadataPageResponse(
+					version,
+					paths,
+					entries,
+					(page) => {
+						const found = page.entries.filter(
+							(entry) => entry.status === 'found'
+						).length;
+						const hasContinuation = page.nextIndex !== undefined;
+						span.setAttribute('cupboard.probe.found_paths', found);
+						span.setAttribute(
+							'cupboard.probe.missing_paths',
+							page.entries.length - found
+						);
+						span.setAttribute('cupboard.probe.continuation', hasContinuation);
+						span.setAttribute(
+							'cupboard.probe.outcome',
+							hasContinuation ? 'continuation' : 'complete'
+						);
+					}
 				);
-	try {
-		const response = await cacheMetadataPageResponse(version, paths, entries);
-		await revalidateCacheReadScope(context, version);
-		await revalidateCacheReadAuthority(context);
-		return response;
-	} catch (error) {
-		if (error instanceof ForwardedMetadataRefusal) {
-			return withoutStoring(error.response);
+				await revalidateCacheReadScope(context, version);
+				await revalidateCacheReadAuthority(context);
+				span.setAttribute('http.response.status_code', response.status);
+				return response;
+			} catch (error) {
+				if (error instanceof ForwardedMetadataRefusal) {
+					span.setAttribute('cupboard.probe.outcome', 'refused');
+					span.setAttribute('http.response.status_code', error.response.status);
+					return withoutStoring(error.response);
+				}
+				span.setAttribute('cupboard.probe.outcome', 'error');
+				throw error;
+			}
 		}
-		throw error;
-	}
+	);
 }

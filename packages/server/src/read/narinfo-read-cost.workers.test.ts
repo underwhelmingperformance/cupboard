@@ -1,9 +1,18 @@
+import { NarInfo } from '@cupboard/nix-store/narinfo';
+import {
+	storePathHashSchema,
+	storePathSchema
+} from '@cupboard/nix-store/scalars';
+import { cacheMetadataResponseSchema } from '@cupboard/protocol/cache-metadata';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { committedPath } from '../do/reuse-view-read.test-support.ts';
+import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	defaultCache,
 	initialiseViaWorker,
 	narBytes,
 	pushPathToTenant,
@@ -23,11 +32,17 @@ import {
 function roundTripCountingD1(inner: D1Database): {
 	readonly binding: D1Database;
 	readonly roundTrips: () => number;
+	readonly authorityReads: () => number;
 } {
 	let roundTrips = 0;
+	let authorityReads = 0;
+	const authorityStatements = new WeakSet<D1PreparedStatement>();
 	const executions = new Set(['first', 'run', 'all', 'raw']);
-	const counted = (statement: D1PreparedStatement): D1PreparedStatement =>
-		new Proxy(statement, {
+	const counted = (
+		statement: D1PreparedStatement,
+		isAuthority: boolean
+	): D1PreparedStatement => {
+		const wrapped = new Proxy(statement, {
 			get(target, property, receiver) {
 				const value: unknown = Reflect.get(target, property, receiver);
 
@@ -36,25 +51,44 @@ function roundTripCountingD1(inner: D1Database): {
 				}
 
 				if (property === 'bind') {
-					return (...values: unknown[]) => counted(target.bind(...values));
+					return (...values: unknown[]) =>
+						counted(target.bind(...values), isAuthority);
 				}
 
 				return (...parameters: unknown[]): unknown => {
 					if (executions.has(String(property))) {
 						roundTrips += 1;
+						if (isAuthority) {
+							authorityReads += 1;
+						}
 					}
 
 					return Reflect.apply(value, target, parameters);
 				};
 			}
 		});
+		if (isAuthority) {
+			authorityStatements.add(wrapped);
+		}
+		return wrapped;
+	};
 
 	return {
 		roundTrips: () => roundTrips,
+		authorityReads: () => authorityReads,
 		binding: {
-			prepare: (query) => counted(inner.prepare(query)),
+			prepare: (query) =>
+				counted(
+					inner.prepare(query),
+					query.includes('requested_path_reference')
+				),
 			batch: (statements) => {
 				roundTrips += 1;
+				if (
+					statements.some((statement) => authorityStatements.has(statement))
+				) {
+					authorityReads += 1;
+				}
 
 				return inner.batch(statements);
 			},
@@ -103,4 +137,232 @@ it('refuses a retained public narinfo after its path fence is persisted', async 
 		.run();
 	const response = await readFetch(`/${metadata.storePathHash}.narinfo`);
 	expect(response.status).toBe(StatusCodes.NOT_FOUND);
+});
+
+describe('public metadata page cost', () => {
+	beforeEach(resetTestServer);
+
+	it('measures full canonical pages on initial and repeated origin reads', async () => {
+		const entries = [];
+		for (let index = 0; index < 32; index += 1) {
+			const path = await committedPath(
+				`metadata-cost-${String(index)}`,
+				defaultCache(),
+				{ storePathHash: index.toString(2).padStart(32, '0') }
+			);
+			const response = await readFetch(`/${path.storePathHash}.narinfo`);
+			entries.push({
+				storePath: path.storePath,
+				status: 'found',
+				narinfo: await response.text()
+			});
+		}
+		const samples = [];
+		const gets = vi.spyOn(env.BLOBS, 'get');
+		for (const size of [1, 6, 32]) {
+			for (let repeat = 0; repeat < 3; repeat += 1) {
+				const counting = roundTripCountingD1(env.CUPBOARD_DB);
+				gets.mockClear();
+				const expected = entries.slice(0, size);
+				const started = performance.now();
+				const response = await readFetch(
+					'/api/v1/path-info',
+					{
+						method: 'POST',
+						headers: { 'content-type': 'application/json' },
+						body: JSON.stringify({
+							storePaths: expected.map((entry) => entry.storePath)
+						})
+					},
+					{ CUPBOARD_DB: counting.binding }
+				);
+				const body = cacheMetadataResponseSchema.parse(await response.json());
+				const elapsedMs = performance.now() - started;
+				const observed = {
+					status: response.status,
+					body,
+					authorityReads: counting.authorityReads(),
+					r2Gets: gets.mock.calls.length
+				};
+				expect(observed).toStrictEqual({
+					status: StatusCodes.OK,
+					body: { scopeVersion: 'cache:1:1:public:false', entries: expected },
+					authorityReads: size + 1,
+					r2Gets: size
+				});
+				samples.push({
+					size,
+					repeat,
+					elapsedMs,
+					roundTrips: counting.roundTrips(),
+					authorityReads: counting.authorityReads(),
+					r2Gets: gets.mock.calls.length
+				});
+			}
+		}
+		gets.mockRestore();
+		console.info('public-metadata-origin-cost', JSON.stringify(samples));
+	});
+
+	it.each([0, 1, 6])(
+		'measures a 32-path page with %s authoritative found paths',
+		async (foundCount) => {
+			await initialiseViaWorker();
+			const expected = [];
+			for (let index = 0; index < 32; index += 1) {
+				const hash = index.toString(2).padStart(32, '0');
+				if (index >= foundCount) {
+					expected.push({
+						storePath: storePathSchema.parse(
+							`/nix/store/${hash}-metadata-missing`
+						),
+						status: 'missing'
+					});
+					continue;
+				}
+				const path = await committedPath(
+					`metadata-mixed-${String(index)}`,
+					defaultCache(),
+					{ storePathHash: hash }
+				);
+				const canonical = await readFetch(`/${path.storePathHash}.narinfo`);
+				expected.push({
+					storePath: path.storePath,
+					status: 'found',
+					narinfo: await canonical.text()
+				});
+			}
+			const gets = vi.spyOn(env.BLOBS, 'get');
+			const samples = [];
+			for (let repeat = 0; repeat < 3; repeat += 1) {
+				const counting = roundTripCountingD1(env.CUPBOARD_DB);
+				gets.mockClear();
+				const started = performance.now();
+				const response = await readFetch(
+					'/api/v1/path-info',
+					{
+						method: 'POST',
+						headers: { 'content-type': 'application/json' },
+						body: JSON.stringify({
+							storePaths: expected.map((entry) => entry.storePath)
+						})
+					},
+					{ CUPBOARD_DB: counting.binding }
+				);
+				const body = cacheMetadataResponseSchema.parse(await response.json());
+				const sample = {
+					foundCount,
+					repeat,
+					elapsedMs: performance.now() - started,
+					authorityReads: counting.authorityReads(),
+					roundTrips: counting.roundTrips(),
+					r2Gets: gets.mock.calls.length
+				};
+				expect({
+					status: response.status,
+					body,
+					authorityReads: sample.authorityReads,
+					r2Gets: sample.r2Gets
+				}).toStrictEqual({
+					status: StatusCodes.OK,
+					body: { scopeVersion: 'cache:1:1:public:false', entries: expected },
+					authorityReads: foundCount + 1,
+					r2Gets: foundCount
+				});
+				samples.push(sample);
+			}
+			gets.mockRestore();
+			console.info(
+				'public-metadata-origin-missing-cost',
+				JSON.stringify(samples)
+			);
+		}
+	);
+
+	it('counts canonical reads beyond the continuation prefix', async () => {
+		const entries = [];
+		for (let index = 0; index < 32; index += 1) {
+			const path = await committedPath(
+				`metadata-continuation-${String(index)}`,
+				defaultCache(),
+				{ storePathHash: index.toString(2).padStart(32, '0') }
+			);
+			const key = narInfoObjectKey(
+				fixtureTenant,
+				storePathHashSchema.parse(path.storePathHash),
+				defaultCache()
+			);
+			const canonical = await readFetch(`/${path.storePathHash}.narinfo`);
+			await canonical.text();
+			const object = await env.BLOBS.get(key);
+			if (object === null) {
+				throw new Error('Missing committed narinfo fixture');
+			}
+			const original = await object.text();
+			const narinfo = NarInfo.parse(
+				original.replaceAll(/^CA:.*\n/gmu, '') +
+					(index < 5 ? `CA: ${'x'.repeat(850_000)}\n` : '')
+			).render();
+			await env.BLOBS.put(key, narinfo, {
+				customMetadata: object.customMetadata,
+				httpMetadata: object.httpMetadata
+			});
+			entries.push({ storePath: path.storePath, status: 'found', narinfo });
+		}
+		const outcomes = [];
+		for (const start of [0, 4]) {
+			const counting = roundTripCountingD1(env.CUPBOARD_DB);
+			const started = performance.now();
+			const response = await readFetch(
+				'/api/v1/path-info',
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						storePaths: entries.slice(start).map((entry) => entry.storePath)
+					})
+				},
+				{ CUPBOARD_DB: counting.binding }
+			);
+			const body = cacheMetadataResponseSchema.parse(await response.json());
+			outcomes.push({
+				status: response.status,
+				body,
+				authorityReads: counting.authorityReads(),
+				roundTrips: counting.roundTrips()
+			});
+			console.info(
+				'public-metadata-origin-continuation-cost',
+				JSON.stringify({
+					start,
+					elapsedMs: performance.now() - started,
+					returnedPaths: body.entries.length,
+					nextIndex: body.nextIndex,
+					authorityReads: counting.authorityReads(),
+					roundTrips: counting.roundTrips()
+				})
+			);
+		}
+		expect(outcomes).toStrictEqual([
+			{
+				status: StatusCodes.OK,
+				body: {
+					scopeVersion: 'cache:1:1:public:false',
+					entries: entries.slice(0, 4),
+					nextIndex: 4
+				},
+				authorityReads: 7,
+				roundTrips: 9
+			},
+			{
+				status: StatusCodes.OK,
+				body: {
+					scopeVersion: 'cache:1:1:public:false',
+					entries: entries.slice(4)
+				},
+				authorityReads: 29,
+				roundTrips: 31
+			}
+		]);
+	});
 });

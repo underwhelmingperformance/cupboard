@@ -394,7 +394,7 @@ function baseOptions(): BuildCohortOptions {
 	};
 }
 
-it.each(['outputs', 'closure'] as const)(
+it.each(['outputs', 'built', 'closure'] as const)(
 	'passes the %s publication scope to a local streamed build',
 	(publish) => {
 		const inputs = resolveBuildCohortInputs(
@@ -409,6 +409,7 @@ it.each(['outputs', 'closure'] as const)(
 				baseOptions().url,
 				'--github-oidc',
 				'--no-retain',
+				'--no-reference-dependencies',
 				'--cohorts-file',
 				'/tmp/cohorts.json',
 				'--receipt-file',
@@ -3385,11 +3386,24 @@ function recordingReporter(
 	warnings: string[],
 	progress: RecordedProgress[] = [],
 	information: string[] = [],
-	warningMessages: { label: string; message: string | undefined }[] = []
+	warningMessages: { label: string; message: string | undefined }[] = [],
+	phaseFacts?: { phase: string; label: string; value: string }[]
 ): Reporter {
 	return {
-		phase: (_label, body) =>
-			Promise.resolve(body({ fact: noop, warn: noop, result: noop })),
+		phase: (label, body) =>
+			Promise.resolve(
+				body({
+					fact(factLabel, value) {
+						phaseFacts?.push({
+							phase: label,
+							label: factLabel,
+							value: String(value)
+						});
+					},
+					warn: noop,
+					result: noop
+				})
+			),
 		progress: (_label, options, body) => {
 			const recorded = { total: options.total, completed: 0 };
 			progress.push(recorded);
@@ -5811,9 +5825,11 @@ if (args.includes('--help')) {
 		// client records them and passes them to publication.
 		observedCopies: ReadonlyMap<StorePathString, readonly string[]> = new Map(),
 		flowPlan: {
+			readonly phaseFacts?: { phase: string; label: string; value: string }[];
 			readonly inspectDependencySources?: (
 				paths: readonly StorePathString[],
-				sources: readonly CachedClosureSource[]
+				sources: readonly CachedClosureSource[],
+				tenantUrl: URL | undefined
 			) => void;
 			readonly dependencyReferences?: readonly StorePathString[];
 			readonly dependencyBuilds?: readonly {
@@ -6312,7 +6328,22 @@ if (args.includes('--help')) {
 		try {
 			await buildCohortAction(options, environment, {
 				tenantDependencyReferences: (paths, referenceOptions) => {
-					flowPlan.inspectDependencySources?.(paths, referenceOptions.sources);
+					flowPlan.inspectDependencySources?.(
+						paths,
+						referenceOptions.sources,
+						referenceOptions.tenantUrl
+					);
+					referenceOptions.onProgress?.({
+						traceId: '0123456789abcdef0123456789abcdef',
+						source: 'https://cache.example.test/t/acme',
+						mode: 'legacy',
+						checked: paths.length,
+						total: paths.length,
+						found: paths.length,
+						requests: 1,
+						inFlight: 0,
+						elapsedMs: 2500
+					});
 					return Promise.resolve(
 						paths.map((storePath) => ({
 							storePath,
@@ -6407,7 +6438,8 @@ if (args.includes('--help')) {
 					warnings,
 					progress,
 					information,
-					warningMessages
+					warningMessages,
+					flowPlan.phaseFacts
 				),
 				signal
 			});
@@ -6580,6 +6612,15 @@ if (args.includes('--help')) {
 			credential: { user: 'source-reader', password: 'source-secret' }
 		},
 		{
+			name: 'the explicit reference cache before a configured duplicate',
+			cache: 'pr-cache',
+			referenceSource: url,
+			reuseView: '',
+			configured: url,
+			selectedSource: url,
+			credential: { user: 'source-reader', password: 'source-secret' }
+		},
+		{
 			name: 'the merged PR reference cache',
 			cache: '',
 			referenceSource: `${url}/cache/gh-1234-pr-42`,
@@ -6617,7 +6658,9 @@ if (args.includes('--help')) {
 			credential
 		}) => {
 			vi.stubEnv('NIX_CONFIG', `builders =\nsubstituters = ${configured}\n`);
+			const phaseFacts: { phase: string; label: string; value: string }[] = [];
 			const sourceCalls: {
+				tenantUrl: string | undefined;
 				paths: readonly StorePathString[];
 				sources: readonly {
 					url: string;
@@ -6652,9 +6695,11 @@ if (args.includes('--help')) {
 					...(configured === ''
 						? { publishByReference: [appPath] }
 						: { attachOnly: [appPath] }),
+					phaseFacts,
 					dependencyReferences: [storePathSchema.parse(referencePath)],
-					inspectDependencySources: (paths, sources) => {
+					inspectDependencySources: (paths, sources, tenantUrl) => {
 						sourceCalls.push({
+							tenantUrl: tenantUrl?.href,
 							paths,
 							sources: sources.map(({ url: sourceUrl, ...source }) => ({
 								...source,
@@ -6666,11 +6711,15 @@ if (args.includes('--help')) {
 			);
 			expect({
 				sourceCalls,
+				phaseFacts: phaseFacts.filter(
+					({ phase }) => phase === 'Checking tenant dependency metadata'
+				),
 				builds: run.nixBuilds,
 				error: run.actionError
 			}).toStrictEqual({
 				sourceCalls: [
 					{
+						tenantUrl: url,
 						paths: [referencePath],
 						sources: [
 							{ url: cache === '' ? url : `${url}/cache/${cache}`, paths: [] },
@@ -6682,6 +6731,20 @@ if (args.includes('--help')) {
 						]
 					}
 				],
+				phaseFacts: Object.entries({
+					traceId: '0123456789abcdef0123456789abcdef',
+					source: 'https://cache.example.test/t/acme',
+					mode: 'legacy',
+					checked: '1/1',
+					found: '1',
+					requests: '1',
+					inFlight: '0',
+					elapsed: '2.5s'
+				}).map(([label, value]) => ({
+					phase: 'Checking tenant dependency metadata',
+					label,
+					value
+				})),
 				builds: [],
 				error: undefined
 			});
@@ -6691,6 +6754,7 @@ if (args.includes('--help')) {
 	it.each(['destination', 'reuse', 'reprobe', 'build'] as const)(
 		'publishes tenant build dependencies by reference for a %s target',
 		async (source) => {
+			const probePaths: (readonly StorePathString[])[] = [];
 			const options = {
 				...baseOptions(),
 				publish: 'built',
@@ -6726,6 +6790,9 @@ if (args.includes('--help')) {
 						]
 					}),
 					dependencyReferences: [storePathSchema.parse(referencePath)],
+					inspectDependencySources: (paths) => {
+						probePaths.push(paths);
+					},
 					...(source === 'build' && { streamedBuilt: [appPath] })
 				}
 			);
@@ -6752,6 +6819,10 @@ if (args.includes('--help')) {
 				})
 			);
 			expect({
+				probePaths,
+				delegation: run.calls
+					.filter((call) => call[1] === 'build-push')
+					.map((call) => call.includes('--no-reference-dependencies')),
 				intermediates: intermediates.flat(),
 				paths: receipt.paths,
 				targetOrigins: receipt.subjects
@@ -6766,6 +6837,8 @@ if (args.includes('--help')) {
 					argumentValue(call, '--run-root')
 				)
 			}).toStrictEqual({
+				probePaths: [[storePathSchema.parse(referencePath)]],
+				delegation: source === 'build' ? [true] : [],
 				intermediates: [referencePath],
 				paths:
 					source === 'destination' ? [referencePath] : [appPath, referencePath],
@@ -7177,6 +7250,7 @@ if (args.includes('--help')) {
 					cacheUrl,
 					'--github-oidc',
 					'--no-retain',
+					'--no-reference-dependencies',
 					'--cohorts-file',
 					cohortsFile,
 					'--receipt-file',
@@ -8734,6 +8808,7 @@ if (args.includes('--help')) {
 			url,
 			'--github-oidc',
 			'--no-retain',
+			'--no-reference-dependencies',
 			'--cohorts-file',
 			path.join(directory, `cupboard-build-cohorts-${cohortKey}.json`),
 			'--receipt-file',

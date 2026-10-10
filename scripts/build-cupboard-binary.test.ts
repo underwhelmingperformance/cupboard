@@ -1,10 +1,13 @@
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { build } from 'esbuild';
 import { describe, expect, it } from 'vitest';
 
 import {
+	binaryCliEntrySource,
 	compileHookHelper,
 	generateSeaPreparationBlob,
 	hookHelperBinaryName,
@@ -13,6 +16,64 @@ import {
 	releaseArchiveArguments,
 	releaseAssetNameFor
 } from './build-cupboard-binary.ts';
+
+describe('binaryCliEntrySource', () => {
+	it('initialises a real trace context before the packaged CLI runs', async () => {
+		const bundled = await build({
+			stdin: {
+				contents: binaryCliEntrySource,
+				loader: 'ts',
+				resolveDir: path.resolve(import.meta.dirname, '..')
+			},
+			bundle: true,
+			format: 'cjs',
+			platform: 'node',
+			write: false,
+			plugins: [
+				{
+					name: 'cli-trace-probe',
+					setup(bundler) {
+						bundler.onLoad(
+							{ filter: new RegExp(/packages\/cli\/src\/run\.ts$/u.source) },
+							() => ({
+								contents: [
+									"import { trace } from '@opentelemetry/api';",
+									'export async function runCli() {',
+									"const span = trace.getTracer('binary-test').startSpan('command');",
+									'console.log(JSON.stringify(span.spanContext()));',
+									'span.end();',
+									'return 0;',
+									'}'
+								].join('\n'),
+								loader: 'ts',
+								resolveDir: path.resolve(
+									import.meta.dirname,
+									'../packages/shared'
+								)
+							})
+						);
+					}
+				}
+			]
+		});
+		const output = bundled.outputFiles[0];
+		if (output === undefined) {
+			throw new TypeError('The binary entry bundle was not generated');
+		}
+		const context: unknown = JSON.parse(
+			execFileSync(process.execPath, ['-e', output.text], {
+				encoding: 'utf8'
+			})
+		);
+		const traceId: unknown = expect.stringMatching(/^(?!0{32}$)[0-9a-f]{32}$/u);
+		const spanId: unknown = expect.stringMatching(/^(?!0{16}$)[0-9a-f]{16}$/u);
+		expect(context).toStrictEqual({
+			traceId,
+			spanId,
+			traceFlags: 1
+		});
+	});
+});
 
 interface Invocation {
 	readonly command: string;

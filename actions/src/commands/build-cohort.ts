@@ -59,6 +59,7 @@ import {
 } from '@cupboard/protocol/upload';
 import {
 	createGithubReporter,
+	formatDuration,
 	type Reporter,
 	type ReporterResultEvent
 } from '@cupboard/reporter';
@@ -1959,13 +1960,31 @@ async function settleCohortBuild(
 							])
 				]
 			);
-			const references = await context.tenantDependencyReferences(paths, {
-				sources,
-				...(context.fetcher !== undefined && { fetch: context.fetcher }),
-				...(cupboardRunDependencies?.signal !== undefined && {
-					signal: cupboardRunDependencies.signal
-				})
-			});
+			const references = await context.reporter.phase(
+				'Checking tenant dependency metadata',
+				(phase) =>
+					context.tenantDependencyReferences(paths, {
+						tenantUrl: parseTenantCacheUrl(inputs.url).tenantUrl,
+						sources,
+						onProgress(progress) {
+							phase.fact('traceId', progress.traceId);
+							phase.fact('source', progress.source);
+							phase.fact('mode', progress.mode);
+							phase.fact(
+								'checked',
+								`${String(progress.checked)}/${String(progress.total)}`
+							);
+							phase.fact('found', progress.found);
+							phase.fact('requests', progress.requests);
+							phase.fact('inFlight', progress.inFlight);
+							phase.fact('elapsed', formatDuration(progress.elapsedMs));
+						},
+						...(context.fetcher !== undefined && { fetch: context.fetcher }),
+						...(cupboardRunDependencies?.signal !== undefined && {
+							signal: cupboardRunDependencies.signal
+						})
+					})
+			);
 			const grouped = Map.groupBy(references, (reference) => reference.source);
 			for (const [source, entries] of grouped) {
 				closureReferences.set(source, [
@@ -2331,6 +2350,7 @@ export function cohortBuildPushArguments(
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		'--github-oidc',
 		'--no-retain',
+		'--no-reference-dependencies',
 		'--cohorts-file',
 		cohortsFile,
 		'--receipt-file',

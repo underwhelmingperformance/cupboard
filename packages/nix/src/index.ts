@@ -92,7 +92,10 @@ export {
 } from './substituter.ts';
 export type { SubstituterReach } from './substituter-reach.ts';
 export { isReachableElsewhere } from './substituter-reach.ts';
-export type { TenantDependencyReferenceOptions } from './tenant-publication.ts';
+export type {
+	TenantDependencyProgress,
+	TenantDependencyReferenceOptions
+} from './tenant-publication.ts';
 export {
 	tenantDependencyReferences,
 	tenantReferenceSources
