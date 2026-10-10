@@ -59,8 +59,12 @@ target is a cohort of its own, so each target gets its own job. If you give
 several targets the same `cohort` label in the manifest, they share a job
 instead.
 
-The plan job evaluates the manifest once, with `nix eval --json`, and checks it
-before grouping the targets:
+The plan job first discovers the number of targets, then evaluates at most four
+at a time with `nix eval --json`. It assembles the original target objects in
+manifest order and checks the complete list before planning any cohort. Private
+reads use one renewing credential session for count discovery and every target.
+With `publish: none`, Nix removes each target's top-level `rootDrvPath` before
+JSON conversion. Planning checks the following constraints:
 
 - Every target's `rootSuffix` must be different.
 - Targets in the same cohort must have the same system, runner, and `remote` and

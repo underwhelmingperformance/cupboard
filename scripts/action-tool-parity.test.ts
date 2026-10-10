@@ -237,6 +237,33 @@ describe('native build action runtime', () => {
 	});
 });
 
+describe('native evaluation action runtime', () => {
+	it('uses the pinned Node major and its standalone main bundle without post cleanup', () => {
+		const document: unknown = parse(
+			readFileSync(
+				path.join(actionsDirectory, 'evaluate-targets', 'action.yml'),
+				'utf8'
+			)
+		);
+		const runs = z
+			.object({ runs: z.record(z.string(), z.string()) })
+			.parse(document).runs;
+		const [major] = readFileSync(
+			path.join(repositoryRoot, '.node-version'),
+			'utf8'
+		)
+			.trim()
+			.split('.', 1);
+		if (major === undefined) {
+			throw new Error('The workspace must specify its Node major version.');
+		}
+		expect(runs).toStrictEqual({
+			using: `node${major}`,
+			main: 'dist/main.cjs'
+		});
+	});
+});
+
 describe('source acquisition smoke', () => {
 	it('runs the setup action from a canonical source coordinate in CI', () => {
 		const workflow = readFileSync(ciWorkflowPath, 'utf8');

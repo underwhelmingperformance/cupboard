@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { z } from 'zod';
 
+import { nativeEvaluationMain } from '../actions/src/evaluate-targets/native.ts';
 import {
 	type NixSystem,
 	nixSystemRunners,
@@ -538,6 +539,23 @@ describe('cupboard acquisition', () => {
 		});
 	});
 
+	it('passes the complete manifest evaluation inputs to the packaged action', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		expect(
+			inputsOf(workflow, cupboardAction('evaluate-targets'))
+		).toStrictEqual([
+			{
+				targets: '${{ inputs.targets }}',
+				publish: '${{ needs.configure.outputs.publish }}',
+				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
+				audience: '${{ steps.setup.outputs.read-session-audience }}',
+				'read-session-caches': '${{ steps.setup.outputs.read-session-caches }}',
+				'read-session-view': '${{ steps.setup.outputs.read-session-view }}'
+			}
+		]);
+	});
+
 	it('creates the pull-request cache from the plan job alone', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		const provisioning = inputsOf(workflow, cupboardAction('setup'))
@@ -905,6 +923,7 @@ describe('cohort planning and publication', () => {
 				cupboardAction('publication-settings'),
 				cupboardAction('prepare'),
 				cupboardAction('setup'),
+				cupboardAction('evaluate-targets'),
 				cupboardAction('plan'),
 				cupboardAction('prepare'),
 				cupboardAction('setup'),
@@ -2664,7 +2683,7 @@ it.each([
 	{ audience: '  custom-audience  ', expected: 'custom-audience' },
 	{ audience: ' custom-audience ', expected: 'custom-audience' }
 ])(
-	'uses the normalised audience in extracted workflow scripts: $audience',
+	'uses the normalised audience in native evaluation and lifecycle scripts: $audience',
 	async ({ audience, expected }) => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		const evaluate = workflow.jobs.plan?.steps.find(
@@ -2677,12 +2696,12 @@ it.each([
 			(step) => step.name === 'Reopen the pull request cache'
 		);
 		if (
-			evaluate?.run === undefined ||
+			evaluate?.uses !== cupboardAction('evaluate-targets') ||
 			remove?.run === undefined ||
 			reopen?.run === undefined
 		) {
 			throw new Error(
-				'The flake workflow must have evaluation, close and reopen scripts'
+				'The flake workflow must have native evaluation, close and reopen steps'
 			);
 		}
 		const setup = workflow.jobs['close-cache']?.steps.find(
@@ -2696,11 +2715,30 @@ it.each([
 		try {
 			await writeFile(
 				binary,
-				`#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.ARGUMENTS_FILE, JSON.stringify(process.argv.slice(2))); process.stdout.write('[]');\n`,
+				`#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.ARGUMENTS_FILE, JSON.stringify(process.argv.slice(2))); process.stdout.write('[{"attr":".#package","system":"x86_64-linux","os":"ubuntu-latest","rootSuffix":"/package/"}]');\n`,
 				{ mode: 0o700 }
 			);
 			const argumentsByStep: unknown[] = [];
-			for (const step of [evaluate, remove, reopen]) {
+			await nativeEvaluationMain(
+				{
+					...process.env,
+					INPUT_TARGETS: '.#targets',
+					INPUT_PUBLISH: 'outputs',
+					'INPUT_CUPBOARD-PATH': binary,
+					'INPUT_READ-SESSION-TARGET':
+						'https://cache.example.test/t/acme/cache/builds',
+					INPUT_AUDIENCE: expected,
+					'INPUT_READ-SESSION-CACHES':
+						'["https://cache.example.test/t/acme/cache/extra"]',
+					'INPUT_READ-SESSION-VIEW': 'prior',
+					ARGUMENTS_FILE: capture,
+					GITHUB_OUTPUT: path.join(directory, 'output')
+				},
+				undefined,
+				{ workerPath: path.join(directory, 'worker.cjs') }
+			);
+			argumentsByStep.push(JSON.parse(await readFile(capture, 'utf8')));
+			for (const step of [remove, reopen]) {
 				if (step.run === undefined) {
 					throw new Error('The workflow step must have a shell script');
 				}
@@ -2750,10 +2788,8 @@ it.each([
 						'--reuse-view',
 						'prior',
 						'--',
-						'nix',
-						'eval',
-						'--json',
-						'.#targets'
+						process.execPath,
+						path.join(directory, 'worker.cjs')
 					],
 					[
 						'cache',

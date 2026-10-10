@@ -1,0 +1,31 @@
+name: Evaluate cupboard target manifest
+description: Evaluates the target manifest with at most four Nix processes.
+inputs:
+  targets:
+    description: Nix attribute that produces the target manifest.
+    required: true
+  publish:
+    description: Publication scope used when evaluating derivation fields.
+    required: false
+    default: outputs
+  cupboard-path:
+    description: Path to cupboard, required for private OIDC reads.
+    required: false
+  read-session-target:
+    description: Pass the read-session-target output from actions/setup.
+    required: false
+  audience:
+    description: Pass the read-session-audience output from actions/setup.
+    required: false
+  read-session-caches:
+    description: Pass the JSON read-session-caches output from actions/setup.
+    required: false
+  read-session-view:
+    description: Pass the read-session-view output from actions/setup.
+    required: false
+outputs:
+  manifest:
+    description: Complete target manifest in its original order.
+runs:
+  using: node24
+  main: dist/main.cjs

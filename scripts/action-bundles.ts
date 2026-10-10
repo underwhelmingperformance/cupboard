@@ -6,7 +6,10 @@ import { CodedError } from '@cupboard/shared/errors';
 import { build } from 'esbuild';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '..');
-const entrypoints = ['main', 'post', 'worker'] as const;
+const actions = [
+	{ name: 'build-paths', entrypoints: ['main', 'post', 'worker'] },
+	{ name: 'evaluate-targets', entrypoints: ['main', 'worker'] }
+] as const;
 
 class ActionBundleGenerationError extends CodedError {
 	constructor(sourcePath: string) {
@@ -51,43 +54,45 @@ export async function renderActionBundle(sourcePath: string): Promise<string> {
 }
 
 async function updateActionBundles(shouldCheck: boolean): Promise<void> {
-	for (const entrypoint of entrypoints) {
-		const sourcePath = path.join(
-			repositoryRoot,
-			'actions',
-			'src',
-			'build-paths',
-			`${entrypoint}.ts`
-		);
-		const outputPath = path.join(
-			repositoryRoot,
-			'actions',
-			'build-paths',
-			'dist',
-			`${entrypoint}.cjs`
-		);
-		const contents = await renderActionBundle(sourcePath);
-		if (shouldCheck) {
-			let recorded: string | undefined;
-			try {
-				recorded = await readFile(outputPath, 'utf8');
-			} catch (error) {
-				if (
-					!(error instanceof Error) ||
-					!('code' in error) ||
-					error.code !== 'ENOENT'
-				) {
-					throw error;
+	for (const action of actions) {
+		for (const entrypoint of action.entrypoints) {
+			const sourcePath = path.join(
+				repositoryRoot,
+				'actions',
+				'src',
+				action.name,
+				`${entrypoint}.ts`
+			);
+			const outputPath = path.join(
+				repositoryRoot,
+				'actions',
+				action.name,
+				'dist',
+				`${entrypoint}.cjs`
+			);
+			const contents = await renderActionBundle(sourcePath);
+			if (shouldCheck) {
+				let recorded: string | undefined;
+				try {
+					recorded = await readFile(outputPath, 'utf8');
+				} catch (error) {
+					if (
+						!(error instanceof Error) ||
+						!('code' in error) ||
+						error.code !== 'ENOENT'
+					) {
+						throw error;
+					}
 				}
+				if (recorded !== contents) {
+					throw new ActionBundleStaleError(outputPath);
+				}
+				continue;
 			}
-			if (recorded !== contents) {
-				throw new ActionBundleStaleError(outputPath);
-			}
-			continue;
-		}
 
-		await mkdir(path.dirname(outputPath), { recursive: true });
-		await writeFile(outputPath, contents);
+			await mkdir(path.dirname(outputPath), { recursive: true });
+			await writeFile(outputPath, contents);
+		}
 	}
 }
 
