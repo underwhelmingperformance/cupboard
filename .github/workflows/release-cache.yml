@@ -51,7 +51,7 @@ jobs:
   flakehub:
     name: publish (flakehub)
     needs: publish
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read # check out the tagged flake source
       id-token: write # OIDC token that authenticates the FlakeHub publish
