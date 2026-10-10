@@ -1335,13 +1335,22 @@ export async function buildCohortAction(
 			build =
 				buildInstallables.length === 0
 					? { paths: [], status: 0, copiedFrom: new Map() }
-					: await runNix(
-							buildInstallables,
-							inputs.maxJobs,
-							inputs.store,
-							inputs.outLinkDirectory,
-							dependencies.signal,
-							...buildPolicy
+					: await reporter.phase(
+							isStreamed
+								? 'Resolving target outputs'
+								: 'Building cohort targets',
+							async (phase) => {
+								const outputs = await runNix(
+									buildInstallables,
+									inputs.maxJobs,
+									inputs.store,
+									inputs.outLinkDirectory,
+									dependencies.signal,
+									...buildPolicy
+								);
+								phase.fact('Target outputs', outputs.paths.length);
+								return outputs;
+							}
 						);
 		} else {
 			build = {
@@ -1443,12 +1452,19 @@ export async function buildCohortAction(
 		await withLocalDerivationRoots(
 			plannedDerivations,
 			async () => {
-				const bindings = await materialisePlannedDerivations(
-					queryable,
-					targets,
-					runDerivationShow,
-					materialiseGraph,
-					dependencies.signal
+				const bindings = await reporter.phase(
+					'Evaluating cohort targets',
+					async (phase) => {
+						const bindings = await materialisePlannedDerivations(
+							queryable,
+							targets,
+							runDerivationShow,
+							materialiseGraph,
+							dependencies.signal
+						);
+						phase.fact('Targets', queryable.length);
+						return bindings;
+					}
 				);
 				const graph = await resolveLocalGraph(
 					plannedDerivations,
@@ -1481,13 +1497,17 @@ export async function buildCohortAction(
 		await withLocalDerivationRoots(
 			targets.map((target) => derivationPathOf(target)),
 			async () => {
-				await materialisePlannedDerivations(
-					queryable,
-					targets,
-					runDerivationShow,
-					materialiseGraph,
-					dependencies.signal
-				);
+				await reporter.phase('Evaluating cohort targets', async (phase) => {
+					const bindings = await materialisePlannedDerivations(
+						queryable,
+						targets,
+						runDerivationShow,
+						materialiseGraph,
+						dependencies.signal
+					);
+					phase.fact('Targets', queryable.length);
+					return bindings;
+				});
 				const graph = inputs.push
 					? await resolveLocalGraph(
 							targets.map((target) => derivationPathOf(target)),
