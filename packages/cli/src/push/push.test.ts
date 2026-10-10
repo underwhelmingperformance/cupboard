@@ -1447,6 +1447,12 @@ describe('runPush', () => {
 				uploadedBytes:
 					compressedNarBytes.byteLength + replacementBytes.byteLength,
 				failures: [],
+				roots: [
+					rootSummary({
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					})
+				],
 				paths: [
 					{
 						storePathHash: StorePath.hash(appPath),
@@ -1642,6 +1648,12 @@ describe('runPush', () => {
 				skipped: 0,
 				uploadedBytes: 14,
 				failures: [],
+				roots: [
+					rootSummary({
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					})
+				],
 				paths: [
 					{
 						storePathHash: StorePath.hash(appPath),
@@ -1747,6 +1759,12 @@ describe('runPush', () => {
 				skipped: 1,
 				uploadedBytes: 14,
 				failures: [],
+				roots: [
+					rootSummary({
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					})
+				],
 				paths: [
 					{
 						storePathHash: StorePath.hash(appPath),
@@ -3568,6 +3586,7 @@ describe('runPush', () => {
 					skipped: 1,
 					uploadedBytes: 0,
 					failures: [],
+					roots: [rootSummary({ name: rootName('main'), targets: [appPath] })],
 					paths: [
 						{
 							storePathHash: StorePath.hash(appPath),
@@ -3669,6 +3688,7 @@ describe('runPush', () => {
 					skipped: 1,
 					uploadedBytes: 0,
 					failures: [],
+					roots: [rootSummary({ name: rootName('main'), targets: [appPath] })],
 					paths: [
 						{
 							storePathHash: StorePath.hash(appPath),
@@ -4202,7 +4222,7 @@ describe('runPush', () => {
 		});
 	});
 
-	it('caps the per-path rows for a closure larger than the row limit', async () => {
+	it('lists all explicit target outputs without truncating', async () => {
 		const storePaths = Array.from({ length: 22 }, (_, index) =>
 			storePathSchema.parse(
 				`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
@@ -4234,15 +4254,60 @@ describe('runPush', () => {
 				{ label: 'Already available', value: '22' },
 				{ label: 'Bytes uploaded', value: '0 B' },
 				{ label: 'Retention', value: 'none (--no-retain)' },
-				...storePaths.slice(0, 20).map((storePath) => ({
+				...storePaths.map((storePath) => ({
 					label: StorePath.basename(storePath),
 					value: 'available; retention grace not reported'
-				})),
-				{
-					label: '…',
-					value: '2 more path(s); the full list is in the JSON output'
-				}
+				}))
 			]
+		]);
+	});
+
+	it('caps intermediate paths and identifies the artifact with the complete result', async () => {
+		const storePaths = Array.from({ length: 24 }, (_, index) =>
+			storePathSchema.parse(
+				`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+			)
+		);
+		const target = storePaths.at(-1);
+		if (target === undefined) {
+			throw new Error('The fixture must include a target');
+		}
+		const payloads: ResultPayload[] = [];
+
+		const infos = Object.fromEntries(
+			storePaths.map((storePath) => [
+				storePath,
+				pathInfo(storePath, appDigest, [])
+			])
+		);
+
+		await runPush(
+			PublicationCollection.of({
+				targets: [target],
+				intermediatePaths: storePaths.slice(0, -1)
+			}),
+			reporter([], [], payloads),
+			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				retain: false,
+				resultArtifact: 'cupboard-publication-linux',
+				client: skipClient([], []),
+				nix: nixStore(infos)
+			}
+		);
+
+		const result = payloads.at(-1);
+		expect(result?.rows.slice(6)).toStrictEqual([
+			...[target, ...storePaths.slice(0, 20)].map((storePath) => ({
+				label: StorePath.basename(storePath),
+				value: 'available; retention grace not reported'
+			})),
+			{
+				label: '…',
+				value:
+					'3 more path(s); the full list is in artifact cupboard-publication-linux'
+			}
 		]);
 	});
 
@@ -4945,6 +5010,113 @@ describe('runPush', () => {
 		});
 	});
 
+	it('reports the actual root expiry for retained targets and their closure', async () => {
+		const payloads: ResultPayload[] = [];
+		const root = rootName('main');
+		const retained = rootSummary(
+			{ name: root, targets: [appPath] },
+			'2026-02-15T00:00:00.000Z'
+		);
+
+		await runPush(publication([appPath]), reporter([], [], payloads), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
+			root,
+			closure: true,
+			client: {
+				...skipClient([], []),
+				negotiate: (body) =>
+					Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: body.paths.map((path) => ({
+								action: 'skip',
+								storePathHash: path.storePathHash,
+								narHash: path.narHash,
+								grace: { retainUntil: '2026-02-01T00:00:00.000Z' }
+							}))
+						})
+					),
+				setRoot: () => Promise.resolve(retained)
+			},
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			})
+		});
+
+		const result = payloads.at(-1);
+		const data = z
+			.object({ roots: z.array(z.unknown()).optional() })
+			.parse(result?.data);
+
+		expect({
+			roots: data.roots,
+			paths: result?.rows.filter((row) =>
+				new Set<string>([
+					StorePath.basename(appPath),
+					StorePath.basename(runtimePath)
+				]).has(row.label)
+			)
+		}).toStrictEqual({
+			roots: [retained],
+			paths: [
+				{
+					label: StorePath.basename(appPath),
+					value: 'available; root main, expires 2026-02-15 00:00 UTC'
+				},
+				{
+					label: StorePath.basename(runtimePath),
+					value: 'available; root main, expires 2026-02-15 00:00 UTC'
+				}
+			]
+		});
+	});
+
+	it('lists target outputs before intermediate paths', async () => {
+		const results: ResultRow[][] = [];
+
+		await runPush(
+			PublicationCollection.of({
+				targets: [runtimePath],
+				intermediatePaths: [appPath]
+			}),
+			reporter(results, []),
+			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				retain: false,
+				client: skipClient([], []),
+				nix: Object.assign(nixStore({}), {
+					queryValidPathsInfo: () =>
+						Promise.resolve([
+							pathInfo(appPath, appDigest, []),
+							pathInfo(runtimePath, runtimeDigest, [])
+						])
+				})
+			}
+		);
+
+		expect(
+			results
+				.at(-1)
+				?.filter((row) =>
+					new Set<string>([
+						StorePath.basename(appPath),
+						StorePath.basename(runtimePath)
+					]).has(row.label)
+				)
+		).toStrictEqual([
+			{
+				label: StorePath.basename(runtimePath),
+				value: 'available; retention grace not reported'
+			},
+			{
+				label: StorePath.basename(appPath),
+				value: 'available; retention grace not reported'
+			}
+		]);
+	});
+
 	it('reports a kept-until fact and an unmatched path together, in rows and JSON data', async () => {
 		const results: ResultRow[][] = [];
 		const payloads: ResultPayload[] = [];
@@ -5016,11 +5188,11 @@ describe('runPush', () => {
 					{ label: 'Pin expiry', value: 'permanent' },
 					{
 						label: StorePath.basename(appPath),
-						value: 'available; kept until 2026-02-01 00:00 UTC'
+						value: `available; root pin:${StorePath.hash(appPath)}, permanent`
 					},
 					{
 						label: StorePath.basename(runtimePath),
-						value: 'available; retention grace not reported'
+						value: `available; root pin:${StorePath.hash(runtimePath)}, permanent`
 					}
 				]
 			],
@@ -5030,6 +5202,16 @@ describe('runPush', () => {
 				skipped: 1,
 				uploadedBytes: 14,
 				failures: [],
+				roots: [
+					rootSummary({
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}),
+					rootSummary({
+						name: `pin:${StorePath.hash(runtimePath)}`,
+						targets: [runtimePath]
+					})
+				],
 				paths: [
 					{
 						storePathHash: appHash,
@@ -5105,7 +5287,7 @@ describe('runPush', () => {
 					{ label: 'Pin expiry', value: 'permanent' },
 					{
 						label: StorePath.basename(appPath),
-						value: 'accepted; verification pending; retention grace period 900s'
+						value: `accepted; verification pending; root pin:${StorePath.hash(appPath)}, permanent`
 					}
 				]
 			],
@@ -5115,6 +5297,12 @@ describe('runPush', () => {
 				skipped: 0,
 				uploadedBytes: 14,
 				failures: [],
+				roots: [
+					rootSummary({
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					})
+				],
 				paths: [
 					{
 						storePathHash: appHash,

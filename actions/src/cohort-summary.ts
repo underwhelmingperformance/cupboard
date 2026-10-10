@@ -4,6 +4,7 @@ import {
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
+import type { RootSummary } from '@cupboard/protocol/retention';
 import {
 	formatBytes,
 	formatCount,
@@ -59,6 +60,16 @@ function eventUploads(event: ReporterResultEvent): UploadTally | undefined {
 	return summary === undefined
 		? undefined
 		: { paths: summary.uploadedPaths, bytes: summary.uploadedBytes };
+}
+
+export function recordedRoots(
+	results: readonly ReporterResultEvent[]
+): readonly RootSummary[] {
+	return results.flatMap((event) =>
+		event.kind === pushSummaryResultKind
+			? (pushSummarySchema.safeParse(event.data).data?.roots ?? [])
+			: []
+	);
 }
 
 export function addUploads(
@@ -121,6 +132,7 @@ export interface CohortRootSummary {
 	Absent when the job did not set this root.
 	*/
 	readonly retention?: RootRetention;
+	readonly recordedRetention?: RootSummary;
 }
 
 export interface CohortSummary {
@@ -176,7 +188,10 @@ export function cohortSummaryResult(
 					root.uploads?.bytes === undefined
 						? '-'
 						: formatBytes(root.uploads.bytes),
-				expiry: retentionText(root.retention)
+				expiry:
+					root.recordedRetention === undefined
+						? retentionText(root.retention)
+						: (root.recordedRetention.expiresAt ?? 'Permanent')
 			}))
 		),
 		jobSummary: true

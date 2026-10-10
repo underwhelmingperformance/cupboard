@@ -815,6 +815,8 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runsOn }}
     timeout-minutes: 180
+    env:
+      CUPBOARD_RESULT_ARTIFACT: cupboard-publication-${{ matrix.key }}
     permissions:
       attestations: write # allow the attest action to upload bundles to the repository's attestation store
       contents: read # check out the flake source
@@ -1039,6 +1041,14 @@ jobs:
           if ! nix store gc; then
             echo '::warning::nix store gc failed; a later cohort job builds with the store as it stands'
           fi
+
+      - name: Save complete publication results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: ${{ env.CUPBOARD_RESULT_ARTIFACT }}
+          path: ${{ runner.temp }}/cupboard-result-*.jsonl
+          if-no-files-found: ignore
 
   close-cache:
     name: Close the pull request's cache

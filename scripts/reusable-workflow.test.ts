@@ -888,12 +888,7 @@ describe('cohort planning and publication', () => {
 			.filter((uses) => uses?.startsWith(cupboardActionPrefix));
 
 		expect({
-			cupboardActions,
-			// The receipt comes from the supervised build, so no separate push or
-			// build step may publish alongside it.
-			artifactSteps: allSteps(workflow).filter(({ step }) =>
-				step.uses?.startsWith('actions/upload-artifact')
-			)
+			cupboardActions
 		}).toStrictEqual({
 			cupboardActions: [
 				cupboardAction('resolve-cupboard'),
@@ -909,10 +904,45 @@ describe('cohort planning and publication', () => {
 				cupboardAction('attest-status'),
 				cupboardAction('prepare'),
 				cupboardAction('setup')
-			],
-			artifactSteps: []
+			]
 		});
 	});
+
+	it.each([
+		{
+			file: flakeWorkflow,
+			job: 'cohort',
+			artifact: 'cupboard-publication-${{ matrix.key }}'
+		},
+		{ file: publishWorkflow, job: 'publish', artifact: 'cupboard-publication' }
+	])(
+		'saves complete publication results from $job, including failed jobs',
+		async ({ file, job, artifact }) => {
+			const workflow = await loadWorkflow(file);
+			const definition = workflow.jobs[job];
+
+			expect({
+				environment: scalarMapSchema.parse(definition?.env),
+				artifacts: definition?.steps.filter((step) =>
+					step.uses?.startsWith('actions/upload-artifact')
+				)
+			}).toStrictEqual({
+				environment: { CUPBOARD_RESULT_ARTIFACT: artifact },
+				artifacts: [
+					{
+						name: 'Save complete publication results',
+						uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+						if: '${{ !cancelled() }}',
+						with: {
+							name: '${{ env.CUPBOARD_RESULT_ARTIFACT }}',
+							path: '${{ runner.temp }}/cupboard-result-*.jsonl',
+							'if-no-files-found': 'ignore'
+						}
+					}
+				]
+			});
+		}
+	);
 
 	it('leaves build concurrency to the Nix configuration', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);

@@ -9515,7 +9515,10 @@ describe('cohort job summary', () => {
 		await rm(directory, { recursive: true, force: true });
 	});
 
-	function pushSummary(root: string | undefined): ReporterResultEvent[] {
+	function pushSummary(
+		root: string | undefined,
+		shouldIncludeRootExpiry = false
+	): ReporterResultEvent[] {
 		const [uploadedPaths, uploadedBytes] = uploadsByRoot.get(root ?? '') ?? [
 			0, 0
 		];
@@ -9529,7 +9532,20 @@ describe('cohort job summary', () => {
 					skipped: 0,
 					uploadedBytes,
 					failures: [],
-					paths: []
+					paths: [],
+					...(shouldIncludeRootExpiry &&
+						root !== undefined && {
+							roots: [
+								{
+									name: root,
+									targets: [],
+									createdAt: '2026-10-09T10:00:00.000Z',
+									updatedAt: '2026-10-09T10:00:00.000Z',
+									expiresAt: '2026-10-16T10:00:00.000Z',
+									expired: false
+								}
+							]
+						})
 				}
 			}
 		];
@@ -9550,7 +9566,10 @@ describe('cohort job summary', () => {
 		}
 	};
 
-	async function summarise(failedTargets: readonly string[]): Promise<{
+	async function summarise(
+		failedTargets: readonly string[],
+		shouldIncludeRootExpiry = false
+	): Promise<{
 		readonly summary: readonly unknown[];
 	}> {
 		const builtPaths = [
@@ -9578,7 +9597,10 @@ describe('cohort job summary', () => {
 		const runCupboardMock = vi.fn<typeof runCupboard>(
 			async (binaryPath, arguments_, passedEnvironment) => {
 				if (arguments_[1] === 'push') {
-					return pushSummary(argumentValue(arguments_, '--root'));
+					return pushSummary(
+						argumentValue(arguments_, '--root'),
+						shouldIncludeRootExpiry
+					);
 				}
 
 				if (arguments_[1] !== 'build-push') {
@@ -9648,6 +9670,21 @@ describe('cohort job summary', () => {
 
 		return { summary };
 	}
+
+	it('reports expiry returned by the root update', async () => {
+		expect(await summarise([], true)).toStrictEqual({
+			summary: [
+				{
+					path: jobSummaryFile,
+					text: cohortSummaryText([
+						String.raw`| .#packages.x86\_64-linux.app | github:owner/repo/main/app | Already served | 0 | 0 B | 2026-10-16T10:00:00.000Z |`,
+						String.raw`| .#packages.x86\_64-linux.lib | github:owner/repo/main/lib | Built | 1 | 2.05 kB | 2026-10-16T10:00:00.000Z |`,
+						String.raw`| .#packages.x86\_64-linux.floating | github:owner/repo/main/floating | Built | 2 | 1.5 MB | 2026-10-16T10:00:00.000Z |`
+					])
+				}
+			]
+		});
+	});
 
 	it.each([
 		{
