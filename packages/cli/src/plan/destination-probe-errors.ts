@@ -1,4 +1,9 @@
-import { authExitCode, CliError, transientExitCode } from '../errors.ts';
+import {
+	authExitCode,
+	CliError,
+	CliUsageError,
+	transientExitCode
+} from '../errors.ts';
 
 /**
  * The destination or reuse-view availability probe returned a non-2xx status
@@ -33,5 +38,14 @@ export class PrivateViewReadRefusedError extends CliError {
 
 	override get exitCode(): number {
 		return authExitCode;
+	}
+}
+
+export class ReferenceCacheSourceInvalidError extends CliUsageError {
+	constructor() {
+		super(
+			'The reference source must be a cache in the destination tenant and cannot be combined with reuse-view.'
+		);
+		this.name = 'ReferenceCacheSourceInvalidError';
 	}
 }

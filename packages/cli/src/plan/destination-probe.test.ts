@@ -2,7 +2,7 @@ import { cacheNameSchema, storePathSchema } from '@cupboard/nix-store/scalars';
 import { readUserSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 
-import { tenantProbesFor } from './destination-probe.ts';
+import { cacheReferenceSource, tenantProbesFor } from './destination-probe.ts';
 
 const baseUrl = new URL('https://cupboard.example.test/t/owner');
 const appHash = '0123456789abcdfghijklmnpqrsvwxyz';
@@ -114,4 +114,93 @@ describe('tenantProbesFor read credentials', () => {
 			});
 		}
 	);
+});
+
+it.each([
+	{ cache: { kind: 'default' } as const, suffix: '' },
+	{
+		cache: { kind: 'named', name: cacheNameSchema.parse('merged-pr') } as const,
+		suffix: '/cache/merged-pr'
+	}
+])(
+	'probes a cache reference source without treating it as destination availability: $suffix',
+	async ({ cache, suffix }) => {
+		const requests: ProbeRequest[] = [];
+		const probes = tenantProbesFor({
+			baseUrl,
+			cache: { kind: 'named', name: cacheNameSchema.parse('pr') },
+			referenceSource: { kind: 'cache', cache },
+			viewCredentials: {
+				user: readUserSchema.parse('source'),
+				password: 'source-secret'
+			},
+			fetcher: (input, init) => {
+				requests.push({
+					url: requestUrl(input),
+					authorization:
+						new Headers(init?.headers).get('authorization') ?? undefined
+				});
+				return Promise.resolve(Response.json({ missingStorePathHashes: [] }));
+			}
+		});
+		const served = await probes.viewServed([appPath]);
+		expect({ served: [...served], requests }).toStrictEqual({
+			served: [appPath],
+			requests: [
+				{
+					url: `${baseUrl.href}${suffix}/api/v1/missing-paths`,
+					authorization: `Basic ${btoa('source:source-secret')}`
+				}
+			]
+		});
+	}
+);
+
+it('builds when a reference cache has been removed without hiding a missing destination', async () => {
+	const probes = tenantProbesFor({
+		baseUrl,
+		cache: { kind: 'default' },
+		referenceSource: {
+			kind: 'cache',
+			cache: { kind: 'named', name: cacheNameSchema.parse('merged-pr') }
+		},
+		fetcher: () => Promise.resolve(new Response(undefined, { status: 404 }))
+	});
+	expect([...(await probes.viewServed([appPath]))]).toStrictEqual([]);
+	await expect(probes.destinationServed([appPath])).rejects.toThrow('HTTP 404');
+});
+
+it.each([401, 403])(
+	'does not hide reference cache read refusal: %s',
+	async (status) => {
+		const probes = tenantProbesFor({
+			baseUrl,
+			cache: { kind: 'default' },
+			referenceSource: { kind: 'cache', cache: { kind: 'default' } },
+			fetcher: () => Promise.resolve(new Response(undefined, { status }))
+		});
+		await expect(probes.viewServed([appPath])).rejects.toThrow(
+			`HTTP ${String(status)}`
+		);
+	}
+);
+
+it('rejects a reference source outside the destination tenant', () => {
+	expect(() =>
+		cacheReferenceSource(
+			baseUrl,
+			new URL('https://cupboard.example.test/t/other')
+		)
+	).toThrow('destination tenant');
+});
+
+it('rejects a cache reference source combined with a reuse view', () => {
+	expect(() =>
+		tenantProbesFor({
+			baseUrl,
+			cache: { kind: 'default' },
+			referenceSource: { kind: 'cache', cache: { kind: 'default' } },
+			view: 'shared'
+		})
+	).toThrow('reuse-view');
 });

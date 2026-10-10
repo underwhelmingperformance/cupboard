@@ -89,6 +89,7 @@ import {
 	type CupboardRunDependencies,
 	runCupboard as defaultRunCupboard
 } from '../cupboard-run.ts';
+import { ReferenceSourceInvalidError } from '../errors.ts';
 import {
 	BuildObservationMissingError,
 	BuildRebuildRemoteDispatchError,
@@ -410,6 +411,7 @@ export interface BuildCohortOptions {
 	readonly cupboardPath?: string;
 	readonly cache?: string;
 	readonly reuseView?: string;
+	readonly referenceSource?: string;
 	readonly ttl?: string;
 	readonly permanent?: string;
 	readonly audience?: string;
@@ -441,6 +443,7 @@ export interface BuildCohortInputs {
 	readonly cupboardPath: string;
 	readonly cache: CacheScope;
 	readonly reuseView: string;
+	readonly referenceSource?: string;
 	readonly ttl: string;
 	readonly permanent: boolean;
 	readonly audience: string;
@@ -500,6 +503,21 @@ export function resolveBuildCohortInputs(
 		throw new MissingInputError('url');
 	}
 
+	const referenceSource = provided(options.referenceSource);
+	if (referenceSource !== undefined) {
+		try {
+			const source = parseTenantCacheUrl(new URL(referenceSource));
+			const destination = parseTenantCacheUrl(url);
+			if (
+				provided(options.reuseView) !== undefined ||
+				canonicalHref(source.tenantUrl) !== canonicalHref(destination.tenantUrl)
+			) {
+				throw new ReferenceSourceInvalidError();
+			}
+		} catch (error) {
+			throw new ReferenceSourceInvalidError(error);
+		}
+	}
 	const cupboardPath = provided(options.cupboardPath);
 
 	if (cupboardPath === undefined) {
@@ -605,6 +623,7 @@ export function resolveBuildCohortInputs(
 		cupboardPath,
 		cache: providedCacheSelection(options.cache),
 		reuseView: provided(options.reuseView) ?? '',
+		...(referenceSource !== undefined && { referenceSource }),
 		ttl,
 		permanent: isPermanent,
 		audience: provided(options.audience) ?? '',
@@ -669,6 +688,10 @@ export function registerBuildCohortCommand(
 			'path to the cupboard binary installed by actions/setup'
 		)
 		.option('--cache <name>', 'Inspect and publish to a named cache.')
+		.option(
+			'--reference-source <url>',
+			'cache URL to probe for publication by reference'
+		)
 		.option(
 			'--reuse-view <name>',
 			'named reuse view to probe for substitutable paths'
@@ -822,12 +845,9 @@ function cachedClosureSources(
 		});
 	}
 
-	if (inputs.reuseView !== '') {
+	if (cohortReferenceSource(inputs) !== '') {
 		sources.push({
-			url: new URL(
-				`reuse/${inputs.reuseView}`,
-				`${canonicalHref(inputs.url)}/`
-			),
+			url: new URL(cohortReferenceSource(inputs)),
 			paths: view,
 			...(inputs.fallbackReadUser !== '' && {
 				credential: {
@@ -1923,14 +1943,11 @@ async function settleCohortBuild(
 							}
 						})
 					},
-					...(inputs.reuseView === ''
+					...(cohortReferenceSource(inputs) === ''
 						? []
 						: [
 								{
-									url: new URL(
-										`reuse/${inputs.reuseView}`,
-										`${canonicalHref(inputs.url)}/`
-									),
+									url: new URL(cohortReferenceSource(inputs)),
 									paths: [],
 									...(inputs.fallbackReadUser !== '' && {
 										credential: {
@@ -2636,16 +2653,14 @@ export function cohortPushArguments(
 		| 'fallbackReadUser'
 		| 'fallbackReadPassword'
 		| 'reuseView'
+		| 'referenceSource'
 		| 'publish'
 	>,
 	group: CohortRootGroup,
 	extras: CohortPushExtras
 ): readonly string[] {
 	const hasReferences = extras.referencePathsFile !== '';
-	const viewSource =
-		hasReferences && inputs.reuseView !== ''
-			? `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`
-			: '';
+	const viewSource = hasReferences ? cohortReferenceSource(inputs) : '';
 	const isViewReference =
 		viewSource !== '' && extras.referenceSource === viewSource;
 	const readUser = isViewReference ? inputs.fallbackReadUser : inputs.readUser;
@@ -2704,6 +2719,26 @@ export function cohortPushArguments(
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
 		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
 	];
+}
+
+function cohortReferenceSource(
+	inputs: Pick<BuildCohortInputs, 'url' | 'reuseView' | 'referenceSource'>
+): string {
+	return (
+		inputs.referenceSource ??
+		(inputs.reuseView === ''
+			? ''
+			: `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`)
+	);
+}
+
+function referenceProbeArguments(
+	inputs: Pick<BuildCohortInputs, 'reuseView' | 'referenceSource'>
+): string[] {
+	if (inputs.referenceSource !== undefined) {
+		return ['--reference-source', inputs.referenceSource];
+	}
+	return inputs.reuseView === '' ? [] : ['--reuse-view', inputs.reuseView];
 }
 
 interface PublishCohortOptions {
@@ -2830,10 +2865,7 @@ async function publishCohort(
 		leftUpstreamPaths,
 		incompleteRoots
 	});
-	const referenceSource =
-		inputs.reuseView === ''
-			? ''
-			: `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`;
+	const referenceSource = cohortReferenceSource(inputs);
 	const destinationSource = canonicalHref(
 		cacheUrlFor(inputs.url, inputs.cache)
 	);
@@ -3302,6 +3334,7 @@ export function planReprobeArguments(
 		| 'url'
 		| 'cache'
 		| 'reuseView'
+		| 'referenceSource'
 		| 'readUser'
 		| 'readPassword'
 		| 'fallbackReadUser'
@@ -3318,8 +3351,8 @@ export function planReprobeArguments(
 		targetsFile
 	];
 
-	if (inputs.reuseView !== '') {
-		arguments_.push('--reuse-view', inputs.reuseView);
+	if (cohortReferenceSource(inputs) !== '') {
+		arguments_.push(...referenceProbeArguments(inputs));
 		if (inputs.fallbackReadUser !== '') {
 			arguments_.push(
 				'--view-read-user',
@@ -3445,8 +3478,8 @@ async function planCohort(
 		'--publish',
 		inputs.publish,
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
-		...(inputs.reuseView === '' ? [] : ['--reuse-view', inputs.reuseView]),
-		...(inputs.reuseView !== '' && inputs.fallbackReadUser !== ''
+		...referenceProbeArguments(inputs),
+		...(cohortReferenceSource(inputs) !== '' && inputs.fallbackReadUser !== ''
 			? [
 					'--view-read-user',
 					inputs.fallbackReadUser,

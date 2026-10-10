@@ -2545,6 +2545,7 @@ Arguments:
 
 Options:
   --targets-file <path>                         JSON file that describes the cohort's targets
+  --reference-source <url>                      cache URL to query for publication by reference
   --reuse-view <name>                           reuse view to query for store paths that other caches already have
   --read-user <user>                            user name of the read credential for a private cache
   --read-password <password>                    password of the read credential for a private cache
@@ -2602,6 +2603,8 @@ Arguments:
 Options:
   --targets-file <path>            JSON file that describes the targets to be
                                    built
+  --reference-source <url>         cache URL to query for publication by
+                                   reference
   --reuse-view <name>              reuse view to query for store paths that
                                    other caches already have
   --read-user <user>               user name of the read credential for a

@@ -8,6 +8,9 @@ inputs:
       validate-publication-options.
     required: true
 outputs:
+  reference-source:
+    description: Reference cache URL selected by the publication preset.
+    value: ${{ steps.resolve.outputs.reference-source }}
   publish:
     description: Resolved publish value.
     value: ${{ steps.resolve.outputs.publish }}

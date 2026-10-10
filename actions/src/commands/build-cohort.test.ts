@@ -15,6 +15,7 @@ import {
 	type NixDerivedPathString,
 	type NixValidPathInfo
 } from '@cupboard/nix';
+import type { CachedClosureSource } from '@cupboard/nix/cache-metadata';
 import { Derivation } from '@cupboard/nix-store/derivation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
@@ -5810,6 +5811,10 @@ if (args.includes('--help')) {
 		// client records them and passes them to publication.
 		observedCopies: ReadonlyMap<StorePathString, readonly string[]> = new Map(),
 		flowPlan: {
+			readonly inspectDependencySources?: (
+				paths: readonly StorePathString[],
+				sources: readonly CachedClosureSource[]
+			) => void;
 			readonly dependencyReferences?: readonly StorePathString[];
 			readonly dependencyBuilds?: readonly {
 				readonly path: StorePathString;
@@ -6306,8 +6311,9 @@ if (args.includes('--help')) {
 
 		try {
 			await buildCohortAction(options, environment, {
-				tenantDependencyReferences: (paths, referenceOptions) =>
-					Promise.resolve(
+				tenantDependencyReferences: (paths, referenceOptions) => {
+					flowPlan.inspectDependencySources?.(paths, referenceOptions.sources);
+					return Promise.resolve(
 						paths.map((storePath) => ({
 							storePath,
 							source:
@@ -6316,7 +6322,8 @@ if (args.includes('--help')) {
 							narinfo: cacheNarInfo(storePath),
 							kind: 'intermediate' as const
 						}))
-					),
+					);
+				},
 				selectPublicationPaths: (candidates, selectionOptions) => {
 					publicationTenantUrls.push(selectionOptions.tenantUrl?.href);
 					const leftUpstream =
@@ -6561,6 +6568,125 @@ if (args.includes('--help')) {
 			]
 		});
 	});
+
+	it.each([
+		{
+			name: 'the default reference cache',
+			cache: 'pr-cache',
+			referenceSource: url,
+			reuseView: '',
+			configured: '',
+			selectedSource: url,
+			credential: { user: 'source-reader', password: 'source-secret' }
+		},
+		{
+			name: 'the merged PR reference cache',
+			cache: '',
+			referenceSource: `${url}/cache/gh-1234-pr-42`,
+			reuseView: '',
+			configured: '',
+			selectedSource: `${url}/cache/gh-1234-pr-42`,
+			credential: { user: 'source-reader', password: 'source-secret' }
+		},
+		{
+			name: 'the explicit reuse view',
+			cache: '',
+			referenceSource: undefined,
+			reuseView: 'prs',
+			configured: '',
+			selectedSource: `${url}/reuse/prs`,
+			credential: { user: 'source-reader', password: 'source-secret' }
+		},
+		{
+			name: 'a configured tenant cache',
+			cache: '',
+			referenceSource: undefined,
+			reuseView: '',
+			configured: `${url}/cache/configured`,
+			selectedSource: `${url}/cache/configured`,
+			credential: undefined
+		}
+	])(
+		'uses $name for cached build dependency publication',
+		async ({
+			cache,
+			referenceSource,
+			reuseView,
+			configured,
+			selectedSource,
+			credential
+		}) => {
+			vi.stubEnv('NIX_CONFIG', `builders =\nsubstituters = ${configured}\n`);
+			const sourceCalls: {
+				paths: readonly StorePathString[];
+				sources: readonly {
+					url: string;
+					paths: readonly StorePathString[];
+					credential?: { user: string; password: string };
+				}[];
+			}[] = [];
+			const run = await runPublicationFlow(
+				{
+					...baseOptions(),
+					publish: 'built',
+					cache,
+					reuseView,
+					...(referenceSource !== undefined && { referenceSource }),
+					fallbackReadUser: 'source-reader',
+					fallbackReadPassword: 'source-secret',
+					cohortJson: remotelyQueryableCohortJson({
+						remote: false,
+						attrs: ['.#packages.x86_64-linux.app'],
+						installables: ['.#packages.x86_64-linux.app^out'],
+						queryInstallables: [appQueryInstallable],
+						expectedPaths: [appPath],
+						roots: ['github:owner/repo/main/app']
+					})
+				},
+				[],
+				[],
+				[],
+				undefined,
+				new Map(),
+				{
+					...(configured === ''
+						? { publishByReference: [appPath] }
+						: { attachOnly: [appPath] }),
+					dependencyReferences: [storePathSchema.parse(referencePath)],
+					inspectDependencySources: (paths, sources) => {
+						sourceCalls.push({
+							paths,
+							sources: sources.map(({ url: sourceUrl, ...source }) => ({
+								...source,
+								url: canonicalHref(sourceUrl)
+							}))
+						});
+					}
+				}
+			);
+			expect({
+				sourceCalls,
+				builds: run.nixBuilds,
+				error: run.actionError
+			}).toStrictEqual({
+				sourceCalls: [
+					{
+						paths: [referencePath],
+						sources: [
+							{ url: cache === '' ? url : `${url}/cache/${cache}`, paths: [] },
+							{
+								url: selectedSource,
+								paths: [],
+								...(credential !== undefined && { credential })
+							}
+						]
+					}
+				],
+				builds: [],
+				error: undefined
+			});
+		}
+	);
 
 	it.each(['destination', 'reuse', 'reprobe', 'build'] as const)(
 		'publishes tenant build dependencies by reference for a %s target',
@@ -9809,4 +9935,32 @@ describe('cohort job summary', () => {
 			summary: [{ path: jobSummaryFile, text: cohortSummaryText(rows) }]
 		});
 	});
+});
+
+it('passes a cache reference source to the availability reprobe with its own credential', () => {
+	const url = 'https://cache.example.test/t/acme';
+	const environment = { RUNNER_TEMP: '/tmp', GITHUB_OUTPUT: '/tmp/output' };
+	const inputs = resolveBuildCohortInputs(
+		{
+			...baseOptions(),
+			referenceSource: url,
+			fallbackReadUser: 'source-reader',
+			fallbackReadPassword: 'source-secret'
+		},
+		environment
+	);
+	expect(planReprobeArguments(inputs, '/tmp/targets.json')).toStrictEqual([
+		'--no-colour',
+		'plan',
+		'reprobe',
+		url,
+		'--targets-file',
+		'/tmp/targets.json',
+		'--reference-source',
+		url,
+		'--view-read-user',
+		'source-reader',
+		'--view-read-password',
+		'source-secret'
+	]);
 });

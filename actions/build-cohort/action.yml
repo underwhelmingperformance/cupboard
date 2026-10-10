@@ -33,6 +33,9 @@ inputs:
     description:
       Named cache to check and publish to. Leave empty for the default cache.
     required: false
+  reference-source:
+    description: Cache URL to query for publication by reference.
+    required: false
   reuse-view:
     description:
       Reuse view to check for paths that can be published by reference.
@@ -189,7 +192,13 @@ runs:
     - name: Resolve the pinned toolchain
       id: toolchain
       shell: bash
-      run: bash "$GITHUB_ACTION_PATH/../bootstrap.sh" toolchain
+      run: |
+        manifest="$GITHUB_ACTION_PATH/../../package.json"
+        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
+        node_version="$(tr -d '\r\n' < "$GITHUB_ACTION_PATH/../../.node-version")"
+        test -n "$version" && test -n "$node_version"
+        echo "pnpm-version=$version" >> "$GITHUB_OUTPUT"
+        echo "node-version=$node_version" >> "$GITHUB_OUTPUT"
 
     - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       with:
@@ -203,7 +212,7 @@ runs:
     - name: Install action dependencies
       shell: bash
       working-directory: ${{ github.action_path }}/../..
-      run: bash "$GITHUB_ACTION_PATH/../bootstrap.sh" install
+      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
 
     - name: Build cohort
       id: build-cohort
@@ -217,6 +226,7 @@ runs:
         READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         CACHE: ${{ inputs.cache }}
+        REFERENCE_SOURCE: ${{ inputs.reference-source }}
         REUSE_VIEW: ${{ inputs.reuse-view }}
         TTL: ${{ inputs.ttl }}
         PERMANENT: ${{ inputs.permanent }}
@@ -248,6 +258,7 @@ runs:
           --cupboard-path "$CUPBOARD_PATH"
           --cache "$CACHE"
           --reuse-view "$REUSE_VIEW"
+          --reference-source "$REFERENCE_SOURCE"
           --ttl "$TTL"
           --permanent "$PERMANENT"
           --audience "$AUDIENCE"

@@ -71,7 +71,10 @@ import {
 	type CohortTarget,
 	type PlannedLocalOutput
 } from '../plan/cohort-target.ts';
-import { tenantProbesFor } from '../plan/destination-probe.ts';
+import {
+	cacheReferenceSource,
+	tenantProbesFor
+} from '../plan/destination-probe.ts';
 import {
 	confirmUpstreamAvailabilityWith,
 	upstreamConfirmationOverrides
@@ -172,6 +175,7 @@ export async function resolvePlannedSubstitutionPolicy(
 export interface PlanCohortOptions {
 	readonly targetsFile: string;
 	readonly reuseView?: string;
+	readonly referenceSource?: URL;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly viewReadUser?: ReadUser;
@@ -309,6 +313,11 @@ export function registerPlanCommands(
 		.requiredOption(
 			'--targets-file <path>',
 			"JSON file that describes the cohort's targets"
+		)
+		.option(
+			'--reference-source <url>',
+			'cache URL to query for publication by reference',
+			parseWorkerUrl
 		)
 		.option(
 			'--reuse-view <name>',
@@ -469,6 +478,12 @@ export function registerPlanCommands(
 					baseUrl: target.tenantUrl,
 					cache,
 					...(options.reuseView !== undefined && { view: options.reuseView }),
+					...(options.referenceSource !== undefined && {
+						referenceSource: cacheReferenceSource(
+							target.tenantUrl,
+							options.referenceSource
+						)
+					}),
 					...(credentials !== undefined && { credentials }),
 					...(viewCredentials !== undefined && { viewCredentials })
 				});

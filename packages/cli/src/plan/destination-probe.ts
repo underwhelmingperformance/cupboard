@@ -1,5 +1,9 @@
 import { withReadAuthentication } from '@cupboard/nix';
-import { cacheUrl, reuseViewUrl } from '@cupboard/nix-store/cache-url';
+import {
+	cacheUrl,
+	parseTenantCacheUrl,
+	reuseViewUrl
+} from '@cupboard/nix-store/cache-url';
 import {
 	type CacheScope,
 	type StorePathHash,
@@ -19,10 +23,14 @@ import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { readResponseJson } from '@cupboard/shared/response-body';
 import { StatusCodes } from 'http-status-codes';
 
-import type { DestinationProbes } from './availability-partition.ts';
+import type {
+	DestinationProbes,
+	ReuseSource
+} from './availability-partition.ts';
 import {
 	DestinationProbeResponseError,
-	PrivateViewReadRefusedError
+	PrivateViewReadRefusedError,
+	ReferenceCacheSourceInvalidError
 } from './destination-probe-errors.ts';
 
 const readRefusalStatuses: ReadonlySet<number> = new Set([
@@ -92,6 +100,7 @@ export interface TenantProbeOptions {
 	readonly baseUrl: URL;
 	readonly cache: CacheScope;
 	readonly view?: string;
+	readonly referenceSource?: ReuseSource;
 	readonly credentials?: BasicCredential;
 	/**
 	Overrides credentials for view reads; other probes keep credentials.
@@ -103,6 +112,14 @@ export interface TenantProbeOptions {
 export function tenantProbesFor(
 	options: TenantProbeOptions
 ): DestinationProbes {
+	if (
+		options.referenceSource !== undefined &&
+		options.view !== undefined &&
+		options.view.trim() !== ''
+	) {
+		throw new ReferenceCacheSourceInvalidError();
+	}
+
 	const shared = {
 		baseUrl: options.baseUrl,
 		...(options.credentials !== undefined && {
@@ -110,24 +127,57 @@ export function tenantProbesFor(
 		}),
 		...(options.fetcher !== undefined && { fetcher: options.fetcher })
 	};
-	const view = options.view;
+	const source =
+		options.referenceSource ??
+		(options.view === undefined
+			? undefined
+			: { kind: 'view' as const, view: options.view });
 
 	return {
 		destinationServed: (paths) =>
 			destinationServedPaths({ ...shared, paths, cache: options.cache }),
-		viewServed: (paths) =>
-			// Do not make a request when no reuse view is configured.
-			view === undefined
-				? Promise.resolve(new Set())
-				: viewServedPaths({
-						...shared,
-						paths,
-						view,
-						...(options.viewCredentials !== undefined && {
-							credentials: options.viewCredentials
-						})
-					})
+		viewServed: async (paths) => {
+			if (source === undefined) {
+				return new Set();
+			}
+			const reference = {
+				...shared,
+				paths,
+				...(options.viewCredentials !== undefined && {
+					credentials: options.viewCredentials
+				})
+			};
+			if (source.kind === 'view') {
+				return viewServedPaths({ ...reference, view: source.view });
+			}
+
+			try {
+				return await destinationServedPaths({
+					...reference,
+					cache: source.cache
+				});
+			} catch (error) {
+				if (
+					error instanceof DestinationProbeResponseError &&
+					error.status === 404
+				) {
+					return new Set();
+				}
+				throw error;
+			}
+		}
 	};
+}
+
+export function cacheReferenceSource(
+	baseUrl: URL,
+	referenceUrl: URL
+): ReuseSource {
+	const target = parseTenantCacheUrl(referenceUrl);
+	if (canonicalHref(target.tenantUrl) !== canonicalHref(baseUrl)) {
+		throw new ReferenceCacheSourceInvalidError();
+	}
+	return { kind: 'cache', cache: target.cache };
 }
 
 // Cache indexes paths by their hash component. Send one request per distinct

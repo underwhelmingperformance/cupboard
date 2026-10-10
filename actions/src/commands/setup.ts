@@ -86,6 +86,7 @@ import {
 	ReadConfigurationUnavailableError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
+	ReferenceSourceInvalidError,
 	ReuseViewPriorityError,
 	StaticReadCredentialRejectedError
 } from '../errors.ts';
@@ -137,6 +138,7 @@ export interface SetupOptions {
 	readonly cacheCredentials?: string;
 	readonly privateSubstituters?: string;
 	readonly readCaches?: string;
+	readonly referenceSource?: string;
 	readonly destinationReadUser?: string;
 	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
@@ -170,6 +172,7 @@ export interface SetupInputs {
 	readonly caches: readonly CacheSelection[];
 	readonly privateSubstituters: readonly URL[];
 	readonly readCaches: readonly CacheScope[];
+	readonly referenceCache?: CacheScope;
 	readonly provisionCache: ProvisionCache | undefined;
 	readonly cacheAccessMode: 'public' | 'private' | undefined;
 	readonly reuseView: string;
@@ -202,6 +205,7 @@ interface ConfigureNixInputs extends Pick<
 	| 'caches'
 	| 'privateSubstituters'
 	| 'readCaches'
+	| 'referenceCache'
 	| 'reuseView'
 	| 'audience'
 	| 'trustedPublicKey'
@@ -280,6 +284,10 @@ export function registerSetupCommand(
 		.option(
 			'--cache-credentials <json>',
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
+		)
+		.option(
+			'--reference-source <url>',
+			'Same-tenant reference cache, using the default read credential or OIDC.'
 		)
 		.option(
 			'--read-caches <urls>',
@@ -442,6 +450,27 @@ export function resolveSetupInputs(
 		privateSubstituters
 	);
 
+	let referenceCache: CacheScope | undefined;
+	const referenceSource = provided(options.referenceSource);
+	if (referenceSource !== undefined) {
+		try {
+			const source = parseTenantCacheUrl(new URL(referenceSource));
+			if (
+				cacheUrl === undefined ||
+				canonicalHref(source.tenantUrl) !==
+					canonicalHref(parseTenantCacheUrl(cacheUrl).tenantUrl)
+			) {
+				throw new ReferenceSourceInvalidError();
+			}
+			referenceCache = source.cache;
+		} catch (error) {
+			if (error instanceof ReferenceSourceInvalidError) {
+				throw error;
+			}
+			throw new ReferenceSourceInvalidError(error);
+		}
+	}
+
 	return {
 		cupboard,
 		version: normaliseVersion(provided(options.cupboardVersion) ?? 'latest'),
@@ -465,6 +494,7 @@ export function resolveSetupInputs(
 		caches,
 		privateSubstituters,
 		readCaches,
+		...(referenceCache !== undefined && { referenceCache }),
 		provisionCache,
 		cacheAccessMode: resolveCacheAccessMode(
 			options,
@@ -564,9 +594,20 @@ function resolveReadCaches(
 }
 
 function allReadCaches(
-	inputs: Pick<SetupInputs, 'caches' | 'readCaches'>
+	inputs: Pick<SetupInputs, 'caches' | 'readCaches' | 'referenceCache'>
 ): readonly CacheSelection[] {
-	return [...inputs.caches, ...inputs.readCaches.map((cache) => ({ cache }))];
+	const selected = [
+		...inputs.caches,
+		...inputs.readCaches.map((cache) => ({ cache }))
+	];
+	const referenceCache = inputs.referenceCache;
+	if (
+		referenceCache !== undefined &&
+		selected.every(({ cache }) => !isSameCacheScope(cache, referenceCache))
+	) {
+		selected.push({ cache: referenceCache });
+	}
+	return selected;
 }
 
 function resolveProvisionCache(
@@ -837,8 +878,20 @@ export async function setupAction(
 			)
 		}))
 	);
+	const isRemovedReference = (selection: CacheSelection): boolean =>
+		inputs.referenceCache !== undefined &&
+		inputs.caches.every(
+			({ cache }) => !isSameCacheScope(cache, selection.cache)
+		) &&
+		isSameCacheScope(selection.cache, inputs.referenceCache) &&
+		destinationStates.some(
+			(result) => result.selection === selection && result.state === 'absent'
+		);
 	const oidcDestinations = destinationStates.flatMap(({ selection, state }) =>
-		state === 'challenge' || state === 'absent' ? [selection] : []
+		!isRemovedReference(selection) &&
+		(state === 'challenge' || state === 'absent')
+			? [selection]
+			: []
 	);
 	const viewState = isOidcView
 		? await probeCacheAccessState(
@@ -860,6 +913,7 @@ export async function setupAction(
 						...selectedCaches.filter(
 							(selection) =>
 								!isSameCacheScope(selection.cache, destination.cache) &&
+								!isRemovedReference(selection) &&
 								(readDestinations.includes(selection) ||
 									metadataDestinations.includes(selection))
 						)
@@ -1187,6 +1241,9 @@ async function performSetupConfiguration(
 	await Promise.all(
 		inputs.readCaches.map((cache) => accessFor(cache, undefined))
 	);
+	if (inputs.referenceCache !== undefined) {
+		await accessFor(inputs.referenceCache, staticCredential);
+	}
 	await configureNix({ ...inputs, readFacts: facts }, reporter, {
 		...(dependencies.fetch !== undefined && { fetch: dependencies.fetch }),
 		...(dependencies.signal !== undefined && { signal: dependencies.signal })
@@ -1206,6 +1263,7 @@ const configureNixPayloadSchema = z.object({
 	caches: z.array(configureCacheSelectionSchema),
 	privateSubstituters: z.array(z.url()),
 	readCaches: z.array(cacheScopeSchema).default([]),
+	referenceCache: cacheScopeSchema.optional(),
 	reuseView: z.string(),
 	trustedPublicKey: z.string(),
 	readUser: z.union([z.literal(''), readUserInputSchema]),
@@ -1290,6 +1348,7 @@ async function configureWithReadAccess(
 			cacheUrl: canonicalHref(inputs.cacheUrl),
 			caches: inputs.caches,
 			readCaches: inputs.readCaches,
+			referenceCache: inputs.referenceCache,
 			privateSubstituters: inputs.privateSubstituters.map((url) =>
 				canonicalHref(url)
 			),
@@ -1785,6 +1844,9 @@ async function configureNix(
 	const substituters = [
 		...cupboardSubstituters,
 		...inputs.readCaches.map((cache) => cacheUrlFor(inputs.cacheUrl, cache)),
+		...(inputs.referenceCache === undefined
+			? []
+			: [cacheUrlFor(inputs.cacheUrl, inputs.referenceCache)]),
 		...inputs.privateSubstituters
 	];
 	dependencies.signal?.throwIfAborted();
