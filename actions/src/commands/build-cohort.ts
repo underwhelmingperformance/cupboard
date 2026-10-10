@@ -75,6 +75,8 @@ import { z } from 'zod';
 
 import {
 	addUploads,
+	attributedUploads,
+	cohortFailureResult,
 	type CohortRootSummary,
 	cohortSummaryResult,
 	outcomeOrder,
@@ -1034,6 +1036,18 @@ export async function buildCohortAction(
 				);
 			} catch (error) {
 				if (!inputs.allBestEffort) {
+					const uploads =
+						error instanceof CupboardReportedError
+							? uploadTally(error.results)
+							: undefined;
+					reporter.result(
+						cohortFailureResult({
+							durationMs: now() - startedAt,
+							cause: error instanceof Error ? error.message : String(error),
+							targets: members.map(({ attr, root }) => ({ attr, root })),
+							...(uploads !== undefined && { uploads })
+						})
+					);
 					throw error;
 				}
 
@@ -2079,10 +2093,19 @@ async function settleCohortBuild(
 	);
 
 	const uploadsBeforeRoots = addUploads(buildUploads, publication.otherUploads);
+	const owners = targetPathOwners(members, { resultBuilds, localBuilds });
+	const assignedUploads = attributedUploads(buildUploads, owners);
+	const rootUploads = new Map(publication.rootUploads);
+	for (const [root, uploads] of assignedUploads) {
+		const total = addUploads(rootUploads.get(root), uploads);
+		if (total !== undefined) {
+			rootUploads.set(root, total);
+		}
+	}
 	const roots = cohortRootSummaries({
 		inputs,
 		members,
-		owners: targetPathOwners(members, { resultBuilds, localBuilds }),
+		owners,
 		paths: {
 			attachOnly: new Set(partition?.attachOnly),
 			reference: new Set(referencePaths),
@@ -2090,7 +2113,13 @@ async function settleCohortBuild(
 			known: [...targetPaths, ...referencePaths, ...leftUpstream]
 		},
 		incompleteRoots,
-		publication
+		publication: { ...publication, rootUploads },
+		origins: new Map(
+			streamedReceipt?.subjects.map((subject) => [
+				subject.storePath,
+				subject.origin
+			])
+		)
 	});
 
 	context.reporter.result(
@@ -2116,6 +2145,7 @@ interface CohortRootSummaryInputs {
 	};
 	readonly incompleteRoots: ReadonlySet<string>;
 	readonly publication: CohortPublication;
+	readonly origins?: ReadonlyMap<string, string>;
 }
 
 function cohortRootSummaries(
@@ -2132,7 +2162,11 @@ function cohortRootSummaries(
 			return 'reused';
 		}
 
-		return paths.attachOnly.has(storePath) ? 'already-served' : 'built';
+		if (paths.attachOnly.has(storePath)) {
+			return 'already-served';
+		}
+		const origin = options.origins?.get(storePath);
+		return origin === undefined || origin === 'built' ? 'built' : 'reused';
 	};
 	const roots = [...new Set(options.members.map((member) => member.root))];
 
@@ -2304,14 +2338,26 @@ async function runBuildPushCohort(
 	);
 	await rm(inputs.receiptFile, { force: true });
 
-	return uploadTally(
-		await runCupboard(
-			inputs.cupboardPath,
-			cohortBuildPushArguments(inputs, cohortsFile),
-			environment,
-			cupboardRunDependencies
-		)
+	const buildContexts = membersOf(inputs.cohort).map((member) => ({
+		installables: [
+			member.installable,
+			...(member.queryInstallable === undefined
+				? []
+				: [member.queryInstallable])
+		],
+		attr: member.attr,
+		root: member.root
+	}));
+	const results = await runCupboard(
+		inputs.cupboardPath,
+		cohortBuildPushArguments(inputs, cohortsFile),
+		{
+			...environment,
+			CUPBOARD_BUILD_CONTEXTS: JSON.stringify(buildContexts)
+		},
+		cupboardRunDependencies
 	);
+	return uploadTally(results);
 }
 
 /**

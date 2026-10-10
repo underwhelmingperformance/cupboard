@@ -19,13 +19,20 @@ import type { RootRetention } from './root-retention.ts';
 const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 
 /**
- * The number of paths and bytes uploaded by one or more cupboard runs. The
- * summary of `cupboard build-push` has no byte count, so `bytes` is absent
- * when a build-push run contributes to the tally.
+ * Upload totals from one or more cupboard runs. Older build summaries omit
+ * the byte count.
  */
 export interface UploadTally {
 	readonly paths: number;
 	readonly bytes?: number;
+	readonly pathReferences?: readonly {
+		readonly storePath: string;
+		readonly references: readonly string[];
+	}[];
+	readonly uploads?: readonly {
+		readonly storePath: string;
+		readonly uploadedBytes: number;
+	}[];
 }
 
 /**
@@ -36,17 +43,33 @@ export interface UploadTally {
 export function uploadTally(
 	results: readonly ReporterResultEvent[]
 ): UploadTally | undefined {
-	return results
-		.values()
-		.map((event) => eventUploads(event))
-		.find((uploads) => uploads !== undefined);
+	const builds = results.filter(
+		(event) => event.kind === buildSummaryResultKind
+	);
+	const relevant = builds.length === 0 ? results : builds;
+	let total: UploadTally | undefined;
+	for (const event of relevant) {
+		total = addUploads(total, eventUploads(event));
+	}
+	return total;
 }
 
 function eventUploads(event: ReporterResultEvent): UploadTally | undefined {
 	if (event.kind === buildSummaryResultKind) {
 		const summary = buildSummarySchema.safeParse(event.data).data;
 
-		return summary === undefined ? undefined : { paths: summary.uploadedPaths };
+		return summary === undefined
+			? undefined
+			: {
+					paths: summary.uploadedPaths,
+					...(summary.uploadedBytes !== undefined && {
+						bytes: summary.uploadedBytes
+					}),
+					...(summary.uploads !== undefined && { uploads: summary.uploads }),
+					...(summary.pathReferences !== undefined && {
+						pathReferences: summary.pathReferences
+					})
+				};
 	}
 
 	if (event.kind !== pushSummaryResultKind) {
@@ -60,6 +83,67 @@ function eventUploads(event: ReporterResultEvent): UploadTally | undefined {
 	return summary === undefined
 		? undefined
 		: { paths: summary.uploadedPaths, bytes: summary.uploadedBytes };
+}
+
+/**
+ * Attributes an upload to a root only when its recorded closure has one owner.
+ * Shared uploads remain in the cohort total.
+ */
+export function attributedUploads(
+	uploads: UploadTally | undefined,
+	owners: ReadonlyMap<string, ReadonlySet<string>>
+): ReadonlyMap<string, UploadTally> {
+	if (uploads?.uploads === undefined || uploads.pathReferences === undefined) {
+		return new Map();
+	}
+	const references = new Map(
+		uploads.pathReferences.map((info) => [info.storePath, info.references])
+	);
+	const rootsByPath = new Map<string, Set<string>>();
+	const incompleteRoots = new Set<string>();
+	for (const [target, roots] of owners) {
+		for (const root of roots) {
+			const visited = new Set<string>();
+			const pending = [target];
+			while (pending.length > 0) {
+				const current = pending.pop();
+				if (current === undefined || visited.has(current)) {
+					continue;
+				}
+				visited.add(current);
+				const pathRoots = rootsByPath.get(current) ?? new Set<string>();
+				pathRoots.add(root);
+				rootsByPath.set(current, pathRoots);
+				const next = references.get(current);
+				if (next === undefined) {
+					incompleteRoots.add(root);
+					continue;
+				}
+				pending.push(...next);
+			}
+		}
+	}
+	const totals = new Map<string, UploadTally>();
+	for (const upload of uploads.uploads) {
+		const knownRoots = rootsByPath.get(upload.storePath);
+		if (knownRoots === undefined) {
+			continue;
+		}
+		const roots = knownRoots.union(incompleteRoots);
+		if (roots.size !== 1) {
+			continue;
+		}
+		const root = roots.values().next().value;
+		if (root === undefined) {
+			continue;
+		}
+		const total = totals.get(root) ?? { paths: 0, bytes: 0 };
+		totals.set(root, {
+			paths: total.paths + 1,
+			bytes: (total.bytes ?? 0) + upload.uploadedBytes
+		});
+	}
+	return totals;
 }
 
 export function recordedRoots(
@@ -82,9 +166,19 @@ export function addUploads(
 
 	const paths = left.paths + right.paths;
 
-	return left.bytes === undefined || right.bytes === undefined
-		? { paths }
-		: { paths, bytes: left.bytes + right.bytes };
+	return {
+		paths,
+		...(left.pathReferences !== undefined &&
+			right.pathReferences !== undefined && {
+				pathReferences: [...left.pathReferences, ...right.pathReferences]
+			}),
+		...(left.bytes !== undefined &&
+			right.bytes !== undefined && { bytes: left.bytes + right.bytes }),
+		...(left.uploads !== undefined &&
+			right.uploads !== undefined && {
+				uploads: [...left.uploads, ...right.uploads]
+			})
+	};
 }
 
 /**
@@ -194,6 +288,48 @@ export function cohortSummaryResult(
 						: (root.recordedRetention.expiresAt ?? 'Permanent')
 			}))
 		),
+		note: [
+			'Duration is for the shared cohort. Root rows include uploads with one established owner and subsequent root pushes. Shared uploads and paths with incomplete ownership remain in the cohort total.'
+		],
+		jobSummary: true
+	};
+}
+
+interface CohortFailureSummary {
+	readonly durationMs: number;
+	readonly cause: string;
+	readonly targets: readonly { readonly attr: string; readonly root: string }[];
+	readonly uploads?: UploadTally;
+}
+
+/**
+ * Records the completed transfers when publication stops before roots are set.
+ */
+export function cohortFailureResult(
+	summary: CohortFailureSummary
+): ResultPayload<CohortFailureSummary> {
+	return {
+		kind: 'cohort-failure',
+		title: 'Publication stopped',
+		data: summary,
+		rows: [
+			{ label: 'Duration', value: formatDuration(summary.durationMs) },
+			{
+				label: 'Targets',
+				value: summary.targets
+					.map(({ attr, root }) => `${attr} (root ${root})`)
+					.join(', ')
+			},
+			...(summary.uploads === undefined
+				? []
+				: [
+						{
+							label: 'Uploaded before the failure',
+							value: uploadText(summary.uploads)
+						}
+					]),
+			{ label: 'Cause', value: summary.cause }
+		],
 		jobSummary: true
 	};
 }

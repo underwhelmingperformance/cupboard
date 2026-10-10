@@ -96,7 +96,8 @@ export async function runCupboardWithProtocol(
 	const status = await spawnCupboard(
 		binaryPath,
 		['--output-mode', 'github', '--result-file', resultFile, ...arguments_],
-		dependencies.signal
+		dependencies.signal,
+		environment
 	);
 
 	const results = await readResults(resultFile, status);
@@ -367,12 +368,17 @@ function warningMessage(event: LegacyReporterEvent): string {
 async function spawnCupboard(
 	binaryPath: string,
 	arguments_: readonly string[],
-	signal?: AbortSignal
+	signal: AbortSignal | undefined,
+	environment: Environment
 ): Promise<number | null> {
 	signal?.throwIfAborted();
 
 	const child = spawn(binaryPath, [...arguments_], {
-		stdio: 'inherit'
+		stdio: 'inherit',
+		env: {
+			...process.env,
+			...environment
+		}
 	});
 	const result = await waitForAbortableChildProcess(
 		observeChildProcess(child),

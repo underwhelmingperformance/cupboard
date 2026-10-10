@@ -555,6 +555,10 @@ async function publishRequired(
 		return [];
 	}
 
+	for (const info of infos) {
+		options.uploadReport?.resolved?.(info);
+	}
+
 	const present = new Set(infos.map((info) => info.storePath));
 
 	for (const [storePath, isTarget] of required) {

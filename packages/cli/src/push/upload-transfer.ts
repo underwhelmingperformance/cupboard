@@ -1,3 +1,4 @@
+import type { NixValidPathInfo } from '@cupboard/nix';
 import type {
 	CommitBlobDeclaration,
 	UploadId
@@ -136,6 +137,7 @@ export interface CompletedNarUpload {
  * path's upload, and `completed` receives the upload once it has finished.
  */
 export interface UploadReport {
+	resolved?(info: NixValidPathInfo): void;
 	observe(storePath: string): NarUploadObserver;
 	completed(storePath: string, upload: CompletedNarUpload): void;
 }
