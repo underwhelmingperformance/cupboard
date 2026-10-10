@@ -10,8 +10,9 @@ import {
 	type UploadDecision
 } from '@cupboard/protocol/upload';
 
+import { abortable } from '../abort.ts';
 import type { CommitOptions } from '../client/client.ts';
-import type { CommitSession } from '../client/commit-socket.ts';
+import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
 import { PushNarMetadataMismatchError } from '../errors.ts';
 import { compressNarToStream } from '../nix/blob.ts';
@@ -51,7 +52,7 @@ export interface BatchStore {
 }
 
 /**
- * One path's terminal state in the streaming session: published by this run,
+ * A path's state in the streaming session: published by this run,
  * already served by the destination, or collected locally before its NAR
  * could be read. The command layer decides which paths are targets and what a
  * collected target means for the run; this module only reports the outcome.
@@ -96,6 +97,10 @@ export interface BuildOutputBatcherOptions {
 	readonly onFailure?: (failure: BatchPathFailure) => void;
 }
 
+type CommitVerdict =
+	| { readonly kind: 'servable' }
+	| { readonly kind: 'failed'; readonly reason: unknown };
+
 type PublishableDecision = Extract<
 	UploadDecision,
 	{ action: 'upload' | 'commit' }
@@ -127,8 +132,8 @@ function assertNarMetadata(info: NixValidPathInfo, digest: NarDigest): void {
  * worker waits for its commit acknowledgement before taking another path. The
  * store implementation controls how long protection remains in place.
  *
- * The batcher records only terminal outcomes. If publication fails, the path
- * returns to the candidate set for the next flush or final reconciliation. A
+ * Deferred commit verdicts are retained until final reconciliation. If
+ * publication fails, the path returns to the candidate set for reconciliation. A
  * path that vanished from the local store produces a typed `collected` outcome
  * instead of failing the batch.
  */
@@ -136,6 +141,11 @@ export class BuildOutputBatcher {
 	private readonly waiting = new Set<StorePathString>();
 	private readonly inFlight = new Set<StorePathString>();
 	private readonly recorded = new Map<StorePathString, BatchPathOutcome>();
+	private readonly verdicts = new Map<
+		StorePathString,
+		Promise<CommitVerdict>
+	>();
+	private readonly pendingVerdicts = new Set<StorePathString>();
 	private timer: NodeJS.Timeout | undefined;
 	private chain: Promise<void> = Promise.resolve();
 
@@ -291,7 +301,21 @@ export class BuildOutputBatcher {
 		}
 
 		try {
-			await this.uploadAndCommit(decision, item.path);
+			const outcome = await this.uploadAndCommit(decision, item.path);
+			this.pendingVerdicts.add(storePath);
+			this.verdicts.set(
+				storePath,
+				(async (): Promise<CommitVerdict> => {
+					try {
+						await outcome.settled;
+						return { kind: 'servable' };
+					} catch (error) {
+						return { kind: 'failed', reason: error };
+					} finally {
+						this.pendingVerdicts.delete(storePath);
+					}
+				})()
+			);
 		} catch (error) {
 			this.settlePath(storePath, error, remaining);
 			return;
@@ -304,7 +328,7 @@ export class BuildOutputBatcher {
 	private async uploadAndCommit(
 		decision: PublishableDecision,
 		info: NixValidPathInfo
-	): Promise<void> {
+	): Promise<CommitOutcome> {
 		let blob: CommitBlobDeclaration | undefined;
 
 		if (decision.action === 'upload') {
@@ -329,7 +353,7 @@ export class BuildOutputBatcher {
 			this.options.uploadReport?.completed(info.storePath, upload);
 		}
 
-		await commitOverSession(this.options, {
+		return commitOverSession(this.options, {
 			uploadId: decision.uploadId,
 			storePathHash: decision.storePathHash,
 			narHash: decision.narHash,
@@ -339,6 +363,37 @@ export class BuildOutputBatcher {
 
 	get outcomes(): ReadonlyMap<StorePathString, BatchPathOutcome> {
 		return this.recorded;
+	}
+
+	get pendingCommits(): number {
+		return this.pendingVerdicts.size;
+	}
+
+	/**
+	 * Waits for the original streamed verdicts before fresh reconciliation.
+	 * Failed verdicts return their paths and typed reasons to the candidate set.
+	 */
+	async settleCommits(
+		signal?: AbortSignal,
+		onSettled?: () => void
+	): Promise<void> {
+		await abortable(
+			Promise.all(
+				[...this.verdicts].map(async ([storePath, pending]) => {
+					const verdict = await pending;
+					this.verdicts.delete(storePath);
+					if (signal?.aborted === true) {
+						return;
+					}
+					if (verdict.kind === 'failed') {
+						this.recorded.delete(storePath);
+						this.recordFailure(storePath, verdict.reason);
+					}
+					onSettled?.();
+				})
+			),
+			signal
+		);
 	}
 
 	get candidates(): readonly StorePathString[] {
@@ -385,6 +440,8 @@ export class BuildOutputBatcher {
 	async stop(): Promise<void> {
 		this.clearTimer();
 		await this.chain;
+		this.verdicts.clear();
+		this.pendingVerdicts.clear();
 	}
 
 	/**

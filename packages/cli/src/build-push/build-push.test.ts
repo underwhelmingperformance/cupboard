@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 
 import {
 	NixStorePathNotFoundError,
@@ -64,7 +65,8 @@ import {
 	transientExitCode,
 	unavailableExitCode,
 	UntrustedDaemonError,
-	UploadRequestLimitExceededError
+	UploadRequestLimitExceededError,
+	UploadVerificationFailedError
 } from '../errors.ts';
 import { classifyPublicationFailures } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
@@ -285,7 +287,11 @@ interface RecordedRun {
 	readonly storeCalls: string[];
 }
 
-function recordingReporter(record: RecordedRun): Reporter {
+function recordingReporter(
+	record: RecordedRun,
+	phaseFacts?: { phase: string; label: string; value: string }[],
+	phaseStarted?: (label: string) => void
+): Reporter {
 	const recordWarn = (label: string, value?: string): void => {
 		record.warnings.push({ label, value });
 	};
@@ -296,11 +302,16 @@ function recordingReporter(record: RecordedRun): Reporter {
 	return {
 		phase: (label, body) => {
 			record.phases.push(label);
+			phaseStarted?.(label);
 
 			return Promise.resolve(
 				body({
-					fact() {
-						return;
+					fact(factLabel, value) {
+						phaseFacts?.push({
+							phase: label,
+							label: factLabel,
+							value: String(value)
+						});
 					},
 					warn: recordWarn,
 					result: recordResult
@@ -391,6 +402,12 @@ interface ConstructedFlowConfig {
 }
 
 interface FlowConfig {
+	readonly now?: () => number;
+	readonly signal?: AbortSignal;
+	readonly publicationClient?: Pick<PushClient, 'negotiate' | 'commit'>;
+	readonly phaseStarted?: (label: string) => void;
+	readonly dependencyTenantUrls?: (string | undefined)[];
+	readonly phaseFacts?: { phase: string; label: string; value: string }[];
 	readonly tenantDependency?: boolean;
 	readonly tenantDependencySource?: string;
 	readonly requireReferenceAuthority?: boolean;
@@ -736,7 +753,8 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 				updatedAt: '2026-07-31T00:00:00.000Z',
 				targets: []
 			});
-		}
+		},
+		...config.publicationClient
 	};
 
 	// The count file separates paths that existed before the stub build from
@@ -847,6 +865,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	};
 
 	const dependencies: BuildPushDependencies = {
+		...(config.signal !== undefined && { signal: config.signal }),
 		selectPublicationPaths: (candidates, options) => {
 			const leftUpstream = (config.externallyServed ?? []).filter(
 				(storePath) =>
@@ -875,8 +894,20 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 					])
 				)
 			),
-		tenantDependencyReferences: (paths, options) =>
-			Promise.resolve(
+		tenantDependencyReferences: (paths, options) => {
+			config.dependencyTenantUrls?.push(options.tenantUrl?.href);
+			options.onProgress?.({
+				traceId: '0123456789abcdef0123456789abcdef',
+				source: 'https://cache.example/t/acme',
+				mode: 'bulk',
+				checked: paths.length,
+				total: paths.length,
+				found: paths.length,
+				requests: 1,
+				inFlight: 0,
+				elapsedMs: 2500
+			});
+			return Promise.resolve(
 				paths.map((storePath) => ({
 					storePath,
 					source:
@@ -884,7 +915,8 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 					kind: 'intermediate' as const,
 					narinfo: `StorePath: ${storePath}\nURL: nar/file.nar\nCompression: zstd\nFileHash: ${narHash.toString()}\nFileSize: 4\nNarHash: ${narHash.toString()}\nNarSize: 4\nReferences: \n`
 				}))
-			),
+			);
+		},
 		client:
 			config.requireReferenceAuthority === true
 				? {
@@ -948,7 +980,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			...(compression !== undefined && { compression: () => compression })
 		}),
 		peakRss: () => 300_000_000,
-		now: () => 100,
+		now: config.now ?? (() => 100),
 		...(environment !== undefined && { environment }),
 		nextAttemptId: () => {
 			attemptIdsIssued += 1;
@@ -1013,7 +1045,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	try {
 		await runBuildPush(
 			{ invocation, receiptFile, ...config.options },
-			recordingReporter(record),
+			recordingReporter(record, config.phaseFacts, config.phaseStarted),
 			dependencies
 		);
 	} catch (error) {
@@ -1467,6 +1499,342 @@ describe('runBuildPush', () => {
 			requests: 1
 		});
 	});
+
+	it.each(['servable', 'absent', 'retry', 'divergent'] as const)(
+		'awaits the original streamed verdict before fresh reconciliation: %s',
+		async (verdict) => {
+			const deferred = Promise.withResolvers<undefined>();
+			void deferred.promise.catch(() => {
+				return;
+			});
+			const reconciling = Promise.withResolvers<undefined>();
+			const events: string[] = [];
+			let isAvailable = false;
+			let negotiations = 0;
+			const runPromise = runFlow({
+				emitEvent: true,
+				valid: [pathA],
+				phaseStarted(label) {
+					if (label === 'Reconciling build results') {
+						reconciling.resolve(undefined);
+					}
+				},
+				publicationClient: {
+					negotiate(body) {
+						negotiations += 1;
+						events.push(`negotiate:${String(negotiations)}`);
+						return Promise.resolve({
+							uploads: body.paths.map((candidate) => {
+								const selected = decisionFor(
+									storePathSchema.parse(candidate.storePath),
+									isAvailable ? 'skip' : 'commit'
+								);
+								return uploadDecisionSchema.parse({
+									...selected,
+									...(selected.action === 'commit' && {
+										uploadId: `streamed-${String(negotiations)}`
+									}),
+									...(isAvailable &&
+										verdict === 'divergent' && {
+											narHash: NixSha256Hash.fromDigest(
+												Buffer.alloc(32, 0xbb)
+											).toString()
+										})
+								});
+							})
+						});
+					},
+					commit(target) {
+						events.push(`ack:${target.uploadId}`);
+						return Promise.resolve({
+							storePathHash: target.storePathHash,
+							narHash: target.narHash,
+							status: 'pending' as const,
+							settled:
+								target.uploadId === 'streamed-1'
+									? deferred.promise
+									: Promise.resolve()
+						});
+					}
+				}
+			});
+			await reconciling.promise;
+			await setImmediate();
+			const whilePending = [...events];
+			isAvailable = verdict !== 'retry';
+			events.push(`verdict:${verdict}`);
+			if (verdict === 'absent' || verdict === 'retry') {
+				deferred.reject(
+					new UploadVerificationFailedError('streamed-1', 'absent')
+				);
+			} else {
+				deferred.resolve(undefined);
+			}
+			const run = await runPromise;
+			const receipt = await parseReceipt(run.receiptFile);
+			expect({
+				whilePending,
+				events,
+				paths: receipt.paths,
+				error: run.error instanceof Error ? run.error.name : run.error
+			}).toStrictEqual({
+				whilePending: ['negotiate:1', 'ack:streamed-1'],
+				events: [
+					'negotiate:1',
+					'ack:streamed-1',
+					`verdict:${verdict}`,
+					'negotiate:2',
+					...(verdict === 'retry' ? ['ack:streamed-2'] : [])
+				],
+				paths: verdict === 'divergent' ? [] : [pathA],
+				error:
+					verdict === 'divergent' ? 'BuildPublicationFailedError' : undefined
+			});
+		}
+	);
+
+	it('finishes no-wait reconciliation while the original streamed verdict remains pending', async () => {
+		const deferred = Promise.withResolvers<undefined>();
+		const reconciling = Promise.withResolvers<undefined>();
+		const events: string[] = [];
+		let negotiations = 0;
+		const runPromise = runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			options: { wait: false },
+			phaseStarted(label) {
+				if (label === 'Reconciling build results') {
+					reconciling.resolve(undefined);
+				}
+			},
+			publicationClient: {
+				negotiate(body) {
+					negotiations += 1;
+					events.push(`negotiate:${String(negotiations)}`);
+					return Promise.resolve({
+						uploads: body.paths.map((candidate) =>
+							uploadDecisionSchema.parse({
+								...decisionFor(
+									storePathSchema.parse(candidate.storePath),
+									'commit'
+								),
+								uploadId: `streamed-${String(negotiations)}`
+							})
+						)
+					});
+				},
+				commit(target) {
+					events.push(`ack:${target.uploadId}`);
+					return Promise.resolve({
+						...target,
+						status: 'pending',
+						settled: deferred.promise
+					});
+				}
+			}
+		});
+		try {
+			await reconciling.promise;
+			await setImmediate();
+			expect([...events]).toStrictEqual([
+				'negotiate:1',
+				'ack:streamed-1',
+				'negotiate:2',
+				'ack:streamed-2'
+			]);
+			const run = await runPromise;
+			const receipt = await parseReceipt(run.receiptFile);
+			expect({
+				events,
+				error: run.error,
+				paths: receipt.paths,
+				runtimeDirectoryExists: existsSync(run.preflight.runtimePlan.directory),
+				rootDirectoryExists: existsSync(run.rootLinkDirectory)
+			}).toStrictEqual({
+				events: [
+					'negotiate:1',
+					'ack:streamed-1',
+					'negotiate:2',
+					'ack:streamed-2'
+				],
+				error: undefined,
+				paths: [],
+				runtimeDirectoryExists: false,
+				rootDirectoryExists: false
+			});
+		} finally {
+			deferred.resolve(undefined);
+			await runPromise;
+		}
+	});
+
+	it('cancels reconciliation with a pending streamed verdict and cleans the runtime', async () => {
+		const deferred = Promise.withResolvers<undefined>();
+		const reconciling = Promise.withResolvers<undefined>();
+		const controller = new AbortController();
+		const events: string[] = [];
+		const runPromise = runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			signal: controller.signal,
+			phaseStarted(label) {
+				if (label === 'Reconciling build results') {
+					reconciling.resolve(undefined);
+				}
+			},
+			publicationClient: {
+				negotiate: (body) => {
+					events.push('negotiate');
+					return Promise.resolve({
+						uploads: body.paths.map((candidate) =>
+							decisionFor(storePathSchema.parse(candidate.storePath), 'commit')
+						)
+					});
+				},
+				commit: (target) => {
+					events.push('ack');
+					return Promise.resolve({
+						...target,
+						status: 'pending',
+						settled: deferred.promise
+					});
+				}
+			}
+		});
+		await reconciling.promise;
+		controller.abort(new CliAbortError());
+		const run = await runPromise;
+		deferred.reject(new UploadVerificationFailedError('cancelled', 'absent'));
+		await Promise.resolve();
+		expect({
+			events,
+			error: run.error,
+			runtimeDirectoryExists: existsSync(run.preflight.runtimePlan.directory),
+			rootDirectoryExists: existsSync(run.rootLinkDirectory)
+		}).toStrictEqual({
+			events: ['negotiate', 'ack'],
+			error: new CliAbortError(),
+			runtimeDirectoryExists: false,
+			rootDirectoryExists: false
+		});
+	});
+
+	it.each(['servable', 'absent', 'cancelled'] as const)(
+		'reports a pending verdict heartbeat and clears it after %s',
+		async (verdict) => {
+			vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+			try {
+				const deferred = Promise.withResolvers<undefined>();
+				const reconciling = Promise.withResolvers<undefined>();
+				const controller = new AbortController();
+				const phaseFacts: { phase: string; label: string; value: string }[] =
+					[];
+				let elapsed = 0;
+				let isAvailable = false;
+				const runPromise = runFlow({
+					emitEvent: true,
+					valid: [pathA],
+					signal: controller.signal,
+					phaseFacts,
+					now: () => elapsed,
+					phaseStarted(label) {
+						if (label === 'Reconciling build results') {
+							reconciling.resolve(undefined);
+						}
+					},
+					publicationClient: {
+						negotiate: (body) =>
+							Promise.resolve({
+								uploads: body.paths.map((candidate) =>
+									decisionFor(
+										storePathSchema.parse(candidate.storePath),
+										isAvailable ? 'skip' : 'commit'
+									)
+								)
+							}),
+						commit: (target) =>
+							Promise.resolve({
+								...target,
+								status: 'pending',
+								settled: deferred.promise
+							})
+					}
+				});
+				await reconciling.promise;
+				elapsed = 10_000;
+				await vi.advanceTimersByTimeAsync(10_000);
+				const heartbeatFacts = phaseFacts.filter(
+					(fact) => fact.phase === 'Reconciling build results'
+				);
+				if (verdict === 'cancelled') {
+					controller.abort(new CliAbortError());
+				} else {
+					isAvailable = true;
+					if (verdict === 'absent') {
+						deferred.reject(
+							new UploadVerificationFailedError('first', 'absent')
+						);
+					} else {
+						deferred.resolve(undefined);
+					}
+				}
+				const run = await runPromise;
+				if (verdict === 'cancelled') {
+					deferred.reject(
+						new UploadVerificationFailedError('cancelled', 'absent')
+					);
+				}
+				const finishedFacts = [...phaseFacts];
+				elapsed = 30_000;
+				await vi.advanceTimersByTimeAsync(20_000);
+				const snapshot = (pending: string, settled: string, wait: number) => [
+					{
+						phase: 'Reconciling build results',
+						label: 'pending verdicts',
+						value: pending
+					},
+					{
+						phase: 'Reconciling build results',
+						label: 'settled verdicts',
+						value: settled
+					},
+					{
+						phase: 'Reconciling build results',
+						label: 'verdict wait',
+						value: formatDuration(wait)
+					}
+				];
+				expect({
+					heartbeatFacts,
+					verdictFacts: finishedFacts.filter((fact) =>
+						['pending verdicts', 'settled verdicts', 'verdict wait'].includes(
+							fact.label
+						)
+					),
+					afterwards: phaseFacts,
+					finishedFacts,
+					timers: vi.getTimerCount(),
+					error: run.error
+				}).toStrictEqual({
+					heartbeatFacts: [
+						...snapshot('1', '0', 0),
+						...snapshot('1', '0', 10_000)
+					],
+					verdictFacts: [
+						...snapshot('1', '0', 0),
+						...snapshot('1', '0', 10_000),
+						...(verdict === 'cancelled' ? [] : snapshot('0', '1', 10_000))
+					],
+					afterwards: finishedFacts,
+					finishedFacts,
+					timers: 0,
+					error: verdict === 'cancelled' ? new CliAbortError() : undefined
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
 
 	it('reports the streamed mode, the phases in run order and a summary result', async () => {
 		const run = await runFlow({});
@@ -2324,6 +2692,103 @@ describe('runBuildPush', () => {
 			});
 		}
 	);
+
+	it('delegates tenant dependency references only when explicitly disabled', async () => {
+		const phaseFacts: { phase: string; label: string; value: string }[] = [];
+		const dependencyTenantUrls: (string | undefined)[] = [];
+		const run = await runFlow({
+			phaseFacts,
+			dependencyTenantUrls,
+			tenantDependency: true,
+			constructed: { succeedOn: 1, installables: [`${drvA}^out`] },
+			declaredOutputs: [pathA],
+			valid: [pathA],
+			alreadyValid: [pathA],
+			outPaths: [pathA],
+			options: {
+				publicationScope: 'built',
+				tenantUrl: new URL('https://cache.example/t/acme'),
+				referenceDependencies: false
+			}
+		});
+		const receipt = await parseReceipt(run.receiptFile);
+		expect({
+			error: run.error,
+			dependencyTenantUrls,
+			paths: receipt.paths,
+			references: receipt.subjects.filter(
+				(subject) => subject.origin === 'republished'
+			),
+			phases: phaseFacts.filter(
+				({ phase }) =>
+					phase === 'Discovering dependency outputs' ||
+					phase === 'Checking tenant dependency metadata'
+			)
+		}).toStrictEqual({
+			error: undefined,
+			dependencyTenantUrls: [],
+			paths: [pathA],
+			references: [],
+			phases: []
+		});
+	});
+
+	it('reports dependency discovery and metadata probe progress', async () => {
+		const phaseFacts: { phase: string; label: string; value: string }[] = [];
+		const dependencyTenantUrls: (string | undefined)[] = [];
+		const run = await runFlow({
+			phaseFacts,
+			dependencyTenantUrls,
+			tenantDependency: true,
+			constructed: { succeedOn: 1, installables: [`${drvA}^out`] },
+			declaredOutputs: [pathA],
+			valid: [pathA],
+			alreadyValid: [pathA],
+			outPaths: [pathA],
+			options: {
+				publicationScope: 'built',
+				tenantUrl: new URL('https://cache.example/t/acme')
+			}
+		});
+		expect({
+			error: run.error,
+			dependencyTenantUrls,
+			facts: phaseFacts.filter(
+				({ phase }) =>
+					phase === 'Discovering dependency outputs' ||
+					phase === 'Checking tenant dependency metadata'
+			)
+		}).toStrictEqual({
+			error: undefined,
+			dependencyTenantUrls: ['https://cache.example/t/acme'],
+			facts: [
+				{
+					phase: 'Discovering dependency outputs',
+					label: 'derivations',
+					value: '1'
+				},
+				{
+					phase: 'Discovering dependency outputs',
+					label: 'derivations',
+					value: '2'
+				},
+				...Object.entries({
+					traceId: '0123456789abcdef0123456789abcdef',
+					source: 'https://cache.example/t/acme',
+					mode: 'bulk',
+					checked: '1/1',
+					found: '1',
+					requests: '1',
+					inFlight: '0',
+					elapsed: '2.5s'
+				}).map(([label, value]) => ({
+					phase: 'Checking tenant dependency metadata',
+					label,
+					value
+				}))
+			]
+		});
+	});
 
 	it('preserves the reconciled target receipt when reference authentication fails', async () => {
 		const fixture = {

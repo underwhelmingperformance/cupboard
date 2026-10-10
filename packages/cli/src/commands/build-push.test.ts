@@ -438,6 +438,46 @@ async function parseBuildPush(arguments_: readonly string[]): Promise<unknown> {
 }
 
 describe('registerBuildPushCommand', () => {
+	it.each([
+		{ arguments: [], enabled: true },
+		{ arguments: ['--no-reference-dependencies'], enabled: false }
+	])(
+		'parses dependency reference publication delegation: $enabled',
+		async ({ arguments: arguments_, enabled }) => {
+			const command = silentProgram().commands.find(
+				(command) => command.name() === 'build-push'
+			);
+			if (command === undefined) {
+				throw new Error('Build-push command is missing');
+			}
+			const actionReferences: (boolean | undefined)[] = [];
+			command.action(
+				(
+					_url: URL,
+					_arguments: string[],
+					options: { referenceDependencies?: boolean }
+				) => {
+					actionReferences.push(options.referenceDependencies);
+				}
+			);
+			await command.parseAsync(
+				['https://cache.example/t/acme', ...arguments_],
+				{
+					from: 'user'
+				}
+			);
+			expect({
+				actionReferences,
+				referenceDependencies: command.opts<{
+					referenceDependencies?: boolean;
+				}>().referenceDependencies
+			}).toStrictEqual({
+				actionReferences: [enabled],
+				referenceDependencies: enabled
+			});
+		}
+	);
+
 	it.each([['--closure'], ['--intermediate-paths-file', 'paths.txt']])(
 		'rejects publication scope combined with %s',
 		async (...conflict) => {

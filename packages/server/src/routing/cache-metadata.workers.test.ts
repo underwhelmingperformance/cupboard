@@ -1,6 +1,9 @@
 import { NarInfo } from '@cupboard/nix-store/narinfo';
-import { storePathSchema } from '@cupboard/nix-store/scalars';
-import { StorePath } from '@cupboard/nix-store/store-path';
+import {
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import {
 	cacheMetadataCapability,
@@ -23,12 +26,15 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { sha256Hex } from '../crypto/crypto.ts';
 import { committedPath, setView } from '../do/reuse-view-read.test-support.ts';
+import { type SpanAttributes } from '../observability/span.ts';
 import {
 	countingD1,
 	currentOrigin,
 	defaultCache,
 	fixtureWorkerServer,
+	flakyD1,
 	initialiseViaWorker,
 	issueWorkerSignedToken,
 	namedCache,
@@ -42,6 +48,56 @@ import {
 import worker from '../worker.ts';
 
 import { fixtureTenant } from './tenant-routing.test-support.ts';
+
+const probeSpans = vi.hoisted(() => {
+	vi.resetModules();
+	return [] as {
+		name: string;
+		attributes: Record<string, boolean | number | string>;
+	}[];
+});
+
+vi.mock('../observability/span.ts', () => ({
+	withSpan: async (
+		name: string,
+		attributes: SpanAttributes,
+		body: (span: Span) => Promise<unknown>
+	) => {
+		const values = Object.fromEntries(
+			Object.entries(attributes).filter(
+				(entry): entry is [string, boolean | number | string] =>
+					entry[1] !== undefined
+			)
+		);
+		if (name === 'cache-metadata-probe' || name === 'narinfo-read') {
+			probeSpans.push({ name, attributes: values });
+		}
+		const span: Span = {
+			isTraced: false,
+			setAttribute(key, value) {
+				values[key] = value;
+				return span;
+			},
+			setAttributes(attributes) {
+				for (const [key, value] of Object.entries(attributes)) {
+					if (value !== undefined) {
+						values[key] = value;
+					}
+				}
+				return span;
+			},
+			recordException: vi.fn(),
+			updateName() {
+				return span;
+			},
+			setStatus() {
+				return span;
+			},
+			end: vi.fn()
+		};
+		return body(span);
+	}
+}));
 
 const stringMatcher: unknown = expect.any(String);
 
@@ -61,8 +117,207 @@ function probe(
 
 describe('cache metadata probe', () => {
 	beforeEach(async () => {
+		probeSpans.length = 0;
 		await resetTestServer();
 		await recordTransition('cache-identity', 'complete');
+	});
+
+	it.each([true, false])(
+		'records bounded metadata outcomes with upstream context %s',
+		async (withContext) => {
+			await initialiseViaWorker();
+			const found = await committedPath(
+				'metadata-observability',
+				defaultCache()
+			);
+			const missing = storePathSchema.parse(
+				`/nix/store/${'9'.repeat(32)}-missing`
+			);
+			probeSpans.length = 0;
+			const requested = withContext
+				? [found.storePath, missing]
+				: [missing, found.storePath];
+			const init = probe(requested);
+			const headers = new Headers(init.headers);
+			headers.set('authorization', 'Basic secret');
+			headers.set('cookie', 'secret=value');
+			if (withContext) {
+				headers.set(
+					'traceparent',
+					'00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+				);
+			}
+			const orderedPaths = [found.storePath, missing].toSorted(byCodeUnit);
+			const fingerprint = await sha256Hex(JSON.stringify(orderedPaths));
+			const response = await readFetch('/api/v1/path-info?token=secret', {
+				...init,
+				headers
+			});
+			const result = cacheMetadataResponseSchema.parse(await response.json());
+			expect({
+				status: response.status,
+				statuses: result.entries.map(({ status }) => status),
+				spans: probeSpans
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				statuses: withContext ? ['found', 'missing'] : ['missing', 'found'],
+				spans: [
+					{
+						name: 'cache-metadata-probe',
+						attributes: {
+							...(withContext && {
+								'cupboard.upstream.trace_id':
+									'4bf92f3577b34da6a3ce929d0e0e4736',
+								'cupboard.upstream.span_id': '00f067aa0ba902b7'
+							}),
+							'cupboard.probe.requested_paths': 2,
+							'cupboard.probe.access': 'public',
+							'cupboard.probe.canonical_reads': 1,
+							'url.path': `/t/${fixtureTenant}/api/v1/path-info`,
+							'cupboard.probe.path_set_sha256': fingerprint,
+							'cupboard.probe.found_paths': 1,
+							'cupboard.probe.missing_paths': 1,
+							'cupboard.probe.continuation': false,
+							'cupboard.probe.outcome': 'complete',
+							'http.response.status_code': StatusCodes.OK
+						}
+					}
+				]
+			});
+		}
+	);
+
+	it.each(['public', 'private'] as const)(
+		'counts actual canonical attempts for a %s page',
+		async (access) => {
+			await initialiseViaWorker();
+			await provisionFixtureTenant({
+				read: { user: 'alice', password: 'secret' }
+			});
+			const path = await committedPath(
+				'metadata-access-count',
+				defaultCache(),
+				{ access }
+			);
+			probeSpans.length = 0;
+			const response = await readFetch(
+				'/api/v1/path-info',
+				probe([path.storePath], true)
+			);
+			await response.text();
+			expect({
+				status: response.status,
+				probes: probeSpans.filter(
+					(span) => span.name === 'cache-metadata-probe'
+				)
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				probes: [
+					{
+						name: 'cache-metadata-probe',
+						attributes: {
+							'url.path': `/t/${fixtureTenant}/api/v1/path-info`,
+							'cupboard.probe.access': access,
+							'cupboard.probe.requested_paths': 1,
+							'cupboard.probe.canonical_reads': access === 'public' ? 1 : 0,
+							'cupboard.probe.path_set_sha256': await sha256Hex(
+								JSON.stringify([path.storePath])
+							),
+							'cupboard.probe.found_paths': 1,
+							'cupboard.probe.missing_paths': 0,
+							'cupboard.probe.continuation': false,
+							'cupboard.probe.outcome': 'complete',
+							'http.response.status_code': StatusCodes.OK
+						}
+					}
+				]
+			});
+		}
+	);
+
+	it.each(['found', 'missing'] as const)(
+		'records correlated narinfo %s without request secrets',
+		async (outcome) => {
+			await initialiseViaWorker();
+			const path = await committedPath('narinfo-observability', defaultCache());
+			probeSpans.length = 0;
+			const hash = outcome === 'found' ? path.storePathHash : '9'.repeat(32);
+			const response = await readFetch(`/${hash}.narinfo?token=secret`, {
+				headers: {
+					traceparent:
+						'00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+					cookie: 'secret=value'
+				}
+			});
+			const status =
+				outcome === 'found' ? StatusCodes.OK : StatusCodes.NOT_FOUND;
+			expect({ status: response.status, spans: probeSpans }).toStrictEqual({
+				status,
+				spans: [
+					{
+						name: 'narinfo-read',
+						attributes: {
+							'cupboard.upstream.trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+							'cupboard.upstream.span_id': '00f067aa0ba902b7',
+							'cupboard.probe.requested_paths': 1,
+							'cupboard.probe.outcome': outcome,
+							'http.response.status_code': status
+						}
+					}
+				]
+			});
+		}
+	);
+
+	it('records an upstream refusal without reporting missing paths or refusal details', async () => {
+		await initialiseViaWorker();
+		const path = await committedPath(
+			'metadata-refusal-observability',
+			defaultCache()
+		);
+		probeSpans.length = 0;
+		const overridden = new Proxy(env, {
+			get(target, key, receiver): unknown {
+				if (key === 'CUPBOARD_TENANT') {
+					return {
+						fetch: () =>
+							new Response('private diagnostics', {
+								status: StatusCodes.UNAUTHORIZED
+							})
+					};
+				}
+				return Reflect.get(target, key, receiver);
+			}
+		});
+		const context = createExecutionContext();
+		const response = await worker.fetch(
+			new Request<unknown, IncomingRequestCfProperties>(
+				`${currentOrigin()}/t/${fixtureTenant}/api/v1/path-info`,
+				probe([path.storePath])
+			),
+			overridden,
+			context
+		);
+		await waitOnExecutionContext(context);
+		expect({ status: response.status, spans: probeSpans }).toStrictEqual({
+			status: StatusCodes.UNAUTHORIZED,
+			spans: [
+				{
+					name: 'cache-metadata-probe',
+					attributes: {
+						'cupboard.probe.requested_paths': 1,
+						'cupboard.probe.access': 'public',
+						'cupboard.probe.canonical_reads': 1,
+						'url.path': `/t/${fixtureTenant}/api/v1/path-info`,
+						'cupboard.probe.path_set_sha256': await sha256Hex(
+							JSON.stringify([path.storePath])
+						),
+						'cupboard.probe.outcome': 'refused',
+						'http.response.status_code': StatusCodes.UNAUTHORIZED
+					}
+				}
+			]
+		});
 	});
 
 	it.each([
@@ -179,6 +434,118 @@ describe('cache metadata probe', () => {
 		});
 	});
 
+	it.each(['revoked', 'old generation', 'uncommitted'] as const)(
+		'rejects a stale cached public hit when authority is %s',
+		async (state) => {
+			await initialiseViaWorker();
+			const path = await committedPath('metadata-stale-cache', defaultCache());
+			const original = await readFetch(`/${path.storePathHash}.narinfo`);
+			const stale = await original.text();
+			if (state === 'revoked') {
+				await env.CUPBOARD_DB.prepare(
+					'INSERT INTO path_read_revocation(tenant,cache_kind,store_path_hash,cache_generation,generation) SELECT tenant, cache_kind, store_path_hash, cache_generation, max(generation) FROM blob_ref_storage WHERE tenant = ? AND cache_kind = ? AND store_path_hash = ? GROUP BY tenant, cache_kind, store_path_hash, cache_generation'
+				)
+					.bind(fixtureTenant, 'default', path.storePathHash)
+					.run();
+			} else if (state === 'old generation') {
+				await env.CUPBOARD_DB.prepare(
+					'UPDATE cache_lifecycle_storage SET generation = 2 WHERE tenant = ? AND cache_kind = ?'
+				)
+					.bind(fixtureTenant, 'default')
+					.run();
+			}
+			const requested =
+				state === 'uncommitted'
+					? storePathSchema.parse(`/nix/store/${'9'.repeat(32)}-uncommitted`)
+					: path.storePath;
+			const canonical = vi.fn(
+				() => new Response(stale.replace(path.storePath, () => requested))
+			);
+			const overridden = new Proxy(env, {
+				get(target, key, receiver): unknown {
+					return key === 'CUPBOARD_TENANT'
+						? { fetch: canonical }
+						: Reflect.get(target, key, receiver);
+				}
+			});
+			const context = createExecutionContext();
+			const response = await worker.fetch(
+				new Request<unknown, IncomingRequestCfProperties>(
+					`${currentOrigin()}/t/${fixtureTenant}/api/v1/path-info`,
+					probe([requested])
+				),
+				overridden,
+				context
+			);
+			await waitOnExecutionContext(context);
+			expect({
+				status: response.status,
+				cacheControl: response.headers.get('cache-control'),
+				body: await response.json(),
+				canonicalCalls: canonical.mock.calls
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				cacheControl: 'no-store',
+				body: {
+					scopeVersion: `cache:${state === 'old generation' ? '2' : '1'}:1:public:false`,
+					entries: [{ storePath: requested, status: 'missing' }]
+				},
+				canonicalCalls: []
+			});
+		}
+	);
+
+	it('retries page authority once and refuses an outage without calling the canonical cache', async () => {
+		await initialiseViaWorker();
+		const path = storePathSchema.parse(
+			`/nix/store/${'9'.repeat(32)}-uncommitted`
+		);
+		let authorityAttempts = 0;
+		const failing = flakyD1(env.CUPBOARD_DB, {
+			failures: 1000,
+			matches: (query) => query.includes('requested_path_reference'),
+			onMatch: () => {
+				authorityAttempts += 1;
+			}
+		});
+		const canonical = vi.fn(() => new Response('Unexpected stale body'));
+		const overridden = new Proxy(env, {
+			get(target, key, receiver): unknown {
+				if (key === 'CUPBOARD_DB') {
+					return failing;
+				}
+				return key === 'CUPBOARD_TENANT'
+					? { fetch: canonical }
+					: Reflect.get(target, key, receiver);
+			}
+		});
+		const context = createExecutionContext();
+		const response = await worker.fetch(
+			new Request<unknown, IncomingRequestCfProperties>(
+				`${currentOrigin()}/t/${fixtureTenant}/api/v1/path-info`,
+				probe([path])
+			),
+			overridden,
+			context
+		);
+		await waitOnExecutionContext(context);
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
+			retryAfter: response.headers.get('retry-after'),
+			body: await response.text(),
+			authorityAttempts,
+			canonicalCalls: canonical.mock.calls
+		}).toStrictEqual({
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			cacheControl: 'no-store',
+			retryAfter: '5',
+			body: 'Cache facts are temporarily unavailable\n',
+			authorityAttempts: 2,
+			canonicalCalls: []
+		});
+	});
+
 	it('uses canonical managed-cache requests after one page admission and rejects a mid-page access change', async () => {
 		const token = await initialiseViaWorker();
 		const path = await committedPath('metadata-managed-cache', defaultCache());
@@ -187,11 +554,18 @@ describe('cache metadata probe', () => {
 		});
 		const original = await readFetch(`/${path.storePathHash}.narinfo`);
 		const narinfo = await original.text();
-		const paths = Array.from({ length: 32 }, (_, index) =>
-			storePathSchema.parse(
-				`/nix/store/${index.toString(2).padStart(32, '0')}-metadata`
-			)
-		);
+		const paths: StorePathString[] = [];
+		for (let index = 0; index < 32; index += 1) {
+			const committed = await committedPath(
+				`metadata-canonical-${String(index)}`,
+				defaultCache(),
+				{
+					storePathHash: index.toString(2).padStart(32, '0'),
+					name: 'metadata'
+				}
+			);
+			paths.push(storePathSchema.parse(committed.storePath));
+		}
 		const narinfos = new Map(
 			paths.map((storePath) => [
 				storePath,
@@ -259,7 +633,7 @@ describe('cache metadata probe', () => {
 				status: 'found',
 				narinfo: narinfos.get(storePath)
 			})),
-			statements: 4
+			statements: 5
 		});
 		isChange = true;
 		const racedContext = createExecutionContext();

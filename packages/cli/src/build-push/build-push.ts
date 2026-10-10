@@ -190,6 +190,7 @@ export interface BuildPushRunOptions {
 	readonly runRoot?: UploadAttachRootInput;
 	readonly closure?: boolean;
 	readonly publicationScope?: 'outputs' | 'built' | 'closure';
+	readonly referenceDependencies?: boolean;
 	readonly substituter?: 'leave' | 'copy';
 	readonly tenantUrl?: URL;
 	readonly destinationUrl?: URL;
@@ -1739,6 +1740,7 @@ async function publishTenantDependencies(
 	receipt: BuildReceiptV3
 ): Promise<BuildReceiptV3> {
 	if (
+		options.referenceDependencies === false ||
 		options.publicationScope !== 'built' ||
 		options.tenantUrl === undefined ||
 		options.invocation.kind !== 'constructed'
@@ -1781,26 +1783,57 @@ async function publishTenantDependencies(
 			}
 		}
 	}
-	const outputs = await dependencyOutputs([...roots], {
-		readDerivation: (path) => {
-			const term = terms.get(path);
-			return term === undefined
-				? dependencies.store.readDerivation(path)
-				: Promise.resolve(term);
-		},
-		...(dependencies.signal !== undefined && { signal: dependencies.signal })
-	});
+	const outputs = await reporter.phase(
+		'Discovering dependency outputs',
+		(phase) => {
+			let checked = 0;
+			return dependencyOutputs([...roots], {
+				readDerivation: async (path) => {
+					const term =
+						terms.get(path) ?? (await dependencies.store.readDerivation(path));
+					checked += 1;
+					phase.fact('derivations', checked);
+					return term;
+				},
+				...(dependencies.signal !== undefined && {
+					signal: dependencies.signal
+				})
+			});
+		}
+	);
 	const paths = outputs
 		.map((output) => output.storePath)
 		.filter((path) => !receipt.paths.includes(path));
-	const references = await (
-		dependencies.tenantDependencyReferences ?? tenantDependencyReferences
-	)(paths, {
-		sources: tenantReferenceSources(options.tenantUrl, [
-			{ url: options.destinationUrl ?? options.tenantUrl, paths: [] }
-		]),
-		...(dependencies.signal !== undefined && { signal: dependencies.signal })
-	});
+	const tenantUrl = options.tenantUrl;
+	const references = await reporter.phase(
+		'Checking tenant dependency metadata',
+		(phase) =>
+			(dependencies.tenantDependencyReferences ?? tenantDependencyReferences)(
+				paths,
+				{
+					tenantUrl,
+					sources: tenantReferenceSources(tenantUrl, [
+						{ url: options.destinationUrl ?? tenantUrl, paths: [] }
+					]),
+					onProgress(progress) {
+						phase.fact('traceId', progress.traceId);
+						phase.fact('source', progress.source);
+						phase.fact('mode', progress.mode);
+						phase.fact(
+							'checked',
+							`${String(progress.checked)}/${String(progress.total)}`
+						);
+						phase.fact('found', progress.found);
+						phase.fact('requests', progress.requests);
+						phase.fact('inFlight', progress.inFlight);
+						phase.fact('elapsed', formatDuration(progress.elapsedMs));
+					},
+					...(dependencies.signal !== undefined && {
+						signal: dependencies.signal
+					})
+				}
+			)
+	);
 	if (references.length === 0) {
 		return receipt;
 	}
@@ -1920,6 +1953,26 @@ async function settleRun(
 		let result = await reporter.phase(
 			buildPushPhases.reconcile,
 			async (ctx) => {
+				if (options.wait !== false) {
+					const now = dependencies.now ?? Date.now;
+					const verdictStartedAt = now();
+					let settledVerdicts = 0;
+					const reportVerdicts = (): void => {
+						ctx.fact('pending verdicts', batcher.pendingCommits);
+						ctx.fact('settled verdicts', settledVerdicts);
+						ctx.fact('verdict wait', formatDuration(now() - verdictStartedAt));
+					};
+					reportVerdicts();
+					const heartbeat = setInterval(reportVerdicts, 10_000);
+					try {
+						await batcher.settleCommits(dependencies.signal, () => {
+							settledVerdicts += 1;
+							reportVerdicts();
+						});
+					} finally {
+						clearInterval(heartbeat);
+					}
+				}
 				const closureIntermediates = await closureExpansion(
 					options,
 					dependencies,

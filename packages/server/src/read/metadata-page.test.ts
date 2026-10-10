@@ -4,7 +4,7 @@ import {
 	cacheMetadataMaxNarInfoBytes,
 	cacheMetadataMaxResponseBytes
 } from '@cupboard/protocol/cache-metadata';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
 	MetadataNarInfoInvalidError,
@@ -28,10 +28,12 @@ describe('bounded metadata pages', () => {
 			status: 'found',
 			narinfo: '"'.repeat(cacheMetadataMaxNarInfoBytes)
 		}));
+		const onPage = vi.fn();
 		const response = await cacheMetadataPageResponse(
 			'cache:1:1:public:false',
 			paths,
-			entries
+			entries,
+			onPage
 		);
 		const bytes = new Uint8Array(await response.arrayBuffer());
 		const result: unknown = JSON.parse(new TextDecoder().decode(bytes));
@@ -41,6 +43,7 @@ describe('bounded metadata pages', () => {
 			nextIndex: 1
 		});
 		expect(bytes.byteLength).toBeLessThanOrEqual(cacheMetadataMaxResponseBytes);
+		expect(onPage.mock.calls).toStrictEqual([[result]]);
 	});
 
 	it('refuses one oversized UTF-8 narinfo instead of returning an empty continuation', async () => {

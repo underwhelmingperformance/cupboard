@@ -12,7 +12,7 @@ export type SpanAttributes = Readonly<
 export function withSpan<T>(
 	name: string,
 	attributes: SpanAttributes,
-	body: () => Promise<T>
+	body: (span: Span) => Promise<T>
 ): Promise<T> {
 	return tracing.enterSpan(name, (span) => {
 		for (const [key, value] of Object.entries(attributes)) {
@@ -21,6 +21,6 @@ export function withSpan<T>(
 			}
 		}
 
-		return body();
+		return body(span);
 	});
 }

@@ -42,6 +42,15 @@ export const hookHelperSourcePath =
 	'packages/cli/hook-helper/cupboard-hook-relay.c';
 export const hookHelperBinaryName = 'cupboard-hook-relay';
 
+export const binaryCliEntrySource = [
+	"import { initialiseTracing } from '@cupboard/shared/node-tracing';",
+	"import { runCli } from './packages/cli/src/run.ts';",
+	'initialiseTracing();',
+	'void (async () => {',
+	'\tprocess.exitCode = await runCli();',
+	'})();'
+].join('\n');
+
 export async function generateSeaPreparationBlob(
 	workDirectory: string
 ): Promise<string> {
@@ -218,12 +227,7 @@ async function main(): Promise<void> {
 				CUPBOARD_VERSION: JSON.stringify(options.version)
 			},
 			stdin: {
-				contents: [
-					"import { runCli } from './packages/cli/src/run.ts';",
-					'void (async () => {',
-					'\tprocess.exitCode = await runCli();',
-					'})();'
-				].join('\n'),
+				contents: binaryCliEntrySource,
 				loader: 'ts',
 				resolveDir: process.cwd(),
 				sourcefile: 'cupboard-cjs-entry.ts'

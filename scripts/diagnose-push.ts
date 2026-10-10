@@ -167,6 +167,79 @@ export interface TraceErrorStat {
 	readonly occurrences: number;
 }
 
+const nonzeroTraceId = z
+	.string()
+	.regex(/^[0-9a-f]{32}$/u)
+	.refine((value) => value !== '0'.repeat(32));
+const nonzeroSpanId = z
+	.string()
+	.regex(/^[0-9a-f]{16}$/u)
+	.refine((value) => value !== '0'.repeat(16));
+const probeCount = z.number().int().nonnegative();
+const pageProbeOutcome = z.enum([
+	'complete',
+	'continuation',
+	'refused',
+	'error'
+]);
+const probeOutcome = z.enum([
+	'complete',
+	'continuation',
+	'refused',
+	'error',
+	'found',
+	'missing'
+]);
+const probeSourcePath = z
+	.string()
+	.max(2048)
+	.regex(/^\/[^?#\s]*$/u);
+const probeAccess = z.enum(['public', 'private']);
+const probeAttributesSchema = z.object({
+	clientTraceId: nonzeroTraceId.optional(),
+	clientSpanId: nonzeroSpanId.optional(),
+	requestedPaths: probeCount.optional(),
+	canonicalReads: probeCount.optional(),
+	access: probeAccess.optional(),
+	sourcePath: probeSourcePath.optional(),
+	foundPaths: probeCount.optional(),
+	missingPaths: probeCount.optional(),
+	continuation: z.boolean().optional(),
+	pathSetSha256: z
+		.string()
+		.regex(/^[0-9a-f]{64}$/u)
+		.optional(),
+	outcome: probeOutcome.optional()
+});
+
+type ProbeAttributes = z.infer<typeof probeAttributesSchema>;
+
+interface ProbePathSet {
+	readonly sourcePath: string;
+	readonly canonicalReadAttempts: number | 'unknown';
+	readonly sha256: string;
+	readonly attempts: number;
+	readonly requestedPathAttempts: number | 'unknown';
+}
+
+interface MetadataProbeStat {
+	readonly clientTraceId: string;
+	readonly clientSpanIds: readonly string[];
+	readonly attempts: number;
+	readonly requestedPathAttempts: number | 'unknown';
+	readonly canonicalReadAttempts: number | 'unknown';
+	readonly accessModes: readonly z.infer<typeof probeAccess>[];
+	readonly foundPathResults: number | 'unknown';
+	readonly missingPathResults: number | 'unknown';
+	readonly continuationAttempts: number | 'unknown';
+	readonly summedServerMs: number;
+	readonly observedWallSpanMs: number;
+	readonly outcomes: Readonly<
+		Record<z.infer<typeof pageProbeOutcome> | 'unknown', number>
+	>;
+	readonly pathSets: readonly ProbePathSet[];
+}
+
 export interface SpanEvent {
 	readonly traceId: string;
 	readonly spanId: string | undefined;
@@ -174,6 +247,7 @@ export interface SpanEvent {
 	readonly name: string;
 	readonly startMs: number;
 	readonly endMs: number;
+	readonly probe?: ProbeAttributes;
 }
 
 /**
@@ -232,6 +306,7 @@ export interface GitHubJobReference {
 }
 
 export interface Analysis {
+	readonly metadataProbes?: readonly MetadataProbeStat[];
 	readonly worker: string;
 	readonly window: TimeWindow;
 	readonly invocations: number;
@@ -445,6 +520,7 @@ const traceSchema = z.object({
 
 const spanSchema = z.object({
 	timestamp: z.number(),
+	source: z.unknown().optional(),
 	$metadata: z.object({
 		type: z.string().optional(),
 		traceId: z.string().optional(),
@@ -526,6 +602,58 @@ export function parseTraceSummary(trace: unknown): TraceSummary | undefined {
 	};
 }
 
+function probeSourceValue(
+	source: Record<string, unknown>,
+	key: string
+): unknown {
+	if (Object.hasOwn(source, key)) {
+		return source[key];
+	}
+
+	let value: unknown = source;
+
+	for (const segment of key.split('.')) {
+		value = structuredSource.safeParse(value).data?.[segment];
+	}
+
+	return value;
+}
+
+function parseProbeAttributes(
+	source: Record<string, unknown> | undefined
+): ProbeAttributes | undefined {
+	if (source === undefined) {
+		return undefined;
+	}
+
+	const fields = [
+		['clientTraceId', 'cupboard.upstream.trace_id', nonzeroTraceId],
+		['clientSpanId', 'cupboard.upstream.span_id', nonzeroSpanId],
+		['requestedPaths', 'cupboard.probe.requested_paths', probeCount],
+		['canonicalReads', 'cupboard.probe.canonical_reads', probeCount],
+		['access', 'cupboard.probe.access', probeAccess],
+		['sourcePath', 'url.path', probeSourcePath],
+		['foundPaths', 'cupboard.probe.found_paths', probeCount],
+		['missingPaths', 'cupboard.probe.missing_paths', probeCount],
+		['continuation', 'cupboard.probe.continuation', z.boolean()],
+		[
+			'pathSetSha256',
+			'cupboard.probe.path_set_sha256',
+			z.string().regex(/^[0-9a-f]{64}$/u)
+		],
+		['outcome', 'cupboard.probe.outcome', probeOutcome]
+	] as const;
+	const values = fields.flatMap(([key, nativeKey, schema]) => {
+		const parsed = schema.safeParse(probeSourceValue(source, nativeKey));
+
+		return parsed.success ? [[key, parsed.data]] : [];
+	});
+
+	return values.length === 0
+		? undefined
+		: probeAttributesSchema.parse(Object.fromEntries(values));
+}
+
 export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 	const parsed = spanSchema.safeParse(event);
 
@@ -542,6 +670,12 @@ export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 
 	const startMs = meta.startTime ?? parsed.data.timestamp;
 	const endMs = Math.max(startMs, meta.endTime ?? startMs);
+	const probe =
+		name === 'cache-metadata-probe' || name === 'narinfo-read'
+			? parseProbeAttributes(
+					structuredSource.safeParse(parsed.data.source).data
+				)
+			: undefined;
 
 	return {
 		traceId: meta.traceId,
@@ -549,7 +683,8 @@ export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 		parentSpanId: meta.parentSpanId,
 		name,
 		startMs,
-		endMs
+		endMs,
+		...(probe !== undefined && { probe })
 	};
 }
 
@@ -808,7 +943,7 @@ export function analyse(
 			continue;
 		}
 
-		const key = `${span.traceId} ${span.name}`;
+		const key = `${span.traceId}\0${span.name}`;
 		const group = perTraceKind.get(key) ?? {
 			bucket: bucketKey,
 			name: span.name,
@@ -882,8 +1017,10 @@ export function analyse(
 	);
 
 	const groups = groupOperations(operations);
+	const metadataProbes = metadataProbeStats(spans);
 
 	return {
+		...(metadataProbes.length > 0 && { metadataProbes }),
 		worker,
 		window,
 		invocations: Math.max(traces.length, invocationIds.size),
@@ -908,6 +1045,141 @@ export function analyse(
 			errors: operations.reduce((sum, op) => sum + op.errors, 0)
 		}
 	};
+}
+
+function completeProbeCount(
+	values: readonly (number | undefined)[]
+): number | 'unknown' {
+	if (values.includes(undefined)) {
+		return 'unknown';
+	}
+
+	return values.reduce<number>((sum, value) => sum + (value ?? 0), 0);
+}
+
+function metadataProbeStats(spans: readonly SpanEvent[]): MetadataProbeStat[] {
+	const byClient = new Map<string, SpanEvent[]>();
+
+	for (const span of spans) {
+		if (span.name !== 'cache-metadata-probe' || span.probe === undefined) {
+			continue;
+		}
+
+		const key = span.probe.clientTraceId ?? 'uncorrelated';
+		const group = byClient.get(key) ?? [];
+		group.push(span);
+		byClient.set(key, group);
+	}
+
+	return [...byClient]
+		.map(([clientTraceId, attempts]) => {
+			const outcomes = {
+				complete: 0,
+				continuation: 0,
+				refused: 0,
+				error: 0,
+				unknown: 0
+			};
+			const pathSets = new Map<
+				string,
+				{ sourcePath: string; sha256: string; matching: SpanEvent[] }
+			>();
+			const accessModes = new Set<z.infer<typeof probeAccess>>();
+			const clientSpanIds = new Set<string>();
+			let earliestMs = Infinity;
+			let latestMs = -Infinity;
+
+			for (const span of attempts) {
+				earliestMs = Math.min(earliestMs, span.startMs);
+				latestMs = Math.max(latestMs, span.endMs);
+
+				if (span.probe?.clientSpanId !== undefined) {
+					clientSpanIds.add(span.probe.clientSpanId);
+				}
+
+				if (span.probe?.access !== undefined) {
+					accessModes.add(span.probe.access);
+				}
+
+				outcomes[
+					pageProbeOutcome.safeParse(span.probe?.outcome).data ?? 'unknown'
+				] += 1;
+				const fingerprint = span.probe?.pathSetSha256;
+
+				if (fingerprint === undefined) {
+					continue;
+				}
+
+				const sourcePath = span.probe?.sourcePath ?? 'unknown';
+				const key = JSON.stringify([sourcePath, fingerprint]);
+				const group = pathSets.get(key) ?? {
+					sourcePath,
+					sha256: fingerprint,
+					matching: []
+				};
+				group.matching.push(span);
+				pathSets.set(key, group);
+			}
+
+			return {
+				clientTraceId,
+				clientSpanIds: [...clientSpanIds].toSorted((a, b) =>
+					a.localeCompare(b)
+				),
+				attempts: attempts.length,
+				requestedPathAttempts: completeProbeCount(
+					attempts.map((span) => span.probe?.requestedPaths)
+				),
+				canonicalReadAttempts: completeProbeCount(
+					attempts.map((span) => span.probe?.canonicalReads)
+				),
+				accessModes: [...accessModes].toSorted((a, b) => a.localeCompare(b)),
+				foundPathResults: completeProbeCount(
+					attempts.map((span) => span.probe?.foundPaths)
+				),
+				missingPathResults: completeProbeCount(
+					attempts.map((span) => span.probe?.missingPaths)
+				),
+				continuationAttempts: completeProbeCount(
+					attempts.map((span) =>
+						span.probe?.continuation === undefined
+							? undefined
+							: Number(span.probe.continuation)
+					)
+				),
+				summedServerMs: attempts.reduce(
+					(sum, span) => sum + span.endMs - span.startMs,
+					0
+				),
+				observedWallSpanMs: latestMs - earliestMs,
+				outcomes,
+				pathSets: pathSets
+					.values()
+					.map(({ sourcePath, sha256, matching }) => ({
+						sourcePath,
+						sha256,
+						attempts: matching.length,
+						canonicalReadAttempts: completeProbeCount(
+							matching.map((span) => span.probe?.canonicalReads)
+						),
+						requestedPathAttempts: completeProbeCount(
+							matching.map((span) => span.probe?.requestedPaths)
+						)
+					}))
+					.toArray()
+					.toSorted(
+						(a, b) =>
+							b.attempts - a.attempts ||
+							a.sourcePath.localeCompare(b.sourcePath) ||
+							a.sha256.localeCompare(b.sha256)
+					)
+			};
+		})
+		.toSorted(
+			(a, b) =>
+				b.summedServerMs - a.summedServerMs ||
+				a.clientTraceId.localeCompare(b.clientTraceId)
+		);
 }
 
 export function groupOperations(
@@ -1071,6 +1343,57 @@ export function slowestRows(analysis: Analysis): ResultRow[] {
 		label: formatMs(trace.durationMs),
 		value: `${trace.bucket}${trace.errors.length > 0 ? ' (error)' : ''}`
 	}));
+}
+
+function probeCountText(value: number | 'unknown'): string {
+	return value === 'unknown'
+		? 'unknown (incomplete telemetry)'
+		: formatCount(value);
+}
+
+function metadataProbeRows(probe: MetadataProbeStat): ResultRow[] {
+	return [
+		{
+			label: 'Client span IDs',
+			value: probe.clientSpanIds.join(', ') || 'unknown'
+		},
+		{ label: 'Page attempts', value: formatCount(probe.attempts) },
+		{
+			label: 'Canonical read attempts',
+			value: probeCountText(probe.canonicalReadAttempts)
+		},
+		{ label: 'Access modes', value: probe.accessModes.join(', ') || 'unknown' },
+		{
+			label: 'Requested path attempts',
+			value: `${probeCountText(probe.requestedPathAttempts)} (unique paths unknown)`
+		},
+		{
+			label: 'Found/missing path results',
+			value: `${probeCountText(probe.foundPathResults)}/${probeCountText(probe.missingPathResults)}`
+		},
+		{
+			label: 'Continuation attempts',
+			value: probeCountText(probe.continuationAttempts)
+		},
+		{
+			label: 'Outcomes',
+			value: Object.entries(probe.outcomes)
+				.map(([outcome, count]) => `${outcome} ${formatCount(count)}`)
+				.join(' · ')
+		},
+		{
+			label: 'Summed server duration',
+			value: `${formatMs(probe.summedServerMs)} (overlapping attempts add)`
+		},
+		{
+			label: 'Observed probe wall span',
+			value: formatMs(probe.observedWallSpanMs)
+		},
+		...probe.pathSets.map((set) => ({
+			label: `Path set ${set.sha256} · ${set.sourcePath === 'unknown' ? 'unknown source' : set.sourcePath}`,
+			value: `${formatCount(set.attempts)} attempts · ${probeCountText(set.requestedPathAttempts)} requested path attempts · ${probeCountText(set.canonicalReadAttempts)} canonical read attempts${set.attempts > 1 ? ' (repeated exact set)' : ''}`
+		}))
+	];
 }
 
 export function traceErrorRows(analysis: Analysis): ResultRow[] {
@@ -2141,6 +2464,15 @@ export function renderAnalysis(
 
 	if (analysis.slowest.length > 0) {
 		ui.note('Slowest invocations', slowestRows(analysis));
+	}
+
+	const metadataProbes = analysis.metadataProbes ?? [];
+
+	for (const probe of metadataProbes) {
+		ui.note(
+			`Metadata probes · ${probe.clientTraceId === 'uncorrelated' ? 'uncorrelated' : `client trace ${probe.clientTraceId}`}`,
+			metadataProbeRows(probe)
+		);
 	}
 
 	if (analysis.traceErrors.length > 0) {

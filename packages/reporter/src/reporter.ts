@@ -910,9 +910,13 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 
 			const openedAtWrite = writes;
 			const startedAt = now();
+			let lastEmitAt = startedAt;
+			let isPhaseFinished = false;
+			let isFlushQueued = false;
 			const facts = new Map<string, string>();
 			const results: ResultPayload[] = [];
 			const writeOutcome = (): void => {
+				isPhaseFinished = true;
 				emitFacts(facts);
 				for (const payload of results) {
 					writeResult(payload);
@@ -931,6 +935,20 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 							display?.humanLabel ?? factLabel,
 							String(display?.humanValue ?? factValue)
 						);
+						const at = now();
+						if (isFlushQueued || at - lastEmitAt < progressIntervalMs) {
+							return;
+						}
+						lastEmitAt = at;
+						isFlushQueued = true;
+						queueMicrotask(() => {
+							isFlushQueued = false;
+							if (isPhaseFinished) {
+								return;
+							}
+							emitFacts(facts);
+							line(`Elapsed: ${formatDuration(at - startedAt)}`);
+						});
 					},
 					warn: emitWarn,
 					result(payload) {

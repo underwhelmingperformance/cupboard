@@ -749,6 +749,8 @@ Options:
                                     references. Both modes select outputs built
                                     in this run. (choices: "leave", "copy",
                                     default: "copy")
+  --no-reference-dependencies       leave publication of tenant dependency
+                                    references to the caller
   --intermediate-paths-file <path>  file of extra store paths, one per line, to
                                     publish without adding them to the root
   --run-root <name>                 also add each published path to this run

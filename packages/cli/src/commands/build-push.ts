@@ -96,6 +96,7 @@ interface BuildPushOptions {
 	readonly retain?: boolean;
 	readonly closure?: boolean;
 	readonly publicationScope?: 'outputs' | 'built' | 'closure';
+	readonly referenceDependencies?: boolean;
 	readonly substituter?: 'leave' | 'copy';
 	readonly intermediatePathsFile?: string;
 	readonly runRoot?: RootName;
@@ -500,6 +501,10 @@ export function registerBuildPushCommand(
 				.default('copy')
 		)
 		.option(
+			'--no-reference-dependencies',
+			'leave publication of tenant dependency references to the caller'
+		)
+		.option(
 			'--intermediate-paths-file <path>',
 			'file of extra store paths, one per line, to publish without adding them to the root'
 		)
@@ -708,6 +713,9 @@ export function registerBuildPushCommand(
 							}),
 							...(options.publicationScope !== undefined && {
 								publicationScope: options.publicationScope
+							}),
+							...(options.referenceDependencies !== undefined && {
+								referenceDependencies: options.referenceDependencies
 							}),
 							...(options.closure !== undefined && {
 								closure: options.closure

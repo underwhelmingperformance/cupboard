@@ -58,6 +58,12 @@ export interface CachedClosureOffer extends NarInfoOffer {
 	readonly narinfo: string;
 }
 
+export interface CachedClosureProgress {
+	readonly mode: 'bulk' | 'legacy';
+	readonly checked: number;
+	readonly found: number;
+}
+
 export class CachedClosureSourceUnavailableError extends Error {
 	constructor(
 		storePath: StorePathString,
@@ -303,7 +309,8 @@ export class CachedClosureReader {
 	constructor(
 		readonly source: CachedClosureSource,
 		readonly fetcher: typeof fetch,
-		readonly signal?: AbortSignal
+		readonly signal?: AbortSignal,
+		readonly onProgress?: (progress: CachedClosureProgress) => void
 	) {}
 
 	async #legacy(
@@ -316,6 +323,11 @@ export class CachedClosureReader {
 				this.fetcher,
 				this.signal
 			);
+			this.onProgress?.({
+				mode: 'legacy',
+				checked: 1,
+				found: result.offer === undefined ? 0 : 1
+			});
 			return result.offer;
 		});
 	}
@@ -363,13 +375,17 @@ export class CachedClosureReader {
 					'the metadata response does not match the requested prefix'
 				);
 			}
-			offers.push(
-				...response.entries.map((entry) =>
-					entry.status === 'missing'
-						? undefined
-						: parseSourceOffer(this.source, entry.storePath, entry.narinfo)
-				)
+			const pageOffers = response.entries.map((entry) =>
+				entry.status === 'missing'
+					? undefined
+					: parseSourceOffer(this.source, entry.storePath, entry.narinfo)
 			);
+			offers.push(...pageOffers);
+			this.onProgress?.({
+				mode: 'bulk',
+				checked: pageOffers.length,
+				found: pageOffers.filter((offer) => offer !== undefined).length
+			});
 			remaining =
 				response.nextIndex === undefined
 					? []
@@ -542,6 +558,11 @@ export class CachedClosureReader {
 			);
 			this.#mode = discovery.bulk ? 'bulk' : 'legacy';
 			if (!discovery.bulk) {
+				this.onProgress?.({
+					mode: 'legacy',
+					checked: 1,
+					found: discovery.offer === undefined ? 0 : 1
+				});
 				return [discovery.offer, ...(await this.#legacy(paths.slice(1)))];
 			}
 		}

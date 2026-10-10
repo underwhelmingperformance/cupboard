@@ -23,6 +23,7 @@ import type {
 	CommitSession,
 	CommitSessionTarget
 } from '../client/commit-socket.ts';
+import { CliAbortError, UploadVerificationFailedError } from '../errors.ts';
 import { byteStream } from '../io/byte-stream.ts';
 import { SequentialNarSource } from '../nix/nar-source.ts';
 import type { PushClient } from '../push/push.ts';
@@ -609,6 +610,126 @@ describe('BuildOutputBatcher', () => {
 // A run shares one commit session across every phase. Calling the client's
 // `commit` method from a flush would open a second socket for the same run.
 describe('BuildOutputBatcher over a shared commit session', () => {
+	it.each(['servable', 'absent'] as const)(
+		'keeps upload workers free before awaiting the %s deferred verdict',
+		async (verdict) => {
+			const deferred = Promise.withResolvers<undefined>();
+			void deferred.promise.catch(() => {
+				return;
+			});
+			const acknowledgements: string[] = [];
+			const commitSession: CommitSession = {
+				commit: (target) => {
+					acknowledgements.push(target.uploadId);
+					return Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: target.narHash,
+						status: 'pending' as const,
+						settled:
+							target.storePathHash === StorePath.hash(pathA)
+								? deferred.promise
+								: Promise.resolve()
+					});
+				},
+				close() {
+					throw new Error('the caller closes the shared session');
+				}
+			};
+			const { batcher, events, failures } = harness({
+				commitSession,
+				uploadConcurrency: 1,
+				maxEntries: 1
+			});
+			batcher.enqueue(pathA);
+			await batcher.settled();
+			batcher.enqueue(pathB);
+			await batcher.settled();
+			let isJoined = false;
+			const joining = (async () => {
+				await batcher.settleCommits();
+				isJoined = true;
+			})();
+			await Promise.resolve();
+			const beforeVerdict = {
+				acknowledgements: [...acknowledgements],
+				uploads: events.filter((event) => event.startsWith('upload:')),
+				isJoined
+			};
+			const failure = new UploadVerificationFailedError('first', 'absent');
+			if (verdict === 'absent') {
+				deferred.reject(failure);
+			} else {
+				deferred.resolve(undefined);
+			}
+			await joining;
+			expect({
+				beforeVerdict,
+				isJoined,
+				outcomes: batcher.outcomes.values().toArray(),
+				candidates: batcher.candidates,
+				failures,
+				pending: batcher.pendingCommits
+			}).toStrictEqual({
+				beforeVerdict: {
+					acknowledgements: [
+						`upload-${StorePath.basename(pathA)}`,
+						`upload-${StorePath.basename(pathB)}`
+					],
+					uploads: [
+						`upload:staging/${StorePath.basename(pathA)}`,
+						`upload:staging/${StorePath.basename(pathB)}`
+					],
+					isJoined: false
+				},
+				isJoined: true,
+				outcomes: [
+					...(verdict === 'servable'
+						? [{ outcome: 'published', storePath: pathA }]
+						: []),
+					{ outcome: 'published', storePath: pathB }
+				],
+				candidates: verdict === 'absent' ? [pathA] : [],
+				failures:
+					verdict === 'absent' ? [{ storePath: pathA, reason: failure }] : [],
+				pending: 0
+			});
+		}
+	);
+
+	it('cancels the verdict join and clears pending state without closing the shared session', async () => {
+		const deferred = Promise.withResolvers<undefined>();
+		const controller = new AbortController();
+		let isClosed = false;
+		const commitSession: CommitSession = {
+			commit: (target) =>
+				Promise.resolve({
+					...target,
+					status: 'pending',
+					settled: deferred.promise
+				}),
+			close: () => {
+				isClosed = true;
+			}
+		};
+		const { batcher, failures } = harness({ commitSession, maxEntries: 1 });
+		batcher.enqueue(pathA);
+		await batcher.settled();
+		const joining = batcher.settleCommits(controller.signal);
+		const rejection = expect(joining).rejects.toStrictEqual(
+			new CliAbortError()
+		);
+		controller.abort(new CliAbortError());
+		await rejection;
+		await batcher.stop();
+		deferred.reject(new UploadVerificationFailedError('cancelled', 'absent'));
+		await Promise.resolve();
+		expect({
+			pending: batcher.pendingCommits,
+			failures,
+			isClosed
+		}).toStrictEqual({ pending: 0, failures: [], isClosed: false });
+	});
+
 	it.each(['upload', 'commit'] as const)(
 		'commits %s entries over the session with a declaration only for uploaded bytes',
 		async (action) => {
