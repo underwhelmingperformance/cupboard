@@ -82,12 +82,121 @@ async function casLifecycleRows(digest: Sha256HexDigest) {
 	};
 }
 
+async function withWritablePresenceView(
+	operation: () => Promise<void>
+): Promise<void> {
+	await env.CUPBOARD_DB.batch(
+		[
+			'ALTER TABLE tenant_cas_blob RENAME TO tenant_cas_blob_test_storage',
+			'CREATE VIEW tenant_cas_blob AS SELECT * FROM tenant_cas_blob_test_storage',
+			`CREATE TRIGGER tenant_cas_blob_test_insert INSTEAD OF INSERT ON tenant_cas_blob
+			 BEGIN
+			 INSERT INTO tenant_cas_blob_test_storage (tenant, digest, size)
+			 VALUES (NEW.tenant, NEW.digest, NEW.size);
+			 END`,
+			`CREATE TRIGGER tenant_cas_blob_test_delete INSTEAD OF DELETE ON tenant_cas_blob
+			 BEGIN
+			 DELETE FROM tenant_cas_blob_test_storage
+			 WHERE tenant = OLD.tenant AND digest = OLD.digest;
+			 END`
+		].map((query) => env.CUPBOARD_DB.prepare(query))
+	);
+
+	try {
+		await operation();
+	} finally {
+		await env.CUPBOARD_DB.batch(
+			[
+				'DROP VIEW tenant_cas_blob',
+				'ALTER TABLE tenant_cas_blob_test_storage RENAME TO tenant_cas_blob'
+			].map((query) => env.CUPBOARD_DB.prepare(query))
+		);
+	}
+}
+
 describe('attestation CAS lifecycle', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		await resetTestServer();
 		await clearBlobStorage();
+	});
+
+	it('charges and credits shared references through a writable presence view', async () => {
+		await withWritablePresenceView(async () => {
+			const bytes = textEncoder.encode('shared migration presence');
+			const first = await fileAttestationReference({
+				uploadId: 'presence-view-a',
+				bytes,
+				storePathHash,
+				generation: 0,
+				predicateType
+			});
+			const firstReference = {
+				cache: defaultCache(),
+				storePathHash,
+				generation: narInfoGenerationSchema.parse(0),
+				predicateType,
+				digest: first.digest
+			};
+			const repeated = await currentServer().reserveAttestationReference(
+				firstReference,
+				first.size
+			);
+			const otherPathHash = storePathHashSchema.parse('b'.repeat(32));
+			await fileAttestationReference({
+				uploadId: 'presence-view-b',
+				bytes,
+				storePathHash: otherPathHash,
+				generation: 0,
+				predicateType
+			});
+			const charged = {
+				usage: await tenantUsageRow(),
+				presence: await tenantCasBlobRows()
+			};
+			await currentServer().removeAttestationReference(firstReference);
+			const afterFirst = {
+				usage: await tenantUsageRow(),
+				presence: await tenantCasBlobRows()
+			};
+			const lastReference = {
+				...firstReference,
+				storePathHash: otherPathHash
+			};
+			await currentServer().removeAttestationReference(lastReference);
+			await currentServer().removeAttestationReference(lastReference);
+			const usage = {
+				bytes: 0,
+				narinfos: 0,
+				blobs: 0,
+				casBytes: first.size,
+				casBlobs: 1,
+				quotaBytes: undefined
+			};
+			const presence = [
+				{ tenant: fixtureTenant, digest: first.digest, size: first.size }
+			];
+			expect({
+				repeated,
+				charged,
+				afterFirst,
+				afterLast: {
+					usage: await tenantUsageRow(),
+					presence: await tenantCasBlobRows(),
+					refs: await attestationReferenceRows()
+				}
+			}).toStrictEqual({
+				repeated: 'already-present',
+				charged: { usage, presence },
+				afterFirst: { usage, presence },
+				afterLast: {
+					usage: { ...usage, casBytes: 0, casBlobs: 0 },
+					presence: [],
+					refs: []
+				}
+			});
+		});
 	});
 
 	it.each(['suspended', 'offboarding', 'missing-usage'])(
