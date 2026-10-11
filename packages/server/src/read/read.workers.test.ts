@@ -264,6 +264,174 @@ describe('NAR serve under shared-fact read faults', () => {
 		});
 	});
 
+	it.each([
+		{
+			range: 'bytes=1-3',
+			status: 206,
+			contentRange: 'bytes 1-3/9',
+			body: 'ar-',
+			length: '3'
+		},
+		{
+			range: 'bytes=4-',
+			status: 206,
+			contentRange: 'bytes 4-8/9',
+			body: 'bytes',
+			length: '5'
+		},
+		{
+			range: 'bytes=-5',
+			status: 206,
+			contentRange: 'bytes 4-8/9',
+			body: 'bytes',
+			length: '5'
+		},
+		{
+			range: 'bytes=8-999999999999999999999',
+			status: 206,
+			contentRange: 'bytes 8-8/9',
+			body: 's',
+			length: '1'
+		},
+		{
+			range: 'bytes=9-',
+			status: 416,
+			contentRange: 'bytes */9',
+			body: '',
+			length: '0'
+		},
+		{
+			range: 'bytes=-0',
+			status: 416,
+			contentRange: 'bytes */9',
+			body: '',
+			length: '0'
+		},
+		{
+			range: 'bytes=0-1,4-5',
+			status: 200,
+			contentRange: undefined,
+			body: narBytes,
+			length: '9'
+		},
+		{
+			range: 'bytes=3-1',
+			status: 200,
+			contentRange: undefined,
+			body: narBytes,
+			length: '9'
+		},
+		{
+			range: 'items=0-1',
+			status: 200,
+			contentRange: undefined,
+			body: narBytes,
+			length: '9'
+		}
+	])('serves a private NAR with $range', async ({ range, ...expected }) => {
+		await seedOwnedNar();
+		const response = await serveNar(
+			new Request('https://cache.example/nar/probe', { headers: { range } }),
+			env,
+			tenant,
+			parsedNar(),
+			defaultPublicAuthority,
+			true
+		);
+		expect({
+			status: response.status,
+			contentRange: response.headers.get('content-range') ?? undefined,
+			body: await response.text(),
+			length: response.headers.get('content-length'),
+			acceptRanges: response.headers.get('accept-ranges'),
+			cacheControl: response.headers.get('cache-control')
+		}).toStrictEqual({
+			...expected,
+			acceptRanges: 'bytes',
+			cacheControl: 'no-store'
+		});
+	});
+
+	it.each([
+		'match',
+		'mismatch',
+		'weak',
+		'old-date',
+		'matching-date',
+		'new-date'
+	] as const)('checks a private range validator: %s', async (validator) => {
+		await seedOwnedNar();
+		const object = await env.BLOBS.head(narObjectKey(narHash));
+		if (object === null) {
+			throw new Error('Missing seeded NAR');
+		}
+		const ifRange = {
+			match: object.httpEtag,
+			mismatch: '"different"',
+			weak: `W/${object.httpEtag}`,
+			'old-date': new Date(0).toUTCString(),
+			'matching-date': object.uploaded.toUTCString(),
+			'new-date': new Date(object.uploaded.getTime() + 60_000).toUTCString()
+		}[validator];
+		const response = await serveNar(
+			new Request('https://cache.example/nar/probe', {
+				headers: { range: 'bytes=4-', 'if-range': ifRange }
+			}),
+			env,
+			tenant,
+			parsedNar(),
+			defaultPublicAuthority,
+			true
+		);
+		const isMatched = validator === 'match' || validator === 'matching-date';
+		expect({
+			status: response.status,
+			body: await response.text(),
+			contentRange: response.headers.get('content-range') ?? undefined
+		}).toStrictEqual(
+			isMatched
+				? { status: 206, body: 'bytes', contentRange: 'bytes 4-8/9' }
+				: { status: 200, body: narBytes, contentRange: undefined }
+		);
+	});
+
+	it('ignores Range on a private HEAD and evaluates conditional requests before Range', async () => {
+		await seedOwnedNar();
+		const object = await env.BLOBS.head(narObjectKey(narHash));
+		if (object === null) {
+			throw new Error('Missing seeded NAR');
+		}
+		const requests = [
+			new Request('https://cache.example/nar/probe', {
+				method: 'HEAD',
+				headers: { range: 'bytes=4-' }
+			}),
+			new Request('https://cache.example/nar/probe', {
+				headers: { range: 'bytes=999-', 'if-none-match': object.httpEtag }
+			})
+		];
+		const results = [];
+		for (const request of requests) {
+			const response = await serveNar(
+				request,
+				env,
+				tenant,
+				parsedNar(),
+				defaultPublicAuthority,
+				true
+			);
+			results.push({
+				status: response.status,
+				body: await response.text(),
+				contentRange: response.headers.get('content-range') ?? undefined
+			});
+		}
+		expect(results).toStrictEqual([
+			{ status: 200, body: '', contentRange: undefined },
+			{ status: 304, body: '', contentRange: undefined }
+		]);
+	});
+
 	it('retries a transient fault on the reference read', async () => {
 		await seedOwnedNar();
 
@@ -588,6 +756,44 @@ describe('private narinfo reference gate', () => {
 		access: 'private',
 		generation: firstCacheGeneration
 	} as const;
+
+	it('refuses a ranged narinfo when its commit metadata changes before the body read', async () => {
+		await seedPrivateNarInfo();
+		const originalHead = env.BLOBS.head.bind(env.BLOBS);
+		const heads = vi
+			.spyOn(env.BLOBS, 'head')
+			.mockImplementationOnce(async (key) => {
+				const object = await originalHead(key);
+				await env.BLOBS.put(key, 'narinfo-bytes', {
+					customMetadata: { ...currentObjectMetadata, generation: '2' }
+				});
+				return object;
+			});
+
+		try {
+			const response = await serveNarInfo(
+				new Request('https://cache.example/probe.narinfo', {
+					headers: { range: 'bytes=0-2' }
+				}),
+				env,
+				tenant,
+				privateRead,
+				referencingPath,
+				true
+			);
+			expect({
+				status: response.status,
+				body: await response.text(),
+				cacheControl: response.headers.get('cache-control')
+			}).toStrictEqual({
+				status: StatusCodes.NOT_FOUND,
+				body: 'Not found\n',
+				cacheControl: 'no-store'
+			});
+		} finally {
+			heads.mockRestore();
+		}
+	});
 
 	it('serves a narinfo without reading the NAR at its recorded URL', async () => {
 		await seedPrivateNarInfo();
