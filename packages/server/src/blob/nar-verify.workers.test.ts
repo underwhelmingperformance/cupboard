@@ -402,6 +402,81 @@ describe('verifyDecompressedNar', () => {
 	const encoder = new TextEncoder();
 	const nar = encoder.encode('nar payload '.repeat(250_000));
 
+	it.each(['none', 'write', 'finish'] as const)(
+		'generates optional metadata in the decode pass, with failure at %s',
+		async (failure) => {
+			let metadataBytes = 0;
+			const fault = new Error('optional metadata failed');
+			const aborted: unknown[] = [];
+			let wasFinished = false;
+			const compressed = await compressedBytes(nar);
+			const result = await verifyDecompressedNar(
+				byteBody([compressed]).stream,
+				{ narHash: await nixNarHash(nar), narSize: nar.byteLength },
+				{
+					metadata: {
+						write(chunk) {
+							if (failure === 'write') {
+								throw fault;
+							}
+							metadataBytes += chunk.byteLength;
+							return Promise.resolve();
+						},
+						finish() {
+							wasFinished = true;
+							if (failure === 'finish') {
+								throw fault;
+							}
+							return Promise.resolve();
+						},
+						abort(error) {
+							aborted.push(error);
+							return Promise.resolve();
+						}
+					}
+				}
+			);
+			expect({ result, wasFinished, aborted, metadataBytes }).toStrictEqual({
+				result: {
+					ok: true,
+					fileHash: await nixNarHash(compressed),
+					fileSize: compressed.byteLength
+				},
+				wasFinished: failure !== 'write',
+				aborted: failure === 'none' ? [] : [fault],
+				metadataBytes: failure === 'write' ? 0 : nar.byteLength
+			});
+		}
+	);
+
+	it('aborts optional metadata when the NAR fails verification', async () => {
+		const finish = vi.fn<() => Promise<void>>().mockResolvedValue();
+		const abort = vi
+			.fn<(reason: unknown) => Promise<void>>()
+			.mockResolvedValue();
+		const write = vi
+			.fn<(chunk: Uint8Array) => Promise<void>>()
+			.mockResolvedValue();
+		const result = await verifyDecompressedNar(
+			await compressedStream(nar),
+			{ narHash: await nixNarHash(new Uint8Array()), narSize: nar.byteLength },
+			{ metadata: { write, finish, abort } }
+		);
+		expect({
+			result,
+			finishCalls: finish.mock.calls,
+			abortCalls: abort.mock.calls
+		}).toStrictEqual({
+			result: {
+				ok: false,
+				reason: 'nar-hash-mismatch',
+				actualNarHash: await nixNarHash(nar)
+			},
+			finishCalls: [],
+			abortCalls: [[expect.any(DOMException)]]
+		});
+	});
+
 	it('accepts a blob and reports the compressed file hash and size', async () => {
 		const narHash = await nixNarHash(nar);
 		const compressed = await compressedBytes(nar);
