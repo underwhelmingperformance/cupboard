@@ -318,6 +318,13 @@
 			"breakpoints": true
 		},
 		{
+			"idx": 45,
+			"version": "6",
+			"when": 1791744021544,
+			"tag": "0045_cache_path_intersection_index",
+			"breakpoints": true
+		},
+		{
 			"idx": 46,
 			"version": "6",
 			"when": 1791747359406,

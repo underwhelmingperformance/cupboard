@@ -79,6 +79,7 @@ export const transitionIdSchema = z.enum([
 	'control-database-split',
 	'control-database-initial',
 	'cas-storage',
+	'cache-path-intersection-index',
 	'native-artifact-storage'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
@@ -333,7 +334,8 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		id: 'blob-reference-read-authority',
 		expand: ['0035_blob_reference_read_authority.sql'],
 		contract: ['0036_path_read_authority_contract.sql'],
-		expandAfter: ['cache-identity']
+		expandAfter: ['cache-identity'],
+		completedBy: 'v0.0.44'
 	},
 	{
 		id: 'tenant-retry-clock',
@@ -380,6 +382,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		independent: true,
 		contractStep: casStorageLocalStep,
 		reportableStepOnComplete: casStorageLocalStep
+	},
+	{
+		id: 'cache-path-intersection-index',
+		expand: ['0045_cache_path_intersection_index.sql'],
+		contract: [],
+		expandAfter: ['blob-reference-read-authority']
 	},
 	{
 		id: 'native-artifact-storage',

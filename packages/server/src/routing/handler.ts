@@ -10,6 +10,7 @@ import {
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
 import {
+	cacheIntersectionCapability,
 	cacheMetadataCapability,
 	cacheMetadataCapabilityHeader
 } from '@cupboard/protocol/cache-metadata';
@@ -148,7 +149,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		const headers = new Headers(context.res.headers);
 		headers.set(
 			cacheMetadataCapabilityHeader,
-			`${cacheMetadataCapability} ${attestationInfoCapability}`
+			`${cacheMetadataCapability} ${attestationInfoCapability}${/^\/(?:cache\/[^/]+\/)?(?:[^/]+\.narinfo|nix-cache-info|api\/v1\/(?:missing-paths|attestation-info|path-info))$/u.test(context.get('tenantRest')) ? ` ${cacheIntersectionCapability}` : ''}`
 		);
 		context.res = new Response(context.res.body, {
 			status: context.res.status,

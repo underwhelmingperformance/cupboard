@@ -175,8 +175,10 @@ async function deployOverPredecessor(
 	now = deployedAt
 ): Promise<void> {
 	const stage =
-		server.deploymentStage === 'current' ? 'current' : 'intermediate';
-	if (stage === 'current') {
+		server.deploymentStage === 'predecessor'
+			? 'intermediate'
+			: server.deploymentStage;
+	if (stage !== 'intermediate') {
 		await prepareTransitions(
 			server.transitionWalk({ now: () => now }, stage, 'CONTROL_DB'),
 			false
@@ -190,7 +192,26 @@ async function deployOverPredecessor(
 		await server.deployCurrent();
 		return;
 	}
+	if (stage === 'path-authority') {
+		await server.deployPathAuthority();
+		return;
+	}
 	await server.deployIntermediate();
+}
+
+async function deployPathAuthority(
+	server: StagedDeploymentServer,
+	now = deployedAt
+): Promise<void> {
+	await prepareTransitions(
+		server.transitionWalk({ now: () => now }, 'path-authority', 'CONTROL_DB'),
+		false
+	);
+	await prepareTransitions(
+		server.transitionWalk({ now: () => now }, 'path-authority'),
+		false
+	);
+	await server.deployPathAuthority();
 }
 
 /**
@@ -203,13 +224,21 @@ async function contractOverPredecessor(
 	server: StagedDeploymentServer,
 	now = deployedAt
 ): Promise<TransitionStates> {
-	if (server.deploymentStage === 'intermediate') {
-		await completeTransitions(
-			server.transitionWalk({ now: () => now }, 'intermediate')
+	if (server.deploymentStage === 'predecessor') {
+		throw new Error(
+			'Deploy intermediate Workers before completing transitions'
 		);
-		await prepareTransitions(
-			server.transitionWalk({ now: () => now }, 'current', 'CONTROL_DB'),
-			false
+	}
+	while (server.deploymentStage !== 'current') {
+		if (server.deploymentStage === 'intermediate') {
+			await completeTransitions(
+				server.transitionWalk({ now: () => now }, 'intermediate')
+			);
+			await deployPathAuthority(server, now);
+			continue;
+		}
+		await completeTransitions(
+			server.transitionWalk({ now: () => now }, 'path-authority')
 		);
 		await prepareTransitions(server.transitionWalk({ now: () => now }), false);
 		await server.deployCurrent();
@@ -303,6 +332,7 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'control-subject-nonces', independent: true },
 		{ id: 'control-database-split', independent: true },
 		{ id: 'cas-storage', independent: true },
+		{ id: 'cache-path-intersection-index', independent: false },
 		{ id: 'native-artifact-storage', independent: true }
 	]);
 });
@@ -856,10 +886,17 @@ it('completes a transfer when another deploy contracts during a source schema re
 		await completeTransitions(
 			server.transitionWalk({ now: () => deployedAt }, 'intermediate')
 		);
-		await prepareTransitions(
-			server.transitionWalk({ now: () => deployedAt }, 'current', 'CONTROL_DB'),
-			false
+		await deployPathAuthority(server);
+		const releasedWalk = server.transitionWalk(
+			{ now: () => deployedAt },
+			'path-authority'
 		);
+		await completeTransitions({
+			...releasedWalk,
+			transitions: releasedWalk.transitions.filter(
+				(planned) => planned.transition.id !== 'control-database-split'
+			)
+		});
 		await prepareTransitions(
 			server.transitionWalk({ now: () => deployedAt }),
 			false
@@ -944,10 +981,17 @@ it('uses Cloudflare recovery only while a real control transfer remains frozen',
 		await completeTransitions(
 			server.transitionWalk({ now: () => deployedAt }, 'intermediate')
 		);
-		await prepareTransitions(
-			server.transitionWalk({ now: () => deployedAt }, 'current', 'CONTROL_DB'),
-			false
+		await deployPathAuthority(server);
+		const releasedWalk = server.transitionWalk(
+			{ now: () => deployedAt },
+			'path-authority'
 		);
+		await completeTransitions({
+			...releasedWalk,
+			transitions: releasedWalk.transitions.filter(
+				(planned) => planned.transition.id !== 'control-database-split'
+			)
+		});
 		await prepareTransitions(
 			server.transitionWalk({ now: () => deployedAt }),
 			false

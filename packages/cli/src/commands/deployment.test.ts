@@ -64,6 +64,11 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'control-database-split', state: 'complete', updatedAt: recorded },
 		{ id: 'control-database-initial', state: 'complete', updatedAt: recorded },
 		{ id: 'cas-storage', state: 'complete', updatedAt: recorded },
+		{
+			id: 'cache-path-intersection-index',
+			state: 'complete',
+			updatedAt: recorded
+		},
 		{ id: 'native-artifact-storage', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
@@ -575,6 +580,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition cas-storage',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition cache-path-intersection-index',
 							value: `complete ${since}`
 						},
 						{

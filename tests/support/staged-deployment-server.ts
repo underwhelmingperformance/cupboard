@@ -58,6 +58,10 @@ import {
 	intermediateTransitions
 } from './intermediate-deployment.ts';
 import { StubOidcIssuer } from './oidc-issuer.ts';
+import {
+	pathAuthorityArtifact,
+	pathAuthorityTransitions
+} from './path-authority-deployment.ts';
 import { signBound } from './subject-binding.ts';
 
 const controlScript = 'cupboard';
@@ -256,7 +260,7 @@ type PersistedRuntime =
 	| { readonly kind: 'predecessor'; readonly bundles: FixtureBundles }
 	| {
 			readonly kind: 'release';
-			readonly stage: 'intermediate' | 'current';
+			readonly stage: 'intermediate' | 'path-authority' | 'current';
 			readonly artifact: DeploymentArtifact;
 	  };
 
@@ -548,7 +552,7 @@ export class StagedDeploymentServer {
 
 	private async deployArtifact(
 		artifact: DeploymentArtifact,
-		stage: 'intermediate' | 'current'
+		stage: 'intermediate' | 'path-authority' | 'current'
 	): Promise<void> {
 		await this.miniflare.setOptions(currentOptions(this.paths, artifact));
 		this.persistedRuntime = { kind: 'release', stage, artifact };
@@ -849,7 +853,8 @@ export class StagedDeploymentServer {
 		return this.artifact.buildVersion;
 	}
 
-	get deploymentStage(): 'predecessor' | 'intermediate' | 'current' {
+	get deploymentStage():
+		'predecessor' | 'intermediate' | 'path-authority' | 'current' {
 		return this.persistedRuntime.kind === 'predecessor'
 			? 'predecessor'
 			: this.persistedRuntime.stage;
@@ -864,21 +869,30 @@ export class StagedDeploymentServer {
 			throw new ArtifactD1MigrationMissingError();
 		}
 
-		const completedIds = new Set(
-			intermediateTransitions.map((transition) => transition.id)
-		);
-		const later = schemaTransitions.filter(
-			(transition) =>
-				(transition.database ?? databaseBinding) === databaseBinding &&
-				!completedIds.has(transition.id)
-		);
-
-		return [
-			...intermediateTransitions.flatMap((transition) => transition.expand),
-			...intermediateTransitions.flatMap((transition) => transition.contract),
-			...later.flatMap((transition) => transition.expand),
-			...later.flatMap((transition) => transition.contract)
+		const stages: readonly (readonly SchemaTransition[])[] = [
+			intermediateTransitions,
+			pathAuthorityTransitions,
+			schemaTransitions
 		];
+		const completedIds = new Set<string>();
+		const migrations: string[] = [];
+
+		for (const transitions of stages) {
+			const pending = transitions.filter(
+				(transition) =>
+					(transition.database ?? databaseBinding) === databaseBinding &&
+					!completedIds.has(transition.id)
+			);
+			migrations.push(
+				...pending.flatMap((transition) => transition.expand),
+				...pending.flatMap((transition) => transition.contract)
+			);
+			for (const transition of pending) {
+				completedIds.add(transition.id);
+			}
+		}
+
+		return migrations;
 	}
 
 	/**
@@ -892,12 +906,23 @@ export class StagedDeploymentServer {
 	 */
 	transitionWalk(
 		hooks: Partial<TransitionHooks> = {},
-		stage: 'intermediate' | 'current' = 'current',
+		stage: 'intermediate' | 'path-authority' | 'current' = 'current',
 		binding = databaseBinding
 	): TransitionWalk {
-		const artifact = stage === 'current' ? this.artifact : intermediateArtifact;
+		const releases = {
+			intermediate: {
+				artifact: intermediateArtifact,
+				transitions: intermediateTransitions
+			},
+			'path-authority': {
+				artifact: pathAuthorityArtifact,
+				transitions: pathAuthorityTransitions
+			},
+			current: { artifact: this.artifact, transitions: schemaTransitions }
+		};
+		const { artifact } = releases[stage];
 		const stageTransitions: readonly SchemaTransition[] =
-			stage === 'current' ? schemaTransitions : intermediateTransitions;
+			releases[stage].transitions;
 		const transitions = stageTransitions.filter(
 			(transition) => (transition.database ?? databaseBinding) === binding
 		);
@@ -1103,6 +1128,10 @@ export class StagedDeploymentServer {
 	*/
 	async deployIntermediate(): Promise<void> {
 		await this.deployArtifact(intermediateArtifact, 'intermediate');
+	}
+
+	async deployPathAuthority(): Promise<void> {
+		await this.deployArtifact(pathAuthorityArtifact, 'path-authority');
 	}
 
 	async restart(): Promise<void> {

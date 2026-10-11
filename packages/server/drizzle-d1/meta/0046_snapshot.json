@@ -338,6 +338,19 @@
 					"isUnique": false,
 					"where": "\"blob_ref_storage\".\"readable\" = true"
 				},
+				"blob_ref_readable_cache_generation_idx": {
+					"name": "blob_ref_readable_cache_generation_idx",
+					"columns": [
+						"tenant",
+						"cache_kind",
+						"cache_name",
+						"cache_generation",
+						"store_path_hash",
+						"generation"
+					],
+					"isUnique": false,
+					"where": "\"blob_ref_storage\".\"readable\" = true"
+				},
 				"blob_ref_readable_nar_idx": {
 					"name": "blob_ref_readable_nar_idx",
 					"columns": [
@@ -1863,5 +1876,5 @@
 		"indexes": {}
 	},
 	"id": "f5097670-b3bd-49bc-86e4-5bb3c5ac4fb0",
-	"prevId": "261e3d37-a3ed-4389-8e71-02e9cd9fa902"
+	"prevId": "df7dccb9-a2ad-4a32-ace7-8d392646c79d"
 }

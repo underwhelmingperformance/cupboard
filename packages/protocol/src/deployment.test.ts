@@ -169,7 +169,13 @@ describe('path authority rollout', () => {
 				state === undefined
 					? new Map<TransitionId, TransitionState>()
 					: states([['cache-identity', state]]);
-			const result = deferredTransition(schemaTransitions, recorded);
+			const authorityTransitions = schemaTransitions.slice(
+				0,
+				schemaTransitions.findIndex(
+					(transition) => transition.id === 'blob-reference-read-authority'
+				) + 1
+			);
+			const result = deferredTransition(authorityTransitions, recorded);
 			expect(
 				result === undefined
 					? undefined
@@ -203,9 +209,15 @@ describe('tenant retry clock rollout', () => {
 		if (authority === undefined || retry === undefined) {
 			throw new Error('Both transitions must be declared');
 		}
+		const retryTransitions = schemaTransitions.slice(
+			0,
+			schemaTransitions.findIndex(
+				(transition) => transition.id === 'tenant-retry-clock'
+			) + 1
+		);
 		expect(
 			deferredTransition(
-				schemaTransitions,
+				retryTransitions,
 				states([
 					['cache-identity', 'complete'],
 					[authority.id, 'expanded']
@@ -411,6 +423,33 @@ describe('requiredLocalStepFrom', () => {
 		({ recorded, step }) => {
 			expect(requiredLocalStepAmong([cacheIdentity, later], recorded)).toBe(
 				step
+			);
+		}
+	);
+});
+
+describe('cache intersection index rollout', () => {
+	it.each(['expanded', 'complete'] as const)(
+		'requires contracted path authority when it is %s',
+		(state) => {
+			const recorded = new Map<TransitionId, TransitionState>(
+				schemaTransitions.map((transition) => [transition.id, 'expanded'])
+			);
+			recorded.set('cache-identity', 'complete');
+			recorded.set('blob-reference-read-authority', state);
+			recorded.delete('cache-path-intersection-index');
+			const result = deferredTransition(schemaTransitions, recorded);
+			expect(
+				result === undefined
+					? undefined
+					: { transition: result.transition.id, waitsFor: result.waitsFor.id }
+			).toStrictEqual(
+				state === 'complete'
+					? undefined
+					: {
+							transition: 'cache-path-intersection-index',
+							waitsFor: 'blob-reference-read-authority'
+						}
 			);
 		}
 	);

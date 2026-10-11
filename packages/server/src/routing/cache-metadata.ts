@@ -27,7 +27,7 @@ import { withSpan } from '../observability/span.ts';
 import { upstreamTraceAttributes } from '../observability/trace-context.ts';
 import {
 	cacheMetadataPageResponse,
-	parseCacheMetadataRequest
+	parseCachePathInfoRequest
 } from '../read/metadata-page.ts';
 import {
 	readCacheMetadata,
@@ -35,6 +35,7 @@ import {
 } from '../read/metadata-read.ts';
 import { authorisedNarInfoVersions } from '../read/read.ts';
 
+import { answerCacheIntersection } from './cache-intersection.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import {
 	cacheReadScopeVersion,
@@ -159,7 +160,10 @@ async function* publicEntries(
 export async function answerCacheMetadata(
 	context: Context<WorkerHonoEnv>
 ): Promise<Response> {
-	const request = await parseCacheMetadataRequest(context.req.raw);
+	const request = await parseCachePathInfoRequest(context.req.raw);
+	if ('operation' in request) {
+		return answerCacheIntersection(context, request);
+	}
 	return withSpan(
 		'cache-metadata-probe',
 		{

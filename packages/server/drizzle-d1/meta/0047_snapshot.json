@@ -343,6 +343,19 @@
 					"isUnique": false,
 					"where": "\"blob_ref_storage\".\"readable\" = true"
 				},
+				"blob_ref_readable_cache_generation_idx": {
+					"name": "blob_ref_readable_cache_generation_idx",
+					"columns": [
+						"tenant",
+						"cache_kind",
+						"cache_name",
+						"cache_generation",
+						"store_path_hash",
+						"generation"
+					],
+					"isUnique": false,
+					"where": "\"blob_ref_storage\".\"readable\" = true"
+				},
 				"blob_ref_readable_nar_idx": {
 					"name": "blob_ref_readable_nar_idx",
 					"columns": [

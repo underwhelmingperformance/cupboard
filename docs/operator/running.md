@@ -80,6 +80,14 @@ checking the same paths in different caches produces separate groups. A repeated
 fingerprint can indicate a retry or another check of the same page; it does not
 prove a repeated build or upload.
 
+Direct cache intersections produce `cache-path-intersection` spans with the
+upstream trace and span IDs, requested hash count, ordered-input fingerprint,
+lookup strategy, raw reference-row count, authority-candidate count, possible
+match count and outcome. Raw reference rows count the bounded range returned by
+the query, including the overflow sentinel. They are not D1's billed rows read.
+Possible matches still require canonical metadata validation. These counts
+distinguish a complete cache scan from a full candidate fallback.
+
 From a repository checkout, use the diagnostic script with a GitHub Actions job
 URL and `--worker cupboard` to inspect the control Worker's activity. Use
 `--worker cupboard-tenant` to inspect canonical narinfo reads and publication

@@ -110,22 +110,18 @@ describe('checkD1Migrations', () => {
 				...transition.contract
 			]).length,
 			replayed: [
-				'local-step-attempts',
-				'publication-identity',
-				'blob-reference-read-authority',
-				'tenant-retry-clock',
-				'tenant-schema-progress',
-				'control-refresh-sessions',
-				'control-subject-nonces',
-				'control-database-split',
 				'cas-storage',
+				'cache-path-intersection-index',
 				'native-artifact-storage'
 			]
 		});
 	});
 
 	it('expands path authority after contracted cache identity and contracts the path index before renaming its table', () => {
-		const order = deployOrder(sharedTransitions, 1);
+		const earlierTransitions = sharedTransitions.filter(
+			(transition) => transition.id !== 'cache-path-intersection-index'
+		);
+		const order = deployOrder(earlierTransitions, 1);
 		expect(order).toStrictEqual({
 			files: [
 				...(schemaTransitions[0]?.expand ?? []),

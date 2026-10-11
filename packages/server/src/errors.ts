@@ -71,9 +71,9 @@ export abstract class MetadataHttpError extends ServerHttpError {
 export class MetadataRequestTooLargeError extends MetadataHttpError {
 	readonly code = cacheMetadataErrorCodes.requestTooLarge;
 	readonly status = StatusCodes.REQUEST_TOO_LONG;
-	constructor() {
+	constructor(maximumBytes = 64 * 1024) {
 		super(
-			'The metadata request exceeds 64 KiB. Split the store paths into smaller pages.'
+			`The metadata request exceeds ${String(maximumBytes / 1024)} KiB. Split the store paths into smaller pages.`
 		);
 		this.name = 'MetadataRequestTooLargeError';
 	}
@@ -106,6 +106,17 @@ export class MetadataNarInfoInvalidError extends MetadataHttpError {
 				: `The cache returned invalid narinfo metadata for ${storePath}.`
 		);
 		this.name = 'MetadataNarInfoInvalidError';
+	}
+}
+
+export class MetadataIntersectionTooManyHashesError extends MetadataHttpError {
+	readonly code = cacheMetadataErrorCodes.candidateBudget;
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+	constructor(hashes: number, maximumHashes: number) {
+		super(
+			`The intersection request has ${String(hashes)} hashes; send at most ${String(maximumHashes)} hashes per request.`
+		);
+		this.name = 'MetadataIntersectionTooManyHashesError';
 	}
 }
 

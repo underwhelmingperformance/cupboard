@@ -190,6 +190,16 @@ export const blobReference = sqliteTable(
 				table.generation
 			)
 			.where(sql`${table.readable} = true`),
+		index('blob_ref_readable_cache_generation_idx')
+			.on(
+				table.tenant,
+				table.cacheKind,
+				table.cacheName,
+				table.cacheGeneration,
+				table.storePathHash,
+				table.generation
+			)
+			.where(sql`${table.readable} = true`),
 		index('blob_ref_readable_nar_idx')
 			.on(
 				table.tenant,

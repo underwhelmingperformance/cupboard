@@ -1,5 +1,6 @@
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import {
+	cacheIntersectionMaxRequestBytes,
 	type CacheMetadataEntry,
 	cacheMetadataMaxNarInfoBytes,
 	cacheMetadataMaxResponseBytes
@@ -9,12 +10,14 @@ import { describe, expect, it, vi } from 'vitest';
 import {
 	MetadataNarInfoInvalidError,
 	MetadataNarInfoTooLargeError,
-	MetadataRequestTooLargeError
+	MetadataRequestTooLargeError,
+	ServerHttpError
 } from '../errors.ts';
 
 import {
 	cacheMetadataPageResponse,
-	parseCacheMetadataRequest
+	parseCacheMetadataRequest,
+	parseCachePathInfoRequest
 } from './metadata-page.ts';
 
 const paths = ['1', '2', '3'].map((hash) =>
@@ -137,5 +140,106 @@ describe('bounded metadata pages', () => {
 			MetadataRequestTooLargeError
 		);
 		expect(isCancelled).toBe(true);
+	});
+});
+
+describe('path-info operation dispatch', () => {
+	it('accepts a sparse intersection request beyond the metadata page limit', async () => {
+		const storePathHashes = Array.from({ length: 3000 }, (_, index) =>
+			String(index).padStart(32, '0')
+		);
+		const input = { operation: 'intersection', storePathHashes };
+		const request = new Request('https://cache.test/api/v1/path-info', {
+			method: 'POST',
+			body: JSON.stringify(input)
+		});
+		const result = await parseCachePathInfoRequest(request);
+		expect(result).toStrictEqual(input);
+	});
+	it('keeps the metadata byte limit including original whitespace', async () => {
+		const request = new Request('https://cache.test/api/v1/path-info', {
+			method: 'POST',
+			body: ' '.repeat(65_536) + JSON.stringify({ storePaths: paths })
+		});
+		await expect(parseCachePathInfoRequest(request)).rejects.toBeInstanceOf(
+			MetadataRequestTooLargeError
+		);
+	});
+	it.each([
+		{ operation: 'unknown', storePathHashes: ['0'.repeat(32)] },
+		{
+			operation: 'intersection',
+			storePathHashes: ['0'.repeat(32), '0'.repeat(32)]
+		},
+		{ operation: 'intersection', storePathHashes: ['bad-hash'] },
+		{
+			operation: 'intersection',
+			storePathHashes: Array.from({ length: 32_769 }, (_, index) =>
+				String(index).padStart(32, '0')
+			)
+		},
+		{
+			storePaths: Array.from(
+				{ length: 33 },
+				(_, index) => `/nix/store/${String(index).padStart(32, '0')}-path`
+			)
+		}
+	])('refuses invalid or over-count requests', async (input) => {
+		const request = new Request('https://cache.test/api/v1/path-info', {
+			method: 'POST',
+			body: JSON.stringify(input)
+		});
+		await expect(parseCachePathInfoRequest(request)).rejects.toThrow();
+	});
+
+	it('cancels an intersection stream beyond its separate byte cap', async () => {
+		let isCancelled = false;
+		const init = {
+			method: 'POST',
+			duplex: 'half',
+			body: new ReadableStream({
+				start(controller) {
+					controller.enqueue(
+						new Uint8Array(cacheIntersectionMaxRequestBytes + 1)
+					);
+				},
+				cancel() {
+					isCancelled = true;
+				}
+			})
+		};
+		const request = new Request('https://cache.test/api/v1/path-info', init);
+		await expect(parseCachePathInfoRequest(request)).rejects.toBeInstanceOf(
+			MetadataRequestTooLargeError
+		);
+		expect(isCancelled).toBe(true);
+	});
+});
+
+it('bounds diagnostics before validating an oversized array of invalid hashes', async () => {
+	const request = new Request('https://cache.test/api/v1/path-info', {
+		method: 'POST',
+		body: JSON.stringify({
+			operation: 'intersection',
+			storePathHashes: Array.from({ length: 100_000 }, () => 0)
+		})
+	});
+	let error: unknown;
+	try {
+		await parseCachePathInfoRequest(request);
+	} catch (error_) {
+		error = error_;
+	}
+	if (!(error instanceof ServerHttpError)) {
+		throw new Error('Expected a bounded HTTP refusal');
+	}
+	expect({
+		status: error.status,
+		diagnostic:
+			error.message.length > 200 ? 'oversized diagnostic' : error.message
+	}).toStrictEqual({
+		status: 413,
+		diagnostic:
+			'The intersection request has 100000 hashes; send at most 32768 hashes per request.'
 	});
 });

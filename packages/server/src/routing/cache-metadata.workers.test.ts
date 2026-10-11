@@ -6,6 +6,7 @@ import {
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import {
+	cacheIntersectionCapability,
 	cacheMetadataCapability,
 	cacheMetadataCapabilityHeader,
 	cacheMetadataErrorCodes,
@@ -366,7 +367,7 @@ describe('cache metadata probe', () => {
 			}).toStrictEqual({
 				status: StatusCodes.OK,
 				cacheControl: 'no-store',
-				discoveryCapability: `${cacheMetadataCapability} ${attestationInfoCapability}`,
+				discoveryCapability: `${cacheMetadataCapability} ${attestationInfoCapability}${kind === 'reuse' ? '' : ` ${cacheIntersectionCapability}`}`,
 				body: {
 					scopeVersion: stringMatcher,
 					entries: [

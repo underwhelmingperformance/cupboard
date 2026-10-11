@@ -114,6 +114,34 @@ tenant object, which verifies the selected candidates and rechecks the view
 revision before returning the page. Each page checks its source scope; the
 client's traversal across pages and sources is not an atomic closure snapshot.
 
+Direct caches advertise `path-intersection-v1` through the read capability
+header. A client can submit `operation: "intersection"` and up to 32,768 unique
+`storePathHashes` to `POST /api/v1/path-info`. Requests and responses have
+separate 2 MiB limits; ordinary metadata pages retain their 32-path and 64 KiB
+request limits. The sparse response includes `complete`, `checked`, the SHA-256
+fingerprint of the ordered unique hash list encoded as JSON, `matchingHashes`
+and `scopeVersion`. The client validates complete accounting before accepting
+misses, then reads canonical metadata only for possible matches. Full-path
+aliases remain separate metadata candidates. Reuse views retain their existing
+metadata protocol.
+
+For at least 256 input hashes, the Worker first enumerates readable reference
+rows through a covering index for the admitted tenant, cache and lifecycle
+generation. The raw-row budget is the smaller of the input count and 4,096; the
+query reads one extra row to detect overflow. Only an exhausted range can
+exclude candidates. An overflowing range falls back to the existing authority
+query for the full input. Small inputs use that query directly. Surviving
+candidates always pass the publication-generation and revocation-fence checks.
+The lookup does not read canonical objects or establish build provenance.
+
+The raw range is a conservative membership superset at its statement snapshot.
+An ordinary publication after the scan can be outside its result. `scopeVersion`
+binds lifecycle and access policy, not a snapshot of membership additions. The
+Worker revalidates lifecycle, access and private read credentials before
+returning a complete result. The complete build dependency population remains
+eligible for retention; sparse lookup only reduces the metadata requests needed
+to select dependencies from each source.
+
 `POST /api/v1/attestation-info` discovers stored attestation descriptors for a
 cache. The same route is available under a named-cache prefix. It accepts up to
 32 unique store-path hashes, optional exact predicate-type filters and an
