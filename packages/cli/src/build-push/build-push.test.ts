@@ -896,6 +896,23 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			),
 		tenantDependencyReferences: (paths, options) => {
 			config.dependencyTenantUrls?.push(options.tenantUrl?.href);
+			options.onDiagnostic?.({
+				version: 1,
+				kind: 'source',
+				traceId: '0123456789abcdef0123456789abcdef',
+				source: 'https://cache.example/t/acme',
+				mode: 'bulk',
+				status: 'complete',
+				checked: paths.length,
+				total: paths.length,
+				found: paths.length,
+				missing: 0,
+				remaining: 0,
+				requests: 1,
+				inFlight: 0,
+				elapsedMs: 2500,
+				droppedRecords: 0
+			});
 			options.onProgress?.({
 				traceId: '0123456789abcdef0123456789abcdef',
 				source: 'https://cache.example/t/acme',
@@ -2788,6 +2805,29 @@ describe('runBuildPush', () => {
 				}))
 			]
 		});
+		expect(
+			run.results
+				.filter((result) => result.kind === 'dependency-metadata-source')
+				.map((result) => result.data)
+		).toStrictEqual([
+			{
+				version: 1,
+				kind: 'source',
+				traceId: '0123456789abcdef0123456789abcdef',
+				source: 'https://cache.example/t/acme',
+				mode: 'bulk',
+				status: 'complete',
+				checked: 1,
+				total: 1,
+				found: 1,
+				missing: 0,
+				remaining: 0,
+				requests: 1,
+				inFlight: 0,
+				elapsedMs: 2500,
+				droppedRecords: 0
+			}
+		]);
 	});
 
 	it('preserves the reconciled target receipt when reference authentication fails', async () => {

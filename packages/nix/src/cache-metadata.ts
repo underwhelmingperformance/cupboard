@@ -42,6 +42,12 @@ import {
 } from '@cupboard/shared/response-body';
 import { fetchWithProbeDeadline } from '@cupboard/shared/timeout';
 
+import type {
+	MetadataProbeInput,
+	MetadataProbeObserver,
+	MetadataProbeResult
+} from './metadata-diagnostics.ts';
+
 const narInfoConcurrency = 6;
 const utf8 = new TextEncoder();
 
@@ -335,19 +341,58 @@ export class CachedClosureReader {
 		readonly source: CachedClosureSource,
 		readonly fetcher: typeof fetch,
 		readonly signal?: AbortSignal,
-		readonly onProgress?: (progress: CachedClosureProgress) => void
+		readonly onProgress?: (progress: CachedClosureProgress) => void,
+		readonly observer?: MetadataProbeObserver
 	) {}
+
+	async #observe<T>(
+		input: MetadataProbeInput,
+		operation: (fetcher: typeof fetch) => Promise<MetadataProbeResult<T>>
+	): Promise<T> {
+		if (this.observer !== undefined) {
+			return this.observer.run(input, operation);
+		}
+		const result = await operation(this.fetcher);
+		return result.value;
+	}
+
+	async #sourceOffer(
+		storePath: StorePathString,
+		shouldDiscover = false
+	): Promise<Awaited<ReturnType<typeof sourceOffer>>> {
+		return this.#observe(
+			{
+				operation: shouldDiscover ? 'discovery' : 'legacy',
+				inputs: [storePath]
+			},
+			async (fetcher) => {
+				const value = await sourceOffer(
+					this.source,
+					storePath,
+					fetcher,
+					this.signal,
+					shouldDiscover
+				);
+				return {
+					value,
+					outcome: value.bulk
+						? { status: 'capability', checked: 0, found: 0, missing: 0 }
+						: {
+								status: 'complete',
+								checked: 1,
+								found: value.offer === undefined ? 0 : 1,
+								missing: value.offer === undefined ? 1 : 0
+							}
+				};
+			}
+		);
+	}
 
 	async #legacy(
 		paths: readonly StorePathString[]
 	): Promise<readonly (CachedClosureOffer | undefined)[]> {
 		return mapWithConcurrency(paths, narInfoConcurrency, async (storePath) => {
-			const result = await sourceOffer(
-				this.source,
-				storePath,
-				this.fetcher,
-				this.signal
-			);
+			const result = await this.#sourceOffer(storePath);
 			this.onProgress?.({
 				mode: 'legacy',
 				checked: 1,
@@ -364,8 +409,9 @@ export class CachedClosureReader {
 		let remaining = paths;
 		while (remaining.length > 0) {
 			let response: CacheMetadataResponse;
+			let pageOffers: readonly (CachedClosureOffer | undefined)[];
 			try {
-				response = await this.#request(remaining);
+				({ response, pageOffers } = await this.#metadataPage(remaining));
 			} catch (error) {
 				if (
 					!(error instanceof CachedClosureMetadataBudgetError) ||
@@ -380,31 +426,7 @@ export class CachedClosureReader {
 					...(await this.#bulkPage(remaining.slice(midpoint)))
 				];
 			}
-			if (
-				this.#scopeVersion !== undefined &&
-				response.scopeVersion !== this.#scopeVersion
-			) {
-				throw new CachedClosureSourceChangedError(this.source.url);
-			}
-			this.#scopeVersion ??= response.scopeVersion;
-			if (
-				response.entries.some(
-					(entry, index) => entry.storePath !== remaining[index]
-				) ||
-				(response.nextIndex === undefined
-					? response.entries.length !== remaining.length
-					: response.nextIndex >= remaining.length)
-			) {
-				throw new CachedClosureSourceInvalidError(
-					this.source.url,
-					'the metadata response does not match the requested prefix'
-				);
-			}
-			const pageOffers = response.entries.map((entry) =>
-				entry.status === 'missing'
-					? undefined
-					: parseSourceOffer(this.source, entry.storePath, entry.narinfo)
-			);
+
 			offers.push(...pageOffers);
 			this.onProgress?.({
 				mode: 'bulk',
@@ -419,8 +441,57 @@ export class CachedClosureReader {
 		return offers;
 	}
 
+	async #metadataPage(paths: readonly StorePathString[]): Promise<{
+		response: CacheMetadataResponse;
+		pageOffers: readonly (CachedClosureOffer | undefined)[];
+	}> {
+		return this.#observe(
+			{ operation: 'metadata', inputs: paths },
+			async (fetcher) => {
+				const response = await this.#request(paths, fetcher);
+				if (
+					this.#scopeVersion !== undefined &&
+					response.scopeVersion !== this.#scopeVersion
+				) {
+					throw new CachedClosureSourceChangedError(this.source.url);
+				}
+				this.#scopeVersion ??= response.scopeVersion;
+				if (
+					response.entries.some(
+						(entry, index) => entry.storePath !== paths[index]
+					) ||
+					(response.nextIndex === undefined
+						? response.entries.length !== paths.length
+						: response.nextIndex >= paths.length)
+				) {
+					throw new CachedClosureSourceInvalidError(
+						this.source.url,
+						'the metadata response does not match the requested prefix'
+					);
+				}
+				const pageOffers = response.entries.map((entry) =>
+					entry.status === 'missing'
+						? undefined
+						: parseSourceOffer(this.source, entry.storePath, entry.narinfo)
+				);
+				const found = pageOffers.filter((offer) => offer !== undefined).length;
+				return {
+					value: { response, pageOffers },
+					outcome: {
+						status:
+							response.nextIndex === undefined ? 'complete' : 'continuation',
+						checked: pageOffers.length,
+						found,
+						missing: pageOffers.length - found
+					}
+				};
+			}
+		);
+	}
+
 	async #request(
-		paths: readonly StorePathString[]
+		paths: readonly StorePathString[],
+		fetcher: typeof fetch
 	): Promise<CacheMetadataResponse> {
 		const request = cacheMetadataRequestSchema.parse({
 			storePaths: paths,
@@ -436,7 +507,7 @@ export class CachedClosureReader {
 			);
 		}
 		return fetchWithProbeDeadline(
-			this.fetcher,
+			fetcher,
 			`${canonicalHref(this.source.url)}/api/v1/path-info`,
 			{
 				method: 'POST',
@@ -580,6 +651,33 @@ export class CachedClosureReader {
 		hashes: readonly StorePathHash[],
 		paths: readonly StorePathString[]
 	): Promise<CacheIntersectionResponse> {
+		return this.#observe(
+			{ operation: 'intersection', inputs: hashes },
+			async (fetcher) => {
+				const value = await this.#readIntersectionRequest(
+					hashes,
+					paths,
+					fetcher
+				);
+				return {
+					value,
+					outcome: {
+						status: 'complete',
+						checked: hashes.length,
+						found: 0,
+						missing: hashes.length - value.matchingHashes.length,
+						possibleMatches: value.matchingHashes.length
+					}
+				};
+			}
+		);
+	}
+
+	async #readIntersectionRequest(
+		hashes: readonly StorePathHash[],
+		paths: readonly StorePathString[],
+		fetcher: typeof fetch
+	): Promise<CacheIntersectionResponse> {
 		const request = cacheIntersectionRequestSchema.parse({
 			operation: 'intersection',
 			storePathHashes: hashes,
@@ -595,7 +693,7 @@ export class CachedClosureReader {
 			);
 		}
 		return fetchWithProbeDeadline(
-			this.fetcher,
+			fetcher,
 			`${canonicalHref(this.source.url)}/api/v1/path-info`,
 			{
 				method: 'POST',
@@ -733,13 +831,7 @@ export class CachedClosureReader {
 			return [];
 		}
 		if (this.#mode === undefined) {
-			const discovery = await sourceOffer(
-				this.source,
-				first,
-				this.fetcher,
-				this.signal,
-				true
-			);
+			const discovery = await this.#sourceOffer(first, true);
 			this.#mode = discovery.intersection
 				? 'intersection'
 				: discovery.bulk

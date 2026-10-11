@@ -66,6 +66,7 @@ import {
 	requireEnvironment,
 	setOutput
 } from '../inputs.ts';
+import { metadataDiagnostics } from '../metadata-diagnostics.ts';
 import {
 	collectLines,
 	isEnabled,
@@ -1204,6 +1205,8 @@ export async function buildAction(
 					.map((output) => output.storePath)
 					.filter((path) => !allPaths.includes(path)),
 				{
+					tenantUrl,
+					...metadataDiagnostics(environment),
 					sources: tenantReferenceSources(tenantUrl, [
 						{ url: new URL(publicationUrl), paths: [] }
 					]),

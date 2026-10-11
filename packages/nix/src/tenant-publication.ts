@@ -1,21 +1,21 @@
 import type { StorePathString } from '@cupboard/nix-store/scalars';
 import { canonicalHref, parseBaseUrl } from '@cupboard/nix-store/url';
-import { retryingFetcher } from '@cupboard/shared/retry';
 import {
-	defaultTextMapSetter,
 	ROOT_CONTEXT,
 	type Span,
-	SpanKind,
 	SpanStatusCode,
 	trace
 } from '@opentelemetry/api';
-import { W3CTraceContextPropagator } from '@opentelemetry/core';
 
 import {
 	CachedClosureReader,
 	type CachedClosureSource,
 	requireSourceUrl
 } from './cache-metadata.ts';
+import {
+	MetadataDiagnostics,
+	type TenantDependencyDiagnostic
+} from './metadata-diagnostics.ts';
 import { withReadAuthentication } from './read-authentication.ts';
 import { discoverNixStoreConfig } from './store-config.ts';
 
@@ -32,6 +32,8 @@ export interface TenantDependencyReferenceOptions {
 	readonly signal?: AbortSignal;
 	readonly tenantUrl?: URL;
 	readonly onProgress?: (progress: TenantDependencyProgress) => void;
+	readonly onDiagnostic?: (diagnostic: TenantDependencyDiagnostic) => void;
+	readonly onDiagnosticError?: (error: unknown) => void;
 }
 
 /**
@@ -60,52 +62,6 @@ function isTenantSource(source: URL, tenant: URL): boolean {
 		(sourcePath.startsWith(`${tenantPath}/`) &&
 			/^\/(?:cache|reuse)\/[^/]+$/u.test(sourcePath.slice(tenantPath.length)))
 	);
-}
-
-function observeResponseBody(
-	response: Response,
-	finish: (error?: unknown) => void
-): Response {
-	if (response.body === null) {
-		finish();
-		return response;
-	}
-	const reader = response.body.getReader();
-	const body = new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			try {
-				const result = await reader.read();
-				if (result.done) {
-					controller.close();
-					reader.releaseLock();
-					finish();
-					return;
-				}
-				const value: unknown = result.value;
-				if (!(value instanceof Uint8Array)) {
-					throw new TypeError('The metadata response body must contain bytes');
-				}
-				controller.enqueue(value);
-			} catch (error) {
-				controller.error(error);
-				reader.releaseLock();
-				finish(error);
-			}
-		},
-		async cancel(reason) {
-			try {
-				await reader.cancel(reason);
-			} finally {
-				reader.releaseLock();
-				finish();
-			}
-		}
-	});
-	return new Response(body, {
-		status: response.status,
-		statusText: response.statusText,
-		headers: response.headers
-	});
 }
 
 export async function tenantDependencyReferences(
@@ -140,7 +96,6 @@ async function discoverDependencyReferences(
 	const references: TenantDependencyReference[] = [];
 	const traceId = span.spanContext().traceId;
 	const parent = trace.setSpan(ROOT_CONTEXT, span);
-	const propagator = new W3CTraceContextPropagator();
 	let pending = [...new Set(paths)];
 	for (const source of options.sources) {
 		if (pending.length === 0) {
@@ -172,77 +127,34 @@ async function discoverDependencyReferences(
 		const shouldPropagate =
 			options.tenantUrl !== undefined &&
 			isTenantSource(source.url, options.tenantUrl);
-		const observedFetch: typeof fetch = async (input, init) => {
-			const headers = new Headers(
-				init?.headers ?? (input instanceof Request ? input.headers : undefined)
-			);
-			const requestSpan = trace.getTracer('cupboard.nix').startSpan(
-				'cache-metadata-request',
-				{
-					kind: SpanKind.CLIENT,
-					attributes: {
-						'server.address': source.url.hostname,
-						'http.request.method': init?.method ?? 'GET'
-					}
-				},
-				parent
-			);
-			if (shouldPropagate) {
-				const carrier: Record<string, string> = {};
-				propagator.inject(
-					trace.setSpan(parent, requestSpan),
-					carrier,
-					defaultTextMapSetter
-				);
-				for (const [key, value] of Object.entries(carrier)) {
-					headers.set(key, value);
-				}
-			}
-			requests += 1;
-			inFlight += 1;
-			let isFinished = false;
-			const finish = (error?: unknown): void => {
-				if (isFinished) {
-					return;
-				}
-				isFinished = true;
-				if (error !== undefined) {
-					if (error instanceof Error) {
-						requestSpan.recordException(error);
-					}
-					requestSpan.setStatus({ code: SpanStatusCode.ERROR });
-				}
-				requestSpan.end();
-				inFlight -= 1;
+		const diagnostics = new MetadataDiagnostics({
+			source: canonicalHref(source.url),
+			parent,
+			propagate: shouldPropagate,
+			fetcher,
+			onChange(inFlightDelta, requestDelta) {
+				inFlight += inFlightDelta;
+				requests += requestDelta;
 				report();
-			};
-			try {
-				report();
-				const response = await fetcher(input, {
-					...init,
-					headers,
-					...(shouldPropagate && { redirect: 'error' })
-				});
-				requestSpan.setAttribute('http.response.status_code', response.status);
-				if (response.status >= 500) {
-					requestSpan.setStatus({ code: SpanStatusCode.ERROR });
-				}
-				return observeResponseBody(response, finish);
-			} catch (error) {
-				finish(error);
-				throw error;
-			}
-		};
+			},
+			...(options.onDiagnostic !== undefined && {
+				onDiagnostic: options.onDiagnostic
+			}),
+			...(options.onDiagnosticError !== undefined && {
+				onDiagnosticError: options.onDiagnosticError
+			})
+		});
 		const reader = new CachedClosureReader(
 			source,
-			retryingFetcher(observedFetch, 'replay-safe'),
+			fetcher,
 			options.signal,
 			(progress) => {
 				mode = progress.mode;
 				checked += progress.checked;
 				found += progress.found;
 				report();
-			}
+			},
+			diagnostics
 		);
 		report();
 		const heartbeat =
@@ -250,11 +162,31 @@ async function discoverDependencyReferences(
 				? undefined
 				: setInterval(report, 10_000);
 		let offers: Awaited<ReturnType<CachedClosureReader['offers']>>;
+		let status: 'complete' | 'error' = 'error';
 		try {
 			offers = await reader.offers(pending);
+			status = 'complete';
 		} finally {
 			clearInterval(heartbeat);
+			diagnostics.emit({
+				version: 1,
+				kind: 'source',
+				traceId,
+				source: canonicalHref(source.url),
+				mode,
+				status,
+				checked,
+				total: pending.length,
+				found,
+				missing: checked - found,
+				remaining: pending.length - checked,
+				requests,
+				inFlight,
+				elapsedMs: Date.now() - startedAt,
+				droppedRecords: diagnostics.droppedRecords
+			});
 		}
+
 		const missing: StorePathString[] = [];
 		for (const [index, path] of pending.entries()) {
 			const offer = offers[index];
