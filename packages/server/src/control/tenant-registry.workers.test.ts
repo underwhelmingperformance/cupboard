@@ -650,9 +650,9 @@ describe('tenant registry', () => {
 			digest: `sha256:${'0'.repeat(52)}`
 		},
 		{
-			table: 'tenant_cas_blob',
+			table: 'tenant_cas_blob_storage',
 			insert:
-				'INSERT INTO tenant_cas_blob (tenant, digest, size) VALUES (?, ?, 13)',
+				'INSERT INTO tenant_cas_blob_storage (tenant, digest, size) VALUES (?, ?, 13)',
 			digest: 'a'.repeat(64)
 		},
 		{

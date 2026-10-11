@@ -87,16 +87,16 @@ async function withWritablePresenceView(
 ): Promise<void> {
 	await env.CUPBOARD_DB.batch(
 		[
-			'ALTER TABLE tenant_cas_blob RENAME TO tenant_cas_blob_test_storage',
-			'CREATE VIEW tenant_cas_blob AS SELECT * FROM tenant_cas_blob_test_storage',
-			`CREATE TRIGGER tenant_cas_blob_test_insert INSTEAD OF INSERT ON tenant_cas_blob
+			'ALTER TABLE tenant_cas_blob_storage RENAME TO tenant_cas_blob_test_backing',
+			'CREATE VIEW tenant_cas_blob_storage AS SELECT * FROM tenant_cas_blob_test_backing',
+			`CREATE TRIGGER tenant_cas_blob_test_insert INSTEAD OF INSERT ON tenant_cas_blob_storage
 			 BEGIN
-			 INSERT INTO tenant_cas_blob_test_storage (tenant, digest, size)
+			 INSERT INTO tenant_cas_blob_test_backing (tenant, digest, size)
 			 VALUES (NEW.tenant, NEW.digest, NEW.size);
 			 END`,
-			`CREATE TRIGGER tenant_cas_blob_test_delete INSTEAD OF DELETE ON tenant_cas_blob
+			`CREATE TRIGGER tenant_cas_blob_test_delete INSTEAD OF DELETE ON tenant_cas_blob_storage
 			 BEGIN
-			 DELETE FROM tenant_cas_blob_test_storage
+			 DELETE FROM tenant_cas_blob_test_backing
 			 WHERE tenant = OLD.tenant AND digest = OLD.digest;
 			 END`
 		].map((query) => env.CUPBOARD_DB.prepare(query))
@@ -107,8 +107,8 @@ async function withWritablePresenceView(
 	} finally {
 		await env.CUPBOARD_DB.batch(
 			[
-				'DROP VIEW tenant_cas_blob',
-				'ALTER TABLE tenant_cas_blob_test_storage RENAME TO tenant_cas_blob'
+				'DROP VIEW tenant_cas_blob_storage',
+				'ALTER TABLE tenant_cas_blob_test_backing RENAME TO tenant_cas_blob_storage'
 			].map((query) => env.CUPBOARD_DB.prepare(query))
 		);
 	}

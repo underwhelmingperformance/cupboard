@@ -15,7 +15,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { controlLocalStepStatus } from '../control/local-step.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -50,6 +50,10 @@ import {
 import { CupboardServer } from './server.ts';
 
 const start = testBase.getTime();
+
+beforeEach(async () => {
+	await recordTransition('cas-storage', 'expanded');
+});
 
 class InjectedPageFault extends Error {
 	constructor() {
@@ -376,7 +380,7 @@ describe('local-step work on the alarm', () => {
 					unwokenSample: [],
 					workingSample: []
 				},
-				row: { step: localStep(5), schema: currentLocalSchemaVersion },
+				row: { step: currentLocalStep, schema: currentLocalSchemaVersion },
 				pending: false
 			});
 		}, server);

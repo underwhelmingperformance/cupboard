@@ -1,5 +1,5 @@
 import {
-	currentLocalStep,
+	cacheIdentityLocalStep,
 	expansionLocalStep
 } from '@cupboard/protocol/deployment';
 import { storedPermittedGrantsSchema } from '@cupboard/protocol/grants';
@@ -57,7 +57,7 @@ describe('local grant contraction', () => {
 		const after = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const progress = await instance.reportLocalStep(currentLocalStep);
+				const progress = await instance.reportLocalStep(cacheIdentityLocalStep);
 				return {
 					progress,
 					grants: instance.context.db.get<{ grants: string }>(
@@ -92,7 +92,7 @@ describe('writes across local grant contraction', () => {
 					storedPermittedGrantsSchema.parse(JSON.parse(selectorGrant))
 				);
 				await recordTransition('cache-identity', 'complete');
-				await instance.reportLocalStep(currentLocalStep);
+				await instance.reportLocalStep(cacheIdentityLocalStep);
 				const writtenRule: unknown = JSON.parse(
 					spelling.permittedGrantsForWrite(rule)
 				);
@@ -109,7 +109,7 @@ describe('writes across local grant contraction', () => {
 			await recordTransition('cache-identity', 'complete');
 			await bootstrap();
 			await runInDurableObject(currentServer(), async (instance, state) => {
-				await instance.reportLocalStep(currentLocalStep);
+				await instance.reportLocalStep(cacheIdentityLocalStep);
 				const insert =
 					"INSERT INTO oidc_trust (id, issuer, audience, permitted_grants_json, created_at) VALUES ('late', 'https://issuer.example', 'https://cache.example', ?, '2026-01-01T00:00:00.000Z')";
 				if (operation === 'update') {
@@ -142,11 +142,11 @@ describe('writes across local grant contraction', () => {
 					);
 				}
 				await recordTransition('cache-identity', 'complete');
-				const first = await instance.reportLocalStep(currentLocalStep);
+				const first = await instance.reportLocalStep(cacheIdentityLocalStep);
 				const afterFirst = state.storage.sql
 					.exec('SELECT complete FROM grant_contraction')
 					.one();
-				const second = await instance.reportLocalStep(currentLocalStep);
+				const second = await instance.reportLocalStep(cacheIdentityLocalStep);
 				const afterSecond = state.storage.sql
 					.exec('SELECT complete FROM grant_contraction')
 					.one();

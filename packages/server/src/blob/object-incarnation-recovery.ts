@@ -56,7 +56,7 @@ function objectKey(row: ObjectIncarnationIdentity): R2ObjectKey {
 }
 
 /**
- * Retries deletion of R2 objects after their `blob_state` or `cas_object` rows
+ * Retries deletion of R2 objects after their `blob_state` or `cas_object_storage` rows
  * have been deleted. Each marker identifies one immutable R2 key, so deleting
  * that key cannot remove an object created by a later promotion. A future
  * removal deadline keeps the old object available while a preceding Worker or

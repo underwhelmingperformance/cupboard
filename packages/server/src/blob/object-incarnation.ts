@@ -33,7 +33,7 @@ export interface ObjectIncarnation {
 // The persisted `incarnation` value is a monotonically increasing object
 // version. Version one identifies objects written before the registry existed.
 // A new registry row must start above it because the corresponding `blob_state`
-// or `cas_object` row may already have been deleted while a response for the old
+// or `cas_object_storage` row may already have been deleted while a response for the old
 // immutable key remains cached.
 export const firstVersionedObjectIncarnation = 2;
 

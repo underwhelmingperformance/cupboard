@@ -539,7 +539,7 @@ describe('attestation attach and reads', () => {
 						shape === 'caches'
 							? 'SEARCH blob_ref_storage USING INDEX blob_ref_named_identity_idx (tenant=? AND cache_name=? AND store_path_hash=? AND generation=?) LEFT-JOIN'
 							: 'SEARCH blob_ref_storage USING INDEX blob_ref_default_identity_idx (tenant=? AND store_path_hash=? AND generation=?) LEFT-JOIN',
-						'SEARCH cas_object USING INDEX sqlite_autoindex_cas_object_1 (digest=?) LEFT-JOIN',
+						'SEARCH cas_object_storage USING INDEX sqlite_autoindex_cas_object_storage_1 (digest=?) LEFT-JOIN',
 						'SEARCH cache_lifecycle_storage USING INDEX cache_lifecycle_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=?) LEFT-JOIN',
 						'CORRELATED SCALAR SUBQUERY 1',
 						'SEARCH destination_inheritance_reference USING COVERING INDEX attestation_ref_named_identity_idx (tenant=? AND cache_name=? AND store_path_hash=? AND generation=? AND predicate_type=? AND digest=?)',

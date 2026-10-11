@@ -115,6 +115,10 @@
 		"CUPBOARD_SUBREQUESTS_PER_INVOCATION": ""
 	},
 	"exports": {
+		"CasStorageRollbackGuard": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		},
 		"ControlDatabaseRollbackGuard": {
 			"type": "durable-object",
 			"storage": "sqlite"

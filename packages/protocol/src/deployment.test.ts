@@ -2,7 +2,8 @@ import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
 import {
-	currentLocalStep,
+	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	deferredTransition,
 	expansionLocalStep,
 	hasReachedTransitionState,
@@ -24,6 +25,19 @@ function states(
 }
 
 describe('schemaTransitions', () => {
+	it('waits for compatible tenant objects before contracting CAS storage', () => {
+		expect(
+			schemaTransitions.find((transition) => transition.id === 'cas-storage')
+		).toStrictEqual({
+			id: 'cas-storage',
+			expand: ['0043_cas_storage_expand.sql'],
+			contract: ['0044_cas_storage_contract.sql'],
+			independent: true,
+			contractStep: 6,
+			reportableStepOnComplete: 6
+		});
+	});
+
 	it.each(['CUPBOARD_DB', 'CONTROL_DB'])(
 		'lists every %s migration once, in name order',
 		(binding) => {
@@ -104,7 +118,7 @@ describe('schemaTransitions', () => {
 					'0030_cache_credential_lifecycle.sql'
 				],
 				contractStep: expansionLocalStep,
-				reportableStepOnComplete: currentLocalStep,
+				reportableStepOnComplete: cacheIdentityLocalStep,
 				compatibilityPhase: true
 			},
 			{
@@ -132,13 +146,6 @@ describe('schemaTransitions', () => {
 		).toStrictEqual(['cache-identity']);
 	});
 
-	// A contract step identifies the object work that must finish before the
-	// transition's contract migrations run. An object's `recordLocalStep`
-	// (packages/server/src/do/local-step.ts) does such work only for
-	// `cache-identity`: it reports `expansionLocalStep` until that transition is
-	// complete and `currentLocalStep` afterwards. Any other contract step would
-	// refer to work that no object does. Extend `recordLocalStep` before extending
-	// this list.
 	it('declares only contract steps that an object can record', () => {
 		expect(
 			new Set(
@@ -146,7 +153,7 @@ describe('schemaTransitions', () => {
 					transition.contractStep === undefined ? [] : [transition.contractStep]
 				)
 			)
-		).toStrictEqual(new Set([expansionLocalStep]));
+		).toStrictEqual(new Set([expansionLocalStep, casStorageLocalStep]));
 	});
 });
 
@@ -342,7 +349,23 @@ describe('requiredLocalStepFrom', () => {
 		{
 			name: 'cache-identity complete',
 			recorded: states([['cache-identity', 'complete']]),
-			step: currentLocalStep
+			step: cacheIdentityLocalStep
+		},
+		{
+			name: 'CAS storage expanded after cache identity completes',
+			recorded: states([
+				['cache-identity', 'complete'],
+				['cas-storage', 'expanded']
+			]),
+			step: casStorageLocalStep
+		},
+		{
+			name: 'CAS storage complete after cache identity completes',
+			recorded: states([
+				['cache-identity', 'complete'],
+				['cas-storage', 'complete']
+			]),
+			step: casStorageLocalStep
 		},
 		{
 			name: 'only the transition without a contract step complete',
@@ -381,7 +404,7 @@ describe('requiredLocalStepFrom', () => {
 				['cache-identity', 'complete'],
 				['later', 'expanded']
 			] as const),
-			step: currentLocalStep
+			step: cacheIdentityLocalStep
 		}
 	])(
 		'requires $step with a later incomplete transition and $name',

@@ -1451,13 +1451,13 @@ describe('tenant contract round trip', () => {
 				});
 			}
 			await env.CUPBOARD_DB.prepare(
-				'UPDATE cas_object SET delete_after = ? WHERE digest = ?'
+				'UPDATE cas_object_storage SET delete_after = ? WHERE digest = ?'
 			)
 				.bind(isoTimestamp(new Date(0)), decision.digest)
 				.run();
 			const originalKey = await currentCasObjectKey(decision.digest);
 			const original = await env.CUPBOARD_DB.prepare(
-				'SELECT incarnation FROM cas_object WHERE digest = ?'
+				'SELECT incarnation FROM cas_object_storage WHERE digest = ?'
 			)
 				.bind(decision.digest)
 				.first<{ incarnation: number }>();

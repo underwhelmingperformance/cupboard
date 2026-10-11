@@ -3,6 +3,7 @@ import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { capturingReporter, fakeCliUi } from '@cupboard/cli-ui/testing';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
+	cacheIdentityLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
@@ -213,7 +214,13 @@ async function contractOverPredecessor(
 		await prepareTransitions(server.transitionWalk({ now: () => now }), false);
 		await server.deployCurrent();
 	}
-	return completeTransitions(server.transitionWalk({ now: () => now }));
+	return completeTransitions(
+		server.transitionWalk({
+			now: () => now,
+			wakeTenants: async (step) =>
+				wakeUntilStep(server, await server.deploymentClient(), step)
+		})
+	);
 }
 
 it.each(['predecessor', 'intermediate'] as const)(
@@ -294,7 +301,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'tenant-schema-progress', independent: true },
 		{ id: 'control-refresh-sessions', independent: true },
 		{ id: 'control-subject-nonces', independent: true },
-		{ id: 'control-database-split', independent: true }
+		{ id: 'control-database-split', independent: true },
+		{ id: 'cas-storage', independent: true }
 	]);
 });
 
@@ -352,7 +360,7 @@ it('upgrades a populated predecessor deployment', async () => {
 			intermediateStage: 'intermediate',
 			currentStage: 'current',
 			expandedStatus: {
-				current: currentLocalStep,
+				current: cacheIdentityLocalStep,
 				required: expansionLocalStep,
 				ready: resumableFixtureTenants,
 				...noTenantPending
@@ -467,7 +475,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 			after: await client.localStepStatus()
 		}).toStrictEqual({
 			before: {
-				current: currentLocalStep,
+				current: cacheIdentityLocalStep,
 				required: expansionLocalStep,
 				ready: 0,
 				pending: resumableFixtureTenants,
@@ -856,6 +864,11 @@ it('completes a transfer when another deploy contracts during a source schema re
 			false
 		);
 		await server.deployCurrent();
+		await wakeUntilStep(
+			server,
+			await server.deploymentClient(),
+			currentLocalStep
+		);
 		const controlWalk = server.transitionWalk({}, 'current', 'CONTROL_DB');
 		const other = server.transitionWalk({ now: () => deployedAt });
 		let didContract = false;
@@ -1104,6 +1117,11 @@ it('uses Cloudflare recovery only while a real control transfer remains frozen',
 			ready: { state: 'ready' },
 			copied: { copied_at: undefined }
 		});
+		await wakeUntilStep(
+			server,
+			await server.deploymentClient(),
+			currentLocalStep
+		);
 		await completeTransitions(server.transitionWalk({ now: () => deployedAt }));
 		await expect(establishAuthority(plans, world)).rejects.toBeInstanceOf(
 			AdminTokenRequiredError

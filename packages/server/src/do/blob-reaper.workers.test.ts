@@ -428,7 +428,7 @@ describe('blob reaper', () => {
 		},
 		{
 			kind: 'CAS',
-			table: 'cas_object',
+			table: 'cas_object_storage',
 			seed: () => seedCasObjects([syntheticCasDigest(1)]),
 			reference: () =>
 				env.CUPBOARD_DB.prepare(

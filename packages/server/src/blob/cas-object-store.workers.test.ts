@@ -44,17 +44,17 @@ async function withWritableCasView(
 ): Promise<void> {
 	await env.CUPBOARD_DB.batch(
 		[
-			'ALTER TABLE cas_object RENAME TO cas_object_test_storage',
-			'CREATE VIEW cas_object AS SELECT * FROM cas_object_test_storage',
-			`CREATE TRIGGER cas_object_test_insert INSTEAD OF INSERT ON cas_object
+			'ALTER TABLE cas_object_storage RENAME TO cas_object_test_backing',
+			'CREATE VIEW cas_object_storage AS SELECT * FROM cas_object_test_backing',
+			`CREATE TRIGGER cas_object_test_insert INSTEAD OF INSERT ON cas_object_storage
 			 BEGIN
-			 INSERT INTO cas_object_test_storage
+			 INSERT INTO cas_object_test_backing
 			 (digest, size, incarnation, stored_at, delete_after)
 			 VALUES (NEW.digest, NEW.size, NEW.incarnation, NEW.stored_at, NEW.delete_after);
 			 END`,
-			`CREATE TRIGGER cas_object_test_update INSTEAD OF UPDATE ON cas_object
+			`CREATE TRIGGER cas_object_test_update INSTEAD OF UPDATE ON cas_object_storage
 			 BEGIN
-			 UPDATE cas_object_test_storage SET
+			 UPDATE cas_object_test_backing SET
 			 size = NEW.size, incarnation = NEW.incarnation,
 			 stored_at = NEW.stored_at, delete_after = NEW.delete_after
 			 WHERE digest = OLD.digest;
@@ -67,8 +67,8 @@ async function withWritableCasView(
 	} finally {
 		await env.CUPBOARD_DB.batch(
 			[
-				'DROP VIEW cas_object',
-				'ALTER TABLE cas_object_test_storage RENAME TO cas_object'
+				'DROP VIEW cas_object_storage',
+				'ALTER TABLE cas_object_test_backing RENAME TO cas_object_storage'
 			].map((query) => env.CUPBOARD_DB.prepare(query))
 		);
 	}

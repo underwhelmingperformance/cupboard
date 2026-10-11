@@ -1,5 +1,6 @@
 import {
-	currentLocalStep,
+	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	expansionLocalStep,
 	type LocalStep,
 	localStepSchema
@@ -241,10 +242,15 @@ export async function recordLocalStep(
 			progressed: true
 		};
 	}
-	// This mapping covers only `cache-identity`, whose contract step is
-	// `expansionLocalStep`. A later transition that declares a contract step
-	// needs its own branch here, or objects never report that step.
-	const reached = isContracted ? currentLocalStep : expansionLocalStep;
+	const hasCasStorage = await context.transitions.hasReached(
+		'cas-storage',
+		'expanded'
+	);
+	const reached = isContracted
+		? hasCasStorage
+			? casStorageLocalStep
+			: cacheIdentityLocalStep
+		: expansionLocalStep;
 	const moved = projection.projected + legacyMove.moved + incarnationMove.moved;
 	const belowReached = and(
 		eq(d1Schema.tenant.id, tenant),

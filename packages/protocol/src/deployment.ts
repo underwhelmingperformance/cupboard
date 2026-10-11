@@ -25,19 +25,29 @@ export function localStep(value: number): LocalStep {
 }
 
 /**
- * The final local step this build asks each tenant to reach.
+ * The final local step that this build asks each tenant to reach.
  *
  * Step 1 projects missing cache lifecycle rows into D1. Steps 2 and 3 move
  * private-cache objects and later cache generations to their current R2 keys.
  * Step 4 imports legacy retention and grace policies in bounded batches.
  * Step 5 rewrites stored grants once the `cache-identity` transition is
- * complete.
+ * complete. Step 6 confirms that the object writes through the compatible
+ * CAS storage interface after expansion.
  *
- * Objects report at most step 4 before that transition completes. Afterwards
- * they stay below this watermark until the control plane wakes them for the
- * grant rewrite.
+ * Objects report at most step 4 before cache identity completes, then step 5
+ * after the grant rewrite. They can report step 6 once CAS storage has expanded.
  */
-export const currentLocalStep: LocalStep = localStep(5);
+export const currentLocalStep: LocalStep = localStep(6);
+
+/**
+The completed grant rewrite, before the CAS storage transition.
+*/
+export const cacheIdentityLocalStep: LocalStep = localStep(5);
+
+/**
+The compatible CAS storage interface required before contraction.
+*/
+export const casStorageLocalStep: LocalStep = localStep(6);
 
 /**
 The local data work that must finish before the deploy contracts D1.
@@ -67,7 +77,8 @@ export const transitionIdSchema = z.enum([
 	'control-refresh-sessions',
 	'control-subject-nonces',
 	'control-database-split',
-	'control-database-initial'
+	'control-database-initial',
+	'cas-storage'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -287,7 +298,7 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 			'0030_cache_credential_lifecycle.sql'
 		],
 		contractStep: expansionLocalStep,
-		reportableStepOnComplete: currentLocalStep,
+		reportableStepOnComplete: cacheIdentityLocalStep,
 		compatibilityPhase: true,
 		completedBy: 'v0.0.34'
 	},
@@ -360,6 +371,14 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0000_control_database.sql'],
 		contract: [],
 		independent: true
+	},
+	{
+		id: 'cas-storage',
+		expand: ['0043_cas_storage_expand.sql'],
+		contract: ['0044_cas_storage_contract.sql'],
+		independent: true,
+		contractStep: casStorageLocalStep,
+		reportableStepOnComplete: casStorageLocalStep
 	}
 ];
 
@@ -371,18 +390,11 @@ export const transitionIds: readonly TransitionId[] = schemaTransitions.map(
 );
 
 /**
- * Returns the required local step: the local step that every active or
- * suspended tenant must reach now. This is the contract step of the first
- * incomplete transition that has one, or `currentLocalStep` when every such
- * transition is complete. It is never lower than the `reportableStepOnComplete`
- * of a complete transition.
- *
- * Objects cannot record past step 4 until the deploy records `cache-identity`
- * complete, so the count of tenants below `currentLocalStep` would never reach
- * zero before then. Once it is complete, objects can record
- * `currentLocalStep`, so an incomplete later transition with a lower contract
- * step does not stop the control Worker's cron trigger from waking the
- * tenants that are still below `currentLocalStep`.
+ * Returns the local step that every active or suspended tenant must reach now.
+ * The first incomplete transition with a contract step requires that step
+ * after expansion. Before expansion, tenants need only the highest reportable
+ * step of completed transitions, or the baseline expansion step. Once every
+ * transition with a contract step is complete, tenants need `currentLocalStep`.
  */
 export function requiredLocalStepFrom(recorded: TransitionStates): LocalStep {
 	return requiredLocalStepAmong(schemaTransitions, recorded);
@@ -403,15 +415,21 @@ export function requiredLocalStepAmong<Id extends string>(
 			.filter((transition) => isComplete(transition))
 			.map((transition) => transition.reportableStepOnComplete ?? 0)
 	);
-	const contractStep = transitions.find(
+	const incomplete = transitions.find(
 		(transition) =>
 			transition.contractStep !== undefined && !isComplete(transition)
-	)?.contractStep;
+	);
 
-	if (contractStep === undefined) {
+	if (incomplete === undefined) {
 		return currentLocalStep;
 	}
 
+	const contractStep = hasReachedTransitionState(
+		recorded.get(incomplete.id),
+		'expanded'
+	)
+		? (incomplete.contractStep ?? 0)
+		: 0;
 	return localStep(Math.max(contractStep, reportable));
 }
 

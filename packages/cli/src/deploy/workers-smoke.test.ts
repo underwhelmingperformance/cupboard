@@ -22,6 +22,7 @@ const state: {
 		readonly tenant: boolean;
 	};
 	pathAuthorityGuards?: { readonly control: boolean; readonly tenant: boolean };
+	casStorageGuards?: { readonly control: boolean; readonly tenant: boolean };
 	hasVersionedR2ObjectRollbackGuardExport?: boolean;
 } = {};
 
@@ -76,6 +77,14 @@ beforeAll(async () => {
 				artifact.controlBundle.code
 			),
 		tenant: /export \{[\s\S]*\bPathReadAuthorityRollbackGuard\b[\s\S]*\};/.test(
+			artifact.tenantBundle.code
+		)
+	};
+	state.casStorageGuards = {
+		control: /export \{[\s\S]*\bCasStorageRollbackGuard\b[\s\S]*\};/.test(
+			artifact.controlBundle.code
+		),
+		tenant: /export \{[\s\S]*\bCasStorageRollbackGuard\b[\s\S]*\};/.test(
 			artifact.tenantBundle.code
 		)
 	};
@@ -143,6 +152,7 @@ it('couples versioned R2 object keys to declarative class lifecycle', () => {
 		hasRollbackGuardExport: state.hasVersionedR2ObjectRollbackGuardExport
 	}).toStrictEqual({
 		exports: {
+			CasStorageRollbackGuard: { type: 'durable-object', storage: 'sqlite' },
 			ControlDatabaseRollbackGuard: {
 				type: 'durable-object',
 				storage: 'sqlite'
@@ -168,6 +178,7 @@ it('protects path read authority with both Worker class lifecycles', () => {
 		exported: state.pathAuthorityGuards
 	}).toStrictEqual({
 		control: {
+			CasStorageRollbackGuard: { type: 'durable-object', storage: 'sqlite' },
 			ControlDatabaseRollbackGuard: {
 				type: 'durable-object',
 				storage: 'sqlite'
@@ -178,6 +189,7 @@ it('protects path read authority with both Worker class lifecycles', () => {
 			}
 		},
 		tenant: {
+			CasStorageRollbackGuard: { type: 'durable-object', storage: 'sqlite' },
 			ControlDatabaseRollbackGuard: {
 				type: 'durable-object',
 				storage: 'sqlite'
@@ -201,4 +213,8 @@ it('exports control database rollback guards from both Worker bundles', () => {
 		control: true,
 		tenant: true
 	});
+});
+
+it('protects the contracted CAS storage interface with both Worker class lifecycles', () => {
+	expect(state.casStorageGuards).toStrictEqual({ control: true, tenant: true });
 });

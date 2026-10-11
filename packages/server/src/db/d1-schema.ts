@@ -56,7 +56,7 @@ export const instanceConfig = sqliteTable('instance_config', {
 // `incarnation` column.
 // `pending` has reserved the versioned R2 key, `live` has completed the R2
 // write, and `absent` has no current object. Maintenance can recover or retire
-// an abandoned promotion when its `blob_state` or `cas_object` row is missing.
+// an abandoned promotion when its `blob_state` or `cas_object_storage` row is missing.
 export const objectIncarnation = sqliteTable(
 	'object_incarnation',
 	{
@@ -84,7 +84,7 @@ export const objectIncarnation = sqliteTable(
 );
 
 // Each row schedules deletion of one versioned R2 object after its `blob_state`
-// or `cas_object` row has been deleted. Maintenance deletes the exact R2 key at
+// or `cas_object_storage` row has been deleted. Maintenance deletes the exact R2 key at
 // `remove_after` and then removes the marker. A replacement uses a deadline that
 // outlives preceding Workers and cached narinfos.
 export const objectDeletion = sqliteTable(
@@ -646,7 +646,7 @@ export const tenantBlob = sqliteTable(
 // object version of `cas/<digest>`. It does not mean that the bundle passed
 // Sigstore, DSSE, or trust-root verification.
 export const casObject = sqliteTable(
-	'cas_object',
+	'cas_object_storage',
 	{
 		digest: text('digest').$type<Sha256HexDigest>().primaryKey(),
 		size: integer('size').notNull(),
@@ -732,7 +732,7 @@ export const attestationReference = sqliteTable(
 // Per-tenant unique-bundle presence: a tenant references this bundle via at least
 // one live attestation edge. This drives once-per-tenant-per-bundle CAS accounting.
 export const tenantCasBlob = sqliteTable(
-	'tenant_cas_blob',
+	'tenant_cas_blob_storage',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
@@ -741,9 +741,17 @@ export const tenantCasBlob = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.digest] })]
 );
 
+export const precedingCasObject = sqliteView('cas_object').as((query) =>
+	query.select().from(casObject)
+);
+
+export const precedingTenantCasBlob = sqliteView('tenant_cas_blob').as(
+	(query) => query.select().from(tenantCasBlob)
+);
+
 // The authoritative per-tenant usage and quota counter. `bytes`/`blobs` are NAR
 // storage only, matching `tenant_blob`; `cas_bytes`/`cas_blobs` are attestation CAS
-// storage only, matching `tenant_cas_blob`. `narinfos` is the committed-narinfo
+// storage only, matching `tenant_cas_blob_storage`. `narinfos` is the committed-narinfo
 // count. The quota applies to total charged bytes (`bytes + cas_bytes`). The
 // counters are maintained incrementally by the owning tenant's Durable Object as it
 // charges on 0-to-1 presence transitions and credits on 1-to-0 transitions.

@@ -259,24 +259,24 @@ and recovery requirements.
 
 The remaining tables in `CUPBOARD_DB` include:
 
-| Table                                   | What it stores                                                                                                               |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `tenant`                                | The list of tenants: status, owner identity, config version, the tenant read-credential verifier, and maintenance position.  |
-| `tenant_cache_read_credential`          | The verifier for each cache that has its own read credential.                                                                |
-| `cache_lifecycle_storage`               | Each cache's access mode, generation, read revision and deletion time.                                                       |
-| `path_read_revocation`                  | Per-path revocation fences and pending demotion of readable references.                                                      |
-| `blob_state`                            | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                   |
-| `blob_ref_storage`                      | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
-| `tenant_blob`, `tenant_cas_blob`        | Which NARs and attestation bundles each tenant uses, for counting storage.                                                   |
-| `tenant_usage`                          | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                  |
-| `cas_object`, `attestation_ref_storage` | Stored attestation bundles and their references.                                                                             |
-| `object_incarnation`, `object_deletion` | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                             |
-| `deployment_transition`                 | The state of each schema transition that the deploy has started.                                                             |
-| `deployment_phase`                      | The deployment phase that v0.0.34 and v0.0.35 read. The deploy keeps it up to date for a rollback to those releases.         |
-| `local_step_wake_cursor`                | No longer read. A later transition's contract migrations will drop it.                                                       |
-| `manifest_state`                        | Kept for older databases. Nothing reads it.                                                                                  |
-| `tenant_maintenance_eligibility`        | Hints about which tenants to wake.                                                                                           |
-| `instance_config`                       | The deployment's instance name.                                                                                              |
+| Table                                           | What it stores                                                                                                               |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `tenant`                                        | The list of tenants: status, owner identity, config version, the tenant read-credential verifier, and maintenance position.  |
+| `tenant_cache_read_credential`                  | The verifier for each cache that has its own read credential.                                                                |
+| `cache_lifecycle_storage`                       | Each cache's access mode, generation, read revision and deletion time.                                                       |
+| `path_read_revocation`                          | Per-path revocation fences and pending demotion of readable references.                                                      |
+| `blob_state`                                    | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                   |
+| `blob_ref_storage`                              | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
+| `tenant_blob`, `tenant_cas_blob_storage`        | Which NARs and attestation bundles each tenant uses, for counting storage.                                                   |
+| `tenant_usage`                                  | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                  |
+| `cas_object_storage`, `attestation_ref_storage` | Stored attestation bundles and their references.                                                                             |
+| `object_incarnation`, `object_deletion`         | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                             |
+| `deployment_transition`                         | The state of each schema transition that the deploy has started.                                                             |
+| `deployment_phase`                              | The deployment phase that v0.0.34 and v0.0.35 read. The deploy keeps it up to date for a rollback to those releases.         |
+| `local_step_wake_cursor`                        | No longer read. A later transition's contract migrations will drop it.                                                       |
+| `manifest_state`                                | Kept for older databases. Nothing reads it.                                                                                  |
+| `tenant_maintenance_eligibility`                | Hints about which tenants to wake.                                                                                           |
+| `instance_config`                               | The deployment's instance name.                                                                                              |
 
 Some of these tables are written by only one party. A tenant's Durable Object is
 the only thing that writes that tenant's `blob_ref` and `tenant_blob` rows.
@@ -1269,7 +1269,7 @@ don't depend on the deploy: an object that is making progress continues after
 the deploy stops or is interrupted, and an object that has stopped waits for the
 next wake.
 
-This build defines five local steps:
+This build defines six local steps:
 
 - Step 1 projects missing lifecycle rows into D1, at most 36 caches per page.
   The local schema migrations reconcile registrations and fill identity columns
@@ -1286,6 +1286,10 @@ This build defines five local steps:
 - Step 5 rewrites stored trust rules and refresh-token grants once D1 records
   `cache-identity` complete. A page rewrites at most 100 rules and 100 families.
   Completion enables local database triggers that reject the old format.
+- Step 6 confirms that the object uses the compatible CAS storage interface
+  after the `cas-storage` expansion. The deploy requires this step from every
+  active or suspended tenant before replacing the old physical table identifiers
+  with read-only views.
 
 Each object caches its reading of the transition states for one minute, so the
 grant rewrite at local step 5 reads them again before it starts.

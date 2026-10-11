@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+	cacheIdentityLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type SchemaTransition,
@@ -2059,7 +2060,7 @@ describe('reviewed deployment plan', () => {
 				readiness: { pending: 0, stragglers: [] }
 			},
 			stage: 'complete',
-			readiness: '0 pending at local step 5'
+			readiness: `0 pending at local step ${String(cacheIdentityLocalStep)}`
 		}
 	])(
 		'describes the cache-identity transition for $name',

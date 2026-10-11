@@ -14,6 +14,8 @@ export {
 	objectIncarnation,
 	pathReadRevocation,
 	precedingCacheAdmission,
+	precedingCasObject,
+	precedingTenantCasBlob,
 	publication,
 	readableAttestationReference,
 	readableBlobReference,

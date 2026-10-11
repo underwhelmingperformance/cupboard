@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
+	cacheIdentityLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
@@ -13,7 +14,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { currentLocalSchemaVersion } from '../do/local-schema-run.ts';
@@ -40,6 +41,10 @@ const logger = rootLogger();
 const laterStep = localStep(currentLocalStep + 1);
 const now = testBase.getTime();
 const windowStart = now - localStepStallWindowMs;
+
+beforeEach(async () => {
+	await recordTransition('cas-storage', 'expanded');
+});
 
 class InjectedWakeFault extends Error {
 	constructor() {
@@ -145,6 +150,22 @@ describe('required local step', () => {
 		{
 			name: 'cache-identity complete',
 			rows: [['cache-identity', 'complete']],
+			step: cacheIdentityLocalStep
+		},
+		{
+			name: 'CAS storage expanded',
+			rows: [
+				['cache-identity', 'complete'],
+				['cas-storage', 'expanded']
+			],
+			step: currentLocalStep
+		},
+		{
+			name: 'CAS storage complete',
+			rows: [
+				['cache-identity', 'complete'],
+				['cas-storage', 'complete']
+			],
 			step: currentLocalStep
 		},
 		{
@@ -155,9 +176,12 @@ describe('required local step', () => {
 		{
 			name: 'cache-identity in a state that this build does not define',
 			rows: [['cache-identity', 'later-state']],
-			step: currentLocalStep
+			step: cacheIdentityLocalStep
 		}
 	])('is $step with $name', async ({ rows, step }) => {
+		await env.CUPBOARD_DB.prepare(
+			"DELETE FROM deployment_transition WHERE id = 'cas-storage'"
+		).run();
 		for (const [id, state] of rows) {
 			await env.CUPBOARD_DB.prepare(
 				'INSERT INTO deployment_transition (id, state, updated_at) VALUES (?, ?, ?)'
@@ -168,6 +192,41 @@ describe('required local step', () => {
 
 		await expect(requiredLocalStep(env)).resolves.toBe(step);
 	});
+});
+
+describe('CAS storage local readiness', () => {
+	it.each([
+		{ state: undefined, step: cacheIdentityLocalStep },
+		{ state: 'expanded', step: currentLocalStep },
+		{ state: 'complete', step: currentLocalStep }
+	] as const)(
+		'records $step when CAS storage is $state',
+		async ({ state, step }) => {
+			await recordTransition('cache-identity', 'complete');
+			await env.CUPBOARD_DB.prepare(
+				"DELETE FROM deployment_transition WHERE id = 'cas-storage'"
+			).run();
+			if (state !== undefined) {
+				await recordTransition('cas-storage', state);
+			}
+			const id = tenant('cas-readiness');
+			await provisionNamedTenant(id);
+			const page = await runInDurableObject(tenantServer(env, id), (instance) =>
+				asOneInvocation(() =>
+					recordLocalStep(
+						instance.context,
+						[],
+						isoTimestamp(new Date()),
+						undefined
+					)
+				)
+			);
+			expect({ page, facts: await factsOf(id) }).toStrictEqual({
+				page: { kind: 'recorded', step, progressed: true },
+				facts: { localStep: step, progressedAt: at(now) }
+			});
+		}
+	);
 });
 
 describe('local step status', () => {

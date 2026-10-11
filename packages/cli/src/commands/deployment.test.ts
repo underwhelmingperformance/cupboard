@@ -1,6 +1,7 @@
 import { capturingReporter as reporter } from '@cupboard/cli-ui/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
+	cacheIdentityLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
@@ -61,7 +62,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'control-refresh-sessions', state: 'complete', updatedAt: recorded },
 		{ id: 'control-subject-nonces', state: 'complete', updatedAt: recorded },
 		{ id: 'control-database-split', state: 'complete', updatedAt: recorded },
-		{ id: 'control-database-initial', state: 'complete', updatedAt: recorded }
+		{ id: 'control-database-initial', state: 'complete', updatedAt: recorded },
+		{ id: 'cas-storage', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -570,8 +572,12 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition control-database-initial',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition cas-storage',
+							value: `complete ${since}`
+						},
 						{ label: `Transition ${row.id}`, value },
-						{ label: 'Required local step', value: '5' },
+						{ label: 'Required local step', value: String(currentLocalStep) },
 						{
 							label: 'Pending tenant diagnostics',
 							value: '0 (working 0, stalled 0, unwoken 0)'
@@ -725,6 +731,30 @@ describe('runDeploymentResume', () => {
 			transitions: complete,
 			step: currentLocalStep,
 			info: 'Every active or suspended tenant has completed the required schema and data updates. All deployment database changes are complete.'
+		},
+		{
+			name: 'CAS storage has not expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.filter(
+					(transition) => transition.id !== 'cas-storage'
+				)
+			},
+			step: cacheIdentityLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+		},
+		{
+			name: 'CAS storage is expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.map((transition) =>
+					transition.id === 'cas-storage'
+						? { ...transition, state: 'expanded' as const }
+						: transition
+				)
+			},
+			step: currentLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
 		},
 		{
 			name: 'cache-identity is still expanded',

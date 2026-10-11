@@ -7135,7 +7135,9 @@ build traces available from a cupboard cache.
       pages.
 - [ ] Prevent older CAS cleanup and quota code from ignoring new reference kinds
       during deployment. Enable artifact writes only after the compatible
-      readers and cleanup code are active.
+      readers and cleanup code are active. The storage-interface expand/contract
+      transition, local readiness step and rollback guards are implemented.
+      Generic references and their writer activation gate remain pending.
 - [ ] Set a metadata and trace budget with actionable refusals. A trace that
       exceeds its budget must not reject the NAR publication. Idempotent retries
       remain valid.
