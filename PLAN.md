@@ -7100,9 +7100,10 @@ build traces available from a cupboard cache.
       measured bytes or replayable streams with known lengths, and skip source
       reads during reuse. Keep logical references, read authority and quota in
       the publishing services.
-- [ ] Move the Nix baseline to 2.35.2 and regenerate the native configuration
-      oracles on all four supported platforms. ARM macOS, ARM Linux and Intel
-      Linux have been checked; the Intel macOS oracle remains outstanding.
+- [x] Move the Nix baseline to 2.35.2 and regenerate the native configuration
+      oracles on all four supported platforms. Probe the nullable certificate
+      path with an explicit value so its type does not depend on the host's CA
+      bundle. The Intel macOS table comes from its native CI runner.
 - [ ] Test interrupted downloads with real Nix. Keep Cloudflare's public cache
       slicing behaviour and validate checksums, concatenated frames and
       multipart retries.

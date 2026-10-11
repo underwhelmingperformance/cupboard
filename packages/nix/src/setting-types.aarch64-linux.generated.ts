@@ -113,6 +113,7 @@ export const nixSettingTypes: Readonly<Record<string, NixSettingValueType>> = {
 	'sandbox-paths': 'map',
 	'secret-key-files': 'list',
 	'show-trace': 'boolean',
+	'ssl-cert-file': 'string',
 	'stalled-download-timeout': 'integer',
 	'start-id': 'integer',
 	store: 'string',
