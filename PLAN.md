@@ -7113,6 +7113,9 @@ listings, build logs or build traces available from a cupboard cache.
       atomic update-and-insert batch. Fence both writes by the live incarnation
       and preserve newer state rows. Reference-aware cleanup and the deployment
       cutover remain below.
+- [x] Write tenant CAS presence through writable migration views without UPSERT.
+      Keep shared-reference publication idempotent, charge a digest once per
+      tenant and credit the charge only after the last reference is removed.
 - [ ] Add distinct logical models for listings, build logs, build traces and
       listing-generation proofs. Store their bytes in the shared digest and
       incarnation CAS. A digest does not grant access.

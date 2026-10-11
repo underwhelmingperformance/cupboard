@@ -283,19 +283,16 @@ export class AttestationCasService {
 						.where(chargeableTenantFilter)
 				)
 				.onConflictDoNothing(),
-			this.context.d1
-				.insert(d1Schema.tenantCasBlob)
-				.select((qb) =>
-					qb
-						.select({
-							tenant: sql<TenantId>`${tenant}`.as('tenant'),
-							digest: sql<Sha256HexDigest>`${reference.digest}`.as('digest'),
-							size: sql<number>`${size}`.as('size')
-						})
-						.from(d1Schema.tenant)
-						.where(chargeableTenantFilter)
-				)
-				.onConflictDoNothing(),
+			this.context.d1.insert(d1Schema.tenantCasBlob).select((qb) =>
+				qb
+					.select({
+						tenant: sql<TenantId>`${tenant}`.as('tenant'),
+						digest: sql<Sha256HexDigest>`${reference.digest}`.as('digest'),
+						size: sql<number>`${size}`.as('size')
+					})
+					.from(d1Schema.tenant)
+					.where(and(chargeableTenantFilter, presenceMissing))
+			),
 			this.context.d1
 				.update(d1Schema.casObject)
 				.set({ deleteAfter: sql`null` })
