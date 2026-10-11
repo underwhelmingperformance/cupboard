@@ -7169,12 +7169,58 @@ listings, build logs or build traces available from a cupboard cache.
 - [ ] Publish stored builder output by default from the CLI and actions, with an
       opt-out. Include successful intermediate builds and failed attempts;
       reused and substituted paths must not be described as local builds.
+- [ ] Use a typed log-source interface in `@cupboard/nix` for local stored logs,
+      observed build streams and explicitly configured remote log sources.
+      Select sources by their capabilities, not provider identity. Support
+      builds dispatched to remote builders and builds executed directly in a
+      remote store, including nested remote execution.
+- [ ] Preserve native build activity IDs, parent relationships and builder
+      attribution. Capture forwarded builder output per derivation and attempt
+      before terminal rendering, including remote intermediate builds and failed
+      attempts. Keep provider diagnostics and the combined supervisor log
+      separate from builder output.
+- [ ] Retrieve retained logs through supported Nix log interfaces or the
+      standard binary-cache `/log/<drv-basename>` endpoint. Reuse configured
+      transport, authentication and proxy policy. Retrieval must not start a
+      build or copy a closure. Report unsupported sources explicitly; do not
+      assume that every SSH store can retrieve retained logs. A provider adapter
+      may supply a missing capability through the same interface without
+      changing artifact storage or publication.
+- [ ] Record the source, derivation identity, attempt association when known,
+      capture times and completeness. A historical derivation log without an
+      attempt identity must not be attributed to the current attempt or merged
+      with its stream. Logs do not prove that the current invocation built an
+      output. Keep credentials out of persisted source descriptions.
+- [ ] Bound remote retrieval, decompression and stream capture by bytes,
+      concurrency, time and cancellation. Distinguish unavailable, unsupported,
+      failed, incomplete and truncated logs in attempt information and job
+      progress. Optional log failures must not reject a successful NAR
+      publication or obscure the original build failure. Publish remote logs
+      through the same CAS, authority, parent-edge and expiry rules as local
+      logs.
 - [ ] Limit each log to 16 MiB with an explicit truncation marker and retain
       logs for 30 days by default. Successful logs have publication-parent
       edges; failed logs have independent expiry roots. Apply expiry to both
       kinds.
 - [ ] Serve `/log/<drv-basename>` with cache read authority and add an
       administrative attempt-info API. Keep logs as separate CAS artifacts.
+- [ ] Test forwarded logs through the existing SSH remote-store fixture, plus
+      nested and concurrent activities, failed builds, retained-log retrieval,
+      missing capabilities, retry attribution, truncation and cancellation.
+      Validate nixbuild interoperability when an authorised live environment is
+      available; keep ordinary tests independent of provider credentials.
+
+Nix's [log command][native-nix-log] searches the selected store and configured
+substituters, but [its implementation][native-log-retrieval] checks whether each
+store supports log retrieval. Nixbuild documents [forwarding remote build
+logs][nixbuild-remote-logs] to the client console. Capture during execution and
+retrieval after execution are separate capabilities.
+
+[native-nix-log]:
+  https://nix.dev/manual/nix/2.35/command-ref/new-cli/nix3-log.html
+[native-log-retrieval]:
+  https://github.com/NixOS/nix/blob/2.35.2/src/libcmd/get-build-log.cc
+[nixbuild-remote-logs]: https://docs.nixbuild.net/v2.7.2/remote-builds/
 
 ### Content-addressed derivations
 
