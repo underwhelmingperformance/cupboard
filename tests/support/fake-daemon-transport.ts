@@ -59,7 +59,8 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 
 		if (this.writeCount === 2) {
 			expect(readStringList(Buffer.from(bytes), 0)).toStrictEqual([
-				'queryPathInfos'
+				'queryPathInfos',
+				'realisation-with-path-not-hash'
 			]);
 			this.pendingBytes.push(stringSetResponse(this.options.features ?? []));
 			return;

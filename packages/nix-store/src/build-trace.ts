@@ -11,7 +11,7 @@ import {
 } from './scalars.ts';
 import { isNixSignature, NixSignature } from './signature.ts';
 
-const outputNameSchema = z
+export const nixOutputNameSchema = z
 	.string()
 	.min(1)
 	.max(storePathNameMaxLength)
@@ -21,7 +21,7 @@ const outputNameSchema = z
 export const buildTraceKeySchema = z
 	.object({
 		drvPath: storePathBasenameSchema,
-		outputName: outputNameSchema
+		outputName: nixOutputNameSchema
 	})
 	.readonly();
 export type BuildTraceKey = z.output<typeof buildTraceKeySchema>;
