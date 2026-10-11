@@ -26,6 +26,7 @@ import {
 
 import { answerAttestationInfo } from './attestation-info.ts';
 import { answerCacheMetadata } from './cache-metadata.ts';
+import { answerCacheSetup } from './cache-setup.ts';
 import {
 	answerAvailabilityInChunks,
 	cacheAvailabilityChunkSizeFor
@@ -45,6 +46,8 @@ export const readApp = buildReadApp();
 
 function buildReadApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
+
+	app.get('/', serveCacheSetup);
 
 	app.get('/nix-cache-info', async (context) => {
 		const denied = await guardContentRead(context);
@@ -214,6 +217,32 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 	});
 
 	return app;
+}
+
+/**
+ * Authenticates a cache root before fetching its current signing keys.
+ */
+export async function serveCacheSetup(
+	context: Context<WorkerHonoEnv>
+): Promise<Response> {
+	const denied = await guardContentRead(context);
+
+	if (denied !== undefined) {
+		return denied;
+	}
+
+	const keysUrl = new URL(context.req.url);
+	keysUrl.pathname = '/pubkey';
+	keysUrl.search = '';
+	const response = await tenantServer(context.env, context.get('tenant')).fetch(
+		new Request(keysUrl)
+	);
+
+	if (!response.ok) {
+		return response;
+	}
+
+	return answerCacheSetup(context, await response.text());
 }
 
 function guardRead(

@@ -64,7 +64,7 @@ import {
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
-import { readApp } from './read-app.ts';
+import { readApp, serveCacheSetup } from './read-app.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
 import {
 	innerRequest,
@@ -305,6 +305,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		)
 	);
 
+	app.on(
+		'GET',
+		['/t/:tenant/', '/t/:tenant/cache/:cacheName/'],
+		serveCacheSetup
+	);
 	app.route('/t/:tenant', readApp);
 	app.route('/t/:tenant/cache/:cacheName', readApp);
 

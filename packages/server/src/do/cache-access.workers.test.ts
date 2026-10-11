@@ -597,27 +597,42 @@ describe('private cache access', () => {
 	});
 
 	it.each([
-		{ name: 'an unserved path under a named cache', suffix: '/no-such-route' },
-		{ name: 'the cache prefix itself', suffix: '' },
-		{ name: 'a store-path deletion', suffix: `/paths/${'a'.repeat(32)}` }
-	])(
-		'returns 404 for $name whether or not a credential is offered',
-		async ({ suffix }) => {
-			await publishToPrivateCache();
-			const path = `${cachePrefix}${suffix}`;
-
-			const anonymous = await readFetch(path);
-			const authenticated = await readFetch(path, basic(tenantReader));
-
-			expect({
-				anonymous: anonymous.status,
-				authenticated: authenticated.status
-			}).toStrictEqual({
+		{
+			name: 'an unserved path under a named cache',
+			suffix: '/no-such-route',
+			expected: {
 				anonymous: StatusCodes.NOT_FOUND,
 				authenticated: StatusCodes.NOT_FOUND
-			});
+			}
+		},
+		{
+			name: 'the cache setup page',
+			suffix: '',
+			expected: {
+				anonymous: StatusCodes.UNAUTHORIZED,
+				authenticated: StatusCodes.OK
+			}
+		},
+		{
+			name: 'a store-path deletion',
+			suffix: `/paths/${'a'.repeat(32)}`,
+			expected: {
+				anonymous: StatusCodes.NOT_FOUND,
+				authenticated: StatusCodes.NOT_FOUND
+			}
 		}
-	);
+	])('applies the read policy for $name', async ({ suffix, expected }) => {
+		await publishToPrivateCache();
+		const path = `${cachePrefix}${suffix}`;
+
+		const anonymous = await readFetch(path);
+		const authenticated = await readFetch(path, basic(tenantReader));
+
+		expect({
+			anonymous: anonymous.status,
+			authenticated: authenticated.status
+		}).toStrictEqual(expected);
+	});
 
 	it('does not accept a read credential on a cache write route', async () => {
 		await publishToPrivateCache();
