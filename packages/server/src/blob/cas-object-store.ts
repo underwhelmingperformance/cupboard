@@ -23,6 +23,17 @@ export interface MeasuredCasObject {
 	readonly bytes: Uint8Array;
 }
 
+export interface MeasuredCasStream {
+	readonly digest: Sha256HexDigest;
+	readonly size: number;
+	/**
+	 * Returns a fresh body with a known length, such as an R2 get body.
+	 */
+	open(): Promise<ReadableStream<Uint8Array>>;
+}
+
+type CasSource = MeasuredCasObject | MeasuredCasStream;
+
 /**
  * Stores measured bytes at immutable CAS incarnations. Logical references,
  * read authority and tenant quota belong to the publishing service.
@@ -34,7 +45,7 @@ export class CasObjectStore {
 	) {}
 
 	private async ensureCasObject(
-		object: MeasuredCasObject,
+		object: CasSource,
 		incarnation: number,
 		canCreate: boolean,
 		replaceMissingIncarnation?: number
@@ -59,10 +70,22 @@ export class CasObjectStore {
 			return this.ensureCasObject(object, replacement, true);
 		}
 
-		const written = await this.blobs.put(key, object.bytes, {
-			sha256: object.digest,
-			onlyIf: { etagDoesNotMatch: '*' }
-		});
+		const body = 'bytes' in object ? object.bytes : await object.open();
+		let written: R2Object | null;
+		try {
+			written = await this.blobs.put(key, body, {
+				sha256: object.digest,
+				onlyIf: { etagDoesNotMatch: '*' }
+			});
+		} finally {
+			if (body instanceof ReadableStream && !body.locked) {
+				try {
+					await body.cancel();
+				} catch {
+					// A conditional put can already have canceled its input.
+				}
+			}
+		}
 
 		if (written !== null) {
 			return incarnation;
@@ -180,10 +203,11 @@ export class CasObjectStore {
 	}
 
 	/**
-	 * Stores measured bytes and returns their live incarnation.
+	 * Stores measured bytes and returns their live incarnation. A streamed source
+	 * is opened only when the immutable object needs creation or repair.
 	 */
 	async promote(
-		object: MeasuredCasObject,
+		object: CasSource,
 		options?: { readonly restoreMissingObject: true }
 	): Promise<number> {
 		const claimed = await this.claimLiveIncarnation(object.digest);

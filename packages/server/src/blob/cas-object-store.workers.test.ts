@@ -56,4 +56,49 @@ describe('shared CAS objects', () => {
 			chargedTenants: []
 		});
 	});
+
+	it('streams measured staging bytes only for creation or repair', async () => {
+		await initialiseViaWorker();
+		const bytes = new TextEncoder().encode('streamed listing');
+		const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bytes));
+		await env.BLOBS.put('staged-listing', bytes);
+		const store = new CasObjectStore(
+			drizzle(env.CUPBOARD_DB, { schema: d1Schema }),
+			env.BLOBS
+		);
+		let opened = 0;
+		const measured = {
+			digest,
+			size: bytes.byteLength,
+			async open() {
+				opened += 1;
+				const staged = await env.BLOBS.get('staged-listing');
+				if (staged === null) {
+					throw new Error('The test staging object must exist.');
+				}
+				return staged.body;
+			}
+		};
+		const created = await store.promote(measured);
+		const reused = await store.promote(measured);
+		await env.BLOBS.delete(casObjectKey(digest, created));
+		const repaired = await store.promote(measured, {
+			restoreMissingObject: true
+		});
+		const object = await env.BLOBS.get(casObjectKey(digest, repaired));
+		expect({
+			incarnations: [created, reused, repaired],
+			opened,
+			stored:
+				object === null
+					? undefined
+					: new Uint8Array(await object.arrayBuffer()),
+			chargedTenants: await tenantCasBlobRows()
+		}).toStrictEqual({
+			incarnations: [2, 2, 3],
+			opened: 2,
+			stored: bytes,
+			chargedTenants: []
+		});
+	});
 });
