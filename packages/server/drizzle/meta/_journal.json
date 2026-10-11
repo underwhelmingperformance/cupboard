@@ -540,6 +540,13 @@
 			"when": 1791499117285,
 			"tag": "0076_pending_upload_promotion",
 			"breakpoints": true
+		},
+		{
+			"idx": 77,
+			"version": "6",
+			"when": 1791747359405,
+			"tag": "0077_native_artifacts",
+			"breakpoints": true
 		}
 	]
 }

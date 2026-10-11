@@ -393,8 +393,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 259,
-			largeBacklogCost: 259
+			smallBacklogCost: 287,
+			largeBacklogCost: 287
 		});
 	});
 
@@ -404,12 +404,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 242,
+				rowsRead: 270,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 242,
+				rowsRead: 270,
 				usesIndex: true,
 				sorts: false
 			}
@@ -446,8 +446,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 251,
-			largeBacklogCost: 251
+			smallBacklogCost: 279,
+			largeBacklogCost: 279
 		});
 	});
 
@@ -478,8 +478,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 883, rowsWritten: 131 },
-			largeBacklog: { rowsRead: 883, rowsWritten: 131 }
+			smallBacklog: { rowsRead: 911, rowsWritten: 131 },
+			largeBacklog: { rowsRead: 911, rowsWritten: 131 }
 		});
 	});
 
@@ -502,8 +502,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 267,
-			largeBacklogCost: 267
+			smallBacklogCost: 295,
+			largeBacklogCost: 295
 		});
 	});
 });

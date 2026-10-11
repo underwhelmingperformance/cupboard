@@ -316,6 +316,20 @@
 			"when": 1791741593161,
 			"tag": "0044_cas_storage_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 46,
+			"version": "6",
+			"when": 1791747359406,
+			"tag": "0046_native_artifact_storage",
+			"breakpoints": true
+		},
+		{
+			"idx": 47,
+			"version": "6",
+			"when": 1791748246367,
+			"tag": "0047_attestation_cas_retention_index",
+			"breakpoints": true
 		}
 	]
 }

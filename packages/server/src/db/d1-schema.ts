@@ -11,6 +11,13 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import {
+	type ArtifactGeneration,
+	type ArtifactId,
+	type ArtifactKind,
+	artifactKinds,
+	type ListingGeneratorRevision
+} from '@cupboard/protocol/artifacts';
 import type { LocalStep } from '@cupboard/protocol/deployment';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import type {
@@ -642,9 +649,8 @@ export const tenantBlob = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.narHash] })]
 );
 
-// A row records measured attestation bytes stored at the physical R2 key for one
-// object version of `cas/<digest>`. It does not mean that the bundle passed
-// Sigstore, DSSE, or trust-root verification.
+// A row records measured bytes at the physical R2 key for one CAS incarnation.
+// The logical publication services validate the bytes before granting access.
 export const casObject = sqliteTable(
 	'cas_object_storage',
 	{
@@ -725,12 +731,13 @@ export const attestationReference = sqliteTable(
 				table.generation
 			)
 			.where(sql`${table.readable} = true`),
-		index('attestation_ref_digest_idx').on(table.digest)
+		index('attestation_ref_digest_idx').on(table.digest),
+		index('attestation_ref_tenant_digest_idx').on(table.tenant, table.digest)
 	]
 );
 
-// Per-tenant unique-bundle presence: a tenant references this bundle via at least
-// one live attestation edge. This drives once-per-tenant-per-bundle CAS accounting.
+// Each tenant has one presence row per CAS digest across all reference kinds.
+// The presence row determines the size charged to that tenant.
 export const tenantCasBlob = sqliteTable(
 	'tenant_cas_blob_storage',
 	{
@@ -750,7 +757,7 @@ export const precedingTenantCasBlob = sqliteView('tenant_cas_blob').as(
 );
 
 // The authoritative per-tenant usage and quota counter. `bytes`/`blobs` are NAR
-// storage only, matching `tenant_blob`; `cas_bytes`/`cas_blobs` are attestation CAS
+// storage only, matching `tenant_blob`; `cas_bytes`/`cas_blobs` are shared CAS
 // storage only, matching `tenant_cas_blob_storage`. `narinfos` is the committed-narinfo
 // count. The quota applies to total charged bytes (`bytes + cas_bytes`). The
 // counters are maintained incrementally by the owning tenant's Durable Object as it
@@ -820,3 +827,68 @@ export const controlDatabaseSplit = sqliteTable('control_database_split', {
 	frozenAt: text('frozen_at').notNull(),
 	copiedAt: text('copied_at')
 });
+
+export const artifactReference = sqliteTable(
+	'artifact_ref',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		artifactId: text('artifact_id').$type<ArtifactId>().notNull(),
+		artifactGeneration: integer('artifact_generation')
+			.$type<ArtifactGeneration>()
+			.notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		kind: text('kind', { enum: artifactKinds }).$type<ArtifactKind>().notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.tenant, table.artifactId, table.artifactGeneration]
+		}),
+		index('artifact_ref_digest_idx').on(table.digest, table.tenant),
+		index('artifact_ref_tenant_digest_idx').on(table.tenant, table.digest),
+		index('artifact_ref_cache_idx').on(
+			table.tenant,
+			table.cacheKind,
+			table.cacheName,
+			table.cacheGeneration,
+			table.artifactId,
+			table.artifactGeneration
+		),
+		check(
+			'artifact_ref_cache_identity_check',
+			cacheIdentityConstraint(table.cacheKind, table.cacheName)
+		),
+		check(
+			'artifact_ref_generation_check',
+			sql`${table.artifactGeneration} >= 1`
+		),
+		check(
+			'artifact_ref_cache_generation_check',
+			sql`${table.cacheGeneration} >= 1`
+		)
+	]
+);
+
+export const listingFact = sqliteTable(
+	'listing_fact',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		format: integer('format').$type<1>().notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		size: integer('size').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		check('listing_fact_format_check', sql`${table.format} = 1`),
+		check('listing_fact_size_check', sql`${table.size} > 0`)
+	]
+);

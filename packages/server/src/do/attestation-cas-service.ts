@@ -9,8 +9,9 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, notExists, sql } from 'drizzle-orm';
 
+import { casObjectNotRepromoted } from '../blob/cas-object-state.ts';
 import {
 	CasObjectStore,
 	type MeasuredCasObject
@@ -18,6 +19,7 @@ import {
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { pathReferenceReadability } from '../db/cache-generation.ts';
+import { readCasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
@@ -27,6 +29,7 @@ import {
 } from '../errors.ts';
 import { type R2ObjectKey } from '../http/http.ts';
 
+import { CasQuotaService } from './cas-quota-service.ts';
 import { type ServerContext } from './context.ts';
 import { jsonRowList } from './json-list.ts';
 import {
@@ -341,116 +344,33 @@ export class AttestationCasService {
 		await new PathReadAuthorityService(this.context).requireWritable();
 
 		const tenant = this.context.requireTenant();
-		const now = isoTimestamp(new Date());
-
-		// A pending repair has advanced the registry but has not yet published its
-		// CAS row. Check the registry too while the CAS row describes the old version.
-		const repromotedFilter =
-			fenceIncarnation === undefined
-				? undefined
-				: and(
-						eq(d1Schema.casObject.digest, reference.digest),
-						ne(d1Schema.casObject.incarnation, fenceIncarnation)
-					);
-		const repromotedRegistryFilter =
-			fenceIncarnation === undefined
-				? undefined
-				: and(
-						eq(d1Schema.objectIncarnation.kind, 'cas'),
-						eq(d1Schema.objectIncarnation.objectId, reference.digest),
-						ne(d1Schema.objectIncarnation.incarnation, fenceIncarnation)
-					);
-		const notRepromoted =
-			fenceIncarnation === undefined
-				? undefined
-				: and(
-						notExists(
-							this.context.d1
-								.select({ one: sql`1` })
-								.from(d1Schema.casObject)
-								.where(repromotedFilter)
-						),
-						notExists(
-							this.context.d1
-								.select({ one: sql`1` })
-								.from(d1Schema.objectIncarnation)
-								.where(repromotedRegistryFilter)
-						)
-					);
-
+		const notRepromoted = casObjectNotRepromoted(
+			this.context.d1,
+			reference.digest,
+			fenceIncarnation
+		);
 		const edgeDeleteFilter = and(
 			this.edgeFilter(tenant, reference),
 			notRepromoted
 		);
-		const stillReferencedFilter = and(
-			eq(d1Schema.attestationReference.tenant, tenant),
-			eq(d1Schema.attestationReference.digest, reference.digest)
+		const references = await readCasReferenceSet(this.context.d1);
+		const release = new CasQuotaService(this.context).releaseStatements(
+			reference.digest,
+			references,
+			fenceIncarnation
 		);
-		const presenceFilter = this.presenceFilter(tenant, reference.digest);
-
-		// The credit batch rechecks references because a publisher can add one
-		// after these reads.
-		const [, stillReferencedRows, presenceRows] = await this.context.d1.batch([
+		await this.context.d1.batch([
 			this.context.d1
 				.delete(d1Schema.attestationReference)
 				.where(edgeDeleteFilter),
-			this.context.d1
-				.select({ digest: d1Schema.attestationReference.digest })
-				.from(d1Schema.attestationReference)
-				.where(stillReferencedFilter)
-				.limit(1),
-			this.context.d1
-				.select({ size: d1Schema.tenantCasBlob.size })
-				.from(d1Schema.tenantCasBlob)
-				.where(presenceFilter),
 			reclaimPathReadFence(
 				this.context.d1,
 				tenant,
 				reference.cache,
 				jsonRowList([{ storePathHash: reference.storePathHash }])
-			)
-		]);
-
-		if (stillReferencedRows[0] !== undefined) {
-			return;
-		}
-
-		const presence = presenceRows[0];
-
-		if (presence === undefined) {
-			return;
-		}
-		const presenceExists = exists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenantCasBlob)
-				.where(presenceFilter)
-		);
-		const unreferenced = notExists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.attestationReference)
-				.where(stillReferencedFilter)
-		);
-		const creditFilter = and(
-			eq(d1Schema.tenantUsage.tenant, tenant),
-			presenceExists,
-			notRepromoted,
-			unreferenced
-		);
-
-		await this.context.d1.batch([
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					casBytes: sql`${d1Schema.tenantUsage.casBytes} - ${presence.size}`,
-					casBlobs: sql`${d1Schema.tenantUsage.casBlobs} - 1`,
-					updatedAt: now
-				})
-				.where(creditFilter),
-			this.context.d1
-				.delete(d1Schema.tenantCasBlob)
-				.where(and(presenceFilter, notRepromoted, unreferenced))
+			),
+			release.credit,
+			release.presenceDelete
 		]);
 	}
 }

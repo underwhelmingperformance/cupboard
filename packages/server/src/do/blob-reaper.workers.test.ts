@@ -1,5 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
+import { type Sha256HexDigest } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { type ArtifactKind, artifactKinds } from '@cupboard/protocol/artifacts';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,6 +24,7 @@ import {
 	flakyD1,
 	initialise,
 	readFetch,
+	recordTransition,
 	resetTestServer,
 	runBlobReaperToCompletion as runBlobReaper,
 	runCasReaperToCompletion as runCasReaper,
@@ -34,6 +37,19 @@ import {
 	verifiableNar,
 	verifiableNarStored
 } from '../test-support.ts';
+
+async function fileArtifactProjection(
+	digest: Sha256HexDigest,
+	kind: ArtifactKind = 'listing'
+): Promise<unknown> {
+	return env.CUPBOARD_DB.prepare(
+		`INSERT INTO artifact_ref
+         (tenant, artifact_id, artifact_generation, cache_kind, cache_generation, kind, digest, created_at)
+         VALUES ('v1', 'artifact', 1, 'default', 1, ?, ?, '2026-01-01T00:00:00.000Z')`
+	)
+		.bind(kind, digest)
+		.run();
+}
 
 async function deletionMarkerCount(
 	kind: 'nar' | 'cas',
@@ -296,6 +312,121 @@ describe('blob reaper', () => {
 
 		await runBlobReaper(rootLogger(), env);
 		expect(await deletionMarkerCount('nar', nar.narHash)).toBe(0);
+	});
+
+	it.each(artifactKinds)(
+		'retains CAS bytes referenced only by a %s artifact',
+		async (kind) => {
+			await recordTransition('native-artifact-storage', 'complete');
+			const digest = syntheticCasDigest(2000);
+			const key = casObjectKey(digest);
+			await seedCasObjects([digest]);
+			await env.BLOBS.put(key, 'artifact');
+			await fileArtifactProjection(digest, kind);
+			const before = {
+				objects: await casObjectRows(),
+				markerCount: await deletionMarkerCount('cas', digest),
+				objectPresent: (await env.BLOBS.head(key)) !== null
+			};
+			await runCasReaper(rootLogger(), env);
+			vi.setSystemTime(afterGrace());
+			await runCasReaper(rootLogger(), env);
+			expect({
+				objects: await casObjectRows(),
+				markerCount: await deletionMarkerCount('cas', digest),
+				objectPresent: (await env.BLOBS.head(key)) !== null
+			}).toStrictEqual(before);
+		}
+	);
+
+	it('retains an armed CAS object when an artifact reference arrives before collection', async () => {
+		await recordTransition('native-artifact-storage', 'complete');
+		const digest = syntheticCasDigest(2001);
+		const key = casObjectKey(digest);
+		await seedCasObjects([digest]);
+		await env.BLOBS.put(key, 'artifact');
+		await runCasReaper(rootLogger(), env);
+		const before = {
+			objects: await casObjectRows(),
+			markerCount: await deletionMarkerCount('cas', digest),
+			objectPresent: (await env.BLOBS.head(key)) !== null
+		};
+		await fileArtifactProjection(digest);
+		vi.setSystemTime(afterGrace());
+		await runCasReaper(rootLogger(), env);
+		expect({
+			objects: await casObjectRows(),
+			markerCount: await deletionMarkerCount('cas', digest),
+			objectPresent: (await env.BLOBS.head(key)) !== null
+		}).toStrictEqual(before);
+	});
+
+	it('leaves CAS unarmed when an artifact reference arrives after candidate discovery', async () => {
+		await recordTransition('native-artifact-storage', 'complete');
+		const digest = syntheticCasDigest(2002);
+		await seedCasObjects([digest]);
+		const injection = referenceBeforeArm(
+			env.CUPBOARD_DB,
+			'cas_object_storage',
+			() => fileArtifactProjection(digest)
+		);
+		await runCasReaper(rootLogger(), {
+			...env,
+			CUPBOARD_DB: injection.database
+		});
+		expect({
+			hasReferenced: injection.hasReferenced(),
+			objects: await casObjectRows()
+		}).toStrictEqual({
+			hasReferenced: true,
+			objects: [{ digest, size: 1, deleteAfter: undefined }]
+		});
+	});
+
+	it('refuses a stale CAS mutation when artifact storage expands after candidate discovery', async () => {
+		const digest = syntheticCasDigest(2003);
+		await seedCasObjects([digest]);
+		const injection = referenceBeforeArm(
+			env.CUPBOARD_DB,
+			'cas_object_storage',
+			async () => {
+				await recordTransition('native-artifact-storage', 'complete');
+				await fileArtifactProjection(digest);
+			}
+		);
+		await runCasReaper(rootLogger(), {
+			...env,
+			CUPBOARD_DB: injection.database
+		});
+		expect({
+			hasReferenced: injection.hasReferenced(),
+			objects: await casObjectRows()
+		}).toStrictEqual({
+			hasReferenced: true,
+			objects: [{ digest, size: 1, deleteAfter: undefined }]
+		});
+	});
+
+	it('collects an unrelated CAS object while another digest has an artifact reference', async () => {
+		await recordTransition('native-artifact-storage', 'complete');
+		const retained = syntheticCasDigest(2010);
+		const unrelated = syntheticCasDigest(2011);
+		await seedCasObjects([retained, unrelated]);
+		await env.BLOBS.put(casObjectKey(retained), 'retained');
+		await env.BLOBS.put(casObjectKey(unrelated), 'unrelated');
+		await fileArtifactProjection(retained);
+		await runCasReaper(rootLogger(), env);
+		vi.setSystemTime(afterGrace());
+		await runCasReaper(rootLogger(), env);
+		expect({
+			objects: await casObjectRows(),
+			retainedPresent: (await env.BLOBS.head(casObjectKey(retained))) !== null,
+			unrelatedPresent: (await env.BLOBS.head(casObjectKey(unrelated))) !== null
+		}).toStrictEqual({
+			objects: [{ digest: retained, size: 1, deleteAfter: undefined }],
+			retainedPresent: true,
+			unrelatedPresent: false
+		});
 	});
 
 	it('retries a CAS object delete after collection loses its first response', async () => {

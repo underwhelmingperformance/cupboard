@@ -38,6 +38,7 @@ import {
 	type ReadPasswordSalt,
 	readPasswordSaltSchema
 } from '../read/read-auth.ts';
+import { recordTransition } from '../test-support.ts';
 
 import {
 	clearCacheReadCredential,
@@ -704,6 +705,59 @@ describe('tenant registry', () => {
 			});
 		}
 	);
+
+	it('refuses zero accounting repair while artifact references remain', async () => {
+		await recordTransition('native-artifact-storage', 'complete');
+		await ensureTenant(database(), createBody(acme), now);
+		await database()
+			.delete(d1Schema.tenantUsage)
+			.where(eq(d1Schema.tenantUsage.tenant, acme));
+		await env.CUPBOARD_DB.prepare(
+			`INSERT INTO artifact_ref
+			 (tenant, artifact_id, artifact_generation, cache_kind, cache_generation, kind, digest, created_at)
+			 VALUES (?, 'artifact', 1, 'default', 1, 'listing', 'digest', ?)`
+		)
+			.bind(acme, now)
+			.run();
+		const rejected = await rejectedBy(() =>
+			ensureTenant(database(), createBody(acme), now)
+		);
+		expect({
+			error: rejected === undefined ? undefined : errorFields(rejected),
+			usage: await usageRow(acme)
+		}).toStrictEqual({
+			error: {
+				name: 'TenantUsageRepairRequiredError',
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				tenant: acme
+			},
+			usage: undefined
+		});
+	});
+
+	it('refuses registry finalisation while artifact references remain', async () => {
+		await recordTransition('native-artifact-storage', 'complete');
+		await ensureTenant(database(), createBody(acme), now);
+		await setTenantStatus(database(), acme, 'offboarding');
+		await env.CUPBOARD_DB.prepare(
+			`INSERT INTO artifact_ref
+			 (tenant, artifact_id, artifact_generation, cache_kind, cache_generation, kind, digest, created_at)
+			 VALUES (?, 'artifact', 1, 'default', 1, 'listing', 'digest', ?)`
+		)
+			.bind(acme, now)
+			.run();
+		const outcome = await finaliseOffboardedTenant(database(), acme);
+		const status = await database()
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, acme))
+			.get();
+		expect({ outcome, status, usage: await usageRow(acme) }).toStrictEqual({
+			outcome: { finalised: false },
+			status: { status: 'offboarding' },
+			usage: { quotaBytes: undefined }
+		});
+	});
 
 	it('repairs a tenant row created before provisioning became atomic', async () => {
 		await database()

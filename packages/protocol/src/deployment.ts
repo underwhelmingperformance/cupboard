@@ -78,7 +78,8 @@ export const transitionIdSchema = z.enum([
 	'control-subject-nonces',
 	'control-database-split',
 	'control-database-initial',
-	'cas-storage'
+	'cas-storage',
+	'native-artifact-storage'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -379,6 +380,13 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		independent: true,
 		contractStep: casStorageLocalStep,
 		reportableStepOnComplete: casStorageLocalStep
+	},
+	{
+		id: 'native-artifact-storage',
+		expand: ['0046_native_artifact_storage.sql'],
+		// The storage identifier is a view until path authority contracts.
+		contract: ['0047_attestation_cas_retention_index.sql'],
+		independent: true
 	}
 ];
 

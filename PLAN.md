@@ -7119,7 +7119,8 @@ build traces available from a cupboard cache.
       tenant and credit the charge only after the last reference is removed.
 - [ ] Add distinct logical models for listings, build logs, build traces and
       listing-generation proofs. Store their bytes in the shared digest and
-      incarnation CAS. A digest does not grant access.
+      incarnation CAS. A digest does not grant access. The logical schemas and
+      additive storage migrations are implemented; publication remains disabled.
 - [ ] Keep tenant authority in the Durable Object. Use `CUPBOARD_DB` for shared
       listing facts, reference projections and durable jobs; `CONTROL_DB`
       continues to contain operator authentication state.
@@ -7128,7 +7129,10 @@ build traces available from a cupboard cache.
       reuse the artifact's bytes. Artifact edges do not keep NARs alive.
 - [ ] Charge each physical digest once per tenant across every artifact and
       attestation reference. Generalise collection, demotion, repair and final
-      reference removal before creating artifact references.
+      reference removal before creating artifact references. Collection and
+      final quota credit now check every reference kind. Bounded tenant
+      offboarding, provisioning residue checks and finalisation guards are
+      implemented; missing-object demotion and repair remain pending.
 - [ ] Fence reads, completion and deletion by cache generation, publication
       generation and physical incarnation. Use grace periods and deletion
       outboxes for late writes, and drain cache and tenant teardown in bounded

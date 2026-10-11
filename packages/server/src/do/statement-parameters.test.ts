@@ -31,6 +31,7 @@ import { drizzle as drizzleDurable } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
 import { cacheIdSchema } from '../db/cache.ts';
+import { CasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoReferenceQuery } from '../read/read.ts';
@@ -323,7 +324,8 @@ function tenantCasBlobDeleteParameters(objects: number): number {
 	return buildTenantCasBlobDeleteStatement(
 		database,
 		tenant,
-		digestList(objects)
+		digestList(objects),
+		new CasReferenceSet(database, 'all')
 	).toSQL().params.length;
 }
 
@@ -476,8 +478,12 @@ const listStatements: readonly {
 	{
 		statement: 'reaper CAS registry UPDATE',
 		parameters: (objects) =>
-			buildCasCollection(database, digestList(objects), now).retire.toSQL()
-				.params.length
+			buildCasCollection(
+				database,
+				digestList(objects),
+				now,
+				new CasReferenceSet(database, 'all')
+			).retire.toSQL().params.length
 	},
 	{
 		statement: 'reaper fenced registry UPDATE',

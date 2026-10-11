@@ -41,6 +41,7 @@ import {
 	offboardTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
+	recordTransition,
 	resetTestServer,
 	runBlobReaperToCompletion as runBlobReaper,
 	tenantBlobRows,
@@ -344,6 +345,69 @@ describe('offboarding drain', () => {
 					)
 				}
 			]
+		});
+	});
+
+	it('drains captured artifact generations in bounded pages before CAS presence', async () => {
+		const { id } = await provisionedWritingTenant();
+		await recordTransition('native-artifact-storage', 'complete');
+		const digest = 'a'.repeat(64);
+		await env.CUPBOARD_DB.batch([
+			env.CUPBOARD_DB.prepare(
+				`INSERT INTO artifact_ref
+				 (tenant, artifact_id, artifact_generation, cache_kind, cache_generation, kind, digest, created_at)
+				 VALUES (?, 'artifact', 1, 'default', 1, 'listing', ?, ?),
+				        (?, 'artifact', 2, 'default', 2, 'listing', ?, ?),
+				        ('another-tenant', 'artifact', 1, 'default', 1, 'listing', ?, ?)`
+			).bind(
+				id,
+				digest,
+				testBase.toISOString(),
+				id,
+				digest,
+				testBase.toISOString(),
+				digest,
+				testBase.toISOString()
+			),
+			env.CUPBOARD_DB.prepare(
+				'INSERT INTO tenant_cas_blob_storage (tenant, digest, size) VALUES (?, ?, 32)'
+			).bind(id, digest),
+			env.CUPBOARD_DB.prepare(
+				'UPDATE tenant_usage SET cas_bytes = 32, cas_blobs = 1 WHERE tenant = ?'
+			).bind(id)
+		]);
+		await offboardTenant(id);
+		const first = await testServerFor(id).runOffboard(1);
+		const { results: afterFirst } = await env.CUPBOARD_DB.prepare(
+			'SELECT tenant, artifact_generation AS generation FROM artifact_ref ORDER BY tenant, artifact_generation'
+		).all();
+		const { results: firstPresence } = await env.CUPBOARD_DB.prepare(
+			'SELECT tenant, digest, size FROM tenant_cas_blob_storage'
+		).all();
+		const second = await testServerFor(id).runOffboard(1);
+		const { results: afterSecond } = await env.CUPBOARD_DB.prepare(
+			'SELECT tenant, artifact_generation AS generation FROM artifact_ref ORDER BY tenant, artifact_generation'
+		).all();
+		const { results: lastPresence } = await env.CUPBOARD_DB.prepare(
+			'SELECT tenant, digest, size FROM tenant_cas_blob_storage'
+		).all();
+		expect({
+			first,
+			afterFirst,
+			firstPresence,
+			second,
+			afterSecond,
+			lastPresence
+		}).toStrictEqual({
+			first: { drained: false },
+			afterFirst: [
+				{ tenant: 'another-tenant', generation: 1 },
+				{ tenant: id, generation: 2 }
+			],
+			firstPresence: [{ tenant: id, digest, size: 32 }],
+			second: { drained: true },
+			afterSecond: [{ tenant: 'another-tenant', generation: 1 }],
+			lastPresence: []
 		});
 	});
 

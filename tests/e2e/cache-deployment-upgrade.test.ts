@@ -302,7 +302,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'control-refresh-sessions', independent: true },
 		{ id: 'control-subject-nonces', independent: true },
 		{ id: 'control-database-split', independent: true },
-		{ id: 'cas-storage', independent: true }
+		{ id: 'cas-storage', independent: true },
+		{ id: 'native-artifact-storage', independent: true }
 	]);
 });
 

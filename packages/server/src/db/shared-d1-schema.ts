@@ -1,4 +1,5 @@
 export {
+	artifactReference,
 	attestationReference,
 	blobReference,
 	blobState,
@@ -8,6 +9,7 @@ export {
 	deploymentPhase,
 	deploymentTransition,
 	instanceConfig,
+	listingFact,
 	localStepWakeCursor,
 	manifestState,
 	objectDeletion,

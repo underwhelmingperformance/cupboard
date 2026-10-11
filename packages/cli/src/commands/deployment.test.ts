@@ -63,7 +63,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'control-subject-nonces', state: 'complete', updatedAt: recorded },
 		{ id: 'control-database-split', state: 'complete', updatedAt: recorded },
 		{ id: 'control-database-initial', state: 'complete', updatedAt: recorded },
-		{ id: 'cas-storage', state: 'complete', updatedAt: recorded }
+		{ id: 'cas-storage', state: 'complete', updatedAt: recorded },
+		{ id: 'native-artifact-storage', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -574,6 +575,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition cas-storage',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition native-artifact-storage',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },

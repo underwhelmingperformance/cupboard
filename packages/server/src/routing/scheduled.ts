@@ -60,6 +60,7 @@ import {
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import { cacheIdSchema } from '../db/cache.ts';
+import { readCasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	BlobReaperService,
@@ -886,11 +887,24 @@ async function hasRemainingTenantObjects(
 // Purge Durable Object storage before writing the terminal registry tombstone.
 // Each step is safe to repeat after an interruption.
 async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
-	await tenantServer(env, id).purgeStorage();
-
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	await finaliseOffboardedTenant(database, id);
-	await deleteTenantMember(env.TENANT_CACHE, id);
+	const references = await readCasReferenceSet(database);
+	const ready = await database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(
+			and(eq(d1Schema.tenant.id, id), references.artifactReferencesAbsent(id))
+		)
+		.get();
+	if (ready === undefined) {
+		return;
+	}
+
+	await tenantServer(env, id).purgeStorage();
+	const outcome = await finaliseOffboardedTenant(database, id);
+	if (outcome.finalised) {
+		await deleteTenantMember(env.TENANT_CACHE, id);
+	}
 }
 
 /**

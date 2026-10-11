@@ -1,6 +1,6 @@
 import { type Sha256HexDigest } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, notExists, sql } from 'drizzle-orm';
+import { and, eq, ne, notExists, type SQL, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -74,4 +74,43 @@ export async function publishCasObjectState(
 	const insert = database.insert(d1Schema.casObject).select(missingLiveState);
 
 	await database.batch([update, insert]);
+}
+
+/**
+ * Refuses a captured missing-object removal after repair advances either the
+ * registry or its published state. The registry can advance before state does.
+ */
+export function casObjectNotRepromoted(
+	database: DrizzleD1Database<typeof d1Schema>,
+	digest: Sha256HexDigest,
+	incarnation: number | undefined
+): SQL | undefined {
+	if (incarnation === undefined) {
+		return undefined;
+	}
+
+	const newerState = and(
+		eq(d1Schema.casObject.digest, digest),
+		ne(d1Schema.casObject.incarnation, incarnation)
+	);
+	const newerRegistry = and(
+		eq(d1Schema.objectIncarnation.kind, 'cas'),
+		eq(d1Schema.objectIncarnation.objectId, digest),
+		ne(d1Schema.objectIncarnation.incarnation, incarnation)
+	);
+
+	return and(
+		notExists(
+			database
+				.select({ one: sql`1` })
+				.from(d1Schema.casObject)
+				.where(newerState)
+		),
+		notExists(
+			database
+				.select({ one: sql`1` })
+				.from(d1Schema.objectIncarnation)
+				.where(newerRegistry)
+		)
+	);
 }

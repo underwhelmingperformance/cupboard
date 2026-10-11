@@ -170,12 +170,8 @@ export const maxNarInfoDeletionsFlushedPerRun =
 // One query finds the attestation references of every path in a chunk.
 const attestationQuerySubrequestsPerChunk = 1;
 
-// Retiring one attestation reference runs a three-statement batch: the edge
-// delete and the two reads that decide whether the tenant still holds the
-// digest. The tenant's last reference to a digest runs a further two-statement
-// batch for the quota credit and the presence delete. The drain cannot tell the
-// two apart until the delete has run, so it reserves the larger cost before
-// each reference.
+// Retiring a reference reads the installed reference kinds, then deletes the
+// edge and conditionally releases the tenant charge in one atomic batch.
 const attestationRetirementSubrequests = 2;
 
 // After retiring all attestation references, the chunk credits usage, deletes

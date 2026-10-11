@@ -1,11 +1,19 @@
 import { rootLogger } from '@cupboard/logger';
 import {
+	cacheGenerationSchema,
 	narInfoGenerationSchema,
 	predicateTypeSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
-	storePathHashSchema
+	storePathHashSchema,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import {
+	artifactGenerationSchema,
+	artifactIdSchema,
+	type ArtifactKind,
+	artifactKinds
+} from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -13,6 +21,7 @@ import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import {
 	lateWriteTombstoneHorizonMs,
@@ -40,6 +49,7 @@ import {
 	offboardTenant,
 	provisionFixtureTenant,
 	provisionNamedTenant,
+	recordTransition,
 	resetTestServer,
 	runCasReaperToCompletion as runCasReaper,
 	stageAttestationBundle,
@@ -58,6 +68,24 @@ const predicateType = predicateTypeSchema.parse(
 	'https://slsa.dev/provenance/v1'
 );
 const storePathHash = storePathHashSchema.parse('a'.repeat(32));
+
+async function fileArtifactProjection(
+	digest: Sha256HexDigest,
+	kind: ArtifactKind,
+	tenant = fixtureTenant
+): Promise<void> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	await database.insert(d1Schema.artifactReference).values({
+		tenant,
+		artifactId: artifactIdSchema.parse('00000000-0000-4000-8000-000000000001'),
+		artifactGeneration: artifactGenerationSchema.parse(1),
+		cacheKind: 'default',
+		cacheGeneration: cacheGenerationSchema.parse(1),
+		kind,
+		digest,
+		createdAt: isoTimestamp(new Date())
+	});
+}
 
 async function casLifecycleRows(digest: Sha256HexDigest) {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -638,6 +666,133 @@ describe('attestation CAS lifecycle', () => {
 			presence: [],
 			refs: []
 		});
+	});
+
+	it.each(artifactKinds)(
+		'keeps the tenant charge while a %s artifact references the digest',
+		async (kind) => {
+			await recordTransition('native-artifact-storage', 'complete');
+			const bundle = await fileAttestationReference({
+				uploadId: `artifact-credit-${kind}`,
+				bytes: textEncoder.encode('shared artifact and attestation bytes'),
+				storePathHash,
+				generation: 0,
+				predicateType
+			});
+			await fileArtifactProjection(bundle.digest, kind);
+			const reference = {
+				cache: defaultCache(),
+				storePathHash,
+				generation: narInfoGenerationSchema.parse(0),
+				predicateType,
+				digest: bundle.digest
+			};
+			const before = {
+				usage: await tenantUsageRow(),
+				presence: await tenantCasBlobRows()
+			};
+			await currentServer().removeAttestationReference(reference);
+			await currentServer().removeAttestationReference(reference);
+			expect({
+				usage: await tenantUsageRow(),
+				presence: await tenantCasBlobRows(),
+				attestations: await attestationReferenceRows()
+			}).toStrictEqual({ ...before, attestations: [] });
+
+			await env.CUPBOARD_DB.prepare('DELETE FROM artifact_ref WHERE tenant = ?')
+				.bind(fixtureTenant)
+				.run();
+			await currentServer().removeAttestationReference(reference);
+			expect({
+				usage: await tenantUsageRow(),
+				presence: await tenantCasBlobRows()
+			}).toStrictEqual({
+				usage: { ...before.usage, casBytes: 0, casBlobs: 0 },
+				presence: []
+			});
+		}
+	);
+
+	it('credits a tenant independently of another tenant artifact', async () => {
+		await recordTransition('native-artifact-storage', 'complete');
+		const bundle = await fileAttestationReference({
+			uploadId: 'artifact-other-tenant',
+			bytes: textEncoder.encode('separately charged bytes'),
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+		const otherTenant = tenantIdSchema.parse('other-tenant');
+		await fileArtifactProjection(bundle.digest, 'listing', otherTenant);
+		const before = await tenantUsageRow();
+		await currentServer().removeAttestationReference({
+			cache: defaultCache(),
+			storePathHash,
+			generation: narInfoGenerationSchema.parse(0),
+			predicateType,
+			digest: bundle.digest
+		});
+		const { results: artifacts } = await env.CUPBOARD_DB.prepare(
+			'SELECT tenant, digest FROM artifact_ref'
+		).all();
+		expect({
+			usage: await tenantUsageRow(),
+			presence: await tenantCasBlobRows(),
+			artifacts
+		}).toStrictEqual({
+			usage: { ...before, casBytes: 0, casBlobs: 0 },
+			presence: [],
+			artifacts: [{ tenant: otherTenant, digest: bundle.digest }]
+		});
+	});
+
+	it('refuses quota credit when artifact storage expands before the credit batch', async () => {
+		const bundle = await fileAttestationReference({
+			uploadId: 'artifact-credit-expansion-race',
+			bytes: textEncoder.encode('retained across expansion'),
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+		const before = {
+			usage: await tenantUsageRow(),
+			presence: await tenantCasBlobRows()
+		};
+		const statementSchema = z.object({ statement: z.string() });
+		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		let didInsert = false;
+		const spy = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementation(async (statements) => {
+				const hasUsageCredit = statements.some((statement) =>
+					statementSchema
+						.safeParse(statement)
+						.data?.statement.startsWith('update "tenant_usage"')
+				);
+				if (!didInsert && hasUsageCredit) {
+					didInsert = true;
+					await recordTransition('native-artifact-storage', 'complete');
+					await fileArtifactProjection(bundle.digest, 'listing');
+				}
+				return originalBatch(statements);
+			});
+		try {
+			await currentServer().removeAttestationReference({
+				cache: defaultCache(),
+				storePathHash,
+				generation: narInfoGenerationSchema.parse(0),
+				predicateType,
+				digest: bundle.digest
+			});
+		} finally {
+			spy.mockRestore();
+		}
+		expect({
+			didInsert,
+			usage: await tenantUsageRow(),
+			presence: await tenantCasBlobRows(),
+			attestations: await attestationReferenceRows()
+		}).toStrictEqual({ didInsert: true, ...before, attestations: [] });
 	});
 
 	it('rejects an over-quota CAS reference without stranding an edge or charge', async () => {

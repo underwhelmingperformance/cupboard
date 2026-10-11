@@ -31,6 +31,10 @@ import {
 	recoverAbandonedIncarnations
 } from '../blob/object-incarnation-recovery.ts';
 import { cacheScopeFromRow } from '../db/cache.ts';
+import {
+	type CasReferenceSet,
+	readCasReferenceSet
+} from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	blobReaperGraceMs,
@@ -200,16 +204,14 @@ export function buildBlobCollection(
 export function buildCasCollection(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	digests: JsonValueList<Sha256HexDigest>,
-	nowIso: IsoTimestamp
+	nowIso: IsoTimestamp,
+	references: CasReferenceSet
 ) {
-	const referencedDigests = d1
-		.select({ digest: d1Schema.attestationReference.digest })
-		.from(d1Schema.attestationReference);
 	const fence = and(
 		inArray(d1Schema.casObject.digest, digests),
 		isNotNull(d1Schema.casObject.deleteAfter),
 		lte(d1Schema.casObject.deleteAfter, nowIso),
-		notInArray(d1Schema.casObject.digest, referencedDigests)
+		references.unreferenced(d1Schema.casObject.digest)
 	);
 	const sameObjectId = eq(
 		d1Schema.casObject.digest,
@@ -486,16 +488,14 @@ export class BlobReaperService {
 		const deletionTime = isoTimestamp(
 			new Date(now.getTime() + blobReaperGraceMs)
 		);
-		const referencedDigests = this.d1
-			.select({ digest: d1Schema.attestationReference.digest })
-			.from(d1Schema.attestationReference);
+		const references = await readCasReferenceSet(this.d1);
 		const candidates = await this.d1
 			.select({ digest: d1Schema.casObject.digest })
 			.from(d1Schema.casObject)
 			.where(
 				and(
 					isNull(d1Schema.casObject.deleteAfter),
-					notInArray(d1Schema.casObject.digest, referencedDigests)
+					references.unreferenced(d1Schema.casObject.digest)
 				)
 			)
 			.limit(limit + 1)
@@ -509,12 +509,12 @@ export class BlobReaperService {
 		const candidateDigests = batch.map((candidate) => candidate.digest);
 
 		// The update arms only rows whose timer is still unset, so a concurrent
-		// attestation reference wins.
+		// reference wins.
 		const queries = jsonValueLists(candidateDigests).map((digests) => {
 			const fence = and(
 				inArray(d1Schema.casObject.digest, digests),
 				isNull(d1Schema.casObject.deleteAfter),
-				notInArray(d1Schema.casObject.digest, referencedDigests)
+				references.unreferenced(d1Schema.casObject.digest)
 			);
 
 			return this.d1
@@ -533,6 +533,7 @@ export class BlobReaperService {
 		limit: number
 	): Promise<{ readonly deleted: number; readonly hasMoreWork: boolean }> {
 		const nowIso = isoTimestamp(now);
+		const references = await readCasReferenceSet(this.d1);
 		const expired = await this.d1
 			.select({
 				digest: d1Schema.casObject.digest,
@@ -542,7 +543,8 @@ export class BlobReaperService {
 			.where(
 				and(
 					isNotNull(d1Schema.casObject.deleteAfter),
-					lte(d1Schema.casObject.deleteAfter, nowIso)
+					lte(d1Schema.casObject.deleteAfter, nowIso),
+					references.unreferenced(d1Schema.casObject.digest)
 				)
 			)
 			.limit(limit + 1)
@@ -563,7 +565,8 @@ export class BlobReaperService {
 			const { retire, queueDeletion, remove } = buildCasCollection(
 				this.d1,
 				digests,
-				nowIso
+				nowIso,
+				references
 			);
 			const collection = await this.d1.batch([retire, queueDeletion, remove]);
 			const removed = collection[2];

@@ -1,3 +1,4 @@
+import { type BuildTraceKey } from '@cupboard/nix-store/build-trace';
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
@@ -13,11 +14,19 @@ import {
 	type Sha256HexDigest,
 	type SigningKeyGeneration,
 	signingKeyGenerationSchema,
+	type StorePathBasename,
 	type StorePathHash,
 	type StorePathString,
 	type TenantId,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import {
+	type ArtifactGeneration,
+	type ArtifactId,
+	type ArtifactKind,
+	artifactKinds,
+	type ListingGeneratorRevision
+} from '@cupboard/protocol/artifacts';
 import type {
 	OidcIssuer,
 	OidcSubject,
@@ -1151,4 +1160,196 @@ export const grantContraction = sqliteTable(
 		complete: integer('complete', { mode: 'boolean' }).notNull().default(false)
 	},
 	(table) => [check('grant_contraction_singleton_check', sql`${table.id} = 1`)]
+);
+
+export const artifacts = sqliteTable(
+	'artifact',
+	{
+		id: text('id').$type<ArtifactId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		generation: integer('generation').$type<ArtifactGeneration>().notNull(),
+		kind: text('kind', { enum: artifactKinds }).$type<ArtifactKind>().notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		publicationIncarnation: integer('publication_incarnation').notNull(),
+		state: text('state', { enum: ['pending', 'live', 'retired'] }).notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		completedAt: text('completed_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		index('artifact_cache_idx').on(table.cacheId, table.id),
+		index('artifact_digest_idx').on(table.digest, table.id),
+		index('artifact_expiry_idx').on(table.expiresAt, table.id),
+		index('artifact_pending_idx').on(table.state, table.id),
+		check('artifact_generation_check', sql`${table.generation} >= 1`),
+		check(
+			'artifact_incarnation_check',
+			sql`${table.publicationIncarnation} >= 1`
+		),
+		check(
+			'artifact_log_expiry_check',
+			sql`${table.kind} != 'build-log' OR ${table.expiresAt} IS NOT NULL`
+		),
+		check(
+			'artifact_completion_check',
+			sql`${table.state} != 'live' OR ${table.completedAt} IS NOT NULL`
+		)
+	]
+);
+
+export const artifactParents = sqliteTable(
+	'artifact_parent',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().notNull(),
+		artifactGeneration: integer('artifact_generation')
+			.$type<ArtifactGeneration>()
+			.notNull(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		publicationGeneration: integer('publication_generation')
+			.$type<NarInfoGeneration>()
+			.notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [
+				table.artifactId,
+				table.artifactGeneration,
+				table.storePathHash,
+				table.publicationGeneration
+			]
+		}),
+		index('artifact_parent_publication_idx').on(
+			table.cacheId,
+			table.storePathHash,
+			table.publicationGeneration,
+			table.artifactId
+		)
+	]
+);
+
+export const artifactRoots = sqliteTable(
+	'artifact_root',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().notNull(),
+		artifactGeneration: integer('artifact_generation')
+			.$type<ArtifactGeneration>()
+			.notNull(),
+		kind: text('kind', { enum: ['cache-lifetime', 'expiry'] }).notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.artifactId, table.artifactGeneration, table.kind]
+		}),
+		index('artifact_root_expiry_idx').on(table.expiresAt, table.artifactId),
+		check(
+			'artifact_root_expiry_check',
+			sql`(${table.kind} = 'cache-lifetime' AND ${table.expiresAt} IS NULL) OR (${table.kind} = 'expiry' AND ${table.expiresAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const artifactReferenceDeletion = sqliteTable(
+	'artifact_reference_deletion',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().notNull(),
+		artifactGeneration: integer('artifact_generation')
+			.$type<ArtifactGeneration>()
+			.notNull(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.artifactId, table.artifactGeneration] }),
+		index('artifact_reference_deletion_cache_idx').on(table.cacheId)
+	]
+);
+
+export const narListings = sqliteTable(
+	'nar_listing',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		format: integer('format').$type<1>().notNull()
+	},
+	(table) => [
+		uniqueIndex('nar_listing_identity_idx').on(
+			table.cacheId,
+			table.narHash,
+			table.generatorRevision
+		),
+		check('nar_listing_format_check', sql`${table.format} = 1`)
+	]
+);
+
+export const buildLogs = sqliteTable(
+	'build_log',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		derivation: text('derivation').$type<StorePathBasename>().notNull(),
+		attemptId: text('attempt_id'),
+		sourceKind: text('source_kind', {
+			enum: ['local-stored', 'observed', 'remote-stored']
+		}).notNull(),
+		sourceDescription: text('source_description').notNull(),
+		capturedAt: text('captured_at').$type<IsoTimestamp>().notNull(),
+		completeness: text('completeness', {
+			enum: ['complete', 'incomplete', 'truncated']
+		}).notNull(),
+		outcome: text('outcome', {
+			enum: ['success', 'failure', 'unknown']
+		}).notNull()
+	},
+	(table) => [
+		index('build_log_derivation_idx').on(
+			table.cacheId,
+			table.derivation,
+			table.capturedAt,
+			table.artifactId
+		),
+		index('build_log_attempt_idx').on(table.cacheId, table.attemptId)
+	]
+);
+
+export const buildTraceMappings = sqliteTable(
+	'build_trace_mapping',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		derivation: text('derivation').$type<StorePathBasename>().notNull(),
+		outputName: text('output_name')
+			.$type<BuildTraceKey['outputName']>()
+			.notNull(),
+		outputPath: text('output_path').$type<StorePathBasename>().notNull(),
+		artifactId: text('artifact_id').$type<ArtifactId>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.cacheId, table.derivation, table.outputName]
+		}),
+		index('build_trace_mapping_artifact_idx').on(table.artifactId)
+	]
+);
+
+export const listingGenerationProofs = sqliteTable(
+	'listing_generation_proof',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().primaryKey(),
+		listingArtifactId: text('listing_artifact_id')
+			.$type<ArtifactId>()
+			.notNull(),
+		predicateType: text('predicate_type').$type<PredicateType>().notNull(),
+		signingKey: text('signing_key').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('listing_generation_proof_listing_idx').on(table.listingArtifactId)
+	]
 );

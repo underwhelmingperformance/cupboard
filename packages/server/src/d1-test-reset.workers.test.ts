@@ -33,6 +33,12 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			"INSERT INTO object_incarnation (kind, object_id, incarnation, state) VALUES ('nar', 'reset-object', 1, 'absent')"
 		),
 		env.CUPBOARD_DB.prepare(
+			"INSERT INTO artifact_ref (tenant, artifact_id, artifact_generation, cache_kind, cache_generation, kind, digest, created_at) VALUES ('reset-tenant', 'reset-artifact', 1, 'default', 1, 'listing', 'reset-digest', '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_fact (nar_hash, generator_revision, format, digest, size, created_at) VALUES ('reset-nar', 'reset-generator', 1, 'reset-digest', 100, '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
 			"UPDATE deployment_transition SET state = 'pending', updated_at = '2025-01-01T00:00:00.000Z'"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -86,6 +92,8 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		tenant_blob: 0,
 		cas_object_storage: 0,
 		attestation_ref_storage: 0,
+		artifact_ref: 0,
+		listing_fact: 0,
 		tenant_cas_blob_storage: 0,
 		tenant_usage: 0,
 		local_step_wake_cursor: 0
