@@ -46,9 +46,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
@@ -71,9 +71,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
@@ -96,9 +96,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
@@ -121,9 +121,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
@@ -146,9 +146,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
@@ -183,9 +183,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
@@ -240,9 +240,9 @@ jobs:
 
       # Build the CLI through the flake so a stale pnpm dependency hash or a
       # broken derivation fails here rather than in a consumer's checkout.
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - run: nix flake check
 
@@ -285,9 +285,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
@@ -310,9 +310,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
@@ -339,9 +339,9 @@ jobs:
       # derivations, the composite action, and an OIDC push to a Worker in
       # workerd. Install the same Nix used by publication jobs. The remote-store
       # leg starts its ssh-ng store in a container supplied by the runner image.
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.35.2
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 

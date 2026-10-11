@@ -48,7 +48,7 @@ const remoteStoreDockerfile = new URL(
 );
 
 const checkoutAction = 'actions/checkout';
-const nixInstaller = 'nixbuild/nix-quick-install-action';
+const nixInstaller = 'cachix/install-nix-action';
 const nixClientVersion = '2.35.2';
 const cloudGuardStep = 'Require GitHub Cloud workflow identity';
 const reservationStep = 'Reserve the cupboard workflow checkout';
@@ -1854,18 +1854,32 @@ describe('pinned Nix client', () => {
 
 		expect({
 			installs,
+			installerCount: installs.length,
 			// The composite action is not a workflow, so its pinned step is read
 			// from the file.
-			prepareInstalls: action.includes(`nix_version: ${nixClientVersion}`),
+			prepareInstalls: action.includes(
+				`install_url: https://releases.nixos.org/nix/nix-${nixClientVersion}/install`
+			),
 			otherInstallers: workflows.flatMap((workflow) =>
 				allSteps(workflow)
 					.map(({ step }) => step.uses)
-					.filter((uses) => uses?.includes('nix-installer-action'))
+					.filter((uses) => {
+						if (uses === undefined) {
+							return false;
+						}
+						return (
+							uses.includes('nix-installer-action') ||
+							uses.includes('nix-quick-install-action')
+						);
+					})
 			),
 			// The e2e daemon image is the matching release of the same series.
 			remoteDaemon: dockerfile.includes('FROM nixos/nix:2.35.2@sha256:')
 		}).toStrictEqual({
-			installs: installs.map(() => ({ nix_version: nixClientVersion })),
+			installs: installs.map(() => ({
+				install_url: `https://releases.nixos.org/nix/nix-${nixClientVersion}/install`
+			})),
+			installerCount: 13,
 			prepareInstalls: true,
 			otherInstallers: [],
 			remoteDaemon: true
