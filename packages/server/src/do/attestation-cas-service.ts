@@ -388,9 +388,8 @@ export class AttestationCasService {
 		);
 		const presenceFilter = this.presenceFilter(tenant, reference.digest);
 
-		// D1 executes a batch sequentially in one transaction. These reads must see
-		// the state after the edge deletion so only the last reference releases the
-		// tenant's charge.
+		// The credit batch rechecks references because a publisher can add one
+		// after these reads.
 		const [, stillReferencedRows, presenceRows] = await this.context.d1.batch([
 			this.context.d1
 				.delete(d1Schema.attestationReference)
@@ -398,7 +397,8 @@ export class AttestationCasService {
 			this.context.d1
 				.select({ digest: d1Schema.attestationReference.digest })
 				.from(d1Schema.attestationReference)
-				.where(stillReferencedFilter),
+				.where(stillReferencedFilter)
+				.limit(1),
 			this.context.d1
 				.select({ size: d1Schema.tenantCasBlob.size })
 				.from(d1Schema.tenantCasBlob)
@@ -426,10 +426,17 @@ export class AttestationCasService {
 				.from(d1Schema.tenantCasBlob)
 				.where(presenceFilter)
 		);
+		const unreferenced = notExists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.attestationReference)
+				.where(stillReferencedFilter)
+		);
 		const creditFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			presenceExists,
-			notRepromoted
+			notRepromoted,
+			unreferenced
 		);
 
 		await this.context.d1.batch([
@@ -443,7 +450,7 @@ export class AttestationCasService {
 				.where(creditFilter),
 			this.context.d1
 				.delete(d1Schema.tenantCasBlob)
-				.where(and(presenceFilter, notRepromoted))
+				.where(and(presenceFilter, notRepromoted, unreferenced))
 		]);
 	}
 }

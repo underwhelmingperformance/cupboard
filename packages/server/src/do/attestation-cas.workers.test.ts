@@ -551,6 +551,95 @@ describe('attestation CAS lifecycle', () => {
 		});
 	});
 
+	it('keeps the charge when another reference appears after removal preflight', async () => {
+		const bundle = await fileAttestationReference({
+			uploadId: 'credit-reference-race',
+			bytes: textEncoder.encode('retained after removal preflight'),
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+		const reference = {
+			cache: defaultCache(),
+			storePathHash,
+			generation: narInfoGenerationSchema.parse(0),
+			predicateType,
+			digest: bundle.digest
+		};
+		const before = {
+			usage: await tenantUsageRow(),
+			presence: await tenantCasBlobRows()
+		};
+		const otherPathHash = storePathHashSchema.parse('b'.repeat(32));
+		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		let didInsert = false;
+		const spy = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementation(async (statements) => {
+				const results = await originalBatch(statements);
+				if (didInsert) {
+					return results;
+				}
+				const remaining = await env.CUPBOARD_DB.prepare(
+					'SELECT count(*) AS count FROM attestation_ref_storage WHERE tenant = ? AND store_path_hash = ? AND digest = ?'
+				)
+					.bind(fixtureTenant, storePathHash, bundle.digest)
+					.first<number>('count');
+				if (remaining !== 0) {
+					return results;
+				}
+				didInsert = true;
+				await originalBatch([
+					env.CUPBOARD_DB.prepare(
+						'UPDATE tenant_usage SET cas_bytes = cas_bytes + ?, cas_blobs = cas_blobs + 1 WHERE tenant = ? AND NOT EXISTS (SELECT 1 FROM tenant_cas_blob_storage WHERE tenant = ? AND digest = ?)'
+					).bind(bundle.size, fixtureTenant, fixtureTenant, bundle.digest),
+					env.CUPBOARD_DB.prepare(
+						"INSERT INTO attestation_ref_storage (tenant, cache_kind, store_path_hash, generation, predicate_type, digest) VALUES (?, 'default', ?, 0, ?, ?)"
+					).bind(fixtureTenant, otherPathHash, predicateType, bundle.digest),
+					env.CUPBOARD_DB.prepare(
+						'INSERT INTO tenant_cas_blob_storage (tenant, digest, size) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM tenant_cas_blob_storage WHERE tenant = ? AND digest = ?)'
+					).bind(
+						fixtureTenant,
+						bundle.digest,
+						bundle.size,
+						fixtureTenant,
+						bundle.digest
+					)
+				]);
+				return results;
+			});
+		try {
+			await currentServer().removeAttestationReference(reference);
+		} finally {
+			spy.mockRestore();
+		}
+		expect({
+			didInsert,
+			usage: await tenantUsageRow(),
+			presence: await tenantCasBlobRows(),
+			refs: await attestationReferenceRows()
+		}).toStrictEqual({
+			didInsert: true,
+			...before,
+			refs: [
+				{ tenant: fixtureTenant, ...reference, storePathHash: otherPathHash }
+			]
+		});
+		await currentServer().removeAttestationReference({
+			...reference,
+			storePathHash: otherPathHash
+		});
+		expect({
+			usage: await tenantUsageRow(),
+			presence: await tenantCasBlobRows(),
+			refs: await attestationReferenceRows()
+		}).toStrictEqual({
+			usage: { ...before.usage, casBytes: 0, casBlobs: 0 },
+			presence: [],
+			refs: []
+		});
+	});
+
 	it('rejects an over-quota CAS reference without stranding an edge or charge', async () => {
 		await provisionFixtureTenant({ quotaBytes: 1 });
 		const bytes = textEncoder.encode('too large');
