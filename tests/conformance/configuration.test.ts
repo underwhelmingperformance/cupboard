@@ -7,7 +7,6 @@ import {
 	comparisonOf,
 	type ConfigurationFixture,
 	resolveFixture,
-	settingsAbsentFromTheOracle,
 	settingsMissingFromOracle,
 	settingsOf,
 	unmodelledSettings
@@ -122,6 +121,19 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 					'download-attempts = 9\n' +
 					'stalled-download-timeout = 42\n' +
 					'http-connections = 3\n'
+			}
+		},
+		{
+			name: 'retry settings introduced in Nix 2.35',
+			fixture: {
+				nixConf: [
+					'filetransfer-retry-attempts = 9',
+					'filetransfer-retry-delay = 2k',
+					'filetransfer-retry-delay-rate-limited = 9000',
+					'filetransfer-retry-max-delay = 30000',
+					'filetransfer-retry-jitter = false',
+					''
+				].join('\n')
 			}
 		},
 		{
@@ -386,14 +398,6 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 		);
 
 		expect(unmodelled).toStrictEqual(recordedUnmodelledSettings);
-	});
-
-	it('confirms that the renamed transfer settings remain absent', async () => {
-		const settings = settingsOf(await resolveFixture(oracle, { nixConf: '' }));
-
-		expect(
-			settingsAbsentFromTheOracle.filter((setting) => settings.has(setting))
-		).toStrictEqual([]);
 	});
 
 	// Nix derives the microarchitecture levels from the local CPU and reports

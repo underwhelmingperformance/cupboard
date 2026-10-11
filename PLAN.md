@@ -34,7 +34,7 @@ cannot unwrap the control signing key it can read from shared D1.
 
 ## Compatibility
 
-- Develop and test against Nix 2.34.7, which the end-to-end suite installs with
+- Develop and test against Nix 2.35.2, which the end-to-end suite installs with
   Determinate Nix. That is the only version cupboard is verified against, and
   there is no compatibility guarantee for older releases. Supporting older
   clients is an explicit non-goal. zstd-compressed NARs are the obvious hard
