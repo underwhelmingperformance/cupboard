@@ -94,6 +94,28 @@ describe('required source check', () => {
 		]);
 	});
 
+	it('prints the complete oracle failure in the job log', async () => {
+		const { jobs } = await workflow();
+		const step = jobs.conformance?.steps?.find((candidate) =>
+			candidate.run?.startsWith('pnpm update:conformance-oracle')
+		);
+
+		expect(step).toStrictEqual({
+			name: 'Check the generated oracle data',
+			env: {
+				NIX_SYSTEM: '${{ matrix.system }}',
+				CUPBOARD_DEFER_ERROR_ANNOTATIONS: '1'
+			},
+			run: [
+				'pnpm update:conformance-oracle --system "$NIX_SYSTEM"',
+				'git diff --exit-code -- \\',
+				'  tests/conformance/oracle.json \\',
+				'  "packages/nix/src/setting-types.${NIX_SYSTEM}.generated.ts"',
+				''
+			].join('\n')
+		});
+	});
+
 	it.each(['success', 'failure', 'cancelled', 'skipped'])(
 		'accepts only successful prerequisites (%s)',
 		async (result) => {

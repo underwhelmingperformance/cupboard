@@ -61,8 +61,9 @@ describe('binaryCliEntrySource', () => {
 			throw new TypeError('The binary entry bundle was not generated');
 		}
 		const context: unknown = JSON.parse(
-			execFileSync(process.execPath, ['-e', output.text], {
-				encoding: 'utf8'
+			execFileSync(process.execPath, ['--input-type=commonjs', '-'], {
+				encoding: 'utf8',
+				input: output.text
 			})
 		);
 		const traceId: unknown = expect.stringMatching(/^(?!0{32}$)[0-9a-f]{32}$/u);
