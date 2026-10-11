@@ -5,6 +5,7 @@ import {
 	type NixSha256HashString
 } from '@cupboard/nix-store/scalars';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
+import { withDeadline } from '@cupboard/shared/timeout';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -402,9 +403,62 @@ describe('verifyDecompressedNar', () => {
 	const encoder = new TextEncoder();
 	const nar = encoder.encode('nar payload '.repeat(250_000));
 
+	it('accepts a valid NAR while an optional metadata write remains stalled', async () => {
+		const started = Promise.withResolvers<undefined>();
+		const blocked = Promise.withResolvers<undefined>();
+		const deferred: Promise<void>[] = [];
+		let wasFinished = false;
+		const compressed = await compressedBytes(nar);
+		const verification = verifyDecompressedNar(
+			byteBody([compressed]).stream,
+			{ narHash: await nixNarHash(nar), narSize: nar.byteLength },
+			{
+				metadata: {
+					defer(completion) {
+						deferred.push(completion);
+					},
+					sink: {
+						async write() {
+							started.resolve(undefined);
+							await blocked.promise;
+						},
+						finish() {
+							wasFinished = true;
+							return Promise.resolve();
+						},
+						abort() {
+							return Promise.resolve();
+						}
+					}
+				}
+			}
+		);
+		await started.promise;
+		try {
+			const result = await withDeadline(
+				() => verification,
+				1000,
+				() => new Error('Optional metadata blocked valid NAR verification.')
+			);
+			expect({ result, wasFinished }).toStrictEqual({
+				result: {
+					ok: true,
+					fileHash: await nixNarHash(compressed),
+					fileSize: compressed.byteLength
+				},
+				wasFinished: false
+			});
+		} finally {
+			blocked.resolve(undefined);
+			await verification;
+			await Promise.all(deferred);
+		}
+	});
+
 	it.each(['none', 'write', 'finish'] as const)(
 		'generates optional metadata in the decode pass, with failure at %s',
 		async (failure) => {
+			const deferred: Promise<void>[] = [];
 			let metadataBytes = 0;
 			const fault = new Error('optional metadata failed');
 			const aborted: unknown[] = [];
@@ -415,27 +469,33 @@ describe('verifyDecompressedNar', () => {
 				{ narHash: await nixNarHash(nar), narSize: nar.byteLength },
 				{
 					metadata: {
-						write(chunk) {
-							if (failure === 'write') {
-								throw fault;
-							}
-							metadataBytes += chunk.byteLength;
-							return Promise.resolve();
+						defer(completion) {
+							deferred.push(completion);
 						},
-						finish() {
-							wasFinished = true;
-							if (failure === 'finish') {
-								throw fault;
+						sink: {
+							write(chunk) {
+								if (failure === 'write') {
+									throw fault;
+								}
+								metadataBytes += chunk.byteLength;
+								return Promise.resolve();
+							},
+							finish() {
+								wasFinished = true;
+								if (failure === 'finish') {
+									throw fault;
+								}
+								return Promise.resolve();
+							},
+							abort(error) {
+								aborted.push(error);
+								return Promise.resolve();
 							}
-							return Promise.resolve();
-						},
-						abort(error) {
-							aborted.push(error);
-							return Promise.resolve();
 						}
 					}
 				}
 			);
+			await Promise.all(deferred);
 			expect({ result, wasFinished, aborted, metadataBytes }).toStrictEqual({
 				result: {
 					ok: true,
@@ -450,6 +510,7 @@ describe('verifyDecompressedNar', () => {
 	);
 
 	it('aborts optional metadata when the NAR fails verification', async () => {
+		const deferred: Promise<void>[] = [];
 		const finish = vi.fn<() => Promise<void>>().mockResolvedValue();
 		const abort = vi
 			.fn<(reason: unknown) => Promise<void>>()
@@ -460,8 +521,16 @@ describe('verifyDecompressedNar', () => {
 		const result = await verifyDecompressedNar(
 			await compressedStream(nar),
 			{ narHash: await nixNarHash(new Uint8Array()), narSize: nar.byteLength },
-			{ metadata: { write, finish, abort } }
+			{
+				metadata: {
+					sink: { write, finish, abort },
+					defer(completion) {
+						deferred.push(completion);
+					}
+				}
+			}
 		);
+		await Promise.all(deferred);
 		expect({
 			result,
 			finishCalls: finish.mock.calls,

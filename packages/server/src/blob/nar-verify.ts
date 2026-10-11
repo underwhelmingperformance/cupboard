@@ -17,6 +17,10 @@ import {
 	openStoredNarChunks,
 	type RangeReadProgress
 } from './nar-chunks.ts';
+import {
+	type NarMetadataCapture,
+	OptionalNarMetadata
+} from './nar-metadata.ts';
 import { type NarReadBufferPool } from './nar-read-buffers.ts';
 import { isR2BadDigest } from './r2-errors.ts';
 
@@ -134,61 +138,7 @@ export function narVerifyProgress(): NarVerifyProgress {
 
 export interface NarVerifyOptions {
 	readonly progress?: NarVerifyProgress;
-	readonly metadata?: NarMetadataSink;
-}
-
-/**
- * Receives the uncompressed NAR in the verification pass. `finish` runs only
- * after verification accepts the NAR and the compressed object. A metadata
- * error calls `abort` and disables the sink without rejecting the NAR.
- */
-export interface NarMetadataSink {
-	write(chunk: Uint8Array): Promise<void>;
-	finish(): Promise<void>;
-	abort(reason: unknown): Promise<void>;
-}
-
-class OptionalNarMetadata {
-	private isActive: boolean;
-
-	constructor(private readonly sink?: NarMetadataSink) {
-		this.isActive = sink !== undefined;
-	}
-
-	async abort(reason: unknown): Promise<void> {
-		if (!this.isActive) {
-			return;
-		}
-		this.isActive = false;
-		try {
-			await this.sink?.abort(reason);
-		} catch {
-			return;
-		}
-	}
-
-	async write(chunk: Uint8Array): Promise<void> {
-		if (!this.isActive) {
-			return;
-		}
-		try {
-			await this.sink?.write(chunk);
-		} catch (error) {
-			await this.abort(error);
-		}
-	}
-
-	async finish(): Promise<void> {
-		if (!this.isActive) {
-			return;
-		}
-		try {
-			await this.sink?.finish();
-			this.isActive = false;
-		} catch (error) {
-			await this.abort(error);
-		}
-	}
+	readonly metadata?: NarMetadataCapture;
 }
 
 export interface StoredNarVerifyOptions extends NarVerifyOptions {
@@ -320,7 +270,7 @@ class NarDecoder {
 		}
 
 		await this.hash.write(chunk);
-		await this.metadata.write(chunk);
+		this.metadata.write(chunk);
 	}
 
 	/**
@@ -437,7 +387,7 @@ async function verifyNarChunks<Result extends DeclaredNarVerification>(
 	progress: NarVerifyProgress,
 	sink: CompressedSink<Result>,
 	watchdog?: StallWatchdog,
-	metadataSink?: NarMetadataSink
+	metadataSink?: NarMetadataCapture
 ): Promise<Result | NarMismatch> {
 	const signal = watchdog?.signal;
 	const metadata = new OptionalNarMetadata(metadataSink);
@@ -451,6 +401,7 @@ async function verifyNarChunks<Result extends DeclaredNarVerification>(
 	let next = readAhead(source);
 	let isDecoded = false;
 	let isFinished = false;
+	let isAccepted = false;
 
 	try {
 		for (;;) {
@@ -510,7 +461,8 @@ async function verifyNarChunks<Result extends DeclaredNarVerification>(
 		const result = await raceVerificationOperation(sink.finish(), signal);
 		isFinished = true;
 		if (result.ok) {
-			await raceVerificationOperation(metadata.finish(), signal);
+			isAccepted = true;
+			metadata.finish();
 		}
 
 		return result;
@@ -519,8 +471,10 @@ async function verifyNarChunks<Result extends DeclaredNarVerification>(
 		// Another verification can detach a buffer as soon as it is back in the
 		// pool.
 		const reason: unknown = signal?.reason ?? verificationRejected();
+		if (!isAccepted) {
+			metadata.abort(reason);
+		}
 		await Promise.allSettled([
-			metadata.abort(reason),
 			...(isDecoded ? [] : [decoder.destroy()]),
 			...(isFinished ? [] : [sink.abort(reason)])
 		]);
