@@ -11,6 +11,7 @@
 		"vitest": "catalog:"
 	},
 	"exports": {
+		"./build-trace": "./src/build-trace.ts",
 		"./cache-info": "./src/cache-info.ts",
 		"./cache-url": "./src/cache-url.ts",
 		"./content-address": "./src/content-address.ts",
