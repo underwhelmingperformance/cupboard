@@ -29,6 +29,7 @@ import {
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import {
+	buildPushPhases,
 	formatBytes,
 	formatDuration,
 	type Reporter,
@@ -604,17 +605,46 @@ function stubCountFile(workspace: string): string {
 }
 
 const workspaces: string[] = [];
+const flows = new Map<AbortController, Promise<FlowRun>>();
 
-afterEach(async () => {
+afterEach(cleanupFlows);
+
+async function cleanupFlows(): Promise<void> {
+	for (const controller of flows.keys()) {
+		controller.abort(new CliAbortError());
+	}
+	await Promise.allSettled(flows.values());
 	const removals = workspaces.map((workspace) =>
 		rm(workspace, { recursive: true, force: true })
 	);
 	workspaces.length = 0;
 
 	await Promise.all(removals);
-});
+}
 
-async function runFlow(config: FlowConfig): Promise<FlowRun> {
+function runFlow(config: FlowConfig): Promise<FlowRun> {
+	const controller = new AbortController();
+	const run = finishFlow(config, controller);
+	flows.set(controller, run);
+	return run;
+}
+
+async function finishFlow(
+	config: FlowConfig,
+	controller: AbortController
+): Promise<FlowRun> {
+	const signal =
+		config.signal === undefined
+			? controller.signal
+			: AbortSignal.any([config.signal, controller.signal]);
+	try {
+		return await executeFlow({ ...config, signal });
+	} finally {
+		flows.delete(controller);
+	}
+}
+
+async function executeFlow(config: FlowConfig): Promise<FlowRun> {
 	const workspace = await mkdtemp(path.join(tmpdir(), 'cupboard-bp-'));
 	workspaces.push(workspace);
 
@@ -1192,6 +1222,100 @@ function grantNothing(socket: FakeCommitSocket): void {
 		}
 	});
 }
+
+it.each(['command', 'constructed'] as const)(
+	'refuses a %s child cancelled as its build phase starts',
+	async (kind) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-aborted-build-')
+		);
+		const marker = path.join(directory, 'started');
+		const controller = new AbortController();
+		const reason = new CliAbortError();
+		try {
+			const run = await runFlow({
+				signal: controller.signal,
+				...(kind === 'command'
+					? {
+							command: [
+								process.execPath,
+								'-e',
+								"require('node:fs').writeFileSync(process.argv[1], 'started');",
+								marker
+							] satisfies ChildCommand
+						}
+					: { constructed: { succeedOn: 1 } }),
+				phaseStarted(label) {
+					if (label === buildPushPhases.build) {
+						controller.abort(reason);
+					}
+				}
+			});
+			const workspace = path.dirname(run.preflight.runtimePlan.directory);
+			expect({
+				error: run.error,
+				commandStarted: existsSync(marker),
+				constructedStarted: existsSync(stubCountFile(workspace)),
+				runtimeExists: existsSync(run.preflight.runtimePlan.directory)
+			}).toStrictEqual({
+				error: reason,
+				commandStarted: false,
+				constructedStarted: false,
+				runtimeExists: false
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	}
+);
+
+it('joins a cancelled flow before removing its workspace', async () => {
+	const reconciling = Promise.withResolvers<undefined>();
+	const verdict = Promise.withResolvers<undefined>();
+	const runPromise = runFlow({
+		emitEvent: true,
+		valid: [pathA],
+		phaseStarted(label) {
+			if (label === 'Reconciling build results') {
+				reconciling.resolve(undefined);
+			}
+		},
+		publicationClient: {
+			negotiate: (body) =>
+				Promise.resolve({
+					uploads: body.paths.map((candidate) =>
+						decisionFor(storePathSchema.parse(candidate.storePath), 'commit')
+					)
+				}),
+			commit: (target) =>
+				Promise.resolve({
+					...target,
+					status: 'pending',
+					settled: verdict.promise
+				})
+		}
+	});
+	let isFlowSettled = false;
+	const completion = (async () => {
+		await runPromise;
+		isFlowSettled = true;
+	})();
+	try {
+		await reconciling.promise;
+		const workspace = workspaces[0];
+		await cleanupFlows();
+		expect({
+			isFlowSettled,
+			workspaceExists: workspace !== undefined && existsSync(workspace)
+		}).toStrictEqual({
+			isFlowSettled: true,
+			workspaceExists: false
+		});
+	} finally {
+		verdict.resolve(undefined);
+		await completion;
+	}
+});
 
 describe('capacityWaitReporter', () => {
 	beforeEach(() => {

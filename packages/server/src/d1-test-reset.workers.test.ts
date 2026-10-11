@@ -1,13 +1,20 @@
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { getTableName, is } from 'drizzle-orm';
+import { eq, getTableName, is, sql } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/d1';
 import { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { expect, it, vi } from 'vitest';
 
 import { testControlDatabase } from './control-database.test-support.ts';
 import { resetControlD1TestState, resetD1TestState } from './d1-test-reset.ts';
 import * as schema from './db/d1-schema.ts';
-import { currentServer, resetTestServer } from './test-support.ts';
+import { fixtureTenant } from './routing/tenant-routing.test-support.ts';
+import {
+	configureFixtureTenants,
+	currentServer,
+	provisionFixtureTenant,
+	resetTestServer
+} from './test-support.ts';
 
 it('clears shared D1 facts and restores the completed transition in one batch', async () => {
 	await env.CUPBOARD_DB.batch([
@@ -164,4 +171,99 @@ it('resets the isolated control database without changing shared state or exposi
 		sharedAdmin: [{ issuer: 'legacy-issuer' }],
 		tenantBindings: { controlDatabase: false, controlDatabaseService: false }
 	});
+});
+
+it('batches fixture provisioning while preserving usage and updating cache access', async () => {
+	await provisionFixtureTenant();
+	const database = drizzle(env.CUPBOARD_DB, { schema });
+	await database
+		.update(schema.tenantUsage)
+		.set({ bytes: 7, narinfos: 2, blobs: 1 })
+		.where(eq(schema.tenantUsage.tenant, fixtureTenant));
+	const batch = vi.spyOn(env.CUPBOARD_DB, 'batch');
+	let batchSizes: number[];
+	try {
+		await provisionFixtureTenant({
+			defaultCacheAccess: 'private',
+			quotaBytes: 100
+		});
+		batchSizes = batch.mock.calls.map(([statements]) => statements.length);
+	} finally {
+		batch.mockRestore();
+	}
+	const tenant = await database
+		.select({
+			status: schema.tenant.status,
+			configVersion: schema.tenant.configVersion
+		})
+		.from(schema.tenant)
+		.where(eq(schema.tenant.id, fixtureTenant))
+		.get();
+	const cache = await database
+		.select({
+			access: schema.cacheLifecycle.access,
+			generation: schema.cacheLifecycle.generation,
+			isDeleted:
+				sql<boolean>`${schema.cacheLifecycle.deletedAt} IS NOT NULL`.mapWith(
+					Boolean
+				)
+		})
+		.from(schema.cacheLifecycle)
+		.where(eq(schema.cacheLifecycle.tenant, fixtureTenant))
+		.get();
+	const usage = await database
+		.select({
+			bytes: schema.tenantUsage.bytes,
+			narinfos: schema.tenantUsage.narinfos,
+			blobs: schema.tenantUsage.blobs,
+			quotaBytes: schema.tenantUsage.quotaBytes
+		})
+		.from(schema.tenantUsage)
+		.where(eq(schema.tenantUsage.tenant, fixtureTenant))
+		.get();
+	expect({ batchSizes, tenant, cache, usage }).toStrictEqual({
+		batchSizes: [3],
+		tenant: { status: 'active', configVersion: 1 },
+		cache: { access: 'private', generation: 1, isDeleted: false },
+		usage: { bytes: 7, narinfos: 2, blobs: 1, quotaBytes: 100 }
+	});
+});
+
+it('joins both fixture configurations before reporting a failed sibling', async () => {
+	const sibling = Promise.withResolvers<undefined>();
+	const failed = new Error('fixture configuration failed');
+	let hasSiblingStarted = false;
+	let isResetSettled = false;
+	let failure: unknown;
+	const reset = (async () => {
+		try {
+			await configureFixtureTenants([
+				{ configure: () => Promise.reject(failed) },
+				{
+					configure: () => {
+						hasSiblingStarted = true;
+						return sibling.promise;
+					}
+				}
+			]);
+		} catch (error) {
+			failure = error;
+		} finally {
+			isResetSettled = true;
+		}
+	})();
+	try {
+		await scheduler.wait(0);
+		const beforeRelease = { hasSiblingStarted, isResetSettled };
+		sibling.resolve(undefined);
+		await reset;
+		expect({ beforeRelease, isResetSettled, failure }).toStrictEqual({
+			beforeRelease: { hasSiblingStarted: true, isResetSettled: false },
+			isResetSettled: true,
+			failure: failed
+		});
+	} finally {
+		sibling.resolve(undefined);
+		await reset;
+	}
 });

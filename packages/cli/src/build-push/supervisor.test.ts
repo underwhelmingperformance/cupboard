@@ -1,11 +1,14 @@
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { platform } from 'node:process';
+import { setImmediate } from 'node:timers/promises';
 
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+	type ChildCommand,
 	type ChildExit,
 	childTerminationGracePeriodMs,
 	type ChildTerminationScheduler,
@@ -491,6 +494,140 @@ function immediateDelay() {
 	};
 }
 
+it.each(['command', 'constructed'] as const)(
+	'passes cancellation through the %s supervisor',
+	async (kind) => {
+		const directory = await runtimeDirectory();
+		const controller = new AbortController();
+		let received: AbortSignal | undefined;
+		const options = {
+			environment: {},
+			runtimeDirectory: directory,
+			signal: controller.signal,
+			runChild: (options: RunChildOptions) => {
+				received = options.signal;
+				return Promise.resolve(succeeded);
+			}
+		};
+		await (kind === 'command'
+			? superviseBuild({ ...options, command: ['sh', '-c', 'exit 0'] })
+			: superviseAttemptedBuild({
+					...options,
+					command: () => ['sh', '-c', 'exit 0'],
+					attempts: 1
+				}));
+		expect({
+			signal: received,
+			directoryExists: existsSync(directory)
+		}).toStrictEqual({
+			signal: controller.signal,
+			directoryExists: false
+		});
+	}
+);
+
+it.each(['command', 'constructed'] as const)(
+	'refuses an already cancelled %s build and removes its runtime',
+	async (kind) => {
+		const directory = await runtimeDirectory();
+		const controller = new AbortController();
+		const reason = new Error('cancel before child');
+		controller.abort(reason);
+		let starts = 0;
+		let failure: unknown;
+		const options = {
+			environment: {},
+			runtimeDirectory: directory,
+			signal: controller.signal,
+			runChild: (options: RunChildOptions) => {
+				options.signal?.throwIfAborted();
+				starts += 1;
+				return Promise.resolve(succeeded);
+			}
+		};
+		try {
+			await (kind === 'command'
+				? superviseBuild({ ...options, command: ['sh', '-c', 'exit 0'] })
+				: superviseAttemptedBuild({
+						...options,
+						command: () => ['sh', '-c', 'exit 0'],
+						attempts: 1
+					}));
+		} catch (error) {
+			failure = error;
+		}
+		expect({
+			failure,
+			starts,
+			directoryExists: existsSync(directory)
+		}).toStrictEqual({ failure: reason, starts: 0, directoryExists: false });
+	}
+);
+
+it.each(['command', 'constructed'] as const)(
+	'joins the cancelled child before removing the %s runtime',
+	async (kind) => {
+		const directory = await runtimeDirectory();
+		const controller = new AbortController();
+		const child = controlledChild();
+		const started = Promise.withResolvers<undefined>();
+		const signals = recordingSignalSource();
+		const scheduler = new ControlledTerminationScheduler();
+		const options = {
+			environment: {},
+			runtimeDirectory: directory,
+			signal: controller.signal,
+			signalSource: signals.source,
+			runChild: (options: RunChildOptions) =>
+				runChild({
+					...options,
+					terminationScheduler: scheduler,
+					spawnChild: () => {
+						started.resolve(undefined);
+						return child.child;
+					}
+				})
+		};
+		const run =
+			kind === 'command'
+				? superviseBuild({ ...options, command: ['sh', '-c', 'exit 0'] })
+				: superviseAttemptedBuild({
+						...options,
+						command: () => ['sh', '-c', 'exit 0'],
+						attempts: 3
+					});
+		try {
+			await started.promise;
+			controller.abort();
+			const beforeExit = {
+				signals: [...child.signals],
+				directoryExists: existsSync(directory)
+			};
+			child.exitWith(succeeded);
+			const result = await run;
+			expect({
+				beforeExit,
+				exit: 'exit' in result ? result.exit : result,
+				directoryExists: existsSync(directory),
+				listeners: signals.listenerCount(),
+				terminationCancelled: scheduler.scheduled.map(
+					(entry) => entry.cancelled
+				)
+			}).toStrictEqual({
+				beforeExit: { signals: ['SIGTERM'], directoryExists: true },
+				exit: { status: undefined, signal: 'SIGTERM' },
+				directoryExists: false,
+				listeners: 0,
+				terminationCancelled: [true]
+			});
+		} finally {
+			controller.abort();
+			child.exitWith(succeeded);
+			await run;
+		}
+	}
+);
+
 describe('superviseAttemptedBuild', () => {
 	it('stops at the first success, sleeping a growing delay between attempts', async () => {
 		const directory = await runtimeDirectory();
@@ -671,6 +808,77 @@ describe('superviseAttemptedBuild', () => {
 			listeners: 0
 		});
 	});
+
+	it.each(['before-return', 'waiting'] as const)(
+		'cancels a retry delay from AbortSignal (%s)',
+		async (when) => {
+			const directory = await runtimeDirectory();
+			const controller = new AbortController();
+			const started = Promise.withResolvers<undefined>();
+			const delay = Promise.withResolvers<undefined>();
+			let calls = 0;
+			let cancellations = 0;
+			const options = {
+				command: (): ChildCommand => ['sh', '-c', 'exit 2'],
+				attempts: 3,
+				environment: {},
+				runtimeDirectory: directory,
+				signal: controller.signal,
+				nextAttemptId: attemptIds(),
+				runChild: () => {
+					calls += 1;
+					return Promise.resolve({ status: 2, signal: undefined });
+				},
+				startDelay: () => {
+					started.resolve(undefined);
+					if (when === 'before-return') {
+						controller.abort();
+					}
+					return {
+						completed: delay.promise,
+						cancel() {
+							cancellations += 1;
+						}
+					};
+				}
+			};
+			const run = superviseAttemptedBuild(options);
+			try {
+				await started.promise;
+				if (when === 'waiting') {
+					controller.abort();
+				}
+				await setImmediate();
+				const cancellationsBeforeRelease = cancellations;
+				delay.resolve(undefined);
+				const result = await run;
+				expect({
+					result,
+					calls,
+					cancellationsBeforeRelease,
+					cancellations
+				}).toStrictEqual({
+					result: {
+						exit: { status: undefined, signal: 'SIGTERM' },
+						attempts: [
+							{
+								attempt: 1,
+								attemptId: 'attempt-1',
+								log: '',
+								exit: { status: 2, signal: undefined }
+							}
+						]
+					},
+					calls: 1,
+					cancellationsBeforeRelease: 1,
+					cancellations: 1
+				});
+			} finally {
+				delay.resolve(undefined);
+				await run;
+			}
+		}
+	);
 
 	it('clears the production retry timer when it is cancelled', async () => {
 		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });

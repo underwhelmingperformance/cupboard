@@ -290,18 +290,33 @@ export async function resetTestServer(): Promise<void> {
 	harness.nextTestServerId += 1;
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	await database.delete(d1Schema.instanceConfig).run();
-	await database
-		.insert(d1Schema.instanceConfig)
-		.values({
+	await database.batch([
+		database.delete(d1Schema.instanceConfig),
+		database.insert(d1Schema.instanceConfig).values({
 			id: 'singleton',
 			name: instanceNameSchema.parse('cupboard'),
 			createdAt: isoTimestamp(testBase)
 		})
-		.run();
+	]);
 	await provisionFixtureTenant();
-	await configureFixtureTenant(harness.server);
-	await configureFixtureTenant(fixtureWorkerServer());
+	await configureFixtureTenants([harness.server, fixtureWorkerServer()]);
+}
+
+/**
+ * Configures fixture objects and waits for every call before reporting a failure.
+ */
+export async function configureFixtureTenants(
+	stubs: readonly Pick<CupboardServer, 'configure'>[]
+): Promise<void> {
+	const configurations = await Promise.allSettled(
+		stubs.map((stub) => configureFixtureTenant(stub))
+	);
+
+	for (const configuration of configurations) {
+		if (configuration.status === 'rejected') {
+			throw configuration.reason;
+		}
+	}
 }
 
 /**
@@ -352,7 +367,7 @@ export async function provisionFixtureTenant(
 	}
 	const now = isoTimestamp(testBase);
 
-	await database
+	const tenant = database
 		.insert(d1Schema.tenant)
 		.values({
 			id: fixtureTenant,
@@ -373,14 +388,18 @@ export async function provisionFixtureTenant(
 				readPasswordHash,
 				readPasswordSalt
 			}
-		})
-		.run();
+		});
 
-	await provisionD1Cache(database, fixtureTenant, defaultCacheAccess, now);
+	const cache = defaultCacheUpsert(
+		database,
+		fixtureTenant,
+		defaultCacheAccess,
+		now
+	);
 
 	// The usage row is created with the tenant; a later call (e.g. switching read
 	// mode) updates only the quota, leaving the accumulated counters intact.
-	await database
+	const usage = database
 		.insert(d1Schema.tenantUsage)
 		.values({
 			tenant: fixtureTenant,
@@ -393,9 +412,9 @@ export async function provisionFixtureTenant(
 		.onConflictDoUpdate({
 			target: d1Schema.tenantUsage.tenant,
 			set: { quotaBytes: options.quotaBytes, updatedAt: now }
-		})
-		.run();
+		});
 
+	await database.batch([tenant, cache, usage]);
 	await refreshTenantMembership(env);
 	await invalidateTenantRow(fixtureTenant);
 }
@@ -447,12 +466,12 @@ export async function provisionNamedTenant(
 		})
 		.run();
 
-	await provisionD1Cache(
+	await defaultCacheUpsert(
 		database,
 		id,
 		defaultCacheAccess,
 		isoTimestamp(testBase)
-	);
+	).run();
 
 	await database
 		.insert(d1Schema.tenantUsage)
@@ -482,13 +501,13 @@ export async function provisionNamedTenant(
 	return issuer;
 }
 
-async function provisionD1Cache(
+function defaultCacheUpsert(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	access: 'public' | 'private',
 	updatedAt: IsoTimestamp
-): Promise<void> {
-	await database
+) {
+	return database
 		.insert(d1Schema.cacheLifecycle)
 		.values({
 			tenant,
@@ -505,8 +524,7 @@ async function provisionD1Cache(
 				deletedAt: sql`null`,
 				updatedAt
 			}
-		})
-		.run();
+		});
 }
 
 /**
@@ -607,7 +625,7 @@ export const tenantTestIssuer = 'https://cupboard.test/t/v1';
 // Configures a Durable Object as the fixture tenant, the way provisioning would,
 // with the fixed legacy issuer for low-level token round-trips.
 async function configureFixtureTenant(
-	stub: DurableObjectStub<CupboardServer>
+	stub: Pick<CupboardServer, 'configure'>
 ): Promise<void> {
 	const issuer = tenantTestIssuer;
 

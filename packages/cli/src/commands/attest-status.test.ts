@@ -8,7 +8,38 @@ import process from 'node:process';
 import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import { cacheMetadataCapabilityHeader } from '@cupboard/protocol/cache-metadata';
 import { parseReporterResults, type ReporterMode } from '@cupboard/reporter';
-import { describe, expect, it, onTestFinished } from 'vitest';
+import { build } from 'esbuild';
+import {
+	afterAll,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	onTestFinished
+} from 'vitest';
+
+const bundleDirectory = await mkdtemp(
+	path.join(tmpdir(), 'cupboard-status-cli-')
+);
+const cliBundle = path.join(bundleDirectory, 'main.mjs');
+
+beforeAll(async () => {
+	await build({
+		entryPoints: [path.resolve(import.meta.dirname, '../main.ts')],
+		outfile: cliBundle,
+		bundle: true,
+		platform: 'node',
+		format: 'esm',
+		target: 'node24',
+		banner: {
+			js: "import { createRequire as createTestRequire } from 'node:module'; const require = createTestRequire(import.meta.url);"
+		}
+	});
+});
+
+afterAll(async () => {
+	await rm(bundleDirectory, { recursive: true, force: true });
+});
 
 const hashes = [
 	'0123456789abcdfghijklmnpqrsvwxyz',
@@ -49,9 +80,8 @@ async function runStatus(
 	const child = spawn(
 		process.execPath,
 		[
-			'--experimental-transform-types',
 			'--disable-warning=ExperimentalWarning',
-			path.resolve(import.meta.dirname, '../main.ts'),
+			cliBundle,
 			'--output-mode',
 			mode,
 			'attest',

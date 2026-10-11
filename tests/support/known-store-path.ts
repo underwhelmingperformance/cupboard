@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -20,16 +19,13 @@ export async function addKnownStorePath(
 ): Promise<KnownStorePath> {
 	const targetStore =
 		store ?? (await NixStore.host(path.join(workspace, 'home')));
-	const sources = path.join(workspace, 'sources');
-	await mkdir(sources, { recursive: true });
-	const dependencySource = path.join(sources, 'dependency.txt');
-	await writeFile(dependencySource, `cupboard dependency ${randomUUID()}\n`);
-	const dependency = storePathSchema.parse(
-		await targetStore.add(dependencySource)
-	);
-	const root = storePathSchema.parse(
-		await targetStore.addReference('cupboard-known-root', dependency)
+	const paths = await targetStore.addTextReference(
+		'cupboard-known-root',
+		`cupboard dependency ${randomUUID()}\n`
 	);
 
-	return { root, dependency };
+	return {
+		root: storePathSchema.parse(paths.root),
+		dependency: storePathSchema.parse(paths.dependency)
+	};
 }

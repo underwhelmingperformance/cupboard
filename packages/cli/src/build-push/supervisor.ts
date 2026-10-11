@@ -73,6 +73,7 @@ export interface RunChildOptions {
 export type RunChild = (options: RunChildOptions) => Promise<ChildExit>;
 
 export interface SuperviseOptions {
+	readonly signal?: AbortSignal;
 	readonly command: ChildCommand;
 	readonly environment: ChildEnvironment;
 	readonly runtimeDirectory: string;
@@ -227,6 +228,7 @@ export async function superviseBuild(
 		const exit = await run({
 			command: options.command,
 			environment: options.environment,
+			...(options.signal !== undefined && { signal: options.signal }),
 			...(options.signalSource !== undefined && {
 				signalSource: options.signalSource
 			}),
@@ -254,6 +256,7 @@ export interface SupervisedAttempt {
 }
 
 export interface AttemptedBuildOptions {
+	readonly signal?: AbortSignal;
 	readonly command: (logFile: string) => ChildCommand;
 	/**
 	Maximum attempts; the loop stops at the first success.
@@ -356,8 +359,10 @@ export async function superviseAttemptedBuild(
 
 	signalSource.on('SIGINT', interruptInt);
 	signalSource.on('SIGTERM', interruptTerm);
+	options.signal?.addEventListener('abort', interruptTerm, { once: true });
 
 	return withCleanups(async () => {
+		options.signal?.throwIfAborted();
 		for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
 			const attemptId = nextAttemptId();
 			const logFile = path.join(
@@ -368,6 +373,7 @@ export async function superviseAttemptedBuild(
 			exit = await run({
 				command: options.command(logFile),
 				environment: options.environment,
+				...(options.signal !== undefined && { signal: options.signal }),
 				...(options.signalSource !== undefined && {
 					signalSource: options.signalSource
 				}),
@@ -403,6 +409,9 @@ export async function superviseAttemptedBuild(
 			wakeDelay = () => {
 				delayInterruption.resolve(undefined);
 			};
+			if (interruptedSignal() !== undefined) {
+				wakeDelay();
+			}
 
 			await withCleanups(
 				() => Promise.race([delay.completed, delayInterruption.promise]),
@@ -430,6 +439,10 @@ export async function superviseAttemptedBuild(
 
 		return { exit, attempts };
 	}, [
+		() => {
+			options.signal?.removeEventListener('abort', interruptTerm);
+			return Promise.resolve();
+		},
 		() => {
 			signalSource.off('SIGINT', interruptInt);
 

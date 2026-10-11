@@ -684,6 +684,7 @@ async function runInvocation(
 			command: invocation.command,
 			environment,
 			runtimeDirectory,
+			...(dependencies.signal !== undefined && { signal: dependencies.signal }),
 			...(dependencies.signalSource !== undefined && {
 				signalSource: dependencies.signalSource
 			}),
@@ -830,6 +831,7 @@ async function runConstructedBuild(
 		attempts: build.attempts ?? defaultBuildAttempts,
 		environment,
 		runtimeDirectory,
+		...(dependencies.signal !== undefined && { signal: dependencies.signal }),
 		...(dependencies.signalSource !== undefined && {
 			signalSource: dependencies.signalSource
 		}),
