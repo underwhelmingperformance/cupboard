@@ -7,11 +7,11 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { casObjectKey } from '../http/http.ts';
 
+import { publishCasObjectState } from './cas-object-state.ts';
 import {
 	activateObjectIncarnation,
 	isObjectIncarnationLive,
 	lateWriteTombstoneHorizonMs,
-	promotableStateIncarnation,
 	queueObjectDeletion,
 	registeredLiveObjectIncarnation,
 	reserveObjectIncarnation
@@ -236,29 +236,12 @@ export class CasObjectStore {
 			);
 		}
 
-		const now = isoTimestamp(new Date());
-		await this.database
-			.insert(d1Schema.casObject)
-			.values({
-				digest: object.digest,
-				size: object.size,
-				incarnation,
-				storedAt: now
-			})
-			.onConflictDoUpdate({
-				target: d1Schema.casObject.digest,
-				set: {
-					size: object.size,
-					incarnation,
-					deleteAfter: sql`null`,
-					storedAt: now
-				},
-				setWhere: promotableStateIncarnation(
-					d1Schema.casObject.incarnation,
-					incarnation
-				)
-			})
-			.run();
+		await publishCasObjectState(this.database, {
+			digest: object.digest,
+			size: object.size,
+			incarnation,
+			storedAt: isoTimestamp(new Date())
+		});
 
 		if (
 			await isObjectIncarnationLive(

@@ -7109,6 +7109,10 @@ listings, build logs or build traces available from a cupboard cache.
 
 ### Storage and retention
 
+- [x] Publish and recover CAS state through writable migration views with an
+      atomic update-and-insert batch. Fence both writes by the live incarnation
+      and preserve newer state rows. Reference-aware cleanup and the deployment
+      cutover remain below.
 - [ ] Add distinct logical models for listings, build logs, build traces and
       listing-generation proofs. Store their bytes in the shared digest and
       incarnation CAS. A digest does not grant access.
