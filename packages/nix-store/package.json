@@ -18,6 +18,7 @@
 		"./encoding": "./src/encoding.ts",
 		"./errors": "./src/errors.ts",
 		"./hash": "./src/hash.ts",
+		"./nar-listing": "./src/nar-listing.ts",
 		"./narinfo": "./src/narinfo.ts",
 		"./narinfo-reader": "./src/narinfo-reader.ts",
 		"./nix-config": "./src/nix-config.ts",
