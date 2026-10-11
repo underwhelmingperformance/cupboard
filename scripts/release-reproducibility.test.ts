@@ -103,7 +103,7 @@ describe('release reproducibility', () => {
 			failFast: false,
 			build: { needs: 'validate', if: undefined, continueOnError: undefined },
 			draft: { needs: 'build', if: undefined, continueOnError: undefined },
-			installer: { nix_version: '2.34.7' },
+			installer: { nix_version: '2.35.2' },
 			barrier: {
 				name: barrierName,
 				shell: 'bash',

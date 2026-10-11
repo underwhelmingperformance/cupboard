@@ -235,9 +235,34 @@ const fieldAdapters: readonly FieldAdapter[] = [
 	},
 	{
 		field: 'fileTransfer.attempts',
-		settings: ['download-attempts'],
-		fromOracle: (settings) => settings.integer('download-attempts'),
+		settings: ['filetransfer-retry-attempts'],
+		fromOracle: (settings) => settings.integer('filetransfer-retry-attempts'),
 		fromClient: (config) => config.fileTransfer.attempts
+	},
+	{
+		field: 'fileTransfer.retryDelayMs',
+		settings: ['filetransfer-retry-delay'],
+		fromOracle: (settings) => settings.integer('filetransfer-retry-delay'),
+		fromClient: (config) => config.fileTransfer.retryDelayMs
+	},
+	{
+		field: 'fileTransfer.rateLimitedRetryDelayMs',
+		settings: ['filetransfer-retry-delay-rate-limited'],
+		fromOracle: (settings) =>
+			settings.integer('filetransfer-retry-delay-rate-limited'),
+		fromClient: (config) => config.fileTransfer.rateLimitedRetryDelayMs
+	},
+	{
+		field: 'fileTransfer.maxRetryDelayMs',
+		settings: ['filetransfer-retry-max-delay'],
+		fromOracle: (settings) => settings.integer('filetransfer-retry-max-delay'),
+		fromClient: (config) => config.fileTransfer.maxRetryDelayMs
+	},
+	{
+		field: 'fileTransfer.retryJitter',
+		settings: ['filetransfer-retry-jitter'],
+		fromOracle: (settings) => settings.boolean('filetransfer-retry-jitter'),
+		fromClient: (config) => config.fileTransfer.retryJitter
 	},
 	{
 		// Nix reports seconds, while the domain field uses milliseconds.
@@ -319,7 +344,11 @@ export const settingsInScope: readonly string[] = sorted([
 
 	// How a transfer is attempted.
 	'connect-timeout',
-	'download-attempts',
+	'filetransfer-retry-attempts',
+	'filetransfer-retry-delay',
+	'filetransfer-retry-delay-rate-limited',
+	'filetransfer-retry-jitter',
+	'filetransfer-retry-max-delay',
 	'download-buffer-size',
 	'download-speed',
 	'http-connections',
@@ -338,21 +367,6 @@ export const settingsInScope: readonly string[] = sorted([
 	// Which store is opened.
 	'store'
 ]);
-
-/**
- * Settings represented by `NixFileTransferSettings` but absent from the pinned
- * oracle. Nix renamed its retry settings after this oracle version, while the
- * domain fields use the newer names. The pinned Nix can therefore confirm
- * neither their defaults nor their parsing rules. The suite verifies that the
- * settings remain absent. A later oracle that includes them will fail until
- * the adapter is updated.
- */
-export const settingsAbsentFromTheOracle: readonly string[] = [
-	'filetransfer-retry-delay',
-	'filetransfer-retry-delay-rate-limited',
-	'filetransfer-retry-jitter',
-	'filetransfer-retry-max-delay'
-];
 
 export function unmodelledSettings(
 	settings: OracleSettings

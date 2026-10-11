@@ -35,7 +35,7 @@ You also need these for some of the slower checks:
 
 - Nix. The conformance suite and the end-to-end suites need it, and so do the
   `update:conformance-oracle` and `update:flake-deps` scripts. CI installs Nix
-  2.34.7.
+  2.35.2.
 - Docker, or another container engine that Testcontainers can drive. The
   remote-store end-to-end suite needs it, and so does the remote-store part of
   the publish pipeline suite, `pnpm e2e:pipeline`, which skips that part when no

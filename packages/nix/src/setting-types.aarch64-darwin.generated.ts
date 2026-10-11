@@ -7,7 +7,7 @@
 
 import type { NixIntegerWidth, NixSettingValueType } from './setting-types.ts';
 
-export const generatedFromNix = 'nix (Nix) 2.34.8';
+export const generatedFromNix = 'nix (Nix) 2.35.2';
 
 export const nixSettingTypes: Readonly<Record<string, NixSettingValueType>> = {
 	'abort-on-warn': 'boolean',
@@ -39,7 +39,6 @@ export const nixSettingTypes: Readonly<Record<string, NixSettingValueType>> = {
 	'darwin-log-sandbox-violations': 'boolean',
 	'debugger-on-trace': 'boolean',
 	'debugger-on-warn': 'boolean',
-	'download-attempts': 'integer',
 	'download-buffer-size': 'integer',
 	'download-speed': 'integer',
 	'eval-attrset-update-layer-rhs-threshold': 'integer',
@@ -52,6 +51,11 @@ export const nixSettingTypes: Readonly<Record<string, NixSettingValueType>> = {
 	'external-builders': 'list',
 	'extra-platforms': 'list',
 	fallback: 'boolean',
+	'filetransfer-retry-attempts': 'integer',
+	'filetransfer-retry-delay': 'integer',
+	'filetransfer-retry-delay-rate-limited': 'integer',
+	'filetransfer-retry-jitter': 'boolean',
+	'filetransfer-retry-max-delay': 'integer',
 	'flake-registry': 'string',
 	'fsync-metadata': 'boolean',
 	'fsync-store-paths': 'boolean',
@@ -59,6 +63,7 @@ export const nixSettingTypes: Readonly<Record<string, NixSettingValueType>> = {
 	'hashed-mirrors': 'list',
 	'http-connections': 'integer',
 	http2: 'boolean',
+	http3: 'boolean',
 	'id-count': 'integer',
 	'ignore-try': 'boolean',
 	'impersonate-linux-26': 'boolean',
@@ -139,11 +144,14 @@ export const nixIntegerWidths: Readonly<Record<string, NixIntegerWidth>> = {
 	'build-poll-interval': 'uint32',
 	'connect-timeout': 'uint64',
 	cores: 'uint32',
-	'download-attempts': 'uint32',
 	'download-buffer-size': 'uint64',
 	'download-speed': 'uint32',
 	'eval-attrset-update-layer-rhs-threshold': 'uint32',
 	'eval-profiler-frequency': 'uint32',
+	'filetransfer-retry-attempts': 'uint32',
+	'filetransfer-retry-delay': 'uint32',
+	'filetransfer-retry-delay-rate-limited': 'uint32',
+	'filetransfer-retry-max-delay': 'uint32',
 	'gc-reserved-space': 'int64',
 	'http-connections': 'uint64',
 	'id-count': 'uint32',

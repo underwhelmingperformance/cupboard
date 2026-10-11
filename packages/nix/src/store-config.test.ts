@@ -788,9 +788,18 @@ describe('discoverNixStoreConfig', () => {
 		}
 	);
 
-	// The pinned daemon does not recognise the newer retry settings, so the client
-	// parses them without forwarding them.
-	it('parses newer retry settings without forwarding them', () => {
+	it.each(['download-attempts', 'filetransfer-retry-attempts'])(
+		'uses the declared integer width for transfer attempts written as %s',
+		(setting) => {
+			const config = discover({ env: { NIX_CONFIG: `${setting} = 1T` } });
+			expect(config.fileTransfer).toStrictEqual({
+				...defaultFileTransferSettings,
+				attempts: 0
+			});
+		}
+	);
+
+	it('parses and forwards the pinned retry settings', () => {
 		const config = discover({
 			env: {
 				NIX_CONFIG: [
@@ -813,7 +822,12 @@ describe('discoverNixStoreConfig', () => {
 				maxRetryDelayMs: 30_000,
 				retryJitter: false
 			},
-			daemonOverrides: {}
+			daemonOverrides: {
+				'filetransfer-retry-delay': '250',
+				'filetransfer-retry-delay-rate-limited': '9000',
+				'filetransfer-retry-max-delay': '30000',
+				'filetransfer-retry-jitter': 'false'
+			}
 		});
 	});
 

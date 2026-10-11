@@ -49,7 +49,7 @@ const remoteStoreDockerfile = new URL(
 
 const checkoutAction = 'actions/checkout';
 const nixInstaller = 'nixbuild/nix-quick-install-action';
-const nixClientVersion = '2.34.7';
+const nixClientVersion = '2.35.2';
 const cloudGuardStep = 'Require GitHub Cloud workflow identity';
 const reservationStep = 'Reserve the cupboard workflow checkout';
 const workflowCheckoutPath = '.cupboard-workflow';
@@ -1863,7 +1863,7 @@ describe('pinned Nix client', () => {
 					.filter((uses) => uses?.includes('nix-installer-action'))
 			),
 			// The e2e daemon image is the matching release of the same series.
-			remoteDaemon: dockerfile.includes('FROM nixos/nix:2.34.8@sha256:')
+			remoteDaemon: dockerfile.includes('FROM nixos/nix:2.35.2@sha256:')
 		}).toStrictEqual({
 			installs: installs.map(() => ({ nix_version: nixClientVersion })),
 			prepareInstalls: true,

@@ -214,7 +214,7 @@ jobs:
 
       - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
         with:
-          nix_version: 2.34.7
+          nix_version: 2.35.2
 
       # A source acquisition builds cupboard from a git checkout, so fetch the
       # workflow's own source for that case. Reserve the path first so
@@ -391,7 +391,7 @@ jobs:
     steps:
       - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
         with:
-          nix_version: 2.34.7
+          nix_version: 2.35.2
 
       # A source acquisition builds cupboard from a git checkout, so fetch the
       # workflow's own source for that case. Reserve the path first so

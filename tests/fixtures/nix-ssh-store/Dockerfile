@@ -1,6 +1,6 @@
 # Pin the fixture's complete userspace, including Nix and OpenSSH, to the
 # official multi-platform image manifest.
-FROM nixos/nix:2.34.8@sha256:1a711b619c8a713eff32c3f8d8781b3b4d0130cb91c0a57f67e87abfeeb90b01
+FROM nixos/nix:2.35.2@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
 
 RUN cp /etc/passwd /tmp/passwd \
 	&& cp /etc/group /tmp/group \
