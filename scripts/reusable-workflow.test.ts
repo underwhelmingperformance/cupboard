@@ -1849,7 +1849,10 @@ describe('pinned Nix client', () => {
 			readFile(remoteStoreDockerfile, 'utf8')
 		]);
 		const installs = workflows.flatMap((workflow) =>
-			stepsUsing(workflow, nixInstaller).map(({ step }) => step.with)
+			stepsUsing(workflow, nixInstaller).map(({ job, step }) => ({
+				job,
+				inputs: step.with
+			}))
 		);
 
 		expect({
@@ -1876,8 +1879,12 @@ describe('pinned Nix client', () => {
 			// The e2e daemon image is the matching release of the same series.
 			remoteDaemon: dockerfile.includes('FROM nixos/nix:2.35.2@sha256:')
 		}).toStrictEqual({
-			installs: installs.map(() => ({
-				install_url: `https://releases.nixos.org/nix/nix-${nixClientVersion}/install`
+			installs: installs.map(({ job }) => ({
+				job,
+				inputs: {
+					install_url: `https://releases.nixos.org/nix/nix-${nixClientVersion}/install`,
+					...(job === 'e2e' && { install_options: '--no-daemon' })
+				}
 			})),
 			installerCount: 13,
 			prepareInstalls: true,
