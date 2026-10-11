@@ -199,6 +199,7 @@ jobs:
       - name: Check the generated oracle data
         env:
           NIX_SYSTEM: ${{ matrix.system }}
+          CUPBOARD_DEFER_ERROR_ANNOTATIONS: '1'
         run: |
           pnpm update:conformance-oracle --system "$NIX_SYSTEM"
           git diff --exit-code -- \
