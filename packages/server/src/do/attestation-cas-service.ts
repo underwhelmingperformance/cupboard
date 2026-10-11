@@ -12,14 +12,9 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
 
 import {
-	activateObjectIncarnation,
-	isObjectIncarnationLive,
-	lateWriteTombstoneHorizonMs,
-	promotableStateIncarnation,
-	queueObjectDeletion,
-	registeredLiveObjectIncarnation,
-	reserveObjectIncarnation
-} from '../blob/object-incarnation.ts';
+	CasObjectStore,
+	type MeasuredCasObject
+} from '../blob/cas-object-store.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { pathReferenceReadability } from '../db/cache-generation.ts';
@@ -30,7 +25,7 @@ import {
 	TenantWritesStoppedError,
 	UploadedObjectNotFoundError
 } from '../errors.ts';
-import { casObjectKey, type R2ObjectKey } from '../http/http.ts';
+import { type R2ObjectKey } from '../http/http.ts';
 
 import { type ServerContext } from './context.ts';
 import { jsonRowList } from './json-list.ts';
@@ -39,11 +34,7 @@ import {
 	reclaimPathReadFence
 } from './path-read-authority-service.ts';
 
-export interface MeasuredAttestationBundle {
-	readonly digest: Sha256HexDigest;
-	readonly size: number;
-	readonly bytes: Uint8Array;
-}
+export type MeasuredAttestationBundle = MeasuredCasObject;
 
 export interface AttestationReference {
 	readonly cache: CacheScope;
@@ -58,115 +49,6 @@ export type AttestationReferenceOutcome =
 
 export class AttestationCasService {
 	constructor(private readonly context: ServerContext) {}
-
-	private async ensureCasObject(
-		bundle: MeasuredAttestationBundle,
-		incarnation: number,
-		canCreate: boolean,
-		replaceMissingIncarnation?: number
-	): Promise<number> {
-		const key = casObjectKey(bundle.digest, incarnation);
-		const existing = await this.context.env.BLOBS.head(key);
-
-		if (existing !== null) {
-			return incarnation;
-		}
-
-		if (!canCreate) {
-			throw new UploadedObjectNotFoundError(key);
-		}
-
-		if (replaceMissingIncarnation !== undefined) {
-			const replacement = await this.reserveRepairIncarnation(
-				bundle.digest,
-				replaceMissingIncarnation
-			);
-
-			return this.ensureCasObject(bundle, replacement, true);
-		}
-
-		const written = await this.context.env.BLOBS.put(key, bundle.bytes, {
-			sha256: bundle.digest,
-			onlyIf: { etagDoesNotMatch: '*' }
-		});
-
-		if (written !== null) {
-			return incarnation;
-		}
-
-		const winner = await this.context.env.BLOBS.head(key);
-
-		if (winner === null) {
-			throw new UploadedObjectNotFoundError(key);
-		}
-
-		return incarnation;
-	}
-
-	private async reserveRepairIncarnation(
-		digest: Sha256HexDigest,
-		incarnation: number
-	): Promise<number> {
-		const now = isoTimestamp(new Date());
-		const removalDeadline = isoTimestamp(
-			new Date(Date.now() + lateWriteTombstoneHorizonMs)
-		);
-		const captured = and(
-			eq(d1Schema.objectIncarnation.kind, 'cas'),
-			eq(d1Schema.objectIncarnation.objectId, digest),
-			eq(d1Schema.objectIncarnation.incarnation, incarnation),
-			eq(d1Schema.objectIncarnation.state, 'live')
-		);
-		const replacement = and(
-			eq(d1Schema.objectIncarnation.kind, 'cas'),
-			eq(d1Schema.objectIncarnation.objectId, digest),
-			eq(d1Schema.objectIncarnation.incarnation, incarnation + 1),
-			eq(d1Schema.objectIncarnation.state, 'pending')
-		);
-		const reserve = this.context.d1
-			.update(d1Schema.objectIncarnation)
-			.set({
-				incarnation: incarnation + 1,
-				state: 'pending',
-				reservationOwner: sql`null`,
-				updatedAt: now
-			})
-			.where(captured);
-		const superseded = this.context.d1
-			.select({
-				kind: d1Schema.objectIncarnation.kind,
-				objectId: d1Schema.objectIncarnation.objectId,
-				incarnation: sql<number>`${incarnation}`.as('incarnation'),
-				removeAfter: sql<typeof removalDeadline>`${removalDeadline}`.as(
-					'remove_after'
-				)
-			})
-			.from(d1Schema.objectIncarnation)
-			.where(replacement);
-		const queueSuperseded = this.context.d1
-			.insert(d1Schema.objectDeletion)
-			.select(superseded)
-			.onConflictDoUpdate({
-				target: [
-					d1Schema.objectDeletion.kind,
-					d1Schema.objectDeletion.objectId,
-					d1Schema.objectDeletion.incarnation
-				],
-				set: {
-					removeAfter: sql`max(${d1Schema.objectDeletion.removeAfter}, excluded.remove_after)`
-				}
-			});
-
-		await this.context.d1.batch([reserve, queueSuperseded]);
-
-		const reserved = await reserveObjectIncarnation(
-			this.context.d1,
-			'cas',
-			digest
-		);
-
-		return reserved.incarnation;
-	}
 
 	private async overQuota(
 		tenant: TenantId,
@@ -233,32 +115,6 @@ export class AttestationCasService {
 		);
 	}
 
-	private async claimLiveIncarnation(
-		digest: Sha256HexDigest,
-		incarnation?: number
-	): Promise<number | undefined> {
-		const [claimed] = await this.context.d1
-			.update(d1Schema.casObject)
-			.set({ deleteAfter: sql`null` })
-			.where(
-				and(
-					eq(d1Schema.casObject.digest, digest),
-					incarnation === undefined
-						? undefined
-						: eq(d1Schema.casObject.incarnation, incarnation),
-					registeredLiveObjectIncarnation(
-						this.context.d1,
-						'cas',
-						digest,
-						d1Schema.casObject.incarnation
-					)
-				)
-			)
-			.returning({ incarnation: d1Schema.casObject.incarnation });
-
-		return claimed?.incarnation;
-	}
-
 	async measureStagedBundle(
 		stagingKey: R2ObjectKey
 	): Promise<MeasuredAttestationBundle> {
@@ -304,13 +160,10 @@ export class AttestationCasService {
 		digest: Sha256HexDigest,
 		incarnation: number
 	): Promise<boolean> {
-		const claimed = await this.claimLiveIncarnation(digest, incarnation);
-
-		if (claimed === undefined) {
-			return false;
-		}
-
-		return isObjectIncarnationLive(this.context.d1, 'cas', digest, claimed);
+		return new CasObjectStore(this.context.d1, this.context.env.BLOBS).reuse(
+			digest,
+			incarnation
+		);
 	}
 
 	async promoteMeasuredBundle(
@@ -318,75 +171,9 @@ export class AttestationCasService {
 		bundle: MeasuredAttestationBundle,
 		options?: { readonly restoreMissingObject: true }
 	): Promise<void> {
-		const claimed = await this.claimLiveIncarnation(bundle.digest);
-		const reserved =
-			claimed === undefined
-				? await reserveObjectIncarnation(this.context.d1, 'cas', bundle.digest)
-				: { incarnation: claimed };
-
-		const incarnation = await this.ensureCasObject(
+		await new CasObjectStore(this.context.d1, this.context.env.BLOBS).promote(
 			bundle,
-			reserved.incarnation,
-			claimed === undefined || options?.restoreMissingObject === true,
-			options?.restoreMissingObject === true ? claimed : undefined
-		);
-
-		const activation = await activateObjectIncarnation(
-			this.context.d1,
-			'cas',
-			bundle.digest,
-			incarnation
-		);
-
-		if (activation === 'retired') {
-			throw new UploadedObjectNotFoundError(
-				casObjectKey(bundle.digest, incarnation)
-			);
-		}
-
-		const now = isoTimestamp(new Date());
-		await this.context.d1
-			.insert(d1Schema.casObject)
-			.values({
-				digest: bundle.digest,
-				size: bundle.size,
-				incarnation,
-				storedAt: now
-			})
-			.onConflictDoUpdate({
-				target: d1Schema.casObject.digest,
-				set: {
-					size: bundle.size,
-					incarnation,
-					deleteAfter: sql`null`,
-					storedAt: now
-				},
-				setWhere: promotableStateIncarnation(
-					d1Schema.casObject.incarnation,
-					incarnation
-				)
-			})
-			.run();
-
-		if (
-			await isObjectIncarnationLive(
-				this.context.d1,
-				'cas',
-				bundle.digest,
-				incarnation
-			)
-		) {
-			return;
-		}
-
-		await queueObjectDeletion(
-			this.context.d1,
-			'cas',
-			bundle.digest,
-			incarnation
-		);
-		throw new UploadedObjectNotFoundError(
-			casObjectKey(bundle.digest, incarnation)
+			options
 		);
 	}
 
