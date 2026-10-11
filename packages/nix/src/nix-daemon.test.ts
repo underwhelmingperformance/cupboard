@@ -3,6 +3,10 @@ import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
+import {
+	BuildTrace,
+	buildTraceKeySchema
+} from '@cupboard/nix-store/build-trace';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	storeDirectorySchema,
@@ -10,6 +14,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { NixSignature } from '@cupboard/nix-store/signature';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -140,6 +145,7 @@ class ScriptedDaemonTransport implements NixDaemonTransport {
 	private writeCount = 0;
 
 	readonly readsByWrite = new Map<number, number[]>();
+	readonly writes: Buffer[] = [];
 	closed = false;
 
 	constructor(private readonly responses: ScriptedDaemonResponses) {}
@@ -169,7 +175,8 @@ class ScriptedDaemonTransport implements NixDaemonTransport {
 			: this.responses.operation[this.writeCount - 5];
 	}
 
-	write(): Promise<void> {
+	write(bytes: Uint8Array): Promise<void> {
+		this.writes.push(Buffer.from(bytes));
 		this.writeCount += 1;
 		const response = this.responseForWrite();
 
@@ -2916,3 +2923,267 @@ function pathInfo(
 		ultimate: false
 	};
 }
+
+const nativeTraceKey = buildTraceKeySchema.parse({
+	drvPath: 'l63vh4x7n28p853f6iy9yxiym01b1ljq-cupboard-ca-root.drv',
+	outputName: 'out'
+});
+const nativeTraceOutput = '8lrypsd2939z5b3bv5xrlkwx99aca8ax-cupboard-ca-root';
+const nativeTraceSignature =
+	'cupboard-trace-fixture-1:9FgG7Av9oShLUsnG+EXPtd2PhCIq0E5HdrRKsusABkLUuFedR+YUvuk12m10U6ynPA3frEpP/MFcl+YjbALWBg==';
+const nativeTraceFeature = 'realisation-with-path-not-hash';
+
+describe('native Nix build-trace protocol', () => {
+	it.each(['/nix/store', '/private/tmp/cupboard-trace-oracle/store'])(
+		'reads a signed native trace in %s without a build operation',
+		async (directory) => {
+			const response = new ProtocolWriter();
+			response.writeInteger(stderrLast);
+			response.writeInteger(1);
+			response.writeString(`${directory}/${nativeTraceOutput}`);
+			response.writeStringSet([nativeTraceSignature]);
+			const transport = new ScriptedDaemonTransport({
+				features: stringSetFrame([nativeTraceFeature]),
+				operation: response.bytes()
+			});
+			const client = new NixDaemonStoreClient({
+				storeDirectory: storeDirectorySchema.parse(directory),
+				connect: () => Promise.resolve(transport)
+			});
+			const trace = await client.queryBuildTrace(nativeTraceKey);
+			const request = new ProtocolWriter();
+			request.writeInteger(43);
+			request.writeString(`${directory}/${nativeTraceKey.drvPath}`);
+			request.writeString('out');
+
+			expect({
+				trace,
+				request: transport.writes[4],
+				closed: transport.closed
+			}).toStrictEqual({
+				trace: new BuildTrace({
+					key: nativeTraceKey,
+					value: {
+						outPath: nativeTraceOutput,
+						signatures: [nativeTraceSignature]
+					}
+				}),
+				request: request.bytes(),
+				closed: true
+			});
+		}
+	);
+
+	it('returns undefined for a missing trace and continues querying on the same session', async () => {
+		const transport = new ScriptedDaemonTransport({
+			features: stringSetFrame([nativeTraceFeature]),
+			operation: [integerFrame(stderrLast, 0), integerFrame(stderrLast, 0)]
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+		const result = await client.withConnection(async (session) => [
+			await session.queryBuildTrace(nativeTraceKey),
+			await session.queryValidPaths([appPath])
+		]);
+
+		expect({ result, closed: transport.closed }).toStrictEqual({
+			result: [undefined, []],
+			closed: true
+		});
+	});
+
+	it('refuses an older daemon before sending a trace operation', async () => {
+		const transport = new ScriptedDaemonTransport({
+			operation: Buffer.alloc(0)
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryBuildTrace(nativeTraceKey)).rejects.toMatchObject({
+			name: 'UnsupportedNixDaemonFeatureError',
+			feature: nativeTraceFeature
+		});
+		expect({
+			writes: transport.writes.length,
+			closed: transport.closed
+		}).toStrictEqual({ writes: 4, closed: true });
+	});
+
+	it.each([
+		{
+			name: 'invalid presence tag',
+			bytes: integerFrame(stderrLast, 2),
+			error: {
+				name: 'NixDaemonRemoteError',
+				messageFromDaemon: 'invalid optional build trace'
+			}
+		},
+		{
+			name: 'excessive signature count',
+			bytes: (() => {
+				const frame = new ProtocolWriter();
+				frame.writeInteger(stderrLast);
+				frame.writeInteger(1);
+				frame.writeString(`/nix/store/${nativeTraceOutput}`);
+				frame.writeInteger(1025);
+				return frame.bytes();
+			})(),
+			error: {
+				name: 'NixDaemonCollectionTooLargeError',
+				collection: 'build-trace signatures',
+				maximumEntries: 1024,
+				observedEntries: 1025
+			}
+		},
+		{
+			name: 'excessive scalar',
+			bytes: integerFrame(stderrLast, 1, 8193),
+			error: {
+				name: 'NixDaemonFieldTooLargeError',
+				field: 'build-trace output path',
+				maximumBytes: 8192,
+				observedBytes: 8193
+			}
+		}
+	])('rejects $name before reading its body', async ({ bytes, error }) => {
+		const transport = new ScriptedDaemonTransport({
+			features: stringSetFrame([nativeTraceFeature]),
+			operation: bytes
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryBuildTrace(nativeTraceKey)).rejects.toMatchObject(
+			error
+		);
+		expect(transport.closed).toBe(true);
+	});
+
+	it.each([
+		{
+			name: 'a different store directory',
+			outPath: `/other/store/${nativeTraceOutput}`,
+			signatures: [nativeTraceSignature],
+			message: `build-trace output path outside /nix/store: /other/store/${nativeTraceOutput}`
+		},
+		{
+			name: 'a malformed signature',
+			outPath: `/nix/store/${nativeTraceOutput}`,
+			signatures: ['not-a-signature'],
+			message: 'invalid build-trace signature'
+		}
+	])('rejects $name', async ({ outPath, signatures, message }) => {
+		const frame = new ProtocolWriter();
+		frame.writeInteger(stderrLast);
+		frame.writeInteger(1);
+		frame.writeString(outPath);
+		frame.writeStringSet(signatures);
+		const transport = new ScriptedDaemonTransport({
+			features: stringSetFrame([nativeTraceFeature]),
+			operation: frame.bytes()
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryBuildTrace(nativeTraceKey)).rejects.toMatchObject({
+			name: 'NixDaemonRemoteError',
+			messageFromDaemon: message
+		});
+		expect(transport.closed).toBe(true);
+	});
+
+	it('rejects invalid UTF-8 without replacing bytes in a signed path', async () => {
+		const frame = Buffer.concat([
+			integerFrame(stderrLast, 1, 1),
+			Buffer.from([0xff, 0, 0, 0, 0, 0, 0, 0])
+		]);
+		const transport = new ScriptedDaemonTransport({
+			features: stringSetFrame([nativeTraceFeature]),
+			operation: frame
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryBuildTrace(nativeTraceKey)).rejects.toMatchObject({
+			name: 'NixDaemonRemoteError',
+			messageFromDaemon: 'invalid UTF-8 in build-trace output path'
+		});
+	});
+
+	it('bounds the aggregate bytes of a trace before reading another signature', async () => {
+		const path = `/nix/store/${nativeTraceOutput}`;
+		const signature = `${'x'.repeat(8103)}:${new NixSignature(nativeTraceSignature).material}`;
+		const frame = new ProtocolWriter();
+		frame.writeInteger(stderrLast);
+		frame.writeInteger(1);
+		frame.writeString(path);
+		frame.writeStringSet(Array.from({ length: 1024 }, () => signature));
+		const transport = new ScriptedDaemonTransport({
+			features: stringSetFrame([nativeTraceFeature]),
+			operation: frame.bytes()
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryBuildTrace(nativeTraceKey)).rejects.toMatchObject({
+			name: 'NixDaemonFieldTooLargeError',
+			field: 'build-trace signature',
+			maximumBytes: 8192 - path.length,
+			observedBytes: 8192
+		});
+	});
+
+	it('preserves native output signatures in keyed build results', async () => {
+		const response = new ProtocolWriter();
+		response.writeInteger(stderrLast);
+		response.writeInteger(1);
+		response.writeString(`${buildDrvPath}!out`);
+		response.writeInteger(0);
+		response.writeString('');
+		response.writeInteger(1);
+		response.writeBoolean(false);
+		response.writeInteger(100);
+		response.writeInteger(260);
+		response.writeBoolean(false);
+		response.writeBoolean(false);
+		response.writeInteger(1);
+		response.writeString('out');
+		response.writeString(`/nix/store/${nativeTraceOutput}`);
+		response.writeStringSet([nativeTraceSignature]);
+		const transport = new ScriptedDaemonTransport({
+			features: stringSetFrame([nativeTraceFeature]),
+			operation: response.bytes()
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(
+			client.buildPathsWithResults([`${buildDrvPath}^out`])
+		).resolves.toStrictEqual([
+			{
+				target: `${buildDrvPath}^out`,
+				outcome: {
+					kind: 'built',
+					outputs: { out: `/nix/store/${nativeTraceOutput}` }
+				},
+				outputRealisations: {
+					out: {
+						outPath: `/nix/store/${nativeTraceOutput}`,
+						signatures: [nativeTraceSignature]
+					}
+				},
+				timesBuilt: 1,
+				nonDeterministic: false,
+				startTime: 100,
+				stopTime: 260
+			}
+		]);
+	});
+});

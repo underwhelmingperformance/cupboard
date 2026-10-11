@@ -18,7 +18,10 @@ export type {
 } from './nix.ts';
 export { Nix } from './nix.ts';
 export type { NixDaemonSession } from './nix-daemon.ts';
-export { NixDaemonStoreClient } from './nix-daemon.ts';
+export {
+	NixDaemonStoreClient,
+	UnsupportedNixDaemonFeatureError
+} from './nix-daemon.ts';
 export type {
 	DaemonChildProcess,
 	DaemonCommandRunner
@@ -36,6 +39,7 @@ export type {
 	NixDaemonTrust,
 	NixDerivedPathString,
 	NixMissingPartition,
+	NixOutputRealisation,
 	NixStoreDirectorySource,
 	NixSubstitutablePathInfo,
 	NixValidPathInfo,
