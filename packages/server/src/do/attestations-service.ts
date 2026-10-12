@@ -29,6 +29,7 @@ import {
 } from '@cupboard/protocol/attestations';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
+import { bestEffort } from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	decodeDsseStatement,
@@ -42,6 +43,8 @@ import {
 	inArray,
 	isNull,
 	lte,
+	ne,
+	notExists,
 	or,
 	type SQL,
 	sql
@@ -50,6 +53,7 @@ import { alias } from 'drizzle-orm/sqlite-core';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
+import { AttestationListRevisionRepository } from '../db/attestation-list-revision.ts';
 import {
 	type CacheId,
 	cacheIdentityCondition,
@@ -62,6 +66,7 @@ import {
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { AttestationListPendingError } from '../errors.ts';
 import {
 	AttestationBundleInvalidError,
 	AttestationBundleTooLargeError,
@@ -97,6 +102,10 @@ import {
 	RetryPolicy
 } from '../policy/retry.ts';
 import {
+	isObjectOfListPublication,
+	isSameListPublication
+} from '../read/attestation-generation.ts';
+import {
 	isListOfCommittedGeneration,
 	listGenerationMetadataKey,
 	recordedListGeneration
@@ -109,6 +118,7 @@ import {
 	type AttestationReference,
 	type MeasuredAttestationBundle
 } from './attestation-cas-service.ts';
+import { AttestationListRefreshService } from './attestation-list-refresh-service.ts';
 import {
 	batchNonEmpty,
 	deleteObjects,
@@ -158,7 +168,7 @@ interface PendingAttestationUpload {
 // the destination's references.
 export const inheritanceLookupSubrequests = 2;
 
-// Writing the destination's list reads its descriptors from D1 and puts it in R2.
+// The activation and descriptor queries share one D1 batch.
 export const inheritanceListSubrequests = 2;
 
 // A bundle costs one CAS head, one source revalidation and three reference calls.
@@ -500,30 +510,6 @@ export class AttestationsService {
 		return false;
 	}
 
-	/**
-	 * Returns the greatest narinfo generation among the reference edges for this
-	 * tenant, cache identity and path that the current cache generation authorises,
-	 * or `undefined` when it authorises none.
-	 *
-	 * A recommit can leave an earlier edge behind until the drain retires it.
-	 * Narinfo generations increase and never repeat for a stored name and path,
-	 * so the greatest authorised generation identifies the current commit.
-	 * Advancing the cache generation excludes every edge from the previous cache
-	 * incarnation.
-	 */
-	private async authorisedNarInfoGeneration(
-		cache: ResolvedCache,
-		storePathHash: StorePathHash
-	): Promise<NarInfoGeneration | undefined> {
-		const versions = await authorisedNarInfoVersions(
-			this.context.d1,
-			this.context.requireTenant(),
-			cache.scope,
-			[storePathHash]
-		);
-		return versions.get(storePathHash)?.generation;
-	}
-
 	private async availableBundleIncarnation(
 		digest: Sha256HexDigest
 	): Promise<number | undefined> {
@@ -544,25 +530,39 @@ export class AttestationsService {
 			: row.incarnation;
 	}
 
-	private async descriptorsFor(
+	private async listMaterialisationFor(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash,
-		generation: NarInfoGeneration
-	): Promise<AttestationDescriptorInput[]> {
+		generation: NarInfoGeneration | undefined
+	): Promise<
+		| { readonly status: 'queued' }
+		| {
+				readonly status: 'legacy';
+				readonly descriptors: AttestationDescriptorInput[];
+		  }
+	> {
+		const activationFilter = and(
+			eq(d1Schema.deploymentTransition.id, 'attestation-list-revision'),
+			ne(d1Schema.deploymentTransition.state, 'expanded')
+		);
+		const activation = this.context.d1
+			.select({ id: d1Schema.deploymentTransition.id })
+			.from(d1Schema.deploymentTransition)
+			.where(activationFilter);
 		const tenant = this.context.requireTenant();
-		const rows = await this.context.d1
+		const descriptors = this.context.d1
 			.select({
-				digest: d1Schema.attestationReference.digest,
-				predicateType: d1Schema.attestationReference.predicateType,
-				size: d1Schema.casObject.size
+				digest: sql<Sha256HexDigest>`${d1Schema.attestationReference}."digest"`,
+				predicateType: sql<PredicateType>`${d1Schema.attestationReference}."predicate_type"`,
+				size: sql<number>`${d1Schema.casObject}."size"`
 			})
-			.from(d1Schema.attestationReference)
-			.innerJoin(
-				d1Schema.casObject,
-				eq(d1Schema.attestationReference.digest, d1Schema.casObject.digest)
+			.from(
+				sql`(select 1 where ${notExists(activation)} limit 1) legacy_list
+				cross join ${d1Schema.attestationReference} cross join ${d1Schema.casObject}`
 			)
 			.where(
 				and(
+					eq(d1Schema.attestationReference.digest, d1Schema.casObject.digest),
 					eq(d1Schema.attestationReference.tenant, tenant),
 					cacheIdentityCondition(
 						d1Schema.attestationReference.cacheKind,
@@ -570,23 +570,27 @@ export class AttestationsService {
 						cache.scope
 					),
 					eq(d1Schema.attestationReference.storePathHash, storePathHash),
-					eq(d1Schema.attestationReference.generation, generation)
+					generation === undefined
+						? sql`false`
+						: eq(d1Schema.attestationReference.generation, generation)
 				)
-			)
-			.all();
-
-		return rows
-			.map((row) => ({
-				digest: row.digest,
-				predicateType: row.predicateType,
-				size: row.size
-			}))
-			.toSorted((left, right) =>
+			);
+		const [activated, rows] = await this.context.d1.batch([
+			activation,
+			descriptors
+		]);
+		if (activated.length > 0) {
+			return { status: 'queued' };
+		}
+		return {
+			status: 'legacy',
+			descriptors: rows.toSorted((left, right) =>
 				`${left.predicateType}:${left.digest}` >
 				`${right.predicateType}:${right.digest}`
 					? 1
 					: -1
-			);
+			)
+		};
 	}
 
 	private async serveTenantObject(
@@ -594,7 +598,7 @@ export class AttestationsService {
 		key: string,
 		contentType: string,
 		cacheControl = 'no-store',
-		isServable?: (object: R2Object) => boolean
+		isServable?: (object: R2Object) => boolean | Promise<boolean>
 	): Promise<Response> {
 		const object = await this.context.env.BLOBS.get(key);
 
@@ -602,8 +606,18 @@ export class AttestationsService {
 			return uncachedNotFoundResponse();
 		}
 
-		if (isServable !== undefined && !isServable(object)) {
-			return uncachedNotFoundResponse();
+		if (isServable !== undefined) {
+			let isAllowed: boolean;
+			try {
+				isAllowed = await isServable(object);
+			} catch (error) {
+				await bestEffort(() => object.body.cancel());
+				throw error;
+			}
+			if (!isAllowed) {
+				await object.body.cancel();
+				return uncachedNotFoundResponse();
+			}
 		}
 
 		const headers = new Headers({
@@ -2344,22 +2358,71 @@ export class AttestationsService {
 	): Promise<Response> {
 		const storePathHash = parseRequestValue(storePathHashSchema, hash);
 		const cache = this.context.cacheRepository.require(cacheScope);
-		const committed = await this.authorisedNarInfoGeneration(
-			cache,
-			storePathHash
+		const repository = new AttestationListRevisionRepository(
+			this.context.d1,
+			this.context.requireTenant()
 		);
-
-		if (committed === undefined) {
+		const publications = await repository.publicationsFor(cache.scope, [
+			storePathHash
+		]);
+		const publication = publications.get(storePathHash);
+		if (publication === undefined) {
 			return uncachedNotFoundResponse();
 		}
-
-		return this.serveTenantObject(
+		if (publication.state.status === 'pending') {
+			throw new AttestationListPendingError(storePathHash);
+		}
+		const revalidatePublication = async (): Promise<void> => {
+			const latest = await repository.publicationsFor(cache.scope, [
+				storePathHash
+			]);
+			if (!isSameListPublication(publication, latest.get(storePathHash))) {
+				throw new AttestationListPendingError(storePathHash);
+			}
+		};
+		const key =
+			publication.state.status === 'ready'
+				? publication.state.key
+				: this.listKey(cache, storePathHash);
+		if (key === undefined) {
+			await revalidatePublication();
+			return uncachedNotFoundResponse();
+		}
+		const response = await this.serveTenantObject(
 			request,
-			this.listKey(cache, storePathHash),
+			key,
 			'application/json; charset=utf-8',
 			'no-store',
-			(object) => isListOfCommittedGeneration(object, cache, committed)
+			async (object) => {
+				await revalidatePublication();
+				const isMatch = isObjectOfListPublication(object, cache, publication);
+				if (!isMatch && publication.state.status === 'ready') {
+					await bestEffort(() =>
+						new AttestationListRefreshService(this.context).repairObserved(
+							cache.scope,
+							storePathHash,
+							publication
+						)
+					);
+					throw new AttestationListPendingError(storePathHash);
+				}
+				return isMatch;
+			}
 		);
+		if (response.status === 404) {
+			await revalidatePublication();
+			if (publication.state.status === 'ready') {
+				await bestEffort(() =>
+					new AttestationListRefreshService(this.context).repairObserved(
+						cache.scope,
+						storePathHash,
+						publication
+					)
+				);
+				throw new AttestationListPendingError(storePathHash);
+			}
+		}
+		return response;
 	}
 
 	async handleServeBundle(
@@ -2437,6 +2500,15 @@ export class AttestationsService {
 				? await this.narInfoObjects.committedNarInfoRow(cache, storePathHash)
 				: undefined;
 		const resolvedGeneration = generation ?? committedRow?.generation;
+		const materialisation = await this.listMaterialisationFor(
+			cache,
+			storePathHash,
+			resolvedGeneration
+		);
+		if (materialisation.status === 'queued') {
+			await new AttestationListRefreshService(this.context).requestWake();
+			return;
+		}
 
 		// The list object is path-keyed, so its mutations order behind any
 		// abandoned mutation of the same key, exactly as the narinfo objects do.
@@ -2447,11 +2519,7 @@ export class AttestationsService {
 			return;
 		}
 
-		const descriptors = await this.descriptorsFor(
-			cache,
-			storePathHash,
-			resolvedGeneration
-		);
+		const { descriptors } = materialisation;
 
 		if (descriptors.length === 0) {
 			await this.context.objectWrites.write([key], () =>

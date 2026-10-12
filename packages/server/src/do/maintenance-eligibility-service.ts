@@ -52,6 +52,25 @@ export class MaintenanceEligibilityService {
 	// Indexed existence checks keep this calculation independent of the number
 	// of pending uploads and queued deletions.
 	private hasImmediateWork(now: IsoTimestamp): boolean {
+		const wake = this.context.db
+			.select({ id: schema.attestationListRefreshWake.id })
+			.from(schema.attestationListRefreshWake)
+			.limit(1)
+			.get();
+		if (wake !== undefined) {
+			return true;
+		}
+		const refresh = this.context.db
+			.select({ id: schema.attestationListRefreshJobs.id })
+			.from(schema.attestationListRefreshJobs)
+			.where(
+				sql`${schema.attestationListRefreshJobs.cleanupAt} IS NULL OR ${schema.attestationListRefreshJobs.cleanupAt} <= ${Date.parse(now)}`
+			)
+			.limit(1)
+			.get();
+		if (refresh !== undefined) {
+			return true;
+		}
 		const retryAt = new UploadRetrySchedule(this.context).projectedAt();
 		if (retryAt !== undefined && retryAt <= Date.parse(now)) {
 			return true;
@@ -162,8 +181,19 @@ export class MaintenanceEligibilityService {
 			.get()?.nextCheckAt;
 	}
 
-	// Choose the earliest upload, attestation, root, grace, auth-key, or
-	// managed-cache retirement deadline when no immediate work is recorded.
+	private earliestListCleanup(): IsoTimestamp | undefined {
+		const at = this.context.db
+			.select({ at: schema.attestationListRefreshJobs.cleanupAt })
+			.from(schema.attestationListRefreshJobs)
+			.where(isNotNull(schema.attestationListRefreshJobs.cleanupAt))
+			.orderBy(asc(schema.attestationListRefreshJobs.cleanupAt))
+			.limit(1)
+			.get()?.at;
+		return at === undefined || at === null
+			? undefined
+			: isoTimestamp(new Date(at));
+	}
+
 	private earliestFutureWake(now: IsoTimestamp): IsoTimestamp | undefined {
 		return [
 			this.earliestSettleRetry(now),
@@ -174,7 +204,8 @@ export class MaintenanceEligibilityService {
 			this.earliestAuthKeyRetirement(),
 			this.earliestManagedCacheRetirement(),
 			this.earliestRefreshMaintenance(),
-			this.earliestSubjectNonceExpiry()
+			this.earliestSubjectNonceExpiry(),
+			this.earliestListCleanup()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];

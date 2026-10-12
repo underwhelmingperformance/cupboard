@@ -61,6 +61,7 @@ import migrations from '../../drizzle/migrations.js';
 import { type AccessClaims } from '../auth/auth.ts';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
+import type { AttestationListPublication } from '../db/attestation-list-revision.ts';
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import { summariseLocalStepError } from '../db/local-step-attempts.ts';
 import * as schema from '../db/schema.ts';
@@ -148,6 +149,7 @@ import {
 	type AttestationReferenceOutcome,
 	type MeasuredAttestationBundle
 } from './attestation-cas-service.ts';
+import { AttestationListRefreshService } from './attestation-list-refresh-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { AuthKeysService } from './auth-keys-service.ts';
 import {
@@ -324,6 +326,7 @@ export const maintenancePassCursorKey = 'maintenance:alarm-pass';
 type MaintenancePassKey =
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
+	| 'attestation-list-refresh'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
 	| 'local-step'
@@ -2486,6 +2489,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				run: () => this.drainAttestationInheritance()
 			},
 			{
+				key: 'attestation-list-refresh',
+				workAt: (now) =>
+					Promise.resolve(
+						new AttestationListRefreshService(this.context).nextWorkAt(now)
+					),
+				run: () =>
+					this.metered('attestation-list-refresh', () =>
+						this.withMaintenanceEligibility(() =>
+							new AttestationListRefreshService(this.context).advance()
+						)
+					)
+			},
+
+			{
 				key: 'local-step',
 				workAt: readyWhen(() => this.localStepRun.isPending()),
 				run: () => this.continueLocalStep(logger)
@@ -3327,6 +3344,35 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	async wakeAttestationListRefresh(): Promise<void> {
+		await this.initialise();
+		if (this.context.offboarding) {
+			return;
+		}
+		await this.metered('attestation-list-refresh', () =>
+			this.withMaintenanceEligibility(() =>
+				new AttestationListRefreshService(this.context).requestWake()
+			)
+		);
+	}
+
+	async queueAttestationListRepair(
+		cache: CacheScope,
+		hash: StorePathHash,
+		observed: AttestationListPublication
+	): Promise<void> {
+		await this.initialise();
+		await this.metered('attestation-list-repair', () =>
+			this.withMaintenanceEligibility(async () => {
+				await new AttestationListRefreshService(this.context).repairObserved(
+					cache,
+					hash,
+					observed
+				);
+			})
+		);
+	}
+
 	async measureAttestationBundle(
 		stagingKey: R2ObjectKey
 	): Promise<MeasuredAttestationBundle> {
@@ -3807,8 +3853,10 @@ function logRequestFinished(
 }
 
 type MeteredMethod =
+	| 'attestation-list-repair'
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
+	| 'attestation-list-refresh'
 	| 'auth-key-retirement'
 	| 'cache-teardown'
 	| 'claim-verifications'

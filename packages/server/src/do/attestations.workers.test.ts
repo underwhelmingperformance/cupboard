@@ -1411,11 +1411,24 @@ describe('attestation attach and reads', () => {
 						boundary === 'source lookup'
 							? 'select "generation"'
 							: 'select "attestation_ref_storage"."digest"';
+					const listStatements = new WeakSet<D1PreparedStatement>();
+					const replaceClaim = () => {
+						instance.context.db
+							.update(table)
+							.set({ claimOwner: 'replacement-owner' })
+							.where(filter)
+							.run();
+						replacement = instance.context.db
+							.select()
+							.from(table)
+							.where(filter)
+							.get();
+					};
 					const wrap = (
 						statement: D1PreparedStatement,
 						query: string
-					): D1PreparedStatement =>
-						new Proxy(statement, {
+					): D1PreparedStatement => {
+						const wrapped = new Proxy(statement, {
 							get(source, field) {
 								if (field === 'bind') {
 									return (...values: unknown[]) =>
@@ -1423,16 +1436,7 @@ describe('attestation attach and reads', () => {
 								}
 								if (field === 'raw' && query.startsWith(queryPrefix)) {
 									return async () => {
-										instance.context.db
-											.update(table)
-											.set({ claimOwner: 'replacement-owner' })
-											.where(filter)
-											.run();
-										replacement = instance.context.db
-											.select()
-											.from(table)
-											.where(filter)
-											.get();
+										replaceClaim();
 										return source.raw();
 									};
 								}
@@ -1443,10 +1447,27 @@ describe('attestation attach and reads', () => {
 									: value;
 							}
 						});
+						if (query.startsWith(queryPrefix)) {
+							listStatements.add(wrapped);
+						}
+						return wrapped;
+					};
 					const binding = new Proxy(env.CUPBOARD_DB, {
 						get(target, field) {
 							if (field === 'prepare') {
 								return (query: string) => wrap(target.prepare(query), query);
+							}
+							if (field === 'batch') {
+								return (statements: D1PreparedStatement[]) => {
+									if (
+										statements.some((statement) =>
+											listStatements.has(statement)
+										)
+									) {
+										replaceClaim();
+									}
+									return target.batch(statements);
+								};
 							}
 							const value: unknown = Reflect.get(target, field, target);
 							return typeof value === 'function'

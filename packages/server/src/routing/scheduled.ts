@@ -104,6 +104,7 @@ import {
 import { queueSendBatchSize } from '../policy/queues.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
+import { wakePendingAttestationLists } from './attestation-list-wakes.ts';
 import { tenantServer } from './durable-object.ts';
 
 // Rotate through active tenants in bounded batches ordered by
@@ -218,6 +219,7 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('cas-demote') }),
 	z.object({ kind: z.literal('control-key-retirement') }),
 	z.object({ kind: z.literal('control-session-pruning') }),
+	z.object({ kind: z.literal('attestation-list-sweep') }),
 	z.object({
 		kind: z.literal('local-step'),
 		tenants: z.array(tenantIdSchema).min(1).max(localStepWakeBatchSize)
@@ -254,6 +256,7 @@ export type MaintenanceQueueMessage =
 	| { readonly kind: 'cas-demote' }
 	| { readonly kind: 'control-key-retirement' }
 	| { readonly kind: 'control-session-pruning' }
+	| { readonly kind: 'attestation-list-sweep' }
 	| { readonly kind: 'local-step-sweep' };
 
 /**
@@ -273,7 +276,8 @@ export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 		() => runCasReaperDemote(logger, env),
 		() => runControlKeyRetirement(logger, env),
 		() => runControlSessionPruning(logger, env),
-		() => enqueueLocalStepWakes(env)
+		() => enqueueLocalStepWakes(env),
+		() => wakePendingAttestationLists(logger, env)
 	]) {
 		try {
 			await pass();
@@ -331,6 +335,7 @@ export async function enqueueMaintenanceJobs(
 		{ kind: 'cas-demote' },
 		{ kind: 'control-key-retirement' },
 		{ kind: 'control-session-pruning' },
+		{ kind: 'attestation-list-sweep' },
 		...(localStepWakes.kind === 'selected' ? localStepWakes.messages : [])
 	];
 
@@ -552,6 +557,11 @@ export async function executeMaintenanceQueueMessage(
 				);
 				return { action: 'ack' };
 			}
+			case 'attestation-list-sweep': {
+				await wakePendingAttestationLists(logger, env);
+				return { action: 'ack' };
+			}
+
 			case 'local-step-sweep': {
 				return { action: 'ack' };
 			}

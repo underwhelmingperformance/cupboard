@@ -7140,10 +7140,11 @@ build traces available from a cupboard cache.
       repair. Stale deletion after storage expansion preserves references,
       charges and durable deletion work for retry. Missing-object tenant
       discovery now uses incarnation-fenced D1 progress, bounded indexed tenant
-      jumps and fair retry polling alongside new discovery. Bounded tenant
-      reference drains and generation-fenced list refresh remain pending.
-      Abandoned repair reservations no longer prevent cleanup after recovery
-      marks them absent.
+      jumps and fair retry polling alongside new discovery. Generation-fenced
+      list refresh now uses durable multipart phases, revision-aware readers and
+      indexed repair wake discovery. Bounded tenant reference drains and the
+      remaining teardown integration are pending. Abandoned repair reservations
+      no longer prevent cleanup after recovery marks them absent.
 - [ ] Fence reads, completion and deletion by cache generation, publication
       generation and physical incarnation. Use grace periods and deletion
       outboxes for late writes, and drain cache and tenant teardown in bounded

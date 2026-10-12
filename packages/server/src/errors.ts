@@ -46,6 +46,7 @@ export abstract class InvalidRequestBodyError extends ServerHttpError {
 
 export class AttestationInfoHttpError extends ServerHttpError {
 	readonly status: number;
+	override readonly retryAfterSeconds: number | undefined;
 	constructor(
 		readonly code: AttestationInfoError['code'],
 		message: string,
@@ -54,12 +55,26 @@ export class AttestationInfoHttpError extends ServerHttpError {
 	) {
 		super(message);
 		this.name = 'AttestationInfoHttpError';
+		this.retryAfterSeconds = code === 'list-pending' ? 5 : undefined;
 		this.status =
-			code === 'scope-changed'
-				? StatusCodes.CONFLICT
-				: code === 'list-invalid'
-					? StatusCodes.BAD_GATEWAY
-					: StatusCodes.REQUEST_TOO_LONG;
+			code === 'list-pending'
+				? StatusCodes.SERVICE_UNAVAILABLE
+				: code === 'scope-changed'
+					? StatusCodes.CONFLICT
+					: code === 'list-invalid'
+						? StatusCodes.BAD_GATEWAY
+						: StatusCodes.REQUEST_TOO_LONG;
+	}
+}
+
+export class AttestationListPendingError extends AttestationInfoHttpError {
+	constructor(hash: StorePathHash) {
+		super(
+			'list-pending',
+			'Attestation list refresh is pending. Retry the request.',
+			hash
+		);
+		this.name = 'AttestationListPendingError';
 	}
 }
 

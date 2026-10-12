@@ -3,6 +3,7 @@ import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { currentLocalStep } from '@cupboard/protocol/deployment';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { runInDurableObject } from 'cloudflare:test';
 import { env as tenantEnv } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -12,6 +13,7 @@ import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
+	driveToCompletion,
 	flakyD1,
 	offboardTenant,
 	provisionNamedTenant,
@@ -21,10 +23,12 @@ import {
 	suspendTenant,
 	tenantMaintenanceFailureRow,
 	testControlEnv,
-	wasTenantMaintained
+	wasTenantMaintained,
+	withoutAlarmArming
 } from '../test-support.ts';
 import worker from '../worker.ts';
 
+import { tenantServer } from './durable-object.ts';
 import {
 	enqueueMaintenanceJobs,
 	executeMaintenanceQueueMessage,
@@ -145,6 +149,7 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'cas-demote' },
 				{ kind: 'control-key-retirement' },
 				{ kind: 'control-session-pruning' },
+				{ kind: 'attestation-list-sweep' },
 				{
 					kind: 'local-step',
 					tenants: ['acme', 'beta', 'current', fixtureTenant]
@@ -161,6 +166,7 @@ describe('scheduled tenant pass failure records', () => {
 					{ kind: 'cas-demote' },
 					{ kind: 'control-key-retirement' },
 					{ kind: 'control-session-pruning' },
+					{ kind: 'attestation-list-sweep' },
 					{
 						kind: 'local-step',
 						tenants: ['acme', 'beta', 'current', fixtureTenant]
@@ -352,6 +358,7 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'cas-demote' },
 				{ kind: 'control-key-retirement' },
 				{ kind: 'control-session-pruning' },
+				{ kind: 'attestation-list-sweep' },
 				{ kind: 'local-step', tenants: ['acme', 'current', fixtureTenant] }
 			],
 			acmeOutcome: undefined,
@@ -361,7 +368,8 @@ describe('scheduled tenant pass failure records', () => {
 
 	it('brings every tenant to the current local step from the queue', async () => {
 		await recordTransition('cache-identity', 'complete');
-		await recordTransition('cas-storage', 'expanded');
+		await recordTransition('cas-storage', 'complete');
+		await recordTransition('attestation-list-revision', 'expanded');
 		await provisionNamedTenant('acme');
 		await provisionNamedTenant('beta');
 
@@ -374,6 +382,19 @@ describe('scheduled tenant pass failure records', () => {
 				tenants: [tenantIdSchema.parse('acme'), tenantIdSchema.parse('beta')]
 			}
 		);
+
+		for (const id of ['acme', 'beta']) {
+			const stub = tenantServer(env, tenantIdSchema.parse(id));
+			await withoutAlarmArming(
+				() =>
+					driveToCompletion(
+						() => runInDurableObject(stub, (instance) => instance.alarm()),
+						async () => (await localStepOf(id)) === currentLocalStep,
+						4
+					),
+				stub
+			);
+		}
 
 		expect({
 			decision,
@@ -468,7 +489,8 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
 				{ kind: 'control-key-retirement' },
-				{ kind: 'control-session-pruning' }
+				{ kind: 'control-session-pruning' },
+				{ kind: 'attestation-list-sweep' }
 			]
 		});
 	});
@@ -808,6 +830,7 @@ describe('scheduled tenant pass failure records', () => {
 									'cas-demote',
 									'control-key-retirement',
 									'control-session-pruning',
+									'attestation-list-sweep',
 									'local-step',
 									'local-step-sweep'
 								],
