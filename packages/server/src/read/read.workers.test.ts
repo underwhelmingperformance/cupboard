@@ -29,6 +29,7 @@ import {
 } from '../errors.ts';
 import { narCacheTag } from '../http/cache-tags.ts';
 import {
+	narCacheControl,
 	narInfoObjectKey,
 	narObjectKey,
 	type NarObjectName
@@ -176,9 +177,40 @@ async function serveWithFaults(failures: number): Promise<Response> {
 }
 
 describe('NAR serve under shared-fact read faults', () => {
+	it('advertises public byte ranges and leaves slicing to Workers Cache', async () => {
+		await seedOwnedNar();
+		const response = await serveNar(
+			new Request('https://cache.example/nar/probe', {
+				headers: { range: 'bytes=2-5' }
+			}),
+			env,
+			tenant,
+			parsedNar(),
+			defaultPublicAuthority,
+			false
+		);
+
+		expect({
+			status: response.status,
+			body: await response.text(),
+			acceptRanges: response.headers.get('accept-ranges'),
+			contentRange: response.headers.get('content-range') ?? undefined,
+			contentLength: response.headers.get('content-length'),
+			cacheControl: response.headers.get('cache-control')
+		}).toStrictEqual({
+			status: 200,
+			body: narBytes,
+			acceptRanges: 'bytes',
+			contentRange: undefined,
+			contentLength: '9',
+			cacheControl: narCacheControl
+		});
+	});
+
 	it('marks every private miss as uncacheable', async () => {
 		const absentNarHash = nixSha256HashSchema.parse(`sha256:${'2'.repeat(52)}`);
 		await seedOwnedNarReference();
+		await env.BLOBS.delete(narObjectKey(narHash));
 
 		const [unreferencedMiss, objectMiss, narInfoMiss] = await Promise.all([
 			serveNar(

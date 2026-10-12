@@ -7104,9 +7104,12 @@ build traces available from a cupboard cache.
       oracles on all four supported platforms. Probe the nullable certificate
       path with an explicit value so its type does not depend on the host's CA
       bundle. The Intel macOS table comes from its native CI runner.
-- [ ] Test interrupted downloads with real Nix. Keep Cloudflare's public cache
+- [x] Test interrupted downloads with real Nix. Keep Cloudflare's public cache
       slicing behaviour and validate checksums, concatenated frames and
-      multipart retries.
+      multipart retries. Private origin ranges and a public edge-cache protocol
+      fixture resume twice across upload and frame boundaries. Public origin
+      responses advertise byte ranges while returning the complete object for
+      Workers Cache to slice.
 
 ### Storage and retention
 

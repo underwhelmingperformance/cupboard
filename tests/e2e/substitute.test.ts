@@ -1,9 +1,16 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import {
+	createServer,
+	type IncomingMessage,
+	type Server,
+	type ServerResponse
+} from 'node:http';
 import path from 'node:path';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { renderNetrc } from '@cupboard/nix-store/nix-config';
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
@@ -13,7 +20,10 @@ import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { UploadVerificationFailedError } from '../../packages/cli/src/errors.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import { fingerprint, pseudoRandomBytes } from '../support/bytes.ts';
-import { CupboardTestServer } from '../support/cupboard-server.ts';
+import {
+	CupboardTestServer,
+	type TenantProvisionSpec
+} from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import {
 	generatePublicKey,
@@ -89,6 +99,101 @@ const referencedDerivation = [
 ].join('\n');
 
 describe('Nix substitution', () => {
+	it.each(['private-origin', 'public-edge'] as const)(
+		'resumes interrupted multipart and multi-frame downloads through %s',
+		(mode) =>
+			withHarness(
+				`cupboard-e2e-download-retry-${mode}-`,
+				async (harness) => {
+					const contents = pseudoRandomBytes(40 * 1024 * 1024, 3);
+					const storePath = await withTemporaryDirectory(
+						'cupboard-e2e-download-source-',
+						async (directory) => {
+							const source = path.join(directory, 'cupboard-interrupted');
+							await mkdir(source);
+							await writeFile(path.join(source, 'payload.bin'), contents);
+
+							return harness.source.add(source);
+						}
+					);
+
+					await pushStorePaths(pushContext(harness), [storePath]);
+					const narInfo = await fetchNarInfo(harness.server, storePath, mode);
+					const interruptions = [8 * 1024 * 1024 - 13, 17 * 1024 * 1024 + 13];
+					const proxy = await InterruptedDownloadProxy.start(
+						harness.server.url,
+						mode,
+						interruptions
+					);
+
+					try {
+						const netrcFile = path.join(harness.directory, 'download.netrc');
+						await writeFile(
+							netrcFile,
+							renderNetrc(proxy.url, 'download-reader', downloadPassword)
+						);
+						await harness.target.realise(storePath, {
+							...signedBy(harness, harness.publicKey),
+							substituter: new URL(harness.server.tenantUrl.pathname, proxy.url)
+								.href,
+							...(mode === 'private-origin' && { netrcFile })
+						});
+						const realised = await readFile(
+							path.join(harness.target.physicalPath(storePath), 'payload.bin')
+						);
+						const [first, second] = z
+							.tuple([z.number(), z.number()])
+							.parse(interruptions);
+
+						expect({
+							payload: fingerprint(realised),
+							storedObject: proxy.storedObject,
+							narOriginRequests: proxy.narOriginRequests,
+							requests: proxy.observations,
+							errors: proxy.errors
+						}).toStrictEqual({
+							payload: fingerprint(contents),
+							storedObject: {
+								size: narInfo.fileSize,
+								sha256: narInfo.fileHash.digestHex()
+							},
+							narOriginRequests: mode === 'private-origin' ? 3 : 1,
+							requests: [
+								{
+									range: undefined,
+									originStatus: 200,
+									status: 200,
+									sentBytes: first,
+									isInterrupted: true
+								},
+								{
+									range: `bytes=${String(first)}-`,
+									originStatus: mode === 'private-origin' ? 206 : 200,
+									status: 206,
+									sentBytes: second - first,
+									isInterrupted: true
+								},
+								{
+									range: `bytes=${String(second)}-`,
+									originStatus: mode === 'private-origin' ? 206 : 200,
+									status: 206,
+									sentBytes: narInfo.fileSize - second,
+									isInterrupted: false
+								}
+							],
+							errors: []
+						});
+					} finally {
+						await proxy.stop();
+					}
+				},
+				{
+					defaultCacheAccess: mode === 'private-origin' ? 'private' : 'public',
+					read: { user: 'download-reader', password: downloadPassword }
+				}
+			)
+	);
+
 	it('substitutes a content-addressed path into a clean store', () =>
 		withHarness('cupboard-e2e-ca-', async (harness) => {
 			const storePath = await harness.source.add(contentAddressedFixture);
@@ -331,6 +436,7 @@ describe('Nix substitution', () => {
 });
 
 interface Harness {
+	readonly directory: string;
 	readonly server: CupboardTestServer;
 	readonly source: NixStore;
 	readonly target: NixStore;
@@ -340,12 +446,13 @@ interface Harness {
 
 function withHarness(
 	prefix: string,
-	body: (harness: Harness) => Promise<void>
+	body: (harness: Harness) => Promise<void>,
+	provision?: TenantProvisionSpec
 ): Promise<void> {
 	return withTemporaryDirectory(
 		prefix,
 		async (directory) => {
-			const server = await CupboardTestServer.start(directory);
+			const server = await CupboardTestServer.start(directory, { provision });
 
 			try {
 				const raw = new CupboardClient(server.tenantUrl, fetch, {
@@ -355,6 +462,7 @@ function withHarness(
 				const publicKey = await raw.publicKey();
 
 				await body({
+					directory,
 					server,
 					source: await NixStore.host(path.join(directory, 'source-home')),
 					target: await NixStore.chroot(
@@ -389,13 +497,223 @@ function signedBy(harness: Harness, trustedPublicKey: string): RealiseOptions {
 
 async function fetchNarInfo(
 	server: CupboardTestServer,
-	storePath: string
+	storePath: string,
+	mode?: DownloadMode
 ): Promise<NarInfo> {
 	const response = await fetch(
-		server.tenantPath(`/${StorePath.hash(storePath)}.narinfo`)
+		server.tenantPath(`/${StorePath.hash(storePath)}.narinfo`),
+		mode === 'private-origin'
+			? {
+					headers: {
+						authorization: `Basic ${Buffer.from(`download-reader:${downloadPassword}`).toString('base64')}`
+					}
+				}
+			: undefined
 	);
 
 	return NarInfo.parse(await response.text());
+}
+
+type DownloadMode = 'private-origin' | 'public-edge';
+const downloadPassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23';
+
+interface DownloadObservation {
+	readonly range: string | undefined;
+	readonly originStatus: number;
+	readonly status: number;
+	readonly sentBytes: number;
+	readonly isInterrupted: boolean;
+}
+
+interface CachedDownload {
+	readonly bytes: Uint8Array;
+	readonly headers: Headers;
+	readonly status: number;
+}
+
+class DownloadProxyAddressError extends Error {
+	constructor() {
+		super('The download proxy did not receive an IP address.');
+		this.name = 'DownloadProxyAddressError';
+	}
+}
+
+class InterruptedDownloadProxy {
+	static async start(
+		upstream: URL,
+		mode: DownloadMode,
+		interruptions: readonly number[]
+	): Promise<InterruptedDownloadProxy> {
+		const proxy = new InterruptedDownloadProxy(upstream, mode, interruptions);
+		await new Promise<void>((resolve, reject) => {
+			proxy.server.once('error', reject);
+			proxy.server.listen(0, '127.0.0.1', () => {
+				proxy.server.removeListener('error', reject);
+				resolve();
+			});
+		});
+		return proxy;
+	}
+
+	private readonly server: Server;
+	private readonly active = new Set<Promise<void>>();
+	private readonly controller = new AbortController();
+	private readonly cached = new Map<string, CachedDownload>();
+	readonly observations: DownloadObservation[] = [];
+	readonly errors: string[] = [];
+	storedObject: ReturnType<typeof fingerprint> | undefined;
+	narOriginRequests = 0;
+
+	private constructor(
+		private readonly upstream: URL,
+		private readonly mode: DownloadMode,
+		private readonly interruptions: readonly number[]
+	) {
+		this.server = createServer((request, response) => {
+			const pending = this.respond(request, response);
+			this.active.add(pending);
+			void pending.finally(() => this.active.delete(pending));
+		});
+	}
+
+	private async respond(
+		request: IncomingMessage,
+		response: ServerResponse
+	): Promise<void> {
+		try {
+			await this.forward(request, response);
+		} catch (error) {
+			this.errors.push(error instanceof Error ? error.message : String(error));
+			if (response.destroyed) {
+				return;
+			}
+			response.writeHead(500);
+			response.end();
+		}
+	}
+
+	private async forward(
+		request: IncomingMessage,
+		response: ServerResponse
+	): Promise<void> {
+		const url = new URL(request.url ?? '/', this.upstream);
+		const headers = new Headers();
+		for (const [key, value] of Object.entries(request.headers)) {
+			if (value === undefined || key === 'host') {
+				continue;
+			}
+			const parts = Array.isArray(value) ? value : [value];
+			for (const part of parts) {
+				headers.append(key, part);
+			}
+		}
+		const isNar = url.pathname.includes('/nar/');
+		const upstream = await this.originResponse(url, headers, isNar);
+		const bytes = upstream.bytes;
+		const outgoing = new Headers(upstream.headers);
+		outgoing.delete('transfer-encoding');
+		outgoing.set('connection', 'close');
+		if (!isNar) {
+			response.writeHead(upstream.status, Object.fromEntries(outgoing));
+			response.end(bytes);
+			return;
+		}
+
+		const range = request.headers.range;
+		const offset =
+			range === undefined
+				? 0
+				: Number(
+						z
+							.string()
+							.regex(/^bytes=\d+-$/)
+							.parse(range)
+							.slice(6, -1)
+					);
+		let body = bytes;
+		let status = upstream.status;
+		if (this.observations.length === 0) {
+			this.storedObject = fingerprint(bytes);
+		}
+		if (
+			range !== undefined &&
+			this.mode === 'public-edge' &&
+			upstream.status === 200
+		) {
+			body = bytes.subarray(offset);
+			status = 206;
+			outgoing.set(
+				'content-range',
+				`bytes ${String(offset)}-${String(bytes.byteLength - 1)}/${String(bytes.byteLength)}`
+			);
+			outgoing.set('content-length', String(body.byteLength));
+		}
+		const cutoff = this.interruptions[this.observations.length];
+		const isInterrupted = cutoff !== undefined;
+		const sent =
+			cutoff === undefined ? body : body.subarray(0, cutoff - offset);
+		this.observations.push({
+			range,
+			originStatus: upstream.status,
+			status,
+			sentBytes: sent.byteLength,
+			isInterrupted
+		});
+		response.writeHead(status, Object.fromEntries(outgoing));
+		response.end(sent);
+	}
+
+	private async originResponse(
+		url: URL,
+		headers: Headers,
+		isNar: boolean
+	): Promise<CachedDownload> {
+		if (isNar && this.mode === 'public-edge') {
+			const cached = this.cached.get(url.href);
+			if (cached !== undefined) {
+				return cached;
+			}
+			headers.delete('range');
+		}
+		if (isNar) {
+			this.narOriginRequests += 1;
+		}
+		const response = await fetch(url, {
+			headers,
+			signal: this.controller.signal
+		});
+		const result: CachedDownload = {
+			bytes: new Uint8Array(await response.arrayBuffer()),
+			headers: new Headers(response.headers),
+			status: response.status
+		};
+		if (isNar && this.mode === 'public-edge' && response.status === 200) {
+			this.cached.set(url.href, result);
+		}
+		return result;
+	}
+	get url(): URL {
+		const address = this.server.address();
+		if (address === null || typeof address === 'string') {
+			throw new DownloadProxyAddressError();
+		}
+		return new URL(`http://127.0.0.1:${String(address.port)}`);
+	}
+
+	async stop(): Promise<void> {
+		this.controller.abort();
+		this.server.closeAllConnections();
+		await new Promise<void>((resolve, reject) => {
+			this.server.close((error) => {
+				if (error !== undefined) {
+					reject(error);
+					return;
+				}
+				resolve();
+			});
+		});
+		await Promise.allSettled(this.active);
+	}
 }
 
 // A zstd skippable frame of `size` bytes: the magic number, the payload

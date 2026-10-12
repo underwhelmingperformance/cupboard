@@ -702,6 +702,7 @@ function narHeaders(
 	cache: CacheScope | undefined
 ): Headers {
 	const headers = new Headers({
+		'accept-ranges': 'bytes',
 		'cache-control': narCacheControl,
 		'content-type': 'application/zstd',
 		etag: object.httpEtag,

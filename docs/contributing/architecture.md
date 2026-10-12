@@ -493,6 +493,18 @@ steps:
 Public NARs are cached for a year, marked as immutable. Public narinfos are
 cached for an hour, with `must-revalidate`.
 
+NAR responses advertise `Accept-Ranges: bytes`. Nix [checks that header before
+retrying a partially streamed download][native-download-retries]. The response
+uses `Content-Type: application/zstd` without `Content-Encoding`, so a byte
+range refers to the compressed file bytes. Private reads implement single byte
+ranges in the Worker. For an unconditional public `GET`, the Worker returns the
+complete `200` response and [Workers Cache slices the cached
+representation][worker-ranges] for a range request.
+
+[native-download-retries]:
+  https://github.com/NixOS/nix/blob/2.35.2/src/libstore/filetransfer.cc
+[worker-ranges]: https://developers.cloudflare.com/workers/cache/configuration/
+
 Public narinfo and NAR reads, and private reads authenticated by static
 credentials, do not wake the tenant's Durable Object. Token-authenticated
 private reads call the object once per HTTP request; the NAR stream stays on the
