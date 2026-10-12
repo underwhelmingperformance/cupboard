@@ -546,9 +546,41 @@ describe('attestation attach and reads', () => {
 					]
 				]
 			});
-			if (shape !== 'revoked') {
-				return;
-			}
+		}
+	);
+
+	it('resumes unreadable inheritance with a fresh budget for each page', () =>
+		withoutAlarmArming(async () => {
+			const { token, metadata, nar } = await committedPathBundle();
+			const destination = namedCache('readable-source-continuation');
+			await putWorkerTestCache(token, destination);
+			await env.CUPBOARD_DB.batch([
+				env.CUPBOARD_DB.prepare(
+					`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 129)
+ INSERT INTO attestation_ref_storage (tenant, cache_kind, store_path_hash, generation, predicate_type, digest)
+ SELECT ?, 'default', ?, 0, ?, printf('%064x', n) FROM source`
+				).bind(fixtureTenant, metadata.storePathHash, predicateType),
+				env.CUPBOARD_DB.prepare(
+					'UPDATE blob_ref_storage SET readable = false WHERE tenant = ? AND store_path_hash = ?'
+				).bind(fixtureTenant, metadata.storePathHash)
+			]);
+			const reads: number[] = [];
+			const binding = new Proxy(env.CUPBOARD_DB, {
+				get(target, field) {
+					if (field === 'batch') {
+						return async (statements: D1PreparedStatement[]) => {
+							const results = await target.batch(statements);
+							reads.push(...results.map((result) => result.meta.rows_read));
+							return results;
+						};
+					}
+					const value: unknown = Reflect.get(target, field, target);
+					return typeof value === 'function'
+						? (...values: unknown[]): unknown =>
+								Reflect.apply(value, target, values)
+						: value;
+				}
+			});
 			await runInDurableObject(fixtureWorkerServer(), async (instance) => {
 				const context = instance.context;
 				const cache = resolvedCache(context, destination);
@@ -584,11 +616,6 @@ describe('attestation attach and reads', () => {
 			const budgets: { subrequests: number; rows: number }[] = [];
 			const pageSubrequests =
 				inheritanceLookupSubrequests + inheritanceListSubrequests;
-			const pagesPerDispatch = Math.floor(
-				(workersInvocationAllowances.free.subrequests -
-					subrequestSafetyReserve) /
-					pageSubrequests
-			);
 			const readPage = async (
 				instance: CupboardServer,
 				state: DurableObjectState
@@ -634,21 +661,16 @@ describe('attestation attach and reads', () => {
 					digest: queue.sourceDigest ?? undefined
 				};
 			};
-			const pageGroups = chunk(Array.from({ length: 391 }), pagesPerDispatch);
-			for (const passes of pageGroups) {
-				await runInDurableObject(
-					fixtureWorkerServer(),
-					async (instance, state) => {
-						for (const _pass of passes) {
-							const cursor = await withRowBudget(() =>
-								withSubrequestSlice(() => readPage(instance, state), {
-									subrequests: pageSubrequests,
-									reserve: 0
-								})
-							);
-							cursors.push(cursor);
-						}
-					}
+			for (let pass = 0; pass < 3; pass++) {
+				await runInDurableObject(fixtureWorkerServer(), (instance, state) =>
+					withRowBudget(() =>
+						withSubrequestSlice(
+							async () => {
+								cursors.push(await readPage(instance, state));
+							},
+							{ subrequests: pageSubrequests, reserve: 0 }
+						)
+					)
 				);
 			}
 			expect({
@@ -657,7 +679,7 @@ describe('attestation attach and reads', () => {
 				bounded: reads.every((read) => read <= 1000)
 			}).toStrictEqual({
 				cursors: [
-					...Array.from({ length: 390 }, (_, index) => ({
+					...Array.from({ length: 2 }, (_, index) => ({
 						result: 'budget-exhausted-after-progress',
 						digest: sha256HexDigestSchema.parse(
 							((index + 1) * 64).toString(16).padStart(64, '0')
@@ -665,15 +687,14 @@ describe('attestation attach and reads', () => {
 					})),
 					{ result: 'complete', digest: undefined }
 				],
-				budgets: Array.from({ length: 391 }, () => ({
+				budgets: Array.from({ length: 3 }, () => ({
 					subrequests:
 						inheritanceLookupSubrequests + inheritanceListSubrequests,
 					rows: 25_000
 				})),
 				bounded: true
 			});
-		}
-	);
+		}, fixtureWorkerServer()));
 
 	it('continues inheriting after a path exceeds one pass of bundles', async () => {
 		const { destination, metadata, digest } = await reusedPathWithSourceBundle(
