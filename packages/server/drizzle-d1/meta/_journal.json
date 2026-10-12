@@ -344,6 +344,20 @@
 			"when": 1791769686096,
 			"tag": "0048_cas_demotion_progress",
 			"breakpoints": true
+		},
+		{
+			"idx": 49,
+			"version": "6",
+			"when": 1791841418930,
+			"tag": "0049_attestation_list_revision",
+			"breakpoints": true
+		},
+		{
+			"idx": 50,
+			"version": "6",
+			"when": 1791841668370,
+			"tag": "0050_attestation_list_revision_contract",
+			"breakpoints": true
 		}
 	]
 }

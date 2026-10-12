@@ -3,6 +3,8 @@ import {
 	narInfoGenerationSchema
 } from '@cupboard/nix-store/scalars';
 
+import type { AttestationListPublication } from '../db/attestation-list-revision.ts';
+
 export const listGenerationMetadataKey = 'narinfo-generation';
 
 export function recordedListGeneration(
@@ -42,4 +44,49 @@ export function isListOfCommittedGeneration(
 	}
 
 	return recorded === committed;
+}
+
+export function isSameListPublication(
+	first: AttestationListPublication,
+	second: AttestationListPublication | undefined
+): boolean {
+	if (
+		first.parent.generation !== second?.parent.generation ||
+		first.parent.cacheGeneration !== second.parent.cacheGeneration ||
+		first.parent.narHash !== second.parent.narHash ||
+		first.state.status !== second.state.status ||
+		first.revision !== second.revision
+	) {
+		return false;
+	}
+	return (
+		first.state.status !== 'ready' ||
+		second.state.status !== 'ready' ||
+		first.state.key === second.state.key
+	);
+}
+
+export function isObjectOfListPublication(
+	object: R2Object,
+	cache: { readonly access: 'public' | 'private' },
+	publication: AttestationListPublication
+): boolean {
+	if (publication.state.status === 'legacy') {
+		return isListOfCommittedGeneration(
+			object,
+			cache,
+			publication.parent.generation
+		);
+	}
+	if (publication.state.status !== 'ready') {
+		return false;
+	}
+	const metadata = object.customMetadata;
+	return (
+		recordedListGeneration(object) === publication.parent.generation &&
+		metadata?.['cache-generation'] ===
+			String(publication.parent.cacheGeneration) &&
+		metadata['nar-hash'] === publication.parent.narHash &&
+		metadata['list-revision'] === String(publication.revision)
+	);
 }

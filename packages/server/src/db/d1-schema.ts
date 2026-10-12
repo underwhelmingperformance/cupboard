@@ -40,6 +40,7 @@ import {
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
+import type { R2ObjectKey } from '../http/http.ts';
 import {
 	type ReadPasswordHash,
 	type ReadPasswordSalt
@@ -767,6 +768,51 @@ export const attestationReference = sqliteTable(
 		index('attestation_ref_digest_idx').on(table.digest),
 		index('attestation_ref_digest_tenant_idx').on(table.digest, table.tenant),
 		index('attestation_ref_tenant_digest_idx').on(table.tenant, table.digest)
+	]
+);
+
+export const attestationListRevision = sqliteTable(
+	'attestation_list_revision',
+	{
+		id: integer('id').primaryKey({ autoIncrement: true }),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		revision: integer('revision').notNull().default(1),
+		publishedRevision: integer('published_revision'),
+		publishedCacheGeneration: integer(
+			'published_cache_generation'
+		).$type<CacheGeneration>(),
+		publishedNarHash: text('published_nar_hash').$type<NixSha256HashString>(),
+		publishedKey: text('published_key').$type<R2ObjectKey>(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		check(
+			'attestation_list_revision_cache_identity_check',
+			cacheIdentityConstraint(table.cacheKind, table.cacheName)
+		),
+		check(
+			'attestation_list_revision_number_check',
+			sql`${table.revision} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'attestation_list_revision_publication_check',
+			sql`(${table.publishedRevision} IS NULL AND ${table.publishedCacheGeneration} IS NULL AND ${table.publishedNarHash} IS NULL AND ${table.publishedKey} IS NULL) OR (${table.publishedRevision} IS NOT NULL AND ${table.publishedRevision} BETWEEN 1 AND ${table.revision} AND ${table.publishedCacheGeneration} >= 1 AND ${table.publishedCacheGeneration} IS NOT NULL AND ${table.publishedNarHash} IS NOT NULL)`
+		),
+		uniqueIndex('attestation_list_revision_default_idx')
+			.on(table.tenant, table.storePathHash, table.generation)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('attestation_list_revision_named_idx')
+			.on(table.tenant, table.cacheName, table.storePathHash, table.generation)
+			.where(sql`${table.cacheKind} = 'named'`),
+		index('attestation_list_revision_pending_idx')
+			.on(table.tenant, table.id)
+			.where(
+				sql`${table.publishedRevision} IS NULL OR ${table.publishedRevision} != ${table.revision}`
+			)
 	]
 );
 

@@ -1,4 +1,5 @@
 import {
+	attestationListLocalStep,
 	cacheIdentityLocalStep,
 	casStorageLocalStep,
 	expansionLocalStep,
@@ -19,6 +20,7 @@ import {
 	retentionMigrationBatchSize
 } from '../migration/cache-retention.ts';
 
+import { AttestationListInitialisationService } from './attestation-list-initialisation-service.ts';
 import {
 	projectLocalCacheLifecycles,
 	resetCacheLifecycleProjection
@@ -246,11 +248,33 @@ export async function recordLocalStep(
 		'cas-storage',
 		'expanded'
 	);
-	const reached = isContracted
+	let reached = isContracted
 		? hasCasStorage
 			? casStorageLocalStep
 			: cacheIdentityLocalStep
 		: expansionLocalStep;
+	const hasListRevisions = await context.transitions.hasReached(
+		'attestation-list-revision',
+		'expanded'
+	);
+	if (
+		hasListRevisions &&
+		reached >= casStorageLocalStep &&
+		(requested === undefined || requested >= attestationListLocalStep)
+	) {
+		const initialisation = await new AttestationListInitialisationService(
+			context
+		).advance();
+		if (initialisation.status === 'pending') {
+			return {
+				kind: 'incomplete',
+				projected: initialisation.created,
+				progressed: true
+			};
+		}
+		reached = attestationListLocalStep;
+	}
+
 	const moved = projection.projected + legacyMove.moved + incarnationMove.moved;
 	const belowReached = and(
 		eq(d1Schema.tenant.id, tenant),

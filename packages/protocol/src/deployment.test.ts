@@ -2,6 +2,7 @@ import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
 import {
+	attestationListLocalStep,
 	cacheIdentityLocalStep,
 	casStorageLocalStep,
 	deferredTransition,
@@ -153,7 +154,13 @@ describe('schemaTransitions', () => {
 					transition.contractStep === undefined ? [] : [transition.contractStep]
 				)
 			)
-		).toStrictEqual(new Set([expansionLocalStep, casStorageLocalStep]));
+		).toStrictEqual(
+			new Set([
+				expansionLocalStep,
+				casStorageLocalStep,
+				attestationListLocalStep
+			])
+		);
 	});
 });
 
@@ -347,6 +354,15 @@ describe('hasReachedTransitionState', () => {
 });
 
 describe('requiredLocalStepFrom', () => {
+	it('requires revision initialisation before activating the new readers', () => {
+		const recorded = states([
+			['cache-identity', 'complete'],
+			['cas-storage', 'complete'],
+			['attestation-list-revision', 'expanded']
+		]);
+		expect(requiredLocalStepFrom(recorded)).toBe(attestationListLocalStep);
+	});
+
 	it.each([
 		{
 			name: 'nothing recorded',

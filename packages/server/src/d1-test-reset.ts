@@ -4,6 +4,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import * as controlSchema from './db/control-d1-schema.ts';
 import {
 	artifactReference,
+	attestationListRevision,
 	attestationReference,
 	blobReference,
 	blobState,
@@ -44,6 +45,7 @@ export async function resetD1TestState(binding: D1Database): Promise<void> {
 		database.delete(listingFact),
 		database.delete(attestationReference),
 		database.delete(blobReference),
+		database.delete(attestationListRevision),
 		database.delete(pathReadRevocation),
 		database.delete(publication),
 		database.delete(cacheLifecycle),

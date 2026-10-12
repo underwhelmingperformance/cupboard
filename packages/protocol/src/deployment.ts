@@ -32,12 +32,14 @@ export function localStep(value: number): LocalStep {
  * Step 4 imports legacy retention and grace policies in bounded batches.
  * Step 5 rewrites stored grants once the `cache-identity` transition is
  * complete. Step 6 confirms that the object writes through the compatible
- * CAS storage interface after expansion.
+ * CAS storage interface after expansion. Step 7 initialises content revisions
+ * for existing NAR publications after forward capture is installed.
  *
  * Objects report at most step 4 before cache identity completes, then step 5
  * after the grant rewrite. They can report step 6 once CAS storage has expanded.
+ * Step 7 also requires completed attestation-list initialisation.
  */
-export const currentLocalStep: LocalStep = localStep(6);
+export const currentLocalStep: LocalStep = localStep(7);
 
 /**
 The completed grant rewrite, before the CAS storage transition.
@@ -48,6 +50,11 @@ export const cacheIdentityLocalStep: LocalStep = localStep(5);
 The compatible CAS storage interface required before contraction.
 */
 export const casStorageLocalStep: LocalStep = localStep(6);
+
+/**
+The revision initialisation required before attestation-list reader activation.
+*/
+export const attestationListLocalStep: LocalStep = localStep(7);
 
 /**
 The local data work that must finish before the deploy contracts D1.
@@ -81,7 +88,8 @@ export const transitionIdSchema = z.enum([
 	'cas-storage',
 	'cache-path-intersection-index',
 	'native-artifact-storage',
-	'cas-demotion-progress'
+	'cas-demotion-progress',
+	'attestation-list-revision'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -402,6 +410,15 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0048_cas_demotion_progress.sql'],
 		contract: [],
 		expandAfter: ['cas-storage']
+	},
+	{
+		id: 'attestation-list-revision',
+		expand: ['0049_attestation_list_revision.sql'],
+		contract: ['0050_attestation_list_revision_contract.sql'],
+		contractAfterUpload: true,
+		contractStep: attestationListLocalStep,
+		reportableStepOnComplete: attestationListLocalStep,
+		expandAfter: ['blob-reference-read-authority']
 	}
 ];
 

@@ -1,5 +1,6 @@
 export {
 	artifactReference,
+	attestationListRevision,
 	attestationReference,
 	blobReference,
 	blobState,

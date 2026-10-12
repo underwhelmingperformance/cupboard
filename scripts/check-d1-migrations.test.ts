@@ -109,21 +109,33 @@ describe('checkD1Migrations', () => {
 				...transition.expand,
 				...transition.contract
 			]).length,
-			replayed: ['cas-demotion-progress']
+			replayed: ['cas-demotion-progress', 'attestation-list-revision']
 		});
 	});
 
 	it('preserves replay coverage for the preceding CAS and artifact transitions', () => {
 		const full = readMigrationSet(repositoryMigrations);
 		const transitions = sharedTransitions.filter(
-			(transition) => transition.id !== 'cas-demotion-progress'
+			(transition) =>
+				transition.id !== 'cas-demotion-progress' &&
+				transition.id !== 'attestation-list-revision'
 		);
 		const preceding: MigrationSet = {
 			files: full.files.filter(
-				(file) => file !== '0048_cas_demotion_progress.sql'
+				(file) =>
+					![
+						'0048_cas_demotion_progress.sql',
+						'0049_attestation_list_revision.sql',
+						'0050_attestation_list_revision_contract.sql'
+					].includes(file)
 			),
 			journal: full.journal.filter(
-				(file) => file !== '0048_cas_demotion_progress.sql'
+				(file) =>
+					![
+						'0048_cas_demotion_progress.sql',
+						'0049_attestation_list_revision.sql',
+						'0050_attestation_list_revision_contract.sql'
+					].includes(file)
 			),
 			sql: full.sql
 		};
@@ -143,7 +155,8 @@ describe('checkD1Migrations', () => {
 		const earlierTransitions = sharedTransitions.filter(
 			(transition) =>
 				transition.id !== 'cache-path-intersection-index' &&
-				transition.id !== 'cas-demotion-progress'
+				transition.id !== 'cas-demotion-progress' &&
+				transition.id !== 'attestation-list-revision'
 		);
 		const order = deployOrder(earlierTransitions, 1);
 		expect(order).toStrictEqual({
