@@ -1493,14 +1493,14 @@ describe('narinfo deletion queue', () => {
 				written: result.meta.rows_written
 			}))
 		).toStrictEqual([
-			{ rows: [], read: 131, written: 0 },
-			{ rows: [], read: 130, written: 0 },
-			{ rows: [], read: 548, written: 78 },
-			{ rows: [], read: 548, written: 78 },
+			{ rows: [], read: 147, written: 0 },
+			{ rows: [], read: 146, written: 0 },
+			{ rows: [], read: 627, written: 93 },
+			{ rows: [], read: 627, written: 93 },
 			{ rows: [], read: 1, written: 2 },
 			{ rows: [], read: 1, written: 2 },
-			{ rows: [], read: 131, written: 0 },
-			{ rows: [], read: 533, written: 69 },
+			{ rows: [], read: 147, written: 0 },
+			{ rows: [], read: 606, written: 81 },
 			{ rows: [], read: 1, written: 2 }
 		]);
 
@@ -1592,8 +1592,8 @@ describe('narinfo deletion queue', () => {
 			bundles
 		}).toStrictEqual({
 			revocationCosts: [{ read: 0, written: 4 }],
-			maxRead: 600,
-			maxWritten: 100,
+			maxRead: 902,
+			maxWritten: 301,
 			retained: { total: 25_000, readable: 0 },
 			bundles: { total: 25_000, readable: 0 }
 		});

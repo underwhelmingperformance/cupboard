@@ -7151,7 +7151,8 @@ build traces available from a cupboard cache.
       teardown now retires bounded revision pages and preserves publications
       from recreated caches. Cache teardown persists its next deadline and
       origin, recovers missing hints and schedules future cleanup without
-      immediate polling. Activation fixtures and final verification remain
+      immediate polling. Readiness and accounting fixtures now cover reader
+      activation and bounded list cleanup. Final integrated verification remains
       pending. Abandoned repair reservations no longer prevent cleanup after
       recovery marks them absent.
 - [ ] Fence reads, completion and deletion by cache generation, publication
