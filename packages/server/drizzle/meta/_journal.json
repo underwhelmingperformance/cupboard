@@ -547,6 +547,13 @@
 			"when": 1791747359405,
 			"tag": "0077_native_artifacts",
 			"breakpoints": true
+		},
+		{
+			"idx": 78,
+			"version": "6",
+			"when": 1791841669485,
+			"tag": "0078_attestation_list_refresh",
+			"breakpoints": true
 		}
 	]
 }

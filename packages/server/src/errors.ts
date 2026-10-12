@@ -1884,3 +1884,34 @@ export class CacheClosedError extends ServerHttpError {
 		this.name = 'CacheClosedError';
 	}
 }
+
+export class AttestationListSourceUnavailableError extends Error {
+	constructor(public readonly digest: Sha256HexDigest) {
+		super(`Attestation metadata is unavailable for digest ${digest}`);
+		this.name = 'AttestationListSourceUnavailableError';
+	}
+}
+
+export class AttestationListStagingInvalidError extends Error {
+	constructor(
+		public readonly jobId: string,
+		public readonly reason:
+			| 'missing-chunk'
+			| 'invalid-chunk'
+			| 'part-limit'
+			| 'short-buffer'
+			| 'chunk-too-large'
+			| 'completed-size'
+			| 'completed-metadata'
+	) {
+		super(`Attestation-list staging for job ${jobId} is invalid (${reason})`);
+		this.name = 'AttestationListStagingInvalidError';
+	}
+}
+
+export class AttestationListRefreshLeaseLostError extends Error {
+	constructor() {
+		super('The attestation-list refresh lease is no longer valid');
+		this.name = 'AttestationListRefreshLeaseLostError';
+	}
+}

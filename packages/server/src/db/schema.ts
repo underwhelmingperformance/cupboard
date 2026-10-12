@@ -51,8 +51,13 @@ import {
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
+import type {
+	AttestationListRefreshFailure,
+	AttestationListRefreshSource
+} from '../do/attestation-list-refresh-state.ts';
 import type { R2ObjectKey } from '../http/http.ts';
 
+import type { AttestationListCursor } from './attestation-list-revision.ts';
 import { type CacheId } from './cache.ts';
 import {
 	emptyRootRetentionRuleSetId,
@@ -1351,5 +1356,106 @@ export const listingGenerationProofs = sqliteTable(
 	},
 	(table) => [
 		index('listing_generation_proof_listing_idx').on(table.listingArtifactId)
+	]
+);
+
+export const attestationListRefreshJobs = sqliteTable(
+	'attestation_list_refresh_job',
+	{
+		id: text('id').primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>(),
+		slot: integer('slot').notNull().default(1),
+		source: text('source', { mode: 'json' })
+			.$type<AttestationListRefreshSource>()
+			.notNull(),
+		key: text('key').$type<R2ObjectKey>().notNull(),
+		uploadId: text('upload_id'),
+		phase: text('phase', {
+			enum: ['collecting', 'uploading', 'completing', 'publishing', 'cleanup']
+		})
+			.notNull()
+			.default('collecting'),
+		after: text('after', { mode: 'json' }).$type<AttestationListCursor>(),
+		readSequence: integer('read_sequence').notNull().default(0),
+		readOffset: integer('read_offset').notNull().default(0),
+		nextSequence: integer('next_sequence').notNull().default(0),
+		bufferedBytes: integer('buffered_bytes').notNull().default(0),
+		nextPart: integer('next_part').notNull().default(1),
+		completedBytes: integer('completed_bytes').notNull().default(0),
+		hasEntries: integer('has_entries', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		isFinal: integer('is_final', { mode: 'boolean' }).notNull().default(false),
+		cleanupNotBefore: integer('cleanup_not_before').notNull().default(0),
+		cleanupAt: integer('cleanup_at')
+	},
+	(table) => [
+		check('attestation_list_refresh_slot_check', sql`${table.slot} = 1`),
+		uniqueIndex('attestation_list_refresh_active_idx')
+			.on(table.slot)
+			.where(sql`${table.cleanupAt} IS NULL`),
+		index('attestation_list_refresh_cleanup_idx').on(table.cleanupAt, table.id),
+		index('attestation_list_refresh_key_idx').on(
+			table.key,
+			table.cleanupNotBefore
+		),
+		index('attestation_list_refresh_cache_idx').on(table.cacheId, table.id)
+	]
+);
+
+export const attestationListRefreshChunks = sqliteTable(
+	'attestation_list_refresh_chunk',
+	{
+		jobId: text('job_id').notNull(),
+		sequence: integer('sequence').notNull(),
+		body: text('body').notNull(),
+		bytes: integer('bytes').notNull()
+	},
+	(table) => [primaryKey({ columns: [table.jobId, table.sequence] })]
+);
+
+export const attestationListRefreshParts = sqliteTable(
+	'attestation_list_refresh_part',
+	{
+		jobId: text('job_id').notNull(),
+		partNumber: integer('part_number').notNull(),
+		etag: text('etag').notNull()
+	},
+	(table) => [primaryKey({ columns: [table.jobId, table.partNumber] })]
+);
+
+export const attestationListRefreshLease = sqliteTable(
+	'attestation_list_refresh_lease',
+	{
+		id: integer('id').primaryKey(),
+		owner: text('owner').notNull(),
+		expiresAt: integer('expires_at').notNull()
+	},
+	(table) => [
+		check('attestation_list_refresh_lease_singleton', sql`${table.id} = 1`)
+	]
+);
+
+export const attestationListRefreshRetries = sqliteTable(
+	'attestation_list_refresh_retry',
+	{
+		revisionId: integer('revision_id').primaryKey(),
+		revision: integer('revision').notNull(),
+		cacheId: integer('cache_id').$type<CacheId>(),
+		notBefore: integer('not_before').notNull(),
+		failure: text('failure', { mode: 'json' })
+			.$type<AttestationListRefreshFailure>()
+			.notNull()
+	}
+);
+
+export const attestationListRefreshWake = sqliteTable(
+	'attestation_list_refresh_wake',
+	{
+		id: integer('id').primaryKey(),
+		token: text('token').notNull()
+	},
+	(table) => [
+		check('attestation_list_refresh_wake_singleton', sql`${table.id} = 1`)
 	]
 );

@@ -77,6 +77,7 @@ import m0074 from './0074_subject_nonces.sql';
 import m0075 from './0075_pending_upload_blob_declaration.sql';
 import m0076 from './0076_pending_upload_promotion.sql';
 import m0077 from './0077_native_artifacts.sql';
+import m0078 from './0078_attestation_list_refresh.sql';
 
 export default {
 	journal,
@@ -158,6 +159,7 @@ export default {
 		m0074,
 		m0075,
 		m0076,
-		m0077
+		m0077,
+		m0078
 	}
 };
