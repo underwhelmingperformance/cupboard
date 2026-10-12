@@ -2,6 +2,7 @@ import { rootLogger } from '@cupboard/logger';
 import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
@@ -12,11 +13,12 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { AttestationListInitialisationService } from '../do/attestation-list-initialisation-service.ts';
 import { currentLocalSchemaVersion } from '../do/local-schema-run.ts';
 import { recordLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
@@ -44,6 +46,7 @@ const windowStart = now - localStepStallWindowMs;
 
 beforeEach(async () => {
 	await recordTransition('cas-storage', 'expanded');
+	await recordTransition('attestation-list-revision', 'expanded');
 });
 
 class InjectedWakeFault extends Error {
@@ -125,6 +128,26 @@ async function pendingTenant(
 	}
 }
 
+async function provisionListReadyTenant(name: string): Promise<void> {
+	await provisionNamedTenant(name);
+	await runInDurableObject(tenantServer(env, tenant(name)), (instance) =>
+		instance.context.criticalSection(async () => {
+			const service = new AttestationListInitialisationService(
+				instance.context
+			);
+			for (let pass = 0; pass < 4; pass++) {
+				const progress = await service.advance();
+				if (progress.status === 'complete') {
+					return;
+				}
+			}
+			throw new Error(
+				'The fixture did not finish list revision initialisation'
+			);
+		})
+	);
+}
+
 function queueCollector(
 	sent: LocalStepWakeMessage[][]
 ): Pick<Queue<LocalStepWakeMessage>, 'sendBatch'> {
@@ -158,13 +181,31 @@ describe('required local step', () => {
 				['cache-identity', 'complete'],
 				['cas-storage', 'expanded']
 			],
-			step: currentLocalStep
+			step: casStorageLocalStep
 		},
 		{
 			name: 'CAS storage complete',
 			rows: [
 				['cache-identity', 'complete'],
 				['cas-storage', 'complete']
+			],
+			step: casStorageLocalStep
+		},
+		{
+			name: 'list revisions expanded',
+			rows: [
+				['cache-identity', 'complete'],
+				['cas-storage', 'complete'],
+				['attestation-list-revision', 'expanded']
+			],
+			step: currentLocalStep
+		},
+		{
+			name: 'list revisions complete',
+			rows: [
+				['cache-identity', 'complete'],
+				['cas-storage', 'complete'],
+				['attestation-list-revision', 'complete']
 			],
 			step: currentLocalStep
 		},
@@ -180,7 +221,7 @@ describe('required local step', () => {
 		}
 	])('is $step with $name', async ({ rows, step }) => {
 		await env.CUPBOARD_DB.prepare(
-			"DELETE FROM deployment_transition WHERE id = 'cas-storage'"
+			"DELETE FROM deployment_transition WHERE id IN ('cas-storage', 'attestation-list-revision')"
 		).run();
 		for (const [id, state] of rows) {
 			await env.CUPBOARD_DB.prepare(
@@ -203,6 +244,7 @@ describe('CAS storage local readiness', () => {
 		'records $step when CAS storage is $state',
 		async ({ state, step }) => {
 			await recordTransition('cache-identity', 'complete');
+			await recordTransition('cas-storage', 'complete');
 			await env.CUPBOARD_DB.prepare(
 				"DELETE FROM deployment_transition WHERE id = 'cas-storage'"
 			).run();
@@ -210,7 +252,7 @@ describe('CAS storage local readiness', () => {
 				await recordTransition('cas-storage', state);
 			}
 			const id = tenant('cas-readiness');
-			await provisionNamedTenant(id);
+			await provisionListReadyTenant(id);
 			const page = await runInDurableObject(tenantServer(env, id), (instance) =>
 				asOneInvocation(() =>
 					recordLocalStep(
@@ -232,6 +274,7 @@ describe('CAS storage local readiness', () => {
 describe('local step status', () => {
 	it('reports and wakes a tenant that recorded step 5 before the new schema migrations', async () => {
 		await recordTransition('cache-identity', 'complete');
+		await recordTransition('cas-storage', 'complete');
 		await pendingTenant('previous-final-step', {
 			localStep: localStep(5),
 			schemaVersion: 65
@@ -275,7 +318,7 @@ describe('local step status', () => {
 		await pendingTenant('unwoken-after-recording', { progressedAt: recent });
 		await pendingTenant('suspended');
 		await suspendTenant('suspended');
-		await provisionNamedTenant('offboarding');
+		await provisionListReadyTenant('offboarding');
 		await offboardTenant('offboarding');
 		await pendingTenant('working', {
 			attemptedAt: at(windowStart),
@@ -400,7 +443,8 @@ describe('local step wake message', () => {
 
 	it('lets a woken object record its step and its attempt', async () => {
 		await recordTransition('cache-identity', 'complete');
-		await provisionNamedTenant('woken');
+		await recordTransition('cas-storage', 'complete');
+		await provisionListReadyTenant('woken');
 
 		await wakeLocalStepTenants(logger, env, [tenant('woken')]);
 
@@ -413,9 +457,14 @@ describe('local step wake message', () => {
 	// Recording a step clears the attempt time, so a tenant that recorded step 4
 	// a moment ago is not counted as working once step 5 is required.
 	it('wakes a tenant again once the required step rises above the step that it recorded', async () => {
-		await provisionNamedTenant('raised');
+		await provisionListReadyTenant('raised');
 		await wakeLocalStepTenants(logger, env, [tenant('raised')]);
+		await database()
+			.update(d1Schema.tenant)
+			.set({ localStep: casStorageLocalStep, localStepAttemptedAt: sql`null` })
+			.where(eq(d1Schema.tenant.id, tenant('raised')));
 		await recordTransition('cache-identity', 'complete');
+		await recordTransition('cas-storage', 'complete');
 
 		const sent: LocalStepWakeMessage[][] = [];
 		const response = await enqueueLocalStepWakes(env, queueCollector(sent));
@@ -432,7 +481,7 @@ describe('local step wake message', () => {
 			progressedAt: at(windowStart)
 		});
 		await pendingTenant('already-ready', { localStep: expansionLocalStep });
-		await provisionNamedTenant('offboarded');
+		await provisionListReadyTenant('offboarded');
 		await offboardTenant('offboarded');
 		const called: TenantId[] = [];
 
@@ -540,8 +589,9 @@ describe('local step wake message', () => {
 	// done.
 	it('keeps a step that a newer build recorded when the object reports', async () => {
 		await recordTransition('cache-identity', 'complete');
+		await recordTransition('cas-storage', 'complete');
 		const id = tenant('step-rolled-back');
-		await provisionNamedTenant(id);
+		await provisionListReadyTenant(id);
 		await writeFacts(id, { localStep: laterStep });
 
 		// A wake finds the step recorded and runs no page. A page that runs anyway,

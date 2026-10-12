@@ -8,7 +8,8 @@ import {
 	migrateThrough,
 	recordTransition,
 	testServerFor,
-	useTestServer
+	useTestServer,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 // A Durable Object remembers that it has initialised on the instance, not in
@@ -20,26 +21,35 @@ import {
 describe('server initialisation over a migrated store', () => {
 	const serverName = 'server-restart';
 
-	it('initialises over a store it has already migrated', async () => {
-		await recordTransition('cache-identity', 'complete');
-		await recordTransition('cas-storage', 'expanded');
-		// Migrate the storage without initialising the object, which leaves it
-		// exactly as a first start would and as an eviction would find it.
-		await runInDurableObject(testServerFor(serverName), (_instance, state) =>
-			migrateThrough(state, latestMigrationIndex)
-		);
+	it('initialises over a store it has already migrated', () =>
+		withoutAlarmArming(async () => {
+			await recordTransition('cache-identity', 'complete');
+			await recordTransition('cas-storage', 'expanded');
+			await recordTransition('attestation-list-revision', 'expanded');
+			// Migrate the storage without initialising the object, which leaves it
+			// exactly as a first start would and as an eviction would find it.
+			await runInDurableObject(testServerFor(serverName), (_instance, state) =>
+				migrateThrough(state, latestMigrationIndex)
+			);
 
-		// Configuring the tenant initialises the object over that storage.
-		await useTestServer(serverName);
+			// Configuring the tenant initialises the object over that storage.
+			await useTestServer(serverName);
 
-		const outcome = await runInDurableObject(currentServer(), (instance) =>
-			instance.reportLocalStep(currentLocalStep)
-		);
+			const outcome = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					let result = await instance.reportLocalStep(currentLocalStep);
+					for (let pass = 0; pass < 3 && result.kind === 'incomplete'; pass++) {
+						result = await instance.reportLocalStep(currentLocalStep);
+					}
+					return result;
+				}
+			);
 
-		expect(outcome).toStrictEqual({
-			kind: 'recorded',
-			step: currentLocalStep,
-			progressed: true
-		});
-	});
+			expect(outcome).toStrictEqual({
+				kind: 'recorded',
+				step: currentLocalStep,
+				progressed: true
+			});
+		}));
 });

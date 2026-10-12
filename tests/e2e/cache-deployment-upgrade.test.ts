@@ -429,7 +429,9 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'cas-storage', independent: true },
 		{ id: 'cache-path-intersection-index', independent: false },
 		{ id: 'native-artifact-storage', independent: true },
-		{ id: 'cas-demotion-progress', independent: false }
+		{ id: 'cas-demotion-progress', independent: false },
+		{ id: 'attestation-list-revision', independent: false },
+		{ id: 'tenant-namespace-cleanup', independent: true }
 	]);
 });
 

@@ -2,6 +2,7 @@ import { capturingReporter as reporter } from '@cupboard/cli-ui/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
@@ -70,7 +71,9 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			updatedAt: recorded
 		},
 		{ id: 'native-artifact-storage', state: 'complete', updatedAt: recorded },
-		{ id: 'cas-demotion-progress', state: 'complete', updatedAt: recorded }
+		{ id: 'cas-demotion-progress', state: 'complete', updatedAt: recorded },
+		{ id: 'attestation-list-revision', state: 'complete', updatedAt: recorded },
+		{ id: 'tenant-namespace-cleanup', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -595,6 +598,14 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition cas-demotion-progress',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition attestation-list-revision',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition tenant-namespace-cleanup',
+							value: `complete ${since}`
+						},
 						{ label: `Transition ${row.id}`, value },
 						{ label: 'Required local step', value: String(currentLocalStep) },
 						{
@@ -756,7 +767,9 @@ describe('runDeploymentResume', () => {
 			transitions: {
 				...complete,
 				transitions: complete.transitions.filter(
-					(transition) => transition.id !== 'cas-storage'
+					(transition) =>
+						transition.id !== 'cas-storage' &&
+						transition.id !== 'attestation-list-revision'
 				)
 			},
 			step: cacheIdentityLocalStep,
@@ -768,6 +781,30 @@ describe('runDeploymentResume', () => {
 				...complete,
 				transitions: complete.transitions.map((transition) =>
 					transition.id === 'cas-storage'
+						? { ...transition, state: 'expanded' as const }
+						: transition
+				)
+			},
+			step: currentLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+		},
+		{
+			name: 'list revisions have not expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.filter(
+					(transition) => transition.id !== 'attestation-list-revision'
+				)
+			},
+			step: casStorageLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+		},
+		{
+			name: 'list revisions are expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.map((transition) =>
+					transition.id === 'attestation-list-revision'
 						? { ...transition, state: 'expanded' as const }
 						: transition
 				)

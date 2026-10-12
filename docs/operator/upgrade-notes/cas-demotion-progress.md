@@ -18,6 +18,13 @@ eligible for a later pass while other tenants progress. Final reference and
 incarnation checks still decide whether metadata can be removed.
 
 There is no manual cursor conversion. Existing missing objects are discovered
-through the normal scan. This change bounds global tenant discovery; tenant
-reference removal and attestation-list refresh are subsequent work, and native
-artifact publication remains disabled.
+through the normal scan. Tenant reference removal uses bounded pages after the
+`attestation-list-revision` transition completes. Before that transition
+completes, cleanup preserves the references, tenant charges and D1 progress.
+Legacy readers need synchronous list regeneration, which cannot bound its work
+when a path has many descriptors.
+
+Complete `attestation-list-revision` with `cupboard deploy`. Subsequent reaper
+passes resume queued cleanup and schedule durable list refresh. A digest's
+charge is credited only after its final reference is removed. Native artifact
+publication remains disabled.
