@@ -346,9 +346,19 @@ and the reapers.
 Earlier releases stored private caches under a `private/` name. A migration in a
 later release moved those objects to the current keys.
 
-The deploy sets an R2 lifecycle rule on the `staging/` prefix. It deletes
-anything there a day after it's written, and aborts multipart uploads there that
-are still incomplete after a day.
+The deploy reconciles two R2 upload lifecycle rules. The `staging/` rule deletes
+staging objects and aborts incomplete multipart uploads after a day. The `t/`
+rule only aborts incomplete multipart uploads after a day; completed tenant
+objects follow their publication and retention lifecycle. These rules reclaim
+uploads when creation succeeds after a timeout and the caller loses the upload
+ID. Matching managed rules and unrelated operator rules are preserved.
+
+R2 applies lifecycle actions asynchronously. The configured age is an
+eligibility threshold, not a cleanup completion deadline. See [R2 object
+lifecycles][r2-object-lifecycles].
+
+[r2-object-lifecycles]:
+  https://developers.cloudflare.com/r2/buckets/object-lifecycles/
 
 Orphan staging reconciliation and the lifecycle rule also remove late writes
 from upload requests that were already in progress when the cache was deleted.

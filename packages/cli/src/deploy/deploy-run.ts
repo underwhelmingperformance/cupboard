@@ -376,7 +376,7 @@ async function reconcileResources(
 			await Promise.all(
 				plan.r2Buckets.map(async (name) => {
 					await api.ensureR2Bucket(name);
-					await api.ensureStagingLifecycleRule(name);
+					await api.ensureUploadLifecycleRules(name);
 				})
 			);
 			await Promise.all(plan.queues.map((name) => api.ensureQueue(name)));

@@ -50,8 +50,8 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'ensureR2Bucket');
 			return Promise.resolve();
 		},
-		ensureStagingLifecycleRule: () => {
-			recordApiCall(apiCalls, 'ensureStagingLifecycleRule');
+		ensureUploadLifecycleRules: () => {
+			recordApiCall(apiCalls, 'ensureUploadLifecycleRules');
 			return Promise.resolve();
 		},
 		findD1Database: () => Promise.resolve(undefined),

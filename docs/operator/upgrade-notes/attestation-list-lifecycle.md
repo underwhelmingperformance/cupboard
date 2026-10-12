@@ -28,3 +28,11 @@ scheduler can recover revision cleanup after an earlier controller has purged
 local storage. Finalisation and provisioning checks include revision residue,
 and a database trigger prevents older controllers from completing offboarding
 while revisions remain.
+
+Run `cupboard deploy` to reconcile the bucket lifecycle configuration before
+activating revision readers. Deployment installs an abort-only rule for
+incomplete multipart uploads under `t/`, with an age of one day. This rule
+reclaims abandoned uploads whose creation succeeded after a timeout without
+returning an upload ID. Completed list objects continue to follow the normal
+cleanup lifecycle, and the 86-minute tenant finalisation guard remains in place.
+Deployment refuses to upload the Workers if lifecycle reconciliation fails.

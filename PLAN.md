@@ -7144,9 +7144,12 @@ build traces available from a cupboard cache.
       list refresh now uses durable multipart phases, revision-aware readers and
       indexed repair wake discovery. Missing-CAS tenant reference drains now use
       bounded pages after reader activation. Earlier readers retain references
-      and charges until activation. The remaining teardown integration and final
-      verification are pending. Abandoned repair reservations no longer prevent
-      cleanup after recovery marks them absent.
+      and charges until activation. Tenant list teardown now drains bounded
+      pages, and D1 guards prevent finalisation before the late-write cleanup
+      window ends. Deployment reconciles an abort-only tenant-prefix lifecycle
+      rule for unknown multipart upload IDs before uploading Workers. Cache list
+      teardown and final verification remain pending. Abandoned repair
+      reservations no longer prevent cleanup after recovery marks them absent.
 - [ ] Fence reads, completion and deletion by cache generation, publication
       generation and physical incarnation. Use grace periods and deletion
       outboxes for late writes, and drain cache and tenant teardown in bounded
