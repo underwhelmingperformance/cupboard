@@ -55,7 +55,7 @@ import type {
 	AttestationListRefreshFailure,
 	AttestationListRefreshSource
 } from '../do/attestation-list-refresh-state.ts';
-import type { R2ObjectKey } from '../http/http.ts';
+import type { R2ObjectKey, RequestOrigin } from '../http/http.ts';
 
 import type { AttestationListCursor } from './attestation-list-revision.ts';
 import { type CacheId } from './cache.ts';
@@ -566,9 +566,17 @@ export const pendingAttestationSubjects = sqliteTable(
 	]
 );
 
-export const cacheTeardowns = sqliteTable('cache_teardown', {
-	cacheId: integer('cache_id').$type<CacheId>().primaryKey()
-});
+export const cacheTeardowns = sqliteTable(
+	'cache_teardown',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
+		nextWorkAt: integer('next_work_at').notNull().default(0),
+		origin: text('origin').$type<RequestOrigin>()
+	},
+	(table) => [
+		index('cache_teardown_work_idx').on(table.nextWorkAt, table.cacheId)
+	]
+);
 
 export const stagingCleanup = sqliteTable(
 	'staging_cleanup',

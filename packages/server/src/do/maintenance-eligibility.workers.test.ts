@@ -26,7 +26,8 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	currentServer,
 	resetTestServer,
-	resolvedCache
+	resolvedCache,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import type { ServerContext } from './context.ts';
@@ -94,6 +95,38 @@ describe('maintenance eligibility projection', () => {
 			reconciledAt: now.toISOString()
 		});
 	});
+
+	it.each(['future', 'due', 'earlier-work'] as const)(
+		'projects cache teardown when the next work is %s',
+		(kind) =>
+			withoutAlarmArming(async () => {
+				const deadline = isoTimestampSchema.parse('2026-01-01T00:05:00.000Z');
+				await runInDurableObject(currentServer(), async (instance) => {
+					const cache = resolvedCache(instance.context);
+					instance.context.db
+						.insert(schema.cacheTeardowns)
+						.values({
+							cacheId: cache.id,
+							nextWorkAt: kind === 'due' ? now.getTime() : Date.parse(deadline)
+						})
+						.run();
+					if (kind === 'earlier-work') {
+						instance.context.db
+							.insert(schema.attestationListRefreshWake)
+							.values({ id: 1, token: 'earlier-work' })
+							.run();
+					}
+					await new MaintenanceEligibilityService(instance.context).reconcile(
+						now
+					);
+				});
+				expect(await eligibilityRow()).toStrictEqual({
+					tenant: fixtureTenant,
+					nextWakeAt: kind === 'future' ? deadline : wakeImmediately,
+					reconciledAt: now.toISOString()
+				});
+			})
+	);
 
 	it('schedules a deferred upload at its retry deadline while a fresh row remains due', async () => {
 		const retryAt = isoTimestampSchema.parse('2026-01-01T00:05:00.000Z');

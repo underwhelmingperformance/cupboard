@@ -2418,7 +2418,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'teardown',
-				workAt: readyWhen(() => this.cacheAdmin.hasPendingTeardown()),
+				workAt: () => this.cacheAdmin.nextTeardownWorkAt(Date.now()),
 				run: async () => {
 					await this.resumeCacheTeardown();
 
@@ -2938,18 +2938,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async resumeCacheTeardown(limit?: number): Promise<void> {
 		const claimed = await this.cacheAdmin.claimTeardown();
 
-		if (claimed === undefined) {
-			return;
+		if (claimed !== undefined) {
+			await this.metered('cache-teardown', () =>
+				this.withMaintenanceEligibility(() =>
+					this.cacheAdmin.resumeTeardownPass(
+						claimed.cache,
+						claimed.origin,
+						limit
+					)
+				)
+			);
 		}
-
-		await this.metered('cache-teardown', () =>
-			this.withMaintenanceEligibility(() =>
-				this.cacheAdmin.resumeTeardownPass(claimed.cache, claimed.origin, limit)
-			)
-		);
-
-		if (await this.cacheAdmin.hasPendingTeardown()) {
-			await this.ctx.storage.setAlarm(Date.now());
+		const next = await this.cacheAdmin.nextTeardownWorkAt(Date.now());
+		if (next !== undefined) {
+			await armAlarmNoLaterThan(this.ctx.storage, next);
 		}
 	}
 

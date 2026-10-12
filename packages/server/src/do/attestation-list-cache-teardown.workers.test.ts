@@ -24,6 +24,7 @@ import {
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
+import { maintenancePassCursorKey } from './server.ts';
 
 const scope = namedCache('lists');
 const origin = requestOriginSchema.parse('https://cache.example');
@@ -544,6 +545,176 @@ describe('attestation list cache teardown', () => {
 			expect({ marker: await hasMarker(cache.id), jobs }).toStrictEqual({
 				marker: false,
 				jobs: [{ count: 16 }]
+			});
+		}));
+	it.each([false, true])(
+		'schedules future cleanup without immediate polling (earlier alarm: %s)',
+		(hasEarlierAlarm) =>
+			withoutAlarmArming(async () => {
+				const cache = await fixture();
+				const cleanupAfter = await uncertainCompletion(cache);
+				await currentServer().runCacheTeardown(scope, origin);
+				await runInDurableObject(currentServer(), async (instance, state) => {
+					const expectedAt = hasEarlierAlarm ? Date.now() + 5000 : cleanupAfter;
+					let scheduledAt = hasEarlierAlarm ? expectedAt : Infinity;
+					const get = vi
+						.spyOn(state.storage, 'getAlarm')
+						.mockImplementation(() => Promise.resolve(scheduledAt));
+					const set = vi
+						.spyOn(state.storage, 'setAlarm')
+						.mockImplementation((at) => {
+							scheduledAt = typeof at === 'number' ? at : at.getTime();
+							return Promise.resolve();
+						});
+					try {
+						await instance.resumeCacheTeardown(1);
+						expect(scheduledAt).toBe(expectedAt);
+					} finally {
+						get.mockRestore();
+						set.mockRestore();
+					}
+				});
+			})
+	);
+
+	it('runs another due cache while an earlier teardown waits for completion', () =>
+		withoutAlarmArming(async () => {
+			const cache = await fixture();
+			const cleanupAfter = await uncertainCompletion(cache);
+			const otherScope = namedCache('ready');
+			const other = await runInDurableObject(currentServer(), (instance) =>
+				instance.context.criticalSection(() =>
+					new CacheRegistrationService(instance.context).createInSection(
+						otherScope,
+						{ access: 'private', priority: cachePrioritySchema.parse(40) }
+					)
+				)
+			);
+			await currentServer().runCacheTeardown(scope, origin);
+			await currentServer().runCacheTeardown(otherScope, origin);
+			await runInDurableObject(currentServer(), async (instance, state) => {
+				let scheduledAt = Infinity;
+				const get = vi
+					.spyOn(state.storage, 'getAlarm')
+					.mockImplementation(() => Promise.resolve(scheduledAt));
+				const set = vi
+					.spyOn(state.storage, 'setAlarm')
+					.mockImplementation((at) => {
+						scheduledAt = typeof at === 'number' ? at : at.getTime();
+						return Promise.resolve();
+					});
+				try {
+					await instance.resumeCacheTeardown(1);
+					expect(scheduledAt).toBeLessThan(cleanupAfter);
+					scheduledAt = Infinity;
+					await instance.resumeCacheTeardown(1);
+					expect(scheduledAt).toBe(cleanupAfter);
+				} finally {
+					get.mockRestore();
+					set.mockRestore();
+				}
+			});
+			expect({
+				waiting: await hasMarker(cache.id),
+				other: await hasMarker(other.id)
+			}).toStrictEqual({ waiting: true, other: false });
+		}));
+	it.each(['modern', 'legacy'] as const)(
+		'keeps its deadline after losing the KV hint and skips teardown in an early alarm (%s marker)',
+		(markerKind) =>
+			withoutAlarmArming(async () => {
+				const cache = await fixture();
+				const cleanupAfter = await uncertainCompletion(cache);
+				await currentServer().runCacheTeardown(scope, origin);
+				await runInDurableObject(currentServer(), async (_instance, state) => {
+					if (markerKind === 'legacy') {
+						await state.storage.delete(
+							`${teardownEntryPrefix}${String(cache.id)}`
+						);
+						await state.storage.put(
+							`${teardownEntryPrefix}${scope.name}`,
+							origin
+						);
+					}
+					state.storage.sql.exec(
+						'UPDATE cache_teardown SET origin = NULL WHERE cache_id = ?',
+						cache.id
+					);
+				});
+				await currentServer().resumeCacheTeardown(1);
+				await runInDurableObject(currentServer(), async (instance, state) => {
+					await state.storage.delete(
+						`${teardownEntryPrefix}${String(cache.id)}`
+					);
+					await state.storage.delete(maintenancePassCursorKey);
+					const headers = state.storage.sql
+						.exec(
+							'SELECT next_work_at AS at, origin FROM cache_teardown WHERE cache_id = ?',
+							cache.id
+						)
+						.toArray();
+					expect(headers).toStrictEqual([{ at: cleanupAfter, origin }]);
+					let scheduledAt = Infinity;
+					const get = vi
+						.spyOn(state.storage, 'getAlarm')
+						.mockImplementation(() => Promise.resolve(scheduledAt));
+					const set = vi
+						.spyOn(state.storage, 'setAlarm')
+						.mockImplementation((at) => {
+							scheduledAt = typeof at === 'number' ? at : at.getTime();
+							return Promise.resolve();
+						});
+					try {
+						await instance.resumeCacheTeardown(1);
+						expect(scheduledAt).toBe(cleanupAfter);
+						await instance.alarm();
+						const pass = await state.storage.get(maintenancePassCursorKey);
+						expect(pass).not.toBe('teardown');
+					} finally {
+						get.mockRestore();
+						set.mockRestore();
+					}
+				});
+				expect({
+					pending: await hasMarker(cache.id),
+					objectPresent: (await env.BLOBS.head(key)) !== null
+				}).toStrictEqual({ pending: true, objectPresent: true });
+			})
+	);
+	it('selects a persisted deadline without scanning 25,000 later teardowns', () =>
+		withoutAlarmArming(async () => {
+			const cache = await fixture();
+			const cleanupAfter = await uncertainCompletion(cache);
+			await currentServer().runCacheTeardown(scope, origin);
+			await currentServer().resumeCacheTeardown(1);
+			await runInDurableObject(currentServer(), async (instance, state) => {
+				state.storage.sql.exec(
+					'WITH RECURSIVE numbered(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM numbered WHERE value<25000) INSERT INTO cache_teardown(cache_id,next_work_at) SELECT value+1000, ? FROM numbered',
+					cleanupAfter + 86_400_000
+				);
+				let scheduledAt = Infinity;
+				const get = vi
+					.spyOn(state.storage, 'getAlarm')
+					.mockImplementation(() => Promise.resolve(scheduledAt));
+				const set = vi
+					.spyOn(state.storage, 'setAlarm')
+					.mockImplementation((at) => {
+						scheduledAt = typeof at === 'number' ? at : at.getTime();
+						return Promise.resolve();
+					});
+				try {
+					instance.context.dbCost.recordOutstanding();
+					const before = instance.context.dbCost.rowsRead;
+					await instance.resumeCacheTeardown(1);
+					instance.context.dbCost.recordOutstanding();
+					expect(scheduledAt).toBe(cleanupAfter);
+					expect(instance.context.dbCost.rowsRead - before).toBeLessThanOrEqual(
+						100
+					);
+				} finally {
+					get.mockRestore();
+					set.mockRestore();
+				}
 			});
 		}));
 });

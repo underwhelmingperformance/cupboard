@@ -93,6 +93,7 @@ export class MaintenanceEligibilityService {
 		const teardown = this.context.db
 			.select({ present: sql`1` })
 			.from(schema.cacheTeardowns)
+			.where(lte(schema.cacheTeardowns.nextWorkAt, Date.parse(now)))
 			.limit(1)
 			.get();
 		if (teardown !== undefined) {
@@ -194,6 +195,19 @@ export class MaintenanceEligibilityService {
 			: isoTimestamp(new Date(at));
 	}
 
+	private earliestTeardownWake(): IsoTimestamp | undefined {
+		const at = this.context.db
+			.select({ at: schema.cacheTeardowns.nextWorkAt })
+			.from(schema.cacheTeardowns)
+			.orderBy(
+				asc(schema.cacheTeardowns.nextWorkAt),
+				asc(schema.cacheTeardowns.cacheId)
+			)
+			.limit(1)
+			.get()?.at;
+		return at === undefined ? undefined : isoTimestamp(new Date(at));
+	}
+
 	private earliestFutureWake(now: IsoTimestamp): IsoTimestamp | undefined {
 		return [
 			this.earliestSettleRetry(now),
@@ -205,7 +219,8 @@ export class MaintenanceEligibilityService {
 			this.earliestManagedCacheRetirement(),
 			this.earliestRefreshMaintenance(),
 			this.earliestSubjectNonceExpiry(),
-			this.earliestListCleanup()
+			this.earliestListCleanup(),
+			this.earliestTeardownWake()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];

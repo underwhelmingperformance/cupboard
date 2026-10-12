@@ -79,6 +79,7 @@ import m0076 from './0076_pending_upload_promotion.sql';
 import m0077 from './0077_native_artifacts.sql';
 import m0078 from './0078_attestation_list_refresh.sql';
 import m0079 from './0079_attestation_list_cache_cleanup.sql';
+import m0080 from './0080_cache_teardown_deadlines.sql';
 
 export default {
 	journal,
@@ -162,6 +163,7 @@ export default {
 		m0076,
 		m0077,
 		m0078,
-		m0079
+		m0079,
+		m0080
 	}
 };

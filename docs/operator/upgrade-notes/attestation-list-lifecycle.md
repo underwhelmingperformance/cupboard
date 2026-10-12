@@ -41,3 +41,8 @@ Cache teardown retains its durable marker until list revisions and local refresh
 state have drained. Each pass retires a bounded page and preserves publications
 and active jobs from a later cache generation, including a cache recreated with
 the same name. Uncertain multipart completions retain their cleanup deadline.
+
+Cache teardown persists its next cleanup deadline and request origin in local
+SQLite. Losing a storage hint does not discard that deadline. Maintenance skips
+future teardown work, processes another due cache and schedules the earliest
+remaining deadline. An earlier alarm for other maintenance work is preserved.

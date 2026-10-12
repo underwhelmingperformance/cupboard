@@ -7149,7 +7149,9 @@ build traces available from a cupboard cache.
       window ends. Deployment reconciles an abort-only tenant-prefix lifecycle
       rule for unknown multipart upload IDs before uploading Workers. Cache list
       teardown now retires bounded revision pages and preserves publications
-      from recreated caches. Deadline scheduling and final verification remain
+      from recreated caches. Cache teardown persists its next deadline and
+      origin, recovers missing hints and schedules future cleanup without
+      immediate polling. Activation fixtures and final verification remain
       pending. Abandoned repair reservations no longer prevent cleanup after
       recovery marks them absent.
 - [ ] Fence reads, completion and deletion by cache generation, publication
