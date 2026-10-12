@@ -7142,9 +7142,11 @@ build traces available from a cupboard cache.
       discovery now uses incarnation-fenced D1 progress, bounded indexed tenant
       jumps and fair retry polling alongside new discovery. Generation-fenced
       list refresh now uses durable multipart phases, revision-aware readers and
-      indexed repair wake discovery. Bounded tenant reference drains and the
-      remaining teardown integration are pending. Abandoned repair reservations
-      no longer prevent cleanup after recovery marks them absent.
+      indexed repair wake discovery. Missing-CAS tenant reference drains now use
+      bounded pages after reader activation. Earlier readers retain references
+      and charges until activation. The remaining teardown integration and final
+      verification are pending. Abandoned repair reservations no longer prevent
+      cleanup after recovery marks them absent.
 - [ ] Fence reads, completion and deletion by cache generation, publication
       generation and physical incarnation. Use grace periods and deletion
       outboxes for late writes, and drain cache and tenant teardown in bounded

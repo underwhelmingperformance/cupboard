@@ -138,6 +138,7 @@ import {
 	hasSubrequestsFor,
 	requireSubrequestsFor
 } from './subrequest-slice.ts';
+import { TransitionGate } from './transition-gate.ts';
 
 export { listGenerationMetadataKey } from '../read/attestation-generation.ts';
 
@@ -182,6 +183,9 @@ export const inheritanceDrainPageSize = 100;
 export const inheritanceRetryDelayMs = 60 * 1000;
 const inheritanceDiagnosticTtlMs = 7 * 24 * 60 * 60_000;
 const inheritanceContinuationDelayMs = 1;
+const missingReferencePageSize = 16;
+const capturedReferenceRemovalSubrequests = 3;
+const missingReferenceTrailingSubrequests = 6;
 
 /**
  * How an inheritance attempt ended. `budget-exhausted` means more work
@@ -2608,11 +2612,8 @@ export class AttestationsService {
 		digest: Sha256HexDigest,
 		fenceIncarnation: number
 	): Promise<void> {
-		// The reaper routes here on a single head()===null observation. Re-check inside
-		// this Durable Object, the single writer of the tenant's rows: a concurrent
-		// re-promote may have restored the shared object, in which case its references
-		// are valid and must not be stripped. Unlike the re-materialisable narinfo
-		// demote, stripping a reference and crediting quota cannot be undone.
+		// A re-promotion can restore the observed incarnation before this writer
+		// runs. Recheck the object before removing references or crediting quota.
 		if (
 			(await this.context.env.BLOBS.head(
 				casObjectKey(digest, fenceIncarnation)
@@ -2621,7 +2622,25 @@ export class AttestationsService {
 			return;
 		}
 
+		if (
+			!(await new TransitionGate(this.context.d1).hasReached(
+				'attestation-list-revision',
+				'complete'
+			))
+		) {
+			return;
+		}
 		const tenant = this.context.requireTenant();
+		const limit = Math.min(
+			missingReferencePageSize,
+			affordableSubrequestOperations(
+				capturedReferenceRemovalSubrequests,
+				missingReferenceTrailingSubrequests
+			)
+		);
+		if (limit === 0) {
+			return;
+		}
 		const references = await this.context.d1
 			.select({
 				cacheKind: d1Schema.attestationReference.cacheKind,
@@ -2638,30 +2657,28 @@ export class AttestationsService {
 					eq(d1Schema.attestationReference.digest, digest)
 				)
 			)
+			.limit(limit)
 			.all();
-		const touchedPaths = new Map<ResolvedCache['id'], Set<StorePathHash>>();
-
 		for (const reference of references) {
-			const cache = this.context.cacheRepository.require(
-				cacheScopeFromRow({
-					kind: reference.cacheKind,
-					name: reference.cacheName
-				})
-			);
+			if (
+				!hasSubrequestsFor(
+					capturedReferenceRemovalSubrequests +
+						missingReferenceTrailingSubrequests
+				)
+			) {
+				break;
+			}
+			const scope = cacheScopeFromRow({
+				kind: reference.cacheKind,
+				name: reference.cacheName
+			});
 			await this.attestationCas.removeCapturedReference(
-				{ ...reference, cache: cache.scope },
+				{ ...reference, cache: scope },
 				fenceIncarnation
 			);
-			const paths = touchedPaths.get(cache.id) ?? new Set<StorePathHash>();
-			paths.add(reference.storePathHash);
-			touchedPaths.set(cache.id, paths);
 		}
-
-		for (const [cacheId, storePathHashes] of touchedPaths) {
-			const cache = this.context.cacheRepository.resolvedForId(cacheId);
-			for (const storePathHash of storePathHashes) {
-				await this.materialiseList(cache, storePathHash);
-			}
+		if (references.length > 0) {
+			await new AttestationListRefreshService(this.context).requestWake();
 		}
 	}
 }
