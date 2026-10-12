@@ -17,8 +17,13 @@ export class LocalDevelopmentBootstrapRefusedError extends Error {
 }
 
 const tableRows = z.array(z.object({ name: z.string() }));
-const transitionRows = z.array(z.object({ id: z.string(), state: z.string() }));
-const phaseRows = z.array(z.object({ id: z.string(), phase: z.string() }));
+const recordedStateRows = z.array(
+	z.object({
+		kind: z.enum(['transition', 'phase']),
+		id: z.string(),
+		state: z.string()
+	})
+);
 function transitionsFor(database: LocalDevelopmentDatabase): readonly string[] {
 	return schemaTransitions
 		.filter(
@@ -42,30 +47,33 @@ async function checkLocalState(
 		await database.query("SELECT name FROM sqlite_master WHERE type = 'table'")
 	);
 	const tableNames = new Set(tables.map(({ name }) => name));
-	const transitions = tableNames.has('deployment_transition')
-		? transitionRows.parse(
-				await database.query('SELECT id, state FROM deployment_transition')
-			)
-		: [];
+	const stateQueries: string[] = [];
+	if (tableNames.has('deployment_transition')) {
+		stateQueries.push(
+			"SELECT 'transition' AS kind, id, state FROM deployment_transition"
+		);
+	}
+	if (tableNames.has('deployment_phase')) {
+		stateQueries.push(
+			"SELECT 'phase' AS kind, id, phase AS state FROM deployment_phase"
+		);
+	}
+	const states =
+		stateQueries.length === 0
+			? []
+			: recordedStateRows.parse(
+					await database.query(stateQueries.join(' UNION ALL '))
+				);
 	if (
-		transitions.some(
-			({ id, state }) => !knownTransitions.has(id) || state !== 'complete'
+		states.some(
+			({ kind, id, state }) =>
+				!knownTransitions.has(id) ||
+				state !== (kind === 'transition' ? 'complete' : 'contracted')
 		)
 	) {
 		throw new LocalDevelopmentBootstrapRefusedError();
 	}
-	if (tableNames.has('deployment_phase')) {
-		const phases = phaseRows.parse(
-			await database.query('SELECT id, phase FROM deployment_phase')
-		);
-		if (
-			phases.some(
-				({ id, phase }) => !knownTransitions.has(id) || phase !== 'contracted'
-			)
-		) {
-			throw new LocalDevelopmentBootstrapRefusedError();
-		}
-	}
+	const transitions = states.filter(({ kind }) => kind === 'transition');
 	if (transitionIds.every((id) => transitions.some((row) => row.id === id))) {
 		return;
 	}
