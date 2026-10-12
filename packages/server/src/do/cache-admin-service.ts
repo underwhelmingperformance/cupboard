@@ -60,6 +60,7 @@ import {
 } from '../http/http.ts';
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
+import { AttestationListTeardownService } from './attestation-list-teardown-service.ts';
 import { drainObjectDeletionPages } from './bulk.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
 import { CacheCreationDefaultsService } from './cache-creation-defaults-service.ts';
@@ -1388,6 +1389,14 @@ export class CacheAdminService {
 				this.hasQueuedDeletions(cache) ||
 				this.hasStagingCleanup(cache)
 			) {
+				return;
+			}
+
+			const lists = await new AttestationListTeardownService(
+				this.context,
+				this.context.requireTenant()
+			).advanceCache(cache, limit);
+			if (lists.status === 'pending') {
 				return;
 			}
 

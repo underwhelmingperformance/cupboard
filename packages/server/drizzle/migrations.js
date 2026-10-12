@@ -78,6 +78,7 @@ import m0075 from './0075_pending_upload_blob_declaration.sql';
 import m0076 from './0076_pending_upload_promotion.sql';
 import m0077 from './0077_native_artifacts.sql';
 import m0078 from './0078_attestation_list_refresh.sql';
+import m0079 from './0079_attestation_list_cache_cleanup.sql';
 
 export default {
 	journal,
@@ -160,6 +161,7 @@ export default {
 		m0075,
 		m0076,
 		m0077,
-		m0078
+		m0078,
+		m0079
 	}
 };

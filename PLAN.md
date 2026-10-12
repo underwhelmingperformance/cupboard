@@ -7148,8 +7148,10 @@ build traces available from a cupboard cache.
       pages, and D1 guards prevent finalisation before the late-write cleanup
       window ends. Deployment reconciles an abort-only tenant-prefix lifecycle
       rule for unknown multipart upload IDs before uploading Workers. Cache list
-      teardown and final verification remain pending. Abandoned repair
-      reservations no longer prevent cleanup after recovery marks them absent.
+      teardown now retires bounded revision pages and preserves publications
+      from recreated caches. Deadline scheduling and final verification remain
+      pending. Abandoned repair reservations no longer prevent cleanup after
+      recovery marks them absent.
 - [ ] Fence reads, completion and deletion by cache generation, publication
       generation and physical incarnation. Use grace periods and deletion
       outboxes for late writes, and drain cache and tenant teardown in bounded

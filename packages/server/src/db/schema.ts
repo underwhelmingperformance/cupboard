@@ -1446,7 +1446,13 @@ export const attestationListRefreshRetries = sqliteTable(
 		failure: text('failure', { mode: 'json' })
 			.$type<AttestationListRefreshFailure>()
 			.notNull()
-	}
+	},
+	(table) => [
+		index('attestation_list_refresh_retry_cache_idx').on(
+			table.cacheId,
+			table.revisionId
+		)
+	]
 );
 
 export const attestationListRefreshWake = sqliteTable(

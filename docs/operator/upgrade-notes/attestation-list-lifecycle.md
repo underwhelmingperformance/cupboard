@@ -36,3 +36,8 @@ reclaims abandoned uploads whose creation succeeded after a timeout without
 returning an upload ID. Completed list objects continue to follow the normal
 cleanup lifecycle, and the 86-minute tenant finalisation guard remains in place.
 Deployment refuses to upload the Workers if lifecycle reconciliation fails.
+
+Cache teardown retains its durable marker until list revisions and local refresh
+state have drained. Each pass retires a bounded page and preserves publications
+and active jobs from a later cache generation, including a cache recreated with
+the same name. Uncertain multipart completions retain their cleanup deadline.

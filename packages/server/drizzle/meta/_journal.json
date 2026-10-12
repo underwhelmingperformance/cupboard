@@ -554,6 +554,13 @@
 			"when": 1791841669485,
 			"tag": "0078_attestation_list_refresh",
 			"breakpoints": true
+		},
+		{
+			"idx": 79,
+			"version": "6",
+			"when": 1791841669494,
+			"tag": "0079_attestation_list_cache_cleanup",
+			"breakpoints": true
 		}
 	]
 }
