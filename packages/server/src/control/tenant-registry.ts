@@ -31,6 +31,7 @@ import {
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
+import { tenantListRevisionsAbsent } from '../db/attestation-list-retirement.ts';
 import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import {
@@ -42,6 +43,7 @@ import {
 	readCasReferenceSet
 } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { tenantNamespaceCleanupAllowed } from '../db/tenant-namespace-cleanup.ts';
 import {
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
@@ -326,6 +328,7 @@ function provisioningStatements(
 		noStoredState(d1Schema.tenantCasBlob),
 		noStoredState(d1Schema.blobReference),
 		noStoredState(d1Schema.attestationReference),
+		tenantListRevisionsAbsent(database, body.id),
 		references.artifactReferencesAbsent(body.id)
 	);
 	const usageRow = database
@@ -811,19 +814,44 @@ export async function finaliseOffboardedTenant(
 	id: TenantId
 ): Promise<{ readonly finalised: boolean }> {
 	const references = await readCasReferenceSet(database);
-	const noArtifacts = references.artifactReferencesAbsent(id);
-	const tenantFilter = and(eq(d1Schema.tenant.id, id), noArtifacts);
-	const usageFilter = and(eq(d1Schema.tenantUsage.tenant, id), noArtifacts);
+	const noArtifacts = and(
+		references.artifactReferencesAbsent(id),
+		tenantListRevisionsAbsent(database, id)
+	);
+	const namespaceReady = tenantNamespaceCleanupAllowed(database, id);
+	const terminalTenantFilter = and(
+		eq(d1Schema.tenant.id, id),
+		eq(d1Schema.tenant.status, 'offboarded')
+	);
+	const terminalTenant = exists(
+		database
+			.select({ id: d1Schema.tenant.id })
+			.from(d1Schema.tenant)
+			.where(terminalTenantFilter)
+	);
+
+	const tenantFilter = and(
+		eq(d1Schema.tenant.id, id),
+		noArtifacts,
+		namespaceReady
+	);
+	const usageFilter = and(
+		eq(d1Schema.tenantUsage.tenant, id),
+		noArtifacts,
+		terminalTenant
+	);
 	const eligibilityFilter = and(
 		eq(d1Schema.tenantMaintenanceEligibility.tenant, id),
-		noArtifacts
+		noArtifacts,
+		terminalTenant
 	);
 	const credentialFilter = and(
 		eq(d1Schema.tenantCacheReadCredential.tenant, id),
-		noArtifacts
+		noArtifacts,
+		terminalTenant
 	);
 	return writeCacheLifecycle(database, async (table) => {
-		const cacheFilter = and(eq(table.tenant, id), noArtifacts);
+		const cacheFilter = and(eq(table.tenant, id), noArtifacts, terminalTenant);
 		const [updated] = await database.batch([
 			database
 				.update(d1Schema.tenant)

@@ -358,6 +358,20 @@
 			"when": 1791841668370,
 			"tag": "0050_attestation_list_revision_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 51,
+			"version": "6",
+			"when": 1791841669384,
+			"tag": "0051_tenant_namespace_cleanup_guard",
+			"breakpoints": true
+		},
+		{
+			"idx": 52,
+			"version": "6",
+			"when": 1791841669386,
+			"tag": "0052_attestation_list_retirement_guard",
+			"breakpoints": true
 		}
 	]
 }

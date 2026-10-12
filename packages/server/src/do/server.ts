@@ -77,6 +77,7 @@ import {
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	SubrequestTimeoutError,
+	TenantDrainIdentityMismatchError,
 	TenantNotConfiguredError,
 	UnauthenticatedError,
 	UploadNotFoundError,
@@ -1797,7 +1798,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 		await this.assertZstdAvailable();
 
-		const tenant = explicitTenant ?? this.tenantIdentity.current()?.tenant;
+		const assigned = this.tenantIdentity.current()?.tenant;
+		if (
+			assigned !== undefined &&
+			explicitTenant !== undefined &&
+			assigned !== explicitTenant
+		) {
+			throw new TenantDrainIdentityMismatchError();
+		}
+		const tenant = explicitTenant ?? assigned;
 
 		if (tenant === undefined) {
 			throw new TenantNotConfiguredError();
@@ -3426,11 +3435,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Drain only the reference and ownership rows assigned to this tenant writer.
 	// The Worker repeats bounded passes; the global reaper collects shared blobs.
-	async runOffboard(limit: number): Promise<{ drained: boolean }> {
-		await this.initialise();
+	async runOffboard(
+		limit: number,
+		recoveryTenant?: TenantId
+	): Promise<{ drained: boolean }> {
+		await this.initialise(recoveryTenant);
+
+		const assigned = this.tenantIdentity.current()?.tenant;
+		if (
+			assigned !== undefined &&
+			recoveryTenant !== undefined &&
+			assigned !== recoveryTenant
+		) {
+			throw new TenantDrainIdentityMismatchError();
+		}
 
 		return this.metered('offboard', () =>
-			this.context.criticalSection(() => this.offboarding.drain(limit))
+			this.context.criticalSection(() =>
+				this.offboarding.drain(limit, recoveryTenant)
+			)
 		);
 	}
 

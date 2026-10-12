@@ -109,7 +109,36 @@ describe('checkD1Migrations', () => {
 				...transition.expand,
 				...transition.contract
 			]).length,
-			replayed: ['cas-demotion-progress', 'attestation-list-revision']
+			replayed: [
+				'cas-demotion-progress',
+				'attestation-list-revision',
+				'tenant-namespace-cleanup'
+			]
+		});
+	});
+
+	it('installs the namespace guard before the reader transition contracts', () => {
+		const completeCount = sharedTransitions.findIndex(
+			(transition) => transition.id === 'attestation-list-revision'
+		);
+		const order = deployOrder(sharedTransitions, completeCount);
+		if (order === undefined) {
+			throw new Error('The reader transition has no valid deployment order');
+		}
+		const guardIndex = order.files.indexOf(
+			'0051_tenant_namespace_cleanup_guard.sql'
+		);
+		const readerIndex = order.files.indexOf(
+			'0050_attestation_list_revision_contract.sql'
+		);
+		expect({
+			guardPresent: guardIndex !== -1,
+			readerPresent: readerIndex !== -1,
+			guardBeforeReaders: guardIndex < readerIndex
+		}).toStrictEqual({
+			guardPresent: true,
+			readerPresent: true,
+			guardBeforeReaders: true
 		});
 	});
 
@@ -118,7 +147,8 @@ describe('checkD1Migrations', () => {
 		const transitions = sharedTransitions.filter(
 			(transition) =>
 				transition.id !== 'cas-demotion-progress' &&
-				transition.id !== 'attestation-list-revision'
+				transition.id !== 'attestation-list-revision' &&
+				transition.id !== 'tenant-namespace-cleanup'
 		);
 		const preceding: MigrationSet = {
 			files: full.files.filter(
@@ -126,7 +156,9 @@ describe('checkD1Migrations', () => {
 					![
 						'0048_cas_demotion_progress.sql',
 						'0049_attestation_list_revision.sql',
-						'0050_attestation_list_revision_contract.sql'
+						'0050_attestation_list_revision_contract.sql',
+						'0051_tenant_namespace_cleanup_guard.sql',
+						'0052_attestation_list_retirement_guard.sql'
 					].includes(file)
 			),
 			journal: full.journal.filter(
@@ -134,7 +166,9 @@ describe('checkD1Migrations', () => {
 					![
 						'0048_cas_demotion_progress.sql',
 						'0049_attestation_list_revision.sql',
-						'0050_attestation_list_revision_contract.sql'
+						'0050_attestation_list_revision_contract.sql',
+						'0051_tenant_namespace_cleanup_guard.sql',
+						'0052_attestation_list_retirement_guard.sql'
 					].includes(file)
 			),
 			sql: full.sql
@@ -156,7 +190,8 @@ describe('checkD1Migrations', () => {
 			(transition) =>
 				transition.id !== 'cache-path-intersection-index' &&
 				transition.id !== 'cas-demotion-progress' &&
-				transition.id !== 'attestation-list-revision'
+				transition.id !== 'attestation-list-revision' &&
+				transition.id !== 'tenant-namespace-cleanup'
 		);
 		const order = deployOrder(earlierTransitions, 1);
 		expect(order).toStrictEqual({

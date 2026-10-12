@@ -10,6 +10,7 @@ import {
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
+import { AttestationListTeardownService } from './attestation-list-teardown-service.ts';
 import { batchNonEmpty } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import {
@@ -400,10 +401,11 @@ export class OffboardingService {
 		this.context.offboarding = true;
 	}
 
-	// A missing identity means an earlier finalisation already purged local state.
-	// Report it as drained so the Worker can repeat the remaining D1 finalisation.
-	async drain(limit: number): Promise<{ drained: boolean }> {
-		const tenant = this.tenantSlug();
+	async drain(
+		limit: number,
+		recoveryTenant?: TenantId
+	): Promise<{ drained: boolean }> {
+		const tenant = this.tenantSlug() ?? recoveryTenant;
 
 		if (tenant === undefined) {
 			return { drained: true };
@@ -420,6 +422,14 @@ export class OffboardingService {
 		await this.deleteCasPresenceBatch(tenant, limit, references);
 		await this.deletePathFenceBatch(tenant, limit);
 
-		return { drained: !(await this.hasResidue(tenant, references)) };
+		if (await this.hasResidue(tenant, references)) {
+			return { drained: false };
+		}
+		return {
+			drained: await new AttestationListTeardownService(
+				this.context,
+				tenant
+			).advance(limit)
+		};
 	}
 }

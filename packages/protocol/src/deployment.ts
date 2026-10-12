@@ -89,7 +89,8 @@ export const transitionIdSchema = z.enum([
 	'cache-path-intersection-index',
 	'native-artifact-storage',
 	'cas-demotion-progress',
-	'attestation-list-revision'
+	'attestation-list-revision',
+	'tenant-namespace-cleanup'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -419,6 +420,15 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		contractStep: attestationListLocalStep,
 		reportableStepOnComplete: attestationListLocalStep,
 		expandAfter: ['blob-reference-read-authority']
+	},
+	{
+		id: 'tenant-namespace-cleanup',
+		expand: [
+			'0051_tenant_namespace_cleanup_guard.sql',
+			'0052_attestation_list_retirement_guard.sql'
+		],
+		contract: [],
+		independent: true
 	}
 ];
 

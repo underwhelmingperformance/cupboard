@@ -105,6 +105,7 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		listing_fact: 0,
 		tenant_cas_blob_storage: 0,
 		tenant_usage: 0,
+		tenant_namespace_cleanup_guard: 0,
 		local_step_wake_cursor: 0
 	});
 	const transition = await env.CUPBOARD_DB.prepare(

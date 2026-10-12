@@ -644,6 +644,16 @@ export class TenantNotFoundError extends ServerHttpError {
 	}
 }
 
+export class TenantDrainIdentityMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+	constructor() {
+		super(
+			'Offboarding recovery must target the tenant assigned to this Durable Object'
+		);
+		this.name = 'TenantDrainIdentityMismatchError';
+	}
+}
+
 // Provisioning configures the Durable Object before admitting the tenant slug.
 // If an admitted tenant is not configured, the provisioning sequence did not
 // finish. The failing tenant request cannot repair this state; an operator must

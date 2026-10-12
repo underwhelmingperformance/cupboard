@@ -59,9 +59,11 @@ import {
 	refreshTenantMembership
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
+import { tenantListRevisionsAbsent } from '../db/attestation-list-retirement.ts';
 import { cacheIdSchema } from '../db/cache.ts';
 import { readCasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { tenantNamespaceCleanupAllowed } from '../db/tenant-namespace-cleanup.ts';
 import {
 	BlobReaperService,
 	type CasReferenceDemoter,
@@ -863,7 +865,8 @@ async function drainTenant(
 ): Promise<void> {
 	for (let round = 0; round < rounds; round += 1) {
 		const { drained: isDrained } = await tenantServer(env, id).runOffboard(
-			drainLimit
+			drainLimit,
+			id
 		);
 		const hasRemainingObjects = await hasRemainingTenantObjects(
 			env,
@@ -903,7 +906,12 @@ async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
 		.where(
-			and(eq(d1Schema.tenant.id, id), references.artifactReferencesAbsent(id))
+			and(
+				eq(d1Schema.tenant.id, id),
+				references.artifactReferencesAbsent(id),
+				tenantNamespaceCleanupAllowed(database, id),
+				tenantListRevisionsAbsent(database, id)
+			)
 		)
 		.get();
 	if (ready === undefined) {

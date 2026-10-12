@@ -28,5 +28,6 @@ export {
 	tenantCacheReadCredential,
 	tenantCasBlob,
 	tenantMaintenanceEligibility,
+	tenantNamespaceCleanupGuard,
 	tenantUsage
 } from './d1-schema.ts';

@@ -33,6 +33,7 @@ import {
 	tenantCasBlob,
 	tenantMaintenanceEligibility,
 	tenantMaintenanceFailure,
+	tenantNamespaceCleanupGuard,
 	tenantUsage
 } from './db/d1-schema.ts';
 
@@ -73,6 +74,7 @@ export async function resetD1TestState(binding: D1Database): Promise<void> {
 			updatedAt: now
 		}),
 		database.delete(globalAdmin),
+		database.delete(tenantNamespaceCleanupGuard),
 		database.delete(tenant),
 		database.delete(manifestState),
 		database.delete(localStepWakeCursor)

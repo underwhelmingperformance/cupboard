@@ -836,6 +836,15 @@ export const precedingTenantCasBlob = sqliteView('tenant_cas_blob').as(
 	(query) => query.select().from(tenantCasBlob)
 );
 
+export const tenantNamespaceCleanupGuard = sqliteTable(
+	'tenant_namespace_cleanup_guard',
+	{
+		tenant: text('tenant').$type<TenantId>().primaryKey(),
+		startedAt: text('started_at').$type<IsoTimestamp>().notNull(),
+		notBefore: text('not_before').$type<IsoTimestamp>().notNull()
+	}
+);
+
 // The authoritative per-tenant usage and quota counter. `bytes`/`blobs` are NAR
 // storage only, matching `tenant_blob`; `cas_bytes`/`cas_blobs` are shared CAS
 // storage only, matching `tenant_cas_blob_storage`. `narinfos` is the committed-narinfo
