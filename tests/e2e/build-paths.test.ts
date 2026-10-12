@@ -157,8 +157,9 @@ beforeAll(async () => {
 	);
 	for (const kind of ['daemon', 'daemonless'] as const) {
 		await store().exec([
-			'mkdir',
-			'-p',
+			'install',
+			'-d',
+			'--mode=0755',
 			`/var/lib/build-paths-${kind}/home`,
 			`/tmp/build-paths-${kind}/runner`,
 			`/var/lib/build-paths-${kind}/store`,
