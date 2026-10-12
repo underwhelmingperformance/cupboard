@@ -24,12 +24,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
+	activateObjectIncarnation,
 	lateWriteTombstoneHorizonMs,
 	reserveObjectIncarnation
 } from '../blob/object-incarnation.ts';
+import { recoverAbandonedIncarnations } from '../blob/object-incarnation-recovery.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
+import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import { runCasReaperDemote } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -746,54 +749,90 @@ describe('attestation CAS lifecycle', () => {
 		});
 	});
 
-	it('refuses quota credit when artifact storage expands before the credit batch', async () => {
-		const bundle = await fileAttestationReference({
-			uploadId: 'artifact-credit-expansion-race',
-			bytes: textEncoder.encode('retained across expansion'),
-			storePathHash,
-			generation: 0,
-			predicateType
-		});
-		const before = {
-			usage: await tenantUsageRow(),
-			presence: await tenantCasBlobRows()
-		};
-		const statementSchema = z.object({ statement: z.string() });
-		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
-		let didInsert = false;
-		const spy = vi
-			.spyOn(env.CUPBOARD_DB, 'batch')
-			.mockImplementation(async (statements) => {
-				const hasUsageCredit = statements.some((statement) =>
-					statementSchema
-						.safeParse(statement)
-						.data?.statement.startsWith('update "tenant_usage"')
-				);
-				if (!didInsert && hasUsageCredit) {
-					didInsert = true;
-					await recordTransition('native-artifact-storage', 'complete');
-					await fileArtifactProjection(bundle.digest, 'listing');
-				}
-				return originalBatch(statements);
+	it.each([false, true])(
+		'preserves a retryable reference when artifact storage expands before deletion (artifact: %s)',
+		async (hasArtifact) => {
+			const bundle = await fileAttestationReference({
+				uploadId: 'artifact-credit-expansion-race',
+				bytes: textEncoder.encode('retained across expansion'),
+				storePathHash,
+				generation: 0,
+				predicateType
 			});
-		try {
-			await currentServer().removeAttestationReference({
+			const before = {
+				usage: await tenantUsageRow(),
+				presence: await tenantCasBlobRows(),
+				attestations: await attestationReferenceRows()
+			};
+			const statementSchema = z.object({ statement: z.string() });
+			const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+			let didInsert = false;
+			const spy = vi
+				.spyOn(env.CUPBOARD_DB, 'batch')
+				.mockImplementation(async (statements) => {
+					const hasUsageCredit = statements.some((statement) =>
+						statementSchema
+							.safeParse(statement)
+							.data?.statement.startsWith('update "tenant_usage"')
+					);
+					if (!didInsert && hasUsageCredit) {
+						didInsert = true;
+						await recordTransition('native-artifact-storage', 'complete');
+						if (hasArtifact) {
+							await fileArtifactProjection(bundle.digest, 'listing');
+						}
+					}
+					return originalBatch(statements);
+				});
+			const reference = {
 				cache: defaultCache(),
 				storePathHash,
 				generation: narInfoGenerationSchema.parse(0),
 				predicateType,
 				digest: bundle.digest
+			};
+			let refusal: unknown;
+			try {
+				await currentServer().removeAttestationReference(reference);
+			} catch (error) {
+				refusal = error;
+			} finally {
+				spy.mockRestore();
+			}
+			expect({
+				didInsert,
+				refusal:
+					refusal instanceof Error
+						? { name: refusal.name, message: refusal.message }
+						: refusal,
+				usage: await tenantUsageRow(),
+				presence: await tenantCasBlobRows(),
+				attestations: await attestationReferenceRows()
+			}).toStrictEqual({
+				didInsert: true,
+				refusal: {
+					name: 'CasReferenceSetChangedError',
+					message:
+						'CAS reference storage changed during deletion; retry the operation'
+				},
+				...before
 			});
-		} finally {
-			spy.mockRestore();
+
+			await currentServer().removeAttestationReference(reference);
+			await currentServer().removeAttestationReference(reference);
+			expect({
+				usage: await tenantUsageRow(),
+				presence: await tenantCasBlobRows(),
+				attestations: await attestationReferenceRows()
+			}).toStrictEqual({
+				usage: hasArtifact
+					? before.usage
+					: { ...before.usage, casBytes: 0, casBlobs: 0 },
+				presence: hasArtifact ? before.presence : [],
+				attestations: []
+			});
 		}
-		expect({
-			didInsert,
-			usage: await tenantUsageRow(),
-			presence: await tenantCasBlobRows(),
-			attestations: await attestationReferenceRows()
-		}).toStrictEqual({ didInsert: true, ...before, attestations: [] });
-	});
+	);
 
 	it('rejects an over-quota CAS reference without stranding an edge or charge', async () => {
 		await provisionFixtureTenant({ quotaBytes: 1 });
@@ -1158,6 +1197,83 @@ describe('attestation CAS lifecycle', () => {
 		}
 	);
 
+	it('retires missing state after a failed repair reservation becomes absent', async () => {
+		const bundle = await fileAttestationReference({
+			uploadId: 'abandoned-repair',
+			bytes: textEncoder.encode('abandoned repair'),
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+		const measured = await currentServer().measureAttestationBundle(
+			bundle.stagingKey
+		);
+		await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
+		const put = vi
+			.spyOn(env.BLOBS, 'put')
+			.mockRejectedValueOnce(new Error('repair stopped'));
+		try {
+			await runInDurableObject(currentServer(), (instance) =>
+				expect(
+					new AttestationCasService(instance.context).promoteMeasuredBundle(
+						bundle.stagingKey,
+						measured,
+						{ restoreMissingObject: true }
+					)
+				).rejects.toThrow('repair stopped')
+			);
+		} finally {
+			put.mockRestore();
+		}
+		const failed = await casLifecycleRows(bundle.digest);
+		const reservation = failed.registry[0];
+		if (reservation === undefined) {
+			throw new Error('The failed repair must retain its reservation.');
+		}
+		vi.setSystemTime(new Date(Date.now() + blobReaperGraceMs + 1));
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const recovery = await recoverAbandonedIncarnations(
+			database,
+			env.BLOBS,
+			'cas',
+			new Date(),
+			10,
+			subrequestsPerInvocation(env),
+			rootLogger()
+		);
+		const activation = await activateObjectIncarnation(
+			database,
+			'cas',
+			bundle.digest,
+			reservation.incarnation
+		);
+		const demoted = await runCasReaperDemote(rootLogger(), env, 10);
+		expect({
+			recovery,
+			activation,
+			demoted,
+			objects: await casObjectRows(),
+			refs: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			recovery: { hasMoreWork: false, recovered: 1 },
+			activation: 'retired',
+			demoted: 1,
+			objects: [],
+			refs: [],
+			presence: [],
+			usage: {
+				bytes: 0,
+				narinfos: 0,
+				blobs: 0,
+				casBytes: 0,
+				casBlobs: 0,
+				quotaBytes: undefined
+			}
+		});
+	});
+
 	it.each(['reservation', 'bytes'] as const)(
 		'retries a missing-object repair after losing the %s response',
 		async (phase) => {
@@ -1172,6 +1288,8 @@ describe('attestation CAS lifecycle', () => {
 			const measured = await currentServer().measureAttestationBundle(
 				bundle.stagingKey
 			);
+			const beforeLifecycle = await casLifecycleRows(bundle.digest);
+			const beforeObjects = beforeLifecycle.objects;
 			const before = {
 				refs: await attestationReferenceRows(),
 				presence: await tenantCasBlobRows(),
@@ -1210,16 +1328,27 @@ describe('attestation CAS lifecycle', () => {
 				lost.mockRestore();
 			}
 
-			await runCasReaperDemote(rootLogger(), env, 10);
+			const demoted = await runCasReaperDemote(rootLogger(), env, 10);
 			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 			const now = isoTimestamp(new Date());
 			expect({
+				demoted,
+				previousBytesPresent: await Promise.all(
+					beforeObjects.map(
+						async (object) =>
+							(await env.BLOBS.head(
+								casObjectKey(object.digest, object.incarnation)
+							)) !== null
+					)
+				),
 				...(await casLifecycleRows(bundle.digest)),
 				refs: await attestationReferenceRows(),
 				presence: await tenantCasBlobRows(),
 				usage: await tenantUsageRow()
 			}).toStrictEqual({
-				objects: [],
+				demoted: 0,
+				previousBytesPresent: [false],
+				objects: beforeObjects,
 				registry: [
 					{
 						kind: 'cas',

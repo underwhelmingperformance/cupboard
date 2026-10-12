@@ -1613,6 +1613,16 @@ export class AttestationPathNotFoundError extends ServerHttpError {
 	}
 }
 
+export class CasReferenceSetChangedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super('CAS reference storage changed during deletion; retry the operation');
+		this.name = 'CasReferenceSetChangedError';
+	}
+}
+
 export class AttestationInheritanceSourceChangedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;

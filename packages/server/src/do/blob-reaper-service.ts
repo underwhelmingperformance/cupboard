@@ -17,8 +17,11 @@ import {
 	isNotNull,
 	isNull,
 	lte,
+	ne,
+	notExists,
 	notInArray,
-	sql
+	sql,
+	type SQLWrapper
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
@@ -330,13 +333,36 @@ export function fencedBlobStateDeletion(
 }
 
 /**
- * Builds the registry retirement and the object delete for the CAS object
- * versions a demote scan captured.
+ * Builds registry retirement and metadata deletion for captured CAS versions.
+ *
+ * The reaper discovers missing objects through CAS metadata. Keep that metadata
+ * until attestation demotion finishes. Artifact references remain after physical
+ * loss.
  */
 export function fencedCasObjectDeletion(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	rows: JsonRowList<CasObjectVersion>
 ) {
+	const attestationReferencesAbsent = (digest: SQLWrapper) =>
+		notExists(
+			d1
+				.select({ one: sql`1` })
+				.from(d1Schema.attestationReference)
+				.where(eq(d1Schema.attestationReference.digest, digest))
+		);
+	const repaired = and(
+		eq(d1Schema.objectIncarnation.kind, 'cas'),
+		eq(d1Schema.objectIncarnation.objectId, d1Schema.casObject.digest),
+		ne(d1Schema.objectIncarnation.incarnation, d1Schema.casObject.incarnation),
+		ne(d1Schema.objectIncarnation.state, 'absent')
+	);
+	const notRepaired = notExists(
+		d1
+			.select({ one: sql`1` })
+			.from(d1Schema.objectIncarnation)
+			.where(repaired)
+	);
+
 	return {
 		retire: d1
 			.update(d1Schema.objectIncarnation)
@@ -345,6 +371,7 @@ export function fencedCasObjectDeletion(
 				and(
 					eq(d1Schema.objectIncarnation.kind, 'cas'),
 					eq(d1Schema.objectIncarnation.state, 'live'),
+					attestationReferencesAbsent(d1Schema.objectIncarnation.objectId),
 					rows.matches({
 						digest: d1Schema.objectIncarnation.objectId,
 						incarnation: d1Schema.objectIncarnation.incarnation
@@ -354,10 +381,14 @@ export function fencedCasObjectDeletion(
 		remove: d1
 			.delete(d1Schema.casObject)
 			.where(
-				rows.matches({
-					digest: d1Schema.casObject.digest,
-					incarnation: d1Schema.casObject.incarnation
-				})
+				and(
+					rows.matches({
+						digest: d1Schema.casObject.digest,
+						incarnation: d1Schema.casObject.incarnation
+					}),
+					attestationReferencesAbsent(d1Schema.casObject.digest),
+					notRepaired
+				)
 			)
 			.returning({ digest: d1Schema.casObject.digest })
 	};

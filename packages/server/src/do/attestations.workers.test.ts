@@ -106,12 +106,10 @@ import {
 	inheritanceLookupSubrequests,
 	inheritedBundleSubrequests
 } from './attestations-service.ts';
-import { fencedCasObjectDeletion } from './blob-reaper-service.ts';
 import { chunk, maxBoundParameters } from './bulk.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
 import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
-import { jsonRowList } from './json-list.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	PathReadAuthorityService,
@@ -3360,11 +3358,14 @@ describe('attestation attach and reads', () => {
 						captured.incarnation
 					)
 				);
-				const deletion = fencedCasObjectDeletion(
-					database,
-					jsonRowList([{ digest, incarnation: captured.incarnation }])
-				);
-				await database.batch([deletion.retire, deletion.remove]);
+				await database
+					.delete(d1Schema.casObject)
+					.where(
+						and(
+							eq(d1Schema.casObject.digest, digest),
+							eq(d1Schema.casObject.incarnation, captured.incarnation)
+						)
+					);
 			};
 			const originalHead = env.BLOBS.head.bind(env.BLOBS);
 			const head = vi

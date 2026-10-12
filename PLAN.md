@@ -7132,7 +7132,12 @@ build traces available from a cupboard cache.
       reference removal before creating artifact references. Collection and
       final quota credit now check every reference kind. Bounded tenant
       offboarding, provisioning residue checks and finalisation guards are
-      implemented; missing-object demotion and repair remain pending.
+      implemented. Missing-state retirement rechecks attestation demotion and
+      physical repairs, and artifact references and charges remain during
+      repair. Stale deletion after storage expansion preserves references,
+      charges and durable deletion work for retry. Bounded missing-object
+      discovery and tenant drains remain pending. Abandoned repair reservations
+      no longer prevent cleanup after recovery marks them absent.
 - [ ] Fence reads, completion and deletion by cache generation, publication
       generation and physical incarnation. Use grace periods and deletion
       outboxes for late writes, and drain cache and tenant teardown in bounded

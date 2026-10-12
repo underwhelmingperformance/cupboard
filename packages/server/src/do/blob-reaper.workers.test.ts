@@ -1,13 +1,20 @@
 import { rootLogger } from '@cupboard/logger';
-import { type Sha256HexDigest } from '@cupboard/nix-store/scalars';
+import {
+	type Sha256HexDigest,
+	sha256HexDigestSchema
+} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { type ArtifactKind, artifactKinds } from '@cupboard/protocol/artifacts';
 import { env } from 'cloudflare:workers';
+import { drizzle } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { CasObjectStore } from '../blob/cas-object-store.ts';
 import { lateWriteTombstoneHorizonMs } from '../blob/object-incarnation.ts';
+import { sha256HexBytes } from '../crypto/crypto.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
 import {
 	afterGrace,
@@ -32,11 +39,15 @@ import {
 	seedCasObjects,
 	syntheticCasDigest,
 	syntheticNarHash,
+	tenantCasBlobRows,
+	tenantUsageRow,
 	testBase,
 	uploadMetadata,
 	verifiableNar,
 	verifiableNarStored
 } from '../test-support.ts';
+
+import { BlobReaperService } from './blob-reaper-service.ts';
 
 async function fileArtifactProjection(
 	digest: Sha256HexDigest,
@@ -87,20 +98,18 @@ function failD1Batch(database: D1Database, failureNumber: number): D1Database {
 const boundStatementSchema = z.object({ statement: z.string() });
 
 /**
- * Runs `reference` once, after the reaper has read its candidates and before
- * the batch that arms deadlines on `table` reaches D1.
+ * Inserts a reference immediately before a captured mutation reaches D1.
  */
-function referenceBeforeArm(
+function referenceBeforeMutation(
 	database: D1Database,
-	table: string,
+	mutationPrefix: string,
 	reference: () => Promise<unknown>
 ): { readonly database: D1Database; hasReferenced(): boolean } {
-	const armStatement = `update "${table}" set "delete_after"`;
 	let hasReferenced = false;
 	const isArm = (statement: D1PreparedStatement): boolean =>
 		boundStatementSchema
 			.safeParse(statement)
-			.data?.statement.startsWith(armStatement) ?? false;
+			.data?.statement.startsWith(mutationPrefix) ?? false;
 
 	return {
 		database: {
@@ -122,6 +131,18 @@ function referenceBeforeArm(
 		},
 		hasReferenced: () => hasReferenced
 	};
+}
+
+function referenceBeforeArm(
+	database: D1Database,
+	table: string,
+	reference: () => Promise<unknown>
+) {
+	return referenceBeforeMutation(
+		database,
+		`update "${table}" set "delete_after"`,
+		reference
+	);
 }
 
 async function removeLateWriteTombstones(): Promise<void> {
@@ -147,6 +168,146 @@ describe('blob reaper', () => {
 
 		await clearBlobStorage();
 	});
+
+	it('keeps missing CAS state when a reference arrives before registry retirement', async () => {
+		await initialise();
+		const digest = syntheticCasDigest(2020);
+		await seedCasObjects([digest]);
+		const before = await casObjectRows();
+		const injection = referenceBeforeMutation(
+			env.CUPBOARD_DB,
+			'update "object_incarnation" set "state"',
+			() =>
+				env.CUPBOARD_DB.prepare(
+					`INSERT INTO attestation_ref_storage
+					 (tenant, cache_kind, store_path_hash, generation, predicate_type, digest)
+					 VALUES ('v1', 'default', ?, 0, 'test', ?)`
+				)
+					.bind('a'.repeat(32), digest)
+					.run()
+		);
+		const reaper = new BlobReaperService(
+			drizzle(injection.database, { schema: d1Schema }),
+			env.BLOBS,
+			{ demote: () => Promise.resolve() },
+			{ demote: () => Promise.resolve() },
+			1000
+		);
+		const demoted = await reaper.demoteMissingCasObjects(rootLogger(), 10, {
+			read: () => Promise.resolve(''),
+			advance: () => Promise.resolve()
+		});
+		const registry = await env.CUPBOARD_DB.prepare(
+			'SELECT incarnation, state FROM object_incarnation WHERE kind = ? AND object_id = ?'
+		)
+			.bind('cas', digest)
+			.all();
+		expect({
+			demoted,
+			injected: injection.hasReferenced(),
+			objects: await casObjectRows(),
+			registry: registry.results
+		}).toStrictEqual({
+			demoted: 0,
+			injected: true,
+			objects: before,
+			registry: [{ incarnation: 1, state: 'live' }]
+		});
+	});
+
+	it.each(artifactKinds)(
+		'preserves %s references and quota through physical loss and repair',
+		async (kind) => {
+			await initialise();
+			await recordTransition('native-artifact-storage', 'complete');
+			const bytes = Uint8Array.of(42);
+			const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bytes));
+			await seedCasObjects([digest]);
+			await fileArtifactProjection(digest, kind);
+			await env.CUPBOARD_DB.batch([
+				env.CUPBOARD_DB.prepare(
+					"INSERT INTO tenant_cas_blob_storage (tenant, digest, size) VALUES ('v1', ?, 1)"
+				).bind(digest),
+				env.CUPBOARD_DB.prepare(
+					"UPDATE tenant_usage SET cas_bytes = 1, cas_blobs = 1 WHERE tenant = 'v1'"
+				)
+			]);
+			const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+			const logicalState = async () => {
+				const references = await database
+					.select()
+					.from(d1Schema.artifactReference);
+				return {
+					references: references.map((reference) => ({
+						...reference,
+						cacheName: reference.cacheName ?? undefined
+					})),
+					presence: await tenantCasBlobRows(),
+					usage: await tenantUsageRow()
+				};
+			};
+			const before = await logicalState();
+			expect(before).toStrictEqual({
+				references: [
+					{
+						tenant: 'v1',
+						artifactId: 'artifact',
+						artifactGeneration: 1,
+						cacheKind: 'default',
+						cacheName: undefined,
+						cacheGeneration: 1,
+						kind,
+						digest,
+						createdAt: '2026-01-01T00:00:00.000Z'
+					}
+				],
+				presence: [{ tenant: 'v1', digest, size: 1 }],
+				usage: {
+					bytes: 0,
+					narinfos: 0,
+					blobs: 0,
+					casBytes: 1,
+					casBlobs: 1,
+					quotaBytes: undefined
+				}
+			});
+			const reaper = new BlobReaperService(
+				database,
+				env.BLOBS,
+				{ demote: () => Promise.resolve() },
+				{ demote: () => Promise.resolve() },
+				1000
+			);
+			const demoted = await reaper.demoteMissingCasObjects(rootLogger(), 10, {
+				read: () => Promise.resolve(''),
+				advance: () => Promise.resolve()
+			});
+			expect({
+				demoted,
+				logical: await logicalState(),
+				objects: await casObjectRows()
+			}).toStrictEqual({ demoted: 1, logical: before, objects: [] });
+			const incarnation = await new CasObjectStore(database, env.BLOBS).promote(
+				{ digest, size: bytes.byteLength, bytes },
+				{ restoreMissingObject: true }
+			);
+			const repaired = await env.BLOBS.get(casObjectKey(digest, incarnation));
+			expect({
+				incarnation,
+				logical: await logicalState(),
+				objects: await casObjectRows(),
+				bytes:
+					repaired === null
+						? undefined
+						: new Uint8Array(await repaired.arrayBuffer())
+			}).toStrictEqual({
+				incarnation: 2,
+				logical: before,
+				objects: [{ digest, size: 1, deleteAfter: undefined }],
+				bytes
+			});
+		}
+	);
 
 	it('arms an unreferenced blob and collects it only after the grace', async () => {
 		const token = await initialise();

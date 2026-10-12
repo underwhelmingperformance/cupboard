@@ -77,8 +77,9 @@ export async function publishCasObjectState(
 }
 
 /**
- * Refuses a captured missing-object removal after repair advances either the
- * registry or its published state. The registry can advance before state does.
+ * Refuses missing-object removal after a newer published state or while a newer
+ * reservation is pending or live.
+ * An absent reservation cannot publish state.
  */
 export function casObjectNotRepromoted(
 	database: DrizzleD1Database<typeof d1Schema>,
@@ -96,7 +97,8 @@ export function casObjectNotRepromoted(
 	const newerRegistry = and(
 		eq(d1Schema.objectIncarnation.kind, 'cas'),
 		eq(d1Schema.objectIncarnation.objectId, digest),
-		ne(d1Schema.objectIncarnation.incarnation, incarnation)
+		ne(d1Schema.objectIncarnation.incarnation, incarnation),
+		ne(d1Schema.objectIncarnation.state, 'absent')
 	);
 
 	return and(

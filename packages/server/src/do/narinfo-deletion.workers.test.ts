@@ -56,6 +56,8 @@ import {
 	syntheticNarHash,
 	syntheticStorePathHash,
 	takeStalledMaintenancePasses,
+	tenantCasBlobRows,
+	tenantUsageRow,
 	testBase,
 	testServerFor,
 	uploadMetadata,
@@ -2052,6 +2054,104 @@ describe('narinfo deletion queue', () => {
 		expect({ withoutUploads, withUploads }).toStrictEqual({
 			withoutUploads: 82,
 			withUploads: 82
+		});
+	});
+
+	it('keeps the deletion queue and quota retryable across artifact storage expansion', async () => {
+		await initialise();
+		const entry = {
+			storePathHash: syntheticStorePathHash(0),
+			narHash: syntheticNarHash(0),
+			generation: narInfoGenerationSchema.parse(0)
+		};
+		await fileAttestationReference({
+			uploadId: 'queued-artifact-expansion',
+			bytes: new TextEncoder().encode('queued expansion'),
+			storePathHash: entry.storePathHash,
+			generation: entry.generation,
+			predicateType: predicateTypeSchema.parse('https://example.com/predicate')
+		});
+		await seedQueuedDeletions([entry]);
+		const before = {
+			queue: await narInfoDeletionRows(),
+			attestations: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		};
+		const drain = () =>
+			runInDurableObject(currentServer(), (instance) =>
+				asOneInvocation(() =>
+					instance.context.criticalSection(() =>
+						buildDeletionQueue(instance.context).retireTornDownNarInfos(
+							resolvedCache(instance.context),
+							[entry]
+						)
+					)
+				)
+			);
+		const statementSchema = z.object({ statement: z.string() });
+		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		let didExpand = false;
+		const spy = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementation(async (statements) => {
+				if (
+					!didExpand &&
+					statements.some((statement) =>
+						statementSchema
+							.safeParse(statement)
+							.data?.statement.startsWith('update "tenant_usage"')
+					)
+				) {
+					didExpand = true;
+					await recordTransition('native-artifact-storage', 'complete');
+				}
+				return originalBatch(statements);
+			});
+		let failure: unknown;
+		try {
+			await drain();
+		} catch (error) {
+			failure = error;
+		} finally {
+			spy.mockRestore();
+		}
+		expect({
+			didExpand,
+			failure:
+				failure instanceof ServerHttpError
+					? {
+							name: failure.name,
+							status: failure.status,
+							retryAfterSeconds: failure.retryAfterSeconds
+						}
+					: failure,
+			queue: await narInfoDeletionRows(),
+			attestations: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			didExpand: true,
+			failure: {
+				name: 'CasReferenceSetChangedError',
+				status: 503,
+				retryAfterSeconds: 1
+			},
+			...before
+		});
+
+		await drain();
+		await drain();
+		expect({
+			queue: await narInfoDeletionRows(),
+			attestations: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			queue: [],
+			attestations: [],
+			presence: [],
+			usage: { ...before.usage, casBytes: 0, casBlobs: 0 }
 		});
 	});
 

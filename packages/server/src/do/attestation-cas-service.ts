@@ -23,6 +23,7 @@ import { readCasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
+	CasReferenceSetChangedError,
 	TenantUsageMissingError,
 	TenantWritesStoppedError,
 	UploadedObjectNotFoundError
@@ -344,6 +345,8 @@ export class AttestationCasService {
 		await new PathReadAuthorityService(this.context).requireWritable();
 
 		const tenant = this.context.requireTenant();
+		const references = await readCasReferenceSet(this.context.d1);
+		const mutationFence = references.mutationFence();
 		const notRepromoted = casObjectNotRepromoted(
 			this.context.d1,
 			reference.digest,
@@ -351,15 +354,20 @@ export class AttestationCasService {
 		);
 		const edgeDeleteFilter = and(
 			this.edgeFilter(tenant, reference),
-			notRepromoted
+			notRepromoted,
+			mutationFence
 		);
-		const references = await readCasReferenceSet(this.context.d1);
 		const release = new CasQuotaService(this.context).releaseStatements(
 			reference.digest,
 			references,
 			fenceIncarnation
 		);
-		await this.context.d1.batch([
+		const [mutationRows] = await this.context.d1.batch([
+			this.context.d1
+				.select({
+					allowed: sql<number>`case when ${mutationFence ?? sql`true`} then 1 else 0 end`
+				})
+				.from(sql`(select 1) mutation_gate`),
 			this.context.d1
 				.delete(d1Schema.attestationReference)
 				.where(edgeDeleteFilter),
@@ -372,5 +380,9 @@ export class AttestationCasService {
 			release.credit,
 			release.presenceDelete
 		]);
+
+		if (mutationRows[0]?.allowed !== 1) {
+			throw new CasReferenceSetChangedError();
+		}
 	}
 }
