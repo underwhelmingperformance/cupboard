@@ -19,12 +19,43 @@ function bounded<A extends unknown[], R>(
 	};
 }
 
-// A multipart handle issues requests outside these per-call proxies.
-// Reject the member when the wrapper cannot apply a deadline to those requests.
 function unboundable(member: string): () => never {
 	return () => {
 		throw new UnboundableIoError(member);
 	};
+}
+
+class BoundedMultipartUpload implements R2MultipartUpload {
+	constructor(private readonly upload: R2MultipartUpload) {}
+
+	get key(): string {
+		return this.upload.key;
+	}
+
+	get uploadId(): string {
+		return this.upload.uploadId;
+	}
+
+	uploadPart(
+		...arguments_: Parameters<R2MultipartUpload['uploadPart']>
+	): Promise<R2UploadedPart> {
+		return bounded(
+			this.upload.uploadPart.bind(this.upload),
+			'r2.uploadPart',
+			unboundedCapMs
+		)(...arguments_);
+	}
+
+	complete(uploadedParts: R2UploadedPart[]): Promise<R2Object> {
+		return bounded(
+			this.upload.complete.bind(this.upload),
+			'r2.complete'
+		)(uploadedParts);
+	}
+
+	abort(): Promise<void> {
+		return bounded(this.upload.abort.bind(this.upload), 'r2.abort')();
+	}
 }
 
 // Bind pass-through methods to the host object because their implementations
@@ -79,9 +110,11 @@ export function boundedWorkerEnv<
 }
 
 /**
- * Wraps an {@link R2Bucket} with deadlines. `head`, `delete` and `list` use the
- * per-call limit. `get` and `put` transfer blob bytes, so they use the enclosing
- * critical-section deadline and can continue without the input gate.
+ * Wraps an {@link R2Bucket} with deadlines and subrequest accounting. Byte
+ * transfers (`get`, `put` and multipart part uploads) use the enclosing deadline
+ * without a per-call cap. Metadata operations, including multipart creation,
+ * completion and abort, also use the per-call limit. Resuming a multipart handle
+ * does not issue a request.
  */
 export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 	return new Proxy(bucket, {
@@ -102,9 +135,24 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 				case 'list': {
 					return bounded(target.list.bind(target), 'r2.list');
 				}
-				case 'createMultipartUpload':
+				case 'createMultipartUpload': {
+					return bounded(
+						async (
+							...arguments_: Parameters<R2Bucket['createMultipartUpload']>
+						) =>
+							new BoundedMultipartUpload(
+								await target.createMultipartUpload(...arguments_)
+							),
+						'r2.createMultipartUpload'
+					);
+				}
 				case 'resumeMultipartUpload': {
-					return unboundable(`r2.${property}`);
+					return (
+						...arguments_: Parameters<R2Bucket['resumeMultipartUpload']>
+					) =>
+						new BoundedMultipartUpload(
+							target.resumeMultipartUpload(...arguments_)
+						);
 				}
 				default: {
 					return passThrough(target, property);
