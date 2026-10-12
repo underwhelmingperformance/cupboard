@@ -4,6 +4,7 @@ import { capturingReporter, fakeCliUi } from '@cupboard/cli-ui/testing';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
 	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
@@ -196,6 +197,10 @@ async function deployOverPredecessor(
 		await server.deployPathAuthority();
 		return;
 	}
+	if (stage === 'cas-storage') {
+		await server.deployCasStorage();
+		return;
+	}
 	await server.deployIntermediate();
 }
 
@@ -212,6 +217,36 @@ async function deployPathAuthority(
 		false
 	);
 	await server.deployPathAuthority();
+}
+
+async function deployCasStorage(
+	server: StagedDeploymentServer,
+	now = deployedAt,
+	shouldDeferControlTransfer = false
+): Promise<void> {
+	await prepareTransitions(
+		server.transitionWalk({ now: () => now }, 'cas-storage', 'CONTROL_DB'),
+		false
+	);
+	await prepareTransitions(
+		server.transitionWalk({ now: () => now }, 'cas-storage'),
+		false
+	);
+	await server.deployCasStorage();
+	await wakeUntilStep(
+		server,
+		await server.deploymentClient(),
+		casStorageLocalStep
+	);
+	const walk = server.transitionWalk({ now: () => now }, 'cas-storage');
+	await completeTransitions({
+		...walk,
+		transitions: shouldDeferControlTransfer
+			? walk.transitions.filter(
+					(planned) => planned.transition.id !== 'control-database-split'
+				)
+			: walk.transitions
+	});
 }
 
 /**
@@ -237,9 +272,23 @@ async function contractOverPredecessor(
 			await deployPathAuthority(server, now);
 			continue;
 		}
-		await completeTransitions(
-			server.transitionWalk({ now: () => now }, 'path-authority')
-		);
+		if (server.deploymentStage === 'path-authority') {
+			await completeTransitions(
+				server.transitionWalk({ now: () => now }, 'path-authority')
+			);
+			await deployCasStorage(server, now);
+		} else {
+			await completeTransitions(
+				server.transitionWalk(
+					{
+						now: () => now,
+						wakeTenants: async (step) =>
+							wakeUntilStep(server, await server.deploymentClient(), step)
+					},
+					'cas-storage'
+				)
+			);
+		}
 		await prepareTransitions(server.transitionWalk({ now: () => now }), false);
 		await server.deployCurrent();
 	}
@@ -313,6 +362,52 @@ async function stoppedBeforeContract(
 	return undefined;
 }
 
+it('refuses expansion until the deployed CAS release has contracted', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+		await wakeUntilStep(
+			server,
+			await server.deploymentClient(),
+			expansionLocalStep
+		);
+		await completeTransitions(
+			server.transitionWalk({ now: () => deployedAt }, 'intermediate')
+		);
+		await deployPathAuthority(server);
+		await completeTransitions(
+			server.transitionWalk({ now: () => deployedAt }, 'path-authority')
+		);
+		const before = await server.terminalSnapshot();
+		await expect(
+			prepareTransitions(
+				server.transitionWalk({ now: () => deployedAt }),
+				false
+			)
+		).rejects.toStrictEqual(
+			new TransitionIncompleteError(
+				'cas-storage',
+				'cas-demotion-progress',
+				undefined
+			)
+		);
+		expect(await server.terminalSnapshot()).toStrictEqual(before);
+		await deployCasStorage(server);
+		await server.restart();
+		await prepareTransitions(
+			server.transitionWalk({ now: () => deployedAt }),
+			false
+		);
+		await server.deployCurrent();
+		await contractOverPredecessor(server);
+		const client = await server.deploymentClient();
+		expect(await client.transitions()).toStrictEqual(completedTransitions);
+	} finally {
+		await server.stop();
+	}
+});
+
 it('defines the dependencies of the staged schema transitions', () => {
 	expect(
 		sharedTransitions.map((transition) => ({
@@ -333,7 +428,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'control-database-split', independent: true },
 		{ id: 'cas-storage', independent: true },
 		{ id: 'cache-path-intersection-index', independent: false },
-		{ id: 'native-artifact-storage', independent: true }
+		{ id: 'native-artifact-storage', independent: true },
+		{ id: 'cas-demotion-progress', independent: false }
 	]);
 });
 
@@ -897,6 +993,7 @@ it('completes a transfer when another deploy contracts during a source schema re
 				(planned) => planned.transition.id !== 'control-database-split'
 			)
 		});
+		await deployCasStorage(server, deployedAt, true);
 		await prepareTransitions(
 			server.transitionWalk({ now: () => deployedAt }),
 			false
@@ -992,6 +1089,7 @@ it('uses Cloudflare recovery only while a real control transfer remains frozen',
 				(planned) => planned.transition.id !== 'control-database-split'
 			)
 		});
+		await deployCasStorage(server, deployedAt, true);
 		await prepareTransitions(
 			server.transitionWalk({ now: () => deployedAt }),
 			false

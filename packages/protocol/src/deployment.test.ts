@@ -436,6 +436,7 @@ describe('cache intersection index rollout', () => {
 				schemaTransitions.map((transition) => [transition.id, 'expanded'])
 			);
 			recorded.set('cache-identity', 'complete');
+			recorded.set('cas-storage', 'complete');
 			recorded.set('blob-reference-read-authority', state);
 			recorded.delete('cache-path-intersection-index');
 			const result = deferredTransition(schemaTransitions, recorded);
@@ -450,6 +451,29 @@ describe('cache intersection index rollout', () => {
 							transition: 'cache-path-intersection-index',
 							waitsFor: 'blob-reference-read-authority'
 						}
+			);
+		}
+	);
+});
+
+describe('CAS demotion discovery rollout', () => {
+	it.each(['expanded', 'complete'] as const)(
+		'waits for CAS storage contraction when it is %s',
+		(state) => {
+			const recorded = new Map<TransitionId, TransitionState>(
+				schemaTransitions.map((transition) => [transition.id, 'complete'])
+			);
+			recorded.set('cas-storage', state);
+			recorded.delete('cas-demotion-progress');
+			const result = deferredTransition(schemaTransitions, recorded);
+			expect(
+				result === undefined
+					? undefined
+					: { transition: result.transition.id, waitsFor: result.waitsFor.id }
+			).toStrictEqual(
+				state === 'complete'
+					? undefined
+					: { transition: 'cas-demotion-progress', waitsFor: 'cas-storage' }
 			);
 		}
 	);

@@ -52,6 +52,10 @@ import {
 	predecessorVersionTag
 } from '../fixtures/cache-deployment-predecessor/constants.ts';
 
+import {
+	casStorageArtifact,
+	casStorageTransitions
+} from './cas-storage-deployment.ts';
 import { sharedStagedDeployment } from './e2e-artifacts.ts';
 import {
 	intermediateArtifact,
@@ -260,7 +264,8 @@ type PersistedRuntime =
 	| { readonly kind: 'predecessor'; readonly bundles: FixtureBundles }
 	| {
 			readonly kind: 'release';
-			readonly stage: 'intermediate' | 'path-authority' | 'current';
+			readonly stage:
+				'intermediate' | 'path-authority' | 'cas-storage' | 'current';
 			readonly artifact: DeploymentArtifact;
 	  };
 
@@ -552,7 +557,7 @@ export class StagedDeploymentServer {
 
 	private async deployArtifact(
 		artifact: DeploymentArtifact,
-		stage: 'intermediate' | 'path-authority' | 'current'
+		stage: 'intermediate' | 'path-authority' | 'cas-storage' | 'current'
 	): Promise<void> {
 		await this.miniflare.setOptions(currentOptions(this.paths, artifact));
 		this.persistedRuntime = { kind: 'release', stage, artifact };
@@ -854,7 +859,11 @@ export class StagedDeploymentServer {
 	}
 
 	get deploymentStage():
-		'predecessor' | 'intermediate' | 'path-authority' | 'current' {
+		| 'predecessor'
+		| 'intermediate'
+		| 'path-authority'
+		| 'cas-storage'
+		| 'current' {
 		return this.persistedRuntime.kind === 'predecessor'
 			? 'predecessor'
 			: this.persistedRuntime.stage;
@@ -872,6 +881,7 @@ export class StagedDeploymentServer {
 		const stages: readonly (readonly SchemaTransition[])[] = [
 			intermediateTransitions,
 			pathAuthorityTransitions,
+			casStorageTransitions,
 			schemaTransitions
 		];
 		const completedIds = new Set<string>();
@@ -906,7 +916,8 @@ export class StagedDeploymentServer {
 	 */
 	transitionWalk(
 		hooks: Partial<TransitionHooks> = {},
-		stage: 'intermediate' | 'path-authority' | 'current' = 'current',
+		stage:
+			'intermediate' | 'path-authority' | 'cas-storage' | 'current' = 'current',
 		binding = databaseBinding
 	): TransitionWalk {
 		const releases = {
@@ -917,6 +928,10 @@ export class StagedDeploymentServer {
 			'path-authority': {
 				artifact: pathAuthorityArtifact,
 				transitions: pathAuthorityTransitions
+			},
+			'cas-storage': {
+				artifact: casStorageArtifact,
+				transitions: casStorageTransitions
 			},
 			current: { artifact: this.artifact, transitions: schemaTransitions }
 		};
@@ -1132,6 +1147,10 @@ export class StagedDeploymentServer {
 
 	async deployPathAuthority(): Promise<void> {
 		await this.deployArtifact(pathAuthorityArtifact, 'path-authority');
+	}
+
+	async deployCasStorage(): Promise<void> {
+		await this.deployArtifact(casStorageArtifact, 'cas-storage');
 	}
 
 	async restart(): Promise<void> {

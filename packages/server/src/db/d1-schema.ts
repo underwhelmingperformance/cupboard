@@ -673,6 +673,29 @@ export const casObject = sqliteTable(
 	(table) => [index('cas_object_delete_after_idx').on(table.deleteAfter)]
 );
 
+export const casDemotionProgress = sqliteTable(
+	'cas_demotion_progress',
+	{
+		digest: text('digest').$type<Sha256HexDigest>().primaryKey(),
+		incarnation: integer('incarnation').notNull(),
+		afterTenant: text('after_tenant').$type<TenantId>(),
+		revision: integer('revision').notNull().default(1),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('cas_demotion_progress_ready_idx').on(
+			table.updatedAt,
+			table.revision,
+			table.digest
+		),
+		check(
+			'cas_demotion_progress_incarnation_check',
+			sql`${table.incarnation} >= 1`
+		),
+		check('cas_demotion_progress_revision_check', sql`${table.revision} >= 1`)
+	]
+);
+
 // One attestation reference for one committed narinfo generation. Like `blob_ref`,
 // generation is part of the key so stale deletion can retire only the captured
 // narinfo version and never a later recommit.
@@ -742,6 +765,7 @@ export const attestationReference = sqliteTable(
 			)
 			.where(sql`${table.readable} = true`),
 		index('attestation_ref_digest_idx').on(table.digest),
+		index('attestation_ref_digest_tenant_idx').on(table.digest, table.tenant),
 		index('attestation_ref_tenant_digest_idx').on(table.tenant, table.digest)
 	]
 );

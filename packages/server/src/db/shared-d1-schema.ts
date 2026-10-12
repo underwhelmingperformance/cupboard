@@ -4,6 +4,7 @@ export {
 	blobReference,
 	blobState,
 	cacheLifecycle,
+	casDemotionProgress,
 	casObject,
 	controlDatabaseSplit,
 	deploymentPhase,

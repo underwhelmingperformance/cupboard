@@ -337,6 +337,13 @@
 			"when": 1791748246367,
 			"tag": "0047_attestation_cas_retention_index",
 			"breakpoints": true
+		},
+		{
+			"idx": 48,
+			"version": "6",
+			"when": 1791769686096,
+			"tag": "0048_cas_demotion_progress",
+			"breakpoints": true
 		}
 	]
 }

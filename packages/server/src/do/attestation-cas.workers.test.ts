@@ -151,6 +151,7 @@ describe('attestation CAS lifecycle', () => {
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		await resetTestServer();
 		await clearBlobStorage();
+		await recordTransition('cas-demotion-progress', 'complete');
 	});
 
 	it('charges and credits shared references through a writable presence view', async () => {

@@ -80,7 +80,8 @@ export const transitionIdSchema = z.enum([
 	'control-database-initial',
 	'cas-storage',
 	'cache-path-intersection-index',
-	'native-artifact-storage'
+	'native-artifact-storage',
+	'cas-demotion-progress'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -395,6 +396,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		// The storage identifier is a view until path authority contracts.
 		contract: ['0047_attestation_cas_retention_index.sql'],
 		independent: true
+	},
+	{
+		id: 'cas-demotion-progress',
+		expand: ['0048_cas_demotion_progress.sql'],
+		contract: [],
+		expandAfter: ['cas-storage']
 	}
 ];
 

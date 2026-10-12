@@ -69,7 +69,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			state: 'complete',
 			updatedAt: recorded
 		},
-		{ id: 'native-artifact-storage', state: 'complete', updatedAt: recorded }
+		{ id: 'native-artifact-storage', state: 'complete', updatedAt: recorded },
+		{ id: 'cas-demotion-progress', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -588,6 +589,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition native-artifact-storage',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition cas-demotion-progress',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },

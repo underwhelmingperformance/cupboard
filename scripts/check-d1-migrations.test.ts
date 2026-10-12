@@ -109,6 +109,28 @@ describe('checkD1Migrations', () => {
 				...transition.expand,
 				...transition.contract
 			]).length,
+			replayed: ['cas-demotion-progress']
+		});
+	});
+
+	it('preserves replay coverage for the preceding CAS and artifact transitions', () => {
+		const full = readMigrationSet(repositoryMigrations);
+		const transitions = sharedTransitions.filter(
+			(transition) => transition.id !== 'cas-demotion-progress'
+		);
+		const preceding: MigrationSet = {
+			files: full.files.filter(
+				(file) => file !== '0048_cas_demotion_progress.sql'
+			),
+			journal: full.journal.filter(
+				(file) => file !== '0048_cas_demotion_progress.sql'
+			),
+			sql: full.sql
+		};
+		expect(
+			checkD1Migrations(withControlDatabaseTransfer(preceding), transitions)
+		).toStrictEqual({
+			applied: 48,
 			replayed: [
 				'cas-storage',
 				'cache-path-intersection-index',
@@ -119,7 +141,9 @@ describe('checkD1Migrations', () => {
 
 	it('expands path authority after contracted cache identity and contracts the path index before renaming its table', () => {
 		const earlierTransitions = sharedTransitions.filter(
-			(transition) => transition.id !== 'cache-path-intersection-index'
+			(transition) =>
+				transition.id !== 'cache-path-intersection-index' &&
+				transition.id !== 'cas-demotion-progress'
 		);
 		const order = deployOrder(earlierTransitions, 1);
 		expect(order).toStrictEqual({

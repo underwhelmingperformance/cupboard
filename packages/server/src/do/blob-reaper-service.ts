@@ -5,6 +5,7 @@ import {
 	type Sha256HexDigest,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { subrequestSafetyReserve } from '@cupboard/protocol/platform';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
@@ -35,10 +36,15 @@ import {
 } from '../blob/object-incarnation-recovery.ts';
 import { cacheScopeFromRow } from '../db/cache.ts';
 import {
+	CasDemotionProgressRepository,
+	casDemotionSourcesPerPass
+} from '../db/cas-demotion-progress.ts';
+import {
 	type CasReferenceSet,
 	readCasReferenceSet
 } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { readRecordedTransitions } from '../db/deployment-transitions.ts';
 import {
 	blobReaperGraceMs,
 	casObjectKey,
@@ -790,45 +796,25 @@ export class BlobReaperService {
 			.all();
 	}
 
-	// Group each digest's referencing tenants in bounded reads. Each tenant then
-	// receives one demotion call. Each entry includes the object version read here.
 	private async casReferencingDemotions(
-		objects: readonly { digest: Sha256HexDigest; incarnation: number }[]
+		objects: readonly CasObjectVersion[],
+		progress: CasDemotionProgressRepository,
+		now: IsoTimestamp
 	): Promise<Map<string, CasReferenceDemotion[]>> {
-		const incarnationByDigest = new Map(
-			objects.map((object) => [object.digest, object.incarnation])
-		);
-		const pages = await mapWithConcurrency(
-			jsonValueLists(objects.map((object) => object.digest)),
-			maxOutgoingConnections,
-			(list) =>
-				this.d1
-					.selectDistinct({
-						tenant: d1Schema.attestationReference.tenant,
-						digest: d1Schema.attestationReference.digest
-					})
-					.from(d1Schema.attestationReference)
-					.where(inArray(d1Schema.attestationReference.digest, list))
-					.all()
-		);
-
-		const rowsByTenant = Map.groupBy(pages.flat(), (row) => row.tenant);
-		const demotionsByTenant = new Map<string, CasReferenceDemotion[]>();
-
-		for (const [tenant, rows] of rowsByTenant) {
-			demotionsByTenant.set(
-				tenant,
-				rows.flatMap((row) => {
-					const fenceIncarnation = incarnationByDigest.get(row.digest);
-
-					return fenceIncarnation === undefined
-						? []
-						: [{ digest: row.digest, fenceIncarnation }];
-				})
-			);
+		const byTenant = new Map<string, CasReferenceDemotion[]>();
+		for (const object of objects) {
+			await progress.register(object, now);
+			const tenants = await progress.tenantPage(object, now);
+			for (const tenant of tenants) {
+				const demotions = byTenant.get(tenant) ?? [];
+				demotions.push({
+					digest: object.digest,
+					fenceIncarnation: object.incarnation
+				});
+				byTenant.set(tenant, demotions);
+			}
 		}
-
-		return demotionsByTenant;
+		return byTenant;
 	}
 
 	private async reapObjects({
@@ -994,24 +980,52 @@ export class BlobReaperService {
 		limit: number,
 		cursor: DemoteCursor
 	): Promise<number> {
-		const log = logger.with({ job: 'blob-reaper' });
-		const after = await cursor.read();
-		const batch = await this.demoteCasBatch(after, limit);
-		const next = batch.length < limit ? '' : (batch.at(-1)?.digest ?? '');
-		await cursor.advance(next);
-
-		if (batch.length === 0) {
+		const transitions = await readRecordedTransitions(this.d1);
+		const state = transitions.get('cas-demotion-progress');
+		if (state !== 'expanded' && state !== 'complete') {
 			return 0;
 		}
-
-		const present = await this.presentCasObjects(batch);
-		const missing = batch.filter((object) => !present.has(object.digest));
-
+		const log = logger.with({ job: 'blob-reaper' });
+		const progress = new CasDemotionProgressRepository(this.d1);
+		const affordableSources = Math.floor(
+			(this.subrequestAllowance - subrequestSafetyReserve - 8) / 20
+		);
+		const boundedSources = Math.min(
+			affordableSources,
+			casDemotionSourcesPerPass
+		);
+		const sourcesPerLane = Math.floor(boundedSources / 2);
+		const sourceLimit = Math.max(0, Math.min(limit, sourcesPerLane));
+		if (sourceLimit === 0) {
+			return 0;
+		}
+		const pending = await progress.dueSources(sourceLimit);
+		const after = await cursor.read();
+		const batch = await this.demoteCasBatch(after, sourceLimit);
+		const next = batch.length < sourceLimit ? '' : (batch.at(-1)?.digest ?? '');
+		await cursor.advance(next);
+		const sources = new Map(
+			[...pending, ...batch].map((object) => [object.digest, object])
+		);
+		if (sources.size === 0) {
+			return 0;
+		}
+		const objects = sources.values().toArray();
+		const present = await this.presentCasObjects(objects);
+		await progress.forget(
+			objects.filter((object) => present.has(object.digest))
+		);
+		const missing = objects.filter((object) => !present.has(object.digest));
 		if (missing.length === 0) {
 			return 0;
 		}
+		const now = isoTimestamp(new Date());
+		const demotionsByTenant = await this.casReferencingDemotions(
+			missing,
+			progress,
+			now
+		);
 
-		const demotionsByTenant = await this.casReferencingDemotions(missing);
 		const failedTenants = await this.routeByTenant(
 			log,
 			demotionsByTenant,
@@ -1029,8 +1043,10 @@ export class BlobReaperService {
 			}
 		}
 
-		return this.deleteFencedCasObjects(
+		const demoted = await this.deleteFencedCasObjects(
 			missing.filter((object) => !blocked.has(object.digest))
 		);
+		await progress.prune(objects);
+		return demoted;
 	}
 }

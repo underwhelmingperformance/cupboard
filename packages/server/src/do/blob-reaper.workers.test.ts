@@ -5,6 +5,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { type ArtifactKind, artifactKinds } from '@cupboard/protocol/artifacts';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -14,6 +15,7 @@ import { z } from 'zod';
 import { CasObjectStore } from '../blob/cas-object-store.ts';
 import { lateWriteTombstoneHorizonMs } from '../blob/object-incarnation.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
+import { CasDemotionProgressRepository } from '../db/cas-demotion-progress.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
 import {
@@ -167,6 +169,219 @@ describe('blob reaper', () => {
 		await resetTestServer();
 
 		await clearBlobStorage();
+		await recordTransition('cas-demotion-progress', 'complete');
+	});
+
+	it('resumes bounded CAS tenant discovery across restarts and failed tenants', async () => {
+		await initialise();
+		const digest = syntheticCasDigest(2025);
+		await seedCasObjects([digest]);
+		const before = await casObjectRows();
+		const tenants = Array.from(
+			{ length: 12 },
+			(_, index) => `t${String(index).padStart(2, '0')}`
+		);
+		for (const tenant of tenants) {
+			await env.CUPBOARD_DB.prepare(
+				`INSERT INTO attestation_ref_storage
+				 (tenant, cache_kind, store_path_hash, generation, predicate_type, digest)
+				 VALUES (?, 'default', ?, 0, 'test', ?)`
+			)
+				.bind(tenant, 'a'.repeat(32), digest)
+				.run();
+		}
+		const passes: string[][] = [];
+		const demoted: number[] = [];
+
+		for (let pass = 0; pass < 4; pass += 1) {
+			const routed: string[] = [];
+			const reaper = new BlobReaperService(
+				drizzle(env.CUPBOARD_DB, { schema: d1Schema }),
+				env.BLOBS,
+				{ demote: () => Promise.resolve() },
+				{
+					demote(tenant) {
+						routed.push(tenant);
+						return tenant === 't00'
+							? Promise.reject(new Error('tenant unavailable'))
+							: Promise.resolve();
+					}
+				},
+				1000
+			);
+			demoted.push(
+				await reaper.demoteMissingCasObjects(rootLogger(), 10, {
+					read: () => Promise.resolve(pass === 0 ? '' : 'f'.repeat(64)),
+					advance: () => Promise.resolve()
+				})
+			);
+			passes.push(routed);
+		}
+
+		expect({
+			passes,
+			demoted,
+			remainingObjects: await casObjectRows()
+		}).toStrictEqual({
+			passes: [
+				['t00', 't01', 't02', 't03'],
+				['t04', 't05', 't06', 't07'],
+				['t08', 't09', 't10', 't11'],
+				['t00', 't01', 't02', 't03']
+			],
+			demoted: [0, 0, 0, 0],
+			remainingObjects: before
+		});
+	});
+
+	it('seeks one indexed row per tenant despite 25,000 references in the first tenant', async () => {
+		const digest = syntheticCasDigest(2026);
+		await seedCasObjects([digest]);
+		await env.CUPBOARD_DB.prepare(
+			`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 25000)
+			 INSERT INTO attestation_ref_storage
+			 (tenant, cache_kind, store_path_hash, generation, predicate_type, digest)
+			 SELECT 't00', 'default', ?, n, 'test', ? FROM source`
+		)
+			.bind('a'.repeat(32), digest)
+			.run();
+		for (const tenant of ['t01', 't02', 't03', 't04']) {
+			await env.CUPBOARD_DB.prepare(
+				`INSERT INTO attestation_ref_storage
+				 (tenant, cache_kind, store_path_hash, generation, predicate_type, digest)
+				 VALUES (?, 'default', ?, 0, 'test', ?)`
+			)
+				.bind(tenant, 'a'.repeat(32), digest)
+				.run();
+		}
+		const probes: { query: string; parameters: unknown[] }[] = [];
+		const database = drizzle(env.CUPBOARD_DB, {
+			schema: d1Schema,
+			logger: {
+				logQuery(query, parameters) {
+					if (
+						query.startsWith('select "tenant" from "attestation_ref_storage"')
+					) {
+						probes.push({ query, parameters });
+					}
+				}
+			}
+		});
+		const progress = new CasDemotionProgressRepository(database);
+		const source = { digest, incarnation: 1 };
+		const now = isoTimestamp(new Date());
+		await progress.register(source, now);
+		const tenants = await progress.tenantPage(source, now);
+		const reads = await Promise.all(
+			probes.map(async (probe) => {
+				const result = await env.CUPBOARD_DB.prepare(probe.query)
+					.bind(...probe.parameters)
+					.all();
+				return { rows: result.results, read: result.meta.rows_read };
+			})
+		);
+		expect({ tenants, reads }).toStrictEqual({
+			tenants: ['t00', 't01', 't02', 't03'],
+			reads: [
+				{ rows: [{ tenant: 't00' }], read: 1 },
+				{ rows: [{ tenant: 't01' }], read: 1 },
+				{ rows: [{ tenant: 't02' }], read: 1 },
+				{ rows: [{ tenant: 't03' }], read: 1 },
+				{ rows: [{ tenant: 't04' }], read: 1 }
+			]
+		});
+	});
+
+	it('refuses an older source after a replacement resets its tenant cursor', async () => {
+		const digest = syntheticCasDigest(2027);
+		await seedCasObjects([digest]);
+		const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+		const progress = new CasDemotionProgressRepository(database);
+		const now = isoTimestamp(new Date());
+		const original = { digest, incarnation: 1 };
+		await progress.register(original, now);
+		await progress.tenantPage(original, now);
+		await env.CUPBOARD_DB.batch([
+			env.CUPBOARD_DB.prepare(
+				'UPDATE cas_object_storage SET incarnation = 2 WHERE digest = ?'
+			).bind(digest),
+			env.CUPBOARD_DB.prepare(
+				"UPDATE object_incarnation SET incarnation = 2 WHERE kind = 'cas' AND object_id = ?"
+			).bind(digest)
+		]);
+		const replacement = { digest, incarnation: 2 };
+		await progress.register(replacement, now);
+		await progress.register(original, now);
+		const staleTenants = await progress.tenantPage(original, now);
+		const sources = await progress.dueSources(4);
+		const rows = await database
+			.select()
+			.from(d1Schema.casDemotionProgress)
+			.all();
+		expect({
+			staleTenants,
+			sources,
+			rows: rows.map((row) => ({
+				...row,
+				afterTenant: row.afterTenant ?? undefined
+			}))
+		}).toStrictEqual({
+			staleTenants: [],
+			sources: [replacement],
+			rows: [
+				{
+					digest,
+					incarnation: 2,
+					afterTenant: undefined,
+					revision: 3,
+					updatedAt: now
+				}
+			]
+		});
+	});
+
+	it('preserves missing objects and scan hints until discovery storage is ready', async () => {
+		await env.CUPBOARD_DB.prepare(
+			'DELETE FROM deployment_transition WHERE id = ?'
+		)
+			.bind('cas-demotion-progress')
+			.run();
+		const digest = syntheticCasDigest(2028);
+		await seedCasObjects([digest]);
+		const before = await casObjectRows();
+		const read = vi.fn(() => Promise.resolve(''));
+		const advance = vi.fn(() => Promise.resolve());
+		const route = vi.fn(() => Promise.resolve());
+		const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+		const reaper = new BlobReaperService(
+			database,
+			env.BLOBS,
+			{ demote: route },
+			{ demote: route },
+			1000
+		);
+		const demoted = await reaper.demoteMissingCasObjects(rootLogger(), 10, {
+			read,
+			advance
+		});
+		expect({
+			demoted,
+			reads: read.mock.calls,
+			advances: advance.mock.calls,
+			routes: route.mock.calls,
+			progress: await database
+				.select()
+				.from(d1Schema.casDemotionProgress)
+				.all(),
+			objects: await casObjectRows()
+		}).toStrictEqual({
+			demoted: 0,
+			reads: [],
+			advances: [],
+			routes: [],
+			progress: [],
+			objects: before
+		});
 	});
 
 	it('keeps missing CAS state when a reference arrives before registry retirement', async () => {

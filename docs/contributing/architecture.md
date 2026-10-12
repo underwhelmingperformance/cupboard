@@ -373,6 +373,16 @@ falls back to that D1 read rather than refusing the request.
 reaper's under `reaper:demote-cursor`, and the attestation reaper's under
 `reaper:cas-demote-cursor`.
 
+The CAS cursor in KV is a hint for discovering missing objects. Active CAS
+demotion uses `cas_demotion_progress` in D1, with the captured object
+incarnation, last discovered tenant and a revision. Each pass polls active work
+alongside new discovery. Tenant lookup seeks one row through the digest/tenant
+index, skips duplicate references and routes at most four tenants per object.
+The cursor cycles after the last tenant, so a failed tenant does not prevent
+later tenants from progressing. Reference and incarnation predicates decide
+whether metadata can be removed; advancing discovery does not mean demotion
+completed.
+
 ## Scheduled and background work
 
 The control Worker's cron trigger fires every hour (`0 * * * *`). It first
