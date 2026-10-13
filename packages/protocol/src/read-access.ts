@@ -28,10 +28,13 @@ export const readAccessGrantType =
 	'urn:cupboard:params:oauth:grant-type:read-access';
 export const readAccessFileEnvironment = 'CUPBOARD_READ_ACCESS_FILE';
 
+// An optional cache is included when a trust rule permits it. Otherwise the
+// session omits it instead of refusing the request.
 const cacheResourceSchema = z.strictObject({
 	type: z.literal('cupboard_cache'),
 	cache: cacheScopeSchema,
-	mode: z.enum(['content', 'metadata']).default('content')
+	mode: z.enum(['content', 'metadata']).default('content'),
+	optional: z.literal(true).optional()
 });
 
 const viewResourceSchema = z.strictObject({
@@ -90,6 +93,13 @@ const absentStateSchema = z.strictObject({
 		.optional()
 });
 
+// The state of an optional cache that the session omits. It does not say
+// whether the cache exists, so an omitted private cache and an absent one
+// look the same.
+const unavailableStateSchema = z.strictObject({
+	kind: z.literal('unavailable')
+});
+
 const absentViewStateSchema = z.strictObject({ kind: z.literal('absent') });
 const viewStateSchema = z.discriminatedUnion('kind', [
 	existingStateSchema,
@@ -97,12 +107,19 @@ const viewStateSchema = z.discriminatedUnion('kind', [
 ]);
 
 export const readResourceStateSchema = z.discriminatedUnion('type', [
-	cacheResourceSchema.extend({
-		state: z.discriminatedUnion('kind', [
-			existingStateSchema,
-			absentStateSchema
-		])
-	}),
+	cacheResourceSchema
+		.extend({
+			state: z.discriminatedUnion('kind', [
+				existingStateSchema,
+				absentStateSchema,
+				unavailableStateSchema
+			])
+		})
+		.refine(
+			(resource) =>
+				resource.state.kind !== 'unavailable' || resource.optional === true,
+			'Only an optional cache can be unavailable'
+		),
 	viewResourceSchema.extend({
 		state: viewStateSchema
 	})
@@ -137,7 +154,9 @@ export type ReadAccessGrantRequest = z.output<
 
 function readRequirement(resource: ReadResourceState): GrantRequirement {
 	const isOptional =
-		resource.state.kind === 'existing' && resource.state.access === 'public';
+		(resource.state.kind === 'existing' &&
+			resource.state.access === 'public') ||
+		(resource.type === 'cupboard_cache' && resource.optional === true);
 	if (resource.type === 'cupboard_view') {
 		return {
 			alternatives: [
