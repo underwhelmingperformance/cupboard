@@ -1,4 +1,7 @@
-import { type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	type Sha256HexDigest,
+	type TenantId
+} from '@cupboard/nix-store/scalars';
 import {
 	type ArtifactGeneration,
 	type ArtifactId,
@@ -7,6 +10,7 @@ import {
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, exists, inArray, isNull, notExists, sql } from 'drizzle-orm';
 
+import { casObjectNotRepromoted } from '../blob/cas-object-state.ts';
 import { registeredLiveObjectIncarnation } from '../blob/object-incarnation.ts';
 import {
 	cacheIdentityColumns,
@@ -32,17 +36,27 @@ type Artifact = typeof schema.artifacts.$inferSelect;
 export type ArtifactReferenceOutcome =
 	'referenced' | 'already-present' | 'unavailable' | 'over-quota';
 
+export interface CapturedArtifactReference {
+	readonly artifactId: ArtifactId;
+	readonly artifactGeneration: ArtifactGeneration;
+	readonly digest: Sha256HexDigest;
+	readonly cache: ResolvedCache;
+}
+
+export type ArtifactReferenceRemovalOutcome =
+	'removed' | 'already-absent' | 'deferred';
+
 /**
-Cache-scoped logical reservations for existing immutable CAS bytes.
+Cache-scoped logical references to immutable CAS bytes.
 */
 export class ArtifactCasService {
 	constructor(private readonly context: ServerContext) {}
 
-	private keyFilter(artifact: Artifact) {
+	private keyFilter(id: ArtifactId, generation: ArtifactGeneration) {
 		return and(
 			eq(d1Schema.artifactReference.tenant, this.context.requireTenant()),
-			eq(d1Schema.artifactReference.artifactId, artifact.id),
-			eq(d1Schema.artifactReference.artifactGeneration, artifact.generation)
+			eq(d1Schema.artifactReference.artifactId, id),
+			eq(d1Schema.artifactReference.artifactGeneration, generation)
 		);
 	}
 
@@ -56,6 +70,19 @@ export class ArtifactCasService {
 				d1Schema.artifactReference.cacheName,
 				cache.scope
 			)
+		);
+	}
+
+	private storageReady() {
+		const storageFilter = and(
+			eq(d1Schema.deploymentTransition.id, 'native-artifact-storage'),
+			inArray(d1Schema.deploymentTransition.state, ['expanded', 'complete'])
+		);
+		return exists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.deploymentTransition)
+				.where(storageFilter)
 		);
 	}
 
@@ -82,12 +109,8 @@ export class ArtifactCasService {
 			isNull(d1Schema.cacheLifecycle.deletedAt)
 		);
 		const conflictFilter = and(
-			this.keyFilter(artifact),
+			this.keyFilter(artifact.id, artifact.generation),
 			sql`not (${this.matchingFilter(artifact, cache)})`
-		);
-		const storageFilter = and(
-			eq(d1Schema.deploymentTransition.id, 'native-artifact-storage'),
-			inArray(d1Schema.deploymentTransition.state, ['expanded', 'complete'])
 		);
 		const physical = exists(
 			this.context.d1
@@ -107,12 +130,7 @@ export class ArtifactCasService {
 				.from(d1Schema.artifactReference)
 				.where(conflictFilter)
 		);
-		const storageReady = exists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.deploymentTransition)
-				.where(storageFilter)
-		);
+		const storageReady = this.storageReady();
 		return sql`${physical} and ${liveCache} and ${compatible} and ${storageReady}`;
 	}
 
@@ -198,7 +216,7 @@ export class ArtifactCasService {
 				matches: sql<number>`case when ${this.matchingFilter(artifact, cache)} then 1 else 0 end`
 			})
 			.from(d1Schema.artifactReference)
-			.where(this.keyFilter(artifact))
+			.where(this.keyFilter(artifact.id, artifact.generation))
 			.get();
 		if (existing?.matches === 0) {
 			throw new ArtifactReferenceConflictError();
@@ -255,5 +273,63 @@ export class ArtifactCasService {
 			return 'unavailable';
 		}
 		return existing === undefined ? 'referenced' : 'already-present';
+	}
+	/**
+	 * Keep the tenant critical section open until the retirement outbox is
+	 * acknowledged. This method deletes only the captured logical generation.
+	 */
+	async removeCapturedInSection(
+		reference: CapturedArtifactReference,
+		fenceIncarnation?: number
+	): Promise<ArtifactReferenceRemovalOutcome> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+		const references = await readCasReferenceSet(this.context.d1);
+		if (references.kinds !== 'all') {
+			throw new ArtifactStorageMigrationPendingError();
+		}
+		const notRepromoted = casObjectNotRepromoted(
+			this.context.d1,
+			reference.digest,
+			fenceIncarnation
+		);
+		const storageReady = this.storageReady();
+		const capturedReferenceFilter = and(
+			this.keyFilter(reference.artifactId, reference.artifactGeneration),
+			eq(d1Schema.artifactReference.digest, reference.digest),
+			eq(
+				d1Schema.artifactReference.cacheGeneration,
+				reference.cache.generation
+			),
+			cacheIdentityCondition(
+				d1Schema.artifactReference.cacheKind,
+				d1Schema.artifactReference.cacheName,
+				reference.cache.scope
+			),
+			notRepromoted,
+			storageReady
+		);
+		const release = new CasQuotaService(this.context).releaseStatements(
+			reference.digest,
+			references,
+			fenceIncarnation,
+			storageReady
+		);
+		const [gateRows, removedRows] = await this.context.d1.batch([
+			this.context.d1
+				.select({
+					allowed: sql<number>`case when ${notRepromoted ?? sql`true`} and ${storageReady} then 1 else 0 end`
+				})
+				.from(sql`(select 1) mutation_gate`),
+			this.context.d1
+				.delete(d1Schema.artifactReference)
+				.where(capturedReferenceFilter)
+				.returning({ artifactId: d1Schema.artifactReference.artifactId }),
+			release.credit,
+			release.presenceDelete
+		]);
+		if (gateRows[0]?.allowed !== 1) {
+			return 'deferred';
+		}
+		return removedRows.length === 0 ? 'already-absent' : 'removed';
 	}
 }

@@ -2,7 +2,10 @@ import {
 	cacheGenerationSchema,
 	cacheNameSchema,
 	cachePrioritySchema,
-	sha256HexDigestSchema
+	narInfoGenerationSchema,
+	predicateTypeSchema,
+	sha256HexDigestSchema,
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	artifactGenerationSchema,
@@ -19,7 +22,10 @@ import { CasObjectStore } from '../blob/cas-object-store.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { ArtifactReferenceConflictError } from '../errors.ts';
+import {
+	ArtifactReferenceConflictError,
+	ArtifactStorageMigrationPendingError
+} from '../errors.ts';
 import { casObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -33,6 +39,7 @@ import {
 } from '../test-support.ts';
 
 import { ArtifactCasService } from './artifact-cas-service.ts';
+import { AttestationCasService } from './attestation-cas-service.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
 import type { ServerContext } from './context.ts';
 
@@ -380,4 +387,188 @@ describe('artifact CAS reservation', () => {
 				})
 			)
 	);
+	it('credits the digest only after its last artifact generation is removed', () =>
+		withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance) => {
+				const context = instance.context;
+				await context.criticalSection(async () => {
+					const artifact = await createArtifact(context);
+					const service = new ArtifactCasService(context);
+					await service.reserveInSection(id, generation);
+					const nextGeneration = artifactGenerationSchema.parse(2);
+					context.db
+						.update(schema.artifacts)
+						.set({ generation: nextGeneration, kind: 'listing-proof' })
+						.where(eq(schema.artifacts.id, id))
+						.run();
+					await service.reserveInSection(id, nextGeneration);
+					const before = await reservationState(context);
+					const captured = {
+						artifactId: id,
+						artifactGeneration: generation,
+						digest: artifact.digest,
+						cache: artifact.cache
+					};
+					const outcome = await service.removeCapturedInSection(captured);
+					const remaining = await reservationState(context);
+					expect({ outcome, state: remaining }).toStrictEqual({
+						outcome: 'removed',
+						state: {
+							...before,
+							references: before.references.filter(
+								(row) => row.artifactGeneration === nextGeneration
+							)
+						}
+					});
+					const repeated = await service.removeCapturedInSection(captured);
+					expect({
+						outcome: repeated,
+						state: await reservationState(context)
+					}).toStrictEqual({ outcome: 'already-absent', state: remaining });
+					const final = await service.removeCapturedInSection({
+						...captured,
+						artifactGeneration: nextGeneration
+					});
+					expect({
+						outcome: final,
+						state: await reservationState(context)
+					}).toStrictEqual({
+						outcome: 'removed',
+						state: {
+							...remaining,
+							references: [],
+							presence: [],
+							usage: { ...remaining.usage, casBytes: 0, casBlobs: 0 }
+						}
+					});
+				});
+			})
+		));
+
+	it('keeps the shared charge while an attestation still references the digest', () =>
+		withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance) => {
+				const context = instance.context;
+				await context.criticalSection(async () => {
+					const artifact = await createArtifact(context);
+					const service = new ArtifactCasService(context);
+					await service.reserveInSection(id, generation);
+					await new AttestationCasService(context).reserveReferenceAndCharge(
+						{
+							cache: defaultCache(),
+							storePathHash: storePathHashSchema.parse('a'.repeat(32)),
+							generation: narInfoGenerationSchema.parse(0),
+							predicateType: predicateTypeSchema.parse(
+								'https://slsa.dev/provenance/v1'
+							),
+							digest: artifact.digest
+						},
+						artifact.size
+					);
+					const before = await reservationState(context);
+					const outcome = await service.removeCapturedInSection({
+						artifactId: id,
+						artifactGeneration: generation,
+						digest: artifact.digest,
+						cache: artifact.cache
+					});
+					expect({
+						outcome,
+						state: await reservationState(context)
+					}).toStrictEqual({
+						outcome: 'removed',
+						state: { ...before, references: [] }
+					});
+				});
+			})
+		));
+
+	it('preserves a reference and charge when removal captures a different cache generation', () =>
+		withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance) => {
+				const context = instance.context;
+				await context.criticalSection(async () => {
+					const artifact = await createArtifact(context);
+					const service = new ArtifactCasService(context);
+					await service.reserveInSection(id, generation);
+					const before = await reservationState(context);
+					const outcome = await service.removeCapturedInSection({
+						artifactId: id,
+						artifactGeneration: generation,
+						digest: artifact.digest,
+						cache: {
+							...artifact.cache,
+							generation: cacheGenerationSchema.parse(
+								artifact.cache.generation + 1
+							)
+						}
+					});
+					expect({
+						outcome,
+						state: await reservationState(context)
+					}).toStrictEqual({ outcome: 'already-absent', state: before });
+				});
+			})
+		));
+
+	it('defers stale missing-object removal after a physical repair', () =>
+		withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance) => {
+				const context = instance.context;
+				await context.criticalSection(async () => {
+					const artifact = await createArtifact(context);
+					const service = new ArtifactCasService(context);
+					await service.reserveInSection(id, generation);
+					await context.env.BLOBS.delete(
+						casObjectKey(artifact.digest, artifact.incarnation)
+					);
+					const bytes = new TextEncoder().encode('native artifact');
+					await new CasObjectStore(context.d1, context.env.BLOBS).promote(
+						{ digest: artifact.digest, size: artifact.size, bytes },
+						{ restoreMissingObject: true }
+					);
+					const before = await reservationState(context);
+					const outcome = await service.removeCapturedInSection(
+						{
+							artifactId: id,
+							artifactGeneration: generation,
+							digest: artifact.digest,
+							cache: artifact.cache
+						},
+						artifact.incarnation
+					);
+					expect({
+						outcome,
+						state: await reservationState(context)
+					}).toStrictEqual({ outcome: 'deferred', state: before });
+				});
+			})
+		));
+
+	it('refuses artifact deletion before compatible reference storage is active', () =>
+		withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance) => {
+				const context = instance.context;
+				await context.criticalSection(async () => {
+					const artifact = await createArtifact(context);
+					const service = new ArtifactCasService(context);
+					await service.reserveInSection(id, generation);
+					await context.d1
+						.delete(d1Schema.deploymentTransition)
+						.where(
+							eq(d1Schema.deploymentTransition.id, 'native-artifact-storage')
+						);
+					const before = await reservationState(context);
+					await expect(
+						service.removeCapturedInSection({
+							artifactId: id,
+							artifactGeneration: generation,
+							digest: artifact.digest,
+							cache: artifact.cache
+						})
+					).rejects.toThrow(ArtifactStorageMigrationPendingError);
+					expect(await reservationState(context)).toStrictEqual(before);
+				});
+			})
+		));
 });

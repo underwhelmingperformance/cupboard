@@ -7133,8 +7133,10 @@ build traces available from a cupboard cache.
       internal reservation service validates captured artifact and cache
       identities, the immutable object's size and its live incarnation. It
       reserves the reference and shared quota in one fenced D1 batch without
-      downloading or uploading the object bytes. Parent-edge integration and
-      producer activation remain pending.
+      downloading or uploading the object bytes. Captured reference removal
+      preserves newer generations and repaired physical incarnations, and
+      credits quota after the last artifact or attestation reference is gone.
+      Parent-edge integration and producer activation remain pending.
 - [ ] Charge each physical digest once per tenant across every artifact and
       attestation reference. Generalise collection, demotion, repair and final
       reference removal before creating artifact references. Collection and

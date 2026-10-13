@@ -17,12 +17,14 @@ import { runInDurableObject } from 'cloudflare:test';
 import { eq, type SQL, sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { readCasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	currentServer,
 	defaultCache,
 	initialise,
+	recordTransition,
 	resetTestServer,
 	tenantUsageRow,
 	withoutAlarmArming
@@ -187,6 +189,27 @@ describe('shared CAS quota reservation', () => {
 					quota: await quotaFacts(context),
 					objects: await context.d1.select().from(d1Schema.casObject)
 				}).toStrictEqual(before);
+			});
+		}));
+	it('preserves a remaining charge and presence when its release fence refuses cleanup', () =>
+		withoutAlarmArming(async () => {
+			await recordTransition('native-artifact-storage', 'expanded');
+			await runInDurableObject(currentServer(), async (instance) => {
+				const context = instance.context;
+				await context.d1.batch(artifactReservation(context, 'listing'));
+				await context.d1
+					.delete(d1Schema.artifactReference)
+					.where(eq(d1Schema.artifactReference.tenant, fixtureTenant));
+				const before = await quotaFacts(context);
+				const references = await readCasReferenceSet(context.d1);
+				const release = new CasQuotaService(context).releaseStatements(
+					digest,
+					references,
+					undefined,
+					sql`false`
+				);
+				await context.d1.batch([release.credit, release.presenceDelete]);
+				expect(await quotaFacts(context)).toStrictEqual(before);
 			});
 		}));
 });

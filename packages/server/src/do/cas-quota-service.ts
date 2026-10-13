@@ -153,10 +153,15 @@ export class CasQuotaService {
 		};
 	}
 
+	/**
+	 * Run the credit before deleting presence, in the same D1 batch as the
+	 * captured reference deletion. Those writes must not change the mutation fence.
+	 */
 	releaseStatements(
 		digest: Sha256HexDigest,
 		references: CasReferenceSet,
-		fenceIncarnation?: number
+		fenceIncarnation?: number,
+		mutationFence?: SQL
 	) {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
@@ -178,12 +183,18 @@ export class CasQuotaService {
 			digest,
 			fenceIncarnation
 		);
-		const releaseFilter = and(presenceFilter, notRepromoted, unreferenced);
+		const releaseFilter = and(
+			presenceFilter,
+			notRepromoted,
+			unreferenced,
+			mutationFence
+		);
 		const creditFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			presenceExists,
 			notRepromoted,
-			unreferenced
+			unreferenced,
+			mutationFence
 		);
 
 		return {
