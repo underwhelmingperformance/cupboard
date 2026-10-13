@@ -7197,7 +7197,11 @@ build traces available from a cupboard cache.
       producer integration remain pending.
 - [ ] Set a metadata and trace budget with actionable refusals. A trace that
       exceeds its budget must not reject the NAR publication. Idempotent retries
-      remain valid.
+      remain valid. The shared limits are 64 MiB for listings, 16 MiB for logs,
+      8 MiB for traces and 1 MiB for listing-generation proofs. Reservation by
+      reference checks the measured CAS size before R2 access or shared writes.
+      Producer-side enforcement and optional publication failure isolation
+      remain pending.
 
 ### Listings and generation proofs
 

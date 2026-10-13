@@ -10,6 +10,7 @@ import {
 	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { type ArtifactKind } from '@cupboard/protocol/artifacts';
 import { type AttestationInfoError } from '@cupboard/protocol/attestations';
 import {
 	type CacheMetadataError,
@@ -1669,6 +1670,21 @@ export class ArtifactStorageMigrationPendingError extends ServerHttpError {
 			'Artifact reference storage is not ready; complete the storage transition before publishing artifacts'
 		);
 		this.name = 'ArtifactStorageMigrationPendingError';
+	}
+}
+
+export class ArtifactTooLargeError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor(
+		public readonly kind: ArtifactKind,
+		public readonly size: number,
+		public readonly maxSize: number
+	) {
+		super(
+			`${kind} artifact is ${String(size)} bytes; the limit is ${String(maxSize)} bytes. Omit this optional artifact or reduce its size before publishing it.`
+		);
+		this.name = 'ArtifactTooLargeError';
 	}
 }
 

@@ -5,7 +5,8 @@ import {
 import {
 	type ArtifactGeneration,
 	type ArtifactId,
-	type ArtifactKind
+	type ArtifactKind,
+	maxArtifactBytes
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, exists, isNull, notExists, or, sql } from 'drizzle-orm';
@@ -24,6 +25,7 @@ import {
 	ArtifactPublicationMigrationPendingError,
 	ArtifactReferenceConflictError,
 	ArtifactStorageMigrationPendingError,
+	ArtifactTooLargeError,
 	TenantUsageMissingError,
 	TenantWritesStoppedError
 } from '../errors.ts';
@@ -262,6 +264,10 @@ export class ArtifactCasService {
 			.get();
 		if (object === undefined) {
 			return 'unavailable';
+		}
+		const maxSize = maxArtifactBytes[artifact.kind];
+		if (object.size > maxSize) {
+			throw new ArtifactTooLargeError(artifact.kind, object.size, maxSize);
 		}
 		const head = await this.context.env.BLOBS.head(
 			casObjectKey(artifact.digest, artifact.publicationIncarnation)

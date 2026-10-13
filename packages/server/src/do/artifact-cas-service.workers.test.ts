@@ -154,6 +154,120 @@ describe('artifact CAS reservation', () => {
 	);
 
 	it.each([
+		{ kind: 'listing', limit: 64 * 1024 * 1024 },
+		{ kind: 'build-log', limit: 16 * 1024 * 1024 },
+		{ kind: 'build-trace', limit: 8 * 1024 * 1024 },
+		{ kind: 'listing-proof', limit: 1024 * 1024 }
+	] as const)(
+		'enforces the $kind byte budget and preserves retries at its limit',
+		({ kind, limit }) =>
+			withoutAlarmArming(() =>
+				runInDurableObject(currentServer(), async (instance) => {
+					const context = instance.context;
+					await context.criticalSection(async () => {
+						const artifact = await createArtifact(context, kind);
+						const originalHead = context.env.BLOBS.head.bind(context.env.BLOBS);
+						let size = limit + 1;
+						const head = vi
+							.spyOn(context.env.BLOBS, 'head')
+							.mockImplementation(async (key) => {
+								const object = await originalHead(key);
+								if (object === null) {
+									return object;
+								}
+								return new Proxy(object, {
+									get(target, property): unknown {
+										if (property === 'size') {
+											return size;
+										}
+										const value: unknown = Reflect.get(
+											target,
+											property,
+											target
+										);
+										return value;
+									}
+								});
+							});
+						const get = vi.spyOn(context.env.BLOBS, 'get');
+						const put = vi.spyOn(context.env.BLOBS, 'put');
+						try {
+							await context.d1
+								.update(d1Schema.casObject)
+								.set({ size })
+								.where(eq(d1Schema.casObject.digest, artifact.digest));
+							const before = await reservationState(context);
+							const service = new ArtifactCasService(context);
+							await expect(
+								service.reserveInSection(id, generation)
+							).rejects.toMatchObject({
+								name: 'ArtifactTooLargeError',
+								status: 413,
+								kind,
+								size,
+								maxSize: limit
+							});
+							expect({
+								state: await reservationState(context),
+								heads: head.mock.calls.length,
+								gets: get.mock.calls.length,
+								puts: put.mock.calls.length
+							}).toStrictEqual({ state: before, heads: 0, gets: 0, puts: 0 });
+							size = limit;
+							await context.d1
+								.update(d1Schema.casObject)
+								.set({ size })
+								.where(eq(d1Schema.casObject.digest, artifact.digest));
+							const first = await service.reserveInSection(id, generation);
+							const repeated = await service.reserveInSection(id, generation);
+							expect({
+								first,
+								repeated,
+								state: await reservationState(context),
+								gets: get.mock.calls.length,
+								puts: put.mock.calls.length
+							}).toStrictEqual({
+								first: 'referenced',
+								repeated: 'already-present',
+								state: {
+									...before,
+									usage: { ...before.usage, casBytes: size, casBlobs: 1 },
+									presence: [
+										{ tenant: fixtureTenant, digest: artifact.digest, size }
+									],
+									references: [
+										{
+											tenant: fixtureTenant,
+											artifactId: id,
+											artifactGeneration: generation,
+											cacheKind: 'default',
+											cacheName: undefined,
+											cacheGeneration: artifact.cache.generation,
+											kind,
+											digest: artifact.digest,
+											createdAt: artifact.createdAt
+										}
+									],
+									objects: before.objects.map((object) => ({
+										...object,
+										size,
+										deleteAfter: undefined
+									}))
+								},
+								gets: 0,
+								puts: 0
+							});
+						} finally {
+							head.mockRestore();
+							get.mockRestore();
+							put.mockRestore();
+						}
+					});
+				})
+			)
+	);
+
+	it.each([
 		'cache-generation',
 		'cas-incarnation',
 		'storage-readiness',

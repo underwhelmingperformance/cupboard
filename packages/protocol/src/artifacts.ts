@@ -19,6 +19,13 @@ export const artifactKinds = [
 ] as const;
 export type ArtifactKind = (typeof artifactKinds)[number];
 
+export const maxArtifactBytes = {
+	listing: 64 * 1024 * 1024,
+	'build-log': 16 * 1024 * 1024,
+	'build-trace': 8 * 1024 * 1024,
+	'listing-proof': 1024 * 1024
+} as const satisfies Readonly<Record<ArtifactKind, number>>;
+
 export const listingGeneratorRevisionSchema = z
 	.string()
 	.min(1)
