@@ -7145,12 +7145,16 @@ build traces available from a cupboard cache.
       alarm pass drains artifact outboxes, and indexed readiness includes queued
       NAR deletion even without a saved GC continuation. Cache teardown also
       retires pending and independently rooted artifacts in indexed pages and
-      keeps its durable marker until reference outboxes drain. Producer
-      activation remains pending. Retirement drains remove at most 16 local rows
-      and consider at most eight captured entries per pass. Their durable
-      shared-removal phase prevents repeated D1 deletion and quota work while
-      large edge sets are cleaned up. Newer artifact generations and auxiliary
-      metadata remain intact.
+      keeps its durable marker until reference outboxes drain. Expiry retirement
+      selects at most eight artifacts and eight roots per pass, commits root
+      removal with retirement outboxes, and projects deadlines for cron and
+      alarm scheduling. An artifact's own expiry overrides its roots; another
+      valid root or current parent can retain a trace after an expiry root is
+      removed. Producer activation remains pending. Retirement drains remove at
+      most 16 local rows and consider at most eight captured entries per pass.
+      Their durable shared-removal phase prevents repeated D1 deletion and quota
+      work while large edge sets are cleaned up. Newer artifact generations and
+      auxiliary metadata remain intact.
 - [ ] Charge each physical digest once per tenant across every artifact and
       attestation reference. Generalise collection, demotion, repair and final
       reference removal before creating artifact references. Collection and

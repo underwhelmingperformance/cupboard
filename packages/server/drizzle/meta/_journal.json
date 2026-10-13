@@ -582,6 +582,13 @@
 			"when": 1791862441144,
 			"tag": "0082_artifact_cache_retirement",
 			"breakpoints": true
+		},
+		{
+			"idx": 83,
+			"version": "6",
+			"when": 1791864384739,
+			"tag": "0083_artifact_expiry_retirement",
+			"breakpoints": true
 		}
 	]
 }

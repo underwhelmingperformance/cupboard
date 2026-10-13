@@ -2,6 +2,7 @@ import type {
 	NarInfoGeneration,
 	StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import type {
 	ArtifactGeneration,
 	ArtifactId
@@ -14,6 +15,7 @@ import {
 	exists,
 	gt,
 	isNotNull,
+	lte,
 	notExists,
 	or,
 	sql
@@ -26,7 +28,8 @@ import { authorisedNarInfoVersions } from '../read/read.ts';
 import type { SchemaDatabase, ServerContext } from './context.ts';
 
 type RetirementDatabase = Pick<SchemaDatabase, 'select' | 'update' | 'insert'>;
-const parentRetirementPageSize = 16;
+const retirementPageSize = 16;
+const expiryPageSize = 8;
 
 export interface ArtifactVersion {
 	readonly id: ArtifactId;
@@ -45,6 +48,12 @@ export type ArtifactRetentionRoot =
 export type ArtifactRetentionAttachment =
 	'attached' | 'already-present' | 'unavailable';
 
+export interface ArtifactExpirySweep {
+	readonly rootsRemoved: number;
+	readonly artifactsRetired: number;
+	readonly pending: boolean;
+}
+
 export interface ArtifactParentRetirement {
 	readonly edgesRemoved: number;
 	readonly artifactsRetired: number;
@@ -62,6 +71,10 @@ export class ArtifactRetentionService {
 			eq(schema.artifacts.id, version.id),
 			eq(schema.artifacts.generation, version.generation)
 		);
+	}
+
+	private activeExpiryFilter() {
+		return sql`${schema.artifacts.state} != 'retired' AND ${schema.artifacts.expiresAt} IS NOT NULL`;
 	}
 
 	private currentArtifact(version: ArtifactVersion) {
@@ -308,6 +321,91 @@ export class ArtifactRetentionService {
 		);
 	}
 
+	nextExpiryAt(): IsoTimestamp | undefined {
+		const artifact = this.context.db
+			.select({ at: schema.artifacts.expiresAt })
+			.from(schema.artifacts)
+			.where(this.activeExpiryFilter())
+			.orderBy(schema.artifacts.expiresAt, schema.artifacts.id)
+			.limit(1)
+			.get()?.at;
+		const root = this.context.db
+			.select({ at: schema.artifactRoots.expiresAt })
+			.from(schema.artifactRoots)
+			.where(isNotNull(schema.artifactRoots.expiresAt))
+			.orderBy(schema.artifactRoots.expiresAt, schema.artifactRoots.artifactId)
+			.limit(1)
+			.get()?.at;
+		return [artifact, root]
+			.filter((at) => at != undefined)
+			.toSorted(byCodeUnit)
+			.at(0);
+	}
+
+	/**
+	Removes expired roots and persists resulting retirement atomically in bounded pages.
+	*/
+	expireInSection(): ArtifactExpirySweep {
+		const now = isoTimestamp(new Date());
+		const artifactFilter = and(
+			this.activeExpiryFilter(),
+			lte(schema.artifacts.expiresAt, now)
+		);
+		const artifacts = this.context.db
+			.select({
+				id: schema.artifacts.id,
+				generation: schema.artifacts.generation
+			})
+			.from(schema.artifacts)
+			.where(artifactFilter)
+			.orderBy(schema.artifacts.expiresAt, schema.artifacts.id)
+			.limit(expiryPageSize)
+			.all();
+		const rootExpiry = lte(schema.artifactRoots.expiresAt, now);
+		const roots = this.context.db
+			.select({
+				id: schema.artifactRoots.artifactId,
+				generation: schema.artifactRoots.artifactGeneration
+			})
+			.from(schema.artifactRoots)
+			.where(rootExpiry)
+			.orderBy(schema.artifactRoots.expiresAt, schema.artifactRoots.artifactId)
+			.limit(expiryPageSize)
+			.all();
+		const result = this.context.db.transaction((transaction) => {
+			let artifactsRetired = 0;
+			let rootsRemoved = 0;
+			for (const version of artifacts) {
+				if (this.retireWithin(transaction, version, true)) {
+					artifactsRetired += 1;
+				}
+			}
+			for (const version of roots) {
+				const filter = and(
+					rootExpiry,
+					eq(schema.artifactRoots.artifactId, version.id),
+					eq(schema.artifactRoots.artifactGeneration, version.generation),
+					eq(schema.artifactRoots.kind, 'expiry')
+				);
+				const removed = transaction
+					.delete(schema.artifactRoots)
+					.where(filter)
+					.returning({ id: schema.artifactRoots.artifactId })
+					.all();
+				rootsRemoved += removed.length;
+				if (
+					removed.length > 0 &&
+					this.retireWithin(transaction, version, true)
+				) {
+					artifactsRetired += 1;
+				}
+			}
+			return { rootsRemoved, artifactsRetired };
+		});
+		const next = this.nextExpiryAt();
+		return { ...result, pending: next !== undefined && next <= now };
+	}
+
 	retireCacheInSection(cache: ResolvedCache): {
 		readonly artifactsRetired: number;
 		readonly pending: boolean;
@@ -339,7 +437,7 @@ export class ArtifactRetentionService {
 			.from(schema.artifacts)
 			.where(filter)
 			.orderBy(schema.artifacts.state, schema.artifacts.id)
-			.limit(parentRetirementPageSize)
+			.limit(retirementPageSize)
 			.all();
 		const artifactsRetired = this.context.db.transaction((transaction) => {
 			let retired = 0;
@@ -407,7 +505,7 @@ export class ArtifactRetentionService {
 			.from(schema.artifactParents)
 			.where(publicationFilter)
 			.orderBy(asc(schema.artifactParents.artifactId))
-			.limit(parentRetirementPageSize)
+			.limit(retirementPageSize)
 			.all();
 		const result = this.context.db.transaction((transaction) => {
 			let edgesRemoved = 0;

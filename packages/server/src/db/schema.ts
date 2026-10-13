@@ -1194,6 +1194,11 @@ export const artifacts = sqliteTable(
 		index('artifact_cache_state_idx').on(table.cacheId, table.state, table.id),
 		index('artifact_digest_idx').on(table.digest, table.id),
 		index('artifact_expiry_idx').on(table.expiresAt, table.id),
+		index('artifact_active_expiry_idx')
+			.on(table.expiresAt, table.id)
+			.where(
+				sql`${table.state} != 'retired' AND ${table.expiresAt} IS NOT NULL`
+			),
 		index('artifact_pending_idx').on(table.state, table.id),
 		check('artifact_generation_check', sql`${table.generation} >= 1`),
 		check(

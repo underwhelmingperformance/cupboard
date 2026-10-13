@@ -144,6 +144,7 @@ import {
 	MaintenanceRetrySchedule,
 	noProgressRetryMs
 } from './alarm.ts';
+import { ArtifactRetentionService } from './artifact-retention-service.ts';
 import { ArtifactRetirementService } from './artifact-retirement-service.ts';
 import {
 	AttestationCasService,
@@ -329,6 +330,7 @@ type MaintenancePassKey =
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
 	| 'attestation-list-refresh'
+	| 'artifact-expiry'
 	| 'artifact-retirement'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
@@ -2515,6 +2517,31 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 
 			{
+				key: 'artifact-expiry',
+				workAt: () => {
+					const at = new ArtifactRetentionService(this.context).nextExpiryAt();
+					return Promise.resolve(at === undefined ? undefined : Date.parse(at));
+				},
+				run: () =>
+					this.metered('artifact-expiry', () =>
+						this.withMaintenanceEligibility(() =>
+							this.context.criticalSection(() => {
+								const result = new ArtifactRetentionService(
+									this.context
+								).expireInSection();
+								return Promise.resolve(
+									!result.pending ||
+										result.rootsRemoved > 0 ||
+										result.artifactsRetired > 0
+										? 'progressed'
+										: 'stalled'
+								);
+							})
+						)
+					)
+			},
+
+			{
 				key: 'artifact-retirement',
 				workAt: readyWhen(() =>
 					Promise.resolve(
@@ -3909,6 +3936,7 @@ type MeteredMethod =
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
 	| 'attestation-list-refresh'
+	| 'artifact-expiry'
 	| 'artifact-retirement'
 	| 'auth-key-retirement'
 	| 'cache-teardown'
