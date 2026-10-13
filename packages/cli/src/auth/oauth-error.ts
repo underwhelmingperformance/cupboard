@@ -3,7 +3,8 @@ import { z } from 'zod';
 const oauthErrorResponseSchema = z.object({
 	error: z.string().min(1),
 	error_description: z.string().optional(),
-	problem: z.string().min(1).optional()
+	problem: z.string().min(1).optional(),
+	detail: z.record(z.string(), z.string()).optional().catch(undefined)
 });
 
 export type OAuthErrorResponse = z.infer<typeof oauthErrorResponseSchema>;

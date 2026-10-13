@@ -1,4 +1,8 @@
-import { operationSchema } from '@cupboard/protocol/grants';
+import {
+	type AuthorizationDetail,
+	authorizationDetailsSchema,
+	operationSchema
+} from '@cupboard/protocol/grants';
 import { formatErrorWithCauses } from '@cupboard/shared/errors';
 import { RequestError } from '@octokit/request-error';
 import { ORPCError } from '@orpc/client';
@@ -189,9 +193,54 @@ function oauthFailure(
 		}
 	}
 	if (oauth.error === 'invalid_authorization_details') {
+		const refused =
+			oauth.problem === 'read-resources-not-permitted'
+				? refusedReadResources(oauth.detail?.read_resources)
+				: [];
+		if (refused.length > 0) {
+			return `The trust rules do not permit reading ${joinNames(refused)}. Run \`cupboard github check\` to review the read grants, or ask the tenant administrator to grant read access.`;
+		}
 		return 'The requested permissions could not be accepted. Review the job permissions and trust-rule restrictions. Use --debug for diagnostic information.';
 	}
 	return undefined;
+}
+
+// The server lists the read resources that no trust rule covers. Name them
+// from the structured detail rather than repeating the server's wording.
+function refusedReadResources(encoded: string | undefined): string[] {
+	if (encoded === undefined) {
+		return [];
+	}
+	let payload: unknown;
+	try {
+		payload = JSON.parse(encoded);
+	} catch {
+		return [];
+	}
+	const parsed = authorizationDetailsSchema.safeParse(payload);
+	if (!parsed.success) {
+		return [];
+	}
+	return parsed.data.flatMap((detail) => readResourceName(detail) ?? []);
+}
+
+function readResourceName(detail: AuthorizationDetail): string | undefined {
+	if (detail.type === 'cupboard_cache') {
+		return detail.cache.kind === 'default'
+			? 'the default cache'
+			: `cache '${detail.cache.name}'`;
+	}
+	if (detail.type === 'cupboard_view') {
+		return `reuse view '${detail.view}'`;
+	}
+	return undefined;
+}
+
+function joinNames(names: readonly string[]): string {
+	return new Intl.ListFormat('en-GB', {
+		style: 'long',
+		type: 'conjunction'
+	}).format(names);
 }
 
 function httpError(status: number, options: HumanErrorOptions): string {
