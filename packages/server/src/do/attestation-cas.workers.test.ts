@@ -1395,115 +1395,117 @@ describe('attestation CAS lifecycle', () => {
 
 	it.each(['reference-demotion', 'object-retirement'] as const)(
 		'fences missing-object repair against stale %s',
-		async (phase) => {
-			const token = await initialise();
-			const nar = await verifiableNar(`missing-repair-${phase}`);
-			const metadata = uploadMetadata({
-				storePathHash,
-				narHash: nar.narHash,
-				narSize: nar.narSize,
-				fileHash: nar.fileHash,
-				fileSize: nar.narBytes.byteLength
-			});
-			await commitPath(token, metadata, nar);
+		(phase) =>
+			withoutAlarmArming(async () => {
+				const token = await initialise();
+				const nar = await verifiableNar(`missing-repair-${phase}`);
+				const metadata = uploadMetadata({
+					storePathHash,
+					narHash: nar.narHash,
+					narSize: nar.narSize,
+					fileHash: nar.fileHash,
+					fileSize: nar.narBytes.byteLength
+				});
+				await commitPath(token, metadata, nar);
 
-			const bytes = textEncoder.encode('repaired bundle');
-			const bundle = await fileAttestationReference({
-				uploadId: `missing-repair-${phase}`,
-				bytes,
-				storePathHash,
-				generation: 0,
-				predicateType
-			});
-			const staging = bundle.stagingKey;
-			const measured = await currentServer().measureAttestationBundle(staging);
-			const before = {
-				refs: await attestationReferenceRows(),
-				presence: await tenantCasBlobRows(),
-				usage: await tenantUsageRow()
-			};
-			await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
+				const bytes = textEncoder.encode('repaired bundle');
+				const bundle = await fileAttestationReference({
+					uploadId: `missing-repair-${phase}`,
+					bytes,
+					storePathHash,
+					generation: 0,
+					predicateType
+				});
+				const staging = bundle.stagingKey;
+				const measured =
+					await currentServer().measureAttestationBundle(staging);
+				const before = {
+					refs: await attestationReferenceRows(),
+					presence: await tenantCasBlobRows(),
+					usage: await tenantUsageRow()
+				};
+				await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
 
-			const demoted = await runInDurableObject(
-				currentServer(),
-				async (instance) => {
-					const cas = new AttestationCasService(instance.context);
-					const reaper = new BlobReaperService(
-						instance.context.d1,
-						env.BLOBS,
-						{ demote: () => Promise.resolve() },
-						{
-							async demote(_tenant, demotions) {
-								await cas.promoteMeasuredBundle(staging, measured, {
-									restoreMissingObject: true
-								});
+				const demoted = await runInDurableObject(
+					currentServer(),
+					async (instance) => {
+						const cas = new AttestationCasService(instance.context);
+						const reaper = new BlobReaperService(
+							instance.context.d1,
+							env.BLOBS,
+							{ demote: () => Promise.resolve() },
+							{
+								async demote(_tenant, demotions) {
+									await cas.promoteMeasuredBundle(staging, measured, {
+										restoreMissingObject: true
+									});
 
-								if (phase === 'reference-demotion') {
-									for (const demotion of demotions) {
-										await cas.removeCapturedReference(
-											{
-												cache: defaultCache(),
-												storePathHash,
-												generation: narInfoGenerationSchema.parse(0),
-												predicateType,
-												digest: bundle.digest
-											},
-											demotion.fenceIncarnation
-										);
+									if (phase === 'reference-demotion') {
+										for (const demotion of demotions) {
+											await cas.removeCapturedReference(
+												{
+													cache: defaultCache(),
+													storePathHash,
+													generation: narInfoGenerationSchema.parse(0),
+													predicateType,
+													digest: bundle.digest
+												},
+												demotion.fenceIncarnation
+											);
+										}
 									}
 								}
-							}
-						},
-						instance.context.subrequestsPerInvocation
-					);
+							},
+							instance.context.subrequestsPerInvocation
+						);
 
-					return reaper.demoteMissingCasObjects(rootLogger(), 10, {
-						read: () => Promise.resolve(''),
-						advance: () => Promise.resolve()
-					});
-				}
-			);
-			const read = await authorisedFetch(
-				`/attestation-bundles/${bundle.digest}`,
-				token
-			);
-			const now = isoTimestamp(new Date());
+						return reaper.demoteMissingCasObjects(rootLogger(), 10, {
+							read: () => Promise.resolve(''),
+							advance: () => Promise.resolve()
+						});
+					}
+				);
+				const read = await authorisedFetch(
+					`/attestation-bundles/${bundle.digest}`,
+					token
+				);
+				const now = isoTimestamp(new Date());
 
-			expect({
-				demoted,
-				...(await casLifecycleRows(bundle.digest)),
-				refs: await attestationReferenceRows(),
-				presence: await tenantCasBlobRows(),
-				usage: await tenantUsageRow(),
-				read: {
-					status: read.status,
-					bytes: new Uint8Array(await read.arrayBuffer())
-				}
-			}).toStrictEqual({
-				demoted: 0,
-				objects: [
-					{
-						digest: bundle.digest,
-						size: bundle.size,
-						incarnation: 3,
-						storedAt: now,
-						deleteAfter: undefined
+				expect({
+					demoted,
+					...(await casLifecycleRows(bundle.digest)),
+					refs: await attestationReferenceRows(),
+					presence: await tenantCasBlobRows(),
+					usage: await tenantUsageRow(),
+					read: {
+						status: read.status,
+						bytes: new Uint8Array(await read.arrayBuffer())
 					}
-				],
-				registry: [
-					{
-						kind: 'cas',
-						objectId: bundle.digest,
-						incarnation: 3,
-						state: 'live',
-						reservationOwner: undefined,
-						updatedAt: now
-					}
-				],
-				...before,
-				read: { status: StatusCodes.OK, bytes }
-			});
-		}
+				}).toStrictEqual({
+					demoted: 0,
+					objects: [
+						{
+							digest: bundle.digest,
+							size: bundle.size,
+							incarnation: 3,
+							storedAt: now,
+							deleteAfter: undefined
+						}
+					],
+					registry: [
+						{
+							kind: 'cas',
+							objectId: bundle.digest,
+							incarnation: 3,
+							state: 'live',
+							reservationOwner: undefined,
+							updatedAt: now
+						}
+					],
+					...before,
+					read: { status: StatusCodes.OK, bytes }
+				});
+			})
 	);
 
 	it('retires missing state after a failed repair reservation becomes absent', async () => {
