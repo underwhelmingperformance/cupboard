@@ -7140,8 +7140,11 @@ build traces available from a cupboard cache.
       generations. Independent cache-lifetime and expiry roots are supported,
       and a log's own expiry overrides its parents and roots. Local retirement
       and its reference-deletion outbox commit atomically. NAR deletion
-      integration, bounded outbox draining and producer activation remain
-      pending.
+      integration and producer activation remain pending. Retirement drains
+      remove at most 16 local rows and consider at most eight captured entries
+      per pass. Their durable shared-removal phase prevents repeated D1 deletion
+      and quota work while large edge sets are cleaned up. Newer artifact
+      generations and auxiliary metadata remain intact.
 - [ ] Charge each physical digest once per tenant across every artifact and
       attestation reference. Generalise collection, demotion, repair and final
       reference removal before creating artifact references. Collection and

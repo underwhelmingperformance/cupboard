@@ -568,6 +568,13 @@
 			"when": 1791841669503,
 			"tag": "0080_cache_teardown_deadlines",
 			"breakpoints": true
+		},
+		{
+			"idx": 81,
+			"version": "6",
+			"when": 1791858325710,
+			"tag": "0081_artifact_reference_deletion_progress",
+			"breakpoints": true
 		}
 	]
 }

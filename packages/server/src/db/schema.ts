@@ -1272,6 +1272,9 @@ export const artifactReferenceDeletion = sqliteTable(
 			.notNull(),
 		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		referenceRemoved: integer('reference_removed', { mode: 'boolean' })
+			.notNull()
+			.default(false),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [

@@ -160,6 +160,7 @@ describe('directed artifact retention', () => {
 							artifactGeneration: row.generation,
 							cacheId: row.cacheId,
 							digest: row.digest,
+							referenceRemoved: false,
 							createdAt: isoTimestamp(new Date())
 						}))
 					},
