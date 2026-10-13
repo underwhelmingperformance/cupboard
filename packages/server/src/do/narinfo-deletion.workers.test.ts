@@ -1378,54 +1378,55 @@ describe('narinfo deletion queue', () => {
 		}).toStrictEqual({ queued: [], edges: [] });
 	});
 
-	it('caps a flush at its limit and reports the remaining backlog', async () => {
-		const total = 6;
-		const flushLimit = 4;
-		const entries = syntheticEntries(total);
-		await seedQueuedDeletions(entries);
+	it('caps a flush at its limit and reports the remaining backlog', () =>
+		withoutAlarmArming(async () => {
+			const total = 6;
+			const flushLimit = 4;
+			const entries = syntheticEntries(total);
+			await seedQueuedDeletions(entries);
 
-		const firstPass = await runInDurableObject(
-			currentServer(),
-			async (instance) => {
-				const queue = buildDeletionQueue(instance.context);
-				const retired = await asOneInvocation(() =>
-					instance.context.criticalSection(() =>
-						queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
-					)
-				);
+			const firstPass = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const queue = buildDeletionQueue(instance.context);
+					const retired = await asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
+						)
+					);
 
-				return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
-			}
-		);
-		const remainingAfterFirst = await narInfoDeletionRows();
+					return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
+				}
+			);
+			const remainingAfterFirst = await narInfoDeletionRows();
 
-		const secondPass = await runInDurableObject(
-			currentServer(),
-			async (instance) => {
-				const queue = buildDeletionQueue(instance.context);
-				const retired = await asOneInvocation(() =>
-					instance.context.criticalSection(() =>
-						queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
-					)
-				);
+			const secondPass = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const queue = buildDeletionQueue(instance.context);
+					const retired = await asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
+						)
+					);
 
-				return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
-			}
-		);
-		const remainingAfterSecond = await narInfoDeletionRows();
+					return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
+				}
+			);
+			const remainingAfterSecond = await narInfoDeletionRows();
 
-		expect({
-			firstPass,
-			remainingAfterFirst,
-			secondPass,
-			remainingAfterSecond
-		}).toStrictEqual({
-			firstPass: { retired: flushLimit, hasMore: true },
-			remainingAfterFirst: expectedQueueRows(entries.slice(flushLimit)),
-			secondPass: { retired: total - flushLimit, hasMore: false },
-			remainingAfterSecond: []
-		});
-	});
+			expect({
+				firstPass,
+				remainingAfterFirst,
+				secondPass,
+				remainingAfterSecond
+			}).toStrictEqual({
+				firstPass: { retired: flushLimit, hasMore: true },
+				remainingAfterFirst: expectedQueueRows(entries.slice(flushLimit)),
+				secondPass: { retired: total - flushLimit, hasMore: false },
+				remainingAfterSecond: []
+			});
+		}));
 
 	it('bounds authority revocation across 25,000 retained generations', async () => {
 		const token = await initialise();
@@ -1999,34 +2000,35 @@ describe('narinfo deletion queue', () => {
 		]);
 	});
 
-	it('reads the same rows in a flush however many uploads are pending in the cache', async () => {
-		await initialise();
-		const entries = syntheticEntries(8);
-		const flushRowsRead = async (
-			batch: readonly TornDownNarInfo[]
-		): Promise<number> => {
-			await seedQueuedDeletions(batch);
+	it('reads the same rows in a flush however many uploads are pending in the cache', () =>
+		withoutAlarmArming(async () => {
+			await initialise();
+			const entries = syntheticEntries(8);
+			const flushRowsRead = async (
+				batch: readonly TornDownNarInfo[]
+			): Promise<number> => {
+				await seedQueuedDeletions(batch);
 
-			return runInDurableObject(currentServer(), async (instance) => {
-				const { dbCost } = instance.context;
-				dbCost.recordOutstanding();
-				const before = dbCost.rowsRead;
+				return runInDurableObject(currentServer(), async (instance) => {
+					const { dbCost } = instance.context;
+					dbCost.recordOutstanding();
+					const before = dbCost.rowsRead;
 
-				await asOneInvocation(() =>
-					instance.context.criticalSection(() =>
-						buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions()
-					)
-				);
-				dbCost.recordOutstanding();
+					await asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions()
+						)
+					);
+					dbCost.recordOutstanding();
 
-				return dbCost.rowsRead - before;
-			});
-		};
+					return dbCost.rowsRead - before;
+				});
+			};
 
-		const withoutUploads = await flushRowsRead(entries.slice(0, 4));
-		await runInDurableObject(currentServer(), (instance, state) => {
-			state.storage.sql.exec(
-				`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+			const withoutUploads = await flushRowsRead(entries.slice(0, 4));
+			await runInDurableObject(currentServer(), (instance, state) => {
+				state.storage.sql.exec(
+					`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
 				 rows(value) AS (
 				   SELECT ones.digit + tens.digit * 10 + hundreds.digit * 100
 				   FROM digits AS ones CROSS JOIN digits AS tens CROSS JOIN digits AS hundreds
@@ -2037,25 +2039,25 @@ describe('narinfo deletion queue', () => {
 				        json_object('storePathHash', printf('p%031d', value)),
 				        '2026-01-01T00:00:00.000Z', '2026-01-01T01:00:00.000Z', 'pending'
 				 FROM rows`,
-				resolvedCache(instance.context).id,
-				syntheticNarHash(0)
-			);
-		});
-		await runInDurableObject(currentServer(), (_instance, state) => {
-			state.storage.sql.exec(
-				`WITH RECURSIVE rows(value) AS (VALUES (1) UNION ALL SELECT value + 1 FROM rows WHERE value < 1000)
+					resolvedCache(instance.context).id,
+					syntheticNarHash(0)
+				);
+			});
+			await runInDurableObject(currentServer(), (_instance, state) => {
+				state.storage.sql.exec(
+					`WITH RECURSIVE rows(value) AS (VALUES (1) UNION ALL SELECT value + 1 FROM rows WHERE value < 1000)
 				 INSERT INTO cache_identity (kind, name, access, priority, created_at, deleted_at)
 				 SELECT 'named', printf('historic-%d', value), 'public', 40,
 				 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z' FROM rows`
-			);
-		});
-		const withUploads = await flushRowsRead(entries.slice(4));
+				);
+			});
+			const withUploads = await flushRowsRead(entries.slice(4));
 
-		expect({ withoutUploads, withUploads }).toStrictEqual({
-			withoutUploads: 86,
-			withUploads: 86
-		});
-	});
+			expect({ withoutUploads, withUploads }).toStrictEqual({
+				withoutUploads: 86,
+				withUploads: 86
+			});
+		}));
 
 	it('keeps the deletion queue and quota retryable across artifact storage expansion', async () => {
 		await initialise();
