@@ -369,7 +369,9 @@ describe('scheduled tenant pass failure records', () => {
 	it('brings every tenant to the current local step from the queue', async () => {
 		await recordTransition('cache-identity', 'complete');
 		await recordTransition('cas-storage', 'complete');
-		await recordTransition('attestation-list-revision', 'expanded');
+		await recordTransition('attestation-list-revision', 'complete');
+		await recordTransition('native-artifact-storage', 'expanded');
+		await recordTransition('native-artifact-publication', 'expanded');
 		await provisionNamedTenant('acme');
 		await provisionNamedTenant('beta');
 

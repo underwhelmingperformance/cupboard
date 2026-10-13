@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
+	attestationListLocalStep,
 	cacheIdentityLocalStep,
 	casStorageLocalStep,
 	currentLocalStep,
@@ -47,6 +48,8 @@ const windowStart = now - localStepStallWindowMs;
 beforeEach(async () => {
 	await recordTransition('cas-storage', 'expanded');
 	await recordTransition('attestation-list-revision', 'expanded');
+	await recordTransition('native-artifact-storage', 'expanded');
+	await recordTransition('native-artifact-publication', 'expanded');
 });
 
 class InjectedWakeFault extends Error {
@@ -198,7 +201,7 @@ describe('required local step', () => {
 				['cas-storage', 'complete'],
 				['attestation-list-revision', 'expanded']
 			],
-			step: currentLocalStep
+			step: attestationListLocalStep
 		},
 		{
 			name: 'list revisions complete',
@@ -206,6 +209,28 @@ describe('required local step', () => {
 				['cache-identity', 'complete'],
 				['cas-storage', 'complete'],
 				['attestation-list-revision', 'complete']
+			],
+			step: attestationListLocalStep
+		},
+		{
+			name: 'artifact publication expanded',
+			rows: [
+				['cache-identity', 'complete'],
+				['cas-storage', 'complete'],
+				['attestation-list-revision', 'complete'],
+				['native-artifact-storage', 'expanded'],
+				['native-artifact-publication', 'expanded']
+			],
+			step: currentLocalStep
+		},
+		{
+			name: 'artifact publication complete',
+			rows: [
+				['cache-identity', 'complete'],
+				['cas-storage', 'complete'],
+				['attestation-list-revision', 'complete'],
+				['native-artifact-storage', 'expanded'],
+				['native-artifact-publication', 'complete']
 			],
 			step: currentLocalStep
 		},
@@ -221,7 +246,7 @@ describe('required local step', () => {
 		}
 	])('is $step with $name', async ({ rows, step }) => {
 		await env.CUPBOARD_DB.prepare(
-			"DELETE FROM deployment_transition WHERE id IN ('cas-storage', 'attestation-list-revision')"
+			"DELETE FROM deployment_transition WHERE id IN ('cas-storage', 'attestation-list-revision', 'native-artifact-storage', 'native-artifact-publication')"
 		).run();
 		for (const [id, state] of rows) {
 			await env.CUPBOARD_DB.prepare(
@@ -245,6 +270,7 @@ describe('CAS storage local readiness', () => {
 		async ({ state, step }) => {
 			await recordTransition('cache-identity', 'complete');
 			await recordTransition('cas-storage', 'complete');
+			await recordTransition('attestation-list-revision', 'complete');
 			await env.CUPBOARD_DB.prepare(
 				"DELETE FROM deployment_transition WHERE id = 'cas-storage'"
 			).run();
@@ -275,6 +301,7 @@ describe('local step status', () => {
 	it('reports and wakes a tenant that recorded step 5 before the new schema migrations', async () => {
 		await recordTransition('cache-identity', 'complete');
 		await recordTransition('cas-storage', 'complete');
+		await recordTransition('attestation-list-revision', 'complete');
 		await pendingTenant('previous-final-step', {
 			localStep: localStep(5),
 			schemaVersion: 65
@@ -444,6 +471,7 @@ describe('local step wake message', () => {
 	it('lets a woken object record its step and its attempt', async () => {
 		await recordTransition('cache-identity', 'complete');
 		await recordTransition('cas-storage', 'complete');
+		await recordTransition('attestation-list-revision', 'complete');
 		await provisionListReadyTenant('woken');
 
 		await wakeLocalStepTenants(logger, env, [tenant('woken')]);
@@ -465,6 +493,7 @@ describe('local step wake message', () => {
 			.where(eq(d1Schema.tenant.id, tenant('raised')));
 		await recordTransition('cache-identity', 'complete');
 		await recordTransition('cas-storage', 'complete');
+		await recordTransition('attestation-list-revision', 'complete');
 
 		const sent: LocalStepWakeMessage[][] = [];
 		const response = await enqueueLocalStepWakes(env, queueCollector(sent));
@@ -590,6 +619,7 @@ describe('local step wake message', () => {
 	it('keeps a step that a newer build recorded when the object reports', async () => {
 		await recordTransition('cache-identity', 'complete');
 		await recordTransition('cas-storage', 'complete');
+		await recordTransition('attestation-list-revision', 'complete');
 		const id = tenant('step-rolled-back');
 		await provisionListReadyTenant(id);
 		await writeFacts(id, { localStep: laterStep });

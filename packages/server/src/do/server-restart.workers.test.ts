@@ -26,6 +26,8 @@ describe('server initialisation over a migrated store', () => {
 			await recordTransition('cache-identity', 'complete');
 			await recordTransition('cas-storage', 'expanded');
 			await recordTransition('attestation-list-revision', 'expanded');
+			await recordTransition('native-artifact-storage', 'expanded');
+			await recordTransition('native-artifact-publication', 'expanded');
 			// Migrate the storage without initialising the object, which leaves it
 			// exactly as a first start would and as an eviction would find it.
 			await runInDurableObject(testServerFor(serverName), (_instance, state) =>
