@@ -73,6 +73,7 @@ describe('artifact cache teardown', () => {
 		await resetTestServer();
 		await withoutAlarmArming(initialise);
 		await recordTransition('native-artifact-storage', 'expanded');
+		await recordTransition('native-artifact-publication', 'complete');
 	});
 
 	it('retires pending and independently rooted live artifacts in pages and preserves teardown until drains complete', () =>

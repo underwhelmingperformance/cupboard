@@ -86,6 +86,7 @@ describe('captured publication parent retirement', () => {
 		await resetTestServer();
 		await withoutAlarmArming(initialise);
 		await recordTransition('native-artifact-storage', 'expanded');
+		await recordTransition('native-artifact-publication', 'complete');
 	});
 
 	it('removes at most 16 captured edges and keeps independently rooted artifacts alive', () =>

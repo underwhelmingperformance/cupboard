@@ -96,6 +96,7 @@ describe('directed artifact retention', () => {
 		await resetTestServer();
 		token = await withoutAlarmArming(initialise);
 		await recordTransition('native-artifact-storage', 'expanded');
+		await recordTransition('native-artifact-publication', 'complete');
 	});
 
 	it('retains an artifact through either current parent without preventing parent deletion', () =>

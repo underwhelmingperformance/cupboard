@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+	artifactPublicationLocalStep,
 	cacheIdentityLocalStep,
 	casStorageLocalStep,
 	expansionLocalStep,
@@ -515,6 +516,86 @@ describe('CAS storage rollout', () => {
 	});
 });
 
+describe('artifact publication activation', () => {
+	it.each([true, false])(
+		'waits for serving Workers and ready tenants on a fresh=%s database',
+		async (fresh) => {
+			const world = fixture();
+			try {
+				await prepareTransitions(
+					world.walk([cacheIdentity, independent]),
+					true
+				);
+				world.database.exec(
+					"INSERT INTO tenant (id, status, local_step) VALUES ('active', 'active', 7), ('suspended', 'suspended', 7), ('offboarding', 'offboarding', 7)"
+				);
+				const transition = schemaTransitions.find(
+					(item) => item.id === 'native-artifact-publication'
+				);
+				if (transition === undefined) {
+					throw new Error(
+						'The artifact publication transition must be declared'
+					);
+				}
+				const walk = world.walk([cacheIdentity, independent, transition], {
+					wakeTenants: false
+				});
+				await prepareTransitions(walk, fresh);
+				const beforeUpload = {
+					state: recorded(world.database)[transition.id],
+					woken: world.woken,
+					servingChecks: world.servingChecks
+				};
+				const rolloutError = new Error('Both Workers must serve the new build');
+				await expect(
+					completeTransitions({
+						...walk,
+						hooks: {
+							...walk.hooks,
+							checkServing: () => Promise.reject(rolloutError)
+						}
+					})
+				).rejects.toBe(rolloutError);
+				expect(recorded(world.database)[transition.id]).toBe(
+					beforeUpload.state
+				);
+				await expect(completeTransitions(walk)).rejects.toThrow(
+					new LocalStepUnreachedError({
+						kind: 'below-step',
+						pending: 2,
+						requiredStep: artifactPublicationLocalStep,
+						stragglers: ['active', 'suspended']
+					})
+				);
+				const waiting = recorded(world.database)[transition.id];
+				world.database
+					.prepare(
+						"UPDATE tenant SET local_step = ? WHERE status IN ('active', 'suspended')"
+					)
+					.run(artifactPublicationLocalStep);
+				await completeTransitions(walk);
+				expect({
+					beforeUpload,
+					waiting,
+					complete: recorded(world.database)[transition.id],
+					servingChecks: world.servingChecks
+				}).toStrictEqual({
+					beforeUpload: {
+						state: 'expanded@2026-01-01T00:00:00.000Z',
+						woken: [],
+						servingChecks: 0
+					},
+					waiting: 'expanded@2026-01-01T00:00:00.000Z',
+					complete: 'complete@2026-01-01T00:00:00.000Z',
+					servingChecks: 2
+				});
+			} finally {
+				world.database.close();
+			}
+		}
+	);
+});
+
 describe('v0.0.35 path authority rollout', () => {
 	it.each([
 		{ phase: 'contracted', through: '0030', step: 5, blocked: false },
@@ -555,6 +636,8 @@ describe('v0.0.35 path authority rollout', () => {
 					schemaTransitions.filter(
 						(transition) =>
 							transition.database === undefined &&
+							(transition.reportableStepOnComplete ?? cacheIdentityLocalStep) <=
+								cacheIdentityLocalStep &&
 							[...transition.expand, ...transition.contract].every((name) =>
 								actualMigrations.some((migration) => migration.name === name)
 							)

@@ -19,6 +19,7 @@ import { CasObjectStore } from '../blob/cas-object-store.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
+	ArtifactPublicationMigrationPendingError,
 	ArtifactReferenceConflictError,
 	ArtifactStorageMigrationPendingError
 } from '../errors.ts';
@@ -48,7 +49,37 @@ describe('artifact CAS reservation', () => {
 		await resetTestServer();
 		await withoutAlarmArming(initialise);
 		await recordTransition('native-artifact-storage', 'expanded');
+		await recordTransition('native-artifact-publication', 'complete');
 	});
+
+	it.each([undefined, 'expanded'] as const)(
+		'requires publication activation before reserving a reference (%s)',
+		(state) =>
+			withoutAlarmArming(() =>
+				runInDurableObject(currentServer(), async (instance) => {
+					const context = instance.context;
+					await context.criticalSection(async () => {
+						await context.d1
+							.delete(d1Schema.deploymentTransition)
+							.where(
+								eq(
+									d1Schema.deploymentTransition.id,
+									'native-artifact-publication'
+								)
+							);
+						if (state !== undefined) {
+							await recordTransition('native-artifact-publication', state);
+						}
+						await createArtifact(context);
+						const before = await reservationState(context);
+						await expect(
+							new ArtifactCasService(context).reserveInSection(id, generation)
+						).rejects.toBeInstanceOf(ArtifactPublicationMigrationPendingError);
+						expect(await reservationState(context)).toStrictEqual(before);
+					});
+				})
+			)
+	);
 
 	it.each(artifactKinds)(
 		'reserves %s by reference without reading or uploading bytes',
@@ -125,7 +156,8 @@ describe('artifact CAS reservation', () => {
 	it.each([
 		'cache-generation',
 		'cas-incarnation',
-		'storage-readiness'
+		'storage-readiness',
+		'publication-readiness'
 	] as const)(
 		'rejects a changed %s after R2 head without creating a charge',
 		(changed) =>
@@ -150,13 +182,18 @@ describe('artifact CAS reservation', () => {
 											)
 										})
 										.where(eq(d1Schema.cacheLifecycle.tenant, fixtureTenant));
-								} else if (changed === 'storage-readiness') {
+								} else if (
+									changed === 'storage-readiness' ||
+									changed === 'publication-readiness'
+								) {
 									await context.d1
 										.delete(d1Schema.deploymentTransition)
 										.where(
 											eq(
 												d1Schema.deploymentTransition.id,
-												'native-artifact-storage'
+												changed === 'storage-readiness'
+													? 'native-artifact-storage'
+													: 'native-artifact-publication'
 											)
 										);
 								} else {
@@ -388,7 +425,7 @@ describe('artifact CAS reservation', () => {
 			})
 		));
 
-	it('keeps the shared charge while an attestation still references the digest', () =>
+	it('removes an existing reference before publication is active and keeps a shared attestation charge', () =>
 		withoutAlarmArming(() =>
 			runInDurableObject(currentServer(), async (instance) => {
 				const context = instance.context;
@@ -408,6 +445,14 @@ describe('artifact CAS reservation', () => {
 						},
 						artifact.size
 					);
+					await context.d1
+						.delete(d1Schema.deploymentTransition)
+						.where(
+							eq(
+								d1Schema.deploymentTransition.id,
+								'native-artifact-publication'
+							)
+						);
 					const before = await reservationState(context);
 					const outcome = await service.removeCapturedInSection({
 						artifactId: id,

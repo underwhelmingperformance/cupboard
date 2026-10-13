@@ -1672,6 +1672,18 @@ export class ArtifactStorageMigrationPendingError extends ServerHttpError {
 	}
 }
 
+export class ArtifactPublicationMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super(
+			'Artifact publication is not active; complete the publication transition before publishing artifacts'
+		);
+		this.name = 'ArtifactPublicationMigrationPendingError';
+	}
+}
+
 export class CasReferenceSetChangedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;

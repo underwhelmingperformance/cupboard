@@ -1,4 +1,5 @@
 import {
+	artifactPublicationLocalStep,
 	attestationListLocalStep,
 	cacheIdentityLocalStep,
 	casStorageLocalStep,
@@ -273,6 +274,25 @@ export async function recordLocalStep(
 			};
 		}
 		reached = attestationListLocalStep;
+	}
+
+	if (
+		reached >= attestationListLocalStep &&
+		(requested === undefined || requested >= artifactPublicationLocalStep) &&
+		(await context.transitions.hasReached(
+			'native-artifact-storage',
+			'expanded'
+		)) &&
+		(await context.transitions.hasReached(
+			'native-artifact-publication',
+			'expanded'
+		)) &&
+		(await context.transitions.hasReached(
+			'blob-reference-read-authority',
+			'complete'
+		))
+	) {
+		reached = artifactPublicationLocalStep;
 	}
 
 	const moved = projection.projected + legacyMove.moved + incarnationMove.moved;

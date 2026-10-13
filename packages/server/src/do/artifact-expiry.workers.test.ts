@@ -73,6 +73,7 @@ describe('bounded artifact expiry', () => {
 		await resetTestServer();
 		await withoutAlarmArming(initialise);
 		await recordTransition('native-artifact-storage', 'expanded');
+		await recordTransition('native-artifact-publication', 'complete');
 	});
 
 	it.each(['pending', 'live'] as const)(

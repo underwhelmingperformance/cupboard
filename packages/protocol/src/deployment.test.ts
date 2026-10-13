@@ -2,6 +2,7 @@ import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
 import {
+	artifactPublicationLocalStep,
 	attestationListLocalStep,
 	cacheIdentityLocalStep,
 	casStorageLocalStep,
@@ -36,6 +37,22 @@ describe('schemaTransitions', () => {
 			independent: true,
 			contractStep: 6,
 			reportableStepOnComplete: 6
+		});
+	});
+
+	it('activates artifact publication only after Worker upload and tenant lifecycle readiness', () => {
+		expect(
+			schemaTransitions.find(
+				(transition) => transition.id === 'native-artifact-publication'
+			)
+		).toStrictEqual({
+			id: 'native-artifact-publication',
+			expand: [],
+			contract: [],
+			independent: true,
+			contractAfterUpload: true,
+			contractStep: 8,
+			reportableStepOnComplete: 8
 		});
 	});
 
@@ -158,7 +175,8 @@ describe('schemaTransitions', () => {
 			new Set([
 				expansionLocalStep,
 				casStorageLocalStep,
-				attestationListLocalStep
+				attestationListLocalStep,
+				artifactPublicationLocalStep
 			])
 		);
 	});

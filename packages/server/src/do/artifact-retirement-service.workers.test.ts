@@ -60,6 +60,7 @@ describe('bounded artifact retirement', () => {
 		await resetTestServer();
 		await withoutAlarmArming(initialise);
 		await recordTransition('native-artifact-storage', 'expanded');
+		await recordTransition('native-artifact-publication', 'complete');
 	});
 
 	it('removes the reference and credits quota before acknowledging the captured retirement', () =>

@@ -33,13 +33,16 @@ export function localStep(value: number): LocalStep {
  * Step 5 rewrites stored grants once the `cache-identity` transition is
  * complete. Step 6 confirms that the object writes through the compatible
  * CAS storage interface after expansion. Step 7 initialises content revisions
- * for existing NAR publications after forward capture is installed.
+ * for existing NAR publications after forward capture is installed. Step 8
+ * confirms the compatible artifact lifecycle before publication activates.
  *
  * Objects report at most step 4 before cache identity completes, then step 5
  * after the grant rewrite. They can report step 6 once CAS storage has expanded.
- * Step 7 also requires completed attestation-list initialisation.
+ * Step 7 also requires completed attestation-list initialisation. Step 8
+ * requires expanded artifact storage and publication transitions, with path
+ * read authority complete.
  */
-export const currentLocalStep: LocalStep = localStep(7);
+export const currentLocalStep: LocalStep = localStep(8);
 
 /**
 The completed grant rewrite, before the CAS storage transition.
@@ -55,6 +58,11 @@ export const casStorageLocalStep: LocalStep = localStep(6);
 The revision initialisation required before attestation-list reader activation.
 */
 export const attestationListLocalStep: LocalStep = localStep(7);
+
+/**
+The compatible artifact lifecycle required before publication activation.
+*/
+export const artifactPublicationLocalStep: LocalStep = localStep(8);
 
 /**
 The local data work that must finish before the deploy contracts D1.
@@ -90,7 +98,8 @@ export const transitionIdSchema = z.enum([
 	'native-artifact-storage',
 	'cas-demotion-progress',
 	'attestation-list-revision',
-	'tenant-namespace-cleanup'
+	'tenant-namespace-cleanup',
+	'native-artifact-publication'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -429,6 +438,15 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		],
 		contract: [],
 		independent: true
+	},
+	{
+		id: 'native-artifact-publication',
+		expand: [],
+		contract: [],
+		independent: true,
+		contractAfterUpload: true,
+		contractStep: artifactPublicationLocalStep,
+		reportableStepOnComplete: artifactPublicationLocalStep
 	}
 ];
 

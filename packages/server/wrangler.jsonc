@@ -115,6 +115,10 @@
 		"CUPBOARD_SUBREQUESTS_PER_INVOCATION": ""
 	},
 	"exports": {
+		"ArtifactPublicationRollbackGuard": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		},
 		"CasStorageRollbackGuard": {
 			"type": "durable-object",
 			"storage": "sqlite"

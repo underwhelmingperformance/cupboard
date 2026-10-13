@@ -21,6 +21,7 @@ import { readCasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
+	ArtifactPublicationMigrationPendingError,
 	ArtifactReferenceConflictError,
 	ArtifactStorageMigrationPendingError,
 	TenantUsageMissingError,
@@ -89,6 +90,19 @@ export class ArtifactCasService {
 		);
 	}
 
+	private publicationReady() {
+		const filter = and(
+			eq(d1Schema.deploymentTransition.id, 'native-artifact-publication'),
+			eq(d1Schema.deploymentTransition.state, 'complete')
+		);
+		return exists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.deploymentTransition)
+				.where(filter)
+		);
+	}
+
 	private sourceFence(artifact: Artifact, cache: ResolvedCache, size: number) {
 		const physicalFilter = and(
 			eq(d1Schema.casObject.digest, artifact.digest),
@@ -134,7 +148,8 @@ export class ArtifactCasService {
 				.where(conflictFilter)
 		);
 		const storageReady = this.storageReady();
-		return sql`${physical} and ${liveCache} and ${compatible} and ${storageReady}`;
+		const publicationReady = this.publicationReady();
+		return sql`${physical} and ${liveCache} and ${compatible} and ${storageReady} and ${publicationReady}`;
 	}
 
 	private referenceInsert(
@@ -188,6 +203,16 @@ export class ArtifactCasService {
 		const references = await readCasReferenceSet(this.context.d1);
 		if (references.kinds !== 'all') {
 			throw new ArtifactStorageMigrationPendingError();
+		}
+
+		const publication = await this.context.d1
+			.select({
+				active: sql<number>`case when ${this.publicationReady()} then 1 else 0 end`
+			})
+			.from(sql`(select 1) publication_gate`)
+			.get();
+		if (publication?.active !== 1) {
+			throw new ArtifactPublicationMigrationPendingError();
 		}
 		const artifact = this.context.db
 			.select()

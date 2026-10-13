@@ -7188,8 +7188,13 @@ build traces available from a cupboard cache.
       during deployment. Enable artifact writes only after the compatible
       readers and cleanup code are active. The storage-interface expand/contract
       transition, local readiness step and rollback guards are implemented.
-      Generic reference lifecycle integration and the writer activation gate
-      remain pending.
+      Generic reference reservation and retirement are implemented. The
+      `native-artifact-publication` transition waits until both Workers serve
+      the uploaded build and every active or suspended tenant records step 8.
+      Reservation batches recheck activation in every write predicate. Cleanup
+      remains available before activation. Both Workers export a rollback guard
+      for the compatible lifecycle. Final activation verification and native
+      producer integration remain pending.
 - [ ] Set a metadata and trace budget with actionable refusals. A trace that
       exceeds its budget must not reject the NAR publication. Idempotent retries
       remain valid.

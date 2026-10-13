@@ -3,6 +3,7 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import {
+	artifactPublicationLocalStep,
 	attestationListLocalStep,
 	casStorageLocalStep
 } from '@cupboard/protocol/deployment';
@@ -253,4 +254,101 @@ describe('attestation list initialisation', () => {
 			migration.queries.map((query) => env.CUPBOARD_DB.prepare(query))
 		);
 	});
+
+	it.each([
+		{
+			missing: 'native-artifact-storage',
+			requested: artifactPublicationLocalStep,
+			expected: attestationListLocalStep
+		},
+		{
+			missing: 'native-artifact-publication',
+			requested: artifactPublicationLocalStep,
+			expected: attestationListLocalStep
+		},
+		{
+			missing: 'blob-reference-read-authority',
+			requested: artifactPublicationLocalStep,
+			expected: attestationListLocalStep
+		},
+		{
+			missing: undefined,
+			requested: attestationListLocalStep,
+			expected: attestationListLocalStep
+		},
+		{
+			missing: undefined,
+			requested: artifactPublicationLocalStep,
+			expected: artifactPublicationLocalStep
+		},
+		{
+			missing: undefined,
+			requested: undefined,
+			expected: artifactPublicationLocalStep
+		}
+	] as const)(
+		'records publication readiness with unready=$missing and requested=$requested',
+		({ missing, requested, expected }) =>
+			withoutAlarmArming(async () => {
+				await initialise();
+				await recordTransition('cache-identity', 'complete');
+				await recordTransition('cas-storage', 'expanded');
+				await recordTransition('attestation-list-revision', 'expanded');
+				if (missing !== undefined) {
+					await env.CUPBOARD_DB.prepare(
+						'DELETE FROM deployment_transition WHERE id = ?'
+					)
+						.bind(missing)
+						.run();
+					if (missing === 'blob-reference-read-authority') {
+						await recordTransition(missing, 'expanded');
+					}
+				}
+				for (const id of [
+					'native-artifact-storage',
+					'native-artifact-publication',
+					'blob-reference-read-authority'
+				] as const) {
+					if (id === missing) {
+						continue;
+					}
+					await recordTransition(
+						id,
+						id === 'blob-reference-read-authority' ? 'complete' : 'expanded'
+					);
+				}
+				const outcome = await runInDurableObject(
+					currentServer(),
+					async (instance) => {
+						await recordLocalStep(
+							instance.context,
+							[],
+							isoTimestamp(new Date()),
+							requested
+						);
+						await recordLocalStep(
+							instance.context,
+							[],
+							isoTimestamp(new Date()),
+							requested
+						);
+						return recordLocalStep(
+							instance.context,
+							[],
+							isoTimestamp(new Date()),
+							requested
+						);
+					}
+				);
+				const recorded = await env.CUPBOARD_DB.prepare(
+					'SELECT local_step AS step FROM tenant WHERE id = ?'
+				)
+					.bind(fixtureTenant)
+					.first<{ step: number }>();
+				expect({ outcome, recorded }).toStrictEqual({
+					outcome: { kind: 'recorded', step: expected, progressed: false },
+					recorded: { step: expected }
+				});
+			})
+	);
 });

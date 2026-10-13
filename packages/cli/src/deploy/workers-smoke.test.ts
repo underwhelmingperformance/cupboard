@@ -22,6 +22,10 @@ const state: {
 		readonly tenant: boolean;
 	};
 	pathAuthorityGuards?: { readonly control: boolean; readonly tenant: boolean };
+	artifactPublicationGuards?: {
+		readonly control: boolean;
+		readonly tenant: boolean;
+	};
 	casStorageGuards?: { readonly control: boolean; readonly tenant: boolean };
 	hasVersionedR2ObjectRollbackGuardExport?: boolean;
 } = {};
@@ -88,6 +92,16 @@ beforeAll(async () => {
 			artifact.tenantBundle.code
 		)
 	};
+	state.artifactPublicationGuards = {
+		control:
+			/export \{[\s\S]*\bArtifactPublicationRollbackGuard\b[\s\S]*\};/.test(
+				artifact.controlBundle.code
+			),
+		tenant:
+			/export \{[\s\S]*\bArtifactPublicationRollbackGuard\b[\s\S]*\};/.test(
+				artifact.tenantBundle.code
+			)
+	};
 	state.hasVersionedR2ObjectRollbackGuardExport =
 		/export \{[\s\S]*\bVersionedR2ObjectRollbackGuard\b[\s\S]*\};/.test(
 			artifact.tenantBundle.code
@@ -152,6 +166,10 @@ it('couples versioned R2 object keys to declarative class lifecycle', () => {
 		hasRollbackGuardExport: state.hasVersionedR2ObjectRollbackGuardExport
 	}).toStrictEqual({
 		exports: {
+			ArtifactPublicationRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			},
 			CasStorageRollbackGuard: { type: 'durable-object', storage: 'sqlite' },
 			ControlDatabaseRollbackGuard: {
 				type: 'durable-object',
@@ -178,6 +196,10 @@ it('protects path read authority with both Worker class lifecycles', () => {
 		exported: state.pathAuthorityGuards
 	}).toStrictEqual({
 		control: {
+			ArtifactPublicationRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			},
 			CasStorageRollbackGuard: { type: 'durable-object', storage: 'sqlite' },
 			ControlDatabaseRollbackGuard: {
 				type: 'durable-object',
@@ -189,6 +211,10 @@ it('protects path read authority with both Worker class lifecycles', () => {
 			}
 		},
 		tenant: {
+			ArtifactPublicationRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			},
 			CasStorageRollbackGuard: { type: 'durable-object', storage: 'sqlite' },
 			ControlDatabaseRollbackGuard: {
 				type: 'durable-object',
@@ -217,4 +243,11 @@ it('exports control database rollback guards from both Worker bundles', () => {
 
 it('protects the contracted CAS storage interface with both Worker class lifecycles', () => {
 	expect(state.casStorageGuards).toStrictEqual({ control: true, tenant: true });
+});
+
+it('protects artifact publication with both Worker class lifecycles', () => {
+	expect(state.artifactPublicationGuards).toStrictEqual({
+		control: true,
+		tenant: true
+	});
 });
