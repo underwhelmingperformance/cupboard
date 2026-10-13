@@ -3,7 +3,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, notExists, type SQL, sql } from 'drizzle-orm';
 
 import { casObjectNotRepromoted } from '../blob/cas-object-state.ts';
 import { type CasReferenceSet } from '../db/cas-reference-set.ts';
@@ -28,9 +28,14 @@ export class CasQuotaService {
 	 * Builds the quota and presence statements for a reference transaction.
 	 * Run these statements with the reference insert in one D1 batch. Charge
 	 * before inserting presence because charging tests whether the tenant already
-	 * has presence for the digest.
+	 * has presence for the digest. Reference, quota and presence writes must not
+	 * change the publication fence.
 	 */
-	chargeStatements(digest: Sha256HexDigest, size: number) {
+	chargeStatements(
+		digest: Sha256HexDigest,
+		size: number,
+		publicationFence?: SQL
+	) {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
 
@@ -49,7 +54,8 @@ export class CasQuotaService {
 		const chargeableTenantFilter = and(
 			eq(d1Schema.tenant.id, tenant),
 			eq(d1Schema.tenant.status, 'active'),
-			usagePresent
+			usagePresent,
+			publicationFence
 		);
 		const tenantChargeable = exists(
 			this.context.d1

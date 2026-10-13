@@ -14,7 +14,7 @@ import {
 } from '@cupboard/protocol/artifacts';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
-import { eq, sql } from 'drizzle-orm';
+import { eq, type SQL, sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -36,8 +36,16 @@ const digest = sha256HexDigestSchema.parse('b'.repeat(64));
 const size = 12;
 const recordedAt = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
-function artifactReservation(context: ServerContext, kind: ArtifactKind) {
-	const charge = new CasQuotaService(context).chargeStatements(digest, size);
+function artifactReservation(
+	context: ServerContext,
+	kind: ArtifactKind,
+	publicationFence?: SQL
+) {
+	const charge = new CasQuotaService(context).chargeStatements(
+		digest,
+		size,
+		publicationFence
+	);
 	const artifactId = artifactIdSchema.parse(
 		`00000000-0000-4000-8000-${String(artifactKinds.indexOf(kind) + 1).padStart(12, '0')}`
 	);
@@ -154,6 +162,31 @@ describe('shared CAS quota reservation', () => {
 					context.d1.batch(artifactReservation(context, 'listing'))
 				).rejects.toThrow('tenant_usage_within_quota');
 				expect(await quotaFacts(context)).toStrictEqual(before);
+			});
+		}));
+
+	it('preserves quota, references and deletion grace when the publication fence fails', () =>
+		withoutAlarmArming(async () => {
+			await runInDurableObject(currentServer(), async (instance) => {
+				const context = instance.context;
+				await context.d1.insert(d1Schema.casObject).values({
+					digest,
+					size,
+					incarnation: 2,
+					storedAt: recordedAt,
+					deleteAfter: recordedAt
+				});
+				const before = {
+					quota: await quotaFacts(context),
+					objects: await context.d1.select().from(d1Schema.casObject)
+				};
+				await context.d1.batch(
+					artifactReservation(context, 'listing', sql`false`)
+				);
+				expect({
+					quota: await quotaFacts(context),
+					objects: await context.d1.select().from(d1Schema.casObject)
+				}).toStrictEqual(before);
 			});
 		}));
 });
