@@ -173,6 +173,16 @@ export class ArtifactRetirementService {
 		});
 	}
 
+	hasPending(): boolean {
+		return (
+			this.context.db
+				.select({ id: schema.artifactReferenceDeletion.artifactId })
+				.from(schema.artifactReferenceDeletion)
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
 	/**
 	The caller keeps the tenant critical section open through shared removal and local acknowledgement.
 	*/

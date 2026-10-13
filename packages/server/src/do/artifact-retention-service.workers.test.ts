@@ -26,7 +26,8 @@ import {
 import {
 	artifactFixtureGeneration as generation,
 	artifactFixtureId as id,
-	createArtifact
+	createArtifact,
+	reservationState
 } from './artifact.test-support.ts';
 import { ArtifactCasService } from './artifact-cas-service.ts';
 import {
@@ -148,7 +149,7 @@ describe('directed artifact retention', () => {
 					state: retentionState(context),
 					narinfos: context.db.select().from(schema.narInfos).all()
 				}).toStrictEqual({
-					retired: true,
+					retired: false,
 					state: {
 						...before,
 						artifacts: before.artifacts.map((row) => ({
@@ -283,4 +284,64 @@ describe('directed artifact retention', () => {
 				});
 			})
 		));
+	it('retires the final parent through NAR deletion and drains the artifact through an alarm', () =>
+		withoutAlarmArming(async () => {
+			const parent = await publishParent(token, 'a');
+			const initial = await runInDurableObject(
+				currentServer(),
+				async (instance) =>
+					instance.context.criticalSection(async () => {
+						await publishArtifact(instance.context);
+						await new ArtifactRetentionService(
+							instance.context
+						).attachParentInSection(version, parent);
+						return retentionState(instance.context);
+					})
+			);
+			await deletePath(token, parent.storePathHash);
+			await runInDurableObject(currentServer(), async (instance) => {
+				const context = instance.context;
+				expect(retentionState(context)).toStrictEqual({
+					...initial,
+					artifacts: initial.artifacts.map((row) => ({
+						...row,
+						state: 'retired'
+					})),
+					parents: [],
+					deletions: initial.artifacts.map((row) => ({
+						artifactId: row.id,
+						artifactGeneration: row.generation,
+						cacheId: row.cacheId,
+						digest: row.digest,
+						referenceRemoved: false,
+						createdAt: isoTimestamp(new Date())
+					}))
+				});
+				const beforeDrain = await reservationState(context);
+				for (let turn = 0; turn < 20; turn += 1) {
+					if (
+						context.db
+							.select()
+							.from(schema.artifactReferenceDeletion)
+							.limit(1)
+							.get() === undefined
+					) {
+						break;
+					}
+					await instance.alarm();
+				}
+				expect({
+					local: retentionState(context),
+					shared: await reservationState(context)
+				}).toStrictEqual({
+					local: { artifacts: [], parents: [], roots: [], deletions: [] },
+					shared: {
+						...beforeDrain,
+						usage: { ...beforeDrain.usage, casBytes: 0, casBlobs: 0 },
+						presence: [],
+						references: []
+					}
+				});
+			});
+		}));
 });

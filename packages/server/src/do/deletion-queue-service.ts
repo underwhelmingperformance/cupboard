@@ -51,6 +51,7 @@ import {
 import { type RequestOrigin } from '../http/http.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
+import { ArtifactRetentionService } from './artifact-retention-service.ts';
 import {
 	type AttestationCasService,
 	type AttestationReference
@@ -734,11 +735,29 @@ export class DeletionQueueService {
 		return referenced === undefined;
 	}
 
-	private clearQueuedNarInfoDeletion(
+	private async retireArtifactParents(
+		cache: ResolvedCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration
+	): Promise<boolean> {
+		const result = new ArtifactRetentionService(
+			this.context
+		).retirePublicationParentsInSection({ cache, storePathHash, generation });
+		if (result.pending || result.artifactsRetired > 0) {
+			await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+		}
+		return !result.pending;
+	}
+
+	private async clearQueuedNarInfoDeletion(
 		cacheId: CacheId,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
-	): void {
+	): Promise<void> {
+		const cache = this.context.cacheRepository.resolvedForId(cacheId);
+		if (!(await this.retireArtifactParents(cache, storePathHash, generation))) {
+			return;
+		}
 		this.context.db
 			.delete(schema.narInfoDeletions)
 			.where(
@@ -948,10 +967,23 @@ export class DeletionQueueService {
 
 		await this.discardRetiredLists(cache, removable, superseded);
 
+		const completed: TornDownNarInfo[] = [];
+		for (const entry of batch) {
+			if (
+				await this.retireArtifactParents(
+					cache,
+					entry.storePathHash,
+					entry.generation
+				)
+			) {
+				completed.push(entry);
+			}
+		}
+
 		// Clear only the retired path and generation pairs. A later generation
 		// keeps its queue entry, and clearing each completed chunk preserves
 		// progress across a timeout.
-		for (const entries of jsonRowLists(batch)) {
+		for (const entries of jsonRowLists(completed)) {
 			this.context.db
 				.delete(schema.narInfoDeletions)
 				.where(
@@ -966,7 +998,9 @@ export class DeletionQueueService {
 				.run();
 		}
 
-		return removable.length;
+		const completedKeys = new Set(completed.map((entry) => deletionKey(entry)));
+		return removable.filter((entry) => completedKeys.has(deletionKey(entry)))
+			.length;
 	}
 
 	// The attestation references filed against the exact narinfo generations this
@@ -1445,7 +1479,11 @@ export class DeletionQueueService {
 			);
 
 			if (hasRetiredEveryReference) {
-				this.clearQueuedNarInfoDeletion(cache.id, storePathHash, generation);
+				await this.clearQueuedNarInfoDeletion(
+					cache.id,
+					storePathHash,
+					generation
+				);
 			}
 
 			return {
@@ -1473,7 +1511,11 @@ export class DeletionQueueService {
 		);
 
 		if (hasRetiredEveryReference) {
-			this.clearQueuedNarInfoDeletion(cache.id, storePathHash, generation);
+			await this.clearQueuedNarInfoDeletion(
+				cache.id,
+				storePathHash,
+				generation
+			);
 		}
 
 		return {

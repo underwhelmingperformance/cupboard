@@ -7,13 +7,16 @@ import type {
 	ArtifactId
 } from '@cupboard/protocol/artifacts';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, gt, notExists, or, sql } from 'drizzle-orm';
+import { and, asc, eq, exists, gt, notExists, or, sql } from 'drizzle-orm';
 
 import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { authorisedNarInfoVersions } from '../read/read.ts';
 
-import type { ServerContext } from './context.ts';
+import type { SchemaDatabase, ServerContext } from './context.ts';
+
+type RetirementDatabase = Pick<SchemaDatabase, 'select' | 'update' | 'insert'>;
+const parentRetirementPageSize = 16;
 
 export interface ArtifactVersion {
 	readonly id: ArtifactId;
@@ -31,6 +34,12 @@ export type ArtifactRetentionRoot =
 	| { readonly kind: 'expiry'; readonly expiresAt: IsoTimestamp };
 export type ArtifactRetentionAttachment =
 	'attached' | 'already-present' | 'unavailable';
+
+export interface ArtifactParentRetirement {
+	readonly edgesRemoved: number;
+	readonly artifactsRetired: number;
+	readonly pending: boolean;
+}
 
 /**
 Directed publication parents and independent roots for tenant artifacts.
@@ -68,6 +77,44 @@ export class ArtifactRetentionService {
 		return artifact;
 	}
 
+	private retireWithin(
+		database: RetirementDatabase,
+		version: ArtifactVersion
+	): boolean {
+		const artifact = database
+			.select()
+			.from(schema.artifacts)
+			.where(this.artifactFilter(version))
+			.get();
+		if (artifact?.state !== 'live' || this.retainedInSection(version)) {
+			return false;
+		}
+		const filter = and(
+			this.artifactFilter(version),
+			eq(schema.artifacts.state, 'live')
+		);
+		const retired = database
+			.update(schema.artifacts)
+			.set({ state: 'retired' })
+			.where(filter)
+			.returning({ id: schema.artifacts.id })
+			.all()
+			.at(0);
+		if (retired === undefined) {
+			return false;
+		}
+		database
+			.insert(schema.artifactReferenceDeletion)
+			.values({
+				artifactId: artifact.id,
+				artifactGeneration: artifact.generation,
+				cacheId: artifact.cacheId,
+				digest: artifact.digest,
+				createdAt: isoTimestamp(new Date())
+			})
+			.run();
+		return true;
+	}
 	/**
 	The caller keeps the tenant critical section open through the authority read and local insert.
 	*/
@@ -237,43 +284,88 @@ export class ArtifactRetentionService {
 	}
 
 	/**
-	Local retirement and the durable reference-deletion record commit together.
+	Local retirement and its reference-deletion record commit together.
 	*/
 	retireUnretainedInSection(version: ArtifactVersion): boolean {
-		const artifact = this.context.db
-			.select()
-			.from(schema.artifacts)
-			.where(this.artifactFilter(version))
-			.get();
-		if (artifact?.state !== 'live' || this.retainedInSection(version)) {
-			return false;
-		}
-		const filter = and(
-			this.artifactFilter(version),
-			eq(schema.artifacts.state, 'live')
+		return this.context.db.transaction((transaction) =>
+			this.retireWithin(transaction, version)
 		);
-		return this.context.db.transaction((transaction) => {
-			const retired = transaction
-				.update(schema.artifacts)
-				.set({ state: 'retired' })
-				.where(filter)
-				.returning({ id: schema.artifacts.id })
-				.all()
-				.at(0);
-			if (retired === undefined) {
-				return false;
+	}
+
+	/**
+	Removes a bounded page from one captured publication and persists resulting retirement atomically.
+	*/
+	retirePublicationParentsInSection(
+		parent: ArtifactPublicationParent
+	): ArtifactParentRetirement {
+		const publicationFilter = and(
+			eq(schema.artifactParents.cacheId, parent.cache.id),
+			eq(schema.artifactParents.storePathHash, parent.storePathHash),
+			eq(schema.artifactParents.publicationGeneration, parent.generation)
+		);
+		const currentFilter = and(
+			eq(schema.narInfos.cacheId, parent.cache.id),
+			eq(schema.narInfos.storePathHash, parent.storePathHash),
+			eq(schema.narInfos.generation, parent.generation)
+		);
+		const queuedFilter = and(
+			eq(schema.narInfoDeletions.cacheId, parent.cache.id),
+			eq(schema.narInfoDeletions.storePathHash, parent.storePathHash),
+			eq(schema.narInfoDeletions.generation, parent.generation)
+		);
+		const current = this.context.db
+			.select({ hash: schema.narInfos.storePathHash })
+			.from(schema.narInfos)
+			.where(currentFilter)
+			.get();
+		const queued = this.context.db
+			.select({ hash: schema.narInfoDeletions.storePathHash })
+			.from(schema.narInfoDeletions)
+			.where(queuedFilter)
+			.get();
+		if (current !== undefined && queued === undefined) {
+			return { edgesRemoved: 0, artifactsRetired: 0, pending: true };
+		}
+		const page = this.context.db
+			.select()
+			.from(schema.artifactParents)
+			.where(publicationFilter)
+			.orderBy(asc(schema.artifactParents.artifactId))
+			.limit(parentRetirementPageSize)
+			.all();
+		const result = this.context.db.transaction((transaction) => {
+			let edgesRemoved = 0;
+			let artifactsRetired = 0;
+			for (const edge of page) {
+				const edgeFilter = and(
+					publicationFilter,
+					eq(schema.artifactParents.artifactId, edge.artifactId),
+					eq(schema.artifactParents.artifactGeneration, edge.artifactGeneration)
+				);
+				const removed = transaction
+					.delete(schema.artifactParents)
+					.where(edgeFilter)
+					.returning({ id: schema.artifactParents.artifactId })
+					.all();
+				edgesRemoved += removed.length;
+				if (
+					removed.length > 0 &&
+					this.retireWithin(transaction, {
+						id: edge.artifactId,
+						generation: edge.artifactGeneration
+					})
+				) {
+					artifactsRetired += 1;
+				}
 			}
-			transaction
-				.insert(schema.artifactReferenceDeletion)
-				.values({
-					artifactId: artifact.id,
-					artifactGeneration: artifact.generation,
-					cacheId: artifact.cacheId,
-					digest: artifact.digest,
-					createdAt: isoTimestamp(new Date())
-				})
-				.run();
-			return true;
+			return { edgesRemoved, artifactsRetired };
 		});
+		const pending = this.context.db
+			.select({ id: schema.artifactParents.artifactId })
+			.from(schema.artifactParents)
+			.where(publicationFilter)
+			.limit(1)
+			.get();
+		return { ...result, pending: pending !== undefined };
 	}
 }

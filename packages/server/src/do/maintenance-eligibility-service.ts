@@ -81,6 +81,15 @@ export class MaintenanceEligibilityService {
 			return true;
 		}
 
+		const artifactRetirement = this.context.db
+			.select({ present: sql`1` })
+			.from(schema.artifactReferenceDeletion)
+			.limit(1)
+			.get();
+		if (artifactRetirement !== undefined) {
+			return true;
+		}
+
 		const queuedDeletion = this.context.db
 			.select({ present: sql`1` })
 			.from(schema.narInfoDeletions)

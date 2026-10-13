@@ -144,6 +144,7 @@ import {
 	MaintenanceRetrySchedule,
 	noProgressRetryMs
 } from './alarm.ts';
+import { ArtifactRetirementService } from './artifact-retirement-service.ts';
 import {
 	AttestationCasService,
 	type AttestationReference,
@@ -328,6 +329,7 @@ type MaintenancePassKey =
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
 	| 'attestation-list-refresh'
+	| 'artifact-retirement'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
 	| 'local-step'
@@ -2464,7 +2466,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				// A deletion deferred for inheritance becomes work again when the
 				// pending upload that defers it expires.
 				workAt: async (now) =>
-					(await this.hasGarbageCollectionContinuation())
+					(await this.hasGarbageCollectionContinuation()) ||
+					this.deletionQueue.hasNarInfoDeletionWork(new Date(now))
 						? now
 						: this.deletionQueue.deferralWakeAt(),
 				run: async () => {
@@ -2507,6 +2510,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					this.metered('attestation-list-refresh', () =>
 						this.withMaintenanceEligibility(() =>
 							new AttestationListRefreshService(this.context).advance()
+						)
+					)
+			},
+
+			{
+				key: 'artifact-retirement',
+				workAt: readyWhen(() =>
+					Promise.resolve(
+						new ArtifactRetirementService(this.context).hasPending()
+					)
+				),
+				run: () =>
+					this.metered('artifact-retirement', () =>
+						this.withMaintenanceEligibility(() =>
+							this.context.criticalSection(async () => {
+								const result = await new ArtifactRetirementService(
+									this.context
+								).drainInSection();
+								return !result.pending ||
+									result.referencesRemoved > 0 ||
+									result.rowsRemoved > 0
+									? 'progressed'
+									: 'stalled';
+							})
 						)
 					)
 			},
@@ -3882,6 +3909,7 @@ type MeteredMethod =
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
 	| 'attestation-list-refresh'
+	| 'artifact-retirement'
 	| 'auth-key-retirement'
 	| 'cache-teardown'
 	| 'claim-verifications'

@@ -2052,8 +2052,8 @@ describe('narinfo deletion queue', () => {
 		const withUploads = await flushRowsRead(entries.slice(4));
 
 		expect({ withoutUploads, withUploads }).toStrictEqual({
-			withoutUploads: 82,
-			withUploads: 82
+			withoutUploads: 86,
+			withUploads: 86
 		});
 	});
 
