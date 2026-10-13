@@ -8,8 +8,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, notExists, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import { casObjectNotRepromoted } from '../blob/cas-object-state.ts';
 import {
@@ -197,63 +196,15 @@ export class AttestationCasService {
 			return 'over-quota';
 		}
 
-		const now = isoTimestamp(new Date());
 		const cache = this.context.cacheRepository.require(reference.cache);
 		const cacheIdentity = cacheIdentityColumns(cache.scope);
-		const presenceMissing = notExists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenantCasBlob)
-				.where(this.presenceFilter(tenant, reference.digest))
+		const charge = new CasQuotaService(this.context).chargeStatements(
+			reference.digest,
+			size
 		);
-		const usagePresent = exists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenantUsage)
-				.where(eq(d1Schema.tenantUsage.tenant, tenant))
-		);
-		const chargeableTenantFilter = and(
-			eq(d1Schema.tenant.id, tenant),
-			eq(d1Schema.tenant.status, 'active'),
-			usagePresent
-		);
-		const tenantChargeable = exists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenant)
-				.where(chargeableTenantFilter)
-		);
-		const chargeFilter = and(
-			eq(d1Schema.tenantUsage.tenant, tenant),
-			presenceMissing,
-			tenantChargeable
-		);
-
-		const graceClearFilter = and(
-			eq(d1Schema.casObject.digest, reference.digest),
-			tenantChargeable
-		);
-
 		const [gateRows] = await this.context.d1.batch([
-			this.context.d1
-				.select({
-					status: d1Schema.tenant.status,
-					usageTenant: d1Schema.tenantUsage.tenant
-				})
-				.from(d1Schema.tenant)
-				.leftJoin(
-					d1Schema.tenantUsage,
-					eq(d1Schema.tenantUsage.tenant, d1Schema.tenant.id)
-				)
-				.where(eq(d1Schema.tenant.id, tenant)),
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					casBytes: sql`${d1Schema.tenantUsage.casBytes} + ${size}`,
-					casBlobs: sql`${d1Schema.tenantUsage.casBlobs} + 1`,
-					updatedAt: now
-				})
-				.where(chargeFilter),
+			charge.tenantGate,
+			charge.charge,
 			this.context.d1
 				.insert(d1Schema.attestationReference)
 				.select((qb) =>
@@ -284,23 +235,11 @@ export class AttestationCasService {
 							).as('readable')
 						})
 						.from(d1Schema.tenant)
-						.where(chargeableTenantFilter)
+						.where(charge.tenantCondition)
 				)
 				.onConflictDoNothing(),
-			this.context.d1.insert(d1Schema.tenantCasBlob).select((qb) =>
-				qb
-					.select({
-						tenant: sql<TenantId>`${tenant}`.as('tenant'),
-						digest: sql<Sha256HexDigest>`${reference.digest}`.as('digest'),
-						size: sql<number>`${size}`.as('size')
-					})
-					.from(d1Schema.tenant)
-					.where(and(chargeableTenantFilter, presenceMissing))
-			),
-			this.context.d1
-				.update(d1Schema.casObject)
-				.set({ deleteAfter: sql`null` })
-				.where(graceClearFilter)
+			charge.presenceInsert,
+			charge.graceClear
 		]);
 
 		const gate = gateRows[0];
