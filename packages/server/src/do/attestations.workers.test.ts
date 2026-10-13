@@ -1980,112 +1980,114 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
-	it('inherits a public source bundle when its path is collected before the drain', async () => {
-		const { destination, metadata, digest } = await reusedPathWithSourceBundle(
-			'source-collected-before-inheritance'
-		);
-		const first = await runInDurableObject(
-			fixtureWorkerServer(),
-			async (instance) => {
-				const cache = resolvedCache(instance.context);
-				instance.context.db
-					.delete(schema.narInfos)
-					.where(
-						and(
-							eq(schema.narInfos.cacheId, cache.id),
-							eq(schema.narInfos.storePathHash, metadata.storePathHash)
+	it('inherits a public source bundle when its path is collected before the drain', () =>
+		withoutAlarmArming(async () => {
+			const { destination, metadata, digest } =
+				await reusedPathWithSourceBundle('source-collected-before-inheritance');
+			const first = await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance) => {
+					const cache = resolvedCache(instance.context);
+					instance.context.db
+						.delete(schema.narInfos)
+						.where(
+							and(
+								eq(schema.narInfos.cacheId, cache.id),
+								eq(schema.narInfos.storePathHash, metadata.storePathHash)
+							)
 						)
-					)
-					.run();
-				instance.context.db
-					.insert(schema.narInfoDeletions)
-					.values({
-						cacheId: cache.id,
-						storePathHash: metadata.storePathHash,
-						generation: narInfoGenerationSchema.parse(0),
-						narHash: metadata.narHash,
-						createdAt: isoTimestamp(new Date())
-					})
-					.run();
-				const narInfoObjects = new NarInfoObjectsService(instance.context);
-				const attestationCas = new AttestationCasService(instance.context);
-				const attestations = attestationsFor(instance.context);
-				const deletionQueue = new DeletionQueueService(
-					instance.context,
-					attestationCas,
-					attestations,
-					narInfoObjects
-				);
-				return instance.context.criticalSection(() =>
-					deletionQueue.flushQueuedNarInfoDeletions()
-				);
-			}
-		);
-		await drainInheritance();
-		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		const references = await database
-			.select({
-				cacheKind: d1Schema.attestationReference.cacheKind,
-				cacheName: d1Schema.attestationReference.cacheName,
-				digest: d1Schema.attestationReference.digest
-			})
-			.from(d1Schema.attestationReference)
-			.where(eq(d1Schema.attestationReference.digest, digest));
-		const list = await readFetch(
-			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
-		);
-		expect({
-			first,
-			references: references.map((row) => ({
-				...row,
-				cacheName: row.cacheName ?? 'default'
-			})),
-			listStatus: list.status
-		}).toStrictEqual({
-			first: 0,
-			references: [
-				{ cacheKind: 'default', cacheName: 'default', digest },
-				{ cacheKind: 'named', cacheName: destination.name, digest }
-			],
-			listStatus: StatusCodes.OK
-		});
-		const retired = await runInDurableObject(
-			fixtureWorkerServer(),
-			(instance) => {
-				const narInfoObjects = new NarInfoObjectsService(instance.context);
-				const attestationCas = new AttestationCasService(instance.context);
-				const deletionQueue = new DeletionQueueService(
-					instance.context,
-					attestationCas,
-					attestationsFor(instance.context),
-					narInfoObjects
-				);
-				return instance.context.criticalSection(() =>
-					deletionQueue.flushQueuedNarInfoDeletions()
-				);
-			}
-		);
-		const remaining = await database
-			.select({
-				cacheKind: d1Schema.attestationReference.cacheKind,
-				cacheName: d1Schema.attestationReference.cacheName,
-				digest: d1Schema.attestationReference.digest
-			})
-			.from(d1Schema.attestationReference)
-			.where(eq(d1Schema.attestationReference.digest, digest));
-		const destinationList = await readFetch(
-			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
-		);
-		expect({
-			retired,
-			remaining,
-			destinationListStatus: destinationList.status
-		}).toStrictEqual({
-			retired: 1,
-			remaining: [{ cacheKind: 'named', cacheName: destination.name, digest }],
-			destinationListStatus: StatusCodes.OK
-		});
-	});
+						.run();
+					instance.context.db
+						.insert(schema.narInfoDeletions)
+						.values({
+							cacheId: cache.id,
+							storePathHash: metadata.storePathHash,
+							generation: narInfoGenerationSchema.parse(0),
+							narHash: metadata.narHash,
+							createdAt: isoTimestamp(new Date())
+						})
+						.run();
+					const narInfoObjects = new NarInfoObjectsService(instance.context);
+					const attestationCas = new AttestationCasService(instance.context);
+					const attestations = attestationsFor(instance.context);
+					const deletionQueue = new DeletionQueueService(
+						instance.context,
+						attestationCas,
+						attestations,
+						narInfoObjects
+					);
+					return instance.context.criticalSection(() =>
+						deletionQueue.flushQueuedNarInfoDeletions()
+					);
+				}
+			);
+			await drainInheritance();
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const references = await database
+				.select({
+					cacheKind: d1Schema.attestationReference.cacheKind,
+					cacheName: d1Schema.attestationReference.cacheName,
+					digest: d1Schema.attestationReference.digest
+				})
+				.from(d1Schema.attestationReference)
+				.where(eq(d1Schema.attestationReference.digest, digest));
+			const list = await readFetch(
+				`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+			);
+			expect({
+				first,
+				references: references.map((row) => ({
+					...row,
+					cacheName: row.cacheName ?? 'default'
+				})),
+				listStatus: list.status
+			}).toStrictEqual({
+				first: 0,
+				references: [
+					{ cacheKind: 'default', cacheName: 'default', digest },
+					{ cacheKind: 'named', cacheName: destination.name, digest }
+				],
+				listStatus: StatusCodes.OK
+			});
+			const retired = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) => {
+					const narInfoObjects = new NarInfoObjectsService(instance.context);
+					const attestationCas = new AttestationCasService(instance.context);
+					const deletionQueue = new DeletionQueueService(
+						instance.context,
+						attestationCas,
+						attestationsFor(instance.context),
+						narInfoObjects
+					);
+					return instance.context.criticalSection(() =>
+						deletionQueue.flushQueuedNarInfoDeletions()
+					);
+				}
+			);
+			const remaining = await database
+				.select({
+					cacheKind: d1Schema.attestationReference.cacheKind,
+					cacheName: d1Schema.attestationReference.cacheName,
+					digest: d1Schema.attestationReference.digest
+				})
+				.from(d1Schema.attestationReference)
+				.where(eq(d1Schema.attestationReference.digest, digest));
+			const destinationList = await readFetch(
+				`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+			);
+			expect({
+				retired,
+				remaining,
+				destinationListStatus: destinationList.status
+			}).toStrictEqual({
+				retired: 1,
+				remaining: [
+					{ cacheKind: 'named', cacheName: destination.name, digest }
+				],
+				destinationListStatus: StatusCodes.OK
+			});
+		}, fixtureWorkerServer()));
 
 	it.each(['pending', 'committed'] as const)(
 		'inherits from an explicitly deleted public source for a $0 destination',
