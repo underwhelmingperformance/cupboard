@@ -60,6 +60,7 @@ import {
 } from '../http/http.ts';
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
+import { ArtifactRetentionService } from './artifact-retention-service.ts';
 import { AttestationListTeardownService } from './attestation-list-teardown-service.ts';
 import { drainObjectDeletionPages } from './bulk.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
@@ -1418,6 +1419,9 @@ export class CacheAdminService {
 		)
 	): Promise<void> {
 		await this.context.criticalSection(async () => {
+			const artifacts = new ArtifactRetentionService(
+				this.context
+			).retireCacheInSection(cache);
 			const hasSweptEdges = await this.drainTeardownChunk(cache, origin, limit);
 			await this.drainStagingCleanup(cache);
 
@@ -1430,8 +1434,9 @@ export class CacheAdminService {
 				limit
 			);
 			if (
-				!hasSweptEdges ||
 				hasMoreHistory ||
+				!hasSweptEdges ||
+				artifacts.pending ||
 				this.hasQueuedDeletions(cache) ||
 				this.hasStagingCleanup(cache)
 			) {

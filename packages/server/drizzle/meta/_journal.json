@@ -575,6 +575,13 @@
 			"when": 1791858325710,
 			"tag": "0081_artifact_reference_deletion_progress",
 			"breakpoints": true
+		},
+		{
+			"idx": 82,
+			"version": "6",
+			"when": 1791862441144,
+			"tag": "0082_artifact_cache_retirement",
+			"breakpoints": true
 		}
 	]
 }

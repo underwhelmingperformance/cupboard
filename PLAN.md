@@ -7143,9 +7143,11 @@ build traces available from a cupboard cache.
       integration now retires at most 16 captured parent edges per publication
       pass and preserves the NAR deletion queue until every page completes. An
       alarm pass drains artifact outboxes, and indexed readiness includes queued
-      NAR deletion even without a saved GC continuation. Producer activation
-      remains pending. Retirement drains remove at most 16 local rows and
-      consider at most eight captured entries per pass. Their durable
+      NAR deletion even without a saved GC continuation. Cache teardown also
+      retires pending and independently rooted artifacts in indexed pages and
+      keeps its durable marker until reference outboxes drain. Producer
+      activation remains pending. Retirement drains remove at most 16 local rows
+      and consider at most eight captured entries per pass. Their durable
       shared-removal phase prevents repeated D1 deletion and quota work while
       large edge sets are cleaned up. Newer artifact generations and auxiliary
       metadata remain intact.

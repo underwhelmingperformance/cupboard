@@ -7,7 +7,17 @@ import type {
 	ArtifactId
 } from '@cupboard/protocol/artifacts';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, asc, eq, exists, gt, notExists, or, sql } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	eq,
+	exists,
+	gt,
+	isNotNull,
+	notExists,
+	or,
+	sql
+} from 'drizzle-orm';
 
 import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
@@ -79,19 +89,25 @@ export class ArtifactRetentionService {
 
 	private retireWithin(
 		database: RetirementDatabase,
-		version: ArtifactVersion
+		version: ArtifactVersion,
+		canRetirePending = false
 	): boolean {
 		const artifact = database
 			.select()
 			.from(schema.artifacts)
 			.where(this.artifactFilter(version))
 			.get();
-		if (artifact?.state !== 'live' || this.retainedInSection(version)) {
+		if (
+			artifact === undefined ||
+			(artifact.state !== 'live' &&
+				!(canRetirePending && artifact.state === 'pending')) ||
+			this.retainedInSection(version)
+		) {
 			return false;
 		}
 		const filter = and(
 			this.artifactFilter(version),
-			eq(schema.artifacts.state, 'live')
+			eq(schema.artifacts.state, artifact.state)
 		);
 		const retired = database
 			.update(schema.artifacts)
@@ -290,6 +306,66 @@ export class ArtifactRetentionService {
 		return this.context.db.transaction((transaction) =>
 			this.retireWithin(transaction, version)
 		);
+	}
+
+	retireCacheInSection(cache: ResolvedCache): {
+		readonly artifactsRetired: number;
+		readonly pending: boolean;
+	} {
+		const deleted = this.context.db
+			.select({ id: schema.cacheIdentities.id })
+			.from(schema.cacheIdentities)
+			.where(
+				and(
+					eq(schema.cacheIdentities.id, cache.id),
+					eq(schema.cacheIdentities.generation, cache.generation),
+					isNotNull(schema.cacheIdentities.deletedAt)
+				)
+			)
+			.get();
+		if (deleted === undefined) {
+			return { artifactsRetired: 0, pending: true };
+		}
+		const active = or(
+			eq(schema.artifacts.state, 'pending'),
+			eq(schema.artifacts.state, 'live')
+		);
+		const filter = and(eq(schema.artifacts.cacheId, cache.id), active);
+		const page = this.context.db
+			.select({
+				id: schema.artifacts.id,
+				generation: schema.artifacts.generation
+			})
+			.from(schema.artifacts)
+			.where(filter)
+			.orderBy(schema.artifacts.state, schema.artifacts.id)
+			.limit(parentRetirementPageSize)
+			.all();
+		const artifactsRetired = this.context.db.transaction((transaction) => {
+			let retired = 0;
+			for (const version of page) {
+				if (this.retireWithin(transaction, version, true)) {
+					retired += 1;
+				}
+			}
+			return retired;
+		});
+		const artifact = this.context.db
+			.select({ id: schema.artifacts.id })
+			.from(schema.artifacts)
+			.where(eq(schema.artifacts.cacheId, cache.id))
+			.limit(1)
+			.get();
+		const deletion = this.context.db
+			.select({ id: schema.artifactReferenceDeletion.artifactId })
+			.from(schema.artifactReferenceDeletion)
+			.where(eq(schema.artifactReferenceDeletion.cacheId, cache.id))
+			.limit(1)
+			.get();
+		return {
+			artifactsRetired,
+			pending: artifact !== undefined || deletion !== undefined
+		};
 	}
 
 	/**

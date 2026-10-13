@@ -81,6 +81,7 @@ import m0078 from './0078_attestation_list_refresh.sql';
 import m0079 from './0079_attestation_list_cache_cleanup.sql';
 import m0080 from './0080_cache_teardown_deadlines.sql';
 import m0081 from './0081_artifact_reference_deletion_progress.sql';
+import m0082 from './0082_artifact_cache_retirement.sql';
 
 export default {
 	journal,
@@ -166,6 +167,7 @@ export default {
 		m0078,
 		m0079,
 		m0080,
-		m0081
+		m0081,
+		m0082
 	}
 };

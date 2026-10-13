@@ -1191,6 +1191,7 @@ export const artifacts = sqliteTable(
 	},
 	(table) => [
 		index('artifact_cache_idx').on(table.cacheId, table.id),
+		index('artifact_cache_state_idx').on(table.cacheId, table.state, table.id),
 		index('artifact_digest_idx').on(table.digest, table.id),
 		index('artifact_expiry_idx').on(table.expiresAt, table.id),
 		index('artifact_pending_idx').on(table.state, table.id),
