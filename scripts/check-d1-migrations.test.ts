@@ -112,7 +112,8 @@ describe('checkD1Migrations', () => {
 			replayed: [
 				'cas-demotion-progress',
 				'attestation-list-revision',
-				'tenant-namespace-cleanup'
+				'tenant-namespace-cleanup',
+				'native-artifact-publication'
 			]
 		});
 	});
@@ -148,7 +149,8 @@ describe('checkD1Migrations', () => {
 			(transition) =>
 				transition.id !== 'cas-demotion-progress' &&
 				transition.id !== 'attestation-list-revision' &&
-				transition.id !== 'tenant-namespace-cleanup'
+				transition.id !== 'tenant-namespace-cleanup' &&
+				transition.id !== 'native-artifact-publication'
 		);
 		const preceding: MigrationSet = {
 			files: full.files.filter(
@@ -191,7 +193,8 @@ describe('checkD1Migrations', () => {
 				transition.id !== 'cache-path-intersection-index' &&
 				transition.id !== 'cas-demotion-progress' &&
 				transition.id !== 'attestation-list-revision' &&
-				transition.id !== 'tenant-namespace-cleanup'
+				transition.id !== 'tenant-namespace-cleanup' &&
+				transition.id !== 'native-artifact-publication'
 		);
 		const order = deployOrder(earlierTransitions, 1);
 		expect(order).toStrictEqual({

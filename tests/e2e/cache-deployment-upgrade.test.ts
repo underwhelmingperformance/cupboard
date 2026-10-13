@@ -3,6 +3,7 @@ import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { capturingReporter, fakeCliUi } from '@cupboard/cli-ui/testing';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
+	attestationListLocalStep,
 	cacheIdentityLocalStep,
 	casStorageLocalStep,
 	currentLocalStep,
@@ -431,7 +432,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'native-artifact-storage', independent: true },
 		{ id: 'cas-demotion-progress', independent: false },
 		{ id: 'attestation-list-revision', independent: false },
-		{ id: 'tenant-namespace-cleanup', independent: true }
+		{ id: 'tenant-namespace-cleanup', independent: true },
+		{ id: 'native-artifact-publication', independent: true }
 	]);
 });
 
@@ -1004,10 +1006,14 @@ it('completes a transfer when another deploy contracts during a source schema re
 		await wakeUntilStep(
 			server,
 			await server.deploymentClient(),
-			currentLocalStep
+			attestationListLocalStep
 		);
 		const controlWalk = server.transitionWalk({}, 'current', 'CONTROL_DB');
-		const other = server.transitionWalk({ now: () => deployedAt });
+		const other = server.transitionWalk({
+			now: () => deployedAt,
+			wakeTenants: async (step) =>
+				wakeUntilStep(server, await server.deploymentClient(), step)
+		});
 		let didContract = false;
 		const api: D1QueryApi = {
 			queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
@@ -1025,6 +1031,8 @@ it('completes a transfer when another deploy contracts during a source schema re
 		};
 		const first = server.transitionWalk({
 			now: () => deployedAt,
+			wakeTenants: async (step) =>
+				wakeUntilStep(server, await server.deploymentClient(), step),
 			beforeContract: async (id) => {
 				if (id !== 'control-database-split') {
 					return;
@@ -1265,9 +1273,15 @@ it('uses Cloudflare recovery only while a real control transfer remains frozen',
 		await wakeUntilStep(
 			server,
 			await server.deploymentClient(),
-			currentLocalStep
+			attestationListLocalStep
 		);
-		await completeTransitions(server.transitionWalk({ now: () => deployedAt }));
+		await completeTransitions(
+			server.transitionWalk({
+				now: () => deployedAt,
+				wakeTenants: async (step) =>
+					wakeUntilStep(server, await server.deploymentClient(), step)
+			})
+		);
 		await expect(establishAuthority(plans, world)).rejects.toBeInstanceOf(
 			AdminTokenRequiredError
 		);

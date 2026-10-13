@@ -73,7 +73,12 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'native-artifact-storage', state: 'complete', updatedAt: recorded },
 		{ id: 'cas-demotion-progress', state: 'complete', updatedAt: recorded },
 		{ id: 'attestation-list-revision', state: 'complete', updatedAt: recorded },
-		{ id: 'tenant-namespace-cleanup', state: 'complete', updatedAt: recorded }
+		{ id: 'tenant-namespace-cleanup', state: 'complete', updatedAt: recorded },
+		{
+			id: 'native-artifact-publication',
+			state: 'complete',
+			updatedAt: recorded
+		}
 	],
 	unrecognised: []
 };
@@ -606,6 +611,10 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition tenant-namespace-cleanup',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition native-artifact-publication',
+							value: `complete ${since}`
+						},
 						{ label: `Transition ${row.id}`, value },
 						{ label: 'Required local step', value: String(currentLocalStep) },
 						{
@@ -769,7 +778,8 @@ describe('runDeploymentResume', () => {
 				transitions: complete.transitions.filter(
 					(transition) =>
 						transition.id !== 'cas-storage' &&
-						transition.id !== 'attestation-list-revision'
+						transition.id !== 'attestation-list-revision' &&
+						transition.id !== 'native-artifact-publication'
 				)
 			},
 			step: cacheIdentityLocalStep,
@@ -793,7 +803,9 @@ describe('runDeploymentResume', () => {
 			transitions: {
 				...complete,
 				transitions: complete.transitions.filter(
-					(transition) => transition.id !== 'attestation-list-revision'
+					(transition) =>
+						transition.id !== 'attestation-list-revision' &&
+						transition.id !== 'native-artifact-publication'
 				)
 			},
 			step: casStorageLocalStep,
