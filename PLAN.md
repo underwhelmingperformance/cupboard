@@ -7136,7 +7136,12 @@ build traces available from a cupboard cache.
       downloading or uploading the object bytes. Captured reference removal
       preserves newer generations and repaired physical incarnations, and
       credits quota after the last artifact or attestation reference is gone.
-      Parent-edge integration and producer activation remain pending.
+      Directed parents now require current local and authorised publication
+      generations. Independent cache-lifetime and expiry roots are supported,
+      and a log's own expiry overrides its parents and roots. Local retirement
+      and its reference-deletion outbox commit atomically. NAR deletion
+      integration, bounded outbox draining and producer activation remain
+      pending.
 - [ ] Charge each physical digest once per tenant across every artifact and
       attestation reference. Generalise collection, demotion, repair and final
       reference removal before creating artifact references. Collection and
