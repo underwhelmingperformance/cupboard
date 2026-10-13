@@ -20,9 +20,13 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import {
+	closeAlarmFence,
+	openAlarmFence
+} from '../alarm-fence.test-support.ts';
 import {
 	activateObjectIncarnation,
 	lateWriteTombstoneHorizonMs,
@@ -72,6 +76,7 @@ import { BlobReaperService } from './blob-reaper-service.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
 import { ServerContext } from './context.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import type { CupboardServer } from './server.ts';
 import { withSubrequestSlice } from './subrequest-slice.ts';
 
 const textEncoder = new TextEncoder();
@@ -154,13 +159,30 @@ async function withWritablePresenceView(
 }
 
 describe('attestation CAS lifecycle', () => {
+	let participants: readonly DurableObjectStub<CupboardServer>[] = [];
+
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		await resetTestServer();
+		participants = [currentServer(), fixtureWorkerServer()];
+		for (const participant of participants) {
+			await runInDurableObject(participant, (_instance, state) => {
+				openAlarmFence(state);
+			});
+		}
 		await clearBlobStorage();
 		await recordTransition('cas-demotion-progress', 'complete');
 		await recordTransition('attestation-list-revision', 'complete');
+	});
+
+	afterEach(async () => {
+		for (const participant of participants) {
+			await runInDurableObject(participant, (_instance, state) => {
+				closeAlarmFence(state);
+			});
+		}
+		participants = [];
 	});
 
 	it('charges and credits shared references through a writable presence view', async () => {
