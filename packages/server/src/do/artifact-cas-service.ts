@@ -8,7 +8,7 @@ import {
 	type ArtifactKind
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, inArray, isNull, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, isNull, notExists, or, sql } from 'drizzle-orm';
 
 import { casObjectNotRepromoted } from '../blob/cas-object-state.ts';
 import { registeredLiveObjectIncarnation } from '../blob/object-incarnation.ts';
@@ -76,7 +76,10 @@ export class ArtifactCasService {
 	private storageReady() {
 		const storageFilter = and(
 			eq(d1Schema.deploymentTransition.id, 'native-artifact-storage'),
-			inArray(d1Schema.deploymentTransition.state, ['expanded', 'complete'])
+			or(
+				eq(d1Schema.deploymentTransition.state, 'expanded'),
+				eq(d1Schema.deploymentTransition.state, 'complete')
+			)
 		);
 		return exists(
 			this.context.d1
