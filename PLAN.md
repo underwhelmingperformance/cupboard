@@ -7129,7 +7129,12 @@ build traces available from a cupboard cache.
       continues to contain operator authentication state.
 - [ ] Add cache-scoped references and directed publication-parent edges. Several
       publications can keep an artifact alive, and publication by reference can
-      reuse the artifact's bytes. Artifact edges do not keep NARs alive.
+      reuse the artifact's bytes. Artifact edges do not keep NARs alive. The
+      internal reservation service validates captured artifact and cache
+      identities, the immutable object's size and its live incarnation. It
+      reserves the reference and shared quota in one fenced D1 batch without
+      downloading or uploading the object bytes. Parent-edge integration and
+      producer activation remain pending.
 - [ ] Charge each physical digest once per tenant across every artifact and
       attestation reference. Generalise collection, demotion, repair and final
       reference removal before creating artifact references. Collection and
@@ -7163,7 +7168,8 @@ build traces available from a cupboard cache.
       during deployment. Enable artifact writes only after the compatible
       readers and cleanup code are active. The storage-interface expand/contract
       transition, local readiness step and rollback guards are implemented.
-      Generic references and their writer activation gate remain pending.
+      Generic reference lifecycle integration and the writer activation gate
+      remain pending.
 - [ ] Set a metadata and trace budget with actionable refusals. A trace that
       exceeds its budget must not reject the NAR publication. Idempotent retries
       remain valid.

@@ -8,6 +8,7 @@ import { and, eq, exists, notExists, type SQL, sql } from 'drizzle-orm';
 import { casObjectNotRepromoted } from '../blob/cas-object-state.ts';
 import { type CasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { TenantUsageMissingError } from '../errors.ts';
 
 import { type ServerContext } from './context.ts';
 
@@ -22,6 +23,44 @@ export class CasQuotaService {
 			eq(d1Schema.tenantCasBlob.tenant, tenant),
 			eq(d1Schema.tenantCasBlob.digest, digest)
 		);
+	}
+
+	async overQuota(digest: Sha256HexDigest, size: number): Promise<boolean> {
+		const tenant = this.context.requireTenant();
+		const [usageRows, ownedRows] = await this.context.d1.batch([
+			this.context.d1
+				.select({
+					bytes: d1Schema.tenantUsage.bytes,
+					casBytes: d1Schema.tenantUsage.casBytes,
+					quotaBytes: d1Schema.tenantUsage.quotaBytes
+				})
+				.from(d1Schema.tenantUsage)
+				.where(eq(d1Schema.tenantUsage.tenant, tenant)),
+			this.context.d1
+				.select({ digest: d1Schema.tenantCasBlob.digest })
+				.from(d1Schema.tenantCasBlob)
+				.where(this.presenceFilter(tenant, digest))
+		]);
+		const usage = usageRows[0];
+		if (usage === undefined) {
+			throw new TenantUsageMissingError(tenant);
+		}
+		return this.overQuotaForCharge(usage, ownedRows.length > 0, size);
+	}
+
+	overQuotaForCharge(
+		usage: {
+			readonly bytes: number;
+			readonly casBytes: number;
+			readonly quotaBytes: number | null;
+		},
+		isOwned: boolean,
+		size: number
+	): boolean {
+		if (isOwned || usage.quotaBytes === null) {
+			return false;
+		}
+		return usage.bytes + usage.casBytes + size > usage.quotaBytes;
 	}
 
 	/**

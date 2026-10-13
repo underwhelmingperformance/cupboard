@@ -53,36 +53,6 @@ export type AttestationReferenceOutcome =
 export class AttestationCasService {
 	constructor(private readonly context: ServerContext) {}
 
-	private async overQuota(
-		tenant: TenantId,
-		digest: Sha256HexDigest,
-		size: number
-	): Promise<boolean> {
-		const usageFilter = eq(d1Schema.tenantUsage.tenant, tenant);
-		const [usageRows, ownedRows] = await this.context.d1.batch([
-			this.context.d1
-				.select({
-					bytes: d1Schema.tenantUsage.bytes,
-					casBytes: d1Schema.tenantUsage.casBytes,
-					quotaBytes: d1Schema.tenantUsage.quotaBytes
-				})
-				.from(d1Schema.tenantUsage)
-				.where(usageFilter),
-			this.context.d1
-				.select({ digest: d1Schema.tenantCasBlob.digest })
-				.from(d1Schema.tenantCasBlob)
-				.where(this.presenceFilter(tenant, digest))
-		]);
-
-		const usage = usageRows[0];
-
-		if (usage === undefined) {
-			throw new TenantUsageMissingError(tenant);
-		}
-
-		return this.overQuotaForCharge(usage, ownedRows.length > 0, size);
-	}
-
 	private edgeFilter(tenant: TenantId, reference: AttestationReference) {
 		return and(
 			eq(d1Schema.attestationReference.tenant, tenant),
@@ -109,13 +79,6 @@ export class AttestationCasService {
 			.get();
 
 		return existing !== undefined;
-	}
-
-	private presenceFilter(tenant: TenantId, digest: Sha256HexDigest) {
-		return and(
-			eq(d1Schema.tenantCasBlob.tenant, tenant),
-			eq(d1Schema.tenantCasBlob.digest, digest)
-		);
 	}
 
 	async measureStagedBundle(
@@ -192,7 +155,9 @@ export class AttestationCasService {
 			return 'already-present';
 		}
 
-		if (await this.overQuota(tenant, reference.digest, size)) {
+		if (
+			await new CasQuotaService(this.context).overQuota(reference.digest, size)
+		) {
 			return 'over-quota';
 		}
 
@@ -253,8 +218,6 @@ export class AttestationCasService {
 		return 'referenced';
 	}
 
-	// `usage` is required. Without the row there is no quota to compare against,
-	// and the caller refuses with `TenantUsageMissingError`.
 	overQuotaForCharge(
 		usage: {
 			readonly bytes: number;
@@ -264,11 +227,11 @@ export class AttestationCasService {
 		isOwned: boolean,
 		size: number
 	): boolean {
-		if (isOwned || usage.quotaBytes === null) {
-			return false;
-		}
-
-		return usage.bytes + usage.casBytes + size > usage.quotaBytes;
+		return new CasQuotaService(this.context).overQuotaForCharge(
+			usage,
+			isOwned,
+			size
+		);
 	}
 
 	async hasCapturedReference(

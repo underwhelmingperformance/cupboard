@@ -1649,6 +1649,29 @@ export class AttestationPathNotFoundError extends ServerHttpError {
 	}
 }
 
+export class ArtifactReferenceConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super(
+			'The artifact generation already references different immutable content or cache authority'
+		);
+		this.name = 'ArtifactReferenceConflictError';
+	}
+}
+
+export class ArtifactStorageMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super(
+			'Artifact reference storage is not ready; complete the storage transition before publishing artifacts'
+		);
+		this.name = 'ArtifactStorageMigrationPendingError';
+	}
+}
+
 export class CasReferenceSetChangedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;
