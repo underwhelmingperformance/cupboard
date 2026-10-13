@@ -1791,6 +1791,7 @@ export async function resolveSubstituters(
 
 				if (
 					fact?.type === 'cupboard_cache' &&
+					fact.state.kind === 'absent' &&
 					fact.state.firstWrite !== undefined
 				) {
 					return Promise.resolve(fact.state.firstWrite.priority);

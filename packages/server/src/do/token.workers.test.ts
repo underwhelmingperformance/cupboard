@@ -878,6 +878,82 @@ describe('server-resolved read acquisition', () => {
 		}
 	);
 
+	// The response is the same for an absent and a private optional cache, so
+	// it does not reveal whether a cache exists.
+	it.each(['absent', 'private'] as const)(
+		'omits an ungranted optional %s cache without disclosing its state',
+		async (state) => {
+			const subject = await installTrustedIdp('release-write');
+			const cache = {
+				kind: 'named' as const,
+				name: cacheNameSchema.parse('ci')
+			};
+			if (state === 'private') {
+				await putTestCache(
+					await issueServerSignedToken(adminGrants()),
+					cache,
+					'private'
+				);
+			}
+			const resource = {
+				type: 'cupboard_cache' as const,
+				cache,
+				mode: 'content' as const,
+				optional: true as const
+			};
+			const response = await postToken({
+				grant_type: readAccessGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				read_resources: JSON.stringify([resource])
+			});
+			expect(response.status).toBe(StatusCodes.OK);
+			const result = readAccessResponseSchema.parse(await response.json());
+			expect({
+				grants: result.authorization_details,
+				facts: result.read_resources
+			}).toStrictEqual({
+				grants: [],
+				facts: [{ ...resource, state: { kind: 'unavailable' } }]
+			});
+		}
+	);
+
+	it('includes a permitted optional cache with its state', async () => {
+		const { subject, resources } = await installComposedReadRules();
+		const [first] = resources;
+		if (first?.type !== 'cupboard_cache') {
+			throw new Error('expected a cache resource');
+		}
+		const resource = { ...first, optional: true as const };
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify([resource])
+		});
+		expect(response.status).toBe(StatusCodes.OK);
+		const result = readAccessResponseSchema.parse(await response.json());
+		expect({
+			grants: result.authorization_details,
+			facts: result.read_resources
+		}).toStrictEqual({
+			grants: [
+				{
+					type: 'cupboard_cache',
+					cache: resource.cache,
+					actions: ['cache:content-read']
+				}
+			],
+			facts: [
+				{
+					...resource,
+					state: { kind: 'existing', access: 'private', priority: 40 }
+				}
+			]
+		});
+	});
+
 	it('explains missing view authority without listing unrelated resources', async () => {
 		const subject = await installTrustedIdp('release-write');
 		const response = await postToken({

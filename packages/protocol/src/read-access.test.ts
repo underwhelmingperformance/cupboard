@@ -309,6 +309,64 @@ describe('read authority', () => {
 		});
 	});
 
+	// An optional resource is granted when a rule permits it and skipped
+	// otherwise. The rest of the request is unaffected.
+	it.each(['absent', 'private'] as const)(
+		'skips an uncovered optional %s cache without refusing the request',
+		(state) => {
+			const resource: ReadResourceState = {
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: cacheNameSchema.parse('other') },
+				mode: 'content',
+				optional: true,
+				state:
+					state === 'absent'
+						? { kind: 'absent' }
+						: {
+								kind: 'existing',
+								access: 'private',
+								priority: cachePrioritySchema.parse(40)
+							}
+			};
+
+			expect(selectReadTrust([rule], claims, [resource])).toStrictEqual({
+				outcome: 'selected',
+				rule,
+				grants: []
+			});
+		}
+	);
+
+	it('grants a permitted optional cache', () => {
+		const readable: OidcTrustRule = {
+			...rule,
+			permittedGrants: [
+				{
+					type: 'cupboard_cache',
+					actions: ['cache:content-read'],
+					resources: {
+						cache: { kind: 'named', exact: 'builds', validate: 'cacheName' }
+					}
+				}
+			]
+		};
+		const resource: ReadResourceState = {
+			type: 'cupboard_cache',
+			cache,
+			mode: 'content',
+			optional: true,
+			state: { kind: 'absent' }
+		};
+
+		expect(selectReadTrust([readable], claims, [resource])).toStrictEqual({
+			outcome: 'selected',
+			rule: readable,
+			grants: [
+				{ type: 'cupboard_cache', cache, actions: ['cache:content-read'] }
+			]
+		});
+	});
+
 	it.each(['absent', 'private'] as const)(
 		'rechecks %s resource facts without expanding the previous read ceiling',
 		(state) => {
@@ -449,6 +507,24 @@ describe('read resource batches', () => {
 			resources: readResourcesSchema.parse(resources),
 			facts: readAccessFactsSchema.parse(facts)
 		}).toStrictEqual({ resources, facts });
+	});
+
+	it('describes an optional cache that the session does not include as unavailable', () => {
+		const optional = { ...extraResource, optional: true as const };
+		const facts = [{ ...optional, state: { kind: 'unavailable' as const } }];
+
+		expect({
+			resources: readResourcesSchema.parse([optional]),
+			facts: readAccessFactsSchema.parse(facts)
+		}).toStrictEqual({ resources: [optional], facts });
+	});
+
+	it('refuses an unavailable state for a required cache', () => {
+		expect(() =>
+			readAccessFactsSchema.parse([
+				{ ...extraResource, state: { kind: 'unavailable' } }
+			])
+		).toThrow();
 	});
 
 	it.each([

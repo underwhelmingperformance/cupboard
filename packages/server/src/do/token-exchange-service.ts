@@ -1,6 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import { type TtlSeconds } from '@cupboard/nix-store/scalars';
+import { isSameCacheScope, type TtlSeconds } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
@@ -433,7 +433,9 @@ export class TokenExchangeService {
 			issued_token_type: issuedAccessTokenType,
 			expires_in: writeJwtTtlSeconds,
 			authorization_details: selection.grants,
-			read_resources: currentFacts
+			read_resources: currentFacts.map((fact) =>
+				withheldOptionalState(fact, selection.grants)
+			)
 		} satisfies ReadAccessResponse);
 	}
 
@@ -1168,4 +1170,27 @@ export class TokenExchangeService {
 
 		return oauthEmptyResponse();
 	}
+}
+
+// An optional cache that the session omits is reported as unavailable. Its
+// real state would show whether a private cache of that name exists. A
+// public cache is readable without a grant, so its state is kept.
+function withheldOptionalState(
+	fact: ReadResourceState,
+	grants: AuthorizationDetails
+): ReadResourceState {
+	if (
+		fact.type !== 'cupboard_cache' ||
+		fact.optional !== true ||
+		(fact.state.kind === 'existing' && fact.state.access === 'public') ||
+		grants.some(
+			(grant) =>
+				grant.type === 'cupboard_cache' &&
+				isSameCacheScope(grant.cache, fact.cache)
+		)
+	) {
+		return fact;
+	}
+
+	return { ...fact, state: { kind: 'unavailable' } };
 }
