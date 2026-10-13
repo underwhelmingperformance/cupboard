@@ -16,6 +16,23 @@ import {
 import { formatHumanError } from './human-errors.ts';
 
 const target = new URL('https://cupboard.example.workers.dev/t/acme');
+const refusedReadResources = JSON.stringify([
+	{
+		type: 'cupboard_cache',
+		cache: { kind: 'named', name: 'gh-1234-pr-42' },
+		actions: ['cache:content-read']
+	},
+	{
+		type: 'cupboard_cache',
+		cache: { kind: 'default' },
+		actions: ['cache:content-read']
+	},
+	{
+		type: 'cupboard_view',
+		view: 'pull-requests-1234',
+		actions: ['view:content-read']
+	}
+]);
 
 describe('human error presentation', () => {
 	it.each([undefined, 'v0.0.34'])(
@@ -95,6 +112,35 @@ describe('human error presentation', () => {
 			),
 			expected:
 				'The trust rule refused this push token request, which includes read access to the private reference source https://cupboard.example.workers.dev/t/acme/reuse/prs. Run `cupboard github check` to check the source read grants and destination publication grants.'
+		},
+		{
+			error: new CupboardHttpError(
+				'POST',
+				'/t/acme/oauth/token',
+				400,
+				JSON.stringify({
+					error: 'invalid_authorization_details',
+					error_description: 'server wording',
+					problem: 'read-resources-not-permitted',
+					detail: { read_resources: refusedReadResources }
+				})
+			),
+			expected:
+				"The trust rules do not permit reading cache 'gh-1234-pr-42', the default cache and reuse view 'pull-requests-1234'. Run `cupboard github check` to review the read grants, or ask the tenant administrator to grant read access."
+		},
+		{
+			error: new CupboardHttpError(
+				'POST',
+				'/t/acme/oauth/token',
+				400,
+				JSON.stringify({
+					error: 'invalid_authorization_details',
+					problem: 'read-resources-not-permitted',
+					detail: { read_resources: 'not JSON' }
+				})
+			),
+			expected:
+				'The requested permissions could not be accepted. Review the job permissions and trust-rule restrictions. Use --debug for diagnostic information.'
 		},
 		{
 			error: new ORPCError('UNRECOGNISED', {
