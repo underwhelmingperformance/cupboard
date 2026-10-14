@@ -826,27 +826,18 @@ Usage: cupboard run <cache-or-view-url> [options] -- <command...>
 Run a command with renewable cache read access in CI.
 
 Arguments:
-  cache-or-view-url                  cache or reuse view URL
-  command                            command to run after --
+  cache-or-view-url                      cache or reuse view URL
+  command                                command to run after --
 
 Options:
-  --github-oidc                      use temporary GitHub Actions read access
-                                     even if the cache is public or saved read
-                                     credentials are present; requires id-token:
-                                     write
-  --audience <audience>              OIDC audience (default: the tenant URL)
-  --cache-metadata                   request access to cache configuration while
-                                     using an existing credential to download
-                                     paths
-  --read-cache <cache-url>           additional cache in this tenant to include
-                                     in the OIDC read session (repeatable)
-                                     (default: [])
-  --read-cache-metadata <cache-url>  additional cache in this tenant whose
-                                     configuration the command needs
-                                     (repeatable) (default: [])
-  --reuse-view <name>                reuse view whose private cache content the
-                                     command will read
-  -h, --help                         display help for command
+  --github-oidc                          use temporary GitHub Actions read access even if the cache is public or saved read credentials are present; requires id-token: write
+  --audience <audience>                  OIDC audience (default: the tenant URL)
+  --cache-metadata                       request access to cache configuration while using an existing credential to download paths
+  --read-cache <cache-url>               additional cache in this tenant to include in the OIDC read session (repeatable) (default: [])
+  --read-cache-metadata <cache-url>      additional cache in this tenant whose configuration the command needs (repeatable) (default: [])
+  --read-cache-if-permitted <cache-url>  cache in this tenant to include in the OIDC read session when the trust rules permit it, and to omit otherwise (repeatable) (default: [])
+  --reuse-view <name>                    reuse view whose private cache content the command will read
+  -h, --help                             display help for command
 
 The child inherits stdin, stdout and stderr. The command returns the child's exit status, or 128 plus the signal number when a signal terminates the child. A missing executable exits 127. OIDC acquisition or renewal failures use Cupboard's own exit statuses, including 77 for refused authority and 75 for temporary failures.
 ```
