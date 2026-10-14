@@ -113,6 +113,16 @@ due now and preserves an existing overdue deadline. Repeated wakes therefore
 preserve the priority of older waiting jobs. Revision fences still prevent an
 older queue-send failure from postponing a newer wake.
 
+The bounded dispatcher captures at most eight due jobs and eight messages in one
+SQLite transaction. It prioritises sealed recovery and gives each selected job
+an admission opportunity before another round. Shared staging limits decide
+whether generation can reserve bytes; existing tickets and ready staging reuse
+their reservations. The dispatcher sends one queue batch after releasing the
+tenant critical section. A failed send preserves its specific admissions and
+schedules a 30-second retry for each unchanged dispatch reservation. Suspended
+and offboarding tenants do not reserve or send work. Automatic alarm/cron
+invocation, capacity-release wakes and targeted consumer retries remain pending.
+
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a
 tenant URL, `/t/<tenant>/...`, are checked by the control Worker and then either

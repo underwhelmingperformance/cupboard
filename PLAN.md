@@ -7252,8 +7252,12 @@ build traces available from a cupboard cache.
       Unused reservations are released before promotion and after preparation
       failure or timeout. Dispatch scheduling preserves waiting jobs' deadline
       order across repeated wakes, completion, deferral and resume. New jobs
-      enter that order at their creation time. Targeted queue retry integration,
-      automatic fan-out and alarm dispatch remain pending.
+      enter that order at their creation time. A bounded dispatcher now reserves
+      at most eight jobs and eight messages per pass, distributes admissions
+      across jobs before a second round and prioritises sealed recovery. Queue
+      I/O runs outside the tenant critical section; failed delivery preserves
+      admissions and schedules fenced retries. Targeted queue retry integration,
+      capacity-release wakes and automatic alarm/cron dispatch remain pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last
       progress and paged failures. The total remains unknown until discovery

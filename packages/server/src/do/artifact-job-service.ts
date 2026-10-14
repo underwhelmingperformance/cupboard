@@ -480,6 +480,39 @@ export class ArtifactJobService {
 		};
 	}
 
+	dispatchCandidateIdsInSection(
+		version: ArtifactJobVersion
+	): readonly ArtifactTaskId[] {
+		const job = this.current(version.id);
+		if (job?.generation !== version.generation) {
+			return [];
+		}
+		const ready = this.context.db
+			.select({ id: schema.artifactStages.taskId })
+			.from(schema.artifactStages)
+			.where(
+				and(
+					eq(schema.artifactStages.jobId, job.id),
+					eq(schema.artifactStages.state, 'ready'),
+					eq(schema.artifactStages.writesSealed, true)
+				)
+			)
+			.orderBy(
+				asc(schema.artifactStages.createdAt),
+				asc(schema.artifactStages.id)
+			)
+			.limit(claimScanLimit)
+			.all()
+			.filter(
+				(row) =>
+					this.inspectDispatchTaskInSection(version, row.id) !== undefined
+			)
+			.map((row) => row.id);
+		return [
+			...new Set([...ready, ...this.candidates(job).map((task) => task.id)])
+		].slice(0, claimScanLimit);
+	}
+
 	inspectDispatchTaskInSection(
 		version: ArtifactJobVersion,
 		id: ArtifactTaskId
