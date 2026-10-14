@@ -7246,8 +7246,12 @@ build traces available from a cupboard cache.
       Consumers now claim specific admitted tasks, including independent tasks
       from the same job. Terminal outcomes atomically release admissions and
       make dispatch due; admitted completions request a fenced wake without
-      reusing spent messages. Automatic fan-out and alarm dispatch remain
-      pending.
+      reusing spent messages. The listing executor reserves local output memory
+      before preparation. Preparation permits shared-fact reuse and sealed-stage
+      promotion at full output capacity, but refuses new staging and NAR reads.
+      Unused reservations are released before promotion and after preparation
+      failure or timeout. Targeted queue retry integration, automatic fan-out
+      and alarm dispatch remain pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last
       progress and paged failures. The total remains unknown until discovery

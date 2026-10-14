@@ -97,6 +97,16 @@ keeps the task pending and the job due without releasing unfinished staging
 bytes. Queue retry integration, automatic fan-out and alarm dispatch remain
 pending.
 
+The listing executor reserves an output buffer before calling the tenant
+preparation RPC. Preparation attempts shared-fact reuse and sealed-stage
+promotion even when local output capacity is exhausted, then refuses generation
+before allocating staging or reading NAR bytes. The capacity-aware RPC is
+separate from the legacy method so an earlier tenant Worker rejects the new
+request instead of ignoring its capacity argument. The executor releases unused
+reservations before promotion and after preparation failure or timeout. A
+multipart writer receives ownership of a generation reservation and returns the
+buffer only after every storage operation finishes.
+
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a
 tenant URL, `/t/<tenant>/...`, are checked by the control Worker and then either

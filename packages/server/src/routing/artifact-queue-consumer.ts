@@ -26,7 +26,7 @@ type ArtifactQueueRpc = Pick<
 	| 'claimArtifactTask'
 	| 'claimAdmittedArtifactTask'
 	| 'requestArtifactDispatch'
-	| 'prepareListingTask'
+	| 'prepareListingTaskWithCapacity'
 	| 'registerArtifactMultipart'
 	| 'sealArtifactStaging'
 	| 'renewListingTask'

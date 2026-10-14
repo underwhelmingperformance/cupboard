@@ -48,7 +48,12 @@ export type ListingTaskPreparation =
 	  }
 	| { readonly kind: 'capacity'; readonly retryAt: IsoTimestamp }
 	| {
-			readonly kind: 'reused' | 'unavailable' | 'bytes-missing' | 'over-quota';
+			readonly kind:
+				| 'reused'
+				| 'unavailable'
+				| 'bytes-missing'
+				| 'over-quota'
+				| 'local-capacity';
 	  };
 export interface ListingTaskCompletion {
 	readonly kind: 'completed' | 'unavailable' | 'bytes-missing' | 'over-quota';
@@ -189,7 +194,8 @@ export class ListingTaskService {
 	 * for a Worker to decode and upload outside the Durable Object.
 	 */
 	async prepareInSection(
-		claim: ArtifactTaskClaim
+		claim: ArtifactTaskClaim,
+		canGenerate = true
 	): Promise<ListingTaskPreparation> {
 		const task = await this.capture(claim);
 		if (task === undefined) {
@@ -231,6 +237,9 @@ export class ListingTaskService {
 			throw new ListingGeneratorUnavailableError(
 				task.identity.generatorRevision
 			);
+		}
+		if (!canGenerate) {
+			return { kind: 'local-capacity' };
 		}
 		const source = await this.generationSource(task);
 		if (source === undefined) {

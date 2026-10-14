@@ -3246,11 +3246,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async prepareListingTask(
 		claim: ArtifactTaskClaim
 	): Promise<ListingTaskPreparation> {
+		return this.prepareListingTaskWithCapacity(claim, true);
+	}
+
+	async prepareListingTaskWithCapacity(
+		claim: ArtifactTaskClaim,
+		canGenerate: boolean
+	): Promise<ListingTaskPreparation> {
 		const parsedClaim = artifactTaskClaimSchema.parse(claim);
+		const isParsedCapacity = z.boolean().parse(canGenerate);
 		await this.initialise();
 		return this.metered('listing-task-prepare', () =>
 			this.withArtifactStagingWake(() =>
-				new ListingTaskService(this.context).prepareInSection(parsedClaim)
+				new ListingTaskService(this.context).prepareInSection(
+					parsedClaim,
+					isParsedCapacity
+				)
 			)
 		);
 	}

@@ -22,7 +22,10 @@ import { drizzle } from 'drizzle-orm/d1';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ArtifactOutputBuffer } from '../blob/artifact-multipart-writer.ts';
-import { ByteBufferPool } from '../blob/byte-buffers.ts';
+import {
+	ByteBufferPool,
+	type ByteBufferPoolState
+} from '../blob/byte-buffers.ts';
 import { CasObjectStore } from '../blob/cas-object-store.ts';
 import { StoredNarListingGenerator } from '../blob/nar-listing-generation.ts';
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
@@ -287,7 +290,8 @@ function workerRpc(
 ): ListingTaskWorkerDependencies['server'] {
 	const real = currentServer();
 	return {
-		prepareListingTask: (claim) => real.prepareListingTask(claim),
+		prepareListingTaskWithCapacity: (claim, canGenerate) =>
+			real.prepareListingTaskWithCapacity(claim, canGenerate),
 		registerArtifactMultipart: (lease, id) =>
 			real.registerArtifactMultipart(lease, id),
 		sealArtifactStaging: (lease, id, measurement) =>
@@ -855,6 +859,191 @@ describe('listing task workflow', () => {
 		})
 	);
 
+	it('defers generation at full output capacity before staging, then retries the same task', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const pool = new ByteBufferPool({
+				buffers: 1,
+				bufferSize: 5 * 1024 * 1024
+			});
+			const occupied = pool.tryAcquire();
+			if (occupied === undefined) {
+				throw new Error('The fixture output buffer was not occupied');
+			}
+			const get = vi.spyOn(env.BLOBS, 'get');
+			const multipart = vi.spyOn(env.BLOBS, 'createMultipartUpload');
+			const worker = new ListingTaskWorker({
+				server: currentServer(),
+				database: env.CUPBOARD_DB,
+				blobs: env.BLOBS,
+				buffers: new NarReadBufferPool(),
+				outputBuffers: pool
+			});
+			try {
+				let result: unknown;
+				try {
+					result = await worker.run(claim);
+				} catch (error) {
+					result = error;
+				}
+				const after = await inSection((context) => state(context, claim));
+				expect({
+					result,
+					reads: get.mock.calls,
+					uploads: multipart.mock.calls,
+					stages: after.stages,
+					progress: after.job?.progress
+				}).toStrictEqual({
+					result: { kind: 'local-capacity' },
+					reads: [],
+					uploads: [],
+					stages: [],
+					progress: { discovered: 1, completed: 0, skipped: 0, failed: 0 }
+				});
+			} finally {
+				occupied.release();
+			}
+			const next = await inSection((context) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const retry = admissions.requeueInSection(claim, 'reuse');
+				if (retry.kind !== 'admitted') {
+					throw new Error('The deferred listing task was not admitted');
+				}
+				const nextOwner = artifactTaskOwnerSchema.parse(crypto.randomUUID());
+				return Promise.resolve(
+					admissions.claimInSection(retry.admission, nextOwner)
+				);
+			});
+			if (next === undefined) {
+				throw new Error('The deferred listing task was not reclaimed');
+			}
+			expect({
+				taskId: next.id,
+				result: await worker.run(next),
+				buffers: pool.state
+			}).toStrictEqual({
+				taskId: claim.id,
+				result: { kind: 'completed' },
+				buffers: { free: 1, allocations: 1 }
+			});
+		}));
+
+	it.each([
+		{ kind: 'shared', capacity: 'busy' },
+		{ kind: 'sealed', capacity: 'busy' },
+		{ kind: 'shared', capacity: 'free' },
+		{ kind: 'sealed', capacity: 'free' }
+	] as const)(
+		'reuses $kind listing bytes with $capacity output capacity',
+		({ kind, capacity }) =>
+			withoutAlarmArming(async () => {
+				const original = await fixture();
+				const generated = await generate(original);
+				if (kind === 'shared') {
+					await promote(generated);
+					await currentServer().completeListingTask(
+						generated.lease,
+						generated.fact
+					);
+				}
+				const claim = await inSection(async (context) => {
+					const jobs = new ArtifactJobService(context);
+					if (kind === 'sealed') {
+						const retry = new ArtifactAdmissionService(
+							context
+						).requeueInSection(original);
+						if (retry.kind !== 'admitted') {
+							throw new Error('The sealed retry was not admitted');
+						}
+						return new ArtifactAdmissionService(context).claimInSection(
+							retry.admission,
+							artifactTaskOwnerSchema.parse(crypto.randomUUID())
+						);
+					}
+					const job = await jobs.startInSection(defaultCache(), {
+						kind: 'listing',
+						generatorRevision: currentListingGeneratorRevision
+					});
+					jobs.enqueueInSection(job, original.source);
+					jobs.checkpointInSection(job, undefined, true);
+					return jobs.claimInSection(
+						job.id,
+						artifactTaskOwnerSchema.parse(crypto.randomUUID())
+					).claim;
+				});
+				if (claim === undefined) {
+					throw new Error('The reuse listing task was not claimed');
+				}
+				const pool = new ByteBufferPool({
+					buffers: 1,
+					bufferSize: 5 * 1024 * 1024
+				});
+				const occupied = capacity === 'busy' ? pool.tryAcquire() : undefined;
+				if (capacity === 'busy' && occupied === undefined) {
+					throw new Error('The fixture output buffer was not occupied');
+				}
+				const preparation: {
+					readonly canGenerate: boolean;
+					readonly buffers: ByteBufferPoolState;
+				}[] = [];
+				const promotionBuffers: ByteBufferPoolState[] = [];
+				const server = workerRpc({
+					prepareListingTaskWithCapacity: (current, canGenerate) => {
+						preparation.push({ canGenerate, buffers: pool.state });
+						return currentServer().prepareListingTaskWithCapacity(
+							current,
+							canGenerate
+						);
+					},
+					completeListingTask: (lease, fact) => {
+						promotionBuffers.push(pool.state);
+						return currentServer().completeListingTask(lease, fact);
+					}
+				});
+				const get = vi.spyOn(env.BLOBS, 'get');
+				const create = vi.spyOn(env.BLOBS, 'createMultipartUpload');
+				try {
+					const result = await new ListingTaskWorker({
+						server,
+						database: env.CUPBOARD_DB,
+						blobs: env.BLOBS,
+						buffers: new NarReadBufferPool(),
+						outputBuffers: pool
+					}).run(claim);
+					const after = await inSection((context) => state(context, claim));
+					expect({
+						result,
+						preparation,
+						promotionBuffers,
+						sourceReads: get.mock.calls.filter(
+							([key]) => key === generated.source.key
+						),
+						uploads: create.mock.calls,
+						progress: after.job?.progress,
+						buffers: pool.state
+					}).toStrictEqual({
+						result: { kind: kind === 'shared' ? 'reused' : 'completed' },
+						preparation: [
+							{
+								canGenerate: capacity === 'free',
+								buffers: { free: 0, allocations: 1 }
+							}
+						],
+						promotionBuffers:
+							kind === 'sealed'
+								? [{ free: capacity === 'free' ? 1 : 0, allocations: 1 }]
+								: [],
+						sourceReads: [],
+						uploads: [],
+						progress: { discovered: 1, completed: 1, skipped: 0, failed: 0 },
+						buffers: { free: capacity === 'free' ? 1 : 0, allocations: 1 }
+					});
+				} finally {
+					occupied?.release();
+				}
+			})
+	);
+
 	it('executes a claimed listing in the Worker without entering the tenant gate for byte transfers', () =>
 		withoutAlarmArming(async () => {
 			const claim = await fixture();
@@ -955,26 +1144,59 @@ describe('listing task workflow', () => {
 			});
 		}));
 
-	it('bounds a stalled preparation RPC without writing artifact bytes', () =>
+	it('releases its output reservation when preparation fails', () =>
 		withoutAlarmArming(async () => {
 			const claim = await fixture();
 			const before = await inSection((context) => state(context, claim));
-			const preparation = Promise.withResolvers<ListingTaskPreparation>();
+			const pool = new ByteBufferPool({
+				buffers: 1,
+				bufferSize: 5 * 1024 * 1024
+			});
+			const failure = new Error('Preparation RPC unavailable');
 			const server = workerRpc({
-				prepareListingTask: () => preparation.promise
+				prepareListingTaskWithCapacity: () => Promise.reject(failure)
 			});
 			await expect(
 				new ListingTaskWorker({
 					server,
 					database: env.CUPBOARD_DB,
 					blobs: env.BLOBS,
-					buffers: new NarReadBufferPool()
+					buffers: new NarReadBufferPool(),
+					outputBuffers: pool
+				}).run(claim)
+			).rejects.toBe(failure);
+			expect({
+				state: await inSection((context) => state(context, claim)),
+				buffers: pool.state
+			}).toStrictEqual({ state: before, buffers: { free: 1, allocations: 1 } });
+		}));
+
+	it('bounds a stalled preparation RPC without writing artifact bytes', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const before = await inSection((context) => state(context, claim));
+			const pool = new ByteBufferPool({
+				buffers: 1,
+				bufferSize: 5 * 1024 * 1024
+			});
+			const preparation = Promise.withResolvers<ListingTaskPreparation>();
+			const server = workerRpc({
+				prepareListingTaskWithCapacity: () => preparation.promise
+			});
+			await expect(
+				new ListingTaskWorker({
+					server,
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					buffers: new NarReadBufferPool(),
+					outputBuffers: pool
 				}).run(claim, { budgetMs: 50 })
 			).rejects.toBeInstanceOf(SubrequestTimeoutError);
 			preparation.reject(new Error('late preparation failure'));
-			expect(await inSection((context) => state(context, claim))).toStrictEqual(
-				before
-			);
+			expect({
+				state: await inSection((context) => state(context, claim)),
+				buffers: pool.state
+			}).toStrictEqual({ state: before, buffers: { free: 1, allocations: 1 } });
 		}));
 
 	it('does not retire another multipart producer using the same claim', () =>

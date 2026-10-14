@@ -6,6 +6,10 @@ import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { positiveSafeInteger } from '@cupboard/shared/limits';
 import { drizzle } from 'drizzle-orm/d1';
 
+import {
+	ArtifactOutputBuffer,
+	ArtifactWriterUnavailableError
+} from '../blob/artifact-multipart-writer.ts';
 import { type ArtifactStageLease } from '../blob/artifact-staging.ts';
 import { type ByteBufferPool } from '../blob/byte-buffers.ts';
 import { CasObjectStore } from '../blob/cas-object-store.ts';
@@ -35,7 +39,7 @@ const cleanupBudgetMs = 1000;
 
 type ListingTaskRpc = Pick<
 	CupboardServer,
-	| 'prepareListingTask'
+	| 'prepareListingTaskWithCapacity'
 	| 'registerArtifactMultipart'
 	| 'sealArtifactStaging'
 	| 'renewListingTask'
@@ -60,7 +64,7 @@ export interface ListingTaskWorkerOptions {
 }
 export type ListingTaskWorkerResult =
 	| ListingTaskCompletion
-	| { readonly kind: 'reused' }
+	| { readonly kind: 'reused' | 'local-capacity' }
 	| { readonly kind: 'capacity'; readonly retryAt: IsoTimestamp }
 	| {
 			readonly kind: 'failed';
@@ -171,7 +175,8 @@ export class ListingTaskWorker {
 
 	private async produce(
 		prepared: Extract<ListingTaskPreparation, { kind: 'generate' | 'promote' }>,
-		signal: AbortSignal
+		signal: AbortSignal,
+		outputBuffer?: ArtifactOutputBuffer
 	): Promise<ListingTaskWorkerResult> {
 		const lease = prepared.lease;
 		const attempt = new StagingUploadAttempt(prepared.kind === 'promote');
@@ -183,6 +188,11 @@ export class ListingTaskWorker {
 					if (prepared.kind === 'promote') {
 						fact = prepared.fact;
 					} else {
+						if (outputBuffer === undefined) {
+							throw new ArtifactWriterUnavailableError(
+								'generation was prepared without an output buffer'
+							);
+						}
 						const currentUpload = await raceClaimOperation(
 							this.blobs.createMultipartUpload(lease.key),
 							workSignal
@@ -206,7 +216,7 @@ export class ListingTaskWorker {
 							expected: prepared.source.expected,
 							upload: currentUpload,
 							buffers: this.dependencies.buffers,
-							outputBuffers: this.dependencies.outputBuffers,
+							outputBuffer,
 							generatorRevision: prepared.generatorRevision,
 							maximumOutputBytes: lease.maximumBytes,
 							signal: workSignal,
@@ -290,6 +300,35 @@ export class ListingTaskWorker {
 		}
 	}
 
+	private async execute(
+		claim: ArtifactTaskClaim,
+		signal: AbortSignal
+	): Promise<ListingTaskWorkerResult> {
+		signal.throwIfAborted();
+		const outputBuffer = ArtifactOutputBuffer.tryAcquire(
+			this.dependencies.outputBuffers
+		);
+		try {
+			const prepared = await this.rpc(
+				() =>
+					this.dependencies.server.prepareListingTaskWithCapacity(
+						claim,
+						outputBuffer !== undefined
+					),
+				signal
+			);
+			if (prepared.kind !== 'generate') {
+				outputBuffer?.release();
+			}
+			if (prepared.kind !== 'generate' && prepared.kind !== 'promote') {
+				return prepared;
+			}
+			return await this.produce(prepared, signal, outputBuffer);
+		} finally {
+			outputBuffer?.release();
+		}
+	}
+
 	/**
 	 * Executes one claimed listing outside the Durable Object. The tenant RPCs
 	 * decide whether the measured output may become a cache publication.
@@ -325,16 +364,7 @@ export class ListingTaskWorker {
 				() =>
 					withDeadlineBudget(
 						budgetMs,
-						async () => {
-							const prepared = await this.rpc(
-								() => this.dependencies.server.prepareListingTask(claim),
-								signal
-							);
-							if (prepared.kind !== 'generate' && prepared.kind !== 'promote') {
-								return prepared;
-							}
-							return this.produce(prepared, signal);
-						},
+						() => this.execute(claim, signal),
 						'artifact.task'
 					)
 			);
