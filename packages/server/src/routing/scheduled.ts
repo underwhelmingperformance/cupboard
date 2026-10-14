@@ -420,33 +420,42 @@ export async function handleMaintenanceQueue(
 	const logger = rootLogger().with({ worker: 'scheduled', queue: batch.queue });
 
 	for (const message of batch.messages) {
-		const messageLogger = logger.with({
-			messageId: message.id,
-			attempts: message.attempts
-		});
-		const parsed = maintenanceQueueMessageSchema.safeParse(message.body);
-
-		if (!parsed.success) {
-			logInvalidMaintenanceQueueMessage(messageLogger, parsed.error);
-			message.ack();
-			continue;
-		}
-
-		const decision = await executeMaintenanceQueueMessage(
-			messageLogger,
-			env,
-			buffers,
-			parsed.data
-		);
-
-		if (decision.action === 'ack') {
-			message.ack();
-			continue;
-		}
-
-		logMaintenanceQueueRetry(messageLogger, parsed.data, decision);
-		message.retry({ delaySeconds: decision.delaySeconds });
+		await handleMaintenanceQueueMessage(logger, env, buffers, message);
 	}
+}
+
+export async function handleMaintenanceQueueMessage(
+	logger: Logger,
+	env: Env,
+	buffers: NarReadBufferPool,
+	message: Message
+): Promise<void> {
+	const messageLogger = logger.with({
+		messageId: message.id,
+		attempts: message.attempts
+	});
+	const parsed = maintenanceQueueMessageSchema.safeParse(message.body);
+
+	if (!parsed.success) {
+		logInvalidMaintenanceQueueMessage(messageLogger, parsed.error);
+		message.ack();
+		return;
+	}
+
+	const decision = await executeMaintenanceQueueMessage(
+		messageLogger,
+		env,
+		buffers,
+		parsed.data
+	);
+
+	if (decision.action === 'ack') {
+		message.ack();
+		return;
+	}
+
+	logMaintenanceQueueRetry(messageLogger, parsed.data, decision);
+	message.retry({ delaySeconds: decision.delaySeconds });
 }
 
 export async function executeMaintenanceQueueMessage(

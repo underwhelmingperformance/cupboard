@@ -65,8 +65,9 @@ import {
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
+import { handleWorkerQueue } from './queue.ts';
 import { readApp, serveCacheSetup } from './read-app.ts';
-import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
+import { enqueueMaintenanceJobs } from './scheduled.ts';
 import {
 	innerRequest,
 	tenantUncachedRead,
@@ -567,8 +568,7 @@ export default {
 
 	async queue(batch, env) {
 		await withSubrequestSlice(
-			() =>
-				handleMaintenanceQueue(batch, boundedWorkerEnv(env), narReadBuffers),
+			() => handleWorkerQueue(batch, env, narReadBuffers),
 			{ subrequests: subrequestsPerInvocation(env) }
 		);
 	}

@@ -14,6 +14,7 @@ import {
 	currentListingGeneratorRevision,
 	type NarListingFact
 } from '@cupboard/protocol/artifacts';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -26,6 +27,11 @@ import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
+import {
+	ArtifactQueueConsumer,
+	type ArtifactQueueDependencies
+} from '../routing/artifact-queue-consumer.ts';
+import { type ArtifactQueueMessage } from '../routing/artifact-queue-message.ts';
 import {
 	ArtifactTaskOwnershipLostError,
 	ListingTaskWorker,
@@ -256,9 +262,193 @@ function workerRpc(
 	};
 }
 
+function artifactMessage(body: unknown, actions: unknown[]): Message {
+	return {
+		id: 'artifact-message',
+		timestamp: new Date(),
+		attempts: 1,
+		body,
+		ack: () => {
+			actions.push({ action: 'ack' });
+		},
+		retry: (options) => {
+			actions.push({ action: 'retry', delaySeconds: options?.delaySeconds });
+		}
+	};
+}
+
+function artifactConsumer(
+	sent: ArtifactQueueMessage[],
+	executeTask?: ArtifactQueueDependencies['executeTask']
+) {
+	return new ArtifactQueueConsumer({
+		blobs: env.BLOBS,
+		database: env.CUPBOARD_DB,
+		buffers: new NarReadBufferPool(),
+		serverFor: () => currentServer(),
+		queue: {
+			send: (body) => {
+				sent.push(body);
+				return Promise.resolve({
+					metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } }
+				});
+			}
+		},
+		executeTask
+	});
+}
+
+function jobMessage(claim: ArtifactTaskClaim): ArtifactQueueMessage {
+	return {
+		kind: 'artifact-job',
+		tenant: fixtureTenant,
+		job: { id: claim.jobId, generation: claim.jobGeneration },
+		artifactKind: 'listing'
+	};
+}
+
 describe('listing task workflow', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => vi.restoreAllMocks());
+
+	it('does not claim a queue task whose requested kind differs from its job', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const before = await inSection((context) => state(context, claim));
+			const owner = crypto.randomUUID();
+			const result = await currentServer().claimArtifactTask(
+				{ id: claim.jobId, generation: claim.jobGeneration },
+				owner,
+				'build-log'
+			);
+			expect({
+				result,
+				state: await inSection((context) => state(context, claim))
+			}).toStrictEqual({
+				result: { kind: 'idle', pending: false },
+				state: before
+			});
+		}));
+
+	it('consumes a listing job and sends its continuation only after completion', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = jobMessage(claim);
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			await artifactConsumer(sent).handleMessage(
+				artifactMessage(body, actions)
+			);
+			const after = await inSection((context) => state(context, claim));
+			expect({
+				actions,
+				sent,
+				progress: after.job?.progress,
+				artifacts: after.artifacts.map((row) => row.state)
+			}).toStrictEqual({
+				actions: [{ action: 'ack' }],
+				sent: [body],
+				progress: { discovered: 1, completed: 1, skipped: 0, failed: 0 },
+				artifacts: ['live']
+			});
+		}));
+
+	it('acknowledges malformed artifact messages without claiming or executing work', async () => {
+		const actions: unknown[] = [];
+		const sent: ArtifactQueueMessage[] = [];
+		const execute = vi.fn(() =>
+			Promise.resolve({ kind: 'completed' } as const)
+		);
+		await artifactConsumer(sent, execute).handleMessage(
+			artifactMessage({ kind: 'artifact-job' }, actions)
+		);
+		expect({ actions, sent, executions: execute.mock.calls }).toStrictEqual({
+			actions: [{ action: 'ack' }],
+			sent: [],
+			executions: []
+		});
+	});
+
+	it('defers a second valid artifact message in the same consumer invocation', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			const consumer = artifactConsumer(sent);
+			await consumer.handleMessage(artifactMessage(jobMessage(claim), actions));
+			await consumer.handleMessage(artifactMessage(jobMessage(claim), actions));
+			expect({ actions, sent }).toStrictEqual({
+				actions: [{ action: 'ack' }, { action: 'retry', delaySeconds: 60 }],
+				sent: [jobMessage(claim)]
+			});
+		}));
+
+	it('ignores a cancelled job generation in the artifact queue', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			await inSection((context) => {
+				const jobs = new ArtifactJobService(context);
+				jobs.cancelInSection(claim.jobId);
+				jobs.resumeInSection(claim.jobId);
+				return Promise.resolve();
+			});
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			const execute = vi.fn(() =>
+				Promise.resolve({ kind: 'completed' } as const)
+			);
+			await artifactConsumer(sent, execute).handleMessage(
+				artifactMessage(jobMessage(claim), actions)
+			);
+			expect({ actions, sent, executions: execute.mock.calls }).toStrictEqual({
+				actions: [{ action: 'ack' }],
+				sent: [],
+				executions: []
+			});
+		}));
+
+	it.each([
+		'capacity',
+		'transport',
+		'unavailable',
+		'bytes-missing',
+		'over-quota'
+	] as const)('retries %s without counting a completed task', (reason) =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			const retryAt = isoTimestamp(new Date(Date.now() + 120_000));
+			const execute = () => {
+				if (reason === 'transport') {
+					return Promise.reject(new Error('R2 temporarily unavailable'));
+				}
+				return reason === 'capacity'
+					? Promise.resolve({ kind: 'capacity' as const, retryAt })
+					: Promise.resolve({ kind: reason });
+			};
+			await artifactConsumer(sent, execute).handleMessage(
+				artifactMessage(jobMessage(claim), actions)
+			);
+			const after = await inSection((context) => state(context, claim));
+			expect({
+				actions,
+				sent,
+				progress: after.job?.progress,
+				artifacts: after.artifacts
+			}).toStrictEqual({
+				actions: [
+					{ action: 'retry', delaySeconds: reason === 'capacity' ? 120 : 60 }
+				],
+				sent: [],
+				progress: { discovered: 1, completed: 0, skipped: 0, failed: 0 },
+				artifacts: []
+			});
+		})
+	);
 
 	it('executes a claimed listing in the Worker without entering the tenant gate for byte transfers', () =>
 		withoutAlarmArming(async () => {

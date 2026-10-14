@@ -760,6 +760,22 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
+	it('routes malformed artifact envelopes separately from maintenance messages', async () => {
+		const actions: QueueMessageAction[] = [];
+		const batch = queueBatch(
+			[
+				queueMessage('artifact', { kind: 'artifact-job' }, actions),
+				queueMessage('maintenance', { kind: 'local-step-sweep' }, actions)
+			],
+			actions
+		);
+		await worker.queue(batch, env);
+		expect(actions).toStrictEqual([
+			{ target: 'message', id: 'artifact', action: 'ack' },
+			{ target: 'message', id: 'maintenance', action: 'ack' }
+		]);
+	});
+
 	it('queue entrypoint acks, retries, and logs messages independently', async () => {
 		const actions: QueueMessageAction[] = [];
 		const batch = queueBatch(

@@ -17,6 +17,8 @@ import {
 	artifactTaskOwnerSchema
 } from '@cupboard/protocol/artifact-jobs';
 import {
+	type ArtifactKind,
+	artifactKinds,
 	type NarListingFact,
 	narListingFactSchema
 } from '@cupboard/protocol/artifacts';
@@ -3141,16 +3143,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	async claimArtifactTask(
 		version: ArtifactJobVersion,
-		owner: string
+		owner: string,
+		expectedKind?: ArtifactKind
 	): Promise<ArtifactTaskClaimRpcResult> {
 		const parsedVersion = artifactJobVersionSchema.parse(version);
 		const parsedOwner = artifactTaskOwnerSchema.parse(owner);
+		const parsedKind = z.enum(artifactKinds).optional().parse(expectedKind);
 		await this.initialise();
 		return this.metered('artifact-task-claim', () =>
 			this.context.criticalSection(() =>
 				new ArtifactTaskRpcService(this.context).claimInSection(
 					parsedVersion,
-					parsedOwner
+					parsedOwner,
+					parsedKind
 				)
 			)
 		);

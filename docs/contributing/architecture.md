@@ -64,8 +64,10 @@ binds a separate `CONTROL_DB` database, which the tenant Worker never receives.
 Both Workers also bind `cupboard-artifacts` as `ARTIFACT_QUEUE`. Its control
 Worker consumer accepts one message per batch and at most two concurrent
 invocations. The queue has a separate `cupboard-artifacts-dlq`. These resources
-are installed before native artifact producers are activated; the current build
-does not enqueue artifact jobs.
+are installed before native artifact producers are activated. The consumer
+processes listing jobs under a 14-minute budget, using generation-fenced tenant
+RPCs and sending a continuation after a terminal task outcome. Discovery and
+initial dispatch remain disabled.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a

@@ -1,4 +1,5 @@
 import {
+	type ArtifactJobDefinition,
 	artifactJobDefinitionSchema,
 	type ArtifactJobVersion,
 	artifactTaskClaimSchema,
@@ -33,7 +34,8 @@ export class ArtifactTaskRpcService {
 
 	async claimInSection(
 		version: ArtifactJobVersion,
-		owner: ArtifactTaskOwner
+		owner: ArtifactTaskOwner,
+		expectedKind?: ArtifactJobDefinition['kind']
 	): Promise<ArtifactTaskClaimRpcResult> {
 		if (this.context.offboarding) {
 			return { kind: 'idle', pending: false };
@@ -55,6 +57,9 @@ export class ArtifactTaskRpcService {
 		const jobs = new ArtifactJobService(this.context);
 		const job = jobs.summaryInSection(version.id);
 		if (job?.generation !== version.generation || job.state !== 'running') {
+			return { kind: 'idle', pending: false };
+		}
+		if (expectedKind !== undefined && job.definition.kind !== expectedKind) {
 			return { kind: 'idle', pending: false };
 		}
 		const result = jobs.claimInSection(version.id, owner);

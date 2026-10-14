@@ -595,7 +595,8 @@ cupboard uses, not your Cloudflare subscription.
 `init` creates anything that's missing and leaves existing resources alone.
 
 The artifact queue is provisioned before native artifact producers are
-activated. The current build does not enqueue artifact jobs.
+activated. The consumer can process listing jobs; discovery and initial dispatch
+remain disabled.
 
 ### Resource names and cron triggers
 
