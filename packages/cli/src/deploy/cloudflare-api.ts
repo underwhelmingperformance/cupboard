@@ -183,7 +183,7 @@ export interface CloudflareApi {
 	r2BucketExists(name: string): Promise<boolean>;
 	ensureR2Bucket(name: string): Promise<void>;
 	/**
-	 * Reconciles lifecycle rules that expire staging objects and abort incomplete
+	 * Expires push and artifact staging objects after a day and aborts incomplete
 	 * staging and tenant multipart uploads after a day. The bucket must exist.
 	 */
 	ensureUploadLifecycleRules(bucketName: string): Promise<void>;
@@ -437,17 +437,17 @@ const stagingReclaimRuleId = 'cupboard-staging-reclaim';
 const oneDayInSeconds = 24 * 60 * 60;
 
 /**
- * The lifecycle rule reclaiming a push's transient staging objects: it expires
- * anything under `staging/` a day after it is written, and aborts incomplete
- * multipart uploads there a day after they begin. An abandoned incomplete
- * multipart upload is not a listable object, so this rule is the only thing
- * that can recover its storage.
+ * R2 cannot list incomplete multipart uploads. Object-deletion rules therefore
+ * do not reclaim their uploaded parts.
  */
-function stagingReclaimRule(): LifecycleUpdateParams.Rule {
+function stagingReclaimRule(
+	id: string,
+	prefix: string
+): LifecycleUpdateParams.Rule {
 	return {
-		id: stagingReclaimRuleId,
+		id,
 		enabled: true,
-		conditions: { prefix: stagingPrefix },
+		conditions: { prefix },
 		deleteObjectsTransition: {
 			condition: { type: 'Age', maxAge: oneDayInSeconds }
 		},
@@ -648,7 +648,14 @@ export function createCloudflareApi(
 		},
 
 		async ensureUploadLifecycleRules(bucketName) {
-			const desired = [stagingReclaimRule(), tenantMultipartReclaimRule()];
+			const desired = [
+				stagingReclaimRule(stagingReclaimRuleId, stagingPrefix),
+				tenantMultipartReclaimRule(),
+				stagingReclaimRule(
+					'cupboard-artifact-staging-reclaim',
+					'artifact-staging/'
+				)
+			];
 			const current = await client.r2.buckets.lifecycle.get(
 				bucketName,
 				account

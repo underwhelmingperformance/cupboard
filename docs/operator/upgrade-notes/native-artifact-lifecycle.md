@@ -5,6 +5,11 @@ references for listings, logs, traces and generation proofs require compatible
 quota, collection and retirement code in both Workers. The storage expansion
 alone does not enable reference reservation.
 
+Deployment also reconciles a bucket lifecycle rule for `artifact-staging/`. The
+rule deletes transient objects and aborts incomplete multipart uploads after a
+day. CAS bytes and completed tenant publications use their existing retention
+rules. R2 applies lifecycle cleanup asynchronously.
+
 Use `cupboard deploy` or `cupboard init`. The command expands the transition,
 uploads both Workers and confirms that both Workers serve the uploaded build.
 Every active or suspended tenant must then record local step 8 before the
