@@ -139,6 +139,10 @@ export function narVerifyProgress(): NarVerifyProgress {
 export interface NarVerifyOptions {
 	readonly progress?: NarVerifyProgress;
 	readonly metadata?: NarMetadataCapture;
+	/**
+	 * A required consumer of decoded bytes. Rejections fail verification.
+	 */
+	readonly decoded?: (chunk: Uint8Array) => Promise<void>;
 }
 
 export interface StoredNarVerifyOptions extends NarVerifyOptions {
@@ -247,7 +251,8 @@ class NarDecoder {
 	constructor(
 		private readonly limit: number,
 		private readonly progress: NarVerifyProgress,
-		private readonly metadata: OptionalNarMetadata
+		private readonly metadata: OptionalNarMetadata,
+		private readonly decoded?: (chunk: Uint8Array) => Promise<void>
 	) {
 		this.zstd = new ZstdDecoder({
 			chunkSize: narChunkSize,
@@ -270,6 +275,7 @@ class NarDecoder {
 		}
 
 		await this.hash.write(chunk);
+		await this.decoded?.(chunk);
 		this.metadata.write(chunk);
 	}
 
@@ -387,7 +393,8 @@ async function verifyNarChunks<Result extends DeclaredNarVerification>(
 	progress: NarVerifyProgress,
 	sink: CompressedSink<Result>,
 	watchdog?: StallWatchdog,
-	metadataSink?: NarMetadataCapture
+	metadataSink?: NarMetadataCapture,
+	decoded?: (chunk: Uint8Array) => Promise<void>
 ): Promise<Result | NarMismatch> {
 	const signal = watchdog?.signal;
 	const metadata = new OptionalNarMetadata(metadataSink);
@@ -396,7 +403,8 @@ async function verifyNarChunks<Result extends DeclaredNarVerification>(
 	const decoder = new NarDecoder(
 		Math.min(expected.narSize, verifiableMaxBytes),
 		progress,
-		metadata
+		metadata,
+		decoded
 	);
 	let next = readAhead(source);
 	let isDecoded = false;
@@ -498,7 +506,7 @@ async function verifyNarChunks<Result extends DeclaredNarVerification>(
 export async function verifyDecompressedNar(
 	body: ReadableStream,
 	expected: ExpectedNar,
-	{ progress = narVerifyProgress(), metadata }: NarVerifyOptions = {}
+	{ progress = narVerifyProgress(), metadata, decoded }: NarVerifyOptions = {}
 ): Promise<NarVerification> {
 	return verifyNarChunks(
 		new BodyChunks(body),
@@ -506,7 +514,8 @@ export async function verifyDecompressedNar(
 		progress,
 		new FileHashSink(),
 		undefined,
-		metadata
+		metadata,
+		decoded
 	);
 }
 
@@ -529,7 +538,8 @@ export async function verifyStoredNar(
 		signal: outerSignal,
 		stallMs = narVerifyStallMs,
 		progress = narVerifyProgress(),
-		metadata
+		metadata,
+		decoded
 	}: StoredNarVerifyOptions
 ): Promise<NarVerification> {
 	const watchdog = new StallWatchdog(stallMs, outerSignal);
@@ -548,7 +558,8 @@ export async function verifyStoredNar(
 			progress,
 			new FileHashSink(),
 			watchdog,
-			metadata
+			metadata,
+			decoded
 		);
 		watchdog.signal.throwIfAborted();
 
@@ -747,7 +758,8 @@ export async function verifyAndWriteStoredNar(
 		signal: outerSignal,
 		stallMs = canonicalWriteStallMs,
 		progress = narVerifyProgress(),
-		metadata
+		metadata,
+		decoded
 	}: CanonicalWriteOptions
 ): Promise<DeclaredNarVerification> {
 	// R2 limits the time for which the put receives nothing, which reads alone
@@ -786,7 +798,8 @@ export async function verifyAndWriteStoredNar(
 				receiving
 			),
 			watchdog,
-			metadata
+			metadata,
+			decoded
 		);
 		watchdog.signal.throwIfAborted();
 
