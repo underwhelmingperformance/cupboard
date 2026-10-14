@@ -138,6 +138,230 @@ async function completeStage(
 describe('durable artifact staging', () => {
 	beforeEach(resetTestServer);
 
+	it.each(['recover', 'expire'] as const)(
+		'keeps sealed bytes after lease expiry to %s within the recovery window',
+		(action) =>
+			withoutAlarmArming(async () => {
+				const lease = await withStage(
+					async (staging, _jobs, context, claim) => {
+						const lease = leaseOf(await staging.reserveInSection(claim));
+						await completeStage(staging, context, lease);
+						return lease;
+					}
+				);
+				vi.setSystemTime(new Date(lease.expiresAt));
+				const retained = await runInDurableObject(
+					currentServer(),
+					async (instance) => {
+						const staging = new ArtifactStagingService(instance.context);
+						const collected = await staging.collect();
+						return {
+							collected,
+							oldReady: staging.readyInSection(lease),
+							oldRetired: staging.retireInSection(lease),
+							exists:
+								(await instance.context.env.BLOBS.head(lease.key)) !== null,
+							states: instance.context.db
+								.select()
+								.from(schema.artifactStages)
+								.all()
+								.map((row) => row.state)
+						};
+					}
+				);
+				expect(retained).toStrictEqual({
+					collected: {
+						removed: 0,
+						pending: true,
+						nextWakeAt: lease.cleanupAfter
+					},
+					oldReady: undefined,
+					oldRetired: false,
+					exists: true,
+					states: ['ready']
+				});
+				if (action === 'expire') {
+					vi.setSystemTime(new Date(lease.cleanupAfter));
+					const expired = await runInDurableObject(
+						currentServer(),
+						async (instance) => {
+							const collected = await new ArtifactStagingService(
+								instance.context
+							).collect();
+							return {
+								collected,
+								exists:
+									(await instance.context.env.BLOBS.head(lease.key)) !== null,
+								states: instance.context.db
+									.select()
+									.from(schema.artifactStages)
+									.all()
+									.map((row) => row.state)
+							};
+						}
+					);
+					expect(expired).toStrictEqual({
+						collected: { removed: 1, pending: false },
+						exists: false,
+						states: []
+					});
+					return;
+				}
+				const claimed = await currentServer().claimArtifactTask(
+					{ id: lease.claim.jobId, generation: lease.claim.jobGeneration },
+					crypto.randomUUID()
+				);
+				if (claimed.kind !== 'claimed') {
+					throw new Error('The expired task was not reclaimed');
+				}
+				const between = await runInDurableObject(currentServer(), (instance) =>
+					new ArtifactStagingService(instance.context).collect()
+				);
+				expect(between).toStrictEqual({
+					removed: 0,
+					pending: true,
+					nextWakeAt: lease.cleanupAfter
+				});
+				const recovered = await runInDurableObject(
+					currentServer(),
+					(instance) =>
+						instance.context.criticalSection(() => {
+							const reused = new ArtifactStagingService(
+								instance.context
+							).reuseReadyInSection(claimed.claim);
+							return Promise.resolve(
+								reused === undefined
+									? undefined
+									: {
+											id: reused.id,
+											key: reused.key,
+											generation: reused.claim.generation,
+											recoveryExtended: reused.cleanupAfter > lease.cleanupAfter
+										}
+							);
+						})
+				);
+				expect(recovered).toStrictEqual({
+					id: lease.id,
+					key: lease.key,
+					generation: 2,
+					recoveryExtended: true
+				});
+			})
+	);
+
+	it.each([
+		'cancelled',
+		'source-replaced',
+		'cache-replaced',
+		'offboarding',
+		'task-finished',
+		'stage-ahead'
+	] as const)('does not retain invalid sealed recovery after %s', (change) =>
+		withoutAlarmArming(async () => {
+			const lease = await withStage(async (staging, jobs, context, claim) => {
+				const lease = leaseOf(await staging.reserveInSection(claim));
+				await completeStage(staging, context, lease);
+				switch (change) {
+					case 'cancelled': {
+						jobs.cancelInSection(claim.jobId);
+						break;
+					}
+					case 'source-replaced': {
+						context.db
+							.update(schema.narInfos)
+							.set({ generation: narInfoGenerationSchema.parse(2) })
+							.run();
+						break;
+					}
+					case 'cache-replaced': {
+						context.db
+							.update(schema.cacheIdentities)
+							.set({ generation: cacheGenerationSchema.parse(2) })
+							.run();
+						break;
+					}
+					case 'offboarding': {
+						context.offboarding = true;
+						break;
+					}
+					case 'task-finished': {
+						jobs.finishInSection(claim, 'failed');
+						break;
+					}
+					case 'stage-ahead': {
+						context.db
+							.update(schema.artifactStages)
+							.set({ taskGeneration: claim.generation + 1 })
+							.run();
+						break;
+					}
+				}
+				return lease;
+			});
+			vi.setSystemTime(new Date(lease.expiresAt));
+			const after = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const collected = await new ArtifactStagingService(
+						instance.context
+					).collect();
+					return {
+						collected,
+						exists: (await instance.context.env.BLOBS.head(lease.key)) !== null,
+						stages: instance.context.db
+							.select()
+							.from(schema.artifactStages)
+							.all()
+					};
+				}
+			);
+			expect(after).toStrictEqual({
+				collected: { removed: 1, pending: false },
+				exists: false,
+				stages: []
+			});
+		})
+	);
+
+	it('preserves queued sealed recovery without extending the old producer authority', () =>
+		withoutAlarmArming(() =>
+			withStage(async (staging, _jobs, context, claim) => {
+				const lease = leaseOf(await staging.reserveInSection(claim));
+				const sealed = await completeStage(staging, context, lease);
+				const admission = new ArtifactAdmissionService(
+					context
+				).requeueInSection(claim);
+				const row = context.db.select().from(schema.artifactStages).get();
+				if (row?.multipartId === null || row?.multipartId === undefined) {
+					throw new Error('The sealed upload ID is missing');
+				}
+				expect({
+					admission: admission.kind,
+					ready: staging.readyInSection(lease),
+					renewed: staging.renewInSection(lease),
+					sealed: await staging.sealInSection(
+						lease,
+						row.multipartId,
+						sealed.measurement
+					),
+					retired: staging.retireInSection(lease),
+					states: context.db
+						.select()
+						.from(schema.artifactStages)
+						.all()
+						.map((stage) => stage.state)
+				}).toStrictEqual({
+					admission: 'admitted',
+					ready: undefined,
+					renewed: undefined,
+					sealed: false,
+					retired: false,
+					states: ['ready']
+				});
+			})
+		));
+
 	it.each(['sealed', 'abandoned'] as const)(
 		'reclaims %s staging through durable alarm passes',
 		(kind) =>

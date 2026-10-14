@@ -107,6 +107,17 @@ reservations before promotion and after preparation failure or timeout. A
 multipart writer receives ownership of a generation reservation and returns the
 buffer only after every storage operation finishes.
 
+Producer authority and staging retention are separate. A producer still needs a
+current claim and write window. Sealed bytes can remain for recovery until the
+persisted cleanup deadline while the job, cache, source, kind and task
+generation remain valid. The existing late-write horizon exceeds the dispatch
+backstop, so recovery can begin after a consumer disappears without adding a
+storage budget or migration. Handover renews that bounded deadline without
+shortening it. Expired or deferred producers cannot use retention to renew, seal
+or retire the stage. Cancellation, source replacement, cache replacement,
+offboarding and a terminal task remove recovery eligibility. Explicit retirement
+still removes sealed bytes promptly.
+
 Dispatch orders due jobs by their persisted deadlines. New and resumed jobs use
 the current time. A wake, task completion or deferral makes a future deadline
 due now and preserves an existing overdue deadline. Repeated wakes therefore

@@ -274,7 +274,7 @@ export class ArtifactJobService {
 			: undefined;
 	}
 
-	private captureDispatchTask(
+	private captureTask(
 		version: ArtifactJobVersion,
 		id: ArtifactTaskId
 	): DispatchCandidate | undefined {
@@ -293,6 +293,18 @@ export class ArtifactJobService {
 		) {
 			return;
 		}
+		return { job, task };
+	}
+
+	private captureDispatchTask(
+		version: ArtifactJobVersion,
+		id: ArtifactTaskId
+	): DispatchCandidate | undefined {
+		const captured = this.captureTask(version, id);
+		if (captured === undefined) {
+			return;
+		}
+		const { job, task } = captured;
 		if (
 			task.state === 'claimed' &&
 			task.jobGeneration >= job.generation &&
@@ -301,8 +313,9 @@ export class ArtifactJobService {
 		) {
 			return;
 		}
-		return { job, task };
+		return captured;
 	}
+
 	private dispatchSnapshot({
 		job,
 		task
@@ -511,6 +524,20 @@ export class ArtifactJobService {
 		return [
 			...new Set([...ready, ...this.candidates(job).map((task) => task.id)])
 		].slice(0, claimScanLimit);
+	}
+
+	inspectRecoveryTaskInSection(
+		version: ArtifactJobVersion,
+		id: ArtifactTaskId
+	): ArtifactDispatchTask | undefined {
+		const captured = this.captureTask(version, id);
+		if (
+			captured === undefined ||
+			!this.sourceCurrent(captured.job, captured.task.source)
+		) {
+			return;
+		}
+		return this.dispatchSnapshot(captured);
 	}
 
 	inspectDispatchTaskInSection(

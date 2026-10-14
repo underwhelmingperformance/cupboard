@@ -7233,8 +7233,13 @@ build traces available from a cupboard cache.
       and multipart uploads. Retry transitions atomically defer the owned task
       and replace its admission when capacity permits. Repeated retry requests
       reuse the replacement admission. Sealed staging has a separate bounded
-      admission allowance so full unstaged slots do not prevent promotion. Queue
-      retry integration, job dispatch and producer activation remain pending.
+      admission allowance so full unstaged slots do not prevent promotion.
+      Sealed bytes now retain a bounded recovery window after producer expiry,
+      including the gap between a replacement claim and adoption. Retention does
+      not extend old producer authority. Recovery rechecks job, cache, source,
+      kind and task generation; handover renews the bounded cleanup deadline.
+      Queue retry integration, job dispatch and producer activation remain
+      pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

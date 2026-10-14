@@ -127,9 +127,6 @@ export class ArtifactStagingService {
 			: undefined;
 	}
 	private active(row: Stage): boolean {
-		if (this.protectedDeadline(row) !== undefined) {
-			return true;
-		}
 		const now = isoTimestamp(new Date());
 		return (
 			row.state !== 'retired' &&
@@ -138,6 +135,48 @@ export class ArtifactStagingService {
 			this.taskDeadline(row) !== undefined
 		);
 	}
+	private recoveryDeadline(row: Stage): IsoTimestamp | undefined {
+		if (
+			this.context.offboarding ||
+			row.state !== 'ready' ||
+			!row.writesSealed ||
+			row.cleanupAfter <= isoTimestamp(new Date())
+		) {
+			return;
+		}
+		const jobs = new ArtifactJobService(this.context);
+		const job = jobs.summaryInSection(row.jobId);
+		if (job === undefined || job.generation < row.jobGeneration) {
+			return;
+		}
+		const source = jobs.inspectRecoveryTaskInSection(job, row.taskId);
+		return source?.sourceKey === row.sourceKey &&
+			source.cacheGeneration === row.cacheGeneration &&
+			source.generation >= row.taskGeneration &&
+			source.definition.kind === row.kind
+			? row.cleanupAfter
+			: undefined;
+	}
+	private retained(row: Stage): boolean {
+		return (
+			this.protectedDeadline(row) !== undefined ||
+			this.active(row) ||
+			this.recoveryDeadline(row) !== undefined
+		);
+	}
+	private nextDeadline(row: Stage): IsoTimestamp {
+		if (row.state === 'retired') {
+			return row.nextCleanupAt;
+		}
+		const protectedUntil = this.protectedDeadline(row);
+		if (protectedUntil !== undefined) {
+			return protectedUntil;
+		}
+		return this.active(row)
+			? row.expiresAt
+			: (this.recoveryDeadline(row) ?? row.expiresAt);
+	}
+
 	private lease(row: Stage, claim: ArtifactTaskClaim): ArtifactStageLease {
 		return {
 			id: row.id,
@@ -165,7 +204,7 @@ export class ArtifactStagingService {
 	}
 	private cleanupPlanInSection(): Stage[] {
 		for (const row of this.rows()) {
-			if (row.state !== 'retired' && !this.active(row)) {
+			if (row.state !== 'retired' && !this.retained(row)) {
 				this.retire(row);
 			}
 		}
@@ -177,11 +216,7 @@ export class ArtifactStagingService {
 	private collectionInSection(removed: number): ArtifactStageCollection {
 		const rows = this.rows();
 		const nextWakeAt = rows
-			.map((row) =>
-				row.state === 'retired'
-					? row.nextCleanupAt
-					: (this.protectedDeadline(row) ?? row.expiresAt)
-			)
+			.map((row) => this.nextDeadline(row))
 			.toSorted(byCodeUnit)[0];
 		return {
 			removed,
@@ -285,6 +320,11 @@ export class ArtifactStagingService {
 			return;
 		}
 		const writeUntil = isoTimestamp(new Date(Date.now() + producerWindowMs));
+		const cleanupAfterMs = Math.max(
+			Date.parse(reusable.cleanupAfter),
+			Date.now() + lateWriteTombstoneHorizonMs
+		);
+		const cleanupAfter = isoTimestamp(new Date(cleanupAfterMs));
 		const updated = this.context.db
 			.update(schema.artifactStages)
 			.set({
@@ -292,7 +332,8 @@ export class ArtifactStagingService {
 				jobGeneration: claim.jobGeneration,
 				owner: claim.owner,
 				expiresAt,
-				writeUntil
+				writeUntil,
+				cleanupAfter
 			})
 			.where(eq(schema.artifactStages.id, reusable.id))
 			.returning()
@@ -484,7 +525,10 @@ export class ArtifactStagingService {
 	}
 	retireInSection(lease: ArtifactStageLease): boolean {
 		const row = this.rowFor(lease);
-		if (row === undefined) {
+		if (
+			row === undefined ||
+			(row.writesSealed && this.retained(row) && !this.active(row))
+		) {
 			return false;
 		}
 		this.retire(row);
