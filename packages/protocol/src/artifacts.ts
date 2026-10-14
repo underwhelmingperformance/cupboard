@@ -1,3 +1,7 @@
+import {
+	nixSha256HashSchema,
+	sha256HexDigestSchema
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 export const artifactIdSchema = z.uuid().brand('ArtifactId');
@@ -38,3 +42,16 @@ export type ListingGeneratorRevision = z.output<
 
 export const currentListingGeneratorRevision =
 	listingGeneratorRevisionSchema.parse('nix-v1-r1');
+
+export const narListingFactSchema = z.strictObject({
+	narHash: nixSha256HashSchema,
+	generatorRevision: listingGeneratorRevisionSchema,
+	format: z.literal(1),
+	digest: sha256HexDigestSchema,
+	size: z.number().int().positive().max(maxArtifactBytes.listing)
+});
+export type NarListingFact = z.output<typeof narListingFactSchema>;
+export type NarListingIdentity = Pick<
+	NarListingFact,
+	'narHash' | 'generatorRevision'
+>;

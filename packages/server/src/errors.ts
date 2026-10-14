@@ -1673,6 +1673,17 @@ export class ArtifactStorageMigrationPendingError extends ServerHttpError {
 	}
 }
 
+export class ListingFactConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super(
+			'A listing fact already records different bytes for this NAR and generator revision'
+		);
+		this.name = 'ListingFactConflictError';
+	}
+}
+
 export class ArtifactReadChangedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;
