@@ -25,6 +25,12 @@ import { StoredNarListingGenerator } from '../blob/nar-listing-generation.ts';
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { SubrequestTimeoutError } from '../errors.ts';
+import {
+	ArtifactTaskOwnershipLostError,
+	ListingTaskWorker,
+	type ListingTaskWorkerDependencies
+} from '../routing/listing-task-worker.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
@@ -35,6 +41,7 @@ import {
 	recordTransition,
 	resetTestServer,
 	uploadMetadata,
+	verifiableNar,
 	withoutAlarmArming
 } from '../test-support.ts';
 
@@ -106,11 +113,11 @@ async function inSection<T>(
 	);
 }
 
-async function fixture() {
+async function fixture(input?: Awaited<ReturnType<typeof sourceNar>>) {
 	const token = await initialise();
 	await recordTransition('native-artifact-storage', 'expanded');
 	await recordTransition('native-artifact-publication', 'complete');
-	const nar = await sourceNar();
+	const nar = input ?? (await sourceNar());
 	await commitPath(
 		token,
 		uploadMetadata({
@@ -230,9 +237,231 @@ async function state(context: ServerContext, claim: ArtifactTaskClaim) {
 	};
 }
 
+function workerRpc(
+	overrides: Partial<ListingTaskWorkerDependencies['server']>
+): ListingTaskWorkerDependencies['server'] {
+	const real = currentServer();
+	return {
+		prepareListingTask: (claim) => real.prepareListingTask(claim),
+		registerArtifactMultipart: (lease, id) =>
+			real.registerArtifactMultipart(lease, id),
+		sealArtifactStaging: (lease, id, measurement) =>
+			real.sealArtifactStaging(lease, id, measurement),
+		renewListingTask: (lease) => real.renewListingTask(lease),
+		completeListingTask: (lease, fact) => real.completeListingTask(lease, fact),
+		retireArtifactStaging: (lease) => real.retireArtifactStaging(lease),
+		finishArtifactTask: (claim, outcome) =>
+			real.finishArtifactTask(claim, outcome),
+		...overrides
+	};
+}
+
 describe('listing task workflow', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => vi.restoreAllMocks());
+
+	it('executes a claimed listing in the Worker without entering the tenant gate for byte transfers', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const result = await new ListingTaskWorker({
+				server: currentServer(),
+				database: env.CUPBOARD_DB,
+				blobs: env.BLOBS,
+				buffers: new NarReadBufferPool()
+			}).run(claim);
+			const after = await inSection((context) => state(context, claim));
+			expect({
+				result,
+				progress: after.job?.progress,
+				artifacts: after.artifacts.map((row) => row.state),
+				stages: after.stages.map((row) => ({
+					state: row.state,
+					sealed: row.writesSealed
+				})),
+				facts: after.facts.map((row) => row.narHash),
+				references: after.references.map((row) => row.digest)
+			}).toStrictEqual({
+				result: { kind: 'completed' },
+				progress: { discovered: 1, completed: 1, skipped: 0, failed: 0 },
+				artifacts: ['live'],
+				stages: [{ state: 'retired', sealed: true }],
+				facts: [claim.source.kind === 'nar' ? claim.source.narHash : undefined],
+				references: after.facts.map((row) => row.digest)
+			});
+		}));
+
+	it('reuses sealed output in the Worker after producer expiry without opening the NAR', () =>
+		withoutAlarmArming(async () => {
+			const original = await fixture();
+			const value = await generate(original);
+			vi.setSystemTime(new Date(original.leaseExpiresAt));
+			const claimed = await currentServer().claimArtifactTask(
+				{ id: original.jobId, generation: original.jobGeneration },
+				crypto.randomUUID()
+			);
+			if (claimed.kind !== 'claimed') {
+				throw new Error('The expired listing was not reclaimed');
+			}
+			const source = value.source;
+			const blobs = env.BLOBS;
+			const existing = await blobs.list({ prefix: `cas/${value.fact.digest}` });
+			await blobs.delete(existing.objects.map((object) => object.key));
+			const get = vi.spyOn(blobs, 'get');
+			const result = await new ListingTaskWorker({
+				server: currentServer(),
+				database: env.CUPBOARD_DB,
+				blobs,
+				buffers: new NarReadBufferPool()
+			}).run(claimed.claim);
+			expect({
+				result,
+				sourceReads: get.mock.calls.filter(([key]) => key === source.key),
+				stagingReads: get.mock.calls.filter(([key]) => key === value.lease.key)
+			}).toStrictEqual({
+				result: { kind: 'completed' },
+				sourceReads: [],
+				stagingReads: [[value.lease.key]]
+			});
+		}));
+
+	it('preserves ready staging when the Worker loses the sealing acknowledgement', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const real = currentServer();
+			const failure = new Error('sealing acknowledgement lost');
+			const server = workerRpc({
+				sealArtifactStaging: async (lease, multipartId, measurement) => {
+					await real.sealArtifactStaging(lease, multipartId, measurement);
+					throw failure;
+				}
+			});
+			await expect(
+				new ListingTaskWorker({
+					server,
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					buffers: new NarReadBufferPool()
+				}).run(claim)
+			).rejects.toBe(failure);
+			const after = await inSection((context) => state(context, claim));
+			expect({
+				progress: after.job?.progress,
+				stages: after.stages.map((row) => ({
+					state: row.state,
+					sealed: row.writesSealed
+				})),
+				facts: after.facts,
+				references: after.references
+			}).toStrictEqual({
+				progress: { discovered: 1, completed: 0, skipped: 0, failed: 0 },
+				stages: [{ state: 'ready', sealed: true }],
+				facts: [],
+				references: []
+			});
+		}));
+
+	it('bounds a stalled preparation RPC without writing artifact bytes', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const before = await inSection((context) => state(context, claim));
+			const preparation = Promise.withResolvers<ListingTaskPreparation>();
+			const server = workerRpc({
+				prepareListingTask: () => preparation.promise
+			});
+			await expect(
+				new ListingTaskWorker({
+					server,
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					buffers: new NarReadBufferPool()
+				}).run(claim, { budgetMs: 50 })
+			).rejects.toBeInstanceOf(SubrequestTimeoutError);
+			preparation.reject(new Error('late preparation failure'));
+			expect(await inSection((context) => state(context, claim))).toStrictEqual(
+				before
+			);
+		}));
+
+	it('does not retire another multipart producer using the same claim', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const prepared = generationOf(
+				await currentServer().prepareListingTask(claim)
+			);
+			const upload = await env.BLOBS.createMultipartUpload(prepared.lease.key);
+			await currentServer().registerArtifactMultipart(
+				prepared.lease,
+				upload.uploadId
+			);
+			const before = await inSection((context) => state(context, claim));
+			try {
+				await expect(
+					new ListingTaskWorker({
+						server: currentServer(),
+						database: env.CUPBOARD_DB,
+						blobs: env.BLOBS,
+						buffers: new NarReadBufferPool()
+					}).run(claim)
+				).rejects.toBeInstanceOf(ArtifactTaskOwnershipLostError);
+				expect(
+					await inSection((context) => state(context, claim))
+				).toStrictEqual(before);
+			} finally {
+				await upload.abort();
+			}
+		}));
+
+	it('records an invalid archive as a failed optional listing task', () =>
+		withoutAlarmArming(async () => {
+			const nar = await verifiableNar('invalid-listing-source');
+			const claim = await fixture({
+				...nar,
+				narBytes: new Uint8Array(nar.narBytes)
+			});
+			const result = await new ListingTaskWorker({
+				server: currentServer(),
+				database: env.CUPBOARD_DB,
+				blobs: env.BLOBS,
+				buffers: new NarReadBufferPool()
+			}).run(claim);
+			const after = await inSection((context) => state(context, claim));
+			expect({
+				result,
+				progress: after.job?.progress,
+				stages: after.stages.map((row) => ({
+					state: row.state,
+					sealed: row.writesSealed
+				})),
+				facts: after.facts,
+				references: after.references
+			}).toStrictEqual({
+				result: { kind: 'failed', reason: 'invalid-nar' },
+				progress: { discovered: 1, completed: 0, skipped: 0, failed: 1 },
+				stages: [{ state: 'retired', sealed: false }],
+				facts: [],
+				references: []
+			});
+		}));
+
+	it('does not prepare or write a listing after caller cancellation', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const before = await inSection((context) => state(context, claim));
+			const controller = new AbortController();
+			const failure = new Error('caller cancelled');
+			controller.abort(failure);
+			await expect(
+				new ListingTaskWorker({
+					server: currentServer(),
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					buffers: new NarReadBufferPool()
+				}).run(claim, { signal: controller.signal })
+			).rejects.toBe(failure);
+			expect(await inSection((context) => state(context, claim))).toStrictEqual(
+				before
+			);
+		}));
 
 	it('generates, seals and publishes through the internal RPC boundary', () =>
 		withoutAlarmArming(async () => {
