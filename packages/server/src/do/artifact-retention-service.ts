@@ -321,6 +321,24 @@ export class ArtifactRetentionService {
 		);
 	}
 
+	retirePendingInSection(version: ArtifactVersion): boolean {
+		return this.context.db.transaction((transaction) => {
+			const pending = transaction
+				.select({ id: schema.artifacts.id })
+				.from(schema.artifacts)
+				.where(
+					and(
+						this.artifactFilter(version),
+						eq(schema.artifacts.state, 'pending')
+					)
+				)
+				.get();
+			return (
+				pending !== undefined && this.retireWithin(transaction, version, true)
+			);
+		});
+	}
+
 	nextExpiryAt(): IsoTimestamp | undefined {
 		const artifact = this.context.db
 			.select({ at: schema.artifacts.expiresAt })
