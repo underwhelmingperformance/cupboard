@@ -7098,3 +7098,5 @@ access-checked reuse release is a prerequisite for this change.
 - [x] D3: Update GitHub setup, checks and guided trust repair for both modes.
 - [x] D4: Document the trust direction and required upgrade choices.
 - [x] D5: Record the future merge-queue verified publication mode.
+- [x] D6: Request the reference source only if the trust rules permit it, so an
+      unreadable or absent merged PR cache builds instead of failing.

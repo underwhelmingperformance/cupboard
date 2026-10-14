@@ -191,6 +191,12 @@ outputs:
     description:
       Audience to pass to later actions for the read session and publication.
     value: ${{ steps.setup.outputs.read-session-audience }}
+  reference-source:
+    description:
+      The reference-source input when this run can read it. Empty when the trust
+      rules do not permit reading the cache or it does not exist, so later steps
+      build the outputs that it would have provided.
+    value: ${{ steps.setup.outputs.reference-source }}
 runs:
   using: composite
   steps:

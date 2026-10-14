@@ -245,6 +245,7 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 | `read-session-view` | Configured reuse view to add to cupboard run alongside the destination. Empty for view-only sessions or when a static credential covers the view. |
 | `read-session-caches` | JSON array of additional cache URLs for the same read session. |
 | `read-session-audience` | Audience to pass to later actions for the read session and publication. |
+| `reference-source` | The reference-source input when this run can read it. Empty when the trust rules do not permit reading the cache or it does not exist, so later steps build the outputs that it would have provided. |
 
 ### actions/build-paths
 

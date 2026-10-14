@@ -3699,7 +3699,8 @@ it.each([
 							{
 								type: 'cupboard_cache',
 								cache: namedCache('source'),
-								mode: 'content'
+								mode: 'content',
+								optional: true
 							},
 							{ type: 'cupboard_cache', cache: defaultCache, mode: 'content' }
 						]
@@ -3708,6 +3709,419 @@ it.each([
 		);
 	}
 );
+
+// A reference cache that the trust rules do not cover is left out of the run.
+// The session reports it as unavailable, and the outputs drop it so that later
+// steps build its outputs.
+it.each([
+	{
+		state: { kind: 'unavailable' } as const,
+		referenceSource: undefined,
+		target: 'https://cache.example.test/t/acme',
+		substituters: 'https://cache.example.test/t/acme'
+	},
+	{
+		state: {
+			kind: 'existing',
+			access: 'private',
+			priority: cachePrioritySchema.parse(40)
+		} as const,
+		referenceSource: 'https://cache.example.test/t/acme/cache/source',
+		target: 'https://cache.example.test/t/acme/cache/source',
+		substituters:
+			'https://cache.example.test/t/acme https://cache.example.test/t/acme/cache/source'
+	}
+])(
+	'configures a reference source that the session reports as $state.kind',
+	async ({ state, referenceSource, target, substituters }) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-reference-session-')
+		);
+		onTestFinished(() => rm(directory, { recursive: true, force: true }));
+		const environment = {
+			RUNNER_TEMP: directory,
+			GITHUB_ENV: path.join(directory, 'env'),
+			GITHUB_OUTPUT: path.join(directory, 'output')
+		};
+		const tenant = new URL('https://cache.example.test/t/acme');
+		const source = parseTenantCacheUrl(new URL(`${tenant.href}/cache/source`));
+		const requests: unknown[] = [];
+		await setupAction(
+			{
+				addToPath: 'false',
+				cacheUrl: tenant.href,
+				referenceSource: `${tenant.href}/cache/source`,
+				trustedPublicKey: 'acme:AAAA'
+			},
+			environment,
+			createGithubReporter(),
+			{
+				installRelease: () =>
+					Promise.resolve({
+						binaryPath: '/cupboard',
+						version: 'v1.2.3',
+						sourceCommit: 'd'.repeat(40)
+					}),
+				fetch: stubFetch(() => cacheInfoBody(40), {
+					status: (url) => (url.includes('/cache/source/') ? 401 : 200)
+				}),
+				configureWithReadAccess: async (_binary, inputs) => {
+					const payloadFile = path.join(directory, 'payload.json');
+					await writeFile(
+						payloadFile,
+						JSON.stringify({ ...inputs, cacheUrl: inputs.cacheUrl.href })
+					);
+					await runWithReadAccess(
+						source,
+						['setup-configure', payloadFile],
+						{
+							githubOidc: true,
+							readCache: [parseTenantCacheUrl(tenant)],
+							readCacheIfPermitted: [source]
+						},
+						{
+							environment: inputs.environment,
+							storeConfig: discoverNixStoreConfig(),
+							readFile: () => Promise.resolve(''),
+							issue: (input) => {
+								requests.push(input.resources);
+								return Promise.resolve({
+									user: 'cupboard-oidc',
+									password: 'cupboard-access+jwt:example',
+									expiresAtMs: Date.now() + 900_000,
+									resources: input.resources.map((resource) =>
+										resource.type === 'cupboard_cache' &&
+										resource.cache.kind === 'named'
+											? { ...resource, state }
+											: {
+													...resource,
+													state: {
+														kind: 'existing',
+														access: 'public',
+														priority: cachePrioritySchema.parse(40)
+													}
+												}
+									)
+								});
+							},
+							runChild: async ({ environment: childEnvironment }) => {
+								await setupConfigureAction(
+									payloadFile,
+									{ ...inputs.environment, ...childEnvironment },
+									createGithubReporter(),
+									{
+										fetch: () => {
+											throw new Error(
+												'All configuration facts must come from the session'
+											);
+										}
+									}
+								);
+								return { status: 0, signal: undefined };
+							}
+						}
+					);
+				}
+			}
+		);
+		const outputs = await readActionOutputs(environment.GITHUB_OUTPUT);
+		const nixConfigFile = outputs['nix-config-file'];
+		if (nixConfigFile === undefined) {
+			throw new Error('setup did not output the generated Nix config path');
+		}
+		const nixConfig = await readFile(nixConfigFile, 'utf8');
+		const [configured] = nixConfig.split('\n', 1);
+
+		expect({
+			requests,
+			target: outputs['read-session-target'],
+			caches: outputs['read-session-caches'],
+			referenceSource: outputs['reference-source'],
+			substituters: configured
+		}).toStrictEqual({
+			requests: [
+				[
+					{
+						type: 'cupboard_cache',
+						cache: namedCache('source'),
+						mode: 'content',
+						optional: true
+					},
+					{ type: 'cupboard_cache', cache: defaultCache, mode: 'content' }
+				]
+			],
+			target,
+			caches:
+				referenceSource === undefined
+					? '[]'
+					: JSON.stringify(['https://cache.example.test/t/acme']),
+			referenceSource: referenceSource ?? '',
+			substituters: `extra-substituters = ${substituters}`
+		});
+	}
+);
+
+// The parent's probe can see the reference as absent through an ambient
+// credential that the read session then replaces. Setup leaves it out of the
+// session, so it must also leave it out of the configuration.
+it('omits a reference that an ambient credential shows is absent', async () => {
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-reference-absent-')
+	);
+	onTestFinished(() => rm(directory, { recursive: true, force: true }));
+	const tenant = new URL('https://cache.example.test/t/acme');
+	const netrcFile = path.join(directory, 'ambient-netrc');
+	await writeFile(
+		netrcFile,
+		'machine cache.example.test login alice password secret\n'
+	);
+	const inheritedConfig = `netrc-file = ${netrcFile}`;
+	vi.stubEnv('NIX_CONFIG', inheritedConfig);
+	onTestFinished(() => {
+		vi.unstubAllEnvs();
+	});
+	const ambient = `Basic ${Buffer.from('alice:secret').toString('base64')}`;
+	const environment = {
+		RUNNER_TEMP: directory,
+		GITHUB_ENV: path.join(directory, 'env'),
+		GITHUB_OUTPUT: path.join(directory, 'output'),
+		NIX_CONFIG: inheritedConfig
+	};
+	const requests: unknown[] = [];
+	await setupAction(
+		{
+			addToPath: 'false',
+			cacheUrl: tenant.href,
+			readCaches: `${tenant.href}/cache/falcon`,
+			referenceSource: `${tenant.href}/cache/source`,
+			trustedPublicKey: 'acme:AAAA'
+		},
+		environment,
+		createGithubReporter(),
+		{
+			installRelease: () =>
+				Promise.resolve({
+					binaryPath: '/cupboard',
+					version: 'v1.2.3',
+					sourceCommit: 'd'.repeat(40)
+				}),
+			fetch: stubFetch(() => cacheInfoBody(40), {
+				status: (url, supplied) => {
+					if (url.includes('/cache/source/')) {
+						return supplied === ambient ? 404 : 401;
+					}
+					return url.includes('/cache/falcon/') ? 401 : 200;
+				}
+			}),
+			configureWithReadAccess: async (_binary, inputs, target) => {
+				const payloadFile = path.join(directory, 'payload.json');
+				await writeFile(
+					payloadFile,
+					JSON.stringify({ ...inputs, cacheUrl: inputs.cacheUrl.href })
+				);
+				await runWithReadAccess(
+					parseTenantCacheUrl(target),
+					['setup-configure', payloadFile],
+					{ githubOidc: true, readCache: [parseTenantCacheUrl(tenant)] },
+					{
+						environment: inputs.environment,
+						storeConfig: discoverNixStoreConfig(),
+						readFile: () => Promise.resolve(''),
+						issue: (input) => {
+							requests.push(input.resources);
+							return Promise.resolve({
+								user: 'cupboard-oidc',
+								password: 'cupboard-access+jwt:example',
+								expiresAtMs: Date.now() + 900_000,
+								resources: input.resources.map((resource) => ({
+									...resource,
+									state: {
+										kind: 'existing',
+										access:
+											resource.type === 'cupboard_cache' &&
+											resource.cache.kind === 'named'
+												? 'private'
+												: 'public',
+										priority: cachePrioritySchema.parse(40)
+									}
+								}))
+							});
+						},
+						runChild: async ({ environment: childEnvironment }) => {
+							await setupConfigureAction(
+								payloadFile,
+								{ ...inputs.environment, ...childEnvironment },
+								createGithubReporter(),
+								{
+									fetch: () => {
+										throw new Error(
+											'All configuration facts must come from the session'
+										);
+									}
+								}
+							);
+							return { status: 0, signal: undefined };
+						}
+					}
+				);
+			}
+		}
+	);
+	const outputs = await readActionOutputs(environment.GITHUB_OUTPUT);
+	const nixConfigFile = outputs['nix-config-file'];
+	if (nixConfigFile === undefined) {
+		throw new Error('setup did not output the generated Nix config path');
+	}
+	const nixConfig = await readFile(nixConfigFile, 'utf8');
+	const [configured] = nixConfig.split('\n', 1);
+
+	expect({
+		requests,
+		target: outputs['read-session-target'],
+		caches: outputs['read-session-caches'],
+		referenceSource: outputs['reference-source'],
+		substituters: configured
+	}).toStrictEqual({
+		requests: [
+			[
+				{
+					type: 'cupboard_cache',
+					cache: namedCache('falcon'),
+					mode: 'content'
+				},
+				{ type: 'cupboard_cache', cache: defaultCache, mode: 'content' }
+			]
+		],
+		target: 'https://cache.example.test/t/acme/cache/falcon',
+		caches: JSON.stringify(['https://cache.example.test/t/acme']),
+		referenceSource: '',
+		substituters:
+			'extra-substituters = https://cache.example.test/t/acme https://cache.example.test/t/acme/cache/falcon'
+	});
+});
+
+it('warns about an absent reference when no read session is needed', async () => {
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-reference-absent-anonymous-')
+	);
+	onTestFinished(() => rm(directory, { recursive: true, force: true }));
+	const tenant = new URL('https://cache.example.test/t/acme');
+	const netrcFile = path.join(directory, 'ambient-netrc');
+	await writeFile(
+		netrcFile,
+		'machine cache.example.test login alice password secret\n'
+	);
+	const inheritedConfig = `netrc-file = ${netrcFile}`;
+	vi.stubEnv('NIX_CONFIG', inheritedConfig);
+	const warnings: string[] = [];
+	vi.spyOn(process.stderr, 'write').mockImplementation((value) => {
+		warnings.push(String(value));
+		return true;
+	});
+	onTestFinished(() => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+	});
+	const ambient = `Basic ${Buffer.from('alice:secret').toString('base64')}`;
+	const environment = {
+		RUNNER_TEMP: directory,
+		GITHUB_ENV: path.join(directory, 'env'),
+		GITHUB_OUTPUT: path.join(directory, 'output'),
+		NIX_CONFIG: inheritedConfig
+	};
+	await setupAction(
+		{
+			addToPath: 'false',
+			cacheUrl: tenant.href,
+			referenceSource: `${tenant.href}/cache/source`,
+			trustedPublicKey: 'acme:AAAA'
+		},
+		environment,
+		createGithubReporter(),
+		{
+			installRelease: () =>
+				Promise.resolve({
+					binaryPath: '/cupboard',
+					version: 'v1.2.3',
+					sourceCommit: 'd'.repeat(40)
+				}),
+			fetch: stubFetch(() => cacheInfoBody(40), {
+				status: (url, supplied) => {
+					if (url.includes('/cache/source/')) {
+						return supplied === ambient ? 404 : 401;
+					}
+					return 200;
+				}
+			}),
+			configureWithReadAccess: () => {
+				throw new Error('A public destination needs no read session');
+			}
+		}
+	);
+	const outputs = await readActionOutputs(environment.GITHUB_OUTPUT);
+
+	expect({
+		referenceSource: outputs['reference-source'],
+		warnings: warnings.filter((line) => line.startsWith('::warning::'))
+	}).toStrictEqual({
+		referenceSource: '',
+		warnings: [
+			'::warning::The trust rules do not permit reading the reference source https://cache.example.test/t/acme/cache/source, or it does not exist. This run builds the outputs it would have reused. Run `cupboard github check` if the source should be readable.\n'
+		]
+	});
+});
+
+it('requests a reference-only cache through the optional run option', async () => {
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-reference-process-')
+	);
+	onTestFinished(() => rm(directory, { recursive: true, force: true }));
+	const binary = path.join(directory, 'cupboard');
+	const captured = path.join(directory, 'captured.json');
+	vi.stubEnv('CUPBOARD_SETUP_CAPTURE', captured);
+	onTestFinished(() => {
+		vi.unstubAllEnvs();
+	});
+	await writeFile(
+		binary,
+		`#!${process.execPath}\nconst fs = require('node:fs'); const args = process.argv.slice(2); if (args.includes('--help')) { console.log('Usage: cupboard run [options] <url>\\n  --github-oidc\\n  --cache-metadata\\n  --read-cache <url>\\n  --read-cache-metadata <url>\\n  --read-cache-if-permitted <url>\\n  --audience <audience>'); } else { fs.writeFileSync(process.env.CUPBOARD_SETUP_CAPTURE, JSON.stringify(args.slice(0, args.indexOf('--')))); }\n`,
+		{ mode: 0o700 }
+	);
+	await setupAction(
+		{
+			addToPath: 'false',
+			cacheUrl: 'https://cache.example.test/t/acme',
+			readCaches: 'https://cache.example.test/t/acme/cache/falcon',
+			referenceSource: 'https://cache.example.test/t/acme/cache/source',
+			trustedPublicKey: 'acme:AAAA'
+		},
+		{
+			RUNNER_TEMP: directory,
+			GITHUB_OUTPUT: path.join(directory, 'output')
+		},
+		createGithubReporter(),
+		{
+			installRelease: () =>
+				Promise.resolve({
+					binaryPath: binary,
+					version: 'v1.2.3',
+					sourceCommit: 'd'.repeat(40)
+				}),
+			fetch: stubFetch(() => cacheInfoBody(40), {
+				status: (url) => (url.includes('/cache/') ? 401 : 200)
+			})
+		}
+	);
+	expect(JSON.parse(await readFile(captured, 'utf8'))).toStrictEqual([
+		'run',
+		'https://cache.example.test/t/acme/cache/falcon',
+		'--github-oidc',
+		'--read-cache',
+		'https://cache.example.test/t/acme',
+		'--read-cache-if-permitted',
+		'https://cache.example.test/t/acme/cache/source'
+	]);
+});
 
 it.each([401, 403])(
 	'refuses failed static reference access %s',

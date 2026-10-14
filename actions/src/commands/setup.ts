@@ -222,7 +222,15 @@ interface ConfigureNixInputs extends Pick<
 	readonly cacheMetadata?: boolean;
 	readonly readFacts?: readonly ReadResourceState[];
 	readonly readResources?: readonly ReadResource[];
+	readonly sessionResultFile?: string;
+	readonly omittedCaches?: readonly CacheScope[];
 }
+
+// What setup-configure learnt inside the read session, for the outputs that
+// setup writes after it.
+const sessionResultSchema = z.object({
+	unavailableCaches: z.array(cacheScopeSchema)
+});
 
 interface WriteNetrcOptions {
 	readonly cacheUrl: URL;
@@ -878,15 +886,30 @@ export async function setupAction(
 			)
 		}))
 	);
-	const isRemovedReference = (selection: CacheSelection): boolean =>
+	// Reference reuse is an optimisation. A reference that only reuse reads is
+	// requested if the trust rules permit it, and the run builds without it
+	// otherwise. A reader without authority cannot tell an absent cache from a
+	// private one, so this also covers a reference that was never created.
+	const isReferenceOnly = (selection: CacheSelection): boolean =>
 		inputs.referenceCache !== undefined &&
+		isSameCacheScope(selection.cache, inputs.referenceCache) &&
 		inputs.caches.every(
 			({ cache }) => !isSameCacheScope(cache, selection.cache)
 		) &&
-		isSameCacheScope(selection.cache, inputs.referenceCache) &&
+		inputs.readCaches.every(
+			(cache) => !isSameCacheScope(cache, selection.cache)
+		);
+	const isRemovedReference = (selection: CacheSelection): boolean =>
+		isReferenceOnly(selection) &&
 		destinationStates.some(
 			(result) => result.selection === selection && result.state === 'absent'
 		);
+	// A probe that sees the reference as absent may have used an ambient
+	// credential that the read session replaces, so setup-configure must not
+	// read the reference again either.
+	const omittedCaches = destinationStates.flatMap(({ selection }) =>
+		isRemovedReference(selection) ? [selection.cache] : []
+	);
 	const oidcDestinations = destinationStates.flatMap(({ selection, state }) =>
 		!isRemovedReference(selection) &&
 		(state === 'challenge' || state === 'absent')
@@ -928,7 +951,8 @@ export async function setupAction(
 						isSameCacheScope(metadata.cache, selection.cache)
 				)
 					? 'metadata'
-					: 'content'
+					: 'content',
+				...(isReferenceOnly(selection) && { optional: true as const })
 			})),
 			...(isOidcView
 				? [
@@ -946,8 +970,39 @@ export async function setupAction(
 		const readSessionView =
 			destination === undefined || !isOidcView ? '' : inputs.reuseView;
 
+		const sessionResultFile = path.join(
+			requireEnvironment(environment, 'RUNNER_TEMP'),
+			`cupboard-setup-session-${randomUUID()}.json`
+		);
+		await (dependencies.configureWithReadAccess ?? configureWithReadAccess)(
+			acquired.binaryPath,
+			{
+				...configureInputs,
+				readResources,
+				sessionResultFile,
+				omittedCaches,
+				cacheMetadata:
+					readResources[0]?.type === 'cupboard_cache' &&
+					readResources[0].mode === 'metadata'
+			},
+			target,
+			readSessionView,
+			dependencies.signal
+		);
+		const { unavailableCaches } = await readSessionResult(sessionResultFile);
+		const isUnavailable = (cache: CacheScope): boolean =>
+			[...unavailableCaches, ...omittedCaches].some((unavailable) =>
+				isSameCacheScope(unavailable, cache)
+			);
+		const referenceCache = inputs.referenceCache;
+		if (referenceCache !== undefined && isUnavailable(referenceCache)) {
+			warnUnreadableReference(reporter, cacheUrl, referenceCache);
+		}
+
 		const contentDestinations = readResources.flatMap((resource) =>
-			resource.type === 'cupboard_cache' && resource.mode === 'content'
+			resource.type === 'cupboard_cache' &&
+			resource.mode === 'content' &&
+			!isUnavailable(resource.cache)
 				? [resource]
 				: []
 		);
@@ -979,19 +1034,14 @@ export async function setupAction(
 					)
 			)
 		);
-		await (dependencies.configureWithReadAccess ?? configureWithReadAccess)(
-			acquired.binaryPath,
-			{
-				...configureInputs,
-				readResources,
-				cacheMetadata:
-					readResources[0]?.type === 'cupboard_cache' &&
-					readResources[0].mode === 'metadata'
-			},
-			target,
-			readSessionView,
-			dependencies.signal
-		);
+		if (referenceCache !== undefined) {
+			await setReferenceSourceOutput(
+				environment,
+				isUnavailable(referenceCache)
+					? undefined
+					: cacheUrlFor(cacheUrl, referenceCache)
+			);
+		}
 
 		return;
 	}
@@ -999,7 +1049,65 @@ export async function setupAction(
 	await setOutput(environment, 'read-session-target', '');
 	await setOutput(environment, 'read-session-view', '');
 	await setOutput(environment, 'read-session-caches', '[]');
-	await performSetupConfiguration(configureInputs, reporter, dependencies);
+	await performSetupConfiguration(
+		{ ...configureInputs, omittedCaches },
+		reporter,
+		dependencies
+	);
+	const referenceCache = inputs.referenceCache;
+	if (referenceCache === undefined) {
+		return;
+	}
+	const isOmitted = omittedCaches.some((omitted) =>
+		isSameCacheScope(omitted, referenceCache)
+	);
+	if (isOmitted) {
+		warnUnreadableReference(reporter, cacheUrl, referenceCache);
+	}
+	await setReferenceSourceOutput(
+		environment,
+		isOmitted ? undefined : cacheUrlFor(cacheUrl, referenceCache)
+	);
+}
+
+function warnUnreadableReference(
+	reporter: Reporter,
+	cacheUrl: URL,
+	referenceCache: CacheScope
+): void {
+	reporter.warn(
+		`The trust rules do not permit reading the reference source ${canonicalHref(cacheUrlFor(cacheUrl, referenceCache))}, or it does not exist. This run builds the outputs it would have reused. Run \`cupboard github check\` if the source should be readable.`
+	);
+}
+
+// Later steps reuse the reference source only when this output names it, so a
+// reference that the read session omitted is not read again.
+async function setReferenceSourceOutput(
+	environment: Environment,
+	referenceSource: URL | undefined
+): Promise<void> {
+	await setOutput(
+		environment,
+		'reference-source',
+		referenceSource === undefined ? '' : canonicalHref(referenceSource)
+	);
+}
+
+// A session that did not run setup-configure (a test double) leaves no
+// result, and then no cache was omitted.
+async function readSessionResult(
+	file: string
+): Promise<z.infer<typeof sessionResultSchema>> {
+	let contents: string;
+	try {
+		contents = await readFile(file, 'utf8');
+	} catch (error) {
+		if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+			return { unavailableCaches: [] };
+		}
+		throw error;
+	}
+	return sessionResultSchema.parse(JSON.parse(contents));
 }
 
 async function performSetupConfiguration(
@@ -1241,13 +1349,47 @@ async function performSetupConfiguration(
 	await Promise.all(
 		inputs.readCaches.map((cache) => accessFor(cache, undefined))
 	);
-	if (inputs.referenceCache !== undefined) {
-		await accessFor(inputs.referenceCache, staticCredential);
+	const referenceCache = inputs.referenceCache;
+	if (
+		referenceCache !== undefined &&
+		withheldCaches({ ...inputs, readFacts: facts }).every(
+			(withheld) => !isSameCacheScope(withheld, referenceCache)
+		)
+	) {
+		await accessFor(referenceCache, staticCredential);
 	}
 	await configureNix({ ...inputs, readFacts: facts }, reporter, {
 		...(dependencies.fetch !== undefined && { fetch: dependencies.fetch }),
 		...(dependencies.signal !== undefined && { signal: dependencies.signal })
 	});
+	if (inputs.sessionResultFile !== undefined) {
+		await writeFile(
+			inputs.sessionResultFile,
+			JSON.stringify({ unavailableCaches: unavailableCaches(facts) }),
+			{ flag: 'wx', mode: 0o600 }
+		);
+	}
+}
+
+// Caches that this run does not read: those the read session omitted, and a
+// reference that setup left out because it does not exist.
+function withheldCaches(
+	inputs: Pick<ConfigureNixInputs, 'readFacts' | 'omittedCaches'>
+): readonly CacheScope[] {
+	return [
+		...unavailableCaches(inputs.readFacts ?? []),
+		...(inputs.omittedCaches ?? [])
+	];
+}
+
+function unavailableCaches(
+	facts: readonly ReadResourceState[]
+): readonly CacheScope[] {
+	return facts.flatMap((fact) =>
+		fact.type === 'cupboard_cache' && fact.state.kind === 'unavailable'
+			? [fact.cache]
+			: []
+	);
 }
 
 const configureCredentialSchema = z.object({
@@ -1276,7 +1418,9 @@ const configureNixPayloadSchema = z.object({
 	binaryPath: z.string(),
 	inheritedNixConfig: z.string().default(''),
 	audience: z.string().default(''),
-	readResources: readResourcesSchema.optional()
+	readResources: readResourcesSchema.optional(),
+	sessionResultFile: z.string().optional(),
+	omittedCaches: z.array(cacheScopeSchema).default([])
 });
 
 export async function setupConfigureAction(
@@ -1310,22 +1454,11 @@ async function configureWithReadAccess(
 	let isSupported: boolean;
 	try {
 		const options = await inspectCommandOptions(binaryPath, ['run'], signal);
-		const additionalCaches = (inputs.readResources ?? []).flatMap((resource) =>
-			resource.type === 'cupboard_cache' &&
-			canonicalHref(cacheUrlFor(inputs.cacheUrl, resource.cache)) !==
-				canonicalHref(target)
-				? [resource]
-				: []
-		);
 		isSupported =
 			options.has('--github-oidc') &&
 			options.has('--cache-metadata') &&
-			additionalCaches.every((resource) =>
-				options.has(
-					resource.mode === 'metadata'
-						? '--read-cache-metadata'
-						: '--read-cache'
-				)
+			readCacheArguments(inputs, target).every(
+				(argument) => !argument.startsWith('--') || options.has(argument)
 			);
 	} catch (error) {
 		signal?.throwIfAborted();
@@ -1362,7 +1495,9 @@ async function configureWithReadAccess(
 			binaryPath: inputs.binaryPath,
 			inheritedNixConfig: inputs.inheritedNixConfig,
 			audience: inputs.audience,
-			readResources: inputs.readResources
+			readResources: inputs.readResources,
+			sessionResultFile: inputs.sessionResultFile,
+			omittedCaches: inputs.omittedCaches
 		}),
 		{ flag: 'wx', mode: 0o600 }
 	);
@@ -1375,18 +1510,7 @@ async function configureWithReadAccess(
 				canonicalHref(target),
 				'--github-oidc',
 				...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
-				...(inputs.readResources ?? []).flatMap((resource) =>
-					resource.type === 'cupboard_cache' &&
-					canonicalHref(cacheUrlFor(inputs.cacheUrl, resource.cache)) !==
-						canonicalHref(target)
-						? [
-								resource.mode === 'metadata'
-									? '--read-cache-metadata'
-									: '--read-cache',
-								canonicalHref(cacheUrlFor(inputs.cacheUrl, resource.cache))
-							]
-						: []
-				),
+				...readCacheArguments(inputs, target),
 				...(inputs.cacheMetadata === true ? ['--cache-metadata'] : []),
 				...(reuseView === '' ? [] : ['--reuse-view', reuseView]),
 				'--',
@@ -1842,12 +1966,17 @@ async function configureNix(
 		},
 		dependencies
 	);
+	const omitted = withheldCaches(inputs);
 	const substituters = [
 		...cupboardSubstituters,
-		...inputs.readCaches.map((cache) => cacheUrlFor(inputs.cacheUrl, cache)),
-		...(inputs.referenceCache === undefined
-			? []
-			: [cacheUrlFor(inputs.cacheUrl, inputs.referenceCache)]),
+		...[
+			...inputs.readCaches,
+			...(inputs.referenceCache === undefined ? [] : [inputs.referenceCache])
+		]
+			.filter((cache) =>
+				omitted.every((unavailable) => !isSameCacheScope(unavailable, cache))
+			)
+			.map((cache) => cacheUrlFor(inputs.cacheUrl, cache)),
 		...inputs.privateSubstituters
 	];
 	dependencies.signal?.throwIfAborted();
@@ -1986,4 +2115,29 @@ export async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 	await chmod(netrcFile, 0o600);
 
 	return netrcFile;
+}
+
+// The `cupboard run` options for every cache in the read session. The target
+// cache is the positional argument, so it needs an option only when it is
+// optional.
+function readCacheArguments(
+	inputs: Pick<ConfigureNixInputs, 'cacheUrl' | 'readResources'>,
+	target: URL
+): readonly string[] {
+	return (inputs.readResources ?? []).flatMap((resource) => {
+		if (resource.type !== 'cupboard_cache') {
+			return [];
+		}
+		const url = canonicalHref(cacheUrlFor(inputs.cacheUrl, resource.cache));
+		if (resource.optional === true) {
+			return ['--read-cache-if-permitted', url];
+		}
+		if (url === canonicalHref(target)) {
+			return [];
+		}
+		return [
+			resource.mode === 'metadata' ? '--read-cache-metadata' : '--read-cache',
+			url
+		];
+	});
 }
