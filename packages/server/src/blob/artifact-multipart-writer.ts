@@ -25,11 +25,50 @@ export interface ArtifactMultipartWriterOptions {
 	readonly signal?: AbortSignal;
 	readonly assertCurrent?: () => Promise<void>;
 	readonly pool?: ByteBufferPool;
+	readonly buffer?: ArtifactOutputBuffer;
 }
 export class ArtifactWriterUnavailableError extends Error {
 	constructor(reason: string) {
 		super(`Cannot write artifact: ${reason}`);
 		this.name = 'ArtifactWriterUnavailableError';
+	}
+}
+
+/**
+ * A buffer reserved before an artifact task allocates staging. Transfer the
+ * reservation to a multipart writer when generation starts.
+ */
+export class ArtifactOutputBuffer {
+	static tryAcquire(
+		pool: ByteBufferPool = sharedBuffers
+	): ArtifactOutputBuffer | undefined {
+		if (pool.bufferSize < minimumPartBytes) {
+			throw new RangeError('Artifact multipart buffers must be at least 5 MiB');
+		}
+		const lease = pool.tryAcquire();
+		return lease === undefined ? undefined : new ArtifactOutputBuffer(lease);
+	}
+
+	private lease: ByteBufferLease | undefined;
+
+	private constructor(lease: ByteBufferLease) {
+		this.lease = lease;
+	}
+
+	take(): ByteBufferLease {
+		const lease = this.lease;
+		if (lease === undefined) {
+			throw new ArtifactWriterUnavailableError(
+				'the output buffer has already been transferred or released'
+			);
+		}
+		this.lease = undefined;
+		return lease;
+	}
+
+	release(): void {
+		this.lease?.release();
+		this.lease = undefined;
 	}
 }
 
@@ -62,14 +101,12 @@ export class ArtifactMultipartWriter {
 		if (this.maximumBytes > maxArtifactBytes[options.kind]) {
 			throw new RangeError('The artifact output limit exceeds its kind budget');
 		}
-		const pool = options.pool ?? sharedBuffers;
-		if (pool.bufferSize < minimumPartBytes) {
-			throw new RangeError('Artifact multipart buffers must be at least 5 MiB');
-		}
-		const lease = pool.tryAcquire();
-		if (lease === undefined) {
+		const reservation =
+			options.buffer ?? ArtifactOutputBuffer.tryAcquire(options.pool);
+		if (reservation === undefined) {
 			throw new ArtifactWriterUnavailableError('upload buffers are busy');
 		}
+		const lease = reservation.take();
 		this.lease = lease;
 		this.buffer = new Uint8Array(lease.buffer);
 		this.hash = new crypto.DigestStream('SHA-256');

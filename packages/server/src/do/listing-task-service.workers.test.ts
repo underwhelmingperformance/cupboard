@@ -21,9 +21,12 @@ import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ArtifactOutputBuffer } from '../blob/artifact-multipart-writer.ts';
+import { ByteBufferPool } from '../blob/byte-buffers.ts';
 import { CasObjectStore } from '../blob/cas-object-store.ts';
 import { StoredNarListingGenerator } from '../blob/nar-listing-generation.ts';
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
+import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
@@ -201,7 +204,10 @@ function generationOf(result: ListingTaskPreparation) {
 	return result;
 }
 
-async function generate(claim: ArtifactTaskClaim) {
+async function generate(
+	claim: ArtifactTaskClaim,
+	outputBuffer?: ArtifactOutputBuffer
+) {
 	const prepared = generationOf(
 		await inSection((context) =>
 			new ListingTaskService(context).prepareInSection(claim)
@@ -225,6 +231,7 @@ async function generate(claim: ArtifactTaskClaim) {
 		expected: prepared.source.expected,
 		upload,
 		buffers: new NarReadBufferPool(),
+		outputBuffer,
 		generatorRevision: prepared.generatorRevision
 	}).run();
 	if (generated.kind !== 'generated') {
@@ -361,6 +368,41 @@ async function admittedMessage(
 describe('listing task workflow', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => vi.restoreAllMocks());
+
+	it('uses a preleased output buffer for native listing generation', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			if (claim.source.kind !== 'nar') {
+				throw new Error('The listing source is not a NAR');
+			}
+			const pool = new ByteBufferPool({
+				buffers: 1,
+				bufferSize: 5 * 1024 * 1024
+			});
+			const buffer = ArtifactOutputBuffer.tryAcquire(pool);
+			if (buffer === undefined) {
+				throw new Error('The output buffer was not reserved');
+			}
+			try {
+				const generated = await generate(claim, buffer);
+				const listingBytes = new TextEncoder().encode(expectedListing);
+				const digest = sha256HexDigestSchema.parse(
+					await sha256HexBytes(listingBytes)
+				);
+				expect({ fact: generated.fact, pool: pool.state }).toStrictEqual({
+					fact: {
+						narHash: claim.source.narHash,
+						generatorRevision: currentListingGeneratorRevision,
+						format: 1,
+						digest,
+						size: listingBytes.byteLength
+					},
+					pool: { free: 1, allocations: 1 }
+				});
+			} finally {
+				buffer.release();
+			}
+		}));
 
 	it('consumes an admitted listing without allowing its replay to claim a sibling task', () =>
 		withoutAlarmArming(async () => {

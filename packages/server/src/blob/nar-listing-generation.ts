@@ -9,7 +9,10 @@ import {
 
 import type { R2ObjectKey } from '../http/http.ts';
 
-import { ArtifactMultipartWriter } from './artifact-multipart-writer.ts';
+import {
+	ArtifactMultipartWriter,
+	type ArtifactOutputBuffer
+} from './artifact-multipart-writer.ts';
 import type { ByteBufferPool } from './byte-buffers.ts';
 import type { R2ObjectStore } from './connection-limited-bucket.ts';
 import type { NarReadBufferPool } from './nar-read-buffers.ts';
@@ -27,6 +30,7 @@ export interface StoredNarListingOptions {
 	readonly upload: R2MultipartUpload;
 	readonly buffers: NarReadBufferPool;
 	readonly outputBuffers?: ByteBufferPool;
+	readonly outputBuffer?: ArtifactOutputBuffer;
 	readonly signal?: AbortSignal;
 	readonly assertCurrent?: () => Promise<void>;
 	readonly generatorRevision?: ListingGeneratorRevision;
@@ -51,6 +55,7 @@ export class StoredNarListingGenerator {
 			kind: 'listing',
 			maximumBytes,
 			pool: this.options.outputBuffers,
+			buffer: this.options.outputBuffer,
 			signal: this.options.signal,
 			assertCurrent: this.options.assertCurrent
 		});

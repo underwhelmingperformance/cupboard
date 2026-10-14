@@ -5,7 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 
-import { ArtifactMultipartWriter } from './artifact-multipart-writer.ts';
+import {
+	ArtifactMultipartWriter,
+	ArtifactOutputBuffer
+} from './artifact-multipart-writer.ts';
 import { ByteBufferPool } from './byte-buffers.ts';
 
 const partBytes = 5 * 1024 * 1024;
@@ -17,6 +20,71 @@ async function fixture() {
 }
 
 describe('bounded artifact multipart writer', () => {
+	it('reserves output capacity before a multipart upload is created', () => {
+		const pool = new ByteBufferPool({ buffers: 1, bufferSize: partBytes });
+		const buffer = ArtifactOutputBuffer.tryAcquire(pool);
+		if (buffer === undefined) {
+			throw new Error('The output buffer was not reserved');
+		}
+		const occupied = ArtifactOutputBuffer.tryAcquire(pool);
+		const before = pool.state;
+		buffer.release();
+		buffer.release();
+		expect({ occupied, before, after: pool.state }).toStrictEqual({
+			occupied: undefined,
+			before: { free: 0, allocations: 1 },
+			after: { free: 1, allocations: 1 }
+		});
+	});
+
+	it('transfers buffer ownership without letting caller cleanup release an unfinished upload', async () => {
+		const { upload } = await fixture();
+		const pool = new ByteBufferPool({ buffers: 1, bufferSize: partBytes });
+		const buffer = ArtifactOutputBuffer.tryAcquire(pool);
+		if (buffer === undefined) {
+			throw new Error('The output buffer was not reserved');
+		}
+		const pending = Promise.withResolvers<R2UploadedPart>();
+		const parts = vi
+			.spyOn(upload, 'uploadPart')
+			.mockReturnValueOnce(pending.promise);
+		const writer = new ArtifactMultipartWriter(upload, {
+			kind: 'listing',
+			buffer
+		});
+		const writing = writer.write(new Uint8Array(partBytes));
+		const rejected = expect(writing).rejects.toThrow('cancelled');
+		await vi.waitFor(() => {
+			expect(parts).toHaveBeenCalledTimes(1);
+		});
+		buffer.release();
+		await writer.abort(new Error('producer cancelled'));
+		await rejected;
+		expect(pool.state).toStrictEqual({ free: 0, allocations: 1 });
+		pending.resolve({ partNumber: 1, etag: 'fixture' });
+		await writer.settled();
+		expect(pool.state).toStrictEqual({ free: 1, allocations: 1 });
+		parts.mockRestore();
+	});
+
+	it('refuses reuse of a transferred output reservation', async () => {
+		const { upload } = await fixture();
+		const pool = new ByteBufferPool({ buffers: 1, bufferSize: partBytes });
+		const buffer = ArtifactOutputBuffer.tryAcquire(pool);
+		if (buffer === undefined) {
+			throw new Error('The output buffer was not reserved');
+		}
+		const writer = new ArtifactMultipartWriter(upload, {
+			kind: 'listing',
+			buffer
+		});
+		expect(
+			() => new ArtifactMultipartWriter(upload, { kind: 'listing', buffer })
+		).toThrow('transferred or released');
+		await writer.abort();
+		expect(pool.state).toStrictEqual({ free: 1, allocations: 1 });
+	});
+
 	it('streams chunk boundaries into valid R2 parts and measures the exact bytes', async () => {
 		const { key, upload } = await fixture();
 		const pool = new ByteBufferPool({ buffers: 1, bufferSize: partBytes });
