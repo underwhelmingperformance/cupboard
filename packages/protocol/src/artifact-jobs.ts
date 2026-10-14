@@ -108,21 +108,23 @@ export const artifactJobSummarySchema = z.strictObject({
 });
 export type ArtifactJobSummary = z.output<typeof artifactJobSummarySchema>;
 
-export interface ArtifactJobVersion {
-	readonly id: ArtifactJobId;
-	readonly generation: ArtifactJobGeneration;
-}
+export const artifactJobVersionSchema = z.strictObject({
+	id: artifactJobIdSchema,
+	generation: artifactJobGenerationSchema
+});
+export type ArtifactJobVersion = z.output<typeof artifactJobVersionSchema>;
 
-export interface ArtifactTaskClaim {
-	readonly jobId: ArtifactJobId;
-	readonly jobGeneration: ArtifactJobGeneration;
-	readonly id: ArtifactTaskId;
-	readonly generation: ArtifactTaskGeneration;
-	readonly owner: ArtifactTaskOwner;
-	readonly cacheGeneration: z.output<typeof cacheGenerationSchema>;
-	readonly source: ArtifactTaskSource;
-	readonly leaseExpiresAt: z.output<typeof isoTimestampSchema>;
-}
+export const artifactTaskClaimSchema = z.strictObject({
+	jobId: artifactJobIdSchema,
+	jobGeneration: artifactJobGenerationSchema,
+	id: artifactTaskIdSchema,
+	generation: artifactTaskGenerationSchema,
+	owner: artifactTaskOwnerSchema,
+	cacheGeneration: cacheGenerationSchema,
+	source: artifactTaskSourceSchema,
+	leaseExpiresAt: isoTimestampSchema
+});
+export type ArtifactTaskClaim = z.output<typeof artifactTaskClaimSchema>;
 export interface ArtifactTaskClaimResult {
 	readonly claim?: ArtifactTaskClaim;
 	readonly pending: boolean;

@@ -5,16 +5,13 @@ import {
 	artifactTaskGenerationSchema,
 	artifactTaskSourceSchema
 } from '@cupboard/protocol/artifact-jobs';
-import {
-	type ArtifactKind,
-	maxArtifactBytes
-} from '@cupboard/protocol/artifacts';
+import { maxArtifactBytes } from '@cupboard/protocol/artifacts';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, asc, desc, eq, lt, lte } from 'drizzle-orm';
 
 import {
-	type ArtifactStageId,
 	artifactStageIdSchema,
+	type ArtifactStageLease,
 	type ArtifactStageMeasurement,
 	artifactStageMeasurementSchema,
 	artifactStageObjectKey
@@ -35,16 +32,7 @@ const cleanupRetryMs = 30_000;
 const logger = rootLogger().with({ component: 'artifact-staging' });
 type Stage = typeof schema.artifactStages.$inferSelect;
 
-export interface ArtifactStageLease {
-	readonly id: ArtifactStageId;
-	readonly key: R2ObjectKey;
-	readonly claim: ArtifactTaskClaim;
-	readonly expiresAt: IsoTimestamp;
-	readonly writeUntil: IsoTimestamp;
-	readonly kind: ArtifactKind;
-	readonly maximumBytes: number;
-	readonly cleanupAfter: IsoTimestamp;
-}
+export type { ArtifactStageLease } from '../blob/artifact-staging.ts';
 export type ArtifactStageReservation =
 	| { readonly kind: 'reserved'; readonly lease: ArtifactStageLease }
 	| { readonly kind: 'capacity'; readonly retryAt: IsoTimestamp }

@@ -10,6 +10,17 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import {
+	type ArtifactJobVersion,
+	artifactJobVersionSchema,
+	type ArtifactTaskClaim,
+	artifactTaskClaimSchema,
+	artifactTaskOwnerSchema
+} from '@cupboard/protocol/artifact-jobs';
+import {
+	type NarListingFact,
+	narListingFactSchema
+} from '@cupboard/protocol/artifacts';
+import {
 	cacheAvailabilityMaxRequestBytes,
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse,
@@ -27,7 +38,7 @@ import {
 	type ReuseViewName,
 	reuseViewNameSchema
 } from '@cupboard/protocol/reuse-views';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type CommitBatchEntry,
 	type CommitBlobDeclaration,
@@ -59,6 +70,13 @@ import { z } from 'zod';
 
 import migrations from '../../drizzle/migrations.js';
 import { type AccessClaims } from '../auth/auth.ts';
+import {
+	artifactMultipartIdSchema,
+	type ArtifactStageLease,
+	artifactStageLeaseSchema,
+	type ArtifactStageMeasurement,
+	artifactStageMeasurementSchema
+} from '../blob/artifact-staging.ts';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
 import type { AttestationListPublication } from '../db/attestation-list-revision.ts';
@@ -146,8 +164,19 @@ import {
 	MaintenanceRetrySchedule,
 	noProgressRetryMs
 } from './alarm.ts';
+import { ArtifactJobService } from './artifact-job-service.ts';
 import { ArtifactRetentionService } from './artifact-retention-service.ts';
 import { ArtifactRetirementService } from './artifact-retirement-service.ts';
+import {
+	type ArtifactStageCollection,
+	ArtifactStagingService
+} from './artifact-staging-service.ts';
+import {
+	type ArtifactTaskClaimRpcResult,
+	type ArtifactTaskFailureOutcome,
+	artifactTaskFailureOutcomeSchema,
+	ArtifactTaskRpcService
+} from './artifact-task-rpc.ts';
 import {
 	AttestationCasService,
 	type AttestationReference,
@@ -204,6 +233,11 @@ import {
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import { LegacyRetentionService } from './legacy-retention-service.ts';
+import {
+	type ListingTaskCompletion,
+	type ListingTaskPreparation,
+	ListingTaskService
+} from './listing-task-service.ts';
 import { LocalSchemaRun } from './local-schema-run.ts';
 import {
 	type LocalStepOutcome,
@@ -3105,6 +3139,141 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	async claimArtifactTask(
+		version: ArtifactJobVersion,
+		owner: string
+	): Promise<ArtifactTaskClaimRpcResult> {
+		const parsedVersion = artifactJobVersionSchema.parse(version);
+		const parsedOwner = artifactTaskOwnerSchema.parse(owner);
+		await this.initialise();
+		return this.metered('artifact-task-claim', () =>
+			this.context.criticalSection(() =>
+				new ArtifactTaskRpcService(this.context).claimInSection(
+					parsedVersion,
+					parsedOwner
+				)
+			)
+		);
+	}
+
+	async prepareListingTask(
+		claim: ArtifactTaskClaim
+	): Promise<ListingTaskPreparation> {
+		const parsedClaim = artifactTaskClaimSchema.parse(claim);
+		await this.initialise();
+		return this.metered('listing-task-prepare', () =>
+			this.context.criticalSection(() =>
+				new ListingTaskService(this.context).prepareInSection(parsedClaim)
+			)
+		);
+	}
+
+	async registerArtifactMultipart(
+		lease: ArtifactStageLease,
+		multipartId: string
+	): Promise<boolean> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		const parsedId = artifactMultipartIdSchema.parse(multipartId);
+		await this.initialise();
+		return this.metered('artifact-stage-register', () =>
+			this.context.criticalSection(() =>
+				Promise.resolve(
+					new ArtifactStagingService(this.context).registerMultipartInSection(
+						parsedLease,
+						parsedId
+					)
+				)
+			)
+		);
+	}
+
+	async sealArtifactStaging(
+		lease: ArtifactStageLease,
+		multipartId: string,
+		measurement: ArtifactStageMeasurement
+	): Promise<boolean> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		const parsedId = artifactMultipartIdSchema.parse(multipartId);
+		const parsedMeasurement = artifactStageMeasurementSchema.parse(measurement);
+		await this.initialise();
+		return this.metered('artifact-stage-seal', () =>
+			this.context.criticalSection(() =>
+				new ArtifactStagingService(this.context).sealInSection(
+					parsedLease,
+					parsedId,
+					parsedMeasurement
+				)
+			)
+		);
+	}
+
+	async renewListingTask(
+		lease: ArtifactStageLease
+	): Promise<IsoTimestamp | undefined> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		await this.initialise();
+		return this.metered('listing-task-renew', () =>
+			this.context.criticalSection(() =>
+				new ListingTaskService(this.context).renewInSection(parsedLease)
+			)
+		);
+	}
+
+	async completeListingTask(
+		lease: ArtifactStageLease,
+		fact: NarListingFact
+	): Promise<ListingTaskCompletion> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		const parsedFact = narListingFactSchema.parse(fact);
+		await this.initialise();
+		return this.metered('listing-task-complete', () =>
+			this.context.criticalSection(() =>
+				new ListingTaskService(this.context).completeInSection(
+					parsedLease,
+					parsedFact
+				)
+			)
+		);
+	}
+
+	async retireArtifactStaging(lease: ArtifactStageLease): Promise<boolean> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		await this.initialise();
+		return this.metered('artifact-stage-retire', () =>
+			this.context.criticalSection(() =>
+				Promise.resolve(
+					new ArtifactStagingService(this.context).retireInSection(parsedLease)
+				)
+			)
+		);
+	}
+
+	async finishArtifactTask(
+		claim: ArtifactTaskClaim,
+		outcome: ArtifactTaskFailureOutcome
+	): Promise<boolean> {
+		const parsedClaim = artifactTaskClaimSchema.parse(claim);
+		const parsedOutcome = artifactTaskFailureOutcomeSchema.parse(outcome);
+		await this.initialise();
+		return this.metered('artifact-task-finish', () =>
+			this.context.criticalSection(() =>
+				Promise.resolve(
+					new ArtifactJobService(this.context).finishInSection(
+						parsedClaim,
+						parsedOutcome
+					)
+				)
+			)
+		);
+	}
+
+	async collectArtifactStaging(): Promise<ArtifactStageCollection> {
+		await this.initialise();
+		return this.metered('artifact-stage-collect', () =>
+			new ArtifactStagingService(this.context).collect()
+		);
+	}
+
 	// Keep CPU-bound NAR decoding in the queue consumer, off the Durable Object
 	// thread. This RPC returns a bounded snapshot. The consumer promotes staging
 	// objects and reports verdicts, leaving only state transitions to the single
@@ -3992,6 +4161,15 @@ function logRequestFinished(
 }
 
 type MeteredMethod =
+	| 'artifact-task-claim'
+	| 'artifact-task-finish'
+	| 'artifact-stage-register'
+	| 'artifact-stage-seal'
+	| 'artifact-stage-retire'
+	| 'artifact-stage-collect'
+	| 'listing-task-prepare'
+	| 'listing-task-renew'
+	| 'listing-task-complete'
 	| 'attestation-list-repair'
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'

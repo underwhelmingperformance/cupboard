@@ -6,6 +6,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 import {
+	artifactJobGenerationSchema,
 	type ArtifactTaskClaim,
 	artifactTaskOwnerSchema
 } from '@cupboard/protocol/artifact-jobs';
@@ -197,7 +198,9 @@ async function generate(claim: ArtifactTaskClaim) {
 	return { ...prepared, fact: generated.fact };
 }
 
-async function promote(value: Awaited<ReturnType<typeof generate>>) {
+async function promote(
+	value: Pick<Awaited<ReturnType<typeof generate>>, 'lease' | 'fact'>
+) {
 	const objects = new CasObjectStore(
 		drizzle(env.CUPBOARD_DB, { schema: d1Schema }),
 		env.BLOBS
@@ -230,6 +233,266 @@ async function state(context: ServerContext, claim: ArtifactTaskClaim) {
 describe('listing task workflow', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => vi.restoreAllMocks());
+
+	it('generates, seals and publishes through the internal RPC boundary', () =>
+		withoutAlarmArming(async () => {
+			const original = await fixture();
+			const version = {
+				id: original.jobId,
+				generation: original.jobGeneration
+			};
+			const owner = artifactTaskOwnerSchema.parse(crypto.randomUUID());
+			expect(
+				await currentServer().claimArtifactTask(version, owner)
+			).toStrictEqual({
+				kind: 'idle',
+				pending: true
+			});
+			vi.setSystemTime(new Date(original.leaseExpiresAt));
+			const claimed = await currentServer().claimArtifactTask(version, owner);
+			if (claimed.kind !== 'claimed') {
+				throw new Error('The expired RPC task was not reclaimed');
+			}
+			expect({
+				definition: claimed.definition,
+				source: claimed.claim.source,
+				owner: claimed.claim.owner,
+				generation: claimed.claim.generation
+			}).toStrictEqual({
+				definition: {
+					kind: 'listing',
+					generatorRevision: currentListingGeneratorRevision
+				},
+				source: original.source,
+				owner,
+				generation: original.generation + 1
+			});
+			const prepared = generationOf(
+				await currentServer().prepareListingTask(claimed.claim)
+			);
+			const upload = await env.BLOBS.createMultipartUpload(prepared.lease.key);
+			expect(
+				await currentServer().registerArtifactMultipart(
+					prepared.lease,
+					upload.uploadId
+				)
+			).toBe(true);
+			const generated = await new StoredNarListingGenerator({
+				objects: env.BLOBS,
+				source: prepared.source.key,
+				expected: prepared.source.expected,
+				upload,
+				buffers: new NarReadBufferPool(),
+				generatorRevision: prepared.generatorRevision
+			}).run();
+			if (generated.kind !== 'generated') {
+				throw new Error('The RPC fixture NAR did not verify');
+			}
+			expect(
+				await currentServer().sealArtifactStaging(
+					prepared.lease,
+					upload.uploadId,
+					{ digest: generated.fact.digest, size: generated.fact.size }
+				)
+			).toBe(true);
+			expect(
+				await currentServer().completeListingTask(
+					prepared.lease,
+					generated.fact
+				)
+			).toStrictEqual({ kind: 'bytes-missing' });
+			await promote({ lease: prepared.lease, fact: generated.fact });
+			expect(await currentServer().renewListingTask(prepared.lease)).toBe(
+				claimed.claim.leaseExpiresAt
+			);
+			expect(
+				await currentServer().completeListingTask(
+					prepared.lease,
+					generated.fact
+				)
+			).toStrictEqual({ kind: 'completed' });
+			expect(
+				await currentServer().prepareListingTask(claimed.claim)
+			).toStrictEqual({ kind: 'unavailable' });
+			expect(await currentServer().collectArtifactStaging()).toStrictEqual({
+				removed: 1,
+				pending: false
+			});
+			const progress = await inSection((context) =>
+				Promise.resolve(
+					new ArtifactJobService(context).summaryInSection(original.jobId)
+						?.progress
+				)
+			);
+			expect(progress).toStrictEqual({
+				discovered: 1,
+				completed: 1,
+				skipped: 0,
+				failed: 0
+			});
+		}));
+
+	it('refuses a queue message from an earlier job generation', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			await inSection((context) => {
+				const jobs = new ArtifactJobService(context);
+				jobs.cancelInSection(claim.jobId);
+				jobs.resumeInSection(claim.jobId);
+				return Promise.resolve();
+			});
+			const owner = artifactTaskOwnerSchema.parse(crypto.randomUUID());
+			expect(
+				await currentServer().claimArtifactTask(
+					{ id: claim.jobId, generation: claim.jobGeneration },
+					owner
+				)
+			).toStrictEqual({ kind: 'idle', pending: false });
+			const current = await currentServer().claimArtifactTask(
+				{
+					id: claim.jobId,
+					generation: artifactJobGenerationSchema.parse(claim.jobGeneration + 2)
+				},
+				owner
+			);
+			expect(current.kind).toBe('claimed');
+		}));
+
+	it.each(['suspended', 'offboarding'] as const)(
+		'does not claim a task while the tenant is %s',
+		(status) =>
+			withoutAlarmArming(async () => {
+				const claim = await fixture();
+				vi.setSystemTime(new Date(claim.leaseExpiresAt));
+				await drizzle(env.CUPBOARD_DB)
+					.update(d1Schema.tenant)
+					.set({ status })
+					.where(eq(d1Schema.tenant.id, fixtureTenant));
+				const before = await inSection((context) => state(context, claim));
+				expect(
+					await currentServer().claimArtifactTask(
+						{ id: claim.jobId, generation: claim.jobGeneration },
+						crypto.randomUUID()
+					)
+				).toStrictEqual({ kind: 'idle', pending: false });
+				expect(
+					await inSection((context) => state(context, claim))
+				).toStrictEqual(before);
+			})
+	);
+
+	it('rejects malformed RPC ownership without modifying durable state', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const before = await inSection((context) => state(context, claim));
+			await expect(
+				runInDurableObject(currentServer(), (instance) =>
+					instance.claimArtifactTask(
+						{ id: claim.jobId, generation: claim.jobGeneration },
+						'not-an-owner'
+					)
+				)
+			).rejects.toThrow();
+			expect(await inSection((context) => state(context, claim))).toStrictEqual(
+				before
+			);
+		}));
+
+	it('rejects malformed staging packets before modifying durable state', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const prepared = generationOf(
+				await currentServer().prepareListingTask(claim)
+			);
+			const before = await inSection((context) => state(context, claim));
+			await expect(
+				runInDurableObject(currentServer(), (instance) =>
+					instance.registerArtifactMultipart(prepared.lease, '')
+				)
+			).rejects.toThrow();
+			await expect(
+				runInDurableObject(currentServer(), (instance) =>
+					instance.renewListingTask({
+						...prepared.lease,
+						maximumBytes: prepared.lease.maximumBytes + 1
+					})
+				)
+			).rejects.toThrow();
+			await expect(
+				runInDurableObject(currentServer(), (instance) =>
+					instance.prepareListingTask(Object.assign({}, claim, { extra: true }))
+				)
+			).rejects.toThrow();
+			expect(await inSection((context) => state(context, claim))).toStrictEqual(
+				before
+			);
+		}));
+
+	it.each(['skipped', 'failed'] as const)(
+		'reports %s and cleans staging only for its current RPC owner',
+		(outcome) =>
+			withoutAlarmArming(async () => {
+				const claim = await fixture();
+				const value = await generate(claim);
+				const otherClaim = {
+					...claim,
+					owner: artifactTaskOwnerSchema.parse(crypto.randomUUID())
+				};
+				const otherLease = { ...value.lease, claim: otherClaim };
+				const before = await inSection((context) => state(context, claim));
+				expect({
+					retired: await currentServer().retireArtifactStaging(otherLease),
+					finished: await currentServer().finishArtifactTask(
+						otherClaim,
+						outcome
+					),
+					renewed: await currentServer().renewListingTask(otherLease),
+					completed: await currentServer().completeListingTask(
+						otherLease,
+						value.fact
+					),
+					state: await inSection((context) => state(context, claim))
+				}).toStrictEqual({
+					retired: false,
+					finished: false,
+					renewed: undefined,
+					completed: { kind: 'unavailable' },
+					state: before
+				});
+				expect(await currentServer().retireArtifactStaging(value.lease)).toBe(
+					true
+				);
+				expect(await currentServer().finishArtifactTask(claim, outcome)).toBe(
+					true
+				);
+				expect(await currentServer().finishArtifactTask(claim, outcome)).toBe(
+					false
+				);
+				expect(await currentServer().collectArtifactStaging()).toStrictEqual({
+					removed: 1,
+					pending: false
+				});
+				const after = await inSection((context) => state(context, claim));
+				expect({
+					progress: after.job?.progress,
+					artifacts: after.artifacts,
+					stages: after.stages,
+					facts: after.facts,
+					references: after.references
+				}).toStrictEqual({
+					progress: {
+						discovered: 1,
+						completed: 0,
+						skipped: outcome === 'skipped' ? 1 : 0,
+						failed: outcome === 'failed' ? 1 : 0
+					},
+					artifacts: [],
+					stages: [],
+					facts: [],
+					references: []
+				});
+			})
+	);
 
 	it('allocates fresh staging when the old sealed output has entered cleanup', () =>
 		withoutAlarmArming(async () => {
