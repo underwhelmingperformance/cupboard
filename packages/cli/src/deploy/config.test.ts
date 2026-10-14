@@ -61,7 +61,7 @@ const tenantSource = `{
 }`;
 
 describe('parseDeploymentConfig', () => {
-	it('limits production maintenance batches to one subrequest-budgeted operation', async () => {
+	it('bounds production batches and allows artifact consumers to autoscale', async () => {
 		const productionControlSource = await readFile(
 			new URL('../../../server/wrangler.jsonc', import.meta.url),
 			'utf8'
@@ -82,7 +82,7 @@ describe('parseDeploymentConfig', () => {
 				maxBatchSize: 1,
 				maxBatchTimeout: 5,
 				maxRetries: 3,
-				maxConcurrency: 2,
+				maxConcurrency: undefined,
 				deadLetterQueue: 'cupboard-artifacts-dlq'
 			}
 		]);

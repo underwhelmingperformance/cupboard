@@ -7226,9 +7226,14 @@ build traces available from a cupboard cache.
 - [ ] Use D1 job and task records with expiring claims, source-incarnation
       fences and resumable staging cleanup. Queue messages are wake-up hints;
       persisted state decides whether work can run and complete.
-- [ ] Add a dedicated artifact queue with one consumer and one decode initially.
-      Bound multipart staging, connections, memory, subrequests and each
-      operation.
+- [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
+      decoding, multipart staging, connections, memory, subrequests and elapsed
+      time within each invocation. Dispatch independent tasks in parallel,
+      including tasks from the same job, with generation-fenced claims and
+      bounded, fair fan-out. Keep slow jobs and tenants from blocking unrelated
+      work. Apply backpressure from measured storage and staging capacity;
+      reserve work only when a consumer can make progress. Queue concurrency has
+      no fixed global cap unless measurements establish a resource limit.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last
       progress and paged failures. The total remains unknown until discovery
@@ -7327,6 +7332,9 @@ retrieval after execution are separate capabilities.
       distance matching and known input sizes. Use executables, source trees,
       many small files and large payloads. Measure encoder time, CPU, memory,
       compressed size, Worker verification and native Nix download/decode.
+      Measure artifact throughput, queue age and task latency under concurrent
+      jobs and tenants. Exercise saturation and recovery to choose batch sizes,
+      dispatch fan-out and capacity limits from evidence.
 - [ ] Keep the current compression default unless aggregate size improves and
       time and memory each regress by no more than 5%.
 - [ ] Add migration declarations and local steps, upgrade notes and current
