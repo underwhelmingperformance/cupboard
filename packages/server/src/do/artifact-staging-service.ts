@@ -10,7 +10,7 @@ import {
 	maxArtifactBytes
 } from '@cupboard/protocol/artifacts';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, lt, lte } from 'drizzle-orm';
 
 import {
 	type ArtifactStageId,
@@ -233,6 +233,67 @@ export class ArtifactStagingService {
 		return row !== undefined && this.active(row)
 			? this.lease(row, claim)
 			: undefined;
+	}
+	reuseReadyInSection(
+		claim: ArtifactTaskClaim
+	): ArtifactStageLease | undefined {
+		const jobs = new ArtifactJobService(this.context);
+		const expiresAt = jobs.claimDeadlineInSection(claim);
+		const job = jobs.summaryInSection(claim.jobId);
+		if (
+			expiresAt === undefined ||
+			job === undefined ||
+			this.taskStage(claim) !== undefined
+		) {
+			return;
+		}
+		const sourceKey = JSON.stringify(
+			artifactTaskSourceSchema.parse(claim.source)
+		);
+		const reusable = this.context.db
+			.select()
+			.from(schema.artifactStages)
+			.where(
+				and(
+					eq(schema.artifactStages.taskId, claim.id),
+					lt(schema.artifactStages.taskGeneration, claim.generation),
+					eq(schema.artifactStages.jobId, claim.jobId),
+					lte(schema.artifactStages.jobGeneration, claim.jobGeneration),
+					eq(schema.artifactStages.cacheGeneration, claim.cacheGeneration),
+					eq(schema.artifactStages.sourceKey, sourceKey),
+					eq(schema.artifactStages.kind, job.definition.kind),
+					eq(
+						schema.artifactStages.maximumBytes,
+						maxArtifactBytes[job.definition.kind]
+					),
+					eq(schema.artifactStages.state, 'ready'),
+					eq(schema.artifactStages.writesSealed, true)
+				)
+			)
+			.orderBy(desc(schema.artifactStages.taskGeneration))
+			.limit(1)
+			.get();
+		if (
+			reusable?.digest === undefined ||
+			reusable.digest === null ||
+			reusable.size === null
+		) {
+			return;
+		}
+		const writeUntil = isoTimestamp(new Date(Date.now() + producerWindowMs));
+		const updated = this.context.db
+			.update(schema.artifactStages)
+			.set({
+				taskGeneration: claim.generation,
+				jobGeneration: claim.jobGeneration,
+				owner: claim.owner,
+				expiresAt,
+				writeUntil
+			})
+			.where(eq(schema.artifactStages.id, reusable.id))
+			.returning()
+			.all()[0];
+		return updated === undefined ? undefined : this.lease(updated, claim);
 	}
 	async reserveInSection(
 		claim: ArtifactTaskClaim

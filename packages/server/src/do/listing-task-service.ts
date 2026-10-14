@@ -211,7 +211,8 @@ export class ListingTaskService {
 			return { kind: reused.kind };
 		}
 		const staging = new ArtifactStagingService(this.context);
-		const existing = staging.findInSection(claim);
+		const existing =
+			staging.findInSection(claim) ?? staging.reuseReadyInSection(claim);
 		const ready =
 			existing === undefined ? undefined : staging.readyInSection(existing);
 		if (existing !== undefined && ready !== undefined) {

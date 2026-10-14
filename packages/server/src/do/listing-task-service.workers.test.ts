@@ -231,6 +231,123 @@ describe('listing task workflow', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => vi.restoreAllMocks());
 
+	it('allocates fresh staging when the old sealed output has entered cleanup', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const value = await generate(claim);
+			await inSection((context) =>
+				Promise.resolve(
+					new ArtifactStagingService(context).retireInSection(value.lease)
+				)
+			);
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const prepared = await inSection(async (context) => {
+				const next = new ArtifactJobService(context).claimInSection(
+					claim.jobId,
+					artifactTaskOwnerSchema.parse(crypto.randomUUID())
+				).claim;
+				if (next === undefined) {
+					throw new Error('The expired task was not reclaimed');
+				}
+				return generationOf(
+					await new ListingTaskService(context).prepareInSection(next)
+				);
+			});
+			const collection = await runInDurableObject(currentServer(), (instance) =>
+				new ArtifactStagingService(instance.context).collect()
+			);
+			await inSection(async (context) => {
+				expect({
+					differentKey: prepared.lease.key !== value.lease.key,
+					collection,
+					rows: context.db
+						.select({
+							id: schema.artifactStages.id,
+							state: schema.artifactStages.state
+						})
+						.from(schema.artifactStages)
+						.all(),
+					oldObjectExists: (await env.BLOBS.head(value.lease.key)) !== null,
+					currentDeadline: new ArtifactStagingService(
+						context
+					).deadlineInSection(prepared.lease)
+				}).toStrictEqual({
+					differentKey: true,
+					collection: {
+						removed: 1,
+						pending: true,
+						nextWakeAt: prepared.lease.expiresAt
+					},
+					rows: [{ id: prepared.lease.id, state: 'pending' }],
+					oldObjectExists: false,
+					currentDeadline: prepared.lease.expiresAt
+				});
+			});
+		}));
+
+	it.each(['expiry', 'resume'] as const)(
+		'recovers sealed output after %s without accepting operations from the old producer',
+		(mode) =>
+			withoutAlarmArming(async () => {
+				const claim = await fixture();
+				const value = await generate(claim);
+				if (mode === 'expiry') {
+					vi.setSystemTime(new Date(claim.leaseExpiresAt));
+				}
+				await inSection(async (context) => {
+					const jobs = new ArtifactJobService(context);
+					if (mode === 'resume') {
+						jobs.cancelInSection(claim.jobId);
+						jobs.resumeInSection(claim.jobId);
+					}
+					const next = jobs.claimInSection(
+						claim.jobId,
+						artifactTaskOwnerSchema.parse(crypto.randomUUID())
+					).claim;
+					if (next === undefined) {
+						throw new Error('The expired listing task was not reclaimed');
+					}
+					const workflow = new ListingTaskService(context);
+					const result = await workflow.prepareInSection(next);
+					if (result.kind !== 'promote') {
+						throw new Error('Expected recovery of the sealed listing');
+					}
+					expect({
+						fact: result.fact,
+						stageId: result.lease.id,
+						key: result.lease.key,
+						claim: result.lease.claim,
+						maximumBytes: result.lease.maximumBytes
+					}).toStrictEqual({
+						fact: value.fact,
+						stageId: value.lease.id,
+						key: value.lease.key,
+						claim: next,
+						maximumBytes: value.lease.maximumBytes
+					});
+					const before = await state(context, next);
+					const staging = new ArtifactStagingService(context);
+					expect({
+						oldReady: staging.readyInSection(value.lease),
+						oldRenewal: staging.renewInSection(value.lease),
+						oldRetirement: staging.retireInSection(value.lease),
+						current: staging.readyInSection(result.lease),
+						state: await state(context, next)
+					}).toStrictEqual({
+						oldReady: undefined,
+						oldRenewal: undefined,
+						oldRetirement: false,
+						current: {
+							key: value.lease.key,
+							digest: value.fact.digest,
+							size: value.fact.size
+						},
+						state: before
+					});
+				});
+			})
+	);
+
 	it('renews the task and staging together while refusing renewal after source revocation', () =>
 		withoutAlarmArming(async () => {
 			const claim = await fixture();
