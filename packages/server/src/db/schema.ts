@@ -20,6 +20,14 @@ import {
 	type TenantId,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import type {
+	ArtifactJobDefinition,
+	ArtifactJobGeneration,
+	ArtifactJobId,
+	ArtifactTaskId,
+	ArtifactTaskOwner,
+	ArtifactTaskSource
+} from '@cupboard/protocol/artifact-jobs';
 import {
 	type ArtifactGeneration,
 	type ArtifactId,
@@ -1173,6 +1181,95 @@ export const grantContraction = sqliteTable(
 		complete: integer('complete', { mode: 'boolean' }).notNull().default(false)
 	},
 	(table) => [check('grant_contraction_singleton_check', sql`${table.id} = 1`)]
+);
+
+export const artifactJobs = sqliteTable(
+	'artifact_job',
+	{
+		id: text('id').$type<ArtifactJobId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		definition: text('definition', { mode: 'json' })
+			.$type<ArtifactJobDefinition>()
+			.notNull(),
+		generation: integer('generation').$type<ArtifactJobGeneration>().notNull(),
+		state: text('state', {
+			enum: ['running', 'cancelled', 'complete']
+		}).notNull(),
+		discoveryComplete: integer('discovery_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		cursor: text('cursor').$type<StorePathHash>(),
+		discovered: integer('discovered').notNull().default(0),
+		completed: integer('completed').notNull().default(0),
+		skipped: integer('skipped').notNull().default(0),
+		failed: integer('failed').notNull().default(0),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+		completedAt: text('completed_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		index('artifact_job_cache_idx').on(table.cacheId, table.id),
+		index('artifact_job_state_idx').on(table.state, table.id),
+		check('artifact_job_generation_check', sql`${table.generation} >= 1`),
+		check(
+			'artifact_job_progress_check',
+			sql`${table.discovered} >= 0 AND ${table.completed} >= 0 AND ${table.skipped} >= 0 AND ${table.failed} >= 0 AND ${table.completed} + ${table.skipped} + ${table.failed} <= ${table.discovered}`
+		),
+		check(
+			'artifact_job_completion_check',
+			sql`${table.state} != 'complete' OR (${table.discoveryComplete} = 1 AND ${table.completed} + ${table.skipped} + ${table.failed} = ${table.discovered} AND ${table.completedAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const artifactTasks = sqliteTable(
+	'artifact_task',
+	{
+		id: text('id').$type<ArtifactTaskId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		sourceKey: text('source_key').notNull(),
+		source: text('source', { mode: 'json' })
+			.$type<ArtifactTaskSource>()
+			.notNull(),
+		state: text('state', {
+			enum: ['pending', 'claimed', 'completed', 'skipped', 'failed']
+		})
+			.notNull()
+			.default('pending'),
+		claimGeneration: integer('claim_generation').notNull().default(0),
+		jobGeneration: integer('job_generation').notNull().default(0),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		completedAt: text('completed_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		uniqueIndex('artifact_task_source_idx').on(table.jobId, table.sourceKey),
+		index('artifact_task_state_idx').on(table.jobId, table.state, table.id),
+		index('artifact_task_lease_idx').on(
+			table.jobId,
+			table.state,
+			table.leaseExpiresAt,
+			table.id
+		),
+		index('artifact_task_job_generation_idx').on(
+			table.jobId,
+			table.state,
+			table.jobGeneration,
+			table.id
+		),
+		check(
+			'artifact_task_generation_check',
+			sql`${table.claimGeneration} >= 0 AND ${table.jobGeneration} >= 0`
+		),
+		check(
+			'artifact_task_claim_check',
+			sql`${table.state} != 'claimed' OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.claimGeneration} > 0 AND ${table.jobGeneration} > 0)`
+		)
+	]
 );
 
 export const artifacts = sqliteTable(

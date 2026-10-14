@@ -83,6 +83,7 @@ import m0080 from './0080_cache_teardown_deadlines.sql';
 import m0081 from './0081_artifact_reference_deletion_progress.sql';
 import m0082 from './0082_artifact_cache_retirement.sql';
 import m0083 from './0083_artifact_expiry_retirement.sql';
+import m0084 from './0084_artifact_jobs.sql';
 
 export default {
 	journal,
@@ -170,6 +171,7 @@ export default {
 		m0080,
 		m0081,
 		m0082,
-		m0083
+		m0083,
+		m0084
 	}
 };
