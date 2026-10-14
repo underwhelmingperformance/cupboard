@@ -5,6 +5,7 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { currentListingGeneratorRevision } from '@cupboard/protocol/artifacts';
 import { cacheSummarySchema } from '@cupboard/protocol/caches';
 import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import {
@@ -85,6 +86,61 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('adds dispatch deadlines without changing existing artifact job progress', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-artifact-dispatch'),
+			async (_instance, state) => {
+				await migrateThrough(state, 85);
+				for (const jobState of ['running', 'cancelled', 'complete']) {
+					state.storage.sql.exec(
+						"INSERT INTO artifact_job(id,cache_id,cache_generation,definition,generation,state,discovery_complete,discovered,completed,skipped,failed,created_at,updated_at,completed_at) VALUES (?,1,1,?,1,?,?,3,1,1,?, ?, ?, CASE WHEN ? = 'complete' THEN '2026-01-01T00:00:00.000Z' END)",
+						jobState,
+						JSON.stringify({
+							kind: 'listing',
+							generatorRevision: currentListingGeneratorRevision
+						}),
+						jobState,
+						jobState === 'complete' ? 1 : 0,
+						jobState === 'complete' ? 1 : 0,
+						'2026-01-01T00:00:00.000Z',
+						'2026-01-01T00:00:00.000Z',
+						jobState
+					);
+				}
+				const before = state.storage.sql
+					.exec('SELECT * FROM artifact_job ORDER BY id')
+					.toArray();
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 86)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 86)
+				);
+				return {
+					before,
+					after: state.storage.sql
+						.exec('SELECT * FROM artifact_job ORDER BY id')
+						.toArray(),
+					migrated,
+					repeated
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			before: result.before,
+			after: result.before.map((row) => ({
+				...row,
+				next_dispatch_at: 0,
+				dispatch_revision: 0
+			})),
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false }
+		});
+	});
+
 	it('adds a durable staging queue without changing pending state', async () => {
 		const result = await runInDurableObject(
 			testServerFor('migration-staging-cleanup'),

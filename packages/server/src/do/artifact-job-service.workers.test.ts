@@ -5,6 +5,7 @@ import {
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type ArtifactTaskClaim,
 	type ArtifactTaskClaimResult,
@@ -30,6 +31,10 @@ import {
 	withoutAlarmArming
 } from '../test-support.ts';
 
+import {
+	type ArtifactJobDispatchResult,
+	ArtifactJobDispatchService
+} from './artifact-job-dispatch-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import type { ServerContext } from './context.ts';
 
@@ -83,6 +88,13 @@ async function withJob<T>(
 			body(new ArtifactJobService(instance.context), instance.context, source)
 		)
 	);
+}
+
+function dispatchOf(result: ArtifactJobDispatchResult) {
+	if (result.kind !== 'dispatch') {
+		throw new Error('The fixture job was not reserved for dispatch');
+	}
+	return result.dispatch;
 }
 
 function seedDiscoverySources(context: ServerContext) {
@@ -532,4 +544,225 @@ describe('durable artifact task claims', () => {
 				});
 			})
 		));
+
+	it('persists a redispatch deadline before queue delivery and recovers after message loss', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				jobs.enqueueInSection(job, source);
+				jobs.checkpointInSection(job, hash, true);
+				const dispatches = new ArtifactJobDispatchService(context);
+				vi.setSystemTime(new Date());
+				const now = Date.now();
+				const first = dispatchOf(dispatches.reserveInSection());
+				expect({
+					first,
+					nextAt: dispatches.nextAtInSection(),
+					duplicate: dispatches.reserveInSection()
+				}).toStrictEqual({
+					first: {
+						job: { id: job.id, generation: job.generation },
+						artifactKind: 'listing',
+						revision: 1,
+						notBefore: now + 900_000
+					},
+					nextAt: now + 900_000,
+					duplicate: { kind: 'idle' }
+				});
+				vi.setSystemTime(new Date(first.notBefore));
+				expect(dispatches.reserveInSection()).toStrictEqual({
+					kind: 'dispatch',
+					dispatch: {
+						...first,
+						revision: 2,
+						notBefore: first.notBefore + 900_000
+					}
+				});
+			})
+		));
+
+	it('fences a failed send from a newer reservation and from a cancelled or resumed job', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				jobs.enqueueInSection(job, source);
+				jobs.checkpointInSection(job, hash, true);
+				const dispatches = new ArtifactJobDispatchService(context);
+				const first = dispatchOf(dispatches.reserveInSection());
+				vi.setSystemTime(new Date(first.notBefore));
+				const second = dispatchOf(dispatches.reserveInSection());
+				const isStaleSend = dispatches.retryInSection(first);
+				const isFailedSend = dispatches.retryInSection(second);
+				const isRepeated = dispatches.retryInSection(second);
+				expect({
+					staleSend: isStaleSend,
+					failedSend: isFailedSend,
+					repeated: isRepeated,
+					nextAt: dispatches.nextAtInSection()
+				}).toStrictEqual({
+					staleSend: false,
+					failedSend: true,
+					repeated: false,
+					nextAt: Date.now() + 30_000
+				});
+				jobs.cancelInSection(job.id);
+				const cancelled = dispatches.nextAtInSection();
+				jobs.resumeInSection(job.id);
+				const resumed = dispatchOf(dispatches.reserveInSection());
+				expect({
+					cancelled,
+					oldSend: dispatches.retryInSection(second),
+					generation: resumed.job.generation
+				}).toStrictEqual({
+					cancelled: undefined,
+					oldSend: false,
+					generation: 3
+				});
+			})
+		));
+
+	it('bounds discovery during dispatch and continues the next page after a lost message', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, _source) => {
+				seedDiscoverySources(context);
+				const job = await jobs.startInSection(defaultCache(), definition);
+				const dispatches = new ArtifactJobDispatchService(context);
+				const first = dispatchOf(dispatches.reserveInSection());
+				const firstSummary = jobs.summaryInSection(job.id);
+				vi.setSystemTime(new Date(first.notBefore));
+				dispatches.reserveInSection();
+				expect({
+					first: {
+						discovered: firstSummary?.progress.discovered,
+						discoveryComplete: firstSummary?.discoveryComplete
+					},
+					second: {
+						discovered: jobs.summaryInSection(job.id)?.progress.discovered,
+						discoveryComplete: jobs.summaryInSection(job.id)?.discoveryComplete
+					}
+				}).toStrictEqual({
+					first: { discovered: 32, discoveryComplete: false },
+					second: { discovered: 41, discoveryComplete: true }
+				});
+			})
+		));
+
+	it('retires a due job after its cache generation changes', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, _source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				context.db
+					.update(schema.cacheIdentities)
+					.set({ generation: cacheGenerationSchema.parse(2) })
+					.run();
+				const dispatches = new ArtifactJobDispatchService(context);
+				expect({
+					result: dispatches.reserveInSection(),
+					nextAt: dispatches.nextAtInSection(),
+					state: jobs.summaryInSection(job.id)?.state
+				}).toStrictEqual({
+					result: { kind: 'progressed' },
+					nextAt: undefined,
+					state: 'cancelled'
+				});
+			})
+		));
+
+	it('does not dispatch jobs which finish during empty discovery', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, _source) => {
+				context.db.delete(schema.narInfos).run();
+				const job = await jobs.startInSection(defaultCache(), definition);
+				const dispatches = new ArtifactJobDispatchService(context);
+				expect({
+					result: dispatches.reserveInSection(),
+					nextAt: dispatches.nextAtInSection(),
+					state: jobs.summaryInSection(job.id)?.state
+				}).toStrictEqual({
+					result: { kind: 'progressed' },
+					nextAt: undefined,
+					state: 'complete'
+				});
+			})
+		));
+
+	it('reserves other due jobs before retrying an unfinished job', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const first = await jobs.startInSection(defaultCache(), definition);
+				const second = await jobs.startInSection(defaultCache(), definition);
+				for (const job of [first, second]) {
+					jobs.enqueueInSection(job, source);
+					jobs.checkpointInSection(job, hash, true);
+				}
+				const dispatches = new ArtifactJobDispatchService(context);
+				const dispatched = [
+					dispatchOf(dispatches.reserveInSection()).job.id,
+					dispatchOf(dispatches.reserveInSection()).job.id
+				];
+				expect({
+					ids: dispatched.toSorted(byCodeUnit),
+					next: dispatches.reserveInSection()
+				}).toStrictEqual({
+					ids: [first.id, second.id].toSorted(byCodeUnit),
+					next: { kind: 'idle' }
+				});
+			})
+		));
+
+	it.each([
+		{
+			operation: 'next',
+			expected:
+				'SEARCH artifact_job USING COVERING INDEX artifact_job_dispatch_idx (state=?)'
+		},
+		{
+			operation: 'reserve',
+			expected:
+				'SEARCH artifact_job USING INDEX artifact_job_dispatch_idx (state=?)'
+		}
+	])(
+		'uses the dispatch deadline index for $operation',
+		({ operation, expected }) =>
+			withoutAlarmArming(() =>
+				withJob(async (jobs, context, _source) => {
+					await jobs.startInSection(defaultCache(), definition);
+					const execute = vi.spyOn(context.ctx.storage.sql, 'exec');
+					let captured: readonly [string, ...unknown[]] | undefined;
+					try {
+						const dispatches = new ArtifactJobDispatchService(context);
+						switch (operation) {
+							case 'next': {
+								dispatches.nextAtInSection();
+								break;
+							}
+							case 'reserve': {
+								dispatches.reserveInSection();
+								break;
+							}
+						}
+						captured = execute.mock.calls.find(([query]) =>
+							query.includes('order by "artifact_job"."next_dispatch_at"')
+						);
+					} finally {
+						execute.mockRestore();
+					}
+					if (captured === undefined) {
+						throw new Error('The dispatch deadline query was not recorded');
+					}
+					const [query, ...inputBindings] = captured;
+					const bindings = z
+						.array(z.union([z.string(), z.number()]))
+						.parse(inputBindings);
+					const plan = Array.from(
+						context.ctx.storage.sql.exec<{ detail: string }>(
+							`EXPLAIN QUERY PLAN ${query}`,
+							...bindings
+						),
+						(row) => row.detail
+					);
+					expect(plan).toStrictEqual([expected]);
+				})
+			)
+	);
 });

@@ -1256,6 +1256,8 @@ export const artifactJobs = sqliteTable(
 		state: text('state', {
 			enum: ['running', 'cancelled', 'complete']
 		}).notNull(),
+		nextDispatchAt: integer('next_dispatch_at').notNull().default(0),
+		dispatchRevision: integer('dispatch_revision').notNull().default(0),
 		discoveryComplete: integer('discovery_complete', { mode: 'boolean' })
 			.notNull()
 			.default(false),
@@ -1271,6 +1273,11 @@ export const artifactJobs = sqliteTable(
 	(table) => [
 		index('artifact_job_cache_idx').on(table.cacheId, table.id),
 		index('artifact_job_state_idx').on(table.state, table.id),
+		index('artifact_job_dispatch_idx').on(
+			table.state,
+			table.nextDispatchAt,
+			table.id
+		),
 		check('artifact_job_generation_check', sql`${table.generation} >= 1`),
 		check(
 			'artifact_job_progress_check',

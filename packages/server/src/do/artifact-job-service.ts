@@ -480,6 +480,7 @@ export class ArtifactJobService {
 			.update(schema.artifactJobs)
 			.set({
 				state: 'running',
+				nextDispatchAt: 0,
 				generation: artifactJobGenerationSchema.parse(job.generation + 1),
 				updatedAt: isoTimestamp(new Date())
 			})
