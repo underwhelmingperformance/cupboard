@@ -66,8 +66,10 @@ Worker consumer accepts one message per batch, and consumer invocations scale
 with demand without a configured concurrency ceiling. The queue has a separate
 `cupboard-artifacts-dlq`. These resources are installed before native artifact
 producers are activated. The consumer processes listing jobs under a 14-minute
-budget, using generation-fenced tenant RPCs and sending a continuation after a
-terminal task outcome. Discovery and initial dispatch remain disabled.
+budget, using generation-fenced tenant RPCs. Legacy job hints send a
+continuation after a terminal task outcome. Admitted messages claim only their
+specific task, make the job durably due after completion and request a dispatch
+wake. Discovery and initial dispatch remain disabled.
 
 The admission model records queued work in tenant SQLite before a consumer
 claims it. Admissions expire, capture the job, task, source and cache
@@ -75,8 +77,11 @@ generations, and share the staging pool's reservation and byte budgets. A
 consumer exchanges its admission for staging in one critical section. Reuse work
 can proceed at full staging capacity, but generation must reserve space before
 writing bytes. An admitted replacement keeps sealed staging available until
-handover or expiry. Queue dispatch and consumption still require integration
-with this model.
+handover or expiry. Independent admissions allow consumers to execute tasks from
+the same job concurrently. Terminal task outcomes release remaining admissions
+in the transaction that updates progress. Replayed, spent or stale admissions
+cannot claim another task. Automatic fan-out and alarm dispatch still require
+integration with this model.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a

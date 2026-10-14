@@ -24,6 +24,34 @@ const redispatchDelayMs = 15 * 60 * 1000;
 export class ArtifactJobDispatchService {
 	constructor(private readonly context: ServerContext) {}
 
+	wakeInSection(version: ArtifactJobVersion): boolean {
+		if (this.context.offboarding) {
+			return false;
+		}
+		const job = this.context.db
+			.select()
+			.from(schema.artifactJobs)
+			.where(eq(schema.artifactJobs.id, version.id))
+			.get();
+		if (job?.generation !== version.generation || job.state !== 'running') {
+			return false;
+		}
+		const scope = this.context.cacheRepository.scopeForId(job.cacheId);
+		const cache = this.context.cacheRepository.resolve(scope);
+		if (cache?.id !== job.cacheId || cache.generation !== job.cacheGeneration) {
+			return false;
+		}
+		this.context.db
+			.update(schema.artifactJobs)
+			.set({
+				nextDispatchAt: 0,
+				dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`
+			})
+			.where(eq(schema.artifactJobs.id, version.id))
+			.run();
+		return true;
+	}
+
 	nextAtInSection(): number | undefined {
 		return this.context.db
 			.select({ at: schema.artifactJobs.nextDispatchAt })

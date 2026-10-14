@@ -7234,6 +7234,11 @@ build traces available from a cupboard cache.
       work. Apply backpressure from measured storage and staging capacity;
       reserve work only when a consumer can make progress. Queue concurrency has
       no fixed global cap unless measurements establish a resource limit.
+      Consumers now claim specific admitted tasks, including independent tasks
+      from the same job. Terminal outcomes atomically release admissions and
+      make dispatch due; admitted completions request a fenced wake without
+      reusing spent messages. Automatic fan-out and alarm dispatch remain
+      pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last
       progress and paged failures. The total remains unknown until discovery

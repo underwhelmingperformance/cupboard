@@ -51,6 +51,7 @@ import {
 	withoutAlarmArming
 } from '../test-support.ts';
 
+import { ArtifactAdmissionService } from './artifact-admission-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import { ArtifactStagingService } from './artifact-staging-service.ts';
 import { type ServerContext } from './context.ts';
@@ -67,14 +68,14 @@ const expectedListing = JSON.stringify({
 	root: { type: 'regular', size: 5, narOffset: 96 }
 });
 
-async function sourceNar() {
+async function sourceNar(contents = 'hello') {
 	const parts = [
 		'nix-archive-1',
 		'(',
 		'type',
 		'regular',
 		'contents',
-		'hello',
+		contents,
 		')'
 	].map((value) => {
 		const bytes = new TextEncoder().encode(value);
@@ -119,7 +120,10 @@ async function inSection<T>(
 	);
 }
 
-async function fixture(input?: Awaited<ReturnType<typeof sourceNar>>) {
+async function fixture(
+	input?: Awaited<ReturnType<typeof sourceNar>>,
+	hasSibling = false
+) {
 	const token = await initialise();
 	await recordTransition('native-artifact-storage', 'expanded');
 	await recordTransition('native-artifact-publication', 'complete');
@@ -135,6 +139,25 @@ async function fixture(input?: Awaited<ReturnType<typeof sourceNar>>) {
 		}),
 		nar
 	);
+	const siblingNar = hasSibling ? await sourceNar('world') : undefined;
+	const siblingHash = storePathHashSchema.parse('b'.repeat(32));
+	if (siblingNar !== undefined) {
+		await commitPath(
+			token,
+			uploadMetadata({
+				storePathHash: siblingHash,
+				narHash: siblingNar.narHash,
+				narSize: siblingNar.narSize,
+				fileHash: siblingNar.fileHash,
+				fileSize: siblingNar.narBytes.byteLength
+			}),
+			siblingNar
+		);
+	}
+	const siblingGeneration = hasSibling
+		? narInfoGenerationSchema.parse(await narInfoGeneration(siblingHash))
+		: undefined;
+
 	const generation = narInfoGenerationSchema.parse(
 		await narInfoGeneration(hash)
 	);
@@ -150,6 +173,15 @@ async function fixture(input?: Awaited<ReturnType<typeof sourceNar>>) {
 			generation,
 			narHash: nar.narHash
 		});
+		if (siblingGeneration !== undefined && siblingNar !== undefined) {
+			jobs.enqueueInSection(job, {
+				kind: 'nar',
+				storePathHash: siblingHash,
+				generation: siblingGeneration,
+				narHash: siblingNar.narHash
+			});
+		}
+
 		jobs.checkpointInSection(job, undefined, true);
 		const claimed = jobs.claimInSection(
 			job.id,
@@ -307,9 +339,340 @@ function jobMessage(claim: ArtifactTaskClaim): ArtifactQueueMessage {
 	};
 }
 
+async function admittedMessage(
+	claim: ArtifactTaskClaim,
+	mode: 'generate' | 'reuse' = 'generate'
+) {
+	const body = jobMessage(claim);
+	const admission = await inSection((context) => {
+		const result = new ArtifactAdmissionService(context).reserveInSection(
+			body.job,
+			claim.id,
+			mode
+		);
+		if (result.kind !== 'admitted') {
+			throw new Error('The queue fixture admission was refused');
+		}
+		return Promise.resolve(result.admission);
+	});
+	return { ...body, admission };
+}
+
 describe('listing task workflow', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => vi.restoreAllMocks());
+
+	it('consumes an admitted listing without allowing its replay to claim a sibling task', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture(undefined, true);
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim);
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			await artifactConsumer(sent).handleMessage(
+				artifactMessage(body, actions)
+			);
+			await artifactConsumer(sent).handleMessage(
+				artifactMessage(body, actions)
+			);
+			const after = await inSection((context) => state(context, claim));
+			const queueState = await inSection((context) =>
+				Promise.resolve({
+					admissions: context.db.select().from(schema.artifactAdmissions).all(),
+					job: context.db
+						.select({ nextDispatchAt: schema.artifactJobs.nextDispatchAt })
+						.from(schema.artifactJobs)
+						.get()
+				})
+			);
+			expect({
+				actions,
+				sent,
+				progress: after.job?.progress,
+				queueState
+			}).toStrictEqual({
+				actions: [{ action: 'ack' }, { action: 'ack' }],
+				sent: [],
+				progress: { discovered: 2, completed: 1, skipped: 0, failed: 0 },
+				queueState: { admissions: [], job: { nextDispatchAt: 0 } }
+			});
+		}));
+
+	it('claims the specific admitted task through the trusted RPC', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim);
+			const owner = crypto.randomUUID();
+			const expectedDeadline = isoTimestamp(new Date(Date.now() + 60_000));
+			const result = await currentServer().claimAdmittedArtifactTask(
+				body.admission,
+				owner,
+				'listing'
+			);
+			expect(result).toStrictEqual({
+				kind: 'claimed',
+				claim: {
+					...claim,
+					generation: 2,
+					owner,
+					leaseExpiresAt: expectedDeadline
+				},
+				definition: {
+					kind: 'listing',
+					generatorRevision: currentListingGeneratorRevision
+				}
+			});
+		}));
+
+	it('does not consume admission for a different artifact kind', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim);
+			const before = await inSection((context) =>
+				Promise.resolve(
+					context.db.select().from(schema.artifactAdmissions).all()
+				)
+			);
+			const result = await currentServer().claimAdmittedArtifactTask(
+				body.admission,
+				crypto.randomUUID(),
+				'build-log'
+			);
+			expect({
+				result,
+				admissions: await inSection((context) =>
+					Promise.resolve(
+						context.db.select().from(schema.artifactAdmissions).all()
+					)
+				)
+			}).toStrictEqual({
+				result: { kind: 'idle', pending: false },
+				admissions: before
+			});
+		}));
+
+	it('releases admitted work when a failed task finishes', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim);
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			await artifactConsumer(sent, async (server, current) => {
+				await server.finishArtifactTask(current, 'failed');
+				return { kind: 'failed', reason: 'invalid-nar' };
+			}).handleMessage(artifactMessage(body, actions));
+			const after = await inSection((context) => state(context, claim));
+			expect({
+				actions,
+				sent,
+				progress: after.job?.progress,
+				admissions: await inSection((context) =>
+					Promise.resolve(
+						context.db.select().from(schema.artifactAdmissions).all()
+					)
+				)
+			}).toStrictEqual({
+				actions: [{ action: 'ack' }],
+				sent: [],
+				progress: { discovered: 1, completed: 0, skipped: 0, failed: 1 },
+				admissions: []
+			});
+		}));
+
+	it.each(['expired', 'cancelled', 'suspended'] as const)(
+		'acknowledges %s admission without executing another task',
+		(reason) =>
+			withoutAlarmArming(async () => {
+				const claim = await fixture();
+				vi.setSystemTime(new Date(claim.leaseExpiresAt));
+				const body = await admittedMessage(claim);
+				switch (reason) {
+					case 'expired': {
+						vi.setSystemTime(new Date(body.admission.expiresAt));
+						break;
+					}
+					case 'cancelled': {
+						await inSection((context) =>
+							Promise.resolve(
+								new ArtifactJobService(context).cancelInSection(claim.jobId)
+							)
+						);
+						break;
+					}
+					case 'suspended': {
+						await drizzle(env.CUPBOARD_DB, { schema: d1Schema })
+							.update(d1Schema.tenant)
+							.set({ status: 'suspended' })
+							.where(eq(d1Schema.tenant.id, fixtureTenant))
+							.run();
+						break;
+					}
+				}
+				const actions: unknown[] = [];
+				const sent: ArtifactQueueMessage[] = [];
+				const execute = vi.fn(() =>
+					Promise.resolve({ kind: 'completed' } as const)
+				);
+				await artifactConsumer(sent, execute).handleMessage(
+					artifactMessage(body, actions)
+				);
+				expect({ actions, sent, executions: execute.mock.calls }).toStrictEqual(
+					{ actions: [{ action: 'ack' }], sent: [], executions: [] }
+				);
+			})
+	);
+
+	it('runs independent admitted tasks from the same job concurrently', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture(undefined, true);
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const bodies = await inSection((context) => {
+				const tasks = context.db.select().from(schema.artifactTasks).all();
+				const admissions = new ArtifactAdmissionService(context);
+				return Promise.resolve(
+					tasks.map((task) => {
+						const message = jobMessage(claim);
+						const result = admissions.reserveInSection(message.job, task.id);
+						if (result.kind !== 'admitted') {
+							throw new Error('The concurrent task was not admitted');
+						}
+						return { ...message, admission: result.admission };
+					})
+				);
+			});
+			const barrier = Promise.withResolvers<undefined>();
+			const claims: ArtifactTaskClaim[] = [];
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			const execute: NonNullable<
+				ArtifactQueueDependencies['executeTask']
+			> = async (server, current) => {
+				claims.push(current);
+				if (claims.length === bodies.length) {
+					barrier.resolve(undefined);
+				}
+				await barrier.promise;
+				await server.finishArtifactTask(current, 'failed');
+				return { kind: 'failed', reason: 'invalid-nar' };
+			};
+			await Promise.all(
+				bodies.map((body) =>
+					artifactConsumer(sent, execute).handleMessage(
+						artifactMessage(body, actions)
+					)
+				)
+			);
+			const after = await inSection((context) => state(context, claim));
+			expect({
+				actions,
+				sent,
+				claimed: claims
+					.map((current) => current.id)
+					.toSorted((left, right) => left.localeCompare(right)),
+				progress: after.job?.progress
+			}).toStrictEqual({
+				actions: [{ action: 'ack' }, { action: 'ack' }],
+				sent: [],
+				claimed: bodies
+					.map((body) => body.admission.taskId)
+					.toSorted((left, right) => left.localeCompare(right)),
+				progress: { discovered: 2, completed: 0, skipped: 0, failed: 2 }
+			});
+		}));
+
+	it('releases a reuse admission after publishing a shared listing fact', () =>
+		withoutAlarmArming(async () => {
+			const original = await fixture();
+			const generated = await generate(original);
+			await promote(generated);
+			await currentServer().completeListingTask(
+				generated.lease,
+				generated.fact
+			);
+			const claim = await inSection(async (context) => {
+				const jobs = new ArtifactJobService(context);
+				const job = await jobs.startInSection(defaultCache(), {
+					kind: 'listing',
+					generatorRevision: currentListingGeneratorRevision
+				});
+				jobs.enqueueInSection(job, original.source);
+				jobs.checkpointInSection(job, undefined, true);
+				const result = jobs.claimInSection(
+					job.id,
+					artifactTaskOwnerSchema.parse(crypto.randomUUID())
+				);
+				if (result.claim === undefined) {
+					throw new Error('The reuse task was not claimed');
+				}
+				return result.claim;
+			});
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim, 'reuse');
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			await artifactConsumer(sent).handleMessage(
+				artifactMessage(body, actions)
+			);
+			const after = await inSection((context) => state(context, claim));
+			expect({
+				actions,
+				sent,
+				progress: after.job?.progress,
+				admissions: await inSection((context) =>
+					Promise.resolve(
+						context.db.select().from(schema.artifactAdmissions).all()
+					)
+				)
+			}).toStrictEqual({
+				actions: [{ action: 'ack' }],
+				sent: [],
+				progress: { discovered: 1, completed: 1, skipped: 0, failed: 0 },
+				admissions: []
+			});
+		}));
+
+	it('rejects an invalid admitted RPC owner before changing the task', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim);
+			const before = await inSection((context) => state(context, claim));
+			await expect(
+				runInDurableObject(currentServer(), (instance) =>
+					instance.claimAdmittedArtifactTask(
+						body.admission,
+						'invalid',
+						'listing'
+					)
+				)
+			).rejects.toThrow();
+			expect(await inSection((context) => state(context, claim))).toStrictEqual(
+				before
+			);
+		}));
+
+	it('fences dispatch wakes by the current job generation', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const job = { id: claim.jobId, generation: claim.jobGeneration };
+			const isCurrent = await currentServer().requestArtifactDispatch(job);
+			const isStale = await currentServer().requestArtifactDispatch({
+				...job,
+				generation: artifactJobGenerationSchema.parse(job.generation + 1)
+			});
+			await inSection((context) =>
+				Promise.resolve(new ArtifactJobService(context).cancelInSection(job.id))
+			);
+			const isCancelled = await currentServer().requestArtifactDispatch(job);
+			expect({ isCurrent, isStale, isCancelled }).toStrictEqual({
+				isCurrent: true,
+				isStale: false,
+				isCancelled: false
+			});
+		}));
 
 	it('does not claim a queue task whose requested kind differs from its job', () =>
 		withoutAlarmArming(async () => {

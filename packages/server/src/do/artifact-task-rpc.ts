@@ -8,8 +8,10 @@ import {
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 
+import { type ArtifactAdmission } from '../blob/artifact-admission.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 
+import { ArtifactAdmissionService } from './artifact-admission-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import type { ServerContext } from './context.ts';
 
@@ -35,7 +37,8 @@ export class ArtifactTaskRpcService {
 	async claimInSection(
 		version: ArtifactJobVersion,
 		owner: ArtifactTaskOwner,
-		expectedKind?: ArtifactJobDefinition['kind']
+		expectedKind?: ArtifactJobDefinition['kind'],
+		admission?: ArtifactAdmission
 	): Promise<ArtifactTaskClaimRpcResult> {
 		if (this.context.offboarding) {
 			return { kind: 'idle', pending: false };
@@ -61,6 +64,17 @@ export class ArtifactTaskRpcService {
 		}
 		if (expectedKind !== undefined && job.definition.kind !== expectedKind) {
 			return { kind: 'idle', pending: false };
+		}
+		if (admission !== undefined) {
+			const claim = new ArtifactAdmissionService(this.context).claimInSection(
+				admission,
+				owner
+			);
+			return artifactTaskClaimRpcResultSchema.parse(
+				claim === undefined
+					? { kind: 'idle', pending: false }
+					: { kind: 'claimed', claim, definition: job.definition }
+			);
 		}
 		const result = jobs.claimInSection(version.id, owner);
 		return artifactTaskClaimRpcResultSchema.parse(

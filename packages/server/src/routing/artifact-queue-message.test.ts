@@ -26,6 +26,33 @@ describe('artifact queue messages', () => {
 		expect(artifactQueueMessageSchema.safeParse(input).success).toBe(false);
 	});
 
+	const admission = {
+		id: '00000000-0000-4000-8000-000000000002',
+		job: message.job,
+		taskId: '00000000-0000-4000-8000-000000000003',
+		cacheGeneration: 1,
+		expiresAt: '2099-01-01T00:00:00.000Z'
+	};
+	it('preserves an admission for the same job generation', () => {
+		const admitted = { ...message, admission };
+		expect(artifactQueueMessageSchema.parse(admitted)).toStrictEqual(admitted);
+	});
+	it.each([
+		{
+			...admission,
+			job: { id: '00000000-0000-4000-8000-000000000099', generation: 1 }
+		},
+		{ ...admission, job: { ...message.job, generation: 2 } },
+		{ ...admission, taskId: 'not-a-task' },
+		{ ...admission, cacheGeneration: 0 },
+		{ ...admission, extra: true }
+	])('rejects an admission outside the envelope scope or schema', (input) => {
+		expect(
+			artifactQueueMessageSchema.safeParse({ ...message, admission: input })
+				.success
+		).toBe(false);
+	});
+
 	it('routes malformed artifact envelopes to their own validator', () => {
 		expect({
 			artifact: artifactQueueHeaderSchema.safeParse({ kind: 'artifact-job' })

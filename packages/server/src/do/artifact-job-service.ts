@@ -152,11 +152,22 @@ export class ArtifactJobService {
 			if (changed.length === 0) {
 				return;
 			}
+			database
+				.delete(schema.artifactAdmissions)
+				.where(
+					and(
+						eq(schema.artifactAdmissions.taskId, task.id),
+						lte(schema.artifactAdmissions.taskGeneration, task.claimGeneration)
+					)
+				)
+				.run();
 			const column = schema.artifactJobs[outcome];
 			database
 				.update(schema.artifactJobs)
 				.set({
 					[outcome]: sql`${column} + 1`,
+					nextDispatchAt: 0,
+					dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`,
 					updatedAt: isoTimestamp(new Date())
 				})
 				.where(eq(schema.artifactJobs.id, task.jobId))

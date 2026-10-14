@@ -73,6 +73,10 @@ import { z } from 'zod';
 import migrations from '../../drizzle/migrations.js';
 import { type AccessClaims } from '../auth/auth.ts';
 import {
+	type ArtifactAdmission,
+	artifactAdmissionSchema
+} from '../blob/artifact-admission.ts';
+import {
 	artifactMultipartIdSchema,
 	type ArtifactStageLease,
 	artifactStageLeaseSchema,
@@ -166,6 +170,7 @@ import {
 	MaintenanceRetrySchedule,
 	noProgressRetryMs
 } from './alarm.ts';
+import { ArtifactJobDispatchService } from './artifact-job-dispatch-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import { ArtifactRetentionService } from './artifact-retention-service.ts';
 import { ArtifactRetirementService } from './artifact-retirement-service.ts';
@@ -3161,6 +3166,43 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	async claimAdmittedArtifactTask(
+		admission: ArtifactAdmission,
+		owner: string,
+		expectedKind: ArtifactKind
+	): Promise<ArtifactTaskClaimRpcResult> {
+		const parsedAdmission = artifactAdmissionSchema.parse(admission);
+		const parsedOwner = artifactTaskOwnerSchema.parse(owner);
+		const parsedKind = z.enum(artifactKinds).parse(expectedKind);
+		await this.initialise();
+		return this.metered('artifact-task-claim', () =>
+			this.context.criticalSection(() =>
+				new ArtifactTaskRpcService(this.context).claimInSection(
+					parsedAdmission.job,
+					parsedOwner,
+					parsedKind,
+					parsedAdmission
+				)
+			)
+		);
+	}
+
+	async requestArtifactDispatch(version: ArtifactJobVersion): Promise<boolean> {
+		const parsedVersion = artifactJobVersionSchema.parse(version);
+		await this.initialise();
+		return this.metered('artifact-job-dispatch-wake', () =>
+			this.context.criticalSection(async () => {
+				const isDue = new ArtifactJobDispatchService(
+					this.context
+				).wakeInSection(parsedVersion);
+				if (isDue) {
+					await armAlarmNoLaterThan(this.ctx.storage, Date.now());
+				}
+				return isDue;
+			})
+		);
+	}
+
 	async prepareListingTask(
 		claim: ArtifactTaskClaim
 	): Promise<ListingTaskPreparation> {
@@ -4167,6 +4209,7 @@ function logRequestFinished(
 
 type MeteredMethod =
 	| 'artifact-task-claim'
+	| 'artifact-job-dispatch-wake'
 	| 'artifact-task-finish'
 	| 'artifact-stage-register'
 	| 'artifact-stage-seal'

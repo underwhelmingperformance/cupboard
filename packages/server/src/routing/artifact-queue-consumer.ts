@@ -24,6 +24,8 @@ import {
 type ArtifactQueueRpc = Pick<
 	CupboardServer,
 	| 'claimArtifactTask'
+	| 'claimAdmittedArtifactTask'
+	| 'requestArtifactDispatch'
 	| 'prepareListingTask'
 	| 'registerArtifactMultipart'
 	| 'sealArtifactStaging'
@@ -76,6 +78,16 @@ export class ArtifactQueueConsumer {
 		message: ArtifactQueueMessage,
 		signal: AbortSignal
 	): Promise<QueueDecision> {
+		if (message.admission !== undefined) {
+			await this.rpc(
+				() =>
+					this.dependencies
+						.serverFor(message.tenant)
+						.requestArtifactDispatch(message.job),
+				signal
+			);
+			return { action: 'ack' };
+		}
 		await this.rpc(() => this.dependencies.queue.send(message), signal);
 		return { action: 'ack' };
 	}
@@ -96,7 +108,13 @@ export class ArtifactQueueConsumer {
 		const claimed = artifactTaskClaimRpcResultSchema.parse(
 			await this.rpc(
 				() =>
-					server.claimArtifactTask(message.job, owner, message.artifactKind),
+					message.admission === undefined
+						? server.claimArtifactTask(message.job, owner, message.artifactKind)
+						: server.claimAdmittedArtifactTask(
+								message.admission,
+								owner,
+								message.artifactKind
+							),
 				signal
 			)
 		);
@@ -106,6 +124,15 @@ export class ArtifactQueueConsumer {
 				: { action: 'ack' };
 		}
 		if (claimed.definition.kind !== message.artifactKind) {
+			return { action: 'retry', delaySeconds: retryDelaySeconds };
+		}
+		if (
+			message.admission !== undefined &&
+			(claimed.claim.id !== message.admission.taskId ||
+				claimed.claim.jobId !== message.job.id ||
+				claimed.claim.jobGeneration !== message.job.generation ||
+				claimed.claim.cacheGeneration !== message.admission.cacheGeneration)
+		) {
 			return { action: 'retry', delaySeconds: retryDelaySeconds };
 		}
 		const options = { signal, budgetMs: workBudgetMs };
