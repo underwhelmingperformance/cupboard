@@ -210,6 +210,30 @@ export class ArtifactStagingService {
 			.where(this.cleanupFilter(row))
 			.run();
 	}
+	private taskStage(claim: ArtifactTaskClaim): Stage | undefined {
+		return this.context.db
+			.select()
+			.from(schema.artifactStages)
+			.where(
+				and(
+					eq(schema.artifactStages.taskId, claim.id),
+					eq(schema.artifactStages.taskGeneration, claim.generation)
+				)
+			)
+			.get();
+	}
+	findInSection(claim: ArtifactTaskClaim): ArtifactStageLease | undefined {
+		if (
+			new ArtifactJobService(this.context).claimDeadlineInSection(claim) ===
+			undefined
+		) {
+			return;
+		}
+		const row = this.taskStage(claim);
+		return row !== undefined && this.active(row)
+			? this.lease(row, claim)
+			: undefined;
+	}
 	async reserveInSection(
 		claim: ArtifactTaskClaim
 	): Promise<ArtifactStageReservation> {
@@ -220,16 +244,7 @@ export class ArtifactStagingService {
 		if (expiresAt === undefined || job === undefined) {
 			return { kind: 'unavailable' };
 		}
-		const existing = this.context.db
-			.select()
-			.from(schema.artifactStages)
-			.where(
-				and(
-					eq(schema.artifactStages.taskId, claim.id),
-					eq(schema.artifactStages.taskGeneration, claim.generation)
-				)
-			)
-			.get();
+		const existing = this.taskStage(claim);
 		if (existing !== undefined) {
 			if (!this.active(existing)) {
 				this.retire(existing);
@@ -363,6 +378,11 @@ export class ArtifactStagingService {
 			return;
 		}
 		return { key: row.r2Key, digest: row.digest, size: row.size };
+	}
+
+	deadlineInSection(lease: ArtifactStageLease): IsoTimestamp | undefined {
+		const row = this.rowFor(lease);
+		return row !== undefined && this.active(row) ? row.expiresAt : undefined;
 	}
 	renewInSection(lease: ArtifactStageLease): IsoTimestamp | undefined {
 		const row = this.rowFor(lease);
