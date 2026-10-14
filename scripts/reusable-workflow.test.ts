@@ -851,7 +851,7 @@ describe('cohort planning and publication', () => {
 				'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
 				'read-session-caches': '${{ steps.setup.outputs.read-session-caches }}',
 				audience: '${{ steps.setup.outputs.read-session-audience }}',
-				'reference-source': '${{ needs.configure.outputs.reference-source }}',
+				'reference-source': '${{ steps.setup.outputs.reference-source }}',
 				'fallback-read-user':
 					'${{ secrets.read_user || secrets.fallback_read_user }}',
 				'fallback-read-password':
@@ -994,7 +994,7 @@ describe('cohort planning and publication', () => {
 				audience: '${{ steps.setup.outputs.read-session-audience }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
-				'reference-source': '${{ needs.configure.outputs.reference-source }}',
+				'reference-source': '${{ steps.setup.outputs.reference-source }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
 				'read-user':

@@ -86,17 +86,24 @@ while the command runs. Add other caches in the tenant with repeatable
 `--read-cache <cache-url>` options. Setup uses
 `--read-cache-metadata <cache-url>` for additional caches whose content uses
 static credentials. These metadata resources do not become content resources in
-downstream action sessions. A session accepts up to sixteen distinct resources,
-including at most one reuse view. It writes the credential to a private netrc
-file for Nix. Direct HTTP readers use the current credential for each request.
-The file is removed when the command finishes. Without `--github-oidc`, the
-wrapper runs the child with its existing configuration; read failures are
-reported by the child. The audience, resource and metadata options require
-`--github-oidc`. Explicit OIDC acquisition replaces an incidental netrc
-credential for the same deployment host. An explicit credential in a selected
-substituter URL conflicts with OIDC content access. Explicit OIDC acquisition
-requires `id-token: write` and a matching trust rule, including when the
-requested resources are public.
+downstream action sessions. A cache added with
+`--read-cache-if-permitted <cache-url>` is optional, unless a required option
+also lists it. A public cache is readable without a grant, so the session
+describes it as it does a required public cache. Any other optional cache is
+included only when a trust rule permits it. Otherwise the session reports it as
+unavailable without saying whether it exists, and the command runs without it.
+Setup requests a reference source this way. Setup also omits a reference that
+its probes show does not exist. A session accepts up to sixteen distinct
+resources, including at most one reuse view. It writes the credential to a
+private netrc file for Nix. Direct HTTP readers use the current credential for
+each request. The file is removed when the command finishes. Without
+`--github-oidc`, the wrapper runs the child with its existing configuration;
+read failures are reported by the child. The audience, resource and metadata
+options require `--github-oidc`. Explicit OIDC acquisition replaces an
+incidental netrc credential for the same deployment host. An explicit credential
+in a selected substituter URL conflicts with OIDC content access. Explicit OIDC
+acquisition requires `id-token: write` and a matching trust rule, including when
+the requested resources are public.
 
 `cupboard run` forwards the child's input and output and returns the child's
 exit status. A missing executable exits 127. OIDC acquisition or renewal exits

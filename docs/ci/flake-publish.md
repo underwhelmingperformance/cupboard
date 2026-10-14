@@ -93,14 +93,22 @@ ambiguous, the branch run builds. If the selected cache lacks an output, the run
 builds that output. PR runs still use only the default cache as their reference
 source.
 
+Reuse never stops a branch run. Setup requests the selected cache in the read
+session only if the trust rules permit it. If they don't, or the cache doesn't
+exist, the run builds the outputs that the cache would have provided, and setup
+warns. The cache might not exist because the PR never published, or because its
+closed cache was collected after grace. A reader without read authority can't
+tell an absent cache from a private one.
+
 A private default cache requires `cache:content-read` on the PR rule. Private PR
 caches require a repository-scoped `cache:content-read` grant on the branch
-rule. Setup and guided trust repair add these grants. The nested publication
-jobs issue OIDC tokens for `cupboard-flake-publish.yml`, so trust rules bind
-that inner workflow at the same ref. `cupboard github check` reports the mode,
-permission and read-authority requirements. Guided repair changes tenant
-configuration; it reports the caller edits needed to select the wrapper and
-grant GitHub permissions.
+rule. Without it, branch runs build instead of reusing. Setup and guided trust
+repair add these grants. The nested publication jobs issue OIDC tokens for
+`cupboard-flake-publish.yml`, so trust rules bind that inner workflow at the
+same ref. `cupboard github check` reports the mode, permission and
+read-authority requirements. Guided repair changes tenant configuration; it
+reports the caller edits needed to select the wrapper and grant GitHub
+permissions.
 
 ### Choosing the cache and roots yourself
 

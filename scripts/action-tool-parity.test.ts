@@ -353,6 +353,7 @@ describe('canonical acquisition composition', () => {
 			'nix-config-file': '${{ steps.setup.outputs.nix-config-file }}',
 			'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
 			'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+			'reference-source': '${{ steps.setup.outputs.reference-source }}',
 			'read-session-caches': '${{ steps.setup.outputs.read-session-caches }}',
 			'read-session-audience':
 				'${{ steps.setup.outputs.read-session-audience }}'
