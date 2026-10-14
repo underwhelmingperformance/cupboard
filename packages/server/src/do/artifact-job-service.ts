@@ -422,6 +422,10 @@ export class ArtifactJobService {
 		}
 		return { pending: this.pending(id) };
 	}
+	claimDeadlineInSection(claim: ArtifactTaskClaim): IsoTimestamp | undefined {
+		return this.owned(claim)?.leaseExpiresAt ?? undefined;
+	}
+
 	renewInSection(claim: ArtifactTaskClaim): IsoTimestamp | undefined {
 		if (this.owned(claim) === undefined) {
 			return;

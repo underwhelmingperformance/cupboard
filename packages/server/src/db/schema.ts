@@ -59,6 +59,7 @@ import {
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
+import type { ArtifactStageId } from '../blob/artifact-staging.ts';
 import type {
 	AttestationListRefreshFailure,
 	AttestationListRefreshSource
@@ -1181,6 +1182,63 @@ export const grantContraction = sqliteTable(
 		complete: integer('complete', { mode: 'boolean' }).notNull().default(false)
 	},
 	(table) => [check('grant_contraction_singleton_check', sql`${table.id} = 1`)]
+);
+
+export const artifactStages = sqliteTable(
+	'artifact_stage',
+	{
+		id: text('id').$type<ArtifactStageId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		taskId: text('task_id').$type<ArtifactTaskId>().notNull(),
+		taskGeneration: integer('task_generation').notNull(),
+		sourceKey: text('source_key').notNull(),
+		owner: text('owner').$type<ArtifactTaskOwner>().notNull(),
+		kind: text('kind', { enum: artifactKinds }).notNull(),
+		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
+		maximumBytes: integer('maximum_bytes').notNull(),
+		state: text('state', { enum: ['pending', 'ready', 'retired'] }).notNull(),
+		multipartId: text('multipart_id'),
+		writesSealed: integer('writes_sealed', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		digest: text('digest').$type<Sha256HexDigest>(),
+		size: integer('size'),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		writeUntil: text('write_until').$type<IsoTimestamp>().notNull(),
+		cleanupAfter: text('cleanup_after').$type<IsoTimestamp>().notNull(),
+		nextCleanupAt: text('next_cleanup_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		uniqueIndex('artifact_stage_task_idx').on(
+			table.taskId,
+			table.taskGeneration
+		),
+		index('artifact_stage_cleanup_idx').on(
+			table.state,
+			table.nextCleanupAt,
+			table.id
+		),
+		check(
+			'artifact_stage_budget_check',
+			sql`${table.maximumBytes} BETWEEN 1 AND 67108864 AND (${table.size} IS NULL OR ${table.size} BETWEEN 0 AND ${table.maximumBytes})`
+		),
+		check(
+			'artifact_stage_seal_check',
+			sql`${table.writesSealed} = 0 OR (${table.multipartId} IS NOT NULL AND ${table.digest} IS NOT NULL AND ${table.size} IS NOT NULL)`
+		),
+		check(
+			'artifact_stage_ready_check',
+			sql`${table.state} != 'ready' OR ${table.writesSealed} = 1`
+		)
+	]
 );
 
 export const artifactJobs = sqliteTable(

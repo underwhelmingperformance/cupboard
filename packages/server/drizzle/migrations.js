@@ -84,6 +84,7 @@ import m0081 from './0081_artifact_reference_deletion_progress.sql';
 import m0082 from './0082_artifact_cache_retirement.sql';
 import m0083 from './0083_artifact_expiry_retirement.sql';
 import m0084 from './0084_artifact_jobs.sql';
+import m0085 from './0085_artifact_staging.sql';
 
 export default {
 	journal,
@@ -172,6 +173,7 @@ export default {
 		m0081,
 		m0082,
 		m0083,
-		m0084
+		m0084,
+		m0085
 	}
 };
