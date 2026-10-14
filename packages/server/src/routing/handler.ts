@@ -347,6 +347,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		String.raw`/t/:tenant/reuse/:view/:name{[0-9a-z]+\.narinfo}`,
 		serveReuse
 	);
+	app.get(String.raw`/t/:tenant/reuse/:view/:name{[0-9a-z]+\.ls}`, serveReuse);
 	app.get('/t/:tenant/reuse/:view/nar/:name', serveReuse);
 	// The object authenticates each chunk of a private view's page as it
 	// authenticates every other read of the view.

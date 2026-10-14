@@ -1673,6 +1673,16 @@ export class ArtifactStorageMigrationPendingError extends ServerHttpError {
 	}
 }
 
+export class ArtifactReadChangedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super('Artifact publication changed during the read; retry the request');
+		this.name = 'ArtifactReadChangedError';
+	}
+}
+
 export class ArtifactTooLargeError extends ServerHttpError {
 	readonly status = StatusCodes.REQUEST_TOO_LONG;
 

@@ -35,3 +35,6 @@ export const listingGeneratorRevisionSchema = z
 export type ListingGeneratorRevision = z.output<
 	typeof listingGeneratorRevisionSchema
 >;
+
+export const currentListingGeneratorRevision =
+	listingGeneratorRevisionSchema.parse('nix-v1-r1');

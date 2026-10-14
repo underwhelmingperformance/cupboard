@@ -1,4 +1,7 @@
-import { sha256HexDigestSchema } from '@cupboard/nix-store/scalars';
+import {
+	type CacheScope,
+	sha256HexDigestSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	artifactGenerationSchema,
 	artifactIdSchema,
@@ -22,15 +25,16 @@ export const artifactFixtureGeneration = artifactGenerationSchema.parse(1);
 
 export async function createArtifact(
 	context: ServerContext,
-	kind: ArtifactKind = 'listing'
+	kind: ArtifactKind = 'listing',
+	bytes: Uint8Array = new TextEncoder().encode('native artifact'),
+	scope: CacheScope = defaultCache()
 ) {
-	const bytes = new TextEncoder().encode('native artifact');
 	const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bytes));
 	const incarnation = await new CasObjectStore(
 		context.d1,
 		context.env.BLOBS
 	).promote({ digest, size: bytes.byteLength, bytes });
-	const cache = context.cacheRepository.require(defaultCache());
+	const cache = context.cacheRepository.require(scope);
 	const createdAt = isoTimestamp(new Date());
 	const expiresAt = isoTimestamp(new Date(Date.now() + 30 * 86_400_000));
 	context.db

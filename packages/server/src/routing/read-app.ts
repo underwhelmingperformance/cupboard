@@ -10,6 +10,7 @@ import {
 	notFoundResponse,
 	parseAttestationDigestName,
 	parseNarInfoName,
+	parseNarListingName,
 	parseNarName,
 	uncachedNotFoundResponse
 } from '../http/http.ts';
@@ -103,6 +104,14 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 				}
 			}
 		);
+	});
+
+	app.get(String.raw`/:name{[0-9a-z]+\.ls}`, async (context, next) => {
+		if (parseNarListingName(context.req.param('name')) === undefined) {
+			return next();
+		}
+		const denied = await guardContentRead(context);
+		return denied ?? tenantUncachedRead(context, true);
 	});
 
 	app.get('/nar/:name', async (context) => {

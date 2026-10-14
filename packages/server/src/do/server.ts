@@ -93,10 +93,12 @@ import {
 	maxVerificationRpcRows,
 	narInfoObjectPrefix,
 	parseNarInfoName,
+	parseNarListingName,
 	parseNarName,
 	type R2ObjectKey,
 	type RequestOrigin,
 	textResponse,
+	uncachedNotFoundResponse,
 	verificationBatchSize
 } from '../http/http.ts';
 import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
@@ -215,6 +217,7 @@ import {
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
 import { applyMigrations } from './migrate.ts';
+import { NarListingReadService } from './nar-listing-read-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	type NegotiateHints,
@@ -857,6 +860,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.on(
 			'GET',
 			[
+				String.raw`/:name{[0-9a-z]+\.ls}`,
+				String.raw`/cache/:cacheName/:name{[0-9a-z]+\.ls}`
+			],
+			(context) => {
+				const hash = parseNarListingName(context.req.param('name'));
+				if (hash === undefined) {
+					return uncachedNotFoundResponse();
+				}
+				return new NarListingReadService(this.context).serve(
+					context.req.raw,
+					context.get('cache'),
+					hash
+				);
+			}
+		);
+		this.app.on(
+			'GET',
+			[
 				'/attestation-bundles/:digest',
 				'/cache/:cacheName/attestation-bundles/:digest'
 			],
@@ -932,6 +953,45 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					'content-type': 'text/x-nix-narinfo; charset=utf-8',
 					'cache-control': 'no-store'
 				});
+			}
+		);
+
+		this.app.get(
+			String.raw`/reuse/:view/:name{[0-9a-z]+\.ls}`,
+			async (context) => {
+				const view = requestedView(context);
+				const hash = parseNarListingName(context.req.param('name'));
+				if (view === undefined || hash === undefined) {
+					return reuseNotFound();
+				}
+				const denied = await this.guardReuseViewRead(context.req.raw, view);
+				if (denied !== undefined) {
+					return denied;
+				}
+				const sources = await this.reuseLookup.listingSources(
+					context.get('logger'),
+					view.name,
+					view.access,
+					hash
+				);
+				if (sources === undefined) {
+					return reuseNotFound();
+				}
+				const isCurrent = () =>
+					sources.revision === view.revision && sources.isCurrent();
+				const reader = new NarListingReadService(this.context);
+				for (const cache of sources.caches) {
+					const response = await reader.serve(
+						context.req.raw,
+						cache.scope,
+						hash,
+						isCurrent
+					);
+					if (response.status !== 404) {
+						return response;
+					}
+				}
+				return reuseNotFound();
 			}
 		);
 
