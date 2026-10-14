@@ -1,21 +1,25 @@
 import {
 	cacheGenerationSchema,
 	narInfoGenerationSchema,
+	sha256HexDigestSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	artifactJobGenerationSchema,
 	type ArtifactJobVersion,
+	artifactTaskGenerationSchema,
 	type ArtifactTaskId,
 	artifactTaskOwnerSchema
 } from '@cupboard/protocol/artifact-jobs';
 import { currentListingGeneratorRevision } from '@cupboard/protocol/artifacts';
 import { runInDurableObject } from 'cloudflare:test';
+import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { artifactStageIdSchema } from '../blob/artifact-staging.ts';
+import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
 	commitPath,
@@ -62,7 +66,8 @@ async function withAdmissions<T>(
 		jobs: ArtifactJobService,
 		job: ArtifactJobVersion,
 		tasks: readonly ArtifactTaskId[]
-	) => Promise<T> | T
+	) => Promise<T> | T,
+	taskCount = 3
 ) {
 	const token = await initialise();
 	const nar = await verifiableNar('artifact-admission-source');
@@ -90,7 +95,7 @@ async function withAdmissions<T>(
 			const jobs = new ArtifactJobService(context);
 			const job = await jobs.startInSection(defaultCache(), definition);
 			const tasks: ArtifactTaskId[] = [];
-			for (let index = 1; index <= 3; index += 1) {
+			for (let index = 1; index <= taskCount; index += 1) {
 				const storePathHash = storePathHashSchema.parse(
 					String(index).padStart(32, '0')
 				);
@@ -134,6 +139,310 @@ function taskAt(
 
 describe('durable artifact admission', () => {
 	beforeEach(resetTestServer);
+
+	it('requeues only the owned task and repeats the same retry admission after a lost reply', () =>
+		withoutAlarmArming(() =>
+			withAdmissions((context, jobs, job, tasks) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const original = admitted(
+					admissions.reserveInSection(job, taskAt(tasks, 0))
+				);
+				const claim = admissions.claimInSection(original, owner);
+				if (claim === undefined) {
+					throw new Error('The fixture retry task was not claimed');
+				}
+				context.db
+					.update(schema.artifactJobs)
+					.set({ nextDispatchAt: Date.now() + 1000, dispatchRevision: 7 })
+					.where(eq(schema.artifactJobs.id, job.id))
+					.run();
+				const before = jobs.summaryInSection(job.id);
+				const replacement = admitted(admissions.requeueInSection(claim));
+				const repeated = new ArtifactAdmissionService(context).requeueInSection(
+					claim
+				);
+				const after = jobs.summaryInSection(job.id);
+				const next = admissions.claimInSection(replacement, otherOwner);
+				expect({
+					fresh: replacement.id !== original.id,
+					repeated,
+					progress: after,
+					dispatch: context.db
+						.select({
+							at: schema.artifactJobs.nextDispatchAt,
+							revision: schema.artifactJobs.dispatchRevision
+						})
+						.from(schema.artifactJobs)
+						.where(eq(schema.artifactJobs.id, job.id))
+						.get(),
+					oldTicket: admissions.claimInSection(original, owner),
+					oldCompletion: jobs.finishInSection(claim, 'completed'),
+					lateRetry: admissions.requeueInSection(claim),
+					claimed:
+						next === undefined
+							? undefined
+							: { id: next.id, generation: next.generation, owner: next.owner },
+					sibling: jobs.inspectDispatchTaskInSection(job, taskAt(tasks, 1))
+						?.generation
+				}).toStrictEqual({
+					fresh: true,
+					repeated: { kind: 'admitted', admission: replacement },
+					progress: before,
+					dispatch: { at: 0, revision: 8 },
+					oldTicket: undefined,
+					oldCompletion: false,
+					lateRetry: { kind: 'unavailable' },
+					claimed: { id: claim.id, generation: 2, owner: otherOwner },
+					sibling: 0
+				});
+			})
+		));
+
+	it('protects sealed staging for retry while every unstaged admission is occupied', () =>
+		withoutAlarmArming(async () => {
+			const fixture = await withAdmissions(
+				async (context, _jobs, job, tasks) => {
+					const admissions = new ArtifactAdmissionService(context);
+					const original = admitted(
+						admissions.reserveInSection(job, taskAt(tasks, 0))
+					);
+					const claim = admissions.claimInSection(original, owner);
+					if (claim === undefined) {
+						throw new Error('The fixture retry task was not claimed');
+					}
+					const staging = new ArtifactStagingService(context);
+					const reserved = await staging.reserveInSection(claim);
+					if (reserved.kind !== 'reserved') {
+						throw new Error('The fixture retry stage was not reserved');
+					}
+					const lease = reserved.lease;
+					const bytes = new TextEncoder().encode('sealed listing retry');
+					const upload = await context.env.BLOBS.createMultipartUpload(
+						lease.key
+					);
+					staging.registerMultipartInSection(lease, upload.uploadId);
+					const part = await upload.uploadPart(1, bytes);
+					await upload.complete([part]);
+					const isSealed = await staging.sealInSection(lease, upload.uploadId, {
+						digest: sha256HexDigestSchema.parse(await sha256HexBytes(bytes)),
+						size: bytes.byteLength
+					});
+					for (const id of tasks.slice(1, 9)) {
+						admitted(admissions.reserveInSection(job, id, 'reuse'));
+					}
+					const replacement = admitted(admissions.requeueInSection(claim));
+					const capacity = admissions.reserveInSection(
+						job,
+						taskAt(tasks, 9),
+						'reuse'
+					);
+					return { claim, lease, replacement, capacity, sealed: isSealed };
+				},
+				10
+			);
+			vi.setSystemTime(new Date(Date.parse(fixture.claim.leaseExpiresAt) + 1));
+			const collected = await runInDurableObject(currentServer(), (instance) =>
+				new ArtifactStagingService(instance.context).collect()
+			);
+			const after = await runInDurableObject(currentServer(), (instance) =>
+				instance.context.criticalSection(async () => {
+					const context = instance.context;
+					const next = new ArtifactAdmissionService(context).claimInSection(
+						fixture.replacement,
+						otherOwner
+					);
+					const reused =
+						next === undefined
+							? undefined
+							: new ArtifactStagingService(context).reuseReadyInSection(next);
+					const object = await context.env.BLOBS.get(fixture.lease.key);
+					return {
+						bytes: await object?.text(),
+						reused:
+							reused === undefined
+								? undefined
+								: { id: reused.id, taskGeneration: reused.claim.generation },
+						progress: new ArtifactJobService(context).summaryInSection(
+							fixture.claim.jobId
+						)?.progress
+					};
+				})
+			);
+			expect({
+				sealed: fixture.sealed,
+				collected,
+				capacity: fixture.capacity,
+				...after
+			}).toStrictEqual({
+				sealed: true,
+				collected: {
+					removed: 0,
+					pending: true,
+					nextWakeAt: fixture.replacement.expiresAt
+				},
+				bytes: 'sealed listing retry',
+				reused: { id: fixture.lease.id, taskGeneration: 2 },
+				capacity: { kind: 'capacity', retryAt: fixture.replacement.expiresAt },
+				progress: { discovered: 10, completed: 0, skipped: 0, failed: 0 }
+			});
+		}));
+
+	it.each([
+		'owner',
+		'generation',
+		'source',
+		'cache',
+		'job',
+		'completed',
+		'expired',
+		'offboarding'
+	] as const)('fences a retry after $0 changes', (change) =>
+		withoutAlarmArming(() =>
+			withAdmissions((context, jobs, job, tasks) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const original = admitted(
+					admissions.reserveInSection(job, taskAt(tasks, 0))
+				);
+				const owned = admissions.claimInSection(original, owner);
+				if (owned === undefined) {
+					throw new Error('The fixture retry task was not claimed');
+				}
+				const claim = { ...owned };
+				switch (change) {
+					case 'owner': {
+						claim.owner = otherOwner;
+						break;
+					}
+					case 'generation': {
+						claim.generation = artifactTaskGenerationSchema.parse(2);
+						break;
+					}
+					case 'source': {
+						context.db
+							.update(schema.narInfos)
+							.set({ generation: narInfoGenerationSchema.parse(2) })
+							.run();
+						break;
+					}
+					case 'cache': {
+						context.db
+							.update(schema.cacheIdentities)
+							.set({ generation: cacheGenerationSchema.parse(2) })
+							.run();
+						break;
+					}
+					case 'job': {
+						jobs.cancelInSection(job.id);
+						jobs.resumeInSection(job.id);
+						break;
+					}
+					case 'completed': {
+						jobs.finishInSection(owned, 'completed');
+						break;
+					}
+					case 'expired': {
+						vi.setSystemTime(new Date(Date.parse(claim.leaseExpiresAt)));
+						break;
+					}
+					case 'offboarding': {
+						context.offboarding = true;
+						break;
+					}
+				}
+				const before = {
+					tasks: context.db.select().from(schema.artifactTasks).all(),
+					admissions: context.db.select().from(schema.artifactAdmissions).all(),
+					jobs: context.db.select().from(schema.artifactJobs).all()
+				};
+				expect({
+					result: admissions.requeueInSection(claim),
+					tasks: context.db.select().from(schema.artifactTasks).all(),
+					admissions: context.db.select().from(schema.artifactAdmissions).all(),
+					jobs: context.db.select().from(schema.artifactJobs).all()
+				}).toStrictEqual({ result: { kind: 'unavailable' }, ...before });
+			})
+		)
+	);
+
+	it('keeps a capacity-blocked retry pending without releasing unfinished staging bytes', () =>
+		withoutAlarmArming(() =>
+			withAdmissions(async (context, jobs, job, tasks) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const first = admitted(
+					admissions.reserveInSection(job, taskAt(tasks, 0))
+				);
+				const claim = admissions.claimInSection(first, owner);
+				if (claim === undefined) {
+					throw new Error('The fixture retry task was not claimed');
+				}
+				const stage = await new ArtifactStagingService(
+					context
+				).reserveInSection(claim);
+				if (stage.kind !== 'reserved') {
+					throw new Error('The fixture retry stage was not reserved');
+				}
+				admitted(admissions.reserveInSection(job, taskAt(tasks, 1)));
+				const before = context.db.select().from(schema.artifactStages).all();
+				const retry = admissions.requeueInSection(claim);
+				const repeated = admissions.requeueInSection(claim);
+				const task = jobs.inspectDispatchTaskInSection(job, claim.id);
+				expect({
+					retry,
+					repeated,
+					task,
+					stages: context.db.select().from(schema.artifactStages).all(),
+					progress: jobs.summaryInSection(job.id)?.progress,
+					oldCompletion: jobs.finishInSection(claim, 'completed')
+				}).toStrictEqual({
+					retry: { kind: 'capacity', retryAt: claim.leaseExpiresAt },
+					repeated: { kind: 'capacity', retryAt: claim.leaseExpiresAt },
+					task: {
+						definition,
+						cacheGeneration: claim.cacheGeneration,
+						generation: 1,
+						sourceKey: JSON.stringify(claim.source)
+					},
+					stages: before,
+					progress: { discovered: 3, completed: 0, skipped: 0, failed: 0 },
+					oldCompletion: false
+				});
+			})
+		));
+
+	it('rolls back claim deferral when admission persistence fails', () =>
+		withoutAlarmArming(() =>
+			withAdmissions((context, _jobs, job, tasks) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const original = admitted(
+					admissions.reserveInSection(job, taskAt(tasks, 0))
+				);
+				const claim = admissions.claimInSection(original, owner);
+				if (claim === undefined) {
+					throw new Error('The fixture retry task was not claimed');
+				}
+				const before = {
+					tasks: context.db.select().from(schema.artifactTasks).all(),
+					admissions: context.db.select().from(schema.artifactAdmissions).all(),
+					jobs: context.db.select().from(schema.artifactJobs).all()
+				};
+				const failure = new Error('Retry admission persistence failed');
+				const reserve = vi
+					.spyOn(admissions, 'reserveInSection')
+					.mockImplementation(() => {
+						throw failure;
+					});
+				try {
+					expect(() => admissions.requeueInSection(claim)).toThrow(failure);
+				} finally {
+					reserve.mockRestore();
+				}
+				expect({
+					tasks: context.db.select().from(schema.artifactTasks).all(),
+					admissions: context.db.select().from(schema.artifactAdmissions).all(),
+					jobs: context.db.select().from(schema.artifactJobs).all()
+				}).toStrictEqual(before);
+			})
+		));
 
 	it('accounts for queued work before consumers claim it', () =>
 		withoutAlarmArming(() =>

@@ -26,7 +26,9 @@ import { ArtifactJobService } from './artifact-job-service.ts';
 import type { ServerContext } from './context.ts';
 
 const queuedLeaseMs = 15 * 60 * 1000;
-const maximumAdmissions = 8;
+const maximumUnstagedAdmissions = 8;
+const maximumAdmissions =
+	maximumUnstagedAdmissions + artifactStagingLimits.reservations;
 type AdmissionRow = typeof schema.artifactAdmissions.$inferSelect;
 export type ArtifactAdmissionReservation =
 	| { readonly kind: 'admitted'; readonly admission: ArtifactAdmission }
@@ -237,16 +239,19 @@ export class ArtifactAdmissionService {
 				? 0
 				: maxArtifactBytes[task.definition.kind];
 		const capacity = this.stagingCapacityInSection();
-		if (
+		const unstaged = rows.filter((row) => row.stageId === null);
+		const isAdmissionLimitReached =
 			rows.length >= maximumAdmissions ||
+			(stageId === undefined && unstaged.length >= maximumUnstagedAdmissions);
+		if (
+			isAdmissionLimitReached ||
 			(maximumBytes > 0 &&
 				(capacity.reservations >= artifactStagingLimits.reservations ||
 					capacity.bytes + maximumBytes > artifactStagingLimits.bytes))
 		) {
-			const retryAt =
-				rows.length >= maximumAdmissions
-					? rows.map((row) => row.expiresAt).toSorted(byCodeUnit)[0]
-					: capacity.retryAt;
+			const retryAt = isAdmissionLimitReached
+				? unstaged.map((row) => row.expiresAt).toSorted(byCodeUnit)[0]
+				: capacity.retryAt;
 			if (retryAt === undefined) {
 				throw new Error('The artifact admission capacity deadline is missing');
 			}
@@ -276,6 +281,23 @@ export class ArtifactAdmissionService {
 		}
 		return { kind: 'admitted', admission: this.envelope(inserted) };
 	}
+	requeueInSection(
+		claim: ArtifactTaskClaim,
+		mode: 'generate' | 'reuse' = 'generate'
+	): ArtifactAdmissionReservation {
+		return this.context.db.transaction(() => {
+			if (!new ArtifactJobService(this.context).deferInSection(claim)) {
+				return { kind: 'unavailable' };
+			}
+			this.releaseForClaimInSection(claim);
+			return this.reserveInSection(
+				{ id: claim.jobId, generation: claim.jobGeneration },
+				claim.id,
+				mode
+			);
+		});
+	}
+
 	claimInSection(
 		admission: ArtifactAdmission,
 		owner: ArtifactTaskOwner

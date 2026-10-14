@@ -7230,8 +7230,11 @@ build traces available from a cupboard cache.
       alarm pass preserves late-write horizons and admitted sealed staging,
       retries failed deletion and releases capacity only after physical cleanup.
       A deployment lifecycle rule reclaims abandoned artifact staging objects
-      and multipart uploads. Job dispatch and producer activation remain
-      pending.
+      and multipart uploads. Retry transitions atomically defer the owned task
+      and replace its admission when capacity permits. Repeated retry requests
+      reuse the replacement admission. Sealed staging has a separate bounded
+      admission allowance so full unstaged slots do not prevent promotion. Queue
+      retry integration, job dispatch and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

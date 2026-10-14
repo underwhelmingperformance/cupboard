@@ -84,8 +84,18 @@ cannot claim another task. Staging mutations arm the tenant alarm and update the
 cron eligibility projection. Cleanup takes its own bounded alarm turn, retains
 unsealed bytes through the late-write horizon and keeps valid admitted staging
 available for handover. Deadline queries do not change claims, admissions or
-progress. Automatic fan-out and alarm dispatch still require integration with
-this model.
+progress.
+
+The retry service atomically returns an owned task to pending state and replaces
+its admission when capacity permits. It preserves the previous owner and claim
+generation so a repeated request after a lost reply returns the same admission.
+A newer claim fences the old request. Retry does not change terminal counters.
+Up to eight unstaged admissions can coexist with one borrowed admission for each
+of the pool's eight physical stages. Borrowing a sealed stage reserves no new
+bytes, so full unstaged slots do not prevent its promotion. A capacity refusal
+keeps the task pending and the job due without releasing unfinished staging
+bytes. Queue retry integration, automatic fan-out and alarm dispatch remain
+pending.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a

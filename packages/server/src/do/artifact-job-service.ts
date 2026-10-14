@@ -239,7 +239,7 @@ export class ArtifactJobService {
 			.all();
 		return [...captured, ...pending];
 	}
-	private owned(claim: ArtifactTaskClaim): Task | undefined {
+	private capturedClaimTask(claim: ArtifactTaskClaim): Task | undefined {
 		const job = this.current(claim.jobId);
 		if (
 			job?.generation !== claim.jobGeneration ||
@@ -254,18 +254,24 @@ export class ArtifactJobService {
 			.get();
 		if (
 			task?.jobId !== job.id ||
-			task.state !== 'claimed' ||
 			task.owner !== claim.owner ||
 			task.claimGeneration !== claim.generation ||
 			task.jobGeneration !== claim.jobGeneration ||
-			task.leaseExpiresAt === null ||
-			task.leaseExpiresAt <= isoTimestamp(new Date()) ||
 			task.sourceKey !== this.sourceKey(claim.source) ||
 			!this.sourceCurrent(job, task.source)
 		) {
 			return;
 		}
 		return task;
+	}
+
+	private owned(claim: ArtifactTaskClaim): Task | undefined {
+		const task = this.capturedClaimTask(claim);
+		return task?.state === 'claimed' &&
+			task.leaseExpiresAt !== null &&
+			task.leaseExpiresAt > isoTimestamp(new Date())
+			? task
+			: undefined;
 	}
 
 	private captureDispatchTask(
@@ -542,6 +548,41 @@ export class ArtifactJobService {
 	}
 	claimDeadlineInSection(claim: ArtifactTaskClaim): IsoTimestamp | undefined {
 		return this.owned(claim)?.leaseExpiresAt ?? undefined;
+	}
+
+	deferInSection(claim: ArtifactTaskClaim): boolean {
+		if (this.context.offboarding) {
+			return false;
+		}
+		const task = this.capturedClaimTask(claim);
+		if (task?.state === 'pending' && task.leaseExpiresAt === null) {
+			return true;
+		}
+		if (
+			task?.state !== 'claimed' ||
+			task.leaseExpiresAt === null ||
+			task.leaseExpiresAt <= isoTimestamp(new Date())
+		) {
+			return false;
+		}
+		this.context.db.transaction((database) => {
+			// Preserve the owner so a lost retry reply can repeat this deferral.
+			database
+				.update(schema.artifactTasks)
+				.set({ state: 'pending', leaseExpiresAt: sql`null` })
+				.where(eq(schema.artifactTasks.id, claim.id))
+				.run();
+			database
+				.update(schema.artifactJobs)
+				.set({
+					nextDispatchAt: 0,
+					dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`,
+					updatedAt: isoTimestamp(new Date())
+				})
+				.where(eq(schema.artifactJobs.id, claim.jobId))
+				.run();
+		});
+		return true;
 	}
 
 	renewInSection(claim: ArtifactTaskClaim): IsoTimestamp | undefined {
