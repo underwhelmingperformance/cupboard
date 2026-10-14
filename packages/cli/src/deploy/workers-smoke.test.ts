@@ -124,7 +124,10 @@ beforeAll(async () => {
 				r2Buckets: ['BLOBS'],
 				kvNamespaces: ['TENANT_CACHE', 'CRON_STATE'],
 				d1Databases: ['CUPBOARD_DB', 'CONTROL_DB'],
-				queueProducers: { MAINTENANCE_QUEUE: 'cupboard-maintenance' },
+				queueProducers: {
+					MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' },
+					ARTIFACT_QUEUE: { queueName: 'cupboard-artifacts' }
+				},
 				bindings: { ...artifact.config.control.vars }
 			},
 			{
@@ -136,6 +139,10 @@ beforeAll(async () => {
 				durableObjects: { CUPBOARD_DO: 'CupboardServer' },
 				r2Buckets: ['BLOBS'],
 				d1Databases: ['CUPBOARD_DB'],
+				queueProducers: {
+					MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' },
+					ARTIFACT_QUEUE: { queueName: 'cupboard-artifacts' }
+				},
 				bindings: { ...artifact.config.tenant.vars }
 			}
 		]

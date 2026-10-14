@@ -84,6 +84,7 @@ const blobsBinding = 'BLOBS';
 const blobsBucket = 'cupboard-upgrade-blobs';
 const recoveryBucket = 'cupboard-upgrade-recovery';
 const maintenanceQueue = 'cupboard-upgrade-maintenance';
+const artifactQueue = 'cupboard-upgrade-artifacts';
 const tenantCacheBinding = 'TENANT_CACHE';
 const pathHash = storePathHashSchema.parse('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 const legacyCacheName = cacheNameSchema.parse('builds');
@@ -453,7 +454,8 @@ function currentOptions(
 					CRON_STATE: 'cupboard-upgrade-cron-state'
 				},
 				queueProducers: {
-					MAINTENANCE_QUEUE: { queueName: maintenanceQueue }
+					MAINTENANCE_QUEUE: { queueName: maintenanceQueue },
+					ARTIFACT_QUEUE: { queueName: artifactQueue }
 				},
 				ratelimits: Object.fromEntries(
 					artifact.config.control.rateLimits.map((rateLimit) => [
@@ -492,7 +494,8 @@ function currentOptions(
 				d1Databases: { [databaseBinding]: databaseName },
 				r2Buckets: { [blobsBinding]: blobsBucket },
 				queueProducers: {
-					MAINTENANCE_QUEUE: { queueName: maintenanceQueue }
+					MAINTENANCE_QUEUE: { queueName: maintenanceQueue },
+					ARTIFACT_QUEUE: { queueName: artifactQueue }
 				},
 				bindings: tenantBindings
 			},

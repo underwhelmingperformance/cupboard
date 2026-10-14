@@ -235,7 +235,8 @@ export class CupboardTestServer {
 						// production, so a deferred commit's verification request is
 						// processed.
 						queueProducers: {
-							MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
+							MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' },
+							ARTIFACT_QUEUE: { queueName: 'cupboard-artifacts' }
 						},
 						queueConsumers: {
 							'cupboard-maintenance': { maxBatchSize: 1, maxBatchTimeout: 0 }
@@ -267,7 +268,8 @@ export class CupboardTestServer {
 						d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
 						r2Buckets: { BLOBS: r2Credentials.bucketName },
 						queueProducers: {
-							MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
+							MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' },
+							ARTIFACT_QUEUE: { queueName: 'cupboard-artifacts' }
 						}
 					}
 				]

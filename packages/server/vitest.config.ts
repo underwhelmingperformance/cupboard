@@ -192,7 +192,8 @@ export default defineConfig(async () => {
 									CRON_STATE: 'cron-state'
 								},
 								queueProducers: {
-									MAINTENANCE_QUEUE: 'cupboard-maintenance'
+									MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' },
+									ARTIFACT_QUEUE: { queueName: 'cupboard-artifacts' }
 								},
 								// Most tests send their requests without a client address, so
 								// they would all share one budget. This limiter never refuses a
