@@ -86,6 +86,67 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('adds admission records without changing existing artifact jobs and tasks', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-artifact-admission'),
+			async (_instance, state) => {
+				await migrateThrough(state, 86);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_job(id,cache_id,cache_generation,definition,generation,state,discovered,completed,created_at,updated_at) VALUES ('job',1,1,?,1,'running',3,1,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
+					JSON.stringify({
+						kind: 'listing',
+						generatorRevision: currentListingGeneratorRevision
+					})
+				);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_task(id,job_id,source_key,source,created_at) VALUES ('task','job','source',?,'2026-01-01T00:00:00.000Z')",
+					JSON.stringify({
+						kind: 'nar',
+						storePathHash: 'a'.repeat(32),
+						generation: 1,
+						narHash: 'sha256:nar'
+					})
+				);
+				const before = {
+					jobs: state.storage.sql.exec('SELECT * FROM artifact_job').toArray(),
+					tasks: state.storage.sql.exec('SELECT * FROM artifact_task').toArray()
+				};
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 87)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 87)
+				);
+				return {
+					before,
+					after: {
+						jobs: state.storage.sql
+							.exec('SELECT * FROM artifact_job')
+							.toArray(),
+						tasks: state.storage.sql
+							.exec('SELECT * FROM artifact_task')
+							.toArray()
+					},
+					admissions: state.storage.sql
+						.exec('SELECT * FROM artifact_admission')
+						.toArray(),
+					migrated,
+					repeated
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			before: result.before,
+			after: result.before,
+			admissions: [],
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false }
+		});
+	});
+
 	it('adds dispatch deadlines without changing existing artifact job progress', async () => {
 		const result = await runInDurableObject(
 			testServerFor('migration-artifact-dispatch'),

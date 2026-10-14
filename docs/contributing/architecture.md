@@ -69,6 +69,15 @@ producers are activated. The consumer processes listing jobs under a 14-minute
 budget, using generation-fenced tenant RPCs and sending a continuation after a
 terminal task outcome. Discovery and initial dispatch remain disabled.
 
+The admission model records queued work in tenant SQLite before a consumer
+claims it. Admissions expire, capture the job, task, source and cache
+generations, and share the staging pool's reservation and byte budgets. A
+consumer exchanges its admission for staging in one critical section. Reuse work
+can proceed at full staging capacity, but generation must reserve space before
+writing bytes. An admitted replacement keeps sealed staging available until
+handover or expiry. Queue dispatch and consumption still require integration
+with this model.
+
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a
 tenant URL, `/t/<tenant>/...`, are checked by the control Worker and then either

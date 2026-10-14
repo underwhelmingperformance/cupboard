@@ -34,6 +34,7 @@ import {
 } from '../test-support.ts';
 
 import { artifactFixtureId, createArtifact } from './artifact.test-support.ts';
+import { ArtifactAdmissionService } from './artifact-admission-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import {
 	type ArtifactStageLease,
@@ -537,4 +538,85 @@ describe('durable artifact staging', () => {
 				});
 			})
 		));
+
+	it('keeps ready bytes available for an admitted replacement at full staging capacity', () =>
+		withoutAlarmArming(async () => {
+			const snapshot = await withStage(
+				async (staging, jobs, context, claim) => {
+					const first = leaseOf(await staging.reserveInSection(claim));
+					const measured = await completeStage(staging, context, first);
+					const secondJob = await jobs.startInSection(
+						defaultCache(),
+						definition
+					);
+					jobs.enqueueInSection(secondJob, claim.source);
+					const second = jobs.claimInSection(secondJob.id, owner).claim;
+					if (second === undefined) {
+						throw new Error('The second fixture source was not claimed');
+					}
+					const secondStage = leaseOf(await staging.reserveInSection(second));
+					vi.setSystemTime(new Date(Date.parse(claim.leaseExpiresAt) - 1));
+					jobs.renewInSection(second);
+					const secondDeadline = staging.renewInSection(secondStage);
+					vi.setSystemTime(new Date(Date.parse(claim.leaseExpiresAt) + 1));
+					const result = new ArtifactAdmissionService(context).reserveInSection(
+						{ id: claim.jobId, generation: claim.jobGeneration },
+						claim.id
+					);
+					if (result.kind !== 'admitted') {
+						throw new Error('The ready replacement was not admitted');
+					}
+					return {
+						first,
+						admission: result.admission,
+						measurement: measured.measurement,
+						secondDeadline
+					};
+				}
+			);
+			const collected = await runInDurableObject(currentServer(), (instance) =>
+				new ArtifactStagingService(instance.context).collect()
+			);
+			const adopted = await runInDurableObject(currentServer(), (instance) =>
+				instance.context.criticalSection(() => {
+					const admissions = new ArtifactAdmissionService(instance.context);
+					const claim = admissions.claimInSection(
+						snapshot.admission,
+						artifactTaskOwnerSchema.parse(
+							'00000000-0000-4000-8000-000000000002'
+						)
+					);
+					if (claim === undefined) {
+						throw new Error('The ready replacement was not claimed');
+					}
+					const staging = new ArtifactStagingService(instance.context);
+					const reused = staging.reuseReadyInSection(claim);
+					if (reused === undefined) {
+						throw new Error('The ready stage could not be adopted');
+					}
+					return Promise.resolve({
+						sameKey: reused.key === snapshot.first.key,
+						oldReady: staging.readyInSection(snapshot.first),
+						newReady: staging.readyInSection(reused),
+						admissionRows: instance.context.db
+							.select()
+							.from(schema.artifactAdmissions)
+							.all()
+					});
+				})
+			);
+			expect({ collected, adopted }).toStrictEqual({
+				collected: {
+					removed: 0,
+					pending: true,
+					nextWakeAt: snapshot.secondDeadline
+				},
+				adopted: {
+					sameKey: true,
+					oldReady: undefined,
+					newReady: { ...snapshot.measurement, key: snapshot.first.key },
+					admissionRows: []
+				}
+			});
+		}));
 });

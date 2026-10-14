@@ -9,6 +9,7 @@ import { maxArtifactBytes } from '@cupboard/protocol/artifacts';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, asc, desc, eq, lt, lte } from 'drizzle-orm';
 
+import { artifactStagingLimits } from '../blob/artifact-admission.ts';
 import {
 	artifactStageIdSchema,
 	type ArtifactStageLease,
@@ -21,12 +22,11 @@ import * as schema from '../db/schema.ts';
 import { ArtifactTooLargeError } from '../errors.ts';
 import { type R2ObjectKey } from '../http/http.ts';
 
+import { ArtifactAdmissionService } from './artifact-admission-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import type { ServerContext } from './context.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 
-const maximumReservations = 8;
-const maximumReservedBytes = 128 * 1024 * 1024;
 const producerWindowMs = 15 * 60 * 1000;
 const cleanupRetryMs = 30_000;
 const logger = rootLogger().with({ component: 'artifact-staging' });
@@ -63,7 +63,7 @@ export class ArtifactStagingService {
 				asc(schema.artifactStages.createdAt),
 				asc(schema.artifactStages.id)
 			)
-			.limit(maximumReservations + 1)
+			.limit(artifactStagingLimits.reservations + 1)
 			.all();
 	}
 	private rowFor(lease: ArtifactStageLease): Stage | undefined {
@@ -119,7 +119,17 @@ export class ArtifactStagingService {
 			leaseExpiresAt: task.leaseExpiresAt
 		});
 	}
+	private protectedDeadline(row: Stage): IsoTimestamp | undefined {
+		return row.state === 'ready' && row.writesSealed
+			? new ArtifactAdmissionService(
+					this.context
+				).protectedStageDeadlineInSection(row.id)
+			: undefined;
+	}
 	private active(row: Stage): boolean {
+		if (this.protectedDeadline(row) !== undefined) {
+			return true;
+		}
 		const now = isoTimestamp(new Date());
 		return (
 			row.state !== 'retired' &&
@@ -168,7 +178,9 @@ export class ArtifactStagingService {
 		const rows = this.rows();
 		const nextWakeAt = rows
 			.map((row) =>
-				row.state === 'retired' ? row.nextCleanupAt : row.expiresAt
+				row.state === 'retired'
+					? row.nextCleanupAt
+					: (this.protectedDeadline(row) ?? row.expiresAt)
 			)
 			.toSorted(byCodeUnit)[0];
 		return {
@@ -281,7 +293,11 @@ export class ArtifactStagingService {
 			.where(eq(schema.artifactStages.id, reusable.id))
 			.returning()
 			.all()[0];
-		return updated === undefined ? undefined : this.lease(updated, claim);
+		if (updated === undefined) {
+			return;
+		}
+		new ArtifactAdmissionService(this.context).releaseForClaimInSection(claim);
+		return this.lease(updated, claim);
 	}
 	async reserveInSection(
 		claim: ArtifactTaskClaim
@@ -299,55 +315,63 @@ export class ArtifactStagingService {
 				this.retire(existing);
 				return { kind: 'unavailable' };
 			}
+			new ArtifactAdmissionService(this.context).releaseForClaimInSection(
+				claim
+			);
 			return { kind: 'reserved', lease: this.lease(existing, claim) };
 		}
-		const rows = this.rows();
+
+		const admissions = new ArtifactAdmissionService(this.context);
+		const capacity = admissions.stagingCapacityInSection(claim);
 		const maximumBytes = maxArtifactBytes[job.definition.kind];
 		if (
-			rows.length >= maximumReservations ||
-			rows.reduce((total, row) => total + row.maximumBytes, 0) + maximumBytes >
-				maximumReservedBytes
+			capacity.reservations >= artifactStagingLimits.reservations ||
+			capacity.bytes + maximumBytes > artifactStagingLimits.bytes
 		) {
-			const retryAt = rows
-				.map((row) =>
-					row.state === 'retired' ? row.nextCleanupAt : row.expiresAt
-				)
-				.toSorted(byCodeUnit)[0];
-			if (retryAt === undefined) {
+			if (capacity.retryAt === undefined) {
 				throw new Error('The artifact staging capacity record is missing');
 			}
-			return { kind: 'capacity', retryAt };
+			return { kind: 'capacity', retryAt: capacity.retryAt };
 		}
+
 		const now = Date.now();
 		const id = artifactStageIdSchema.parse(crypto.randomUUID());
 		const cleanupAfter = isoTimestamp(
 			new Date(now + lateWriteTombstoneHorizonMs)
 		);
 		const cache = this.context.cacheRepository.require(job.cache);
-		const inserted = this.context.db
-			.insert(schema.artifactStages)
-			.values({
-				id,
-				r2Key: artifactStageObjectKey(this.context.requireTenant(), id),
-				cacheId: cache.id,
-				cacheGeneration: claim.cacheGeneration,
-				jobId: claim.jobId,
-				jobGeneration: claim.jobGeneration,
-				taskId: claim.id,
-				taskGeneration: claim.generation,
-				sourceKey: JSON.stringify(artifactTaskSourceSchema.parse(claim.source)),
-				owner: claim.owner,
-				kind: job.definition.kind,
-				maximumBytes,
-				state: 'pending',
-				createdAt: isoTimestamp(new Date(now)),
-				expiresAt,
-				writeUntil: isoTimestamp(new Date(now + producerWindowMs)),
-				cleanupAfter,
-				nextCleanupAt: cleanupAfter
-			})
-			.returning()
-			.all()[0];
+		const inserted = this.context.db.transaction((database) => {
+			const created = database
+				.insert(schema.artifactStages)
+				.values({
+					id,
+					r2Key: artifactStageObjectKey(this.context.requireTenant(), id),
+					cacheId: cache.id,
+					cacheGeneration: claim.cacheGeneration,
+					jobId: claim.jobId,
+					jobGeneration: claim.jobGeneration,
+					taskId: claim.id,
+					taskGeneration: claim.generation,
+					sourceKey: JSON.stringify(
+						artifactTaskSourceSchema.parse(claim.source)
+					),
+					owner: claim.owner,
+					kind: job.definition.kind,
+					maximumBytes,
+					state: 'pending',
+					createdAt: isoTimestamp(new Date(now)),
+					expiresAt,
+					writeUntil: isoTimestamp(new Date(now + producerWindowMs)),
+					cleanupAfter,
+					nextCleanupAt: cleanupAfter
+				})
+				.returning()
+				.all()[0];
+			if (created !== undefined) {
+				admissions.releaseForClaimInSection(claim);
+			}
+			return created;
+		});
 		if (inserted === undefined) {
 			throw new Error('The artifact staging reservation was not created');
 		}

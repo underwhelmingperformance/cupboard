@@ -1,4 +1,7 @@
-import { type CacheScope } from '@cupboard/nix-store/scalars';
+import {
+	type CacheGeneration,
+	type CacheScope
+} from '@cupboard/nix-store/scalars';
 import {
 	type ArtifactJobDefinition,
 	artifactJobDefinitionSchema,
@@ -31,6 +34,13 @@ const claimScanLimit = 8;
 const discoveryPageSize = 32;
 type Job = typeof schema.artifactJobs.$inferSelect;
 type Task = typeof schema.artifactTasks.$inferSelect;
+
+export interface ArtifactDispatchTask {
+	readonly definition: ArtifactJobDefinition;
+	readonly cacheGeneration: CacheGeneration;
+	readonly sourceKey: string;
+	readonly generation: number;
+}
 
 export interface ArtifactDiscoveryPage {
 	readonly discovered: number;
@@ -243,6 +253,38 @@ export class ArtifactJobService {
 		return task;
 	}
 
+	private claimTask(
+		job: Job,
+		task: Task,
+		owner: ArtifactTaskOwner
+	): ArtifactTaskClaim {
+		const generation = artifactTaskGenerationSchema.parse(
+			task.claimGeneration + 1
+		);
+		const leaseExpiresAt = isoTimestamp(new Date(Date.now() + leaseDurationMs));
+		this.context.db
+			.update(schema.artifactTasks)
+			.set({
+				state: 'claimed',
+				owner,
+				claimGeneration: generation,
+				jobGeneration: job.generation,
+				leaseExpiresAt
+			})
+			.where(eq(schema.artifactTasks.id, task.id))
+			.run();
+		return {
+			id: task.id,
+			jobId: job.id,
+			jobGeneration: job.generation,
+			generation,
+			owner,
+			cacheGeneration: job.cacheGeneration,
+			source: task.source,
+			leaseExpiresAt
+		};
+	}
+
 	async startInSection(
 		scope: CacheScope,
 		input: ArtifactJobDefinition
@@ -376,6 +418,67 @@ export class ArtifactJobService {
 		};
 	}
 
+	dispatchTaskInSection(
+		version: ArtifactJobVersion,
+		id: ArtifactTaskId
+	): ArtifactDispatchTask | undefined {
+		const job = this.current(version.id);
+		if (job?.generation !== version.generation) {
+			return;
+		}
+		const task = this.context.db
+			.select()
+			.from(schema.artifactTasks)
+			.where(eq(schema.artifactTasks.id, id))
+			.get();
+		if (
+			task?.jobId !== job.id ||
+			(task.state !== 'pending' && task.state !== 'claimed')
+		) {
+			return;
+		}
+		if (
+			task.state === 'claimed' &&
+			task.jobGeneration >= job.generation &&
+			task.leaseExpiresAt !== null &&
+			task.leaseExpiresAt > isoTimestamp(new Date())
+		) {
+			return;
+		}
+		if (!this.sourceCurrent(job, task.source)) {
+			this.outcome(task, 'skipped');
+			return;
+		}
+		return {
+			definition: job.definition,
+			cacheGeneration: job.cacheGeneration,
+			sourceKey: task.sourceKey,
+			generation: task.claimGeneration
+		};
+	}
+
+	claimTaskInSection(
+		version: ArtifactJobVersion,
+		id: ArtifactTaskId,
+		generation: number,
+		owner: ArtifactTaskOwner
+	): ArtifactTaskClaim | undefined {
+		const snapshot = this.dispatchTaskInSection(version, id);
+		if (snapshot?.generation !== generation) {
+			return;
+		}
+		const job = this.current(version.id);
+		const task = this.context.db
+			.select()
+			.from(schema.artifactTasks)
+			.where(eq(schema.artifactTasks.id, id))
+			.get();
+		if (job === undefined || task === undefined) {
+			return;
+		}
+		return this.claimTask(job, task, owner);
+	}
+
 	claimInSection(
 		id: ArtifactJobId,
 		owner: ArtifactTaskOwner
@@ -389,36 +492,7 @@ export class ArtifactJobService {
 				this.outcome(task, 'skipped');
 				continue;
 			}
-			const generation = artifactTaskGenerationSchema.parse(
-				task.claimGeneration + 1
-			);
-			const leaseExpiresAt = isoTimestamp(
-				new Date(Date.now() + leaseDurationMs)
-			);
-			this.context.db
-				.update(schema.artifactTasks)
-				.set({
-					state: 'claimed',
-					owner,
-					claimGeneration: generation,
-					jobGeneration: job.generation,
-					leaseExpiresAt
-				})
-				.where(eq(schema.artifactTasks.id, task.id))
-				.run();
-			return {
-				claim: {
-					id: task.id,
-					jobId: id,
-					jobGeneration: job.generation,
-					generation,
-					owner,
-					cacheGeneration: job.cacheGeneration,
-					source: task.source,
-					leaseExpiresAt
-				},
-				pending: true
-			};
+			return { claim: this.claimTask(job, task, owner), pending: true };
 		}
 		return { pending: this.pending(id) };
 	}

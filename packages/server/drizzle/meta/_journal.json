@@ -610,6 +610,13 @@
 			"when": 1792003187192,
 			"tag": "0086_artifact_job_dispatch",
 			"breakpoints": true
+		},
+		{
+			"idx": 87,
+			"version": "6",
+			"when": 1792006829930,
+			"tag": "0087_artifact_admission",
+			"breakpoints": true
 		}
 	]
 }

@@ -24,6 +24,7 @@ import type {
 	ArtifactJobDefinition,
 	ArtifactJobGeneration,
 	ArtifactJobId,
+	ArtifactTaskClaim,
 	ArtifactTaskId,
 	ArtifactTaskOwner,
 	ArtifactTaskSource
@@ -59,6 +60,7 @@ import {
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
+import type { ArtifactAdmissionId } from '../blob/artifact-admission.ts';
 import type { ArtifactStageId } from '../blob/artifact-staging.ts';
 import type {
 	AttestationListRefreshFailure,
@@ -1333,6 +1335,42 @@ export const artifactTasks = sqliteTable(
 		check(
 			'artifact_task_claim_check',
 			sql`${table.state} != 'claimed' OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.claimGeneration} > 0 AND ${table.jobGeneration} > 0)`
+		)
+	]
+);
+
+export const artifactAdmissions = sqliteTable(
+	'artifact_admission',
+	{
+		id: text('id').$type<ArtifactAdmissionId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		taskId: text('task_id').$type<ArtifactTaskId>().notNull(),
+		taskGeneration: integer('task_generation').notNull(),
+		sourceKey: text('source_key').notNull(),
+		kind: text('kind', { enum: artifactKinds }).$type<ArtifactKind>().notNull(),
+		maximumBytes: integer('maximum_bytes').notNull(),
+		stageId: text('stage_id').$type<ArtifactStageId>(),
+		claim: text('claim_json', { mode: 'json' }).$type<ArtifactTaskClaim>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		uniqueIndex('artifact_admission_task_idx').on(table.taskId),
+		index('artifact_admission_expiry_idx').on(table.expiresAt, table.id),
+		index('artifact_admission_stage_idx').on(table.stageId),
+		check(
+			'artifact_admission_generation_check',
+			sql`${table.jobGeneration} >= 1 AND ${table.cacheGeneration} >= 1 AND ${table.taskGeneration} >= 0`
+		),
+		check(
+			'artifact_admission_bytes_check',
+			sql`${table.maximumBytes} >= 0 AND ${table.maximumBytes} <= 67108864`
 		)
 	]
 );
