@@ -93,7 +93,12 @@ export class ArtifactJobDispatchService {
 				return { kind: 'progressed' };
 			}
 		}
-		const notBefore = Date.now() + redispatchDelayMs;
+		const claimExpiry = jobs.nextClaimExpiryInSection(job.id);
+		const backstop = Date.now() + redispatchDelayMs;
+		const notBefore =
+			claimExpiry === undefined
+				? backstop
+				: Math.min(backstop, Date.parse(claimExpiry));
 		const reserved = this.context.db
 			.update(schema.artifactJobs)
 			.set({
@@ -128,7 +133,10 @@ export class ArtifactJobDispatchService {
 			this.context.db
 				.update(schema.artifactJobs)
 				.set({
-					nextDispatchAt: Date.now() + noProgressRetryMs,
+					nextDispatchAt: Math.min(
+						dispatch.notBefore,
+						Date.now() + noProgressRetryMs
+					),
 					dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`
 				})
 				.where(

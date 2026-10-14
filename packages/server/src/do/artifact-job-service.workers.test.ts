@@ -545,6 +545,148 @@ describe('durable artifact task claims', () => {
 			})
 		));
 
+	it('persists the task lease as a fenced job wake when a consumer claims work', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				jobs.enqueueInSection(job, source);
+				jobs.checkpointInSection(job, hash, true);
+				const dispatches = new ArtifactJobDispatchService(context);
+				const reservation = dispatchOf(dispatches.reserveInSection());
+				const claim = claimOf(jobs.claimInSection(job.id, owner));
+				expect({
+					nextAt: dispatches.nextAtInSection(),
+					staleSend: dispatches.retryInSection(reservation),
+					progress: jobs.summaryInSection(job.id)?.progress
+				}).toStrictEqual({
+					nextAt: Date.parse(claim.leaseExpiresAt),
+					staleSend: false,
+					progress: { discovered: 1, completed: 0, skipped: 0, failed: 0 }
+				});
+				vi.setSystemTime(new Date(claim.leaseExpiresAt));
+				expect(dispatchOf(dispatches.reserveInSection()).job).toStrictEqual({
+					id: job.id,
+					generation: job.generation
+				});
+			})
+		));
+
+	it('reserves the next renewed claim expiry without shortening it to an old lease', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				jobs.enqueueInSection(job, source);
+				jobs.checkpointInSection(job, hash, true);
+				const dispatches = new ArtifactJobDispatchService(context);
+				dispatches.reserveInSection();
+				const claim = claimOf(jobs.claimInSection(job.id, owner));
+				vi.setSystemTime(new Date(Date.parse(claim.leaseExpiresAt) - 1));
+				const renewed = jobs.renewInSection(claim);
+				if (renewed === undefined) {
+					throw new Error('The claim was not renewed');
+				}
+				vi.setSystemTime(new Date(claim.leaseExpiresAt));
+				const reservation = dispatchOf(dispatches.reserveInSection());
+				expect({
+					nextAt: dispatches.nextAtInSection(),
+					notBefore: reservation.notBefore,
+					claimDeadline: jobs.claimDeadlineInSection(claim)
+				}).toStrictEqual({
+					nextAt: Date.parse(renewed),
+					notBefore: Date.parse(renewed),
+					claimDeadline: renewed
+				});
+			})
+		));
+
+	it('does not postpone an earlier claim expiry after a failed send', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				jobs.enqueueInSection(job, source);
+				jobs.checkpointInSection(job, hash, true);
+				const dispatches = new ArtifactJobDispatchService(context);
+				dispatches.reserveInSection();
+				const claim = claimOf(jobs.claimInSection(job.id, owner));
+				vi.setSystemTime(new Date(Date.parse(claim.leaseExpiresAt) - 1000));
+				dispatches.wakeInSection(job);
+				const reserved = dispatchOf(dispatches.reserveInSection());
+				expect({
+					retry: dispatches.retryInSection(reserved),
+					nextAt: dispatches.nextAtInSection()
+				}).toStrictEqual({
+					retry: true,
+					nextAt: Date.parse(claim.leaseExpiresAt)
+				});
+			})
+		));
+
+	it('reads the next claim expiry through the lease index without changing job state', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				jobs.enqueueInSection(job, source);
+				const claim = claimOf(jobs.claimInSection(job.id, owner));
+				const snapshot = () => ({
+					tasks: context.db.select().from(schema.artifactTasks).all(),
+					jobs: context.db.select().from(schema.artifactJobs).all()
+				});
+				const before = snapshot();
+				const execute = vi.spyOn(context.ctx.storage.sql, 'exec');
+				let captured: readonly [string, ...unknown[]] | undefined;
+				let expiry: string | undefined;
+				try {
+					expiry = jobs.nextClaimExpiryInSection(job.id);
+					captured = execute.mock.calls.find(([query]) =>
+						query.includes('order by "artifact_task"."lease_expires_at"')
+					);
+				} finally {
+					execute.mockRestore();
+				}
+				if (captured === undefined) {
+					throw new Error('The claim deadline query was not captured');
+				}
+				const [query, ...rawBindings] = captured;
+				const bindings = z
+					.array(z.union([z.string(), z.number()]))
+					.parse(rawBindings);
+				const plan = Array.from(
+					context.ctx.storage.sql.exec<{ detail: string }>(
+						`EXPLAIN QUERY PLAN ${query}`,
+						...bindings
+					),
+					(row) => row.detail
+				);
+				expect({ expiry, plan, after: snapshot() }).toStrictEqual({
+					expiry: claim.leaseExpiresAt,
+					plan: [
+						'SEARCH artifact_task USING COVERING INDEX artifact_task_lease_idx (job_id=? AND state=? AND lease_expires_at>?)'
+					],
+					after: before
+				});
+			})
+		));
+
+	it('rolls back the claim if its dispatch wake cannot be persisted', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				jobs.enqueueInSection(job, source);
+				const before = context.db.select().from(schema.artifactTasks).all();
+				context.ctx.storage.sql.exec(
+					"CREATE TRIGGER refuse_claim_wake BEFORE UPDATE OF next_dispatch_at ON artifact_job BEGIN SELECT RAISE(ABORT, 'Claim wake failed'); END"
+				);
+				try {
+					expect(() => jobs.claimInSection(job.id, owner)).toThrow();
+				} finally {
+					context.ctx.storage.sql.exec('DROP TRIGGER refuse_claim_wake');
+				}
+				expect(
+					context.db.select().from(schema.artifactTasks).all()
+				).toStrictEqual(before);
+			})
+		));
+
 	it('persists a redispatch deadline before queue delivery and recovers after message loss', () =>
 		withoutAlarmArming(() =>
 			withJob(async (jobs, context, source) => {

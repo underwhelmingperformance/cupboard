@@ -230,6 +230,49 @@ describe('artifact queue dispatch', () => {
 			});
 		}));
 
+	it('waits for the renewed claim expiry when every task is active', () =>
+		withoutAlarmArming(async () => {
+			await fixture(1, 1);
+			const sent: ArtifactQueueMessage[] = [];
+			await dispatch((messages) => {
+				sent.push(...messages);
+			});
+			const admission = sent[0]?.admission;
+			if (admission === undefined) {
+				throw new Error('The claim fixture was not dispatched');
+			}
+			const owner = artifactTaskOwnerSchema.parse(crypto.randomUUID());
+			const claim = await inSection((context) =>
+				new ArtifactAdmissionService(context).claimInSection(admission, owner)
+			);
+			if (claim === undefined) {
+				throw new Error('The dispatched task was not claimed');
+			}
+			vi.setSystemTime(new Date(Date.parse(claim.leaseExpiresAt) - 1));
+			const renewed = await inSection((context) =>
+				new ArtifactJobService(context).renewInSection(claim)
+			);
+			if (renewed === undefined) {
+				throw new Error('The dispatched claim was not renewed');
+			}
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const followup: ArtifactQueueMessage[] = [];
+			const result = await dispatch((messages) => {
+				followup.push(...messages);
+			});
+			expect({
+				result,
+				followup,
+				nextAt: await inSection((context) =>
+					new ArtifactJobDispatchService(context).nextAtInSection()
+				)
+			}).toStrictEqual({
+				result: { selectedJobs: 1, sent: 0, failed: 0 },
+				followup: [],
+				nextAt: Date.parse(renewed)
+			});
+		}));
+
 	it('preserves specific admissions after a failed send and reuses them for redispatch', () =>
 		withoutAlarmArming(async () => {
 			await fixture();

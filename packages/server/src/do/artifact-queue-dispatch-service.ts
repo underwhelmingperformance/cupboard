@@ -132,7 +132,7 @@ export class ArtifactQueueDispatchService {
 				);
 			}
 			for (const selection of selections) {
-				if (selection.messages.length === 0) {
+				if (selection.messages.length === 0 && selection.tasks.length > 0) {
 					dispatches.retryInSection(selection.dispatch);
 				}
 			}

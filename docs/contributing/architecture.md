@@ -131,8 +131,13 @@ whether generation can reserve bytes; existing tickets and ready staging reuse
 their reservations. The dispatcher sends one queue batch after releasing the
 tenant critical section. A failed send preserves its specific admissions and
 schedules a 30-second retry for each unchanged dispatch reservation. Suspended
-and offboarding tenants do not reserve or send work. Automatic alarm/cron
-invocation, capacity-release wakes and targeted consumer retries remain pending.
+and offboarding tenants do not reserve or send work. Claim installation commits
+the task, its job wake deadline and a new dispatch revision in one SQLite
+transaction. Redispatch selects the next future recorded claim expiry through
+the existing per-job lease index. An empty job with active consumers waits for
+that expiry, and failed delivery cannot postpone an earlier lease wake. Deadline
+inspection does not mutate job or task state. Automatic alarm/cron invocation,
+capacity-release wakes and targeted consumer retries remain pending.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a

@@ -188,7 +188,7 @@ describe('durable artifact admission', () => {
 					fresh: true,
 					repeated: { kind: 'admitted', admission: replacement },
 					progress: before,
-					dispatch: { at: Date.now(), revision: 8 },
+					dispatch: { at: Date.now(), revision: 9 },
 					oldTicket: undefined,
 					oldCompletion: false,
 					lateRetry: { kind: 'unavailable' },

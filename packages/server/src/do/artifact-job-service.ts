@@ -336,17 +336,27 @@ export class ArtifactJobService {
 			task.claimGeneration + 1
 		);
 		const leaseExpiresAt = isoTimestamp(new Date(Date.now() + leaseDurationMs));
-		this.context.db
-			.update(schema.artifactTasks)
-			.set({
-				state: 'claimed',
-				owner,
-				claimGeneration: generation,
-				jobGeneration: job.generation,
-				leaseExpiresAt
-			})
-			.where(eq(schema.artifactTasks.id, task.id))
-			.run();
+		this.context.db.transaction((database) => {
+			database
+				.update(schema.artifactTasks)
+				.set({
+					state: 'claimed',
+					owner,
+					claimGeneration: generation,
+					jobGeneration: job.generation,
+					leaseExpiresAt
+				})
+				.where(eq(schema.artifactTasks.id, task.id))
+				.run();
+			database
+				.update(schema.artifactJobs)
+				.set({
+					nextDispatchAt: sql`min(${schema.artifactJobs.nextDispatchAt}, ${Date.parse(leaseExpiresAt)})`,
+					dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`
+				})
+				.where(eq(schema.artifactJobs.id, job.id))
+				.run();
+		});
 		return {
 			id: task.id,
 			jobId: job.id,
@@ -607,6 +617,28 @@ export class ArtifactJobService {
 		}
 		return { pending: this.pending(id) };
 	}
+	nextClaimExpiryInSection(id: ArtifactJobId): IsoTimestamp | undefined {
+		const now = isoTimestamp(new Date());
+		return (
+			this.context.db
+				.select({ at: schema.artifactTasks.leaseExpiresAt })
+				.from(schema.artifactTasks)
+				.where(
+					and(
+						eq(schema.artifactTasks.jobId, id),
+						eq(schema.artifactTasks.state, 'claimed'),
+						gt(schema.artifactTasks.leaseExpiresAt, now)
+					)
+				)
+				.orderBy(
+					asc(schema.artifactTasks.leaseExpiresAt),
+					asc(schema.artifactTasks.id)
+				)
+				.limit(1)
+				.get()?.at ?? undefined
+		);
+	}
+
 	claimDeadlineInSection(claim: ArtifactTaskClaim): IsoTimestamp | undefined {
 		return this.owned(claim)?.leaseExpiresAt ?? undefined;
 	}
