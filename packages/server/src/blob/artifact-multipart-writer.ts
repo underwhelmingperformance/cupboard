@@ -6,7 +6,7 @@ import {
 } from '@cupboard/protocol/artifacts';
 import { positiveSafeInteger } from '@cupboard/shared/limits';
 
-import { raceVerificationOperation } from '../do/verification-claim-lease.ts';
+import { raceClaimOperation } from '../do/claim-lease.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 
 import { type ArtifactStageMeasurement } from './artifact-staging.ts';
@@ -121,7 +121,7 @@ export class ArtifactMultipartWriter {
 		const settled = this.track(started);
 		this.outstanding.add(settled);
 		void this.removeWhenSettled(settled);
-		return raceVerificationOperation(started, this.signal);
+		return raceClaimOperation(started, this.signal);
 	}
 	private async assertCurrent(): Promise<void> {
 		this.signal.throwIfAborted();
