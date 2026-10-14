@@ -107,6 +107,12 @@ reservations before promotion and after preparation failure or timeout. A
 multipart writer receives ownership of a generation reservation and returns the
 buffer only after every storage operation finishes.
 
+Dispatch orders due jobs by their persisted deadlines. New and resumed jobs use
+the current time. A wake, task completion or deferral makes a future deadline
+due now and preserves an existing overdue deadline. Repeated wakes therefore
+preserve the priority of older waiting jobs. Revision fences still prevent an
+older queue-send failure from postponing a newer wake.
+
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a
 tenant URL, `/t/<tenant>/...`, are checked by the control Worker and then either

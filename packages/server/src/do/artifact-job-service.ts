@@ -170,7 +170,7 @@ export class ArtifactJobService {
 				.update(schema.artifactJobs)
 				.set({
 					[outcome]: sql`${column} + 1`,
-					nextDispatchAt: 0,
+					nextDispatchAt: sql`min(${schema.artifactJobs.nextDispatchAt}, ${Date.now()})`,
 					dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`,
 					updatedAt: isoTimestamp(new Date())
 				})
@@ -364,6 +364,7 @@ export class ArtifactJobService {
 				definition,
 				generation: artifactJobGenerationSchema.parse(1),
 				state: 'running',
+				nextDispatchAt: Date.parse(now),
 				createdAt: now,
 				updatedAt: now
 			})
@@ -575,7 +576,7 @@ export class ArtifactJobService {
 			database
 				.update(schema.artifactJobs)
 				.set({
-					nextDispatchAt: 0,
+					nextDispatchAt: sql`min(${schema.artifactJobs.nextDispatchAt}, ${Date.now()})`,
 					dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`,
 					updatedAt: isoTimestamp(new Date())
 				})
@@ -639,7 +640,7 @@ export class ArtifactJobService {
 			.update(schema.artifactJobs)
 			.set({
 				state: 'running',
-				nextDispatchAt: 0,
+				nextDispatchAt: Date.now(),
 				generation: artifactJobGenerationSchema.parse(job.generation + 1),
 				updatedAt: isoTimestamp(new Date())
 			})

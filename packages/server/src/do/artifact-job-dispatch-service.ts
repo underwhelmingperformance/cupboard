@@ -44,7 +44,7 @@ export class ArtifactJobDispatchService {
 		this.context.db
 			.update(schema.artifactJobs)
 			.set({
-				nextDispatchAt: 0,
+				nextDispatchAt: Math.min(job.nextDispatchAt, Date.now()),
 				dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`
 			})
 			.where(eq(schema.artifactJobs.id, version.id))

@@ -411,6 +411,7 @@ describe('listing task workflow', () => {
 	it('consumes an admitted listing without allowing its replay to claim a sibling task', () =>
 		withoutAlarmArming(async () => {
 			const claim = await fixture(undefined, true);
+			const initialDispatchAt = Date.now();
 			vi.setSystemTime(new Date(claim.leaseExpiresAt));
 			const body = await admittedMessage(claim);
 			const actions: unknown[] = [];
@@ -440,7 +441,10 @@ describe('listing task workflow', () => {
 				actions: [{ action: 'ack' }, { action: 'ack' }],
 				sent: [],
 				progress: { discovered: 2, completed: 1, skipped: 0, failed: 0 },
-				queueState: { admissions: [], job: { nextDispatchAt: 0 } }
+				queueState: {
+					admissions: [],
+					job: { nextDispatchAt: initialDispatchAt }
+				}
 			});
 		}));
 

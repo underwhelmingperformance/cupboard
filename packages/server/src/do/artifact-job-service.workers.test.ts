@@ -686,6 +686,105 @@ describe('durable artifact task claims', () => {
 			})
 		));
 
+	it.each(['wake', 'completion', 'deferral', 'resume'] as const)(
+		'preserves waiting-job priority after a busy job receives $0',
+		(trigger) =>
+			withoutAlarmArming(() =>
+				withJob(async (jobs, context, source) => {
+					const base = context.db.select().from(schema.narInfos).get();
+					if (base === undefined) {
+						throw new Error('The fairness source fixture is missing');
+					}
+					const otherHash = storePathHashSchema.parse('d'.repeat(32));
+					context.db
+						.insert(schema.narInfos)
+						.values({
+							...base,
+							storePathHash: otherHash,
+							storePath: storePathSchema.parse(
+								`/nix/store/${otherHash}-fairness-source`
+							)
+						})
+						.run();
+					const first = await jobs.startInSection(defaultCache(), definition);
+					const second = await jobs.startInSection(defaultCache(), definition);
+					for (const job of [first, second]) {
+						jobs.enqueueInSection(job, source);
+						jobs.enqueueInSection(job, { ...source, storePathHash: otherHash });
+						jobs.checkpointInSection(job, hash, true);
+					}
+					const dispatches = new ArtifactJobDispatchService(context);
+					const busy = dispatchOf(dispatches.reserveInSection());
+					const waiting = busy.job.id === first.id ? second : first;
+					const wakeAt = Date.now() + 1000;
+					vi.setSystemTime(new Date(wakeAt));
+					switch (trigger) {
+						case 'wake': {
+							dispatches.wakeInSection(busy.job);
+							break;
+						}
+						case 'completion': {
+							jobs.finishInSection(
+								claimOf(jobs.claimInSection(busy.job.id, owner)),
+								'failed'
+							);
+							break;
+						}
+						case 'deferral': {
+							jobs.deferInSection(
+								claimOf(jobs.claimInSection(busy.job.id, owner))
+							);
+							break;
+						}
+						case 'resume': {
+							jobs.cancelInSection(busy.job.id);
+							jobs.resumeInSection(busy.job.id);
+							break;
+						}
+					}
+					const resumed = jobs.summaryInSection(busy.job.id);
+					if (resumed === undefined) {
+						throw new Error('The busy job disappeared');
+					}
+					vi.setSystemTime(new Date(wakeAt + 1000));
+					dispatches.wakeInSection(resumed);
+					expect({
+						busyAt: context.db
+							.select({ at: schema.artifactJobs.nextDispatchAt })
+							.from(schema.artifactJobs)
+							.where(eq(schema.artifactJobs.id, busy.job.id))
+							.get(),
+						next: dispatchOf(dispatches.reserveInSection()).job
+					}).toStrictEqual({
+						busyAt: { at: wakeAt },
+						next: { id: waiting.id, generation: waiting.generation }
+					});
+				})
+			)
+	);
+
+	it('starts a new job with its actual dispatch age', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context) => {
+				const now = Date.now();
+				const first = await jobs.startInSection(defaultCache(), definition);
+				vi.setSystemTime(new Date(now + 1000));
+				const second = await jobs.startInSection(defaultCache(), definition);
+				const rows = context.db
+					.select({
+						id: schema.artifactJobs.id,
+						at: schema.artifactJobs.nextDispatchAt
+					})
+					.from(schema.artifactJobs)
+					.orderBy(schema.artifactJobs.nextDispatchAt, schema.artifactJobs.id)
+					.all();
+				expect(rows).toStrictEqual([
+					{ id: first.id, at: now },
+					{ id: second.id, at: now + 1000 }
+				]);
+			})
+		));
+
 	it('reserves other due jobs before retrying an unfinished job', () =>
 		withoutAlarmArming(() =>
 			withJob(async (jobs, context, source) => {
