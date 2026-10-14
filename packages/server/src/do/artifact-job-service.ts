@@ -19,7 +19,7 @@ import {
 	artifactTaskSourceSchema
 } from '@cupboard/protocol/artifact-jobs';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, asc, eq, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, lt, lte, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 
@@ -28,8 +28,14 @@ import { PathReadAuthorityService } from './path-read-authority-service.ts';
 
 const leaseDurationMs = 60_000;
 const claimScanLimit = 8;
+const discoveryPageSize = 32;
 type Job = typeof schema.artifactJobs.$inferSelect;
 type Task = typeof schema.artifactTasks.$inferSelect;
+
+export interface ArtifactDiscoveryPage {
+	readonly discovered: number;
+	readonly isComplete: boolean;
+}
 
 export class ArtifactJobService {
 	constructor(private readonly context: ServerContext) {}
@@ -61,7 +67,10 @@ export class ArtifactJobService {
 				return false;
 			}
 			const row = this.context.db
-				.select()
+				.select({
+					generation: schema.narInfos.generation,
+					narHash: schema.narInfos.narHash
+				})
 				.from(schema.narInfos)
 				.where(
 					and(
@@ -319,6 +328,54 @@ export class ArtifactJobService {
 				.get()?.id;
 		});
 	}
+	discoverListingsInSection(
+		version: ArtifactJobVersion
+	): ArtifactDiscoveryPage | undefined {
+		const job = this.current(version.id);
+		if (
+			job?.generation !== version.generation ||
+			job.definition.kind !== 'listing' ||
+			job.discoveryComplete
+		) {
+			return;
+		}
+		const records = this.context.db
+			.select({
+				storePathHash: schema.narInfos.storePathHash,
+				generation: schema.narInfos.generation,
+				narHash: schema.narInfos.narHash
+			})
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cacheId, job.cacheId),
+					job.cursor === null
+						? undefined
+						: gt(schema.narInfos.storePathHash, job.cursor)
+				)
+			)
+			.orderBy(asc(schema.narInfos.storePathHash))
+			.limit(discoveryPageSize + 1)
+			.all();
+		const selected = records.slice(0, discoveryPageSize);
+		for (const source of selected) {
+			this.enqueueInSection(version, { kind: 'nar', ...source });
+		}
+		const cursor = selected.at(-1)?.storePathHash ?? job.cursor ?? undefined;
+		const isComplete = records.length <= discoveryPageSize;
+		if (!this.checkpointInSection(version, cursor, isComplete)) {
+			return;
+		}
+		const updated = this.row(job.id);
+		if (updated === undefined) {
+			throw new Error('The artifact discovery job is missing');
+		}
+		return {
+			discovered: updated.discovered - job.discovered,
+			isComplete
+		};
+	}
+
 	claimInSection(
 		id: ArtifactJobId,
 		owner: ArtifactTaskOwner

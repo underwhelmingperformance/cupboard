@@ -1,7 +1,9 @@
 import {
 	cacheGenerationSchema,
+	cacheNameSchema,
 	narInfoGenerationSchema,
-	storePathHashSchema
+	storePathHashSchema,
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	type ArtifactTaskClaim,
@@ -11,8 +13,9 @@ import {
 } from '@cupboard/protocol/artifact-jobs';
 import { currentListingGeneratorRevision } from '@cupboard/protocol/artifacts';
 import { runInDurableObject } from 'cloudflare:test';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
 import {
@@ -82,8 +85,186 @@ async function withJob<T>(
 	);
 }
 
+function seedDiscoverySources(context: ServerContext) {
+	const base = context.db.select().from(schema.narInfos).get();
+	if (base === undefined) {
+		throw new Error('The discovery source fixture is missing');
+	}
+	const hashes = Array.from({ length: 40 }, (_, index) =>
+		storePathHashSchema.parse(String(index + 1).padStart(32, '0'))
+	);
+	for (const storePathHash of hashes) {
+		context.db
+			.insert(schema.narInfos)
+			.values({
+				...base,
+				storePathHash,
+				storePath: storePathSchema.parse(
+					`/nix/store/${storePathHash}-discovery-source`
+				)
+			})
+			.run();
+	}
+	const other = context.cacheRepository.resolveOrCreate(
+		{
+			kind: 'named',
+			name: cacheNameSchema.parse('other')
+		},
+		'public'
+	);
+	context.db
+		.insert(schema.narInfos)
+		.values({ ...base, cacheId: other.id })
+		.run();
+	return hashes;
+}
+
 describe('durable artifact task claims', () => {
 	beforeEach(resetTestServer);
+
+	it('discovers one cache in bounded pages and resumes from its durable cursor', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const hashes = seedDiscoverySources(context);
+				const job = await jobs.startInSection(defaultCache(), definition);
+				const first = jobs.discoverListingsInSection(job);
+				const firstCursor = jobs.summaryInSection(job.id)?.cursor;
+				context.db
+					.update(schema.narInfos)
+					.set({
+						generation: narInfoGenerationSchema.parse(2)
+					})
+					.where(eq(schema.narInfos.storePathHash, hash))
+					.run();
+				const restarted = new ArtifactJobService(context);
+				const second = restarted.discoverListingsInSection(job);
+				const tasks = context.db
+					.select()
+					.from(schema.artifactTasks)
+					.orderBy(asc(schema.artifactTasks.sourceKey))
+					.all();
+				expect({
+					first,
+					firstCursor,
+					second,
+					cursor: restarted.summaryInSection(job.id)?.cursor,
+					discoveryComplete: restarted.summaryInSection(job.id)
+						?.discoveryComplete,
+					progress: restarted.summaryInSection(job.id)?.progress,
+					sources: tasks.map((task) => task.source)
+				}).toStrictEqual({
+					first: { discovered: 32, isComplete: false },
+					firstCursor: hashes[31],
+					second: { discovered: 9, isComplete: true },
+					cursor: hash,
+					discoveryComplete: true,
+					progress: { discovered: 41, completed: 0, skipped: 0, failed: 0 },
+					sources: [
+						...hashes.map((storePathHash) => ({ ...source, storePathHash })),
+						{ ...source, generation: 2 }
+					]
+				});
+			})
+		));
+
+	it('refuses a stale discovery run and allows the resumed generation to scan', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, _context, _source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				jobs.cancelInSection(job.id);
+				jobs.resumeInSection(job.id);
+				const stale = jobs.discoverListingsInSection(job);
+				const resumed = jobs.summaryInSection(job.id);
+				if (resumed === undefined) {
+					throw new Error('The resumed discovery job is missing');
+				}
+				const current = jobs.discoverListingsInSection(resumed);
+				expect({
+					stale,
+					current,
+					progress: jobs.summaryInSection(job.id)?.progress
+				}).toStrictEqual({
+					stale: undefined,
+					current: { discovered: 1, isComplete: true },
+					progress: { discovered: 1, completed: 0, skipped: 0, failed: 0 }
+				});
+			})
+		));
+
+	it('completes an empty discovery without creating tasks', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, _source) => {
+				context.db.delete(schema.narInfos).run();
+				const job = await jobs.startInSection(defaultCache(), definition);
+				expect({
+					page: jobs.discoverListingsInSection(job),
+					state: jobs.summaryInSection(job.id)?.state,
+					progress: jobs.summaryInSection(job.id)?.progress,
+					tasks: context.db.select().from(schema.artifactTasks).all()
+				}).toStrictEqual({
+					page: { discovered: 0, isComplete: true },
+					state: 'complete',
+					progress: { discovered: 0, completed: 0, skipped: 0, failed: 0 },
+					tasks: []
+				});
+			})
+		));
+
+	it('replays a page after enqueueing without a checkpoint without repeating its counters', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, source) => {
+				const job = await jobs.startInSection(defaultCache(), definition);
+				const task = jobs.enqueueInSection(job, source);
+				const restarted = new ArtifactJobService(context);
+				const replay = restarted.discoverListingsInSection(job);
+				const rows = context.db.select().from(schema.artifactTasks).all();
+				expect({
+					replay,
+					tasks: rows.map((row) => ({ id: row.id, source: row.source })),
+					progress: restarted.summaryInSection(job.id)?.progress
+				}).toStrictEqual({
+					replay: { discovered: 0, isComplete: true },
+					tasks: [{ id: task, source }],
+					progress: { discovered: 1, completed: 0, skipped: 0, failed: 0 }
+				});
+			})
+		));
+
+	it('uses the cache and hash index for historical discovery', () =>
+		withoutAlarmArming(() =>
+			withJob(async (jobs, context, _source) => {
+				seedDiscoverySources(context);
+				const job = await jobs.startInSection(defaultCache(), definition);
+				jobs.discoverListingsInSection(job);
+				const execute = vi.spyOn(context.ctx.storage.sql, 'exec');
+				let captured: readonly [string, ...unknown[]] | undefined;
+				try {
+					jobs.discoverListingsInSection(job);
+					captured = execute.mock.calls.find(([query]) =>
+						query.includes('order by "narinfo"."store_path_hash"')
+					);
+				} finally {
+					execute.mockRestore();
+				}
+				if (captured === undefined) {
+					throw new Error('The discovery page query was not recorded');
+				}
+				const [query, ...inputBindings] = captured;
+				const bindings = z
+					.array(z.union([z.string(), z.number()]))
+					.parse(inputBindings);
+				const plan = Array.from(
+					context.ctx.storage.sql.exec<{ detail: string }>(
+						`EXPLAIN QUERY PLAN ${query}`,
+						...bindings
+					),
+					(row) => row.detail
+				);
+				expect(plan).toStrictEqual([
+					'SEARCH narinfo USING INDEX sqlite_autoindex_narinfo_1 (cache_id=? AND store_path_hash>?)'
+				]);
+			})
+		));
 
 	it('enqueues a source once and persists discovery progress', () =>
 		withoutAlarmArming(() =>
