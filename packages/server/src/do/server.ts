@@ -376,6 +376,7 @@ type MaintenancePassKey =
 	| 'attestation-list-refresh'
 	| 'artifact-expiry'
 	| 'artifact-retirement'
+	| 'artifact-staging-cleanup'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
 	| 'local-step'
@@ -2667,6 +2668,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 
 			{
+				key: 'artifact-staging-cleanup',
+				workAt: () => {
+					const at = new ArtifactStagingService(
+						this.context
+					).nextCollectionAtInSection();
+					return Promise.resolve(at === undefined ? undefined : Date.parse(at));
+				},
+				run: async () => {
+					const result = await this.collectArtifactStaging();
+					return result.removed > 0 ||
+						!result.pending ||
+						(result.nextWakeAt !== undefined &&
+							Date.parse(result.nextWakeAt) > Date.now())
+						? 'progressed'
+						: 'stalled';
+				}
+			},
+
+			{
 				key: 'local-step',
 				workAt: readyWhen(() => this.localStepRun.isPending()),
 				run: () => this.continueLocalStep(logger)
@@ -2986,6 +3006,26 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	private async armArtifactStagingCleanupInSection(): Promise<void> {
+		const at = new ArtifactStagingService(
+			this.context
+		).nextCollectionAtInSection();
+		if (at !== undefined) {
+			await armAlarmNoLaterThan(this.ctx.storage, Date.parse(at));
+		}
+	}
+	private withArtifactStagingWake<T>(operation: () => Promise<T>): Promise<T> {
+		return this.withMaintenanceEligibility(() =>
+			this.context.criticalSection(async () => {
+				try {
+					return await operation();
+				} finally {
+					await this.armArtifactStagingCleanupInSection();
+				}
+			})
+		);
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		try {
 			await this.initialise();
@@ -3209,7 +3249,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedClaim = artifactTaskClaimSchema.parse(claim);
 		await this.initialise();
 		return this.metered('listing-task-prepare', () =>
-			this.context.criticalSection(() =>
+			this.withArtifactStagingWake(() =>
 				new ListingTaskService(this.context).prepareInSection(parsedClaim)
 			)
 		);
@@ -3223,7 +3263,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedId = artifactMultipartIdSchema.parse(multipartId);
 		await this.initialise();
 		return this.metered('artifact-stage-register', () =>
-			this.context.criticalSection(() =>
+			this.withArtifactStagingWake(() =>
 				Promise.resolve(
 					new ArtifactStagingService(this.context).registerMultipartInSection(
 						parsedLease,
@@ -3244,7 +3284,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedMeasurement = artifactStageMeasurementSchema.parse(measurement);
 		await this.initialise();
 		return this.metered('artifact-stage-seal', () =>
-			this.context.criticalSection(() =>
+			this.withArtifactStagingWake(() =>
 				new ArtifactStagingService(this.context).sealInSection(
 					parsedLease,
 					parsedId,
@@ -3260,7 +3300,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedLease = artifactStageLeaseSchema.parse(lease);
 		await this.initialise();
 		return this.metered('listing-task-renew', () =>
-			this.context.criticalSection(() =>
+			this.withArtifactStagingWake(() =>
 				new ListingTaskService(this.context).renewInSection(parsedLease)
 			)
 		);
@@ -3274,7 +3314,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedFact = narListingFactSchema.parse(fact);
 		await this.initialise();
 		return this.metered('listing-task-complete', () =>
-			this.context.criticalSection(() =>
+			this.withArtifactStagingWake(() =>
 				new ListingTaskService(this.context).completeInSection(
 					parsedLease,
 					parsedFact
@@ -3287,7 +3327,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedLease = artifactStageLeaseSchema.parse(lease);
 		await this.initialise();
 		return this.metered('artifact-stage-retire', () =>
-			this.context.criticalSection(() =>
+			this.withArtifactStagingWake(() =>
 				Promise.resolve(
 					new ArtifactStagingService(this.context).retireInSection(parsedLease)
 				)
@@ -3317,7 +3357,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async collectArtifactStaging(): Promise<ArtifactStageCollection> {
 		await this.initialise();
 		return this.metered('artifact-stage-collect', () =>
-			new ArtifactStagingService(this.context).collect()
+			this.withMaintenanceEligibility(async () => {
+				const result = await new ArtifactStagingService(this.context).collect();
+				await this.context.criticalSection(() =>
+					this.armArtifactStagingCleanupInSection()
+				);
+				return result;
+			})
 		);
 	}
 

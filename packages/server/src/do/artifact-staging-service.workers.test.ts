@@ -19,6 +19,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { lateWriteTombstoneHorizonMs } from '../blob/object-incarnation.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
 import {
@@ -42,6 +43,7 @@ import {
 	ArtifactStagingService
 } from './artifact-staging-service.ts';
 import type { ServerContext } from './context.ts';
+import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
 
 const owner = artifactTaskOwnerSchema.parse(
 	'00000000-0000-4000-8000-000000000001'
@@ -135,6 +137,149 @@ async function completeStage(
 
 describe('durable artifact staging', () => {
 	beforeEach(resetTestServer);
+
+	it.each(['sealed', 'abandoned'] as const)(
+		'reclaims %s staging through durable alarm passes',
+		(kind) =>
+			withoutAlarmArming(async () => {
+				const lease = await withStage(
+					async (staging, _jobs, context, claim) => {
+						const lease = leaseOf(await staging.reserveInSection(claim));
+						switch (kind) {
+							case 'sealed': {
+								await completeStage(staging, context, lease);
+								break;
+							}
+							case 'abandoned': {
+								await context.env.BLOBS.put(lease.key, 'late bytes');
+								break;
+							}
+						}
+						staging.retireInSection(lease);
+						return lease;
+					}
+				);
+				const dueAt =
+					kind === 'sealed' ? new Date() : new Date(lease.cleanupAfter);
+				vi.setSystemTime(dueAt);
+				for (let pass = 0; pass < 40; pass += 1) {
+					const isPending = await runInDurableObject(
+						currentServer(),
+						async (instance) => {
+							await instance.alarm();
+							return (
+								instance.context.db.select().from(schema.artifactStages).all()
+									.length > 0
+							);
+						}
+					);
+					if (!isPending) {
+						break;
+					}
+				}
+				const after = await runInDurableObject(
+					currentServer(),
+					async (instance) => ({
+						rows: instance.context.db
+							.select()
+							.from(schema.artifactStages)
+							.all(),
+						hasBytes:
+							(await instance.context.env.BLOBS.head(lease.key)) !== null
+					})
+				);
+				expect(after).toStrictEqual({ rows: [], hasBytes: false });
+			})
+	);
+
+	it.each(['sealed', 'abandoned'] as const)(
+		'arms the %s cleanup deadline after the retirement RPC',
+		(kind) =>
+			withoutAlarmArming(async () => {
+				const lease = await withStage(
+					async (staging, _jobs, context, claim) => {
+						const lease = leaseOf(await staging.reserveInSection(claim));
+						if (kind === 'sealed') {
+							await completeStage(staging, context, lease);
+						}
+						return lease;
+					}
+				);
+				const deadline =
+					kind === 'sealed' ? Date.now() : Date.parse(lease.cleanupAfter);
+				await runInDurableObject(currentServer(), async (instance) => {
+					const setAlarm = vi.spyOn(instance.context.ctx.storage, 'setAlarm');
+					try {
+						const isRetired = await instance.retireArtifactStaging(lease);
+						expect({ isRetired, wakes: setAlarm.mock.calls }).toStrictEqual({
+							isRetired: true,
+							wakes: [[deadline]]
+						});
+					} finally {
+						setAlarm.mockRestore();
+					}
+				});
+			})
+	);
+
+	it('projects staging expiry into the cron recovery deadline', () =>
+		withoutAlarmArming(async () => {
+			const lease = await withStage(async (staging, _jobs, _context, claim) =>
+				leaseOf(await staging.reserveInSection(claim))
+			);
+			const projected = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					for (let pass = 0; pass < 40; pass += 1) {
+						await instance.alarm();
+					}
+					vi.setSystemTime(new Date(Date.now() + 1));
+					await new MaintenanceEligibilityService(instance.context).reconcile();
+					const wake = await instance.context.d1
+						.select()
+						.from(d1Schema.tenantMaintenanceEligibility)
+						.get();
+					return { wake, tenant: instance.context.requireTenant() };
+				}
+			);
+			expect(projected.wake).toStrictEqual({
+				tenant: projected.tenant,
+				nextWakeAt: lease.expiresAt,
+				reconciledAt: isoTimestamp(new Date())
+			});
+		}));
+
+	it('reads the cleanup deadline without skipping an invalid admitted source', () =>
+		withoutAlarmArming(() =>
+			withStage(async (staging, _jobs, context, claim) => {
+				const lease = leaseOf(await staging.reserveInSection(claim));
+				await completeStage(staging, context, lease);
+				vi.setSystemTime(new Date(claim.leaseExpiresAt));
+				const admission = new ArtifactAdmissionService(
+					context
+				).reserveInSection(
+					{ id: claim.jobId, generation: claim.jobGeneration },
+					claim.id
+				);
+				expect(admission.kind).toBe('admitted');
+				context.db
+					.update(schema.narInfos)
+					.set({ generation: narInfoGenerationSchema.parse(2) })
+					.run();
+				const snapshot = () => ({
+					tasks: context.db.select().from(schema.artifactTasks).all(),
+					jobs: context.db.select().from(schema.artifactJobs).all(),
+					stages: context.db.select().from(schema.artifactStages).all(),
+					admissions: context.db.select().from(schema.artifactAdmissions).all()
+				});
+				const before = snapshot();
+				const deadline = staging.nextCollectionAtInSection();
+				expect({ deadline, after: snapshot() }).toStrictEqual({
+					deadline: lease.expiresAt,
+					after: before
+				});
+			})
+		));
 
 	it('reserves once for a claimed task and accounts for its maximum output size', () =>
 		withoutAlarmArming(() =>

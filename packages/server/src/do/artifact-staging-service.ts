@@ -222,6 +222,10 @@ export class ArtifactStagingService {
 			)
 			.get();
 	}
+	nextCollectionAtInSection(): IsoTimestamp | undefined {
+		return this.collectionInSection(0).nextWakeAt;
+	}
+
 	findInSection(claim: ArtifactTaskClaim): ArtifactStageLease | undefined {
 		if (
 			new ArtifactJobService(this.context).claimDeadlineInSection(claim) ===

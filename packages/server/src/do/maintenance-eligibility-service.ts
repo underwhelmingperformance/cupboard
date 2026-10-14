@@ -17,6 +17,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
 import { ArtifactRetentionService } from './artifact-retention-service.ts';
+import { ArtifactStagingService } from './artifact-staging-service.ts';
 import { type ServerContext } from './context.ts';
 import {
 	subrequestSliceReserve,
@@ -225,6 +226,7 @@ export class MaintenanceEligibilityService {
 			this.earliestUploadExpiry(),
 			this.earliestRootExpiry(),
 			new ArtifactRetentionService(this.context).nextExpiryAt(),
+			new ArtifactStagingService(this.context).nextCollectionAtInSection(),
 			this.earliestGraceExpiry(),
 			this.earliestAuthKeyRetirement(),
 			this.earliestManagedCacheRetirement(),

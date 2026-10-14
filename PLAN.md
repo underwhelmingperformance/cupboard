@@ -7225,7 +7225,13 @@ build traces available from a cupboard cache.
       Capture new publications before starting historical backfills.
 - [ ] Use D1 job and task records with expiring claims, source-incarnation
       fences and resumable staging cleanup. Queue messages are wake-up hints;
-      persisted state decides whether work can run and complete.
+      persisted state decides whether work can run and complete. Staging RPCs
+      now arm cleanup deadlines and reconcile cron recovery. The bounded cleanup
+      alarm pass preserves late-write horizons and admitted sealed staging,
+      retries failed deletion and releases capacity only after physical cleanup.
+      A deployment lifecycle rule reclaims abandoned artifact staging objects
+      and multipart uploads. Job dispatch and producer activation remain
+      pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

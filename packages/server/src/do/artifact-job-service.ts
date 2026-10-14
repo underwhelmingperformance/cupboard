@@ -34,6 +34,10 @@ const claimScanLimit = 8;
 const discoveryPageSize = 32;
 type Job = typeof schema.artifactJobs.$inferSelect;
 type Task = typeof schema.artifactTasks.$inferSelect;
+interface DispatchCandidate {
+	readonly job: Job;
+	readonly task: Task;
+}
 
 export interface ArtifactDispatchTask {
 	readonly definition: ArtifactJobDefinition;
@@ -264,6 +268,46 @@ export class ArtifactJobService {
 		return task;
 	}
 
+	private captureDispatchTask(
+		version: ArtifactJobVersion,
+		id: ArtifactTaskId
+	): DispatchCandidate | undefined {
+		const job = this.current(version.id);
+		if (job?.generation !== version.generation) {
+			return;
+		}
+		const task = this.context.db
+			.select()
+			.from(schema.artifactTasks)
+			.where(eq(schema.artifactTasks.id, id))
+			.get();
+		if (
+			task?.jobId !== job.id ||
+			(task.state !== 'pending' && task.state !== 'claimed')
+		) {
+			return;
+		}
+		if (
+			task.state === 'claimed' &&
+			task.jobGeneration >= job.generation &&
+			task.leaseExpiresAt !== null &&
+			task.leaseExpiresAt > isoTimestamp(new Date())
+		) {
+			return;
+		}
+		return { job, task };
+	}
+	private dispatchSnapshot({
+		job,
+		task
+	}: DispatchCandidate): ArtifactDispatchTask {
+		return {
+			definition: job.definition,
+			cacheGeneration: job.cacheGeneration,
+			sourceKey: task.sourceKey,
+			generation: task.claimGeneration
+		};
+	}
 	private claimTask(
 		job: Job,
 		task: Task,
@@ -429,43 +473,32 @@ export class ArtifactJobService {
 		};
 	}
 
+	inspectDispatchTaskInSection(
+		version: ArtifactJobVersion,
+		id: ArtifactTaskId
+	): ArtifactDispatchTask | undefined {
+		const candidate = this.captureDispatchTask(version, id);
+		if (
+			candidate === undefined ||
+			!this.sourceCurrent(candidate.job, candidate.task.source)
+		) {
+			return;
+		}
+		return this.dispatchSnapshot(candidate);
+	}
 	dispatchTaskInSection(
 		version: ArtifactJobVersion,
 		id: ArtifactTaskId
 	): ArtifactDispatchTask | undefined {
-		const job = this.current(version.id);
-		if (job?.generation !== version.generation) {
+		const candidate = this.captureDispatchTask(version, id);
+		if (candidate === undefined) {
 			return;
 		}
-		const task = this.context.db
-			.select()
-			.from(schema.artifactTasks)
-			.where(eq(schema.artifactTasks.id, id))
-			.get();
-		if (
-			task?.jobId !== job.id ||
-			(task.state !== 'pending' && task.state !== 'claimed')
-		) {
+		if (!this.sourceCurrent(candidate.job, candidate.task.source)) {
+			this.outcome(candidate.task, 'skipped');
 			return;
 		}
-		if (
-			task.state === 'claimed' &&
-			task.jobGeneration >= job.generation &&
-			task.leaseExpiresAt !== null &&
-			task.leaseExpiresAt > isoTimestamp(new Date())
-		) {
-			return;
-		}
-		if (!this.sourceCurrent(job, task.source)) {
-			this.outcome(task, 'skipped');
-			return;
-		}
-		return {
-			definition: job.definition,
-			cacheGeneration: job.cacheGeneration,
-			sourceKey: task.sourceKey,
-			generation: task.claimGeneration
-		};
+		return this.dispatchSnapshot(candidate);
 	}
 
 	claimTaskInSection(

@@ -79,11 +79,6 @@ export class ArtifactAdmissionService {
 				return;
 			}
 			if (row.expiresAt !== deadline) {
-				this.context.db
-					.update(schema.artifactAdmissions)
-					.set({ expiresAt: deadline })
-					.where(eq(schema.artifactAdmissions.id, row.id))
-					.run();
 				return { ...row, expiresAt: deadline };
 			}
 			return row;
@@ -91,7 +86,7 @@ export class ArtifactAdmissionService {
 		if (row.expiresAt <= isoTimestamp(new Date())) {
 			return;
 		}
-		const task = jobs.dispatchTaskInSection(
+		const task = jobs.inspectDispatchTaskInSection(
 			{ id: row.jobId, generation: row.jobGeneration },
 			row.taskId
 		);
@@ -104,6 +99,13 @@ export class ArtifactAdmissionService {
 	private live(row: AdmissionRow): AdmissionRow | undefined {
 		const current = this.current(row);
 		if (current !== undefined) {
+			if (current.expiresAt !== row.expiresAt) {
+				this.context.db
+					.update(schema.artifactAdmissions)
+					.set({ expiresAt: current.expiresAt })
+					.where(eq(schema.artifactAdmissions.id, row.id))
+					.run();
+			}
 			return current;
 		}
 		this.context.db
@@ -338,6 +340,6 @@ export class ArtifactAdmissionService {
 			.where(eq(schema.artifactAdmissions.stageId, stageId))
 			.limit(1)
 			.get();
-		return row === undefined ? undefined : this.live(row)?.expiresAt;
+		return row === undefined ? undefined : this.current(row)?.expiresAt;
 	}
 }

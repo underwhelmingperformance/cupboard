@@ -80,8 +80,12 @@ writing bytes. An admitted replacement keeps sealed staging available until
 handover or expiry. Independent admissions allow consumers to execute tasks from
 the same job concurrently. Terminal task outcomes release remaining admissions
 in the transaction that updates progress. Replayed, spent or stale admissions
-cannot claim another task. Automatic fan-out and alarm dispatch still require
-integration with this model.
+cannot claim another task. Staging mutations arm the tenant alarm and update the
+cron eligibility projection. Cleanup takes its own bounded alarm turn, retains
+unsealed bytes through the late-write horizon and keeps valid admitted staging
+available for handover. Deadline queries do not change claims, admissions or
+progress. Automatic fan-out and alarm dispatch still require integration with
+this model.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a
