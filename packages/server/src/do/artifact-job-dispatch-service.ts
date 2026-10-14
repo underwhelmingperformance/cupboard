@@ -2,6 +2,7 @@ import type { ArtifactJobVersion } from '@cupboard/protocol/artifact-jobs';
 import type { ArtifactKind } from '@cupboard/protocol/artifacts';
 import { and, asc, eq, sql } from 'drizzle-orm';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
 import { noProgressRetryMs } from './alarm.ts';
@@ -53,6 +54,9 @@ export class ArtifactJobDispatchService {
 	}
 
 	nextAtInSection(): number | undefined {
+		if (this.context.offboarding) {
+			return undefined;
+		}
 		return this.context.db
 			.select({ at: schema.artifactJobs.nextDispatchAt })
 			.from(schema.artifactJobs)
@@ -63,6 +67,19 @@ export class ArtifactJobDispatchService {
 			)
 			.limit(1)
 			.get()?.at;
+	}
+
+	async nextEligibleAt(): Promise<number | undefined> {
+		const at = this.nextAtInSection();
+		if (at === undefined) {
+			return undefined;
+		}
+		const tenant = await this.context.d1
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, this.context.requireTenant()))
+			.get();
+		return tenant?.status === 'active' ? at : undefined;
 	}
 
 	reserveInSection(): ArtifactJobDispatchResult {

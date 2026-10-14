@@ -437,7 +437,7 @@ describe('durable artifact staging', () => {
 						const isRetired = await instance.retireArtifactStaging(lease);
 						expect({ isRetired, wakes: setAlarm.mock.calls }).toStrictEqual({
 							isRetired: true,
-							wakes: [[deadline]]
+							wakes: [[deadline], [Date.now()]]
 						});
 					} finally {
 						setAlarm.mockRestore();
@@ -454,6 +454,10 @@ describe('durable artifact staging', () => {
 			const projected = await runInDurableObject(
 				currentServer(),
 				async (instance) => {
+					instance.context.db
+						.update(schema.artifactJobs)
+						.set({ nextDispatchAt: Date.now() + 60 * 60 * 1000 })
+						.run();
 					for (let pass = 0; pass < 40; pass += 1) {
 						await instance.alarm();
 					}

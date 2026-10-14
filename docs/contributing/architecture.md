@@ -94,8 +94,8 @@ Up to eight unstaged admissions can coexist with one borrowed admission for each
 of the pool's eight physical stages. Borrowing a sealed stage reserves no new
 bytes, so full unstaged slots do not prevent its promotion. A capacity refusal
 keeps the task pending and the job due without releasing unfinished staging
-bytes. Queue retry integration, automatic fan-out and alarm dispatch remain
-pending.
+bytes. Queue retry integration, capacity-release wakes and producer activation
+remain pending.
 
 The listing executor reserves an output buffer before calling the tenant
 preparation RPC. Preparation attempts shared-fact reuse and sealed-stage
@@ -136,8 +136,13 @@ the task, its job wake deadline and a new dispatch revision in one SQLite
 transaction. Redispatch selects the next future recorded claim expiry through
 the existing per-job lease index. An empty job with active consumers waits for
 that expiry, and failed delivery cannot postpone an earlier lease wake. Deadline
-inspection does not mutate job or task state. Automatic alarm/cron invocation,
-capacity-release wakes and targeted consumer retries remain pending.
+inspection does not mutate job or task state. Claim and terminal task RPCs arm
+the earliest job deadline and reconcile cron eligibility. Staging mutations arm
+both job and cleanup deadlines. The shared alarm scheduler gives dispatch one
+bounded turn, and cron invokes the same dispatcher to recover lost alarms.
+Suspended tenants keep their projected deadline for reactivation, but do not arm
+job alarms or dispatch messages. Capacity-release wakes and targeted consumer
+retries remain pending.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a

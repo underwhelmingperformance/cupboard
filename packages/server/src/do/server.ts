@@ -172,6 +172,7 @@ import {
 } from './alarm.ts';
 import { ArtifactJobDispatchService } from './artifact-job-dispatch-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
+import { ArtifactQueueDispatchService } from './artifact-queue-dispatch-service.ts';
 import { ArtifactRetentionService } from './artifact-retention-service.ts';
 import { ArtifactRetirementService } from './artifact-retirement-service.ts';
 import {
@@ -377,6 +378,7 @@ type MaintenancePassKey =
 	| 'artifact-expiry'
 	| 'artifact-retirement'
 	| 'artifact-staging-cleanup'
+	| 'artifact-job-dispatch'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
 	| 'local-step'
@@ -388,13 +390,12 @@ type MaintenancePassKey =
 	| 'verify-backstop';
 
 /**
- * One bounded background task an alarm can run.
+ * One bounded background task that an alarm can run.
  *
- * `workAt` reads durable storage or local SQLite. The alarm therefore leaves
- * the complete subrequest allowance for the selected pass. `workAt` returns the
- * time from which the pass has work: now or earlier for work that is ready, a later
- * time for scheduled work, or `undefined` for none. A pass is due once that
- * time and its retry deadline have passed.
+ * `workAt` reads persisted deadlines and checks dispatch eligibility. It returns
+ * the time from which the pass has work: now or earlier for work that is ready,
+ * a later time for scheduled work, or `undefined` for none. A pass is due once
+ * that time and its retry deadline have passed.
  *
  * The result from `run` determines the next retry deadline.
  */
@@ -499,7 +500,7 @@ export function verifyBackstopReuseSettleLimit(
 	);
 }
 
-type MaintenanceKind = 'gc' | 'verify' | 'local-step';
+type MaintenanceKind = 'gc' | 'verify' | 'local-step' | 'artifact-dispatch';
 
 // The migration whose assertions require every cache to record its access.
 const cacheAccessContractMigration = '0051_cache_identity_contract_assertions';
@@ -2668,6 +2669,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 
 			{
+				key: 'artifact-job-dispatch',
+				workAt: () =>
+					new ArtifactJobDispatchService(this.context).nextEligibleAt(),
+				run: async () => {
+					await this.runArtifactDispatch();
+					return 'progressed';
+				}
+			},
+
+			{
 				key: 'artifact-staging-cleanup',
 				workAt: () => {
 					const at = new ArtifactStagingService(
@@ -3014,16 +3025,33 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await armAlarmNoLaterThan(this.ctx.storage, Date.parse(at));
 		}
 	}
-	private withArtifactStagingWake<T>(operation: () => Promise<T>): Promise<T> {
+	private async armArtifactDispatchInSection(): Promise<void> {
+		const at = await new ArtifactJobDispatchService(
+			this.context
+		).nextEligibleAt();
+		if (at !== undefined) {
+			await armAlarmNoLaterThan(this.ctx.storage, at);
+		}
+	}
+	private withArtifactDispatchWake<T>(operation: () => Promise<T>): Promise<T> {
 		return this.withMaintenanceEligibility(() =>
 			this.context.criticalSection(async () => {
 				try {
 					return await operation();
 				} finally {
-					await this.armArtifactStagingCleanupInSection();
+					await this.armArtifactDispatchInSection();
 				}
 			})
 		);
+	}
+	private withArtifactStagingWake<T>(operation: () => Promise<T>): Promise<T> {
+		return this.withArtifactDispatchWake(async () => {
+			try {
+				return await operation();
+			} finally {
+				await this.armArtifactStagingCleanupInSection();
+			}
+		});
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -3196,7 +3224,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedKind = z.enum(artifactKinds).optional().parse(expectedKind);
 		await this.initialise();
 		return this.metered('artifact-task-claim', () =>
-			this.context.criticalSection(() =>
+			this.withArtifactDispatchWake(() =>
 				new ArtifactTaskRpcService(this.context).claimInSection(
 					parsedVersion,
 					parsedOwner,
@@ -3216,7 +3244,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedKind = z.enum(artifactKinds).parse(expectedKind);
 		await this.initialise();
 		return this.metered('artifact-task-claim', () =>
-			this.context.criticalSection(() =>
+			this.withArtifactDispatchWake(() =>
 				new ArtifactTaskRpcService(this.context).claimInSection(
 					parsedAdmission.job,
 					parsedOwner,
@@ -3227,19 +3255,34 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	async runArtifactDispatch(): Promise<void> {
+		await this.initialise();
+		await this.runCoalescedCronMaintenance('artifact-dispatch', () =>
+			this.metered('artifact-job-dispatch', () =>
+				this.withMaintenanceEligibility(async () => {
+					try {
+						await new ArtifactQueueDispatchService(this.context).run();
+					} finally {
+						await this.context.criticalSection(() =>
+							this.armArtifactDispatchInSection()
+						);
+					}
+				})
+			)
+		);
+	}
+
 	async requestArtifactDispatch(version: ArtifactJobVersion): Promise<boolean> {
 		const parsedVersion = artifactJobVersionSchema.parse(version);
 		await this.initialise();
 		return this.metered('artifact-job-dispatch-wake', () =>
-			this.context.criticalSection(async () => {
-				const isDue = new ArtifactJobDispatchService(
-					this.context
-				).wakeInSection(parsedVersion);
-				if (isDue) {
-					await armAlarmNoLaterThan(this.ctx.storage, Date.now());
-				}
-				return isDue;
-			})
+			this.withArtifactDispatchWake(() =>
+				Promise.resolve(
+					new ArtifactJobDispatchService(this.context).wakeInSection(
+						parsedVersion
+					)
+				)
+			)
 		);
 	}
 
@@ -3354,7 +3397,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedOutcome = artifactTaskFailureOutcomeSchema.parse(outcome);
 		await this.initialise();
 		return this.metered('artifact-task-finish', () =>
-			this.context.criticalSection(() =>
+			this.withArtifactDispatchWake(() =>
 				Promise.resolve(
 					new ArtifactJobService(this.context).finishInSection(
 						parsedClaim,
@@ -4265,6 +4308,7 @@ function logRequestFinished(
 }
 
 type MeteredMethod =
+	| 'artifact-job-dispatch'
 	| 'artifact-task-claim'
 	| 'artifact-job-dispatch-wake'
 	| 'artifact-task-finish'

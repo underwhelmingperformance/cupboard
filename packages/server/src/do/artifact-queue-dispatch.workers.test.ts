@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	narInfoGenerationSchema,
 	sha256HexDigestSchema,
@@ -11,13 +12,20 @@ import {
 } from '@cupboard/protocol/artifact-jobs';
 import { currentListingGeneratorRevision } from '@cupboard/protocol/artifacts';
 import { runInDurableObject } from 'cloudflare:test';
+import { env as tenantEnv } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { type ArtifactQueueMessage } from '../routing/artifact-queue-message.ts';
+import {
+	type ArtifactQueueMessage,
+	artifactQueueMessageSchema
+} from '../routing/artifact-queue-message.ts';
+import { executeMaintenanceQueueMessage } from '../routing/scheduled.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
 	currentServer,
@@ -25,7 +33,10 @@ import {
 	initialise,
 	narInfoGeneration,
 	resetTestServer,
+	tenantMaintenanceFailureRow,
+	testControlEnv,
 	uploadMetadata,
+	useTestServer,
 	verifiableNar,
 	withoutAlarmArming
 } from '../test-support.ts';
@@ -36,6 +47,8 @@ import { ArtifactJobService } from './artifact-job-service.ts';
 import { ArtifactQueueDispatchService } from './artifact-queue-dispatch-service.ts';
 import { ArtifactStagingService } from './artifact-staging-service.ts';
 import { type ServerContext } from './context.ts';
+import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
+import { maintenancePassCursorKey } from './server.ts';
 
 async function inSection<T>(
 	run: (context: ServerContext) => Promise<T> | T
@@ -116,7 +129,11 @@ function queue(
 		sendBatch: async (
 			messages: Iterable<MessageSendRequest<ArtifactQueueMessage>>
 		) => {
-			await send(Array.from(messages, (message) => message.body));
+			await send(
+				Array.from(messages, (message) =>
+					artifactQueueMessageSchema.parse(message.body)
+				)
+			);
 			return { metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } } };
 		}
 	};
@@ -154,8 +171,264 @@ async function dispatch(
 	});
 }
 
+async function idleFixture() {
+	const versions = await fixture(1, 1);
+	const job = versions[0];
+	if (job === undefined) {
+		throw new Error('The wake fixture job is missing');
+	}
+	await inSection((context) => {
+		context.db
+			.update(schema.artifactJobs)
+			.set({ nextDispatchAt: Date.now() + 60 * 60 * 1000 })
+			.run();
+	});
+	for (let pass = 0; pass < 40; pass += 1) {
+		await runInDurableObject(currentServer(), (instance) => instance.alarm());
+	}
+	vi.setSystemTime(new Date(Date.now() + 1));
+	return job;
+}
+
 describe('artifact queue dispatch', () => {
 	beforeEach(resetTestServer);
+
+	it.each(['legacy', 'admitted'] as const)(
+		'arms and projects the %s claim deadline',
+		(mode) =>
+			withoutAlarmArming(async () => {
+				const job = await idleFixture();
+				const admission = await inSection((context) => {
+					const dispatches = new ArtifactJobDispatchService(context);
+					dispatches.wakeInSection(job);
+					dispatches.reserveInSection();
+					const task = context.db.select().from(schema.artifactTasks).get();
+					if (task === undefined) {
+						throw new Error('The wake task is missing');
+					}
+					const reserved = new ArtifactAdmissionService(
+						context
+					).reserveInSection(job, task.id);
+					if (reserved.kind !== 'admitted') {
+						throw new Error('The wake task was not admitted');
+					}
+					return reserved.admission;
+				});
+				const after = await runInDurableObject(
+					currentServer(),
+					async (instance) => {
+						const alarm = vi.spyOn(instance.context.ctx.storage, 'setAlarm');
+						try {
+							const owner = crypto.randomUUID();
+							const result =
+								mode === 'legacy'
+									? await instance.claimArtifactTask(job, owner, 'listing')
+									: await instance.claimAdmittedArtifactTask(
+											admission,
+											owner,
+											'listing'
+										);
+							if (result.kind !== 'claimed') {
+								throw new Error('The wake RPC refused its claim');
+							}
+							const projection = await instance.context.d1
+								.select()
+								.from(d1Schema.tenantMaintenanceEligibility)
+								.get();
+							return {
+								deadline: result.claim.leaseExpiresAt,
+								wakes: alarm.mock.calls,
+								projection: projection?.nextWakeAt
+							};
+						} finally {
+							alarm.mockRestore();
+						}
+					}
+				);
+				expect(after).toStrictEqual({
+					deadline: after.deadline,
+					wakes: [[Date.parse(after.deadline)]],
+					projection: after.deadline
+				});
+			})
+	);
+
+	it('dispatches due jobs through a bounded alarm turn', () =>
+		withoutAlarmArming(async () => {
+			const job = await idleFixture();
+			await inSection((context) =>
+				new ArtifactJobDispatchService(context).wakeInSection(job)
+			);
+			const after = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const sent: ArtifactQueueMessage[] = [];
+					const send = vi
+						.spyOn(instance.context.env.ARTIFACT_QUEUE, 'sendBatch')
+						.mockImplementation((messages) => {
+							sent.push(
+								...Array.from(messages, (message) =>
+									artifactQueueMessageSchema.parse(message.body)
+								)
+							);
+							return Promise.resolve({
+								metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } }
+							});
+						});
+					try {
+						await instance.alarm();
+						return {
+							pass: await instance.context.ctx.storage.get(
+								maintenancePassCursorKey
+							),
+							jobs: sent.map((message) => message.job),
+							admissions: instance.context.db
+								.select()
+								.from(schema.artifactAdmissions)
+								.all().length
+						};
+					} finally {
+						send.mockRestore();
+					}
+				}
+			);
+			expect(after).toStrictEqual({
+				pass: 'artifact-job-dispatch',
+				jobs: [job],
+				admissions: 1
+			});
+		}));
+
+	it('dispatches due jobs through the cron maintenance queue', async () => {
+		await useTestServer(fixtureTenant);
+		await withoutAlarmArming(async () => {
+			const job = await idleFixture();
+			expect(await currentServer().requestArtifactDispatch(job)).toBe(true);
+			const projected = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const projection = await instance.context.d1
+						.select()
+						.from(d1Schema.tenantMaintenanceEligibility)
+						.get();
+					return projection?.nextWakeAt;
+				}
+			);
+			expect(projected).toBe(new Date(0).toISOString());
+			const sent = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const messages: ArtifactQueueMessage[] = [];
+					const send = vi
+						.spyOn(instance.context.env.ARTIFACT_QUEUE, 'sendBatch')
+						.mockImplementation((batch) => {
+							messages.push(
+								...Array.from(batch, (message) =>
+									artifactQueueMessageSchema.parse(message.body)
+								)
+							);
+							return Promise.resolve({
+								metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } }
+							});
+						});
+					try {
+						const decision = await executeMaintenanceQueueMessage(
+							rootLogger(),
+							Object.assign({}, tenantEnv, testControlEnv),
+							new NarReadBufferPool(),
+							{
+								kind: 'tenant-maintenance',
+								tenant: instance.context.requireTenant()
+							}
+						);
+						expect(decision).toStrictEqual({ action: 'ack' });
+						return messages.map((message) => message.job);
+					} finally {
+						send.mockRestore();
+					}
+				}
+			);
+			expect({
+				sent,
+				maintenance: await tenantMaintenanceFailureRow(
+					fixtureTenant,
+					'maintenance'
+				)
+			}).toStrictEqual({
+				sent: [job],
+				maintenance: {
+					consecutiveFailures: 0,
+					lastError: undefined,
+					lastFailedAt: undefined,
+					lastSuccessAt: new Date().toISOString()
+				}
+			});
+		});
+	});
+
+	it('projects lost-alarm recovery and dispatches after tenant reactivation', () =>
+		withoutAlarmArming(async () => {
+			const job = await idleFixture();
+			const after = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const context = instance.context;
+					new ArtifactJobDispatchService(context).wakeInSection(job);
+					await context.d1
+						.update(d1Schema.tenant)
+						.set({ status: 'suspended' })
+						.where(eq(d1Schema.tenant.id, context.requireTenant()))
+						.run();
+					await new MaintenanceEligibilityService(context).reconcile();
+					const projection = await context.d1
+						.select()
+						.from(d1Schema.tenantMaintenanceEligibility)
+						.get();
+					const sent: ArtifactQueueMessage[] = [];
+					const send = vi
+						.spyOn(context.env.ARTIFACT_QUEUE, 'sendBatch')
+						.mockImplementation((messages) => {
+							sent.push(
+								...Array.from(messages, (message) =>
+									artifactQueueMessageSchema.parse(message.body)
+								)
+							);
+							return Promise.resolve({
+								metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } }
+							});
+						});
+					const alarm = vi.spyOn(context.ctx.storage, 'setAlarm');
+					try {
+						await instance.alarm();
+						const suspended = {
+							messages: sent.length,
+							immediateWakes: alarm.mock.calls.filter(
+								([at]) => Number(at) <= Date.now() + 30_000
+							)
+						};
+						await context.d1
+							.update(d1Schema.tenant)
+							.set({ status: 'active' })
+							.where(eq(d1Schema.tenant.id, context.requireTenant()))
+							.run();
+						await instance.alarm();
+						return {
+							projection: projection?.nextWakeAt,
+							suspended,
+							resumed: sent.map((message) => message.job)
+						};
+					} finally {
+						send.mockRestore();
+						alarm.mockRestore();
+					}
+				}
+			);
+			expect(after).toStrictEqual({
+				projection: new Date(0).toISOString(),
+				suspended: { messages: 0, immediateWakes: [] },
+				resumed: [job]
+			});
+		}));
 
 	it('reserves independent same-job tasks before sending outside the tenant critical section', () =>
 		withoutAlarmArming(async () => {

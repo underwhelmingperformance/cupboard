@@ -1017,7 +1017,8 @@ function maintainTenant(logger: Logger, env: Env, id: TenantId): Promise<void> {
 	return runScheduledMaintenance(
 		() => server.runGarbageCollection(),
 		() => server.runVerification(),
-		() => server.runAuthKeyRetirement()
+		() => server.runAuthKeyRetirement(),
+		() => server.runArtifactDispatch()
 	);
 }
 
@@ -1813,36 +1814,35 @@ async function stampMaintained(
 }
 
 /**
- * Runs garbage collection, verification, and optional key retirement
- * independently. If several fail, reports the garbage-collection failure first.
+ * Runs garbage collection and verification concurrently, then the remaining
+ * maintenance passes independently. Reports the first failure in argument order.
  */
 export async function runScheduledMaintenance(
 	runGarbageCollection: () => Promise<void>,
 	runVerification: () => Promise<void>,
-	runAuthKeyRetirement?: () => Promise<void>
+	...remainingPasses: readonly (() => Promise<void>)[]
 ): Promise<void> {
 	const [gc, verify] = await Promise.allSettled([
 		runGarbageCollection(),
 		runVerification()
 	]);
-	const authKeyRetirement = await settleAuthKeyRetirement(runAuthKeyRetirement);
+	const results = [gc, verify];
+	for (const pass of remainingPasses) {
+		results.push(await settleMaintenancePass(pass));
+	}
 
-	for (const result of [gc, verify, authKeyRetirement]) {
+	for (const result of results) {
 		if (result.status === 'rejected') {
 			throw result.reason;
 		}
 	}
 }
 
-async function settleAuthKeyRetirement(
-	runAuthKeyRetirement: (() => Promise<void>) | undefined
+async function settleMaintenancePass(
+	run: () => Promise<void>
 ): Promise<PromiseSettledResult<void>> {
-	if (runAuthKeyRetirement === undefined) {
-		return { status: 'fulfilled', value: undefined };
-	}
-
 	try {
-		await runAuthKeyRetirement();
+		await run();
 		return { status: 'fulfilled', value: undefined };
 	} catch (error) {
 		return { status: 'rejected', reason: error };

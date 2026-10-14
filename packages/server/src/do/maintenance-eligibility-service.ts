@@ -16,6 +16,7 @@ import { type CacheId } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
+import { ArtifactJobDispatchService } from './artifact-job-dispatch-service.ts';
 import { ArtifactRetentionService } from './artifact-retention-service.ts';
 import { ArtifactStagingService } from './artifact-staging-service.ts';
 import { type ServerContext } from './context.ts';
@@ -282,9 +283,21 @@ export class MaintenanceEligibilityService {
 	}
 
 	private nextWakeAt(now: IsoTimestamp): IsoTimestamp | undefined {
-		return this.hasImmediateWork(now)
-			? wakeImmediately
-			: this.earliestFutureWake(now);
+		const dispatchAt = new ArtifactJobDispatchService(
+			this.context
+		).nextAtInSection();
+		if (
+			this.hasImmediateWork(now) ||
+			(dispatchAt !== undefined && dispatchAt <= Date.parse(now))
+		) {
+			return wakeImmediately;
+		}
+		return [
+			this.earliestFutureWake(now),
+			dispatchAt === undefined ? undefined : isoTimestamp(new Date(dispatchAt))
+		]
+			.filter((at) => at !== undefined)
+			.toSorted(byCodeUnit)[0];
 	}
 
 	retirementRevision(
