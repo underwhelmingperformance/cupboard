@@ -60,6 +60,10 @@
 			{
 				"binding": "MAINTENANCE_QUEUE",
 				"queue": "cupboard-maintenance"
+			},
+			{
+				"binding": "ARTIFACT_QUEUE",
+				"queue": "cupboard-artifacts"
 			}
 		],
 		"consumers": [
@@ -70,6 +74,14 @@
 				"max_retries": 3,
 				"max_concurrency": 4,
 				"dead_letter_queue": "cupboard-maintenance-dlq"
+			},
+			{
+				"queue": "cupboard-artifacts",
+				"max_batch_size": 1,
+				"max_batch_timeout": 5,
+				"max_retries": 3,
+				"max_concurrency": 2,
+				"dead_letter_queue": "cupboard-artifacts-dlq"
 			}
 		]
 	},

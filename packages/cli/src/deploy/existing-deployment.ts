@@ -111,10 +111,10 @@ function throwIfDeadLetterLoop(config: DeploymentConfig): void {
 
 /**
  * The release defaults, with the resource names and cron triggers replaced by
- * the values from the account's control Worker: the bucket, the database and
- * the maintenance queue from its bindings, the dead-letter queue from its queue
- * consumer, and the cron triggers from its schedules. When the control Worker
- * does not report a resource, the result has the release's default name for
+ * the values from the account's control Worker: buckets, databases and queues
+ * from its bindings, dead-letter queues from the queue consumers, and cron
+ * triggers from its schedules. When the control Worker does not report a
+ * resource, the result has the release's default name for
  * it. `undefined` when the control Worker has not been deployed.
  *
  * An empty schedule list is replaced by the default cron triggers, because the

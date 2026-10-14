@@ -50,6 +50,10 @@
 			{
 				"binding": "MAINTENANCE_QUEUE",
 				"queue": "cupboard-maintenance"
+			},
+			{
+				"binding": "ARTIFACT_QUEUE",
+				"queue": "cupboard-artifacts"
 			}
 		]
 	},

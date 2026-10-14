@@ -352,6 +352,21 @@ export function queueRole(config: DeploymentConfig, queue: string): string {
 	const isDeadLetter = consumers.some(
 		(consumer) => consumer.deadLetterQueue === queue
 	);
+	const artifactQueues = new Set(
+		config.control.queueProducers
+			.filter((producer) => producer.binding === 'ARTIFACT_QUEUE')
+			.map((producer) => producer.queue)
+	);
+	if (artifactQueues.has(queue)) {
+		return isDeadLetter ? 'Artifact and dead-letter queue' : 'Artifact queue';
+	}
+	const isArtifactDeadLetter = consumers.some(
+		(consumer) =>
+			artifactQueues.has(consumer.queue) && consumer.deadLetterQueue === queue
+	);
+	if (isArtifactDeadLetter) {
+		return 'Artifact dead-letter queue';
+	}
 	const isMaintenance =
 		consumers.some((consumer) => consumer.queue === queue) ||
 		config.control.queueProducers.some((producer) => producer.queue === queue);

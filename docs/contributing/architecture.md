@@ -31,8 +31,8 @@ platform before, these are the pieces that cupboard uses:
 - A **queue** keeps jobs for a Worker to process later, with retries.
 
 A deployment has two Workers, one Durable Object class that serves tenants, two
-D1 databases, one R2 bucket, two KV namespaces, and a queue with a dead-letter
-queue. The diagram shows how they connect:
+D1 databases, one R2 bucket, two KV namespaces, and two queues, each with its
+own dead-letter queue. The diagram shows the request and maintenance paths:
 
 ```text
                   Nix clients, cupboard CLI, CI jobs
@@ -60,6 +60,12 @@ queue. The diagram shows how they connect:
 
 The D1 box represents the shared `CUPBOARD_DB` database. The control Worker also
 binds a separate `CONTROL_DB` database, which the tenant Worker never receives.
+
+Both Workers also bind `cupboard-artifacts` as `ARTIFACT_QUEUE`. Its control
+Worker consumer accepts one message per batch and at most two concurrent
+invocations. The queue has a separate `cupboard-artifacts-dlq`. These resources
+are installed before native artifact producers are activated; the current build
+does not enqueue artifact jobs.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a

@@ -579,35 +579,39 @@ cupboard uses, not your Cloudflare subscription.
 
 ## What `init` creates
 
-| Resource                               | Name                                                                         |
-| -------------------------------------- | ---------------------------------------------------------------------------- |
-| Control Worker, serving the deployment | `cupboard`                                                                   |
-| Tenant Worker and its Durable Objects  | `cupboard-tenant`                                                            |
-| Shared D1 database                     | `cupboard`                                                                   |
-| Control D1 database                    | `cupboard-control`                                                           |
-| R2 bucket                              | `cupboard-blobs`, with a rule that cleans up abandoned uploads daily         |
-| KV namespaces                          | `cupboard-tenant-cache`, `cupboard-cron-state`                               |
-| Queues                                 | `cupboard-maintenance`, and its dead-letter queue `cupboard-maintenance-dlq` |
-| Cron trigger                           | Hourly, on the control Worker                                                |
-| Account API token                      | `cupboard-r2-<bucket>`, if `init` created the R2 key                         |
+| Resource                               | Name                                                                      |
+| -------------------------------------- | ------------------------------------------------------------------------- |
+| Control Worker, serving the deployment | `cupboard`                                                                |
+| Tenant Worker and its Durable Objects  | `cupboard-tenant`                                                         |
+| Shared D1 database                     | `cupboard`                                                                |
+| Control D1 database                    | `cupboard-control`                                                        |
+| R2 bucket                              | `cupboard-blobs`, with a rule that cleans up abandoned uploads daily      |
+| KV namespaces                          | `cupboard-tenant-cache`, `cupboard-cron-state`                            |
+| Maintenance queue                      | `cupboard-maintenance`, with dead-letter queue `cupboard-maintenance-dlq` |
+| Artifact queue                         | `cupboard-artifacts`, with dead-letter queue `cupboard-artifacts-dlq`     |
+| Cron trigger                           | Hourly, on the control Worker                                             |
+| Account API token                      | `cupboard-r2-<bucket>`, if `init` created the R2 key                      |
 
 `init` creates anything that's missing and leaves existing resources alone.
+
+The artifact queue is provisioned before native artifact producers are
+activated. The current build does not enqueue artifact jobs.
 
 ### Resource names and cron triggers
 
 Before it changes anything, `init` shows the plan and a menu for changing it. In
 the menu you can choose the names of the R2 bucket, both D1 databases, the
-maintenance queue and its dead-letter queue, and change the control Worker's
-cron triggers. The KV namespace names can't be changed. The list of cron
-triggers can't be empty, because the control Worker only runs maintenance when a
-cron trigger fires.
+maintenance and artifact queues and their dead-letter queues, and change the
+control Worker's cron triggers. The KV namespace names can't be changed. The
+list of cron triggers can't be empty, because the control Worker only runs
+maintenance when a cron trigger fires.
 
 On an account that already has a control Worker, the plan starts from the
-existing deployment. `init` reads the bucket, the database and the maintenance
-queue from the control Worker's bindings, the dead-letter queue from its queue
-consumer, and the cron triggers from its schedules. Accepting the plan as shown,
-or deploying with `--yes`, keeps them. On an account without a control Worker,
-the plan starts from the release's defaults.
+existing deployment. `init` reads buckets, databases and queues from the control
+Worker's bindings, dead-letter queues from the queue consumers, and cron
+triggers from its schedules. Accepting the plan as shown, or deploying with
+`--yes`, keeps them. On an account without a control Worker, the plan starts
+from the release's defaults.
 
 A release that changes a default resource name or cron trigger doesn't change an
 existing deployment. There is one exception: when the control Worker has no
