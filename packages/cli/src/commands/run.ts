@@ -52,6 +52,7 @@ interface RunOptions {
 	readonly cacheMetadata?: boolean;
 	readonly readCache?: readonly CacheTarget[];
 	readonly readCacheMetadata?: readonly CacheTarget[];
+	readonly readCacheIfPermitted?: readonly CacheTarget[];
 }
 
 interface ViewTarget {
@@ -145,10 +146,11 @@ export async function runWithReadAccess(
 			options.reuseView !== undefined ||
 			options.cacheMetadata === true ||
 			(options.readCache?.length ?? 0) > 0 ||
-			(options.readCacheMetadata?.length ?? 0) > 0
+			(options.readCacheMetadata?.length ?? 0) > 0 ||
+			(options.readCacheIfPermitted?.length ?? 0) > 0
 		) {
 			throw new RunReadAccessOptionsError(
-				'--audience, --reuse-view, --cache-metadata, --read-cache and --read-cache-metadata require --github-oidc.'
+				'--audience, --reuse-view, --cache-metadata, --read-cache, --read-cache-metadata and --read-cache-if-permitted require --github-oidc.'
 			);
 		}
 		await runOwnedChild(command, environment, dependencies);
@@ -164,6 +166,11 @@ export async function runWithReadAccess(
 		...(options.readCacheMetadata ?? []).map((target) => ({
 			target,
 			mode: 'metadata' as const
+		})),
+		...(options.readCacheIfPermitted ?? []).map((target) => ({
+			target,
+			mode: 'content' as const,
+			isOptional: true
 		}))
 	];
 	for (const { target: additional } of additionalCaches) {
@@ -197,6 +204,15 @@ export async function runWithReadAccess(
 		}
 	}
 	const cache = 'cache' in target ? target.cache : undefined;
+	// A required read of the selected cache takes precedence over an optional
+	// one, as it does for additional caches.
+	const isListed = (targets: readonly CacheTarget[] | undefined): boolean =>
+		cache !== undefined &&
+		(targets ?? []).some((listed) => isSameCacheScope(listed.cache, cache));
+	const isOptionalTarget =
+		isListed(options.readCacheIfPermitted) &&
+		!isListed(options.readCache) &&
+		!isListed(options.readCacheMetadata);
 	const targetUrl =
 		cache === undefined ? undefined : cacheUrl(target.tenantUrl, cache);
 	const viewName = 'view' in target ? target.view : options.reuseView;
@@ -250,11 +266,13 @@ export async function runWithReadAccess(
 						mode:
 							options.cacheMetadata === true
 								? ('metadata' as const)
-								: ('content' as const)
+								: ('content' as const),
+						...(isOptionalTarget && { optional: true as const })
 					}
 				]
 			: []),
-		...additionalCaches.flatMap(({ target: additional, mode }, index, all) => {
+		...additionalCaches.flatMap((additionalCache, index, all) => {
+			const { target: additional, mode } = additionalCache;
 			if (
 				(cache !== undefined && isSameCacheScope(additional.cache, cache)) ||
 				all
@@ -269,7 +287,10 @@ export async function runWithReadAccess(
 				{
 					type: 'cupboard_cache' as const,
 					cache: additional.cache,
-					mode
+					mode,
+					...('isOptional' in additionalCache && {
+						optional: true as const
+					})
 				}
 			];
 		}),
@@ -523,6 +544,12 @@ export function registerRunCommand(
 		.option(
 			'--read-cache-metadata <cache-url>',
 			'additional cache in this tenant whose configuration the command needs (repeatable)',
+			collectReadCache,
+			[]
+		)
+		.option(
+			'--read-cache-if-permitted <cache-url>',
+			'cache in this tenant to include in the OIDC read session when the trust rules permit it, and to omit otherwise (repeatable)',
 			collectReadCache,
 			[]
 		)

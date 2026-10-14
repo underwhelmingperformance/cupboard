@@ -23,6 +23,9 @@ import {
 const tenantUrl = new URL('https://cupboard.example.workers.dev/t/acme');
 const target = parseTenantCacheUrl(new URL(`${tenantUrl.href}/cache/builds`));
 const configuration = discoverNixStoreConfig();
+function cacheTarget(name: string): ReturnType<typeof parseTenantCacheUrl> {
+	return parseTenantCacheUrl(new URL(`${tenantUrl.href}/cache/${name}`));
+}
 const lease = {
 	user: 'cupboard-oidc',
 	password: 'cupboard-access+jwt:example',
@@ -620,6 +623,109 @@ describe('cupboard run', () => {
 			]
 		]);
 	});
+
+	it.each([
+		{
+			description: 'an additional cache',
+			options: {
+				readCache: [],
+				readCacheMetadata: [],
+				readCacheIfPermitted: ['source']
+			},
+			expected: [
+				{ type: 'cupboard_cache', cache: target.cache, mode: 'content' },
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'named', name: 'source' },
+					mode: 'content',
+					optional: true
+				}
+			]
+		},
+		{
+			description: 'the selected cache',
+			options: {
+				readCache: [],
+				readCacheMetadata: [],
+				readCacheIfPermitted: ['builds']
+			},
+			expected: [
+				{
+					type: 'cupboard_cache',
+					cache: target.cache,
+					mode: 'content',
+					optional: true
+				}
+			]
+		},
+		{
+			description: 'a cache that is also required',
+			options: {
+				readCache: ['source'],
+				readCacheMetadata: [],
+				readCacheIfPermitted: ['source']
+			},
+			expected: [
+				{ type: 'cupboard_cache', cache: target.cache, mode: 'content' },
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'named', name: 'source' },
+					mode: 'content'
+				}
+			]
+		},
+		{
+			description: 'a selected cache that is also required',
+			options: {
+				readCache: ['builds'],
+				readCacheMetadata: [],
+				readCacheIfPermitted: ['builds']
+			},
+			expected: [
+				{ type: 'cupboard_cache', cache: target.cache, mode: 'content' }
+			]
+		},
+		{
+			description: 'a selected cache whose configuration is also required',
+			options: {
+				readCache: [],
+				readCacheMetadata: ['builds'],
+				readCacheIfPermitted: ['builds']
+			},
+			expected: [
+				{ type: 'cupboard_cache', cache: target.cache, mode: 'content' }
+			]
+		}
+	])(
+		'requests $description that the session may omit',
+		async ({ options, expected }) => {
+			const intents: unknown[] = [];
+			await runWithReadAccess(
+				target,
+				['nix', 'build'],
+				{
+					githubOidc: true,
+					readCache: options.readCache.map((name) => cacheTarget(name)),
+					readCacheMetadata: options.readCacheMetadata.map((name) =>
+						cacheTarget(name)
+					),
+					readCacheIfPermitted: options.readCacheIfPermitted.map((name) =>
+						cacheTarget(name)
+					)
+				},
+				{
+					storeConfig: configuration,
+					readFile: () => Promise.resolve(''),
+					issue: (input) => {
+						intents.push(input.resources);
+						return Promise.resolve(lease);
+					},
+					runChild: () => Promise.resolve({ status: 0, signal: undefined })
+				}
+			);
+			expect(intents).toStrictEqual([expected]);
+		}
+	);
 
 	it('rejects additional read caches from a different tenant before exchange', async () => {
 		const other = parseTenantCacheUrl(
