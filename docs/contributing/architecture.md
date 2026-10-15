@@ -169,6 +169,26 @@ storage only after its expansion is recorded, so tenant claims and lost-reply
 recovery also work before that table exists. Different NARs and generator
 revisions can run concurrently. Global execution and publication remain pending.
 
+Global listing stages record their computation generation, multipart upload ID
+and sealed measurement in D1. They use `shared-artifact-staging/` keys and do
+not require a tenant identity. Sealed recovery adopts existing bytes without a
+new allocation. Unsealed uploads remain tracked through the late-write horizon.
+Cleanup acknowledgement revokes only the matching computation before removing
+its allocation marker.
+
+Cron starts cleanup waves with a fixed cutoff. Each indexed page selects at most
+eight stage IDs and records a continuation key for the next queue hint. The
+cutoff and key prevent a wave from repeatedly enqueueing unclaimed first-page
+stages or following new deadlines indefinitely. Cleanup uses the demand-scaled
+artifact queue. Consumers check D1 eligibility and acquire expiring cleanup
+claims before accessing R2. They abort incomplete uploads, delete staged objects
+and acknowledge the durable record only after physical deletion. Storage
+failures persist a retry deadline. A fresh cron wave recovers failed sends,
+expired claims and deferred work. Invocation time and subrequest budgets bound
+processing when an invocation receives multiple messages. Readiness checks
+require the staging expansion before selecting or collecting resources, and
+cleanup dispatch runs independently of other cron maintenance selection.
+
 Listing preparation now acquires the shared lease before source byte access or
 staging allocation and checks for a completed fact again after acquisition.
 Competing tenants receive the recorded lease deadline without reserving staging.

@@ -32,6 +32,7 @@ import {
 import {
 	type SharedListingStageCleanupClaim,
 	sharedListingStageCleanupClaimSchema,
+	type SharedListingStageCleanupCursor,
 	SharedListingStageConflictError,
 	sharedListingStageKey,
 	type SharedListingStageLease,
@@ -524,25 +525,43 @@ export class SharedListingStageStore {
 		});
 	}
 
-	async due(now: IsoTimestamp): Promise<{
+	async due(
+		now: IsoTimestamp,
+		after?: SharedListingStageCleanupCursor
+	): Promise<{
 		readonly stages: readonly ArtifactStageId[];
 		readonly hasMore: boolean;
+		readonly next?: SharedListingStageCleanupCursor;
 	}> {
 		return this.execute(async () => {
+			const beyondCursor =
+				after === undefined
+					? undefined
+					: sql`(${schema.sharedListingStage.nextCleanupAt}, ${schema.sharedListingStage.id}) > (${after.at}, ${after.id})`;
+			const eligible = and(
+				lte(schema.sharedListingStage.nextCleanupAt, now),
+				beyondCursor
+			);
 			const [rows] = await this.database.batch([
 				this.database
-					.select({ id: schema.sharedListingStage.id })
+					.select({
+						id: schema.sharedListingStage.id,
+						at: schema.sharedListingStage.nextCleanupAt
+					})
 					.from(schema.sharedListingStage)
-					.where(lte(schema.sharedListingStage.nextCleanupAt, now))
+					.where(eligible)
 					.orderBy(
 						asc(schema.sharedListingStage.nextCleanupAt),
 						asc(schema.sharedListingStage.id)
 					)
 					.limit(cleanupPageSize + 1)
 			]);
+			const hasMore = rows.length > cleanupPageSize;
+			const last = rows[cleanupPageSize - 1];
 			return {
 				stages: rows.slice(0, cleanupPageSize).map((row) => row.id),
-				hasMore: rows.length > cleanupPageSize
+				hasMore,
+				...(hasMore && last !== undefined && { next: last })
 			};
 		});
 	}

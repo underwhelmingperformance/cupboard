@@ -10,6 +10,7 @@ import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { describe, expect, it, vi } from 'vitest';
 
+import { artifactStageIdSchema } from '../blob/artifact-staging.ts';
 import { lateWriteTombstoneHorizonMs } from '../blob/object-incarnation.ts';
 import type { SharedListingGenerationClaimResult } from '../blob/shared-listing-generation.ts';
 import {
@@ -665,6 +666,73 @@ describe('global listing staging ownership', () => {
 		).toStrictEqual(before);
 	});
 
+	it('continues a finite cleanup sweep without waiting for earlier stages to be claimed', async () => {
+		const { database, createStage, store } = await fixture(10);
+		const stages = await Promise.all(
+			Array.from({ length: 10 }, (_, index) => createStage(index))
+		);
+		const ids = stages.map((stage) => stage.lease.id).toSorted(byCodeUnit);
+		const future = isoTimestamp(new Date(Date.parse(deadline) + 60_000));
+		const lastId = ids.at(-1);
+		if (lastId === undefined) {
+			throw new Error('The last stage is missing');
+		}
+		await database
+			.update(schema.sharedListingStage)
+			.set({ nextCleanupAt: future })
+			.where(eq(schema.sharedListingStage.id, lastId));
+		const first = await store.due(deadline);
+		expect(first).toStrictEqual({
+			stages: ids.slice(0, 8),
+			hasMore: true,
+			next: { at: deadline, id: ids[7] }
+		});
+		if (first.next === undefined) {
+			throw new Error('The cleanup continuation is missing');
+		}
+		expect({
+			sameCutoff: await store.due(deadline, first.next),
+			laterCutoff: await store.due(future, first.next)
+		}).toStrictEqual({
+			sameCutoff: { stages: ids.slice(8, 9), hasMore: false },
+			laterCutoff: { stages: ids.slice(8), hasMore: false }
+		});
+	});
+
+	it('seeks past thousands of preceding cleanup rows within a bounded read cost', async () => {
+		const { database, createStage, store } = await fixture();
+		const stage = await createStage();
+		await database.run(sql`WITH RECURSIVE items(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM items WHERE i < 3000)
+			INSERT INTO shared_listing_stage (id, nar_hash, generator_revision, source_incarnation, computation_generation, r2_key, maximum_bytes, state, created_at, expires_at, write_until, cleanup_after, next_cleanup_at)
+			SELECT printf('00000000-0000-4000-8000-%012d', i), printf('sha256:%052d', 100000 + i), ${currentListingGeneratorRevision}, 2, 1, printf('shared-artifact-staging/00000000-0000-4000-8000-%012d', i), ${maxArtifactBytes.listing}, 'pending', ${now}, ${deadline}, ${stage.lease.writeUntil}, ${cleanupAt}, ${now} FROM items`);
+		const after = {
+			at: now,
+			id: artifactStageIdSchema.parse('00000000-0000-4000-8000-000000003000')
+		};
+		const batch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		const reads: number[] = [];
+		const measured = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementation(async (statements) => {
+				const results = await batch(statements);
+				reads.push(...results.map((result) => result.meta.rows_read));
+				return results;
+			});
+		try {
+			expect({
+				page: await store.due(deadline, after),
+				statements: reads.length,
+				bounded: reads.every((read) => read <= 64)
+			}).toStrictEqual({
+				page: { stages: [stage.lease.id], hasMore: false },
+				statements: 1,
+				bounded: true
+			});
+		} finally {
+			measured.mockRestore();
+		}
+	});
+
 	it('returns bounded cleanup pages for independent stages', async () => {
 		const { createStage, store } = await fixture(10);
 		const stages = await Promise.all(
@@ -673,7 +741,8 @@ describe('global listing staging ownership', () => {
 		const ids = stages.map((stage) => stage.lease.id).toSorted(byCodeUnit);
 		expect(await store.due(deadline)).toStrictEqual({
 			stages: ids.slice(0, 8),
-			hasMore: true
+			hasMore: true,
+			next: { at: deadline, id: ids[7] }
 		});
 		await Promise.all(
 			ids.slice(0, 8).map((id) => store.claimCleanup(id, owner, deadline))

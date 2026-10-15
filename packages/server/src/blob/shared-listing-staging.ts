@@ -39,6 +39,14 @@ export type SharedListingStageReservation =
 	  }
 	| { readonly kind: 'unavailable' };
 
+export const sharedListingStageCleanupCursorSchema = z.strictObject({
+	at: z.iso.datetime({ precision: 3 }).pipe(isoTimestampSchema),
+	id: artifactStageIdSchema
+});
+export type SharedListingStageCleanupCursor = z.output<
+	typeof sharedListingStageCleanupCursorSchema
+>;
+
 export const sharedListingStageCleanupClaimSchema = z.strictObject({
 	id: artifactStageIdSchema,
 	key: r2ObjectKeySchema,

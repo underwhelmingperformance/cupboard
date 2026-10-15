@@ -7299,9 +7299,14 @@ build traces available from a cupboard cache.
       allocations and checks completed object sizes before recording seals.
       Post-I/O ownership checks fence cancellation and expired producers.
       Cleanup accepts an already removed multipart upload, defers storage
-      failures and acknowledges only after object deletion. Durable cleanup
-      dispatch, output retention, global task execution, cache adoption
-      projections and producer activation remain pending.
+      failures and acknowledges only after object deletion. Cron and queue
+      consumers now walk finite cleanup waves with an indexed continuation key
+      and fixed cutoff. Failed sends, expired cleanup claims and deferred
+      deletion remain discoverable in D1 and recover through fresh cron waves.
+      Queue hints never clear durable resources. Consumers admit additional
+      messages within their remaining invocation time and subrequest budgets.
+      Output retention, global task execution, cache adoption projections and
+      producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

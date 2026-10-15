@@ -68,6 +68,7 @@ import { computeNegotiateHints } from './negotiate-hints.ts';
 import { handleWorkerQueue } from './queue.ts';
 import { readApp, serveCacheSetup } from './read-app.ts';
 import { enqueueMaintenanceJobs } from './scheduled.ts';
+import { SharedListingCleanupQueue } from './shared-listing-cleanup-queue.ts';
 import {
 	innerRequest,
 	tenantUncachedRead,
@@ -561,7 +562,26 @@ export default {
 		// Enqueue bounded jobs so execution failures retry per message rather than
 		// repeating the whole cron plan.
 		await withSubrequestSlice(
-			() => enqueueMaintenanceJobs(boundedWorkerEnv(env)),
+			async () => {
+				const cleanup = new SharedListingCleanupQueue({
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					queue: env.ARTIFACT_QUEUE
+				});
+				const results = await Promise.allSettled([
+					enqueueMaintenanceJobs(boundedWorkerEnv(env)),
+					cleanup.start()
+				]);
+				const errors: unknown[] = [];
+				for (const result of results) {
+					if (result.status === 'rejected') {
+						errors.push(result.reason);
+					}
+				}
+				if (errors.length > 0) {
+					throw new AggregateError(errors, 'cron queue dispatch failed');
+				}
+			},
 			{ subrequests: subrequestsPerInvocation(env) }
 		);
 	},
