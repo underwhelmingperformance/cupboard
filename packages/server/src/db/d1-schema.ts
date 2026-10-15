@@ -11,7 +11,13 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import type { ArtifactTaskOwner } from '@cupboard/protocol/artifact-jobs';
+import {
+	type ArtifactJobGeneration,
+	artifactJobGenerationSchema,
+	type ArtifactJobId,
+	type ArtifactTaskId,
+	type ArtifactTaskOwner
+} from '@cupboard/protocol/artifact-jobs';
 import {
 	type ArtifactGeneration,
 	type ArtifactId,
@@ -41,6 +47,7 @@ import {
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
+import type { SharedListingJobSummary } from '../blob/shared-listing-jobs.ts';
 import type { R2ObjectKey } from '../http/http.ts';
 import {
 	type ReadPasswordHash,
@@ -1011,6 +1018,81 @@ export const listingGeneration = sqliteTable(
 		check(
 			'listing_generation_ownership_check',
 			sql`(${table.tenant} IS NULL AND ${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.tenant} IS NOT NULL AND ${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const sharedListingJob = sqliteTable(
+	'shared_listing_job',
+	{
+		id: text('id').$type<ArtifactJobId>().primaryKey(),
+		generation: integer('generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull()
+			.default(artifactJobGenerationSchema.parse(1)),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		state: text('state')
+			.$type<SharedListingJobSummary['state']>()
+			.notNull()
+			.default('running'),
+		phase: text('phase')
+			.$type<SharedListingJobSummary['phase']>()
+			.notNull()
+			.default('historical'),
+		cursor: text('cursor').$type<NixSha256HashString>(),
+		discovered: integer('discovered').notNull().default(0),
+		completed: integer('completed').notNull().default(0),
+		skipped: integer('skipped').notNull().default(0),
+		failed: integer('failed').notNull().default(0),
+		claimGeneration: integer('claim_generation').notNull().default(0),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		check(
+			'shared_listing_job_generation_check',
+			sql`${table.generation} BETWEEN 1 AND 9007199254740991 AND ${table.claimGeneration} BETWEEN 0 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_job_state_check',
+			sql`${table.state} IN ('running', 'cancelled', 'complete') AND ${table.phase} IN ('historical', 'catchup', 'processing')`
+		),
+		check(
+			'shared_listing_job_progress_check',
+			sql`${table.completed} >= 0 AND ${table.skipped} >= 0 AND ${table.failed} >= 0 AND ${table.discovered} BETWEEN 0 AND 9007199254740991 AND ${table.discovered} >= ${table.completed} + ${table.skipped} + ${table.failed}`
+		),
+		check(
+			'shared_listing_job_owner_check',
+			sql`(${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const sharedListingTask = sqliteTable(
+	'shared_listing_task',
+	{
+		id: text('id').$type<ArtifactTaskId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		narSize: integer('nar_size').notNull(),
+		fileSize: integer('file_size').notNull(),
+		discoveryPage: text('discovery_page').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		uniqueIndex('shared_listing_task_source_idx').on(
+			table.jobId,
+			table.narHash
+		),
+		index('shared_listing_task_page_idx').on(table.discoveryPage),
+		check(
+			'shared_listing_task_source_check',
+			sql`${table.sourceIncarnation} >= 1 AND ${table.narSize} >= 0 AND ${table.fileSize} >= 0`
 		)
 	]
 );

@@ -49,6 +49,12 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			"INSERT INTO listing_generation (nar_hash, generator_revision, source_incarnation, generation, tenant, owner, lease_expires_at, updated_at) VALUES ('reset-nar', 'reset-generator', 1, 1, 'reset-tenant', 'reset-owner', '2025-01-01T00:01:00.000Z', '2025-01-01T00:00:00.000Z')"
 		),
 		env.CUPBOARD_DB.prepare(
+			"INSERT INTO shared_listing_job (id, generator_revision, created_at, updated_at) VALUES ('reset-job', 'reset-generator', '2025-01-01T00:00:00.000Z', '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO shared_listing_task (id, job_id, nar_hash, source_incarnation, nar_size, file_size, discovery_page, created_at) VALUES ('reset-task', 'reset-job', 'reset-nar', 1, 100, 50, 'reset-page', '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
 			"UPDATE deployment_transition SET state = 'pending', updated_at = '2025-01-01T00:00:00.000Z'"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -107,6 +113,8 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		artifact_ref: 0,
 		listing_fact: 0,
 		listing_generation: 0,
+		shared_listing_job: 0,
+		shared_listing_task: 0,
 		tenant_cas_blob_storage: 0,
 		tenant_usage: 0,
 		tenant_namespace_cleanup_guard: 0,

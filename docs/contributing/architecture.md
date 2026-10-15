@@ -84,8 +84,18 @@ most 33 objects, including lookahead, and returns at most 32 sources. The cursor
 advances past scanned objects even if none is eligible. Indexed retention probes
 do not enumerate tenants or duplicate a NAR for each reference. Discovery grants
 no cache authority; an executor must recheck the captured source incarnation and
-publication authority. Durable global job cursors, forward capture and catch-up
-integration remain pending.
+publication authority.
+
+Shared D1 jobs persist the historical cursor, generator revision, phase and
+progress counters. Discovery ownership expires after sixty seconds and uses
+increasing claim generations. Each page inserts unique NAR tasks and checkpoints
+its cursor and counters in one ownership-fenced batch, then releases discovery
+ownership. The counter subquery reads only the newly inserted page through an
+index. A lost reply cannot insert or count the page twice. Cancellation revokes
+discovery ownership, and resume advances the job generation without discarding
+the cursor or tasks. Historical discovery enters catch-up; it does not declare
+the generation job complete. Forward capture, catch-up, global task execution
+and cache adoption projections remain pending.
 
 The shared D1 generation store reserves one computation lease per NAR and
 generator revision across tenants. Claim acquisition requires an active tenant

@@ -24,6 +24,8 @@ export {
 	publication,
 	readableAttestationReference,
 	readableBlobReference,
+	sharedListingJob,
+	sharedListingTask,
 	tenant,
 	tenantBlob,
 	tenantCacheReadCredential,

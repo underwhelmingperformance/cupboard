@@ -379,6 +379,13 @@
 			"when": 1792029988955,
 			"tag": "0053_listing_generation_claims",
 			"breakpoints": true
+		},
+		{
+			"idx": 54,
+			"version": "6",
+			"when": 1792036278402,
+			"tag": "0054_shared_listing_jobs",
+			"breakpoints": true
 		}
 	]
 }

@@ -96,6 +96,12 @@ const laterTransitions: readonly SchemaTransition<string>[] = [
 const sharedTransitions = schemaTransitions.filter(
 	(transition) => transition.database === undefined
 );
+const precedingSharedTransitions = sharedTransitions.slice(
+	0,
+	sharedTransitions.findIndex(
+		(transition) => transition.id === 'cas-demotion-progress'
+	)
+);
 
 describe('checkD1Migrations', () => {
 	it("accepts the repository's migrations", () => {
@@ -114,7 +120,8 @@ describe('checkD1Migrations', () => {
 				'attestation-list-revision',
 				'tenant-namespace-cleanup',
 				'native-artifact-publication',
-				'shared-listing-generation'
+				'shared-listing-generation',
+				'shared-listing-jobs'
 			]
 		});
 	});
@@ -146,37 +153,16 @@ describe('checkD1Migrations', () => {
 
 	it('preserves replay coverage for the preceding CAS and artifact transitions', () => {
 		const full = readMigrationSet(repositoryMigrations);
-		const transitions = sharedTransitions.filter(
-			(transition) =>
-				transition.id !== 'cas-demotion-progress' &&
-				transition.id !== 'attestation-list-revision' &&
-				transition.id !== 'tenant-namespace-cleanup' &&
-				transition.id !== 'native-artifact-publication' &&
-				transition.id !== 'shared-listing-generation'
+		const transitions = precedingSharedTransitions;
+		const includedFiles = new Set(
+			transitions.flatMap((transition) => [
+				...transition.expand,
+				...transition.contract
+			])
 		);
 		const preceding: MigrationSet = {
-			files: full.files.filter(
-				(file) =>
-					![
-						'0048_cas_demotion_progress.sql',
-						'0049_attestation_list_revision.sql',
-						'0050_attestation_list_revision_contract.sql',
-						'0051_tenant_namespace_cleanup_guard.sql',
-						'0052_attestation_list_retirement_guard.sql',
-						'0053_listing_generation_claims.sql'
-					].includes(file)
-			),
-			journal: full.journal.filter(
-				(file) =>
-					![
-						'0048_cas_demotion_progress.sql',
-						'0049_attestation_list_revision.sql',
-						'0050_attestation_list_revision_contract.sql',
-						'0051_tenant_namespace_cleanup_guard.sql',
-						'0052_attestation_list_retirement_guard.sql',
-						'0053_listing_generation_claims.sql'
-					].includes(file)
-			),
+			files: full.files.filter((file) => includedFiles.has(file)),
+			journal: full.journal.filter((file) => includedFiles.has(file)),
 			sql: full.sql
 		};
 		expect(
@@ -192,14 +178,8 @@ describe('checkD1Migrations', () => {
 	});
 
 	it('expands path authority after contracted cache identity and contracts the path index before renaming its table', () => {
-		const earlierTransitions = sharedTransitions.filter(
-			(transition) =>
-				transition.id !== 'cache-path-intersection-index' &&
-				transition.id !== 'cas-demotion-progress' &&
-				transition.id !== 'attestation-list-revision' &&
-				transition.id !== 'tenant-namespace-cleanup' &&
-				transition.id !== 'native-artifact-publication' &&
-				transition.id !== 'shared-listing-generation'
+		const earlierTransitions = precedingSharedTransitions.filter(
+			(transition) => transition.id !== 'cache-path-intersection-index'
 		);
 		const order = deployOrder(earlierTransitions, 1);
 		expect(order).toStrictEqual({

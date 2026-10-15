@@ -7230,8 +7230,11 @@ build traces available from a cupboard cache.
       Capture new publications before starting historical backfills. The shared
       catalogue reader now pages NAR identities directly, checks retention and
       live source incarnations, and advances through bounded empty pages. It
-      does not enumerate tenants or allocate work per reference. Durable job
-      cursors, forward capture and catch-up integration remain pending.
+      does not enumerate tenants or allocate work per reference. Shared D1 jobs
+      now checkpoint the historical cursor, unique NAR tasks and discovery
+      counters atomically under expiring claims. Empty pages advance the cursor.
+      The historical scan enters catch-up without declaring generation complete.
+      Forward capture and catch-up integration remain pending.
 - [ ] Use D1 job and task records with expiring claims, source-incarnation
       fences and resumable staging cleanup. Queue messages are wake-up hints;
       persisted state decides whether work can run and complete. Staging RPCs
@@ -7260,7 +7263,12 @@ build traces available from a cupboard cache.
       replace its superseded same-tenant owner without rereading the NAR and
       refuses an elapsed recovery horizon even before cleanup runs. Preparation
       refusals and explicit retirement release captured computation claims.
-      Shared D1 job/task projections and producer activation remain pending.
+      Shared D1 historical job/task records now persist discovery progress,
+      ownership, cancellation and resume. Page insertion and checkpoints share
+      one fenced batch; lost replies cannot count a page twice. An indexed page
+      identity bounds counter updates independently of the task catalogue size.
+      Global task execution, cache adoption projections and producer activation
+      remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
