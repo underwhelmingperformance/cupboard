@@ -1,4 +1,8 @@
-import { type CacheScope } from '@cupboard/nix-store/scalars';
+import {
+	type CacheScope,
+	nixSha256HashSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
@@ -43,6 +47,8 @@ import {
 	workerFetch
 } from '../test-support.ts';
 
+import { jsonValueLists } from './json-list.ts';
+import { readableReferenceSelect } from './reuse-authority.ts';
 import { setView } from './reuse-view-read.test-support.ts';
 
 // A public pull-request cache receives the push. A pull request may publish
@@ -287,6 +293,95 @@ describe('access-checked blob reuse', () => {
 		}).toStrictEqual({
 			status: StatusCodes.NOT_FOUND,
 			referencesToNar: [publicSource]
+		});
+	});
+});
+
+function byCacheName(
+	left: Record<string, unknown>,
+	right: Record<string, unknown>
+): number {
+	return String(left.cache_name).localeCompare(String(right.cache_name));
+}
+
+describe('readable reference select', () => {
+	it('seeks one lifecycle row for each reference across ten named caches', async () => {
+		const tenant = tenantIdSchema.parse('acme');
+		const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
+		const path = syntheticStorePathHash(1);
+		// The default cache and ten named caches in `acme` and in `other`. The
+		// even-numbered named caches are private, and `cache-1` was deleted and
+		// created again.
+		await env.CUPBOARD_DB.prepare(
+			`WITH RECURSIVE source(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM source WHERE n < 10)
+			 INSERT INTO cache_lifecycle_storage(tenant,cache_kind,cache_name,access,generation,updated_at)
+			 SELECT owner.value, CASE n WHEN 0 THEN 'default' ELSE 'named' END, CASE n WHEN 0 THEN NULL ELSE 'cache-' || n END, CASE n % 2 WHEN 0 THEN 'private' ELSE 'public' END, CASE n WHEN 1 THEN 2 ELSE 1 END, '2026-01-01T00:00:00.000Z'
+			 FROM source CROSS JOIN json_each('["acme","other"]') owner`
+		).run();
+		// Each cache has four generations of one path that refer to the NAR. The
+		// first three are demoted.
+		await env.CUPBOARD_DB.prepare(
+			`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM source WHERE n < 4)
+			 INSERT INTO blob_ref_storage(tenant,cache_kind,cache_name,store_path_hash,generation,nar_hash,cache_generation,readable)
+			 SELECT tenant, cache_kind, cache_name, ?, n, ?, generation, n = 4 FROM cache_lifecycle_storage CROSS JOIN source`
+		)
+			.bind(path, narHash)
+			.run();
+		// A reference from the deleted first generation of `cache-1`.
+		await env.CUPBOARD_DB.prepare(
+			`INSERT INTO blob_ref_storage(tenant,cache_kind,cache_name,store_path_hash,generation,nar_hash,cache_generation) VALUES (?, 'named', 'cache-1', ?, 5, ?, 1)`
+		)
+			.bind(tenant, path, narHash)
+			.run();
+		await env.CUPBOARD_DB.prepare(
+			`INSERT INTO tenant_blob(tenant,nar_hash,file_size) SELECT value, ?, 1 FROM json_each('["acme","other"]')`
+		)
+			.bind(narHash)
+			.run();
+		const [list] = jsonValueLists([narHash]);
+		if (list === undefined) {
+			throw new Error('The NAR list is empty.');
+		}
+		const query = readableReferenceSelect(
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			tenant,
+			list
+		).toSQL();
+
+		const measured = await env.CUPBOARD_DB.prepare(query.sql)
+			.bind(...query.params)
+			.all();
+		const plan = await env.CUPBOARD_DB.prepare(
+			`EXPLAIN QUERY PLAN ${query.sql}`
+		)
+			.bind(...query.params)
+			.all();
+
+		expect({
+			rows: measured.results
+				.map((row) => ({ ...row, cache_name: row.cache_name ?? undefined }))
+				.toSorted(byCacheName),
+			read: measured.meta.rows_read,
+			plan: plan.results.map((row) => row.detail)
+		}).toStrictEqual({
+			rows: Array.from({ length: 11 }, (_, n) => ({
+				nar_hash: narHash,
+				cache_kind: n === 0 ? 'default' : 'named',
+				cache_name: n === 0 ? undefined : `cache-${String(n)}`,
+				access: n % 2 === 0 ? 'private' : 'public'
+			})).toSorted(byCacheName),
+			read: 62,
+			plan: [
+				'SEARCH blob_ref_storage USING INDEX blob_ref_readable_nar_idx (tenant=? AND nar_hash=?)',
+				'LIST SUBQUERY 1',
+				'SCAN json_each VIRTUAL TABLE INDEX 1:',
+				'CREATE BLOOM FILTER',
+				'CORRELATED SCALAR SUBQUERY 2',
+				'SEARCH path_read_revocation USING INDEX path_read_revocation_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=? AND store_path_hash=?)',
+				'SEARCH tenant_blob USING COVERING INDEX sqlite_autoindex_tenant_blob_1 (tenant=? AND nar_hash=?)',
+				'SEARCH cache_lifecycle_storage USING INDEX cache_lifecycle_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=?)',
+				'USE TEMP B-TREE FOR GROUP BY'
+			]
 		});
 	});
 });
