@@ -7294,9 +7294,14 @@ build traces available from a cupboard cache.
       writes remain tracked through their cleanup horizon. Cleanup
       acknowledgement revokes only the matching computation before deleting its
       allocation marker, so a delayed reservation cannot recreate a deleted
-      stage. The shared prefix has a separate R2 lifecycle fallback. Effectful
-      R2 staging and cleanup dispatch, output retention, global task execution,
-      cache adoption projections and producer activation remain pending.
+      stage. The shared prefix has a separate R2 lifecycle fallback. Shared R2
+      staging now registers real multipart uploads, aborts duplicate or late
+      allocations and checks completed object sizes before recording seals.
+      Post-I/O ownership checks fence cancellation and expired producers.
+      Cleanup accepts an already removed multipart upload, defers storage
+      failures and acknowledges only after object deletion. Durable cleanup
+      dispatch, output retention, global task execution, cache adoption
+      projections and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
