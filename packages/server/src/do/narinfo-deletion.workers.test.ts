@@ -1494,14 +1494,14 @@ describe('narinfo deletion queue', () => {
 				written: result.meta.rows_written
 			}))
 		).toStrictEqual([
-			{ rows: [], read: 170, written: 0 },
-			{ rows: [], read: 169, written: 0 },
-			{ rows: [], read: 733, written: 111 },
-			{ rows: [], read: 729, written: 109 },
+			{ rows: [], read: 175, written: 0 },
+			{ rows: [], read: 174, written: 0 },
+			{ rows: [], read: 752, written: 113 },
+			{ rows: [], read: 748, written: 111 },
 			{ rows: [], read: 1, written: 2 },
 			{ rows: [], read: 1, written: 2 },
-			{ rows: [], read: 170, written: 0 },
-			{ rows: [], read: 708, written: 97 },
+			{ rows: [], read: 175, written: 0 },
+			{ rows: [], read: 727, written: 99 },
 			{ rows: [], read: 1, written: 2 }
 		]);
 

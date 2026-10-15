@@ -123,7 +123,8 @@ describe('checkD1Migrations', () => {
 				'shared-listing-generation',
 				'shared-listing-jobs',
 				'nar-source-capture',
-				'shared-listing-catchup'
+				'shared-listing-catchup',
+				'shared-listing-task-claims'
 			]
 		});
 	});

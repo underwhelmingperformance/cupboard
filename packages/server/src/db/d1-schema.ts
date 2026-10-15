@@ -52,6 +52,7 @@ import {
 	narCaptureSequenceSchema
 } from '../blob/nar-source-capture.ts';
 import type { SharedListingJobSummary } from '../blob/shared-listing-jobs.ts';
+import type { SharedListingTaskState } from '../blob/shared-listing-tasks.ts';
 import type { R2ObjectKey } from '../http/http.ts';
 import {
 	type ReadPasswordHash,
@@ -1092,7 +1093,20 @@ export const sharedListingTask = sqliteTable(
 		narSize: integer('nar_size').notNull(),
 		fileSize: integer('file_size').notNull(),
 		discoveryPage: text('discovery_page').notNull(),
-		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		state: text('state')
+			.$type<SharedListingTaskState>()
+			.notNull()
+			.default('pending'),
+		claimGeneration: integer('claim_generation').notNull().default(0),
+		claimJobGeneration: integer('claim_job_generation').notNull().default(0),
+		claimOwner: text('claim_owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		readyAt: text('ready_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`'1970-01-01T00:00:00.000Z'`),
+		updatedAt: text('updated_at').$type<IsoTimestamp>()
 	},
 	(table) => [
 		uniqueIndex('shared_listing_task_source_idx').on(
@@ -1100,6 +1114,24 @@ export const sharedListingTask = sqliteTable(
 			table.narHash
 		),
 		index('shared_listing_task_page_idx').on(table.discoveryPage),
+		index('shared_listing_task_ready_idx').on(
+			table.jobId,
+			table.state,
+			table.readyAt,
+			table.id
+		),
+		index('shared_listing_task_lease_idx').on(
+			table.jobId,
+			table.state,
+			table.leaseExpiresAt,
+			table.id
+		),
+		index('shared_listing_task_job_claim_idx').on(
+			table.jobId,
+			table.state,
+			table.claimJobGeneration,
+			table.id
+		),
 		check(
 			'shared_listing_task_source_check',
 			sql`${table.sourceIncarnation} >= 1 AND ${table.narSize} >= 0 AND ${table.fileSize} >= 0`

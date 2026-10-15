@@ -97,6 +97,19 @@ the cursor or tasks. Historical discovery enters catch-up; it does not declare
 the generation job complete. Global task execution and cache adoption
 projections remain pending.
 
+Global tasks have independent execution claims, so consumers can claim different
+tasks from the same job while discovery continues. Readiness merges bounded
+indexed pages of pending tasks, expired leases and claims from earlier job
+generations. Job state is checked once in the same read batch, so a cancelled
+job cannot cause an unbounded scan of ready tasks. Claim writes recheck the job
+state and generation. Each claim captures the task generation, generator
+revision, NAR incarnation and sizes. Renewal is monotonic; expired or replaced
+owners cannot renew or defer. Deferral releases the lease and persists a retry
+deadline. Repeated claim and deferral requests return the stored result without
+extending its deadline. Cancellation revokes execution ownership. Resume and
+source repair allow immediate replacement claims without waiting for the old
+lease to expire. Claims grant no cache authority or physical retention.
+
 An append-only capture sequence records retained, registered live NAR sources.
 Indexed triggers append an event when the first reference arrives or a retained
 source becomes available after metadata registration or repair. The event and

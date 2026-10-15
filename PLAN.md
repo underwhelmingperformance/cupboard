@@ -7278,8 +7278,13 @@ build traces available from a cupboard cache.
       ownership, cancellation and resume. Page insertion and checkpoints share
       one fenced batch; lost replies cannot count a page twice. An indexed page
       identity bounds counter updates independently of the task catalogue size.
-      Global task execution, cache adoption projections and producer activation
-      remain pending.
+      Global tasks now have independent expiring execution claims during every
+      discovery phase. Indexed readiness bounds pending, expired and superseded
+      candidates. Claims, renewal and deferral check job generation and captured
+      source metadata. Cancellation revokes ownership; resume and source repair
+      permit immediate replacement claims. Lost claim and deferral replies are
+      idempotent. Global task execution, cache adoption projections and producer
+      activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

@@ -407,6 +407,13 @@
 			"when": 1792041351999,
 			"tag": "0057_shared_listing_catchup",
 			"breakpoints": true
+		},
+		{
+			"idx": 58,
+			"version": "6",
+			"when": 1792043859415,
+			"tag": "0058_shared_listing_task_claims",
+			"breakpoints": true
 		}
 	]
 }

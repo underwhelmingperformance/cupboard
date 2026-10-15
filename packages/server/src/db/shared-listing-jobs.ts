@@ -178,6 +178,13 @@ export class SharedListingJobStore {
 				list.column('narSize'),
 				list.column('fileSize'),
 				sql`${pageId}`,
+				sql`${now}`,
+				sql`'pending'`,
+				sql`0`,
+				sql`0`,
+				sql`null`,
+				sql`null`,
+				sql`${now}`,
 				sql`${now}`
 			])
 			.append(sql` AND ${exists(active)}`);
@@ -197,7 +204,11 @@ export class SharedListingJobStore {
 					set: {
 						sourceIncarnation: sql`excluded.source_incarnation`,
 						narSize: sql`excluded.nar_size`,
-						fileSize: sql`excluded.file_size`
+						fileSize: sql`excluded.file_size`,
+						state: sql`CASE WHEN ${schema.sharedListingTask.state} = 'running' THEN 'pending' ELSE ${schema.sharedListingTask.state} END`,
+						leaseExpiresAt: sql`null`,
+						readyAt: now,
+						updatedAt: now
 					},
 					setWhere: lt(
 						schema.sharedListingTask.sourceIncarnation,

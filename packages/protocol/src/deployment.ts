@@ -103,7 +103,8 @@ export const transitionIdSchema = z.enum([
 	'shared-listing-generation',
 	'shared-listing-jobs',
 	'nar-source-capture',
-	'shared-listing-catchup'
+	'shared-listing-catchup',
+	'shared-listing-task-claims'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -473,6 +474,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 	{
 		id: 'shared-listing-catchup',
 		expand: ['0057_shared_listing_catchup.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-jobs']
+	},
+	{
+		id: 'shared-listing-task-claims',
+		expand: ['0058_shared_listing_task_claims.sql'],
 		contract: [],
 		expandAfter: ['shared-listing-jobs']
 	}
