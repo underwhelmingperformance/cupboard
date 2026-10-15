@@ -29,6 +29,7 @@ import {
 	currentNarObjectKey,
 	currentServer,
 	defaultCache,
+	drainAttestationInheritance,
 	driveToCompletion,
 	namedCache,
 	narBytes,
@@ -579,35 +580,51 @@ describe('cache teardown', () => {
 
 	it('keeps a path recommitted above a queued retirement generation', async () => {
 		await useTestServer('teardown-fence');
-		const { token } = await bootstrap({
-			caches: [{ scope: buildsCache }, { scope: otherCache }]
-		});
-		const path = buildMetadata('a');
+		await withoutAlarmArming(async () => {
+			const { token } = await bootstrap({
+				caches: [{ scope: buildsCache }, { scope: otherCache }]
+			});
+			const path = buildMetadata('a');
 
-		await pushPath(token, path);
+			await pushPath(token, path);
 
-		// Model the state a teardown leaves for one path: its row is gone and its
-		// retirement is queued at the committed generation. The recommit then lands a
-		// fresh row at a higher generation while that retirement is still queued.
-		await queueUnflushedNarInfoDeletion({ storePathHash: path.storePathHash });
-		await pushPath(token, path);
+			await queueUnflushedNarInfoDeletion({
+				storePathHash: path.storePathHash
+			});
+			await pushPath(token, path);
 
-		const recommittedGeneration = await narInfoGeneration(path.storePathHash);
+			const recommittedGeneration = await narInfoGeneration(path.storePathHash);
+			expect({
+				generation: recommittedGeneration,
+				queued: await narInfoDeletionRows()
+			}).toStrictEqual({
+				generation: 1,
+				queued: [
+					{
+						cache: defaultCache(),
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						generation: 0
+					}
+				]
+			});
+			await drainAttestationInheritance();
 
-		const response = await authorisedFetch('/gc', token, { method: 'POST' });
+			const response = await authorisedFetch('/gc', token, { method: 'POST' });
 
-		expect({
-			status: response.status,
-			recommittedGeneration,
-			generation: await narInfoGeneration(path.storePathHash),
-			object: await isNarInfoObjectPresent(path.storePathHash),
-			queued: await narInfoDeletionRows()
-		}).toStrictEqual({
-			status: StatusCodes.OK,
-			recommittedGeneration: 1,
-			generation: 1,
-			object: true,
-			queued: []
+			expect({
+				status: response.status,
+				recommittedGeneration,
+				generation: await narInfoGeneration(path.storePathHash),
+				object: await isNarInfoObjectPresent(path.storePathHash),
+				queued: await narInfoDeletionRows()
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				recommittedGeneration: 1,
+				generation: 1,
+				object: true,
+				queued: []
+			});
 		});
 	});
 
