@@ -20,7 +20,7 @@ import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { lookupInPages } from '@cupboard/shared/paging';
 import { readResponseJson } from '@cupboard/shared/response-body';
-import { retryingFetcher } from '@cupboard/shared/retry';
+import { loggedUrl, retryingFetcher } from '@cupboard/shared/retry';
 import { z } from 'zod';
 
 import {
@@ -739,7 +739,7 @@ async function availablePathsAt(
 		concurrency: maximumConcurrentAvailabilityQueries,
 		finishFirstPage: true,
 		deadline: {
-			url: target,
+			target: { url: loggedUrl(target) },
 			replaySafety: 'replay-safe'
 		},
 		request: async (batch, signal) => {

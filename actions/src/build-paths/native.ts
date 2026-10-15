@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 
+import { configureLogging } from '@cupboard/logger';
 import { PostBuildHookConflictError } from '@cupboard/nix/build-observation';
 import {
 	observeChildProcess,
@@ -132,6 +133,7 @@ class NativePostBuildHookConflictError extends CodedError {
 export async function runNativeBuild(
 	run: (environment: Environment, signal: AbortSignal) => Promise<void>
 ): Promise<void> {
+	configureLogging();
 	const controller = new AbortController();
 	const interrupt = (): void => {
 		controller.abort(new NativeActionSignalError('SIGINT'));

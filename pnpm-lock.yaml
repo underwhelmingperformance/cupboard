@@ -575,7 +575,7 @@ importers:
         specifier: workspace:*
         version: link:../shared
       '@logtape/logtape':
-        specifier: ^2.2.3
+        specifier: ^2.4.0
         version: 2.4.0
     devDependencies:
       '@types/node':
@@ -778,6 +778,9 @@ importers:
 
   packages/shared:
     dependencies:
+      '@logtape/logtape':
+        specifier: ^2.4.0
+        version: 2.4.0
       '@octokit/plugin-retry':
         specifier: ^8.1.0
         version: 8.1.1(@octokit/core@7.0.6)

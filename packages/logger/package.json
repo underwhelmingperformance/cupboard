@@ -3,7 +3,7 @@
 	"version": "0.0.0",
 	"dependencies": {
 		"@cupboard/shared": "workspace:*",
-		"@logtape/logtape": "^2.2.3"
+		"@logtape/logtape": "^2.4.0"
 	},
 	"devDependencies": {
 		"@types/node": "catalog:",

@@ -7,6 +7,10 @@ import { z } from 'zod';
 import { stalledResponse } from '../../../tests/support/stalled-request.ts';
 
 import {
+	type CapturedRecord,
+	captureLogs
+} from './log-capture.test-support.ts';
+import {
 	fetchWithProbeRetries,
 	lookupInPages,
 	maxProbeAttempts,
@@ -23,7 +27,19 @@ class TestFailure extends Error {
 }
 
 const maximumBackoffMs = 5000;
-const url = 'https://cache.test/a';
+const target = { url: 'https://cache.test/a' };
+
+function probeLog(
+	message: string,
+	properties: Record<string, unknown>
+): CapturedRecord {
+	return {
+		level: 'debug',
+		category: ['cupboard', 'probe'],
+		message,
+		properties
+	};
+}
 
 async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
 	try {
@@ -40,7 +56,7 @@ async function stalled(signal: AbortSignal): Promise<string> {
 	return 'never';
 }
 
-const replaySafe = { url, replaySafety: 'replay-safe' } as const;
+const replaySafe = { target, replaySafety: 'replay-safe' } as const;
 
 function timeoutFields(failure: unknown): unknown {
 	return failure instanceof ProbeTimeoutError
@@ -84,7 +100,7 @@ describe('requestWithDeadline', () => {
 							started += 1;
 							return stalled(signal);
 						},
-						{ url, replaySafety }
+						{ target, replaySafety }
 					)
 				);
 				await vi.advanceTimersByTimeAsync(
@@ -95,7 +111,7 @@ describe('requestWithDeadline', () => {
 					failure: timeoutFields(await failure),
 					started
 				}).toStrictEqual({
-					failure: { name: 'ProbeTimeoutError', url },
+					failure: { name: 'ProbeTimeoutError', url: target.url },
 					started: attempts
 				});
 			} finally {
@@ -473,7 +489,7 @@ describe('lookupInPages', () => {
 				lookupInPages([1, 2, 3], {
 					pageSize: 2,
 					concurrency: 1,
-					deadline: { url, replaySafety: 'replay-unsafe' },
+					deadline: { target, replaySafety: 'replay-unsafe' },
 					request: async (inputs, signal) => {
 						requests.push([...inputs]);
 						await stalled(signal);
@@ -489,7 +505,7 @@ describe('lookupInPages', () => {
 				failure: timeoutFields(await failure),
 				requests
 			}).toStrictEqual({
-				failure: { name: 'ProbeTimeoutError', url },
+				failure: { name: 'ProbeTimeoutError', url: target.url },
 				requests: [[1, 2]]
 			});
 		} finally {
@@ -569,5 +585,112 @@ describe('lookupInPages', () => {
 			[3],
 			[4, 5]
 		]);
+	});
+});
+
+describe('probe debug logs', () => {
+	it('records each attempt and the deadline retry without credentials or a query', async () => {
+		const records = captureLogs();
+		const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+		let requests = 0;
+		const fetcher: typeof fetch = (_input, init) => {
+			requests += 1;
+			return requests === 1
+				? stalledResponse(init?.signal)
+				: Promise.resolve(new Response('response body'));
+		};
+
+		vi.useFakeTimers();
+		try {
+			const pending = fetchWithProbeRetries(
+				fetcher,
+				'https://reader:secret@cache.test/api/v1/path-info?token=secret',
+				{ method: 'POST', body: 'paths' },
+				(response) => response.text()
+			);
+			const settled = expect(pending).resolves.toBe('response body');
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs + maximumBackoffMs);
+			await settled;
+		} finally {
+			vi.useRealTimers();
+			random.mockRestore();
+		}
+
+		const probe = { url: 'https://cache.test/api/v1/path-info' };
+		expect(records).toStrictEqual([
+			probeLog('probe attempt finished', {
+				...probe,
+				attempt: 1,
+				outcome: 'timed out',
+				elapsedMs: probeDeadlineMs
+			}),
+			probeLog('retrying probe after its deadline expired', {
+				...probe,
+				nextAttempt: 2,
+				delayMs: 125
+			}),
+			probeLog('probe attempt finished', {
+				...probe,
+				attempt: 2,
+				outcome: 'succeeded',
+				elapsedMs: 0
+			})
+		]);
+	});
+
+	it('records the number of inputs in each page request', async () => {
+		const records = captureLogs();
+
+		await lookupInPages([1, 2, 3], {
+			pageSize: 2,
+			concurrency: 1,
+			deadline: replaySafe,
+			request: (inputs) => Promise.resolve(inputs)
+		});
+
+		expect(
+			records.map(({ properties }) => ({
+				inputs: properties.inputs,
+				outcome: properties.outcome
+			}))
+		).toStrictEqual([
+			{ inputs: 2, outcome: 'succeeded' },
+			{ inputs: 1, outcome: 'succeeded' }
+		]);
+	});
+
+	it('records a failed attempt by its error name and does not retry it', async () => {
+		const records = captureLogs();
+
+		vi.useFakeTimers();
+		let failure: unknown;
+		try {
+			failure = await rejectionOf(
+				fetchWithProbeRetries(
+					() => Promise.reject(new TestFailure()),
+					'https://cache.test/a.narinfo',
+					undefined,
+					(response) => response.text()
+				)
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+
+		expect({
+			isTestFailure: failure instanceof TestFailure,
+			records
+		}).toStrictEqual({
+			isTestFailure: true,
+			records: [
+				probeLog('probe attempt finished', {
+					url: 'https://cache.test/a.narinfo',
+					attempt: 1,
+					outcome: 'failed',
+					errorName: 'TestFailure',
+					elapsedMs: 0
+				})
+			]
+		});
 	});
 });

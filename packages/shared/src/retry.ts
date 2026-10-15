@@ -1,7 +1,10 @@
+import { getLogger } from '@logtape/logtape';
 import { StatusCodes } from 'http-status-codes';
 
 import { discardResponseBody } from './cleanup.ts';
 import { parseHttpDate } from './http-fields.ts';
+
+const logger = getLogger(['cupboard', 'fetch']);
 
 // A long push makes thousands of requests to one single-threaded Durable Object
 // and streams many blobs. Retry a small number of transient gateway and
@@ -56,6 +59,10 @@ export function retryingFetcher(
 			return fetcher(input, init);
 		}
 
+		const request = {
+			method: init?.method ?? (input instanceof Request ? input.method : 'GET'),
+			url: loggedUrl(input)
+		};
 		let retries = 0;
 
 		for (;;) {
@@ -76,13 +83,30 @@ export function retryingFetcher(
 				}
 
 				retries += 1;
-				await backoffDelay(retries, signal);
+				const delayMs = backoffDelayMs(retries);
+				logger.debug('retrying after a network error', () => ({
+					...request,
+					retry: retries,
+					code: networkErrorCode(error.cause),
+					delayMs
+				}));
+				await abortableSleep(delayMs, signal);
 				continue;
 			}
 
 			if (isTransientResponse(response) && retries < maxTransientRetries) {
 				retries += 1;
-				await transientResponseDelay(response, retries, signal);
+				const delayMs = transientResponseDelayMs(response, retries);
+				const cfRay = response.headers.get('cf-ray');
+				logger.debug('retrying after a transient response', {
+					...request,
+					retry: retries,
+					status: response.status,
+					...(cfRay !== null && { cfRay }),
+					delayMs
+				});
+				await discardResponseBody(response);
+				await abortableSleep(delayMs, signal);
 				continue;
 			}
 
@@ -92,41 +116,49 @@ export function retryingFetcher(
 }
 
 /**
- * Discards a transient response body, then waits for the next attempt. A
- * `Retry-After` value in seconds or as an HTTP date supplies the delay,
- * limited to the maximum backoff. A missing or invalid value uses
- * {@link backoffDelay}.
+ * Returns the origin and path of a request URL. Debug logs use this form
+ * because the user information and the query can contain credentials.
  */
-export async function transientResponseDelay(
-	response: Response,
-	attempt: number,
-	signal?: AbortSignal
-): Promise<void> {
-	const retryAfter = retryAfterDelayMs(response.headers.get('retry-after'));
-	await discardResponseBody(response);
+export function loggedUrl(input: Parameters<typeof fetch>[0]): string {
+	const url = URL.parse(
+		input instanceof Request ? input.url : input.toString()
+	);
 
-	if (retryAfter !== undefined) {
-		await abortableSleep(Math.min(retryAfter, maxRetryDelayMs), signal);
-
-		return;
-	}
-
-	await backoffDelay(attempt, signal);
+	return url === null ? 'an unparsable URL' : `${url.origin}${url.pathname}`;
 }
 
 /**
- * Waits for an exponentially increasing delay with full jitter: a random value
- * from zero to the current ceiling. The delay does not exceed
- * `maxRetryDelayMs`. An abort signal ends the wait immediately.
+ * Returns the delay before the next attempt after a transient response. A
+ * `Retry-After` value in seconds or as an HTTP date supplies the delay,
+ * limited to the maximum backoff. A missing or invalid value uses
+ * {@link backoffDelayMs}.
+ */
+function transientResponseDelayMs(response: Response, attempt: number): number {
+	const retryAfter = retryAfterDelayMs(response.headers.get('retry-after'));
+
+	return retryAfter === undefined
+		? backoffDelayMs(attempt)
+		: Math.min(retryAfter, maxRetryDelayMs);
+}
+
+/**
+ * Waits for the jittered backoff delay for this attempt. An abort signal ends
+ * the wait immediately.
  */
 export async function backoffDelay(
 	attempt: number,
 	signal?: AbortSignal
 ): Promise<void> {
-	await abortableSleep(
-		fullJitterDelayMs(attempt, baseRetryDelayMs, maxRetryDelayMs),
-		signal
-	);
+	await abortableSleep(backoffDelayMs(attempt), signal);
+}
+
+/**
+ * Returns an exponentially increasing delay with full jitter for the given
+ * attempt, counted from 1: a random value from zero to the current ceiling.
+ * The delay does not exceed `maxRetryDelayMs`.
+ */
+export function backoffDelayMs(attempt: number): number {
+	return fullJitterDelayMs(attempt, baseRetryDelayMs, maxRetryDelayMs);
 }
 
 /**
@@ -168,7 +200,11 @@ export function retryAfterDelayMs(
 		: Math.max(0, retryAt - nowMilliseconds);
 }
 
-async function abortableSleep(
+/**
+ * Waits for `delay` milliseconds. An abort signal ends the wait immediately
+ * and without an error.
+ */
+export async function abortableSleep(
 	delay: number,
 	signal?: AbortSignal
 ): Promise<void> {
@@ -220,23 +256,31 @@ export function isFetchNetworkError(error: unknown): error is TypeError {
 		return false;
 	}
 
-	return hasNetworkCode(error.cause);
+	return networkErrorCode(error.cause) !== undefined;
 }
 
-function hasNetworkCode(value: unknown): boolean {
+function networkErrorCode(value: unknown): string | undefined {
 	if (typeof value !== 'object' || value === null) {
-		return false;
+		return undefined;
 	}
 
 	if ('code' in value && typeof value.code === 'string' && value.code !== '') {
-		return true;
+		return value.code;
 	}
 
 	if ('errors' in value && Array.isArray(value.errors)) {
-		return value.errors.some((error) => hasNetworkCode(error));
+		for (const error of value.errors) {
+			const code = networkErrorCode(error);
+
+			if (code !== undefined) {
+				return code;
+			}
+		}
+
+		return undefined;
 	}
 
-	return 'cause' in value && hasNetworkCode(value.cause);
+	return 'cause' in value ? networkErrorCode(value.cause) : undefined;
 }
 
 function hostOf(input: Parameters<typeof fetch>[0]): string {
