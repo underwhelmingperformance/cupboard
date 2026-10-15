@@ -28,6 +28,7 @@ export {
 	readableBlobReference,
 	sharedListingGeneration,
 	sharedListingJob,
+	sharedListingJobDispatch,
 	sharedListingOutputCleanup,
 	sharedListingOutputReference,
 	sharedListingStage,

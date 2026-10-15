@@ -7344,7 +7344,16 @@ build traces available from a cupboard cache.
       from preceding Workers. Scheduling epochs reject stale selections even
       when a ready time returns to its previous value. Cancellation and resume
       fence old job generations. The additive migration does not scan existing
-      tasks. Bounded legacy seeding, fair global job scheduling, queue routing,
+      tasks. Global job dispatch now has durable delivery turns and separate
+      expiring pass claims. Each bounded reservation or completed pass moves the
+      job behind waiting peers without changing task execution ownership.
+      Eligibility and final delivery deadlines use current indexed task and
+      discovery state inside the checkpoint statement. Lost replies, cancelled
+      generations and delayed seed pages cannot replace newer progress. Per-job
+      legacy seeding freezes a NAR-hash boundary, advances through fixed
+      32-candidate pages and preserves newer delivery state. New jobs are
+      captured transactionally; a preceding cancelled job is enrolled when it
+      resumes. Bounded discovery of the older job catalogue, queue routing,
       cache adoption projections, shared completion wakes and producer
       activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound

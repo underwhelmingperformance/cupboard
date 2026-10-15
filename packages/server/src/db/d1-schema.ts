@@ -59,6 +59,7 @@ import type {
 	SharedListingTaskOutcome,
 	SharedListingTaskReason
 } from '../blob/shared-listing-completion.ts';
+import type { SharedListingDispatchId } from '../blob/shared-listing-dispatch.ts';
 import type { SharedListingJobSummary } from '../blob/shared-listing-jobs.ts';
 import type { SharedListingOutputEpoch } from '../blob/shared-listing-outputs.ts';
 import type { SharedListingTaskClaim } from '../blob/shared-listing-tasks.ts';
@@ -1225,6 +1226,45 @@ export const sharedListingJob = sqliteTable(
 		check(
 			'shared_listing_job_owner_check',
 			sql`(${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const sharedListingJobDispatch = sqliteTable(
+	'shared_listing_job_dispatch',
+	{
+		id: integer('id')
+			.$type<SharedListingDispatchId>()
+			.primaryKey({ autoIncrement: true }),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		nextDeliveryAt: text('next_delivery_at').$type<IsoTimestamp>(),
+		claimGeneration: integer('claim_generation').notNull().default(0),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		isSeeded: integer('is_seeded', { mode: 'boolean' }).notNull().default(true),
+		seedAfter: text('seed_after').$type<NixSha256HashString>(),
+		seedThrough: text('seed_through').$type<NixSha256HashString>()
+	},
+	(table) => [
+		uniqueIndex('shared_listing_job_dispatch_job_idx').on(table.jobId),
+		index('shared_listing_job_dispatch_due_idx').on(
+			table.nextDeliveryAt,
+			table.id
+		),
+		check(
+			'shared_listing_job_dispatch_version_check',
+			sql`typeof(${table.id}) = 'integer' AND ${table.id} BETWEEN 1 AND 9007199254740991 AND typeof(${table.jobGeneration}) = 'integer' AND ${table.jobGeneration} BETWEEN 1 AND 9007199254740991 AND typeof(${table.claimGeneration}) = 'integer' AND ${table.claimGeneration} BETWEEN 0 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_job_dispatch_owner_check',
+			sql`(${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.nextDeliveryAt} IS NOT NULL AND ${table.claimGeneration} >= 1 AND ${table.nextDeliveryAt} = ${table.leaseExpiresAt})`
+		),
+		check(
+			'shared_listing_job_dispatch_seed_check',
+			sql`${table.isSeeded} IN (0,1) AND (${table.seedAfter} IS NULL OR (${table.seedThrough} IS NOT NULL AND ${table.seedAfter} <= ${table.seedThrough}))`
 		)
 	]
 );

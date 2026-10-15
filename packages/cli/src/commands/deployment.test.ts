@@ -105,7 +105,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			id: 'shared-listing-task-delivery',
 			state: 'complete',
 			updatedAt: recorded
-		}
+		},
+		{ id: 'shared-listing-dispatch', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -684,6 +685,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition shared-listing-task-delivery',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-dispatch',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },

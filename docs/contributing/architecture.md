@@ -119,8 +119,24 @@ changes, including a ready time that changes and then returns to its previous
 value. Reservations postpone duplicate hints for sixty seconds without changing
 task ownership. Expired reservations recover lost sends or replies. Resume
 permits immediate redelivery of superseded running tasks while preserving
-pending retry deadlines. The additive migration does not scan existing tasks;
-bounded legacy seeding and global job scheduling remain integration work.
+pending retry deadlines. The additive migration does not scan existing tasks.
+
+A separate indexed job ticket schedules delivery hints and bounded metadata
+passes. Reserving a hint postpones transport retries without claiming a pass.
+Consumers claim actual eligible work independently of that transport deadline.
+Pass claims exclude another metadata pass for the same job, while NAR task
+executors retain their separate claims. Requeueing allocates a fresh ticket
+sequence so waiting jobs precede a returning job even when the clock is static.
+The checkpoint computes current task and discovery readiness within its D1
+statement. A busy discovery lease does not block ready sibling tasks.
+
+Legacy task seeding freezes the job's highest NAR hash and reads at most 33
+candidates, then checkpoints at most 32. Terminal gaps still advance the cursor.
+Insertion reads current task state and preserves existing delivery epochs and
+reservations. Cursor and boundary fences reject delayed checkpoints. New job
+writes are captured by triggers, and resume enrols a preceding cancelled job
+without a ticket. The migration creates empty dispatch storage. Discovery of
+older running jobs and queue integration remain pending.
 
 An append-only capture sequence records retained, registered live NAR sources.
 Indexed triggers append an event when the first reference arrives or a retained
