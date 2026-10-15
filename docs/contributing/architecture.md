@@ -297,10 +297,11 @@ source transaction. New facts also update a reverse digest projection. CAS
 repair probes that index and records one digest event without enumerating
 matching facts or parents. Registration and object metadata can be written in
 either order; capture requires a matching live incarnation. The additive
-expansion creates only empty tables and indexes. The contract installs the
-capture clock first, then the source triggers, after reference and CAS storage
-become physical tables. Installed triggers record source changes before the
-final consumer-readiness marker. Consumer startup cannot suppress capture.
+expansion creates new storage and indexes, including a zeroed capture clock. The
+contract installs the capture clock first, then the source triggers, after
+reference and CAS storage become physical tables. Installed triggers record
+source changes before the final consumer-readiness marker. Consumer startup
+cannot suppress capture.
 
 The capture stream and reverse projection grant no cache authority and retain no
 bytes. Historical projection seeding, bounded event expansion, durable
