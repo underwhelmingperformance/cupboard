@@ -435,6 +435,13 @@
 			"when": 1792058966807,
 			"tag": "0061_shared_listing_output_retention",
 			"breakpoints": true
+		},
+		{
+			"idx": 62,
+			"version": "6",
+			"when": 1792061121304,
+			"tag": "0062_shared_listing_output_retirement",
+			"breakpoints": true
 		}
 	]
 }

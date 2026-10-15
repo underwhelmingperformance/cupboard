@@ -7309,9 +7309,14 @@ build traces available from a cupboard cache.
       logical NARs. Captured reference epochs fence removal after recreation.
       Global collection respects these references without blocking final tenant
       quota credits. Last-parent deletion records one durable cleanup scope;
-      bounded scope draining and queue dispatch remain pending. Global task
-      execution, atomic fact/output/outcome completion, cache adoption
-      projections and producer activation remain pending.
+      expiring claims now fence bounded transactional retirement. Each page
+      removes only captured references, resets CAS grace and checkpoints its
+      cursor in one batch. Returning parents preserve output references;
+      replacement scopes and lease deadlines fence old consumers. Indexed
+      primary-key probes bound retirement even when many NARs share one digest.
+      New scopes and sweep cutoffs use the D1 clock. Queue dispatch remains
+      pending. Global task execution, atomic fact/output/outcome completion,
+      cache adoption projections and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

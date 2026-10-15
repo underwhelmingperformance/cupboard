@@ -189,7 +189,15 @@ reference epochs prevent an old removal from deleting a recreated reference.
 Each removal rechecks parent absence and resets CAS deletion grace. Database
 guards also prevent preceding collectors from arming deletion, retiring a live
 CAS incarnation or deleting its metadata while a shared reference exists.
-Bounded cleanup scope draining and global producer integration remain pending.
+Retirement claims capture the scope epoch, cursor, owner and lease deadline.
+Each transaction removes at most eight captured references, clears their CAS
+deletion grace and advances the cursor. A returning logical parent discards the
+obsolete cleanup scope and preserves references. Scope recreation and lease
+replacement fence an older token even when the owner identity is reused.
+Deletion-grace updates probe captured primary keys, so unrelated references to
+the same digest do not increase the scan. New scope deadlines and discovery
+cutoffs use the D1 clock; a fixed cutoff excludes later retirement captures.
+Queue dispatch and global producer integration remain pending.
 
 Cron starts cleanup waves with a fixed cutoff. Each indexed page selects at most
 eight stage IDs and records a continuation key for the next queue hint. The

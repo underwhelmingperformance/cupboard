@@ -337,6 +337,9 @@ describe('shared listing output retention', () => {
 			released: await store.releaseCaptured(reference),
 			cleanup: await database.select().from(schema.sharedListingOutputCleanup)
 		}).toStrictEqual({ released: false, cleanup: [] });
+		const beforeCapture = await database.get<{ at: string }>(
+			sql`SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS at`
+		);
 		await database.delete(schema.blobReference);
 		const cleanup = await database
 			.select()
@@ -345,7 +348,13 @@ describe('shared listing output retention', () => {
 		if (scope === undefined) {
 			throw new Error('Parent retirement was not recorded');
 		}
+		const afterCapture = await database.get<{ at: string }>(
+			sql`SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS at`
+		);
 		expect({
+			capturedNow:
+				scope.nextAttemptAt >= beforeCapture.at &&
+				scope.nextAttemptAt <= afterCapture.at,
 			cleanup: cleanup.map((row) => ({
 				...row,
 				cursor: row.cursor ?? undefined,
@@ -356,6 +365,7 @@ describe('shared listing output retention', () => {
 				.select()
 				.from(schema.sharedListingOutputReference)
 		}).toStrictEqual({
+			capturedNow: true,
 			cleanup: [
 				{
 					narHash: fact.narHash,
@@ -363,7 +373,7 @@ describe('shared listing output retention', () => {
 					cursor: undefined,
 					owner: undefined,
 					leaseExpiresAt: undefined,
-					nextAttemptAt: '1970-01-01T00:00:00.000Z'
+					nextAttemptAt: scope.nextAttemptAt
 				}
 			],
 			references: [reference]
@@ -586,6 +596,12 @@ describe('shared listing output retention', () => {
 		if (migration === undefined) {
 			throw new Error('The output retention migration is missing');
 		}
+		const retirement = env.TEST_MIGRATIONS.find(
+			(entry) => entry.name === '0062_shared_listing_output_retirement.sql'
+		);
+		if (retirement === undefined) {
+			throw new Error('The retirement migration is missing');
+		}
 		const triggers = ['arm', 'delete', 'retire', 'registry_delete'].map(
 			(suffix) => `DROP TRIGGER shared_listing_output_guard_${suffix}`
 		);
@@ -626,6 +642,9 @@ describe('shared listing output retention', () => {
 		} finally {
 			await env.CUPBOARD_DB.batch(
 				migration.queries.map((query) => env.CUPBOARD_DB.prepare(query))
+			);
+			await env.CUPBOARD_DB.batch(
+				retirement.queries.map((query) => env.CUPBOARD_DB.prepare(query))
 			);
 		}
 		const expanded = await readCasReferenceSet(database);

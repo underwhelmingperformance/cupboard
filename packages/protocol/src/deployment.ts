@@ -107,7 +107,8 @@ export const transitionIdSchema = z.enum([
 	'shared-listing-task-claims',
 	'global-listing-generation',
 	'shared-listing-staging',
-	'shared-listing-output-retention'
+	'shared-listing-output-retention',
+	'shared-listing-output-retirement'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -503,6 +504,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0061_shared_listing_output_retention.sql'],
 		contract: [],
 		expandAfter: ['shared-listing-staging']
+	},
+	{
+		id: 'shared-listing-output-retirement',
+		expand: ['0062_shared_listing_output_retirement.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-output-retention']
 	}
 ];
 
