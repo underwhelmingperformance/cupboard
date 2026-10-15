@@ -78,7 +78,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			id: 'native-artifact-publication',
 			state: 'complete',
 			updatedAt: recorded
-		}
+		},
+		{ id: 'shared-listing-generation', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -613,6 +614,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition native-artifact-publication',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-generation',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },

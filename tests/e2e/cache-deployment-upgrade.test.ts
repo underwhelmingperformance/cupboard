@@ -433,7 +433,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'cas-demotion-progress', independent: false },
 		{ id: 'attestation-list-revision', independent: false },
 		{ id: 'tenant-namespace-cleanup', independent: true },
-		{ id: 'native-artifact-publication', independent: true }
+		{ id: 'native-artifact-publication', independent: true },
+		{ id: 'shared-listing-generation', independent: true }
 	]);
 });
 
