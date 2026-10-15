@@ -15,6 +15,8 @@ export {
 	listingGeneration,
 	localStepWakeCursor,
 	manifestState,
+	narCaptureEvent,
+	narCaptureState,
 	objectDeletion,
 	objectIncarnation,
 	pathReadRevocation,

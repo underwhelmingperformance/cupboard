@@ -435,7 +435,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'tenant-namespace-cleanup', independent: true },
 		{ id: 'native-artifact-publication', independent: true },
 		{ id: 'shared-listing-generation', independent: true },
-		{ id: 'shared-listing-jobs', independent: false }
+		{ id: 'shared-listing-jobs', independent: false },
+		{ id: 'nar-source-capture', independent: false }
 	]);
 });
 

@@ -1,6 +1,7 @@
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { drizzle } from 'drizzle-orm/d1';
 
+import { narCaptureSequenceSchema } from './blob/nar-source-capture.ts';
 import * as controlSchema from './db/control-d1-schema.ts';
 import {
 	artifactReference,
@@ -24,6 +25,8 @@ import {
 	listingGeneration,
 	localStepWakeCursor,
 	manifestState,
+	narCaptureEvent,
+	narCaptureState,
 	objectDeletion,
 	objectIncarnation,
 	pathReadRevocation,
@@ -67,6 +70,12 @@ export async function resetD1TestState(binding: D1Database): Promise<void> {
 		database.delete(casObject),
 		database.delete(casDemotionProgress),
 		database.delete(blobState),
+		database.delete(narCaptureEvent),
+		database.update(narCaptureState).set({
+			latest: narCaptureSequenceSchema.parse(0),
+			prunedThrough: narCaptureSequenceSchema.parse(0),
+			isReady: true
+		}),
 		database.delete(controlAuthKey),
 		database.delete(controlConsumedSubjectNonce),
 		database.delete(controlRefreshSessionMember),

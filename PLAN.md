@@ -7234,7 +7234,12 @@ build traces available from a cupboard cache.
       now checkpoint the historical cursor, unique NAR tasks and discovery
       counters atomically under expiring claims. Empty pages advance the cursor.
       The historical scan enters catch-up without declaring generation complete.
-      Forward capture and catch-up integration remain pending.
+      Source availability now appends capture events transactionally when a live
+      NAR becomes retained or its physical incarnation recovers. Jobs start at
+      the current capture position only after the capture contract is ready.
+      Replay advances through bounded event pages within a fixed upper boundary,
+      and pruning protects running and cancelled jobs' unread prefixes. Catch-up
+      integration remains pending.
 - [ ] Use D1 job and task records with expiring claims, source-incarnation
       fences and resumable staging cleanup. Queue messages are wake-up hints;
       persisted state decides whether work can run and complete. Staging RPCs

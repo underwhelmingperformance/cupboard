@@ -1,6 +1,5 @@
 import {
 	artifactJobGenerationSchema,
-	type ArtifactJobVersion,
 	type ArtifactTaskOwner,
 	artifactTaskOwnerSchema
 } from '@cupboard/protocol/artifact-jobs';
@@ -13,11 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
 	SharedListingDiscoveryClaim,
-	SharedListingDiscoveryClaimResult
+	SharedListingDiscoveryClaimResult,
+	SharedListingJobSummary
 } from '../blob/shared-listing-jobs.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 
 import * as schema from './d1-schema.ts';
+import { NarSourceCaptureStore } from './nar-source-capture.ts';
 import { SharedListingJobStore } from './shared-listing-jobs.ts';
 import {
 	sharedNarDiscoveryFixture,
@@ -45,7 +46,7 @@ function claimed(result: SharedListingDiscoveryClaimResult) {
 }
 
 function expectedClaim(
-	job: ArtifactJobVersion,
+	job: SharedListingJobSummary,
 	claimOwner: ArtifactTaskOwner
 ): SharedListingDiscoveryClaim {
 	return {
@@ -53,15 +54,17 @@ function expectedClaim(
 		owner: claimOwner,
 		generation: 1,
 		leaseExpiresAt: deadline,
-		cursor: undefined
+		cursor: undefined,
+		eventCursor: job.eventCursor
 	};
 }
 
 async function fixture(count = 1) {
 	const { database, sources } = await sharedNarDiscoveryFixture(count);
 	const store = new SharedListingJobStore(database);
+	const capture = await new NarSourceCaptureStore(database).position();
 	const job = await store.start(currentListingGeneratorRevision, now);
-	return { database, store, job, sources };
+	return { database, store, job, sources, capture };
 }
 
 async function tasks() {
@@ -88,7 +91,7 @@ describe('shared listing backfill jobs', () => {
 	});
 
 	it('persists a global job that another D1 client can inspect', async () => {
-		const { job } = await fixture();
+		const { job, capture } = await fixture();
 		const other = new SharedListingJobStore(
 			drizzle(env.CUPBOARD_DB, { schema })
 		);
@@ -99,6 +102,7 @@ describe('shared listing backfill jobs', () => {
 			state: 'running',
 			phase: 'historical',
 			cursor: undefined,
+			eventCursor: capture.latest,
 			progress: { discovered: 0, completed: 0, skipped: 0, failed: 0 },
 			createdAt: now,
 			updatedAt: now
@@ -120,7 +124,8 @@ describe('shared listing backfill jobs', () => {
 					owner,
 					generation: 1,
 					leaseExpiresAt: deadline,
-					cursor: undefined
+					cursor: undefined,
+					eventCursor: job.eventCursor
 				}
 			},
 			replay: first,

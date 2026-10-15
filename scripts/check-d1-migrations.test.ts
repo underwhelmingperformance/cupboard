@@ -121,8 +121,41 @@ describe('checkD1Migrations', () => {
 				'tenant-namespace-cleanup',
 				'native-artifact-publication',
 				'shared-listing-generation',
-				'shared-listing-jobs'
+				'shared-listing-jobs',
+				'nar-source-capture'
 			]
+		});
+	});
+
+	it('installs capture after physical reference storage in a staged deployment', () => {
+		const completeCount = sharedTransitions.findIndex(
+			(transition) => transition.id === 'cas-demotion-progress'
+		);
+		const order = deployOrder(sharedTransitions, completeCount);
+		if (order === undefined) {
+			throw new Error(
+				'The source capture transition has no valid deployment order'
+			);
+		}
+		const expansion = order.files.indexOf('0055_nar_source_capture.sql');
+		const referenceStorage = order.files.indexOf(
+			'0036_path_read_authority_contract.sql'
+		);
+		const captureTriggers = order.files.indexOf(
+			'0056_nar_source_capture_contract.sql'
+		);
+		expect({
+			hasExpansion: expansion !== -1,
+			hasReferenceStorage: referenceStorage !== -1,
+			hasCaptureTriggers: captureTriggers !== -1,
+			expandsAfterReferenceStorage: expansion > referenceStorage,
+			installsTriggersAfterReferenceStorage: captureTriggers > referenceStorage
+		}).toStrictEqual({
+			hasExpansion: true,
+			hasReferenceStorage: true,
+			hasCaptureTriggers: true,
+			expandsAfterReferenceStorage: true,
+			installsTriggersAfterReferenceStorage: true
 		});
 	});
 

@@ -94,8 +94,28 @@ ownership. The counter subquery reads only the newly inserted page through an
 index. A lost reply cannot insert or count the page twice. Cancellation revokes
 discovery ownership, and resume advances the job generation without discarding
 the cursor or tasks. Historical discovery enters catch-up; it does not declare
-the generation job complete. Forward capture, catch-up, global task execution
-and cache adoption projections remain pending.
+the generation job complete. Catch-up, global task execution and cache adoption
+projections remain pending.
+
+An append-only capture sequence records retained, registered live NAR sources.
+Indexed triggers append an event when the first reference arrives or a retained
+source becomes available after metadata registration or repair. The event and
+capture clock commit with the original reference or source transaction. Capture
+adds metadata; it does not decode a NAR or publish a listing. The contract
+migration installs every trigger before enabling readiness. Historical jobs
+capture the current sequence atomically on creation and refuse to start before
+readiness.
+
+Replay reads at most 33 events and returns at most 32 candidates through a fixed
+upper sequence. Eligibility is checked after selecting the event page so removed
+references cannot cause an unbounded scan. Superseded source incarnations are
+excluded, and repeated NAR identities are coalesced within each page. Pruning
+removes at most 128 events in one batch and advances a persisted floor without
+reusing sequence numbers. The caller must have durably recorded forward work
+through the requested boundary. Indexed minimum-cursor probes protect historical
+and catch-up jobs, including cancelled jobs that can resume. Replay reports an
+expired window explicitly if its cursor precedes the retained floor. Capture
+replay is not yet integrated into job catch-up or forward dispatch.
 
 The shared D1 generation store reserves one computation lease per NAR and
 generator revision across tenants. Claim acquisition requires an active tenant

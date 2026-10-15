@@ -64,6 +64,7 @@ export class SharedListingJobStore {
 			state: row.state,
 			phase: row.phase,
 			cursor: row.cursor ?? undefined,
+			eventCursor: row.eventCursor,
 			progress: {
 				discovered: row.discovered,
 				completed: row.completed,
@@ -87,6 +88,7 @@ export class SharedListingJobStore {
 			eq(schema.sharedListingJob.phase, 'historical'),
 			eq(schema.sharedListingJob.owner, claim.owner),
 			eq(schema.sharedListingJob.claimGeneration, claim.generation),
+			eq(schema.sharedListingJob.eventCursor, claim.eventCursor),
 			gt(schema.sharedListingJob.leaseExpiresAt, now),
 			claim.cursor === undefined
 				? isNull(schema.sharedListingJob.cursor)
@@ -99,7 +101,8 @@ export class SharedListingJobStore {
 			owner: row.owner,
 			generation: row.claimGeneration,
 			leaseExpiresAt: row.leaseExpiresAt,
-			cursor: row.cursor ?? undefined
+			cursor: row.cursor ?? undefined,
+			eventCursor: row.eventCursor
 		});
 	}
 	private async checkpoint(
@@ -166,12 +169,22 @@ export class SharedListingJobStore {
 		now: IsoTimestamp
 	): Promise<SharedListingJobSummary> {
 		return this.execute(async () => {
+			const capture = this.database
+				.select({ latest: schema.narCaptureState.latest })
+				.from(schema.narCaptureState)
+				.where(
+					and(
+						eq(schema.narCaptureState.id, 1),
+						eq(schema.narCaptureState.isReady, true)
+					)
+				);
 			const rows = await this.database
 				.insert(schema.sharedListingJob)
 				.values({
 					id: artifactJobIdSchema.parse(crypto.randomUUID()),
 					generation: artifactJobGenerationSchema.parse(1),
 					generatorRevision,
+					eventCursor: sql`(${capture})`,
 					createdAt: now,
 					updatedAt: now
 				})

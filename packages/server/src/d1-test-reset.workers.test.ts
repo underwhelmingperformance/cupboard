@@ -55,6 +55,12 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			"INSERT INTO shared_listing_task (id, job_id, nar_hash, source_incarnation, nar_size, file_size, discovery_page, created_at) VALUES ('reset-task', 'reset-job', 'reset-nar', 1, 100, 50, 'reset-page', '2025-01-01T00:00:00.000Z')"
 		),
 		env.CUPBOARD_DB.prepare(
+			"INSERT INTO nar_capture_event (nar_hash, source_incarnation) VALUES ('reset-nar', 1)"
+		),
+		env.CUPBOARD_DB.prepare(
+			'UPDATE nar_capture_state SET pruned_through = latest, is_ready = 0 WHERE id = 1'
+		),
+		env.CUPBOARD_DB.prepare(
 			"UPDATE deployment_transition SET state = 'pending', updated_at = '2025-01-01T00:00:00.000Z'"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -115,11 +121,18 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		listing_generation: 0,
 		shared_listing_job: 0,
 		shared_listing_task: 0,
+		nar_capture_event: 0,
+		nar_capture_state: 1,
 		tenant_cas_blob_storage: 0,
 		tenant_usage: 0,
 		tenant_namespace_cleanup_guard: 0,
 		local_step_wake_cursor: 0
 	});
+	expect(
+		await drizzle(env.CUPBOARD_DB, { schema })
+			.select()
+			.from(schema.narCaptureState)
+	).toStrictEqual([{ id: 1, latest: 0, prunedThrough: 0, isReady: true }]);
 	const transition = await env.CUPBOARD_DB.prepare(
 		'SELECT id, state, updated_at, contracted_at IS NULL AS uncontracted FROM deployment_transition'
 	).all();

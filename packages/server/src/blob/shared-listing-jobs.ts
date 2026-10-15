@@ -11,11 +11,14 @@ import {
 } from '@cupboard/protocol/scalars';
 import { z } from 'zod';
 
+import { narCaptureSequenceSchema } from './nar-source-capture.ts';
+
 export const sharedListingJobSummarySchema = artifactJobVersionSchema.extend({
 	generatorRevision: listingGeneratorRevisionSchema,
 	state: z.enum(['running', 'cancelled', 'complete']),
 	phase: z.enum(['historical', 'catchup', 'processing']),
 	cursor: nixSha256HashSchema.optional(),
+	eventCursor: narCaptureSequenceSchema,
 	progress: artifactJobProgressSchema,
 	createdAt: isoTimestampSchema,
 	updatedAt: isoTimestampSchema
@@ -29,7 +32,8 @@ export const sharedListingDiscoveryClaimSchema = z.strictObject({
 	owner: artifactTaskOwnerSchema,
 	generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 	leaseExpiresAt: isoTimestampSchema,
-	cursor: nixSha256HashSchema.optional()
+	cursor: nixSha256HashSchema.optional(),
+	eventCursor: narCaptureSequenceSchema
 });
 export type SharedListingDiscoveryClaim = z.output<
 	typeof sharedListingDiscoveryClaimSchema

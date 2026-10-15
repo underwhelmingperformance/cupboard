@@ -47,6 +47,10 @@ import {
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
+import {
+	type NarCaptureSequence,
+	narCaptureSequenceSchema
+} from '../blob/nar-source-capture.ts';
 import type { SharedListingJobSummary } from '../blob/shared-listing-jobs.ts';
 import type { R2ObjectKey } from '../http/http.ts';
 import {
@@ -1042,6 +1046,10 @@ export const sharedListingJob = sqliteTable(
 			.notNull()
 			.default('historical'),
 		cursor: text('cursor').$type<NixSha256HashString>(),
+		eventCursor: integer('event_cursor')
+			.$type<NarCaptureSequence>()
+			.notNull()
+			.default(narCaptureSequenceSchema.parse(0)),
 		discovered: integer('discovered').notNull().default(0),
 		completed: integer('completed').notNull().default(0),
 		skipped: integer('skipped').notNull().default(0),
@@ -1053,6 +1061,7 @@ export const sharedListingJob = sqliteTable(
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
+		index('shared_listing_job_capture_idx').on(table.phase, table.eventCursor),
 		check(
 			'shared_listing_job_generation_check',
 			sql`${table.generation} BETWEEN 1 AND 9007199254740991 AND ${table.claimGeneration} BETWEEN 0 AND 9007199254740991`
@@ -1093,6 +1102,50 @@ export const sharedListingTask = sqliteTable(
 		check(
 			'shared_listing_task_source_check',
 			sql`${table.sourceIncarnation} >= 1 AND ${table.narSize} >= 0 AND ${table.fileSize} >= 0`
+		)
+	]
+);
+
+export const narCaptureState = sqliteTable(
+	'nar_capture_state',
+	{
+		id: integer('id').primaryKey(),
+		latest: integer('latest')
+			.$type<NarCaptureSequence>()
+			.notNull()
+			.default(narCaptureSequenceSchema.parse(0)),
+		prunedThrough: integer('pruned_through')
+			.$type<NarCaptureSequence>()
+			.notNull()
+			.default(narCaptureSequenceSchema.parse(0)),
+		isReady: integer('is_ready', { mode: 'boolean' }).notNull().default(false)
+	},
+	(table) => [
+		check('nar_capture_state_identity_check', sql`${table.id} = 1`),
+		check(
+			'nar_capture_state_position_check',
+			sql`${table.prunedThrough} BETWEEN 0 AND ${table.latest} AND ${table.latest} <= 9007199254740991`
+		)
+	]
+);
+
+export const narCaptureEvent = sqliteTable(
+	'nar_capture_event',
+	{
+		id: integer('id')
+			.$type<NarCaptureSequence>()
+			.primaryKey({ autoIncrement: true }),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		createdAt: text('created_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'nar_capture_event_position_check',
+			sql`${table.id} BETWEEN 1 AND 9007199254740991 AND ${table.sourceIncarnation} BETWEEN 1 AND 9007199254740991`
 		)
 	]
 );

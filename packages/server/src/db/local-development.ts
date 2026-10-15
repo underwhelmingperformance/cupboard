@@ -38,6 +38,20 @@ function sqlString(value: string): string {
 	return `'${value.replaceAll("'", "''")}'`;
 }
 
+function populatedRowsPredicate(
+	database: LocalDevelopmentDatabase,
+	name: string
+): string {
+	const table = `"${name.replaceAll('"', '""')}"`;
+	const isCaptureState =
+		(database.binding ?? 'CUPBOARD_DB') === 'CUPBOARD_DB' &&
+		name === 'nar_capture_state';
+	const usedCaptureState = isCaptureState
+		? ' WHERE id != 1 OR latest != 0 OR pruned_through != 0'
+		: '';
+	return `EXISTS (SELECT 1 FROM ${table}${usedCaptureState} LIMIT 1)`;
+}
+
 async function checkLocalState(
 	database: LocalDevelopmentDatabase
 ): Promise<void> {
@@ -91,10 +105,7 @@ async function checkLocalState(
 	const populated = await database.query(
 		'SELECT 1 AS populated WHERE ' +
 			persistedTables
-				.map(
-					({ name }) =>
-						`EXISTS (SELECT 1 FROM "${name.replaceAll('"', '""')}" LIMIT 1)`
-				)
+				.map(({ name }) => populatedRowsPredicate(database, name))
 				.join(' OR ')
 	);
 	if (populated.length > 0) {

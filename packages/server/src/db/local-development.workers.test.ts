@@ -206,6 +206,31 @@ describe('local development bootstrap', () => {
 		}).toStrictEqual({ transitions: before, tenants: [{ id: fixtureTenant }] });
 	});
 
+	it.each([0, 1])(
+		'refuses capture history with prune floor %s before applying migrations',
+		async (prunedThrough) => {
+			await env.CUPBOARD_DB.prepare(
+				'UPDATE nar_capture_state SET latest = 1, pruned_through = ? WHERE id = 1'
+			)
+				.bind(prunedThrough)
+				.run();
+			const before = await database.query('SELECT * FROM nar_capture_state');
+			const migrate = vi.fn(applyMigrations);
+			await expect(
+				bootstrapLocalDevelopment(database, migrate)
+			).rejects.toStrictEqual(new LocalDevelopmentBootstrapRefusedError());
+			expect({
+				migrationCalls: migrate.mock.calls,
+				capture: await database.query('SELECT * FROM nar_capture_state'),
+				transitions: await transitions()
+			}).toStrictEqual({
+				migrationCalls: [],
+				capture: before,
+				transitions: []
+			});
+		}
+	);
+
 	it.each([
 		[
 			'tenant',
