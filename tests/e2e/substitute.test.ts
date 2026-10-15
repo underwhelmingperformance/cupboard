@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import {
 	createServer,
 	type IncomingMessage,
+	request as httpRequest,
 	type Server,
 	type ServerResponse
 } from 'node:http';
@@ -11,7 +12,10 @@ import path from 'node:path';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { renderNetrc } from '@cupboard/nix-store/nix-config';
-import { storePathSchema } from '@cupboard/nix-store/scalars';
+import {
+	storeDirectorySchema,
+	storePathSchema
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -36,6 +40,7 @@ import {
 	type PushContext,
 	pushStorePaths
 } from '../support/push.ts';
+import { FakeSubstituter } from '../support/substituter.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const contentAddressedFixture = path.join(root, 'tests/fixtures/simple/source');
@@ -97,6 +102,102 @@ const referencedDerivation = [
 	'  args = [ "-c" "printf %s \\"${dependency}\\" > \\"$out\\"" ];',
 	'}'
 ].join('\n');
+
+describe('interrupted-download proxy origin', () => {
+	it.each([
+		'absolute',
+		'network-path',
+		'backslash',
+		'redirect',
+		'relative'
+	] as const)(
+		'keeps %s requests within the configured origin',
+		async (mode) => {
+			const foreign = await FakeSubstituter.start(
+				storeDirectorySchema.parse('/nix/store')
+			);
+			const hash = StorePath.hash(foreign.serve('unexpected-proxy-target'));
+			const foreignUrl = new URL(`/${hash}.narinfo`, foreign.url);
+			const requests: string[] = [];
+			const upstream = createServer((request, response) => {
+				requests.push(request.url ?? '/');
+				if (request.url === '/redirect') {
+					response.writeHead(302, { location: foreignUrl.href });
+					response.end();
+					return;
+				}
+				response.end('upstream');
+			});
+			let proxy: InterruptedDownloadProxy | undefined;
+			try {
+				await new Promise<void>((resolve) => {
+					upstream.listen(0, '127.0.0.1', resolve);
+				});
+				const address = upstream.address();
+				if (address === null || typeof address === 'string') {
+					throw new DownloadProxyAddressError();
+				}
+				proxy = await InterruptedDownloadProxy.start(
+					new URL(`http://127.0.0.1:${String(address.port)}`),
+					'private-origin',
+					[]
+				);
+				const targets = {
+					absolute: foreignUrl.href,
+					'network-path': `//${foreignUrl.host}${foreignUrl.pathname}`,
+					backslash: `\\\\${foreignUrl.host}${foreignUrl.pathname}`,
+					redirect: '/redirect',
+					relative: '/relative?download=1'
+				};
+				const proxyUrl = proxy.url;
+				const status = await new Promise<number | undefined>(
+					(resolve, reject) => {
+						const request = httpRequest(
+							proxyUrl,
+							{ path: targets[mode] },
+							(response) => {
+								response.on('error', reject);
+								response.on('end', () => {
+									resolve(response.statusCode);
+								});
+								response.resume();
+							}
+						);
+						request.on('error', reject);
+						request.end();
+					}
+				);
+				expect({
+					status,
+					requests,
+					foreignRequests: foreign.narInfoRequests
+				}).toStrictEqual({
+					status: mode === 'relative' ? 200 : mode === 'redirect' ? 500 : 400,
+					requests:
+						mode === 'relative'
+							? ['/relative?download=1']
+							: mode === 'redirect'
+								? ['/redirect']
+								: [],
+					foreignRequests: []
+				});
+			} finally {
+				await proxy?.stop();
+				upstream.closeAllConnections();
+				await new Promise<void>((resolve, reject) => {
+					upstream.close((error) => {
+						if (error !== undefined) {
+							reject(error);
+							return;
+						}
+						resolve();
+					});
+				});
+				await foreign.stop();
+			}
+		}
+	);
+});
 
 describe('Nix substitution', () => {
 	it.each(['private-origin', 'public-edge'] as const)(
@@ -596,7 +697,20 @@ class InterruptedDownloadProxy {
 		request: IncomingMessage,
 		response: ServerResponse
 	): Promise<void> {
-		const url = new URL(request.url ?? '/', this.upstream);
+		const target = request.url ?? '/';
+		if (
+			!target.startsWith('/') ||
+			target.startsWith('//') ||
+			target.includes('\\')
+		) {
+			response.writeHead(400);
+			response.end();
+			return;
+		}
+		const requested = new URL(target, this.upstream);
+		const url = new URL(this.upstream);
+		url.pathname = requested.pathname;
+		url.search = requested.search;
 		const headers = new Headers();
 		for (const [key, value] of Object.entries(request.headers)) {
 			if (value === undefined || key === 'host') {
@@ -680,6 +794,7 @@ class InterruptedDownloadProxy {
 		}
 		const response = await fetch(url, {
 			headers,
+			redirect: 'error',
 			signal: this.controller.signal
 		});
 		const result: CachedDownload = {
