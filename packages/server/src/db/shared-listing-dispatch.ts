@@ -31,6 +31,7 @@ import { jsonValueList } from '../do/json-list.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 
 import * as schema from './d1-schema.ts';
+import { SharedListingJobStore } from './shared-listing-jobs.ts';
 
 const pageSize = 8;
 const seedPageSize = 32;
@@ -252,6 +253,20 @@ export class SharedListingDispatchStore {
 		});
 	}
 
+	async hasDue(now: IsoTimestamp): Promise<boolean> {
+		return this.execute(async () => {
+			const table = schema.sharedListingJobDispatch;
+			const row = await this.database
+				.select({ id: table.id })
+				.from(table)
+				.where(lte(table.nextDeliveryAt, now))
+				.orderBy(asc(table.nextDeliveryAt), asc(table.id))
+				.limit(1)
+				.get();
+			return row !== undefined;
+		});
+	}
+
 	async claim(
 		input: ArtifactJobVersion,
 		owner: ArtifactTaskOwner,
@@ -320,10 +335,16 @@ export class SharedListingDispatchStore {
 			const job = this.identity(claim.job);
 			const current = this.owns(claim, now);
 			const next = this.nextAt(job, now);
-			const [rows] = await this.database.batch([
+			const owned = this.database
+				.select({ one: sql`1` })
+				.from(schema.sharedListingJobDispatch)
+				.where(current);
+			const finalizer = new SharedListingJobStore(this.database);
+			const [finished, rows] = await this.database.batch([
+				finalizer.finalizeStatement(claim.job, now, exists(owned)),
 				this.rotate(current, next, now)
 			]);
-			return rows.length > 0;
+			return finished.length > 0 || rows.length > 0;
 		});
 	}
 

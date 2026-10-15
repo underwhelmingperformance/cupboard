@@ -9,6 +9,8 @@ import { tenantServer } from './durable-object.ts';
 import { handleMaintenanceQueueMessage } from './scheduled.ts';
 import { sharedListingCleanupHeaderSchema } from './shared-listing-cleanup-message.ts';
 import { SharedListingCleanupQueue } from './shared-listing-cleanup-queue.ts';
+import { SharedListingQueue } from './shared-listing-queue.ts';
+import { sharedListingQueueHeaderSchema } from './shared-listing-queue-message.ts';
 
 /**
  * Routes messages to maintenance or artifact processing. Pass the raw Worker
@@ -33,7 +35,17 @@ export async function handleWorkerQueue(
 		blobs: env.BLOBS,
 		queue: env.ARTIFACT_QUEUE
 	});
+	const listings = new SharedListingQueue({
+		database: env.CUPBOARD_DB,
+		blobs: env.BLOBS,
+		queue: env.ARTIFACT_QUEUE,
+		buffers
+	});
 	for (const message of batch.messages) {
+		if (sharedListingQueueHeaderSchema.safeParse(message.body).success) {
+			await listings.handleMessage(message);
+			continue;
+		}
 		if (sharedListingCleanupHeaderSchema.safeParse(message.body).success) {
 			await sharedCleanup.handleMessage(message);
 			continue;

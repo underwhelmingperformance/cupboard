@@ -7244,8 +7244,8 @@ build traces available from a cupboard cache.
       tasks with the event cursor, and enter processing only after replay ends.
       Repaired sources refresh existing tasks without recounting them. Expired
       windows and predecessor jobs without a window restart historical discovery
-      from a current capture position. Forward dispatch, global queue dispatch
-      and cache adoption remain pending.
+      from a current capture position. Global queues now drive discovery and
+      task execution. Forward dispatch and cache adoption remain pending.
 - [ ] Use D1 job and task records with expiring claims, source-incarnation
       fences and resumable staging cleanup. Queue messages are wake-up hints;
       persisted state decides whether work can run and complete. Staging RPCs
@@ -7358,8 +7358,18 @@ build traces available from a cupboard cache.
       batch rechecks current job generations and inserts only missing tickets.
       Lost replies recover durable progress, delayed pages cannot regress the
       cursor, and deleted cursor or boundary rows do not prevent completion.
-      Queue routing, cache adoption projections, shared completion wakes and
-      producer activation remain pending.
+      Cron and strict queue messages now drive catalogue seeding, fair global
+      job turns, bounded discovery pages and independent NAR execution. Job
+      consumers acquire fresh metadata owners; task hints grant no execution
+      ownership. Ready siblings can dispatch while discovery is busy. Failed job
+      and task sends recover from durable deadlines and expired passes.
+      Finishing a pass can finalise an already-finished legacy processing job
+      under its current ownership. Invocation admission checks elapsed time and
+      subrequests, with separate 25-second metadata and 14-minute task budgets.
+      Real Worker routing produces canonical CAS listings without creating
+      tenant authority, and independent same-job tasks execute concurrently.
+      Cache adoption projections, shared completion wakes and producer
+      activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
@@ -7405,7 +7415,7 @@ build traces available from a cupboard cache.
       staging capacity. Shared-generation waiters persist the recorded
       computation lease deadline without retaining admissions. Legacy messages
       use that deadline as their transport retry delay. Completion-triggered
-      shared waiter wakes, shared D1 projections, activation and throughput
+      shared waiter wakes, cache adoption projections, activation and throughput
       benchmarks remain pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last

@@ -69,6 +69,7 @@ import { handleWorkerQueue } from './queue.ts';
 import { readApp, serveCacheSetup } from './read-app.ts';
 import { enqueueMaintenanceJobs } from './scheduled.ts';
 import { SharedListingCleanupQueue } from './shared-listing-cleanup-queue.ts';
+import { SharedListingQueue } from './shared-listing-queue.ts';
 import {
 	innerRequest,
 	tenantUncachedRead,
@@ -568,9 +569,16 @@ export default {
 					blobs: env.BLOBS,
 					queue: env.ARTIFACT_QUEUE
 				});
+				const listings = new SharedListingQueue({
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					queue: env.ARTIFACT_QUEUE,
+					buffers: narReadBuffers
+				});
 				const results = await Promise.allSettled([
 					enqueueMaintenanceJobs(boundedWorkerEnv(env)),
-					cleanup.start()
+					cleanup.start(),
+					listings.start()
 				]);
 				const errors: unknown[] = [];
 				for (const result of results) {

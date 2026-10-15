@@ -144,7 +144,27 @@ cursor. Ticket insertion rechecks the job's current generation and preserves
 existing reservations. Enrolment and cursor progress commit atomically; delayed
 pages cannot regress the cursor, and a lost reply resumes from durable progress.
 Deleted cursor rows and upper boundaries do not prevent completion. New jobs are
-captured by the dispatch triggers. Queue integration remains pending.
+captured by the dispatch triggers.
+
+Cron and strict artifact-queue hints now drive catalogue recovery, discovery and
+NAR task execution. A global dispatch turn reserves at most eight job hints and
+continues while indexed deadlines or catalogue seeding remain ready. Sending a
+hint does not acquire execution ownership. A job consumer acquires a fresh
+metadata claim, seeds one task page, attempts one discovery page and dispatches
+at most eight ready task hints. Those independent operations run concurrently,
+so busy discovery does not block ready sibling tasks. Completing the pass
+rechecks actual deadlines and finalises finished legacy processing jobs under
+the current claim. Failed sends remain discoverable through persisted retry
+deadlines and expired leases.
+
+Metadata passes use a 25-second budget. NAR tasks use the separate executor's
+renewable ownership and at most 14 minutes within the invocation's remaining
+allowance. Consumers admit additional messages only with remaining time and
+subrequests. Independent task hints from the same job can run in separate queue
+invocations with fresh owners. Artifact queue concurrency has no configured
+global cap. Message spans and failure logs include job generation and task
+identity. Shared facts and output references still grant no tenant cache
+authority; cache adoption, completion wakes and forward dispatch remain pending.
 
 An append-only capture sequence records retained, registered live NAR sources.
 Indexed triggers append an event when the first reference arrives or a retained
@@ -204,8 +224,7 @@ conflicting write even though those Workers do not query global leases. Current
 tenant consumers report the global lease's retry deadline. They query global
 storage only after its expansion is recorded, so tenant claims and lost-reply
 recovery also work before that table exists. Different NARs and generator
-revisions can run concurrently. Global queue dispatch and cache adoption remain
-pending.
+revisions can run concurrently. Authoritative cache adoption remains pending.
 
 Global listing stages record their computation generation, multipart upload ID
 and sealed measurement in D1. They use `shared-artifact-staging/` keys and do
@@ -263,9 +282,9 @@ alone do not establish their format. Parser resource limits have a distinct
 error type and produce skipped outcomes; malformed NARs and immutable conflicts
 produce failed outcomes. Both preserve bounded reason codes. Execution uses the
 existing connection, buffer, subrequest and deadline accounting. Spans record
-the NAR, generator revision, actual job/task generations and outcome. Global
-queue dispatch, authoritative cache adoption and completion wakes remain
-pending; native producers remain disabled.
+the NAR, generator revision, actual job/task generations and outcome.
+Authoritative cache adoption, completion wakes and automatic forward producers
+remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.
