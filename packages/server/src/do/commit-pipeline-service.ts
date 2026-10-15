@@ -29,6 +29,7 @@ import {
 	exists,
 	gte,
 	inArray,
+	isNotNull,
 	isNull,
 	ne,
 	notExists,
@@ -798,6 +799,7 @@ export class CommitPipelineService {
 		);
 		const graceClearFilter = and(
 			eq(d1Schema.blobState.narHash, metadata.narHash),
+			isNotNull(d1Schema.blobState.deleteAfter),
 			tenantChargeable
 		);
 		const cacheIdentity = cacheIdentityColumns(cache.scope);

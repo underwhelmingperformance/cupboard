@@ -9,7 +9,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, isNotNull, ne, notExists, sql } from 'drizzle-orm';
 
 import {
 	activateObjectIncarnation,
@@ -237,24 +237,31 @@ export class AttestationCasService {
 		digest: Sha256HexDigest,
 		incarnation?: number
 	): Promise<number | undefined> {
-		const [claimed] = await this.context.d1
+		const live = and(
+			eq(d1Schema.casObject.digest, digest),
+			incarnation === undefined
+				? undefined
+				: eq(d1Schema.casObject.incarnation, incarnation),
+			registeredLiveObjectIncarnation(
+				this.context.d1,
+				'cas',
+				digest,
+				d1Schema.casObject.incarnation
+			)
+		);
+		const armed = and(live, isNotNull(d1Schema.casObject.deleteAfter));
+		const clearDeadline = this.context.d1
 			.update(d1Schema.casObject)
 			.set({ deleteAfter: sql`null` })
-			.where(
-				and(
-					eq(d1Schema.casObject.digest, digest),
-					incarnation === undefined
-						? undefined
-						: eq(d1Schema.casObject.incarnation, incarnation),
-					registeredLiveObjectIncarnation(
-						this.context.d1,
-						'cas',
-						digest,
-						d1Schema.casObject.incarnation
-					)
-				)
-			)
-			.returning({ incarnation: d1Schema.casObject.incarnation });
+			.where(armed);
+		const readIncarnation = this.context.d1
+			.select({ incarnation: d1Schema.casObject.incarnation })
+			.from(d1Schema.casObject)
+			.where(live);
+		const [, [claimed]] = await this.context.d1.batch([
+			clearDeadline,
+			readIncarnation
+		]);
 
 		return claimed?.incarnation;
 	}
@@ -440,6 +447,7 @@ export class AttestationCasService {
 
 		const graceClearFilter = and(
 			eq(d1Schema.casObject.digest, reference.digest),
+			isNotNull(d1Schema.casObject.deleteAfter),
 			tenantChargeable
 		);
 
