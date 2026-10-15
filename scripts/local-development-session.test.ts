@@ -123,7 +123,9 @@ describe('local development binding sessions', () => {
 			fail.mockRejectedValueOnce(failure);
 			await expect(
 				withCleanup(
-					() => session[operation]('CUPBOARD_DB', 'invalid SQL'),
+					async () => {
+						await session[operation]('CUPBOARD_DB', 'invalid SQL');
+					},
 					() => session.dispose()
 				)
 			).rejects.toBe(failure);
