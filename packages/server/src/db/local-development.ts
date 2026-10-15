@@ -45,7 +45,7 @@ function populatedRowsPredicate(
 	const table = `"${name.replaceAll('"', '""')}"`;
 	const isCaptureState =
 		(database.binding ?? 'CUPBOARD_DB') === 'CUPBOARD_DB' &&
-		name === 'nar_capture_state';
+		['nar_capture_state', 'listing_adoption_capture_state'].includes(name);
 	const usedCaptureState = isCaptureState
 		? ' WHERE id != 1 OR latest != 0 OR pruned_through != 0'
 		: '';
