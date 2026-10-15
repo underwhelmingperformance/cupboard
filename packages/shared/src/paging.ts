@@ -224,6 +224,12 @@ export interface PageLookup<Input, Result> {
 	 * has one input, and sends the remaining inputs in later requests.
 	 */
 	readonly isPageTooLarge?: (error: unknown) => boolean;
+	/**
+	 * The largest number of inputs in one request, which the lookup reads again
+	 * before each request. Without it, each request sends every remaining
+	 * input.
+	 */
+	readonly requestSize?: () => number;
 }
 
 export interface PagedLookup<Input, Result> extends PageLookup<Input, Result> {
@@ -243,7 +249,8 @@ export interface PagedLookup<Input, Result> extends PageLookup<Input, Result> {
 }
 
 /**
- * Requests `inputs` as one page through {@link requestWithDeadline}. When a
+ * Requests `inputs` as one page through {@link requestWithDeadline}, in
+ * requests of at most `requestSize` inputs when the lookup sets it. When a
  * response has results for only a prefix of the inputs, sends the rest in a
  * further request. Returns one result for each input, in input order. A
  * response with no results, or with more results than the request had inputs,
@@ -254,17 +261,19 @@ export async function lookupPage<Input, Result>(
 	lookup: PageLookup<Input, Result>
 ): Promise<Result[]> {
 	const results: Result[] = [];
-	let remaining = inputs;
+	let offset = 0;
 
-	while (remaining.length > 0) {
-		const pageResults = await requestPrefix(remaining, lookup);
+	while (offset < inputs.length) {
+		const requestSize = lookup.requestSize?.() ?? inputs.length;
+		const requested = inputs.slice(offset, offset + requestSize);
+		const pageResults = await requestPrefix(requested, lookup);
 
-		if (pageResults.length === 0 || pageResults.length > remaining.length) {
-			throw new PageResultCountError(remaining.length, pageResults.length);
+		if (pageResults.length === 0 || pageResults.length > requested.length) {
+			throw new PageResultCountError(requested.length, pageResults.length);
 		}
 
 		results.push(...pageResults);
-		remaining = remaining.slice(pageResults.length);
+		offset += pageResults.length;
 	}
 
 	return results;

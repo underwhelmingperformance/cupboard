@@ -1,4 +1,5 @@
 import { type CacheScope } from '@cupboard/nix-store/scalars';
+import { tenantContract } from '@cupboard/protocol/contract';
 import {
 	subrequestSafetyReserve,
 	workersInvocationAllowances
@@ -8,17 +9,21 @@ import {
 	uploadCapabilitiesHeader,
 	uploadGraceFactsCapability,
 	uploadNegotiateMaxPaths,
-	type UploadNegotiateResponse,
-	type UploadPreviewResponse,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
+import {
+	type DeadlineOptions,
+	lookupPage,
+	requestWithDeadline
+} from '@cupboard/shared/paging';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 
 import { callInCache } from '../client/cache-scoped.ts';
 import { CupboardClient } from '../client/client.ts';
 import { type AccessCredential } from '../client/credentials.ts';
-import { tenantRpc } from '../client/orpc.ts';
+import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
 
 import { credentialSession } from './credential-session.ts';
 import { type PushClient } from './push.ts';
@@ -32,6 +37,11 @@ const negotiationPageSize = Math.floor(
 	(workersInvocationAllowances.free.subrequests - subrequestSafetyReserve) /
 		negotiationSubrequestsPerPath
 );
+// The server creates a pending upload with a fresh identifier for each path
+// on a negotiation page, so a page whose deadline expires is not sent again,
+// and the push fails. No retry can rescue a slow but healthy page, so its
+// single attempt gets a longer deadline than a replay-safe request.
+const negotiationPageDeadlineMs = 4 * probeDeadlineMs;
 
 export interface PushClientOptions {
 	readonly cache: CacheScope;
@@ -52,13 +62,18 @@ export function pushClientFor(
 	const cache = options.cache;
 	const baseFetcher = options.fetcher ?? fetch;
 	let pageSize = negotiationPageSize;
-	// Each call gets its own fetcher, so concurrent negotiations cannot read
-	// each other's grace-facts acknowledgement.
-	const acknowledgingRpc = (): {
-		readonly rpc: ReturnType<typeof tenantRpc>;
-		readonly hasUploadGraceFacts: () => boolean;
-	} => {
+	// Each attempt gets its own client, so a concurrent call or an attempt that
+	// missed its deadline cannot overwrite the capabilities of the answer that
+	// is used.
+	const acknowledged = async <Result>(
+		signal: AbortSignal,
+		call: (rpc: ReturnType<typeof tenantRpc>) => Promise<Result>
+	): Promise<{
+		readonly result: Result;
+		readonly hasUploadGraceFacts: boolean;
+	}> => {
 		let hasUploadGraceFacts = false;
+		let advertisedPageSize: number | undefined;
 		const fetcher: typeof fetch = async (input, init) => {
 			const request = new Request(input, init);
 			const headers = new Headers(request.headers);
@@ -76,20 +91,21 @@ export function pushClientFor(
 				response.headers.get(uploadRequestMaxPathsHeader)
 			);
 			if (response.ok && Number.isSafeInteger(advertised) && advertised > 0) {
-				pageSize = Math.min(advertised, uploadNegotiateMaxPaths);
+				advertisedPageSize = Math.min(advertised, uploadNegotiateMaxPaths);
 			}
 
 			return response;
 		};
+		const result = await call(
+			tenantRpc(url, { credential, signal: options.signal, fetcher })
+		);
 
-		return {
-			rpc: tenantRpc(url, {
-				credential,
-				signal: options.signal,
-				fetcher
-			}),
-			hasUploadGraceFacts: () => hasUploadGraceFacts
-		};
+		// An attempt can answer after its deadline has aborted its signal.
+		// Discard that answer.
+		signal.throwIfAborted();
+		pageSize = advertisedPageSize ?? pageSize;
+
+		return { result, hasUploadGraceFacts };
 	};
 	const rpc = tenantRpc(url, {
 		credential,
@@ -121,63 +137,115 @@ export function pushClientFor(
 	const blobUploader = (): Promise<BlobUploader> =>
 		(uploader ??= buildUploader());
 
+	const negotiationDeadline = procedureDeadline(
+		'uploads.negotiate',
+		tenantContract.uploads.negotiate.inDefaultCache,
+		{ signal: options.signal, deadlineMs: negotiationPageDeadlineMs }
+	);
+	const previewDeadline = procedureDeadline(
+		'uploads.preview',
+		tenantContract.uploads.preview.inDefaultCache,
+		{ signal: options.signal }
+	);
+	// Sends the paths in pages of at most `pageSize`, which a response can
+	// change. A request without paths still reaches the server: it can bind a
+	// run root, and its response shows whether the server acknowledges grace
+	// facts.
+	const decisionPages = async <Path, Decision>(
+		paths: readonly Path[],
+		deadline: DeadlineOptions,
+		send: (paths: Path[], signal: AbortSignal) => Promise<Decision[]>
+	): Promise<Decision[]> => {
+		if (paths.length === 0) {
+			return requestWithDeadline((signal) => send([], signal), deadline);
+		}
+
+		return lookupPage(paths, {
+			deadline,
+			requestSize: () => pageSize,
+			request: (page, signal) => send([...page], signal)
+		});
+	};
+
 	return {
 		negotiate: async (body) => {
 			const pushId = await session.pushId();
-			const call = acknowledgingRpc();
-			const uploads: UploadNegotiateResponse['uploads'] = [];
 			let hasGraceFactsForEveryPage = true;
 
-			let offset = 0;
-			do {
-				const paths = body.paths.slice(offset, offset + pageSize);
-				const response = await callInCache(call.rpc.uploads.negotiate, cache, {
-					pushId,
-					paths,
-					...(body.attachRoot !== undefined && {
-						attachRoot: body.attachRoot
-					})
-				});
-				uploads.push(...response.uploads);
-				hasGraceFactsForEveryPage &&= call.hasUploadGraceFacts();
-				offset += paths.length;
-			} while (offset < body.paths.length);
+			const uploads = await decisionPages(
+				body.paths,
+				negotiationDeadline,
+				async (paths, signal) => {
+					const page = await acknowledged(signal, (rpc) =>
+						callInCache(
+							rpc.uploads.negotiate,
+							cache,
+							{
+								pushId,
+								paths,
+								...(body.attachRoot !== undefined && {
+									attachRoot: body.attachRoot
+								})
+							},
+							{ signal }
+						)
+					);
+					hasGraceFactsForEveryPage &&= page.hasUploadGraceFacts;
+
+					return page.result.uploads;
+				}
+			);
 
 			return { uploads, hasUploadGraceFacts: hasGraceFactsForEveryPage };
 		},
 		// Never touches the credential session: a dry run requests no upload
 		// credential, so preview must not negotiate a pushId to get one.
 		preview: async (body) => {
-			const call = acknowledgingRpc();
-			const uploads: UploadPreviewResponse['uploads'] = [];
 			let hasGraceFactsForEveryPage = true;
 
-			let offset = 0;
-			do {
-				const paths = body.paths.slice(offset, offset + pageSize);
-				const response = await callInCache(call.rpc.uploads.preview, cache, {
-					paths
-				});
-				uploads.push(...response.uploads);
-				hasGraceFactsForEveryPage &&= call.hasUploadGraceFacts();
-				offset += paths.length;
-			} while (offset < body.paths.length);
+			const uploads = await decisionPages(
+				body.paths,
+				previewDeadline,
+				async (paths, signal) => {
+					const page = await acknowledged(signal, (rpc) =>
+						callInCache(rpc.uploads.preview, cache, { paths }, { signal })
+					);
+					hasGraceFactsForEveryPage &&= page.hasUploadGraceFacts;
+
+					return page.result.uploads;
+				}
+			);
 
 			return { uploads, hasUploadGraceFacts: hasGraceFactsForEveryPage };
 		},
 		probeUploadGraceFacts: async (kind) => {
-			const call = acknowledgingRpc();
-
 			if (kind === 'preview') {
-				await callInCache(call.rpc.uploads.preview, cache, { paths: [] });
-			} else {
-				await callInCache(call.rpc.uploads.negotiate, cache, {
-					pushId: await session.pushId(),
-					paths: []
-				});
+				const probe = await requestWithDeadline(
+					(signal) =>
+						acknowledged(signal, (rpc) =>
+							callInCache(rpc.uploads.preview, cache, { paths: [] }, { signal })
+						),
+					previewDeadline
+				);
+
+				return probe.hasUploadGraceFacts;
 			}
 
-			return call.hasUploadGraceFacts();
+			const pushId = await session.pushId();
+			const probe = await requestWithDeadline(
+				(signal) =>
+					acknowledged(signal, (rpc) =>
+						callInCache(
+							rpc.uploads.negotiate,
+							cache,
+							{ pushId, paths: [] },
+							{ signal }
+						)
+					),
+				negotiationDeadline
+			);
+
+			return probe.hasUploadGraceFacts;
 		},
 		// Every server version implements nix-cache-info. A private default cache
 		// returns 401, so only a routing 404 means that the tenant does not exist.

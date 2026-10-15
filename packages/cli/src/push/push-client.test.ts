@@ -7,13 +7,21 @@ import {
 	uploadPreviewRequestSchema,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
+import { probeDeadlineMs, ProbeTimeoutError } from '@cupboard/shared/timeout';
 import { ORPCError } from '@orpc/client';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
 import { translateRpcError } from '../client/rpc-errors.ts';
 import { errorExitCode } from '../exit-code.ts';
 
 import { pushClientFor } from './push-client.ts';
+
+function later(ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		setTimeout(resolve, ms);
+	});
+}
 
 describe('pushClientFor', () => {
 	it.each([
@@ -363,6 +371,152 @@ describe('pushClientFor', () => {
 			});
 		}
 	);
+
+	it.each([
+		{
+			operation: 'preview',
+			outcome: { uploads: 1, timedOut: undefined },
+			pages: 2
+		},
+		{
+			operation: 'negotiate',
+			outcome: {
+				uploads: undefined,
+				timedOut: 'the uploads.negotiate procedure'
+			},
+			pages: 1
+		}
+	] as const)(
+		'sends a hung $operation page $pages times',
+		async ({ operation, outcome, pages }) => {
+			const path = uploadPathNegotiationSchema.parse({
+				storePathHash: '0'.repeat(32),
+				storePath: `/nix/store/${'0'.repeat(32)}-path`,
+				narHash: `sha256:${'0'.repeat(52)}`,
+				narSize: 1,
+				references: []
+			});
+			let pageRequests = 0;
+			const client = pushClientFor(
+				new URL('https://cupboard.test/t/acme'),
+				'token',
+				{
+					cache: { kind: 'default' },
+					fetcher: async (input, init) => {
+						const request = new Request(input, init);
+						if (request.url.endsWith('/uploads/credential')) {
+							return Response.json({
+								pushId: 'push-1',
+								accessKeyId: 'access',
+								secretAccessKey: 'secret',
+								sessionToken: 'session',
+								endpoint: 'https://r2.test',
+								bucket: 'blobs',
+								expiresAt: '2099-01-01T00:00:00.000Z'
+							});
+						}
+
+						pageRequests += 1;
+						if (pageRequests === 1) {
+							return stalledResponse(request.signal);
+						}
+
+						return Response.json({
+							uploads: [
+								{
+									action: 'skip',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash
+								}
+							]
+						});
+					}
+				}
+			);
+
+			const send = async (): Promise<{
+				readonly uploads?: number;
+				readonly timedOut?: unknown;
+			}> => {
+				try {
+					const response =
+						operation === 'preview'
+							? await client.preview({ paths: [path] })
+							: await client.negotiate({ paths: [path] });
+
+					return { uploads: response.uploads.length, timedOut: undefined };
+				} catch (error) {
+					return {
+						uploads: undefined,
+						timedOut: error instanceof ProbeTimeoutError ? error.target : error
+					};
+				}
+			};
+
+			vi.useFakeTimers();
+			try {
+				const pending = send();
+				await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+				expect({ outcome: await pending, pageRequests }).toStrictEqual({
+					outcome,
+					pageRequests: pages
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
+
+	// The first attempt ignores its signal and answers without the
+	// acknowledgement after the retry's headers, while the retry's body is
+	// still arriving.
+	it('reports the grace-facts acknowledgement of the attempt that it uses', async () => {
+		vi.spyOn(Math, 'random').mockReturnValue(0.5);
+		let requests = 0;
+		const client = pushClientFor(
+			new URL('https://cupboard.test/t/acme'),
+			'token',
+			{
+				cache: { kind: 'default' },
+				fetcher: async () => {
+					requests += 1;
+					if (requests === 1) {
+						await later(probeDeadlineMs + 200);
+						return Response.json({ uploads: [] });
+					}
+
+					const body = new ReadableStream<Uint8Array>({
+						async start(controller) {
+							await later(200);
+							controller.enqueue(new TextEncoder().encode('{"uploads":[]}'));
+							controller.close();
+						}
+					});
+					return new Response(body, {
+						headers: {
+							'content-type': 'application/json',
+							[uploadCapabilitiesHeader]: uploadGraceFactsCapability
+						}
+					});
+				}
+			}
+		);
+
+		vi.useFakeTimers();
+		try {
+			const supported = client.probeUploadGraceFacts?.('preview');
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+
+			expect({ supported: await supported, requests }).toStrictEqual({
+				supported: true,
+				requests: 2
+			});
+		} finally {
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+		}
+	});
 
 	it.each([
 		{ name: 'acknowledges it', responseCapability: uploadGraceFactsCapability },
