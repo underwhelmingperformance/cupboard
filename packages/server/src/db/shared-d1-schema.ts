@@ -12,6 +12,7 @@ export {
 	deploymentTransition,
 	instanceConfig,
 	listingFact,
+	listingGeneration,
 	localStepWakeCursor,
 	manifestState,
 	objectDeletion,

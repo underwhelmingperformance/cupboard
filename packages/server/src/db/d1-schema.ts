@@ -11,6 +11,7 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import type { ArtifactTaskOwner } from '@cupboard/protocol/artifact-jobs';
 import {
 	type ArtifactGeneration,
 	type ArtifactId,
@@ -979,5 +980,37 @@ export const listingFact = sqliteTable(
 		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
 		check('listing_fact_format_check', sql`${table.format} = 1`),
 		check('listing_fact_size_check', sql`${table.size} > 0`)
+	]
+);
+
+export const listingGeneration = sqliteTable(
+	'listing_generation',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		generation: integer('generation').notNull(),
+		tenant: text('tenant').$type<TenantId>(),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		index('listing_generation_tenant_idx').on(
+			table.tenant,
+			table.narHash,
+			table.generatorRevision
+		),
+		check(
+			'listing_generation_version_check',
+			sql`${table.sourceIncarnation} >= 1 AND ${table.generation} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'listing_generation_ownership_check',
+			sql`(${table.tenant} IS NULL AND ${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.tenant} IS NOT NULL AND ${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
+		)
 	]
 );

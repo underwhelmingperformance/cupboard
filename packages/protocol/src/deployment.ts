@@ -99,7 +99,8 @@ export const transitionIdSchema = z.enum([
 	'cas-demotion-progress',
 	'attestation-list-revision',
 	'tenant-namespace-cleanup',
-	'native-artifact-publication'
+	'native-artifact-publication',
+	'shared-listing-generation'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -447,6 +448,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		contractAfterUpload: true,
 		contractStep: artifactPublicationLocalStep,
 		reportableStepOnComplete: artifactPublicationLocalStep
+	},
+	{
+		id: 'shared-listing-generation',
+		expand: ['0053_listing_generation_claims.sql'],
+		contract: [],
+		independent: true
 	}
 ];
 

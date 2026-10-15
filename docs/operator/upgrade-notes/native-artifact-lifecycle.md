@@ -5,6 +5,10 @@ references for listings, logs, traces and generation proofs require compatible
 quota, collection and retirement code in both Workers. The storage expansion
 alone does not enable reference reservation.
 
+The additive `shared-listing-generation` transition installs the D1 table for
+cross-tenant computation claims. Expansion does not start generation or enable
+native artifact producers.
+
 Deployment also reconciles a bucket lifecycle rule for `artifact-staging/`. The
 rule deletes transient objects and aborts incomplete multipart uploads after a
 day. CAS bytes and completed tenant publications use their existing retention

@@ -113,7 +113,8 @@ describe('checkD1Migrations', () => {
 				'cas-demotion-progress',
 				'attestation-list-revision',
 				'tenant-namespace-cleanup',
-				'native-artifact-publication'
+				'native-artifact-publication',
+				'shared-listing-generation'
 			]
 		});
 	});
@@ -150,7 +151,8 @@ describe('checkD1Migrations', () => {
 				transition.id !== 'cas-demotion-progress' &&
 				transition.id !== 'attestation-list-revision' &&
 				transition.id !== 'tenant-namespace-cleanup' &&
-				transition.id !== 'native-artifact-publication'
+				transition.id !== 'native-artifact-publication' &&
+				transition.id !== 'shared-listing-generation'
 		);
 		const preceding: MigrationSet = {
 			files: full.files.filter(
@@ -160,7 +162,8 @@ describe('checkD1Migrations', () => {
 						'0049_attestation_list_revision.sql',
 						'0050_attestation_list_revision_contract.sql',
 						'0051_tenant_namespace_cleanup_guard.sql',
-						'0052_attestation_list_retirement_guard.sql'
+						'0052_attestation_list_retirement_guard.sql',
+						'0053_listing_generation_claims.sql'
 					].includes(file)
 			),
 			journal: full.journal.filter(
@@ -170,7 +173,8 @@ describe('checkD1Migrations', () => {
 						'0049_attestation_list_revision.sql',
 						'0050_attestation_list_revision_contract.sql',
 						'0051_tenant_namespace_cleanup_guard.sql',
-						'0052_attestation_list_retirement_guard.sql'
+						'0052_attestation_list_retirement_guard.sql',
+						'0053_listing_generation_claims.sql'
 					].includes(file)
 			),
 			sql: full.sql
@@ -194,7 +198,8 @@ describe('checkD1Migrations', () => {
 				transition.id !== 'cas-demotion-progress' &&
 				transition.id !== 'attestation-list-revision' &&
 				transition.id !== 'tenant-namespace-cleanup' &&
-				transition.id !== 'native-artifact-publication'
+				transition.id !== 'native-artifact-publication' &&
+				transition.id !== 'shared-listing-generation'
 		);
 		const order = deployOrder(earlierTransitions, 1);
 		expect(order).toStrictEqual({

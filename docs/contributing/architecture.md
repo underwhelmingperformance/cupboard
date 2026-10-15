@@ -77,6 +77,16 @@ replacement admissions and recovers failed sends. RPC failure or an invalid
 reply uses transport retry and persisted deadlines for recovery. Cancellation
 starts no new retry RPC. Discovery and initial dispatch remain disabled.
 
+The shared D1 generation store reserves one computation lease per NAR and
+generator revision across tenants. Claim acquisition requires an active tenant
+and the registered live NAR incarnation. Sixty-second leases use monotonically
+increasing generations. Lost claim replies are idempotent, renewal cannot
+shorten a lease, and expired owners cannot renew or complete work. Completion
+checks the current claim, source incarnation and registered CAS output, then
+records the immutable listing fact and releases the claim in one D1 batch.
+Claims and facts create no cache authority or quota charge. Consumer integration
+and shared job/task progress projections remain pending.
+
 The admission model records queued work in tenant SQLite before a consumer
 claims it. Admissions expire, capture the job, task, source and cache
 generations, and share the staging pool's reservation and byte budgets. A

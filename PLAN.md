@@ -7246,8 +7246,12 @@ build traces available from a cupboard cache.
       Job dispatch now runs through bounded alarm turns and cron recovery. The
       trusted requeue RPC validates captured ownership and checks tenant status
       before changing tasks. Consumers now use immediate and delayed retry RPCs
-      and leave delivery recovery to the dispatcher. Shared D1 projections and
-      producer activation remain pending.
+      and leave delivery recovery to the dispatcher. Shared D1 generation claims
+      now coalesce work by NAR and generator revision, fence source incarnations
+      and atomically record facts with claim release. Renewal is monotonic and
+      stale owners cannot complete or release newer claims. Consumer
+      integration, shared D1 job/task projections and producer activation remain
+      pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

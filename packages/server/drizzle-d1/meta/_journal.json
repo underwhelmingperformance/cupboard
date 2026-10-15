@@ -372,6 +372,13 @@
 			"when": 1791841669386,
 			"tag": "0052_attestation_list_retirement_guard",
 			"breakpoints": true
+		},
+		{
+			"idx": 53,
+			"version": "6",
+			"when": 1792029988955,
+			"tag": "0053_listing_generation_claims",
+			"breakpoints": true
 		}
 	]
 }
