@@ -417,6 +417,39 @@ describe('listing task workflow', () => {
 			}
 		}));
 
+	it('defers a delayed retry through RPC without reserving admission credits', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const retryAt = isoTimestamp(new Date(Date.now() + 120_000));
+			const result = await currentServer().requeueArtifactTaskWithDeadline(
+				claim,
+				retryAt
+			);
+			const later = isoTimestamp(new Date(Date.now() + 240_000));
+			const repeated = await currentServer().requeueArtifactTaskWithDeadline(
+				claim,
+				later
+			);
+			const immediate = await currentServer().requeueArtifactTask(claim);
+			const early = await currentServer().claimArtifactTask(
+				{ id: claim.jobId, generation: claim.jobGeneration },
+				crypto.randomUUID(),
+				'listing'
+			);
+			const admissions = await inSection((context) =>
+				Promise.resolve(
+					context.db.select().from(schema.artifactAdmissions).all()
+				)
+			);
+			expect({ result, repeated, immediate, early, admissions }).toStrictEqual({
+				result: { kind: 'deferred', retryAt },
+				repeated: result,
+				immediate: { kind: 'unavailable' },
+				early: { kind: 'idle', pending: true },
+				admissions: []
+			});
+		}));
+
 	it('requeues one owned task idempotently through the trusted RPC', () =>
 		withoutAlarmArming(async () => {
 			const claim = await fixture(undefined, true);

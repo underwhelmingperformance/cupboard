@@ -91,13 +91,19 @@ its admission when capacity permits. It preserves the previous owner and claim
 generation so a repeated request after a lost reply returns the same admission.
 A newer claim fences the old request. The trusted requeue RPC validates the
 captured claim and checks that the tenant remains active before changing task
-state. Its result uses the admission service's shared runtime schema. Retry does
-not change terminal counters. Up to eight unstaged admissions can coexist with
-one borrowed admission for each of the pool's eight physical stages. Borrowing a
-sealed stage reserves no new bytes, so full unstaged slots do not prevent its
-promotion. A capacity refusal keeps the task pending and the job due without
-releasing unfinished staging bytes. Queue retry integration, capacity-release
-wakes and producer activation remain pending.
+state. Its result uses the admission service's shared runtime schema. A future
+retry deadline leaves the task pending and releases its admission without
+reserving generation capacity. Repeated requests preserve that deadline. Claims
+and dispatch skip delayed tasks, while indexed readiness selects ready siblings
+and projects the next retry wake. Resume preserves task deadlines. A separate
+RPC for delayed retries lets an older tenant Worker reject those requests
+instead of ignoring their deadline. The immediate RPC preserves existing delays.
+Retry does not change terminal counters. Up to eight unstaged admissions can
+coexist with one borrowed admission for each of the pool's eight physical
+stages. Borrowing a sealed stage reserves no new bytes, so full unstaged slots
+do not prevent its promotion. A capacity refusal keeps the task pending and the
+job due without releasing unfinished staging bytes. Queue retry integration,
+capacity-release wakes and producer activation remain pending.
 
 The listing executor reserves an output buffer before calling the tenant
 preparation RPC. Preparation attempts shared-fact reuse and sealed-stage

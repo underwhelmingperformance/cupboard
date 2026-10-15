@@ -6,13 +6,14 @@ import {
 	artifactTaskClaimSchema,
 	type ArtifactTaskOwner
 } from '@cupboard/protocol/artifact-jobs';
+import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 
 import {
 	type ArtifactAdmission,
-	type ArtifactAdmissionReservation,
-	artifactAdmissionReservationSchema
+	type ArtifactTaskRequeueResult,
+	artifactTaskRequeueResultSchema
 } from '../blob/artifact-admission.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 
@@ -58,13 +59,18 @@ export class ArtifactTaskRpcService {
 	}
 
 	async requeueInSection(
-		claim: ArtifactTaskClaim
-	): Promise<ArtifactAdmissionReservation> {
+		claim: ArtifactTaskClaim,
+		notBefore?: IsoTimestamp
+	): Promise<ArtifactTaskRequeueResult> {
 		if (!(await this.activeTenant())) {
 			return { kind: 'unavailable' };
 		}
-		return artifactAdmissionReservationSchema.parse(
-			new ArtifactAdmissionService(this.context).requeueInSection(claim)
+		return artifactTaskRequeueResultSchema.parse(
+			new ArtifactAdmissionService(this.context).requeueInSection(
+				claim,
+				'generate',
+				notBefore
+			)
 		);
 	}
 

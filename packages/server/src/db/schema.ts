@@ -1292,6 +1292,8 @@ export const artifactJobs = sqliteTable(
 	]
 );
 
+const initialArtifactTaskAttemptAt = isoTimestamp(new Date(0));
+
 export const artifactTasks = sqliteTable(
 	'artifact_task',
 	{
@@ -1310,12 +1312,22 @@ export const artifactTasks = sqliteTable(
 		jobGeneration: integer('job_generation').notNull().default(0),
 		owner: text('owner').$type<ArtifactTaskOwner>(),
 		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		nextAttemptAt: text('next_attempt_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(initialArtifactTaskAttemptAt),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		completedAt: text('completed_at').$type<IsoTimestamp>()
 	},
 	(table) => [
 		uniqueIndex('artifact_task_source_idx').on(table.jobId, table.sourceKey),
 		index('artifact_task_state_idx').on(table.jobId, table.state, table.id),
+		index('artifact_task_retry_idx').on(
+			table.jobId,
+			table.state,
+			table.nextAttemptAt,
+			table.id
+		),
 		index('artifact_task_lease_idx').on(
 			table.jobId,
 			table.state,

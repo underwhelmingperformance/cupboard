@@ -29,6 +29,14 @@ export type ArtifactAdmissionReservation = z.output<
 	typeof artifactAdmissionReservationSchema
 >;
 
+export const artifactTaskRequeueResultSchema = z.union([
+	artifactAdmissionReservationSchema,
+	z.strictObject({ kind: z.literal('deferred'), retryAt: isoTimestampSchema })
+]);
+export type ArtifactTaskRequeueResult = z.output<
+	typeof artifactTaskRequeueResultSchema
+>;
+
 export const artifactStagingLimits = {
 	reservations: 8,
 	bytes: 128 * 1024 * 1024

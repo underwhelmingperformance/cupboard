@@ -13,12 +13,13 @@ import {
 	artifactTaskOwnerSchema
 } from '@cupboard/protocol/artifact-jobs';
 import { currentListingGeneratorRevision } from '@cupboard/protocol/artifacts';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { type ArtifactAdmissionReservation } from '../blob/artifact-admission.ts';
+import { type ArtifactTaskRequeueResult } from '../blob/artifact-admission.ts';
 import { artifactStageIdSchema } from '../blob/artifact-staging.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
@@ -35,6 +36,7 @@ import {
 } from '../test-support.ts';
 
 import { ArtifactAdmissionService } from './artifact-admission-service.ts';
+import { ArtifactJobDispatchService } from './artifact-job-dispatch-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import { ArtifactStagingService } from './artifact-staging-service.ts';
 import type { ServerContext } from './context.ts';
@@ -51,7 +53,7 @@ const otherOwner = artifactTaskOwnerSchema.parse(
 );
 const hash = storePathHashSchema.parse('a'.repeat(32));
 
-function admitted(result: ArtifactAdmissionReservation) {
+function admitted(result: ArtifactTaskRequeueResult) {
 	if (result.kind !== 'admitted') {
 		throw new Error('The fixture admission was refused');
 	}
@@ -137,6 +139,216 @@ function taskAt(
 
 describe('durable artifact admission', () => {
 	beforeEach(resetTestServer);
+
+	it('keeps delayed retry tasks out of claims without blocking a ready sibling beyond the page', () =>
+		withoutAlarmArming(() =>
+			withAdmissions((context, jobs, job, tasks) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const retryAt = isoTimestamp(new Date(Date.now() + 120_000));
+				const results = tasks.slice(0, 9).map((id) => {
+					const claim = jobs.claimTaskInSection(job, id, 0, owner);
+					if (claim === undefined) {
+						throw new Error('The delayed fixture task was not claimed');
+					}
+					return admissions.requeueInSection(claim, 'generate', retryAt);
+				});
+				const delayed = taskAt(tasks, 0);
+				const claimed = jobs.claimInSection(job.id, otherOwner);
+				expect({
+					results,
+					candidates: jobs.dispatchCandidateIdsInSection(job),
+					directClaim: jobs.claimTaskInSection(job, delayed, 1, otherOwner),
+					inspect: jobs.inspectDispatchTaskInSection(job, delayed),
+					claimed: claimed.claim?.id,
+					admissions: context.db.select().from(schema.artifactAdmissions).all()
+				}).toStrictEqual({
+					results: Array.from({ length: 9 }, () => ({
+						kind: 'deferred',
+						retryAt
+					})),
+					candidates: [],
+					directClaim: undefined,
+					inspect: undefined,
+					claimed: taskAt(tasks, 9),
+					admissions: []
+				});
+			}, 10)
+		));
+
+	it('preserves delayed retry receipts and releases admission credits until the deadline', () =>
+		withoutAlarmArming(() =>
+			withAdmissions((context, jobs, job, tasks) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const original = admitted(
+					admissions.reserveInSection(job, taskAt(tasks, 0))
+				);
+				const claim = admissions.claimInSection(original, owner);
+				if (claim === undefined) {
+					throw new Error('The delayed receipt fixture was not claimed');
+				}
+				const retryAt = isoTimestamp(new Date(Date.now() + 120_000));
+				const first = admissions.requeueInSection(claim, 'generate', retryAt);
+				const later = isoTimestamp(new Date(Date.now() + 240_000));
+				const repeated = admissions.requeueInSection(claim, 'generate', later);
+				const sibling = admitted(
+					admissions.reserveInSection(job, taskAt(tasks, 1))
+				);
+				expect({
+					first,
+					repeated,
+					early: admissions.reserveInSection(job, claim.id),
+					reserved: context.db
+						.select()
+						.from(schema.artifactAdmissions)
+						.all()
+						.map((row) => row.id)
+				}).toStrictEqual({
+					first: { kind: 'deferred', retryAt },
+					repeated: first,
+					early: { kind: 'unavailable' },
+					reserved: [sibling.id]
+				});
+				vi.setSystemTime(new Date(retryAt));
+				const next = admitted(admissions.reserveInSection(job, claim.id));
+				const replacement = admissions.claimInSection(next, otherOwner);
+				expect({
+					taskId: replacement?.id,
+					stale: admissions.requeueInSection(claim, 'generate', retryAt),
+					progress: jobs.summaryInSection(job.id)?.progress
+				}).toStrictEqual({
+					taskId: claim.id,
+					stale: { kind: 'unavailable' },
+					progress: { discovered: 3, completed: 0, skipped: 0, failed: 0 }
+				});
+			})
+		));
+
+	it('rolls back delayed retry state when admission release fails', () =>
+		withoutAlarmArming(() =>
+			withAdmissions((context, jobs, job, tasks) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const original = admitted(
+					admissions.reserveInSection(job, taskAt(tasks, 0))
+				);
+				const claim = admissions.claimInSection(original, owner);
+				if (claim === undefined) {
+					throw new Error('The delayed rollback fixture was not claimed');
+				}
+				const snapshot = () => ({
+					tasks: context.db.select().from(schema.artifactTasks).all(),
+					jobs: context.db.select().from(schema.artifactJobs).all(),
+					admissions: context.db.select().from(schema.artifactAdmissions).all()
+				});
+				const before = snapshot();
+				context.ctx.storage.sql.exec(
+					"CREATE TRIGGER refuse_delayed_release BEFORE DELETE ON artifact_admission BEGIN SELECT RAISE(ABORT, 'delayed release refused'); END"
+				);
+				const retryAt = isoTimestamp(new Date(Date.now() + 120_000));
+				try {
+					expect(() =>
+						admissions.requeueInSection(claim, 'generate', retryAt)
+					).toThrow('delayed release refused');
+				} finally {
+					context.ctx.storage.sql.exec('DROP TRIGGER refuse_delayed_release');
+				}
+				expect(snapshot()).toStrictEqual(before);
+			})
+		));
+
+	it.each(['deadline', 'ready'] as const)(
+		'uses the retry index for %s without mutating delayed retry tasks',
+		(operation) =>
+			withoutAlarmArming(() =>
+				withAdmissions((context, jobs, job, tasks) => {
+					const admissions = new ArtifactAdmissionService(context);
+					const claim = jobs.claimTaskInSection(
+						job,
+						taskAt(tasks, 0),
+						0,
+						owner
+					);
+					if (claim === undefined) {
+						throw new Error('The retry deadline fixture was not claimed');
+					}
+					const retryAt = isoTimestamp(new Date(Date.now() + 120_000));
+					admissions.requeueInSection(claim, 'generate', retryAt);
+					const before = context.db.select().from(schema.artifactTasks).all();
+					const execute = vi.spyOn(context.ctx.storage.sql, 'exec');
+					let captured: readonly [string, ...unknown[]] | undefined;
+					let projected: string | readonly ArtifactTaskId[] | undefined;
+					try {
+						projected =
+							operation === 'deadline'
+								? jobs.nextRetryAtInSection(job.id)
+								: jobs.dispatchCandidateIdsInSection(job);
+						captured = execute.mock.calls.find(([query]) =>
+							query.includes('order by "artifact_task"."next_attempt_at"')
+						);
+					} finally {
+						execute.mockRestore();
+					}
+					if (captured === undefined) {
+						throw new Error('The retry deadline query was not captured');
+					}
+					const [query, ...rawBindings] = captured;
+					const bindings = z
+						.array(z.union([z.string(), z.number()]))
+						.parse(rawBindings);
+					const plan = Array.from(
+						context.ctx.storage.sql.exec<{ detail: string }>(
+							`EXPLAIN QUERY PLAN ${query}`,
+							...bindings
+						),
+						(row) => row.detail
+					);
+					const after = context.db.select().from(schema.artifactTasks).all();
+					const dispatches = new ArtifactJobDispatchService(context);
+					const dispatch = dispatches.reserveInSection();
+					expect({
+						projected,
+						after,
+						plan,
+						deadline:
+							dispatch.kind === 'dispatch'
+								? dispatch.dispatch.notBefore
+								: undefined
+					}).toStrictEqual({
+						projected: operation === 'deadline' ? retryAt : [],
+						after: before,
+						plan: [
+							operation === 'deadline'
+								? 'SEARCH artifact_task USING COVERING INDEX artifact_task_retry_idx (job_id=? AND state=? AND next_attempt_at>?)'
+								: 'SEARCH artifact_task USING INDEX artifact_task_retry_idx (job_id=? AND state=? AND next_attempt_at<?)'
+						],
+						deadline: Date.parse(retryAt)
+					});
+				}, 1)
+			)
+	);
+
+	it('preserves delayed retry readiness when a job is resumed', () =>
+		withoutAlarmArming(() =>
+			withAdmissions((context, jobs, job, tasks) => {
+				const claim = jobs.claimTaskInSection(job, taskAt(tasks, 0), 0, owner);
+				if (claim === undefined) {
+					throw new Error('The resumed retry fixture was not claimed');
+				}
+				const admissions = new ArtifactAdmissionService(context);
+				const retryAt = isoTimestamp(new Date(Date.now() + 120_000));
+				admissions.requeueInSection(claim, 'generate', retryAt);
+				jobs.cancelInSection(job.id);
+				jobs.resumeInSection(job.id);
+				const early = jobs.claimInSection(job.id, otherOwner);
+				const stale = admissions.requeueInSection(claim, 'generate', retryAt);
+				vi.setSystemTime(new Date(retryAt));
+				const ready = jobs.claimInSection(job.id, otherOwner);
+				expect({ early, stale, taskId: ready.claim?.id }).toStrictEqual({
+					early: { pending: true },
+					stale: { kind: 'unavailable' },
+					taskId: claim.id
+				});
+			}, 1)
+		));
 
 	it('requeues only the owned task and repeats the same retry admission after a lost reply', () =>
 		withoutAlarmArming(() =>

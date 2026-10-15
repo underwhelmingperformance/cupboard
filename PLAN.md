@@ -7270,9 +7270,11 @@ build traces available from a cupboard cache.
       Claim and terminal RPCs arm job deadlines and reconcile cron eligibility.
       Alarm turns and cron recovery now invoke the bounded dispatcher. Suspended
       tenants retain their projected deadline for reactivation without polling
-      job alarms. Persist per-task retry deadlines so transient refusals do not
-      delay ready sibling tasks or cause immediate retry loops. Targeted queue
-      retry integration and capacity-release wakes remain pending.
+      job alarms. Per-task retry deadlines now defer work without reserving
+      generation credits or blocking ready siblings. Repeated requests and job
+      resume preserve the deadline, and indexed dispatch readiness schedules its
+      wake. Targeted queue retry integration and capacity-release wakes remain
+      pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last
       progress and paged failures. The total remains unknown until discovery

@@ -231,10 +231,14 @@ export class ArtifactJobService {
 			.where(
 				and(
 					eq(schema.artifactTasks.jobId, job.id),
-					eq(schema.artifactTasks.state, 'pending')
+					eq(schema.artifactTasks.state, 'pending'),
+					lte(schema.artifactTasks.nextAttemptAt, now)
 				)
 			)
-			.orderBy(asc(schema.artifactTasks.id))
+			.orderBy(
+				asc(schema.artifactTasks.nextAttemptAt),
+				asc(schema.artifactTasks.id)
+			)
 			.limit(claimScanLimit - captured.length)
 			.all();
 		return [...captured, ...pending];
@@ -306,6 +310,12 @@ export class ArtifactJobService {
 		}
 		const { job, task } = captured;
 		if (
+			task.state === 'pending' &&
+			task.nextAttemptAt > isoTimestamp(new Date())
+		) {
+			return;
+		}
+		if (
 			task.state === 'claimed' &&
 			task.jobGeneration >= job.generation &&
 			task.leaseExpiresAt !== null &&
@@ -344,7 +354,8 @@ export class ArtifactJobService {
 					owner,
 					claimGeneration: generation,
 					jobGeneration: job.generation,
-					leaseExpiresAt
+					leaseExpiresAt,
+					nextAttemptAt: isoTimestamp(new Date())
 				})
 				.where(eq(schema.artifactTasks.id, task.id))
 				.run();
@@ -424,6 +435,7 @@ export class ArtifactJobService {
 					jobId: id,
 					sourceKey,
 					source,
+					nextAttemptAt: isoTimestamp(new Date()),
 					createdAt: isoTimestamp(new Date())
 				})
 				.onConflictDoNothing({
@@ -639,11 +651,41 @@ export class ArtifactJobService {
 		);
 	}
 
+	nextRetryAtInSection(id: ArtifactJobId): IsoTimestamp | undefined {
+		const now = isoTimestamp(new Date());
+		return this.context.db
+			.select({ at: schema.artifactTasks.nextAttemptAt })
+			.from(schema.artifactTasks)
+			.where(
+				and(
+					eq(schema.artifactTasks.jobId, id),
+					eq(schema.artifactTasks.state, 'pending'),
+					gt(schema.artifactTasks.nextAttemptAt, now)
+				)
+			)
+			.orderBy(
+				asc(schema.artifactTasks.nextAttemptAt),
+				asc(schema.artifactTasks.id)
+			)
+			.limit(1)
+			.get()?.at;
+	}
+
+	deferredUntilInSection(claim: ArtifactTaskClaim): IsoTimestamp | undefined {
+		const task = this.capturedClaimTask(claim);
+		return task?.state === 'pending' && task.leaseExpiresAt === null
+			? task.nextAttemptAt
+			: undefined;
+	}
+
 	claimDeadlineInSection(claim: ArtifactTaskClaim): IsoTimestamp | undefined {
 		return this.owned(claim)?.leaseExpiresAt ?? undefined;
 	}
 
-	deferInSection(claim: ArtifactTaskClaim): boolean {
+	deferInSection(
+		claim: ArtifactTaskClaim,
+		notBefore = isoTimestamp(new Date())
+	): boolean {
 		if (this.context.offboarding) {
 			return false;
 		}
@@ -658,17 +700,19 @@ export class ArtifactJobService {
 		) {
 			return false;
 		}
+		const nextAttemptMs = Math.max(Date.parse(notBefore), Date.now());
+		const nextAttemptAt = isoTimestamp(new Date(nextAttemptMs));
 		this.context.db.transaction((database) => {
 			// Preserve the owner so a lost retry reply can repeat this deferral.
 			database
 				.update(schema.artifactTasks)
-				.set({ state: 'pending', leaseExpiresAt: sql`null` })
+				.set({ state: 'pending', leaseExpiresAt: sql`null`, nextAttemptAt })
 				.where(eq(schema.artifactTasks.id, claim.id))
 				.run();
 			database
 				.update(schema.artifactJobs)
 				.set({
-					nextDispatchAt: sql`min(${schema.artifactJobs.nextDispatchAt}, ${Date.now()})`,
+					nextDispatchAt: sql`min(${schema.artifactJobs.nextDispatchAt}, ${Date.parse(nextAttemptAt)})`,
 					dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`,
 					updatedAt: isoTimestamp(new Date())
 				})

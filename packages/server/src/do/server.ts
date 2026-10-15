@@ -40,7 +40,11 @@ import {
 	type ReuseViewName,
 	reuseViewNameSchema
 } from '@cupboard/protocol/reuse-views';
-import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import {
+	type IsoTimestamp,
+	isoTimestamp,
+	isoTimestampSchema
+} from '@cupboard/protocol/scalars';
 import {
 	type CommitBatchEntry,
 	type CommitBlobDeclaration,
@@ -75,7 +79,8 @@ import { type AccessClaims } from '../auth/auth.ts';
 import {
 	type ArtifactAdmission,
 	type ArtifactAdmissionReservation,
-	artifactAdmissionSchema
+	artifactAdmissionSchema,
+	type ArtifactTaskRequeueResult
 } from '../blob/artifact-admission.ts';
 import {
 	artifactMultipartIdSchema,
@@ -3055,6 +3060,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	private async requeueOwnedArtifactTask(
+		claim: ArtifactTaskClaim,
+		notBefore?: IsoTimestamp
+	): Promise<ArtifactTaskRequeueResult> {
+		const parsedClaim = artifactTaskClaimSchema.parse(claim);
+		await this.initialise();
+		return this.metered('artifact-task-requeue', () =>
+			this.withArtifactDispatchWake(() =>
+				new ArtifactTaskRpcService(this.context).requeueInSection(
+					parsedClaim,
+					notBefore
+				)
+			)
+		);
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		try {
 			await this.initialise();
@@ -3238,12 +3259,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async requeueArtifactTask(
 		claim: ArtifactTaskClaim
 	): Promise<ArtifactAdmissionReservation> {
-		const parsedClaim = artifactTaskClaimSchema.parse(claim);
-		await this.initialise();
-		return this.metered('artifact-task-requeue', () =>
-			this.withArtifactDispatchWake(() =>
-				new ArtifactTaskRpcService(this.context).requeueInSection(parsedClaim)
-			)
+		const result = await this.requeueOwnedArtifactTask(claim);
+		return result.kind === 'deferred' ? { kind: 'unavailable' } : result;
+	}
+
+	async requeueArtifactTaskWithDeadline(
+		claim: ArtifactTaskClaim,
+		notBefore: IsoTimestamp
+	): Promise<ArtifactTaskRequeueResult> {
+		return this.requeueOwnedArtifactTask(
+			claim,
+			isoTimestampSchema.parse(notBefore)
 		);
 	}
 

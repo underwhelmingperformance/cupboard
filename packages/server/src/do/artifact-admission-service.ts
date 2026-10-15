@@ -18,7 +18,8 @@ import {
 	artifactAdmissionIdSchema,
 	type ArtifactAdmissionReservation,
 	artifactAdmissionSchema,
-	artifactStagingLimits
+	artifactStagingLimits,
+	type ArtifactTaskRequeueResult
 } from '../blob/artifact-admission.ts';
 import { type ArtifactStageId } from '../blob/artifact-staging.ts';
 import * as schema from '../db/schema.ts';
@@ -280,11 +281,24 @@ export class ArtifactAdmissionService {
 	}
 	requeueInSection(
 		claim: ArtifactTaskClaim,
-		mode: 'generate' | 'reuse' = 'generate'
-	): ArtifactAdmissionReservation {
+		mode: 'generate' | 'reuse' = 'generate',
+		notBefore?: IsoTimestamp
+	): ArtifactTaskRequeueResult {
 		return this.context.db.transaction(() => {
-			if (!new ArtifactJobService(this.context).deferInSection(claim)) {
+			const jobs = new ArtifactJobService(this.context);
+			if (!jobs.deferInSection(claim, notBefore)) {
 				return { kind: 'unavailable' };
+			}
+			const retryAt = jobs.deferredUntilInSection(claim);
+			if (retryAt === undefined) {
+				throw new Error('The deferred artifact task is missing');
+			}
+			if (retryAt > isoTimestamp(new Date())) {
+				this.context.db
+					.delete(schema.artifactAdmissions)
+					.where(eq(schema.artifactAdmissions.taskId, claim.id))
+					.run();
+				return { kind: 'deferred', retryAt };
 			}
 			this.releaseForClaimInSection(claim);
 			return this.reserveInSection(

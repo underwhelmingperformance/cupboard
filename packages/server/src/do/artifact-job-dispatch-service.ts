@@ -112,10 +112,12 @@ export class ArtifactJobDispatchService {
 		}
 		const claimExpiry = jobs.nextClaimExpiryInSection(job.id);
 		const backstop = Date.now() + redispatchDelayMs;
-		const notBefore =
-			claimExpiry === undefined
-				? backstop
-				: Math.min(backstop, Date.parse(claimExpiry));
+		const retryAt = jobs.nextRetryAtInSection(job.id);
+		const notBefore = Math.min(
+			backstop,
+			claimExpiry === undefined ? backstop : Date.parse(claimExpiry),
+			retryAt === undefined ? backstop : Date.parse(retryAt)
+		);
 		const reserved = this.context.db
 			.update(schema.artifactJobs)
 			.set({
