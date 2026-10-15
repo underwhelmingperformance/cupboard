@@ -51,7 +51,8 @@ export const narListingFactSchema = z.strictObject({
 	size: z.number().int().positive().max(maxArtifactBytes.listing)
 });
 export type NarListingFact = z.output<typeof narListingFactSchema>;
-export type NarListingIdentity = Pick<
-	NarListingFact,
-	'narHash' | 'generatorRevision'
->;
+export const narListingIdentitySchema = narListingFactSchema.pick({
+	narHash: true,
+	generatorRevision: true
+});
+export type NarListingIdentity = z.output<typeof narListingIdentitySchema>;

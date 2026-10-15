@@ -371,8 +371,19 @@ without counting gaps. Overlapping consumers cannot repeat a committed page. A
 cursor behind the retained floor is reported as expired. Storage expansion
 creates empty tables; this consumer is not yet connected to queue dispatch.
 
-Bounded source fan-out, claimed work execution, durable cache-adoption delivery,
-completion wakes and automatic forward producers remain pending.
+Fan-out discovery uses typed fixed windows. A parent hint first refreshes the
+current publication projection, then pages matching listing revisions. Listing
+hints page current parent identities; CAS repair hints page the reverse fact
+index by NAR and generator revision. Each page selects at most 32 candidates
+through the captured upper boundary. Readers can continue after cursor and
+boundary rows are deleted. Later candidates require their own captured input.
+Parent and CAS identity checks reject obsolete windows. Discovery reads metadata
+only and does not grant authority or retain bytes.
+
+Claimed work execution, durable per-parent delivery and retry state, completion
+wakes and automatic forward producers remain pending. Independent delivery
+retries are required so an unavailable tenant cannot block the rest of a
+listing's fan-out.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

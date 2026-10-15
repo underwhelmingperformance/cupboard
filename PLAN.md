@@ -7417,7 +7417,12 @@ build traces available from a cupboard cache.
       epochs, prior progress, readiness and the retained capture floor fence the
       checkpoint. Payloads remain available after their input events are
       removed. A cursor behind the retained floor is reported as expired. Source
-      fan-out, claimed work execution, cache adoption delivery, shared
+      discovery now opens typed fixed windows for a parent's listing revisions,
+      a listing's current parents and a repaired CAS digest's reverse facts.
+      Indexed pages select at most 32 candidates. Parent hints refresh actual
+      source metadata before opening a window. Replaced parents, removed facts
+      and mismatched CAS incarnations invalidate a window. Claimed work
+      execution, durable target enrolment, cache adoption delivery, shared
       completion wakes and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
