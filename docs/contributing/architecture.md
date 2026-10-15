@@ -108,8 +108,8 @@ Retry does not change terminal counters. Up to eight unstaged admissions can
 coexist with one borrowed admission for each of the pool's eight physical
 stages. Borrowing a sealed stage reserves no new bytes, so full unstaged slots
 do not prevent its promotion. A capacity refusal keeps the task pending and the
-job due without releasing unfinished staging bytes. Capacity-release wakes and
-producer activation remain pending.
+job due without releasing unfinished staging bytes. Producer activation remains
+pending.
 
 The listing executor reserves an output buffer before calling the tenant
 preparation RPC. Preparation attempts shared-fact reuse and sealed-stage
@@ -155,7 +155,16 @@ the earliest job deadline and reconcile cron eligibility. Staging mutations arm
 both job and cleanup deadlines. The shared alarm scheduler gives dispatch one
 bounded turn, and cron invokes the same dispatcher to recover lost alarms.
 Suspended tenants keep their projected deadline for reactivation, but do not arm
-job alarms or dispatch messages. Capacity-release wakes remain pending.
+job alarms or dispatch messages.
+
+Capacity refusals record the job's wait time and required bytes or reuse slot.
+An indexed lookup selects at most eight oldest waiters whose requirements fit
+current capacity. Admission release, cancellation and successful physical
+staging cleanup make those jobs due in the same SQLite transaction. Retired
+staging remains charged until deletion succeeds. Waking a job preserves its wait
+time in the dispatch order; admission still rechecks the current capacity. Each
+dispatch pass also wakes another bounded batch if capacity remains available.
+Cleanup RPCs arm the resulting job deadline and reconcile cron recovery.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a

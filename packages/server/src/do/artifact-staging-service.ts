@@ -23,6 +23,7 @@ import { ArtifactTooLargeError } from '../errors.ts';
 import { type R2ObjectKey } from '../http/http.ts';
 
 import { ArtifactAdmissionService } from './artifact-admission-service.ts';
+import { ArtifactCapacityService } from './artifact-capacity-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import type { ServerContext } from './context.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
@@ -231,11 +232,17 @@ export class ArtifactStagingService {
 		);
 	}
 	private acknowledgeCleanupInSection(row: Stage): number {
-		return this.context.db
-			.delete(schema.artifactStages)
-			.where(this.cleanupFilter(row))
-			.returning({ id: schema.artifactStages.id })
-			.all().length;
+		return this.context.db.transaction(() => {
+			const removed = this.context.db
+				.delete(schema.artifactStages)
+				.where(this.cleanupFilter(row))
+				.returning({ id: schema.artifactStages.id })
+				.all().length;
+			if (removed > 0) {
+				new ArtifactCapacityService(this.context).wakeInSection();
+			}
+			return removed;
+		});
 	}
 	private deferCleanupInSection(row: Stage): void {
 		const nextCleanupAt = isoTimestamp(new Date(Date.now() + cleanupRetryMs));

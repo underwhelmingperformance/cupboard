@@ -26,6 +26,7 @@ import { and, asc, eq, gt, lt, lte, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 
+import { ArtifactCapacityService } from './artifact-capacity-service.ts';
 import type { ServerContext } from './context.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 
@@ -177,6 +178,7 @@ export class ArtifactJobService {
 				.where(eq(schema.artifactJobs.id, task.jobId))
 				.run();
 			this.completeIfReady(task.jobId);
+			new ArtifactCapacityService(this.context).wakeInSection();
 		});
 	}
 	private pending(id: ArtifactJobId): boolean {
@@ -750,15 +752,25 @@ export class ArtifactJobService {
 		if (job?.state !== 'running') {
 			return false;
 		}
-		this.context.db
-			.update(schema.artifactJobs)
-			.set({
-				state: 'cancelled',
-				generation: artifactJobGenerationSchema.parse(job.generation + 1),
-				updatedAt: isoTimestamp(new Date())
-			})
-			.where(eq(schema.artifactJobs.id, id))
-			.run();
+		this.context.db.transaction(() => {
+			this.context.db
+				.update(schema.artifactJobs)
+				.set({
+					state: 'cancelled',
+					capacityWaitAt: sql`null`,
+					capacityWaitBytes: 0,
+					capacityWaitStaged: false,
+					generation: artifactJobGenerationSchema.parse(job.generation + 1),
+					updatedAt: isoTimestamp(new Date())
+				})
+				.where(eq(schema.artifactJobs.id, id))
+				.run();
+			this.context.db
+				.delete(schema.artifactAdmissions)
+				.where(eq(schema.artifactAdmissions.jobId, id))
+				.run();
+			new ArtifactCapacityService(this.context).wakeInSection();
+		});
 		return true;
 	}
 	resumeInSection(id: ArtifactJobId): boolean {
@@ -776,6 +788,9 @@ export class ArtifactJobService {
 			.update(schema.artifactJobs)
 			.set({
 				state: 'running',
+				capacityWaitAt: sql`null`,
+				capacityWaitBytes: 0,
+				capacityWaitStaged: false,
 				nextDispatchAt: Date.now(),
 				generation: artifactJobGenerationSchema.parse(job.generation + 1),
 				updatedAt: isoTimestamp(new Date())

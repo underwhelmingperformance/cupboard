@@ -41,3 +41,8 @@ export const artifactStagingLimits = {
 	reservations: 8,
 	bytes: 128 * 1024 * 1024
 } as const;
+
+export const artifactAdmissionLimits = {
+	unstaged: 8,
+	total: 8 + artifactStagingLimits.reservations
+} as const;

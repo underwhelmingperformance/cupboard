@@ -88,6 +88,7 @@ import m0085 from './0085_artifact_staging.sql';
 import m0086 from './0086_artifact_job_dispatch.sql';
 import m0087 from './0087_artifact_admission.sql';
 import m0088 from './0088_artifact_task_retry.sql';
+import m0089 from './0089_artifact_capacity_wakes.sql';
 
 export default {
 	journal,
@@ -180,6 +181,7 @@ export default {
 		m0085,
 		m0086,
 		m0087,
-		m0088
+		m0088,
+		m0089
 	}
 };

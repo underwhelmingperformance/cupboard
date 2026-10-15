@@ -624,6 +624,13 @@
 			"when": 1792023281779,
 			"tag": "0088_artifact_task_retry",
 			"breakpoints": true
+		},
+		{
+			"idx": 89,
+			"version": "6",
+			"when": 1792026957243,
+			"tag": "0089_artifact_capacity_wakes",
+			"breakpoints": true
 		}
 	]
 }

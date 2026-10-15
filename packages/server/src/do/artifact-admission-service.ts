@@ -16,6 +16,7 @@ import { and, asc, desc, eq, lte } from 'drizzle-orm';
 import {
 	type ArtifactAdmission,
 	artifactAdmissionIdSchema,
+	artifactAdmissionLimits,
 	type ArtifactAdmissionReservation,
 	artifactAdmissionSchema,
 	artifactStagingLimits,
@@ -24,19 +25,13 @@ import {
 import { type ArtifactStageId } from '../blob/artifact-staging.ts';
 import * as schema from '../db/schema.ts';
 
+import { ArtifactCapacityService } from './artifact-capacity-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import type { ServerContext } from './context.ts';
 
 const queuedLeaseMs = 15 * 60 * 1000;
-const maximumUnstagedAdmissions = 8;
-const maximumAdmissions =
-	maximumUnstagedAdmissions + artifactStagingLimits.reservations;
+
 type AdmissionRow = typeof schema.artifactAdmissions.$inferSelect;
-interface StagingCapacity {
-	readonly reservations: number;
-	readonly bytes: number;
-	readonly retryAt?: IsoTimestamp;
-}
 
 export class ArtifactAdmissionService {
 	constructor(private readonly context: ServerContext) {}
@@ -96,6 +91,18 @@ export class ArtifactAdmissionService {
 			? row
 			: undefined;
 	}
+	private removeInSection(id: ArtifactAdmission['id']): void {
+		this.context.db.transaction(() => {
+			const removed = this.context.db
+				.delete(schema.artifactAdmissions)
+				.where(eq(schema.artifactAdmissions.id, id))
+				.returning({ id: schema.artifactAdmissions.id })
+				.all();
+			if (removed.length > 0) {
+				new ArtifactCapacityService(this.context).wakeInSection();
+			}
+		});
+	}
 	private live(row: AdmissionRow): AdmissionRow | undefined {
 		const current = this.current(row);
 		if (current !== undefined) {
@@ -108,10 +115,7 @@ export class ArtifactAdmissionService {
 			}
 			return current;
 		}
-		this.context.db
-			.delete(schema.artifactAdmissions)
-			.where(eq(schema.artifactAdmissions.id, row.id))
-			.run();
+		this.removeInSection(row.id);
 		return;
 	}
 	private rows(): AdmissionRow[] {
@@ -122,7 +126,7 @@ export class ArtifactAdmissionService {
 				asc(schema.artifactAdmissions.expiresAt),
 				asc(schema.artifactAdmissions.id)
 			)
-			.limit(maximumAdmissions + 1)
+			.limit(artifactAdmissionLimits.total + 1)
 			.all()
 			.flatMap((row) => {
 				const current = this.live(row);
@@ -168,43 +172,12 @@ export class ArtifactAdmissionService {
 			.get()?.id;
 	}
 
-	stagingCapacityInSection(claim?: ArtifactTaskClaim): StagingCapacity {
-		const stages = this.context.db
-			.select({
-				id: schema.artifactStages.id,
-				bytes: schema.artifactStages.maximumBytes,
-				expiresAt: schema.artifactStages.expiresAt,
-				cleanupAt: schema.artifactStages.nextCleanupAt,
-				state: schema.artifactStages.state
-			})
-			.from(schema.artifactStages)
-			.orderBy(
-				asc(schema.artifactStages.createdAt),
-				asc(schema.artifactStages.id)
+	stagingCapacityInSection(claim?: ArtifactTaskClaim) {
+		return new ArtifactCapacityService(this.context).stagingInSection(
+			this.rows().filter(
+				(row) => claim === undefined || !this.owned(row, claim)
 			)
-			.limit(artifactStagingLimits.reservations + 1)
-			.all();
-		const admissions = this.rows().filter(
-			(row) => claim === undefined || !this.owned(row, claim)
 		);
-		const staged = new Set(stages.map((row) => row.id));
-		const queued = admissions.filter(
-			(row) =>
-				row.maximumBytes > 0 &&
-				(row.stageId === null || !staged.has(row.stageId))
-		);
-		return {
-			reservations: stages.length + queued.length,
-			bytes:
-				stages.reduce((sum, row) => sum + row.bytes, 0) +
-				queued.reduce((sum, row) => sum + row.maximumBytes, 0),
-			retryAt: [
-				...stages.map((row) =>
-					row.state === 'retired' ? row.cleanupAt : row.expiresAt
-				),
-				...queued.map((row) => row.expiresAt)
-			].toSorted(byCodeUnit)[0]
-		};
 	}
 	reserveInSection(
 		version: ArtifactJobVersion,
@@ -239,8 +212,9 @@ export class ArtifactAdmissionService {
 		const capacity = this.stagingCapacityInSection();
 		const unstaged = rows.filter((row) => row.stageId === null);
 		const isAdmissionLimitReached =
-			rows.length >= maximumAdmissions ||
-			(stageId === undefined && unstaged.length >= maximumUnstagedAdmissions);
+			rows.length >= artifactAdmissionLimits.total ||
+			(stageId === undefined &&
+				unstaged.length >= artifactAdmissionLimits.unstaged);
 		if (
 			isAdmissionLimitReached ||
 			(maximumBytes > 0 &&
@@ -253,6 +227,10 @@ export class ArtifactAdmissionService {
 			if (retryAt === undefined) {
 				throw new Error('The artifact admission capacity deadline is missing');
 			}
+			new ArtifactCapacityService(this.context).waitInSection(version, {
+				bytes: maximumBytes,
+				staged: stageId !== undefined
+			});
 			return { kind: 'capacity', retryAt };
 		}
 		const now = Date.now();
@@ -277,6 +255,7 @@ export class ArtifactAdmissionService {
 		if (inserted === undefined) {
 			throw new Error('The artifact admission was not created');
 		}
+		new ArtifactCapacityService(this.context).clearInSection(version);
 		return { kind: 'admitted', admission: this.envelope(inserted) };
 	}
 	requeueInSection(
@@ -298,6 +277,7 @@ export class ArtifactAdmissionService {
 					.delete(schema.artifactAdmissions)
 					.where(eq(schema.artifactAdmissions.taskId, claim.id))
 					.run();
+				new ArtifactCapacityService(this.context).wakeInSection();
 				return { kind: 'deferred', retryAt };
 			}
 			this.releaseForClaimInSection(claim);
@@ -358,10 +338,7 @@ export class ArtifactAdmissionService {
 			.where(eq(schema.artifactAdmissions.taskId, claim.id))
 			.get();
 		if (row !== undefined && this.owned(row, claim)) {
-			this.context.db
-				.delete(schema.artifactAdmissions)
-				.where(eq(schema.artifactAdmissions.id, row.id))
-				.run();
+			this.removeInSection(row.id);
 		}
 	}
 	protectedStageDeadlineInSection(

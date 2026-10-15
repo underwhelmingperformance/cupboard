@@ -86,6 +86,69 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('adds capacity wait metadata without changing predecessor artifact jobs', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-artifact-capacity'),
+			async (_instance, state) => {
+				await migrateThrough(state, 88);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_job(id,cache_id,cache_generation,definition,generation,state,discovered,next_dispatch_at,dispatch_revision,created_at,updated_at) VALUES ('job',1,1,?,1,'running',1,123456,7,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
+					JSON.stringify({
+						kind: 'listing',
+						generatorRevision: currentListingGeneratorRevision
+					})
+				);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_task(id,job_id,source_key,source,created_at,next_attempt_at) VALUES ('task','job','source',?,'2026-01-01T00:00:00.000Z','2026-01-01T01:00:00.000Z')",
+					JSON.stringify({
+						kind: 'nar',
+						storePathHash: 'a'.repeat(32),
+						generation: 1,
+						narHash: 'sha256:nar'
+					})
+				);
+				const before = {
+					jobs: state.storage.sql.exec('SELECT * FROM artifact_job').toArray(),
+					tasks: state.storage.sql.exec('SELECT * FROM artifact_task').toArray()
+				};
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 89)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 89)
+				);
+				const after = {
+					jobs: Array.from(
+						state.storage.sql.exec('SELECT * FROM artifact_job'),
+						(entry) => {
+							const { capacity_wait_at, ...row } = entry;
+							return { ...row, hasCapacityWait: capacity_wait_at !== null };
+						}
+					),
+					tasks: state.storage.sql.exec('SELECT * FROM artifact_task').toArray()
+				};
+				return { before, after, migrated, repeated };
+			}
+		);
+		expect(result).toStrictEqual({
+			before: result.before,
+			after: {
+				jobs: result.before.jobs.map((row) => ({
+					...row,
+					capacity_wait_bytes: 0,
+					capacity_wait_staged: 0,
+					hasCapacityWait: false
+				})),
+				tasks: result.before.tasks
+			},
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false }
+		});
+	});
+
 	it('makes predecessor artifact tasks immediately ready without changing their state', async () => {
 		const result = await runInDurableObject(
 			testServerFor('migration-artifact-retry'),

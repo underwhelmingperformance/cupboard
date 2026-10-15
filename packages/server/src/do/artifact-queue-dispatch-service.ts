@@ -9,6 +9,7 @@ import {
 } from '../routing/artifact-queue-message.ts';
 
 import { ArtifactAdmissionService } from './artifact-admission-service.ts';
+import { ArtifactCapacityService } from './artifact-capacity-service.ts';
 import {
 	type ArtifactJobDispatch,
 	ArtifactJobDispatchService
@@ -136,6 +137,7 @@ export class ArtifactQueueDispatchService {
 					dispatches.retryInSection(selection.dispatch);
 				}
 			}
+			new ArtifactCapacityService(this.context).wakeInSection();
 			return { selections, messages };
 		});
 	}

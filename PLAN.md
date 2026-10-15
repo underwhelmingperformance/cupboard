@@ -7278,8 +7278,14 @@ build traces available from a cupboard cache.
       message is acknowledged. Staging-capacity refusals remain immediately
       eligible, while other transient outcomes defer without fresh generation
       credits. RPC failures retain transport retry and persisted recovery;
-      cancellation starts no new retry RPC. Capacity-release wakes remain
-      pending.
+      cancellation starts no new retry RPC. Capacity release now wakes at most
+      eight oldest eligible waiting jobs through an index on their capacity
+      requirement and wait time. Cancellation releases queued admissions;
+      staging remains charged until physical deletion succeeds. Waiter wakes
+      commit with the release and preserve fair dispatch order. Dispatch passes
+      continue bounded wakes while capacity remains available. Shared-fact
+      admission at full staging capacity, shared D1 projections, activation and
+      throughput benchmarks remain pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last
       progress and paged failures. The total remains unknown until discovery

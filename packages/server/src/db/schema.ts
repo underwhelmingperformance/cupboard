@@ -1260,6 +1260,11 @@ export const artifactJobs = sqliteTable(
 		}).notNull(),
 		nextDispatchAt: integer('next_dispatch_at').notNull().default(0),
 		dispatchRevision: integer('dispatch_revision').notNull().default(0),
+		capacityWaitAt: integer('capacity_wait_at'),
+		capacityWaitBytes: integer('capacity_wait_bytes').notNull().default(0),
+		capacityWaitStaged: integer('capacity_wait_staged', { mode: 'boolean' })
+			.notNull()
+			.default(false),
 		discoveryComplete: integer('discovery_complete', { mode: 'boolean' })
 			.notNull()
 			.default(false),
@@ -1280,6 +1285,15 @@ export const artifactJobs = sqliteTable(
 			table.nextDispatchAt,
 			table.id
 		),
+		index('artifact_job_capacity_idx')
+			.on(
+				table.state,
+				table.capacityWaitBytes,
+				table.capacityWaitStaged,
+				table.capacityWaitAt,
+				table.id
+			)
+			.where(sql`${table.capacityWaitAt} IS NOT NULL`),
 		check('artifact_job_generation_check', sql`${table.generation} >= 1`),
 		check(
 			'artifact_job_progress_check',

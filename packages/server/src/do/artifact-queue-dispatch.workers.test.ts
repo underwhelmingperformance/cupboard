@@ -7,14 +7,17 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
+	artifactJobIdSchema,
 	type ArtifactJobVersion,
 	artifactTaskOwnerSchema
 } from '@cupboard/protocol/artifact-jobs';
 import { currentListingGeneratorRevision } from '@cupboard/protocol/artifacts';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env as tenantEnv } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { and, eq, lte } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
@@ -42,11 +45,13 @@ import {
 } from '../test-support.ts';
 
 import { ArtifactAdmissionService } from './artifact-admission-service.ts';
+import { ArtifactCapacityService } from './artifact-capacity-service.ts';
 import { ArtifactJobDispatchService } from './artifact-job-dispatch-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import { ArtifactQueueDispatchService } from './artifact-queue-dispatch-service.ts';
 import { ArtifactStagingService } from './artifact-staging-service.ts';
 import { type ServerContext } from './context.ts';
+import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
 import { maintenancePassCursorKey } from './server.ts';
 
@@ -500,6 +505,396 @@ describe('artifact queue dispatch', () => {
 				result: { selectedJobs: 2, sent: 2, failed: 0 },
 				jobs: jobs.map((job) => job.id).toSorted(byCodeUnit),
 				uniqueTasks: 2
+			});
+		}));
+
+	it.each(['finish', 'defer'] as const)(
+		'wakes another waiting job immediately when %s releases the last admission',
+		(operation) =>
+			withoutAlarmArming(async () => {
+				const jobs = await fixture(3, 1);
+				const initial: ArtifactQueueMessage[] = [];
+				await dispatch((messages) => {
+					initial.push(...messages);
+				});
+				const waiting = jobs.find((job) =>
+					initial.every((message) => message.job.id !== job.id)
+				);
+				const admission = initial[0]?.admission;
+				if (waiting === undefined || admission === undefined) {
+					throw new Error('The capacity release fixture is missing');
+				}
+				const claimed = await currentServer().claimAdmittedArtifactTask(
+					admission,
+					crypto.randomUUID(),
+					'listing'
+				);
+				if (claimed.kind !== 'claimed') {
+					throw new Error('The capacity release fixture was not claimed');
+				}
+				const now = Date.now();
+				const wake = await runInDurableObject(
+					currentServer(),
+					async (instance) => {
+						const alarm = vi.spyOn(instance.context.ctx.storage, 'setAlarm');
+						try {
+							if (operation === 'finish') {
+								await instance.finishArtifactTask(claimed.claim, 'failed');
+							} else {
+								await instance.requeueArtifactTaskWithDeadline(
+									claimed.claim,
+									isoTimestamp(new Date(now + 60_000))
+								);
+							}
+							const projection = await instance.context.d1
+								.select()
+								.from(d1Schema.tenantMaintenanceEligibility)
+								.get();
+							return {
+								at: new ArtifactJobDispatchService(
+									instance.context
+								).nextAtInSection(),
+								alarms: alarm.mock.calls,
+								projection: projection?.nextWakeAt
+							};
+						} finally {
+							alarm.mockRestore();
+						}
+					}
+				);
+				const sent: ArtifactQueueMessage[] = [];
+				const result = await dispatch((messages) => {
+					sent.push(...messages);
+				});
+				expect({
+					wake,
+					result,
+					jobs: sent.map((message) => message.job)
+				}).toStrictEqual({
+					wake: {
+						at: now,
+						alarms: [[now]],
+						projection: new Date(0).toISOString()
+					},
+					result: { selectedJobs: 1, sent: 1, failed: 0 },
+					jobs: [waiting]
+				});
+			})
+	);
+
+	it.each(['finish', 'cancel'] as const)(
+		'rolls back %s and released capacity when the waiter wake cannot commit',
+		(operation) =>
+			withoutAlarmArming(async () => {
+				await fixture(3, 1);
+				const sent: ArtifactQueueMessage[] = [];
+				await dispatch((messages) => {
+					sent.push(...messages);
+				});
+				const admission = sent[0]?.admission;
+				if (admission === undefined) {
+					throw new Error('The rollback fixture was not admitted');
+				}
+				await inSection((context) => {
+					const jobs = new ArtifactJobService(context);
+					const claim = new ArtifactAdmissionService(context).claimInSection(
+						admission,
+						artifactTaskOwnerSchema.parse(crypto.randomUUID())
+					);
+					if (claim === undefined) {
+						throw new Error('The rollback fixture was not claimed');
+					}
+					const snapshot = () => ({
+						jobs: context.db.select().from(schema.artifactJobs).all(),
+						tasks: context.db.select().from(schema.artifactTasks).all(),
+						admissions: context.db
+							.select()
+							.from(schema.artifactAdmissions)
+							.all()
+					});
+					const before = snapshot();
+					const release = () => {
+						if (operation === 'finish') {
+							expect(jobs.finishInSection(claim, 'failed')).toBe(true);
+							return;
+						}
+						expect(jobs.cancelInSection(claim.jobId)).toBe(true);
+					};
+					context.ctx.storage.sql.exec(
+						"CREATE TRIGGER refuse_capacity_wake BEFORE UPDATE OF capacity_wait_at ON artifact_job WHEN OLD.capacity_wait_at IS NOT NULL AND NEW.capacity_wait_at IS NULL BEGIN SELECT RAISE(ABORT, 'capacity wake refused'); END"
+					);
+					try {
+						expect(release).toThrow('capacity wake refused');
+					} finally {
+						context.ctx.storage.sql.exec('DROP TRIGGER refuse_capacity_wake');
+					}
+					expect(snapshot()).toStrictEqual(before);
+					release();
+					expect(
+						new ArtifactJobDispatchService(context).nextAtInSection()
+					).toBe(Date.now());
+				});
+				const send = vi.fn<Parameters<typeof dispatch>[0]>();
+				const after = await dispatch(send);
+				expect(send).toHaveBeenCalledOnce();
+				expect(after).toStrictEqual({ selectedJobs: 1, sent: 1, failed: 0 });
+			})
+	);
+
+	it('keeps retired staging charged through a failed delete and wakes another job after physical cleanup', () =>
+		withoutAlarmArming(async () => {
+			const jobs = await fixture(3, 1);
+			const sent: ArtifactQueueMessage[] = [];
+			await dispatch((messages) => {
+				sent.push(...messages);
+			});
+			const waiting = jobs.find((job) =>
+				sent.every((message) => message.job.id !== job.id)
+			);
+			if (waiting === undefined) {
+				throw new Error('The staging waiter is missing');
+			}
+			const blockedAt = Date.now();
+			const leases = await inSection(async (context) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const staging = new ArtifactStagingService(context);
+				const leases = [];
+				for (const message of sent) {
+					if (message.admission === undefined) {
+						throw new Error('The staging fixture was not admitted');
+					}
+					const claim = admissions.claimInSection(
+						message.admission,
+						artifactTaskOwnerSchema.parse(crypto.randomUUID())
+					);
+					if (claim === undefined) {
+						throw new Error('The staging fixture was not claimed');
+					}
+					const reserved = await staging.reserveInSection(claim);
+					if (reserved.kind !== 'reserved') {
+						throw new Error('The staging fixture could not reserve bytes');
+					}
+					leases.push(reserved.lease);
+				}
+				const first = leases[0];
+				if (first === undefined) {
+					throw new Error('The first staging fixture is missing');
+				}
+				const bytes = new TextEncoder().encode('capacity cleanup');
+				const upload = await context.env.BLOBS.createMultipartUpload(first.key);
+				staging.registerMultipartInSection(first, upload.uploadId);
+				const part = await upload.uploadPart(1, bytes);
+				await upload.complete([part]);
+				await staging.sealInSection(first, upload.uploadId, {
+					digest: sha256HexDigestSchema.parse(await sha256HexBytes(bytes)),
+					size: bytes.byteLength
+				});
+				return leases;
+			});
+			const first = leases[0];
+			if (first === undefined) {
+				throw new Error('The sealed staging fixture is missing');
+			}
+			await currentServer().finishArtifactTask(first.claim, 'failed');
+			await currentServer().retireArtifactStaging(first);
+			await inSection((context) => {
+				context.db
+					.update(schema.artifactJobs)
+					.set({ nextDispatchAt: blockedAt + 120_000 })
+					.where(eq(schema.artifactJobs.id, waiting.id))
+					.run();
+			});
+			const failed = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const remove = vi
+						.spyOn(instance.context.env.BLOBS, 'delete')
+						.mockRejectedValueOnce(new Error('temporary delete failure'));
+					try {
+						return {
+							collection: await instance.collectArtifactStaging(),
+							capacity: new ArtifactAdmissionService(
+								instance.context
+							).stagingCapacityInSection(),
+							nextAt: new ArtifactJobDispatchService(
+								instance.context
+							).nextAtInSection()
+						};
+					} finally {
+						remove.mockRestore();
+					}
+				}
+			);
+			const retryAt = isoTimestamp(new Date(blockedAt + 30_000));
+			expect(failed).toStrictEqual({
+				collection: { removed: 0, pending: true, nextWakeAt: retryAt },
+				capacity: { reservations: 2, bytes: 128 * 1024 * 1024, retryAt },
+				nextAt: Date.parse(first.claim.leaseExpiresAt)
+			});
+			vi.setSystemTime(new Date(retryAt));
+			const after = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const alarm = vi.spyOn(instance.context.ctx.storage, 'setAlarm');
+					try {
+						const collection = await instance.collectArtifactStaging();
+						return {
+							removed: collection.removed,
+							at: new ArtifactJobDispatchService(
+								instance.context
+							).nextAtInSection(),
+							alarms: alarm.mock.calls
+						};
+					} finally {
+						alarm.mockRestore();
+					}
+				}
+			);
+			const delivered: ArtifactQueueMessage[] = [];
+			await dispatch((messages) => {
+				delivered.push(...messages);
+			});
+			expect({
+				after,
+				jobs: delivered.map((message) => message.job)
+			}).toStrictEqual({
+				after: {
+					removed: 1,
+					at: blockedAt,
+					alarms: [[Date.parse(first.claim.leaseExpiresAt)], [blockedAt]]
+				},
+				jobs: [waiting]
+			});
+		}));
+
+	it('wakes at most eight oldest capacity waiters with indexed selection', () =>
+		withoutAlarmArming(async () => {
+			const versions = await fixture(20, 1);
+			await inSection((context) => {
+				const admissions = new ArtifactAdmissionService(context);
+				const accepted = [];
+				for (const job of versions) {
+					vi.setSystemTime(new Date(Date.now() + 1));
+					const task = context.db
+						.select()
+						.from(schema.artifactTasks)
+						.where(eq(schema.artifactTasks.jobId, job.id))
+						.get();
+					if (task === undefined) {
+						throw new Error('The bounded wake task is missing');
+					}
+					const result = admissions.reserveInSection(job, task.id);
+					if (result.kind === 'admitted') {
+						accepted.push(result.admission);
+					}
+				}
+				context.db
+					.update(schema.artifactJobs)
+					.set({ nextDispatchAt: Date.now() + 120_000 })
+					.run();
+				const first = accepted[0];
+				if (first === undefined) {
+					throw new Error('The bounded wake admission is missing');
+				}
+				const claim = admissions.claimInSection(
+					first,
+					artifactTaskOwnerSchema.parse(crypto.randomUUID())
+				);
+				if (claim === undefined) {
+					throw new Error('The bounded wake claim is missing');
+				}
+				const execute = vi.spyOn(context.ctx.storage.sql, 'exec');
+				let captured: readonly [string, ...unknown[]] | undefined;
+				try {
+					new ArtifactJobService(context).finishInSection(claim, 'failed');
+					captured = execute.mock.calls.find(([query]) =>
+						query.includes('order by "artifact_job"."capacity_wait_at"')
+					);
+				} finally {
+					execute.mockRestore();
+				}
+				if (captured === undefined) {
+					throw new Error('The capacity waiter query was not captured');
+				}
+				const [query, ...rawBindings] = captured;
+				const bindings = z
+					.array(z.union([z.string(), z.number()]))
+					.parse(rawBindings);
+				const plan = Array.from(
+					context.ctx.storage.sql.exec<{ detail: string }>(
+						`EXPLAIN QUERY PLAN ${query}`,
+						...bindings
+					),
+					(row) => row.detail
+				);
+				const now = Date.now();
+				const due = context.db
+					.select({ id: schema.artifactJobs.id })
+					.from(schema.artifactJobs)
+					.where(
+						and(
+							eq(schema.artifactJobs.state, 'running'),
+							lte(schema.artifactJobs.nextDispatchAt, now)
+						)
+					)
+					.orderBy(schema.artifactJobs.nextDispatchAt, schema.artifactJobs.id)
+					.all();
+				expect({ due, plan }).toStrictEqual({
+					due: versions.slice(2, 10).map((job) => ({ id: job.id })),
+					plan: [
+						'SEARCH artifact_job USING INDEX artifact_job_capacity_idx (state=? AND capacity_wait_bytes=? AND capacity_wait_staged=? AND capacity_wait_at>?)'
+					]
+				});
+			});
+		}));
+
+	it('checks for capacity waiters at constant cost without reading idle job backlogs', () =>
+		withoutAlarmArming(async () => {
+			await fixture(3, 1);
+			await inSection(async (context) => {
+				const measure = async () => {
+					const execute = vi.spyOn(context.ctx.storage.sql, 'exec');
+					let cost: DatabaseCost | undefined;
+					try {
+						const woken = await withRequestCost(
+							() =>
+								Promise.resolve(
+									new ArtifactCapacityService(context).wakeInSection()
+								),
+							(observed) => {
+								cost = observed;
+							}
+						);
+						return { woken, cost, queries: execute.mock.calls.length };
+					} finally {
+						execute.mockRestore();
+					}
+				};
+				const small = await measure();
+				const template = context.db.select().from(schema.artifactJobs).get();
+				if (template === undefined) {
+					throw new Error('The idle job fixture is missing');
+				}
+				for (let index = 0; index < 1000; index += 1) {
+					context.db
+						.insert(schema.artifactJobs)
+						.values({
+							...template,
+							id: artifactJobIdSchema.parse(crypto.randomUUID()),
+							discovered: 0,
+							discoveryComplete: false
+						})
+						.run();
+				}
+				const large = await measure();
+				expect({ small, large }).toStrictEqual({
+					small: {
+						woken: 0,
+						cost: { rowsRead: 0, rowsWritten: 0 },
+						queries: 1
+					},
+					large: { woken: 0, cost: { rowsRead: 0, rowsWritten: 0 }, queries: 1 }
+				});
 			});
 		}));
 

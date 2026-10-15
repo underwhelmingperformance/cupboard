@@ -3452,9 +3452,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return this.metered('artifact-stage-collect', () =>
 			this.withMaintenanceEligibility(async () => {
 				const result = await new ArtifactStagingService(this.context).collect();
-				await this.context.criticalSection(() =>
-					this.armArtifactStagingCleanupInSection()
-				);
+				await this.context.criticalSection(async () => {
+					await this.armArtifactStagingCleanupInSection();
+					await this.armArtifactDispatchInSection();
+				});
 				return result;
 			})
 		);
