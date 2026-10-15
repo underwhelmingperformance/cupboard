@@ -7227,7 +7227,11 @@ build traces available from a cupboard cache.
 ### Durable backfills
 
 - [ ] Discover referenced unique NARs with a keyset cursor and catch-up pass.
-      Capture new publications before starting historical backfills.
+      Capture new publications before starting historical backfills. The shared
+      catalogue reader now pages NAR identities directly, checks retention and
+      live source incarnations, and advances through bounded empty pages. It
+      does not enumerate tenants or allocate work per reference. Durable job
+      cursors, forward capture and catch-up integration remain pending.
 - [ ] Use D1 job and task records with expiring claims, source-incarnation
       fences and resumable staging cleanup. Queue messages are wake-up hints;
       persisted state decides whether work can run and complete. Staging RPCs

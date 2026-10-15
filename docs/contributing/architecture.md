@@ -71,11 +71,21 @@ continuation after a terminal task outcome. Admitted messages claim only their
 specific task, make the job durably due after completion and request a dispatch
 wake. Admitted transient outcomes use durable retry RPCs before the spent
 message is acknowledged. The consumer requests immediate requeue after a
-staging-capacity refusal and a 60-second deferral for other transient outcomes.
-Delayed tasks reserve no fresh generation credits. The dispatcher delivers
-replacement admissions and recovers failed sends. RPC failure or an invalid
-reply uses transport retry and persisted deadlines for recovery. Cancellation
-starts no new retry RPC. Discovery and initial dispatch remain disabled.
+staging-capacity refusal, uses the recorded shared lease deadline for generation
+waiters and requests a 60-second deferral for other transient outcomes. Delayed
+tasks reserve no fresh generation credits. The dispatcher delivers replacement
+admissions and recovers failed sends. RPC failure or an invalid reply uses
+transport retry and persisted deadlines for recovery. Cancellation starts no new
+retry RPC. Discovery and initial dispatch remain disabled.
+
+The shared NAR catalogue reader scans the NAR hash key in bounded pages before
+filtering for retention and a registered live incarnation. Each page examines at
+most 33 objects, including lookahead, and returns at most 32 sources. The cursor
+advances past scanned objects even if none is eligible. Indexed retention probes
+do not enumerate tenants or duplicate a NAR for each reference. Discovery grants
+no cache authority; an executor must recheck the captured source incarnation and
+publication authority. Durable global job cursors, forward capture and catch-up
+integration remain pending.
 
 The shared D1 generation store reserves one computation lease per NAR and
 generator revision across tenants. Claim acquisition requires an active tenant
