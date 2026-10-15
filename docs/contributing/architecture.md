@@ -135,8 +135,16 @@ candidates, then checkpoints at most 32. Terminal gaps still advance the cursor.
 Insertion reads current task state and preserves existing delivery epochs and
 reservations. Cursor and boundary fences reject delayed checkpoints. New job
 writes are captured by triggers, and resume enrols a preceding cancelled job
-without a ticket. The migration creates empty dispatch storage. Discovery of
-older running jobs and queue integration remain pending.
+without a ticket. The migrations create empty dispatch storage.
+
+Global catalogue recovery persists a fixed upper job ID and keyset cursor in a
+singleton checkpoint. Each pass reads at most 33 job identities and checkpoints
+32 candidates before filtering current job state. Terminal gaps advance the
+cursor. Ticket insertion rechecks the job's current generation and preserves
+existing reservations. Enrolment and cursor progress commit atomically; delayed
+pages cannot regress the cursor, and a lost reply resumes from durable progress.
+Deleted cursor rows and upper boundaries do not prevent completion. New jobs are
+captured by the dispatch triggers. Queue integration remains pending.
 
 An append-only capture sequence records retained, registered live NAR sources.
 Indexed triggers append an event when the first reference arrives or a retained

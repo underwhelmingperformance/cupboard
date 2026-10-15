@@ -1269,6 +1269,25 @@ export const sharedListingJobDispatch = sqliteTable(
 	]
 );
 
+export const sharedListingDispatchSeed = sqliteTable(
+	'shared_listing_dispatch_seed',
+	{
+		id: integer('id').primaryKey(),
+		after: text('after').$type<ArtifactJobId>(),
+		through: text('through').$type<ArtifactJobId>(),
+		isComplete: integer('is_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false)
+	},
+	(table) => [
+		check('shared_listing_dispatch_seed_id_check', sql`${table.id} = 1`),
+		check(
+			'shared_listing_dispatch_seed_cursor_check',
+			sql`${table.isComplete} IN (0,1) AND (${table.after} IS NULL OR (${table.through} IS NOT NULL AND ${table.after} <= ${table.through})) AND (${table.through} IS NOT NULL OR ${table.isComplete} = 1)`
+		)
+	]
+);
+
 export const sharedListingTask = sqliteTable(
 	'shared_listing_task',
 	{

@@ -7353,9 +7353,13 @@ build traces available from a cupboard cache.
       legacy seeding freezes a NAR-hash boundary, advances through fixed
       32-candidate pages and preserves newer delivery state. New jobs are
       captured transactionally; a preceding cancelled job is enrolled when it
-      resumes. Bounded discovery of the older job catalogue, queue routing,
-      cache adoption projections, shared completion wakes and producer
-      activation remain pending.
+      resumes. Global legacy-job enrolment now freezes a job-ID boundary and
+      checkpoints fixed 32-candidate pages before filtering state. Each atomic
+      batch rechecks current job generations and inserts only missing tickets.
+      Lost replies recover durable progress, delayed pages cannot regress the
+      cursor, and deleted cursor or boundary rows do not prevent completion.
+      Queue routing, cache adoption projections, shared completion wakes and
+      producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

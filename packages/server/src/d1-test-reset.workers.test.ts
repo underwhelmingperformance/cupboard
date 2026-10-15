@@ -19,6 +19,9 @@ import {
 it('clears shared D1 facts and restores the completed transition in one batch', async () => {
 	await env.CUPBOARD_DB.batch([
 		env.CUPBOARD_DB.prepare(
+			'INSERT INTO shared_listing_dispatch_seed (id, is_complete) VALUES (1, 1)'
+		),
+		env.CUPBOARD_DB.prepare(
 			"INSERT INTO tenant (id, status, owner_issuer, owner_subject, owner_audience, config_version, created_at) VALUES ('reset-tenant', 'active', 'issuer', 'subject', 'audience', 1, '2025-01-01T00:00:00.000Z')"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -140,6 +143,7 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		shared_listing_output_cleanup: 0,
 		shared_listing_job: 0,
 		shared_listing_job_dispatch: 0,
+		shared_listing_dispatch_seed: 0,
 		shared_listing_task: 0,
 		shared_listing_task_delivery: 0,
 		shared_listing_task_outcome: 0,

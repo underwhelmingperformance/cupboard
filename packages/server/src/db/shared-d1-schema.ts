@@ -26,6 +26,7 @@ export {
 	publication,
 	readableAttestationReference,
 	readableBlobReference,
+	sharedListingDispatchSeed,
 	sharedListingGeneration,
 	sharedListingJob,
 	sharedListingJobDispatch,

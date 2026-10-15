@@ -131,7 +131,8 @@ describe('checkD1Migrations', () => {
 				'shared-listing-output-retirement',
 				'shared-listing-completion',
 				'shared-listing-task-delivery',
-				'shared-listing-dispatch'
+				'shared-listing-dispatch',
+				'shared-listing-dispatch-seed'
 			]
 		});
 	});
