@@ -104,16 +104,20 @@ describe('bounded artifact multipart writer', () => {
 		if (object === null) {
 			throw new Error('The completed fixture object is missing');
 		}
+		const stored = new Uint8Array(await object.arrayBuffer());
+		const expectedDigest = sha256HexDigestSchema.parse(
+			await sha256HexBytes(bytes)
+		);
 		expect({
 			measurement,
-			body: new Uint8Array(await object.arrayBuffer()),
+			body: { digest: await sha256HexBytes(stored), size: stored.byteLength },
 			pool: pool.state
 		}).toStrictEqual({
 			measurement: {
-				digest: sha256HexDigestSchema.parse(await sha256HexBytes(bytes)),
+				digest: expectedDigest,
 				size: bytes.byteLength
 			},
-			body: bytes,
+			body: { digest: expectedDigest, size: bytes.byteLength },
 			pool: { free: 1, allocations: 1 }
 		});
 		await env.BLOBS.delete(key);
