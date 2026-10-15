@@ -485,11 +485,11 @@ describe('attestation CAS lifecycle', () => {
 	});
 
 	it.each([
-		{ remaining: 'demoted references', demoted: 20 },
-		{ remaining: 'no references', demoted: 0 }
+		{ remaining: 'demoted references', demoted: 20, read: 1 },
+		{ remaining: 'no references', demoted: 0, read: 0 }
 	])(
-		"reads only the tenant's references to a bundle when $remaining remain",
-		async ({ demoted }) => {
+		"reads at most one of the tenant's references to a bundle when $remaining remain",
+		async ({ demoted, read }) => {
 			await provisionNamedTenant('acme');
 			const bytes = textEncoder.encode('widely shared bundle');
 			const removed = await fileAttestationReference({
@@ -570,10 +570,8 @@ describe('attestation CAS lifecycle', () => {
 				plan: plan.results.map((row) => row.detail)
 			}).toStrictEqual({
 				statements: 1,
-				rows: Array.from({ length: demoted }, () => ({
-					digest: removed.digest
-				})),
-				read: demoted,
+				rows: Array.from({ length: read }, () => ({ digest: removed.digest })),
+				read,
 				plan: [
 					'SEARCH attestation_ref_storage USING COVERING INDEX attestation_ref_digest_tenant_idx (digest=? AND tenant=?)'
 				]
