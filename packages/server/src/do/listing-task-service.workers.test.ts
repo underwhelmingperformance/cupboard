@@ -4,6 +4,7 @@ import {
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 import {
 	artifactJobGenerationSchema,
@@ -285,6 +286,14 @@ async function state(context: ServerContext, claim: ArtifactTaskClaim) {
 	};
 }
 
+function taskRetryState(context: ServerContext) {
+	return {
+		jobs: context.db.select().from(schema.artifactJobs).all(),
+		tasks: context.db.select().from(schema.artifactTasks).all(),
+		admissions: context.db.select().from(schema.artifactAdmissions).all()
+	};
+}
+
 function workerRpc(
 	overrides: Partial<ListingTaskWorkerDependencies['server']>
 ): ListingTaskWorkerDependencies['server'] {
@@ -406,6 +415,158 @@ describe('listing task workflow', () => {
 			} finally {
 				buffer.release();
 			}
+		}));
+
+	it('requeues one owned task idempotently through the trusted RPC', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture(undefined, true);
+			const first = await currentServer().requeueArtifactTask(claim);
+			if (first.kind !== 'admitted') {
+				throw new Error('The owned retry was not admitted');
+			}
+			const repeated = await currentServer().requeueArtifactTask(claim);
+			const pending = await inSection((context) =>
+				Promise.resolve({
+					admissions: context.db
+						.select()
+						.from(schema.artifactAdmissions)
+						.all()
+						.map((row) => row.id),
+					states: context.db
+						.select()
+						.from(schema.artifactTasks)
+						.all()
+						.map((row) => row.state),
+					progress: new ArtifactJobService(context).summaryInSection(
+						claim.jobId
+					)?.progress
+				})
+			);
+			expect({ repeated, pending }).toStrictEqual({
+				repeated: first,
+				pending: {
+					admissions: [first.admission.id],
+					states: ['pending', 'pending'],
+					progress: { discovered: 2, completed: 0, skipped: 0, failed: 0 }
+				}
+			});
+			const replacement = await currentServer().claimAdmittedArtifactTask(
+				first.admission,
+				crypto.randomUUID(),
+				'listing'
+			);
+			expect({
+				kind: replacement.kind,
+				taskId:
+					replacement.kind === 'claimed' ? replacement.claim.id : undefined,
+				oldRetry: await currentServer().requeueArtifactTask(claim)
+			}).toStrictEqual({
+				kind: 'claimed',
+				taskId: claim.id,
+				oldRetry: { kind: 'unavailable' }
+			});
+		}));
+
+	it.each(['suspended', 'offboarding', 'local-offboarding'] as const)(
+		'refuses the requeue RPC while the tenant is %s without changing task state',
+		(status) =>
+			withoutAlarmArming(async () => {
+				const claim = await fixture();
+				if (status === 'local-offboarding') {
+					await inSection((context) => {
+						context.offboarding = true;
+						return Promise.resolve();
+					});
+				} else {
+					await drizzle(env.CUPBOARD_DB)
+						.update(d1Schema.tenant)
+						.set({ status })
+						.where(eq(d1Schema.tenant.id, fixtureTenant));
+				}
+				const before = await inSection((context) =>
+					Promise.resolve(taskRetryState(context))
+				);
+				const result = await currentServer().requeueArtifactTask(claim);
+				const after = await inSection((context) =>
+					Promise.resolve(taskRetryState(context))
+				);
+				expect({ result, after }).toStrictEqual({
+					result: { kind: 'unavailable' },
+					after: before
+				});
+			})
+	);
+
+	it('rejects malformed ownership at the requeue RPC boundary', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			const before = await inSection((context) =>
+				Promise.resolve(taskRetryState(context))
+			);
+			await expect(
+				runInDurableObject(currentServer(), (instance) =>
+					instance.requeueArtifactTask(
+						Object.assign({}, claim, { extra: true })
+					)
+				)
+			).rejects.toThrow(/Unrecognized key/);
+			expect(
+				await inSection((context) => Promise.resolve(taskRetryState(context)))
+			).toStrictEqual(before);
+		}));
+
+	it('keeps a capacity-refused requeue RPC pending without releasing unsealed staging', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture(undefined, true);
+			const leases = await inSection(async (context) => {
+				const next = new ArtifactJobService(context).claimInSection(
+					claim.jobId,
+					artifactTaskOwnerSchema.parse(crypto.randomUUID())
+				).claim;
+				if (next === undefined) {
+					throw new Error('The capacity fixture sibling was not claimed');
+				}
+				const listings = new ListingTaskService(context);
+				return [
+					generationOf(await listings.prepareInSection(claim)).lease,
+					generationOf(await listings.prepareInSection(next)).lease
+				];
+			});
+			const result = await currentServer().requeueArtifactTask(claim);
+			const after = await inSection((context) =>
+				Promise.resolve({
+					stages: context.db
+						.select()
+						.from(schema.artifactStages)
+						.orderBy(schema.artifactStages.id)
+						.all()
+						.map((row) => row.id),
+					admissions: context.db.select().from(schema.artifactAdmissions).all(),
+					states: context.db
+						.select()
+						.from(schema.artifactTasks)
+						.all()
+						.map((row) => ({ id: row.id, state: row.state }))
+						.toSorted((a, b) => byCodeUnit(a.id, b.id)),
+					progress: new ArtifactJobService(context).summaryInSection(
+						claim.jobId
+					)?.progress
+				})
+			);
+			expect({ result, after }).toStrictEqual({
+				result: { kind: 'capacity', retryAt: claim.leaseExpiresAt },
+				after: {
+					stages: leases.map((lease) => lease.id).toSorted(byCodeUnit),
+					admissions: [],
+					states: leases
+						.map((lease, index) => ({
+							id: lease.claim.id,
+							state: index === 0 ? 'pending' : 'claimed'
+						}))
+						.toSorted((a, b) => byCodeUnit(a.id, b.id)),
+					progress: { discovered: 2, completed: 0, skipped: 0, failed: 0 }
+				}
+			});
 		}));
 
 	it('consumes an admitted listing without allowing its replay to claim a sibling task', () =>

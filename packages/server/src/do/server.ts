@@ -74,6 +74,7 @@ import migrations from '../../drizzle/migrations.js';
 import { type AccessClaims } from '../auth/auth.ts';
 import {
 	type ArtifactAdmission,
+	type ArtifactAdmissionReservation,
 	artifactAdmissionSchema
 } from '../blob/artifact-admission.ts';
 import {
@@ -3234,6 +3235,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	async requeueArtifactTask(
+		claim: ArtifactTaskClaim
+	): Promise<ArtifactAdmissionReservation> {
+		const parsedClaim = artifactTaskClaimSchema.parse(claim);
+		await this.initialise();
+		return this.metered('artifact-task-requeue', () =>
+			this.withArtifactDispatchWake(() =>
+				new ArtifactTaskRpcService(this.context).requeueInSection(parsedClaim)
+			)
+		);
+	}
+
 	async claimAdmittedArtifactTask(
 		admission: ArtifactAdmission,
 		owner: string,
@@ -4310,6 +4323,7 @@ function logRequestFinished(
 type MeteredMethod =
 	| 'artifact-job-dispatch'
 	| 'artifact-task-claim'
+	| 'artifact-task-requeue'
 	| 'artifact-job-dispatch-wake'
 	| 'artifact-task-finish'
 	| 'artifact-stage-register'

@@ -17,6 +17,18 @@ export const artifactAdmissionSchema = z.strictObject({
 });
 export type ArtifactAdmission = z.output<typeof artifactAdmissionSchema>;
 
+export const artifactAdmissionReservationSchema = z.discriminatedUnion('kind', [
+	z.strictObject({
+		kind: z.literal('admitted'),
+		admission: artifactAdmissionSchema
+	}),
+	z.strictObject({ kind: z.literal('capacity'), retryAt: isoTimestampSchema }),
+	z.strictObject({ kind: z.literal('unavailable') })
+]);
+export type ArtifactAdmissionReservation = z.output<
+	typeof artifactAdmissionReservationSchema
+>;
+
 export const artifactStagingLimits = {
 	reservations: 8,
 	bytes: 128 * 1024 * 1024

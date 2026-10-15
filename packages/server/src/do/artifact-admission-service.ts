@@ -16,6 +16,7 @@ import { and, asc, desc, eq, lte } from 'drizzle-orm';
 import {
 	type ArtifactAdmission,
 	artifactAdmissionIdSchema,
+	type ArtifactAdmissionReservation,
 	artifactAdmissionSchema,
 	artifactStagingLimits
 } from '../blob/artifact-admission.ts';
@@ -30,10 +31,6 @@ const maximumUnstagedAdmissions = 8;
 const maximumAdmissions =
 	maximumUnstagedAdmissions + artifactStagingLimits.reservations;
 type AdmissionRow = typeof schema.artifactAdmissions.$inferSelect;
-export type ArtifactAdmissionReservation =
-	| { readonly kind: 'admitted'; readonly admission: ArtifactAdmission }
-	| { readonly kind: 'capacity'; readonly retryAt: IsoTimestamp }
-	| { readonly kind: 'unavailable' };
 interface StagingCapacity {
 	readonly reservations: number;
 	readonly bytes: number;

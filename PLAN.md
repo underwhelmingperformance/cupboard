@@ -7238,9 +7238,10 @@ build traces available from a cupboard cache.
       including the gap between a replacement claim and adoption. Retention does
       not extend old producer authority. Recovery rechecks job, cache, source,
       kind and task generation; handover renews the bounded cleanup deadline.
-      Job dispatch now runs through bounded alarm turns and cron recovery. Queue
-      retry integration, shared D1 projections and producer activation remain
-      pending.
+      Job dispatch now runs through bounded alarm turns and cron recovery. The
+      trusted requeue RPC validates captured ownership and checks tenant status
+      before changing tasks. Queue retry integration, shared D1 projections and
+      producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
@@ -7269,8 +7270,9 @@ build traces available from a cupboard cache.
       Claim and terminal RPCs arm job deadlines and reconcile cron eligibility.
       Alarm turns and cron recovery now invoke the bounded dispatcher. Suspended
       tenants retain their projected deadline for reactivation without polling
-      job alarms. Targeted queue retry integration and capacity-release wakes
-      remain pending.
+      job alarms. Persist per-task retry deadlines so transient refusals do not
+      delay ready sibling tasks or cause immediate retry loops. Targeted queue
+      retry integration and capacity-release wakes remain pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last
       progress and paged failures. The total remains unknown until discovery

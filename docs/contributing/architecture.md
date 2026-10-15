@@ -89,13 +89,15 @@ progress.
 The retry service atomically returns an owned task to pending state and replaces
 its admission when capacity permits. It preserves the previous owner and claim
 generation so a repeated request after a lost reply returns the same admission.
-A newer claim fences the old request. Retry does not change terminal counters.
-Up to eight unstaged admissions can coexist with one borrowed admission for each
-of the pool's eight physical stages. Borrowing a sealed stage reserves no new
-bytes, so full unstaged slots do not prevent its promotion. A capacity refusal
-keeps the task pending and the job due without releasing unfinished staging
-bytes. Queue retry integration, capacity-release wakes and producer activation
-remain pending.
+A newer claim fences the old request. The trusted requeue RPC validates the
+captured claim and checks that the tenant remains active before changing task
+state. Its result uses the admission service's shared runtime schema. Retry does
+not change terminal counters. Up to eight unstaged admissions can coexist with
+one borrowed admission for each of the pool's eight physical stages. Borrowing a
+sealed stage reserves no new bytes, so full unstaged slots do not prevent its
+promotion. A capacity refusal keeps the task pending and the job due without
+releasing unfinished staging bytes. Queue retry integration, capacity-release
+wakes and producer activation remain pending.
 
 The listing executor reserves an output buffer before calling the tenant
 preparation RPC. Preparation attempts shared-fact reuse and sealed-stage

@@ -18,6 +18,7 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { type ArtifactAdmissionReservation } from '../blob/artifact-admission.ts';
 import { artifactStageIdSchema } from '../blob/artifact-staging.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
@@ -33,10 +34,7 @@ import {
 	withoutAlarmArming
 } from '../test-support.ts';
 
-import {
-	type ArtifactAdmissionReservation,
-	ArtifactAdmissionService
-} from './artifact-admission-service.ts';
+import { ArtifactAdmissionService } from './artifact-admission-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import { ArtifactStagingService } from './artifact-staging-service.ts';
 import type { ServerContext } from './context.ts';

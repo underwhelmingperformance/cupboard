@@ -2,13 +2,18 @@ import {
 	type ArtifactJobDefinition,
 	artifactJobDefinitionSchema,
 	type ArtifactJobVersion,
+	type ArtifactTaskClaim,
 	artifactTaskClaimSchema,
 	type ArtifactTaskOwner
 } from '@cupboard/protocol/artifact-jobs';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 
-import { type ArtifactAdmission } from '../blob/artifact-admission.ts';
+import {
+	type ArtifactAdmission,
+	type ArtifactAdmissionReservation,
+	artifactAdmissionReservationSchema
+} from '../blob/artifact-admission.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 
 import { ArtifactAdmissionService } from './artifact-admission-service.ts';
@@ -34,14 +39,9 @@ export type ArtifactTaskFailureOutcome = z.output<
 export class ArtifactTaskRpcService {
 	constructor(private readonly context: ServerContext) {}
 
-	async claimInSection(
-		version: ArtifactJobVersion,
-		owner: ArtifactTaskOwner,
-		expectedKind?: ArtifactJobDefinition['kind'],
-		admission?: ArtifactAdmission
-	): Promise<ArtifactTaskClaimRpcResult> {
+	private async activeTenant(): Promise<boolean> {
 		if (this.context.offboarding) {
-			return { kind: 'idle', pending: false };
+			return false;
 		}
 		const tenantId = this.context.requireTenant();
 		const tenant = await this.context.d1
@@ -54,7 +54,27 @@ export class ArtifactTaskRpcService {
 				)
 			)
 			.get();
-		if (tenant === undefined) {
+		return tenant !== undefined;
+	}
+
+	async requeueInSection(
+		claim: ArtifactTaskClaim
+	): Promise<ArtifactAdmissionReservation> {
+		if (!(await this.activeTenant())) {
+			return { kind: 'unavailable' };
+		}
+		return artifactAdmissionReservationSchema.parse(
+			new ArtifactAdmissionService(this.context).requeueInSection(claim)
+		);
+	}
+
+	async claimInSection(
+		version: ArtifactJobVersion,
+		owner: ArtifactTaskOwner,
+		expectedKind?: ArtifactJobDefinition['kind'],
+		admission?: ArtifactAdmission
+	): Promise<ArtifactTaskClaimRpcResult> {
+		if (!(await this.activeTenant())) {
 			return { kind: 'idle', pending: false };
 		}
 		const jobs = new ArtifactJobService(this.context);
