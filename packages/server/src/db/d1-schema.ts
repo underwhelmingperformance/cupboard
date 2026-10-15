@@ -54,6 +54,7 @@ import {
 	narCaptureSequenceSchema
 } from '../blob/nar-source-capture.ts';
 import type { SharedListingJobSummary } from '../blob/shared-listing-jobs.ts';
+import type { SharedListingOutputEpoch } from '../blob/shared-listing-outputs.ts';
 import type { SharedListingTaskState } from '../blob/shared-listing-tasks.ts';
 import type { R2ObjectKey } from '../http/http.ts';
 import {
@@ -994,6 +995,66 @@ export const listingFact = sqliteTable(
 		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
 		check('listing_fact_format_check', sql`${table.format} = 1`),
 		check('listing_fact_size_check', sql`${table.size} > 0`)
+	]
+);
+
+export const sharedListingOutputReference = sqliteTable(
+	'shared_listing_output_ref',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		epoch: text('epoch').$type<SharedListingOutputEpoch>().notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		computationGeneration: integer('computation_generation').notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		size: integer('size').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		index('shared_listing_output_ref_digest_idx').on(table.digest),
+		check(
+			'shared_listing_output_ref_generation_check',
+			sql`typeof(${table.sourceIncarnation}) = 'integer' AND ${table.sourceIncarnation} BETWEEN 1 AND 9007199254740991
+  AND typeof(${table.computationGeneration}) = 'integer' AND ${table.computationGeneration} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_output_ref_size_check',
+			sql`typeof(${table.size}) = 'integer' AND ${table.size} BETWEEN 1 AND 67108864`
+		)
+	]
+);
+
+export const sharedListingOutputCleanup = sqliteTable(
+	'shared_listing_output_cleanup',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().primaryKey(),
+		epoch: text('epoch')
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		cursor: text('cursor').$type<ListingGeneratorRevision>(),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		nextAttemptAt: text('next_attempt_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`'1970-01-01T00:00:00.000Z'`)
+	},
+	(table) => [
+		index('shared_listing_output_cleanup_due_idx').on(
+			table.nextAttemptAt,
+			table.narHash
+		),
+		check(
+			'shared_listing_output_cleanup_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'shared_listing_output_cleanup_owner_check',
+			sql`(${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
+		)
 	]
 );
 

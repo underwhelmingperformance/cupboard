@@ -269,7 +269,7 @@ export class OffboardingService {
 		limit: number,
 		references: CasReferenceSet
 	): Promise<void> {
-		if (references.kinds !== 'all') {
+		if (references.kinds === 'attestations') {
 			return;
 		}
 

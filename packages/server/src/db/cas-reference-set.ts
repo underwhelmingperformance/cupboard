@@ -15,7 +15,7 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import * as d1Schema from './d1-schema.ts';
 import { readRecordedTransitions } from './deployment-transitions.ts';
 
-export type CasReferenceKinds = 'attestations' | 'all';
+export type CasReferenceKinds = 'attestations' | 'artifacts' | 'all';
 
 /**
  * Retention predicates for the reference kinds installed in the shared store.
@@ -33,6 +33,20 @@ export class CasReferenceSet {
 				.select({ one: sql`1` })
 				.from(d1Schema.deploymentTransition)
 				.where(eq(d1Schema.deploymentTransition.id, 'native-artifact-storage'))
+		);
+	}
+
+	private outputStorageAbsent(): SQL {
+		return notExists(
+			this.database
+				.select({ one: sql`1` })
+				.from(d1Schema.deploymentTransition)
+				.where(
+					eq(
+						d1Schema.deploymentTransition.id,
+						'shared-listing-output-retention'
+					)
+				)
 		);
 	}
 
@@ -89,7 +103,20 @@ export class CasReferenceSet {
 				.where(artifactFilter)
 		);
 
-		return sql`(${attestationMissing} AND ${artifactMissing})`;
+		const tenantUnreferenced = sql`(${attestationMissing} AND ${artifactMissing})`;
+		if (tenant !== undefined) {
+			return tenantUnreferenced;
+		}
+		if (this.kinds === 'artifacts') {
+			return sql`(${tenantUnreferenced} AND ${this.outputStorageAbsent()})`;
+		}
+		const outputMissing = notExists(
+			this.database
+				.select({ one: sql`1` })
+				.from(d1Schema.sharedListingOutputReference)
+				.where(eq(d1Schema.sharedListingOutputReference.digest, digest))
+		);
+		return sql`(${tenantUnreferenced} AND ${outputMissing})`;
 	}
 }
 
@@ -103,8 +130,14 @@ export async function readCasReferenceSet(
 	const transitions = await readRecordedTransitions(database);
 	const state = transitions.get('native-artifact-storage');
 
+	if (state !== 'expanded' && state !== 'complete') {
+		return new CasReferenceSet(database, 'attestations');
+	}
+	const outputState = transitions.get('shared-listing-output-retention');
 	return new CasReferenceSet(
 		database,
-		state === 'expanded' || state === 'complete' ? 'all' : 'attestations'
+		outputState === 'expanded' || outputState === 'complete'
+			? 'all'
+			: 'artifacts'
 	);
 }

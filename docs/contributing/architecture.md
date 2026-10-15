@@ -176,6 +176,21 @@ new allocation. Unsealed uploads remain tracked through the late-write horizon.
 Cleanup acknowledgement revokes only the matching computation before removing
 its allocation marker.
 
+Shared listing output references retain measured CAS bytes under a logical NAR
+and generator revision. Completion requires current job, task, computation and
+physical source ownership, plus the measured live CAS incarnation. The captured
+source incarnation fences completion; logical NAR retention continues through
+physical repair. These references grant no cache access and create no tenant
+charge. Global CAS collection includes the references, while tenant quota probes
+continue to count only that tenant's artifact and attestation references.
+
+Removing the last NAR reference records one durable cleanup scope. Captured
+reference epochs prevent an old removal from deleting a recreated reference.
+Each removal rechecks parent absence and resets CAS deletion grace. Database
+guards also prevent preceding collectors from arming deletion, retiring a live
+CAS incarnation or deleting its metadata while a shared reference exists.
+Bounded cleanup scope draining and global producer integration remain pending.
+
 Cron starts cleanup waves with a fixed cutoff. Each indexed page selects at most
 eight stage IDs and records a continuation key for the next queue hint. The
 cutoff and key prevent a wave from repeatedly enqueueing unclaimed first-page

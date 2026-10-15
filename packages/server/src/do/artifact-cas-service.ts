@@ -203,7 +203,7 @@ export class ArtifactCasService {
 	): Promise<ArtifactReferenceOutcome> {
 		await new PathReadAuthorityService(this.context).requireWritable();
 		const references = await readCasReferenceSet(this.context.d1);
-		if (references.kinds !== 'all') {
+		if (references.kinds === 'attestations') {
 			throw new ArtifactStorageMigrationPendingError();
 		}
 
@@ -318,7 +318,7 @@ export class ArtifactCasService {
 	): Promise<ArtifactReferenceRemovalOutcome> {
 		await new PathReadAuthorityService(this.context).requireWritable();
 		const references = await readCasReferenceSet(this.context.d1);
-		if (references.kinds !== 'all') {
+		if (references.kinds === 'attestations') {
 			throw new ArtifactStorageMigrationPendingError();
 		}
 		const notRepromoted = casObjectNotRepromoted(

@@ -3,12 +3,14 @@ import {
 	cacheNameSchema,
 	cachePrioritySchema,
 	narInfoGenerationSchema,
+	nixSha256HashSchema,
 	predicateTypeSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	artifactGenerationSchema,
-	artifactKinds
+	artifactKinds,
+	currentListingGeneratorRevision
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
@@ -16,6 +18,7 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CasObjectStore } from '../blob/cas-object-store.ts';
+import { sharedListingOutputEpochSchema } from '../blob/shared-listing-outputs.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -481,63 +484,88 @@ describe('artifact CAS reservation', () => {
 				})
 			)
 	);
-	it('credits the digest only after its last artifact generation is removed', () =>
-		withoutAlarmArming(() =>
-			runInDurableObject(currentServer(), async (instance) => {
-				const context = instance.context;
-				await context.criticalSection(async () => {
-					const artifact = await createArtifact(context);
-					const service = new ArtifactCasService(context);
-					await service.reserveInSection(id, generation);
-					const nextGeneration = artifactGenerationSchema.parse(2);
-					context.db
-						.update(schema.artifacts)
-						.set({ generation: nextGeneration, kind: 'listing-proof' })
-						.where(eq(schema.artifacts.id, id))
-						.run();
-					await service.reserveInSection(id, nextGeneration);
-					const before = await reservationState(context);
-					const captured = {
-						artifactId: id,
-						artifactGeneration: generation,
-						digest: artifact.digest,
-						cache: artifact.cache
-					};
-					const outcome = await service.removeCapturedInSection(captured);
-					const remaining = await reservationState(context);
-					expect({ outcome, state: remaining }).toStrictEqual({
-						outcome: 'removed',
-						state: {
-							...before,
-							references: before.references.filter(
-								(row) => row.artifactGeneration === nextGeneration
-							)
+	it.each([false, true])(
+		'credits the final tenant digest with shared physical retention %s',
+		(sharedRetention) =>
+			withoutAlarmArming(() =>
+				runInDurableObject(currentServer(), async (instance) => {
+					const context = instance.context;
+					await context.criticalSection(async () => {
+						const artifact = await createArtifact(context);
+						if (sharedRetention) {
+							await recordTransition(
+								'shared-listing-output-retention',
+								'expanded'
+							);
+							await context.d1
+								.insert(d1Schema.sharedListingOutputReference)
+								.values({
+									narHash: nixSha256HashSchema.parse(
+										`sha256:${'0'.repeat(52)}`
+									),
+									generatorRevision: currentListingGeneratorRevision,
+									epoch: sharedListingOutputEpochSchema.parse(
+										crypto.randomUUID()
+									),
+									sourceIncarnation: 1,
+									computationGeneration: 1,
+									digest: artifact.digest,
+									size: artifact.size,
+									createdAt: artifact.createdAt
+								});
 						}
+						const service = new ArtifactCasService(context);
+						await service.reserveInSection(id, generation);
+						const nextGeneration = artifactGenerationSchema.parse(2);
+						context.db
+							.update(schema.artifacts)
+							.set({ generation: nextGeneration, kind: 'listing-proof' })
+							.where(eq(schema.artifacts.id, id))
+							.run();
+						await service.reserveInSection(id, nextGeneration);
+						const before = await reservationState(context);
+						const captured = {
+							artifactId: id,
+							artifactGeneration: generation,
+							digest: artifact.digest,
+							cache: artifact.cache
+						};
+						const outcome = await service.removeCapturedInSection(captured);
+						const remaining = await reservationState(context);
+						expect({ outcome, state: remaining }).toStrictEqual({
+							outcome: 'removed',
+							state: {
+								...before,
+								references: before.references.filter(
+									(row) => row.artifactGeneration === nextGeneration
+								)
+							}
+						});
+						const repeated = await service.removeCapturedInSection(captured);
+						expect({
+							outcome: repeated,
+							state: await reservationState(context)
+						}).toStrictEqual({ outcome: 'already-absent', state: remaining });
+						const final = await service.removeCapturedInSection({
+							...captured,
+							artifactGeneration: nextGeneration
+						});
+						expect({
+							outcome: final,
+							state: await reservationState(context)
+						}).toStrictEqual({
+							outcome: 'removed',
+							state: {
+								...remaining,
+								references: [],
+								presence: [],
+								usage: { ...remaining.usage, casBytes: 0, casBlobs: 0 }
+							}
+						});
 					});
-					const repeated = await service.removeCapturedInSection(captured);
-					expect({
-						outcome: repeated,
-						state: await reservationState(context)
-					}).toStrictEqual({ outcome: 'already-absent', state: remaining });
-					const final = await service.removeCapturedInSection({
-						...captured,
-						artifactGeneration: nextGeneration
-					});
-					expect({
-						outcome: final,
-						state: await reservationState(context)
-					}).toStrictEqual({
-						outcome: 'removed',
-						state: {
-							...remaining,
-							references: [],
-							presence: [],
-							usage: { ...remaining.usage, casBytes: 0, casBlobs: 0 }
-						}
-					});
-				});
-			})
-		));
+				})
+			)
+	);
 
 	it('removes an existing reference before publication is active and keeps a shared attestation charge', () =>
 		withoutAlarmArming(() =>

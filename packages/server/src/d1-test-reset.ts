@@ -33,6 +33,8 @@ import {
 	publication,
 	sharedListingGeneration,
 	sharedListingJob,
+	sharedListingOutputCleanup,
+	sharedListingOutputReference,
 	sharedListingStage,
 	sharedListingTask,
 	tenant,
@@ -50,6 +52,8 @@ export async function resetD1TestState(binding: D1Database): Promise<void> {
 	const now = isoTimestamp(new Date());
 	await database.batch([
 		database.delete(controlDatabaseSplit),
+		database.delete(sharedListingOutputReference),
+		database.delete(sharedListingOutputCleanup),
 		database.delete(artifactReference),
 		database.delete(listingFact),
 		database.delete(listingGeneration),

@@ -28,6 +28,8 @@ export {
 	readableBlobReference,
 	sharedListingGeneration,
 	sharedListingJob,
+	sharedListingOutputCleanup,
+	sharedListingOutputReference,
 	sharedListingStage,
 	sharedListingTask,
 	tenant,

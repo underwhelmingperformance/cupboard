@@ -7305,8 +7305,13 @@ build traces available from a cupboard cache.
       deletion remain discoverable in D1 and recover through fresh cron waves.
       Queue hints never clear durable resources. Consumers admit additional
       messages within their remaining invocation time and subrequest budgets.
-      Output retention, global task execution, cache adoption projections and
-      producer activation remain pending.
+      Shared output references now link measured CAS listings to retained
+      logical NARs. Captured reference epochs fence removal after recreation.
+      Global collection respects these references without blocking final tenant
+      quota credits. Last-parent deletion records one durable cleanup scope;
+      bounded scope draining and queue dispatch remain pending. Global task
+      execution, atomic fact/output/outcome completion, cache adoption
+      projections and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
