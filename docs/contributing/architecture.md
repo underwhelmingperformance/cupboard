@@ -197,7 +197,13 @@ replacement fence an older token even when the owner identity is reused.
 Deletion-grace updates probe captured primary keys, so unrelated references to
 the same digest do not increase the scan. New scope deadlines and discovery
 cutoffs use the D1 clock; a fixed cutoff excludes later retirement captures.
-Queue dispatch and global producer integration remain pending.
+Cron dispatches independent output-retirement waves through the artifact queue.
+Each wave preserves its D1 cutoff and an indexed deadline/hash cursor. Consumers
+claim the current scope and send a continuation after each partial checkpoint.
+Failed sends, lost database replies and expired claims recover through durable
+D1 state and fresh cron waves. Queue hints do not advance progress. Staging and
+output dispatch run independently and report each failure. Global producer
+integration remains pending.
 
 Cron starts cleanup waves with a fixed cutoff. Each indexed page selects at most
 eight stage IDs and records a continuation key for the next queue hint. The

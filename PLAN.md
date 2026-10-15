@@ -7314,9 +7314,14 @@ build traces available from a cupboard cache.
       cursor in one batch. Returning parents preserve output references;
       replacement scopes and lease deadlines fence old consumers. Indexed
       primary-key probes bound retirement even when many NARs share one digest.
-      New scopes and sweep cutoffs use the D1 clock. Queue dispatch remains
-      pending. Global task execution, atomic fact/output/outcome completion,
-      cache adoption projections and producer activation remain pending.
+      New scopes and sweep cutoffs use the D1 clock. Cron now starts independent
+      finite output-retirement waves. Queue consumers acquire current D1 claims,
+      checkpoint bounded pages and send per-parent continuations. Failed sends,
+      lost database replies and expired claims recover from durable state;
+      parent recreation cannot revive a stale claim. Staging and output dispatch
+      report failures independently. Global task execution, atomic
+      fact/output/outcome completion, cache adoption projections and producer
+      activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
