@@ -13,6 +13,7 @@ import { workflowCommands } from '@cupboard/shared/github-actions';
 import { z } from 'zod';
 
 import type { BuildOptions } from '../commands/build.ts';
+import { cupboardDebugArguments } from '../cupboard-run.ts';
 import { CommandFailedError } from '../errors.ts';
 import { type Environment, parseLines, requireEnvironment } from '../inputs.ts';
 import { provided } from '../options.ts';
@@ -69,6 +70,7 @@ export async function nativeBuildMain(
 		const view = environment['INPUT_READ-SESSION-VIEW'];
 		command = [
 			cupboard,
+			...(await cupboardDebugArguments(cupboard, environment, signal)),
 			'run',
 			target,
 			'--github-oidc',

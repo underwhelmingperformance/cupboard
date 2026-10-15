@@ -80,10 +80,16 @@ export async function runCupboardWithProtocol(
 	protocol: CupboardResultProtocol,
 	dependencies: CupboardRunDependencies = {}
 ): Promise<CupboardRunResult> {
+	const debugArguments = await cupboardDebugArguments(
+		binaryPath,
+		environment,
+		dependencies.signal
+	);
+
 	if (protocol === 'legacy-stderr') {
 		return runLegacyCupboard(
 			binaryPath,
-			arguments_,
+			[...debugArguments, ...arguments_],
 			dependencies.legacyCommands ?? workflowCommands(),
 			dependencies.signal
 		);
@@ -96,7 +102,14 @@ export async function runCupboardWithProtocol(
 
 	const status = await spawnCupboard(
 		binaryPath,
-		['--output-mode', 'github', '--result-file', resultFile, ...arguments_],
+		[
+			...debugArguments,
+			'--output-mode',
+			'github',
+			'--result-file',
+			resultFile,
+			...arguments_
+		],
 		dependencies.signal,
 		environment,
 		dependencies.deferErrorAnnotations ?? false
@@ -120,34 +133,52 @@ export async function detectCupboardResultProtocol(
 	binaryPath: string,
 	signal?: AbortSignal
 ): Promise<CupboardResultProtocol> {
-	signal?.throwIfAborted();
+	const help = await readHelp(binaryPath, ['--help'], signal);
 
-	const child = spawn(binaryPath, ['--help'], {
-		stdio: ['ignore', 'pipe', 'ignore']
-	});
-	let output = '';
-
-	child.stdout.setEncoding('utf8');
-	child.stdout.on('data', (chunk: string) => {
-		output += chunk;
-	});
-
-	const result = await waitForAbortableChildProcess(
-		observeChildProcess(child),
-		signal
-	);
-
-	if (result.error !== undefined) {
-		throw spawnFailure(binaryPath, result.status, result.error, signal);
+	if (help.status !== 0) {
+		throw new CommandFailedError(binaryPath, help.status);
 	}
 
-	if (result.status !== 0) {
-		throw new CommandFailedError(binaryPath, result.status);
-	}
-
-	return /(?:^|\s)--result-file(?:\s|[<=])/mu.test(output)
+	return /(?:^|\s)--result-file(?:\s|[<=])/mu.test(help.output)
 		? 'result-file'
 		: 'legacy-stderr';
+}
+
+/**
+ * Returns the global options that turn on the CLI's debug logging in a debug
+ * re-run. GitHub sets `RUNNER_DEBUG=1` when it re-runs a job with debug
+ * logging, and shows `::debug::` lines only then. Releases before v0.0.36 do
+ * not accept `--debug`, so the option goes only to a CLI whose help lists it.
+ */
+export async function cupboardDebugArguments(
+	binaryPath: string,
+	environment: Environment,
+	signal?: AbortSignal
+): Promise<readonly string[]> {
+	if (environment.RUNNER_DEBUG !== '1') {
+		return [];
+	}
+
+	const options = await inspectGlobalOptions(binaryPath, signal);
+
+	return options.has('--debug') ? ['--debug'] : [];
+}
+
+async function inspectGlobalOptions(
+	binaryPath: string,
+	signal?: AbortSignal
+): Promise<CommandOptions> {
+	const help = await readHelp(binaryPath, ['--help'], signal);
+
+	if (help.status !== 0 || !help.output.startsWith('Usage: cupboard ')) {
+		throw new CommandFailedError(
+			binaryPath,
+			help.status,
+			'unexpected command help'
+		);
+	}
+
+	return commandOptionsFromHelp(help.output);
 }
 
 export async function detectCacheSelectionSyntax(
@@ -196,9 +227,30 @@ export async function inspectCommandOptions(
 	command: CacheCommand,
 	signal?: AbortSignal
 ): Promise<CommandOptions> {
+	const help = await readHelp(binaryPath, [...command, '--help'], signal);
+
+	if (
+		help.status !== 0 ||
+		!help.output.startsWith(`Usage: cupboard ${command.join(' ')} `)
+	) {
+		throw new CommandFailedError(
+			binaryPath,
+			help.status,
+			'unexpected command help'
+		);
+	}
+
+	return commandOptionsFromHelp(help.output);
+}
+
+async function readHelp(
+	binaryPath: string,
+	arguments_: readonly string[],
+	signal?: AbortSignal
+): Promise<{ readonly status: number | null; readonly output: string }> {
 	signal?.throwIfAborted();
 
-	const child = spawn(binaryPath, [...command, '--help'], {
+	const child = spawn(binaryPath, [...arguments_], {
 		stdio: ['ignore', 'pipe', 'ignore']
 	});
 	let output = '';
@@ -217,18 +269,7 @@ export async function inspectCommandOptions(
 		throw spawnFailure(binaryPath, result.status, result.error, signal);
 	}
 
-	if (
-		result.status !== 0 ||
-		!output.startsWith(`Usage: cupboard ${command.join(' ')} `)
-	) {
-		throw new CommandFailedError(
-			binaryPath,
-			result.status,
-			'unexpected command help'
-		);
-	}
-
-	return commandOptionsFromHelp(output);
+	return { status: result.status, output };
 }
 
 async function runLegacyCupboard(

@@ -242,3 +242,10 @@ skip the artifact.
   when the runner has too little disk for the closure, or when too many paths
   can't be downloaded from any substituter.
 - A cohort job that published nothing writes no receipt and signs nothing.
+- To inspect cache read probes, re-run the failed job with debug logging
+  enabled. The log reports each probe attempt with its outcome and duration, and
+  each retry with its delay. For a retry after a transient HTTP status, the log
+  also shows the status and any `cf-ray` header. For a retry after a network
+  error, it shows the error code. The actions also pass `--debug` to each
+  `cupboard` command, if the installed release accepts it. Releases before
+  v0.0.36 do not.

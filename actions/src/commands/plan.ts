@@ -44,6 +44,7 @@ import {
 	cohortBuildLocation,
 	cohortJobName
 } from '../build-location.ts';
+import { cupboardDebugArguments } from '../cupboard-run.ts';
 import {
 	BuildRebuildRemoteDispatchError,
 	BuiltPublicationObservationUnsupportedError,
@@ -135,9 +136,10 @@ const defaultEnsureRunner: EnsureRunner = async (
 	arguments_,
 	signal
 ) => {
+	const debugArguments = await cupboardDebugArguments(command, env, signal);
 	signal?.throwIfAborted();
 
-	const child = spawn(command, [...arguments_], {
+	const child = spawn(command, [...debugArguments, ...arguments_], {
 		stdio: ['ignore', 'pipe', 'pipe']
 	});
 	const outputLimit = new AbortController();
