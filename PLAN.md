@@ -7385,9 +7385,13 @@ build traces available from a cupboard cache.
       selected cursor without inflating captures; replacements use current
       source data. Lost replies and stale pages preserve committed progress. The
       page query and write batch use bounded indexed reads against a 25,000-fact
-      catalogue. Historical parent seeding, seed scheduling, bounded event
-      expansion, cache adoption delivery, shared completion wakes and producer
-      activation remain pending.
+      catalogue. Historical parent discovery now selects unique cache paths in
+      32-identity pages through the existing default and named partial indexes.
+      Bounded full-key seeks skip retained generations, and typed fixed windows
+      preserve progress through deleted cursor and boundary rows. Discovery
+      precedes current-publication eligibility checks. Durable parent projection
+      and seeding, seed scheduling, bounded event expansion, cache adoption
+      delivery, shared completion wakes and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

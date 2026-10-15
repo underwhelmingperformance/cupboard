@@ -313,6 +313,14 @@ capture covers later inserts on either side of the historical cursor. The
 additive migration creates an empty checkpoint table; the first seed turn
 initialises its window without a migration-time catalogue scan.
 
+Historical parent discovery pages unique cache paths through the existing
+partial identity indexes for default and named caches. Each turn selects at most
+32 identities with one lookahead before checking publication eligibility. A
+bounded recursive query seeks beyond every retained generation of each path.
+Typed fixed windows preserve tenant, cache-name and path order, including
+deleted cursor or boundary rows. Discovery does not select the authorised
+publication.
+
 The capture stream and reverse projection grant no cache authority and retain no
 bytes. Historical parent projection seeding, seed scheduling, bounded event
 expansion, durable cache-adoption delivery, completion wakes and automatic
