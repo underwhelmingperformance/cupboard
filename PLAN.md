@@ -7240,7 +7240,8 @@ build traces available from a cupboard cache.
       kind and task generation; handover renews the bounded cleanup deadline.
       Job dispatch now runs through bounded alarm turns and cron recovery. The
       trusted requeue RPC validates captured ownership and checks tenant status
-      before changing tasks. Queue retry integration, shared D1 projections and
+      before changing tasks. Consumers now use immediate and delayed retry RPCs
+      and leave delivery recovery to the dispatcher. Shared D1 projections and
       producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
@@ -7273,7 +7274,11 @@ build traces available from a cupboard cache.
       job alarms. Per-task retry deadlines now defer work without reserving
       generation credits or blocking ready siblings. Repeated requests and job
       resume preserve the deadline, and indexed dispatch readiness schedules its
-      wake. Targeted queue retry integration and capacity-release wakes remain
+      wake. Admitted transient outcomes now requeue durably before their spent
+      message is acknowledged. Staging-capacity refusals remain immediately
+      eligible, while other transient outcomes defer without fresh generation
+      credits. RPC failures retain transport retry and persisted recovery;
+      cancellation starts no new retry RPC. Capacity-release wakes remain
       pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last

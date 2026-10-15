@@ -60,6 +60,7 @@ import {
 
 import { ArtifactAdmissionService } from './artifact-admission-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
+import { ArtifactQueueDispatchService } from './artifact-queue-dispatch-service.ts';
 import { ArtifactStagingService } from './artifact-staging-service.ts';
 import { type ServerContext } from './context.ts';
 import {
@@ -294,6 +295,11 @@ function taskRetryState(context: ServerContext) {
 	};
 }
 
+function taskExecutionState(task: typeof schema.artifactTasks.$inferSelect) {
+	const { leaseExpiresAt, ...state } = task;
+	return { ...state, hasLease: leaseExpiresAt !== null };
+}
+
 function workerRpc(
 	overrides: Partial<ListingTaskWorkerDependencies['server']>
 ): ListingTaskWorkerDependencies['server'] {
@@ -329,15 +335,34 @@ function artifactMessage(body: unknown, actions: unknown[]): Message {
 	};
 }
 
+type ArtifactQueueRpc = ReturnType<ArtifactQueueDependencies['serverFor']>;
+
+function consumerRpc(overrides: Partial<ArtifactQueueRpc>): ArtifactQueueRpc {
+	const real = currentServer();
+	return {
+		...workerRpc({}),
+		claimArtifactTask: (job, owner, kind) =>
+			real.claimArtifactTask(job, owner, kind),
+		claimAdmittedArtifactTask: (admission, owner, kind) =>
+			real.claimAdmittedArtifactTask(admission, owner, kind),
+		requestArtifactDispatch: (job) => real.requestArtifactDispatch(job),
+		requeueArtifactTask: (claim) => real.requeueArtifactTask(claim),
+		requeueArtifactTaskWithDeadline: (claim, deadline) =>
+			real.requeueArtifactTaskWithDeadline(claim, deadline),
+		...overrides
+	};
+}
+
 function artifactConsumer(
 	sent: ArtifactQueueMessage[],
-	executeTask?: ArtifactQueueDependencies['executeTask']
+	executeTask?: ArtifactQueueDependencies['executeTask'],
+	overrides: Partial<ArtifactQueueRpc> = {}
 ) {
 	return new ArtifactQueueConsumer({
 		blobs: env.BLOBS,
 		database: env.CUPBOARD_DB,
 		buffers: new NarReadBufferPool(),
-		serverFor: () => currentServer(),
+		serverFor: () => consumerRpc(overrides),
 		queue: {
 			send: (body) => {
 				sent.push(body);
@@ -347,6 +372,32 @@ function artifactConsumer(
 			}
 		},
 		executeTask
+	});
+}
+
+async function deliverArtifactBatch(shouldFail = false) {
+	return runInDurableObject(currentServer(), async (instance) => {
+		const messages: ArtifactQueueMessage[] = [];
+		const result = await new ArtifactQueueDispatchService(instance.context, {
+			sendBatch: (batch) => {
+				if (shouldFail) {
+					return Promise.reject(new Error('artifact queue unavailable'));
+				}
+				messages.push(...Array.from(batch, (message) => message.body));
+				return Promise.resolve({
+					metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } }
+				});
+			}
+		}).run();
+		return {
+			result,
+			messages,
+			admissions: instance.context.db
+				.select()
+				.from(schema.artifactAdmissions)
+				.all()
+				.map((row) => row.id)
+		};
 	});
 }
 
@@ -599,6 +650,482 @@ describe('listing task workflow', () => {
 						.toSorted((a, b) => byCodeUnit(a.id, b.id)),
 					progress: { discovered: 2, completed: 0, skipped: 0, failed: 0 }
 				}
+			});
+		}));
+
+	it.each([
+		'local-capacity',
+		'transport',
+		'unavailable',
+		'bytes-missing',
+		'over-quota'
+	] as const)(
+		'durably defers admitted %s and acknowledges its spent message',
+		(reason) =>
+			withoutAlarmArming(async () => {
+				const claim = await fixture(undefined, true);
+				vi.setSystemTime(new Date(claim.leaseExpiresAt));
+				const body = await admittedMessage(claim);
+				const before = await inSection((context) =>
+					Promise.resolve(taskRetryState(context))
+				);
+				const actions: unknown[] = [];
+				const sent: ArtifactQueueMessage[] = [];
+				const execute = vi.fn<
+					NonNullable<ArtifactQueueDependencies['executeTask']>
+				>(() =>
+					reason === 'transport'
+						? Promise.reject(new Error('transient source read'))
+						: Promise.resolve({ kind: reason })
+				);
+				await artifactConsumer(sent, execute).handleMessage(
+					artifactMessage(body, actions)
+				);
+				await artifactConsumer(sent, execute).handleMessage(
+					artifactMessage(body, actions)
+				);
+				const owned = execute.mock.calls[0]?.[1];
+				if (owned === undefined) {
+					throw new Error('The admitted retry task was not executed');
+				}
+				const after = await inSection((context) =>
+					Promise.resolve(taskRetryState(context))
+				);
+				const retryAt = isoTimestamp(new Date(Date.now() + 60_000));
+				expect({
+					actions,
+					sent,
+					executions: execute.mock.calls.map(([, task]) => task.id),
+					tasks: after.tasks.map((task) => taskExecutionState(task)),
+					admissions: after.admissions
+				}).toStrictEqual({
+					actions: [{ action: 'ack' }, { action: 'ack' }],
+					sent: [],
+					executions: [claim.id],
+					admissions: [],
+					tasks: before.tasks.map((task) =>
+						task.id === claim.id
+							? {
+									...taskExecutionState(task),
+									state: 'pending',
+									claimGeneration: claim.generation + 1,
+									jobGeneration: claim.jobGeneration,
+									owner: owned.owner,
+									hasLease: false,
+									nextAttemptAt: retryAt
+								}
+							: taskExecutionState(task)
+					)
+				});
+			})
+	);
+
+	it('requeues admitted staging-capacity refusal immediately without reusing its ticket', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim);
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			const predictedExpiry = isoTimestamp(new Date(Date.now() + 120_000));
+			const execute = vi.fn(() =>
+				Promise.resolve({ kind: 'capacity' as const, retryAt: predictedExpiry })
+			);
+			await artifactConsumer(sent, execute).handleMessage(
+				artifactMessage(body, actions)
+			);
+			const after = await inSection((context) =>
+				Promise.resolve({
+					tasks: context.db
+						.select()
+						.from(schema.artifactTasks)
+						.all()
+						.map((row) => ({
+							id: row.id,
+							state: row.state,
+							nextAttemptAt: row.nextAttemptAt
+						})),
+					admissions: context.db
+						.select()
+						.from(schema.artifactAdmissions)
+						.all()
+						.map((row) => ({
+							taskId: row.taskId,
+							replacement: row.id !== body.admission.id,
+							claimed: row.claim !== null
+						}))
+				})
+			);
+			expect({ actions, sent, after }).toStrictEqual({
+				actions: [{ action: 'ack' }],
+				sent: [],
+				after: {
+					tasks: [
+						{
+							id: claim.id,
+							state: 'pending',
+							nextAttemptAt: isoTimestamp(new Date())
+						}
+					],
+					admissions: [{ taskId: claim.id, replacement: true, claimed: false }]
+				}
+			});
+		}));
+
+	it('keeps admitted staging-capacity pending at a full pool', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture(undefined, true);
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim);
+			const execute = vi.fn<
+				NonNullable<ArtifactQueueDependencies['executeTask']>
+			>(async (server, owned) => {
+				const prepared = generationOf(
+					await server.prepareListingTaskWithCapacity(owned, true)
+				);
+				await inSection(async (context) => {
+					const sibling = new ArtifactJobService(context).claimInSection(
+						owned.jobId,
+						artifactTaskOwnerSchema.parse(crypto.randomUUID())
+					).claim;
+					if (sibling === undefined) {
+						throw new Error('The capacity consumer sibling was not claimed');
+					}
+					generationOf(
+						await new ListingTaskService(context).prepareInSection(sibling)
+					);
+				});
+				return { kind: 'capacity', retryAt: prepared.lease.expiresAt };
+			});
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			await artifactConsumer(sent, execute).handleMessage(
+				artifactMessage(body, actions)
+			);
+			const after = await inSection((context) =>
+				Promise.resolve({
+					task: context.db
+						.select()
+						.from(schema.artifactTasks)
+						.where(eq(schema.artifactTasks.id, claim.id))
+						.get()?.state,
+					admissions: context.db.select().from(schema.artifactAdmissions).all(),
+					stages: context.db
+						.select()
+						.from(schema.artifactStages)
+						.all()
+						.map((row) => row.state),
+					progress: new ArtifactJobService(context).summaryInSection(
+						claim.jobId
+					)?.progress
+				})
+			);
+			expect({ actions, sent, after }).toStrictEqual({
+				actions: [{ action: 'ack' }],
+				sent: [],
+				after: {
+					task: 'pending',
+					admissions: [],
+					stages: ['pending', 'pending'],
+					progress: { discovered: 2, completed: 0, skipped: 0, failed: 0 }
+				}
+			});
+		}));
+
+	it('does not requeue admitted work after its execution budget expires', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim);
+			const started = Promise.withResolvers<undefined>();
+			const real = currentServer();
+			const retry = vi.fn<ArtifactQueueRpc['requeueArtifactTask']>((owned) =>
+				real.requeueArtifactTask(owned)
+			);
+			const delayed = vi.fn<
+				ArtifactQueueRpc['requeueArtifactTaskWithDeadline']
+			>((owned, deadline) =>
+				real.requeueArtifactTaskWithDeadline(owned, deadline)
+			);
+			const execute = vi.fn<
+				NonNullable<ArtifactQueueDependencies['executeTask']>
+			>((_server, _owned, options) => {
+				const work = Promise.withResolvers<never>();
+				options.signal?.addEventListener(
+					'abort',
+					() => {
+						work.reject(options.signal?.reason);
+					},
+					{ once: true }
+				);
+				started.resolve(undefined);
+				return work.promise;
+			});
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+			try {
+				const handling = artifactConsumer(sent, execute, {
+					requeueArtifactTask: retry,
+					requeueArtifactTaskWithDeadline: delayed
+				}).handleMessage(artifactMessage(body, actions));
+				await started.promise;
+				await vi.advanceTimersByTimeAsync(14 * 60 * 1000);
+				await handling;
+				expect({
+					actions,
+					sent,
+					retries: retry.mock.calls,
+					delayed: delayed.mock.calls,
+					aborted: execute.mock.calls[0]?.[2].signal?.aborted
+				}).toStrictEqual({
+					actions: [{ action: 'retry', delaySeconds: 60 }],
+					sent: [],
+					retries: [],
+					delayed: [],
+					aborted: true
+				});
+			} finally {
+				vi.useFakeTimers({ toFake: ['Date'] });
+			}
+		}));
+
+	it.each(['lost-reply', 'older-tenant', 'invalid-reply'] as const)(
+		'recovers an admitted retry after %s without claiming a sibling',
+		(mode) =>
+			withoutAlarmArming(async () => {
+				const claim = await fixture(undefined, true);
+				vi.setSystemTime(new Date(claim.leaseExpiresAt));
+				const body = await admittedMessage(claim);
+				const real = currentServer();
+				const expectedDeadline = isoTimestamp(new Date(Date.now() + 60_000));
+				const retry = vi.fn<
+					ArtifactQueueRpc['requeueArtifactTaskWithDeadline']
+				>(async (owned, deadline) => {
+					if (mode === 'lost-reply') {
+						await real.requeueArtifactTaskWithDeadline(owned, deadline);
+						throw new Error('retry reply lost');
+					}
+					if (mode === 'older-tenant') {
+						throw new Error(
+							'The RPC receiver does not implement requeueArtifactTaskWithDeadline'
+						);
+					}
+					return { kind: 'deferred', retryAt: deadline, extra: true };
+				});
+				const actions: unknown[] = [];
+				const sent: ArtifactQueueMessage[] = [];
+				const execute = vi.fn(() =>
+					Promise.resolve({ kind: 'local-capacity' as const })
+				);
+				const overrides = { requeueArtifactTaskWithDeadline: retry };
+				await artifactConsumer(sent, execute, overrides).handleMessage(
+					artifactMessage(body, actions)
+				);
+				const beforeReplay = await inSection((context) =>
+					Promise.resolve(taskRetryState(context))
+				);
+				await artifactConsumer(sent, execute, overrides).handleMessage(
+					artifactMessage(body, actions)
+				);
+				const afterReplay = await inSection((context) =>
+					Promise.resolve(taskRetryState(context))
+				);
+				expect({
+					actions,
+					sent,
+					calls: retry.mock.calls.map(([owned, deadline]) => ({
+						taskId: owned.id,
+						deadline
+					})),
+					executions: execute.mock.calls.length,
+					changedByReplay: afterReplay,
+					originalState: beforeReplay.tasks.find((task) => task.id === claim.id)
+						?.state,
+					siblingGenerations: beforeReplay.tasks
+						.filter((task) => task.id !== claim.id)
+						.map((task) => task.claimGeneration),
+					admissionCount: beforeReplay.admissions.length
+				}).toStrictEqual({
+					actions: [{ action: 'retry', delaySeconds: 60 }, { action: 'ack' }],
+					sent: [],
+					calls: [
+						{
+							taskId: claim.id,
+							deadline: expectedDeadline
+						}
+					],
+					executions: 1,
+					changedByReplay: beforeReplay,
+					originalState: mode === 'lost-reply' ? 'pending' : 'claimed',
+					siblingGenerations: [0],
+					admissionCount: mode === 'lost-reply' ? 0 : 1
+				});
+			})
+	);
+
+	it.each(['reclaimed', 'cancelled'] as const)(
+		'acknowledges an admitted retry whose task was %s during execution',
+		(mode) =>
+			withoutAlarmArming(async () => {
+				const claim = await fixture(undefined, true);
+				vi.setSystemTime(new Date(claim.leaseExpiresAt));
+				const body = await admittedMessage(claim);
+				const before = await inSection((context) =>
+					Promise.resolve(context.db.select().from(schema.artifactTasks).all())
+				);
+				const real = currentServer();
+				const retry = vi.fn<
+					ArtifactQueueRpc['requeueArtifactTaskWithDeadline']
+				>((owned, deadline) =>
+					real.requeueArtifactTaskWithDeadline(owned, deadline)
+				);
+				const replacementOwner = artifactTaskOwnerSchema.parse(
+					crypto.randomUUID()
+				);
+				const execute = vi.fn<
+					NonNullable<ArtifactQueueDependencies['executeTask']>
+				>(async (_server, owned) => {
+					if (mode === 'reclaimed') {
+						vi.setSystemTime(new Date(owned.leaseExpiresAt));
+					}
+					await inSection((context) => {
+						const jobs = new ArtifactJobService(context);
+						if (mode === 'cancelled') {
+							jobs.cancelInSection(owned.jobId);
+							return Promise.resolve();
+						}
+						const next = jobs.claimTaskInSection(
+							{ id: owned.jobId, generation: owned.jobGeneration },
+							owned.id,
+							owned.generation,
+							replacementOwner
+						);
+						if (next === undefined) {
+							throw new Error(
+								'The ownership replacement fixture did not claim its task'
+							);
+						}
+						return Promise.resolve();
+					});
+					return { kind: 'local-capacity' };
+				});
+				const actions: unknown[] = [];
+				const sent: ArtifactQueueMessage[] = [];
+				await artifactConsumer(sent, execute, {
+					requeueArtifactTaskWithDeadline: retry
+				}).handleMessage(artifactMessage(body, actions));
+				await artifactConsumer(sent, execute).handleMessage(
+					artifactMessage(body, actions)
+				);
+				const after = await inSection((context) =>
+					Promise.resolve({
+						tasks: context.db
+							.select()
+							.from(schema.artifactTasks)
+							.all()
+							.map((row) => ({ id: row.id, generation: row.claimGeneration })),
+						job: new ArtifactJobService(context).summaryInSection(claim.jobId)
+					})
+				);
+				expect({
+					actions,
+					sent,
+					retryCalls: retry.mock.calls.length,
+					executions: execute.mock.calls.length,
+					tasks: after.tasks,
+					state: after.job?.state,
+					progress: after.job?.progress
+				}).toStrictEqual({
+					actions: [{ action: 'ack' }, { action: 'ack' }],
+					sent: [],
+					retryCalls: 1,
+					executions: 1,
+					tasks: before.map((task) => ({
+						id: task.id,
+						generation:
+							task.id === claim.id
+								? claim.generation + (mode === 'reclaimed' ? 2 : 1)
+								: task.claimGeneration
+					})),
+					state: mode === 'cancelled' ? 'cancelled' : 'running',
+					progress: { discovered: 2, completed: 0, skipped: 0, failed: 0 }
+				});
+			})
+	);
+
+	it('recovers a deferred admitted task after replacement queue delivery fails', () =>
+		withoutAlarmArming(async () => {
+			const claim = await fixture();
+			vi.setSystemTime(new Date(claim.leaseExpiresAt));
+			const body = await admittedMessage(claim);
+			const actions: unknown[] = [];
+			const sent: ArtifactQueueMessage[] = [];
+			const outputs: Awaited<ReturnType<typeof generate>>[] = [];
+			await artifactConsumer(sent, async (_server, owned) => {
+				outputs.push(await generate(owned));
+				return { kind: 'bytes-missing' };
+			}).handleMessage(artifactMessage(body, actions));
+			const produced = outputs[0];
+			if (produced === undefined) {
+				throw new Error('The retry fixture did not seal its output');
+			}
+			const retained = await currentServer().collectArtifactStaging();
+			vi.setSystemTime(new Date(Date.now() + 60_000));
+			const failed = await deliverArtifactBatch(true);
+			vi.setSystemTime(new Date(Date.now() + 30_000));
+			const delivered = await deliverArtifactBatch();
+			const replacement = delivered.messages[0];
+			if (replacement === undefined) {
+				throw new Error('The replacement artifact message was not delivered');
+			}
+			const reads = vi.spyOn(env.BLOBS, 'get');
+			let sourceReads: readonly unknown[];
+			try {
+				await artifactConsumer(sent).handleMessage(
+					artifactMessage(replacement, actions)
+				);
+				await artifactConsumer(sent).handleMessage(
+					artifactMessage(body, actions)
+				);
+				sourceReads = reads.mock.calls.filter(
+					([key]) => key === produced.source.key
+				);
+			} finally {
+				reads.mockRestore();
+			}
+			const progress = await inSection((context) =>
+				Promise.resolve(
+					new ArtifactJobService(context).summaryInSection(claim.jobId)
+						?.progress
+				)
+			);
+			expect({
+				actions,
+				sent,
+				failed,
+				reusedTicket: delivered.admissions,
+				delivery: delivered.result,
+				progress,
+				retained,
+				sourceReads
+			}).toStrictEqual({
+				actions: [{ action: 'ack' }, { action: 'ack' }, { action: 'ack' }],
+				sent: [],
+				failed: {
+					result: { selectedJobs: 1, sent: 0, failed: 1 },
+					messages: [],
+					admissions: failed.admissions
+				},
+				reusedTicket: failed.admissions,
+				delivery: { selectedJobs: 1, sent: 1, failed: 0 },
+				progress: { discovered: 1, completed: 1, skipped: 0, failed: 0 },
+				retained: {
+					removed: 0,
+					pending: true,
+					nextWakeAt: produced.lease.cleanupAfter
+				},
+				sourceReads: []
 			});
 		}));
 

@@ -69,7 +69,13 @@ producers are activated. The consumer processes listing jobs under a 14-minute
 budget, using generation-fenced tenant RPCs. Legacy job hints send a
 continuation after a terminal task outcome. Admitted messages claim only their
 specific task, make the job durably due after completion and request a dispatch
-wake. Discovery and initial dispatch remain disabled.
+wake. Admitted transient outcomes use durable retry RPCs before the spent
+message is acknowledged. The consumer requests immediate requeue after a
+staging-capacity refusal and a 60-second deferral for other transient outcomes.
+Delayed tasks reserve no fresh generation credits. The dispatcher delivers
+replacement admissions and recovers failed sends. RPC failure or an invalid
+reply uses transport retry and persisted deadlines for recovery. Cancellation
+starts no new retry RPC. Discovery and initial dispatch remain disabled.
 
 The admission model records queued work in tenant SQLite before a consumer
 claims it. Admissions expire, capture the job, task, source and cache
@@ -102,8 +108,8 @@ Retry does not change terminal counters. Up to eight unstaged admissions can
 coexist with one borrowed admission for each of the pool's eight physical
 stages. Borrowing a sealed stage reserves no new bytes, so full unstaged slots
 do not prevent its promotion. A capacity refusal keeps the task pending and the
-job due without releasing unfinished staging bytes. Queue retry integration,
-capacity-release wakes and producer activation remain pending.
+job due without releasing unfinished staging bytes. Capacity-release wakes and
+producer activation remain pending.
 
 The listing executor reserves an output buffer before calling the tenant
 preparation RPC. Preparation attempts shared-fact reuse and sealed-stage
@@ -149,8 +155,7 @@ the earliest job deadline and reconcile cron eligibility. Staging mutations arm
 both job and cleanup deadlines. The shared alarm scheduler gives dispatch one
 bounded turn, and cron invokes the same dispatcher to recover lost alarms.
 Suspended tenants keep their projected deadline for reactivation, but do not arm
-job alarms or dispatch messages. Capacity-release wakes and targeted consumer
-retries remain pending.
+job alarms or dispatch messages. Capacity-release wakes remain pending.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a

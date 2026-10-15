@@ -1,7 +1,9 @@
 import { rootLogger } from '@cupboard/logger';
 import { type TenantId } from '@cupboard/nix-store/scalars';
 import { type ArtifactTaskClaim } from '@cupboard/protocol/artifact-jobs';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 
+import { artifactTaskRequeueResultSchema } from '../blob/artifact-admission.ts';
 import { type NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { artifactTaskClaimRpcResultSchema } from '../do/artifact-task-rpc.ts';
 import { raceClaimOperation } from '../do/claim-lease.ts';
@@ -26,6 +28,8 @@ type ArtifactQueueRpc = Pick<
 	| 'claimArtifactTask'
 	| 'claimAdmittedArtifactTask'
 	| 'requestArtifactDispatch'
+	| 'requeueArtifactTask'
+	| 'requeueArtifactTaskWithDeadline'
 	| 'prepareListingTaskWithCapacity'
 	| 'registerArtifactMultipart'
 	| 'sealArtifactStaging'
@@ -92,6 +96,26 @@ export class ArtifactQueueConsumer {
 		return { action: 'ack' };
 	}
 
+	private async retryClaim(
+		server: ArtifactQueueRpc,
+		claim: ArtifactTaskClaim,
+		signal: AbortSignal,
+		mode: 'immediate' | 'delayed'
+	): Promise<QueueDecision> {
+		const retryAt = isoTimestamp(
+			new Date(Date.now() + retryDelaySeconds * 1000)
+		);
+		const result = await this.rpc(
+			() =>
+				mode === 'immediate'
+					? server.requeueArtifactTask(claim)
+					: server.requeueArtifactTaskWithDeadline(claim, retryAt),
+			signal
+		);
+		artifactTaskRequeueResultSchema.parse(result);
+		return { action: 'ack' };
+	}
+
 	private async execute(
 		message: ArtifactQueueMessage,
 		signal: AbortSignal
@@ -136,18 +160,43 @@ export class ArtifactQueueConsumer {
 			return { action: 'retry', delaySeconds: retryDelaySeconds };
 		}
 		const options = { signal, budgetMs: workBudgetMs };
-		const execution =
-			this.dependencies.executeTask === undefined
-				? new ListingTaskWorker({
-						server,
-						blobs: this.dependencies.blobs,
-						database: this.dependencies.database,
-						buffers: this.dependencies.buffers
-					}).run(claimed.claim, options)
-				: this.dependencies.executeTask(server, claimed.claim, options);
-		const result = await raceClaimOperation(execution, signal);
+		let result: ListingTaskWorkerResult;
+		try {
+			const execution =
+				this.dependencies.executeTask === undefined
+					? new ListingTaskWorker({
+							server,
+							blobs: this.dependencies.blobs,
+							database: this.dependencies.database,
+							buffers: this.dependencies.buffers
+						}).run(claimed.claim, options)
+					: this.dependencies.executeTask(server, claimed.claim, options);
+			result = await raceClaimOperation(execution, signal);
+		} catch (error) {
+			if (message.admission === undefined || signal.aborted) {
+				throw error;
+			}
+			this.logger.warn(
+				'artifact task execution failed; durable retry requested',
+				{
+					jobId: message.job.id,
+					taskId: claimed.claim.id,
+					error
+				}
+			);
+			return this.retryClaim(server, claimed.claim, signal, 'delayed');
+		}
+
 		if (['completed', 'reused', 'failed'].includes(result.kind)) {
 			return this.continueJob(message, signal);
+		}
+		if (message.admission !== undefined) {
+			return this.retryClaim(
+				server,
+				claimed.claim,
+				signal,
+				result.kind === 'capacity' ? 'immediate' : 'delayed'
+			);
 		}
 		if (result.kind === 'capacity') {
 			const seconds = Math.ceil(
