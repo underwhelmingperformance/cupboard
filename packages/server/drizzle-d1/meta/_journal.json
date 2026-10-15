@@ -519,6 +519,13 @@
 			"when": 1792100120873,
 			"tag": "0073_listing_adoption_seed_dispatch",
 			"breakpoints": true
+		},
+		{
+			"idx": 74,
+			"version": "6",
+			"when": 1792104287211,
+			"tag": "0074_listing_adoption_work",
+			"breakpoints": true
 		}
 	]
 }

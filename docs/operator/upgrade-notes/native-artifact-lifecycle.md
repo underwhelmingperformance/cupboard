@@ -35,6 +35,12 @@ default-parent and named-parent pages. Failed sends and abandoned claims recover
 through their persisted deadlines. This metadata work does not grant cache read
 authority or activate artifact publication.
 
+The additive `listing-adoption-work` transition creates empty capture-consumer
+and expansion-work tables. Each input page can be copied and acknowledged in one
+bounded transaction. Work payloads remain available after event pruning.
+Expansion does not scan historical data or activate this consumer. Source
+fan-out and authoritative adoption delivery remain pending.
+
 Deployment also reconciles bucket lifecycle rules for `artifact-staging/` and
 `shared-artifact-staging/`. The rules delete transient objects and abort
 incomplete multipart uploads after a day. CAS bytes and completed tenant

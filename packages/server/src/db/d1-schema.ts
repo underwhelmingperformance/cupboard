@@ -60,6 +60,10 @@ import {
 	type ListingAdoptionSeedDispatchEpoch,
 	listingAdoptionSeedScopes
 } from '../blob/listing-adoption-seed-dispatch.ts';
+import type {
+	ListingAdoptionConsumerEpoch,
+	ListingAdoptionWorkId
+} from '../blob/listing-adoption-work.ts';
 import {
 	type NarCaptureSequence,
 	narCaptureSequenceSchema
@@ -1229,6 +1233,84 @@ export const listingAdoptionSeedDispatch = sqliteTable(
 			sql`typeof(${table.generation}) = 'integer' AND ${table.generation} BETWEEN 0 AND 9007199254740991
  AND (${table.owner} IS NULL) = (${table.leaseExpiresAt} IS NULL)
  AND (${table.owner} IS NULL OR ${table.generation} >= 1)`
+		)
+	]
+);
+
+export const listingAdoptionConsumer = sqliteTable(
+	'listing_adoption_consumer',
+	{
+		id: integer('id').primaryKey(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionConsumerEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		after: integer('after')
+			.$type<ListingAdoptionCaptureSequence>()
+			.notNull()
+			.default(sql`0`),
+		scanned: integer('scanned').notNull().default(0),
+		enrolled: integer('enrolled').notNull().default(0),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check('listing_adoption_consumer_id_check', sql`${table.id} = 1`),
+		check(
+			'listing_adoption_consumer_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_consumer_progress_check',
+			sql`typeof(${table.after}) = 'integer' AND ${table.after} BETWEEN 0 AND 9007199254740991 AND typeof(${table.scanned}) = 'integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991 AND typeof(${table.enrolled}) = 'integer' AND ${table.enrolled} BETWEEN 0 AND ${table.scanned}`
+		)
+	]
+);
+
+export const listingAdoptionWork = sqliteTable(
+	'listing_adoption_work',
+	{
+		id: text('id')
+			.$type<ListingAdoptionWorkId>()
+			.primaryKey()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		consumerEpoch: text('consumer_epoch')
+			.$type<ListingAdoptionConsumerEpoch>()
+			.notNull(),
+		eventId: integer('event_id')
+			.$type<ListingAdoptionCaptureSequence>()
+			.notNull(),
+		source: text('source', { mode: 'json' })
+			.$type<ListingAdoptionCaptureSource>()
+			.notNull(),
+		createdAt: text('created_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_work_id_check',
+			sql`length(${table.id}) = 32 AND ${table.id} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_work_epoch_check',
+			sql`length(${table.consumerEpoch}) = 32 AND ${table.consumerEpoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_work_event_check',
+			sql`typeof(${table.eventId}) = 'integer' AND ${table.eventId} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'listing_adoption_work_source_check',
+			sql`coalesce(json_valid(${table.source}) AND json_type(${table.source}) = 'object' AND json_extract(${table.source}, '$.kind') IN ('parent','listing','cas'), 0)`
+		),
+		uniqueIndex('listing_adoption_work_consumer_event_idx').on(
+			table.consumerEpoch,
+			table.eventId
 		)
 	]
 );

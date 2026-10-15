@@ -362,8 +362,17 @@ requests a generic dispatch turn. Failed sends and abandoned execution recover
 through persisted D1 deadlines. Independent scopes can execute concurrently;
 per-invocation time and subrequest admission bound each turn.
 
-Bounded event expansion, durable cache-adoption delivery, completion wakes and
-automatic forward producers remain pending.
+A separate capture consumer copies at most 32 events into durable expansion work
+and checkpoints the input cursor in the same transaction. Its epoch, prior
+cursor and counters, deployment and capture readiness, retained floor and
+captured upper position fence both writes. Work records retain complete source
+payloads independently of event retention. Empty and sparse intervals advance
+without counting gaps. Overlapping consumers cannot repeat a committed page. A
+cursor behind the retained floor is reported as expired. Storage expansion
+creates empty tables; this consumer is not yet connected to queue dispatch.
+
+Bounded source fan-out, claimed work execution, durable cache-adoption delivery,
+completion wakes and automatic forward producers remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

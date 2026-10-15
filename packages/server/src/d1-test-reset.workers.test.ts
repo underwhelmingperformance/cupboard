@@ -19,6 +19,12 @@ import {
 it('clears shared D1 facts and restores the completed transition in one batch', async () => {
 	await env.CUPBOARD_DB.batch([
 		env.CUPBOARD_DB.prepare(
+			'INSERT INTO listing_adoption_consumer (id) VALUES (1)'
+		),
+		env.CUPBOARD_DB.prepare(
+			`INSERT INTO listing_adoption_work (consumer_epoch,event_id,source) VALUES ('00000000000000000000000000000001',1,'{"kind":"listing","identity":{"narHash":"reset-nar","generatorRevision":"reset-generator"}}')`
+		),
+		env.CUPBOARD_DB.prepare(
 			"INSERT INTO listing_adoption_seed_dispatch (scope) VALUES ('facts')"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -156,6 +162,8 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		listing_adoption_parent: 0,
 		listing_adoption_parent_seed: 0,
 		listing_adoption_seed_dispatch: 0,
+		listing_adoption_consumer: 0,
+		listing_adoption_work: 0,
 		listing_adoption_capture_event: 0,
 		listing_adoption_capture_state: 1,
 		listing_generation: 0,

@@ -451,7 +451,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'listing-adoption-fact-seed', independent: true },
 		{ id: 'listing-adoption-parents', independent: true },
 		{ id: 'listing-adoption-parent-seed', independent: true },
-		{ id: 'listing-adoption-seed-dispatch', independent: true }
+		{ id: 'listing-adoption-seed-dispatch', independent: true },
+		{ id: 'listing-adoption-work', independent: true }
 	]);
 });
 

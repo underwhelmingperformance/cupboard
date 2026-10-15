@@ -7412,8 +7412,13 @@ build traces available from a cupboard cache.
       execution claims and process one bounded page per hint. Failed sends and
       abandoned execution recover through persisted deadlines. Generic dispatch
       wakes preserve fair scheduling without scope-specific continuation chains.
-      Bounded event expansion, cache adoption delivery, shared completion wakes
-      and producer activation remain pending.
+      Capture consumption now copies at most 32 current events into durable
+      expansion work and advances its input cursor in one transaction. Consumer
+      epochs, prior progress, readiness and the retained capture floor fence the
+      checkpoint. Payloads remain available after their input events are
+      removed. A cursor behind the retained floor is reported as expired. Source
+      fan-out, claimed work execution, cache adoption delivery, shared
+      completion wakes and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
