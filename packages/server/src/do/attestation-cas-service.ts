@@ -614,7 +614,8 @@ export class AttestationCasService {
 			this.context.d1
 				.select({ digest: d1Schema.attestationReference.digest })
 				.from(d1Schema.attestationReference)
-				.where(stillReferencedFilter),
+				.where(stillReferencedFilter)
+				.limit(1),
 			this.context.d1
 				.select({ size: d1Schema.tenantCasBlob.size })
 				.from(d1Schema.tenantCasBlob)
