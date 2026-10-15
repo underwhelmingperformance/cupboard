@@ -626,55 +626,56 @@ describe('durable attestation list refresh', () => {
 		});
 	});
 
-	it('retries the same part after a timed-out response finishes late', async () => {
-		await seedList(2);
-		await runInDurableObject(currentServer(), async (instance) => {
-			const job = await advanceTo(instance.context, 'uploading');
-			if (job.uploadId === null) {
-				throw new Error('The upload ID was not persisted');
-			}
-			const upload = env.BLOBS.resumeMultipartUpload(job.key, job.uploadId);
-			const original = upload.uploadPart.bind(upload);
-			const completion = Promise.withResolvers<undefined>();
-			const part = vi
-				.spyOn(upload, 'uploadPart')
-				.mockImplementationOnce(async (number, body) => {
-					const result = await original(number, body);
-					await completion.promise;
-					return result;
-				});
-			const resume = vi
-				.spyOn(env.BLOBS, 'resumeMultipartUpload')
-				.mockReturnValueOnce(upload);
-			try {
-				await expect(
-					withDeadlineBudget(100, () =>
-						new AttestationListRefreshService(instance.context).advance()
-					)
-				).rejects.toBeInstanceOf(SubrequestTimeoutError);
+	it('retries the same part after a timed-out response finishes late', () =>
+		withoutAlarmArming(async () => {
+			await seedList(2);
+			await runInDurableObject(currentServer(), async (instance) => {
+				const job = await advanceTo(instance.context, 'uploading');
+				if (job.uploadId === null) {
+					throw new Error('The upload ID was not persisted');
+				}
+				const upload = env.BLOBS.resumeMultipartUpload(job.key, job.uploadId);
+				const original = upload.uploadPart.bind(upload);
+				const completion = Promise.withResolvers<undefined>();
+				const part = vi
+					.spyOn(upload, 'uploadPart')
+					.mockImplementationOnce(async (number, body) => {
+						const result = await original(number, body);
+						await completion.promise;
+						return result;
+					});
+				const resume = vi
+					.spyOn(env.BLOBS, 'resumeMultipartUpload')
+					.mockReturnValueOnce(upload);
+				try {
+					await expect(
+						withDeadlineBudget(100, () =>
+							new AttestationListRefreshService(instance.context).advance()
+						)
+					).rejects.toBeInstanceOf(SubrequestTimeoutError);
+					expect(
+						instance.context.db
+							.select({ nextPart: schema.attestationListRefreshJobs.nextPart })
+							.from(schema.attestationListRefreshJobs)
+							.get()
+					).toStrictEqual({ nextPart: 1 });
+				} finally {
+					completion.resolve(undefined);
+					resume.mockRestore();
+					part.mockRestore();
+				}
+				await new AttestationListRefreshService(instance.context).advance();
 				expect(
 					instance.context.db
-						.select({ nextPart: schema.attestationListRefreshJobs.nextPart })
+						.select({
+							nextPart: schema.attestationListRefreshJobs.nextPart,
+							completedBytes: schema.attestationListRefreshJobs.completedBytes
+						})
 						.from(schema.attestationListRefreshJobs)
 						.get()
-				).toStrictEqual({ nextPart: 1 });
-			} finally {
-				completion.resolve(undefined);
-				resume.mockRestore();
-				part.mockRestore();
-			}
-			await new AttestationListRefreshService(instance.context).advance();
-			expect(
-				instance.context.db
-					.select({
-						nextPart: schema.attestationListRefreshJobs.nextPart,
-						completedBytes: schema.attestationListRefreshJobs.completedBytes
-					})
-					.from(schema.attestationListRefreshJobs)
-					.get()
-			).toStrictEqual({ nextPart: 2, completedBytes: job.bufferedBytes });
-		});
-	});
+				).toStrictEqual({ nextPart: 2, completedBytes: job.bufferedBytes });
+			});
+		}));
 
 	it('discards a staged list when the source changes during upload and publishes the new empty revision', async () => {
 		const { identity, parent } = await seedList(2);
