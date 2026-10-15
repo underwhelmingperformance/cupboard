@@ -54,6 +54,7 @@ import type {
 	ListingAdoptionCaptureSequence,
 	ListingAdoptionCaptureSource
 } from '../blob/listing-adoption-capture.ts';
+import type { ListingAdoptionSeedEpoch } from '../blob/listing-adoption-seed.ts';
 import {
 	type NarCaptureSequence,
 	narCaptureSequenceSchema
@@ -1025,6 +1026,54 @@ export const listingAdoptionFact = sqliteTable(
 			table.digest,
 			table.narHash,
 			table.generatorRevision
+		)
+	]
+);
+
+export const listingAdoptionFactSeed = sqliteTable(
+	'listing_adoption_fact_seed',
+	{
+		id: integer('id').primaryKey(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionSeedEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		afterNarHash: text('after_nar_hash').$type<NixSha256HashString>(),
+		afterGeneratorRevision: text(
+			'after_generator_revision'
+		).$type<ListingGeneratorRevision>(),
+		throughNarHash: text('through_nar_hash').$type<NixSha256HashString>(),
+		throughGeneratorRevision: text(
+			'through_generator_revision'
+		).$type<ListingGeneratorRevision>(),
+		scanned: integer('scanned').notNull().default(0),
+		captured: integer('captured').notNull().default(0),
+		isComplete: integer('is_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check('listing_adoption_fact_seed_id_check', sql`${table.id} = 1`),
+		check(
+			'listing_adoption_fact_seed_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_fact_seed_cursor_check',
+			sql`${table.isComplete} IN (0,1) AND (${table.afterNarHash} IS NULL) = (${table.afterGeneratorRevision} IS NULL)
+ AND (${table.throughNarHash} IS NULL) = (${table.throughGeneratorRevision} IS NULL)
+ AND (${table.throughNarHash} IS NOT NULL OR ${table.isComplete} = 1)
+ AND (${table.afterNarHash} IS NULL OR (${table.throughNarHash} IS NOT NULL AND (${table.afterNarHash},${table.afterGeneratorRevision}) <= (${table.throughNarHash},${table.throughGeneratorRevision})))
+ AND (${table.isComplete} = 0 OR ${table.throughNarHash} IS NULL OR (${table.afterNarHash} IS NOT NULL AND (${table.afterNarHash},${table.afterGeneratorRevision}) = (${table.throughNarHash},${table.throughGeneratorRevision})))`
+		),
+		check(
+			'listing_adoption_fact_seed_counts_check',
+			sql`typeof(${table.scanned}) = 'integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991
+ AND typeof(${table.captured}) = 'integer' AND ${table.captured} BETWEEN 0 AND ${table.scanned}`
 		)
 	]
 );

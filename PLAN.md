@@ -7378,8 +7378,16 @@ build traces available from a cupboard cache.
       compatible contract triggers capture after physical storage is ready.
       Consumer readiness follows trigger installation and does not suppress
       source capture. Repair records one digest event without enumerating facts.
-      Historical projection seeding, bounded event expansion, cache adoption
-      delivery, shared completion wakes and producer activation remain pending.
+      Historical listing facts now seed the reverse projection and capture
+      stream in fixed 32-candidate pages. A frozen composite upper boundary,
+      both cursor fields, a seed epoch and current consumer readiness fence each
+      atomic projection, event and counter checkpoint. Deleted facts advance the
+      selected cursor without inflating captures; replacements use current
+      source data. Lost replies and stale pages preserve committed progress. The
+      page query and write batch use bounded indexed reads against a 25,000-fact
+      catalogue. Historical parent seeding, seed scheduling, bounded event
+      expansion, cache adoption delivery, shared completion wakes and producer
+      activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

@@ -133,7 +133,8 @@ describe('checkD1Migrations', () => {
 				'shared-listing-task-delivery',
 				'shared-listing-dispatch',
 				'shared-listing-dispatch-seed',
-				'listing-adoption-capture'
+				'listing-adoption-capture',
+				'listing-adoption-fact-seed'
 			]
 		});
 	});

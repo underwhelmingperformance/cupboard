@@ -447,7 +447,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'shared-listing-task-delivery', independent: false },
 		{ id: 'shared-listing-dispatch', independent: false },
 		{ id: 'shared-listing-dispatch-seed', independent: false },
-		{ id: 'listing-adoption-capture', independent: true }
+		{ id: 'listing-adoption-capture', independent: true },
+		{ id: 'listing-adoption-fact-seed', independent: true }
 	]);
 });
 

@@ -303,10 +303,20 @@ reference and CAS storage become physical tables. Installed triggers record
 source changes before the final consumer-readiness marker. Consumer startup
 cannot suppress capture.
 
+Historical listing facts enter the reverse projection and capture stream in
+pages of 32. The seed freezes its upper NAR-hash and generator-revision pair,
+seeks the existing composite primary key and checkpoints both cursor fields.
+Projection updates, events and counters commit in one batch. The batch rechecks
+current source facts, consumer readiness and the seed epoch, so lost replies,
+deleted boundary rows and delayed pages cannot repeat or regress progress. Live
+capture covers later inserts on either side of the historical cursor. The
+additive migration creates an empty checkpoint table; the first seed turn
+initialises its window without a migration-time catalogue scan.
+
 The capture stream and reverse projection grant no cache authority and retain no
-bytes. Historical projection seeding, bounded event expansion, durable
-cache-adoption delivery, completion wakes and automatic forward producers remain
-pending.
+bytes. Historical parent projection seeding, seed scheduling, bounded event
+expansion, durable cache-adoption delivery, completion wakes and automatic
+forward producers remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

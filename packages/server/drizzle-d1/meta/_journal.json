@@ -484,6 +484,13 @@
 			"when": 1792084524664,
 			"tag": "0068_listing_adoption_capture_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 69,
+			"version": "6",
+			"when": 1792088686166,
+			"tag": "0069_listing_adoption_fact_seed",
+			"breakpoints": true
 		}
 	]
 }
