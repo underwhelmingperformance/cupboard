@@ -470,6 +470,20 @@
 			"when": 1792078068751,
 			"tag": "0066_shared_listing_dispatch_seed",
 			"breakpoints": true
+		},
+		{
+			"idx": 67,
+			"version": "6",
+			"when": 1792084512843,
+			"tag": "0067_listing_adoption_capture",
+			"breakpoints": true
+		},
+		{
+			"idx": 68,
+			"version": "6",
+			"when": 1792084524664,
+			"tag": "0068_listing_adoption_capture_contract",
+			"breakpoints": true
 		}
 	]
 }

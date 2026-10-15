@@ -79,6 +79,9 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			'UPDATE nar_capture_state SET pruned_through = latest, is_ready = 0 WHERE id = 1'
 		),
 		env.CUPBOARD_DB.prepare(
+			'UPDATE listing_adoption_capture_state SET pruned_through = latest, is_ready = 0 WHERE id = 1'
+		),
+		env.CUPBOARD_DB.prepare(
 			"UPDATE deployment_transition SET state = 'pending', updated_at = '2025-01-01T00:00:00.000Z'"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -136,6 +139,9 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		attestation_list_revision: 0,
 		artifact_ref: 0,
 		listing_fact: 0,
+		listing_adoption_fact: 0,
+		listing_adoption_capture_event: 0,
+		listing_adoption_capture_state: 1,
 		listing_generation: 0,
 		shared_listing_generation: 0,
 		shared_listing_stage: 0,
@@ -158,6 +164,11 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		await drizzle(env.CUPBOARD_DB, { schema })
 			.select()
 			.from(schema.narCaptureState)
+	).toStrictEqual([{ id: 1, latest: 0, prunedThrough: 0, isReady: true }]);
+	expect(
+		await drizzle(env.CUPBOARD_DB, { schema })
+			.select()
+			.from(schema.listingAdoptionCaptureState)
 	).toStrictEqual([{ id: 1, latest: 0, prunedThrough: 0, isReady: true }]);
 	const transition = await env.CUPBOARD_DB.prepare(
 		'SELECT id, state, updated_at, contracted_at IS NULL AS uncontracted FROM deployment_transition'

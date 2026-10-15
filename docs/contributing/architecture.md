@@ -289,7 +289,21 @@ generation and uses the publication service's parent authority, live CAS and
 quota checks. The batch publishes sequentially because several parents can refer
 to the same cache-local listing. Repeated parents reuse that artifact and attach
 directed edges without payload reads or writes. A conflicting local fact refuses
-that item without changing its publication or blocking valid siblings. Durable
+that item without changing its publication or blocking valid siblings.
+
+Adoption capture records each new readable parent and relevant generation
+change, each new immutable fact and each matching CAS availability change in the
+source transaction. New facts also update a reverse digest projection. CAS
+repair probes that index and records one digest event without enumerating
+matching facts or parents. Registration and object metadata can be written in
+either order; capture requires a matching live incarnation. The additive
+expansion creates only empty tables and indexes. The contract installs the
+capture clock first, then the source triggers, after reference and CAS storage
+become physical tables. Installed triggers record source changes before the
+final consumer-readiness marker. Consumer startup cannot suppress capture.
+
+The capture stream and reverse projection grant no cache authority and retain no
+bytes. Historical projection seeding, bounded event expansion, durable
 cache-adoption delivery, completion wakes and automatic forward producers remain
 pending.
 

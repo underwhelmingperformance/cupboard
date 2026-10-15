@@ -50,6 +50,10 @@ import {
 } from 'drizzle-orm/sqlite-core';
 
 import type { ArtifactStageId } from '../blob/artifact-staging.ts';
+import type {
+	ListingAdoptionCaptureSequence,
+	ListingAdoptionCaptureSource
+} from '../blob/listing-adoption-capture.ts';
 import {
 	type NarCaptureSequence,
 	narCaptureSequenceSchema
@@ -1003,6 +1007,74 @@ export const listingFact = sqliteTable(
 		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
 		check('listing_fact_format_check', sql`${table.format} = 1`),
 		check('listing_fact_size_check', sql`${table.size} > 0`)
+	]
+);
+
+export const listingAdoptionFact = sqliteTable(
+	'listing_adoption_fact',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		index('listing_adoption_fact_digest_identity_idx').on(
+			table.digest,
+			table.narHash,
+			table.generatorRevision
+		)
+	]
+);
+
+export const listingAdoptionCaptureEvent = sqliteTable(
+	'listing_adoption_capture_event',
+	{
+		id: integer('id')
+			.$type<ListingAdoptionCaptureSequence>()
+			.primaryKey({ autoIncrement: true }),
+		source: text('source', { mode: 'json' })
+			.$type<ListingAdoptionCaptureSource>()
+			.notNull(),
+		createdAt: text('created_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_capture_event_id_check',
+			sql`${table.id} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'listing_adoption_capture_event_source_check',
+			sql`coalesce(json_valid(${table.source}) AND json_type(${table.source}) = 'object' AND json_extract(${table.source}, '$.kind') IN ('parent','listing','cas'), 0)`
+		)
+	]
+);
+
+export const listingAdoptionCaptureState = sqliteTable(
+	'listing_adoption_capture_state',
+	{
+		id: integer('id').primaryKey(),
+		latest: integer('latest')
+			.$type<ListingAdoptionCaptureSequence>()
+			.notNull()
+			.default(sql`0`),
+		prunedThrough: integer('pruned_through')
+			.$type<ListingAdoptionCaptureSequence>()
+			.notNull()
+			.default(sql`0`),
+		isReady: integer('is_ready', { mode: 'boolean' }).notNull().default(false)
+	},
+	(table) => [
+		check('listing_adoption_capture_state_id_check', sql`${table.id} = 1`),
+		check(
+			'listing_adoption_capture_state_position_check',
+			sql`${table.prunedThrough} BETWEEN 0 AND ${table.latest} AND ${table.latest} <= 9007199254740991`
+		)
 	]
 );
 

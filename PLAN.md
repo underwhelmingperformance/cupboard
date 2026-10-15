@@ -7372,8 +7372,14 @@ build traces available from a cupboard cache.
       subrequests, with separate 25-second metadata and 14-minute task budgets.
       Real Worker routing produces canonical CAS listings without creating
       tenant authority, and independent same-job tasks execute concurrently.
-      Cache adoption projections, shared completion wakes and producer
-      activation remain pending.
+      Point capture now records each new readable parent, new listing fact and
+      repaired CAS availability in the source transaction. An independent
+      expansion creates empty capture storage and a reverse digest projection;
+      compatible contract triggers capture after physical storage is ready.
+      Consumer readiness follows trigger installation and does not suppress
+      source capture. Repair records one digest event without enumerating facts.
+      Historical projection seeding, bounded event expansion, cache adoption
+      delivery, shared completion wakes and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

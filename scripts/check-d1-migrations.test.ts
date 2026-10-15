@@ -132,7 +132,8 @@ describe('checkD1Migrations', () => {
 				'shared-listing-completion',
 				'shared-listing-task-delivery',
 				'shared-listing-dispatch',
-				'shared-listing-dispatch-seed'
+				'shared-listing-dispatch-seed',
+				'listing-adoption-capture'
 			]
 		});
 	});
@@ -167,6 +168,66 @@ describe('checkD1Migrations', () => {
 			expandsAfterReferenceStorage: true,
 			installsTriggersAfterReferenceStorage: true
 		});
+	});
+
+	it('installs adoption capture only after reference and CAS storage contract', () => {
+		const completeCount = sharedTransitions.findIndex(
+			(transition) => transition.id === 'cas-demotion-progress'
+		);
+		const order = deployOrder(sharedTransitions, completeCount);
+		if (order === undefined) {
+			throw new Error('Adoption capture has no valid deployment order');
+		}
+		const expansion = order.files.indexOf('0067_listing_adoption_capture.sql');
+		const triggers = order.files.indexOf(
+			'0068_listing_adoption_capture_contract.sql'
+		);
+		const references = order.files.indexOf(
+			'0036_path_read_authority_contract.sql'
+		);
+		const cas = order.files.indexOf('0044_cas_storage_contract.sql');
+		expect({
+			hasAllMigrations: [expansion, triggers, references, cas].every(
+				(position) => position !== -1
+			),
+			expandsBeforeTriggers: expansion < triggers,
+			installsAfterReferences: triggers > references,
+			installsAfterCas: triggers > cas
+		}).toStrictEqual({
+			hasAllMigrations: true,
+			expandsBeforeTriggers: true,
+			installsAfterReferences: true,
+			installsAfterCas: true
+		});
+	});
+
+	it('expands adoption capture without reading the existing catalogue', () => {
+		const database = new DatabaseSync(':memory:');
+		try {
+			const migrations = readMigrationSet(repositoryMigrations);
+			database.exec(migrations.sql('0067_listing_adoption_capture.sql'));
+			const tables = database
+				.prepare(
+					"SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+				)
+				.all();
+			const state = database
+				.prepare('SELECT * FROM listing_adoption_capture_state')
+				.all();
+			expect({
+				tables: tables.map((row) => ({ ...row })),
+				state: state.map((row) => ({ ...row }))
+			}).toStrictEqual({
+				tables: [
+					{ name: 'listing_adoption_capture_event' },
+					{ name: 'listing_adoption_capture_state' },
+					{ name: 'listing_adoption_fact' }
+				],
+				state: [{ id: 1, latest: 0, pruned_through: 0, is_ready: 0 }]
+			});
+		} finally {
+			database.close();
+		}
 	});
 
 	it('installs the namespace guard before the reader transition contracts', () => {
