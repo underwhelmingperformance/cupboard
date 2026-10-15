@@ -6,6 +6,7 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { tenantContract } from '@cupboard/protocol/contract';
 import {
 	type UploadConfirmedPath,
 	uploadConfirmMaxPaths,
@@ -17,6 +18,7 @@ import {
 	type ResultRow,
 	shouldShowDetails
 } from '@cupboard/reporter';
+import { lookupInPages } from '@cupboard/shared/paging';
 import type { Command } from 'commander';
 
 import { isAbortError } from '../abort.ts';
@@ -27,7 +29,7 @@ import { resolveAuthorisedCachePositionals } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import { CupboardClient } from '../client/client.ts';
-import { tenantRpc } from '../client/orpc.ts';
+import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
 import { translateRpcError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
@@ -213,23 +215,32 @@ export async function runConfirm(
 	let confirmedBatches = 0;
 
 	try {
-		await reporter.phase('Confirming published paths', async () => {
-			for (
-				let index = 0;
-				index < storePathHashes.length;
-				index += uploadConfirmMaxPaths
-			) {
-				const batch = await callInCache(client.confirm, cache, {
-					storePathHashes: storePathHashes.slice(
-						index,
-						index + uploadConfirmMaxPaths
-					)
-				});
+		await reporter.phase('Confirming published paths', () =>
+			lookupInPages(storePathHashes, {
+				pageSize: uploadConfirmMaxPaths,
+				concurrency: 1,
+				deadline: procedureDeadline(
+					'uploads.confirm',
+					tenantContract.uploads.confirm.inDefaultCache
+				),
+				request: async (batch, signal) => {
+					const response = await callInCache(
+						client.confirm,
+						cache,
+						{ storePathHashes: [...batch] },
+						{ signal }
+					);
 
-				paths.push(...batch.paths);
-				confirmedBatches += 1;
-			}
-		});
+					// An attempt can answer after its deadline has aborted its
+					// signal. Discard that answer.
+					signal.throwIfAborted();
+					paths.push(...response.paths);
+					confirmedBatches += 1;
+
+					return response.paths;
+				}
+			})
+		);
 	} catch (error) {
 		if (paths.length === 0) {
 			throw error;

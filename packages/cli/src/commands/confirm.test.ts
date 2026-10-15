@@ -17,10 +17,11 @@ import {
 } from '@cupboard/protocol/upload';
 import type { ResultRow } from '@cupboard/reporter';
 import { maxTransientRetries } from '@cupboard/shared/retry';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { Command } from 'commander';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-import { describe, expect, it, onTestFinished } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
 import { recordingCacheScopedClient } from '../client/cache-scoped.test-support.ts';
@@ -341,6 +342,76 @@ describe('runConfirm', () => {
 		await expect(pending).rejects.toBe(abort);
 		expect(captured.results).toHaveLength(1);
 		expect(captured.results[0]?.rows).toHaveLength(uploadConfirmMaxPaths);
+	});
+
+	// The first attempt ignores its signal and answers just after its deadline,
+	// while the second attempt is waiting to start.
+	it('sends a batch again after its deadline and reports it once', async () => {
+		const { ui, captured } = fakeCliUi();
+		const calls: string[][] = [];
+		// The backoff before the second attempt is then 125 milliseconds.
+		vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+		vi.useFakeTimers();
+		try {
+			const pending = runConfirm(
+				defaultCache,
+				[appPath, runtimePath],
+				ui.reporter(),
+				{
+					confirm: recordingCacheScopedClient(async (input) => {
+						calls.push(input.storePathHashes);
+						if (calls.length === 1) {
+							await new Promise((resolve) => {
+								setTimeout(resolve, probeDeadlineMs + 1);
+							});
+						}
+
+						return uploadConfirmResponseSchema.parse({
+							paths: input.storePathHashes.map((storePathHash) => ({
+								storePathHash,
+								confirmed: true,
+								grace: {}
+							}))
+						});
+					})
+				}
+			);
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+			await pending;
+		} finally {
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+		}
+
+		expect({ calls, results: captured.results }).toStrictEqual({
+			calls: [
+				[appHash, runtimeHash],
+				[appHash, runtimeHash]
+			],
+			results: [
+				{
+					kind: 'confirm-paths',
+					title: 'Published paths',
+					data: {
+						paths: [
+							{ storePathHash: appHash, confirmed: true, grace: {} },
+							{ storePathHash: runtimeHash, confirmed: true, grace: {} }
+						]
+					},
+					rows: [
+						{
+							label: `${appHash}-app`,
+							value: 'available; no retention grace period'
+						},
+						{
+							label: `${runtimeHash}-runtime`,
+							value: 'available; no retention grace period'
+						}
+					]
+				}
+			]
+		});
 	});
 
 	// The server bounds one confirm request, so a closure past the bound goes

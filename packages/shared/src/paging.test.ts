@@ -16,6 +16,7 @@ import {
 	cursorPages,
 	fetchWithProbeRetries,
 	lookupInPages,
+	lookupPage,
 	maxProbeAttempts,
 	PageResultCountError,
 	requestWithDeadline
@@ -655,6 +656,28 @@ describe('lookupInPages', () => {
 			[3],
 			[4, 5]
 		]);
+	});
+});
+
+describe('lookupPage', () => {
+	it('sends at most the request size that it reads before each request', async () => {
+		const requests: number[][] = [];
+		let requestSize = 3;
+
+		const results = await lookupPage([1, 2, 3, 4, 5, 6], {
+			deadline: replaySafe,
+			requestSize: () => requestSize,
+			request: (inputs) => {
+				requests.push([...inputs]);
+				requestSize = 2;
+				return Promise.resolve(inputs);
+			}
+		});
+
+		expect({ results, requests }).toStrictEqual({
+			results: [1, 2, 3, 4, 5, 6],
+			requests: [[1, 2, 3], [4, 5], [6]]
+		});
 	});
 });
 
