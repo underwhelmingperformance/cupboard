@@ -1,14 +1,5 @@
 import { type CacheScope } from '@cupboard/nix-store/scalars';
-import {
-	and,
-	eq,
-	exists,
-	gt,
-	inArray,
-	isNotNull,
-	isNull,
-	sql
-} from 'drizzle-orm';
+import { and, eq, exists, gt, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
@@ -187,15 +178,14 @@ export class ListingAdoptionParentSeedStore {
 			identity.cache,
 			jsonValueList([identity.storePathHash])
 		).as('seed_parent');
+		const eligibleStatus = or(
+			eq(schema.tenant.status, 'active'),
+			eq(schema.tenant.status, 'suspended')
+		);
 		const tenant = this.database
 			.select({ id: schema.tenant.id })
 			.from(schema.tenant)
-			.where(
-				and(
-					eq(schema.tenant.id, identity.tenant),
-					inArray(schema.tenant.status, ['active', 'suspended'])
-				)
-			);
+			.where(and(eq(schema.tenant.id, identity.tenant), eligibleStatus));
 		const cache =
 			identity.cache.kind === 'default'
 				? sql`json_object('kind','default')`
