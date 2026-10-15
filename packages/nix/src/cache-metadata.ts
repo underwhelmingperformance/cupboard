@@ -20,15 +20,14 @@ import {
 	cacheMetadataResponseSchema
 } from '@cupboard/protocol/cache-metadata';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
+import { fetchWithProbeRetries, lookupInPages } from '@cupboard/shared/paging';
 import {
 	type BoundedResponseBodyOptions,
 	readResponseBytes,
 	readResponseText
 } from '@cupboard/shared/response-body';
-import { fetchWithProbeDeadline } from '@cupboard/shared/timeout';
 
 const narInfoConcurrency = 6;
 const utf8 = new TextEncoder();
@@ -210,7 +209,7 @@ async function sourceOffer(
 	shouldDiscoverCapability = false
 ): Promise<{ readonly bulk: boolean; readonly offer?: CachedClosureOffer }> {
 	const url = `${canonicalHref(source.url)}/${StorePath.hash(storePath)}.narinfo`;
-	const document = await fetchWithProbeDeadline(
+	const document = await fetchWithProbeRetries(
 		fetcher,
 		url,
 		{
@@ -333,69 +332,49 @@ export class CachedClosureReader {
 	}
 
 	async #bulkPage(
-		paths: readonly StorePathString[]
+		paths: readonly StorePathString[],
+		signal: AbortSignal
 	): Promise<readonly (CachedClosureOffer | undefined)[]> {
-		const offers: (CachedClosureOffer | undefined)[] = [];
-		let remaining = paths;
-		while (remaining.length > 0) {
-			let response: CacheMetadataResponse;
-			try {
-				response = await this.#request(remaining);
-			} catch (error) {
-				if (
-					!(error instanceof CachedClosureMetadataBudgetError) ||
-					remaining.length === 1
-				) {
-					throw error;
-				}
-				const midpoint = Math.ceil(remaining.length / 2);
-				return [
-					...offers,
-					...(await this.#bulkPage(remaining.slice(0, midpoint))),
-					...(await this.#bulkPage(remaining.slice(midpoint)))
-				];
-			}
-			if (
-				this.#scopeVersion !== undefined &&
-				response.scopeVersion !== this.#scopeVersion
-			) {
-				throw new CachedClosureSourceChangedError(this.source.url);
-			}
-			this.#scopeVersion ??= response.scopeVersion;
-			if (
-				response.entries.some(
-					(entry, index) => entry.storePath !== remaining[index]
-				) ||
-				(response.nextIndex === undefined
-					? response.entries.length !== remaining.length
-					: response.nextIndex >= remaining.length)
-			) {
-				throw new CachedClosureSourceInvalidError(
-					this.source.url,
-					'the metadata response does not match the requested prefix'
-				);
-			}
-			const pageOffers = response.entries.map((entry) =>
-				entry.status === 'missing'
-					? undefined
-					: parseSourceOffer(this.source, entry.storePath, entry.narinfo)
-			);
-			offers.push(...pageOffers);
-			this.onProgress?.({
-				mode: 'bulk',
-				checked: pageOffers.length,
-				found: pageOffers.filter((offer) => offer !== undefined).length
-			});
-			remaining =
-				response.nextIndex === undefined
-					? []
-					: remaining.slice(response.nextIndex);
+		const response = await this.#request(paths, signal);
+		// An attempt can answer after its deadline has aborted its signal. Discard
+		// that answer.
+		signal.throwIfAborted();
+		if (
+			this.#scopeVersion !== undefined &&
+			response.scopeVersion !== this.#scopeVersion
+		) {
+			throw new CachedClosureSourceChangedError(this.source.url);
 		}
-		return offers;
+		this.#scopeVersion ??= response.scopeVersion;
+		if (
+			response.entries.some(
+				(entry, index) => entry.storePath !== paths[index]
+			) ||
+			(response.nextIndex === undefined
+				? response.entries.length !== paths.length
+				: response.nextIndex >= paths.length)
+		) {
+			throw new CachedClosureSourceInvalidError(
+				this.source.url,
+				'the metadata response does not match the requested prefix'
+			);
+		}
+		const pageOffers = response.entries.map((entry) =>
+			entry.status === 'missing'
+				? undefined
+				: parseSourceOffer(this.source, entry.storePath, entry.narinfo)
+		);
+		this.onProgress?.({
+			mode: 'bulk',
+			checked: pageOffers.length,
+			found: pageOffers.filter((offer) => offer !== undefined).length
+		});
+		return pageOffers;
 	}
 
 	async #request(
-		paths: readonly StorePathString[]
+		paths: readonly StorePathString[],
+		signal: AbortSignal
 	): Promise<CacheMetadataResponse> {
 		const request = cacheMetadataRequestSchema.parse({
 			storePaths: paths,
@@ -410,21 +389,21 @@ export class CachedClosureReader {
 				'the metadata request exceeds the byte limit'
 			);
 		}
-		return fetchWithProbeDeadline(
-			this.fetcher,
-			`${canonicalHref(this.source.url)}/api/v1/path-info`,
-			{
-				method: 'POST',
-				headers: {
-					accept: 'application/json',
-					'content-type': 'application/json',
-					...(this.source.credential && basicAuthHeader(this.source.credential))
-				},
-				body,
-				...(this.signal && { signal: this.signal })
+		const response = await this.fetcher(this.#pathInfoUrl(), {
+			method: 'POST',
+			headers: {
+				accept: 'application/json',
+				'content-type': 'application/json',
+				...(this.source.credential && basicAuthHeader(this.source.credential))
 			},
-			(response) => this.#readResponse(response, request.storePaths)
-		);
+			body,
+			signal
+		});
+		return this.#readResponse(response, request.storePaths);
+	}
+
+	#pathInfoUrl(): string {
+		return `${canonicalHref(this.source.url)}/api/v1/path-info`;
 	}
 
 	async #readError(
@@ -569,19 +548,18 @@ export class CachedClosureReader {
 		if (this.#mode === 'legacy') {
 			return this.#legacy(paths);
 		}
-		const pages = chunk(paths, cacheMetadataMaxPaths);
-		const initial: (CachedClosureOffer | undefined)[] = [];
-		if (this.#scopeVersion === undefined) {
-			const page = pages.shift();
-			if (page !== undefined) {
-				initial.push(...(await this.#bulkPage(page)));
-			}
-		}
-		const results = await mapWithConcurrency(
-			pages,
-			narInfoConcurrency,
-			(page) => this.#bulkPage(page)
-		);
-		return [...initial, ...results.flat()];
+		return lookupInPages(paths, {
+			pageSize: cacheMetadataMaxPaths,
+			concurrency: narInfoConcurrency,
+			finishFirstPage: this.#scopeVersion === undefined,
+			deadline: {
+				url: this.#pathInfoUrl(),
+				replaySafety: 'replay-safe',
+				signal: this.signal
+			},
+			isPageTooLarge: (error) =>
+				error instanceof CachedClosureMetadataBudgetError,
+			request: (page, signal) => this.#bulkPage(page, signal)
+		});
 	}
 }

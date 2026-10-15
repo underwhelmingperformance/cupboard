@@ -1,4 +1,4 @@
-import { CodedError } from './errors.ts';
+import { CodedError, transientExitCode } from './errors.ts';
 
 async function completionSignal(pending: Promise<unknown>): Promise<void> {
 	try {
@@ -46,42 +46,59 @@ export async function withDeadline<T>(
 export const probeDeadlineMs = 30_000;
 
 /**
- * Apply one deadline to both the request and response consumption. Timing only
- * `fetch` would let a stalled response body hang the probe indefinitely.
+ * Runs one attempt of `operation` with a deadline. `operation` receives a
+ * signal that aborts when the caller's `signal` aborts or the deadline passes.
+ * When the deadline passes first, the attempt rejects with the error from
+ * `makeError`, and the signal aborts with that error so that a request using
+ * it releases its connection. When the caller's signal aborts first, the
+ * attempt rejects at once with its reason, even if `operation` ignores the
+ * signal and never settles.
  */
-export async function fetchWithProbeDeadline<Result>(
-	fetcher: typeof fetch,
-	url: string,
-	init: RequestInit | undefined,
-	consume: (response: Response) => Result | Promise<Result>,
-	deadlineMs = probeDeadlineMs
-): Promise<Result> {
+export async function attemptWithDeadline<T>(
+	operation: (signal: AbortSignal) => Promise<T>,
+	deadlineMs: number,
+	makeError: () => Error,
+	signal?: AbortSignal
+): Promise<T> {
+	signal?.throwIfAborted();
+
 	const deadlineController = new AbortController();
-	const callerSignal = init?.signal ?? undefined;
-	const signal =
-		callerSignal === undefined
+	const attemptSignal =
+		signal === undefined
 			? deadlineController.signal
-			: AbortSignal.any([callerSignal, deadlineController.signal]);
+			: AbortSignal.any([signal, deadlineController.signal]);
 
-	const pending = (async () => {
-		const response = await fetcher(url, { ...init, signal });
-
-		return consume(response);
-	})();
+	const pending = Promise.try(operation, attemptSignal);
 	let timer: ReturnType<typeof setTimeout> | undefined;
-	const deadline = new Promise<never>((_resolve, reject) => {
+	let abandon: (() => void) | undefined;
+	const interruption = new Promise<never>((_resolve, reject) => {
 		timer = setTimeout(() => {
-			const error = new ProbeTimeoutError(url);
+			const error = makeError();
 			reject(error);
 			deadlineController.abort(error);
 		}, deadlineMs);
+		abandon = () => {
+			reject(abortError(signal));
+		};
+		signal?.addEventListener('abort', abandon, { once: true });
 	});
 
 	try {
-		return await Promise.race([pending, deadline]);
+		return await Promise.race([pending, interruption]);
 	} finally {
 		clearTimeout(timer);
+		if (abandon !== undefined) {
+			signal?.removeEventListener('abort', abandon);
+		}
 	}
+}
+
+function abortError(signal: AbortSignal | undefined): Error {
+	const reason: unknown = signal?.reason;
+
+	return reason instanceof Error
+		? reason
+		: new Error('The operation was aborted', { cause: reason });
 }
 
 export class ProbeTimeoutError extends CodedError {
@@ -90,5 +107,9 @@ export class ProbeTimeoutError extends CodedError {
 			`Timed out probing ${url}; the cache did not return a response before the deadline`
 		);
 		this.name = 'ProbeTimeoutError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
 	}
 }

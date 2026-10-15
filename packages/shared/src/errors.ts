@@ -1,11 +1,12 @@
 /**
  * Process exit codes by failure category, so a caller can tell a misuse from
  * the catch-all. 2 is the usual shell convention for a usage error and 1 is the
- * catch-all; packages layer their own categories (for example the BSD sysexits
- * codes) on top.
+ * catch-all. 75 is the BSD sysexits EX_TEMPFAIL code, for a failure that a
+ * later attempt may not repeat. Packages layer their own categories on top.
  */
 export const genericExitCode = 1;
 export const usageExitCode = 2;
+export const transientExitCode = 75;
 
 export abstract class CodedError extends Error {
 	get exitCode(): number {

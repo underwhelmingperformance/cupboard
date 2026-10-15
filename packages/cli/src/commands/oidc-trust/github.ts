@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { transientExitCode } from '@cupboard/shared/errors';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import type { RequestError } from '@octokit/request-error';
@@ -8,12 +9,7 @@ import makeFetchHappen from 'make-fetch-happen';
 
 import { abortReason, isAbortError } from '../../abort.ts';
 import { cacheDirectory } from '../../auth/secret-file.ts';
-import {
-	authExitCode,
-	CliError,
-	CliUsageError,
-	transientExitCode
-} from '../../errors.ts';
+import { authExitCode, CliError, CliUsageError } from '../../errors.ts';
 
 const forbiddenStatus: number = StatusCodes.FORBIDDEN;
 const requestTimeoutStatus: number = StatusCodes.REQUEST_TIMEOUT;

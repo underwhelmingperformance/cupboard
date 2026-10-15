@@ -1,9 +1,6 @@
-import {
-	authExitCode,
-	CliError,
-	CliUsageError,
-	transientExitCode
-} from '../errors.ts';
+import { transientExitCode } from '@cupboard/shared/errors';
+
+import { authExitCode, CliError, CliUsageError } from '../errors.ts';
 
 /**
  * The destination or reuse-view availability probe returned a non-2xx status

@@ -33,6 +33,7 @@
 		"./limits": "./src/limits.ts",
 		"./node-tracing": "./src/node-tracing.ts",
 		"./octokit": "./src/octokit.ts",
+		"./paging": "./src/paging.ts",
 		"./response-body": "./src/response-body.ts",
 		"./retry": "./src/retry.ts",
 		"./sigstore": "./src/sigstore.ts",

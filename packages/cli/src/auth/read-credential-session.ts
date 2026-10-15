@@ -6,14 +6,10 @@ import { renderNetrc } from '@cupboard/nix-store/nix-config';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { bestEffort, withCleanup } from '@cupboard/shared/cleanup';
+import { transientExitCode } from '@cupboard/shared/errors';
 
 import { abortable, abortReason, delayMs, throwIfAborted } from '../abort.ts';
-import {
-	authExitCode,
-	CliError,
-	CupboardHttpError,
-	transientExitCode
-} from '../errors.ts';
+import { authExitCode, CliError, CupboardHttpError } from '../errors.ts';
 
 import {
 	GithubOidcAudienceRefusedError,

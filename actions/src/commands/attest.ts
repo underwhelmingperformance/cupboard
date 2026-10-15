@@ -28,13 +28,13 @@ import {
 	type BasicCredential,
 	type ReadUser
 } from '@cupboard/shared/http';
+import { fetchWithProbeRetries } from '@cupboard/shared/paging';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 
 import type { DestinationAccess } from '../attestation-signing.ts';
-import { fetchWithProbeDeadline } from '../cache-probe.ts';
 import {
 	CacheAccessProbeError,
 	CommittedSubjectInvalidError,
@@ -103,25 +103,20 @@ export async function cacheAccess(
 ): Promise<DestinationAccess> {
 	const target = `${canonicalHref(cacheUrl)}/nix-cache-info`;
 
-	return fetchWithProbeDeadline(
-		fetcher,
-		target,
-		undefined,
-		async (response) => {
-			await discardResponseBody(response);
-			const status: StatusCodes = response.status;
+	return fetchWithProbeRetries(fetcher, target, undefined, async (response) => {
+		await discardResponseBody(response);
+		const status: StatusCodes = response.status;
 
-			if (status === StatusCodes.OK) {
-				return 'public';
-			}
-
-			if (status === StatusCodes.UNAUTHORIZED) {
-				return 'private';
-			}
-
-			throw new CacheAccessProbeError(target, response.status);
+		if (status === StatusCodes.OK) {
+			return 'public';
 		}
-	);
+
+		if (status === StatusCodes.UNAUTHORIZED) {
+			return 'private';
+		}
+
+		throw new CacheAccessProbeError(target, response.status);
+	});
 }
 
 /**
@@ -415,7 +410,7 @@ async function fetchCommittedPathInfo(
 	credential: BasicCredential | undefined
 ): Promise<CommittedPathInfo> {
 	const target = `${base}/${StorePath.hash(storePath)}.narinfo`;
-	const source = await fetchWithProbeDeadline(
+	const source = await fetchWithProbeRetries(
 		fetcher,
 		target,
 		{

@@ -52,13 +52,13 @@ import {
 	type ReadUser,
 	readUserInputSchema
 } from '@cupboard/shared/http';
+import { fetchWithProbeRetries } from '@cupboard/shared/paging';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
-import { fetchWithProbeDeadline } from '../cache-probe.ts';
 import { acquireCupboard } from '../cupboard-acquisition.ts';
 import {
 	parseResolvedCupboard,
@@ -1664,7 +1664,7 @@ async function fetchCacheAccessState(
 				})
 			: plain;
 
-	return fetchWithProbeDeadline<'public' | 'private' | 'absent' | 'challenge'>(
+	return fetchWithProbeRetries<'public' | 'private' | 'absent' | 'challenge'>(
 		fetcher,
 		target,
 		{
@@ -1800,10 +1800,7 @@ async function fetchCacheInfoPriority(
 ): Promise<CachePriority> {
 	const url = canonicalHref(substituter);
 	const target = `${url}/nix-cache-info`;
-	// Each request, retries included, is bounded by the probe deadline, so a
-	// stalled connection fails promptly instead of waiting out undici's much
-	// longer default timeout.
-	return fetchWithProbeDeadline(
+	return fetchWithProbeRetries(
 		fetcher,
 		target,
 		{
@@ -2071,7 +2068,7 @@ export async function fetchCachePublicKeyAt(
 ): Promise<string> {
 	const url = canonicalHref(endpoint);
 
-	return fetchWithProbeDeadline(
+	return fetchWithProbeRetries(
 		retryingFetcher(fetcher, 'replay-safe'),
 		url,
 		{

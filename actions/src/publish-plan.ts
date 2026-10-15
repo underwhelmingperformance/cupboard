@@ -17,14 +17,12 @@ import {
 	cacheAvailabilityResponseSchema
 } from '@cupboard/protocol/cache-availability';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { chunk } from '@cupboard/shared/collections';
-import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
+import { lookupInPages } from '@cupboard/shared/paging';
 import { readResponseJson } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import { z } from 'zod';
 
-import { fetchWithProbeDeadline } from './cache-probe.ts';
 import {
 	CacheAvailabilityQueryError,
 	CacheAvailabilityResponseMalformedError,
@@ -722,7 +720,7 @@ async function availablePathsAt(
 		StorePath.hash(storePath)
 	);
 
-	const batches = chunk(pathsByHash.keys().toArray(), maximumBatchSize);
+	const hashes = pathsByHash.keys().toArray();
 	const fetcher = retryingFetcher(
 		withReadAuthentication(options.fetcher ?? fetch, {
 			tenantUrl: options.baseUrl
@@ -734,24 +732,35 @@ async function availablePathsAt(
 		...(options.credentials !== undefined &&
 			basicAuthHeader(options.credentials))
 	};
-	const firstBatch = requireIndex(batches, 0);
-	const firstMissing = await queryMissingStorePathHashes(
-		fetcher,
-		probeUrl,
-		firstBatch,
-		headers
-	);
-
-	const remainingMissing = await mapWithConcurrency(
-		batches.slice(1),
-		maximumConcurrentAvailabilityQueries,
-		(batch) => queryMissingStorePathHashes(fetcher, probeUrl, batch, headers)
-	);
-	const missing = new Set([...firstMissing, ...remainingMissing.flat()]);
+	// Append the protocol path to one canonical rendering of the cache URL.
+	const target = `${canonicalHref(probeUrl)}/api/v1/missing-paths`;
+	const availability = await lookupInPages(hashes, {
+		pageSize: maximumBatchSize,
+		concurrency: maximumConcurrentAvailabilityQueries,
+		finishFirstPage: true,
+		deadline: {
+			url: target,
+			replaySafety: 'replay-safe'
+		},
+		request: async (batch, signal) => {
+			const missing = new Set(
+				await queryMissingStorePathHashes(fetcher, target, batch, {
+					body: JSON.stringify({ storePathHashes: batch }),
+					headers,
+					method: 'POST',
+					signal
+				})
+			);
+			return batch.map((hash) => (missing.has(hash) ? 'missing' : 'available'));
+		}
+	});
 	const available = new Set<StorePathString>();
 
-	for (const [hash, matchingPaths] of pathsByHash) {
-		if (missing.has(hash)) {
+	for (const [index, matchingPaths] of pathsByHash
+		.values()
+		.toArray()
+		.entries()) {
+		if (availability[index] !== 'available') {
 			continue;
 		}
 
@@ -765,58 +774,46 @@ async function availablePathsAt(
 
 async function queryMissingStorePathHashes(
 	fetcher: typeof fetch,
-	probeUrl: URL,
+	target: string,
 	storePathHashes: readonly StorePathHash[],
-	headers: Readonly<Record<string, string>>
+	init: RequestInit
 ): Promise<StorePathHash[]> {
-	// Append the protocol path to one canonical rendering of the cache URL.
-	const target = `${canonicalHref(probeUrl)}/api/v1/missing-paths`;
+	const response = await fetcher(target, init);
 
-	return fetchWithProbeDeadline(
-		fetcher,
-		target,
-		{
-			body: JSON.stringify({ storePathHashes }),
-			headers,
-			method: 'POST'
-		},
-		async (response) => {
-			if (!response.ok) {
-				await discardResponseBody(response);
-				throw new CacheAvailabilityQueryError(response.status);
-			}
+	if (!response.ok) {
+		await discardResponseBody(response);
+		throw new CacheAvailabilityQueryError(response.status);
+	}
 
-			let value: unknown;
+	let value: unknown;
 
-			try {
-				value = await readResponseJson(response, {
-					description: 'cache availability response',
-					maximumBytes: maximumAvailabilityResponseBytes
-				});
-			} catch (error) {
-				throw new CacheAvailabilityResponseMalformedError(
-					error instanceof SyntaxError ? error : new SyntaxError(String(error))
-				);
-			}
+	try {
+		value = await readResponseJson(response, {
+			description: 'cache availability response',
+			maximumBytes: maximumAvailabilityResponseBytes
+		});
+	} catch (error) {
+		throw new CacheAvailabilityResponseMalformedError(
+			error instanceof SyntaxError ? error : new SyntaxError(String(error))
+		);
+	}
 
-			const parsed = cacheAvailabilityResponseSchema.safeParse(value);
+	const parsed = cacheAvailabilityResponseSchema.safeParse(value);
 
-			if (!parsed.success) {
-				throw new CacheAvailabilityResponseSchemaError(parsed.error);
-			}
+	if (!parsed.success) {
+		throw new CacheAvailabilityResponseSchemaError(parsed.error);
+	}
 
-			const requested = new Set(storePathHashes);
-			const unexpected = parsed.data.missingStorePathHashes.find(
-				(storePathHash) => !requested.has(storePathHash)
-			);
-
-			if (unexpected !== undefined) {
-				throw new CacheAvailabilityResponseUnexpectedHashError(unexpected);
-			}
-
-			return parsed.data.missingStorePathHashes;
-		}
+	const requested = new Set(storePathHashes);
+	const unexpected = parsed.data.missingStorePathHashes.find(
+		(storePathHash) => !requested.has(storePathHash)
 	);
+
+	if (unexpected !== undefined) {
+		throw new CacheAvailabilityResponseUnexpectedHashError(unexpected);
+	}
+
+	return parsed.data.missingStorePathHashes;
 }
 
 /**

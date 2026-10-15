@@ -8,7 +8,11 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { pushIdSchema } from '@cupboard/protocol/upload';
-import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
+import {
+	genericExitCode,
+	transientExitCode,
+	usageExitCode
+} from '@cupboard/shared/errors';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { ORPCError } from '@orpc/client';
 import { ValidationError } from '@orpc/contract';
@@ -20,8 +24,7 @@ import {
 	authExitCode,
 	CliAbortError,
 	CupboardHttpError,
-	QuotaExceededError,
-	transientExitCode
+	QuotaExceededError
 } from '../errors.ts';
 import { errorExitCode } from '../exit-code.ts';
 import { byteStream } from '../io/byte-stream.ts';

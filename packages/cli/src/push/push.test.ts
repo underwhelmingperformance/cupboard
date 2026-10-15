@@ -44,7 +44,7 @@ import {
 	type ResultPayload,
 	type ResultRow
 } from '@cupboard/reporter';
-import { genericExitCode } from '@cupboard/shared/errors';
+import { genericExitCode, transientExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -64,7 +64,6 @@ import {
 	PushNarMetadataMismatchError,
 	QuotaExceededError,
 	ReferenceUploadRequiredError,
-	transientExitCode,
 	UploadGraceFactsUnsupportedError,
 	UploadNegotiationMismatchError,
 	UploadVerificationFailedError

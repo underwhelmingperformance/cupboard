@@ -5,8 +5,14 @@ import {
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { cacheMetadataRequestSchema } from '@cupboard/protocol/cache-metadata';
 import { initialiseTracing } from '@cupboard/shared/node-tracing';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { propagation, trace } from '@opentelemetry/api';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+import {
+	stalledResponse,
+	untilOnlyStalledRequestPending
+} from '../../../tests/support/stalled-request.ts';
 
 import {
 	tenantDependencyReferences,
@@ -19,6 +25,14 @@ const client = storePathSchema.parse(`/nix/store/${'3'.repeat(32)}-deploy-rs`);
 const upstream = storePathSchema.parse(`/nix/store/${'4'.repeat(32)}-upstream`);
 const unrelated = storePathSchema.parse(
 	`/nix/store/${'5'.repeat(32)}-unrelated`
+);
+const dependencies = Array.from({ length: 70 }, (_, index) =>
+	storePathSchema.parse(
+		`/nix/store/${String(index).padStart(32, '0')}-dependency-${String(index)}`
+	)
+);
+const heldDependencies = new Set(
+	dependencies.filter((_, index) => index % 3 === 0)
 );
 const destination = new URL('https://cache.example.test/t/acme');
 const reuse = new URL('https://cache.example.test/t/acme/reuse/prs');
@@ -301,6 +315,96 @@ describe('tenantDependencyReferences', () => {
 			]
 		});
 	});
+	it.each([
+		{
+			mode: 'bulk',
+			capability: 'path-info-v1',
+			stalledRequest: `page ${dependencies[32] ?? ''}`
+		},
+		{
+			mode: 'legacy',
+			capability: '',
+			stalledRequest: `narinfo ${dependencies[40] ?? ''}`
+		}
+	])(
+		'sends a $mode request again after it hangs past the deadline and keeps the input order',
+		async ({ capability, stalledRequest }) => {
+			const requests: string[] = [];
+			const headers = { 'x-cupboard-read-capabilities': capability };
+			const respond = (
+				request: string,
+				signal: AbortSignal | null | undefined,
+				response: () => Response
+			): Promise<Response> => {
+				requests.push(request);
+				if (
+					request === stalledRequest &&
+					requests.indexOf(request) === requests.length - 1
+				) {
+					return stalledResponse(signal);
+				}
+				return Promise.resolve(response());
+			};
+			const fetchMetadata: typeof fetch = (input, init) => {
+				const url = new URL(input instanceof Request ? input.url : input);
+				if (url.pathname.endsWith('.narinfo')) {
+					const path = dependencies.find((candidate) =>
+						url.pathname.endsWith(`/${StorePath.hash(candidate)}.narinfo`)
+					);
+					return respond(`narinfo ${path ?? ''}`, init?.signal, () =>
+						capability === '' &&
+						path !== undefined &&
+						heldDependencies.has(path)
+							? new Response(narinfo(path), { headers })
+							: new Response(undefined, { status: 404, headers })
+					);
+				}
+				if (typeof init?.body !== 'string') {
+					throw new TypeError('Expected a JSON metadata body');
+				}
+				const body = cacheMetadataRequestSchema.parse(JSON.parse(init.body));
+				return respond(`page ${body.storePaths[0] ?? ''}`, init.signal, () =>
+					Response.json({
+						scopeVersion: 'scope-1',
+						entries: body.storePaths.map((storePath) =>
+							heldDependencies.has(storePath)
+								? { storePath, status: 'found', narinfo: narinfo(storePath) }
+								: { storePath, status: 'missing' }
+						)
+					})
+				);
+			};
+
+			vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+			try {
+				const operation = tenantDependencyReferences(dependencies, {
+					sources: [{ url: destination, paths: [] }],
+					fetch: fetchMetadata
+				});
+				const settled = expect(operation).resolves.toStrictEqual(
+					dependencies
+						.filter((path) => heldDependencies.has(path))
+						.map((storePath) => ({
+							storePath,
+							source: destination.href,
+							narinfo: narinfo(storePath),
+							kind: 'intermediate'
+						}))
+				);
+				await untilOnlyStalledRequestPending(() =>
+					requests.includes(stalledRequest)
+				);
+				await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+				await settled;
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(
+				requests.filter((request) => request === stalledRequest)
+			).toStrictEqual([stalledRequest, stalledRequest]);
+		}
+	);
 	it('reports pending requests periodically and removes the timer after failure', async () => {
 		vi.useFakeTimers();
 		const requested = Promise.withResolvers<undefined>();

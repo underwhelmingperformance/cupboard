@@ -1,0 +1,250 @@
+import { chunk } from './collections.ts';
+import { mapWithConcurrency } from './concurrency.ts';
+import { CodedError } from './errors.ts';
+import { backoffDelay, type ReplaySafety } from './retry.ts';
+import {
+	attemptWithDeadline,
+	probeDeadlineMs,
+	ProbeTimeoutError
+} from './timeout.ts';
+
+/**
+ * The number of attempts, including the first, that {@link requestWithDeadline}
+ * makes at a replay-safe request before it reports a deadline expiry.
+ */
+export const maxProbeAttempts = 3;
+
+export interface DeadlineOptions {
+	/**
+	The request URL, which identifies the request in its deadline expiry.
+	*/
+	readonly url: string;
+	/**
+	 * Whether the server can receive the request again without a different
+	 * effect. Only a replay-safe request is sent again after its deadline
+	 * expires.
+	 */
+	readonly replaySafety: ReplaySafety;
+	/**
+	 * The caller's signal. It aborts the attempt in progress, and after it
+	 * aborts no further attempt starts.
+	 */
+	readonly signal?: AbortSignal | undefined;
+	readonly deadlineMs?: number;
+}
+
+/**
+ * Runs `request` with a deadline, which defaults to {@link probeDeadlineMs}.
+ * `request` receives a signal that aborts when the deadline passes, so a
+ * request that uses it releases its connection. The attempt then rejects with
+ * a {@link ProbeTimeoutError} for the URL.
+ *
+ * A replay-safe request starts again after its own deadline expires, up to
+ * {@link maxProbeAttempts} attempts in total, with a full-jitter backoff
+ * between them. A replay-unsafe request makes one attempt. Every other error
+ * propagates unchanged, including a `ProbeTimeoutError` that `request` raises
+ * itself, and an abort during the backoff rejects with the abort reason.
+ *
+ * Put transport retries inside `request`. One deadline then covers each
+ * attempt and its transport retries.
+ */
+export async function requestWithDeadline<T>(
+	request: (signal: AbortSignal) => Promise<T>,
+	options: DeadlineOptions
+): Promise<T> {
+	const attempts =
+		options.replaySafety === 'replay-safe' ? maxProbeAttempts : 1;
+
+	for (let attempt = 1; ; attempt += 1) {
+		options.signal?.throwIfAborted();
+
+		let expiry: ProbeTimeoutError | undefined;
+		try {
+			return await attemptWithDeadline(
+				request,
+				options.deadlineMs ?? probeDeadlineMs,
+				() => (expiry = new ProbeTimeoutError(options.url)),
+				options.signal
+			);
+		} catch (error) {
+			if (
+				expiry === undefined ||
+				error !== expiry ||
+				options.signal?.aborted === true ||
+				attempt >= attempts
+			) {
+				throw error;
+			}
+		}
+
+		await backoffDelay(attempt, options.signal);
+	}
+}
+
+/**
+ * Sends a replay-safe read probe through {@link requestWithDeadline}, which
+ * applies one deadline to the request and the consumption of its response
+ * and sends the request again when the deadline expires. The abort that ends
+ * a timed-out attempt closes its connection, so the next attempt does not
+ * wait on the same stalled connection. `init.signal` is the caller's signal
+ * for both the requests and the backoff.
+ */
+export async function fetchWithProbeRetries<Result>(
+	fetcher: typeof fetch,
+	url: string,
+	init: RequestInit | undefined,
+	consume: (response: Response) => Result | Promise<Result>,
+	deadlineMs = probeDeadlineMs
+): Promise<Result> {
+	return requestWithDeadline(
+		async (signal) => consume(await fetcher(url, { ...init, signal })),
+		{
+			url,
+			replaySafety: 'replay-safe',
+			signal: init?.signal ?? undefined,
+			deadlineMs
+		}
+	);
+}
+
+export class PageResultCountError extends CodedError {
+	constructor(
+		public readonly requested: number,
+		public readonly returned: number
+	) {
+		super(
+			`A paged lookup requested ${String(requested)} inputs but received ${String(returned)} results; the response must contain between 1 and ${String(requested)} results`
+		);
+		this.name = 'PageResultCountError';
+	}
+}
+
+/**
+ * Sends one request for a list of inputs. It returns results for a non-empty
+ * prefix of `inputs`, in input order. When the server stops early, the lookup
+ * sends the remaining inputs in another request. The request must use
+ * `signal`, which aborts when its deadline expires.
+ *
+ * A request can still finish after its deadline, while the lookup sends the
+ * same inputs again, and the lookup then discards its results. A request that
+ * changes state outside its results must check `signal` before it does so.
+ */
+export type PageRequest<Input, Result> = (
+	inputs: readonly Input[],
+	signal: AbortSignal
+) => Promise<readonly Result[]>;
+
+export interface PageLookup<Input, Result> {
+	readonly request: PageRequest<Input, Result>;
+	/**
+	The deadline and replay safety of each request.
+	*/
+	readonly deadline: DeadlineOptions;
+	/**
+	 * Whether a failed request had too many inputs for the server. The lookup
+	 * then sends the first half of those inputs, halving again until a request
+	 * has one input, and sends the remaining inputs in later requests.
+	 */
+	readonly isPageTooLarge?: (error: unknown) => boolean;
+}
+
+export interface PagedLookup<Input, Result> extends PageLookup<Input, Result> {
+	/**
+	The largest number of inputs in one page.
+	*/
+	readonly pageSize: number;
+	/**
+	The largest number of pages in progress at once.
+	*/
+	readonly concurrency: number;
+	/**
+	 * Whether to complete the first page before starting the others, for example
+	 * so its response can establish state that later requests send.
+	 */
+	readonly finishFirstPage?: boolean;
+}
+
+/**
+ * Requests `inputs` as one page through {@link requestWithDeadline}. When a
+ * response has results for only a prefix of the inputs, sends the rest in a
+ * further request. Returns one result for each input, in input order. A
+ * response with no results, or with more results than the request had inputs,
+ * rejects with {@link PageResultCountError}.
+ */
+export async function lookupPage<Input, Result>(
+	inputs: readonly Input[],
+	lookup: PageLookup<Input, Result>
+): Promise<Result[]> {
+	const results: Result[] = [];
+	let remaining = inputs;
+
+	while (remaining.length > 0) {
+		const pageResults = await requestPrefix(remaining, lookup);
+
+		if (pageResults.length === 0 || pageResults.length > remaining.length) {
+			throw new PageResultCountError(remaining.length, pageResults.length);
+		}
+
+		results.push(...pageResults);
+		remaining = remaining.slice(pageResults.length);
+	}
+
+	return results;
+}
+
+async function requestPrefix<Input, Result>(
+	inputs: readonly Input[],
+	lookup: PageLookup<Input, Result>
+): Promise<readonly Result[]> {
+	try {
+		return await requestWithDeadline(
+			(signal) => lookup.request(inputs, signal),
+			lookup.deadline
+		);
+	} catch (error) {
+		if (inputs.length === 1 || lookup.isPageTooLarge?.(error) !== true) {
+			throw error;
+		}
+
+		return lookupPage(inputs.slice(0, Math.ceil(inputs.length / 2)), lookup);
+	}
+}
+
+/**
+ * Splits `inputs` into pages of at most `pageSize`, looks up each page with
+ * {@link lookupPage} with at most `concurrency` pages in progress, and returns
+ * one result for each input, in input order. After a page fails, no further
+ * pages start, the lookup aborts the requests of the pages in progress, and it
+ * rejects with the first failure.
+ */
+export async function lookupInPages<Input, Result>(
+	inputs: readonly Input[],
+	lookup: PagedLookup<Input, Result>
+): Promise<Result[]> {
+	const failed = new AbortController();
+	const callerSignal = lookup.deadline.signal;
+	const pageLookup: PageLookup<Input, Result> = {
+		...lookup,
+		deadline: {
+			...lookup.deadline,
+			signal:
+				callerSignal === undefined
+					? failed.signal
+					: AbortSignal.any([callerSignal, failed.signal])
+		}
+	};
+	const lookUp = async (page: readonly Input[]): Promise<Result[]> => {
+		try {
+			return await lookupPage(page, pageLookup);
+		} catch (error) {
+			failed.abort(error);
+			throw error;
+		}
+	};
+	const pages = chunk(inputs, lookup.pageSize);
+	const firstPage = lookup.finishFirstPage === true ? pages.shift() : undefined;
+	const first = firstPage === undefined ? [] : await lookUp(firstPage);
+	const rest = await mapWithConcurrency(pages, lookup.concurrency, lookUp);
+
+	return [...first, ...rest.flat()];
+}
