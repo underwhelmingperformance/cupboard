@@ -23,6 +23,10 @@ import { SharedFactsUnavailableError } from '../errors.ts';
 
 import * as schema from './d1-schema.ts';
 import {
+	type NarCapturePageResult,
+	NarSourceCaptureStore
+} from './nar-source-capture.ts';
+import {
 	SharedNarDiscovery,
 	type SharedNarDiscoveryPage
 } from './shared-nar-discovery.ts';
@@ -32,6 +36,12 @@ const maximumJobGeneration = artifactJobGenerationSchema.parse(
 	Number.MAX_SAFE_INTEGER
 );
 type Job = typeof schema.sharedListingJob.$inferSelect;
+type DiscoveryPage =
+	| { readonly kind: 'historical'; readonly page: SharedNarDiscoveryPage }
+	| {
+			readonly kind: 'catchup';
+			readonly page: Extract<NarCapturePageResult, { kind: 'page' }>;
+	  };
 
 /**
  * Persists global discovery checkpoints. Jobs and source tasks do not retain
@@ -43,7 +53,11 @@ export class SharedListingJobStore {
 		private readonly discovery: Pick<
 			SharedNarDiscovery,
 			'page'
-		> = new SharedNarDiscovery(database)
+		> = new SharedNarDiscovery(database),
+		private readonly capture: Pick<
+			NarSourceCaptureStore,
+			'page'
+		> = new NarSourceCaptureStore(database)
 	) {}
 
 	private async execute<T>(operation: () => Promise<T>): Promise<T> {
@@ -65,6 +79,7 @@ export class SharedListingJobStore {
 			phase: row.phase,
 			cursor: row.cursor ?? undefined,
 			eventCursor: row.eventCursor,
+			eventThrough: row.eventThrough ?? undefined,
 			progress: {
 				discovered: row.discovered,
 				completed: row.completed,
@@ -85,7 +100,10 @@ export class SharedListingJobStore {
 		return and(
 			this.version(claim.job),
 			eq(schema.sharedListingJob.state, 'running'),
-			eq(schema.sharedListingJob.phase, 'historical'),
+			eq(schema.sharedListingJob.phase, claim.phase),
+			claim.eventThrough === undefined
+				? isNull(schema.sharedListingJob.eventThrough)
+				: eq(schema.sharedListingJob.eventThrough, claim.eventThrough),
 			eq(schema.sharedListingJob.owner, claim.owner),
 			eq(schema.sharedListingJob.claimGeneration, claim.generation),
 			eq(schema.sharedListingJob.eventCursor, claim.eventCursor),
@@ -102,22 +120,51 @@ export class SharedListingJobStore {
 			generation: row.claimGeneration,
 			leaseExpiresAt: row.leaseExpiresAt,
 			cursor: row.cursor ?? undefined,
-			eventCursor: row.eventCursor
+			phase: row.phase,
+			eventCursor: row.eventCursor,
+			eventThrough: row.eventThrough ?? undefined
 		});
 	}
+	private readyCapturePosition() {
+		return this.database
+			.select({ latest: schema.narCaptureState.latest })
+			.from(schema.narCaptureState)
+			.where(
+				and(
+					eq(schema.narCaptureState.id, 1),
+					eq(schema.narCaptureState.isReady, true)
+				)
+			);
+	}
+
+	private phaseAfter(page: DiscoveryPage): Job['phase'] {
+		if (!page.page.isComplete) {
+			return page.kind;
+		}
+		return page.kind === 'historical' ? 'catchup' : 'processing';
+	}
+
 	private async checkpoint(
 		claim: SharedListingDiscoveryClaim,
-		page: SharedNarDiscoveryPage,
+		page: DiscoveryPage,
 		now: IsoTimestamp
 	): Promise<SharedListingJobSummary | undefined> {
 		const pageId = crypto.randomUUID();
 		const list = jsonRowList(
-			page.sources.map((source) => ({
+			page.page.sources.map((source) => ({
 				id: artifactTaskIdSchema.parse(crypto.randomUUID()),
 				...source
 			}))
 		);
-		const current = this.current(claim, now);
+		const capture = this.readyCapturePosition();
+		const current = and(this.current(claim, now), exists(capture));
+		const changes =
+			page.kind === 'historical'
+				? {
+						cursor: page.page.cursor ?? sql`null`,
+						eventThrough: page.page.isComplete ? sql`(${capture})` : sql`null`
+					}
+				: { eventCursor: page.page.cursor };
 		const active = this.database
 			.select({ one: sql`1` })
 			.from(schema.sharedListingJob)
@@ -142,17 +189,26 @@ export class SharedListingJobStore {
 			this.database
 				.insert(schema.sharedListingTask)
 				.select(source)
-				.onConflictDoNothing({
+				.onConflictDoUpdate({
 					target: [
 						schema.sharedListingTask.jobId,
 						schema.sharedListingTask.narHash
-					]
+					],
+					set: {
+						sourceIncarnation: sql`excluded.source_incarnation`,
+						narSize: sql`excluded.nar_size`,
+						fileSize: sql`excluded.file_size`
+					},
+					setWhere: lt(
+						schema.sharedListingTask.sourceIncarnation,
+						sql`excluded.source_incarnation`
+					)
 				}),
 			this.database
 				.update(schema.sharedListingJob)
 				.set({
-					cursor: page.cursor ?? sql`null`,
-					phase: page.isComplete ? 'catchup' : 'historical',
+					...changes,
+					phase: this.phaseAfter(page),
 					discovered: sql`${schema.sharedListingJob.discovered} + (${insertedCount})`,
 					owner: sql`null`,
 					leaseExpiresAt: sql`null`,
@@ -164,20 +220,34 @@ export class SharedListingJobStore {
 		const row = rows[0];
 		return row === undefined ? undefined : this.decoded(row);
 	}
+	private async restartDiscovery(
+		claim: SharedListingDiscoveryClaim,
+		now: IsoTimestamp
+	): Promise<SharedListingJobSummary | undefined> {
+		const capture = this.readyCapturePosition();
+		const current = and(this.current(claim, now), exists(capture));
+		const rows = await this.database
+			.update(schema.sharedListingJob)
+			.set({
+				phase: 'historical',
+				cursor: sql`null`,
+				eventCursor: sql`(${capture})`,
+				eventThrough: sql`null`,
+				owner: sql`null`,
+				leaseExpiresAt: sql`null`,
+				updatedAt: sql`max(${schema.sharedListingJob.updatedAt}, ${now})`
+			})
+			.where(current)
+			.returning();
+		return rows[0] === undefined ? undefined : this.decoded(rows[0]);
+	}
+
 	async start(
 		generatorRevision: ListingGeneratorRevision,
 		now: IsoTimestamp
 	): Promise<SharedListingJobSummary> {
 		return this.execute(async () => {
-			const capture = this.database
-				.select({ latest: schema.narCaptureState.latest })
-				.from(schema.narCaptureState)
-				.where(
-					and(
-						eq(schema.narCaptureState.id, 1),
-						eq(schema.narCaptureState.isReady, true)
-					)
-				);
+			const capture = this.readyCapturePosition();
 			const rows = await this.database
 				.insert(schema.sharedListingJob)
 				.values({
@@ -215,10 +285,16 @@ export class SharedListingJobStore {
 			const deadline = isoTimestamp(
 				new Date(Date.parse(now) + leaseDurationMs)
 			);
+			const capture = this.readyCapturePosition();
+			const legacyWindow = sql`${schema.sharedListingJob.phase} = 'catchup' AND ${schema.sharedListingJob.eventThrough} IS NULL`;
 			const available = and(
 				this.version(job),
 				eq(schema.sharedListingJob.state, 'running'),
-				eq(schema.sharedListingJob.phase, 'historical'),
+				or(
+					eq(schema.sharedListingJob.phase, 'historical'),
+					eq(schema.sharedListingJob.phase, 'catchup')
+				),
+				exists(capture),
 				lt(schema.sharedListingJob.claimGeneration, Number.MAX_SAFE_INTEGER),
 				or(
 					isNull(schema.sharedListingJob.owner),
@@ -228,6 +304,9 @@ export class SharedListingJobStore {
 			const rows = await this.database
 				.update(schema.sharedListingJob)
 				.set({
+					phase: sql`CASE WHEN ${legacyWindow} THEN 'historical' ELSE ${schema.sharedListingJob.phase} END`,
+					cursor: sql`CASE WHEN ${legacyWindow} THEN NULL ELSE ${schema.sharedListingJob.cursor} END`,
+					eventCursor: sql`CASE WHEN ${legacyWindow} THEN (${capture}) ELSE ${schema.sharedListingJob.eventCursor} END`,
 					owner,
 					claimGeneration: sql`${schema.sharedListingJob.claimGeneration} + 1`,
 					leaseExpiresAt: deadline,
@@ -246,11 +325,14 @@ export class SharedListingJobStore {
 				.get();
 			if (
 				row?.state !== 'running' ||
-				row.phase !== 'historical' ||
+				(row.phase !== 'historical' && row.phase !== 'catchup') ||
 				row.leaseExpiresAt === null ||
 				row.leaseExpiresAt <= now
 			) {
 				return { kind: 'unavailable' };
+			}
+			if (row.phase === 'catchup' && row.eventThrough === null) {
+				return { kind: 'busy', retryAt: row.leaseExpiresAt };
 			}
 			return row.owner === owner
 				? { kind: 'claimed', claim: this.claimOf(row) }
@@ -289,8 +371,26 @@ export class SharedListingJobStore {
 			if (current === undefined) {
 				return;
 			}
-			const page = await this.discovery.page(claim.cursor);
-			return this.checkpoint(claim, page, isoTimestamp(new Date()));
+			if (claim.phase === 'historical') {
+				const page = await this.discovery.page(claim.cursor);
+				return this.checkpoint(
+					claim,
+					{ kind: 'historical', page },
+					isoTimestamp(new Date())
+				);
+			}
+			const page = await this.capture.page({
+				after: claim.eventCursor,
+				through: claim.eventThrough
+			});
+			if (page.kind === 'expired') {
+				return this.restartDiscovery(claim, isoTimestamp(new Date()));
+			}
+			return this.checkpoint(
+				claim,
+				{ kind: 'catchup', page },
+				isoTimestamp(new Date())
+			);
 		});
 	}
 	async cancel(

@@ -1050,6 +1050,7 @@ export const sharedListingJob = sqliteTable(
 			.$type<NarCaptureSequence>()
 			.notNull()
 			.default(narCaptureSequenceSchema.parse(0)),
+		eventThrough: integer('event_through').$type<NarCaptureSequence>(),
 		discovered: integer('discovered').notNull().default(0),
 		completed: integer('completed').notNull().default(0),
 		skipped: integer('skipped').notNull().default(0),

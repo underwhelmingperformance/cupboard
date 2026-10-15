@@ -7238,8 +7238,14 @@ build traces available from a cupboard cache.
       NAR becomes retained or its physical incarnation recovers. Jobs start at
       the current capture position only after the capture contract is ready.
       Replay advances through bounded event pages within a fixed upper boundary,
-      and pruning protects running and cancelled jobs' unread prefixes. Catch-up
-      integration remains pending.
+      and pruning protects running and cancelled jobs' unread prefixes.
+      Historical checkpoints now capture a fixed upper sequence. Catch-up claims
+      preserve that window across cancellation and resume, checkpoint unique
+      tasks with the event cursor, and enter processing only after replay ends.
+      Repaired sources refresh existing tasks without recounting them. Expired
+      windows and predecessor jobs without a window restart historical discovery
+      from a current capture position. Forward dispatch and global execution
+      remain pending.
 - [ ] Use D1 job and task records with expiring claims, source-incarnation
       fences and resumable staging cleanup. Queue messages are wake-up hints;
       persisted state decides whether work can run and complete. Staging RPCs

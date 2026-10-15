@@ -94,7 +94,7 @@ ownership. The counter subquery reads only the newly inserted page through an
 index. A lost reply cannot insert or count the page twice. Cancellation revokes
 discovery ownership, and resume advances the job generation without discarding
 the cursor or tasks. Historical discovery enters catch-up; it does not declare
-the generation job complete. Catch-up, global task execution and cache adoption
+the generation job complete. Global task execution and cache adoption
 projections remain pending.
 
 An append-only capture sequence records retained, registered live NAR sources.
@@ -115,7 +115,21 @@ reusing sequence numbers. The caller must have durably recorded forward work
 through the requested boundary. Indexed minimum-cursor probes protect historical
 and catch-up jobs, including cancelled jobs that can resume. Replay reports an
 expired window explicitly if its cursor precedes the retained floor. Capture
-replay is not yet integrated into job catch-up or forward dispatch.
+replay is integrated into job catch-up; forward dispatch remains pending.
+
+The final historical checkpoint records the capture clock as a fixed upper
+boundary. Catch-up claims include the phase, event cursor and upper boundary in
+addition to ownership. Cancellation and resume preserve the window. Each replay
+page refreshes or inserts unique NAR tasks and advances the event cursor in the
+same fenced batch. A repaired source can update a task's incarnation and sizes,
+but its creation page remains unchanged, so progress counts only new tasks.
+Finishing replay changes the phase to processing; it does not complete
+generation.
+
+An expired window restarts historical discovery at the current ready capture
+position and preserves existing tasks and counters. A predecessor catch-up job
+without an upper boundary also restarts historical discovery when it is claimed.
+The rescan uses bounded keyset pages, and existing tasks are not counted again.
 
 The shared D1 generation store reserves one computation lease per NAR and
 generator revision across tenants. Claim acquisition requires an active tenant

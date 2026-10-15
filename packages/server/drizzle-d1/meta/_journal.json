@@ -400,6 +400,13 @@
 			"when": 1792038670855,
 			"tag": "0056_nar_source_capture_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 57,
+			"version": "6",
+			"when": 1792041351999,
+			"tag": "0057_shared_listing_catchup",
+			"breakpoints": true
 		}
 	]
 }

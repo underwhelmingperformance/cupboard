@@ -55,7 +55,9 @@ function expectedClaim(
 		generation: 1,
 		leaseExpiresAt: deadline,
 		cursor: undefined,
-		eventCursor: job.eventCursor
+		eventCursor: job.eventCursor,
+		phase: 'historical',
+		eventThrough: undefined
 	};
 }
 
@@ -103,6 +105,7 @@ describe('shared listing backfill jobs', () => {
 			phase: 'historical',
 			cursor: undefined,
 			eventCursor: capture.latest,
+			eventThrough: undefined,
 			progress: { discovered: 0, completed: 0, skipped: 0, failed: 0 },
 			createdAt: now,
 			updatedAt: now
@@ -125,7 +128,9 @@ describe('shared listing backfill jobs', () => {
 					generation: 1,
 					leaseExpiresAt: deadline,
 					cursor: undefined,
-					eventCursor: job.eventCursor
+					eventCursor: job.eventCursor,
+					phase: 'historical',
+					eventThrough: undefined
 				}
 			},
 			replay: first,
@@ -178,6 +183,7 @@ describe('shared listing backfill jobs', () => {
 				...job,
 				cursor: sharedNarSource(discovered - 1).narHash,
 				phase: discovered === 70 ? 'catchup' : 'historical',
+				eventThrough: discovered === 70 ? job.eventCursor : undefined,
 				progress: { discovered, completed: 0, skipped: 0, failed: 0 }
 			})),
 			tasks: sources.map((source) => ({ jobId: job.id, ...source }))
@@ -189,7 +195,8 @@ describe('shared listing backfill jobs', () => {
 		const claim = claimed(await store.claim(job, owner, now));
 		expect(await store.discover(claim)).toStrictEqual({
 			...job,
-			phase: 'catchup'
+			phase: 'catchup',
+			eventThrough: job.eventCursor
 		});
 	});
 
@@ -210,6 +217,7 @@ describe('shared listing backfill jobs', () => {
 				...job,
 				cursor: sharedNarSource(32).narHash,
 				phase: 'catchup',
+				eventThrough: job.eventCursor,
 				progress: { discovered: 1, completed: 0, skipped: 0, failed: 0 }
 			},
 			tasks: [{ jobId: job.id, ...sharedNarSource(32) }]
@@ -247,6 +255,7 @@ describe('shared listing backfill jobs', () => {
 				result: {
 					...job,
 					phase: 'catchup',
+					eventThrough: job.eventCursor,
 					cursor: sharedNarSource(1).narHash,
 					progress: { discovered: 2002, completed: 0, skipped: 0, failed: 0 }
 				}
@@ -361,6 +370,7 @@ describe('shared listing backfill jobs', () => {
 				generation: artifactJobGenerationSchema.parse(2),
 				cursor: sharedNarSource(33).narHash,
 				phase: 'catchup',
+				eventThrough: job.eventCursor,
 				progress: { discovered: 34, completed: 0, skipped: 0, failed: 0 },
 				updatedAt: later
 			},
@@ -394,6 +404,7 @@ describe('shared listing backfill jobs', () => {
 			result: {
 				...job,
 				phase: 'catchup',
+				eventThrough: job.eventCursor,
 				cursor: sharedNarSource(1).narHash,
 				progress: { discovered: 2, completed: 0, skipped: 0, failed: 0 }
 			},
@@ -427,6 +438,7 @@ describe('shared listing backfill jobs', () => {
 			summary: {
 				...job,
 				phase: 'catchup',
+				eventThrough: job.eventCursor,
 				cursor: sharedNarSource(1).narHash,
 				progress: { discovered: 2, completed: 0, skipped: 0, failed: 0 }
 			},

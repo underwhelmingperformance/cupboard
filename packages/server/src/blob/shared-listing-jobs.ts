@@ -19,6 +19,7 @@ export const sharedListingJobSummarySchema = artifactJobVersionSchema.extend({
 	phase: z.enum(['historical', 'catchup', 'processing']),
 	cursor: nixSha256HashSchema.optional(),
 	eventCursor: narCaptureSequenceSchema,
+	eventThrough: narCaptureSequenceSchema.optional(),
 	progress: artifactJobProgressSchema,
 	createdAt: isoTimestampSchema,
 	updatedAt: isoTimestampSchema
@@ -27,7 +28,7 @@ export type SharedListingJobSummary = z.output<
 	typeof sharedListingJobSummarySchema
 >;
 
-export const sharedListingDiscoveryClaimSchema = z.strictObject({
+const discoveryClaimFields = z.strictObject({
 	job: artifactJobVersionSchema,
 	owner: artifactTaskOwnerSchema,
 	generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -35,6 +36,19 @@ export const sharedListingDiscoveryClaimSchema = z.strictObject({
 	cursor: nixSha256HashSchema.optional(),
 	eventCursor: narCaptureSequenceSchema
 });
+
+export const sharedListingDiscoveryClaimSchema = z.discriminatedUnion('phase', [
+	discoveryClaimFields.extend({
+		phase: z.literal('historical'),
+		eventThrough: z.undefined().optional()
+	}),
+	discoveryClaimFields
+		.extend({
+			phase: z.literal('catchup'),
+			eventThrough: narCaptureSequenceSchema
+		})
+		.refine((claim) => claim.eventCursor <= claim.eventThrough)
+]);
 export type SharedListingDiscoveryClaim = z.output<
 	typeof sharedListingDiscoveryClaimSchema
 >;
