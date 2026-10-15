@@ -355,9 +355,15 @@ write batch.
 The capture stream and reverse projection grant no cache authority and retain no
 bytes. Seed checkpoint creation, projections, events and progress require the
 captured execution claim inside their write transaction. Consumers check storage
-readiness before preparing queries against independently expanded tables. Queue
-and cron scheduling, bounded event expansion, durable cache-adoption delivery,
-completion wakes and automatic forward producers remain pending.
+readiness before preparing queries against independently expanded tables. Cron
+reserves eligible scopes and sends strict queue hints. Each seed hint acquires a
+fresh execution claim, processes one page, releases the captured lease and
+requests a generic dispatch turn. Failed sends and abandoned execution recover
+through persisted D1 deadlines. Independent scopes can execute concurrently;
+per-invocation time and subrequest admission bound each turn.
+
+Bounded event expansion, durable cache-adoption delivery, completion wakes and
+automatic forward producers remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

@@ -6,6 +6,8 @@ import { boundedWorkerEnv } from '../do/bounded-io.ts';
 import { ArtifactQueueConsumer } from './artifact-queue-consumer.ts';
 import { artifactQueueHeaderSchema } from './artifact-queue-message.ts';
 import { tenantServer } from './durable-object.ts';
+import { ListingAdoptionQueue } from './listing-adoption-queue.ts';
+import { listingAdoptionQueueHeaderSchema } from './listing-adoption-queue-message.ts';
 import { handleMaintenanceQueueMessage } from './scheduled.ts';
 import { sharedListingCleanupHeaderSchema } from './shared-listing-cleanup-message.ts';
 import { SharedListingCleanupQueue } from './shared-listing-cleanup-queue.ts';
@@ -41,7 +43,15 @@ export async function handleWorkerQueue(
 		queue: env.ARTIFACT_QUEUE,
 		buffers
 	});
+	const adoption = new ListingAdoptionQueue({
+		database: env.CUPBOARD_DB,
+		queue: env.ARTIFACT_QUEUE
+	});
 	for (const message of batch.messages) {
+		if (listingAdoptionQueueHeaderSchema.safeParse(message.body).success) {
+			await adoption.handleMessage(message);
+			continue;
+		}
 		if (sharedListingQueueHeaderSchema.safeParse(message.body).success) {
 			await listings.handleMessage(message);
 			continue;

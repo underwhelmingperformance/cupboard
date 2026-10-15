@@ -64,6 +64,7 @@ import {
 } from './chunked-uploads.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
+import { ListingAdoptionQueue } from './listing-adoption-queue.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
 import { handleWorkerQueue } from './queue.ts';
 import { readApp, serveCacheSetup } from './read-app.ts';
@@ -575,7 +576,12 @@ export default {
 					queue: env.ARTIFACT_QUEUE,
 					buffers: narReadBuffers
 				});
+				const adoption = new ListingAdoptionQueue({
+					database: env.CUPBOARD_DB,
+					queue: env.ARTIFACT_QUEUE
+				});
 				const results = await Promise.allSettled([
+					adoption.start(),
 					enqueueMaintenanceJobs(boundedWorkerEnv(env)),
 					cleanup.start(),
 					listings.start()

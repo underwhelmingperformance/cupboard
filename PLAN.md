@@ -7407,9 +7407,13 @@ build traces available from a cupboard cache.
       Readiness and source completion are rechecked inside reservation and claim
       writes. Captured claim predicates check epoch, generation, owner and lease
       expiry. Seed checkpoint creation, projections, capture events and progress
-      now require the captured execution claim in every write predicate. Queue
-      and cron scheduling, bounded event expansion, cache adoption delivery,
-      shared completion wakes and producer activation remain pending.
+      now require the captured execution claim in every write predicate. Cron
+      and strict queue hints now reserve all eligible scopes, acquire fresh
+      execution claims and process one bounded page per hint. Failed sends and
+      abandoned execution recover through persisted deadlines. Generic dispatch
+      wakes preserve fair scheduling without scope-specific continuation chains.
+      Bounded event expansion, cache adoption delivery, shared completion wakes
+      and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

@@ -28,7 +28,12 @@ adoption delivery.
 
 The additive `listing-adoption-seed-dispatch` transition creates an empty table
 for the three seed scopes. It adds recoverable delivery deadlines and execution
-leases. Expansion does not enqueue or start seed work.
+leases. Expansion does not enqueue seed work. After the compatible Worker is
+uploaded, cron starts bounded historical seeding when each source contract and
+capture are ready. Queue consumers acquire fresh claims for independent fact,
+default-parent and named-parent pages. Failed sends and abandoned claims recover
+through their persisted deadlines. This metadata work does not grant cache read
+authority or activate artifact publication.
 
 Deployment also reconciles bucket lifecycle rules for `artifact-staging/` and
 `shared-artifact-staging/`. The rules delete transient objects and abort
