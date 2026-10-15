@@ -5,6 +5,7 @@ import { configureLogging, resolveSink } from '@cupboard/logger';
 import { CodedError, formatErrorWithCauses } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
+import { cupboardDebugArguments } from '../cupboard-run.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { publishTargetsSchema } from '../publish-plan.ts';
 
@@ -71,6 +72,7 @@ export async function nativeEvaluationMain(
 		const view = environment['INPUT_READ-SESSION-VIEW'] ?? '';
 		command = [
 			cupboard,
+			...(await cupboardDebugArguments(cupboard, environment, signal)),
 			'run',
 			target,
 			'--github-oidc',

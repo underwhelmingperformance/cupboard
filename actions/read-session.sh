@@ -17,7 +17,20 @@ run_with_read_session() {
     return 1
   fi
 
-  local -a wrapper=("$cupboard_path" run "$target" --github-oidc)
+  local -a wrapper=("$cupboard_path")
+  if [[ "${RUNNER_DEBUG:-}" == 1 ]]; then
+    local debug_lines debug_argument
+    debug_lines=$(node --experimental-transform-types \
+      --disable-warning=ExperimentalWarning \
+      "${BASH_SOURCE[0]%/*}/src/cupboard-debug-arguments.ts" \
+      "$cupboard_path") || return
+    while IFS= read -r debug_argument; do
+      if [[ -n "$debug_argument" ]]; then
+        wrapper+=("$debug_argument")
+      fi
+    done <<< "$debug_lines"
+  fi
+  wrapper+=(run "$target" --github-oidc)
   local audience
   audience=$(node -e 'process.stdout.write((process.env.READ_SESSION_AUDIENCE || "").trim())') || return
   if [[ -n "$audience" ]]; then

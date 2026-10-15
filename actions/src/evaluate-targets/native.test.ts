@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -98,6 +98,55 @@ it.each(['', '  audience  '])(
 		});
 	}
 );
+
+it('passes --debug to cupboard run in a debug re-run when the CLI lists it', async () => {
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-evaluation-debug-')
+	);
+	onTestFinished(() => rm(directory, { recursive: true, force: true }));
+	const cupboard = path.join(directory, 'cupboard');
+	const rootHelp =
+		'Usage: cupboard [options] [command]\n\nOptions:\n  --debug  a global option\n';
+	await writeFile(
+		cupboard,
+		`#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(rootHelp)});\n`
+	);
+	await chmod(cupboard, 0o755);
+	const calls: CapturedCommand[] = [];
+	const environment = {
+		INPUT_TARGETS: '.#targets',
+		INPUT_PUBLISH: 'outputs',
+		'INPUT_CUPBOARD-PATH': cupboard,
+		'INPUT_READ-SESSION-TARGET':
+			'https://cupboard.example.workers.dev/t/acme/cache/pr-1',
+		RUNNER_DEBUG: '1',
+		GITHUB_OUTPUT: path.join(directory, 'output')
+	};
+
+	await nativeEvaluationMain(environment, undefined, {
+		workerPath: '/opt/action/dist/worker.cjs',
+		capture: (command) => {
+			calls.push(command);
+			return Promise.resolve(JSON.stringify(raw));
+		}
+	});
+
+	expect(calls).toStrictEqual([
+		{
+			executable: cupboard,
+			arguments: [
+				'--debug',
+				'run',
+				'https://cupboard.example.workers.dev/t/acme/cache/pr-1',
+				'--github-oidc',
+				'--',
+				process.execPath,
+				'/opt/action/dist/worker.cjs'
+			],
+			environment
+		}
+	]);
+});
 
 it('does not publish worker output when the outer credential wrapper fails', async () => {
 	const directory = await mkdtemp(

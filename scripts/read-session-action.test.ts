@@ -34,7 +34,14 @@ describe('run_with_read_session', () => {
 					'-c',
 					'source "$SCRIPT"; run_with_read_session "$BINARY" "" "" -- printf "%s" "public path"'
 				],
-				{ env: { ...process.env, SCRIPT: script, BINARY: binary } }
+				{
+					env: {
+						...process.env,
+						SCRIPT: script,
+						BINARY: binary,
+						RUNNER_DEBUG: ''
+					}
+				}
 			);
 			await execFileAsync(
 				'bash',
@@ -49,7 +56,8 @@ describe('run_with_read_session', () => {
 						BINARY: binary,
 						TRACE_FILE: trace,
 						TARGET: 'https://cache.example/t/acme/cache/a b',
-						VIEW: 'a b'
+						VIEW: 'a b',
+						RUNNER_DEBUG: ''
 					}
 				}
 			);
@@ -76,4 +84,69 @@ describe('run_with_read_session', () => {
 			await rm(directory, { recursive: true, force: true });
 		}
 	});
+
+	it.each([
+		{
+			cli: 'a CLI that lists --debug',
+			options: '  --debug  include details and internal diagnostics\n',
+			expected: ['--debug']
+		},
+		{ cli: 'a CLI released before --debug', options: '', expected: [] }
+	])(
+		'uses only supported debug arguments before the subcommand for $cli',
+		async ({ options, expected }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-read-shell-')
+			);
+			const binary = path.join(directory, 'cupboard');
+			const trace = path.join(directory, 'trace');
+
+			try {
+				await writeFile(
+					binary,
+					[
+						'#!/usr/bin/env bash',
+						'if [[ "$1" == --help ]]; then',
+						`  printf '%b' ${JSON.stringify(`Usage: cupboard [options] [command]\n\nOptions:\n${options}  --result-file <path>  append results\n`)}`,
+						'  exit 0',
+						'fi',
+						String.raw`printf "%s\n" "$@" > "$TRACE_FILE"`,
+						''
+					].join('\n'),
+					{ mode: 0o700 }
+				);
+				await execFileAsync(
+					'bash',
+					[
+						'-c',
+						'source "$SCRIPT"; run_with_read_session "$BINARY" "$TARGET" "" -- printf "%s" "private path"'
+					],
+					{
+						env: {
+							...process.env,
+							SCRIPT: script,
+							BINARY: binary,
+							TRACE_FILE: trace,
+							TARGET: 'https://cache.example/t/acme',
+							RUNNER_DEBUG: '1'
+						}
+					}
+				);
+
+				const traced = await readFile(trace, 'utf8');
+				expect(traced.trimEnd().split('\n')).toStrictEqual([
+					...expected,
+					'run',
+					'https://cache.example/t/acme',
+					'--github-oidc',
+					'--',
+					'printf',
+					'%s',
+					'private path'
+				]);
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
 });

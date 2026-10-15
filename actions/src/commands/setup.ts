@@ -65,7 +65,11 @@ import {
 	type ResolvedCupboard,
 	serialiseResolvedCupboard
 } from '../cupboard-resolution.ts';
-import { inspectCommandOptions, runCupboard } from '../cupboard-run.ts';
+import {
+	cupboardDebugArguments,
+	inspectCommandOptions,
+	runCupboard
+} from '../cupboard-run.ts';
 import {
 	CacheAccessProbeError,
 	CacheInfoFetchError,
@@ -1503,9 +1507,15 @@ async function configureWithReadAccess(
 	);
 
 	try {
+		const debugArguments = await cupboardDebugArguments(
+			binaryPath,
+			inputs.environment,
+			signal
+		);
 		const child = spawn(
 			binaryPath,
 			[
+				...debugArguments,
 				'run',
 				canonicalHref(target),
 				'--github-oidc',

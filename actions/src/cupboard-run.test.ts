@@ -10,6 +10,7 @@ import { waitForFile } from '../../tests/support/filesystem.ts';
 
 import {
 	commandOptionsFromHelp,
+	cupboardDebugArguments,
 	detectCacheSelectionSyntax,
 	runCupboard
 } from './cupboard-run.ts';
@@ -30,6 +31,7 @@ interface FakeCupboardOptions {
 	readonly supportsResultFile?: boolean;
 	readonly pushHelp?: string;
 	readonly attachHelp?: string;
+	readonly rootHelp?: string;
 }
 
 async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
@@ -52,6 +54,7 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 		'const argv = process.argv.slice(2);',
 		`if (${JSON.stringify(options.captureEnvironmentFile ?? '')}) { fs.writeFileSync(${JSON.stringify(options.captureEnvironmentFile ?? '')}, JSON.stringify({deferred: process.env.CUPBOARD_DEFER_ERROR_ANNOTATIONS ?? ''})); }`,
 		"if (argv.includes('--help')) {",
+		`  if (argv[0] === '--help' && ${JSON.stringify(options.rootHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.rootHelp ?? '')}); process.exit(0); }`,
 		`  if (argv[0] === 'push' && ${JSON.stringify(options.pushHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.pushHelp ?? '')}); process.exit(0); }`,
 		`  if (argv[0] === 'attest' && argv[1] === 'attach' && ${JSON.stringify(options.attachHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.attachHelp ?? '')}); process.exit(0); }`,
 		`  process.stdout.write(${JSON.stringify(options.supportsResultFile === false ? 'Usage: cupboard' : '  --result-file <path>')});`,
@@ -170,6 +173,76 @@ describe('detectCacheSelectionSyntax', () => {
 	});
 });
 
+function rootHelp(options: readonly string[]): string {
+	return [
+		'Usage: cupboard [options] [command]',
+		'',
+		'Options:',
+		...options.map((option) => `  ${option}  a global option`),
+		''
+	].join('\n');
+}
+
+const currentRootHelp = rootHelp([
+	'--output-mode <mode>',
+	'--debug',
+	'--result-file <path>'
+]);
+const releasedRootHelp = rootHelp([
+	'--output-mode <mode>',
+	'--result-file <path>'
+]);
+
+describe('cupboardDebugArguments', () => {
+	it.each([
+		{
+			cli: 'a CLI that lists --debug',
+			help: currentRootHelp,
+			expected: ['--debug']
+		},
+		{
+			cli: 'a CLI released before --debug',
+			help: releasedRootHelp,
+			expected: []
+		}
+	])(
+		'returns the supported debug arguments for $cli in a debug re-run',
+		async ({ help, expected }) => {
+			const binary = await fakeCupboard({
+				results: [],
+				exitCode: 0,
+				rootHelp: help
+			});
+
+			expect(
+				await cupboardDebugArguments(binary, { RUNNER_DEBUG: '1' })
+			).toStrictEqual(expected);
+		}
+	);
+
+	it.each([undefined, '', '0', 'true'])(
+		'returns no debug argument without inspecting CLI help when RUNNER_DEBUG is %j',
+		async (runnerDebug) => {
+			const binary = path.join(tmpdir(), 'cupboard-missing', 'cupboard');
+
+			expect(
+				await cupboardDebugArguments(
+					binary,
+					runnerDebug === undefined ? {} : { RUNNER_DEBUG: runnerDebug }
+				)
+			).toStrictEqual([]);
+		}
+	);
+
+	it('rejects root help that does not describe the CLI', async () => {
+		const binary = await fakeCupboard({ results: [], exitCode: 0 });
+
+		await expect(
+			cupboardDebugArguments(binary, { RUNNER_DEBUG: '1' })
+		).rejects.toBeInstanceOf(CommandFailedError);
+	});
+});
+
 async function runnerTemporary(): Promise<string> {
 	return mkdtemp(path.join(tmpdir(), 'cupboard-runner-'));
 }
@@ -216,6 +289,33 @@ describe('runCupboard', () => {
 			leading: ['--output-mode', 'github', '--result-file'],
 			resultFileDirectory: temporary,
 			trailing: ['--no-colour', 'push', 'url']
+		});
+	});
+
+	it('passes --debug before the other arguments in a debug re-run', async () => {
+		const temporary = await runnerTemporary();
+		const captureArgvFile = path.join(temporary, 'argv.json');
+		const binary = await fakeCupboard({
+			results: [summaryEvent],
+			exitCode: 0,
+			captureArgvFile,
+			rootHelp: currentRootHelp
+		});
+
+		await runCupboard(binary, ['push', 'url'], {
+			RUNNER_TEMP: temporary,
+			RUNNER_DEBUG: '1'
+		});
+		const argv = z
+			.array(z.string())
+			.parse(JSON.parse(await readFile(captureArgvFile, 'utf8')));
+
+		expect({
+			leading: argv.slice(0, 4),
+			trailing: argv.slice(5)
+		}).toStrictEqual({
+			leading: ['--debug', '--output-mode', 'github', '--result-file'],
+			trailing: ['push', 'url']
 		});
 	});
 

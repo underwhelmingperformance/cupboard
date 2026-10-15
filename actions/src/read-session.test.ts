@@ -121,6 +121,7 @@ describe('action read session', () => {
 					{
 						env: {
 							...process.env,
+							RUNNER_DEBUG: '',
 							ARGUMENTS_FILE: argumentsFile,
 							READ_SESSION_AUDIENCE: audience,
 							READ_SESSION_CACHES: JSON.stringify([
@@ -335,6 +336,7 @@ it.each(
 					env: {
 						...process.env,
 						...entrypoint.environment,
+						RUNNER_DEBUG: '',
 						PATH: `${directory}:${process.env.PATH ?? ''}`,
 						REAL_NODE: process.execPath,
 						CLI_MAIN: cliMain,
