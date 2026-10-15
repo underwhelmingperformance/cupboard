@@ -61,7 +61,12 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'control-refresh-sessions', state: 'complete', updatedAt: recorded },
 		{ id: 'control-subject-nonces', state: 'complete', updatedAt: recorded },
 		{ id: 'control-database-split', state: 'complete', updatedAt: recorded },
-		{ id: 'control-database-initial', state: 'complete', updatedAt: recorded }
+		{ id: 'control-database-initial', state: 'complete', updatedAt: recorded },
+		{
+			id: 'attestation-digest-index',
+			state: 'complete',
+			updatedAt: recorded
+		}
 	],
 	unrecognised: []
 };
@@ -568,6 +573,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition control-database-initial',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition attestation-digest-index',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },

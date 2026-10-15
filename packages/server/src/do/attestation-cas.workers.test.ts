@@ -484,6 +484,103 @@ describe('attestation CAS lifecycle', () => {
 		});
 	});
 
+	it.each([
+		{ remaining: 'demoted references', demoted: 20 },
+		{ remaining: 'no references', demoted: 0 }
+	])(
+		"reads only the tenant's references to a bundle when $remaining remain",
+		async ({ demoted }) => {
+			await provisionNamedTenant('acme');
+			const bytes = textEncoder.encode('widely shared bundle');
+			const removed = await fileAttestationReference({
+				uploadId: 'shared-fixture',
+				bytes,
+				storePathHash,
+				generation: 0,
+				predicateType
+			});
+			await fileAttestationReference({
+				uploadId: 'shared-acme',
+				bytes,
+				tenant: 'acme',
+				storePathHash,
+				generation: 0,
+				predicateType
+			});
+			const insertReferences = (
+				tenant: string,
+				path: string,
+				count: number,
+				readable: string
+			) =>
+				env.CUPBOARD_DB.prepare(
+					`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM source WHERE n < ?) INSERT INTO attestation_ref_storage(tenant,cache_kind,store_path_hash,generation,predicate_type,digest,readable) SELECT ?, 'default', ?, n, ?, ?, ${readable} FROM source WHERE n <= ?`
+				)
+					.bind(count, tenant, path, predicateType, removed.digest, count)
+					.run();
+			await insertReferences('acme', storePathHash, 500, 'n % 2');
+			await insertReferences(fixtureTenant, 'e'.repeat(32), demoted, '0');
+			const stillReferenced =
+				'select "digest" from "attestation_ref_storage" where ("attestation_ref_storage"."tenant" = ? and "attestation_ref_storage"."digest" = ?)';
+			const statements: { query: string; values: unknown[] }[] = [];
+			const prepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
+			const spy = vi
+				.spyOn(env.CUPBOARD_DB, 'prepare')
+				.mockImplementation((query) => {
+					const statement = prepare(query);
+					if (!query.startsWith(stillReferenced)) {
+						return statement;
+					}
+					const bind = statement.bind.bind(statement);
+					statement.bind = (...values: unknown[]) => {
+						statements.push({ query, values });
+						return bind(...values);
+					};
+					return statement;
+				});
+
+			try {
+				await currentServer().removeAttestationReference({
+					cache: defaultCache(),
+					storePathHash,
+					generation: narInfoGenerationSchema.parse(0),
+					predicateType,
+					digest: removed.digest
+				});
+			} finally {
+				spy.mockRestore();
+			}
+
+			const [statement] = statements;
+			if (statement === undefined) {
+				throw new Error('The removal did not prepare the reference check.');
+			}
+			const measured = await env.CUPBOARD_DB.prepare(statement.query)
+				.bind(...statement.values)
+				.all();
+			const plan = await env.CUPBOARD_DB.prepare(
+				`EXPLAIN QUERY PLAN ${statement.query}`
+			)
+				.bind(...statement.values)
+				.all();
+			expect({
+				statements: statements.length,
+				rows: measured.results,
+				read: measured.meta.rows_read,
+				plan: plan.results.map((row) => row.detail)
+			}).toStrictEqual({
+				statements: 1,
+				rows: Array.from({ length: demoted }, () => ({
+					digest: removed.digest
+				})),
+				read: demoted,
+				plan: [
+					'SEARCH attestation_ref_storage USING COVERING INDEX attestation_ref_digest_tenant_idx (digest=? AND tenant=?)'
+				]
+			});
+		}
+	);
+
 	it('rejects an over-quota CAS reference without stranding an edge or charge', async () => {
 		await provisionFixtureTenant({ quotaBytes: 1 });
 		const bytes = textEncoder.encode('too large');
