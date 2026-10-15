@@ -1263,11 +1263,79 @@ it('discovers a public source after 25,000 earlier policy-ineligible references'
 		plan: plan.results.map((row) => row.detail)
 	}).toStrictEqual({
 		rows: [{ nar_hash: narHash, available: 1 }],
-		read: 75_006,
+		read: 4,
 		plan: [
 			'SEARCH blob_state USING COVERING INDEX sqlite_autoindex_blob_state_1 (nar_hash=?)',
-			'SEARCH blob_ref_storage USING INDEX blob_ref_readable_nar_idx (tenant=? AND nar_hash=?)',
-			'SEARCH cache_lifecycle_storage USING INDEX cache_lifecycle_native_identity_idx (tenant=? AND cache_kind=?)',
+			'SEARCH cache_lifecycle_storage USING INDEX cache_lifecycle_native_identity_idx (tenant=?)',
+			'SEARCH blob_ref_storage USING INDEX blob_ref_readable_nar_idx (tenant=? AND nar_hash=? AND cache_kind=? AND cache_name=? AND cache_generation=?)',
+			'CORRELATED SCALAR SUBQUERY 1',
+			'SEARCH path_read_revocation USING INDEX path_read_revocation_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=? AND store_path_hash=?)'
+		]
+	});
+});
+
+it('reads each lifecycle row once for a view read across ten named caches', async () => {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	await database.insert(d1Schema.blobState).values({
+		narHash,
+		fileHash: narHash,
+		fileSize: narBytes.length,
+		compression: 'zstd',
+		narSize: narBytes.length,
+		verifiedAt: isoTimestamp(new Date())
+	});
+	// The default cache and ten named caches in `acme` and in `other`. The
+	// even-numbered named caches are private, and `cache-1` was deleted and
+	// created again.
+	await env.CUPBOARD_DB.prepare(
+		`WITH RECURSIVE source(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM source WHERE n < 10)
+		 INSERT INTO cache_lifecycle_storage(tenant,cache_kind,cache_name,access,generation,updated_at)
+		 SELECT owner.value, CASE n WHEN 0 THEN 'default' ELSE 'named' END, CASE n WHEN 0 THEN NULL ELSE 'cache-' || n END, CASE n % 2 WHEN 0 THEN 'private' ELSE 'public' END, CASE n WHEN 1 THEN 2 ELSE 1 END, '2026-01-01T00:00:00.000Z'
+		 FROM source CROSS JOIN json_each('["acme","other"]') owner`
+	).run();
+	// Each cache has four generations of one path that refer to the NAR. The
+	// first three are demoted.
+	await env.CUPBOARD_DB.prepare(
+		`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM source WHERE n < 4)
+		 INSERT INTO blob_ref_storage(tenant,cache_kind,cache_name,store_path_hash,generation,nar_hash,cache_generation,readable)
+		 SELECT tenant, cache_kind, cache_name, ?, n, ?, generation, n = 4 FROM cache_lifecycle_storage CROSS JOIN source`
+	)
+		.bind(referencingPath, narHash)
+		.run();
+	// A reference from the deleted first generation of `cache-1`.
+	await env.CUPBOARD_DB.prepare(
+		`INSERT INTO blob_ref_storage(tenant,cache_kind,cache_name,store_path_hash,generation,nar_hash,cache_generation) VALUES (?, 'named', 'cache-1', ?, 5, ?, 1)`
+	)
+		.bind(tenant, referencingPath, narHash)
+		.run();
+	const query = narReferenceQuery(
+		database,
+		tenant,
+		narHash,
+		viewAuthority('public')
+	).toSQL();
+
+	const measured = await env.CUPBOARD_DB.prepare(query.sql)
+		.bind(...query.params)
+		.all();
+	const plan = await env.CUPBOARD_DB.prepare(`EXPLAIN QUERY PLAN ${query.sql}`)
+		.bind(...query.params)
+		.all();
+
+	expect({
+		rows: measured.results,
+		read: measured.meta.rows_read,
+		plan: plan.results.map((row) => row.detail)
+	}).toStrictEqual({
+		rows: Array.from({ length: 5 }, () => ({
+			nar_hash: narHash,
+			available: 1
+		})),
+		read: 23,
+		plan: [
+			'SEARCH blob_state USING COVERING INDEX sqlite_autoindex_blob_state_1 (nar_hash=?)',
+			'SEARCH cache_lifecycle_storage USING INDEX cache_lifecycle_native_identity_idx (tenant=?)',
+			'SEARCH blob_ref_storage USING INDEX blob_ref_readable_nar_idx (tenant=? AND nar_hash=? AND cache_kind=? AND cache_name=? AND cache_generation=?)',
 			'CORRELATED SCALAR SUBQUERY 1',
 			'SEARCH path_read_revocation USING INDEX path_read_revocation_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=? AND store_path_hash=?)'
 		]

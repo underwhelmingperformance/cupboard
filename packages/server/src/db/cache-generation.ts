@@ -94,8 +94,17 @@ export function referencedCacheLifecycle(): SQL | undefined {
 		defaultReference
 	);
 	const sameNamedCache = and(namedCache, sameName);
+	// SQLite cannot seek an index on a comparison inside an OR. The OR implies
+	// this `is` comparison, so the comparison changes no result, and SQLite
+	// can seek `cache_lifecycle_native_identity_idx` on it.
+	const sameCacheName = sql`${d1Schema.cacheLifecycle.cacheName} is ${d1Schema.blobReference.cacheName}`;
 
-	return and(sameTenant, sameKind, or(sameDefaultCache, sameNamedCache));
+	return and(
+		sameTenant,
+		sameKind,
+		or(sameDefaultCache, sameNamedCache),
+		sameCacheName
+	);
 }
 
 /**
