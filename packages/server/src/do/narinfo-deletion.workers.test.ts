@@ -1505,6 +1505,17 @@ describe('narinfo deletion queue', () => {
 			{ rows: [], read: 1, written: 2 }
 		]);
 
+		// Demotion searches both allocator records in row order. Initialise unused
+		// allocators and put these two last so the cost does not depend on test order.
+		await env.CUPBOARD_DB.prepare(
+			"INSERT INTO sqlite_sequence (name,seq) SELECT name,0 FROM sqlite_master AS allocator WHERE type = 'table' AND instr(upper(sql),'AUTOINCREMENT') > 0 AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE sqlite_sequence.name = allocator.name)"
+		).run();
+		await env.CUPBOARD_DB.prepare(
+			"UPDATE sqlite_sequence SET rowid = (SELECT max(rowid) + 1 FROM sqlite_sequence) WHERE name = 'attestation_list_revision'"
+		).run();
+		await env.CUPBOARD_DB.prepare(
+			"UPDATE sqlite_sequence SET rowid = (SELECT max(rowid) + 1 FROM sqlite_sequence) WHERE name = 'listing_adoption_capture_event'"
+		).run();
 		const precedingAdmission = await env.CUPBOARD_DB.prepare(
 			'SELECT count(*) AS admitted FROM cache_lifecycle WHERE tenant = ?'
 		)
@@ -1593,7 +1604,7 @@ describe('narinfo deletion queue', () => {
 			bundles
 		}).toStrictEqual({
 			revocationCosts: [{ read: 0, written: 4 }],
-			maxRead: 906,
+			maxRead: 909,
 			maxWritten: 301,
 			retained: { total: 25_000, readable: 0 },
 			bundles: { total: 25_000, readable: 0 }
