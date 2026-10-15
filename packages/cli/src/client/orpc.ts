@@ -54,7 +54,8 @@ export type ControlRpc = JsonifiedClient<
  * Creates a tenant admin client from the protocol contract and validates each
  * successful response against the procedure's output schema. The client
  * preserves a tenant path prefix in the base URL. After a 401, it refreshes a
- * provider-backed credential once and retries the request.
+ * provider-backed credential once and retries the request. Either the client's
+ * signal or the signal passed to one call aborts that call.
  */
 export function tenantRpc(
 	baseUrl: URL,
@@ -93,7 +94,8 @@ function derivedClient<C extends AnyContractRouter>(
 
 			return {};
 		},
-		fetch: async (request, init, _options, path) => {
+		fetch: async (request, init, callOptions, path) => {
+			const callSignal = combinedSignal(signal, callOptions.signal);
 			const requestHeaders = Object.fromEntries(request.headers.entries());
 			let attempt = await bearerAttempt(credential, requestHeaders);
 			let canRefresh = typeof credential === 'object';
@@ -104,11 +106,11 @@ function derivedClient<C extends AnyContractRouter>(
 			);
 
 			for (;;) {
-				throwIfAborted(signal);
+				throwIfAborted(callSignal);
 				const response = await transport(current.clone(), {
 					...init,
 					redirect: 'manual',
-					signal
+					signal: callSignal
 				});
 
 				if (
@@ -135,6 +137,17 @@ function derivedClient<C extends AnyContractRouter>(
 	});
 
 	return createORPCClient(link);
+}
+
+function combinedSignal(
+	clientSignal: AbortSignal | undefined,
+	callSignal: AbortSignal | undefined
+): AbortSignal | undefined {
+	if (clientSignal === undefined || callSignal === undefined) {
+		return clientSignal ?? callSignal;
+	}
+
+	return AbortSignal.any([clientSignal, callSignal]);
 }
 
 function replaySafetyFor(

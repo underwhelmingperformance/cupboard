@@ -20,6 +20,7 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
 import {
 	authExitCode,
 	CliAbortError,
@@ -338,6 +339,39 @@ describe('tenantRpc', () => {
 		await expect(rpc.caches.list()).rejects.toBeInstanceOf(CliAbortError);
 		expect(captured).toStrictEqual([]);
 	});
+
+	it.each([
+		{ name: 'without a signal', clientSignal: undefined },
+		{ name: 'with its own signal', clientSignal: new AbortController().signal }
+	])(
+		'aborts a call through the signal passed to it on a client $name',
+		async ({ clientSignal }) => {
+			const call = new AbortController();
+			const reason = new CliAbortError();
+			let requests = 0;
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				...(clientSignal !== undefined && { signal: clientSignal }),
+				fetcher: (input, init) => {
+					requests += 1;
+					return stalledResponse(new Request(input, init).signal);
+				}
+			});
+
+			const failure = rejectedBy(() =>
+				rpc.caches.list(undefined, { signal: call.signal })
+			);
+			await vi.waitFor(() => {
+				expect(requests).toBe(1);
+			});
+			call.abort(reason);
+
+			expect({ failure: await failure, requests }).toStrictEqual({
+				failure: reason,
+				requests: 1
+			});
+		}
+	);
 
 	it('refreshes a provider credential once after a 401', async () => {
 		const provider: TokenProvider = {
