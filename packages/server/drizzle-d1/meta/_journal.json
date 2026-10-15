@@ -302,6 +302,13 @@
 			"when": 1791526946879,
 			"tag": "0042_control_database_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 43,
+			"version": "6",
+			"when": 1792092804663,
+			"tag": "0043_attestation_ref_digest_index",
+			"breakpoints": true
 		}
 	]
 }

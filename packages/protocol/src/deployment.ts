@@ -67,7 +67,8 @@ export const transitionIdSchema = z.enum([
 	'control-refresh-sessions',
 	'control-subject-nonces',
 	'control-database-split',
-	'control-database-initial'
+	'control-database-initial',
+	'attestation-digest-index'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -359,6 +360,17 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		database: 'CONTROL_DB',
 		expand: ['0000_control_database.sql'],
 		contract: [],
+		independent: true
+	},
+	{
+		// The migration indexes `attestation_ref_storage`, which exists only once
+		// migration 0036 has renamed `attestation_ref`. An independent
+		// transition's expand migrations can run before 0036, so the migration is
+		// a contract migration. The deploy applies contract migrations in the
+		// order of this list, so 0043 runs after 0036.
+		id: 'attestation-digest-index',
+		expand: [],
+		contract: ['0043_attestation_ref_digest_index.sql'],
 		independent: true
 	}
 ];

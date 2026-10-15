@@ -117,7 +117,8 @@ describe('checkD1Migrations', () => {
 				'tenant-schema-progress',
 				'control-refresh-sessions',
 				'control-subject-nonces',
-				'control-database-split'
+				'control-database-split',
+				'attestation-digest-index'
 			]
 		});
 	});
@@ -139,7 +140,8 @@ describe('checkD1Migrations', () => {
 				'0041_control_database_split.sql',
 				'0032_attestation_ref_path_index.sql',
 				'0036_path_read_authority_contract.sql',
-				'0042_control_database_contract.sql'
+				'0042_control_database_contract.sql',
+				'0043_attestation_ref_digest_index.sql'
 			],
 			ahead: [
 				'local-step-attempts',
@@ -149,7 +151,8 @@ describe('checkD1Migrations', () => {
 				'tenant-schema-progress',
 				'control-refresh-sessions',
 				'control-subject-nonces',
-				'control-database-split'
+				'control-database-split',
+				'attestation-digest-index'
 			]
 		});
 	});

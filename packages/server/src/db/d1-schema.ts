@@ -725,7 +725,7 @@ export const attestationReference = sqliteTable(
 				table.generation
 			)
 			.where(sql`${table.readable} = true`),
-		index('attestation_ref_digest_idx').on(table.digest)
+		index('attestation_ref_digest_tenant_idx').on(table.digest, table.tenant)
 	]
 );
 

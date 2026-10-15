@@ -434,7 +434,12 @@ describe('v0.0.35 path authority rollout', () => {
 			const directory = new URL('../../../server/drizzle-d1/', import.meta.url);
 			const actualMigrations = parseD1Migrations(
 				readdirSync(directory)
-					.filter((name) => name.endsWith('.sql') && name.slice(0, 4) < '0041')
+					.filter(
+						(name) =>
+							name.endsWith('.sql') &&
+							!name.startsWith('0041') &&
+							!name.startsWith('0042')
+					)
 					.map((name) => ({
 						name,
 						sql: readFileSync(new URL(name, directory), 'utf8')
@@ -531,13 +536,15 @@ describe('v0.0.35 path authority rollout', () => {
 							['tenant-retry-clock', 'complete'],
 							['tenant-schema-progress', 'complete'],
 							['control-refresh-sessions', 'complete'],
-							['control-subject-nonces', 'complete']
+							['control-subject-nonces', 'complete'],
+							['attestation-digest-index', 'expanded']
 						],
 						applied: actualMigrations
 							.filter(
 								(migration) =>
 									!migration.name.startsWith('0032') &&
-									!migration.name.startsWith('0036')
+									!migration.name.startsWith('0036') &&
+									!migration.name.startsWith('0043')
 							)
 							.map((migration) => migration.name),
 						servingChecks: 0
@@ -552,7 +559,8 @@ describe('v0.0.35 path authority rollout', () => {
 						'tenant-retry-clock': 'complete',
 						'tenant-schema-progress': 'complete',
 						'control-refresh-sessions': 'complete',
-						'control-subject-nonces': 'complete'
+						'control-subject-nonces': 'complete',
+						'attestation-digest-index': 'complete'
 					},
 					applied: actualMigrations.map((migration) => migration.name),
 					journal: [
@@ -560,11 +568,13 @@ describe('v0.0.35 path authority rollout', () => {
 							.filter(
 								(migration) =>
 									!migration.name.startsWith('0032') &&
-									!migration.name.startsWith('0036')
+									!migration.name.startsWith('0036') &&
+									!migration.name.startsWith('0043')
 							)
 							.map((migration) => ({ name: migration.name })),
 						{ name: '0032_attestation_ref_path_index.sql' },
-						{ name: '0036_path_read_authority_contract.sql' }
+						{ name: '0036_path_read_authority_contract.sql' },
+						{ name: '0043_attestation_ref_digest_index.sql' }
 					],
 					phase: 'contracted@5',
 					servingChecks: 1,
