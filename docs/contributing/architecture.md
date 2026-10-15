@@ -168,7 +168,8 @@ conflicting write even though those Workers do not query global leases. Current
 tenant consumers report the global lease's retry deadline. They query global
 storage only after its expansion is recorded, so tenant claims and lost-reply
 recovery also work before that table exists. Different NARs and generator
-revisions can run concurrently. Global execution and publication remain pending.
+revisions can run concurrently. Global queue dispatch and cache adoption remain
+pending.
 
 Global listing stages record their computation generation, multipart upload ID
 and sealed measurement in D1. They use `shared-artifact-staging/` keys and do
@@ -202,8 +203,33 @@ authority. Outcome records preserve captured evidence through lease expiry and
 source refresh; those records grant no retention or cache access. Finalisation
 uses persisted counters after discovery closes, without scanning the task
 catalogue. Before the completion expansion is recorded, the store refuses work
-without accessing the new outcome table. Global execution and cache adoption
-remain pending.
+without accessing the new outcome table.
+
+The global listing executor claims a fresh task owner for each invocation and
+renews task, computation and stage ownership while storage I/O runs. It verifies
+the captured compressed NAR, writes bounded multipart listing output, records a
+sealed measurement and promotes the bytes to CAS. Completion runs after the
+renewal loop stops, so a heartbeat cannot reject the claim that a successful
+checkpoint has just released. Source, CAS and ownership checks still fence the
+checkpoint itself.
+
+Preparation reuses retained facts before claiming computation or reading NAR
+bytes. Existing facts and sealed output can make progress with no free output
+buffer; new generation defers before allocating staging or reading a NAR.
+Competing jobs persist the active computation's deadline without releasing its
+owner. Independent NARs can execute concurrently through the same Worker.
+Transient storage failures preserve sealed output for another attempt. CAS
+repair preserves the logical output reference.
+
+New generation requires the supported generator revision. Recovery for an
+unknown revision requires a matching immutable fact, because its staged bytes
+alone do not establish their format. Parser resource limits have a distinct
+error type and produce skipped outcomes; malformed NARs and immutable conflicts
+produce failed outcomes. Both preserve bounded reason codes. Execution uses the
+existing connection, buffer, subrequest and deadline accounting. Spans record
+the NAR, generator revision, actual job/task generations and outcome. Global
+queue dispatch, authoritative cache adoption and completion wakes remain
+pending; native producers remain disabled.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

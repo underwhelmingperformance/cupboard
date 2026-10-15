@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { NarListingWriter } from './nar-listing.ts';
+import { NarListingLimitError, NarListingWriter } from './nar-listing.ts';
 
 function word(value: string | Uint8Array): Uint8Array {
 	const bytes =
@@ -165,4 +165,64 @@ describe('streamed NAR listings', () => {
 			writer.write(archive(['nix-archive-1', '(', 'type', 'directory', ')']))
 		).rejects.toThrow('limit');
 	});
+	it.each([
+		[
+			'output bytes',
+			archive(['nix-archive-1', '(', 'type', 'directory', ')']),
+			{ maxOutputBytes: 8 }
+		],
+		[
+			'entries',
+			archive(['nix-archive-1', '(', 'type', 'directory', ')']),
+			{ maxEntries: 0 }
+		],
+		[
+			'depth',
+			archive([
+				'nix-archive-1',
+				'(',
+				'type',
+				'directory',
+				'entry',
+				'(',
+				'name',
+				'a',
+				'node',
+				'(',
+				'type',
+				'directory',
+				')',
+				')',
+				')'
+			]),
+			{ maxDepth: 0 }
+		],
+		[
+			'metadata bytes',
+			archive([
+				'nix-archive-1',
+				'(',
+				'type',
+				'symlink',
+				'target',
+				'a'.repeat(16 * 1024 + 1),
+				')'
+			]),
+			{}
+		]
+	])(
+		'distinguishes the %s resource limit from malformed NAR data',
+		async (_resource, nar, options) => {
+			const output: string[] = [];
+			const writer = new NarListingWriter({
+				...options,
+				write: (chunk) => {
+					output.push(chunk);
+				}
+			});
+			await expect(writer.write(nar)).rejects.toBeInstanceOf(
+				NarListingLimitError
+			);
+		}
+	);
 });

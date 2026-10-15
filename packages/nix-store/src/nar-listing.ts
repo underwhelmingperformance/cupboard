@@ -7,6 +7,13 @@ export class InvalidNarListingError extends ProtocolError {
 	}
 }
 
+export class NarListingLimitError extends InvalidNarListingError {
+	constructor(reason: string) {
+		super(reason);
+		this.name = 'NarListingLimitError';
+	}
+}
+
 export interface NarListingOptions {
 	readonly write: (json: string) => void | Promise<void>;
 	readonly maxOutputBytes?: number;
@@ -73,7 +80,7 @@ export class NarListingWriter {
 	private emit(json: string): void {
 		this.outputBytes += encoder.encode(json).byteLength;
 		if (this.outputBytes > (this.options.maxOutputBytes ?? 64 * 1024 * 1024)) {
-			fail('output size limit exceeded');
+			throw new NarListingLimitError('output size limit exceeded');
 		}
 		this.pending.push(json);
 	}
@@ -96,11 +103,11 @@ export class NarListingWriter {
 
 	private *node(depth: number): Grammar {
 		if (depth > (this.options.maxDepth ?? 64)) {
-			fail('nesting limit exceeded');
+			throw new NarListingLimitError('nesting limit exceeded');
 		}
 		this.entries += 1;
 		if (this.entries > (this.options.maxEntries ?? 1_000_000)) {
-			fail('entry limit exceeded');
+			throw new NarListingLimitError('entry limit exceeded');
 		}
 		yield* this.expect('(');
 		yield* this.expect('type');
@@ -187,7 +194,7 @@ export class NarListingWriter {
 		}
 
 		if (this.length > 16 * 1024) {
-			fail('metadata length limit exceeded');
+			throw new NarListingLimitError('metadata length limit exceeded');
 		}
 		this.tokenBytes = new Uint8Array(this.length);
 	}

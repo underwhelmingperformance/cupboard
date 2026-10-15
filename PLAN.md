@@ -7326,9 +7326,19 @@ build traces available from a cupboard cache.
       NAR read or a new computation claim. Failed and skipped tasks record
       bounded reasons without creating output authority. Replays preserve the
       original outcome, and discovery can overlap execution. Jobs complete only
-      after discovery closes and every task has a terminal outcome. Global task
-      execution, cache adoption projections, shared completion wakes and
-      producer activation remain pending.
+      after discovery closes and every task has a terminal outcome. A global
+      executor now verifies stored NARs, writes bounded multipart listings,
+      seals measured output and promotes it to CAS through actual task and
+      computation claims. Retained facts and sealed recovery remain available at
+      full local output-buffer capacity. Independent NARs execute concurrently,
+      while competing jobs defer to the actual computation deadline and later
+      reuse its result. Terminal checkpoints run after heartbeat renewal stops.
+      Unsupported revisions can recover only through matching immutable facts;
+      resource limits produce distinct skipped outcomes. Deadline, cancellation
+      and expiry tests prevent publication, and CAS repair preserves the logical
+      reference. Spans record actual NAR/revision identity, job/task generations
+      and outcomes. Global queue dispatch, cache adoption projections, shared
+      completion wakes and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
