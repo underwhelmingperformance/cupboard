@@ -1,13 +1,20 @@
 import { type NarListingIdentity } from '@cupboard/protocol/artifacts';
+import { type TransitionId } from '@cupboard/protocol/deployment';
 import { and, asc, desc, eq, exists, isNull, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
+import { type ListingAdoptionFactSeedClaim } from '../blob/listing-adoption-seed-dispatch.ts';
 import { jsonRowList } from '../do/json-list.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 
 import * as schema from './d1-schema.ts';
+import { ListingAdoptionSeedDispatchStore } from './listing-adoption-seed-dispatch.ts';
 
 const pageSize = 32;
+interface FactSeedPage {
+	readonly identities: readonly NarListingIdentity[];
+	readonly isComplete: boolean;
+}
 type Checkpoint = typeof schema.listingAdoptionFactSeed.$inferSelect;
 export type ListingAdoptionFactSeedResult =
 	| {
@@ -23,14 +30,39 @@ Schedules adoption for facts that precede live capture. Projection rows and
 events do not grant cache authority.
 */
 export class ListingAdoptionFactSeedStore {
-	constructor(private readonly database: DrizzleD1Database<typeof schema>) {}
+	private readonly dispatch: ListingAdoptionSeedDispatchStore;
+
+	constructor(private readonly database: DrizzleD1Database<typeof schema>) {
+		this.dispatch = new ListingAdoptionSeedDispatchStore(database);
+	}
+
+	private transitionQuery(id: TransitionId) {
+		const table = schema.deploymentTransition;
+		return this.database
+			.select({ id: table.id })
+			.from(table)
+			.where(and(eq(table.id, id), eq(table.state, 'complete')));
+	}
+
+	private storageQuery() {
+		const readiness = and(
+			exists(this.transitionQuery('listing-adoption-capture')),
+			exists(this.transitionQuery('listing-adoption-fact-seed'))
+		);
+		return this.database
+			.select({ one: sql`1`.as('one') })
+			.from(sql`(SELECT 1) AS singleton`)
+			.where(readiness);
+	}
 
 	private readyQuery() {
 		const state = schema.listingAdoptionCaptureState;
-		return this.database
-			.select({ id: state.id })
-			.from(state)
-			.where(and(eq(state.id, 1), eq(state.isReady, true)));
+		const readiness = and(
+			eq(state.id, 1),
+			eq(state.isReady, true),
+			exists(this.storageQuery())
+		);
+		return this.database.select({ id: state.id }).from(state).where(readiness);
 	}
 
 	private stateQuery() {
@@ -40,7 +72,9 @@ export class ListingAdoptionFactSeedStore {
 			.where(eq(schema.listingAdoptionFactSeed.id, 1));
 	}
 
-	private async checkpoint(): Promise<Checkpoint | undefined> {
+	private async checkpoint(
+		claim: ListingAdoptionFactSeedClaim
+	): Promise<Checkpoint | undefined> {
 		const stored = await this.stateQuery().get();
 		if (stored !== undefined) {
 			return stored;
@@ -55,6 +89,10 @@ export class ListingAdoptionFactSeedStore {
 			.orderBy(desc(fact.narHash), desc(fact.generatorRevision))
 			.limit(1)
 			.as('boundary');
+		const readiness = and(
+			exists(this.readyQuery()),
+			this.dispatch.condition(claim)
+		);
 		const source = this.database
 			.select({
 				id: sql`1`.as('id'),
@@ -70,7 +108,7 @@ export class ListingAdoptionFactSeedStore {
 			})
 			.from(sql`(SELECT 1) AS singleton`)
 			.leftJoin(boundary, sql`true`)
-			.where(exists(this.readyQuery()));
+			.where(readiness);
 		await this.database
 			.insert(schema.listingAdoptionFactSeed)
 			.select(source)
@@ -78,7 +116,7 @@ export class ListingAdoptionFactSeedStore {
 		return this.stateQuery().get();
 	}
 
-	private fence(row: Checkpoint) {
+	private fence(row: Checkpoint, claim: ListingAdoptionFactSeedClaim) {
 		const table = schema.listingAdoptionFactSeed;
 		const ready = exists(this.readyQuery());
 		return and(
@@ -97,18 +135,20 @@ export class ListingAdoptionFactSeedStore {
 			row.throughGeneratorRevision === null
 				? isNull(table.throughGeneratorRevision)
 				: eq(table.throughGeneratorRevision, row.throughGeneratorRevision),
-			ready
+			ready,
+			this.dispatch.condition(claim)
 		);
 	}
 
 	private async enrol(
 		row: Checkpoint,
-		identities: readonly NarListingIdentity[],
-		isComplete: boolean
+		page: FactSeedPage,
+		claim: ListingAdoptionFactSeedClaim
 	): Promise<ListingAdoptionFactSeedResult> {
 		if (row.throughNarHash === null || row.throughGeneratorRevision === null) {
 			throw new Error('The listing adoption fact seed boundary is missing');
 		}
+		const { identities, isComplete } = page;
 		const next = isComplete
 			? {
 					narHash: row.throughNarHash,
@@ -121,7 +161,7 @@ export class ListingAdoptionFactSeedStore {
 		const current = this.database
 			.select({ one: sql`1` })
 			.from(schema.listingAdoptionFactSeed)
-			.where(this.fence(row));
+			.where(this.fence(row, claim));
 		const fact = schema.listingFact;
 		const selected = jsonRowList(identities);
 		const selectedCondition = selected.matches({
@@ -173,7 +213,7 @@ export class ListingAdoptionFactSeedStore {
 					isComplete,
 					updatedAt: sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
 				})
-				.where(this.fence(row))
+				.where(this.fence(row, claim))
 				.returning({ id: table.id })
 		]);
 		if (checkpoint.length === 0) {
@@ -187,13 +227,22 @@ export class ListingAdoptionFactSeedStore {
 		};
 	}
 
-	async advance(): Promise<ListingAdoptionFactSeedResult> {
+	async advance(
+		claim: ListingAdoptionFactSeedClaim
+	): Promise<ListingAdoptionFactSeedResult> {
 		try {
+			if (!(await this.dispatch.isCurrent(claim))) {
+				return { kind: 'stale' };
+			}
+			const storage = await this.storageQuery().get();
+			if (storage === undefined) {
+				return { kind: 'unavailable' };
+			}
 			const ready = await this.readyQuery().get();
 			if (ready === undefined) {
 				return { kind: 'unavailable' };
 			}
-			const row = await this.checkpoint();
+			const row = await this.checkpoint(claim);
 			if (row === undefined) {
 				return { kind: 'unavailable' };
 			}
@@ -223,8 +272,11 @@ export class ListingAdoptionFactSeedStore {
 				.limit(pageSize + 1);
 			return await this.enrol(
 				row,
-				page.slice(0, pageSize),
-				page.length <= pageSize
+				{
+					identities: page.slice(0, pageSize),
+					isComplete: page.length <= pageSize
+				},
+				claim
 			);
 		} catch (error) {
 			if (error instanceof SharedFactsUnavailableError) {

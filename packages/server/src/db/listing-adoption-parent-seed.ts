@@ -1,4 +1,5 @@
 import { type CacheScope } from '@cupboard/nix-store/scalars';
+import { type TransitionId } from '@cupboard/protocol/deployment';
 import { and, eq, exists, gt, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -9,12 +10,14 @@ import {
 	type ListingAdoptionParentWindow,
 	listingAdoptionParentWindowSchema
 } from '../blob/listing-adoption-parent-discovery.ts';
+import { type ListingAdoptionParentSeedClaim } from '../blob/listing-adoption-seed-dispatch.ts';
 import { jsonValueList } from '../do/json-list.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 import { narInfoReferenceQuery } from '../read/read.ts';
 
 import * as schema from './d1-schema.ts';
 import { ListingAdoptionParentDiscovery } from './listing-adoption-parent-discovery.ts';
+import { ListingAdoptionSeedDispatchStore } from './listing-adoption-seed-dispatch.ts';
 
 type Checkpoint = typeof schema.listingAdoptionParentSeed.$inferSelect;
 const progressSchema = z.array(
@@ -39,39 +42,40 @@ Captures historical cache parents in independent bounded windows. Events grant
 no cache authority; adoption refreshes the current parent before publication.
 */
 export class ListingAdoptionParentSeedStore {
-	constructor(private readonly database: DrizzleD1Database<typeof schema>) {}
+	private readonly dispatch: ListingAdoptionSeedDispatchStore;
 
-	private parentReadyQuery() {
+	constructor(private readonly database: DrizzleD1Database<typeof schema>) {
+		this.dispatch = new ListingAdoptionSeedDispatchStore(database);
+	}
+
+	private transitionQuery(id: TransitionId) {
 		const table = schema.deploymentTransition;
 		return this.database
 			.select({ id: table.id })
 			.from(table)
-			.where(
-				and(
-					eq(table.id, 'listing-adoption-parents'),
-					eq(table.state, 'complete')
-				)
-			);
+			.where(and(eq(table.id, id), eq(table.state, 'complete')));
+	}
+
+	private storageQuery() {
+		const readiness = and(
+			exists(this.transitionQuery('listing-adoption-capture')),
+			exists(this.transitionQuery('listing-adoption-parent-seed')),
+			exists(this.transitionQuery('listing-adoption-parents'))
+		);
+		return this.database
+			.select({ one: sql`1`.as('one') })
+			.from(sql`(SELECT 1) AS singleton`)
+			.where(readiness);
 	}
 
 	private readyQuery() {
-		const table = schema.deploymentTransition;
-		const capture = this.database
-			.select({ id: schema.listingAdoptionCaptureState.id })
-			.from(schema.listingAdoptionCaptureState)
-			.where(
-				and(
-					eq(schema.listingAdoptionCaptureState.id, 1),
-					eq(schema.listingAdoptionCaptureState.isReady, true)
-				)
-			);
+		const state = schema.listingAdoptionCaptureState;
 		const readiness = and(
-			eq(table.id, 'listing-adoption-parent-seed'),
-			eq(table.state, 'complete'),
-			exists(this.parentReadyQuery()),
-			exists(capture)
+			eq(state.id, 1),
+			eq(state.isReady, true),
+			exists(this.storageQuery())
 		);
-		return this.database.select({ id: table.id }).from(table).where(readiness);
+		return this.database.select({ id: state.id }).from(state).where(readiness);
 	}
 
 	private stateQuery(kind: CacheScope['kind']) {
@@ -82,7 +86,8 @@ export class ListingAdoptionParentSeedStore {
 	}
 
 	private async checkpoint(
-		kind: CacheScope['kind']
+		kind: CacheScope['kind'],
+		claim: ListingAdoptionParentSeedClaim
 	): Promise<Checkpoint | undefined> {
 		const stored = await this.stateQuery(kind).get();
 		if (stored !== undefined) {
@@ -97,6 +102,10 @@ export class ListingAdoptionParentSeedStore {
 			window?.kind === 'named' ? sql`${window.through.cacheName}` : sql`NULL`;
 		const throughPath =
 			window === undefined ? sql`NULL` : sql`${window.through.storePathHash}`;
+		const readiness = and(
+			exists(this.readyQuery()),
+			this.dispatch.condition(claim)
+		);
 		const source = this.database
 			.select({
 				cacheKind: sql`${kind}`.as('cache_kind'),
@@ -114,7 +123,7 @@ export class ListingAdoptionParentSeedStore {
 				updatedAt: sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`.as('updated_at')
 			})
 			.from(sql`(SELECT 1) AS singleton`)
-			.where(exists(this.readyQuery()));
+			.where(readiness);
 		await this.database
 			.insert(schema.listingAdoptionParentSeed)
 			.select(source)
@@ -143,7 +152,7 @@ export class ListingAdoptionParentSeedStore {
 		});
 	}
 
-	private fence(row: Checkpoint) {
+	private fence(row: Checkpoint, claim: ListingAdoptionParentSeedClaim) {
 		const table = schema.listingAdoptionParentSeed;
 		return and(
 			eq(table.cacheKind, row.cacheKind),
@@ -155,23 +164,28 @@ export class ListingAdoptionParentSeedStore {
 			sql`${table.throughTenant} IS ${row.throughTenant}`,
 			sql`${table.throughCacheName} IS ${row.throughCacheName}`,
 			sql`${table.throughStorePathHash} IS ${row.throughStorePathHash}`,
-			exists(this.readyQuery())
+			exists(this.readyQuery()),
+			this.dispatch.condition(claim)
 		);
 	}
 
-	private activePage(row: Checkpoint) {
+	private activePage(row: Checkpoint, claim: ListingAdoptionParentSeedClaim) {
 		return this.database
 			.select({ one: sql`1` })
 			.from(schema.listingAdoptionParentSeed)
 			.where(
 				and(
-					this.fence(row),
+					this.fence(row, claim),
 					isNotNull(schema.listingAdoptionParentSeed.pageCaptureAfter)
 				)
 			);
 	}
 
-	private capture(row: Checkpoint, identity: ListingAdoptionParentIdentity) {
+	private capture(
+		row: Checkpoint,
+		identity: ListingAdoptionParentIdentity,
+		claim: ListingAdoptionParentSeedClaim
+	) {
 		const current = narInfoReferenceQuery(
 			this.database,
 			identity.tenant,
@@ -190,7 +204,7 @@ export class ListingAdoptionParentSeedStore {
 			identity.cache.kind === 'default'
 				? sql`json_object('kind','default')`
 				: sql`json_object('kind','named','name',${identity.cache.name})`;
-		const eligible = and(exists(this.activePage(row)), exists(tenant));
+		const eligible = and(exists(this.activePage(row, claim)), exists(tenant));
 		const source = this.database
 			.select({
 				id: sql`NULL`.as('id'),
@@ -209,7 +223,8 @@ export class ListingAdoptionParentSeedStore {
 
 	private async enrol(
 		row: Checkpoint,
-		page: ListingAdoptionParentPage
+		page: ListingAdoptionParentPage,
+		claim: ListingAdoptionParentSeedClaim
 	): Promise<ListingAdoptionParentSeedResult> {
 		const next = page.window.after;
 		if (next === undefined) {
@@ -225,7 +240,7 @@ export class ListingAdoptionParentSeedStore {
 		const start = this.database
 			.update(table)
 			.set({ pageCaptureAfter: sql`(${captureClock})` })
-			.where(and(this.fence(row), isNull(table.pageCaptureAfter)));
+			.where(and(this.fence(row, claim), isNull(table.pageCaptureAfter)));
 		const captured = this.database
 			.select({ count: sql<number>`count(*)` })
 			.from(schema.listingAdoptionCaptureEvent)
@@ -242,7 +257,7 @@ export class ListingAdoptionParentSeedStore {
 				isComplete: page.isComplete,
 				updatedAt: sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
 			})
-			.where(and(this.fence(row), isNotNull(table.pageCaptureAfter)))
+			.where(and(this.fence(row, claim), isNotNull(table.pageCaptureAfter)))
 			.returning({
 				scanned: table.scanned,
 				captured: table.captured,
@@ -250,7 +265,7 @@ export class ListingAdoptionParentSeedStore {
 			});
 		const result = await this.database.batch([
 			start,
-			...page.parents.map((identity) => this.capture(row, identity)),
+			...page.parents.map((identity) => this.capture(row, identity, claim)),
 			completed
 		]);
 		const progress = progressSchema.parse(result.at(-1))[0];
@@ -266,18 +281,22 @@ export class ListingAdoptionParentSeedStore {
 	}
 
 	async advance(
-		kind: CacheScope['kind']
+		claim: ListingAdoptionParentSeedClaim
 	): Promise<ListingAdoptionParentSeedResult> {
 		try {
-			const parentReady = await this.parentReadyQuery().get();
-			if (parentReady === undefined) {
+			if (!(await this.dispatch.isCurrent(claim))) {
+				return { kind: 'stale' };
+			}
+			const storage = await this.storageQuery().get();
+			if (storage === undefined) {
 				return { kind: 'unavailable' };
 			}
 			const ready = await this.readyQuery().get();
 			if (ready === undefined) {
 				return { kind: 'unavailable' };
 			}
-			const row = await this.checkpoint(kind);
+			const kind = claim.scope === 'default-parents' ? 'default' : 'named';
+			const row = await this.checkpoint(kind, claim);
 			if (row === undefined) {
 				return { kind: 'unavailable' };
 			}
@@ -287,7 +306,7 @@ export class ListingAdoptionParentSeedStore {
 			const page = await new ListingAdoptionParentDiscovery(this.database).page(
 				this.window(row)
 			);
-			return await this.enrol(row, page);
+			return await this.enrol(row, page, claim);
 		} catch (error) {
 			if (error instanceof SharedFactsUnavailableError) {
 				throw error;

@@ -7406,9 +7406,10 @@ build traces available from a cupboard cache.
       execution leases for the fact, default-parent and named-parent scopes.
       Readiness and source completion are rechecked inside reservation and claim
       writes. Captured claim predicates check epoch, generation, owner and lease
-      expiry. Applying claims to seed writes, queue and cron scheduling, bounded
-      event expansion, cache adoption delivery, shared completion wakes and
-      producer activation remain pending.
+      expiry. Seed checkpoint creation, projections, capture events and progress
+      now require the captured execution claim in every write predicate. Queue
+      and cron scheduling, bounded event expansion, cache adoption delivery,
+      shared completion wakes and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

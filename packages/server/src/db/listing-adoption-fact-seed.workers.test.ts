@@ -1,11 +1,12 @@
 import { sha256HexDigestSchema } from '@cupboard/nix-store/scalars';
+import { artifactTaskOwnerSchema } from '@cupboard/protocol/artifact-jobs';
 import {
 	listingGeneratorRevisionSchema,
 	type NarListingFact
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -19,6 +20,7 @@ import {
 	type ListingAdoptionFactSeedResult,
 	ListingAdoptionFactSeedStore
 } from './listing-adoption-fact-seed.ts';
+import { ListingAdoptionSeedDispatchStore } from './listing-adoption-seed-dispatch.ts';
 import { ListingFactStore } from './listing-facts.ts';
 import {
 	sharedNarDiscoveryFixture,
@@ -78,7 +80,26 @@ SELECT CASE WHEN ? THEN ? ELSE 'sha256:' || printf('%052d',value) END,
 	} finally {
 		await env.CUPBOARD_DB.prepare(trigger).run();
 	}
-	return { database, facts, store: new ListingAdoptionFactSeedStore(database) };
+	await database.insert(schema.deploymentTransition).values([
+		{ id: 'listing-adoption-capture', state: 'complete', updatedAt: now },
+		{ id: 'listing-adoption-fact-seed', state: 'complete', updatedAt: now },
+		{ id: 'listing-adoption-seed-dispatch', state: 'complete', updatedAt: now }
+	]);
+	const dispatch = new ListingAdoptionSeedDispatchStore(database);
+	await dispatch.reserve();
+	const result = await dispatch.claim(
+		'facts',
+		artifactTaskOwnerSchema.parse(crypto.randomUUID())
+	);
+	if (result.kind !== 'claimed' || result.claim.scope !== 'facts') {
+		throw new Error('The fact seed fixture could not acquire ownership');
+	}
+	return {
+		database,
+		facts,
+		claim: result.claim,
+		store: new ListingAdoptionFactSeedStore(database)
+	};
 }
 
 function listingEvent(input: NarListingFact) {
@@ -128,9 +149,195 @@ async function progress(
 	}));
 }
 
+const invalidations = [
+	{ label: 'expired', values: { leaseExpiresAt: now } },
+	{ label: 'replaced generation', values: { generation: 2 } },
+	{
+		label: 'recreated epoch',
+		values: { epoch: sql`lower(hex(randomblob(16)))` }
+	}
+] as const;
+
 describe('historical listing adoption fact seed', () => {
+	it.each(invalidations)(
+		'fences initialisation after $label ownership',
+		async ({ values }) => {
+			const { database, store, claim } = await fixture(1);
+			const original = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
+			const restores: (() => void)[] = [];
+			const delayed = vi
+				.spyOn(env.CUPBOARD_DB, 'prepare')
+				.mockImplementation((query) => {
+					const statement = original(query);
+					if (!query.startsWith('insert into "listing_adoption_fact_seed"')) {
+						return statement;
+					}
+					const bind = statement.bind.bind(statement);
+					const binding = vi
+						.spyOn(statement, 'bind')
+						.mockImplementation((...parameters) => {
+							const bound = bind(...parameters);
+							const run = bound.run.bind(bound);
+							const running = vi
+								.spyOn(bound, 'run')
+								.mockImplementationOnce(async () => {
+									await database
+										.update(schema.listingAdoptionSeedDispatch)
+										.set(values)
+										.where(
+											eq(schema.listingAdoptionSeedDispatch.scope, 'facts')
+										);
+									return run();
+								});
+							restores.push(() => {
+								running.mockRestore();
+							});
+							return bound;
+						});
+					restores.push(() => {
+						binding.mockRestore();
+					});
+					return statement;
+				});
+			let result: ListingAdoptionFactSeedResult;
+			try {
+				result = await store.advance(claim);
+			} finally {
+				delayed.mockRestore();
+				for (const restore of restores) {
+					restore();
+				}
+			}
+			expect({
+				result,
+				events: await captureSources(database),
+				progress: await progress(database)
+			}).toStrictEqual({
+				result: { kind: 'unavailable' },
+				events: [],
+				progress: []
+			});
+		}
+	);
+	it.each([
+		{
+			id: 'listing-adoption-capture',
+			table: 'listing_adoption_capture_state',
+			kind: 'unavailable'
+		},
+		{
+			id: 'listing-adoption-fact-seed',
+			table: 'listing_adoption_fact_seed',
+			kind: 'unavailable'
+		},
+		{
+			id: 'listing-adoption-seed-dispatch',
+			table: 'listing_adoption_seed_dispatch',
+			kind: 'stale'
+		}
+	] as const)(
+		'waits for $id before preparing its storage',
+		async (transition) => {
+			const { database, store, claim } = await fixture(1);
+			await database
+				.update(schema.deploymentTransition)
+				.set({ state: 'expanded' })
+				.where(eq(schema.deploymentTransition.id, transition.id));
+			const original = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
+			const prepared = vi
+				.spyOn(env.CUPBOARD_DB, 'prepare')
+				.mockImplementation((query) => {
+					if (query.includes('"' + transition.table + '"')) {
+						throw new Error('Unexpanded storage was prepared');
+					}
+					return original(query);
+				});
+			let result: ListingAdoptionFactSeedResult;
+			try {
+				result = await store.advance(claim);
+			} finally {
+				prepared.mockRestore();
+			}
+			expect({
+				result,
+				events: await captureSources(database),
+				progress: await progress(database)
+			}).toStrictEqual({
+				result: { kind: transition.kind },
+				events: [],
+				progress: []
+			});
+		}
+	);
+
+	it.each(invalidations)(
+		'rejects $label ownership before initialisation',
+		async ({ values }) => {
+			const { database, store, claim } = await fixture(1);
+			await database
+				.update(schema.listingAdoptionSeedDispatch)
+				.set(values)
+				.where(eq(schema.listingAdoptionSeedDispatch.scope, 'facts'));
+			expect({
+				result: await store.advance(claim),
+				events: await captureSources(database),
+				projection: await database.select().from(schema.listingAdoptionFact),
+				progress: await progress(database)
+			}).toStrictEqual({
+				result: { kind: 'stale' },
+				events: [],
+				projection: [],
+				progress: []
+			});
+		}
+	);
+	it.each(invalidations)(
+		'fences the selected page after $label ownership',
+		async ({ values }) => {
+			const { database, store, claim } = await fixture(1);
+			const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+			const delayed = vi
+				.spyOn(env.CUPBOARD_DB, 'batch')
+				.mockImplementationOnce(async (queries) => {
+					await database
+						.update(schema.listingAdoptionSeedDispatch)
+						.set(values)
+						.where(eq(schema.listingAdoptionSeedDispatch.scope, 'facts'));
+					return original(queries);
+				});
+			let result: ListingAdoptionFactSeedResult;
+			try {
+				result = await store.advance(claim);
+			} finally {
+				delayed.mockRestore();
+			}
+			const checkpoint = await progress(database);
+			expect({
+				result,
+				events: await captureSources(database),
+				projection: await database.select().from(schema.listingAdoptionFact),
+				progress: checkpoint
+			}).toStrictEqual({
+				result: { kind: 'stale' },
+				events: [],
+				projection: [],
+				progress: [
+					{
+						afterNarHash: undefined,
+						afterGeneratorRevision: undefined,
+						throughNarHash: fact(1).narHash,
+						throughGeneratorRevision: 'history',
+						scanned: 0,
+						captured: 0,
+						isComplete: false
+					}
+				]
+			});
+		}
+	);
+
 	it('recovers a lost reply without repeating an already committed page', async () => {
-		const { database, facts, store } = await fixture();
+		const { database, facts, store, claim } = await fixture();
 		const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 		const reply = vi
 			.spyOn(env.CUPBOARD_DB, 'batch')
@@ -139,13 +346,15 @@ describe('historical listing adoption fact seed', () => {
 				throw new Error('The fact seed checkpoint reply was lost');
 			});
 		try {
-			await expect(store.advance()).rejects.toBeInstanceOf(
+			await expect(store.advance(claim)).rejects.toBeInstanceOf(
 				SharedFactsUnavailableError
 			);
 		} finally {
 			reply.mockRestore();
 		}
-		const result = await new ListingAdoptionFactSeedStore(database).advance();
+		const result = await new ListingAdoptionFactSeedStore(database).advance(
+			claim
+		);
 		expect({
 			result,
 			progress: await progress(database),
@@ -173,12 +382,12 @@ describe('historical listing adoption fact seed', () => {
 	});
 
 	it('rolls back projections, events and counters when the checkpoint fails', async () => {
-		const { database, store } = await fixture(1);
+		const { database, store, claim } = await fixture(1);
 		await env.CUPBOARD_DB.prepare(
 			"CREATE TRIGGER test_fact_seed_abort BEFORE UPDATE ON listing_adoption_fact_seed BEGIN SELECT RAISE(ABORT, 'checkpoint failure'); END"
 		).run();
 		try {
-			await expect(store.advance()).rejects.toBeInstanceOf(
+			await expect(store.advance(claim)).rejects.toBeInstanceOf(
 				SharedFactsUnavailableError
 			);
 		} finally {
@@ -203,7 +412,7 @@ describe('historical listing adoption fact seed', () => {
 				}
 			]
 		});
-		expect(await store.advance()).toStrictEqual({
+		expect(await store.advance(claim)).toStrictEqual({
 			kind: 'advanced',
 			scanned: 1,
 			captured: 1,
@@ -212,8 +421,8 @@ describe('historical listing adoption fact seed', () => {
 	});
 
 	it('finishes through a deleted boundary and seeks beyond a deleted cursor', async () => {
-		const { database, facts, store } = await fixture();
-		await store.advance();
+		const { database, facts, store, claim } = await fixture();
+		await store.advance(claim);
 		await database.delete(schema.listingFact).where(
 			inArray(
 				schema.listingFact.narHash,
@@ -221,7 +430,7 @@ describe('historical listing adoption fact seed', () => {
 			)
 		);
 		expect({
-			result: await store.advance(),
+			result: await store.advance(claim),
 			progress: await progress(database),
 			events: await captureSources(database)
 		}).toStrictEqual({
@@ -242,7 +451,7 @@ describe('historical listing adoption fact seed', () => {
 	});
 
 	it('advances the selected page before filtering deleted facts and counts actual captures', async () => {
-		const { database, facts, store } = await fixture();
+		const { database, facts, store, claim } = await fixture();
 		const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 		const intercept = vi
 			.spyOn(env.CUPBOARD_DB, 'batch')
@@ -257,13 +466,13 @@ describe('historical listing adoption fact seed', () => {
 			});
 		let first: ListingAdoptionFactSeedResult;
 		try {
-			first = await store.advance();
+			first = await store.advance(claim);
 		} finally {
 			intercept.mockRestore();
 		}
 		const before = await progress(database);
-		await store.advance();
-		await store.advance();
+		await store.advance(claim);
+		await store.advance(claim);
 		expect({
 			first,
 			before,
@@ -300,7 +509,7 @@ describe('historical listing adoption fact seed', () => {
 	it.each(['deleted', 'replaced'])(
 		'rechecks a source that was %s after selection',
 		async (condition) => {
-			const { database, store } = await fixture(1);
+			const { database, store, claim } = await fixture(1);
 			const input = fact(1);
 			const replacement = {
 				...input,
@@ -328,7 +537,7 @@ describe('historical listing adoption fact seed', () => {
 				});
 			let result: ListingAdoptionFactSeedResult;
 			try {
-				result = await store.advance();
+				result = await store.advance(claim);
 			} finally {
 				intercept.mockRestore();
 			}
@@ -374,12 +583,12 @@ describe('historical listing adoption fact seed', () => {
 	);
 
 	it('preserves live insertion before the cursor and beyond the frozen boundary', async () => {
-		const { database, facts, store } = await fixture();
-		await store.advance();
+		const { database, facts, store, claim } = await fixture();
+		await store.advance(claim);
 		await new ListingFactStore(database).record(fact(0));
 		await new ListingFactStore(database).record(fact(99));
-		await store.advance();
-		await store.advance();
+		await store.advance(claim);
+		await store.advance(claim);
 		expect({
 			progress: await progress(database),
 			events: await captureSources(database),
@@ -417,19 +626,19 @@ describe('historical listing adoption fact seed', () => {
 	});
 
 	it('rejects a delayed page after another consumer advances revisions of the same NAR', async () => {
-		const { database, facts, store } = await fixture(97, true);
-		await store.advance();
+		const { database, facts, store, claim } = await fixture(97, true);
+		await store.advance(claim);
 		const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 		const intercept = vi
 			.spyOn(env.CUPBOARD_DB, 'batch')
 			.mockImplementationOnce(async (statements) => {
-				await store.advance();
-				await store.advance();
+				await store.advance(claim);
+				await store.advance(claim);
 				return original(statements);
 			});
 		let result: ListingAdoptionFactSeedResult;
 		try {
-			result = await store.advance();
+			result = await store.advance(claim);
 		} finally {
 			intercept.mockRestore();
 		}
@@ -455,7 +664,7 @@ describe('historical listing adoption fact seed', () => {
 	});
 
 	it('rejects a delayed page for a recreated window with identical cursors', async () => {
-		const { database, facts, store } = await fixture();
+		const { database, facts, store, claim } = await fixture();
 		const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 		const epochs: string[] = [];
 		const intercept = vi
@@ -481,7 +690,7 @@ describe('historical listing adoption fact seed', () => {
 			});
 		let result: ListingAdoptionFactSeedResult;
 		try {
-			result = await store.advance();
+			result = await store.advance(claim);
 		} finally {
 			intercept.mockRestore();
 		}
@@ -508,7 +717,7 @@ describe('historical listing adoption fact seed', () => {
 			events: [],
 			projection: []
 		});
-		expect(await store.advance()).toStrictEqual({
+		expect(await store.advance(claim)).toStrictEqual({
 			kind: 'advanced',
 			scanned: 32,
 			captured: 32,
@@ -520,7 +729,7 @@ describe('historical listing adoption fact seed', () => {
 	});
 
 	it('fences readiness lost after selecting a page and resumes without losing facts', async () => {
-		const { database, store } = await fixture(1);
+		const { database, store, claim } = await fixture(1);
 		const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 		const intercept = vi
 			.spyOn(env.CUPBOARD_DB, 'batch')
@@ -532,7 +741,7 @@ describe('historical listing adoption fact seed', () => {
 			});
 		let result: ListingAdoptionFactSeedResult;
 		try {
-			result = await store.advance();
+			result = await store.advance(claim);
 		} finally {
 			intercept.mockRestore();
 		}
@@ -560,7 +769,7 @@ describe('historical listing adoption fact seed', () => {
 		await database
 			.update(schema.listingAdoptionCaptureState)
 			.set({ isReady: true });
-		expect(await store.advance()).toStrictEqual({
+		expect(await store.advance(claim)).toStrictEqual({
 			kind: 'advanced',
 			scanned: 1,
 			captured: 1,
@@ -569,8 +778,8 @@ describe('historical listing adoption fact seed', () => {
 	});
 
 	it('uses the composite primary key for a bounded page in 25,000 facts', async () => {
-		const { store } = await fixture(25_000);
-		await store.advance();
+		const { store, claim } = await fixture(25_000);
+		await store.advance(claim);
 		const statements: { query: string; parameters: unknown[] }[] = [];
 		const database = drizzle(env.CUPBOARD_DB, {
 			schema,
@@ -594,7 +803,7 @@ describe('historical listing adoption fact seed', () => {
 			});
 		let result: ListingAdoptionFactSeedResult;
 		try {
-			result = await new ListingAdoptionFactSeedStore(database).advance();
+			result = await new ListingAdoptionFactSeedStore(database).advance(claim);
 		} finally {
 			measure.mockRestore();
 		}
@@ -648,17 +857,17 @@ describe('historical listing adoption fact seed', () => {
 	it.each([false, true])(
 		'seeds fixed pages with a composite cursor (same NAR: %s)',
 		async (isSameNar) => {
-			const { database, facts, store } = await fixture(65, isSameNar);
-			const first = await store.advance();
+			const { database, facts, store, claim } = await fixture(65, isSameNar);
+			const first = await store.advance(claim);
 			const checkpoint = await progress(database);
-			const second = await store.advance();
-			const third = await store.advance();
+			const second = await store.advance(claim);
+			const third = await store.advance(claim);
 			expect({
 				first,
 				checkpoint,
 				second,
 				third,
-				again: await store.advance(),
+				again: await store.advance(claim),
 				projection: await database
 					.select()
 					.from(schema.listingAdoptionFact)
@@ -726,13 +935,13 @@ describe('historical listing adoption fact seed', () => {
 	);
 
 	it('completes an empty window and relies on live capture for later facts', async () => {
-		const { database, store } = await fixture(0);
-		const first = await store.advance();
+		const { database, store, claim } = await fixture(0);
+		const first = await store.advance(claim);
 		const input = fact(1);
 		await new ListingFactStore(database).record(input);
 		expect({
 			first,
-			again: await store.advance(),
+			again: await store.advance(claim),
 			progress: await progress(database),
 			events: await captureSources(database),
 			projection: await database.select().from(schema.listingAdoptionFact)
@@ -770,13 +979,13 @@ describe('historical listing adoption fact seed', () => {
 	});
 
 	it('refuses consumer startup without suppressing live source capture', async () => {
-		const { database, store } = await fixture(0);
+		const { database, store, claim } = await fixture(0);
 		await database
 			.update(schema.listingAdoptionCaptureState)
 			.set({ isReady: false });
 		await new ListingFactStore(database).record(fact(1));
 		expect({
-			result: await store.advance(),
+			result: await store.advance(claim),
 			progress: await progress(database),
 			events: await captureSources(database)
 		}).toStrictEqual({

@@ -33,6 +33,14 @@ export const listingAdoptionSeedClaimSchema = z.discriminatedUnion('scope', [
 export type ListingAdoptionSeedClaim = z.output<
 	typeof listingAdoptionSeedClaimSchema
 >;
+export type ListingAdoptionFactSeedClaim = Extract<
+	ListingAdoptionSeedClaim,
+	{ scope: 'facts' }
+>;
+export type ListingAdoptionParentSeedClaim = Exclude<
+	ListingAdoptionSeedClaim,
+	{ scope: 'facts' }
+>;
 export type ListingAdoptionSeedClaimResult =
 	| { readonly kind: 'claimed'; readonly claim: ListingAdoptionSeedClaim }
 	| { readonly kind: 'idle' | 'unavailable' };

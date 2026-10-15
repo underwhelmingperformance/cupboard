@@ -353,9 +353,11 @@ claim predicate checks the captured epoch, generation, owner and expiry inside a
 write batch.
 
 The capture stream and reverse projection grant no cache authority and retain no
-bytes. Applying claims to seed writes, queue and cron scheduling, bounded event
-expansion, durable cache-adoption delivery, completion wakes and automatic
-forward producers remain pending.
+bytes. Seed checkpoint creation, projections, events and progress require the
+captured execution claim inside their write transaction. Consumers check storage
+readiness before preparing queries against independently expanded tables. Queue
+and cron scheduling, bounded event expansion, durable cache-adoption delivery,
+completion wakes and automatic forward producers remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.
