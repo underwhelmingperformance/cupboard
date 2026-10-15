@@ -18,6 +18,7 @@ import {
 	lateWriteTombstoneHorizonMs,
 	reserveObjectIncarnation
 } from '../blob/object-incarnation.ts';
+import { recordD1Statements } from '../d1-statements.test-support.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
@@ -58,6 +59,47 @@ const predicateType = predicateTypeSchema.parse(
 	'https://slsa.dev/provenance/v1'
 );
 const storePathHash = storePathHashSchema.parse('a'.repeat(32));
+// A repair sets the replacement incarnation as a bound value. The server's
+// other updates of `object_incarnation` set it with an expression or leave it
+// unchanged, so this prefix matches only the repair's reservation.
+const repairReservationQuery =
+	'update "object_incarnation" set "incarnation" = ?, "state" = ?';
+
+// Runs the first D1 batch that contains a statement starting with `prefix`,
+// then throws `failure` in place of its response. Records the SQL of every
+// statement in that batch.
+function loseBatchResponse(
+	prefix: string,
+	failure: Error,
+	lostBatches: string[][]
+): { mockRestore: () => void } {
+	const database = env.CUPBOARD_DB;
+	const batch = database.batch.bind(database);
+	const log = recordD1Statements(database);
+	const batchSpy = vi
+		.spyOn(database, 'batch')
+		.mockImplementation(async <T>(statements: D1PreparedStatement[]) => {
+			const results = await batch<T>(statements);
+			const sql = statements.map((statement) => log.sql(statement) ?? '');
+
+			if (
+				lostBatches.length > 0 ||
+				sql.every((query) => !query.startsWith(prefix))
+			) {
+				return results;
+			}
+
+			lostBatches.push(sql);
+			throw failure;
+		});
+
+	return {
+		mockRestore: () => {
+			log.restore();
+			batchSpy.mockRestore();
+		}
+	};
+}
 
 async function casLifecycleRows(digest: Sha256HexDigest) {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -805,9 +847,20 @@ describe('attestation CAS lifecycle', () => {
 		}
 	);
 
-	it.each(['reservation', 'bytes'] as const)(
-		'retries a missing-object repair after losing the %s response',
-		async (phase) => {
+	it.each([
+		{
+			phase: 'reservation',
+			lostBatches: [
+				[
+					expect.stringContaining(repairReservationQuery),
+					expect.stringContaining('insert into "object_deletion" ')
+				]
+			]
+		},
+		{ phase: 'bytes', lostBatches: [] }
+	] as const)(
+		'retries a missing-object repair after losing the $phase response',
+		async ({ phase, lostBatches: expectedLostBatches }) => {
 			const bytes = textEncoder.encode('repair retry');
 			const bundle = await fileAttestationReference({
 				uploadId: 'repair-retry',
@@ -825,17 +878,12 @@ describe('attestation CAS lifecycle', () => {
 				usage: await tenantUsageRow()
 			};
 			await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
-			const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 			const originalPut = env.BLOBS.put.bind(env.BLOBS);
 			const failure = new Error('repair response lost');
+			const lostBatches: string[][] = [];
 			const lost =
 				phase === 'reservation'
-					? vi
-							.spyOn(env.CUPBOARD_DB, 'batch')
-							.mockImplementationOnce(async (statements) => {
-								await originalBatch(statements);
-								throw failure;
-							})
+					? loseBatchResponse(repairReservationQuery, failure, lostBatches)
 					: vi
 							.spyOn(env.BLOBS, 'put')
 							.mockImplementationOnce(async (key, value, options) => {
@@ -861,11 +909,13 @@ describe('attestation CAS lifecycle', () => {
 			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 			const now = isoTimestamp(new Date());
 			expect({
+				lostBatches,
 				...(await casLifecycleRows(bundle.digest)),
 				refs: await attestationReferenceRows(),
 				presence: await tenantCasBlobRows(),
 				usage: await tenantUsageRow()
 			}).toStrictEqual({
+				lostBatches: expectedLostBatches,
 				objects: [],
 				registry: [
 					{
