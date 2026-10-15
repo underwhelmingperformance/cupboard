@@ -763,32 +763,6 @@ describe('durable artifact task claims', () => {
 			})
 		));
 
-	it('bounds discovery during dispatch and continues the next page after a lost message', () =>
-		withoutAlarmArming(() =>
-			withJob(async (jobs, context, _source) => {
-				seedDiscoverySources(context);
-				const job = await jobs.startInSection(defaultCache(), definition);
-				const dispatches = new ArtifactJobDispatchService(context);
-				const first = dispatchOf(dispatches.reserveInSection());
-				const firstSummary = jobs.summaryInSection(job.id);
-				vi.setSystemTime(new Date(first.notBefore));
-				dispatches.reserveInSection();
-				expect({
-					first: {
-						discovered: firstSummary?.progress.discovered,
-						discoveryComplete: firstSummary?.discoveryComplete
-					},
-					second: {
-						discovered: jobs.summaryInSection(job.id)?.progress.discovered,
-						discoveryComplete: jobs.summaryInSection(job.id)?.discoveryComplete
-					}
-				}).toStrictEqual({
-					first: { discovered: 32, discoveryComplete: false },
-					second: { discovered: 41, discoveryComplete: true }
-				});
-			})
-		));
-
 	it('retires a due job after its cache generation changes', () =>
 		withoutAlarmArming(() =>
 			withJob(async (jobs, context, _source) => {
@@ -806,24 +780,6 @@ describe('durable artifact task claims', () => {
 					result: { kind: 'progressed' },
 					nextAt: undefined,
 					state: 'cancelled'
-				});
-			})
-		));
-
-	it('does not dispatch jobs which finish during empty discovery', () =>
-		withoutAlarmArming(() =>
-			withJob(async (jobs, context, _source) => {
-				context.db.delete(schema.narInfos).run();
-				const job = await jobs.startInSection(defaultCache(), definition);
-				const dispatches = new ArtifactJobDispatchService(context);
-				expect({
-					result: dispatches.reserveInSection(),
-					nextAt: dispatches.nextAtInSection(),
-					state: jobs.summaryInSection(job.id)?.state
-				}).toStrictEqual({
-					result: { kind: 'progressed' },
-					nextAt: undefined,
-					state: 'complete'
 				});
 			})
 		));

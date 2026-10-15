@@ -4,9 +4,11 @@ import {
 	type NarListingIdentity
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
+import { registeredLiveObjectIncarnation } from '../blob/object-incarnation.ts';
+import { jsonRowList } from '../do/json-list.ts';
 import {
 	ListingFactConflictError,
 	SharedFactsUnavailableError
@@ -14,6 +16,11 @@ import {
 
 import * as schema from './d1-schema.ts';
 import { readWithOneRetry } from './transient.ts';
+
+export interface StoredNarListingFact {
+	readonly fact: NarListingFact;
+	readonly incarnation: number;
+}
 
 /**
  * Facts do not retain CAS bytes or authorise reads. Publishers must separately
@@ -45,6 +52,73 @@ export class ListingFactStore {
 		try {
 			const row = await readWithOneRetry(() => query.get());
 			return row === undefined ? undefined : narListingFactSchema.parse(row);
+		} catch (error) {
+			throw new SharedFactsUnavailableError(error);
+		}
+	}
+
+	async findStored(
+		identities: readonly NarListingIdentity[]
+	): Promise<readonly StoredNarListingFact[]> {
+		if (identities.length === 0) {
+			return [];
+		}
+		const unique = new Map(
+			identities.map(
+				(identity) =>
+					[
+						JSON.stringify([identity.narHash, identity.generatorRevision]),
+						{
+							narHash: identity.narHash,
+							generatorRevision: identity.generatorRevision
+						}
+					] as const
+			)
+		)
+			.values()
+			.toArray();
+		const list = jsonRowList(unique);
+		const query = this.database
+			.select({
+				narHash: schema.listingFact.narHash,
+				generatorRevision: schema.listingFact.generatorRevision,
+				format: schema.listingFact.format,
+				digest: schema.listingFact.digest,
+				size: schema.listingFact.size,
+				incarnation: schema.casObject.incarnation
+			})
+			.from(schema.listingFact)
+			.innerJoin(
+				schema.casObject,
+				and(
+					eq(schema.casObject.digest, schema.listingFact.digest),
+					eq(schema.casObject.size, schema.listingFact.size)
+				)
+			)
+			.where(
+				and(
+					list.matches({
+						narHash: schema.listingFact.narHash,
+						generatorRevision: schema.listingFact.generatorRevision
+					}),
+					registeredLiveObjectIncarnation(
+						this.database,
+						'cas',
+						schema.casObject.digest,
+						schema.casObject.incarnation
+					)
+				)
+			)
+			.orderBy(
+				asc(schema.listingFact.narHash),
+				asc(schema.listingFact.generatorRevision)
+			);
+		try {
+			const rows = await readWithOneRetry(() => query.all());
+			return rows.map(({ incarnation, ...fact }) => ({
+				fact: narListingFactSchema.parse(fact),
+				incarnation
+			}));
 		} catch (error) {
 			throw new SharedFactsUnavailableError(error);
 		}

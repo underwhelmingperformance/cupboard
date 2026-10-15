@@ -65,7 +65,7 @@ async function inSection<T>(
 	);
 }
 
-async function fixture(jobCount = 1, taskCount = 3) {
+async function fixture(jobCount = 1, taskCount = 3, shouldDiscover = false) {
 	const token = await initialise();
 	const nar = await verifiableNar('artifact-dispatch-source');
 	const hash = storePathHashSchema.parse('a'.repeat(32));
@@ -117,10 +117,12 @@ async function fixture(jobCount = 1, taskCount = 3) {
 				kind: 'listing',
 				generatorRevision: currentListingGeneratorRevision
 			});
-			for (const source of sources) {
-				jobs.enqueueInSection(job, source);
+			if (!shouldDiscover) {
+				for (const source of sources) {
+					jobs.enqueueInSection(job, source);
+				}
+				jobs.checkpointInSection(job, undefined, true);
 			}
-			jobs.checkpointInSection(job, undefined, true);
 			versions.push({ id: job.id, generation: job.generation });
 		}
 		return versions;
@@ -432,6 +434,63 @@ describe('artifact queue dispatch', () => {
 				projection: new Date(0).toISOString(),
 				suspended: { messages: 0, immediateWakes: [] },
 				resumed: [job]
+			});
+		}));
+
+	it('bounds discovery during dispatch and continues the next page after a lost message', () =>
+		withoutAlarmArming(async () => {
+			const versions = await fixture(1, 40, true);
+			const job = versions[0];
+			if (job === undefined) {
+				throw new Error('The paged dispatch fixture is missing');
+			}
+			const send = vi.fn<Parameters<typeof dispatch>[0]>();
+			await dispatch(send);
+			const first = await inSection((context) => ({
+				job: new ArtifactJobService(context).summaryInSection(job.id),
+				deadline: new ArtifactJobDispatchService(context).nextAtInSection()
+			}));
+			if (first.deadline === undefined) {
+				throw new Error('The lost-message recovery deadline is missing');
+			}
+			vi.setSystemTime(new Date(first.deadline));
+			await dispatch(send);
+			const second = await inSection((context) =>
+				new ArtifactJobService(context).summaryInSection(job.id)
+			);
+			expect({
+				first: {
+					discovered: first.job?.progress.discovered,
+					discoveryComplete: first.job?.discoveryComplete
+				},
+				second: {
+					discovered: second?.progress.discovered,
+					discoveryComplete: second?.discoveryComplete
+				}
+			}).toStrictEqual({
+				first: { discovered: 32, discoveryComplete: false },
+				second: { discovered: 41, discoveryComplete: true }
+			});
+		}));
+
+	it('does not dispatch jobs which finish during empty discovery', () =>
+		withoutAlarmArming(async () => {
+			const versions = await fixture(1, 0, true);
+			const job = versions[0];
+			if (job === undefined) {
+				throw new Error('The empty discovery fixture is missing');
+			}
+			await inSection((context) => context.db.delete(schema.narInfos).run());
+			const send = vi.fn<Parameters<typeof dispatch>[0]>();
+			const result = await dispatch(send);
+			const after = await inSection((context) => ({
+				nextAt: new ArtifactJobDispatchService(context).nextAtInSection(),
+				state: new ArtifactJobService(context).summaryInSection(job.id)?.state
+			}));
+			expect({ result, after, deliveries: send.mock.calls }).toStrictEqual({
+				result: { selectedJobs: 0, sent: 0, failed: 0 },
+				after: { nextAt: undefined, state: 'complete' },
+				deliveries: []
 			});
 		}));
 

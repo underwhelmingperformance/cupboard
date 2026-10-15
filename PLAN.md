@@ -7211,7 +7211,12 @@ build traces available from a cupboard cache.
       digest for every listing.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
-      revision without treating those facts as read credentials.
+      revision without treating those facts as read credentials. Dispatch now
+      admits shared-fact reuse without generation credits at full staging
+      capacity. A bulk identity lookup checks live CAS metadata, deduplicated
+      size probes check physical bytes, and consumption rechecks authority and
+      quota. Missing-byte races cannot repeatedly reserve reuse work. Producer
+      activation remains pending.
 - [ ] Add an optional tenant-signed in-toto generation proof with its own
       predicate. Verify input, output and signer through the CLI. Keep
       generation evidence separate from build provenance and Sigstore
@@ -7283,9 +7288,10 @@ build traces available from a cupboard cache.
       requirement and wait time. Cancellation releases queued admissions;
       staging remains charged until physical deletion succeeds. Waiter wakes
       commit with the release and preserve fair dispatch order. Dispatch passes
-      continue bounded wakes while capacity remains available. Shared-fact
-      admission at full staging capacity, shared D1 projections, activation and
-      throughput benchmarks remain pending.
+      continue bounded wakes while capacity remains available. Shared-fact reuse
+      now uses zero-byte admissions, including for newly discovered NARs at full
+      staging capacity. Shared D1 projections, activation and throughput
+      benchmarks remain pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last
       progress and paged failures. The total remains unknown until discovery

@@ -12,15 +12,20 @@ import { ArtifactAdmissionService } from './artifact-admission-service.ts';
 import { ArtifactCapacityService } from './artifact-capacity-service.ts';
 import {
 	type ArtifactJobDispatch,
+	type ArtifactJobDispatchCandidate,
 	ArtifactJobDispatchService
 } from './artifact-job-dispatch-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import type { ServerContext } from './context.ts';
 import { boundedSubrequest } from './deadline.ts';
+import { ListingReuseAdmissionService } from './listing-reuse-admission-service.ts';
 import { spendSubrequests } from './subrequest-slice.ts';
 
-const maximumJobs = 8;
 const maximumMessages = 8;
+interface DispatchSnapshot {
+	readonly candidate: ArtifactJobDispatchCandidate;
+	readonly tasks: readonly ArtifactTaskId[];
+}
 interface DispatchSelection {
 	readonly dispatch: ArtifactJobDispatch;
 	readonly tasks: readonly ArtifactTaskId[];
@@ -64,7 +69,8 @@ export class ArtifactQueueDispatchService {
 	private admitRoundInSection(
 		selections: readonly DispatchSelection[],
 		round: number,
-		limit: number
+		limit: number,
+		reusable: ReadonlySet<ArtifactTaskId>
 	): ArtifactQueueMessage[] {
 		const admissions = new ArtifactAdmissionService(this.context);
 		const messages: ArtifactQueueMessage[] = [];
@@ -78,7 +84,8 @@ export class ArtifactQueueDispatchService {
 			}
 			const reserved = admissions.reserveInSection(
 				selection.dispatch.job,
-				taskId
+				taskId,
+				reusable.has(taskId) ? 'reuse' : 'generate'
 			);
 			if (reserved.kind !== 'admitted') {
 				continue;
@@ -96,25 +103,44 @@ export class ArtifactQueueDispatchService {
 		return messages;
 	}
 
-	private prepareInSection(): DispatchBatch {
+	private discoverInSection(): readonly DispatchSnapshot[] {
+		return this.context.db.transaction(() => {
+			const jobs = new ArtifactJobService(this.context);
+			return new ArtifactJobDispatchService(this.context)
+				.dueInSection()
+				.map((candidate) => {
+					if (
+						candidate.definition.kind === 'listing' &&
+						!candidate.discoveryComplete
+					) {
+						jobs.discoverListingsInSection(candidate.job);
+					}
+					return {
+						candidate,
+						tasks:
+							candidate.definition.kind === 'listing'
+								? jobs.dispatchCandidateIdsInSection(candidate.job)
+								: []
+					};
+				});
+		});
+	}
+
+	private prepareInSection(
+		snapshots: readonly DispatchSnapshot[],
+		reusable: ReadonlySet<ArtifactTaskId>
+	): DispatchBatch {
 		return this.context.db.transaction(() => {
 			const dispatches = new ArtifactJobDispatchService(this.context);
-			const jobs = new ArtifactJobService(this.context);
 			const selections: DispatchSelection[] = [];
-			for (let index = 0; index < maximumJobs; index += 1) {
-				const reserved = dispatches.reserveInSection();
-				if (reserved.kind === 'idle') {
-					break;
-				}
+			for (const snapshot of snapshots) {
+				const reserved = dispatches.reserveInSection(snapshot.candidate.job);
 				if (reserved.kind !== 'dispatch') {
 					continue;
 				}
 				selections.push({
 					dispatch: reserved.dispatch,
-					tasks:
-						reserved.dispatch.artifactKind === 'listing'
-							? jobs.dispatchCandidateIdsInSection(reserved.dispatch.job)
-							: [],
+					tasks: snapshot.tasks,
 					messages: []
 				});
 			}
@@ -128,7 +154,8 @@ export class ArtifactQueueDispatchService {
 					...this.admitRoundInSection(
 						selections,
 						round,
-						maximumMessages - messages.length
+						maximumMessages - messages.length,
+						reusable
 					)
 				);
 			}
@@ -147,11 +174,22 @@ export class ArtifactQueueDispatchService {
 	 * commit before queue I/O begins.
 	 */
 	async run(): Promise<ArtifactQueueDispatchResult> {
-		const batch = await this.context.criticalSection(async () =>
-			(await this.activeTenant())
-				? this.prepareInSection()
-				: { selections: [], messages: [] }
-		);
+		const batch = await this.context.criticalSection(async () => {
+			if (!(await this.activeTenant())) {
+				return { selections: [], messages: [] };
+			}
+			const snapshots = this.discoverInSection();
+			if (snapshots.length === 0) {
+				return { selections: [], messages: [] };
+			}
+			const reusable = await new ListingReuseAdmissionService(
+				this.context
+			).reusableInSection(snapshots.flatMap((snapshot) => snapshot.tasks));
+			if (!(await this.activeTenant())) {
+				return { selections: [], messages: [] };
+			}
+			return this.prepareInSection(snapshots, reusable);
+		});
 		const selectedJobs = batch.selections.length;
 		if (batch.messages.length === 0) {
 			return { selectedJobs, sent: 0, failed: 0 };

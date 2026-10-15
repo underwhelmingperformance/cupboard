@@ -13,12 +13,13 @@ import {
 } from '@cupboard/protocol/artifact-jobs';
 import {
 	currentListingGeneratorRevision,
+	listingGeneratorRevisionSchema,
 	type NarListingFact
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -34,6 +35,7 @@ import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
+import { casObjectKey } from '../http/http.ts';
 import {
 	ArtifactQueueConsumer,
 	type ArtifactQueueDependencies
@@ -59,6 +61,7 @@ import {
 } from '../test-support.ts';
 
 import { ArtifactAdmissionService } from './artifact-admission-service.ts';
+import { ArtifactJobDispatchService } from './artifact-job-dispatch-service.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import { ArtifactQueueDispatchService } from './artifact-queue-dispatch-service.ts';
 import { ArtifactStagingService } from './artifact-staging-service.ts';
@@ -121,10 +124,12 @@ async function sourceNar(contents = 'hello') {
 }
 
 async function inSection<T>(
-	run: (context: ServerContext) => Promise<T>
+	run: (context: ServerContext) => Promise<T> | T
 ): Promise<T> {
 	return runInDurableObject(currentServer(), (instance) =>
-		instance.context.criticalSection(() => run(instance.context))
+		instance.context.criticalSection(() =>
+			Promise.resolve(run(instance.context))
+		)
 	);
 }
 
@@ -200,6 +205,59 @@ async function fixture(
 		}
 		return claimed.claim;
 	});
+}
+
+async function fullStagingReuseFixture(
+	mode: 'queued' | 'discovered' = 'queued'
+) {
+	const original = await fixture(undefined, true);
+	const generated = await generate(original);
+	await promote(generated);
+	await currentServer().completeListingTask(generated.lease, generated.fact);
+	await currentServer().collectArtifactStaging();
+	const blockers = await inSection(async (context) => {
+		const jobs = new ArtifactJobService(context);
+		const dispatches = new ArtifactJobDispatchService(context);
+		dispatches.reserveInSection();
+		const first = jobs.claimInSection(
+			original.jobId,
+			artifactTaskOwnerSchema.parse(crypto.randomUUID())
+		).claim;
+		if (first === undefined) {
+			throw new Error('The first staging blocker was not claimed');
+		}
+		const job = await jobs.startInSection(defaultCache(), {
+			kind: 'listing',
+			generatorRevision: currentListingGeneratorRevision
+		});
+		jobs.enqueueInSection(job, first.source);
+		jobs.checkpointInSection(job, undefined, true);
+		dispatches.reserveInSection();
+		const second = jobs.claimInSection(
+			job.id,
+			artifactTaskOwnerSchema.parse(crypto.randomUUID())
+		).claim;
+		if (second === undefined) {
+			throw new Error('The second staging blocker was not claimed');
+		}
+		return [first, second];
+	});
+	for (const claim of blockers) {
+		generationOf(await currentServer().prepareListingTask(claim));
+	}
+	const candidate = await inSection(async (context) => {
+		const jobs = new ArtifactJobService(context);
+		const job = await jobs.startInSection(defaultCache(), {
+			kind: 'listing',
+			generatorRevision: currentListingGeneratorRevision
+		});
+		if (mode === 'queued') {
+			jobs.enqueueInSection(job, original.source);
+			jobs.checkpointInSection(job, undefined, true);
+		}
+		return { id: job.id, generation: job.generation };
+	});
+	return { candidate, blockers, generated };
 }
 
 function generationOf(result: ListingTaskPreparation) {
@@ -1352,6 +1410,327 @@ describe('listing task workflow', () => {
 					.toSorted((left, right) => left.localeCompare(right)),
 				progress: { discovered: 2, completed: 0, skipped: 0, failed: 2 }
 			});
+		}));
+
+	it.each(['queued', 'discovered'] as const)(
+		'dispatches a %s shared listing at full staging capacity without reading NAR bytes',
+		(mode) =>
+			withoutAlarmArming(async () => {
+				const { candidate, blockers } = await fullStagingReuseFixture(mode);
+				const before = await inSection((context) =>
+					new ArtifactAdmissionService(context).stagingCapacityInSection()
+				);
+				const reads = vi.spyOn(env.BLOBS, 'get');
+				const uploads = vi.spyOn(env.BLOBS, 'createMultipartUpload');
+				const delivered = await deliverArtifactBatch();
+				expect({
+					result: delivered.result,
+					jobs: delivered.messages.map((message) => message.job)
+				}).toStrictEqual({
+					result: { selectedJobs: 1, sent: 1, failed: 0 },
+					jobs: [candidate]
+				});
+				const message = delivered.messages[0];
+				if (message === undefined) {
+					throw new Error('The reusable listing was not dispatched');
+				}
+				const actions: unknown[] = [];
+				const sent: ArtifactQueueMessage[] = [];
+				await artifactConsumer(sent).handleMessage(
+					artifactMessage(message, actions)
+				);
+				const after = await inSection((context) => ({
+					capacity: new ArtifactAdmissionService(
+						context
+					).stagingCapacityInSection(),
+					progress: new ArtifactJobService(context).summaryInSection(
+						candidate.id
+					)?.progress,
+					admissions: context.db.select().from(schema.artifactAdmissions).all()
+				}));
+				expect({
+					before,
+					after,
+					actions,
+					sent,
+					reads: reads.mock.calls,
+					uploads: uploads.mock.calls
+				}).toStrictEqual({
+					before: {
+						reservations: 2,
+						bytes: 128 * 1024 * 1024,
+						retryAt: blockers[0]?.leaseExpiresAt
+					},
+					after: {
+						capacity: before,
+						progress: {
+							discovered: mode === 'queued' ? 1 : 2,
+							completed: 1,
+							skipped: 0,
+							failed: 0
+						},
+						admissions: []
+					},
+					actions: [{ action: 'ack' }],
+					sent: [],
+					reads: [],
+					uploads: []
+				});
+			})
+	);
+
+	it('does not admit reuse work when the tenant is suspended during its byte probe', () =>
+		withoutAlarmArming(async () => {
+			const { generated } = await fullStagingReuseFixture();
+			const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+			const object = await database
+				.select()
+				.from(d1Schema.casObject)
+				.where(eq(d1Schema.casObject.digest, generated.fact.digest))
+				.get();
+			if (object === undefined) {
+				throw new Error('The reusable CAS fixture is missing');
+			}
+			const key = casObjectKey(generated.fact.digest, object.incarnation);
+			const before = await inSection((context) =>
+				context.db.select().from(schema.artifactJobs).all()
+			);
+			const readHead = env.BLOBS.head.bind(env.BLOBS);
+			const probe = vi
+				.spyOn(env.BLOBS, 'head')
+				.mockImplementation(async (requested) => {
+					const head = await readHead(requested);
+					if (requested === key) {
+						await database
+							.update(d1Schema.tenant)
+							.set({ status: 'suspended' })
+							.where(eq(d1Schema.tenant.id, fixtureTenant));
+					}
+					return head;
+				});
+			try {
+				const delivered = await deliverArtifactBatch();
+				const after = await inSection((context) =>
+					context.db.select().from(schema.artifactJobs).all()
+				);
+				expect({ delivered, after }).toStrictEqual({
+					delivered: {
+						result: { selectedJobs: 0, sent: 0, failed: 0 },
+						messages: [],
+						admissions: []
+					},
+					after: before
+				});
+			} finally {
+				probe.mockRestore();
+			}
+		}));
+
+	it.each([
+		'missing-bytes',
+		'wrong-size',
+		'absent-incarnation',
+		'other-generator'
+	] as const)(
+		'does not admit a stale shared listing at full staging capacity after %s',
+		(condition) =>
+			withoutAlarmArming(async () => {
+				const { candidate, generated } = await fullStagingReuseFixture();
+				const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+				const object = await database
+					.select()
+					.from(d1Schema.casObject)
+					.where(eq(d1Schema.casObject.digest, generated.fact.digest))
+					.get();
+				if (object === undefined) {
+					throw new Error('The stale CAS fixture is missing');
+				}
+				const key = casObjectKey(generated.fact.digest, object.incarnation);
+				const changedRevision =
+					listingGeneratorRevisionSchema.parse('other-generator');
+				const saved = await env.BLOBS.get(key);
+				if (saved === null) {
+					throw new Error('The original CAS bytes are missing');
+				}
+				const bytes = await saved.arrayBuffer();
+				try {
+					switch (condition) {
+						case 'missing-bytes': {
+							await env.BLOBS.delete(key);
+							break;
+						}
+						case 'wrong-size': {
+							await env.BLOBS.put(key, 'corrupt');
+							break;
+						}
+						case 'absent-incarnation': {
+							await database
+								.update(d1Schema.objectIncarnation)
+								.set({ state: 'absent' })
+								.where(
+									eq(d1Schema.objectIncarnation.objectId, generated.fact.digest)
+								);
+							break;
+						}
+						case 'other-generator': {
+							await database
+								.update(d1Schema.listingFact)
+								.set({
+									generatorRevision: changedRevision
+								})
+								.where(
+									eq(d1Schema.listingFact.narHash, generated.fact.narHash)
+								);
+							break;
+						}
+					}
+					const before = await inSection((context) => ({
+						capacity: new ArtifactAdmissionService(
+							context
+						).stagingCapacityInSection(),
+						tasks: context.db
+							.select()
+							.from(schema.artifactTasks)
+							.where(eq(schema.artifactTasks.jobId, candidate.id))
+							.all()
+					}));
+					const reads = vi.spyOn(env.BLOBS, 'get');
+					const delivered = await deliverArtifactBatch();
+					const after = await inSection((context) => ({
+						capacity: new ArtifactAdmissionService(
+							context
+						).stagingCapacityInSection(),
+						tasks: context.db
+							.select()
+							.from(schema.artifactTasks)
+							.where(eq(schema.artifactTasks.jobId, candidate.id))
+							.all()
+					}));
+					expect({ delivered, after, reads: reads.mock.calls }).toStrictEqual({
+						delivered: {
+							result: { selectedJobs: 1, sent: 0, failed: 0 },
+							messages: [],
+							admissions: []
+						},
+						after: before,
+						reads: []
+					});
+				} finally {
+					await env.BLOBS.put(key, bytes, { sha256: generated.fact.digest });
+					switch (condition) {
+						case 'absent-incarnation': {
+							await database
+								.update(d1Schema.objectIncarnation)
+								.set({ state: 'live' })
+								.where(
+									and(
+										eq(d1Schema.objectIncarnation.kind, 'cas'),
+										eq(
+											d1Schema.objectIncarnation.objectId,
+											generated.fact.digest
+										)
+									)
+								);
+
+							break;
+						}
+						case 'other-generator': {
+							await database
+								.update(d1Schema.listingFact)
+								.set({ generatorRevision: generated.fact.generatorRevision })
+								.where(
+									and(
+										eq(d1Schema.listingFact.narHash, generated.fact.narHash),
+										eq(d1Schema.listingFact.generatorRevision, changedRevision)
+									)
+								);
+
+							break;
+						}
+						default: {
+							break;
+						}
+					}
+				}
+			})
+	);
+
+	it('does not immediately readmit reuse after bytes disappear between dispatch and execution', () =>
+		withoutAlarmArming(async () => {
+			const { candidate, generated } = await fullStagingReuseFixture();
+			const initial = await deliverArtifactBatch();
+			const message = initial.messages[0];
+			if (message === undefined) {
+				throw new Error('The raced reuse fixture was not admitted');
+			}
+			const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+			const object = await database
+				.select()
+				.from(d1Schema.casObject)
+				.where(eq(d1Schema.casObject.digest, generated.fact.digest))
+				.get();
+			if (object === undefined) {
+				throw new Error('The raced CAS fixture is missing');
+			}
+			const key = casObjectKey(generated.fact.digest, object.incarnation);
+			const saved = await env.BLOBS.get(key);
+			if (saved === null) {
+				throw new Error('The original raced CAS bytes are missing');
+			}
+			const bytes = await saved.arrayBuffer();
+			try {
+				await env.BLOBS.delete(
+					casObjectKey(generated.fact.digest, object.incarnation)
+				);
+				const reads = vi.spyOn(env.BLOBS, 'get');
+				const uploads = vi.spyOn(env.BLOBS, 'createMultipartUpload');
+				const sent: ArtifactQueueMessage[] = [];
+				const actions: unknown[] = [];
+				await artifactConsumer(sent).handleMessage(
+					artifactMessage(message, actions)
+				);
+				const repeated = await deliverArtifactBatch();
+				const after = await inSection((context) => ({
+					progress: new ArtifactJobService(context).summaryInSection(
+						candidate.id
+					)?.progress,
+					admissions: context.db.select().from(schema.artifactAdmissions).all(),
+					capacity: new ArtifactAdmissionService(
+						context
+					).stagingCapacityInSection().bytes,
+					tasks: context.db
+						.select({ state: schema.artifactTasks.state })
+						.from(schema.artifactTasks)
+						.where(eq(schema.artifactTasks.jobId, candidate.id))
+						.all()
+				}));
+				expect({
+					repeated,
+					after,
+					sent,
+					actions,
+					reads: reads.mock.calls,
+					uploads: uploads.mock.calls
+				}).toStrictEqual({
+					repeated: {
+						result: { selectedJobs: 1, sent: 0, failed: 0 },
+						messages: [],
+						admissions: []
+					},
+					after: {
+						progress: { discovered: 1, completed: 0, skipped: 0, failed: 0 },
+						admissions: [],
+						capacity: 128 * 1024 * 1024,
+						tasks: [{ state: 'pending' }]
+					},
+					sent: [],
+					actions: [{ action: 'ack' }],
+					reads: [],
+					uploads: []
+				});
+			} finally {
+				await env.BLOBS.put(key, bytes, { sha256: generated.fact.digest });
+			}
 		}));
 
 	it('releases a reuse admission after publishing a shared listing fact', () =>

@@ -1,6 +1,9 @@
-import type { ArtifactJobVersion } from '@cupboard/protocol/artifact-jobs';
+import type {
+	ArtifactJobDefinition,
+	ArtifactJobVersion
+} from '@cupboard/protocol/artifact-jobs';
 import type { ArtifactKind } from '@cupboard/protocol/artifacts';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, lte, sql } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -8,6 +11,12 @@ import * as schema from '../db/schema.ts';
 import { noProgressRetryMs } from './alarm.ts';
 import { ArtifactJobService } from './artifact-job-service.ts';
 import type { ServerContext } from './context.ts';
+
+export interface ArtifactJobDispatchCandidate {
+	readonly job: ArtifactJobVersion;
+	readonly definition: ArtifactJobDefinition;
+	readonly discoveryComplete: boolean;
+}
 
 export interface ArtifactJobDispatch {
 	readonly job: ArtifactJobVersion;
@@ -21,6 +30,7 @@ export type ArtifactJobDispatchResult =
 	| { readonly kind: 'dispatch'; readonly dispatch: ArtifactJobDispatch };
 
 const redispatchDelayMs = 15 * 60 * 1000;
+const maximumJobs = 8;
 
 export class ArtifactJobDispatchService {
 	constructor(private readonly context: ServerContext) {}
@@ -82,11 +92,50 @@ export class ArtifactJobDispatchService {
 		return tenant?.status === 'active' ? at : undefined;
 	}
 
-	reserveInSection(): ArtifactJobDispatchResult {
+	dueInSection(): readonly ArtifactJobDispatchCandidate[] {
+		if (this.context.offboarding) {
+			return [];
+		}
+		const now = Date.now();
+		return this.context.db
+			.select({
+				id: schema.artifactJobs.id,
+				generation: schema.artifactJobs.generation,
+				definition: schema.artifactJobs.definition,
+				discoveryComplete: schema.artifactJobs.discoveryComplete
+			})
+			.from(schema.artifactJobs)
+			.where(
+				and(
+					eq(schema.artifactJobs.state, 'running'),
+					lte(schema.artifactJobs.nextDispatchAt, now)
+				)
+			)
+			.orderBy(
+				asc(schema.artifactJobs.nextDispatchAt),
+				asc(schema.artifactJobs.id)
+			)
+			.limit(maximumJobs)
+			.all()
+			.map((row) => ({
+				job: { id: row.id, generation: row.generation },
+				definition: row.definition,
+				discoveryComplete: row.discoveryComplete
+			}));
+	}
+
+	reserveInSection(version?: ArtifactJobVersion): ArtifactJobDispatchResult {
+		const identity =
+			version === undefined
+				? undefined
+				: and(
+						eq(schema.artifactJobs.id, version.id),
+						eq(schema.artifactJobs.generation, version.generation)
+					);
 		const job = this.context.db
 			.select()
 			.from(schema.artifactJobs)
-			.where(eq(schema.artifactJobs.state, 'running'))
+			.where(and(eq(schema.artifactJobs.state, 'running'), identity))
 			.orderBy(
 				asc(schema.artifactJobs.nextDispatchAt),
 				asc(schema.artifactJobs.id)
@@ -102,13 +151,6 @@ export class ArtifactJobDispatchService {
 		if (cache?.id !== job.cacheId || cache.generation !== job.cacheGeneration) {
 			jobs.cancelInSection(job.id);
 			return { kind: 'progressed' };
-		}
-		const version = { id: job.id, generation: job.generation };
-		if (job.definition.kind === 'listing' && !job.discoveryComplete) {
-			jobs.discoverListingsInSection(version);
-			if (jobs.summaryInSection(job.id)?.state !== 'running') {
-				return { kind: 'progressed' };
-			}
 		}
 		const claimExpiry = jobs.nextClaimExpiryInSection(job.id);
 		const backstop = Date.now() + redispatchDelayMs;
@@ -139,7 +181,7 @@ export class ArtifactJobDispatchService {
 		return {
 			kind: 'dispatch',
 			dispatch: {
-				job: version,
+				job: { id: job.id, generation: job.generation },
 				artifactKind: job.definition.kind,
 				revision: reserved.revision,
 				notBefore

@@ -138,7 +138,17 @@ due now and preserves an existing overdue deadline. Repeated wakes therefore
 preserve the priority of older waiting jobs. Revision fences still prevent an
 older queue-send failure from postponing a newer wake.
 
-The bounded dispatcher captures at most eight due jobs and eight messages in one
+Each dispatcher pass discovers one bounded page for at most eight due jobs and
+captures task candidates. A bulk lookup matches NAR hashes and generator
+revisions against shared listing facts with live CAS incarnations. The
+dispatcher deduplicates CAS keys and checks their physical sizes with at most
+six concurrent HEAD requests. Available listings need no generation credits,
+including when staging is full. Facts are admission hints; the consumer still
+checks authority, physical bytes and quota before publication. Missing bytes
+stop later reuse admissions until bytes are available again.
+
+Discovery commits before the asynchronous probes. After checking tenant status
+again, the dispatcher commits job deadlines and at most eight admissions in one
 SQLite transaction. It prioritises sealed recovery and gives each selected job
 an admission opportunity before another round. Shared staging limits decide
 whether generation can reserve bytes; existing tickets and ready staging reuse
