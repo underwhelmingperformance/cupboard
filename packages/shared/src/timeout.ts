@@ -102,10 +102,12 @@ function abortError(signal: AbortSignal | undefined): Error {
 }
 
 export class ProbeTimeoutError extends CodedError {
-	constructor(public readonly url: string) {
-		super(
-			`Timed out probing ${url}; the cache did not return a response before the deadline`
-		);
+	/**
+	 * @param target The request that timed out: its URL, or a description such
+	 * as `the caches.list procedure`.
+	 */
+	constructor(public readonly target: string) {
+		super(`Timed out waiting for a response from ${target}`);
 		this.name = 'ProbeTimeoutError';
 	}
 

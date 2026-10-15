@@ -30,6 +30,7 @@ import {
 	shouldShowDebug,
 	shouldShowDetails
 } from '@cupboard/reporter';
+import { collectProgressively } from '@cupboard/shared/collections';
 import type { Command } from 'commander';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
@@ -44,7 +45,8 @@ import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import { cacheLabel, CupboardClient } from '../client/client.ts';
-import { tenantRpc } from '../client/orpc.ts';
+import { cachePages, listingLimits } from '../client/listings.ts';
+import { type CallOptions, tenantRpc } from '../client/orpc.ts';
 import {
 	isRpcCacheAlreadyExistsError,
 	isRpcNotFoundError
@@ -105,7 +107,10 @@ interface CacheRemoveOptions {
 }
 
 export interface CacheClient {
-	list(input?: CacheListInput): Promise<CacheListResponse>;
+	list(
+		input?: CacheListInput,
+		options?: CallOptions
+	): Promise<CacheListResponse>;
 	get: CacheScopedClient<object, CacheSummary>;
 	put: CacheScopedClient<CachePutBody, CacheSummary>;
 	update: CacheScopedClient<CacheUpdateBody, CacheSummary>;
@@ -645,21 +650,12 @@ export async function runCacheList(
 	reporter: Reporter,
 	client: Pick<CacheClient, 'list'>
 ): Promise<void> {
-	const caches = await reporter.phase('Listing caches', async () => {
-		const summaries: CacheListEntry[] = [];
-		let cursor: string | undefined;
-
-		do {
-			const page =
-				cursor === undefined
-					? await client.list()
-					: await client.list({ cursor });
-			summaries.push(...page.caches);
-			cursor = page.cursor;
-		} while (cursor !== undefined);
-
-		return summaries;
-	});
+	const caches = await reporter.phase('Listing caches', async () =>
+		collectProgressively(
+			await cachePages(client),
+			listingLimits('The cache listing')
+		)
+	);
 
 	reporter.result({
 		kind: 'caches',

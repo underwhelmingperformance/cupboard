@@ -10,11 +10,15 @@ import type {
 	ResultPayload,
 	ResultRow
 } from '@cupboard/reporter';
-import { describe, expect, it } from 'vitest';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
+import { describe, expect, it, vi } from 'vitest';
 
+import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
 import { CheckDiscrepanciesError } from '../errors.ts';
 
 import { type CheckClient, runCheck, runSharedAccess } from './check.ts';
+
+const maximumBackoffMs = 5000;
 
 interface Warning {
 	readonly label: string;
@@ -291,6 +295,61 @@ describe('shared-access report', () => {
 						{ label: 'Shared NARs', value: '2' },
 						{ label: 'NAR', value: narHash },
 						{ label: 'NAR', value: secondHash }
+					]
+				],
+				infos: [],
+				warnings: []
+			}
+		});
+	});
+
+	it('sends a shared-access page again after it hangs past its deadline', async () => {
+		const calls: { cursor: SharedAccessReport['cursor'] }[] = [];
+		const captured: Captured = { results: [], infos: [], warnings: [] };
+		const phases: { label: string; status: 'ok' | 'failed' }[] = [];
+		const base = reporter(captured);
+		const recording: Reporter = {
+			...base,
+			async phase(label, body) {
+				try {
+					const value = await base.phase(label, body);
+					phases.push({ label, status: 'ok' });
+					return value;
+				} catch (error) {
+					phases.push({ label, status: 'failed' });
+					throw error;
+				}
+			}
+		};
+
+		vi.useFakeTimers();
+		try {
+			const pending = runSharedAccess(recording, {
+				async sharedAccess(input, options) {
+					calls.push(input);
+					if (calls.length === 1) {
+						await stalledResponse(options?.signal);
+					}
+					return sharedAccessReportSchema.parse({
+						narHashes: [narHash],
+						cursor: ''
+					});
+				}
+			});
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs + maximumBackoffMs);
+			await pending;
+		} finally {
+			vi.useRealTimers();
+		}
+
+		expect({ calls, phases, captured }).toStrictEqual({
+			calls: [{ cursor: '' }, { cursor: '' }],
+			phases: [{ label: 'Checking shared NAR access', status: 'ok' }],
+			captured: {
+				results: [
+					[
+						{ label: 'Shared NARs', value: '1' },
+						{ label: 'NAR', value: narHash }
 					]
 				],
 				infos: [],

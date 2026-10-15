@@ -23,12 +23,14 @@ import {
 	reuseViewPrioritySchema,
 	viewPriorityMargin
 } from '@cupboard/protocol/reuse-views';
+import { filterProgressively } from '@cupboard/shared/collections';
 import { genericExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 
 import { isAbortError } from '../../abort.ts';
 import { audienceSchema } from '../../audience.ts';
 import { cacheLabel } from '../../client/client.ts';
+import { cachePages, listingLimits } from '../../client/listings.ts';
 import {
 	CliError,
 	CupboardHttpError,
@@ -767,19 +769,12 @@ async function pullRequestCaches(
 	repositoryId: number
 ): Promise<CacheListEntry[]> {
 	const prefix = pullRequestCachePrefix(repositoryId);
-	const caches: CacheListEntry[] = [];
-	let cursor: string | undefined;
 
-	do {
-		const page = await client.caches.list({ namePrefix: prefix, cursor });
-
-		caches.push(...page.caches);
-		cursor = page.cursor;
-	} while (cursor !== undefined);
-
-	return caches.filter(
+	return filterProgressively(
+		await cachePages(client.caches, prefix),
 		(cache) =>
-			cache.scope.kind === 'named' && cache.scope.name.startsWith(prefix)
+			cache.scope.kind === 'named' && cache.scope.name.startsWith(prefix),
+		listingLimits('The pull-request cache listing')
 	);
 }
 

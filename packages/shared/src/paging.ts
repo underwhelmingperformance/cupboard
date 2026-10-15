@@ -1,6 +1,6 @@
 import { getLogger } from '@logtape/logtape';
 
-import { chunk } from './collections.ts';
+import { chunk, type ProgressivePage } from './collections.ts';
 import { mapWithConcurrency } from './concurrency.ts';
 import { CodedError } from './errors.ts';
 import {
@@ -24,17 +24,26 @@ const logger = getLogger(['cupboard', 'probe']);
 export const maxProbeAttempts = 3;
 
 /**
- * Identifies a probe in debug logs.
+ * Identifies a probe in debug logs: an HTTP request by its URL, or an admin
+ * API call by its procedure, such as `caches.list`.
  */
-export interface ProbeTarget {
-	/**
-	The probe URL without user information or a query.
-	*/
-	readonly url: string;
+export type ProbeTarget = (
+	| {
+			/**
+			The probe URL without user information or a query.
+			*/
+			readonly url: string;
+	  }
+	| { readonly procedure: string }
+) & {
 	/**
 	The number of inputs in the request, for a request with several.
 	*/
 	readonly inputs?: number;
+};
+
+function describeTarget(target: ProbeTarget): string {
+	return 'url' in target ? target.url : `the ${target.procedure} procedure`;
 }
 
 export interface DeadlineOptions {
@@ -104,7 +113,7 @@ export async function requestWithDeadline<T>(
 			const result = await attemptWithDeadline(
 				request,
 				options.deadlineMs ?? probeDeadlineMs,
-				() => (expiry = new ProbeTimeoutError(options.target.url)),
+				() => (expiry = new ProbeTimeoutError(describeTarget(options.target))),
 				options.signal
 			);
 			logger.debug('probe attempt finished', () => ({
@@ -319,4 +328,47 @@ export async function lookupInPages<Input, Result>(
 	const rest = await mapWithConcurrency(pages, lookup.concurrency, lookUp);
 
 	return [...first, ...rest.flat()];
+}
+
+/**
+ * One page of a listing that the server returns in pages. `next` is the
+ * cursor for the following page, and the last page has none.
+ */
+export interface CursorPage<Item, Cursor> {
+	readonly items: readonly Item[];
+	readonly next?: Cursor | undefined;
+}
+
+/**
+ * Requests the first page of a listing and returns it as a
+ * {@link ProgressivePage} whose continuation requests the next page. Each
+ * page request goes through {@link requestWithDeadline} with `deadline`.
+ * `request` receives the cursor from the previous page, or `undefined` for
+ * the first page, and must use `signal`, which aborts when the deadline
+ * expires. As with a {@link PageRequest}, a request that changes state outside
+ * its page must check `signal` before it does so.
+ */
+export async function cursorPages<Item, Cursor>(
+	request: (
+		cursor: Cursor | undefined,
+		signal: AbortSignal
+	) => Promise<CursorPage<Item, Cursor>>,
+	deadline: DeadlineOptions
+): Promise<ProgressivePage<Item>> {
+	const pageAfter = async (
+		cursor: Cursor | undefined
+	): Promise<ProgressivePage<Item>> => {
+		const page = await requestWithDeadline(
+			(signal) => request(cursor, signal),
+			deadline
+		);
+		const next = page.next;
+
+		return {
+			items: page.items,
+			...(next !== undefined && { next: () => pageAfter(next) })
+		};
+	};
+
+	return pageAfter(undefined);
 }

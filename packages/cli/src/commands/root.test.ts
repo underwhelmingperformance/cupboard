@@ -19,18 +19,22 @@ import {
 	rootSetMaxTargets,
 	type RootSummaryInput,
 	rootSummarySchema,
+	type RootTargetsPage,
 	rootTargetsPageSchema
 } from '@cupboard/protocol/retention';
 import type { ResultRow } from '@cupboard/reporter';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { Command } from 'commander';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
 import { cliExitCode } from '../cli.ts';
 import {
 	type RecordedCall,
 	recordingCacheScopedClient
 } from '../client/cache-scoped.test-support.ts';
+import { type CallOptions } from '../client/orpc.ts';
 
 import {
 	describeExpiry,
@@ -440,6 +444,78 @@ describe('runRootTargets', () => {
 			]
 		});
 	});
+});
+
+// Answers every call with `page`, except that the first call does not answer,
+// and rejects when its signal aborts, as on a stalled connection.
+function stallingClient<Output>(page: Output) {
+	let calls = 0;
+
+	return recordingCacheScopedClient(
+		async (_input: object, options?: CallOptions) => {
+			calls += 1;
+			if (calls === 1) {
+				await stalledResponse(options?.signal);
+			}
+
+			return page;
+		}
+	);
+}
+
+const stalledRootList = (): RootListResponse =>
+	rootListResponseSchema.parse({
+		roots: [entry({ name: 'main', targetCount: 1 })]
+	});
+const stalledTargetsPage = (): RootTargetsPage =>
+	rootTargetsPageSchema.parse({ targets: [presentTarget()] });
+
+describe('root listings', () => {
+	it.each([
+		{
+			listing: 'retention roots',
+			run: async (results: ResultRow[][]): Promise<number> => {
+				const list = stallingClient(stalledRootList());
+				const pending = runRootList(defaultCache, reporter(results), { list });
+				await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+				await pending;
+
+				return list.calls.length;
+			},
+			rows: [{ label: 'main', value: '1 store path; permanent' }]
+		},
+		{
+			listing: 'root targets',
+			run: async (results: ResultRow[][]): Promise<number> => {
+				const targets = stallingClient(stalledTargetsPage());
+				const pending = runRootTargets(
+					defaultCache,
+					rootName('main'),
+					reporter(results),
+					{ targets }
+				);
+				await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+				await pending;
+
+				return targets.calls.length;
+			},
+			rows: [{ label: target, value: 'present' }]
+		}
+	])(
+		'sends a page of $listing again after it hangs past its deadline',
+		async ({ run, rows }) => {
+			const results: ResultRow[][] = [];
+
+			vi.useFakeTimers();
+			try {
+				const calls = await run(results);
+
+				expect({ calls, results }).toStrictEqual({ calls: 2, results: [rows] });
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
 });
 
 describe('runRootRemove', () => {

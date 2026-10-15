@@ -9,8 +9,10 @@ import {
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
+import { findProgressively } from '@cupboard/shared/collections';
 
 import { contentReadAuthorizationDetails } from '../../auth/attenuate.ts';
+import { cachePages, listingLimits } from '../../client/listings.ts';
 
 import { type GithubCheckClient } from './check.ts';
 import {
@@ -356,28 +358,16 @@ async function hasPrivateCacheInFamily(
 	client: GithubCheckClient,
 	family: CacheFamily
 ): Promise<boolean> {
-	let cursor: string | undefined;
+	const privateCache = await findProgressively(
+		await cachePages(client.caches, family.prefix),
+		(candidate) =>
+			candidate.scope.kind === 'named' &&
+			candidate.access === 'private' &&
+			family.matches(candidate.scope.name),
+		listingLimits('The cache family listing')
+	);
 
-	do {
-		const page = await client.caches.list({
-			namePrefix: family.prefix,
-			cursor
-		});
-		if (
-			page.caches.some(
-				(candidate) =>
-					candidate.scope.kind === 'named' &&
-					candidate.access === 'private' &&
-					family.matches(candidate.scope.name)
-			)
-		) {
-			return true;
-		}
-
-		cursor = page.cursor;
-	} while (cursor !== undefined);
-
-	return false;
+	return privateCache !== undefined;
 }
 
 async function trustedPullRequestCacheAccess(

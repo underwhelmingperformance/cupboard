@@ -6,11 +6,14 @@ import { z } from 'zod';
 
 import { stalledResponse } from '../../../tests/support/stalled-request.ts';
 
+import { collectProgressively } from './collections.ts';
 import {
 	type CapturedRecord,
 	captureLogs
 } from './log-capture.test-support.ts';
 import {
+	type CursorPage,
+	cursorPages,
 	fetchWithProbeRetries,
 	lookupInPages,
 	maxProbeAttempts,
@@ -60,7 +63,7 @@ const replaySafe = { target, replaySafety: 'replay-safe' } as const;
 
 function timeoutFields(failure: unknown): unknown {
 	return failure instanceof ProbeTimeoutError
-		? { name: failure.name, url: failure.url }
+		? { name: failure.name, target: failure.target }
 		: failure;
 }
 
@@ -111,7 +114,7 @@ describe('requestWithDeadline', () => {
 					failure: timeoutFields(await failure),
 					started
 				}).toStrictEqual({
-					failure: { name: 'ProbeTimeoutError', url: target.url },
+					failure: { name: 'ProbeTimeoutError', target: target.url },
 					started: attempts
 				});
 			} finally {
@@ -221,6 +224,73 @@ describe('requestWithDeadline', () => {
 		}
 
 		expect(attempts).toBe(1);
+	});
+	it('identifies a procedure in its deadline expiry and its debug logs', async () => {
+		const records = captureLogs();
+
+		vi.useFakeTimers();
+		try {
+			const failure = rejectionOf(
+				requestWithDeadline(stalled, {
+					target: { procedure: 'caches.list' },
+					replaySafety: 'replay-unsafe'
+				})
+			);
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs);
+
+			expect({
+				failure: timeoutFields(await failure),
+				records
+			}).toStrictEqual({
+				failure: {
+					name: 'ProbeTimeoutError',
+					target: 'the caches.list procedure'
+				},
+				records: [
+					probeLog('probe attempt finished', {
+						procedure: 'caches.list',
+						attempt: 1,
+						outcome: 'timed out',
+						elapsedMs: probeDeadlineMs
+					})
+				]
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe('cursorPages', () => {
+	it('follows each cursor and retries a page that hangs past its deadline', async () => {
+		const requests: (string | undefined)[] = [];
+		const pages = new Map<string | undefined, CursorPage<number, string>>([
+			[undefined, { items: [1, 2], next: 'second' }],
+			['second', { items: [3] }]
+		]);
+
+		vi.useFakeTimers();
+		try {
+			const collect = async (): Promise<number[]> =>
+				collectProgressively(
+					await cursorPages<number, string>(async (cursor, signal) => {
+						requests.push(cursor);
+						if (cursor === 'second' && requests.length === 2) {
+							await stalled(signal);
+						}
+						return pages.get(cursor) ?? { items: [] };
+					}, replaySafe),
+					{ description: 'test listing', maximumItems: 3, maximumPages: 2 }
+				);
+			const pending = collect();
+			const settled = expect(pending).resolves.toStrictEqual([1, 2, 3]);
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs + maximumBackoffMs);
+			await settled;
+		} finally {
+			vi.useRealTimers();
+		}
+
+		expect(requests).toStrictEqual([undefined, 'second', 'second']);
 	});
 });
 
@@ -505,7 +575,7 @@ describe('lookupInPages', () => {
 				failure: timeoutFields(await failure),
 				requests
 			}).toStrictEqual({
-				failure: { name: 'ProbeTimeoutError', url: target.url },
+				failure: { name: 'ProbeTimeoutError', target: target.url },
 				requests: [[1, 2]]
 			});
 		} finally {

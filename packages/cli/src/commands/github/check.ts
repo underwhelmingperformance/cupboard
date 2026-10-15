@@ -6,7 +6,6 @@ import {
 	cacheNameSchema,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
-import { type CacheListEntry } from '@cupboard/protocol/caches';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
@@ -24,6 +23,7 @@ import {
 } from '@cupboard/protocol/read-access';
 import { type ReuseViewSelectorInput } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import { filterProgressively } from '@cupboard/shared/collections';
 import { type ReadUser } from '@cupboard/shared/http';
 
 import { isAbortError } from '../../abort.ts';
@@ -32,6 +32,7 @@ import {
 	contentReadAuthorizationDetails
 } from '../../auth/attenuate.ts';
 import { cacheLabel } from '../../client/client.ts';
+import { cachePages, listingLimits } from '../../client/listings.ts';
 import {
 	GithubCheckFailedError,
 	GithubCheckIncompleteError
@@ -312,19 +313,13 @@ export async function checkPullRequestCacheAccess(
 	}
 	const check = 'pull-request cache access';
 	const prefix = pullRequestCachePrefix(identity.repositoryId);
-	const caches: CacheListEntry[] = [];
-	let cursor: string | undefined;
-
-	do {
-		const page = await client.caches.list({ namePrefix: prefix, cursor });
-		caches.push(...page.caches);
-		cursor = page.cursor;
-	} while (cursor !== undefined);
-	const mismatched = caches.filter(
+	const mismatched = await filterProgressively(
+		await cachePages(client.caches, prefix),
 		(summary) =>
 			summary.scope.kind === 'named' &&
 			summary.scope.name.startsWith(prefix) &&
-			summary.access !== expectedAccess
+			summary.access !== expectedAccess,
+		listingLimits('The pull-request cache listing')
 	);
 	const [first] = mismatched;
 
