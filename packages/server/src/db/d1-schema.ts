@@ -24,7 +24,8 @@ import {
 	type ArtifactId,
 	type ArtifactKind,
 	artifactKinds,
-	type ListingGeneratorRevision
+	type ListingGeneratorRevision,
+	type NarListingFact
 } from '@cupboard/protocol/artifacts';
 import type { LocalStep } from '@cupboard/protocol/deployment';
 import type { InstanceName } from '@cupboard/protocol/instance';
@@ -53,8 +54,14 @@ import {
 	type NarCaptureSequence,
 	narCaptureSequenceSchema
 } from '../blob/nar-source-capture.ts';
+import type {
+	SharedListingCompletionId,
+	SharedListingTaskOutcome,
+	SharedListingTaskReason
+} from '../blob/shared-listing-completion.ts';
 import type { SharedListingJobSummary } from '../blob/shared-listing-jobs.ts';
 import type { SharedListingOutputEpoch } from '../blob/shared-listing-outputs.ts';
+import type { SharedListingTaskClaim } from '../blob/shared-listing-tasks.ts';
 import type { SharedListingTaskState } from '../blob/shared-listing-tasks.ts';
 import type { R2ObjectKey } from '../http/http.ts';
 import {
@@ -1274,6 +1281,66 @@ export const sharedListingTask = sqliteTable(
 		check(
 			'shared_listing_task_source_check',
 			sql`${table.sourceIncarnation} >= 1 AND ${table.narSize} >= 0 AND ${table.fileSize} >= 0`
+		)
+	]
+);
+
+export const sharedListingTaskOutcome = sqliteTable(
+	'shared_listing_task_outcome',
+	{
+		taskId: text('task_id').$type<ArtifactTaskId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		taskGeneration: integer('task_generation')
+			.$type<ArtifactTaskGeneration>()
+			.notNull(),
+		owner: text('owner').$type<ArtifactTaskOwner>().notNull(),
+		claim: text('claim', { mode: 'json' })
+			.$type<SharedListingTaskClaim>()
+			.notNull(),
+		completionId: text('completion_id')
+			.$type<SharedListingCompletionId>()
+			.notNull(),
+		kind: text('kind').$type<SharedListingTaskOutcome['kind']>().notNull(),
+		fact: text('fact', { mode: 'json' }).$type<NarListingFact>(),
+		incarnation: integer('incarnation'),
+		referenceEpoch: text('reference_epoch').$type<SharedListingOutputEpoch>(),
+		computationGeneration: integer('computation_generation'),
+		stageId: text('stage_id').$type<ArtifactStageId>(),
+		reason: text('reason').$type<SharedListingTaskReason>(),
+		completedAt: text('completed_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('shared_listing_task_outcome_job_idx').on(table.jobId, table.taskId),
+		check(
+			'shared_listing_task_outcome_generation_check',
+			sql`typeof(${table.jobGeneration}) = 'integer' AND ${table.jobGeneration} BETWEEN 1 AND 9007199254740991
+ AND typeof(${table.taskGeneration}) = 'integer' AND ${table.taskGeneration} BETWEEN 1 AND 9007199254740991
+ AND (${table.computationGeneration} IS NULL OR (typeof(${table.computationGeneration}) = 'integer' AND ${table.computationGeneration} BETWEEN 1 AND 9007199254740991))
+ AND (${table.incarnation} IS NULL OR (typeof(${table.incarnation}) = 'integer' AND ${table.incarnation} BETWEEN 1 AND 9007199254740991))`
+		),
+		check(
+			'shared_listing_task_outcome_claim_check',
+			sql`coalesce(json_valid(${table.claim}) AND json_extract(${table.claim}, '$.id') = ${table.taskId}
+ AND json_extract(${table.claim}, '$.job.id') = ${table.jobId} AND json_extract(${table.claim}, '$.job.generation') = ${table.jobGeneration}
+ AND json_extract(${table.claim}, '$.generation') = ${table.taskGeneration} AND json_extract(${table.claim}, '$.owner') = ${table.owner}, 0)`
+		),
+		check(
+			'shared_listing_task_outcome_fact_check',
+			sql`${table.fact} IS NULL OR coalesce(json_valid(${table.fact})
+ AND json_extract(${table.fact}, '$.narHash') = json_extract(${table.claim}, '$.narHash')
+ AND json_extract(${table.fact}, '$.generatorRevision') = json_extract(${table.claim}, '$.generatorRevision')
+ AND json_extract(${table.fact}, '$.format') = 1
+ AND json_type(${table.fact}, '$.size') = 'integer' AND json_extract(${table.fact}, '$.size') BETWEEN 1 AND 9007199254740991
+ AND length(json_extract(${table.fact}, '$.digest')) = 64 AND json_extract(${table.fact}, '$.digest') NOT GLOB '*[^0-9a-f]*', 0)`
+		),
+		check(
+			'shared_listing_task_outcome_kind_check',
+			sql`coalesce((${table.kind} = 'generated' AND ${table.fact} IS NOT NULL AND ${table.incarnation} IS NOT NULL AND ${table.referenceEpoch} IS NOT NULL AND ${table.computationGeneration} IS NOT NULL AND ${table.stageId} IS NOT NULL AND ${table.reason} IS NULL)
+ OR (${table.kind} = 'reused' AND ${table.fact} IS NOT NULL AND ${table.incarnation} IS NOT NULL AND ${table.referenceEpoch} IS NOT NULL AND ${table.stageId} IS NULL AND ${table.reason} IS NULL)
+ OR (${table.kind} IN ('skipped','failed') AND ${table.fact} IS NULL AND ${table.incarnation} IS NULL AND ${table.referenceEpoch} IS NULL AND ${table.computationGeneration} IS NULL AND ${table.stageId} IS NULL AND ${table.reason} IN ('source-unavailable','source-mismatch','unsupported-source','unsupported-generator-revision','resource-limit','generation-failed')), 0)`
 		)
 	]
 );

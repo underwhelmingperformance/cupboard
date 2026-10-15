@@ -8,7 +8,18 @@ import {
 } from '@cupboard/protocol/artifact-jobs';
 import { type ListingGeneratorRevision } from '@cupboard/protocol/artifacts';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, gt, isNull, lt, lte, or, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	exists,
+	gt,
+	isNull,
+	lt,
+	lte,
+	or,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import {
@@ -192,43 +203,51 @@ export class SharedListingJobStore {
 			.select({ count: sql<number>`count(*)` })
 			.from(schema.sharedListingTask)
 			.where(eq(schema.sharedListingTask.discoveryPage, pageId));
-		const [, rows] = await this.database.batch([
-			this.database
-				.insert(schema.sharedListingTask)
-				.select(source)
-				.onConflictDoUpdate({
-					target: [
-						schema.sharedListingTask.jobId,
-						schema.sharedListingTask.narHash
-					],
-					set: {
-						sourceIncarnation: sql`excluded.source_incarnation`,
-						narSize: sql`excluded.nar_size`,
-						fileSize: sql`excluded.file_size`,
-						state: sql`CASE WHEN ${schema.sharedListingTask.state} = 'running' THEN 'pending' ELSE ${schema.sharedListingTask.state} END`,
-						leaseExpiresAt: sql`null`,
-						readyAt: now,
-						updatedAt: now
-					},
-					setWhere: lt(
-						schema.sharedListingTask.sourceIncarnation,
-						sql`excluded.source_incarnation`
-					)
-				}),
-			this.database
-				.update(schema.sharedListingJob)
-				.set({
-					...changes,
-					phase: this.phaseAfter(page),
-					discovered: sql`${schema.sharedListingJob.discovered} + (${insertedCount})`,
-					owner: sql`null`,
+		const insertTasks = this.database
+			.insert(schema.sharedListingTask)
+			.select(source)
+			.onConflictDoUpdate({
+				target: [
+					schema.sharedListingTask.jobId,
+					schema.sharedListingTask.narHash
+				],
+				set: {
+					sourceIncarnation: sql`excluded.source_incarnation`,
+					narSize: sql`excluded.nar_size`,
+					fileSize: sql`excluded.file_size`,
+					state: sql`CASE WHEN ${schema.sharedListingTask.state} = 'running' THEN 'pending' ELSE ${schema.sharedListingTask.state} END`,
 					leaseExpiresAt: sql`null`,
-					updatedAt: sql`max(${schema.sharedListingJob.updatedAt}, ${now})`
-				})
-				.where(current)
-				.returning()
+					readyAt: now,
+					updatedAt: now
+				},
+				setWhere: lt(
+					schema.sharedListingTask.sourceIncarnation,
+					sql`excluded.source_incarnation`
+				)
+			});
+		const checkpoint = this.database
+			.update(schema.sharedListingJob)
+			.set({
+				...changes,
+				phase: this.phaseAfter(page),
+				discovered: sql`${schema.sharedListingJob.discovered} + (${insertedCount})`,
+				owner: sql`null`,
+				leaseExpiresAt: sql`null`,
+				updatedAt: sql`max(${schema.sharedListingJob.updatedAt}, ${now})`
+			})
+			.where(current)
+			.returning();
+		if (this.phaseAfter(page) !== 'processing') {
+			const [, rows] = await this.database.batch([insertTasks, checkpoint]);
+			return rows[0] === undefined ? undefined : this.decoded(rows[0]);
+		}
+		const [, rows, finished] = await this.database.batch([
+			insertTasks,
+			checkpoint,
+			this.finalizeStatement(claim.job, now)
 		]);
-		const row = rows[0];
+
+		const row = finished[0] ?? rows[0];
 		return row === undefined ? undefined : this.decoded(row);
 	}
 	private async restartDiscovery(
@@ -251,6 +270,32 @@ export class SharedListingJobStore {
 			.where(current)
 			.returning();
 		return rows[0] === undefined ? undefined : this.decoded(rows[0]);
+	}
+
+	finalizeStatement(job: ArtifactJobVersion, now: IsoTimestamp, fence?: SQL) {
+		const enabled = this.database
+			.select({ one: sql`1` })
+			.from(schema.deploymentTransition)
+			.where(eq(schema.deploymentTransition.id, 'shared-listing-completion'));
+		return this.database
+			.update(schema.sharedListingJob)
+			.set({
+				state: 'complete',
+				owner: sql`null`,
+				leaseExpiresAt: sql`null`,
+				updatedAt: sql`max(${schema.sharedListingJob.updatedAt},${now})`
+			})
+			.where(
+				and(
+					this.version(job),
+					eq(schema.sharedListingJob.state, 'running'),
+					eq(schema.sharedListingJob.phase, 'processing'),
+					sql`${schema.sharedListingJob.discovered} = ${schema.sharedListingJob.completed} + ${schema.sharedListingJob.skipped} + ${schema.sharedListingJob.failed}`,
+					exists(enabled),
+					fence
+				)
+			)
+			.returning();
 	}
 
 	async start(

@@ -58,35 +58,6 @@ export class SharedListingGenerationStore {
 		);
 	}
 
-	private source(task: SharedListingTaskClaim, now: IsoTimestamp) {
-		const owned = this.database
-			.select({ one: sql`1` })
-			.from(schema.sharedListingTask)
-			.where(new SharedListingTaskStore(this.database).owns(task, now));
-		const source = this.database
-			.select({ one: sql`1` })
-			.from(schema.blobState)
-			.where(
-				and(
-					eq(schema.blobState.narHash, task.narHash),
-					eq(schema.blobState.incarnation, task.sourceIncarnation),
-					eq(schema.blobState.narSize, task.narSize),
-					eq(schema.blobState.fileSize, task.fileSize),
-					registeredLiveObjectIncarnation(
-						this.database,
-						'nar',
-						task.narHash,
-						task.sourceIncarnation
-					)
-				)
-			);
-		const retained = this.database
-			.select({ one: sql`1` })
-			.from(schema.blobReference)
-			.where(eq(schema.blobReference.narHash, task.narHash));
-		return and(exists(owned), exists(source), exists(retained));
-	}
-
 	private captured(claim: SharedListingGenerationClaim) {
 		const task = claim.task;
 		return and(
@@ -155,6 +126,35 @@ export class SharedListingGenerationStore {
 			generation: row.generation,
 			leaseExpiresAt: row.leaseExpiresAt
 		});
+	}
+
+	source(task: SharedListingTaskClaim, now: IsoTimestamp) {
+		const owned = this.database
+			.select({ one: sql`1` })
+			.from(schema.sharedListingTask)
+			.where(new SharedListingTaskStore(this.database).owns(task, now));
+		const source = this.database
+			.select({ one: sql`1` })
+			.from(schema.blobState)
+			.where(
+				and(
+					eq(schema.blobState.narHash, task.narHash),
+					eq(schema.blobState.incarnation, task.sourceIncarnation),
+					eq(schema.blobState.narSize, task.narSize),
+					eq(schema.blobState.fileSize, task.fileSize),
+					registeredLiveObjectIncarnation(
+						this.database,
+						'nar',
+						task.narHash,
+						task.sourceIncarnation
+					)
+				)
+			);
+		const retained = this.database
+			.select({ one: sql`1` })
+			.from(schema.blobReference)
+			.where(eq(schema.blobReference.narHash, task.narHash));
+		return and(exists(owned), exists(source), exists(retained));
 	}
 
 	owns(claim: SharedListingGenerationClaim, now: IsoTimestamp) {

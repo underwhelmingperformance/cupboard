@@ -3,7 +3,17 @@ import {
 	narListingFactSchema
 } from '@cupboard/protocol/artifacts';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, lte, ne, notExists, or, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	exists,
+	lte,
+	ne,
+	notExists,
+	or,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import { registeredLiveObjectIncarnation } from '../blob/object-incarnation.ts';
@@ -100,6 +110,140 @@ export class SharedListingOutputStore {
 		}
 	}
 
+	retentionStatements(
+		request: {
+			readonly claim: SharedListingGenerationClaim;
+			readonly fact: NarListingFact;
+			readonly incarnation: number;
+			readonly now: IsoTimestamp;
+		},
+		fence?: SQL
+	) {
+		const { claim, fact, incarnation, now } = request;
+		const owned = exists(
+			this.database
+				.select({ one: sql`1` })
+				.from(schema.sharedListingGeneration)
+				.where(new SharedListingGenerationStore(this.database).owns(claim, now))
+		);
+		const live = registeredLiveObjectIncarnation(
+			this.database,
+			'cas',
+			fact.digest,
+			incarnation
+		);
+		const conflictingFact = this.conflictingFact(fact);
+		const immutable = notExists(conflictingFact);
+		const selected = this.database
+			.select({
+				narHash: sql<typeof fact.narHash>`${fact.narHash}`.as('nar_hash'),
+				generatorRevision: sql<
+					typeof fact.generatorRevision
+				>`${fact.generatorRevision}`.as('generator_revision'),
+				epoch: sql<
+					SharedListingOutputReference['epoch']
+				>`${sharedListingOutputEpochSchema.parse(crypto.randomUUID())}`.as(
+					'epoch'
+				),
+				sourceIncarnation: sql<number>`${claim.task.sourceIncarnation}`.as(
+					'source_incarnation'
+				),
+				computationGeneration: sql<number>`${claim.generation}`.as(
+					'computation_generation'
+				),
+				digest: schema.casObject.digest,
+				size: schema.casObject.size,
+				createdAt: sql<IsoTimestamp>`${now}`.as('created_at')
+			})
+			.from(schema.casObject)
+			.where(
+				and(
+					eq(schema.casObject.digest, fact.digest),
+					eq(schema.casObject.incarnation, incarnation),
+					eq(schema.casObject.size, fact.size),
+					live,
+					owned,
+					immutable,
+					fence
+				)
+			);
+		const insert = this.database
+			.insert(schema.sharedListingOutputReference)
+			.select(selected)
+			.onConflictDoUpdate({
+				target: [
+					schema.sharedListingOutputReference.narHash,
+					schema.sharedListingOutputReference.generatorRevision
+				],
+				set: {
+					sourceIncarnation: claim.task.sourceIncarnation,
+					computationGeneration: claim.generation
+				},
+				setWhere: and(
+					eq(schema.sharedListingOutputReference.digest, fact.digest),
+					eq(schema.sharedListingOutputReference.size, fact.size),
+					lte(
+						schema.sharedListingOutputReference.computationGeneration,
+						claim.generation
+					)
+				)
+			})
+			.returning();
+		const captured = and(
+			this.identity(fact),
+			eq(
+				schema.sharedListingOutputReference.sourceIncarnation,
+				claim.task.sourceIncarnation
+			),
+			eq(
+				schema.sharedListingOutputReference.computationGeneration,
+				claim.generation
+			),
+			eq(schema.sharedListingOutputReference.digest, fact.digest),
+			eq(schema.sharedListingOutputReference.size, fact.size)
+		);
+		const matchingReference = this.database
+			.select({ one: sql`1` })
+			.from(schema.sharedListingOutputReference)
+			.where(captured);
+		const clearGrace = this.database
+			.update(schema.casObject)
+			.set({ deleteAfter: sql`null` })
+			.where(
+				and(
+					eq(schema.casObject.digest, fact.digest),
+					eq(schema.casObject.incarnation, incarnation),
+					live,
+					owned,
+					immutable,
+					fence,
+					exists(matchingReference)
+				)
+			);
+		const casState = this.database
+			.select({ one: sql`1` })
+			.from(schema.casObject)
+			.where(
+				and(
+					eq(schema.casObject.digest, fact.digest),
+					eq(schema.casObject.incarnation, incarnation),
+					eq(schema.casObject.size, fact.size)
+				)
+			);
+		return {
+			insert,
+			clearGrace,
+			current: and(
+				owned,
+				live,
+				immutable,
+				fence,
+				exists(matchingReference),
+				exists(casState)
+			)
+		};
+	}
+
 	async retain(
 		input: SharedListingGenerationClaim,
 		value: NarListingFact,
@@ -116,105 +260,12 @@ export class SharedListingOutputStore {
 		}
 		try {
 			await this.checkConflict(fact);
-			const owned = exists(
-				this.database
-					.select({ one: sql`1` })
-					.from(schema.sharedListingGeneration)
-					.where(
-						new SharedListingGenerationStore(this.database).owns(claim, now)
-					)
-			);
-			const live = registeredLiveObjectIncarnation(
-				this.database,
-				'cas',
-				fact.digest,
-				incarnation
-			);
-			const conflictingFact = this.conflictingFact(fact);
-			const immutable = notExists(conflictingFact);
-			const selected = this.database
-				.select({
-					narHash: sql<typeof fact.narHash>`${fact.narHash}`.as('nar_hash'),
-					generatorRevision: sql<
-						typeof fact.generatorRevision
-					>`${fact.generatorRevision}`.as('generator_revision'),
-					epoch: sql<
-						SharedListingOutputReference['epoch']
-					>`${sharedListingOutputEpochSchema.parse(crypto.randomUUID())}`.as(
-						'epoch'
-					),
-					sourceIncarnation: sql<number>`${claim.task.sourceIncarnation}`.as(
-						'source_incarnation'
-					),
-					computationGeneration: sql<number>`${claim.generation}`.as(
-						'computation_generation'
-					),
-					digest: schema.casObject.digest,
-					size: schema.casObject.size,
-					createdAt: sql<IsoTimestamp>`${now}`.as('created_at')
-				})
-				.from(schema.casObject)
-				.where(
-					and(
-						eq(schema.casObject.digest, fact.digest),
-						eq(schema.casObject.incarnation, incarnation),
-						eq(schema.casObject.size, fact.size),
-						live,
-						owned,
-						immutable
-					)
-				);
-			const insert = this.database
-				.insert(schema.sharedListingOutputReference)
-				.select(selected)
-				.onConflictDoUpdate({
-					target: [
-						schema.sharedListingOutputReference.narHash,
-						schema.sharedListingOutputReference.generatorRevision
-					],
-					set: {
-						sourceIncarnation: claim.task.sourceIncarnation,
-						computationGeneration: claim.generation
-					},
-					setWhere: and(
-						eq(schema.sharedListingOutputReference.digest, fact.digest),
-						eq(schema.sharedListingOutputReference.size, fact.size),
-						lte(
-							schema.sharedListingOutputReference.computationGeneration,
-							claim.generation
-						)
-					)
-				})
-				.returning();
-			const captured = and(
-				this.identity(fact),
-				eq(
-					schema.sharedListingOutputReference.sourceIncarnation,
-					claim.task.sourceIncarnation
-				),
-				eq(
-					schema.sharedListingOutputReference.computationGeneration,
-					claim.generation
-				),
-				eq(schema.sharedListingOutputReference.digest, fact.digest),
-				eq(schema.sharedListingOutputReference.size, fact.size)
-			);
-			const matchingReference = this.database
-				.select({ one: sql`1` })
-				.from(schema.sharedListingOutputReference)
-				.where(captured);
-			const clearGrace = this.database
-				.update(schema.casObject)
-				.set({ deleteAfter: sql`null` })
-				.where(
-					and(
-						eq(schema.casObject.digest, fact.digest),
-						eq(schema.casObject.incarnation, incarnation),
-						live,
-						owned,
-						exists(matchingReference)
-					)
-				);
+			const { insert, clearGrace } = this.retentionStatements({
+				claim,
+				fact,
+				incarnation,
+				now
+			});
 			const [rows] = await this.database.batch([insert, clearGrace]);
 			await this.checkConflict(fact);
 			return rows[0] === undefined

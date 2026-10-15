@@ -136,8 +136,9 @@ addition to ownership. Cancellation and resume preserve the window. Each replay
 page refreshes or inserts unique NAR tasks and advances the event cursor in the
 same fenced batch. A repaired source can update a task's incarnation and sizes,
 but its creation page remains unchanged, so progress counts only new tasks.
-Finishing replay changes the phase to processing; it does not complete
-generation.
+Finishing replay closes discovery and changes the phase to processing. A job
+completes once discovery has closed and all discovered tasks have terminal
+outcomes.
 
 An expired window restarts historical discovery at the current ready capture
 position and preserves existing tasks and counters. A predecessor catch-up job
@@ -183,6 +184,26 @@ source incarnation fences completion; logical NAR retention continues through
 physical repair. These references grant no cache access and create no tenant
 charge. Global CAS collection includes the references, while tenant quota probes
 continue to count only that tenant's artifact and attestation references.
+
+Global completion installs or verifies output retention, records the immutable
+fact and captured task outcome, increments the matching job counter and releases
+computation ownership in one D1 transaction. The checkpoint also retires
+matching stages. Sealed stages become immediately eligible for cleanup; unsealed
+stages preserve their late-write horizon. Every checkpoint mutation requires the
+fresh outcome receipt, so retries and concurrent duplicates cannot increment
+counters twice. An immutable conflict or failed statement rolls back the whole
+batch.
+
+A task can reuse a retained fact with a live measured CAS incarnation without a
+NAR read or a computation claim. Creating a missing output reference requires a
+current computation claim. Skipped and failed outcomes record bounded reasons
+without requiring physical source availability or creating publication
+authority. Outcome records preserve captured evidence through lease expiry and
+source refresh; those records grant no retention or cache access. Finalisation
+uses persisted counters after discovery closes, without scanning the task
+catalogue. Before the completion expansion is recorded, the store refuses work
+without accessing the new outcome table. Global execution and cache adoption
+remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

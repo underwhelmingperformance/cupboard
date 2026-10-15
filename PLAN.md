@@ -7319,9 +7319,16 @@ build traces available from a cupboard cache.
       checkpoint bounded pages and send per-parent continuations. Failed sends,
       lost database replies and expired claims recover from durable state;
       parent recreation cannot revive a stale claim. Staging and output dispatch
-      report failures independently. Global task execution, atomic
-      fact/output/outcome completion, cache adoption projections and producer
-      activation remain pending.
+      report failures independently. Global completion now records output
+      retention, immutable facts, captured task outcomes and job counters in one
+      fenced D1 batch. The checkpoint retires matching stages and releases
+      computation ownership. Retained facts can complete another job without a
+      NAR read or a new computation claim. Failed and skipped tasks record
+      bounded reasons without creating output authority. Replays preserve the
+      original outcome, and discovery can overlap execution. Jobs complete only
+      after discovery closes and every task has a terminal outcome. Global task
+      execution, cache adoption projections, shared completion wakes and
+      producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

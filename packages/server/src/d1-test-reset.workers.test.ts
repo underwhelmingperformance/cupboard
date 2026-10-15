@@ -55,6 +55,9 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			"INSERT INTO shared_listing_task (id, job_id, nar_hash, source_incarnation, nar_size, file_size, discovery_page, created_at) VALUES ('reset-task', 'reset-job', 'reset-nar', 1, 100, 50, 'reset-page', '2025-01-01T00:00:00.000Z')"
 		),
 		env.CUPBOARD_DB.prepare(
+			`INSERT INTO shared_listing_task_outcome (task_id, job_id, job_generation, task_generation, owner, claim, completion_id, kind, reason, completed_at) VALUES ('reset-task', 'reset-job', 1, 1, 'reset-owner', '{"id":"reset-task","job":{"id":"reset-job","generation":1},"generation":1,"owner":"reset-owner"}', 'reset-completion', 'skipped', 'source-unavailable', '2025-01-01T00:00:00.000Z')`
+		),
+		env.CUPBOARD_DB.prepare(
 			"INSERT INTO shared_listing_generation (nar_hash, generator_revision, source_incarnation, generation, job_id, job_generation, task_id, task_generation, updated_at) VALUES ('reset-nar', 'reset-generator', 1, 1, 'reset-job', 1, 'reset-task', 1, '2025-01-01T00:00:00.000Z')"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -137,6 +140,7 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		shared_listing_output_cleanup: 0,
 		shared_listing_job: 0,
 		shared_listing_task: 0,
+		shared_listing_task_outcome: 0,
 		nar_capture_event: 0,
 		nar_capture_state: 1,
 		tenant_cas_blob_storage: 0,
