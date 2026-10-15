@@ -111,6 +111,11 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			id: 'shared-listing-dispatch-seed',
 			state: 'complete',
 			updatedAt: recorded
+		},
+		{
+			id: 'listing-adoption-capture',
+			state: 'complete',
+			updatedAt: recorded
 		}
 	],
 	unrecognised: []
@@ -700,6 +705,10 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition shared-listing-dispatch-seed',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition listing-adoption-capture',
+							value: `complete ${since}`
+						},
 						{ label: `Transition ${row.id}`, value },
 						{ label: 'Required local step', value: String(currentLocalStep) },
 						{
@@ -902,6 +911,19 @@ describe('runDeploymentResume', () => {
 				...complete,
 				transitions: complete.transitions.map((transition) =>
 					transition.id === 'attestation-list-revision'
+						? { ...transition, state: 'expanded' as const }
+						: transition
+				)
+			},
+			step: currentLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+		},
+		{
+			name: 'adoption capture is expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.map((transition) =>
+					transition.id === 'listing-adoption-capture'
 						? { ...transition, state: 'expanded' as const }
 						: transition
 				)
