@@ -84,8 +84,24 @@ increasing generations. Lost claim replies are idempotent, renewal cannot
 shorten a lease, and expired owners cannot renew or complete work. Completion
 checks the current claim, source incarnation and registered CAS output, then
 records the immutable listing fact and releases the claim in one D1 batch.
-Claims and facts create no cache authority or quota charge. Consumer integration
-and shared job/task progress projections remain pending.
+Claims and facts create no cache authority or quota charge.
+
+Listing preparation now acquires the shared lease before source byte access or
+staging allocation and checks for a completed fact again after acquisition.
+Competing tenants receive the recorded lease deadline without reserving staging.
+The admitted consumer persists that retry deadline and releases its admission
+before acknowledging the spent message. Legacy messages retry at that deadline.
+The stage lease includes the captured shared generation token. Renewal checks
+that token before extending local ownership, and completion records the fact
+through the shared claim's fenced D1 batch. Preparation releases a computation
+claim if it cannot transfer the claim to a producer.
+
+Sealed recovery can replace the previous shared owner after the tenant's task
+generation advances. The captured owner must belong to the same tenant and the
+recoverable stage. A claim from another task or tenant remains exclusive while
+it is active. Recovery never extends an elapsed cleanup horizon, even when
+physical cleanup has not run. Shared job/task progress projections and
+completion-triggered wakes for shared waiters remain pending.
 
 The admission model records queued work in tenant SQLite before a consumer
 claims it. Admissions expire, capture the job, task, source and cache

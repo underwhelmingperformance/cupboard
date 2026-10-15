@@ -65,7 +65,10 @@ export interface ListingTaskWorkerOptions {
 export type ListingTaskWorkerResult =
 	| ListingTaskCompletion
 	| { readonly kind: 'reused' | 'local-capacity' }
-	| { readonly kind: 'capacity'; readonly retryAt: IsoTimestamp }
+	| {
+			readonly kind: 'capacity' | 'generation-busy';
+			readonly retryAt: IsoTimestamp;
+	  }
 	| {
 			readonly kind: 'failed';
 			readonly reason: 'nar-mismatch' | 'invalid-nar';

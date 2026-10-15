@@ -9,6 +9,8 @@ import { z } from 'zod';
 
 import { r2ObjectKeySchema } from '../http/http.ts';
 
+import { listingGenerationClaimSchema } from './listing-generation.ts';
+
 export const artifactStageIdSchema = z.uuid().brand('ArtifactStageId');
 export type ArtifactStageId = z.output<typeof artifactStageIdSchema>;
 export const artifactStageMeasurementSchema = z.strictObject({
@@ -28,7 +30,8 @@ export const artifactStageLeaseSchema = z
 		writeUntil: isoTimestampSchema,
 		kind: z.enum(artifactKinds),
 		maximumBytes: z.number().int().positive().max(maxArtifactBytes.listing),
-		cleanupAfter: isoTimestampSchema
+		cleanupAfter: isoTimestampSchema,
+		listingGeneration: listingGenerationClaimSchema.optional()
 	})
 	.refine(
 		(lease) => lease.maximumBytes <= maxArtifactBytes[lease.kind],

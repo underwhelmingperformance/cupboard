@@ -6,13 +6,15 @@ import {
 	narListingFactSchema,
 	type NarListingIdentity
 } from '@cupboard/protocol/artifacts';
-import { type IsoTimestamp } from '@cupboard/protocol/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { withCleanup } from '@cupboard/shared/cleanup';
 import { and, eq } from 'drizzle-orm';
 
+import { type ListingGenerationClaim } from '../blob/listing-generation.ts';
 import { type ExpectedNar } from '../blob/nar-verify.ts';
 import { registeredLiveObjectIncarnation } from '../blob/object-incarnation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { ListingFactStore } from '../db/listing-facts.ts';
+import { ListingGenerationStore } from '../db/listing-generation.ts';
 import * as schema from '../db/schema.ts';
 import { casObjectKey, narObjectKey, type R2ObjectKey } from '../http/http.ts';
 import { authorisedNarInfoVersions } from '../read/read.ts';
@@ -34,6 +36,10 @@ export interface ListingTaskSource {
 	readonly key: R2ObjectKey;
 	readonly expected: ExpectedNar;
 }
+interface CapturedListingSource extends ListingTaskSource {
+	readonly incarnation: number;
+	readonly fileSize: number;
+}
 export type ListingTaskPreparation =
 	| {
 			readonly kind: 'promote';
@@ -46,7 +52,10 @@ export type ListingTaskPreparation =
 			readonly source: ListingTaskSource;
 			readonly generatorRevision: ListingGeneratorRevision;
 	  }
-	| { readonly kind: 'capacity'; readonly retryAt: IsoTimestamp }
+	| {
+			readonly kind: 'capacity' | 'generation-busy';
+			readonly retryAt: IsoTimestamp;
+	  }
 	| {
 			readonly kind:
 				| 'reused'
@@ -140,7 +149,7 @@ export class ListingTaskService {
 
 	private async generationSource(
 		task: ListingTaskContext
-	): Promise<ListingTaskSource | undefined> {
+	): Promise<CapturedListingSource | undefined> {
 		const local = this.context.db
 			.select({ narSize: schema.narInfos.narSize })
 			.from(schema.narInfos)
@@ -178,14 +187,118 @@ export class ListingTaskService {
 		if (object === undefined) {
 			return;
 		}
-		const key = narObjectKey(task.identity.narHash, object.incarnation);
-		const head = await this.context.env.BLOBS.head(key);
-		if (head?.size !== object.fileSize) {
+		return {
+			key: narObjectKey(task.identity.narHash, object.incarnation),
+			expected: { narHash: task.identity.narHash, narSize: local.narSize },
+			incarnation: object.incarnation,
+			fileSize: object.fileSize
+		};
+	}
+
+	private async reuseInSection(
+		task: ListingTaskContext,
+		claim: ArtifactTaskClaim
+	): Promise<
+		{ readonly kind: 'reused' | 'unavailable' | 'over-quota' } | undefined
+	> {
+		const jobs = new ArtifactJobService(this.context);
+		const reused = await new NarListingPublicationService(
+			this.context
+		).reuseInSection(
+			task.identity,
+			task.parent,
+			() => jobs.claimDeadlineInSection(claim) !== undefined
+		);
+		if (reused.kind === 'published' || reused.kind === 'already-present') {
+			return {
+				kind: jobs.finishInSection(claim, 'completed')
+					? 'reused'
+					: 'unavailable'
+			};
+		}
+		if (reused.kind === 'unavailable' || reused.kind === 'over-quota') {
+			return { kind: reused.kind };
+		}
+		return;
+	}
+
+	private generationFor(
+		lease: ArtifactStageLease,
+		identity: NarListingIdentity
+	): ListingGenerationClaim | undefined {
+		const generation = lease.listingGeneration;
+		if (
+			generation?.tenant !== this.context.requireTenant() ||
+			generation.owner !== lease.claim.owner ||
+			generation.narHash !== identity.narHash ||
+			generation.generatorRevision !== identity.generatorRevision
+		) {
 			return;
 		}
+		return generation;
+	}
+
+	private async releaseSupersededGenerationInSection(
+		task: ListingTaskContext,
+		claim: ArtifactTaskClaim
+	): Promise<void> {
+		const previousOwner = new ArtifactStagingService(
+			this.context
+		).recoveryOwnerInSection(claim);
+		if (previousOwner === undefined) {
+			return;
+		}
+		const store = new ListingGenerationStore(this.context.d1);
+		const previous = await store.find(task.identity);
+		if (
+			previous?.tenant !== this.context.requireTenant() ||
+			previous.owner !== previousOwner
+		) {
+			return;
+		}
+		await store.release(previous, isoTimestamp(new Date()));
+	}
+
+	private async prepareClaimedInSection(
+		claim: ArtifactTaskClaim,
+		task: ListingTaskContext,
+		source: CapturedListingSource,
+		generation: ListingGenerationClaim
+	): Promise<ListingTaskPreparation> {
+		const reused = await this.reuseInSection(task, claim);
+		if (reused !== undefined) {
+			return reused;
+		}
+		const staging = new ArtifactStagingService(this.context);
+		const existing =
+			staging.findInSection(claim) ?? staging.reuseReadyInSection(claim);
+		const ready =
+			existing === undefined ? undefined : staging.readyInSection(existing);
+		if (existing !== undefined && ready !== undefined) {
+			return {
+				kind: 'promote',
+				lease: { ...existing, listingGeneration: generation },
+				fact: narListingFactSchema.parse({
+					...task.identity,
+					format: 1,
+					digest: ready.digest,
+					size: ready.size
+				})
+			};
+		}
+		const head = await this.context.env.BLOBS.head(source.key);
+		if (head?.size !== source.fileSize) {
+			return { kind: 'bytes-missing' };
+		}
+		const stage = await staging.reserveInSection(claim);
+		if (stage.kind !== 'reserved') {
+			return stage;
+		}
 		return {
-			key,
-			expected: { narHash: task.identity.narHash, narSize: local.narSize }
+			kind: 'generate',
+			lease: { ...stage.lease, listingGeneration: generation },
+			source: { key: source.key, expected: source.expected },
+			generatorRevision: task.identity.generatorRevision
 		};
 	}
 
@@ -201,77 +314,112 @@ export class ListingTaskService {
 		if (task === undefined) {
 			return { kind: 'unavailable' };
 		}
-		const jobs = new ArtifactJobService(this.context);
-		const isCurrent = () => jobs.claimDeadlineInSection(claim) !== undefined;
-		const reused = await new NarListingPublicationService(
-			this.context
-		).reuseInSection(task.identity, task.parent, isCurrent);
-		if (reused.kind === 'published' || reused.kind === 'already-present') {
-			return {
-				kind: jobs.finishInSection(claim, 'completed')
-					? 'reused'
-					: 'unavailable'
-			};
-		}
-		if (reused.kind === 'unavailable' || reused.kind === 'over-quota') {
-			return { kind: reused.kind };
+		const reused = await this.reuseInSection(task, claim);
+		if (reused !== undefined) {
+			return reused;
 		}
 		const staging = new ArtifactStagingService(this.context);
-		const existing =
-			staging.findInSection(claim) ?? staging.reuseReadyInSection(claim);
-		const ready =
-			existing === undefined ? undefined : staging.readyInSection(existing);
-		if (existing !== undefined && ready !== undefined) {
-			return {
-				kind: 'promote',
-				lease: existing,
-				fact: narListingFactSchema.parse({
-					...task.identity,
-					format: 1,
-					digest: ready.digest,
-					size: ready.size
-				})
-			};
-		}
-		if (task.identity.generatorRevision !== currentListingGeneratorRevision) {
+		const existing = staging.findInSection(claim);
+		const hasReady =
+			(existing !== undefined &&
+				staging.readyInSection(existing) !== undefined) ||
+			staging.recoveryOwnerInSection(claim) !== undefined;
+		if (
+			!hasReady &&
+			task.identity.generatorRevision !== currentListingGeneratorRevision
+		) {
 			throw new ListingGeneratorUnavailableError(
 				task.identity.generatorRevision
 			);
 		}
-		if (!canGenerate) {
+		if (!hasReady && !canGenerate) {
 			return { kind: 'local-capacity' };
 		}
 		const source = await this.generationSource(task);
 		if (source === undefined) {
 			return { kind: 'bytes-missing' };
 		}
-		const stage = await staging.reserveInSection(claim);
-		if (stage.kind !== 'reserved') {
-			return stage;
+		await this.releaseSupersededGenerationInSection(task, claim);
+		const store = new ListingGenerationStore(this.context.d1);
+		const result = await store.claim(
+			{
+				...task.identity,
+				sourceIncarnation: source.incarnation,
+				tenant: this.context.requireTenant(),
+				owner: claim.owner
+			},
+			isoTimestamp(new Date())
+		);
+		if (result.kind === 'busy') {
+			return { kind: 'generation-busy', retryAt: result.retryAt };
 		}
-		return {
-			kind: 'generate',
-			lease: stage.lease,
-			source,
-			generatorRevision: task.identity.generatorRevision
-		};
+		if (result.kind !== 'claimed') {
+			return { kind: 'unavailable' };
+		}
+		let prepared: ListingTaskPreparation | undefined;
+		return withCleanup(
+			async () => {
+				prepared = await this.prepareClaimedInSection(
+					claim,
+					task,
+					source,
+					result.claim
+				);
+				return prepared;
+			},
+			async () => {
+				if (prepared?.kind === 'generate' || prepared?.kind === 'promote') {
+					return;
+				}
+				await store.release(result.claim, isoTimestamp(new Date()));
+			}
+		);
 	}
 
 	async renewInSection(
 		lease: ArtifactStageLease
 	): Promise<IsoTimestamp | undefined> {
 		const staging = new ArtifactStagingService(this.context);
+		if (staging.deadlineInSection(lease) === undefined) {
+			return;
+		}
+		const task = await this.capture(lease.claim);
+		if (task === undefined) {
+			return;
+		}
+		const generation = this.generationFor(lease, task.identity);
+		if (generation === undefined) {
+			return;
+		}
+		const store = new ListingGenerationStore(this.context.d1);
 		if (
-			staging.deadlineInSection(lease) === undefined ||
-			(await this.capture(lease.claim)) === undefined
+			(await store.renew(generation, isoTimestamp(new Date()))) === undefined
 		) {
 			return;
 		}
 		const jobs = new ArtifactJobService(this.context);
 		if (jobs.renewInSection(lease.claim) === undefined) {
+			await store.release(generation, isoTimestamp(new Date()));
 			return;
 		}
 		return staging.renewInSection(lease);
+	}
+
+	async releaseGenerationInSection(lease: ArtifactStageLease): Promise<void> {
+		const generation = lease.listingGeneration;
+		if (
+			lease.kind !== 'listing' ||
+			lease.claim.source.kind !== 'nar' ||
+			generation?.tenant !== this.context.requireTenant() ||
+			generation.owner !== lease.claim.owner ||
+			generation.narHash !== lease.claim.source.narHash
+		) {
+			return;
+		}
+		await new ListingGenerationStore(this.context.d1).release(
+			generation,
+			isoTimestamp(new Date())
+		);
 	}
 
 	/**
@@ -330,7 +478,17 @@ export class ListingTaskService {
 		if (!isCurrent()) {
 			return { kind: 'unavailable' };
 		}
-		await new ListingFactStore(this.context.d1).record(fact);
+		const generation = this.generationFor(lease, task.identity);
+		if (
+			generation === undefined ||
+			!(await new ListingGenerationStore(this.context.d1).complete(
+				generation,
+				fact,
+				isoTimestamp(new Date())
+			))
+		) {
+			return { kind: 'unavailable' };
+		}
 		const published = await new NarListingPublicationService(
 			this.context
 		).reuseInSection(task.identity, task.parent, isCurrent);

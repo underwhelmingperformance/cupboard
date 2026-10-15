@@ -15,6 +15,10 @@ import { and, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { describe, expect, it, vi } from 'vitest';
 
+import type {
+	ListingGenerationClaim,
+	ListingGenerationClaimResult
+} from '../blob/listing-generation.ts';
 import {
 	ListingFactConflictError,
 	SharedFactsUnavailableError
@@ -22,11 +26,7 @@ import {
 
 import * as schema from './d1-schema.ts';
 import { ListingFactStore } from './listing-facts.ts';
-import {
-	type ListingGenerationClaim,
-	type ListingGenerationClaimResult,
-	ListingGenerationStore
-} from './listing-generation.ts';
+import { ListingGenerationStore } from './listing-generation.ts';
 
 const now = isoTimestamp(new Date('2026-01-01T00:00:00.000Z'));
 const deadline = isoTimestamp(new Date('2026-01-01T00:01:00.000Z'));

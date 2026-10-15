@@ -7,7 +7,7 @@ import {
 } from '@cupboard/protocol/artifact-jobs';
 import { maxArtifactBytes } from '@cupboard/protocol/artifacts';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, asc, desc, eq, lt, lte } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lt, lte } from 'drizzle-orm';
 
 import { artifactStagingLimits } from '../blob/artifact-admission.ts';
 import {
@@ -264,25 +264,7 @@ export class ArtifactStagingService {
 			)
 			.get();
 	}
-	nextCollectionAtInSection(): IsoTimestamp | undefined {
-		return this.collectionInSection(0).nextWakeAt;
-	}
-
-	findInSection(claim: ArtifactTaskClaim): ArtifactStageLease | undefined {
-		if (
-			new ArtifactJobService(this.context).claimDeadlineInSection(claim) ===
-			undefined
-		) {
-			return;
-		}
-		const row = this.taskStage(claim);
-		return row !== undefined && this.active(row)
-			? this.lease(row, claim)
-			: undefined;
-	}
-	reuseReadyInSection(
-		claim: ArtifactTaskClaim
-	): ArtifactStageLease | undefined {
+	private reusableInSection(claim: ArtifactTaskClaim): Stage | undefined {
 		const jobs = new ArtifactJobService(this.context);
 		const expiresAt = jobs.claimDeadlineInSection(claim);
 		const job = jobs.summaryInSection(claim.jobId);
@@ -296,6 +278,7 @@ export class ArtifactStagingService {
 		const sourceKey = JSON.stringify(
 			artifactTaskSourceSchema.parse(claim.source)
 		);
+		const now = isoTimestamp(new Date());
 		const reusable = this.context.db
 			.select()
 			.from(schema.artifactStages)
@@ -312,6 +295,7 @@ export class ArtifactStagingService {
 						schema.artifactStages.maximumBytes,
 						maxArtifactBytes[job.definition.kind]
 					),
+					gt(schema.artifactStages.cleanupAfter, now),
 					eq(schema.artifactStages.state, 'ready'),
 					eq(schema.artifactStages.writesSealed, true)
 				)
@@ -324,6 +308,41 @@ export class ArtifactStagingService {
 			reusable.digest === null ||
 			reusable.size === null
 		) {
+			return;
+		}
+		return reusable;
+	}
+
+	nextCollectionAtInSection(): IsoTimestamp | undefined {
+		return this.collectionInSection(0).nextWakeAt;
+	}
+
+	findInSection(claim: ArtifactTaskClaim): ArtifactStageLease | undefined {
+		if (
+			new ArtifactJobService(this.context).claimDeadlineInSection(claim) ===
+			undefined
+		) {
+			return;
+		}
+		const row = this.taskStage(claim);
+		return row !== undefined && this.active(row)
+			? this.lease(row, claim)
+			: undefined;
+	}
+	recoveryOwnerInSection(
+		claim: ArtifactTaskClaim
+	): ArtifactTaskClaim['owner'] | undefined {
+		return this.reusableInSection(claim)?.owner;
+	}
+
+	reuseReadyInSection(
+		claim: ArtifactTaskClaim
+	): ArtifactStageLease | undefined {
+		const expiresAt = new ArtifactJobService(
+			this.context
+		).claimDeadlineInSection(claim);
+		const reusable = this.reusableInSection(claim);
+		if (expiresAt === undefined || reusable === undefined) {
 			return;
 		}
 		const writeUntil = isoTimestamp(new Date(Date.now() + producerWindowMs));

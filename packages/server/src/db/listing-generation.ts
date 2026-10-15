@@ -1,23 +1,33 @@
-import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
-import {
-	type ArtifactTaskOwner,
-	artifactTaskOwnerSchema
-} from '@cupboard/protocol/artifact-jobs';
+import { type TenantId } from '@cupboard/nix-store/scalars';
+import { type ArtifactTaskOwner } from '@cupboard/protocol/artifact-jobs';
 import {
 	type ListingGeneratorRevision,
 	type NarListingFact,
 	narListingFactSchema,
 	type NarListingIdentity
 } from '@cupboard/protocol/artifacts';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
-	type IsoTimestamp,
-	isoTimestamp,
-	isoTimestampSchema
-} from '@cupboard/protocol/scalars';
-import { and, eq, exists, gt, isNull, lte, ne, or, sql } from 'drizzle-orm';
+	and,
+	eq,
+	exists,
+	gt,
+	isNotNull,
+	isNull,
+	lte,
+	ne,
+	or,
+	sql
+} from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
-import { z } from 'zod';
 
+import {
+	type ListingGenerationClaim,
+	type ListingGenerationClaimResult,
+	listingGenerationClaimSchema,
+	type ListingGenerationRequest,
+	listingGenerationRequestSchema
+} from '../blob/listing-generation.ts';
 import { registeredLiveObjectIncarnation } from '../blob/object-incarnation.ts';
 import {
 	ListingFactConflictError,
@@ -28,34 +38,7 @@ import * as schema from './d1-schema.ts';
 import { ListingFactStore } from './listing-facts.ts';
 
 const leaseDurationMs = 60_000;
-const requestSchema = narListingFactSchema
-	.pick({ narHash: true, generatorRevision: true })
-	.extend({
-		sourceIncarnation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-		tenant: tenantIdSchema,
-		owner: artifactTaskOwnerSchema
-	});
-const claimSchema = requestSchema.extend({
-	generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-	leaseExpiresAt: isoTimestampSchema
-});
 type Row = typeof schema.listingGeneration.$inferSelect;
-
-export interface ListingGenerationRequest extends NarListingIdentity {
-	readonly sourceIncarnation: number;
-	readonly tenant: TenantId;
-	readonly owner: ArtifactTaskOwner;
-}
-
-export interface ListingGenerationClaim extends ListingGenerationRequest {
-	readonly generation: number;
-	readonly leaseExpiresAt: IsoTimestamp;
-}
-
-export type ListingGenerationClaimResult =
-	| { readonly kind: 'claimed'; readonly claim: ListingGenerationClaim }
-	| { readonly kind: 'busy'; readonly retryAt: IsoTimestamp }
-	| { readonly kind: 'unavailable' };
 
 /**
  * Coalesces computation across tenants. Claims do not retain bytes or grant
@@ -130,7 +113,7 @@ export class ListingGenerationStore {
 	}
 
 	private decoded(row: Row): ListingGenerationClaim {
-		return claimSchema.parse({
+		return listingGenerationClaimSchema.parse({
 			narHash: row.narHash,
 			generatorRevision: row.generatorRevision,
 			sourceIncarnation: row.sourceIncarnation,
@@ -173,11 +156,32 @@ export class ListingGenerationStore {
 		return exists(stored);
 	}
 
+	async find(
+		identity: NarListingIdentity
+	): Promise<ListingGenerationClaim | undefined> {
+		return this.execute(async () => {
+			const row = await this.database
+				.select()
+				.from(schema.listingGeneration)
+				.where(
+					and(
+						this.identity(identity),
+						isNotNull(schema.listingGeneration.owner)
+					)
+				)
+				.get();
+			if (row === undefined) {
+				return;
+			}
+			return this.decoded(row);
+		});
+	}
+
 	async claim(
 		input: ListingGenerationRequest,
 		now: IsoTimestamp
 	): Promise<ListingGenerationClaimResult> {
-		const request = requestSchema.parse(input);
+		const request = listingGenerationRequestSchema.parse(input);
 		const leaseExpiresAt = isoTimestamp(
 			new Date(Date.parse(now) + leaseDurationMs)
 		);

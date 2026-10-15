@@ -3420,11 +3420,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsedLease = artifactStageLeaseSchema.parse(lease);
 		await this.initialise();
 		return this.metered('artifact-stage-retire', () =>
-			this.withArtifactStagingWake(() =>
-				Promise.resolve(
-					new ArtifactStagingService(this.context).retireInSection(parsedLease)
-				)
-			)
+			this.withArtifactStagingWake(async () => {
+				const isRetired = new ArtifactStagingService(
+					this.context
+				).retireInSection(parsedLease);
+				if (isRetired) {
+					await new ListingTaskService(this.context).releaseGenerationInSection(
+						parsedLease
+					);
+				}
+				return isRetired;
+			})
 		);
 	}
 

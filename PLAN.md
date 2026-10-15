@@ -7249,9 +7249,14 @@ build traces available from a cupboard cache.
       and leave delivery recovery to the dispatcher. Shared D1 generation claims
       now coalesce work by NAR and generator revision, fence source incarnations
       and atomically record facts with claim release. Renewal is monotonic and
-      stale owners cannot complete or release newer claims. Consumer
-      integration, shared D1 job/task projections and producer activation remain
-      pending.
+      stale owners cannot complete or release newer claims. Listing consumers
+      now acquire those leases before source access and staging, recheck shared
+      facts after acquisition, and include the captured token in staging RPCs.
+      Renewal and completion check both ownership domains. Sealed recovery can
+      replace its superseded same-tenant owner without rereading the NAR and
+      refuses an elapsed recovery horizon even before cleanup runs. Preparation
+      refusals and explicit retirement release captured computation claims.
+      Shared D1 job/task projections and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
@@ -7294,7 +7299,10 @@ build traces available from a cupboard cache.
       commit with the release and preserve fair dispatch order. Dispatch passes
       continue bounded wakes while capacity remains available. Shared-fact reuse
       now uses zero-byte admissions, including for newly discovered NARs at full
-      staging capacity. Shared D1 projections, activation and throughput
+      staging capacity. Shared-generation waiters persist the recorded
+      computation lease deadline without retaining admissions. Legacy messages
+      use that deadline as their transport retry delay. Completion-triggered
+      shared waiter wakes, shared D1 projections, activation and throughput
       benchmarks remain pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last

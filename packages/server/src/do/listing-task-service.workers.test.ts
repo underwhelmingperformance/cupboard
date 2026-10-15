@@ -2,7 +2,9 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	narInfoGenerationSchema,
 	sha256HexDigestSchema,
-	storePathHashSchema
+	storePathHashSchema,
+	type TenantId,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
@@ -19,7 +21,7 @@ import {
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -41,6 +43,7 @@ import {
 	type ArtifactQueueDependencies
 } from '../routing/artifact-queue-consumer.ts';
 import { type ArtifactQueueMessage } from '../routing/artifact-queue-message.ts';
+import { tenantServer } from '../routing/durable-object.ts';
 import {
 	ArtifactTaskOwnershipLostError,
 	ListingTaskWorker,
@@ -48,11 +51,18 @@ import {
 } from '../routing/listing-task-worker.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	adminGrants,
 	commitPath,
 	currentServer,
 	defaultCache,
 	initialise,
+	issueTokenForTenant,
+	namedCache,
 	narInfoGeneration,
+	provisionNamedTenant,
+	pushPath,
+	pushPathToTenant,
+	putTestCache,
 	recordTransition,
 	resetTestServer,
 	uploadMetadata,
@@ -207,6 +217,76 @@ async function fixture(
 	});
 }
 
+interface ListingTenantFixture {
+	readonly tenant: TenantId;
+	readonly server: ReturnType<typeof currentServer>;
+	readonly claim: ArtifactTaskClaim;
+}
+
+async function withOtherListingTenant(
+	nar: Awaited<ReturnType<typeof sourceNar>>,
+	run: (fixture: ListingTenantFixture) => Promise<void>
+): Promise<void> {
+	const tenant = tenantIdSchema.parse('listing-generation-other');
+	const server = tenantServer(env, tenant);
+	await withoutAlarmArming(async () => {
+		const issuer = await provisionNamedTenant(tenant);
+		const token = await issueTokenForTenant(server, issuer, adminGrants());
+		await pushPathToTenant(
+			tenant,
+			token,
+			uploadMetadata({
+				storePathHash: hash,
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			}),
+			nar
+		);
+		const claim = await runInDurableObject(server, (instance) =>
+			instance.context.criticalSection(async () => {
+				const context = instance.context;
+				const cache = context.cacheRepository.require(defaultCache());
+				const source = context.db
+					.select()
+					.from(schema.narInfos)
+					.where(
+						and(
+							eq(schema.narInfos.cacheId, cache.id),
+							eq(schema.narInfos.storePathHash, hash)
+						)
+					)
+					.get();
+				if (source === undefined) {
+					throw new Error('The second tenant did not publish its NAR');
+				}
+				const jobs = new ArtifactJobService(context);
+				const job = await jobs.startInSection(defaultCache(), {
+					kind: 'listing',
+					generatorRevision: currentListingGeneratorRevision
+				});
+				jobs.enqueueInSection(job, {
+					kind: 'nar',
+					storePathHash: hash,
+					generation: source.generation,
+					narHash: source.narHash
+				});
+				jobs.checkpointInSection(job, undefined, true);
+				const result = jobs.claimInSection(
+					job.id,
+					artifactTaskOwnerSchema.parse(crypto.randomUUID())
+				);
+				if (result.claim === undefined) {
+					throw new Error('The second tenant listing task was not claimed');
+				}
+				return result.claim;
+			})
+		);
+		await run({ tenant, server, claim });
+	}, server);
+}
+
 async function fullStagingReuseFixture(
 	mode: 'queued' | 'discovered' = 'queued'
 ) {
@@ -215,6 +295,23 @@ async function fullStagingReuseFixture(
 	await promote(generated);
 	await currentServer().completeListingTask(generated.lease, generated.fact);
 	await currentServer().collectArtifactStaging();
+	const blockerCache = namedCache('staging-blocker');
+	const blockerHash = storePathHashSchema.parse('c'.repeat(32));
+	const blockerNar = await sourceNar('blocker');
+	const token = await initialise();
+	await putTestCache(token, blockerCache);
+	await pushPath(
+		token,
+		uploadMetadata({
+			storePathHash: blockerHash,
+			narHash: blockerNar.narHash,
+			narSize: blockerNar.narSize,
+			fileHash: blockerNar.fileHash,
+			fileSize: blockerNar.narBytes.byteLength
+		}),
+		blockerCache,
+		blockerNar
+	);
 	const blockers = await inSection(async (context) => {
 		const jobs = new ArtifactJobService(context);
 		const dispatches = new ArtifactJobDispatchService(context);
@@ -226,11 +323,30 @@ async function fullStagingReuseFixture(
 		if (first === undefined) {
 			throw new Error('The first staging blocker was not claimed');
 		}
-		const job = await jobs.startInSection(defaultCache(), {
+		const cache = context.cacheRepository.require(blockerCache);
+		const source = context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cacheId, cache.id),
+					eq(schema.narInfos.storePathHash, blockerHash)
+				)
+			)
+			.get();
+		if (source === undefined) {
+			throw new Error('The independent staging blocker was not published');
+		}
+		const job = await jobs.startInSection(blockerCache, {
 			kind: 'listing',
 			generatorRevision: currentListingGeneratorRevision
 		});
-		jobs.enqueueInSection(job, first.source);
+		jobs.enqueueInSection(job, {
+			kind: 'nar',
+			storePathHash: blockerHash,
+			generation: source.generation,
+			narHash: blockerNar.narHash
+		});
 		jobs.checkpointInSection(job, undefined, true);
 		dispatches.reserveInSection();
 		const second = jobs.claimInSection(
@@ -490,6 +606,321 @@ async function admittedMessage(
 describe('listing task workflow', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => vi.restoreAllMocks());
+
+	it('coalesces native generation across tenants and publishes the result by reference in both caches', () =>
+		withoutAlarmArming(async () => {
+			const nar = await sourceNar();
+			const first = await fixture(nar);
+			await withOtherListingTenant(nar, async (other) => {
+				const prepared = generationOf(
+					await currentServer().prepareListingTask(first)
+				);
+				const waiting = await other.server.prepareListingTask(other.claim);
+				const stages = await runInDurableObject(other.server, (instance) =>
+					instance.context.db.select().from(schema.artifactStages).all()
+				);
+				const retryAt = isoTimestamp(new Date(Date.now() + 60_000));
+				expect({ waiting, stages }).toStrictEqual({
+					waiting: {
+						kind: 'generation-busy',
+						retryAt
+					},
+					stages: []
+				});
+				const get = vi.spyOn(env.BLOBS, 'get');
+				const dependencies = {
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					buffers: new NarReadBufferPool()
+				};
+				const firstResult = await new ListingTaskWorker({
+					...dependencies,
+					server: currentServer()
+				}).run(first);
+				const secondResult = await new ListingTaskWorker({
+					...dependencies,
+					server: other.server
+				}).run(other.claim);
+				const firstProgress = await inSection(
+					(context) =>
+						new ArtifactJobService(context).summaryInSection(first.jobId)
+							?.progress
+				);
+				const secondProgress = await runInDurableObject(
+					other.server,
+					(instance) =>
+						new ArtifactJobService(instance.context).summaryInSection(
+							other.claim.jobId
+						)?.progress
+				);
+				const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+				const references = await database
+					.select({ tenant: d1Schema.artifactReference.tenant })
+					.from(d1Schema.artifactReference)
+					.orderBy(d1Schema.artifactReference.tenant);
+				expect({
+					firstResult,
+					secondResult,
+					firstProgress,
+					secondProgress,
+					narReads: get.mock.calls.filter(
+						([key]) => key === prepared.source.key
+					).length,
+					references,
+					secondStages: await runInDurableObject(other.server, (instance) =>
+						instance.context.db.select().from(schema.artifactStages).all()
+					)
+				}).toStrictEqual({
+					firstResult: { kind: 'completed' },
+					secondResult: { kind: 'reused' },
+					firstProgress: { discovered: 1, completed: 1, skipped: 0, failed: 0 },
+					secondProgress: {
+						discovered: 1,
+						completed: 1,
+						skipped: 0,
+						failed: 0
+					},
+					narReads: 1,
+					references: [{ tenant: other.tenant }, { tenant: fixtureTenant }],
+					secondStages: []
+				});
+			});
+		}));
+
+	it('defers a shared-generation waiter until the recorded lease deadline without retaining an admission', () =>
+		withoutAlarmArming(async () => {
+			const nar = await sourceNar();
+			const first = await fixture(nar);
+			await withOtherListingTenant(nar, async (other) => {
+				await currentServer().prepareListingTask(first);
+				const retryAt = isoTimestamp(new Date(Date.now() + 60_000));
+				vi.setSystemTime(new Date(Date.now() + 15_000));
+				const queued = await other.server.requeueArtifactTask(other.claim);
+				if (queued.kind !== 'admitted') {
+					throw new Error('The shared-generation waiter was not admitted');
+				}
+				const body = {
+					...jobMessage(other.claim),
+					tenant: other.tenant,
+					admission: queued.admission
+				};
+				const actions: unknown[] = [];
+				const sent: ArtifactQueueMessage[] = [];
+				const get = vi.spyOn(env.BLOBS, 'get');
+				const consumer = new ArtifactQueueConsumer({
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					buffers: new NarReadBufferPool(),
+					queue: {
+						send(message) {
+							sent.push(message);
+							return Promise.resolve({
+								metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } }
+							});
+						}
+					},
+					serverFor: () => other.server
+				});
+				await consumer.handleMessage(artifactMessage(body, actions));
+				const state = await runInDurableObject(other.server, (instance) => ({
+					task: instance.context.db
+						.select({
+							state: schema.artifactTasks.state,
+							retryAt: schema.artifactTasks.nextAttemptAt
+						})
+						.from(schema.artifactTasks)
+						.where(eq(schema.artifactTasks.id, other.claim.id))
+						.get(),
+					admissions: instance.context.db
+						.select()
+						.from(schema.artifactAdmissions)
+						.all(),
+					stages: instance.context.db.select().from(schema.artifactStages).all()
+				}));
+				expect({ actions, sent, reads: get.mock.calls, state }).toStrictEqual({
+					actions: [{ action: 'ack' }],
+					sent: [],
+					reads: [],
+					state: {
+						task: { state: 'pending', retryAt },
+						admissions: [],
+						stages: []
+					}
+				});
+			});
+		}));
+
+	it('does not revive sealed output after its recovery deadline when cleanup has not run', () =>
+		withoutAlarmArming(async () => {
+			const original = await fixture();
+			const sealed = await generate(original);
+			vi.setSystemTime(new Date(sealed.lease.cleanupAfter));
+			const replacement = await inSection((context) => {
+				const result = new ArtifactJobService(context).claimInSection(
+					original.jobId,
+					artifactTaskOwnerSchema.parse(crypto.randomUUID())
+				);
+				if (result.claim === undefined) {
+					throw new Error('The expired listing task was not reclaimed');
+				}
+				return result.claim;
+			});
+			const prepared = await currentServer().prepareListingTask(replacement);
+			expect({
+				kind: prepared.kind,
+				isFresh:
+					prepared.kind === 'generate' && prepared.lease.id !== sealed.lease.id
+			}).toStrictEqual({ kind: 'generate', isFresh: true });
+		}));
+
+	it.each(['claim', 'source'] as const)(
+		'refuses renewal and completion after the shared %s is replaced',
+		(mode) =>
+			withoutAlarmArming(async () => {
+				const original = await fixture();
+				const generated = await generate(original);
+				await promote(generated);
+				const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+				if (mode === 'claim') {
+					await env.CUPBOARD_DB.prepare(
+						'UPDATE listing_generation SET generation = generation + 1'
+					).run();
+				}
+				if (mode === 'source' && original.source.kind === 'nar') {
+					await database
+						.update(d1Schema.blobState)
+						.set({ incarnation: sql`incarnation + 1` })
+						.where(eq(d1Schema.blobState.narHash, original.source.narHash));
+					await database
+						.update(d1Schema.objectIncarnation)
+						.set({ incarnation: sql`incarnation + 1` })
+						.where(
+							and(
+								eq(d1Schema.objectIncarnation.kind, 'nar'),
+								eq(d1Schema.objectIncarnation.objectId, original.source.narHash)
+							)
+						);
+				}
+				const before = await inSection((context) => state(context, original));
+				expect({
+					renewed: await currentServer().renewListingTask(generated.lease),
+					completed: await currentServer().completeListingTask(
+						generated.lease,
+						generated.fact
+					),
+					state: await inSection((context) => state(context, original))
+				}).toStrictEqual({
+					renewed: undefined,
+					completed: { kind: 'unavailable' },
+					state: before
+				});
+			})
+	);
+
+	it.each([
+		'missing',
+		'owner',
+		'tenant',
+		'nar',
+		'revision',
+		'generation',
+		'incarnation'
+	] as const)(
+		'refuses a staging RPC packet with an invalid shared %s token',
+		(mode) =>
+			withoutAlarmArming(async () => {
+				const original = await fixture();
+				const generated = await generate(original);
+				await promote(generated);
+				const token = generated.lease.listingGeneration;
+				if (token === undefined) {
+					throw new Error('The producer has no captured computation token');
+				}
+				let packet = generated.lease;
+				switch (mode) {
+					case 'missing': {
+						packet = { ...packet, listingGeneration: undefined };
+						break;
+					}
+					case 'owner': {
+						packet = {
+							...packet,
+							listingGeneration: {
+								...token,
+								owner: artifactTaskOwnerSchema.parse(crypto.randomUUID())
+							}
+						};
+						break;
+					}
+					case 'tenant': {
+						packet = {
+							...packet,
+							listingGeneration: {
+								...token,
+								tenant: tenantIdSchema.parse('another-tenant')
+							}
+						};
+						break;
+					}
+					case 'nar': {
+						packet = {
+							...packet,
+							listingGeneration: {
+								...token,
+								narHash: NixSha256Hash.fromDigest(new Uint8Array(32)).value
+							}
+						};
+						break;
+					}
+					case 'revision': {
+						packet = {
+							...packet,
+							listingGeneration: {
+								...token,
+								generatorRevision: listingGeneratorRevisionSchema.parse('other')
+							}
+						};
+						break;
+					}
+					case 'generation': {
+						packet = {
+							...packet,
+							listingGeneration: { ...token, generation: token.generation + 1 }
+						};
+						break;
+					}
+					case 'incarnation': {
+						packet = {
+							...packet,
+							listingGeneration: {
+								...token,
+								sourceIncarnation: token.sourceIncarnation + 1
+							}
+						};
+						break;
+					}
+				}
+				vi.setSystemTime(new Date(Date.now() + 15_000));
+				const snapshot = () =>
+					inSection(async (context) => ({
+						local: await state(context, original),
+						shared: await context.d1.select().from(d1Schema.listingGeneration)
+					}));
+				const before = await snapshot();
+				expect({
+					renewed: await currentServer().renewListingTask(packet),
+					completed: await currentServer().completeListingTask(
+						packet,
+						generated.fact
+					),
+					state: await snapshot()
+				}).toStrictEqual({
+					renewed: undefined,
+					completed: { kind: 'unavailable' },
+					state: before
+				});
+			})
+	);
 
 	it('uses a preleased output buffer for native listing generation', () =>
 		withoutAlarmArming(async () => {
@@ -1924,6 +2355,7 @@ describe('listing task workflow', () => {
 
 	it.each([
 		'capacity',
+		'generation-busy',
 		'transport',
 		'unavailable',
 		'bytes-missing',
@@ -1934,13 +2366,14 @@ describe('listing task workflow', () => {
 			vi.setSystemTime(new Date(claim.leaseExpiresAt));
 			const actions: unknown[] = [];
 			const sent: ArtifactQueueMessage[] = [];
-			const retryAt = isoTimestamp(new Date(Date.now() + 120_000));
+			const delaySeconds = reason === 'generation-busy' ? 20 : 120;
+			const retryAt = isoTimestamp(new Date(Date.now() + delaySeconds * 1000));
 			const execute = () => {
 				if (reason === 'transport') {
 					return Promise.reject(new Error('R2 temporarily unavailable'));
 				}
-				return reason === 'capacity'
-					? Promise.resolve({ kind: 'capacity' as const, retryAt })
+				return reason === 'capacity' || reason === 'generation-busy'
+					? Promise.resolve({ kind: reason, retryAt })
 					: Promise.resolve({ kind: reason });
 			};
 			await artifactConsumer(sent, execute).handleMessage(
@@ -1954,7 +2387,13 @@ describe('listing task workflow', () => {
 				artifacts: after.artifacts
 			}).toStrictEqual({
 				actions: [
-					{ action: 'retry', delaySeconds: reason === 'capacity' ? 120 : 60 }
+					{
+						action: 'retry',
+						delaySeconds:
+							reason === 'capacity' || reason === 'generation-busy'
+								? delaySeconds
+								: 60
+					}
 				],
 				sent: [],
 				progress: { discovered: 1, completed: 0, skipped: 0, failed: 0 },

@@ -1,7 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { type TenantId } from '@cupboard/nix-store/scalars';
 import { type ArtifactTaskClaim } from '@cupboard/protocol/artifact-jobs';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 
 import { artifactTaskRequeueResultSchema } from '../blob/artifact-admission.ts';
 import { type NarReadBufferPool } from '../blob/nar-read-buffers.ts';
@@ -96,20 +96,21 @@ export class ArtifactQueueConsumer {
 		return { action: 'ack' };
 	}
 
+	private defaultRetryAt(): IsoTimestamp {
+		return isoTimestamp(new Date(Date.now() + retryDelaySeconds * 1000));
+	}
+
 	private async retryClaim(
 		server: ArtifactQueueRpc,
 		claim: ArtifactTaskClaim,
 		signal: AbortSignal,
-		mode: 'immediate' | 'delayed'
+		retry: 'immediate' | IsoTimestamp
 	): Promise<QueueDecision> {
-		const retryAt = isoTimestamp(
-			new Date(Date.now() + retryDelaySeconds * 1000)
-		);
 		const result = await this.rpc(
 			() =>
-				mode === 'immediate'
+				retry === 'immediate'
 					? server.requeueArtifactTask(claim)
-					: server.requeueArtifactTaskWithDeadline(claim, retryAt),
+					: server.requeueArtifactTaskWithDeadline(claim, retry),
 			signal
 		);
 		artifactTaskRequeueResultSchema.parse(result);
@@ -184,7 +185,12 @@ export class ArtifactQueueConsumer {
 					error
 				}
 			);
-			return this.retryClaim(server, claimed.claim, signal, 'delayed');
+			return this.retryClaim(
+				server,
+				claimed.claim,
+				signal,
+				this.defaultRetryAt()
+			);
 		}
 
 		if (['completed', 'reused', 'failed'].includes(result.kind)) {
@@ -195,15 +201,21 @@ export class ArtifactQueueConsumer {
 				server,
 				claimed.claim,
 				signal,
-				result.kind === 'capacity' ? 'immediate' : 'delayed'
+				result.kind === 'capacity'
+					? 'immediate'
+					: result.kind === 'generation-busy'
+						? result.retryAt
+						: this.defaultRetryAt()
 			);
 		}
-		if (result.kind === 'capacity') {
+		if (result.kind === 'capacity' || result.kind === 'generation-busy') {
 			const seconds = Math.ceil(
 				(Date.parse(result.retryAt) - Date.now()) / 1000
 			);
+			const minimumDelay =
+				result.kind === 'generation-busy' ? 1 : retryDelaySeconds;
 			const delaySeconds = Number.isFinite(seconds)
-				? Math.max(retryDelaySeconds, Math.min(maximumDelaySeconds, seconds))
+				? Math.max(minimumDelay, Math.min(maximumDelaySeconds, seconds))
 				: retryDelaySeconds;
 			return { action: 'retry', delaySeconds };
 		}
