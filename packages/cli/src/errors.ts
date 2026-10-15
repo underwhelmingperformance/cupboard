@@ -23,6 +23,7 @@ import { formatBytes } from '@cupboard/reporter';
 import {
 	CodedError,
 	genericExitCode,
+	transientExitCode,
 	usageExitCode
 } from '@cupboard/shared/errors';
 import { StatusCodes } from 'http-status-codes';
@@ -37,11 +38,10 @@ import {
 	unwokenTenantText
 } from './deploy/local-step-samples.ts';
 
-// The CLI's own failure categories, layered on the shared generic (1) and usage
-// (2) codes. The values follow the BSD sysexits convention (77 EX_NOPERM, 75
-// EX_TEMPFAIL, 69 EX_UNAVAILABLE, 74 EX_IOERR).
+// The CLI's own failure categories, layered on the shared generic (1), usage
+// (2) and transient (75) codes. The values follow the BSD sysexits convention
+// (77 EX_NOPERM, 69 EX_UNAVAILABLE, 74 EX_IOERR).
 export const authExitCode = 77;
-export const transientExitCode = 75;
 export const unavailableExitCode = 69;
 // Publication or retention failed without a more specific exit status. Only
 // build-push returns it. A failed build exits with the build command's own

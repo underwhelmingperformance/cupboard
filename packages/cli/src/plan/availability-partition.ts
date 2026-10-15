@@ -20,8 +20,9 @@ import {
 	type UnknownPathDetail
 } from '@cupboard/protocol/plan';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { transientExitCode } from '@cupboard/shared/errors';
 
-import { CliError, CliUsageError, transientExitCode } from '../errors.ts';
+import { CliError, CliUsageError } from '../errors.ts';
 
 /**
  * A target with no `expectedPath` is content-addressed or otherwise floating.

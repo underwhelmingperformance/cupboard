@@ -17,9 +17,8 @@ import {
 	reuseViewAvailabilityMaxPaths
 } from '@cupboard/protocol/cache-availability';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { chunk } from '@cupboard/shared/collections';
-import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
+import { lookupInPages } from '@cupboard/shared/paging';
 import { readResponseJson } from '@cupboard/shared/response-body';
 import { StatusCodes } from 'http-status-codes';
 
@@ -209,23 +208,40 @@ async function availablePathsAt(
 		return new Set();
 	}
 
-	const batches = chunk(pathsByHash.keys().toArray(), maximumBatchSize);
+	const hashes = pathsByHash.keys().toArray();
 	const fetcher = options.fetcher ?? fetch;
 	const headers = {
 		'content-type': 'application/json',
 		...(options.credentials !== undefined &&
 			basicAuthHeader(options.credentials))
 	};
-	const missingBatches = await mapWithConcurrency(
-		batches,
-		maximumConcurrentProbes,
-		(batch) => queryMissingStorePathHashes(fetcher, probeUrl, batch, headers)
-	);
-	const missing = new Set(missingBatches.flat());
+	const target = `${canonicalHref(probeUrl)}/api/v1/missing-paths`;
+	const availability = await lookupInPages(hashes, {
+		pageSize: maximumBatchSize,
+		concurrency: maximumConcurrentProbes,
+		deadline: {
+			url: target,
+			replaySafety: 'replay-safe'
+		},
+		request: async (batch, signal) => {
+			const missing = new Set(
+				await queryMissingStorePathHashes(fetcher, target, {
+					method: 'POST',
+					headers,
+					body: JSON.stringify({ storePathHashes: batch }),
+					signal
+				})
+			);
+			return batch.map((hash) => (missing.has(hash) ? 'missing' : 'available'));
+		}
+	});
 	const available = new Set<StorePathString>();
 
-	for (const [hash, matchingPaths] of pathsByHash) {
-		if (missing.has(hash)) {
+	for (const [index, matchingPaths] of pathsByHash
+		.values()
+		.toArray()
+		.entries()) {
+		if (availability[index] !== 'available') {
 			continue;
 		}
 
@@ -239,16 +255,10 @@ async function availablePathsAt(
 
 async function queryMissingStorePathHashes(
 	fetcher: typeof fetch,
-	probeUrl: URL,
-	storePathHashes: readonly StorePathHash[],
-	headers: Readonly<Record<string, string>>
+	target: string,
+	init: RequestInit
 ): Promise<StorePathHash[]> {
-	const target = `${canonicalHref(probeUrl)}/api/v1/missing-paths`;
-	const response = await fetcher(target, {
-		method: 'POST',
-		headers,
-		body: JSON.stringify({ storePathHashes })
-	});
+	const response = await fetcher(target, init);
 
 	if (!response.ok) {
 		await discardResponseBody(response);

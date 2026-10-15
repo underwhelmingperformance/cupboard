@@ -5,6 +5,7 @@ import {
 import {
 	CodedError,
 	genericExitCode,
+	transientExitCode,
 	usageExitCode
 } from '@cupboard/shared/errors';
 
@@ -13,7 +14,6 @@ import {
 	authExitCode,
 	publicationExitCode,
 	type RankedExitStatus,
-	transientExitCode,
 	unavailableExitCode
 } from './errors.ts';
 

@@ -2,7 +2,7 @@ import { env } from 'node:process';
 
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
-import { genericExitCode } from '@cupboard/shared/errors';
+import { genericExitCode, transientExitCode } from '@cupboard/shared/errors';
 import {
 	readResponseJson,
 	readResponseText,
@@ -13,12 +13,7 @@ import { z } from 'zod';
 
 import { isAbortError, throwIfAborted } from '../abort.ts';
 import { resilientFetcher } from '../client/transport.ts';
-import {
-	authExitCode,
-	CliError,
-	isTransientHttpStatus,
-	transientExitCode
-} from '../errors.ts';
+import { authExitCode, CliError, isTransientHttpStatus } from '../errors.ts';
 
 import { isBindingRefusal } from './bound-sign-in.ts';
 

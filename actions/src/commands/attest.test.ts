@@ -13,9 +13,14 @@ import {
 	scaiPredicateType
 } from '@cupboard/protocol/scai';
 import { createGithubReporter } from '@cupboard/reporter';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
+import {
+	stalledResponse,
+	untilOnlyStalledRequestPending
+} from '../../../tests/support/stalled-request.ts';
 import {
 	CacheAccessProbeError,
 	CommittedSubjectInvalidError,
@@ -31,11 +36,43 @@ import { parseChecksums } from '../release-install.ts';
 import {
 	attestAction,
 	attestationSubjects,
+	cacheAccess,
 	provenancedSubjects,
 	renderChecksums,
 	resolveAttestInputs,
 	type SelectedPathInfos
 } from './attest.ts';
+
+describe('cacheAccess', () => {
+	it('reads nix-cache-info again after the first read hangs past its deadline', async () => {
+		const requests: string[] = [];
+		const fetcher: typeof fetch = (input, init) => {
+			requests.push(input instanceof Request ? input.url : input.toString());
+			return requests.length === 1
+				? stalledResponse(init?.signal)
+				: Promise.resolve(new Response('StoreDir: /nix/store\n'));
+		};
+
+		vi.useFakeTimers();
+		try {
+			const pending = cacheAccess(
+				fetcher,
+				new URL('https://cache.example.test/t/acme')
+			);
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+
+			expect({ access: await pending, requests }).toStrictEqual({
+				access: 'public',
+				requests: [
+					'https://cache.example.test/t/acme/nix-cache-info',
+					'https://cache.example.test/t/acme/nix-cache-info'
+				]
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
 
 describe('renderChecksums', () => {
 	it('renders sha256sum lines and parseChecksums recovers their entries', () => {
@@ -775,6 +812,69 @@ describe('attestAction committed cache verification', () => {
 				builtChecksums: '\n'
 			});
 		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('reads a committed narinfo again after it hangs past the deadline', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = await receiptFileIn(directory);
+		const checksumsFile = path.join(directory, 'subjects.txt');
+		const narInfoUrl =
+			'https://cache.example.test/t/acme/cache/builds/3123456789abcdfghijklmnpqrsvwxyz.narinfo';
+		const requests: string[] = [];
+
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			const pending = attestAction(
+				{
+					receiptFile,
+					checksumsFile,
+					url: 'https://cache.example.test/t/acme',
+					cache: 'builds'
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'output')
+				},
+				createGithubReporter(),
+				{
+					fetch: (input, init) => {
+						const url = requestUrl(input);
+						requests.push(url);
+						if (
+							url === narInfoUrl &&
+							requests.indexOf(url) === requests.length - 1
+						) {
+							return stalledResponse(init?.signal);
+						}
+
+						return Promise.resolve(
+							url.includes('/attestations/')
+								? new Response(undefined, { status: StatusCodes.NOT_FOUND })
+								: new Response(committedNarInfo(remotePath, 0xbb))
+						);
+					}
+				}
+			);
+			const settled = expect(pending).resolves.toBeUndefined();
+			await untilOnlyStalledRequestPending(() => requests.includes(narInfoUrl));
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+			await settled;
+
+			expect({
+				requests,
+				checksums: await readFile(checksumsFile, 'utf8')
+			}).toStrictEqual({
+				requests: [
+					'https://cache.example.test/t/acme/cache/builds/nix-cache-info',
+					narInfoUrl,
+					narInfoUrl
+				],
+				checksums: `${'bb'.repeat(32)}  ${path.basename(remotePath)}\n`
+			});
+		} finally {
+			vi.useRealTimers();
 			await rm(directory, { recursive: true, force: true });
 		}
 	});

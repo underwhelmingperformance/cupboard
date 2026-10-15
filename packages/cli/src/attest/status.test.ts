@@ -8,9 +8,11 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import { cacheMetadataCapabilityHeader } from '@cupboard/protocol/cache-metadata';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { getResponse, http, type HttpHandler, HttpResponse } from 'msw';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { untilOnlyStalledRequestPending } from '../../../../tests/support/stalled-request.ts';
 import { cliExitCode } from '../cli.ts';
 import { CupboardHttpError } from '../errors.ts';
 
@@ -338,6 +340,57 @@ describe('attestation discovery client', () => {
 				status: 'missing'
 			}))
 		});
+	});
+
+	it('sends a page again after it hangs past the deadline and keeps the input order', async () => {
+		capability(attestationInfoCapability);
+		const hashes = Array.from({ length: 33 }, (_, index) =>
+			storePathHashSchema.parse(index.toString(2).padStart(32, '0'))
+		);
+		const requests: unknown[] = [];
+		use(
+			http.post(`${url.href}/api/v1/attestation-info`, async ({ request }) => {
+				requests.push(await request.json());
+				if (requests.length === 2) {
+					return Promise.withResolvers<Response>().promise;
+				}
+				const group =
+					requests.length === 1 ? hashes.slice(0, 32) : hashes.slice(32);
+				return HttpResponse.json({
+					scopeVersion: 'current',
+					entries: group.map((storePathHash) => ({
+						storePathHash,
+						status: 'missing'
+					}))
+				});
+			})
+		);
+
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			const pending = readAttestationInfo(
+				{ ...options, storePathHashes: hashes },
+				mockedFetch
+			);
+			const settled = expect(pending).resolves.toStrictEqual(
+				hashes.map((storePathHash) => ({ storePathHash, status: 'missing' }))
+			);
+			await untilOnlyStalledRequestPending(() => requests.length === 2);
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+			await settled;
+		} finally {
+			vi.useRealTimers();
+		}
+
+		const second = {
+			storePathHashes: hashes.slice(32),
+			expectedScopeVersion: 'current'
+		};
+		expect(requests).toStrictEqual([
+			{ storePathHashes: hashes.slice(0, 32) },
+			second,
+			second
+		]);
 	});
 
 	it('continues after the processed prefix instead of skipping the rest of a page', async () => {

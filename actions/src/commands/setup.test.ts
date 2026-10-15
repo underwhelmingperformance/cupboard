@@ -23,12 +23,13 @@ import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
+import { maxProbeAttempts } from '@cupboard/shared/paging';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { runWithReadAccess } from '../../../packages/cli/src/commands/run.ts';
-import { probeDeadlineMs } from '../cache-probe.ts';
 import {
 	BooleanInputInvalidError,
 	CacheAccessProbeError,
@@ -724,12 +725,13 @@ describe('resolveSubstituters', () => {
 		}
 	);
 
-	it('aborts stalled nix-cache-info bodies at the probe deadline', async () => {
-		vi.useFakeTimers();
+	it('sends stalled nix-cache-info reads again and fails after the last deadline', async () => {
+		// Each attempt reads the netrc file with real I/O before it sends its
+		// request, so only the deadline and backoff timers are fake.
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 
 		try {
 			const signals: AbortSignal[] = [];
-			const probesStarted = Promise.withResolvers<undefined>();
 			const fetcher: typeof fetch = (_input, init) => {
 				const signal = init?.signal;
 
@@ -738,9 +740,6 @@ describe('resolveSubstituters', () => {
 				}
 
 				signals.push(signal);
-				if (signals.length === 2) {
-					probesStarted.resolve(undefined);
-				}
 				const body = new ReadableStream({
 					start(controller) {
 						signal.addEventListener(
@@ -755,29 +754,27 @@ describe('resolveSubstituters', () => {
 
 				return Promise.resolve(new Response(body));
 			};
+			const untilRequests = async (count: number): Promise<void> => {
+				while (signals.length < count) {
+					await new Promise((resolve) => setImmediate(resolve));
+				}
+			};
 			const pending = resolveSubstituters(
 				{ ...baseOptions, reuseView: 'reuse' },
 				{ fetch: fetcher }
 			);
 			const rejection =
 				expect(pending).rejects.toBeInstanceOf(ProbeTimeoutError);
-			onTestFinished(async () => {
-				if (!vi.isFakeTimers()) {
-					return;
-				}
-				try {
-					await vi.runOnlyPendingTimersAsync();
-					await rejection;
-				} finally {
-					vi.useRealTimers();
-				}
-			});
 
-			await Promise.race([probesStarted.promise, pending]);
-			await vi.advanceTimersByTimeAsync(30_000);
+			for (let attempt = 1; attempt <= maxProbeAttempts; attempt += 1) {
+				await untilRequests(2 * attempt);
+				await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+			}
 			await rejection;
 
-			expect(signals.map(({ aborted }) => aborted)).toStrictEqual([true, true]);
+			expect(signals.map(({ aborted }) => aborted)).toStrictEqual(
+				Array.from({ length: 2 * maxProbeAttempts }, () => true)
+			);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -1037,11 +1034,12 @@ describe('fetchCachePublicKeyAt', () => {
 		vi.useFakeTimers();
 
 		try {
-			let requestedUrl: string | undefined;
-			let receivedSignal: AbortSignal | undefined;
+			const requestedUrls: string[] = [];
+			const receivedSignals: (AbortSignal | undefined)[] = [];
 			const fetcher: typeof fetch = (input, init) => {
-				requestedUrl = requestUrl(input);
-				receivedSignal = init?.signal ?? undefined;
+				requestedUrls.push(requestUrl(input));
+				const receivedSignal = init?.signal ?? undefined;
+				receivedSignals.push(receivedSignal);
 				const body = new ReadableStream({
 					start(controller) {
 						receivedSignal?.addEventListener(
@@ -1061,15 +1059,17 @@ describe('fetchCachePublicKeyAt', () => {
 			const rejection =
 				expect(pending).rejects.toBeInstanceOf(ProbeTimeoutError);
 
-			await vi.advanceTimersByTimeAsync(probeDeadlineMs);
+			await vi.advanceTimersByTimeAsync(
+				maxProbeAttempts * (probeDeadlineMs + 5000)
+			);
 			await rejection;
 
 			expect({
-				requestedUrl,
-				aborted: receivedSignal?.aborted
+				requestedUrls,
+				aborted: receivedSignals.map((signal) => signal?.aborted)
 			}).toStrictEqual({
-				requestedUrl: url.href,
-				aborted: true
+				requestedUrls: Array.from({ length: maxProbeAttempts }, () => url.href),
+				aborted: Array.from({ length: maxProbeAttempts }, () => true)
 			});
 		} finally {
 			vi.useRealTimers();

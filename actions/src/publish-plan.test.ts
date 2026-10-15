@@ -13,8 +13,14 @@ import {
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { cacheAvailabilityRequestSchema } from '@cupboard/protocol/cache-availability';
 import { readUserInputSchema } from '@cupboard/shared/http';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
+
+import {
+	stalledResponse,
+	untilOnlyStalledRequestPending
+} from '../../tests/support/stalled-request.ts';
 
 import {
 	CacheAvailabilityQueryError,
@@ -1254,6 +1260,42 @@ describe('availableCachePaths', () => {
 		});
 
 		expect(available).toStrictEqual(new Set());
+	});
+
+	it('sends an availability request again after it hangs past the deadline', async () => {
+		const bodies: string[] = [];
+		const fetcher: typeof fetch = (_input, init) => {
+			bodies.push(typeof init?.body === 'string' ? init.body : '');
+			if (bodies.length === 1) {
+				return stalledResponse(init?.signal);
+			}
+			return Promise.resolve(
+				Response.json({ missingStorePathHashes: [StorePath.hash(secondPath)] })
+			);
+		};
+
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			const pending = availableCachePaths({
+				baseUrl: new URL('https://cupboard.example/t/acme'),
+				cache: namedCache('pr-1'),
+				paths: [firstPath, secondPath],
+				fetcher
+			});
+			const settled = expect(pending).resolves.toStrictEqual(
+				new Set([firstPath])
+			);
+			await untilOnlyStalledRequestPending(() => bodies.length === 1);
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
+			await settled;
+		} finally {
+			vi.useRealTimers();
+		}
+
+		const body = JSON.stringify({
+			storePathHashes: [StorePath.hash(firstPath), StorePath.hash(secondPath)]
+		});
+		expect(bodies).toStrictEqual([body, body]);
 	});
 
 	it('returns only paths whose narinfo is available', async () => {

@@ -1,10 +1,11 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import { markErrorReported, type Reporter } from '@cupboard/reporter';
-import { usageExitCode } from '@cupboard/shared/errors';
+import { transientExitCode, usageExitCode } from '@cupboard/shared/errors';
 import {
 	IneffectiveCtlogThresholdError,
 	TrustedRootFormatError
 } from '@cupboard/shared/sigstore';
+import { ProbeTimeoutError } from '@cupboard/shared/timeout';
 import { ORPCError } from '@orpc/client';
 import { type Command, CommanderError } from 'commander';
 import { StatusCodes } from 'http-status-codes';
@@ -30,7 +31,6 @@ import {
 	OwnerLoginRequiredError,
 	PushIncompleteError,
 	RootRetentionOptionError,
-	transientExitCode,
 	TrustRuleFileConflictError,
 	TrustRuleOptionsRequiredError,
 	UploadWaitTimeoutError
@@ -161,6 +161,13 @@ describe('cliExitCode', () => {
 			name: 'a root over its target limit',
 			error: new RootTargetLimitError(150, 149),
 			expected: usageExitCode
+		},
+		{
+			name: 'a request that missed every deadline',
+			error: new ProbeTimeoutError(
+				'https://cupboard.test/t/acme/nix-cache-info'
+			),
+			expected: transientExitCode
 		},
 		{
 			name: 'a timed-out admin request',

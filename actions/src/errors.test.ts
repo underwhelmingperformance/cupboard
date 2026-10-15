@@ -1,4 +1,8 @@
-import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
+import {
+	genericExitCode,
+	transientExitCode,
+	usageExitCode
+} from '@cupboard/shared/errors';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -272,7 +276,7 @@ describe('action errors', () => {
 		[
 			'ProbeTimeoutError',
 			new ProbeTimeoutError('https://cache.example.test/x.narinfo'),
-			genericExitCode
+			transientExitCode
 		],
 		[
 			'CommandOutputTooLargeError',

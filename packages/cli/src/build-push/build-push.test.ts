@@ -34,7 +34,11 @@ import {
 	type Reporter,
 	type ResultPayload
 } from '@cupboard/reporter';
-import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
+import {
+	genericExitCode,
+	transientExitCode,
+	usageExitCode
+} from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -62,7 +66,6 @@ import {
 	PushIncompleteError,
 	QuotaExceededError,
 	SessionRejectedError,
-	transientExitCode,
 	unavailableExitCode,
 	UntrustedDaemonError,
 	UploadRequestLimitExceededError,

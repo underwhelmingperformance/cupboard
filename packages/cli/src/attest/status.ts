@@ -17,9 +17,9 @@ import {
 } from '@cupboard/protocol/attestations';
 import { cacheMetadataCapabilityHeader } from '@cupboard/protocol/cache-metadata';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import { fetchWithProbeRetries, lookupInPages } from '@cupboard/shared/paging';
 import {
 	readResponseBytes,
 	readResponseText
@@ -96,74 +96,91 @@ export async function readAttestationInfo(
 					password: options.readPassword
 				})
 			: {};
-	const target = (path: string): URL =>
-		new URL(`${base.href.replace(/\/$/u, '')}/${path}`);
-	const read = async (path: string, init?: RequestInit): Promise<Response> => {
-		const response = await fetchRead(target(path), {
-			...init,
-			headers: requestHeaders(headers, init?.headers),
-			signal: options.signal
-		});
-		if (!response.ok && response.status !== 404) {
-			if (response.status === 409) {
-				await discardResponseBody(response);
-				throw new AttestationDiscoveryScopeChangedError();
+	const target = (path: string): string =>
+		`${base.href.replace(/\/$/u, '')}/${path}`;
+	const refuseUnexpected = async (
+		path: string,
+		method: string,
+		response: Response
+	): Promise<void> => {
+		if (response.ok || response.status === 404) {
+			return;
+		}
+		if (response.status === 409) {
+			await discardResponseBody(response);
+			throw new AttestationDiscoveryScopeChangedError();
+		}
+		const body = await discoveryRefusalText(response, options.signal);
+		if (path === 'api/v1/attestation-info') {
+			const failure = parseDiscoveryFailure(body);
+			if (response.status === 413 && failure?.code === 'request-too-large') {
+				throw new AttestationDiscoveryRequestLimitError();
 			}
-			const body = await discoveryRefusalText(response, options.signal);
-			if (path === 'api/v1/attestation-info') {
-				const failure = parseDiscoveryFailure(body);
-				if (response.status === 413 && failure?.code === 'request-too-large') {
-					throw new AttestationDiscoveryRequestLimitError();
-				}
-				if (
-					(response.status === 413 && failure?.code === 'list-too-large') ||
-					(response.status === 502 && failure?.code === 'list-invalid')
-				) {
-					throw new InvalidAttestationDiscoveryError();
-				}
+			if (
+				(response.status === 413 && failure?.code === 'list-too-large') ||
+				(response.status === 502 && failure?.code === 'list-invalid')
+			) {
+				throw new InvalidAttestationDiscoveryError();
 			}
+		}
+		throw new CupboardHttpError(
+			method,
+			path,
+			response.status,
+			body,
+			response.headers.get('cf-ray') ?? undefined
+		);
+	};
+	const read = async <Result>(
+		path: string,
+		consume: (response: Response) => Promise<Result>
+	): Promise<Result> =>
+		fetchWithProbeRetries(
+			fetchRead,
+			target(path),
+			{ headers: requestHeaders(headers), signal: options.signal },
+			async (response) => {
+				await refuseUnexpected(path, 'GET', response);
+				return consume(response);
+			}
+		);
+	const capabilities = await read('nix-cache-info', async (response) => {
+		if (!response.ok) {
+			await discardResponseBody(response);
 			throw new CupboardHttpError(
-				init?.method ?? 'GET',
-				path,
+				'GET',
+				'nix-cache-info',
 				response.status,
-				body,
-				response.headers.get('cf-ray') ?? undefined
+				'The cache is unavailable.'
 			);
 		}
-		return response;
-	};
-	const capabilityResponse = await read('nix-cache-info');
-	if (!capabilityResponse.ok) {
-		await discardResponseBody(capabilityResponse);
-		throw new CupboardHttpError(
-			'GET',
-			'nix-cache-info',
-			capabilityResponse.status,
-			'The cache is unavailable.'
-		);
-	}
-	const capabilities =
-		capabilityResponse.headers
-			.get(cacheMetadataCapabilityHeader)
-			?.split(/\s+/u) ?? [];
-	await discardResponseBody(capabilityResponse);
+		const advertised =
+			response.headers.get(cacheMetadataCapabilityHeader)?.split(/\s+/u) ?? [];
+		await discardResponseBody(response);
+		return advertised;
+	});
 	const hashes = [...new Set(options.storePathHashes)];
 	if (!capabilities.includes(attestationInfoCapability)) {
 		return mapWithConcurrency(
 			hashes,
 			6,
 			async (hash): Promise<AttestationInfoEntry> => {
-				const narResponse = await read(`${hash}.narinfo`);
-				if (narResponse.status === 404) {
-					await discardResponseBody(narResponse);
+				const narinfo = await read(`${hash}.narinfo`, async (response) => {
+					if (response.status === 404) {
+						await discardResponseBody(response);
+						return;
+					}
+					return parseDiscoveryNarInfo(
+						await discoveryText(response, {
+							description: 'Attestation discovery narinfo',
+							maximumBytes: 1024 * 1024,
+							signal: options.signal
+						})
+					);
+				});
+				if (narinfo === undefined) {
 					return settled({ storePathHash: hash, status: 'missing' });
 				}
-				const text = await discoveryText(narResponse, {
-					description: 'Attestation discovery narinfo',
-					maximumBytes: 1024 * 1024,
-					signal: options.signal
-				});
-				const narinfo = parseDiscoveryNarInfo(text);
 				if (narinfo.storePath.hash !== hash) {
 					throw new InvalidAttestationDiscoveryError();
 				}
@@ -172,23 +189,28 @@ export async function readAttestationInfo(
 					status: 'found',
 					narHash: narinfo.narHash.toString()
 				} as const;
-				const response = await read(`attestations/${hash}`);
-				if (response.status === 404) {
-					await discardResponseBody(response);
-					return settled({ ...found, attestations: [] });
-				}
-				const value = await discoveryJson(response, {
-					description: 'Attestation list',
-					maximumBytes: attestationInfoMaxListBytes,
-					signal: options.signal
-				});
-				const list = attestationListSchema.safeParse(value);
-				if (!list.success) {
-					throw new InvalidAttestationDiscoveryError(list.error);
-				}
+				const attestations = await read(
+					`attestations/${hash}`,
+					async (response) => {
+						if (response.status === 404) {
+							await discardResponseBody(response);
+							return [];
+						}
+						const value = await discoveryJson(response, {
+							description: 'Attestation list',
+							maximumBytes: attestationInfoMaxListBytes,
+							signal: options.signal
+						});
+						const list = attestationListSchema.safeParse(value);
+						if (!list.success) {
+							throw new InvalidAttestationDiscoveryError(list.error);
+						}
+						return list.data.attestations;
+					}
+				);
 				return settled({
 					...found,
-					attestations: list.data.attestations.filter(
+					attestations: attestations.filter(
 						(descriptor) =>
 							options.predicateTypes === undefined ||
 							options.predicateTypes.includes(descriptor.predicateType)
@@ -197,14 +219,22 @@ export async function readAttestationInfo(
 			}
 		);
 	}
-	const entries: AttestationInfoEntry[] = [];
+	const pagePath = 'api/v1/attestation-info';
 	let scopeVersion: string | undefined;
-	for (const group of chunk(hashes, attestationInfoMaxPaths)) {
-		let remaining = group;
-		while (remaining.length > 0) {
-			const response = await read('api/v1/attestation-info', {
+	return lookupInPages(hashes, {
+		pageSize: attestationInfoMaxPaths,
+		concurrency: 1,
+		deadline: {
+			url: target(pagePath),
+			replaySafety: 'replay-safe',
+			signal: options.signal
+		},
+		request: async (remaining, signal) => {
+			const response = await fetchRead(target(pagePath), {
 				method: 'POST',
-				headers: { 'content-type': 'application/json' },
+				headers: requestHeaders(headers, {
+					'content-type': 'application/json'
+				}),
 				body: JSON.stringify({
 					storePathHashes: remaining,
 					...(options.predicateTypes !== undefined && {
@@ -213,23 +243,26 @@ export async function readAttestationInfo(
 					...(scopeVersion !== undefined && {
 						expectedScopeVersion: scopeVersion
 					})
-				})
+				}),
+				signal
 			});
+			await refuseUnexpected(pagePath, 'POST', response);
 			if (!response.ok) {
 				await discardResponseBody(response);
 				throw new CupboardHttpError(
 					'POST',
-					'api/v1/attestation-info',
+					pagePath,
 					response.status,
 					'The advertised attestation discovery endpoint is unavailable.'
 				);
 			}
-			const value = await discoveryJson(response, {
-				description: 'Attestation discovery page',
-				maximumBytes: attestationInfoMaxResponseBytes,
-				signal: options.signal
-			});
-			const result = attestationInfoResponseSchema.safeParse(value);
+			const result = attestationInfoResponseSchema.safeParse(
+				await discoveryJson(response, {
+					description: 'Attestation discovery page',
+					maximumBytes: attestationInfoMaxResponseBytes,
+					signal: options.signal
+				})
+			);
 			if (!result.success) {
 				throw new InvalidAttestationDiscoveryError(result.error);
 			}
@@ -245,14 +278,15 @@ export async function readAttestationInfo(
 			) {
 				throw new InvalidAttestationDiscoveryError();
 			}
+			// An attempt can answer after its deadline has aborted its signal.
+			// Discard that answer.
+			signal.throwIfAborted();
 			scopeVersion = page.scopeVersion;
-			entries.push(...page.entries);
-			options.onProgress?.(entries.length);
-			remaining =
-				page.nextIndex === undefined ? [] : remaining.slice(page.nextIndex);
+			completed += page.entries.length;
+			options.onProgress?.(completed);
+			return page.entries;
 		}
-	}
-	return entries;
+	});
 }
 
 async function discoveryRefusalText(
