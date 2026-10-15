@@ -1,3 +1,4 @@
+import { tenantContract } from '@cupboard/protocol/contract';
 import type {
 	CheckDiscrepancy,
 	CheckDiscrepancyKind,
@@ -5,12 +6,19 @@ import type {
 	SharedAccessReport
 } from '@cupboard/protocol/reports';
 import { formatCount, type Reporter } from '@cupboard/reporter';
+import { collectProgressively } from '@cupboard/shared/collections';
+import { cursorPages } from '@cupboard/shared/paging';
 import { type Command, Option } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { cacheLabel } from '../client/client.ts';
-import { tenantRpc } from '../client/orpc.ts';
+import { listingLimits } from '../client/listings.ts';
+import {
+	type CallOptions,
+	procedureDeadline,
+	tenantRpc
+} from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { CheckDiscrepanciesError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -29,9 +37,12 @@ export interface CheckClient {
 }
 
 export interface SharedAccessClient {
-	sharedAccess(input: {
-		cursor: SharedAccessReport['cursor'];
-	}): Promise<SharedAccessReport>;
+	sharedAccess(
+		input: {
+			cursor: SharedAccessReport['cursor'];
+		},
+		options?: CallOptions
+	): Promise<SharedAccessReport>;
 }
 
 export function registerCheckCommand(
@@ -139,15 +150,33 @@ export async function runSharedAccess(
 	reporter: Reporter,
 	client: SharedAccessClient
 ): Promise<void> {
-	let cursor: SharedAccessReport['cursor'] = '';
-	const narHashes: SharedAccessReport['narHashes'] = [];
-	do {
-		const page = await reporter.phase('Checking shared NAR access', () =>
-			client.sharedAccess({ cursor })
-		);
-		narHashes.push(...page.narHashes);
-		cursor = page.cursor;
-	} while (cursor !== '');
+	const narHashes = await reporter.phase(
+		'Checking shared NAR access',
+		async () =>
+			collectProgressively(
+				await cursorPages<
+					SharedAccessReport['narHashes'][number],
+					SharedAccessReport['cursor']
+				>(
+					async (cursor, signal) => {
+						const page = await client.sharedAccess(
+							{ cursor: cursor ?? '' },
+							{ signal }
+						);
+
+						return {
+							items: page.narHashes,
+							next: page.cursor === '' ? undefined : page.cursor
+						};
+					},
+					procedureDeadline(
+						'check.sharedAccess',
+						tenantContract.check.sharedAccess
+					)
+				),
+				listingLimits('The shared-access report')
+			)
+	);
 
 	reporter.result({
 		kind: 'shared-access-report',

@@ -4,6 +4,7 @@ import {
 	type RootName,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import { tenantContract } from '@cupboard/protocol/contract';
 import type { AuthorizationDetails } from '@cupboard/protocol/grants';
 import type {
 	RootEnsureBodyInput,
@@ -23,6 +24,8 @@ import {
 	type Reporter,
 	type ResultRow
 } from '@cupboard/reporter';
+import { collectProgressively } from '@cupboard/shared/collections';
+import { cursorPages } from '@cupboard/shared/paging';
 import type { Command } from 'commander';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
@@ -35,7 +38,8 @@ import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import { CupboardClient } from '../client/client.ts';
-import { tenantRpc } from '../client/orpc.ts';
+import { listingLimits } from '../client/listings.ts';
+import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
 import { RootTargetLimitError } from '../push/push.ts';
@@ -434,21 +438,27 @@ export async function runRootList(
 	reporter: Reporter,
 	client: Pick<RootClient, 'list'>
 ): Promise<void> {
-	const roots = await reporter.phase('Listing retention roots', async () => {
-		const entries: RootListEntry[] = [];
-		let cursor: string | undefined;
+	const roots = await reporter.phase('Listing retention roots', async () =>
+		collectProgressively(
+			await cursorPages<RootListEntry, string>(
+				async (cursor, signal) => {
+					const page = await callInCache(
+						client.list,
+						cache,
+						{ ...(cursor !== undefined && { cursor }) },
+						{ signal }
+					);
 
-		do {
-			const page = await callInCache(client.list, cache, {
-				...(cursor !== undefined && { cursor })
-			});
-
-			entries.push(...page.roots);
-			cursor = page.cursor;
-		} while (cursor !== undefined);
-
-		return entries;
-	});
+					return { items: page.roots, next: page.cursor };
+				},
+				procedureDeadline(
+					'roots.list',
+					tenantContract.roots.list.inDefaultCache
+				)
+			),
+			listingLimits('The retention root listing')
+		)
+	);
 
 	reporter.result({
 		kind: 'roots',
@@ -467,22 +477,27 @@ export async function runRootTargets(
 ): Promise<void> {
 	// A run root can accumulate attached paths without bound, so the targets are
 	// read page by page.
-	const targets = await reporter.phase('Listing root targets', async () => {
-		const collected: RootTarget[] = [];
-		let cursor: string | undefined;
+	const targets = await reporter.phase('Listing root targets', async () =>
+		collectProgressively(
+			await cursorPages<RootTarget, string>(
+				async (cursor, signal) => {
+					const page = await callInCache(
+						client.targets,
+						cache,
+						{ name, ...(cursor !== undefined && { cursor }) },
+						{ signal }
+					);
 
-		do {
-			const page = await callInCache(client.targets, cache, {
-				name,
-				...(cursor !== undefined && { cursor })
-			});
-
-			collected.push(...page.targets);
-			cursor = page.cursor;
-		} while (cursor !== undefined);
-
-		return collected;
-	});
+					return { items: page.targets, next: page.cursor };
+				},
+				procedureDeadline(
+					'roots.targets',
+					tenantContract.roots.targets.inDefaultCache
+				)
+			),
+			listingLimits('The root target listing')
+		)
+	);
 
 	reporter.result({
 		kind: 'root-targets',

@@ -225,7 +225,7 @@ describe('runCacheList', () => {
 			list: (input) => {
 				calls.push(input);
 				return Promise.resolve(
-					input === undefined
+					input?.cursor === undefined
 						? { caches: [first], cursor: '1' }
 						: { caches: [second] }
 				);
@@ -236,7 +236,7 @@ describe('runCacheList', () => {
 			calls,
 			labels: results[0]?.map((row) => row.label)
 		}).toStrictEqual({
-			calls: [undefined, { cursor: '1' }],
+			calls: [{}, { cursor: '1' }],
 			labels: ['first', 'second']
 		});
 	});

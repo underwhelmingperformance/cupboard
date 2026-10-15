@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	chunk,
+	collectProgressively,
 	filterProgressively,
 	findProgressively,
 	ProgressiveCollectionLimitError,
@@ -70,6 +71,14 @@ describe('progressive collections', () => {
 		await expect(
 			filterProgressively(first, (item) => item % 2 === 1, limits)
 		).resolves.toStrictEqual([1, 3]);
+	});
+
+	it('collects every item from every page', async () => {
+		const first = page([1, 2], () => Promise.resolve(page([3])));
+
+		await expect(collectProgressively(first, limits)).resolves.toStrictEqual([
+			1, 2, 3
+		]);
 	});
 
 	it('rejects a remaining page before requesting it', async () => {

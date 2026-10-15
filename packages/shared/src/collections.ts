@@ -133,6 +133,25 @@ export function findProgressively<T>(
 }
 
 /**
+Collects every item while enforcing item and page limits.
+*/
+export function collectProgressively<T>(
+	firstPage: ProgressivePage<T>,
+	limits: ProgressiveCollectionLimits
+): Promise<T[]> {
+	const items: T[] = [];
+
+	return visitProgressively(firstPage, limits, {
+		visit(item) {
+			items.push(item);
+
+			return;
+		},
+		complete: () => items
+	});
+}
+
+/**
 Collects matching items while enforcing item and page limits.
 */
 export function filterProgressively<T>(

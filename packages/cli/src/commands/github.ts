@@ -13,6 +13,7 @@ import {
 import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
+import { filterProgressively } from '@cupboard/shared/collections';
 import { genericExitCode } from '@cupboard/shared/errors';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
@@ -25,7 +26,8 @@ import { parseCacheAccess } from '../cache-access.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type TokenProvider } from '../client/client.ts';
 import { bearerAttempt } from '../client/credentials.ts';
-import { tenantRpc } from '../client/orpc.ts';
+import { cachePages, listingLimits } from '../client/listings.ts';
+import { type CallOptions, tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
 import {
 	CacheInfoRateLimitedError,
@@ -174,10 +176,13 @@ export interface GithubSetupClient {
 				input: object
 			): Promise<{ readonly access: CacheAccessMode }>;
 		};
-		list(input?: {
-			readonly namePrefix?: string;
-			readonly cursor?: string;
-		}): Promise<{
+		list(
+			input?: {
+				readonly namePrefix?: string;
+				readonly cursor?: string;
+			},
+			options?: CallOptions
+		): Promise<{
 			readonly caches: readonly {
 				readonly scope: CacheScope;
 				readonly access: CacheAccessMode;
@@ -655,23 +660,16 @@ async function planPullRequestCacheAccess(
 	access: CacheAccessMode
 ): Promise<PlannedSetupStep | undefined> {
 	const prefix = pullRequestCachePrefix(identity.repositoryId);
-	const mismatched: string[] = [];
-	let cursor: string | undefined;
-
-	do {
-		const page = await client.caches.list({ namePrefix: prefix, cursor });
-
-		for (const cache of page.caches) {
-			if (
-				cache.scope.kind === 'named' &&
-				cache.scope.name.startsWith(prefix) &&
-				cache.access !== access
-			) {
-				mismatched.push(cache.scope.name);
-			}
-		}
-		cursor = page.cursor;
-	} while (cursor !== undefined);
+	const differentAccess = await filterProgressively(
+		await cachePages(client.caches, prefix),
+		(cache) => cache.access !== access,
+		listingLimits('The pull-request cache listing')
+	);
+	const mismatched = differentAccess.flatMap((cache) =>
+		cache.scope.kind === 'named' && cache.scope.name.startsWith(prefix)
+			? [cache.scope.name]
+			: []
+	);
 
 	if (mismatched.length === 0) {
 		return undefined;

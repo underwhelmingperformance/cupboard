@@ -1,6 +1,7 @@
 import { controlContract, tenantContract } from '@cupboard/protocol/contract';
 import { type AuthzMeta } from '@cupboard/protocol/contract';
 import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
+import { type DeadlineOptions } from '@cupboard/shared/paging';
 import {
 	BoundedBodyCollector,
 	RemoteBodyTooLargeError,
@@ -137,6 +138,31 @@ function derivedClient<C extends AnyContractRouter>(
 	});
 
 	return createORPCClient(link);
+}
+
+/**
+ * Options for one call of an admin procedure.
+ */
+export interface CallOptions {
+	readonly signal?: AbortSignal | undefined;
+}
+
+/**
+ * Returns the deadline options for page requests that call `procedure`. `name`
+ * identifies the procedure in debug logs and in a deadline expiry. The
+ * contract's replay safety for the procedure decides whether a request that
+ * missed its deadline is sent again.
+ */
+export function procedureDeadline(
+	name: string,
+	procedure: { readonly '~orpc': { readonly meta: AuthzMeta } },
+	options: Pick<DeadlineOptions, 'signal' | 'deadlineMs'> = {}
+): DeadlineOptions {
+	return {
+		target: { procedure: name },
+		replaySafety: procedure['~orpc'].meta.replaySafety ?? 'replay-unsafe',
+		...options
+	};
 }
 
 function combinedSignal(
