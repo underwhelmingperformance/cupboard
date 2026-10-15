@@ -7402,8 +7402,13 @@ build traces available from a cupboard cache.
       fenced by readiness, epoch and every cursor and boundary field. The
       checkpoint counts actual appended rows; deleted or ineligible sources
       advance without captures. Lost replies and rollback preserve resumable
-      progress. Seed scheduling, bounded event expansion, cache adoption
-      delivery, shared completion wakes and producer activation remain pending.
+      progress. Seed dispatch now persists fair delivery reservations and fresh
+      execution leases for the fact, default-parent and named-parent scopes.
+      Readiness and source completion are rechecked inside reservation and claim
+      writes. Captured claim predicates check epoch, generation, owner and lease
+      expiry. Applying claims to seed writes, queue and cron scheduling, bounded
+      event expansion, cache adoption delivery, shared completion wakes and
+      producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

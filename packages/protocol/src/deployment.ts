@@ -116,7 +116,8 @@ export const transitionIdSchema = z.enum([
 	'listing-adoption-capture',
 	'listing-adoption-fact-seed',
 	'listing-adoption-parents',
-	'listing-adoption-parent-seed'
+	'listing-adoption-parent-seed',
+	'listing-adoption-seed-dispatch'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -564,6 +565,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 	{
 		id: 'listing-adoption-parent-seed',
 		expand: ['0072_listing_adoption_parent_seed.sql'],
+		contract: [],
+		independent: true
+	},
+	{
+		id: 'listing-adoption-seed-dispatch',
+		expand: ['0073_listing_adoption_seed_dispatch.sql'],
 		contract: [],
 		independent: true
 	}

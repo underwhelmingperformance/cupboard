@@ -57,6 +57,10 @@ import type {
 import type { ListingAdoptionParentId } from '../blob/listing-adoption-parents.ts';
 import type { ListingAdoptionSeedEpoch } from '../blob/listing-adoption-seed.ts';
 import {
+	type ListingAdoptionSeedDispatchEpoch,
+	listingAdoptionSeedScopes
+} from '../blob/listing-adoption-seed-dispatch.ts';
+import {
 	type NarCaptureSequence,
 	narCaptureSequenceSchema
 } from '../blob/nar-source-capture.ts';
@@ -1185,6 +1189,46 @@ export const listingAdoptionParentSeed = sqliteTable(
 			sql`typeof(${table.scanned}) = 'integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991
  AND typeof(${table.captured}) = 'integer' AND ${table.captured} BETWEEN 0 AND ${table.scanned}
  AND (${table.pageCaptureAfter} IS NULL OR (typeof(${table.pageCaptureAfter}) = 'integer' AND ${table.pageCaptureAfter} BETWEEN 0 AND 9007199254740991 AND ${table.isComplete} = 0))`
+		)
+	]
+);
+
+export const listingAdoptionSeedDispatch = sqliteTable(
+	'listing_adoption_seed_dispatch',
+	{
+		scope: text('scope', { enum: listingAdoptionSeedScopes })
+			.primaryKey()
+			.notNull(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionSeedDispatchEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		availableAt: text('available_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		generation: integer('generation').notNull().default(0),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_seed_dispatch_scope_check',
+			sql`${table.scope} IN ('facts','default-parents','named-parents')`
+		),
+		check(
+			'listing_adoption_seed_dispatch_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_seed_dispatch_claim_check',
+			sql`typeof(${table.generation}) = 'integer' AND ${table.generation} BETWEEN 0 AND 9007199254740991
+ AND (${table.owner} IS NULL) = (${table.leaseExpiresAt} IS NULL)
+ AND (${table.owner} IS NULL OR ${table.generation} >= 1)`
 		)
 	]
 );

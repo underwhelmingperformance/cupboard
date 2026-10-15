@@ -342,9 +342,20 @@ increasing captures. Lost replies preserve committed progress, and a failed
 checkpoint rolls back both events and the marker. Expansion creates an empty
 checkpoint table; it does not scan the reference catalogue.
 
+Seed dispatch persists delivery deadlines and execution leases for facts,
+default-cache parents and named-cache parents. A checked primary key limits this
+metadata to three scopes. Deployment readiness, capture readiness and each
+seed's checkpoint decide whether work remains eligible. Reservations defer
+repeated delivery without granting ownership. A consumer acquires a fresh lease
+for its scope, independently of other scopes. Releasing a scope records the
+database time as its next delivery time, so older waiting scopes run first. The
+claim predicate checks the captured epoch, generation, owner and expiry inside a
+write batch.
+
 The capture stream and reverse projection grant no cache authority and retain no
-bytes. Seed scheduling, bounded event expansion, durable cache-adoption
-delivery, completion wakes and automatic forward producers remain pending.
+bytes. Applying claims to seed writes, queue and cron scheduling, bounded event
+expansion, durable cache-adoption delivery, completion wakes and automatic
+forward producers remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

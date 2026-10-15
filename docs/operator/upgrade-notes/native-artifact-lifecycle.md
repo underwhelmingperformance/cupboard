@@ -26,6 +26,10 @@ caches. The first seed turn initialises a window only after the parent cleanup
 contract and capture are ready. Expansion does not start historical discovery or
 adoption delivery.
 
+The additive `listing-adoption-seed-dispatch` transition creates an empty table
+for the three seed scopes. It adds recoverable delivery deadlines and execution
+leases. Expansion does not enqueue or start seed work.
+
 Deployment also reconciles bucket lifecycle rules for `artifact-staging/` and
 `shared-artifact-staging/`. The rules delete transient objects and abort
 incomplete multipart uploads after a day. CAS bytes and completed tenant
