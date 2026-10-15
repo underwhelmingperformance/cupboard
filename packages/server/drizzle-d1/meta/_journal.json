@@ -491,6 +491,20 @@
 			"when": 1792088686166,
 			"tag": "0069_listing_adoption_fact_seed",
 			"breakpoints": true
+		},
+		{
+			"idx": 70,
+			"version": "6",
+			"when": 1792092826048,
+			"tag": "0070_listing_adoption_parents",
+			"breakpoints": true
+		},
+		{
+			"idx": 71,
+			"version": "6",
+			"when": 1792092826684,
+			"tag": "0071_listing_adoption_parents_contract",
+			"breakpoints": true
 		}
 	]
 }

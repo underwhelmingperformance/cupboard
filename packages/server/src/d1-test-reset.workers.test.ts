@@ -28,6 +28,9 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			"INSERT INTO tenant (id, status, owner_issuer, owner_subject, owner_audience, config_version, created_at) VALUES ('reset-tenant', 'active', 'issuer', 'subject', 'audience', 1, '2025-01-01T00:00:00.000Z')"
 		),
 		env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_adoption_parent (tenant,cache_kind,cache_generation,store_path_hash,generation,nar_hash) VALUES ('reset-tenant','default',1,'reset-path',1,'reset-nar')"
+		),
+		env.CUPBOARD_DB.prepare(
 			"INSERT INTO tenant_usage (tenant, bytes, narinfos, blobs, updated_at) VALUES ('reset-tenant', 100, 2, 1, '2025-01-01T00:00:00.000Z')"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -144,6 +147,7 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		listing_fact: 0,
 		listing_adoption_fact: 0,
 		listing_adoption_fact_seed: 0,
+		listing_adoption_parent: 0,
 		listing_adoption_capture_event: 0,
 		listing_adoption_capture_state: 1,
 		listing_generation: 0,

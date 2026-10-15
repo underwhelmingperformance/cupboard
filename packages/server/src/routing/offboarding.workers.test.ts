@@ -348,6 +348,51 @@ describe('offboarding drain', () => {
 		});
 	});
 
+	it('drains orphaned listing adoption parents without deleting another tenant', async () => {
+		const { id } = await provisionedWritingTenant();
+		await recordTransition('listing-adoption-parents', 'complete');
+		await env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_adoption_parent (id,tenant,cache_kind,cache_generation,store_path_hash,generation,nar_hash) VALUES (? ,?,'default',1,?,1,?), (? ,?,'default',1,?,1,?), (? ,'another-tenant','default',1,?,1,?)"
+		)
+			.bind(
+				'1'.repeat(32),
+				id,
+				'0'.repeat(32),
+				`sha256:${'0'.repeat(52)}`,
+				'2'.repeat(32),
+				id,
+				'1'.repeat(32),
+				`sha256:${'0'.repeat(52)}`,
+				'3'.repeat(32),
+				'0'.repeat(32),
+				`sha256:${'0'.repeat(52)}`
+			)
+			.run();
+		await offboardTenant(id);
+		const first = await testServerFor(id).runOffboard(1);
+		const afterFirst = await env.CUPBOARD_DB.prepare(
+			'SELECT tenant, store_path_hash AS path FROM listing_adoption_parent ORDER BY tenant, store_path_hash'
+		).all();
+		const second = await testServerFor(id).runOffboard(1);
+		const afterSecond = await env.CUPBOARD_DB.prepare(
+			'SELECT tenant, store_path_hash AS path FROM listing_adoption_parent ORDER BY tenant, store_path_hash'
+		).all();
+		expect({
+			first,
+			afterFirst: afterFirst.results,
+			second,
+			afterSecond: afterSecond.results
+		}).toStrictEqual({
+			first: { drained: false },
+			afterFirst: [
+				{ tenant: 'another-tenant', path: '0'.repeat(32) },
+				{ tenant: id, path: '1'.repeat(32) }
+			],
+			second: { drained: true },
+			afterSecond: [{ tenant: 'another-tenant', path: '0'.repeat(32) }]
+		});
+	});
+
 	it('drains captured artifact generations in bounded pages before CAS presence', async () => {
 		const { id } = await provisionedWritingTenant();
 		await recordTransition('native-artifact-storage', 'complete');

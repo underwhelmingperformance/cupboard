@@ -321,6 +321,17 @@ Typed fixed windows preserve tenant, cache-name and path order, including
 deleted cursor or boundary rows. Discovery does not select the authorised
 publication.
 
+The current-parent projection stores one candidate per tenant, cache and path.
+Refresh selects at most 32 paths through the existing read-authority query and
+rechecks readability, revocation, cache generation and tenant eligibility inside
+the write batch. An unchanged candidate preserves its identity; a different
+publication replaces that identity. Source deletion, replacement and revocation
+remove only the matching pointer and append a captured-parent hint for later
+refresh. Active and suspended tenants remain eligible. Offboarding retires
+orphaned metadata in bounded pages, and provisioning and finalisation refuse
+residue. The additive expansion creates an empty indexed table. Refresh waits
+until the cleanup contract and capture consumer are ready.
+
 The capture stream and reverse projection grant no cache authority and retain no
 bytes. Historical parent projection seeding, seed scheduling, bounded event
 expansion, durable cache-adoption delivery, completion wakes and automatic

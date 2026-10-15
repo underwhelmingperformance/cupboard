@@ -735,6 +735,55 @@ describe('tenant registry', () => {
 		});
 	});
 
+	it('refuses zero accounting repair while listing adoption parents remain', async () => {
+		await recordTransition('listing-adoption-parents', 'complete');
+		await ensureTenant(database(), createBody(acme), now);
+		await database()
+			.delete(d1Schema.tenantUsage)
+			.where(eq(d1Schema.tenantUsage.tenant, acme));
+		await env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_adoption_parent (tenant,cache_kind,cache_generation,store_path_hash,generation,nar_hash) VALUES (?,'default',1,?,1,?)"
+		)
+			.bind(acme, '0'.repeat(32), `sha256:${'0'.repeat(52)}`)
+			.run();
+		const rejected = await rejectedBy(() =>
+			ensureTenant(database(), createBody(acme), now)
+		);
+		expect({
+			error: rejected === undefined ? undefined : errorFields(rejected),
+			usage: await usageRow(acme)
+		}).toStrictEqual({
+			error: {
+				name: 'TenantUsageRepairRequiredError',
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				tenant: acme
+			},
+			usage: undefined
+		});
+	});
+
+	it('refuses registry finalisation while listing adoption parents remain', async () => {
+		await recordTransition('listing-adoption-parents', 'complete');
+		await ensureTenant(database(), createBody(acme), now);
+		await setTenantStatus(database(), acme, 'offboarding');
+		await env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_adoption_parent (tenant,cache_kind,cache_generation,store_path_hash,generation,nar_hash) VALUES (?,'default',1,?,1,?)"
+		)
+			.bind(acme, '0'.repeat(32), `sha256:${'0'.repeat(52)}`)
+			.run();
+		const outcome = await finaliseOffboardedTenant(database(), acme);
+		const status = await database()
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, acme))
+			.get();
+		expect({ outcome, status, usage: await usageRow(acme) }).toStrictEqual({
+			outcome: { finalised: false },
+			status: { status: 'offboarding' },
+			usage: { quotaBytes: undefined }
+		});
+	});
+
 	it('refuses registry finalisation while artifact references remain', async () => {
 		await recordTransition('native-artifact-storage', 'complete');
 		await ensureTenant(database(), createBody(acme), now);

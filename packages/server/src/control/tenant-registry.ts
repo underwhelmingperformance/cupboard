@@ -43,6 +43,7 @@ import {
 	readCasReferenceSet
 } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { ListingAdoptionParentStore } from '../db/listing-adoption-parents.ts';
 import { tenantNamespaceCleanupAllowed } from '../db/tenant-namespace-cleanup.ts';
 import {
 	TenantAlreadyExistsError,
@@ -193,7 +194,7 @@ export async function ensureTenant(
 
 	if (!isClaimed) {
 		await writeCacheLifecycle(database, async (table) => {
-			const provisioning = provisioningStatements(
+			const provisioning = await provisioningStatements(
 				database,
 				body,
 				verifier,
@@ -235,7 +236,7 @@ export async function ensureTenant(
 	// configuration is known to match. Only an empty tenant can start at zero.
 	if (isClaimed) {
 		await writeCacheLifecycle(database, async (table) => {
-			const provisioning = provisioningStatements(
+			const provisioning = await provisioningStatements(
 				database,
 				body,
 				verifier,
@@ -268,7 +269,7 @@ export async function ensureTenant(
  * Every statement leaves a stored row alone, so a repair can run the cache and
  * usage statements again for a tenant that already has its row.
  */
-function provisioningStatements(
+async function provisioningStatements(
 	database: Database,
 	body: TenantCreateBody,
 	verifier: ReadVerifierColumns,
@@ -276,6 +277,9 @@ function provisioningStatements(
 	table: CacheLifecycleWriteTable,
 	references: CasReferenceSet
 ) {
+	const parentsAbsent = await new ListingAdoptionParentStore(
+		database
+	).tenantAbsence(body.id);
 	const identity = cacheIdentityColumns({ kind: 'default' });
 	const tenantFilter = liveTenantFilter(body.id);
 	const cacheKind = sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
@@ -329,6 +333,7 @@ function provisioningStatements(
 		noStoredState(d1Schema.blobReference),
 		noStoredState(d1Schema.attestationReference),
 		tenantListRevisionsAbsent(database, body.id),
+		parentsAbsent,
 		references.artifactReferencesAbsent(body.id)
 	);
 	const usageRow = database
@@ -814,8 +819,12 @@ export async function finaliseOffboardedTenant(
 	id: TenantId
 ): Promise<{ readonly finalised: boolean }> {
 	const references = await readCasReferenceSet(database);
+	const parentsAbsent = await new ListingAdoptionParentStore(
+		database
+	).tenantAbsence(id);
 	const noArtifacts = and(
 		references.artifactReferencesAbsent(id),
+		parentsAbsent,
 		tenantListRevisionsAbsent(database, id)
 	);
 	const namespaceReady = tenantNamespaceCleanupAllowed(database, id);

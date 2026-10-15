@@ -54,6 +54,7 @@ import type {
 	ListingAdoptionCaptureSequence,
 	ListingAdoptionCaptureSource
 } from '../blob/listing-adoption-capture.ts';
+import type { ListingAdoptionParentId } from '../blob/listing-adoption-parents.ts';
 import type { ListingAdoptionSeedEpoch } from '../blob/listing-adoption-seed.ts';
 import {
 	type NarCaptureSequence,
@@ -1027,6 +1028,52 @@ export const listingAdoptionFact = sqliteTable(
 			table.narHash,
 			table.generatorRevision
 		)
+	]
+);
+
+export const listingAdoptionParent = sqliteTable(
+	'listing_adoption_parent',
+	{
+		id: text('id')
+			.$type<ListingAdoptionParentId>()
+			.primaryKey()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_parent_id_check',
+			sql`length(${table.id}) = 32 AND ${table.id} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_parent_cache_identity_check',
+			cacheIdentityConstraint(table.cacheKind, table.cacheName)
+		),
+		check(
+			'listing_adoption_parent_generation_check',
+			sql`typeof(${table.generation}) = 'integer' AND ${table.generation} BETWEEN 0 AND 9007199254740991 AND typeof(${table.cacheGeneration}) = 'integer' AND ${table.cacheGeneration} BETWEEN 1 AND 9007199254740991`
+		),
+		uniqueIndex('listing_adoption_parent_default_identity_idx')
+			.on(table.tenant, table.storePathHash)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('listing_adoption_parent_named_identity_idx')
+			.on(table.tenant, table.cacheName, table.storePathHash)
+			.where(sql`${table.cacheKind} = 'named'`),
+		index('listing_adoption_parent_nar_id_idx').on(table.narHash, table.id),
+		index('listing_adoption_parent_tenant_id_idx').on(table.tenant, table.id)
 	]
 );
 

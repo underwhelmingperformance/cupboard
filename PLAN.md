@@ -7389,9 +7389,16 @@ build traces available from a cupboard cache.
       32-identity pages through the existing default and named partial indexes.
       Bounded full-key seeks skip retained generations, and typed fixed windows
       preserve progress through deleted cursor and boundary rows. Discovery
-      precedes current-publication eligibility checks. Durable parent projection
-      and seeding, seed scheduling, bounded event expansion, cache adoption
-      delivery, shared completion wakes and producer activation remain pending.
+      precedes current-publication eligibility checks. Current-parent refresh
+      now projects up to 32 paths through the read-authority query inside one
+      atomic batch. Material publication changes replace the projection
+      identity; unchanged refreshes preserve it. Point cleanup captures matching
+      source deletion, replacement and revocation without enumerating parents.
+      Tenant offboarding drains orphaned metadata in bounded pages, and
+      provisioning and finalisation reject residue. Refresh waits for the
+      cleanup contract and capture readiness. Historical parent seeding, seed
+      scheduling, bounded event expansion, cache adoption delivery, shared
+      completion wakes and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

@@ -1,5 +1,5 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
-import { and, asc, eq, inArray, not, type SQL, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, not, or, type SQL, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import { type AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 
@@ -8,6 +8,7 @@ import {
 	readCasReferenceSet
 } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { ListingAdoptionParentStore } from '../db/listing-adoption-parents.ts';
 import * as schema from '../db/schema.ts';
 
 import { AttestationListTeardownService } from './attestation-list-teardown-service.ts';
@@ -348,9 +349,16 @@ export class OffboardingService {
 		tenant: TenantId,
 		references: CasReferenceSet
 	): Promise<boolean> {
+		const parentsAbsent = await new ListingAdoptionParentStore(
+			this.context.d1
+		).tenantAbsence(tenant);
+		const artifactResidue = or(
+			not(references.artifactReferencesAbsent(tenant)),
+			not(parentsAbsent)
+		);
 		const artifactResidueFilter = and(
 			eq(d1Schema.tenant.id, tenant),
-			not(references.artifactReferencesAbsent(tenant))
+			artifactResidue
 		);
 		const [edge, presence, attestation, casPresence, fences, artifacts] =
 			await this.context.d1.batch([
@@ -416,6 +424,10 @@ export class OffboardingService {
 		const references = await readCasReferenceSet(this.context.d1);
 
 		await this.deleteReferenceBatch(tenant, limit);
+		await new ListingAdoptionParentStore(this.context.d1).retireTenant(
+			tenant,
+			limit
+		);
 		await this.deleteAttestationReferenceBatch(tenant, limit);
 		await this.deleteArtifactReferenceBatch(tenant, limit, references);
 		await this.deletePresenceBatch(tenant, limit);

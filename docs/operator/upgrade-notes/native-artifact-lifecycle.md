@@ -13,6 +13,13 @@ The additive `shared-listing-staging` transition records provisional global
 listing resources separately from tenant staging. Expansion does not start
 global generation.
 
+The additive `listing-adoption-parents` transition creates an empty index of
+current cache-publication candidates. Its contract installs point cleanup for
+source deletion, replacement and revocation, plus a tenant-finalisation guard.
+Projection refresh waits for the completed contract and capture readiness.
+Offboarding drains orphaned projection rows before finalisation. Expansion does
+not scan the existing reference catalogue or publish artifacts into a cache.
+
 Deployment also reconciles bucket lifecycle rules for `artifact-staging/` and
 `shared-artifact-staging/`. The rules delete transient objects and abort
 incomplete multipart uploads after a day. CAS bytes and completed tenant
