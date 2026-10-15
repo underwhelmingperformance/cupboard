@@ -6,6 +6,7 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { type PushId } from '@cupboard/protocol/upload';
 import {
 	and,
 	asc,
@@ -21,19 +22,24 @@ import {
 	sql
 } from 'drizzle-orm';
 
+import { type PushCredentialIssuer } from '../blob/push-credential.ts';
+import { wellFormedPushId } from '../blob/push-id.ts';
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
 	GarbageCollectionBarrierMissingError,
+	PushIdSigningKeyMissingError,
 	StoredReferencesInvalidError,
 	StoredReferencesJsonMalformedError,
-	StoredReferencesNotArrayError
+	StoredReferencesNotArrayError,
+	TenantNotConfiguredError
 } from '../errors.ts';
 import {
 	narObjectKey,
 	type R2ObjectKey,
 	r2ObjectKeySchema,
 	type RequestOrigin,
+	stagingKeyPushSegment,
 	stagingPrefix
 } from '../http/http.ts';
 
@@ -188,6 +194,49 @@ const maxOrphanReclaim = 1000;
 // too young to reclaim. Stop before one maintenance pass can scan an unbounded
 // staging namespace; later passes and the lifecycle rule provide recovery.
 export const maxOrphanListPages = maxOutgoingConnections;
+
+const orphanStagingResumeStorageKey = 'maintenance:orphan-staging-resume-key';
+
+interface OrphanStagingScan {
+	readonly keys: R2ObjectKey[];
+	// Undefined when the scan reached the end of the prefix, so the next scan
+	// starts again from the beginning.
+	readonly resumeAfter: string | undefined;
+	readonly wasCapped: boolean;
+}
+
+// Every tenant lists the same `staging/` prefix, and a staging key does not
+// contain the tenant. Only the push ID's HMAC shows which tenant staged the
+// object, so this tenant deletes only keys under its own push IDs. Expiry
+// does not matter: an expired push ID still belongs to its tenant.
+class StagingKeyOwnership {
+	private issuer: PushCredentialIssuer | undefined;
+	private readonly owned = new Map<PushId, Promise<boolean>>();
+
+	constructor(private readonly resolveIssuer: () => PushCredentialIssuer) {}
+
+	isOwn(key: string): Promise<boolean> {
+		const segment = stagingKeyPushSegment(key);
+		const pushId =
+			segment === undefined ? undefined : wellFormedPushId(segment);
+
+		if (pushId === undefined) {
+			return Promise.resolve(false);
+		}
+
+		const known = this.owned.get(pushId);
+
+		if (known !== undefined) {
+			return known;
+		}
+
+		this.issuer ??= this.resolveIssuer();
+		const owned = this.issuer.isIssuedToTenant(pushId);
+		this.owned.set(pushId, owned);
+
+		return owned;
+	}
+}
 
 import { CacheClosureService } from './cache-closure-service.ts';
 
@@ -1172,21 +1221,49 @@ export class GarbageCollectionService {
 		return !tracked.has(object.key) && object.uploaded.getTime() < orphanBefore;
 	}
 
-	// List staging objects until the object or page cap is reached. Load tracked
-	// rows only after finding an object, so an empty staging prefix reads no rows.
-	// Later passes and the lifecycle rule handle the remainder.
+	private async orphanStagingResumeKey(): Promise<string | undefined> {
+		const stored = await this.context.ctx.storage.get(
+			orphanStagingResumeStorageKey
+		);
+
+		return typeof stored === 'string' ? stored : undefined;
+	}
+
+	private async saveOrphanStagingResumeKey(
+		resumeAfter: string | undefined
+	): Promise<void> {
+		if (resumeAfter === undefined) {
+			await this.context.ctx.storage.delete(orphanStagingResumeStorageKey);
+			return;
+		}
+
+		await this.context.ctx.storage.put(
+			orphanStagingResumeStorageKey,
+			resumeAfter
+		);
+	}
+
+	// List staging objects from the stored resume key until the object or page
+	// cap is reached. Load tracked rows only after finding an object, so an empty
+	// staging prefix reads no rows. Later passes and the lifecycle rule handle
+	// the remainder.
 	private async collectOrphanStagingKeys(
 		orphanBefore: number
-	): Promise<{ keys: R2ObjectKey[]; wasCapped: boolean }> {
+	): Promise<OrphanStagingScan> {
 		const keys: R2ObjectKey[] = [];
+		const ownership = new StagingKeyOwnership(() =>
+			this.context.pushCredentials()
+		);
+		const startAfter = await this.orphanStagingResumeKey();
+		let resumeAfter = startAfter;
 		let cursor: string | undefined;
 		let pages = 0;
 
 		do {
 			const listed = await this.context.env.BLOBS.list({
 				prefix: stagingPrefix,
-				cursor,
-				limit: orphanListPageSize
+				limit: orphanListPageSize,
+				...(cursor === undefined ? { startAfter } : { cursor })
 			});
 			pages += 1;
 			const tracked = this.trackedStagingKeys(
@@ -1195,22 +1272,27 @@ export class GarbageCollectionService {
 
 			for (const object of listed.objects) {
 				if (keys.length >= maxOrphanReclaim) {
-					return { keys, wasCapped: true };
+					return { keys, resumeAfter, wasCapped: true };
 				}
 
-				if (this.isReclaimableOrphan(object, tracked, orphanBefore)) {
+				if (
+					this.isReclaimableOrphan(object, tracked, orphanBefore) &&
+					(await ownership.isOwn(object.key))
+				) {
 					keys.push(r2ObjectKeySchema.parse(object.key));
 				}
+
+				resumeAfter = object.key;
 			}
 
 			cursor = listed.truncated ? listed.cursor : undefined;
 
 			if (cursor !== undefined && pages === maxOrphanListPages) {
-				return { keys, wasCapped: true };
+				return { keys, resumeAfter, wasCapped: true };
 			}
 		} while (cursor !== undefined);
 
-		return { keys, wasCapped: false };
+		return { keys, resumeAfter: undefined, wasCapped: false };
 	}
 
 	private async reclaimOrphanStaging(
@@ -1218,13 +1300,35 @@ export class GarbageCollectionService {
 		now: Date
 	): Promise<number> {
 		const orphanBefore = now.getTime() - orphanStagingGraceMs;
-		const { keys, wasCapped } =
-			await this.collectOrphanStagingKeys(orphanBefore);
+		let scan: OrphanStagingScan;
+
+		try {
+			scan = await this.collectOrphanStagingKeys(orphanBefore);
+		} catch (error) {
+			if (
+				!(error instanceof TenantNotConfiguredError) &&
+				!(error instanceof PushIdSigningKeyMissingError)
+			) {
+				throw error;
+			}
+
+			// Without the issuer, the scan cannot tell which keys belong to this
+			// tenant. Skip the scan so the rest of the pass still completes. The R2
+			// lifecycle rule deletes the keys a day after they are written.
+			logger.warn('orphan staging scan cannot check push ID ownership', {
+				error
+			});
+
+			return 0;
+		}
+
+		const { keys, resumeAfter, wasCapped } = scan;
 
 		await deleteObjects(this.context.env.BLOBS, keys);
+		await this.saveOrphanStagingResumeKey(resumeAfter);
 
 		if (wasCapped) {
-			logger.warn('orphan staging scan hit the per-run cap', {
+			logger.debug('orphan staging scan hit the per-run cap', {
 				reclaimed: keys.length
 			});
 		}

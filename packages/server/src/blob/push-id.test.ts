@@ -1,13 +1,17 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { pushIdSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import {
 	createPushId,
+	importPushIdKey,
+	isPushIdIssuedTo,
 	isPushIdValid,
 	issuePushId,
 	pushIdExpiresAtSeconds,
 	pushIdNonceSchema,
-	pushIdSigningKeySchema
+	pushIdSigningKeySchema,
+	wellFormedPushId
 } from './push-id.ts';
 
 const secret = pushIdSigningKeySchema.parse('parent-secret');
@@ -103,6 +107,55 @@ describe('push IDs', () => {
 			tooShort: false,
 			notHex: false
 		});
+	});
+
+	it('attributes an expired ID to its tenant and rejects tampering, a wrong signing key, other tenants and malformed IDs', async () => {
+		const key = await importPushIdKey(secret);
+		const otherKey = await importPushIdKey(
+			pushIdSigningKeySchema.parse('other-secret')
+		);
+		const expired = await issuePushId(secret, tenant, 0, nonce);
+		const tamperedTag = pushIdSchema.parse(
+			`${expired.slice(0, -1)}${expired.at(-1) === '0' ? '1' : '0'}`
+		);
+		const tooShort = pushIdSchema.parse(expired.slice(0, -1));
+		const notHex = pushIdSchema.parse(`Z${expired.slice(1)}`);
+
+		expect({
+			expired: await isPushIdIssuedTo(key, expired, tenant),
+			tamperedTag: await isPushIdIssuedTo(key, tamperedTag, tenant),
+			wrongSecret: await isPushIdIssuedTo(otherKey, expired, tenant),
+			wrongTenant: await isPushIdIssuedTo(
+				key,
+				expired,
+				tenantIdSchema.parse('beta')
+			),
+			tooShort: await isPushIdIssuedTo(key, tooShort, tenant),
+			notHex: await isPushIdIssuedTo(key, notHex, tenant)
+		}).toStrictEqual({
+			expired: true,
+			tamperedTag: false,
+			wrongSecret: false,
+			wrongTenant: false,
+			tooShort: false,
+			notHex: false
+		});
+	});
+
+	it.each([
+		{ name: 'the v2 layout', value: 'a'.repeat(104), isPushId: true },
+		{ name: 'a legacy path segment', value: 'attestations', isPushId: false },
+		{ name: 'a short value', value: 'a'.repeat(103), isPushId: false },
+		{ name: 'uppercase hexadecimal', value: 'A'.repeat(104), isPushId: false },
+		{
+			name: 'a non-hexadecimal character',
+			value: `${'a'.repeat(103)}-`,
+			isPushId: false
+		}
+	])('accepts only the v2 push ID layout: $name', ({ value, isPushId }) => {
+		expect(wellFormedPushId(value)).toBe(
+			isPushId ? pushIdSchema.parse(value) : undefined
+		);
 	});
 
 	it('issues random, individually verifiable IDs', async () => {

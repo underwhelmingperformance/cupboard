@@ -3,7 +3,8 @@ import { startCapture } from '@cupboard/logger/testing';
 import {
 	nixSha256HashSchema,
 	sha256HexDigestSchema,
-	storePathHashSchema
+	storePathHashSchema,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
@@ -12,24 +13,39 @@ import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as schema from '../db/schema.ts';
-import { r2ObjectKeySchema } from '../http/http.ts';
+import {
+	PushIdSigningKeyMissingError,
+	TenantNotConfiguredError
+} from '../errors.ts';
+import {
+	attestationStagingObjectKey,
+	r2ObjectKeySchema,
+	stagingObjectKey,
+	stagingPushPrefix
+} from '../http/http.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,
 	clearBlobStorage,
 	currentServer,
+	garbageCollectionOf,
 	initialise,
 	negotiateUploads,
+	provisionNamedTenant,
 	resetTestServer,
 	resolvedCache,
 	runGcResult,
+	syntheticNarHash,
+	testPushId,
+	testPushIdFor,
+	testServerFor,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
 
-import {
-	GarbageCollectionService,
-	maxOrphanListPages
-} from './garbage-collection-service.ts';
+import { type GarbageCollectionOutcome } from './context.ts';
+import { maxOrphanListPages } from './garbage-collection-service.ts';
+import { type CupboardServer } from './server.ts';
 
 // A push credential is scoped to `staging/<pushId>/`, so a client may write keys
 // beneath it that it never negotiated. The negotiated keys have pending rows the
@@ -50,6 +66,98 @@ async function realUploadInstant(): Promise<number> {
 	}
 
 	return head.uploaded.getTime();
+}
+
+interface CollectionPass {
+	readonly outcome: GarbageCollectionOutcome;
+	readonly issuerResolutions: number;
+}
+
+interface CollectionOptions {
+	readonly wrapBlobs?: (blobs: R2Bucket) => R2Bucket;
+	readonly issuerError?: Error;
+}
+
+async function collectGarbageIn(
+	stub: DurableObjectStub<CupboardServer>,
+	{ wrapBlobs = (blobs) => blobs, issuerError }: CollectionOptions = {}
+): Promise<CollectionPass> {
+	return runInDurableObject(stub, async (instance) => {
+		const original = instance.context.env;
+		instance.context.env = { ...original, BLOBS: wrapBlobs(original.BLOBS) };
+		const pushCredentials = vi.spyOn(instance.context, 'pushCredentials');
+
+		if (issuerError !== undefined) {
+			pushCredentials.mockImplementation(() => {
+				throw issuerError;
+			});
+		}
+
+		try {
+			const outcome = await asOneInvocation(() =>
+				garbageCollectionOf(instance).collectGarbage(rootLogger(), {
+					scope: 'tenant'
+				})
+			);
+
+			return { outcome, issuerResolutions: pushCredentials.mock.calls.length };
+		} finally {
+			pushCredentials.mockRestore();
+			instance.context.env = original;
+		}
+	});
+}
+
+async function presentKeys(keys: readonly string[]): Promise<string[]> {
+	const present: string[] = [];
+
+	for (const key of keys) {
+		if ((await env.BLOBS.head(key)) !== null) {
+			present.push(key);
+		}
+	}
+
+	return present;
+}
+
+interface ListingPass {
+	startAfter: string | undefined;
+	readonly listed: string[];
+}
+
+// Lists one key per page so a pass reaches its page limit after
+// `maxOrphanListPages` keys. Records the keys that the pass listed and the
+// `startAfter` of its first request.
+function recordingOnePerPage(target: R2Bucket, pass: ListingPass): R2Bucket {
+	let isFirstCall = true;
+
+	return new Proxy(target, {
+		get(bucketTarget, property) {
+			if (property === 'list') {
+				return async (options?: R2ListOptions) => {
+					if (isFirstCall) {
+						pass.startAfter = options?.startAfter;
+						isFirstCall = false;
+					}
+
+					const listed = await bucketTarget.list({ ...options, limit: 1 });
+					pass.listed.push(...listed.objects.map((object) => object.key));
+
+					return listed;
+				};
+			}
+
+			const value: unknown = Reflect.get(bucketTarget, property, bucketTarget);
+
+			if (typeof value !== 'function') {
+				return value;
+			}
+
+			const bound: unknown = value.bind(bucketTarget);
+
+			return bound;
+		}
+	});
 }
 
 describe('orphan staging reconciliation', () => {
@@ -109,7 +217,7 @@ describe('orphan staging reconciliation', () => {
 			{
 				kind: 'nar',
 				id: uploadIdSchema.parse('current-nar'),
-				key: r2ObjectKeySchema.parse('staging/current-push/current-nar.nar.zst')
+				key: stagingObjectKey(testPushId, uploadIdSchema.parse('current-nar'))
 			},
 			{
 				kind: 'attestation',
@@ -121,8 +229,9 @@ describe('orphan staging reconciliation', () => {
 			{
 				kind: 'attestation',
 				id: uploadIdSchema.parse('current-attestation'),
-				key: r2ObjectKeySchema.parse(
-					'staging/current-push/attestations/current-attestation'
+				key: attestationStagingObjectKey(
+					testPushId,
+					uploadIdSchema.parse('current-attestation')
 				)
 			}
 		] as const;
@@ -199,7 +308,10 @@ describe('orphan staging reconciliation', () => {
 		const realNow = await realUploadInstant();
 		vi.setSystemTime(new Date(realNow + 60_000));
 
-		const orphanKey = 'staging/recent-push/recent.nar.zst';
+		const orphanKey = stagingObjectKey(
+			testPushId,
+			uploadIdSchema.parse('recent')
+		);
 		await env.BLOBS.put(orphanKey, new Uint8Array([1, 2, 3]));
 
 		const result = await runGcResult();
@@ -249,14 +361,10 @@ describe('orphan staging reconciliation', () => {
 				};
 
 				try {
-					const garbageCollection = (
-						instance as unknown as {
-							garbageCollection: GarbageCollectionService;
-						}
-					).garbageCollection;
-
 					return await asOneInvocation(() =>
-						garbageCollection.collectGarbage(rootLogger(), { scope: 'tenant' })
+						garbageCollectionOf(instance).collectGarbage(rootLogger(), {
+							scope: 'tenant'
+						})
 					);
 				} finally {
 					instance.context.env = original;
@@ -351,13 +459,11 @@ describe('orphan staging reconciliation', () => {
 		const realNow = await realUploadInstant();
 		vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
 
+		const keys = Array.from({ length: total }, (_unused, index) =>
+			stagingObjectKey(testPushId, uploadIdSchema.parse(String(index)))
+		);
 		await Promise.all(
-			Array.from({ length: total }, (_unused, index) =>
-				env.BLOBS.put(
-					`staging/flood/${String(index)}.nar.zst`,
-					new Uint8Array([1])
-				)
-			)
+			keys.map((key) => env.BLOBS.put(key, new Uint8Array([1])))
 		);
 
 		const capture = startCapture();
@@ -369,18 +475,264 @@ describe('orphan staging reconciliation', () => {
 			capture.stop();
 		}
 
-		const remaining = await env.BLOBS.list({ prefix: 'staging/flood/' });
+		const remaining = await env.BLOBS.list({
+			prefix: stagingPushPrefix(testPushId)
+		});
+		const nextResult = await runGcResult();
+		const remainingAfterNext = await env.BLOBS.list({
+			prefix: stagingPushPrefix(testPushId)
+		});
 
 		expect({
 			orphanStagingDeleted: result.orphanStagingDeleted,
 			remaining: remaining.objects.length,
-			warnedAboutCap: capture.logs.some(
-				(entry) => entry.message === 'orphan staging scan hit the per-run cap'
-			)
+			next: {
+				orphanStagingDeleted: nextResult.orphanStagingDeleted,
+				remaining: remainingAfterNext.objects.length
+			},
+			capLogs: capture.logs
+				.filter(
+					(entry) => entry.message === 'orphan staging scan hit the per-run cap'
+				)
+				.map((entry) => ({ level: entry.level, properties: entry.properties }))
 		}).toStrictEqual({
 			orphanStagingDeleted: perRunCap,
 			remaining: total - perRunCap,
-			warnedAboutCap: true
+			next: { orphanStagingDeleted: total - perRunCap, remaining: 0 },
+			capLogs: [
+				{
+					level: 'debug',
+					properties: {
+						job: 'garbage-collection',
+						method: 'POST',
+						path: '/gc',
+						reclaimed: perRunCap
+					}
+				}
+			]
 		});
 	});
+
+	it("reclaims only the orphans under its own tenant's push IDs", async () => {
+		const otherTenant = tenantIdSchema.parse('orphan-staging-other');
+		await provisionNamedTenant(otherTenant);
+		const ownPushId = await testPushIdFor(fixtureTenant);
+		const otherPushId = await testPushIdFor(otherTenant);
+		const uploadId = uploadIdSchema.parse('untracked');
+		const ownKeys = [
+			stagingObjectKey(ownPushId, uploadId),
+			attestationStagingObjectKey(ownPushId, uploadId)
+		];
+		const otherKeys = [
+			stagingObjectKey(otherPushId, uploadId),
+			attestationStagingObjectKey(otherPushId, uploadId)
+		];
+		const realNow = await realUploadInstant();
+		await Promise.all(
+			[...ownKeys, ...otherKeys].map((key) =>
+				env.BLOBS.put(key, new Uint8Array([1, 2, 3]))
+			)
+		);
+		vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
+
+		const ownPass = await collectGarbageIn(currentServer());
+		const afterOwnPass = await presentKeys([...ownKeys, ...otherKeys]);
+		const otherPass = await collectGarbageIn(testServerFor(otherTenant));
+		const afterOtherPass = await presentKeys([...ownKeys, ...otherKeys]);
+
+		expect({
+			ownPass: {
+				orphanStagingDeleted: ownPass.outcome.orphanStagingDeleted,
+				issuerResolutions: ownPass.issuerResolutions,
+				present: afterOwnPass
+			},
+			otherPass: {
+				orphanStagingDeleted: otherPass.outcome.orphanStagingDeleted,
+				issuerResolutions: otherPass.issuerResolutions,
+				present: afterOtherPass
+			}
+		}).toStrictEqual({
+			ownPass: {
+				orphanStagingDeleted: 2,
+				issuerResolutions: 1,
+				present: otherKeys
+			},
+			otherPass: {
+				orphanStagingDeleted: 2,
+				issuerResolutions: 1,
+				present: []
+			}
+		});
+	});
+
+	it('spares staging keys whose first segment is not a push ID', async () => {
+		const legacyKeys = [
+			'staging/legacy-upload.nar.zst',
+			'staging/attestations/legacy-attestation'
+		];
+		const realNow = await realUploadInstant();
+		await Promise.all(
+			legacyKeys.map((key) => env.BLOBS.put(key, new Uint8Array([1, 2, 3])))
+		);
+		vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
+
+		const pass = await collectGarbageIn(currentServer());
+
+		expect({
+			orphanStagingDeleted: pass.outcome.orphanStagingDeleted,
+			issuerResolutions: pass.issuerResolutions,
+			present: await presentKeys(legacyKeys)
+		}).toStrictEqual({
+			orphanStagingDeleted: 0,
+			issuerResolutions: 0,
+			present: legacyKeys
+		});
+	});
+
+	it('reclaims an orphan under its own push ID after the push ID expires', async () => {
+		const expiredPushId = await testPushIdFor(fixtureTenant, 1, 1);
+		const uploadId = uploadIdSchema.parse('untracked');
+		const keys = [
+			stagingObjectKey(expiredPushId, uploadId),
+			attestationStagingObjectKey(expiredPushId, uploadId)
+		];
+		const realNow = await realUploadInstant();
+		await Promise.all(
+			keys.map((key) => env.BLOBS.put(key, new Uint8Array([1, 2, 3])))
+		);
+		vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
+
+		const pass = await collectGarbageIn(currentServer());
+
+		expect({
+			orphanStagingDeleted: pass.outcome.orphanStagingDeleted,
+			present: await presentKeys(keys)
+		}).toStrictEqual({ orphanStagingDeleted: 2, present: [] });
+	});
+
+	it('resumes the listing after the last examined key and restarts from the beginning after the end', async () => {
+		const keys = Array.from(
+			{ length: maxOrphanListPages + 2 },
+			(_unused, index) =>
+				stagingObjectKey(
+					testPushId,
+					uploadIdSchema.parse(`young-${String(index)}`)
+				)
+		);
+		const realNow = await realUploadInstant();
+		await Promise.all(
+			keys.map((key) => env.BLOBS.put(key, new Uint8Array([1])))
+		);
+		vi.setSystemTime(new Date(realNow + 60_000));
+
+		const passes: ListingPass[] = [];
+
+		for (let index = 0; index < 3; index += 1) {
+			const pass: ListingPass = { startAfter: undefined, listed: [] };
+			await collectGarbageIn(currentServer(), {
+				wrapBlobs: (blobs) => recordingOnePerPage(blobs, pass)
+			});
+			passes.push(pass);
+		}
+
+		const firstPassKeys = keys.slice(0, maxOrphanListPages);
+
+		expect(passes).toStrictEqual([
+			{ startAfter: undefined, listed: firstPassKeys },
+			{
+				startAfter: firstPassKeys.at(-1),
+				listed: keys.slice(maxOrphanListPages)
+			},
+			{ startAfter: undefined, listed: firstPassKeys }
+		]);
+	});
+
+	it.each([
+		{
+			name: 'TenantNotConfiguredError',
+			issuerError: new TenantNotConfiguredError()
+		},
+		{
+			name: 'PushIdSigningKeyMissingError',
+			issuerError: new PushIdSigningKeyMissingError()
+		}
+	])(
+		'finishes the pass without deleting orphans when the issuer fails with $name',
+		async ({ issuerError }) => {
+			const realNow = await realUploadInstant();
+			await initialise();
+			const reapedId = uploadIdSchema.parse('reaped-upload');
+			const reapedKey = stagingObjectKey(testPushId, reapedId);
+			const orphanKeys = [
+				stagingObjectKey(
+					await testPushIdFor(fixtureTenant, 1),
+					uploadIdSchema.parse('untracked')
+				),
+				stagingObjectKey(
+					await testPushIdFor(fixtureTenant, 2),
+					uploadIdSchema.parse('untracked')
+				)
+			];
+			await Promise.all(
+				[reapedKey, ...orphanKeys].map((key) =>
+					env.BLOBS.put(key, new Uint8Array([1, 2, 3]))
+				)
+			);
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.insert(schema.pendingUploads)
+					.values({
+						id: reapedId,
+						cacheId: resolvedCache(instance.context).id,
+						narHash: syntheticNarHash(1),
+						r2Key: reapedKey,
+						metadataJson: '{}',
+						createdAt: isoTimestampSchema.parse('1970-01-01T00:00:00.000Z'),
+						expiresAt: isoTimestampSchema.parse('1970-01-01T00:00:00.000Z')
+					})
+					.run();
+			});
+			vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
+
+			const capture = startCapture();
+			let pass: CollectionPass;
+
+			try {
+				pass = await collectGarbageIn(currentServer(), { issuerError });
+			} finally {
+				capture.stop();
+			}
+
+			expect({
+				outcome: pass.outcome,
+				issuerResolutions: pass.issuerResolutions,
+				present: await presentKeys([reapedKey, ...orphanKeys]),
+				warnings: capture.logs
+					.filter((entry) => entry.level === 'warning')
+					.map((entry) => ({
+						message: entry.message,
+						properties: entry.properties
+					}))
+			}).toStrictEqual({
+				outcome: {
+					pendingUploadsDeleted: 1,
+					pendingAttestationsDeleted: 0,
+					rootsExpired: 0,
+					pathsCollected: 0,
+					hasMoreExpiredRoots: false,
+					hasMoreWork: false,
+					narInfosDeleted: 0,
+					orphanStagingDeleted: 0
+				},
+				issuerResolutions: 1,
+				present: orphanKeys,
+				warnings: [
+					{
+						message: 'orphan staging scan cannot check push ID ownership',
+						properties: { job: 'garbage-collection', error: issuerError }
+					}
+				]
+			});
+		}
+	);
 });

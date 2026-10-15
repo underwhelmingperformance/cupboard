@@ -322,6 +322,22 @@ The deploy sets an R2 lifecycle rule on the `staging/` prefix. It deletes
 anything there a day after it's written, and aborts multipart uploads there that
 are still incomplete after a day.
 
+A push credential can write any key below `staging/<pushId>/`, so a client can
+leave objects that no pending row tracks. Each tenant's garbage-collection pass
+reconciles these orphan objects. It deletes an object when no pending row tracks
+it, it is more than 15 minutes old, and its push ID verifies for the tenant.
+Staging keys don't contain the tenant, but the push ID's HMAC covers it, so one
+tenant's pass never deletes another tenant's staged objects. A push ID that has
+expired still verifies for this check. Keys whose first segment is not a push
+ID, such as `staging/<name>.nar.zst` and `staging/attestations/<id>` from
+earlier releases, are left to the lifecycle rule. If the tenant identity or
+`PUSH_ID_SIGNING_KEY` is missing, the pass skips the scan and logs a warning.
+
+One pass lists at most six pages of 1,000 keys and deletes at most 1,000
+objects. It stores the last key that it examined, and the next pass lists from
+the key after it. A pass that reaches the end of the prefix clears the stored
+key, so the next pass starts again from the beginning.
+
 Orphan staging reconciliation and the lifecycle rule also remove late writes
 from upload requests that were already in progress when the cache was deleted.
 

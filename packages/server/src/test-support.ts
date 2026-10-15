@@ -159,6 +159,7 @@ import {
 import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
 import { CacheRegistrationService } from './do/cache-registration-service.ts';
 import type { ServerContext } from './do/context.ts';
+import type { GarbageCollectionService } from './do/garbage-collection-service.ts';
 import { jsonValueLists } from './do/json-list.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import { applyMigrations, migrationsThrough } from './do/migrate.ts';
@@ -645,6 +646,18 @@ The Durable Object stub the harness is currently targeting.
 */
 export function currentServer(): DurableObjectStub<CupboardServer> {
 	return harness.server;
+}
+
+/**
+Returns the Durable Object's own garbage-collection service, which is a private
+field of `CupboardServer`.
+*/
+export function garbageCollectionOf(
+	instance: CupboardServer
+): GarbageCollectionService {
+	return (
+		instance as unknown as { garbageCollection: GarbageCollectionService }
+	).garbageCollection;
 }
 
 /**
@@ -2511,12 +2524,13 @@ const testPushIdSigningKey = pushIdSigningKeySchema.parse(
 // tenant.
 export async function testPushIdFor(
 	tenant: string,
-	nonceFill = 0
+	nonceFill = 0,
+	expiresAtSeconds = 0xff_ff_ff_ff
 ): Promise<PushId> {
 	return issuePushId(
 		testPushIdSigningKey,
 		tenantIdSchema.parse(tenant),
-		0xff_ff_ff_ff,
+		expiresAtSeconds,
 		pushIdNonceSchema.parse(new Uint8Array(16).fill(nonceFill))
 	);
 }

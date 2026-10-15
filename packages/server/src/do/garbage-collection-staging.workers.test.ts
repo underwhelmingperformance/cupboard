@@ -97,7 +97,10 @@ describe('garbage collection best-effort staging deletes', () => {
 			testPushId,
 			uploadIdSchema.parse('reaped-upload')
 		);
-		const orphanKey = 'staging/orphan-push/orphan.nar.zst';
+		const orphanKey = stagingObjectKey(
+			testPushId,
+			uploadIdSchema.parse('orphan-upload')
+		);
 		await env.BLOBS.put(orphanKey, new Uint8Array([1, 2, 3]));
 
 		// Advance from R2's timestamp so the orphan is older than the upload grace.

@@ -15,6 +15,8 @@ import { stagingPushPrefix } from '../http/http.ts';
 import type { R2PresignerConfiguration } from './presign.ts';
 import {
 	createPushId,
+	importPushIdKey,
+	isPushIdIssuedTo,
 	isPushIdValid,
 	pushIdExpiresAtSeconds,
 	type PushIdSigningKey,
@@ -73,6 +75,8 @@ export function pushIdSigningKey(env: PushIdSigningEnv): PushIdSigningKey {
  * storing per-push state.
  */
 export class PushCredentialIssuer {
+	private hmacKey: Promise<CryptoKey> | undefined;
+
 	// Read the R2 configuration only when issuing a credential. Negotiation can
 	// then verify a push ID when R2 credentials are not configured.
 	constructor(
@@ -128,5 +132,11 @@ export class PushCredentialIssuer {
 
 	verify(pushId: PushId, now = new Date()): Promise<boolean> {
 		return isPushIdValid(this.signingKey, pushId, this.tenant, now);
+	}
+
+	async isIssuedToTenant(pushId: PushId): Promise<boolean> {
+		this.hmacKey ??= importPushIdKey(this.signingKey);
+
+		return isPushIdIssuedTo(await this.hmacKey, pushId, this.tenant);
 	}
 }

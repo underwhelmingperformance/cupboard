@@ -176,6 +176,26 @@ export function stagingPushPrefix(pushId: PushId): string {
 	return `${stagingPrefix}${pushId}/`;
 }
 
+/**
+ * The first path segment below `staging/` when another segment follows it. In
+ * the current layouts this segment is the push ID. A key in the layout
+ * `staging/<name>.nar.zst` has no such segment.
+ */
+export function stagingKeyPushSegment(key: string): string | undefined {
+	if (!key.startsWith(stagingPrefix)) {
+		return undefined;
+	}
+
+	const rest = key.slice(stagingPrefix.length);
+	const end = rest.indexOf('/');
+
+	if (end === -1) {
+		return undefined;
+	}
+
+	return rest.slice(0, end);
+}
+
 export function attestationStagingObjectKey(
 	pushId: PushId,
 	uploadId: UploadId

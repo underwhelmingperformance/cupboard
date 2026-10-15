@@ -1,6 +1,6 @@
 import { tenantIdSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { pushIdSchema } from '@cupboard/protocol/upload';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { InvalidPushIdError } from '../errors.ts';
 
@@ -9,7 +9,7 @@ import {
 	PushCredentialIssuer,
 	pushCredentialTtlSeconds
 } from './push-credential.ts';
-import { pushIdSigningKeySchema } from './push-id.ts';
+import { createPushId, pushIdSigningKeySchema } from './push-id.ts';
 
 const now = new Date('2026-06-29T12:00:00.000Z');
 const maxTtlSeconds = ttlSecondsSchema.parse(6 * 60 * 60);
@@ -133,6 +133,35 @@ describe('PushCredentialIssuer', () => {
 				exp: Math.floor(renewedAt.getTime() / 1000) + renewedTtl
 			}
 		});
+	});
+
+	it('imports the HMAC key once for all of its ownership checks', async () => {
+		const signingKey = pushIdSigningKeySchema.parse('signing-key');
+		const tenant = tenantIdSchema.parse('acme');
+		const pushIds = await Promise.all(
+			[1, 2, 3].map(() => createPushId(signingKey, tenant, issuedAt + 600))
+		);
+		const ownershipIssuer = new PushCredentialIssuer(
+			() => configuration,
+			signingKey,
+			tenant
+		);
+		const importKey = vi.spyOn(crypto.subtle, 'importKey');
+
+		try {
+			const owned: boolean[] = [];
+
+			for (const pushId of pushIds) {
+				owned.push(await ownershipIssuer.isIssuedToTenant(pushId));
+			}
+
+			expect({ owned, imports: importKey.mock.calls.length }).toStrictEqual({
+				owned: [true, true, true],
+				imports: 1
+			});
+		} finally {
+			importKey.mockRestore();
+		}
 	});
 
 	it('bounds renewal by the push lifetime as well as the current access token', async () => {

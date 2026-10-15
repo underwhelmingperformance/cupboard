@@ -23,8 +23,24 @@ const pushIdLength = (nonceByteLength + expiryByteLength + hmacByteLength) * 2;
 
 const textEncoder = new TextEncoder();
 
+function hasPushIdLayout(value: string): boolean {
+	return value.length === pushIdLength && /^[0-9a-f]+$/u.test(value);
+}
+
+/**
+ * The value as a push ID when it has the length and lowercase hexadecimal
+ * layout that `issuePushId` produces.
+ */
+export function wellFormedPushId(value: string): PushId | undefined {
+	if (!hasPushIdLayout(value)) {
+		return undefined;
+	}
+
+	return pushIdSchema.parse(value);
+}
+
 export function pushIdExpiresAtSeconds(pushId: string): number | undefined {
-	if (pushId.length !== pushIdLength || !/^[0-9a-f]+$/u.test(pushId)) {
+	if (!hasPushIdLayout(pushId)) {
 		return undefined;
 	}
 
@@ -41,7 +57,9 @@ function toHex(bytes: Uint8Array): string {
 	);
 }
 
-async function hmacKey(secret: PushIdSigningKey): Promise<CryptoKey> {
+export async function importPushIdKey(
+	secret: PushIdSigningKey
+): Promise<CryptoKey> {
 	return crypto.subtle.importKey(
 		'raw',
 		textEncoder.encode(secret),
@@ -97,7 +115,7 @@ export async function issuePushId(
 
 	return pushIdSchema.parse(
 		`${nonceHex}${expiryHex}${await tagFor(
-			await hmacKey(secret),
+			await importPushIdKey(secret),
 			tenant,
 			expiryHex,
 			nonceHex
@@ -137,17 +155,36 @@ export async function isPushIdValid(
 		return false;
 	}
 
+	return hasTenantTag(await importPushIdKey(secret), pushId, tenant);
+}
+
+/**
+ * Whether the push ID is authentic and belongs to the tenant, whether or not it
+ * has expired. `key` comes from `importPushIdKey`.
+ */
+export async function isPushIdIssuedTo(
+	key: CryptoKey,
+	pushId: PushId,
+	tenant: TenantId
+): Promise<boolean> {
+	return hasTenantTag(key, pushId, tenant);
+}
+
+async function hasTenantTag(
+	key: CryptoKey,
+	pushId: string,
+	tenant: TenantId
+): Promise<boolean> {
+	if (pushIdExpiresAtSeconds(pushId) === undefined) {
+		return false;
+	}
+
 	const nonceHex = pushId.slice(0, nonceByteLength * 2);
 	const expiryStart = nonceByteLength * 2;
 	const tagStart = expiryStart + expiryByteLength * 2;
 	const expiryHex = pushId.slice(expiryStart, tagStart);
 	const providedTag = pushId.slice(tagStart);
-	const expectedTag = await tagFor(
-		await hmacKey(secret),
-		tenant,
-		expiryHex,
-		nonceHex
-	);
+	const expectedTag = await tagFor(key, tenant, expiryHex, nonceHex);
 
 	return isConstantTimeEqual(providedTag, expectedTag, hmacByteLength * 2);
 }
