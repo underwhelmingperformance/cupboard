@@ -7244,8 +7244,8 @@ build traces available from a cupboard cache.
       tasks with the event cursor, and enter processing only after replay ends.
       Repaired sources refresh existing tasks without recounting them. Expired
       windows and predecessor jobs without a window restart historical discovery
-      from a current capture position. Forward dispatch and global execution
-      remain pending.
+      from a current capture position. Forward dispatch, global queue dispatch
+      and cache adoption remain pending.
 - [ ] Use D1 job and task records with expiring claims, source-incarnation
       fences and resumable staging cleanup. Queue messages are wake-up hints;
       persisted state decides whether work can run and complete. Staging RPCs
@@ -7337,8 +7337,16 @@ build traces available from a cupboard cache.
       resource limits produce distinct skipped outcomes. Deadline, cancellation
       and expiry tests prevent publication, and CAS repair preserves the logical
       reference. Spans record actual NAR/revision identity, job/task generations
-      and outcomes. Global queue dispatch, cache adoption projections, shared
-      completion wakes and producer activation remain pending.
+      and outcomes. A separate delivery projection now reserves bounded task
+      hints before sending. Reservations leave actual execution claims unchanged
+      and move selected hints out of the ready page until their retry deadline.
+      Task mutations capture delivery state transactionally, including writes
+      from preceding Workers. Scheduling epochs reject stale selections even
+      when a ready time returns to its previous value. Cancellation and resume
+      fence old job generations. The additive migration does not scan existing
+      tasks. Bounded legacy seeding, fair global job scheduling, queue routing,
+      cache adoption projections, shared completion wakes and producer
+      activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

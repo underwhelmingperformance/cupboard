@@ -32,6 +32,7 @@ export {
 	sharedListingOutputReference,
 	sharedListingStage,
 	sharedListingTask,
+	sharedListingTaskDelivery,
 	sharedListingTaskOutcome,
 	tenant,
 	tenantBlob,

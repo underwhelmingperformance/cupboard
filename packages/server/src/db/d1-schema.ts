@@ -1285,6 +1285,49 @@ export const sharedListingTask = sqliteTable(
 	]
 );
 
+export const sharedListingTaskDelivery = sqliteTable(
+	'shared_listing_task_delivery',
+	{
+		taskId: text('task_id').$type<ArtifactTaskId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		state: text('state', { enum: ['pending', 'running'] }).notNull(),
+		epoch: text('epoch')
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		nextAt: text('next_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('shared_listing_task_delivery_due_idx').on(
+			table.jobId,
+			table.state,
+			table.nextAt,
+			table.taskId
+		),
+		index('shared_listing_task_delivery_generation_idx').on(
+			table.jobId,
+			table.state,
+			table.jobGeneration,
+			table.nextAt,
+			table.taskId
+		),
+		check(
+			'shared_listing_task_delivery_generation_check',
+			sql`typeof(${table.jobGeneration}) = 'integer' AND ${table.jobGeneration} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_task_delivery_state_check',
+			sql`${table.state} IN ('pending', 'running')`
+		),
+		check(
+			'shared_listing_task_delivery_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		)
+	]
+);
+
 export const sharedListingTaskOutcome = sqliteTable(
 	'shared_listing_task_outcome',
 	{

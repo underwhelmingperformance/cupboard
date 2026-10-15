@@ -110,6 +110,18 @@ extending its deadline. Cancellation revokes execution ownership. Resume and
 source repair allow immediate replacement claims without waiting for the old
 lease to expire. Claims grant no cache authority or physical retention.
 
+Global delivery reservations are separate from execution claims. A D1 projection
+records pending ready times and running lease deadlines. Task triggers update
+that projection transactionally for current and preceding writers, and terminal
+tasks remove their delivery metadata. Each pass reads bounded indexed candidate
+pages and reserves at most eight hints. A scheduling epoch fences intervening
+changes, including a ready time that changes and then returns to its previous
+value. Reservations postpone duplicate hints for sixty seconds without changing
+task ownership. Expired reservations recover lost sends or replies. Resume
+permits immediate redelivery of superseded running tasks while preserving
+pending retry deadlines. The additive migration does not scan existing tasks;
+bounded legacy seeding and global job scheduling remain integration work.
+
 An append-only capture sequence records retained, registered live NAR sources.
 Indexed triggers append an event when the first reference arrives or a retained
 source becomes available after metadata registration or repair. The event and

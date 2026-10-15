@@ -129,7 +129,8 @@ describe('checkD1Migrations', () => {
 				'shared-listing-staging',
 				'shared-listing-output-retention',
 				'shared-listing-output-retirement',
-				'shared-listing-completion'
+				'shared-listing-completion',
+				'shared-listing-task-delivery'
 			]
 		});
 	});
