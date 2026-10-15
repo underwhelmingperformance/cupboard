@@ -7283,8 +7283,12 @@ build traces available from a cupboard cache.
       candidates. Claims, renewal and deferral check job generation and captured
       source metadata. Cancellation revokes ownership; resume and source repair
       permit immediate replacement claims. Lost claim and deferral replies are
-      idempotent. Global task execution, cache adoption projections and producer
-      activation remain pending.
+      idempotent. Global computation leases now exclude tenant computation for
+      the same NAR and generator revision. Database guards also protect against
+      preceding tenant writers. Global leases capture job and task generations,
+      recheck physical source retention and cannot outlast task ownership.
+      Different NARs and revisions remain independent. Global task execution,
+      cache adoption projections and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

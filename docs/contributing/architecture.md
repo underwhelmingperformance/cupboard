@@ -153,6 +153,22 @@ checks the current claim, source incarnation and registered CAS output, then
 records the immutable listing fact and releases the claim in one D1 batch.
 Claims and facts create no cache authority or quota charge.
 
+Global jobs reserve computation through a separate D1 lease with the same NAR
+and generator identity. The lease captures the owning job and task generations
+and cannot outlast the task lease. Source checks require a registered live NAR
+with matching sizes and a retention reference. Cancellation, task replacement,
+source repair and lease expiry revoke renewal. A replacement global task can
+acquire an invalidated lease immediately. Released rows preserve the increasing
+computation generation so an earlier release cannot clear a later owner.
+
+Database guards exclude live competing tenant and global leases in both insert
+and update statements. Earlier tenant Workers receive no claim from a
+conflicting write even though those Workers do not query global leases. Current
+tenant consumers report the global lease's retry deadline. They query global
+storage only after its expansion is recorded, so tenant claims and lost-reply
+recovery also work before that table exists. Different NARs and generator
+revisions can run concurrently. Global execution and publication remain pending.
+
 Listing preparation now acquires the shared lease before source byte access or
 staging allocation and checks for a completed fact again after acquisition.
 Competing tenants receive the recorded lease deadline without reserving staging.

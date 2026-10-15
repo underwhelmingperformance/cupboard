@@ -15,6 +15,7 @@ import {
 	type ArtifactJobGeneration,
 	artifactJobGenerationSchema,
 	type ArtifactJobId,
+	type ArtifactTaskGeneration,
 	type ArtifactTaskId,
 	type ArtifactTaskOwner
 } from '@cupboard/protocol/artifact-jobs';
@@ -1135,6 +1136,43 @@ export const sharedListingTask = sqliteTable(
 		check(
 			'shared_listing_task_source_check',
 			sql`${table.sourceIncarnation} >= 1 AND ${table.narSize} >= 0 AND ${table.fileSize} >= 0`
+		)
+	]
+);
+
+export const sharedListingGeneration = sqliteTable(
+	'shared_listing_generation',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		generation: integer('generation').notNull(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		taskId: text('task_id').$type<ArtifactTaskId>().notNull(),
+		taskGeneration: integer('task_generation')
+			.$type<ArtifactTaskGeneration>()
+			.notNull(),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		check(
+			'shared_listing_generation_integer_check',
+			sql`typeof(${table.generation}) = 'integer' AND ${table.generation} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.sourceIncarnation}) = 'integer' AND ${table.sourceIncarnation} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.jobGeneration}) = 'integer' AND ${table.jobGeneration} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.taskGeneration}) = 'integer' AND ${table.taskGeneration} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_generation_ownership_check',
+			sql`(${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
 		)
 	]
 );

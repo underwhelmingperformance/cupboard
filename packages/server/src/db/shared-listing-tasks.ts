@@ -92,13 +92,6 @@ export class SharedListingTaskStore {
 			eq(schema.sharedListingTask.fileSize, claim.fileSize)
 		);
 	}
-	private current(claim: SharedListingTaskClaim, now: IsoTimestamp) {
-		return and(
-			this.captured(claim),
-			eq(schema.sharedListingTask.state, 'running'),
-			gt(schema.sharedListingTask.leaseExpiresAt, now)
-		);
-	}
 	private decoded(
 		row: Task,
 		request: SharedListingTaskRequest,
@@ -116,6 +109,14 @@ export class SharedListingTaskStore {
 			fileSize: row.fileSize,
 			leaseExpiresAt: row.leaseExpiresAt
 		});
+	}
+
+	owns(claim: SharedListingTaskClaim, now: IsoTimestamp) {
+		return and(
+			this.captured(claim),
+			eq(schema.sharedListingTask.state, 'running'),
+			gt(schema.sharedListingTask.leaseExpiresAt, now)
+		);
 	}
 
 	async ready(
@@ -313,7 +314,7 @@ export class SharedListingTaskStore {
 					leaseExpiresAt: sql`max(${schema.sharedListingTask.leaseExpiresAt}, ${deadline})`,
 					updatedAt: sql`max(coalesce(${schema.sharedListingTask.updatedAt}, ${schema.sharedListingTask.createdAt}), ${now})`
 				})
-				.where(this.current(claim, now))
+				.where(this.owns(claim, now))
 				.returning({ at: schema.sharedListingTask.leaseExpiresAt });
 			return rows[0]?.at ?? undefined;
 		});
@@ -333,7 +334,7 @@ export class SharedListingTaskStore {
 					readyAt: sql`max(${now}, ${retryAt})`,
 					updatedAt: sql`max(coalesce(${schema.sharedListingTask.updatedAt}, ${schema.sharedListingTask.createdAt}), ${now})`
 				})
-				.where(this.current(claim, now))
+				.where(this.owns(claim, now))
 				.returning({ at: schema.sharedListingTask.readyAt });
 			if (rows[0] !== undefined) {
 				return rows[0].at;

@@ -26,6 +26,7 @@ export {
 	publication,
 	readableAttestationReference,
 	readableBlobReference,
+	sharedListingGeneration,
 	sharedListingJob,
 	sharedListingTask,
 	tenant,

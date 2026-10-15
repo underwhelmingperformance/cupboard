@@ -83,7 +83,12 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'shared-listing-jobs', state: 'complete', updatedAt: recorded },
 		{ id: 'nar-source-capture', state: 'complete', updatedAt: recorded },
 		{ id: 'shared-listing-catchup', state: 'complete', updatedAt: recorded },
-		{ id: 'shared-listing-task-claims', state: 'complete', updatedAt: recorded }
+		{
+			id: 'shared-listing-task-claims',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{ id: 'global-listing-generation', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -638,6 +643,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition shared-listing-task-claims',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition global-listing-generation',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },

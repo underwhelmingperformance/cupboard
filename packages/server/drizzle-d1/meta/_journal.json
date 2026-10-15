@@ -414,6 +414,13 @@
 			"when": 1792043859415,
 			"tag": "0058_shared_listing_task_claims",
 			"breakpoints": true
+		},
+		{
+			"idx": 59,
+			"version": "6",
+			"when": 1792045932022,
+			"tag": "0059_shared_listing_generation",
+			"breakpoints": true
 		}
 	]
 }

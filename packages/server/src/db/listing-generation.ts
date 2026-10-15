@@ -244,6 +244,35 @@ export class ListingGenerationStore {
 				.from(schema.listingGeneration)
 				.where(and(this.identity(request), this.sourceAvailable(request)))
 				.get();
+			const expanded = await this.database
+				.select({ state: schema.deploymentTransition.state })
+				.from(schema.deploymentTransition)
+				.where(eq(schema.deploymentTransition.id, 'global-listing-generation'))
+				.get();
+			if (expanded !== undefined) {
+				const global = await this.database
+					.select({ at: schema.sharedListingGeneration.leaseExpiresAt })
+					.from(schema.sharedListingGeneration)
+					.where(
+						and(
+							eq(schema.sharedListingGeneration.narHash, request.narHash),
+							eq(
+								schema.sharedListingGeneration.generatorRevision,
+								request.generatorRevision
+							),
+							eq(
+								schema.sharedListingGeneration.sourceIncarnation,
+								request.sourceIncarnation
+							),
+							gt(schema.sharedListingGeneration.leaseExpiresAt, now),
+							this.sourceAvailable(request)
+						)
+					)
+					.get();
+				if (global?.at !== undefined && global.at !== null) {
+					return { kind: 'busy', retryAt: global.at };
+				}
+			}
 			if (current === undefined) {
 				return { kind: 'unavailable' };
 			}
