@@ -1125,6 +1125,70 @@ export const listingAdoptionFactSeed = sqliteTable(
 	]
 );
 
+export const listingAdoptionParentSeed = sqliteTable(
+	'listing_adoption_parent_seed',
+	{
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] })
+			.primaryKey()
+			.notNull(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionSeedEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		afterTenant: text('after_tenant').$type<TenantId>(),
+		afterCacheName: text('after_cache_name').$type<CacheName>(),
+		afterStorePathHash: text('after_store_path_hash').$type<StorePathHash>(),
+		throughTenant: text('through_tenant').$type<TenantId>(),
+		throughCacheName: text('through_cache_name').$type<CacheName>(),
+		throughStorePathHash: text(
+			'through_store_path_hash'
+		).$type<StorePathHash>(),
+		pageCaptureAfter:
+			integer('page_capture_after').$type<ListingAdoptionCaptureSequence>(),
+		scanned: integer('scanned').notNull().default(0),
+		captured: integer('captured').notNull().default(0),
+		isComplete: integer('is_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_parent_seed_kind_check',
+			sql`${table.cacheKind} IN ('default','named')`
+		),
+		check(
+			'listing_adoption_parent_seed_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_parent_seed_cursor_check',
+			sql`${table.isComplete} IN (0,1)
+ AND (${table.afterTenant} IS NULL) = (${table.afterStorePathHash} IS NULL)
+ AND (${table.throughTenant} IS NULL) = (${table.throughStorePathHash} IS NULL)
+ AND (${table.throughTenant} IS NOT NULL OR (${table.isComplete} = 1 AND ${table.afterTenant} IS NULL))
+ AND (${table.afterTenant} IS NULL OR ${table.throughTenant} IS NOT NULL)
+ AND ((${table.cacheKind} = 'default' AND ${table.afterCacheName} IS NULL AND ${table.throughCacheName} IS NULL
+   AND (${table.afterTenant} IS NULL OR (${table.afterTenant},${table.afterStorePathHash}) <= (${table.throughTenant},${table.throughStorePathHash}))
+   AND (${table.isComplete} = 0 OR ${table.throughTenant} IS NULL OR (${table.afterTenant} IS NOT NULL AND (${table.afterTenant},${table.afterStorePathHash}) = (${table.throughTenant},${table.throughStorePathHash}))))
+ OR (${table.cacheKind} = 'named'
+   AND (${table.afterTenant} IS NULL) = (${table.afterCacheName} IS NULL)
+   AND (${table.throughTenant} IS NULL) = (${table.throughCacheName} IS NULL)
+   AND (${table.afterTenant} IS NULL OR (${table.afterTenant},${table.afterCacheName},${table.afterStorePathHash}) <= (${table.throughTenant},${table.throughCacheName},${table.throughStorePathHash}))
+   AND (${table.isComplete} = 0 OR ${table.throughTenant} IS NULL OR (${table.afterTenant} IS NOT NULL AND (${table.afterTenant},${table.afterCacheName},${table.afterStorePathHash}) = (${table.throughTenant},${table.throughCacheName},${table.throughStorePathHash})))))`
+		),
+		check(
+			'listing_adoption_parent_seed_counts_check',
+			sql`typeof(${table.scanned}) = 'integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991
+ AND typeof(${table.captured}) = 'integer' AND ${table.captured} BETWEEN 0 AND ${table.scanned}
+ AND (${table.pageCaptureAfter} IS NULL OR (typeof(${table.pageCaptureAfter}) = 'integer' AND ${table.pageCaptureAfter} BETWEEN 0 AND 9007199254740991 AND ${table.isComplete} = 0))`
+		)
+	]
+);
+
 export const listingAdoptionCaptureEvent = sqliteTable(
 	'listing_adoption_capture_event',
 	{

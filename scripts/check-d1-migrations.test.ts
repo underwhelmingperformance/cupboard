@@ -135,7 +135,8 @@ describe('checkD1Migrations', () => {
 				'shared-listing-dispatch-seed',
 				'listing-adoption-capture',
 				'listing-adoption-fact-seed',
-				'listing-adoption-parents'
+				'listing-adoption-parents',
+				'listing-adoption-parent-seed'
 			]
 		});
 	});

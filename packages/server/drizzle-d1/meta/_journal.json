@@ -505,6 +505,13 @@
 			"when": 1792092826684,
 			"tag": "0071_listing_adoption_parents_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 72,
+			"version": "6",
+			"when": 1792097468831,
+			"tag": "0072_listing_adoption_parent_seed",
+			"breakpoints": true
 		}
 	]
 }

@@ -126,6 +126,11 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			id: 'listing-adoption-parents',
 			state: 'complete',
 			updatedAt: recorded
+		},
+		{
+			id: 'listing-adoption-parent-seed',
+			state: 'complete',
+			updatedAt: recorded
 		}
 	],
 	unrecognised: []
@@ -725,6 +730,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition listing-adoption-parents',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition listing-adoption-parent-seed',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },

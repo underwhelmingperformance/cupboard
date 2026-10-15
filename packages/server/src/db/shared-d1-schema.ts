@@ -16,6 +16,7 @@ export {
 	listingAdoptionFact,
 	listingAdoptionFactSeed,
 	listingAdoptionParent,
+	listingAdoptionParentSeed,
 	listingFact,
 	listingGeneration,
 	localStepWakeCursor,

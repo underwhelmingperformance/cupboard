@@ -20,6 +20,12 @@ Projection refresh waits for the completed contract and capture readiness.
 Offboarding drains orphaned projection rows before finalisation. Expansion does
 not scan the existing reference catalogue or publish artifacts into a cache.
 
+The additive `listing-adoption-parent-seed` transition creates an empty table
+for historical checkpoints, with independent windows for default and named
+caches. The first seed turn initialises a window only after the parent cleanup
+contract and capture are ready. Expansion does not start historical discovery or
+adoption delivery.
+
 Deployment also reconciles bucket lifecycle rules for `artifact-staging/` and
 `shared-artifact-staging/`. The rules delete transient objects and abort
 incomplete multipart uploads after a day. CAS bytes and completed tenant

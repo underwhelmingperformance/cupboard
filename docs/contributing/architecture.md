@@ -332,10 +332,19 @@ orphaned metadata in bounded pages, and provisioning and finalisation refuse
 residue. The additive expansion creates an empty indexed table. Refresh waits
 until the cleanup contract and capture consumer are ready.
 
+Historical parent seeds append current source hints in pages of 32, with
+separate fixed windows and checkpoints for default and named caches. Each atomic
+batch rechecks source authority, tenant eligibility, readiness, the seed epoch
+and all cursor and boundary fields. A capture-clock marker identifies the page's
+events; the checkpoint counts actual appended rows and clears the marker in the
+same transaction. Deleted or ineligible sources advance discovery without
+increasing captures. Lost replies preserve committed progress, and a failed
+checkpoint rolls back both events and the marker. Expansion creates an empty
+checkpoint table; it does not scan the reference catalogue.
+
 The capture stream and reverse projection grant no cache authority and retain no
-bytes. Historical parent projection seeding, seed scheduling, bounded event
-expansion, durable cache-adoption delivery, completion wakes and automatic
-forward producers remain pending.
+bytes. Seed scheduling, bounded event expansion, durable cache-adoption
+delivery, completion wakes and automatic forward producers remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

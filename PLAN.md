@@ -7396,9 +7396,14 @@ build traces available from a cupboard cache.
       source deletion, replacement and revocation without enumerating parents.
       Tenant offboarding drains orphaned metadata in bounded pages, and
       provisioning and finalisation reject residue. Refresh waits for the
-      cleanup contract and capture readiness. Historical parent seeding, seed
-      scheduling, bounded event expansion, cache adoption delivery, shared
-      completion wakes and producer activation remain pending.
+      cleanup contract and capture readiness. Historical parent seeds now append
+      current source hints in fixed 32-candidate pages, with independent default
+      and named windows. Capture events and progress share one transaction,
+      fenced by readiness, epoch and every cursor and boundary field. The
+      checkpoint counts actual appended rows; deleted or ineligible sources
+      advance without captures. Lost replies and rollback preserve resumable
+      progress. Seed scheduling, bounded event expansion, cache adoption
+      delivery, shared completion wakes and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
