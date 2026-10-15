@@ -20,6 +20,7 @@ import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { lookupInPages } from '@cupboard/shared/paging';
 import { readResponseJson } from '@cupboard/shared/response-body';
+import { loggedUrl } from '@cupboard/shared/retry';
 import { StatusCodes } from 'http-status-codes';
 
 import type {
@@ -220,7 +221,7 @@ async function availablePathsAt(
 		pageSize: maximumBatchSize,
 		concurrency: maximumConcurrentProbes,
 		deadline: {
-			url: target,
+			target: { url: loggedUrl(target) },
 			replaySafety: 'replay-safe'
 		},
 		request: async (batch, signal) => {

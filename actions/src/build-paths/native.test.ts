@@ -1,7 +1,9 @@
 import process from 'node:process';
 
+import { stopLogging } from '@cupboard/logger/testing';
 import { discoverNixStoreConfig } from '@cupboard/nix';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fetchWithProbeRetries } from '@cupboard/shared/paging';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { buildPathInputs, runNativeBuild } from './native.ts';
 import { observeBuild } from './observation.ts';
@@ -77,5 +79,35 @@ describe('native build diagnostic', () => {
 			status: 1,
 			protectedPaths: []
 		});
+	});
+});
+
+describe('native build logging', () => {
+	it('writes a probe record from the build as a workflow debug line', async () => {
+		vi.stubEnv('GITHUB_ACTIONS', 'true');
+		stopLogging();
+		onTestFinished(() => {
+			stopLogging();
+		});
+		vi.useFakeTimers();
+		const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+		try {
+			await runNativeBuild(async () => {
+				await fetchWithProbeRetries(
+					() => Promise.resolve(new Response('response body')),
+					'https://cache.example.test/a.narinfo',
+					undefined,
+					(response) => response.text()
+				);
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+
+		expect(output.mock.calls).toStrictEqual([
+			[
+				'::debug::probe attempt finished url=https://cache.example.test/a.narinfo attempt=1 outcome=succeeded elapsedMs=0\n'
+			]
+		]);
 	});
 });

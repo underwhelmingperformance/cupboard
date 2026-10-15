@@ -1,12 +1,21 @@
+import { getLogger } from '@logtape/logtape';
+
 import { chunk } from './collections.ts';
 import { mapWithConcurrency } from './concurrency.ts';
 import { CodedError } from './errors.ts';
-import { backoffDelay, type ReplaySafety } from './retry.ts';
+import {
+	abortableSleep,
+	backoffDelayMs,
+	loggedUrl,
+	type ReplaySafety
+} from './retry.ts';
 import {
 	attemptWithDeadline,
 	probeDeadlineMs,
 	ProbeTimeoutError
 } from './timeout.ts';
+
+const logger = getLogger(['cupboard', 'probe']);
 
 /**
  * The number of attempts, including the first, that {@link requestWithDeadline}
@@ -14,11 +23,25 @@ import {
  */
 export const maxProbeAttempts = 3;
 
-export interface DeadlineOptions {
+/**
+ * Identifies a probe in debug logs.
+ */
+export interface ProbeTarget {
 	/**
-	The request URL, which identifies the request in its deadline expiry.
+	The probe URL without user information or a query.
 	*/
 	readonly url: string;
+	/**
+	The number of inputs in the request, for a request with several.
+	*/
+	readonly inputs?: number;
+}
+
+export interface DeadlineOptions {
+	/**
+	Identifies the request in debug logs and in its deadline expiry.
+	*/
+	readonly target: ProbeTarget;
 	/**
 	 * Whether the server can receive the request again without a different
 	 * effect. Only a replay-safe request is sent again after its deadline
@@ -33,17 +56,34 @@ export interface DeadlineOptions {
 	readonly deadlineMs?: number;
 }
 
+type ProbeOutcome =
+	| { readonly outcome: 'succeeded' }
+	| { readonly outcome: 'timed out' }
+	| { readonly outcome: 'failed'; readonly errorName: string };
+
+function failureOutcome(error: unknown, isExpiry: boolean): ProbeOutcome {
+	if (isExpiry) {
+		return { outcome: 'timed out' };
+	}
+
+	return {
+		outcome: 'failed',
+		errorName: error instanceof Error ? error.name : typeof error
+	};
+}
+
 /**
  * Runs `request` with a deadline, which defaults to {@link probeDeadlineMs}.
  * `request` receives a signal that aborts when the deadline passes, so a
  * request that uses it releases its connection. The attempt then rejects with
- * a {@link ProbeTimeoutError} for the URL.
+ * a {@link ProbeTimeoutError} for the target.
  *
  * A replay-safe request starts again after its own deadline expires, up to
  * {@link maxProbeAttempts} attempts in total, with a full-jitter backoff
  * between them. A replay-unsafe request makes one attempt. Every other error
  * propagates unchanged, including a `ProbeTimeoutError` that `request` raises
- * itself, and an abort during the backoff rejects with the abort reason.
+ * itself, and an abort during the backoff rejects with the abort reason. Each
+ * attempt and each retry is logged at debug level.
  *
  * Put transport retries inside `request`. One deadline then covers each
  * attempt and its transport retries.
@@ -59,17 +99,33 @@ export async function requestWithDeadline<T>(
 		options.signal?.throwIfAborted();
 
 		let expiry: ProbeTimeoutError | undefined;
+		const startedAt = Date.now();
 		try {
-			return await attemptWithDeadline(
+			const result = await attemptWithDeadline(
 				request,
 				options.deadlineMs ?? probeDeadlineMs,
-				() => (expiry = new ProbeTimeoutError(options.url)),
+				() => (expiry = new ProbeTimeoutError(options.target.url)),
 				options.signal
 			);
+			logger.debug('probe attempt finished', () => ({
+				...options.target,
+				attempt,
+				outcome: 'succeeded',
+				elapsedMs: Date.now() - startedAt
+			}));
+
+			return result;
 		} catch (error) {
+			const isExpiry = expiry !== undefined && error === expiry;
+			logger.debug('probe attempt finished', () => ({
+				...options.target,
+				attempt,
+				...failureOutcome(error, isExpiry),
+				elapsedMs: Date.now() - startedAt
+			}));
+
 			if (
-				expiry === undefined ||
-				error !== expiry ||
+				!isExpiry ||
 				options.signal?.aborted === true ||
 				attempt >= attempts
 			) {
@@ -77,8 +133,18 @@ export async function requestWithDeadline<T>(
 			}
 		}
 
-		await backoffDelay(attempt, options.signal);
+		const delayMs = backoffDelayMs(attempt);
+		logger.debug('retrying probe after its deadline expired', {
+			...options.target,
+			nextAttempt: attempt + 1,
+			delayMs
+		});
+		await abortableSleep(delayMs, options.signal);
 	}
+}
+
+export interface ProbeFetchOptions {
+	readonly deadlineMs?: number;
 }
 
 /**
@@ -94,15 +160,17 @@ export async function fetchWithProbeRetries<Result>(
 	url: string,
 	init: RequestInit | undefined,
 	consume: (response: Response) => Result | Promise<Result>,
-	deadlineMs = probeDeadlineMs
+	options: ProbeFetchOptions = {}
 ): Promise<Result> {
 	return requestWithDeadline(
 		async (signal) => consume(await fetcher(url, { ...init, signal })),
 		{
-			url,
+			target: { url: loggedUrl(url) },
 			replaySafety: 'replay-safe',
 			signal: init?.signal ?? undefined,
-			deadlineMs
+			...(options.deadlineMs !== undefined && {
+				deadlineMs: options.deadlineMs
+			})
 		}
 	);
 }
@@ -137,8 +205,9 @@ export type PageRequest<Input, Result> = (
 export interface PageLookup<Input, Result> {
 	readonly request: PageRequest<Input, Result>;
 	/**
-	The deadline and replay safety of each request.
-	*/
+	 * The deadline and replay safety of each request. The lookup adds the
+	 * number of inputs in each request to the target.
+	 */
 	readonly deadline: DeadlineOptions;
 	/**
 	 * Whether a failed request had too many inputs for the server. The lookup
@@ -199,7 +268,10 @@ async function requestPrefix<Input, Result>(
 	try {
 		return await requestWithDeadline(
 			(signal) => lookup.request(inputs, signal),
-			lookup.deadline
+			{
+				...lookup.deadline,
+				target: { ...lookup.deadline.target, inputs: inputs.length }
+			}
 		);
 	} catch (error) {
 		if (inputs.length === 1 || lookup.isPageTooLarge?.(error) !== true) {

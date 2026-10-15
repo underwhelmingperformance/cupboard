@@ -1,6 +1,7 @@
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
+import { captureLogs } from './log-capture.test-support.ts';
 import {
 	backoffDelay,
 	fullJitterDelayMs,
@@ -537,5 +538,67 @@ describe('reachableFetcher', () => {
 		);
 
 		await expect(fetcher('https://cache.example.test/')).rejects.toBe(failure);
+	});
+});
+
+describe('retryingFetcher debug logs', () => {
+	it('records each transport retry with its status or error code, ray and delay', async () => {
+		const records = captureLogs();
+		const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+		const { fetcher } = scriptedFetcher([
+			() =>
+				new Response('', {
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					headers: { 'cf-ray': '8f0e1d2c3b4a5968-LHR' }
+				}),
+			() => {
+				throw networkFailure();
+			},
+			ok
+		]);
+
+		vi.useFakeTimers();
+		try {
+			const pending = retryingFetcher(fetcher)(
+				'https://reader:secret@cache.test/api/v1/path-info?token=secret',
+				{ method: 'POST', body: 'paths' }
+			);
+			const settled = expect(pending).resolves.toBeInstanceOf(Response);
+			await vi.advanceTimersByTimeAsync(10_000);
+			await settled;
+		} finally {
+			vi.useRealTimers();
+			random.mockRestore();
+		}
+
+		const request = {
+			method: 'POST',
+			url: 'https://cache.test/api/v1/path-info'
+		};
+		expect(records).toStrictEqual([
+			{
+				level: 'debug',
+				category: ['cupboard', 'fetch'],
+				message: 'retrying after a transient response',
+				properties: {
+					...request,
+					retry: 1,
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					cfRay: '8f0e1d2c3b4a5968-LHR',
+					delayMs: 125
+				}
+			},
+			{
+				level: 'debug',
+				category: ['cupboard', 'fetch'],
+				message: 'retrying after a network error',
+				properties: {
+					...request,
+					retry: 2,
+					code: 'ECONNRESET',
+					delayMs: 250
+				}
+			}
+		]);
 	});
 });

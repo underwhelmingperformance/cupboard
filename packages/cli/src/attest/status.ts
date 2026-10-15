@@ -24,6 +24,7 @@ import {
 	readResponseBytes,
 	readResponseText
 } from '@cupboard/shared/response-body';
+import { loggedUrl } from '@cupboard/shared/retry';
 
 import { throwIfAborted } from '../abort.ts';
 import { cacheReadFetcher } from '../client/transport.ts';
@@ -225,7 +226,7 @@ export async function readAttestationInfo(
 		pageSize: attestationInfoMaxPaths,
 		concurrency: 1,
 		deadline: {
-			url: target(pagePath),
+			target: { url: loggedUrl(target(pagePath)) },
 			replaySafety: 'replay-safe',
 			signal: options.signal
 		},

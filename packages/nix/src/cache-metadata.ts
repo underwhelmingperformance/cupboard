@@ -28,6 +28,7 @@ import {
 	readResponseBytes,
 	readResponseText
 } from '@cupboard/shared/response-body';
+import { loggedUrl } from '@cupboard/shared/retry';
 
 const narInfoConcurrency = 6;
 const utf8 = new TextEncoder();
@@ -553,7 +554,7 @@ export class CachedClosureReader {
 			concurrency: narInfoConcurrency,
 			finishFirstPage: this.#scopeVersion === undefined,
 			deadline: {
-				url: this.#pathInfoUrl(),
+				target: { url: loggedUrl(this.#pathInfoUrl()) },
 				replaySafety: 'replay-safe',
 				signal: this.signal
 			},

@@ -2,8 +2,11 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import process from 'node:process';
 
+import { stopLogging } from '@cupboard/logger/testing';
 import { observeChildProcess } from '@cupboard/shared/child-process';
+import { fetchWithProbeRetries } from '@cupboard/shared/paging';
 import { expect, it, onTestFinished, vi } from 'vitest';
 
 import {
@@ -12,7 +15,11 @@ import {
 	captureEvaluationProcess,
 	evaluateTargetManifest
 } from './manifest-evaluator.ts';
-import { evaluationInputs, nativeEvaluationMain } from './native.ts';
+import {
+	evaluationInputs,
+	nativeEvaluationMain,
+	runNativeEvaluation
+} from './native.ts';
 
 async function resultOrError(operation: Promise<unknown>): Promise<unknown> {
 	try {
@@ -578,5 +585,42 @@ it('stops all peers on a captured-byte overflow before the overflowing child clo
 		name: 'ManifestOutputLimitError',
 		calls: [0, 1, 2, 3],
 		events: Array.from({ length: 4 }, () => ['SIGTERM', 'close'])
+	});
+});
+
+it('writes a probe record from the worker to stderr, which keeps stdout for the manifest', async () => {
+	vi.stubEnv('GITHUB_ACTIONS', 'true');
+	stopLogging();
+	onTestFinished(() => {
+		stopLogging();
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+	});
+	vi.useFakeTimers();
+	const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+	const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+	try {
+		await runNativeEvaluation(async () => {
+			await fetchWithProbeRetries(
+				() => Promise.resolve(new Response('response body')),
+				'https://cache.example.test/api/v1/missing-paths',
+				undefined,
+				(response) => response.text()
+			);
+		});
+	} finally {
+		vi.useRealTimers();
+	}
+
+	expect({
+		stdout: stdout.mock.calls,
+		stderr: stderr.mock.calls
+	}).toStrictEqual({
+		stdout: [],
+		stderr: [
+			[
+				'::debug::probe attempt finished url=https://cache.example.test/api/v1/missing-paths attempt=1 outcome=succeeded elapsedMs=0\n'
+			]
+		]
 	});
 });

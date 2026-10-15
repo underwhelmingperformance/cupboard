@@ -1,6 +1,7 @@
 import path from 'node:path';
 import process from 'node:process';
 
+import { configureLogging, resolveSink } from '@cupboard/logger';
 import { CodedError, formatErrorWithCauses } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
@@ -125,6 +126,9 @@ export async function nativeEvaluationWorker(
 export async function runNativeEvaluation(
 	operation: (environment: Environment, signal: AbortSignal) => Promise<void>
 ): Promise<void> {
+	// The worker writes the manifest to stdout, and the main process parses
+	// all of stdout as JSON.
+	configureLogging({ sink: resolveSink({ stdout: process.stderr }) });
 	const controller = new AbortController();
 	const interrupt = (): void => {
 		controller.abort(new EvaluationSignalError('SIGINT'));
