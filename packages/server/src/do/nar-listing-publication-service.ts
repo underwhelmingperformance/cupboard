@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	artifactGenerationSchema,
 	artifactIdSchema,
@@ -5,15 +6,21 @@ import {
 	type NarListingIdentity
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, exists, sql } from 'drizzle-orm';
 
 import { CasObjectStore } from '../blob/cas-object-store.ts';
+import {
+	type ListingAdoptionOutcome,
+	type ListingPublicationOutcome,
+	type NarListingAdoptionRequest
+} from '../blob/nar-listing-adoption.ts';
 import { registeredLiveObjectIncarnation } from '../blob/object-incarnation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { ListingFactStore } from '../db/listing-facts.ts';
 import * as schema from '../db/schema.ts';
 import { ListingFactConflictError } from '../errors.ts';
 import { casObjectKey } from '../http/http.ts';
+import { withSpan } from '../observability/span.ts';
 import { authorisedNarInfoVersions } from '../read/read.ts';
 
 import { ArtifactCasService } from './artifact-cas-service.ts';
@@ -27,19 +34,38 @@ import { PathReadAuthorityService } from './path-read-authority-service.ts';
 
 type Artifact = typeof schema.artifacts.$inferSelect;
 const pendingPublicationLifetimeMs = 15 * 60 * 1000;
-
-export type ListingPublicationOutcome =
-	| {
-			readonly kind: 'published' | 'already-present';
-			readonly artifact: ArtifactVersion;
-	  }
-	| {
-			readonly kind:
-				'fact-missing' | 'bytes-missing' | 'unavailable' | 'over-quota';
-	  };
+const logger = rootLogger().with({ component: 'listing-publication' });
 
 export class NarListingPublicationService {
 	constructor(private readonly context: ServerContext) {}
+
+	private async canAdopt(): Promise<boolean> {
+		if (this.context.offboarding) {
+			return false;
+		}
+		const publication = this.context.d1
+			.select({ one: sql`1` })
+			.from(d1Schema.deploymentTransition)
+			.where(
+				and(
+					eq(d1Schema.deploymentTransition.id, 'native-artifact-publication'),
+					eq(d1Schema.deploymentTransition.state, 'complete')
+				)
+			);
+		const tenantId = this.context.requireTenant();
+		const tenant = await this.context.d1
+			.select({ id: d1Schema.tenant.id })
+			.from(d1Schema.tenant)
+			.where(
+				and(
+					eq(d1Schema.tenant.id, tenantId),
+					eq(d1Schema.tenant.status, 'active'),
+					exists(publication)
+				)
+			)
+			.get();
+		return tenant !== undefined;
+	}
 
 	private identityFilter(
 		identity: NarListingIdentity,
@@ -171,6 +197,69 @@ export class NarListingPublicationService {
 				.run();
 		});
 		return { id, generation };
+	}
+
+	/**
+	Publish sequentially because parents can share a cache-local listing identity.
+	*/
+	async adoptManyInSection(
+		requests: readonly NarListingAdoptionRequest[]
+	): Promise<readonly ListingAdoptionOutcome[]> {
+		if (!(await this.canAdopt())) {
+			return requests.map(() => ({ kind: 'unavailable' }));
+		}
+		const outcomes: ListingAdoptionOutcome[] = [];
+		for (const request of requests) {
+			const cache = this.context.cacheRepository.resolve(request.cache);
+			if (cache?.generation !== request.cacheGeneration) {
+				outcomes.push({ kind: 'unavailable' });
+				continue;
+			}
+			const result = await withSpan(
+				'artifact.listing.adopt',
+				{
+					narHash: request.identity.narHash,
+					generatorRevision: request.identity.generatorRevision,
+					storePathHash: request.storePathHash,
+					publicationGeneration: request.generation,
+					cacheGeneration: request.cacheGeneration,
+					cacheKind: request.cache.kind,
+					cacheName:
+						request.cache.kind === 'named' ? request.cache.name : undefined
+				},
+				async (span): Promise<ListingAdoptionOutcome> => {
+					try {
+						const outcome = await this.reuseInSection(
+							request.identity,
+							{
+								cache,
+								storePathHash: request.storePathHash,
+								generation: request.generation
+							},
+							() => !this.context.offboarding
+						);
+						span.setAttribute('completion', outcome.kind);
+						return outcome;
+					} catch (error) {
+						if (!(error instanceof ListingFactConflictError)) {
+							throw error;
+						}
+						logger.error('listing adoption conflicts with immutable fact', {
+							narHash: request.identity.narHash,
+							generatorRevision: request.identity.generatorRevision,
+							cache: request.cache,
+							cacheGeneration: request.cacheGeneration,
+							storePathHash: request.storePathHash,
+							publicationGeneration: request.generation
+						});
+						span.setAttribute('completion', 'conflict');
+						return { kind: 'conflict' };
+					}
+				}
+			);
+			outcomes.push(result);
+		}
+		return outcomes;
 	}
 
 	/**

@@ -7215,8 +7215,12 @@ build traces available from a cupboard cache.
       admits shared-fact reuse without generation credits at full staging
       capacity. A bulk identity lookup checks live CAS metadata, deduplicated
       size probes check physical bytes, and consumption rechecks authority and
-      quota. Missing-byte races cannot repeatedly reserve reuse work. Producer
-      activation remains pending.
+      quota. Missing-byte races cannot repeatedly reserve reuse work. A bounded
+      tenant RPC now adopts up to eight captured parents through the existing
+      authority, quota and directed-reference checks without reading payload
+      bytes. Cache and publication generations fence each item; a local fact
+      conflict refuses only that item. Durable adoption delivery and producer
+      activation remain pending.
 - [ ] Add an optional tenant-signed in-toto generation proof with its own
       predicate. Verify input, output and signer through the CLI. Keep
       generation evidence separate from build provenance and Sigstore

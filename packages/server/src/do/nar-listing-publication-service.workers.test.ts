@@ -15,6 +15,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CasObjectStore } from '../blob/cas-object-store.ts';
+import { type NarListingAdoptionRequest } from '../blob/nar-listing-adoption.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { ListingFactStore } from '../db/listing-facts.ts';
@@ -139,6 +140,30 @@ async function publicationState(context: ServerContext) {
 			.all(),
 		usage
 	};
+}
+
+function adoptionRequest(
+	fact: NarListingFact,
+	parent: ArtifactPublicationParent
+): NarListingAdoptionRequest {
+	return {
+		identity: {
+			narHash: fact.narHash,
+			generatorRevision: fact.generatorRevision
+		},
+		cache: parent.cache.scope,
+		cacheGeneration: parent.cache.generation,
+		storePathHash: parent.storePathHash,
+		generation: parent.generation
+	};
+}
+
+async function adoptOne(request: NarListingAdoptionRequest) {
+	const [result] = await currentServer().adoptNarListings([request]);
+	if (result === undefined) {
+		throw new Error('The adoption RPC omitted its result');
+	}
+	return result;
 }
 
 describe('listing publication by reference', () => {
@@ -575,6 +600,458 @@ describe('listing publication by reference', () => {
 						});
 					});
 				});
+			})
+	);
+	it.each([
+		{ label: 'default', scope: defaultCache() },
+		{ label: 'private named', scope: namedCache('adopt') }
+	])(
+		'adoption RPC reuses bytes and quota for two current parents in the $label cache',
+		({ scope }) =>
+			withoutAlarmArming(async () => {
+				if (scope.kind === 'named') {
+					await putTestCache(token, scope, 'private');
+				}
+				const first = await publishParent(token, 'a', scope);
+				const second = await publishParent(token, 'b', scope);
+				const io = { get: 0, put: 0, multipart: 0 };
+				const restores: (() => void)[] = [];
+				const { fact, incarnation } = await runInDurableObject(
+					currentServer(),
+					async (instance) => {
+						const context = instance.context;
+						const stored = await recordFact(context);
+						const get = vi
+							.spyOn(context.env.BLOBS, 'get')
+							.mockImplementation(() => {
+								io.get += 1;
+								throw new Error('Adoption must not read payload bytes');
+							});
+						const put = vi
+							.spyOn(context.env.BLOBS, 'put')
+							.mockImplementation(() => {
+								io.put += 1;
+								throw new Error('Adoption must not write payload bytes');
+							});
+						const multipart = vi
+							.spyOn(context.env.BLOBS, 'createMultipartUpload')
+							.mockImplementation(() => {
+								io.multipart += 1;
+								throw new Error('Adoption must not stage payload bytes');
+							});
+						restores.push(
+							() => {
+								get.mockRestore();
+							},
+							() => {
+								put.mockRestore();
+							},
+							() => {
+								multipart.mockRestore();
+							}
+						);
+						return stored;
+					}
+				);
+				try {
+					const request = adoptionRequest(fact, first);
+					const [result, attached] = await currentServer().adoptNarListings([
+						request,
+						adoptionRequest(fact, second)
+					]);
+					if (result?.kind !== 'published') {
+						throw new Error(
+							`Expected a published RPC result, received ${String(result?.kind)}`
+						);
+					}
+					const repeated = await adoptOne(request);
+					const state = await runInDurableObject(currentServer(), (instance) =>
+						publicationState(instance.context)
+					);
+					expect({
+						repeated,
+						attached,
+						io,
+						artifacts: state.artifacts.map((row) => ({
+							id: row.id,
+							generation: row.generation,
+							cacheId: row.cacheId,
+							digest: row.digest,
+							incarnation: row.publicationIncarnation,
+							state: row.state
+						})),
+						parents: state.parents,
+						references: state.references.map((row) => ({
+							tenant: row.tenant,
+							artifactId: row.artifactId,
+							artifactGeneration: row.artifactGeneration,
+							cacheKind: row.cacheKind,
+							cacheName: row.cacheName ?? undefined,
+							cacheGeneration: row.cacheGeneration,
+							kind: row.kind,
+							digest: row.digest
+						})),
+						usage: state.usage
+					}).toStrictEqual({
+						repeated: { kind: 'already-present', artifact: result.artifact },
+						attached: { kind: 'published', artifact: result.artifact },
+						io: { get: 0, put: 0, multipart: 0 },
+						artifacts: [
+							{
+								id: result.artifact.id,
+								generation: result.artifact.generation,
+								cacheId: first.cache.id,
+								digest: fact.digest,
+								incarnation,
+								state: 'live'
+							}
+						],
+						parents: [first, second].map((parent) => ({
+							artifactId: result.artifact.id,
+							artifactGeneration: result.artifact.generation,
+							cacheId: parent.cache.id,
+							storePathHash: parent.storePathHash,
+							publicationGeneration: parent.generation
+						})),
+						references: [
+							{
+								tenant: fixtureTenant,
+								artifactId: result.artifact.id,
+								artifactGeneration: result.artifact.generation,
+								cacheKind: scope.kind,
+								cacheName: scope.kind === 'named' ? scope.name : undefined,
+								cacheGeneration: first.cache.generation,
+								kind: 'listing',
+								digest: fact.digest
+							}
+						],
+						usage: { bytes: fact.size, blobs: 1 }
+					});
+				} finally {
+					for (const restore of restores) {
+						restore();
+					}
+				}
+			})
+	);
+
+	it.each([
+		'stale-parent',
+		'stale-cache',
+		'missing-fact',
+		'missing-bytes',
+		'suspended',
+		'offboarding',
+		'pre-activation'
+	] as const)(
+		'adoption RPC refuses %s without local publication state',
+		(condition) =>
+			withoutAlarmArming(async () => {
+				const parent = await publishParent(token);
+				const request = await runInDurableObject(
+					currentServer(),
+					async (instance) => {
+						const { fact, incarnation } = await recordFact(instance.context);
+						const input = adoptionRequest(fact, parent);
+						switch (condition) {
+							case 'stale-parent': {
+								return {
+									...input,
+									generation: narInfoGenerationSchema.parse(
+										parent.generation + 1
+									)
+								};
+							}
+							case 'stale-cache': {
+								return {
+									...input,
+									cacheGeneration: cacheGenerationSchema.parse(
+										parent.cache.generation + 1
+									)
+								};
+							}
+							case 'missing-fact': {
+								await instance.context.d1.delete(d1Schema.listingFact);
+								break;
+							}
+							case 'missing-bytes': {
+								await instance.context.env.BLOBS.delete(
+									casObjectKey(fact.digest, incarnation)
+								);
+								break;
+							}
+							case 'suspended':
+							case 'offboarding': {
+								await instance.context.d1
+									.update(d1Schema.tenant)
+									.set({ status: condition })
+									.where(eq(d1Schema.tenant.id, fixtureTenant));
+								break;
+							}
+							case 'pre-activation': {
+								await instance.context.d1
+									.update(d1Schema.deploymentTransition)
+									.set({ state: 'expanded' })
+									.where(
+										eq(
+											d1Schema.deploymentTransition.id,
+											'native-artifact-publication'
+										)
+									);
+								break;
+							}
+						}
+						return input;
+					}
+				);
+				const before = await runInDurableObject(currentServer(), (instance) =>
+					publicationState(instance.context)
+				);
+				const result = await adoptOne(request);
+				const after = await runInDurableObject(currentServer(), (instance) =>
+					publicationState(instance.context)
+				);
+				expect({ result, state: after }).toStrictEqual({
+					result: {
+						kind:
+							condition === 'missing-fact'
+								? 'fact-missing'
+								: condition === 'missing-bytes'
+									? 'bytes-missing'
+									: 'unavailable'
+					},
+					state: before
+				});
+			})
+	);
+
+	it('adoption RPC preserves quota refusal and retires its pending reservation', () =>
+		withoutAlarmArming(async () => {
+			const parent = await publishParent(token);
+			const request = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const { fact } = await recordFact(instance.context);
+					const usage = await instance.context.d1
+						.select({
+							bytes: d1Schema.tenantUsage.bytes,
+							casBytes: d1Schema.tenantUsage.casBytes
+						})
+						.from(d1Schema.tenantUsage)
+						.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+						.get();
+					if (usage === undefined) {
+						throw new Error('The fixture quota row is missing');
+					}
+					await instance.context.d1
+						.update(d1Schema.tenantUsage)
+						.set({ quotaBytes: usage.bytes + usage.casBytes + fact.size - 1 })
+						.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant));
+					return adoptionRequest(fact, parent);
+				}
+			);
+			const result = await adoptOne(request);
+			const state = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					await instance.context.criticalSection(() =>
+						new ArtifactRetirementService(instance.context).drainInSection()
+					);
+					return publicationState(instance.context);
+				}
+			);
+			expect({ result, state }).toStrictEqual({
+				result: { kind: 'over-quota' },
+				state: {
+					artifacts: [],
+					listings: [],
+					parents: [],
+					roots: [],
+					deletions: [],
+					references: [],
+					usage: { bytes: 0, blobs: 0 }
+				}
+			});
+		}));
+
+	it('adoption RPC rejects extra capabilities before creating publication state', () =>
+		withoutAlarmArming(async () => {
+			const parent = await publishParent(token);
+			const request = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const { fact } = await recordFact(instance.context);
+					return { ...adoptionRequest(fact, parent), owner: 'untrusted-owner' };
+				}
+			);
+			const before = await runInDurableObject(currentServer(), (instance) =>
+				publicationState(instance.context)
+			);
+			let failure: unknown;
+			try {
+				await adoptOne(request);
+			} catch (error) {
+				failure = error;
+			}
+			expect(failure).toBeInstanceOf(Error);
+			const after = await runInDurableObject(currentServer(), (instance) =>
+				publicationState(instance.context)
+			);
+			expect(after).toStrictEqual(before);
+		}));
+	it('adoption RPC keeps valid siblings after a captured cache refusal', () =>
+		withoutAlarmArming(async () => {
+			const scope = namedCache('adopt-sibling');
+			await putTestCache(token, scope, 'private');
+			const first = await publishParent(token, 'a');
+			const second = await publishParent(token, 'b', scope);
+			const { fact } = await runInDurableObject(currentServer(), (instance) =>
+				recordFact(instance.context)
+			);
+			const invalid = {
+				...adoptionRequest(fact, first),
+				cacheGeneration: cacheGenerationSchema.parse(first.cache.generation + 1)
+			};
+			const outcomes = await currentServer().adoptNarListings([
+				adoptionRequest(fact, first),
+				invalid,
+				adoptionRequest(fact, second)
+			]);
+			const left = outcomes[0];
+			const right = outcomes[2];
+			if (left?.kind !== 'published' || right?.kind !== 'published') {
+				throw new Error('The valid siblings were not published');
+			}
+			const state = await runInDurableObject(currentServer(), (instance) =>
+				publicationState(instance.context)
+			);
+			expect({
+				outcomes,
+				references: state.references.map((row) => ({
+					artifactId: row.artifactId,
+					cacheKind: row.cacheKind,
+					cacheName: row.cacheName ?? undefined
+				})),
+				usage: state.usage
+			}).toStrictEqual({
+				outcomes: [
+					{ kind: 'published', artifact: left.artifact },
+					{ kind: 'unavailable' },
+					{ kind: 'published', artifact: right.artifact }
+				],
+				references: [
+					{
+						artifactId: left.artifact.id,
+						cacheKind: 'default',
+						cacheName: undefined
+					},
+					{
+						artifactId: right.artifact.id,
+						cacheKind: 'named',
+						cacheName: scope.name
+					}
+				],
+				usage: { bytes: fact.size, blobs: 1 }
+			});
+		}));
+
+	it('adoption RPC preserves a conflicting cache and publishes a valid sibling', () =>
+		withoutAlarmArming(async () => {
+			const scope = namedCache('adopt-conflict');
+			await putTestCache(token, scope, 'private');
+			const first = await publishParent(token);
+			const second = await publishParent(token, 'b', scope);
+			const { fact } = await runInDurableObject(currentServer(), (instance) =>
+				recordFact(instance.context)
+			);
+			const seeded = await adoptOne(adoptionRequest(fact, first));
+			if (seeded.kind !== 'published') {
+				throw new Error('The conflicting fixture listing was not published');
+			}
+			const before = await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.update(schema.artifacts)
+					.set({ digest: sha256HexDigestSchema.parse('f'.repeat(64)) })
+					.where(eq(schema.artifacts.id, seeded.artifact.id))
+					.run();
+				return publicationState(instance.context);
+			});
+			const outcomes = await currentServer().adoptNarListings([
+				adoptionRequest(fact, first),
+				adoptionRequest(fact, second)
+			]);
+			const sibling = outcomes[1];
+			if (sibling?.kind !== 'published') {
+				throw new Error('The sibling after a conflict was not published');
+			}
+			const after = await runInDurableObject(currentServer(), (instance) =>
+				publicationState(instance.context)
+			);
+			expect({
+				outcomes,
+				preserved: {
+					...after,
+					artifacts: after.artifacts.filter(
+						(row) => row.id !== sibling.artifact.id
+					),
+					listings: after.listings.filter(
+						(row) => row.artifactId !== sibling.artifact.id
+					),
+					parents: after.parents.filter(
+						(row) => row.artifactId !== sibling.artifact.id
+					),
+					references: after.references.filter(
+						(row) => row.artifactId !== sibling.artifact.id
+					)
+				},
+				siblingParents: after.parents.filter(
+					(row) => row.artifactId === sibling.artifact.id
+				)
+			}).toStrictEqual({
+				outcomes: [
+					{ kind: 'conflict' },
+					{ kind: 'published', artifact: sibling.artifact }
+				],
+				preserved: before,
+				siblingParents: [
+					{
+						artifactId: sibling.artifact.id,
+						artifactGeneration: sibling.artifact.generation,
+						cacheId: second.cache.id,
+						storePathHash: second.storePathHash,
+						publicationGeneration: second.generation
+					}
+				]
+			});
+		}));
+
+	it.each([0, 9])(
+		'adoption RPC rejects a batch of %i requests before publication',
+		(count) =>
+			withoutAlarmArming(async () => {
+				const parent = await publishParent(token);
+				const { fact } = await runInDurableObject(currentServer(), (instance) =>
+					recordFact(instance.context)
+				);
+				const requests = Array.from({ length: count }, () =>
+					adoptionRequest(fact, parent)
+				);
+				const before = await runInDurableObject(currentServer(), (instance) =>
+					publicationState(instance.context)
+				);
+				let failure: unknown;
+				try {
+					await currentServer().adoptNarListings(requests);
+				} catch (error) {
+					failure = error;
+				}
+				const after = await runInDurableObject(currentServer(), (instance) =>
+					publicationState(instance.context)
+				);
+				expect({
+					isRejected: failure instanceof Error,
+					state: after
+				}).toStrictEqual({ isRejected: true, state: before });
 			})
 	);
 });

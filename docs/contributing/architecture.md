@@ -282,9 +282,16 @@ alone do not establish their format. Parser resource limits have a distinct
 error type and produce skipped outcomes; malformed NARs and immutable conflicts
 produce failed outcomes. Both preserve bounded reason codes. Execution uses the
 existing connection, buffer, subrequest and deadline accounting. Spans record
-the NAR, generator revision, actual job/task generations and outcome.
-Authoritative cache adoption, completion wakes and automatic forward producers
-remain pending.
+the NAR, generator revision, actual job/task generations and outcome. The
+tenant's internal adoption RPC accepts up to eight captured cache parents. It
+rechecks tenant status and publication activation, resolves each current cache
+generation and uses the publication service's parent authority, live CAS and
+quota checks. The batch publishes sequentially because several parents can refer
+to the same cache-local listing. Repeated parents reuse that artifact and attach
+directed edges without payload reads or writes. A conflicting local fact refuses
+that item without changing its publication or blocking valid siblings. Durable
+cache-adoption delivery, completion wakes and automatic forward producers remain
+pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

@@ -89,6 +89,12 @@ import {
 	type ArtifactStageMeasurement,
 	artifactStageMeasurementSchema
 } from '../blob/artifact-staging.ts';
+import {
+	type ListingAdoptionOutcome,
+	listingAdoptionOutcomesSchema,
+	narListingAdoptionBatchSchema,
+	type NarListingAdoptionRequest
+} from '../blob/nar-listing-adoption.ts';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
 import type { AttestationListPublication } from '../db/attestation-list-revision.ts';
@@ -265,6 +271,7 @@ import {
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
 import { applyMigrations } from './migrate.ts';
+import { NarListingPublicationService } from './nar-listing-publication-service.ts';
 import { NarListingReadService } from './nar-listing-read-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
@@ -3325,6 +3332,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	async adoptNarListings(
+		requests: readonly NarListingAdoptionRequest[]
+	): Promise<readonly ListingAdoptionOutcome[]> {
+		const parsed = narListingAdoptionBatchSchema.parse(requests);
+		await this.initialise();
+		return this.metered('listing-adopt', () =>
+			this.withArtifactDispatchWake(async () => {
+				const result = await new NarListingPublicationService(
+					this.context
+				).adoptManyInSection(parsed);
+				return listingAdoptionOutcomesSchema.parse(result);
+			})
+		);
+	}
+
 	async prepareListingTask(
 		claim: ArtifactTaskClaim
 	): Promise<ListingTaskPreparation> {
@@ -4366,6 +4388,7 @@ type MeteredMethod =
 	| 'listing-task-prepare'
 	| 'listing-task-renew'
 	| 'listing-task-complete'
+	| 'listing-adopt'
 	| 'attestation-list-repair'
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
