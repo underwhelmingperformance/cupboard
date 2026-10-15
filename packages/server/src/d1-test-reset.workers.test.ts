@@ -58,6 +58,9 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			"INSERT INTO shared_listing_generation (nar_hash, generator_revision, source_incarnation, generation, job_id, job_generation, task_id, task_generation, updated_at) VALUES ('reset-nar', 'reset-generator', 1, 1, 'reset-job', 1, 'reset-task', 1, '2025-01-01T00:00:00.000Z')"
 		),
 		env.CUPBOARD_DB.prepare(
+			"INSERT INTO shared_listing_stage (id, nar_hash, generator_revision, source_incarnation, computation_generation, r2_key, maximum_bytes, state, created_at, expires_at, write_until, cleanup_after, next_cleanup_at) VALUES ('reset-stage', 'reset-nar', 'reset-generator', 1, 1, 'shared-artifact-staging/reset-stage', 67108864, 'pending', '2025-01-01T00:00:00.000Z', '2025-01-01T00:01:00.000Z', '2025-01-01T00:15:00.000Z', '2025-01-01T01:26:00.000Z', '2025-01-01T00:01:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
 			"INSERT INTO nar_capture_event (nar_hash, source_incarnation) VALUES ('reset-nar', 1)"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -123,6 +126,7 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		listing_fact: 0,
 		listing_generation: 0,
 		shared_listing_generation: 0,
+		shared_listing_stage: 0,
 		shared_listing_job: 0,
 		shared_listing_task: 0,
 		nar_capture_event: 0,

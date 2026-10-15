@@ -28,6 +28,7 @@ export {
 	readableBlobReference,
 	sharedListingGeneration,
 	sharedListingJob,
+	sharedListingStage,
 	sharedListingTask,
 	tenant,
 	tenantBlob,

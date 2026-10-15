@@ -570,13 +570,13 @@ and the reapers.
 Earlier releases stored private caches under a `private/` name. A migration in a
 later release moved those objects to the current keys.
 
-The deploy reconciles three R2 upload lifecycle rules. The `staging/` and
-`artifact-staging/` rules delete staging objects and abort incomplete multipart
-uploads after a day. The `t/` rule only aborts incomplete multipart uploads
-after a day; completed tenant objects follow their publication and retention
-lifecycle. These rules reclaim uploads when creation succeeds after a timeout
-and the caller loses the upload ID. Matching managed rules and unrelated
-operator rules are preserved.
+The deploy reconciles four R2 upload lifecycle rules. The `staging/`,
+`artifact-staging/` and `shared-artifact-staging/` rules delete staging objects
+and abort incomplete multipart uploads after a day. The `t/` rule only aborts
+incomplete multipart uploads after a day; completed tenant objects follow their
+publication and retention lifecycle. These rules reclaim uploads when creation
+succeeds after a timeout and the caller loses the upload ID. Matching managed
+rules and unrelated operator rules are preserved.
 
 R2 applies lifecycle actions asynchronously. The configured age is an
 eligibility threshold, not a cleanup completion deadline. See [R2 object

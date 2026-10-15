@@ -7287,7 +7287,15 @@ build traces available from a cupboard cache.
       the same NAR and generator revision. Database guards also protect against
       preceding tenant writers. Global leases capture job and task generations,
       recheck physical source retention and cannot outlast task ownership.
-      Different NARs and revisions remain independent. Global task execution,
+      Different NARs and revisions remain independent. Shared staging metadata
+      now records one provisional resource per computation generation, captures
+      multipart IDs and fences sealed measurements and cleanup claims. Sealed
+      recovery can adopt existing bytes without allocating a new stage. Late
+      writes remain tracked through their cleanup horizon. Cleanup
+      acknowledgement revokes only the matching computation before deleting its
+      allocation marker, so a delayed reservation cannot recreate a deleted
+      stage. The shared prefix has a separate R2 lifecycle fallback. Effectful
+      R2 staging and cleanup dispatch, output retention, global task execution,
       cache adoption projections and producer activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed

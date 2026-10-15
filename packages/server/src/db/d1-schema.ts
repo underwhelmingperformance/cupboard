@@ -48,6 +48,7 @@ import {
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
+import type { ArtifactStageId } from '../blob/artifact-staging.ts';
 import {
 	type NarCaptureSequence,
 	narCaptureSequenceSchema
@@ -993,6 +994,82 @@ export const listingFact = sqliteTable(
 		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
 		check('listing_fact_format_check', sql`${table.format} = 1`),
 		check('listing_fact_size_check', sql`${table.size} > 0`)
+	]
+);
+
+export const sharedListingStage = sqliteTable(
+	'shared_listing_stage',
+	{
+		id: text('id').$type<ArtifactStageId>().primaryKey(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		computationGeneration: integer('computation_generation').notNull(),
+		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
+		maximumBytes: integer('maximum_bytes').notNull(),
+		state: text('state', { enum: ['pending', 'ready', 'retired'] }).notNull(),
+		multipartId: text('multipart_id'),
+		writesSealed: integer('writes_sealed', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		digest: text('digest').$type<Sha256HexDigest>(),
+		size: integer('size'),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		writeUntil: text('write_until').$type<IsoTimestamp>().notNull(),
+		cleanupAfter: text('cleanup_after').$type<IsoTimestamp>().notNull(),
+		nextCleanupAt: text('next_cleanup_at').$type<IsoTimestamp>().notNull(),
+		cleanupGeneration: integer('cleanup_generation').notNull().default(0),
+		cleanupOwner: text('cleanup_owner').$type<ArtifactTaskOwner>(),
+		cleanupLeaseExpiresAt: text(
+			'cleanup_lease_expires_at'
+		).$type<IsoTimestamp>()
+	},
+	(table) => [
+		uniqueIndex('shared_listing_stage_computation_idx').on(
+			table.narHash,
+			table.generatorRevision,
+			table.computationGeneration
+		),
+		index('shared_listing_stage_recovery_idx').on(
+			table.narHash,
+			table.generatorRevision,
+			table.state,
+			table.cleanupAfter,
+			table.id
+		),
+		index('shared_listing_stage_cleanup_idx').on(table.nextCleanupAt, table.id),
+		check(
+			'shared_listing_stage_state_check',
+			sql`${table.state} IN ('pending', 'ready', 'retired')`
+		),
+		check(
+			'shared_listing_stage_generation_check',
+			sql`typeof(${table.sourceIncarnation}) = 'integer' AND ${table.sourceIncarnation} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.computationGeneration}) = 'integer' AND ${table.computationGeneration} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.cleanupGeneration}) = 'integer' AND ${table.cleanupGeneration} BETWEEN 0 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_stage_budget_check',
+			sql`typeof(${table.maximumBytes}) = 'integer' AND ${table.maximumBytes} BETWEEN 1 AND 67108864
+		AND (${table.size} IS NULL OR (typeof(${table.size}) = 'integer' AND ${table.size} BETWEEN 0 AND ${table.maximumBytes}))`
+		),
+		check(
+			'shared_listing_stage_seal_check',
+			sql`(${table.writesSealed} = 0 AND ${table.digest} IS NULL AND ${table.size} IS NULL)
+		OR (${table.writesSealed} = 1 AND ${table.multipartId} IS NOT NULL AND ${table.digest} IS NOT NULL AND ${table.size} IS NOT NULL)`
+		),
+		check(
+			'shared_listing_stage_ready_check',
+			sql`${table.state} <> 'ready' OR ${table.writesSealed} = 1`
+		),
+		check(
+			'shared_listing_stage_cleanup_claim_check',
+			sql`(${table.cleanupGeneration} = 0 AND ${table.cleanupOwner} IS NULL AND ${table.cleanupLeaseExpiresAt} IS NULL)
+		OR (${table.cleanupGeneration} > 0 AND ${table.cleanupOwner} IS NOT NULL AND ${table.state} = 'retired')`
+		)
 	]
 );
 

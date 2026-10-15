@@ -654,6 +654,10 @@ export function createCloudflareApi(
 				stagingReclaimRule(
 					'cupboard-artifact-staging-reclaim',
 					'artifact-staging/'
+				),
+				stagingReclaimRule(
+					'cupboard-shared-artifact-staging-reclaim',
+					'shared-artifact-staging/'
 				)
 			];
 			const current = await client.r2.buckets.lifecycle.get(

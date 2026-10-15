@@ -421,6 +421,13 @@
 			"when": 1792045932022,
 			"tag": "0059_shared_listing_generation",
 			"breakpoints": true
+		},
+		{
+			"idx": 60,
+			"version": "6",
+			"when": 1792050296859,
+			"tag": "0060_shared_listing_staging",
+			"breakpoints": true
 		}
 	]
 }

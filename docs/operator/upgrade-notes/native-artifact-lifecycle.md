@@ -9,10 +9,15 @@ The additive `shared-listing-generation` transition installs the D1 table for
 cross-tenant computation claims. Expansion does not start generation or enable
 native artifact producers.
 
-Deployment also reconciles a bucket lifecycle rule for `artifact-staging/`. The
-rule deletes transient objects and aborts incomplete multipart uploads after a
-day. CAS bytes and completed tenant publications use their existing retention
-rules. R2 applies lifecycle cleanup asynchronously.
+The additive `shared-listing-staging` transition records provisional global
+listing resources separately from tenant staging. Expansion does not start
+global generation.
+
+Deployment also reconciles bucket lifecycle rules for `artifact-staging/` and
+`shared-artifact-staging/`. The rules delete transient objects and abort
+incomplete multipart uploads after a day. CAS bytes and completed tenant
+publications use their existing retention rules. R2 applies lifecycle cleanup
+asynchronously.
 
 Use `cupboard deploy` or `cupboard init`. The command expands the transition,
 uploads both Workers and confirms that both Workers serve the uploaded build.

@@ -88,7 +88,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			state: 'complete',
 			updatedAt: recorded
 		},
-		{ id: 'global-listing-generation', state: 'complete', updatedAt: recorded }
+		{ id: 'global-listing-generation', state: 'complete', updatedAt: recorded },
+		{ id: 'shared-listing-staging', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -647,6 +648,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition global-listing-generation',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-staging',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },

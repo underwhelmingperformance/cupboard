@@ -157,6 +157,14 @@ export class SharedListingGenerationStore {
 		});
 	}
 
+	owns(claim: SharedListingGenerationClaim, now: IsoTimestamp) {
+		return and(
+			this.captured(claim),
+			gt(schema.sharedListingGeneration.leaseExpiresAt, now),
+			this.source(claim.task, now)
+		);
+	}
+
 	async claim(
 		input: SharedListingTaskClaim,
 		now: IsoTimestamp
@@ -295,13 +303,7 @@ export class SharedListingGenerationStore {
 					leaseExpiresAt: sql`max(${schema.sharedListingGeneration.leaseExpiresAt}, min(${deadline}, (${taskLease})))`,
 					updatedAt: sql`max(${schema.sharedListingGeneration.updatedAt}, ${now})`
 				})
-				.where(
-					and(
-						this.captured(claim),
-						gt(schema.sharedListingGeneration.leaseExpiresAt, now),
-						this.source(claim.task, now)
-					)
-				)
+				.where(this.owns(claim, now))
 				.returning({ at: schema.sharedListingGeneration.leaseExpiresAt });
 			return rows[0]?.at ?? undefined;
 		});
