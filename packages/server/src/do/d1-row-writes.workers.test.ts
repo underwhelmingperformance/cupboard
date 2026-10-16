@@ -18,6 +18,7 @@ import {
 	currentServer,
 	defaultCache,
 	initialise,
+	narObjectVersionChanges,
 	resetTestServer,
 	runCasReaperToCompletion,
 	stageAttestationBundle,
@@ -158,11 +159,69 @@ describe('D1 rows written', () => {
 						{ statement: 'insert into publication', written: 2 },
 						{ statement: 'insert into blob_ref_storage', written: 7 },
 						{ statement: 'insert into tenant_blob', written: 2 },
-						{ statement: 'update blob_state', written: cleared }
+						{ statement: 'update blob_state', written: cleared },
+						{ statement: 'select', written: 0 }
 					]
 				],
 				deadlines: [{ narHash: nar.narHash, deleteAfter: undefined }]
 			});
+		}
+	);
+
+	it.each(['collected', 'retired'] as const)(
+		'writes nothing in the charge batch for a NAR whose object version is %s',
+		async (change) => {
+			const token = await initialise();
+			const nar = await verifiableNar('charge-batch-refused');
+			const metadata = uploadMetadata({
+				storePathHash: 'a'.repeat(32),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			let isChanged = false;
+
+			const batches = await batchCosts(
+				() => commitPath(token, metadata, nar),
+				async (statements) => {
+					if (
+						isChanged ||
+						!statements.includes('insert into blob_ref_storage')
+					) {
+						return;
+					}
+
+					isChanged = true;
+					await armBlobReaperTimer(nar.narHash);
+					await narObjectVersionChanges[change](nar.narHash);
+				}
+			);
+
+			expect(
+				batchesWith(batches, 'insert into blob_ref_storage')
+			).toStrictEqual([
+				[
+					{ statement: 'select', written: 0 },
+					{ statement: 'update tenant_usage', written: 0 },
+					{ statement: 'update tenant_usage', written: 0 },
+					{ statement: 'insert into publication', written: 0 },
+					{ statement: 'insert into blob_ref_storage', written: 0 },
+					{ statement: 'insert into tenant_blob', written: 0 },
+					{ statement: 'update blob_state', written: 0 },
+					{ statement: 'select', written: 0 }
+				],
+				[
+					{ statement: 'select', written: 0 },
+					{ statement: 'update tenant_usage', written: 1 },
+					{ statement: 'update tenant_usage', written: 1 },
+					{ statement: 'insert into publication', written: 2 },
+					{ statement: 'insert into blob_ref_storage', written: 7 },
+					{ statement: 'insert into tenant_blob', written: 2 },
+					{ statement: 'update blob_state', written: 0 },
+					{ statement: 'select', written: 0 }
+				]
+			]);
 		}
 	);
 

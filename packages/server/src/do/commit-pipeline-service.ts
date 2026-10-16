@@ -4,6 +4,7 @@ import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NarInfoGeneration,
 	narInfoGenerationSchema,
+	nixSha256HashSchema,
 	type NixSha256HashString,
 	type RootName,
 	signingKeyGenerationSchema,
@@ -37,7 +38,12 @@ import {
 	sql
 } from 'drizzle-orm';
 import { type BatchItem } from 'drizzle-orm/batch';
+import { z } from 'zod';
 
+import {
+	referenceableObjectVersion,
+	registryAllowsIncarnation
+} from '../blob/object-incarnation.ts';
 import { signNixFingerprint } from '../crypto/crypto.ts';
 import {
 	cacheIdentityColumns,
@@ -150,6 +156,12 @@ interface ChargeGateRow {
 	readonly usageTenant: TenantId | null;
 }
 
+interface ChargeBatchResult {
+	readonly gate: ChargeGateRow | undefined;
+	// One value per entry, in entry order: whether its reference exists.
+	readonly isReferenced: readonly boolean[];
+}
+
 type PublicationColumns = Pick<
 	typeof d1Schema.publication.$inferInsert,
 	'uploadId'
@@ -199,12 +211,15 @@ export interface MaterialiseRequest {
 export type BatchedMaterialiseOutcome =
 	| MaterialiseOutcome
 	| { readonly kind: 'gone' }
-	// The invocation's allowance cannot cover this request. The caller leaves the
-	// upload pending so a later verification pass can settle it.
+	// The invocation's allowance cannot cover this request, or the charge batch
+	// refused it because the probed object version can no longer be referenced.
+	// The caller leaves the upload pending so a later verification pass can
+	// complete the commit.
 	| { readonly kind: 'deferred' };
 
 type ChargeOutcome =
 	| { readonly kind: 'charged' }
+	| { readonly kind: 'object-changed' }
 	| { readonly kind: 'over-quota' }
 	| {
 			readonly kind: 'tenant-inactive';
@@ -212,7 +227,8 @@ type ChargeOutcome =
 	  };
 
 type BatchChargeOutcome =
-	| Exclude<ChargeOutcome, { kind: 'over-quota' }>
+	| Extract<ChargeOutcome, { kind: 'tenant-inactive' }>
+	| { readonly kind: 'charged'; readonly isReferenced: readonly boolean[] }
 	| { readonly kind: 'retry-individually' };
 
 interface PendingMaterialise {
@@ -260,6 +276,28 @@ export interface PrefetchedMaterialisationFacts {
 export interface PrefetchedCommitFacts {
 	readonly materialisation: PrefetchedMaterialisationFacts;
 	readonly reuseReferences: readonly ReusableReference[];
+}
+
+const chargedReferenceRowsSchema = z.array(
+	z.object({ narHash: nixSha256HashSchema })
+);
+
+function settledOutcome(
+	charged: ChargeOutcome,
+	narInfo: NarInfo
+): BatchedMaterialiseOutcome {
+	switch (charged.kind) {
+		case 'charged': {
+			return { kind: 'materialised', narInfo };
+		}
+		case 'object-changed': {
+			return { kind: 'deferred' };
+		}
+		case 'over-quota':
+		case 'tenant-inactive': {
+			return charged;
+		}
+	}
 }
 
 function isOverQuota(
@@ -442,9 +480,6 @@ export class CommitPipelineService {
 		}
 
 		if (outcome.kind === 'deferred') {
-			// This invocation's subrequest allowance cannot charge the commit. Keep the
-			// upload pending, request verification, and return the protocol's
-			// existing deferred outcome.
 			this.uploadState.markUploadPending(uploadId);
 			await this.requestVerification(logger, this.context.requireTenant());
 
@@ -699,7 +734,12 @@ export class CommitPipelineService {
 						incarnation: d1Schema.blobState.incarnation
 					})
 					.from(d1Schema.blobState)
-					.where(inArray(d1Schema.blobState.narHash, list))
+					.where(
+						and(
+							inArray(d1Schema.blobState.narHash, list),
+							this.currentStateRow()
+						)
+					)
 			)
 		);
 
@@ -713,6 +753,17 @@ export class CommitPipelineService {
 					incarnation: row.incarnation
 				}
 			])
+		);
+	}
+
+	// A state row that the registry contradicts belongs to a retired object
+	// version, which a new reference must not use.
+	private currentStateRow() {
+		return registryAllowsIncarnation(
+			this.context.d1,
+			'nar',
+			d1Schema.blobState.narHash,
+			d1Schema.blobState.incarnation
 		);
 	}
 
@@ -733,7 +784,8 @@ export class CommitPipelineService {
 
 	// Keep the usage updates, reference and ownership inserts, and reaper disarm
 	// in one batch. Their predicates make a replay idempotent and refuse every
-	// write unless the tenant is still active and has a usage row. The first edge
+	// write unless the tenant is still active and has a usage row, and unless
+	// the probed object version can still be referenced. The first edge
 	// also fixes the publisher: local finalisation can stop after D1 commits, so
 	// recording the identity later would let a retry change the publishing run.
 	// The inserts need the usage-row predicate as much as the updates do: without
@@ -777,6 +829,11 @@ export class CommitPipelineService {
 				.from(d1Schema.blobReference)
 				.where(edgeFilter)
 		);
+		const objectReferenceable = referenceableObjectVersion(this.context.d1, {
+			kind: 'nar',
+			narHash: metadata.narHash,
+			incarnation: blob.incarnation
+		});
 		const presenceFilter = and(
 			eq(d1Schema.tenantBlob.tenant, tenant),
 			eq(d1Schema.tenantBlob.narHash, metadata.narHash)
@@ -790,17 +847,21 @@ export class CommitPipelineService {
 		const creditNarInfoFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			edgeMissing,
-			tenantChargeable
+			tenantChargeable,
+			objectReferenceable
 		);
 		const creditBytesFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			presenceMissing,
-			tenantChargeable
+			tenantChargeable,
+			objectReferenceable
 		);
 		const graceClearFilter = and(
 			eq(d1Schema.blobState.narHash, metadata.narHash),
+			eq(d1Schema.blobState.incarnation, blob.incarnation),
 			isNotNull(d1Schema.blobState.deleteAfter),
-			tenantChargeable
+			tenantChargeable,
+			objectReferenceable
 		);
 		const cacheIdentity = cacheIdentityColumns(cache.scope);
 
@@ -847,7 +908,9 @@ export class CommitPipelineService {
 							)
 						})
 						.from(d1Schema.tenant)
-						.where(and(chargeableTenantFilter, edgeMissing))
+						.where(
+							and(chargeableTenantFilter, edgeMissing, objectReferenceable)
+						)
 				)
 				.onConflictDoNothing(),
 			this.context.d1
@@ -880,7 +943,7 @@ export class CommitPipelineService {
 							)
 						})
 						.from(d1Schema.tenant)
-						.where(chargeableTenantFilter)
+						.where(and(chargeableTenantFilter, objectReferenceable))
 				)
 				.onConflictDoNothing(),
 			this.context.d1
@@ -895,7 +958,7 @@ export class CommitPipelineService {
 							fileSize: sql<number>`${blob.fileSize}`.as('file_size')
 						})
 						.from(d1Schema.tenant)
-						.where(chargeableTenantFilter)
+						.where(and(chargeableTenantFilter, objectReferenceable))
 				)
 				.onConflictDoNothing(),
 			this.context.d1
@@ -903,6 +966,33 @@ export class CommitPipelineService {
 				.set({ deleteAfter: sql`null` })
 				.where(graceClearFilter)
 		];
+	}
+
+	// A refused entry writes nothing, and neither does a replay. The reference
+	// exists after a charge or a replay and is missing after a refusal, so this
+	// read follows the entry's writes and tells them apart.
+	private chargedReferenceSelect(
+		tenant: TenantId,
+		charge: MaterialisationCharge
+	) {
+		const { cache, metadata, generation } = charge;
+
+		return this.context.d1
+			.select({ narHash: d1Schema.blobReference.narHash })
+			.from(d1Schema.blobReference)
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, tenant),
+					cacheIdentityCondition(
+						d1Schema.blobReference.cacheKind,
+						d1Schema.blobReference.cacheName,
+						cache.scope
+					),
+					eq(d1Schema.blobReference.storePathHash, metadata.storePathHash),
+					eq(d1Schema.blobReference.generation, generation),
+					eq(d1Schema.blobReference.narHash, metadata.narHash)
+				)
+			);
 	}
 
 	// The leading read of a charge batch: the status the statements are gated
@@ -935,6 +1025,30 @@ export class CommitPipelineService {
 		}
 	}
 
+	private async runChargeBatch(
+		tenant: TenantId,
+		charges: readonly MaterialisationCharge[],
+		now: IsoTimestamp
+	): Promise<ChargeBatchResult> {
+		const references = charges.map((charge) =>
+			this.chargedReferenceSelect(tenant, charge)
+		);
+		const [gate, ...rest] = await this.context.d1.batch([
+			this.tenantChargeGateSelect(tenant),
+			...charges.flatMap((charge) =>
+				this.chargeStatements(tenant, charge, now)
+			),
+			...references
+		]);
+
+		return {
+			gate: gate.at(0),
+			isReferenced: rest
+				.slice(rest.length - references.length)
+				.map((rows) => chargedReferenceRowsSchema.parse(rows).length > 0)
+		};
+	}
+
 	// The database quota check rolls back the whole charge batch, so an edge
 	// cannot be recorded without its corresponding usage charge.
 	private async reserveEdgeAndCharge(
@@ -946,14 +1060,10 @@ export class CommitPipelineService {
 		const { metadata, blob } = charge;
 		const now = isoTimestamp(new Date());
 
-		let gateRows: ChargeGateRow[];
+		let charged: ChargeBatchResult;
 
 		try {
-			const [gate] = await this.context.d1.batch([
-				this.tenantChargeGateSelect(tenant),
-				...this.chargeStatements(tenant, charge, now)
-			]);
-			gateRows = gate;
+			charged = await this.runChargeBatch(tenant, [charge], now);
 		} catch (error) {
 			// Concurrent commits can both pass the advisory quota check. Re-read
 			// after a failed charge to distinguish that race from a storage fault.
@@ -970,16 +1080,15 @@ export class CommitPipelineService {
 			throw error;
 		}
 
-		if (gateRows.at(0)?.status !== 'active') {
-			return {
-				kind: 'tenant-inactive',
-				tenantStatus: gateRows.at(0)?.status
-			};
+		if (charged.gate?.status !== 'active') {
+			return { kind: 'tenant-inactive', tenantStatus: charged.gate?.status };
 		}
 
-		this.refuseUnmeteredTenant(tenant, gateRows.at(0));
+		this.refuseUnmeteredTenant(tenant, charged.gate);
 
-		return { kind: 'charged' };
+		return {
+			kind: charged.isReferenced.at(0) === true ? 'charged' : 'object-changed'
+		};
 	}
 
 	// D1 executes these statements sequentially, so two requests for the same
@@ -992,32 +1101,22 @@ export class CommitPipelineService {
 		await new PathReadAuthorityService(this.context).requireWritable();
 
 		const now = isoTimestamp(new Date());
-		const statements = charges.flatMap((charge) =>
-			this.chargeStatements(tenant, charge, now)
-		);
 
-		let gateRows: ChargeGateRow[];
+		let charged: ChargeBatchResult;
 
 		try {
-			const [gate] = await this.context.d1.batch([
-				this.tenantChargeGateSelect(tenant),
-				...statements
-			]);
-			gateRows = gate;
+			charged = await this.runChargeBatch(tenant, charges, now);
 		} catch {
 			return { kind: 'retry-individually' };
 		}
 
-		if (gateRows.at(0)?.status !== 'active') {
-			return {
-				kind: 'tenant-inactive',
-				tenantStatus: gateRows.at(0)?.status
-			};
+		if (charged.gate?.status !== 'active') {
+			return { kind: 'tenant-inactive', tenantStatus: charged.gate?.status };
 		}
 
-		this.refuseUnmeteredTenant(tenant, gateRows.at(0));
+		this.refuseUnmeteredTenant(tenant, charged.gate);
 
-		return { kind: 'charged' };
+		return { kind: 'charged', isReferenced: charged.isReferenced };
 	}
 
 	// Do not postpone an existing future deadline when more work is deferred.
@@ -1166,17 +1265,18 @@ export class CommitPipelineService {
 					blob: charge.blob,
 					publication: charge.publication
 				});
+				outcomes[charge.index] = settledOutcome(single, charge.narInfo);
+			}
+		} else if (charged.kind === 'charged') {
+			for (const [position, charge] of chargeable.entries()) {
 				outcomes[charge.index] =
-					single.kind === 'charged'
+					charged.isReferenced[position] === true
 						? { kind: 'materialised', narInfo: charge.narInfo }
-						: single;
+						: { kind: 'deferred' };
 			}
 		} else {
 			for (const charge of chargeable) {
-				outcomes[charge.index] =
-					charged.kind === 'charged'
-						? { kind: 'materialised', narInfo: charge.narInfo }
-						: charged;
+				outcomes[charge.index] = charged;
 			}
 		}
 
@@ -1849,7 +1949,7 @@ export class CommitPipelineService {
 				: (stagedObject?.size ?? undefined);
 
 		if (stagedSize === undefined) {
-			if (pending.r2Key === canonicalKey && probe.blob !== undefined) {
+			if (pending.r2Key === canonicalKey) {
 				await this.uploadState.markCanonicalNarMissing(metadata.narHash);
 			}
 
@@ -2111,7 +2211,10 @@ export class CommitPipelineService {
 		}
 
 		const tenant = this.context.requireTenant();
-		const canonicalFilter = eq(d1Schema.blobState.narHash, metadata.narHash);
+		const canonicalFilter = and(
+			eq(d1Schema.blobState.narHash, metadata.narHash),
+			this.currentStateRow()
+		);
 		const ownedFilter = and(
 			eq(d1Schema.tenantBlob.tenant, tenant),
 			eq(d1Schema.tenantBlob.narHash, metadata.narHash)

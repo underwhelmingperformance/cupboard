@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -7,29 +8,45 @@ import { z } from 'zod';
 
 import { lateWriteTombstoneHorizonMs } from '../blob/object-incarnation.ts';
 import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	afterGrace,
 	blobReferenceRows,
 	blobStateArmTimes,
 	blobStateNarHashes,
+	cacheWriteGrants,
 	casObjectRows,
 	clearBlobStorage,
 	commitPath,
+	CommitSocketError,
+	commitUploadRejection,
+	CommitVerdictError,
 	currentNarObjectKey,
 	deleteBlobState,
 	deletePath,
+	expectSingleCommitDecision,
 	fetchNarInfo,
 	flakyD1,
 	initialise,
+	interleaveBeforeInsert,
+	issueTokenForTenant,
+	narObjectVersionChanges,
+	negotiateUploads,
+	provisionNamedTenant,
+	pushPathToTenant,
 	readFetch,
 	resetTestServer,
 	runBlobReaperToCompletion as runBlobReaper,
 	runCasReaperToCompletion as runCasReaper,
 	seedBlobStates,
 	seedCasObjects,
+	singleDecision,
 	syntheticCasDigest,
 	syntheticNarHash,
+	tenantBlobRows,
+	tenantUsageRow,
 	testBase,
+	testServerFor,
 	uploadMetadata,
 	verifiableNar,
 	verifiableNarStored
@@ -648,6 +665,263 @@ describe('blob reaper', () => {
 				fileHash: stored.fileHash,
 				bytes: stored.narBytes
 			}
+		});
+	});
+
+	it.each(['collected', 'retired'] as const)(
+		'refuses the charge for a NAR whose object version is %s before the charge batch',
+		async (change) => {
+			const token = await initialise();
+			const nar = await verifiableNar(`reaper-charge-${change}`);
+			const metadata = uploadMetadata({
+				storePathHash: 'a'.repeat(32),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			const interleaving = interleaveBeforeInsert('blob_ref_storage', () =>
+				narObjectVersionChanges[change](nar.narHash)
+			);
+
+			try {
+				await commitPath(token, metadata, nar);
+			} finally {
+				interleaving.restore();
+			}
+
+			const narInfo = await fetchNarInfo(metadata.storePathHash);
+			const response = await readFetch(`/${narInfo.url}`);
+
+			expect({
+				hasInterleaved: interleaving.hasInterleaved(),
+				served: {
+					url: narInfo.url,
+					status: response.status,
+					bytes: await response.text()
+				},
+				usage: await tenantUsageRow()
+			}).toStrictEqual({
+				hasInterleaved: true,
+				served: {
+					url: narObjectKey(nar.narHash, 3),
+					status: StatusCodes.OK,
+					bytes: new TextDecoder().decode(nar.narBytes)
+				},
+				usage: {
+					bytes: nar.narBytes.byteLength,
+					narinfos: 1,
+					blobs: 1,
+					casBytes: 0,
+					casBlobs: 0,
+					quotaBytes: undefined
+				}
+			});
+		}
+	);
+
+	it('charges a NAR whose state row has no registry row', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('reaper-charge-legacy');
+		const metadata = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		// An older Worker can write a state row without registering it.
+		const interleaving = interleaveBeforeInsert(
+			'blob_ref_storage',
+			async () => {
+				await env.CUPBOARD_DB.prepare(
+					"DELETE FROM object_incarnation WHERE kind = 'nar' AND object_id = ?"
+				)
+					.bind(nar.narHash)
+					.run();
+			}
+		);
+
+		try {
+			await commitPath(token, metadata, nar);
+		} finally {
+			interleaving.restore();
+		}
+
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+		const response = await readFetch(`/${narInfo.url}`);
+
+		expect({
+			hasInterleaved: interleaving.hasInterleaved(),
+			served: { url: narInfo.url, status: response.status },
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			hasInterleaved: true,
+			served: { url: narObjectKey(nar.narHash, 2), status: StatusCodes.OK },
+			usage: {
+				bytes: nar.narBytes.byteLength,
+				narinfos: 1,
+				blobs: 1,
+				casBytes: 0,
+				casBlobs: 0,
+				quotaBytes: undefined
+			}
+		});
+	});
+
+	it("refuses one tenant's charge for a shared NAR demoted before its charge batch", async () => {
+		const acme = tenantIdSchema.parse('acme');
+		const acmeToken = await issueTokenForTenant(
+			testServerFor(acme),
+			await provisionNamedTenant(acme),
+			cacheWriteGrants()
+		);
+		const token = await initialise();
+		const nar = await verifiableNar('reaper-charge-shared');
+		const shared = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		const own = uploadMetadata({ ...shared, storePathHash: 'b'.repeat(32) });
+		await pushPathToTenant(acme, acmeToken, shared, nar);
+		const interleaving = interleaveBeforeInsert('blob_ref_storage', () =>
+			narObjectVersionChanges.demoted(nar.narHash)
+		);
+
+		try {
+			await commitPath(token, own, nar);
+		} finally {
+			interleaving.restore();
+		}
+
+		const narInfo = await fetchNarInfo(own.storePathHash);
+		const references = await blobReferenceRows();
+
+		expect({
+			hasInterleaved: interleaving.hasInterleaved(),
+			url: narInfo.url,
+			references: references.map((row) => ({
+				tenant: row.tenant,
+				storePathHash: row.storePathHash
+			})),
+			presence: await tenantBlobRows()
+		}).toStrictEqual({
+			hasInterleaved: true,
+			url: narObjectKey(nar.narHash, 3),
+			references: [
+				{ tenant: acme, storePathHash: shared.storePathHash },
+				{ tenant: fixtureTenant, storePathHash: own.storePathHash }
+			],
+			presence: [
+				{
+					tenant: acme,
+					narHash: nar.narHash,
+					fileSize: nar.narBytes.byteLength
+				},
+				{
+					tenant: fixtureTenant,
+					narHash: nar.narHash,
+					fileSize: nar.narBytes.byteLength
+				}
+			]
+		});
+	});
+
+	it.each(['demoted', 'retired'] as const)(
+		'defers a reuse commit whose NAR object version is %s before the charge batch',
+		async (change) => {
+			const token = await initialise();
+			const nar = await verifiableNar(`reaper-charge-reuse-${change}`);
+			const first = uploadMetadata({
+				storePathHash: 'a'.repeat(32),
+				name: 'first',
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			const second = uploadMetadata({
+				...first,
+				storePathHash: 'b'.repeat(32),
+				name: 'second'
+			});
+			await commitPath(token, first, nar);
+			const decision = expectSingleCommitDecision(
+				await negotiateUploads(token, [second]),
+				second
+			);
+			const usage = await tenantUsageRow();
+			const interleaving = interleaveBeforeInsert('blob_ref_storage', () =>
+				narObjectVersionChanges[change](nar.narHash)
+			);
+
+			let rejection: unknown;
+
+			try {
+				rejection = await commitUploadRejection(token, decision.uploadId);
+			} finally {
+				interleaving.restore();
+			}
+
+			const references = await blobReferenceRows();
+			const next = singleDecision(await negotiateUploads(token, [second]));
+
+			expect({
+				hasInterleaved: interleaving.hasInterleaved(),
+				charges: interleaving.inserts(),
+				rejection,
+				references: references.map((row) => row.storePathHash),
+				usage: await tenantUsageRow(),
+				next: next.action
+			}).toStrictEqual({
+				hasInterleaved: true,
+				charges: 1,
+				rejection: new CommitVerdictError('absent'),
+				references: [first.storePathHash],
+				usage,
+				next: 'upload'
+			});
+		}
+	);
+
+	it('refuses a reuse commit whose NAR object version is retired before the commit', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('reaper-reuse-retired-first');
+		const first = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			name: 'first',
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		const second = uploadMetadata({
+			...first,
+			storePathHash: 'b'.repeat(32),
+			name: 'second'
+		});
+		await commitPath(token, first, nar);
+		const decision = expectSingleCommitDecision(
+			await negotiateUploads(token, [second]),
+			second
+		);
+		await narObjectVersionChanges.retired(nar.narHash);
+
+		const rejection = await commitUploadRejection(token, decision.uploadId);
+		const next = singleDecision(await negotiateUploads(token, [second]));
+
+		expect({
+			rejection:
+				rejection instanceof CommitSocketError
+					? { status: rejection.status }
+					: rejection,
+			next: next.action
+		}).toStrictEqual({
+			rejection: { status: StatusCodes.NOT_FOUND },
+			next: 'upload'
 		});
 	});
 

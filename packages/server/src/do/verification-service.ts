@@ -44,6 +44,7 @@ import { z } from 'zod';
 
 import { type DeclaredNarVerification } from '../blob/nar-verify.ts';
 import { recordedNarInfoMetadata } from '../blob/narinfo-object-metadata.ts';
+import { registryAllowsIncarnation } from '../blob/object-incarnation.ts';
 import {
 	type CanonicalIncarnation,
 	type StagedBlobPromotion
@@ -2114,7 +2115,17 @@ export class VerificationService {
 		const state = await this.context.d1
 			.select({ incarnation: d1Schema.blobState.incarnation })
 			.from(d1Schema.blobState)
-			.where(eq(d1Schema.blobState.narHash, narHash))
+			.where(
+				and(
+					eq(d1Schema.blobState.narHash, narHash),
+					registryAllowsIncarnation(
+						this.context.d1,
+						'nar',
+						d1Schema.blobState.narHash,
+						d1Schema.blobState.incarnation
+					)
+				)
+			)
 			.get();
 
 		if (state === undefined) {

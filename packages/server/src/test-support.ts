@@ -113,6 +113,7 @@ import { closeAlarmFence, openAlarmFence } from './alarm-fence.test-support.ts';
 import { issueAccessJwt } from './auth/auth.ts';
 import { NarReadBufferPool } from './blob/nar-read-buffers.ts';
 import { type NarVerification } from './blob/nar-verify.ts';
+import { queueObjectDeletion } from './blob/object-incarnation.ts';
 import {
 	issuePushId,
 	pushIdNonceSchema,
@@ -128,6 +129,7 @@ import {
 } from './control/tenant-membership.ts';
 import { testControlDatabase } from './control-database.test-support.ts';
 import { generateSigningKey, parseJwk } from './crypto/crypto.ts';
+import { recordD1Statements } from './d1-statements.test-support.ts';
 import {
 	cacheIdentityColumns,
 	cacheIdSchema,
@@ -156,11 +158,14 @@ import {
 	AttestationsService,
 	listGenerationMetadataKey
 } from './do/attestations-service.ts';
-import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
+import {
+	fencedBlobStateDeletion,
+	type ObjectReaperPhase
+} from './do/blob-reaper-service.ts';
 import { CacheRegistrationService } from './do/cache-registration-service.ts';
 import type { ServerContext } from './do/context.ts';
 import type { GarbageCollectionService } from './do/garbage-collection-service.ts';
-import { jsonValueLists } from './do/json-list.ts';
+import { jsonRowList, jsonValueLists } from './do/json-list.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import { applyMigrations, migrationsThrough } from './do/migrate.ts';
 import { NarInfoObjectsService } from './do/narinfo-objects-service.ts';
@@ -1942,6 +1947,107 @@ export async function blobStateArmTimes(): Promise<
 		.map((row) => ({ ...row, deleteAfter: row.deleteAfter ?? undefined }))
 		.toSorted((left, right) => byCodeUnit(left.narHash, right.narHash));
 }
+
+/**
+ * Runs `interleave` once, when the first D1 batch that inserts into `table`
+ * reaches D1, and then runs that batch. `inserts` counts the batches that
+ * insert into `table`. Call `restore` when the test ends.
+ */
+export function interleaveBeforeInsert(
+	table: string,
+	interleave: () => Promise<void>
+): { hasInterleaved(): boolean; inserts(): number; restore(): void } {
+	const database = env.CUPBOARD_DB;
+	const batch = database.batch.bind(database);
+	const log = recordD1Statements(database);
+	const insert = `insert into "${table}"`;
+	let hasInterleaved = false;
+	let inserts = 0;
+	const isInsert = (statement: D1PreparedStatement): boolean =>
+		log.sql(statement)?.startsWith(insert) ?? false;
+	const spy = vi
+		.spyOn(database, 'batch')
+		.mockImplementation(async <T>(statements: D1PreparedStatement[]) => {
+			if (statements.every((statement) => !isInsert(statement))) {
+				return batch<T>(statements);
+			}
+
+			inserts += 1;
+
+			if (!hasInterleaved) {
+				hasInterleaved = true;
+				await interleave();
+			}
+
+			return batch<T>(statements);
+		});
+
+	return {
+		hasInterleaved: () => hasInterleaved,
+		inserts: () => inserts,
+		restore: () => {
+			log.restore();
+			spy.mockRestore();
+		}
+	};
+}
+
+async function narStateIncarnation(
+	narHash: NixSha256HashString
+): Promise<number> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ incarnation: d1Schema.blobState.incarnation })
+		.from(d1Schema.blobState)
+		.where(eq(d1Schema.blobState.narHash, narHash))
+		.get();
+
+	if (row === undefined) {
+		throw new TypeError(`No blob_state row exists for ${narHash}`);
+	}
+
+	return row.incarnation;
+}
+
+/**
+ * Each function changes a NAR's current object version in the same way as
+ * another writer can between a commit's probe and its charge batch.
+ */
+export const narObjectVersionChanges = {
+	// The reaper collects the unreferenced object.
+	collected: async (narHash: NixSha256HashString): Promise<void> => {
+		const elapsed = isoTimestamp(new Date(Date.now() - 1));
+		await armBlobReaperTimer(narHash, elapsed);
+		await runBlobReaperToCompletion(rootLogger(), env);
+	},
+	// The demote scan finds the object missing and deletes its state row.
+	demoted: async (narHash: NixSha256HashString): Promise<void> => {
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const incarnation = await narStateIncarnation(narHash);
+		const { retire, remove } = fencedBlobStateDeletion(
+			database,
+			jsonRowList([{ narHash, incarnation }])
+		);
+
+		await database.batch([retire, remove]);
+	},
+	// A promotion wrote the state row after collection had set the registry
+	// state to `absent` and queued the object for deletion.
+	retired: async (narHash: NixSha256HashString): Promise<void> => {
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const incarnation = await narStateIncarnation(narHash);
+
+		await database
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'absent' })
+			.where(
+				and(
+					eq(d1Schema.objectIncarnation.kind, 'nar'),
+					eq(d1Schema.objectIncarnation.objectId, narHash)
+				)
+			);
+		await queueObjectDeletion(database, 'nar', narHash, incarnation);
+	}
+};
 
 /**
  * Whether the cron has stamped a tenant as maintained, for asserting which tenants a

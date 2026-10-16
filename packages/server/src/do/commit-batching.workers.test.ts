@@ -9,6 +9,7 @@ import {
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,6 +26,7 @@ import {
 	drivenDirectly,
 	expectSingleCommitDecision,
 	initialise,
+	narObjectVersionChanges,
 	negotiateUploads,
 	openCommitSession,
 	provisionFixtureTenant,
@@ -169,6 +171,113 @@ describe('commit batching', () => {
 			}).toStrictEqual({
 				kinds: paths.map(() => 'materialised'),
 				chargeBatches: 1
+			});
+		} finally {
+			batches.mockRestore();
+		}
+	});
+
+	it('charges only the entries of a combined batch whose NAR object version remains', async () => {
+		const token = await initialise();
+		const reservedPaths: ReturnType<typeof uploadMetadata>[] = [];
+
+		// Commit the fixtures one at a time. The burst below is the concurrency
+		// under test.
+		for (const [index, name] of ['kept', 'demoted'].entries()) {
+			const nar = await verifiableNar(`combined-${name}`);
+			const fields = {
+				narHash: nar.narHash,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength,
+				narSize: nar.narSize
+			};
+			await commitPath(
+				token,
+				uploadMetadata({
+					...fields,
+					name: `committed-${name}`,
+					storePathHash: syntheticStorePathHash(index)
+				}),
+				nar
+			);
+			reservedPaths.push(
+				uploadMetadata({
+					...fields,
+					name: `reserved-${name}`,
+					storePathHash: syntheticStorePathHash(index + 2)
+				})
+			);
+		}
+
+		const [kept, demoted] = reservedPaths;
+
+		if (kept === undefined || demoted === undefined) {
+			throw new Error('the burst needs two paths');
+		}
+
+		const batches = vi.spyOn(env.CUPBOARD_DB, 'batch');
+
+		try {
+			const outcomes = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const pipeline = drivenDirectly(pipelineFor(instance.context));
+					const cache = resolvedCache(instance.context);
+					const requests = await Promise.all(
+						[kept, demoted].map(async (metadata) => {
+							const reserved = await pipeline.reserveNarInfoRow(
+								cache,
+								metadata,
+								0
+							);
+
+							if (reserved.kind === 'lost') {
+								throw new Error('the reserved path has another narinfo row');
+							}
+
+							return {
+								cache,
+								metadata,
+								generation: reserved.generation,
+								probe: await pipeline.probeMaterialisation(metadata),
+								mustOwnBlob: true,
+								graceDecision: undefined,
+								attachRootName: undefined
+							};
+						})
+					);
+
+					await narObjectVersionChanges.demoted(demoted.narHash);
+					batches.mockClear();
+
+					return Promise.all(
+						requests.map((request) =>
+							pipeline.materialiseBatched(rootLogger(), request)
+						)
+					);
+				}
+			);
+			const references = await drizzleD1(env.CUPBOARD_DB, {
+				schema: d1Schema
+			})
+				.select({ storePathHash: d1Schema.blobReference.storePathHash })
+				.from(d1Schema.blobReference)
+				.all();
+
+			expect({
+				kinds: outcomes.map((outcome) => outcome.kind),
+				chargeBatches: batches.mock.calls.length,
+				references: references
+					.map((row) => row.storePathHash)
+					.toSorted(byCodeUnit)
+			}).toStrictEqual({
+				kinds: ['materialised', 'deferred'],
+				chargeBatches: 1,
+				references: [
+					syntheticStorePathHash(0),
+					syntheticStorePathHash(1),
+					syntheticStorePathHash(2)
+				].toSorted(byCodeUnit)
 			});
 		} finally {
 			batches.mockRestore();

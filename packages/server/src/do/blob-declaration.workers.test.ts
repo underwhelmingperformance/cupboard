@@ -43,6 +43,8 @@ import {
 	currentServerTenant,
 	expectSingleUploadDecision,
 	initialise,
+	interleaveBeforeInsert,
+	narObjectVersionChanges,
 	negotiateUploads,
 	nixSha256Hash,
 	openCommitSession,
@@ -585,6 +587,56 @@ describe('canonical writes during verification', () => {
 			registry: [{ incarnation: reservation.incarnation, state: 'live' }]
 		});
 	});
+
+	it('verifies the staged bytes again after a written object is collected before the charge batch', async () =>
+		withoutAlarmArming(async () => {
+			const claim = await declaredClaim('written-collected');
+			const incarnation = await reserveFor(claim);
+			await writeCanonicalObject(claim.nar, incarnation);
+			const interleaving = interleaveBeforeInsert('blob_ref_storage', () =>
+				narObjectVersionChanges.collected(claim.entry.narHash)
+			);
+
+			try {
+				await currentServer().recordVerifications(claim.owner, [
+					writtenVerdict(claim, incarnation)
+				]);
+			} finally {
+				interleaving.restore();
+			}
+
+			const refused = {
+				verdict: await pendingUploadVerdict(claim.entry.uploadId),
+				hasRecordedVerdict: await hasRecordedVerdict(claim.entry.uploadId)
+			};
+			await currentServer().recordVerifications(claim.owner, []);
+			const reapplied = {
+				verdict: await pendingUploadVerdict(claim.entry.uploadId),
+				hasRecordedVerdict: await hasRecordedVerdict(claim.entry.uploadId)
+			};
+			await verifyCurrentTenant();
+
+			expect({
+				hasInterleaved: interleaving.hasInterleaved(),
+				refused,
+				reapplied,
+				verdict: await pendingUploadVerdict(claim.entry.uploadId),
+				blobState: await blobStateRows(claim.entry.narHash)
+			}).toStrictEqual({
+				hasInterleaved: true,
+				refused: { verdict: 'committing', hasRecordedVerdict: true },
+				reapplied: { verdict: 'committing', hasRecordedVerdict: false },
+				verdict: undefined,
+				blobState: [
+					{
+						fileHash: claim.nar.fileHash,
+						fileSize: claim.nar.narBytes.byteLength,
+						narSize: claim.nar.narSize,
+						incarnation: incarnation + 1
+					}
+				]
+			});
+		}));
 
 	it('queues no deletion when it gives up an incarnation that is already live', async () => {
 		const claim = await declaredClaim('abandon-live');
