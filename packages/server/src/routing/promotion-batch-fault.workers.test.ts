@@ -148,9 +148,13 @@ async function referenceEdgesFor(narHash: NixSha256HashString): Promise<
 		}));
 }
 
-// The batch that reserves the promotion's incarnation. The tests allow this
-// batch and inject a fault into a later batch.
-const promotionReservation = '"object_incarnation"';
+// The batch that reserves the promotion's incarnation writes the registry. The
+// tests allow this batch and inject a fault into a later batch. The charge
+// batch and the probe read the registry, so match only its writes.
+const promotionReservationWrites = [
+	'insert into "object_incarnation"',
+	'update "object_incarnation"'
+];
 
 // The batch that prefetches the tenant's presence rows for a page of hashes.
 const presencePrefetch = '"tenant_blob"';
@@ -282,7 +286,8 @@ describe('promotion followed by a persistent D1 fault', () => {
 				);
 			const fault = failBatchesFor({
 				narHashes: new Set([fresh.metadata.narHash]),
-				matches: (sql) => !sql.includes(promotionReservation)
+				matches: (sql) =>
+					promotionReservationWrites.every((write) => !sql.includes(write))
 			});
 			try {
 				await verifyTenant(

@@ -12,6 +12,9 @@ import {
 	inArray,
 	isNull,
 	lte,
+	ne,
+	notExists,
+	or,
 	type SQL,
 	sql,
 	type SQLWrapper
@@ -122,6 +125,98 @@ export async function isObjectIncarnationLive(
 		.where(liveIdentity);
 
 	return row !== undefined;
+}
+
+/**
+ * Returns a predicate that is true when the registry row for an object, if one
+ * exists, records `incarnation` as live. A missing registry row is accepted,
+ * because an older Worker can still write a state row without registering it
+ * (see {@link registerLegacyObjectIncarnations}).
+ */
+export function registryAllowsIncarnation(
+	database: DrizzleD1Database<typeof d1Schema>,
+	kind: SharedObjectKind,
+	objectId: string | SQLWrapper,
+	incarnation: number | SQLWrapper
+): SQL {
+	const otherVersionOrState = or(
+		ne(d1Schema.objectIncarnation.incarnation, incarnation),
+		ne(d1Schema.objectIncarnation.state, 'live')
+	);
+	const disagreeingRow = database
+		.select({ one: sql`1` })
+		.from(d1Schema.objectIncarnation)
+		.where(
+			and(
+				eq(d1Schema.objectIncarnation.kind, kind),
+				eq(d1Schema.objectIncarnation.objectId, objectId),
+				otherVersionOrState
+			)
+		);
+
+	return notExists(disagreeingRow);
+}
+
+/**
+ * The version of a shared object that a caller is about to reference.
+ */
+export type ReferencedObjectVersion =
+	| {
+			readonly kind: 'nar';
+			readonly narHash: NixSha256HashString;
+			readonly incarnation: number;
+	  }
+	| {
+			readonly kind: 'cas';
+			readonly digest: Sha256HexDigest;
+			readonly incarnation: number;
+	  };
+
+/**
+ * Returns a predicate that is true only while a new reference to `version` is
+ * safe: the `blob_state` or `cas_object` row records that incarnation, and the
+ * registry row, if one exists, records that incarnation as live.
+ *
+ * Collection and demotion delete the state row. A promotion can also write
+ * the state row after collection has set the registry state to `absent`, and
+ * collection has then already queued the object for deletion. The state row
+ * alone therefore does not show that the object will remain.
+ */
+export function referenceableObjectVersion(
+	database: DrizzleD1Database<typeof d1Schema>,
+	version: ReferencedObjectVersion
+): SQL | undefined {
+	const objectId = version.kind === 'nar' ? version.narHash : version.digest;
+	const stateRow =
+		version.kind === 'nar'
+			? database
+					.select({ one: sql`1` })
+					.from(d1Schema.blobState)
+					.where(
+						and(
+							eq(d1Schema.blobState.narHash, version.narHash),
+							eq(d1Schema.blobState.incarnation, version.incarnation)
+						)
+					)
+			: database
+					.select({ one: sql`1` })
+					.from(d1Schema.casObject)
+					.where(
+						and(
+							eq(d1Schema.casObject.digest, version.digest),
+							eq(d1Schema.casObject.incarnation, version.incarnation)
+						)
+					);
+
+	return and(
+		exists(stateRow),
+		registryAllowsIncarnation(
+			database,
+			version.kind,
+			objectId,
+			version.incarnation
+		)
+	);
 }
 
 type LegacyObjectIncarnations =
