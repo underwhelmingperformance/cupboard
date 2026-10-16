@@ -37,6 +37,7 @@ import {
 	verifyStoredNar
 } from '../blob/nar-verify.ts';
 import { r2ErrorCode } from '../blob/r2-errors.ts';
+import { R2RequestAdmission } from '../blob/r2-request-admission.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	controlRefreshPrunePageSize,
@@ -1432,23 +1433,30 @@ export interface VerificationMetadataSource {
 	readonly claim: PendingVerification;
 }
 
+export interface VerificationMetadataResources {
+	readonly admission: R2RequestAdmission;
+}
+
 export interface VerifyTenantOptions {
 	/**
 	 * Creates provisional metadata capture. Completion may precede the Durable
 	 * Object verdict or follow claim release, so it cannot grant cache authority.
+	 * Use the shared admission for every capture R2 call.
 	 */
 	readonly metadataFor?: (
-		source: VerificationMetadataSource
+		source: VerificationMetadataSource,
+		resources: VerificationMetadataResources
 	) => Pick<NarMetadataCapture, 'sink' | 'defer'> | undefined;
 }
 
 function verificationMetadata(
 	logger: Logger,
 	options: VerifyTenantOptions,
-	source: VerificationMetadataSource
+	source: VerificationMetadataSource,
+	resources: VerificationMetadataResources
 ): NarMetadataCapture | undefined {
 	try {
-		const capture = options.metadataFor?.(source);
+		const capture = options.metadataFor?.(source, resources);
 		if (capture === undefined) {
 			return undefined;
 		}
@@ -1571,10 +1579,8 @@ export async function verifyTenant(
 
 				const reuseClaims = claims.filter((claim) => claim.reuse);
 				const freshClaims = claims.filter((claim) => !claim.reuse);
-				const blobs = new ConnectionLimitedBucket(
-					env.BLOBS,
-					maxOutgoingConnections
-				);
+				const admission = new R2RequestAdmission(maxOutgoingConnections);
+				const blobs = new ConnectionLimitedBucket(env.BLOBS, admission);
 				// A Durable Object from an earlier build has no reservation RPC. After
 				// any failure the consumer verifies the upload without the write, and
 				// the Durable Object copies its staged object.
@@ -1630,7 +1636,12 @@ export async function verifyTenant(
 					recorder,
 					signal,
 					metadataFor: (claim) =>
-						verificationMetadata(logger, options, { tenant: id, owner, claim })
+						verificationMetadata(
+							logger,
+							options,
+							{ tenant: id, owner, claim },
+							{ admission }
+						)
 				};
 
 				try {

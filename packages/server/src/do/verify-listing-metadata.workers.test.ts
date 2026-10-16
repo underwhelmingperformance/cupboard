@@ -14,10 +14,12 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ConnectionLimitedMultipartBucket } from '../blob/connection-limited-multipart.ts';
 import { NarListingMetadataSink } from '../blob/nar-listing-metadata.ts';
 import { NarListingOutput } from '../blob/nar-listing-output.ts';
 import { type NarMetadataCapture } from '../blob/nar-metadata.ts';
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
+import { type R2RequestAdmission } from '../blob/r2-request-admission.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
@@ -38,6 +40,8 @@ import {
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
+
+import { boundedBlobs } from './bounded-io.ts';
 
 async function sourceNar(contents = 'hello') {
 	const parts = [
@@ -144,25 +148,35 @@ describe('fresh verification listing metadata', () => {
 			const facts: NarListingFact[] = [];
 			const sources: VerificationMetadataSource[] = [];
 			const abandoned: unknown[] = [];
-			const sink = new NarListingMetadataSink({
-				output: new NarListingOutput({ upload, narHash: value.nar.narHash }),
-				seal: async (fact, signal) => {
-					sealing.resolve(undefined);
-					await gate.promise;
-					signal.throwIfAborted();
-					facts.push(fact);
-				},
-				abandon: async (reason) => {
-					abandoned.push(reason);
-					await env.BLOBS.delete(key);
-				}
-			});
+			const sinkFor = (admission: R2RequestAdmission) => {
+				const metadata = new ConnectionLimitedMultipartBucket(
+					boundedBlobs(env.BLOBS),
+					admission,
+					{ priority: 'optional' }
+				);
+				return new NarListingMetadataSink({
+					output: new NarListingOutput({
+						upload: metadata.resumeMultipartUpload(key, upload.uploadId),
+						narHash: value.nar.narHash
+					}),
+					seal: async (fact, signal) => {
+						sealing.resolve(undefined);
+						await gate.promise;
+						signal.throwIfAborted();
+						facts.push(fact);
+					},
+					abandon: async (reason) => {
+						abandoned.push(reason);
+						await env.BLOBS.delete(key);
+					}
+				});
+			};
 			try {
 				await verify({
-					metadataFor: (source) => {
+					metadataFor: (source, resources) => {
 						sources.push(source);
 						return {
-							sink,
+							sink: sinkFor(resources.admission),
 							defer: (completion) => {
 								deferred.push(completion);
 							}

@@ -1,10 +1,6 @@
-import { CountingSemaphore } from '@cupboard/shared/concurrency';
-
-import {
-	holdSubrequests,
-	type SubrequestHold
-} from '../do/subrequest-slice.ts';
 import { type R2ObjectKey } from '../http/http.ts';
+
+import { R2RequestAdmission } from './r2-request-admission.ts';
 
 /**
  * The R2 operations that NAR verification uses. A get with options returns
@@ -34,38 +30,20 @@ export interface R2ObjectStore {
  * subrequest slice from the moment it is admitted, so a caller that checks the
  * slice sees requests that are still waiting for a connection.
  *
- * Use one instance for every R2 request that an invocation makes, so that
- * concurrent reads and streamed writes share the same limit.
+ * Pass one shared admission to native and metadata adapters in an invocation.
+ * A numeric limit creates an admission for this bucket.
  */
 export class ConnectionLimitedBucket implements R2ObjectStore {
-	private readonly connections: CountingSemaphore;
-	private readonly writes: CountingSemaphore;
+	private readonly admission: R2RequestAdmission;
 
 	constructor(
 		private readonly bucket: R2ObjectStore,
-		limit: number
+		admission: R2RequestAdmission | number
 	) {
-		if (!Number.isSafeInteger(limit) || limit < 2) {
-			throw new RangeError(
-				'The connection limit must leave a connection for reads.'
-			);
-		}
-
-		this.connections = new CountingSemaphore(limit);
-		this.writes = new CountingSemaphore(limit - 1);
-	}
-
-	// The bucket counts the request against the slice when it makes it, so the
-	// hold ends at that moment.
-	private connect<T>(
-		admitted: SubrequestHold,
-		call: () => Promise<T>
-	): Promise<T> {
-		return this.connections.run(() => {
-			admitted.release();
-
-			return call();
-		});
+		this.admission =
+			typeof admission === 'number'
+				? new R2RequestAdmission(admission)
+				: admission;
 	}
 
 	get(key: R2ObjectKey): Promise<R2ObjectBody | null>;
@@ -77,9 +55,7 @@ export class ConnectionLimitedBucket implements R2ObjectStore {
 		key: R2ObjectKey,
 		options?: R2GetOptions
 	): Promise<R2ObjectBody | R2Object | null> {
-		const admitted = holdSubrequests(1);
-
-		return this.connect(admitted, () =>
+		return this.admission.read(() =>
 			options === undefined
 				? this.bucket.get(key)
 				: this.bucket.get(key, options)
@@ -91,10 +67,6 @@ export class ConnectionLimitedBucket implements R2ObjectStore {
 		value: ReadableStream,
 		options: R2PutOptions
 	): Promise<R2Object | null> {
-		const admitted = holdSubrequests(1);
-
-		return this.writes.run(() =>
-			this.connect(admitted, () => this.bucket.put(key, value, options))
-		);
+		return this.admission.write(() => this.bucket.put(key, value, options));
 	}
 }

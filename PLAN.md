@@ -7224,7 +7224,11 @@ build traces available from a cupboard cache.
       acquire fresh cleanup ownership before aborting multipart uploads or
       deleting provisional bytes. Failed deletion persists a retry deadline, and
       late writes remain until their cleanup horizon. Producer integration,
-      followed by automatic activation, remains pending.
+      followed by automatic activation, remains pending. Native reads, streamed
+      writes and metadata multipart operations now share one invocation's R2
+      admission. Optional operations recheck subrequest capacity after queueing,
+      and cancellation releases queued reservations without starting new writes.
+      Native-verdict budget protection remains part of producer integration.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now
