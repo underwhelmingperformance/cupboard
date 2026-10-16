@@ -14,6 +14,10 @@ import {
 	type ArtifactStageMeasurement,
 	artifactStageMeasurementSchema
 } from './artifact-staging.ts';
+import {
+	type ListingStageCleanupResult,
+	ListingStageCollector
+} from './listing-stage-collector.ts';
 import { r2ErrorCode } from './r2-errors.ts';
 import {
 	sharedListingStageKey,
@@ -29,16 +33,13 @@ export interface SharedListingStagingDependencies {
 	readonly blobs: R2Bucket;
 	readonly now?: () => IsoTimestamp;
 }
-export type SharedListingStageCleanupResult =
-	| { readonly kind: 'removed' | 'unavailable' }
-	| { readonly kind: 'deferred'; readonly retryAt: IsoTimestamp };
-
 const logger = rootLogger().with({ component: 'shared-listing-staging' });
 
 export class SharedListingStagingService {
 	private readonly store: SharedListingStageStore;
 	private readonly blobs: R2Bucket;
 	private readonly now: () => IsoTimestamp;
+	private readonly collector: ListingStageCollector;
 
 	constructor(dependencies: SharedListingStagingDependencies) {
 		this.store = new SharedListingStageStore(
@@ -46,6 +47,12 @@ export class SharedListingStagingService {
 		);
 		this.blobs = boundedBlobs(dependencies.blobs);
 		this.now = dependencies.now ?? (() => isoTimestamp(new Date()));
+		this.collector = new ListingStageCollector({
+			store: this.store,
+			blobs: dependencies.blobs,
+			scope: 'shared',
+			now: this.now
+		});
 	}
 
 	private async abort(upload: R2MultipartUpload): Promise<void> {
@@ -141,41 +148,10 @@ export class SharedListingStagingService {
 		);
 	}
 
-	async collect(
+	collect(
 		id: ArtifactStageId,
 		owner: ArtifactTaskOwner
-	): Promise<SharedListingStageCleanupResult> {
-		return withSpan(
-			'artifact.stage.shared.cleanup',
-			{ stageId: id },
-			async () => {
-				const claim = await this.store.claimCleanup(id, owner, this.now());
-				if (claim === undefined) {
-					return { kind: 'unavailable' };
-				}
-				try {
-					if (claim.multipartId !== undefined) {
-						await this.abort(
-							this.blobs.resumeMultipartUpload(claim.key, claim.multipartId)
-						);
-					}
-					await this.blobs.delete(claim.key);
-					return {
-						kind: (await this.store.acknowledgeCleanup(claim, this.now()))
-							? 'removed'
-							: 'unavailable'
-					};
-				} catch (error) {
-					logger.warn(
-						'shared listing staging cleanup failed; retry scheduled',
-						{ stageId: id, cleanupGeneration: claim.generation, error }
-					);
-					const retryAt = await this.store.deferCleanup(claim, this.now());
-					return retryAt === undefined
-						? { kind: 'unavailable' }
-						: { kind: 'deferred', retryAt };
-				}
-			}
-		);
+	): Promise<ListingStageCleanupResult> {
+		return this.collector.collect(id, owner);
 	}
 }

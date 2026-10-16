@@ -13,6 +13,8 @@ const sweep = {
 	after: { at: through, id }
 };
 const cleanup = { kind: 'shared-listing-stage-cleanup', id };
+const forwardSweep = { ...sweep, kind: 'forward-listing-stage-sweep' };
+const forwardCleanup = { kind: 'forward-listing-stage-cleanup', id };
 const narHash = `sha256:${'0'.repeat(52)}`;
 const outputSweep = {
 	kind: 'shared-listing-output-sweep',
@@ -22,14 +24,18 @@ const outputSweep = {
 const outputCleanup = { kind: 'shared-listing-output-cleanup', narHash };
 
 describe('shared listing cleanup messages', () => {
-	it.each([sweep, cleanup, outputSweep, outputCleanup])(
-		'preserves a valid $kind envelope',
-		(message) => {
-			expect(sharedListingCleanupMessageSchema.parse(message)).toStrictEqual(
-				message
-			);
-		}
-	);
+	it.each([
+		sweep,
+		cleanup,
+		forwardSweep,
+		forwardCleanup,
+		outputSweep,
+		outputCleanup
+	])('preserves a valid $kind envelope', (message) => {
+		expect(sharedListingCleanupMessageSchema.parse(message)).toStrictEqual(
+			message
+		);
+	});
 
 	it.each([
 		{ ...sweep, through: 'not-a-date' },
@@ -38,6 +44,11 @@ describe('shared listing cleanup messages', () => {
 		{ ...cleanup, id: 'not-a-stage' },
 		{ ...cleanup, tenant: 'acme' },
 		{ ...sweep, extra: true },
+		{ ...forwardSweep, through: 'not-a-date' },
+		{ ...forwardSweep, after: { at: '2026-01-01T00:02:00.000Z', id } },
+		{ ...forwardSweep, extra: true },
+		{ ...forwardCleanup, id: 'not-a-stage' },
+		{ ...forwardCleanup, owner: id },
 		{ ...outputSweep, through: 'not-a-date' },
 		{ ...outputSweep, after: { at: '2026-01-01T00:02:00.000Z', narHash } },
 		{ ...outputCleanup, narHash: 'bad' },
@@ -61,6 +72,12 @@ describe('shared listing cleanup messages', () => {
 			outputSweep: sharedListingCleanupHeaderSchema.safeParse({
 				kind: outputSweep.kind
 			}).success,
+			forward: sharedListingCleanupHeaderSchema.safeParse({
+				kind: forwardCleanup.kind
+			}).success,
+			forwardSweep: sharedListingCleanupHeaderSchema.safeParse({
+				kind: forwardSweep.kind
+			}).success,
 			tenant: sharedListingCleanupHeaderSchema.safeParse({
 				kind: 'artifact-job'
 			}).success
@@ -69,6 +86,8 @@ describe('shared listing cleanup messages', () => {
 			sweep: true,
 			output: true,
 			outputSweep: true,
+			forward: true,
+			forwardSweep: true,
 			tenant: false
 		});
 	});

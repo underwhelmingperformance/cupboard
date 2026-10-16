@@ -7219,8 +7219,12 @@ build traces available from a cupboard cache.
       cleanup owners. Shared execution now adopts sealed output before requiring
       local output memory or rereading the NAR. Promotion verifies the stored
       digest, and transient failures preserve the transferred stage for retry.
-      Producer and cleanup integration, followed by automatic activation, remain
-      pending.
+      Shared and provisional stages now use the same physical collector. Cron
+      dispatches independent finite cleanup waves, and strict queue hints
+      acquire fresh cleanup ownership before aborting multipart uploads or
+      deleting provisional bytes. Failed deletion persists a retry deadline, and
+      late writes remain until their cleanup horizon. Producer integration,
+      followed by automatic activation, remains pending.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now

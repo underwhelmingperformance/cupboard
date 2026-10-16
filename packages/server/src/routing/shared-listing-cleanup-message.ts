@@ -5,9 +5,8 @@ import { artifactStageIdSchema } from '../blob/artifact-staging.ts';
 import { sharedListingOutputCleanupCursorSchema } from '../blob/shared-listing-output-cleanup.ts';
 import { sharedListingStageCleanupCursorSchema } from '../blob/shared-listing-staging.ts';
 
-export const sharedListingCleanupSweepSchema = z
+const stageSweepSchema = z
 	.strictObject({
-		kind: z.literal('shared-listing-stage-sweep'),
 		through: sharedListingStageCleanupCursorSchema.shape.at,
 		after: sharedListingStageCleanupCursorSchema.optional()
 	})
@@ -18,6 +17,12 @@ export const sharedListingCleanupSweepSchema = z
 			message: 'The cleanup cursor must not follow the sweep cutoff'
 		}
 	);
+export const sharedListingCleanupSweepSchema = stageSweepSchema.safeExtend({
+	kind: z.literal('shared-listing-stage-sweep')
+});
+const forwardSweepSchema = stageSweepSchema.safeExtend({
+	kind: z.literal('forward-listing-stage-sweep')
+});
 const outputSweepSchema = z
 	.strictObject({
 		kind: z.literal('shared-listing-output-sweep'),
@@ -31,8 +36,13 @@ const outputSweepSchema = z
 	);
 export const sharedListingCleanupMessageSchema = z.union([
 	sharedListingCleanupSweepSchema,
+	forwardSweepSchema,
 	z.strictObject({
 		kind: z.literal('shared-listing-stage-cleanup'),
+		id: artifactStageIdSchema
+	}),
+	z.strictObject({
+		kind: z.literal('forward-listing-stage-cleanup'),
 		id: artifactStageIdSchema
 	}),
 	outputSweepSchema,
@@ -49,6 +59,8 @@ export const sharedListingCleanupHeaderSchema = z.looseObject({
 		'shared-listing-stage-sweep',
 		'shared-listing-stage-cleanup',
 		'shared-listing-output-sweep',
-		'shared-listing-output-cleanup'
+		'shared-listing-output-cleanup',
+		'forward-listing-stage-sweep',
+		'forward-listing-stage-cleanup'
 	])
 });

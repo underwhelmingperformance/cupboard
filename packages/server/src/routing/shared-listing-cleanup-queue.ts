@@ -6,9 +6,11 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { eq } from 'drizzle-orm';
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
 
+import { ListingStageCollector } from '../blob/listing-stage-collector.ts';
 import { SharedListingStagingService } from '../blob/shared-listing-staging-service.ts';
 import * as schema from '../db/d1-schema.ts';
 import { recordedTransitions } from '../db/deployment-transitions.ts';
+import { ForwardListingStageStore } from '../db/forward-listing-staging.ts';
 import { SharedListingOutputCleanupStore } from '../db/shared-listing-output-cleanup.ts';
 import { SharedListingStageStore } from '../db/shared-listing-staging.ts';
 import { boundedD1 } from '../do/bounded-io.ts';
@@ -34,7 +36,9 @@ export interface SharedListingCleanupDependencies {
 }
 type Sweep = Extract<
 	SharedListingCleanupMessage,
-	{ readonly kind: 'shared-listing-stage-sweep' }
+	{
+		readonly kind: 'shared-listing-stage-sweep' | 'forward-listing-stage-sweep';
+	}
 >;
 type OutputSweep = Extract<
 	SharedListingCleanupMessage,
@@ -52,6 +56,8 @@ export class SharedListingCleanupQueue {
 	private readonly database: DrizzleD1Database<typeof schema>;
 	private readonly store: SharedListingStageStore;
 	private readonly staging: SharedListingStagingService;
+	private readonly forward: ForwardListingStageStore;
+	private readonly forwardCleanup: ListingStageCollector;
 	private readonly outputs: SharedListingOutputCleanupStore;
 	private readonly queue: SharedListingCleanupDependencies['queue'];
 	private readonly logger = rootLogger().with({
@@ -62,6 +68,12 @@ export class SharedListingCleanupQueue {
 	constructor(dependencies: SharedListingCleanupDependencies) {
 		this.database = drizzle(boundedD1(dependencies.database), { schema });
 		this.store = new SharedListingStageStore(this.database);
+		this.forward = new ForwardListingStageStore(this.database);
+		this.forwardCleanup = new ListingStageCollector({
+			store: this.forward,
+			blobs: dependencies.blobs,
+			scope: 'forward'
+		});
 		this.outputs = new SharedListingOutputCleanupStore(this.database);
 		this.staging = new SharedListingStagingService({
 			database: dependencies.database,
@@ -71,7 +83,10 @@ export class SharedListingCleanupQueue {
 	}
 
 	private async ready(
-		transition: 'shared-listing-staging' | 'shared-listing-output-retirement'
+		transition:
+			| 'shared-listing-staging'
+			| 'shared-listing-output-retirement'
+			| 'forward-listing-staging'
 	): Promise<boolean> {
 		const row = await this.database
 			.select({
@@ -93,28 +108,37 @@ export class SharedListingCleanupQueue {
 	}
 
 	private async sweep(message: Sweep): Promise<void> {
-		if (!(await this.ready('shared-listing-staging'))) {
+		const isForward = message.kind === 'forward-listing-stage-sweep';
+		const transition = isForward
+			? 'forward-listing-staging'
+			: 'shared-listing-staging';
+		if (!(await this.ready(transition))) {
 			return;
 		}
+		const store = isForward ? this.forward : this.store;
+		const cleanupKind = isForward
+			? 'forward-listing-stage-cleanup'
+			: 'shared-listing-stage-cleanup';
+		const scope = isForward ? 'forward' : 'shared';
 		await withSpan(
-			'artifact.stage.shared.dispatch',
+			`artifact.stage.${scope}.dispatch`,
 			{ through: message.through, after: message.after?.id },
 			async () => {
-				const page = await this.store.due(message.through, message.after);
+				const page = await store.due(message.through, message.after);
 				if (page.stages.length === 0) {
 					return;
 				}
 				await this.send(() =>
 					this.queue.sendBatch(
 						page.stages.map((id) => ({
-							body: { kind: 'shared-listing-stage-cleanup', id }
+							body: { kind: cleanupKind, id }
 						}))
 					)
 				);
 				if (page.next !== undefined) {
 					await this.send(() =>
 						this.queue.send({
-							kind: 'shared-listing-stage-sweep',
+							kind: message.kind,
 							through: message.through,
 							after: page.next
 						})
@@ -208,6 +232,7 @@ export class SharedListingCleanupQueue {
 		message: SharedListingCleanupMessage
 	): Promise<Decision> {
 		switch (message.kind) {
+			case 'forward-listing-stage-sweep':
 			case 'shared-listing-stage-sweep': {
 				await this.sweep(message);
 				return { action: 'ack' };
@@ -219,12 +244,18 @@ export class SharedListingCleanupQueue {
 			case 'shared-listing-output-cleanup': {
 				return this.retireOutputs(message);
 			}
+			case 'forward-listing-stage-cleanup':
 			case 'shared-listing-stage-cleanup': {
-				if (!(await this.ready('shared-listing-staging'))) {
+				const isForward = message.kind === 'forward-listing-stage-cleanup';
+				const transition = isForward
+					? 'forward-listing-staging'
+					: 'shared-listing-staging';
+				if (!(await this.ready(transition))) {
 					return { action: 'ack' };
 				}
 				const owner = artifactTaskOwnerSchema.parse(crypto.randomUUID());
-				const result = await this.staging.collect(message.id, owner);
+				const collector = isForward ? this.forwardCleanup : this.staging;
+				const result = await collector.collect(message.id, owner);
 				return result.kind === 'deferred'
 					? this.deferred(result.retryAt)
 					: { action: 'ack' };
@@ -242,6 +273,10 @@ export class SharedListingCleanupQueue {
 			async () => {
 				const results = await Promise.allSettled([
 					this.sweep(stageSweep),
+					this.sweep({
+						kind: 'forward-listing-stage-sweep',
+						through: stageSweep.through
+					}),
 					this.sweepOutputs()
 				]);
 				const errors: unknown[] = [];
