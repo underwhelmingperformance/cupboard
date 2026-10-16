@@ -7225,16 +7225,19 @@ build traces available from a cupboard cache.
       same physical collector. Cron dispatches independent finite cleanup waves,
       and strict queue hints acquire fresh cleanup ownership before aborting
       multipart uploads or deleting provisional bytes. Failed deletion persists
-      a retry deadline, and late writes remain until their cleanup horizon.
-      Producer integration, followed by automatic activation, remains pending.
-      Native reads, streamed writes and metadata multipart operations now share
-      one invocation's R2 admission. Optional operations recheck subrequest
-      capacity after queueing, and cancellation releases queued reservations
-      without starting new writes. Optional D1 operations check cancellation and
-      unreserved subrequest capacity before issuing I/O. Metadata-enabled
-      verification reserves and accounts for native verdict retries, then
-      releases unused reservations after recording or when the pass ends. The
-      owned producer remains pending.
+      a retry deadline, and late writes remain until their cleanup horizon. The
+      owned producer now reserves output memory before staging and allocates
+      multipart uploads lazily. Deferred completion includes actual late I/O,
+      and cancellation registers or aborts its captured allocation without
+      deleting completed objects. Queue-entrypoint integration, durable forward
+      enrolment and automatic activation remain pending. Native reads, streamed
+      writes and metadata multipart operations now share one invocation's R2
+      admission. Optional operations recheck subrequest capacity after queueing,
+      and cancellation releases queued reservations without starting new writes.
+      Optional D1 operations check cancellation and unreserved subrequest
+      capacity before issuing I/O. Metadata-enabled verification reserves and
+      accounts for native verdict retries, then releases unused reservations
+      after recording or when the pass ends.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now

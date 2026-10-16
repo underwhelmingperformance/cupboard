@@ -14,9 +14,11 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ByteBufferPool } from '../blob/byte-buffers.ts';
+import { ForwardListingCaptureProducer } from '../blob/forward-listing-capture.ts';
 import { NarListingMetadataSink } from '../blob/nar-listing-metadata.ts';
 import { NarListingOutput } from '../blob/nar-listing-output.ts';
 import { verifyStoredNar } from '../blob/nar-verify.ts';
+import { R2RequestAdmission } from '../blob/r2-request-admission.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as schema from '../db/d1-schema.ts';
 import { ForwardListingStageStore } from '../db/forward-listing-staging.ts';
@@ -130,6 +132,90 @@ async function fixture(
 
 describe('global execution of forward listings', () => {
 	beforeEach(clearBlobStorage);
+	it('adopts owned producer output without rereading the NAR and preserves CAS bytes after late producer cancellation', async () => {
+		const value = await sharedListingTaskFixture();
+		await value.database.insert(schema.deploymentTransition).values({
+			id: 'forward-listing-staging',
+			state: 'complete',
+			updatedAt: now
+		});
+		const deferred: Promise<void>[] = [];
+		const producer = new ForwardListingCaptureProducer({
+			database: env.CUPBOARD_DB,
+			blobs: env.BLOBS,
+			outputBuffers: value.dependencies.outputBuffers,
+			now: () => now,
+			defer: (completion) => {
+				deferred.push(completion);
+			}
+		});
+		const capture = producer.capture(
+			{
+				tenant: tenantIdSchema.parse('native-forward-tenant'),
+				uploadId: uploadIdSchema.parse('owned-upload'),
+				owner: '00000000-0000-4000-8000-000000000003',
+				narHash: value.narHash,
+				generatorRevision: currentListingGeneratorRevision
+			},
+			new R2RequestAdmission(6)
+		);
+		if (capture === undefined) {
+			throw new Error('The owned producer declined capture');
+		}
+		const verified = await verifyStoredNar(
+			env.BLOBS,
+			value.source,
+			{ narHash: value.narHash, narSize: value.raw.byteLength },
+			{ buffers: value.dependencies.buffers, metadata: capture }
+		);
+		await Promise.all(deferred);
+		const stage = await value.database
+			.select()
+			.from(schema.forwardListingStage)
+			.get();
+		if (!verified.ok || stage?.digest === null || stage?.digest === undefined) {
+			throw new Error('The owned capture did not produce a sealed listing');
+		}
+		const reads = vi.spyOn(env.BLOBS, 'get');
+		try {
+			const worker = new SharedListingTaskWorker(value.dependencies);
+			const result = await worker.run(value.first.request);
+			await capture.sink.abort(new Error('late native cancellation'));
+			const sourceReads = reads.mock.calls.map(([key]) => key);
+			const cas = await value.database.select().from(schema.casObject).get();
+			const object =
+				cas === undefined
+					? undefined
+					: await env.BLOBS.head(casObjectKey(stage.digest, cas.incarnation));
+			expect({
+				result:
+					result.kind === 'recorded'
+						? { kind: result.kind, outcome: result.outcome.kind }
+						: result,
+				sourceReads,
+				objectBytes: object?.size,
+				forward: await value.database.select().from(schema.forwardListingStage),
+				retention: await value.database
+					.select({
+						digest: schema.sharedListingOutputReference.digest,
+						size: schema.sharedListingOutputReference.size
+					})
+					.from(schema.sharedListingOutputReference),
+				tenantReferences: await value.database
+					.select()
+					.from(schema.artifactReference)
+			}).toStrictEqual({
+				result: { kind: 'recorded', outcome: 'generated' },
+				sourceReads: [stage.r2Key],
+				objectBytes: listing.byteLength,
+				forward: [],
+				retention: [{ digest: stage.digest, size: listing.byteLength }],
+				tenantReferences: []
+			});
+		} finally {
+			reads.mockRestore();
+		}
+	});
 
 	it.each([0, 2])(
 		'adopts verified forward output with %i free output buffers and no NAR reread',

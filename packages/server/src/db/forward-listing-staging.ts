@@ -293,6 +293,21 @@ export class ForwardListingStageStore {
 					};
 		});
 	}
+	async find(
+		input: ForwardListingSource
+	): Promise<ForwardListingStageReservation> {
+		const source = forwardListingSourceSchema.parse(input);
+		return this.execute(async () => {
+			const row = await this.database
+				.select()
+				.from(table)
+				.where(this.sourceIdentity(source))
+				.get();
+			return row === undefined
+				? { kind: 'unavailable' }
+				: this.reservation(row);
+		});
+	}
 	async canWrite(
 		input: ForwardListingStageLease,
 		now: IsoTimestamp

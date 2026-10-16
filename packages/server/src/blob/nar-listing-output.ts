@@ -64,4 +64,7 @@ export class NarListingOutput {
 	abort(reason?: unknown): Promise<void> {
 		return this.output.abort(reason);
 	}
+	settled(): Promise<void> {
+		return this.output.settled();
+	}
 }

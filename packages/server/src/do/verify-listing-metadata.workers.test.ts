@@ -9,18 +9,23 @@ import {
 	currentListingGeneratorRevision,
 	type NarListingFact
 } from '@cupboard/protocol/artifacts';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ByteBufferPool } from '../blob/byte-buffers.ts';
 import { ConnectionLimitedMultipartBucket } from '../blob/connection-limited-multipart.ts';
+import { ForwardListingCaptureProducer } from '../blob/forward-listing-capture.ts';
 import { NarListingMetadataSink } from '../blob/nar-listing-metadata.ts';
 import { NarListingOutput } from '../blob/nar-listing-output.ts';
 import { type NarMetadataCapture } from '../blob/nar-metadata.ts';
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { type R2RequestAdmission } from '../blob/r2-request-admission.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SubrequestSliceExceededError } from '../errors.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
@@ -235,6 +240,111 @@ class OptionalIoProbe {
 
 describe('fresh verification listing metadata', () => {
 	beforeEach(resetTestServer);
+	it.each([
+		{ isDeclared: false, budget: 8 },
+		{ isDeclared: true, budget: 8 },
+		{ isDeclared: false, budget: 64 },
+		{ isDeclared: true, budget: 64 }
+	])(
+		'publishes the NAR with owned capture (declared=$isDeclared, allowance=$budget)',
+		async ({ isDeclared, budget }) => {
+			const value = await fixture(isDeclared);
+			const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+			await database.insert(d1Schema.deploymentTransition).values({
+				id: 'forward-listing-staging',
+				state: 'complete',
+				updatedAt: isoTimestamp(new Date())
+			});
+			const outputBuffers = new ByteBufferPool({
+				buffers: 1,
+				bufferSize: 5 * 1024 * 1024
+			});
+			const deferred: Promise<void>[] = [];
+			const drained = Promise.withResolvers<undefined>();
+			const sources: VerificationMetadataSource[] = [];
+			const awaitCapture = async (completion: Promise<void>): Promise<void> => {
+				try {
+					await completion;
+				} finally {
+					drained.resolve(undefined);
+				}
+			};
+			const producer = new ForwardListingCaptureProducer({
+				database: env.CUPBOARD_DB,
+				blobs: env.BLOBS,
+				outputBuffers,
+				defer: (completion) => {
+					deferred.push(awaitCapture(completion));
+				}
+			});
+			const remaining = await withSubrequestSlice(
+				async () => {
+					await verify(
+						{
+							metadataFor: (source, resources) => {
+								sources.push(source);
+								return producer.capture(
+									{
+										tenant: source.tenant,
+										uploadId: source.claim.uploadId,
+										owner: source.owner,
+										narHash: source.claim.narHash,
+										generatorRevision: currentListingGeneratorRevision
+									},
+									resources.admission
+								);
+							}
+						},
+						bindingsAfterMetadataDrain(drained.promise)
+					);
+					await Promise.all(deferred);
+					return subrequestsAvailable();
+				},
+				{ subrequests: budget, reserve: 0 }
+			);
+			await fetchNarInfo(value.storePathHash);
+			const source = sources[0];
+			if (source === undefined) {
+				throw new Error('The native capture source is missing');
+			}
+			const ready = await database
+				.select({
+					tenant: d1Schema.forwardListingStage.tenant,
+					uploadId: d1Schema.forwardListingStage.uploadId,
+					owner: d1Schema.forwardListingStage.owner,
+					narHash: d1Schema.forwardListingStage.narHash,
+					generatorRevision: d1Schema.forwardListingStage.generatorRevision,
+					size: d1Schema.forwardListingStage.size,
+					sealed: d1Schema.forwardListingStage.writesSealed
+				})
+				.from(d1Schema.forwardListingStage)
+				.where(eq(d1Schema.forwardListingStage.state, 'ready'));
+			expect({
+				ready,
+				pool: outputBuffers.state,
+				hasProtectedRetries: remaining >= 2,
+				references: await database.select().from(d1Schema.artifactReference)
+			}).toStrictEqual({
+				ready:
+					budget === 64
+						? [
+								{
+									tenant: currentServerTenant(),
+									uploadId: value.upload.uploadId,
+									owner: source.owner,
+									narHash: value.nar.narHash,
+									generatorRevision: currentListingGeneratorRevision,
+									size: 63,
+									sealed: true
+								}
+							]
+						: [],
+				pool: { free: 1, allocations: 1 },
+				hasProtectedRetries: true,
+				references: []
+			});
+		}
+	);
 	it.each(['d1', 'r2'] as const)(
 		'preserves verdict retries while optional %s work exhausts the remaining allowance',
 		async (kind) => {
