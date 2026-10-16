@@ -235,11 +235,15 @@ contain its contents. Every response has `cache-control: no-store`. The only
 public route is `/pubkey`.
 
 A cache serves a NAR only if one of its own store paths refers to it, at
-`<cache URL>/nar/<hash>.nar.zst`. The default cache's URL is the tenant URL, so
-`/t/<tenant>/nar/<hash>.nar.zst` serves the NARs that the default cache refers
-to. A NAR that two caches refer to is served under both URLs. Knowing a NAR's
-hash doesn't let anyone fetch it from a cache that doesn't have it. The public
-routes never serve a NAR that only private caches refer to.
+`<cache URL>/nar/<hash>.<n>.nar.zst`. `<n>` is the version of the stored object,
+and the narinfo's `URL` field contains that number. Version 1 is the legacy form
+that earlier releases wrote. A NAR at version 1 is served at the unnumbered URL,
+`<cache URL>/nar/<hash>.nar.zst`, while that object exists, and its narinfo's
+`URL` field has no number. The default cache's URL is the tenant URL, so
+`/t/<tenant>/nar/...` serves the NARs that the default cache refers to. A NAR
+that two caches refer to is served under both URLs. Knowing a NAR's hash doesn't
+let anyone fetch it from a cache that doesn't have it. The public routes never
+serve a NAR that only private caches refer to.
 
 Suppose only one store path in a cache refers to a NAR. When you delete that
 path, the cache stops serving the NAR before the deletion reports success.
