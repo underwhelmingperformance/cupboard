@@ -3,6 +3,7 @@ import { type TenantId } from '@cupboard/nix-store/scalars';
 import { artifactTaskOwnerSchema } from '@cupboard/protocol/artifact-jobs';
 import { drizzle } from 'drizzle-orm/d1';
 
+import { type ListingAdoptionCaptureSequence } from '../blob/listing-adoption-capture.ts';
 import {
 	type ListingAdoptionDelivery,
 	type ListingAdoptionDeliveryResolution,
@@ -14,6 +15,7 @@ import {
 } from '../blob/nar-listing-adoption.ts';
 import * as schema from '../db/d1-schema.ts';
 import { ListingAdoptionConsumerStore } from '../db/listing-adoption-consumer.ts';
+import { ListingAdoptionRecoveryStore } from '../db/listing-adoption-recovery.ts';
 import { ListingAdoptionTaskStore } from '../db/listing-adoption-tasks.ts';
 import { boundedD1 } from '../do/bounded-io.ts';
 import {
@@ -36,6 +38,7 @@ import {
 
 export interface ListingAdoptionWorkDependencies {
 	readonly database: D1Database;
+	readonly wakeHistorical: () => Promise<unknown>;
 	readonly queue: Pick<Queue<ListingAdoptionWorkMessage>, 'send' | 'sendBatch'>;
 	readonly serverFor: (
 		tenant: TenantId
@@ -59,6 +62,7 @@ interface TenantResolution {
 export class ListingAdoptionWorkQueue {
 	private readonly tasks: ListingAdoptionTaskStore;
 	private readonly captures: ListingAdoptionConsumerStore;
+	private readonly recovery: ListingAdoptionRecoveryStore;
 	private readonly invocationDeadline = Date.now() + budgetMs;
 	private readonly logger = rootLogger().with({
 		worker: 'listing-adoption-work'
@@ -67,6 +71,7 @@ export class ListingAdoptionWorkQueue {
 		const database = drizzle(boundedD1(dependencies.database), { schema });
 		this.tasks = new ListingAdoptionTaskStore(database);
 		this.captures = new ListingAdoptionConsumerStore(database);
+		this.recovery = new ListingAdoptionRecoveryStore(database);
 	}
 	private io<T>(operation: () => Promise<T>): Promise<T> {
 		spendSubrequests(1, 'artifact.listing.adoption.work');
@@ -77,14 +82,44 @@ export class ListingAdoptionWorkQueue {
 			this.dependencies.queue.send({ kind: 'listing-adoption-work-dispatch' })
 		);
 	}
+	private async recover(
+		prunedThrough: ListingAdoptionCaptureSequence
+	): Promise<boolean> {
+		return withSpan(
+			'artifact.listing.adoption.recovery',
+			{ prunedThrough },
+			async (span) => {
+				const progress = await this.recovery.recover();
+				span.setAttribute('outcome', progress.kind);
+				if (progress.kind === 'unavailable') {
+					return false;
+				}
+				if (progress.kind === 'stale') {
+					return true;
+				}
+				if (progress.kind === 'recovered') {
+					span.setAttribute('after', progress.after);
+					span.setAttribute('epoch', progress.epoch);
+					this.logger.warn(
+						'listing adoption recovery reset the historical seeds',
+						{
+							after: progress.after,
+							epoch: progress.epoch,
+							prunedThrough
+						}
+					);
+				}
+				await this.io(() => this.dependencies.wakeHistorical());
+				return true;
+			}
+		);
+	}
 	private async capture(): Promise<boolean> {
 		return withSpan('artifact.listing.adoption.capture', {}, async (span) => {
 			const progress = await this.captures.advance();
 			span.setAttribute('outcome', progress.kind);
 			if (progress.kind === 'expired') {
-				throw new Error(
-					'Listing adoption capture expired before durable enrolment; historical recovery is required'
-				);
+				return this.recover(progress.prunedThrough);
 			}
 			if (progress.kind !== 'advanced' && progress.kind !== 'idle') {
 				return false;

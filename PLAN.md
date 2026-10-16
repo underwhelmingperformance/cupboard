@@ -7445,8 +7445,13 @@ build traces available from a cupboard cache.
       most 32 acknowledged events per turn and commits the retained floor with
       deletion. Consumer epochs and acknowledged positions fence both writes,
       and unread events and durable source work remain intact. Source-work and
-      terminal-task pruning, expired-prefix recovery, forward dispatch and
-      acknowledgement, shared completion wakes and activation remain pending.
+      terminal-task pruning, forward dispatch and acknowledgement, shared
+      completion wakes and activation remain pending. Expired input now restarts
+      all three historical seeds and rotates the live consumer at a fresh
+      capture barrier in one fenced D1 batch. Existing work and enrolment
+      counters remain intact, and old seed claims cannot write after reset.
+      Captures after the barrier remain live input. Failed seed wakes recover
+      through the existing cron dispatcher.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

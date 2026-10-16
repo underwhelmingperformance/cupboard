@@ -428,13 +428,24 @@ Newer consumer progress remains valid, and pruning preserves unread events and
 independently persisted source work. Lost replies retry from the committed
 floor.
 
+When the consumer is behind the retained floor, recovery waits for all seven
+capture, execution and historical-seed storage transitions. One D1 batch removes
+the old fact and parent checkpoints and seed dispatch epochs, then rotates the
+consumer epoch at a fresh capture barrier. The batch preserves existing
+enrolment counters, source work and execution tasks. Every statement rechecks
+readiness, the captured consumer and counters, the retained floor and the
+barrier. Newer captures remain above that barrier. Historical seed hints restart
+fixed-window scans of current facts and parents; live capture continues from the
+barrier. A failed wake leaves the reset seed scopes discoverable by the existing
+cron dispatcher. Recovery uses seven binding calls and no payload I/O.
+
 Metadata invocations have a 25-second deadline. Dispatch admits twenty-six
 binding calls, expansion admits twenty-eight, and delivery admits eight plus
 four calls per hinted target, at most forty. Queue consumers have no configured
 global concurrency cap. Execution metadata grants no cache authority or CAS
 retention. Shared completion wakes, forward availability dispatch and
-acknowledgement, source-work and terminal-task pruning, expired-prefix recovery
-and automatic forward generation remain pending.
+acknowledgement, source-work and terminal-task pruning and automatic forward
+generation remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

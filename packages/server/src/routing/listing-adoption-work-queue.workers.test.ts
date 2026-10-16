@@ -12,7 +12,7 @@ import { listingGeneratorRevisionSchema } from '@cupboard/protocol/artifacts';
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
-import { asc, eq, sql } from 'drizzle-orm';
+import { asc, eq, lte, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -38,6 +38,8 @@ import {
 } from '../db/shared-nar-discovery.test-support.ts';
 import { withSubrequestSlice } from '../do/subrequest-slice.ts';
 
+import { ListingAdoptionQueue } from './listing-adoption-queue.ts';
+import { type ListingAdoptionQueueMessage } from './listing-adoption-queue-message.ts';
 import { type ListingAdoptionWorkMessage } from './listing-adoption-work-message.ts';
 import { ListingAdoptionWorkQueue } from './listing-adoption-work-queue.ts';
 
@@ -160,7 +162,9 @@ async function fixture(count = 3, tenantCount = 1) {
 		): Promise<readonly ListingAdoptionOutcome[]> =>
 			Promise.resolve(requests.map(() => ({ kind: 'conflict' })))
 	);
+	const historical = vi.fn(() => Promise.resolve({ metadata }));
 	const dependencies = {
+		wakeHistorical: historical,
 		database: env.CUPBOARD_DB,
 		queue,
 		serverFor: (tenant: TenantId) => ({
@@ -199,7 +203,74 @@ async function fixture(count = 3, tenantCount = 1) {
 			.orderBy(asc(schema.listingAdoptionTask.id));
 		return rows.map((row) => row.id);
 	};
-	return { database, queue, sent, rpc, consumer, store, deliveries };
+	return {
+		database,
+		queue,
+		sent,
+		rpc,
+		consumer,
+		store,
+		deliveries,
+		historical
+	};
+}
+async function consumerCheckpoint(
+	database: Awaited<ReturnType<typeof fixture>>['database']
+) {
+	return database
+		.select({
+			id: schema.listingAdoptionConsumer.id,
+			epoch: schema.listingAdoptionConsumer.epoch,
+			after: schema.listingAdoptionConsumer.after,
+			scanned: schema.listingAdoptionConsumer.scanned,
+			enrolled: schema.listingAdoptionConsumer.enrolled
+		})
+		.from(schema.listingAdoptionConsumer)
+		.get();
+}
+async function expireCapture(
+	database: Awaited<ReturnType<typeof fixture>>['database']
+) {
+	await database
+		.insert(schema.deploymentTransition)
+		.values(
+			(
+				[
+					'listing-adoption-fact-seed',
+					'listing-adoption-parent-seed',
+					'listing-adoption-seed-dispatch'
+				] as const
+			).map((id) => ({ id, state: 'complete' as const, updatedAt: now }))
+		);
+	await new ListingAdoptionConsumerStore(database).advance();
+	const old = await consumerCheckpoint(database);
+	await database.insert(schema.listingAdoptionCaptureEvent).values({
+		source: {
+			kind: 'listing',
+			identity: { narHash, generatorRevision: revision }
+		}
+	});
+	const position = await database
+		.select()
+		.from(schema.listingAdoptionCaptureState)
+		.get();
+	if (position === undefined || old === undefined) {
+		throw new Error('Expected a recovery capture position');
+	}
+	await database
+		.update(schema.listingAdoptionCaptureState)
+		.set({ prunedThrough: position.latest });
+	await database
+		.insert(schema.listingAdoptionFactSeed)
+		.values({ id: 1, isComplete: true });
+	await database.insert(schema.listingAdoptionParentSeed).values([
+		{ cacheKind: 'default', isComplete: true },
+		{ cacheKind: 'named', isComplete: true }
+	]);
+	await database
+		.delete(schema.listingAdoptionCaptureEvent)
+		.where(lte(schema.listingAdoptionCaptureEvent.id, position.latest));
+	return { old, position };
 }
 async function state(
 	database: Awaited<ReturnType<typeof fixture>>['database']
@@ -275,6 +346,114 @@ describe('listing adoption execution queue', () => {
 			events: [],
 			work: before,
 			state: [{ ...position, prunedThrough: position?.latest }]
+		});
+	});
+	it.each(['expired', 'missing'] as const)(
+		'recovers %s capture and wakes historical seeds within the dispatch budget',
+		async (state) => {
+			const { database, consumer, historical } = await fixture(1);
+			const { old, position } = await expireCapture(database);
+			if (state === 'missing') {
+				await database.delete(schema.listingAdoptionConsumer);
+			}
+			const actions: Action[] = [];
+			await withSubrequestSlice(
+				() =>
+					consumer().handleMessage(
+						message({ kind: 'listing-adoption-work-dispatch' }, actions)
+					),
+				{ subrequests: 50, reserve: 8 }
+			);
+			const current = await consumerCheckpoint(database);
+			expect({
+				actions,
+				wakes: historical.mock.calls.length,
+				consumer: current,
+				rotated: current?.epoch !== old.epoch,
+				facts: await database.select().from(schema.listingAdoptionFactSeed),
+				parents: await database.select().from(schema.listingAdoptionParentSeed)
+			}).toStrictEqual({
+				actions: [{ action: 'ack' }],
+				wakes: 1,
+				consumer: {
+					...old,
+					epoch: current?.epoch,
+					after: position.latest,
+					scanned: state === 'missing' ? 0 : old.scanned,
+					enrolled: state === 'missing' ? 0 : old.enrolled
+				},
+				rotated: true,
+				facts: [],
+				parents: []
+			});
+		}
+	);
+	it('recovers a failed historical wake through the normal seed dispatcher', async () => {
+		const { database, consumer, historical } = await fixture(1);
+		const { old, position } = await expireCapture(database);
+		historical.mockRejectedValueOnce(new Error('Historical wake unavailable'));
+		const actions: Action[] = [];
+		await consumer().handleMessage(
+			message({ kind: 'listing-adoption-work-dispatch' }, actions)
+		);
+		const recovered = await consumerCheckpoint(database);
+		const sent: ListingAdoptionQueueMessage[] = [];
+		const metadata = { metrics: { backlogCount: 0, backlogBytes: 0 } };
+		await withSubrequestSlice(
+			() =>
+				new ListingAdoptionQueue({
+					database: env.CUPBOARD_DB,
+					queue: {
+						send: (body) => {
+							sent.push(body);
+							return Promise.resolve({ metadata });
+						},
+						sendBatch: (entries) => {
+							sent.push(...Array.from(entries, (entry) => entry.body));
+							return Promise.resolve({ metadata });
+						}
+					}
+				}).start(),
+			{ subrequests: 50, reserve: 8 }
+		);
+		expect({
+			actions,
+			recovered,
+			rotated: recovered?.epoch !== old.epoch,
+			sent
+		}).toStrictEqual({
+			actions: [{ action: 'retry', delaySeconds: 60 }],
+			recovered: { ...old, epoch: recovered?.epoch, after: position.latest },
+			rotated: true,
+			sent: ['default-parents', 'facts', 'named-parents'].map((scope) => ({
+				kind: 'listing-adoption-seed',
+				scope
+			}))
+		});
+	});
+	it('keeps independent durable work moving while recovery storage is unavailable', async () => {
+		const { database, consumer, historical, sent } = await fixture(1);
+		const { old } = await expireCapture(database);
+		await database
+			.update(schema.deploymentTransition)
+			.set({ state: 'expanded' })
+			.where(eq(schema.deploymentTransition.id, 'listing-adoption-fact-seed'));
+		const actions: Action[] = [];
+		await consumer().handleMessage(
+			message({ kind: 'listing-adoption-work-dispatch' }, actions)
+		);
+		expect({
+			actions,
+			wakes: historical.mock.calls.length,
+			consumer: await consumerCheckpoint(database),
+			dispatchedIndependentWork: sent.some(
+				(hint) => hint.kind === 'listing-adoption-expand'
+			)
+		}).toStrictEqual({
+			actions: [{ action: 'ack' }],
+			wakes: 0,
+			consumer: old,
+			dispatchedIndependentWork: true
 		});
 	});
 	it('uses the authoritative RPC once per tenant for independent captured targets', async () => {

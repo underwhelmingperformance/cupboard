@@ -14,7 +14,7 @@ import {
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, lte, sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CasObjectStore } from '../blob/cas-object-store.ts';
@@ -22,10 +22,12 @@ import { type NarListingAdoptionRequest } from '../blob/nar-listing-adoption.ts'
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { ListingAdoptionConsumerStore } from '../db/listing-adoption-consumer.ts';
 import { ListingFactStore } from '../db/listing-facts.ts';
 import * as schema from '../db/schema.ts';
 import { ListingFactConflictError } from '../errors.ts';
 import { casObjectKey } from '../http/http.ts';
+import { type ListingAdoptionQueueMessage } from '../routing/listing-adoption-queue-message.ts';
 import { type ListingAdoptionWorkMessage } from '../routing/listing-adoption-work-message.ts';
 import { ListingAdoptionWorkQueue } from '../routing/listing-adoption-work-queue.ts';
 import { handleWorkerQueue } from '../routing/queue.ts';
@@ -1164,29 +1166,39 @@ describe('listing publication by reference', () => {
 			{ label: 'default', scope: defaultCache() },
 			{ label: 'named', scope: namedCache('queued-adopt') }
 		].flatMap((cache) =>
-			(['parents-first', 'fact-first'] as const).map((order) => ({
-				...cache,
-				order
-			}))
+			(['parents-first', 'fact-first'] as const).flatMap((order) =>
+				(['retained', 'expired'] as const).map((retention) => ({
+					...cache,
+					order,
+					retention
+				}))
+			)
 		)
 	)(
-		'publishes queued adoption through the real Worker and DO for $label, $order',
-		({ scope, order }) =>
+		'publishes queued adoption through the real Worker and DO for $label, $order, $retention input',
+		({ scope, order, retention }) =>
 			withoutAlarmArming(async () => {
 				for (const id of [
 					'listing-adoption-capture',
 					'listing-adoption-work',
 					'listing-adoption-parents',
-					'listing-adoption-tasks'
+					'listing-adoption-tasks',
+					'listing-adoption-fact-seed',
+					'listing-adoption-parent-seed',
+					'listing-adoption-seed-dispatch'
 				] as const) {
 					await recordTransition(id, 'complete');
 				}
 				if (scope.kind === 'named') {
 					await putTestCache(token, scope, 'private');
 				}
-				const sent: ListingAdoptionWorkMessage[] = [];
+				const sent: (
+					ListingAdoptionWorkMessage | ListingAdoptionQueueMessage
+				)[] = [];
 				const metadata = { metrics: { backlogCount: 0, backlogBytes: 0 } };
-				const queue: Queue<ListingAdoptionWorkMessage> = {
+				const queue: Queue<
+					ListingAdoptionWorkMessage | ListingAdoptionQueueMessage
+				> = {
 					metrics: () => Promise.resolve(metadata.metrics),
 					send: (body) => {
 						sent.push(body);
@@ -1221,6 +1233,8 @@ describe('listing publication by reference', () => {
 					await new ListingAdoptionWorkQueue({
 						database: env.CUPBOARD_DB,
 						queue,
+						wakeHistorical: () =>
+							queue.send({ kind: 'listing-adoption-dispatch' }),
 						serverFor: () => currentServer()
 					}).start();
 					for (let turn = 0; turn < 64; turn++) {
@@ -1301,6 +1315,46 @@ describe('listing publication by reference', () => {
 					usage: { bytes: 0, blobs: 0 }
 				});
 				await steps[1]();
+				if (retention === 'expired') {
+					const result = await runInDurableObject(
+						currentServer(),
+						async (instance) => {
+							const database = instance.context.d1;
+							const position = await database
+								.select()
+								.from(d1Schema.listingAdoptionCaptureState)
+								.get();
+							if (position === undefined) {
+								throw new Error('Expected the adoption capture position');
+							}
+							await database
+								.insert(d1Schema.listingAdoptionFactSeed)
+								.values({ id: 1, isComplete: true });
+							await database.insert(d1Schema.listingAdoptionParentSeed).values([
+								{ cacheKind: 'default', isComplete: true },
+								{ cacheKind: 'named', isComplete: true }
+							]);
+							await database
+								.delete(d1Schema.listingAdoptionCaptureEvent)
+								.where(
+									lte(d1Schema.listingAdoptionCaptureEvent.id, position.latest)
+								);
+							await database
+								.update(d1Schema.listingAdoptionCaptureState)
+								.set({ prunedThrough: position.latest });
+							return {
+								floor: position.latest,
+								consumer: await new ListingAdoptionConsumerStore(
+									database
+								).advance()
+							};
+						}
+					);
+					expect(result.consumer).toStrictEqual({
+						kind: 'expired',
+						prunedThrough: result.floor
+					});
+				}
 				if (captured.fact === undefined || captured.parents === undefined) {
 					throw new Error('Expected both availability sources');
 				}

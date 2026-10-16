@@ -584,6 +584,8 @@ export default {
 				const adoptionWork = new ListingAdoptionWorkQueue({
 					database: env.CUPBOARD_DB,
 					queue: env.ARTIFACT_QUEUE,
+					wakeHistorical: () =>
+						env.ARTIFACT_QUEUE.send({ kind: 'listing-adoption-dispatch' }),
 					serverFor: (tenant) => tenantServer(env, tenant)
 				});
 				const results = await Promise.allSettled([
