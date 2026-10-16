@@ -1,4 +1,4 @@
-import { startCapture } from '@cupboard/logger/testing';
+import { type Capture, startCapture } from '@cupboard/logger/testing';
 import { nixSha256HashSchema } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
@@ -12,6 +12,7 @@ import * as schema from '../db/schema.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
 import {
 	currentServer,
+	defaultCache,
 	initialise,
 	negotiateUploads,
 	negotiateViaInstance,
@@ -21,19 +22,32 @@ import {
 } from '../test-support.ts';
 
 import { type SchemaWriter } from './context.ts';
+import { type DatabaseCostMeter } from './database-cost-meter.ts';
+import { noCost } from './operation-cost.test-support.ts';
 import {
-	type DatabaseCost,
-	type DatabaseCostMeter,
-	withRequestCost
-} from './database-cost-meter.ts';
+	type OperationCostRecord,
+	withOperationCost
+} from './operation-cost.ts';
 
-const costLineSchema = z.object({
-	method: z.string(),
-	path: z.string(),
-	status: z.number(),
-	rowsRead: z.number(),
-	rowsWritten: z.number()
-});
+const negotiateRequest = {
+	method: 'POST',
+	path: '/uploads',
+	route: '/uploads'
+};
+
+const lineSchema = z.object({ method: z.string(), path: z.string() });
+
+function negotiateLine(capture: Capture): Record<string, unknown> | undefined {
+	return capture.logs.find((entry) => {
+		if (entry.message !== 'request finished') {
+			return false;
+		}
+
+		const line = lineSchema.parse(entry.properties);
+
+		return line.method === 'POST' && line.path.endsWith('/uploads');
+	})?.properties;
+}
 
 // The platform bills the SQLite rows that the Durable Object reads and writes.
 // These tests use those runtime measurements rather than an estimate. A full
@@ -94,13 +108,14 @@ describe('db cost meter', () => {
 					db.select().from(schema.pendingUploads).all();
 				};
 
-				let costA: DatabaseCost | undefined;
-				let costB: DatabaseCost | undefined;
+				let costA: OperationCostRecord | undefined;
+				let costB: OperationCostRecord | undefined;
 
 				// A reads the four rows, yields so B can interleave, then reads them
 				// again; B reads them once while A is suspended. Each request must see
 				// only its own statements' rows: A eight, B four.
-				const a = withRequestCost(
+				const a = withOperationCost(
+					'a',
 					async () => {
 						scanAll();
 						await Promise.resolve();
@@ -110,7 +125,8 @@ describe('db cost meter', () => {
 						costA = cost;
 					}
 				);
-				const b = withRequestCost(
+				const b = withOperationCost(
+					'b',
 					() => {
 						scanAll();
 
@@ -149,20 +165,18 @@ describe('db cost meter', () => {
 		// request resolves before it negotiates anything. The request also probes
 		// for a managed retirement and durable teardown before eligibility
 		// reconciliation, then checks that the cache is still live before it
-		// inserts the pending upload.
-		const negotiate = capture.logs
-			.filter((entry) => entry.message === 'request finished')
-			.map((entry) => costLineSchema.parse(entry.properties))
-			.find((cost) => cost.method === 'POST' && cost.path.endsWith('/uploads'));
-
-		expect({
-			status: negotiate?.status,
-			rowsRead: negotiate?.rowsRead,
-			rowsWritten: negotiate?.rowsWritten
-		}).toStrictEqual({
+		// inserts the pending upload. The request makes three D1 calls, and one of
+		// them returns no row counts.
+		expect(negotiateLine(capture)).toStrictEqual({
+			...negotiateRequest,
 			status: StatusCodes.OK,
+			...noCost,
 			rowsRead: 41,
-			rowsWritten: 11
+			rowsWritten: 11,
+			d1Calls: 3,
+			d1RowsRead: 6,
+			d1RowsWritten: 2,
+			d1CallsWithoutRows: 1
 		});
 	});
 
@@ -186,16 +200,17 @@ describe('db cost meter', () => {
 			capture.stop();
 		}
 
-		const negotiate = capture.logs
-			.filter((entry) => entry.message === 'request finished')
-			.map((entry) => costLineSchema.parse(entry.properties))
-			.find((cost) => cost.method === 'POST' && cost.path.endsWith('/uploads'));
-
-		expect({
-			status: negotiate?.status,
-			rowsRead: negotiate?.rowsRead,
-			rowsWritten: negotiate?.rowsWritten
-		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 41, rowsWritten: 13 });
+		expect(negotiateLine(capture)).toStrictEqual({
+			...negotiateRequest,
+			status: StatusCodes.OK,
+			...noCost,
+			rowsRead: 41,
+			rowsWritten: 13,
+			d1Calls: 3,
+			d1RowsRead: 6,
+			d1RowsWritten: 2,
+			d1CallsWithoutRows: 1
+		});
 	});
 
 	it('logs the cost line with a 500 status when the request fails', async () => {
@@ -218,25 +233,67 @@ describe('db cost meter', () => {
 			capture.stop();
 		}
 
-		// A failed request still emits its cost line: the meter settles in a `finally`,
-		// and `fetch` reports the 500 the failed body resolved to with the rows it had
-		// already read.
-		const negotiate = capture.logs
-			.filter((entry) => entry.message === 'request finished')
-			.map((entry) => costLineSchema.parse(entry.properties))
-			.find((cost) => cost.method === 'POST' && cost.path.endsWith('/uploads'));
-
-		expect({
-			status: negotiate?.status,
-			rowsRead: negotiate?.rowsRead,
-			rowsWritten: negotiate?.rowsWritten
-		}).toStrictEqual({
+		expect(negotiateLine(capture)).toStrictEqual({
+			...negotiateRequest,
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			...noCost,
 			rowsRead: 41,
-			rowsWritten: 1
+			rowsWritten: 1,
+			d1Calls: 2,
+			d1RowsRead: 6
 		});
 	});
 });
+
+describe('dispatch cost', () => {
+	beforeEach(resetTestServer);
+
+	it('logs the cost of an RPC that no narrower scope covers', async () => {
+		const token = await initialise();
+
+		const lines = await methodLines('authoriseCacheContentRead', () =>
+			currentServer().authoriseCacheContentRead(token, defaultCache())
+		);
+
+		expect(lines).toStrictEqual([
+			{ method: 'authoriseCacheContentRead', ...noCost, rowsRead: 2 }
+		]);
+	});
+
+	it('logs nothing for an RPC that touches no billed storage', async () => {
+		await initialise();
+
+		const lines = await methodLines('stageNegotiateHints', () =>
+			currentServer().stageNegotiateHints({
+				blobStates: [],
+				reusableReferences: []
+			})
+		);
+
+		expect(lines).toStrictEqual([]);
+	});
+});
+
+async function methodLines(
+	method: string,
+	run: () => Promise<unknown>
+): Promise<readonly Record<string, unknown>[]> {
+	const capture = startCapture();
+
+	try {
+		await run();
+	} finally {
+		capture.stop();
+	}
+
+	return capture.logs
+		.filter(
+			(entry) =>
+				entry.message === 'method finished' &&
+				entry.properties.method === method
+		)
+		.map((entry) => entry.properties);
+}
 
 function scanUploads(
 	database: SchemaWriter,

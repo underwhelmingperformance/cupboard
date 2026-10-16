@@ -13,12 +13,13 @@
  * calls another method of the same object enters a nested scope, and the
  * invocation still has exactly one.
  *
- * `scope` also receives the object handling the dispatch, so it can read
- * instance-specific configuration.
+ * `scope` also receives the dispatching object, so it can read
+ * instance-specific configuration. It also receives the dispatched method's
+ * name.
  */
 export function wrapDispatchedMethods<T extends object>(
 	prototype: T,
-	scope: (body: () => unknown, receiver: T) => unknown
+	scope: (body: () => unknown, receiver: T, method: string) => unknown
 ): void {
 	for (const property of Object.getOwnPropertyNames(prototype)) {
 		if (property === 'constructor') {
@@ -43,7 +44,8 @@ export function wrapDispatchedMethods<T extends object>(
 			value: function (this: T, ...parameters: unknown[]): unknown {
 				return scope(
 					(): unknown => Reflect.apply(method, this, parameters),
-					this
+					this,
+					property
 				);
 			}
 		});

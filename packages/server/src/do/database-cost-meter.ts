@@ -1,13 +1,6 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
-
 import { admitBoundParameters } from './statement-admission.ts';
 
 type AnyCursor = SqlStorageCursor<Record<string, SqlStorageValue>>;
-
-export interface DatabaseCost {
-	readonly rowsRead: number;
-	readonly rowsWritten: number;
-}
 
 /**
  * Adds up the rows that Durable Object SQLite reads and writes, which is how
@@ -48,36 +41,18 @@ export class DatabaseCostMeter {
 	}
 }
 
-// Requests can interleave at await points. Async-local storage prevents one
-// request from including another request's database rows.
-const requestMeter = new AsyncLocalStorage<DatabaseCostMeter>();
-
 /**
- * Isolates the row count for `body` from interleaved requests and reports the
- * final count whether `body` returns or throws.
+ * Returns the meter for the scope that is open when a statement runs, or
+ * undefined when no such scope is open.
  */
-export async function withRequestCost<T>(
-	body: () => Promise<T>,
-	report: (cost: DatabaseCost) => void
-): Promise<T> {
-	const meter = new DatabaseCostMeter();
-
-	return requestMeter.run(meter, async () => {
-		try {
-			return await body();
-		} finally {
-			meter.recordOutstanding();
-			report({ rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten });
-		}
-	});
-}
+type ScopedMeter = () => DatabaseCostMeter | undefined;
 
 // Keep the platform cursor unchanged. Drizzle consumes it before the next
-// statement, which is when the lifetime, request and scoped meters record it.
+// statement, which is when the lifetime and scoped meters record it.
 function meteredSql(
 	sql: SqlStorage,
 	cumulative: DatabaseCostMeter,
-	scoped: () => DatabaseCostMeter | undefined
+	scoped: readonly ScopedMeter[]
 ): SqlStorage {
 	return {
 		exec<T extends Record<string, SqlStorageValue>>(
@@ -90,8 +65,10 @@ function meteredSql(
 
 			const cursor = sql.exec<T>(query, ...bindings);
 			cumulative.track(cursor);
-			requestMeter.getStore()?.track(cursor);
-			scoped()?.track(cursor);
+
+			for (const meter of scoped) {
+				meter()?.track(cursor);
+			}
 
 			return cursor;
 		},
@@ -106,13 +83,12 @@ function meteredSql(
 // Bind pass-through methods to the platform storage. These host methods depend
 // on their receiver and fail when invoked through an ordinary proxy receiver.
 //
-// `scoped` is looked up per statement rather than passed as a meter, because
-// the meter it returns belongs to whichever budget scope is open when the
-// statement runs, not to the storage wrapper's lifetime.
+// Each `scoped` accessor is called per statement because its meter belongs to
+// the scope that is open when the statement runs, not to the storage wrapper.
 export function meteredStorage(
 	storage: DurableObjectStorage,
 	meter: DatabaseCostMeter,
-	scoped: () => DatabaseCostMeter | undefined = (): undefined => undefined
+	scoped: readonly ScopedMeter[] = []
 ): DurableObjectStorage {
 	const sql = meteredSql(storage.sql, meter, scoped);
 	const boundMethods = new Map<PropertyKey, unknown>();

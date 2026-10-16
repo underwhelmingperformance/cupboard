@@ -1,22 +1,109 @@
 import { UnboundableIoError } from '../errors.ts';
 
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
+import {
+	currentOperationCost,
+	type OperationCost,
+	type R2Operation
+} from './operation-cost.ts';
 import { admitBoundParameters } from './statement-admission.ts';
 import { spendSubrequests } from './subrequest-slice.ts';
+
+interface CallCost<R> {
+	readonly start: (cost: OperationCost) => void;
+	readonly finish?: (cost: OperationCost, result: R) => void;
+}
+
+function r2Call(operation: R2Operation): CallCost<unknown> {
+	return {
+		start: (cost) => {
+			cost.recordR2Call(operation);
+		}
+	};
+}
+
+const d1CallWithRows: CallCost<D1Response> = {
+	start: (cost) => {
+		cost.recordD1Call(true);
+	},
+	finish: (cost, result) => {
+		cost.recordD1Rows([result]);
+	}
+};
+
+const d1Batch: CallCost<readonly D1Response[]> = {
+	start: (cost) => {
+		cost.recordD1Call(true);
+	},
+	finish: (cost, results) => {
+		cost.recordD1Rows(results);
+	}
+};
+
+const d1CallWithoutRows: CallCost<unknown> = {
+	start: (cost) => {
+		cost.recordD1Call(false);
+	}
+};
 
 // Declare the call against the dispatch's subrequest slice before making it.
 // The slice refuses nothing; a pass asks `hasSubrequestsFor` before a unit of
 // work and defers when the answer is no.
+//
+// The cost goes to the scope that made the call, even when the result arrives
+// after another scope has opened. A call that the deadline refuses is never
+// sent, so it is not counted. A call that outlives its deadline still
+// completes and is billed, so its result is read from the binding's own
+// promise.
 function bounded<A extends unknown[], R>(
 	method: (...arguments_: A) => Promise<R>,
 	subrequest: string,
+	callCost: CallCost<R>,
 	capMs?: number
 ): (...arguments_: A) => Promise<R> {
 	return (...arguments_: A) => {
 		spendSubrequests(1, subrequest);
+		const cost = currentOperationCost();
 
-		return boundedSubrequest(() => method(...arguments_), subrequest, capMs);
+		return boundedSubrequest(
+			() => {
+				const call = method(...arguments_);
+
+				if (cost === undefined) {
+					return call;
+				}
+
+				callCost.start(cost);
+				const { finish } = callCost;
+
+				if (finish !== undefined) {
+					void recordWhenFulfilled(call, (result) => {
+						finish(cost, result);
+					});
+				}
+
+				return call;
+			},
+			subrequest,
+			capMs
+		);
 	};
+}
+
+// The caller receives a rejection from the call itself.
+async function recordWhenFulfilled<R>(
+	call: Promise<R>,
+	record: (result: R) => void
+): Promise<void> {
+	let result: R;
+
+	try {
+		result = await call;
+	} catch {
+		return;
+	}
+
+	record(result);
 }
 
 // A multipart handle issues requests outside these per-call proxies.
@@ -88,19 +175,33 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 		get(target, property) {
 			switch (property) {
 				case 'head': {
-					return bounded(target.head.bind(target), 'r2.head');
+					return bounded(target.head.bind(target), 'r2.head', r2Call('head'));
 				}
 				case 'get': {
-					return bounded(target.get.bind(target), 'r2.get', unboundedCapMs);
+					return bounded(
+						target.get.bind(target),
+						'r2.get',
+						r2Call('get'),
+						unboundedCapMs
+					);
 				}
 				case 'put': {
-					return bounded(target.put.bind(target), 'r2.put', unboundedCapMs);
+					return bounded(
+						target.put.bind(target),
+						'r2.put',
+						r2Call('put'),
+						unboundedCapMs
+					);
 				}
 				case 'delete': {
-					return bounded(target.delete.bind(target), 'r2.delete');
+					return bounded(
+						target.delete.bind(target),
+						'r2.delete',
+						r2Call('delete')
+					);
 				}
 				case 'list': {
-					return bounded(target.list.bind(target), 'r2.list');
+					return bounded(target.list.bind(target), 'r2.list', r2Call('list'));
 				}
 				case 'createMultipartUpload':
 				case 'resumeMultipartUpload': {
@@ -130,16 +231,20 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 					};
 				}
 				case 'run': {
-					return bounded(target.run.bind(target), 'd1.run');
+					return bounded(target.run.bind(target), 'd1.run', d1CallWithRows);
 				}
 				case 'all': {
-					return bounded(target.all.bind(target), 'd1.all');
+					return bounded(target.all.bind(target), 'd1.all', d1CallWithRows);
 				}
 				case 'first': {
-					return bounded(target.first.bind(target), 'd1.first');
+					return bounded(
+						target.first.bind(target),
+						'd1.first',
+						d1CallWithoutRows
+					);
 				}
 				case 'raw': {
-					return bounded(target.raw.bind(target), 'd1.raw');
+					return bounded(target.raw.bind(target), 'd1.raw', d1CallWithoutRows);
 				}
 				default: {
 					return passThrough(target, property);
@@ -164,19 +269,16 @@ function boundedD1Client<T extends D1Database | D1DatabaseSession>(
 						boundedStatement(target.prepare(query));
 				}
 				case 'batch': {
-					return (statements: D1PreparedStatement[]) => {
-						spendSubrequests(1, 'd1.batch');
-
-						return boundedSubrequest(
-							() =>
-								target.batch(
-									statements.map(
-										(statement) => realStatement.get(statement) ?? statement
-									)
-								),
-							'd1.batch'
-						);
-					};
+					return bounded(
+						(statements: D1PreparedStatement[]) =>
+							target.batch(
+								statements.map(
+									(statement) => realStatement.get(statement) ?? statement
+								)
+							),
+						'd1.batch',
+						d1Batch
+					);
 				}
 				default: {
 					return passThrough(target, property);
@@ -198,7 +300,11 @@ export function boundedD1(database: D1Database): D1Database {
 	return new Proxy(client, {
 		get(target, property) {
 			if (property === 'exec') {
-				return bounded(database.exec.bind(database), 'd1.exec');
+				return bounded(
+					database.exec.bind(database),
+					'd1.exec',
+					d1CallWithoutRows
+				);
 			}
 
 			if (property === 'withSession') {

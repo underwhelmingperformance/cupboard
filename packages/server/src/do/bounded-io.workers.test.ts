@@ -8,7 +8,24 @@ import { currentServer, initialise, resetTestServer } from '../test-support.ts';
 
 import { boundedBlobs, boundedD1, boundedWorkerEnv } from './bounded-io.ts';
 import { withDeadlineBudget } from './deadline.ts';
+import { noCost } from './operation-cost.test-support.ts';
+import {
+	type OperationCostRecord,
+	withOperationCost
+} from './operation-cost.ts';
 import { hasSubrequestsFor, withSubrequestSlice } from './subrequest-slice.ts';
+
+async function costOf(
+	body: () => Promise<unknown>
+): Promise<OperationCostRecord> {
+	let cost: OperationCostRecord | undefined;
+
+	await withOperationCost('test', body, (settled) => {
+		cost = settled;
+	});
+
+	return cost ?? noCost;
+}
 
 describe('bounded gated subrequest', () => {
 	beforeEach(resetTestServer);
@@ -126,6 +143,138 @@ describe('bounded Worker environment', () => {
 			timedOut: rejection instanceof SubrequestTimeoutError,
 			isSameCronState: worker.CRON_STATE === env.CRON_STATE
 		}).toStrictEqual({ timedOut: true, isSameCronState: true });
+	});
+});
+
+describe('binding cost', () => {
+	it('records each R2 and D1 call against the open scope', async () => {
+		const worker = boundedWorkerEnv(env);
+		await worker.CUPBOARD_DB.exec(
+			'CREATE TABLE IF NOT EXISTS cost_probe (id INTEGER PRIMARY KEY)'
+		);
+		const select = worker.CUPBOARD_DB.prepare(
+			"SELECT value FROM json_each('[1,2,3]')"
+		);
+
+		const cost = await costOf(async () => {
+			await worker.BLOBS.put('cost-probe', 'bytes');
+			await worker.BLOBS.head('cost-probe');
+			await worker.BLOBS.get('cost-probe');
+			await worker.BLOBS.list({ prefix: 'cost-probe' });
+			await worker.BLOBS.delete('cost-probe');
+			await worker.CUPBOARD_DB.prepare(
+				'INSERT INTO cost_probe DEFAULT VALUES'
+			).run();
+			await select.all();
+			await select.raw();
+			await select.first();
+			await worker.CUPBOARD_DB.batch([select, select]);
+			await worker.CUPBOARD_DB.exec('SELECT 1');
+		});
+
+		expect(cost).toStrictEqual({
+			...noCost,
+			d1Calls: 6,
+			d1RowsRead: 9,
+			d1RowsWritten: 1,
+			d1CallsWithoutRows: 3,
+			r2Head: 1,
+			r2Get: 1,
+			r2Put: 1,
+			r2Delete: 1,
+			r2List: 1
+		});
+	});
+
+	it('does not count a call that an expired deadline refuses', async () => {
+		const blobs = boundedBlobs(env.BLOBS);
+		let rejection: unknown;
+
+		const cost = await costOf(async () => {
+			try {
+				await withDeadlineBudget(0, () => blobs.head('refused-key'));
+			} catch (error) {
+				rejection = error;
+			}
+		});
+
+		expect({
+			timedOut: rejection instanceof SubrequestTimeoutError,
+			cost
+		}).toStrictEqual({ timedOut: true, cost: noCost });
+	});
+
+	it('records the rows of a D1 call that completes after its deadline', async () => {
+		const statement = env.CUPBOARD_DB.prepare('SELECT 1');
+		const completion = Promise.withResolvers<D1Result>();
+		const run = vi.spyOn(statement, 'run').mockReturnValue(completion.promise);
+		const prepare = vi
+			.spyOn(env.CUPBOARD_DB, 'prepare')
+			.mockReturnValue(statement);
+		let rejection: unknown;
+
+		try {
+			const cost = await costOf(async () => {
+				try {
+					await withDeadlineBudget(10, () =>
+						boundedD1(env.CUPBOARD_DB).prepare('SELECT 1').run()
+					);
+				} catch (error) {
+					rejection = error;
+				}
+
+				completion.resolve({
+					success: true,
+					results: [],
+					meta: {
+						duration: 0,
+						size_after: 0,
+						rows_read: 3,
+						rows_written: 1,
+						last_row_id: 0,
+						changed_db: true,
+						changes: 1
+					}
+				});
+				await completion.promise;
+			});
+
+			expect({
+				timedOut: rejection instanceof SubrequestTimeoutError,
+				cost
+			}).toStrictEqual({
+				timedOut: true,
+				cost: { ...noCost, d1Calls: 1, d1RowsRead: 3, d1RowsWritten: 1 }
+			});
+		} finally {
+			prepare.mockRestore();
+			run.mockRestore();
+		}
+	});
+
+	it('attributes each call to the innermost scope that made it', async () => {
+		const blobs = boundedBlobs(env.BLOBS);
+		let inner = noCost;
+
+		const [outer, concurrent] = await Promise.all([
+			costOf(async () => {
+				await blobs.head('outer-key');
+				inner = await costOf(async () => {
+					await blobs.head('inner-key');
+					await blobs.head('inner-key');
+				});
+				await blobs.head('outer-key');
+			}),
+			costOf(async () => {
+				await blobs.head('concurrent-key');
+			})
+		]);
+
+		expect({ outer, inner, concurrent }).toStrictEqual({
+			outer: { ...noCost, r2Head: 2 },
+			inner: { ...noCost, r2Head: 2 },
+			concurrent: { ...noCost, r2Head: 1 }
+		});
 	});
 });
 

@@ -1,6 +1,16 @@
 import { configureLogging, type Logger, rootLogger } from '@cupboard/logger';
 import { cloudflareSink } from '@cupboard/logger/sinks';
+import { type Context } from 'hono';
 import { createMiddleware } from 'hono/factory';
+import { matchedRoutes, routePath } from 'hono/route';
+import { METHOD_NAME_ALL } from 'hono/router';
+import { StatusCodes } from 'http-status-codes';
+
+import {
+	currentOperationCost,
+	hasCost,
+	withOperationCost
+} from '../do/operation-cost.ts';
 
 import { stampTraceContext } from './trace.ts';
 
@@ -31,4 +41,51 @@ export const loggerMiddleware = createMiddleware<{
 }>(async (context, next) => {
 	context.set('logger', requestLogger(context.req.raw));
 	await next();
+});
+
+// `app.use` registers a middleware for every method, so a handler is a route
+// with a specific method. Fall back to the route that ran for a request that
+// matched no handler.
+function handlerRoute(context: Context): string {
+	const handler = matchedRoutes(context).findLast(
+		(route) => route.method !== METHOD_NAME_ALL
+	);
+
+	return handler?.path ?? routePath(context);
+}
+
+/**
+ * Measures the billed storage that a request uses and logs it as
+ * `request finished` at `debug`. Register it before every other middleware so
+ * the scope covers the whole request.
+ *
+ * The route is the template of the last registered handler, not middleware,
+ * that matches the request, so a request that a middleware refuses still
+ * reports the handler route that it addressed. A contract procedure records its
+ * own template, because Hono matches it through a catch-all middleware.
+ */
+export const requestCostMiddleware = createMiddleware(async (context, next) => {
+	const logger = requestLogger(context.req.raw);
+	let status: number = StatusCodes.INTERNAL_SERVER_ERROR;
+	let recordedRoute: string | undefined;
+
+	await withOperationCost(
+		'request',
+		async () => {
+			await next();
+			status = context.res.status;
+			recordedRoute = currentOperationCost()?.route;
+		},
+		(cost) => {
+			if (!hasCost(cost)) {
+				return;
+			}
+
+			logger.debug('request finished', {
+				route: recordedRoute ?? handlerRoute(context),
+				status,
+				...cost
+			});
+		}
+	);
 });
