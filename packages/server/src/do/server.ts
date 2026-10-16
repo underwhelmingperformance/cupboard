@@ -106,7 +106,7 @@ import {
 } from '../migration/cache-access.ts';
 import {
 	loggerMiddleware,
-	requestLogger,
+	requestCostMiddleware,
 	rootLogger
 } from '../observability/logging.ts';
 import { withSpan } from '../observability/span.ts';
@@ -185,7 +185,6 @@ import {
 	type RuntimeEnv,
 	ServerContext
 } from './context.ts';
-import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
 import { currentDeadlineSignal, withDeadlineBudget } from './deadline.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
@@ -220,6 +219,12 @@ import {
 import { type ObjectFamily } from './object-move.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
+import {
+	enterOperationCostOnDispatch,
+	hasCost,
+	type OperationCostRecord,
+	withOperationCost
+} from './operation-cost.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RefreshSessionsService } from './refresh-sessions-service.ts';
@@ -452,16 +457,19 @@ type MaintenanceKind = 'gc' | 'verify' | 'local-step';
 const cacheAccessContractMigration = '0051_cache_identity_contract_assertions';
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
-	// Put the Durable Object row budget and subrequest
-	// slice on every method the runtime can dispatch to: a request, an alarm, an
-	// RPC, and any method added later. No dispatched method can run without them,
-	// and none has to remember to open them itself.
+	// Put the Durable Object row budget, the subrequest slice and a cost scope on
+	// every method that the runtime can dispatch to: a request, an alarm, an RPC,
+	// and any method added later. No dispatched method can run without them, and
+	// none has to remember to open them itself.
 	static {
 		enterRowBudgetOnDispatch(this.prototype);
 		enterSubrequestSliceOnDispatch(
 			this.prototype,
 			(server) => server.context.subrequestsPerInvocation
 		);
+		enterOperationCostOnDispatch(this.prototype, (method, cost) => {
+			logMethodFinished(rootLogger().with({ method }), cost);
+		});
 	}
 
 	private readonly app = new Hono<TenantHonoEnv>();
@@ -630,6 +638,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private routes(): void {
 		this.app.onError(serverErrorHandler);
+		this.app.use(requestCostMiddleware);
 
 		// Create the request logger before any guard runs so early failures retain
 		// the request fields.
@@ -1695,7 +1704,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const logger = rootLogger().with({ method });
 
 		return withSpan('tenant-rpc', { method }, () =>
-			withRequestCost(
+			withOperationCost(
+				method,
 				() => body(logger),
 				(cost) => {
 					logMethodFinished(logger, cost);
@@ -1712,7 +1722,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async runInitialisation(tenant?: TenantId): Promise<void> {
 		try {
-			await this.migrateAndSeed(tenant);
+			await withOperationCost(
+				'initialise',
+				() => this.migrateAndSeed(tenant),
+				(cost) => {
+					logMethodFinished(rootLogger().with({ method: 'initialise' }), cost);
+				}
+			);
 		} catch (error: unknown) {
 			this.migrationPromise = undefined;
 
@@ -1773,12 +1789,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async migrateAndSeed(explicitTenant?: TenantId): Promise<void> {
 		const migrationBudget = localMigrationBudget();
-		// The meter is cumulative and a purged object can initialise again. Measure
-		// only this migration interval; the awaited operations (hashing the bundled
-		// migrations, probing zstd) do not access the database.
-		this.context.dbCost.recordOutstanding();
-		const rowsReadBefore = this.context.dbCost.rowsRead;
-		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
 		// Cache access comes from this tenant's D1 catalogue, which a SQLite
 		// migration cannot read. Reconcile it before the contraction assertions.
@@ -1845,12 +1855,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.oidcTrust.seedOwnerRule();
 		await this.uploadState.migratePendingNarRefreshMarkers();
 		await this.localSchemaRun.complete(tenant);
-
-		this.context.dbCost.recordOutstanding();
-		logMethodFinished(rootLogger().with({ method: 'initialise' }), {
-			rowsRead: this.context.dbCost.rowsRead - rowsReadBefore,
-			rowsWritten: this.context.dbCost.rowsWritten - rowsWrittenBefore
-		});
 	}
 
 	// Resolve the chain marker even when a pass fails. The failure reaches its own
@@ -2819,27 +2823,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			throw error;
 		}
 
-		let status = StatusCodes.INTERNAL_SERVER_ERROR;
 		const { pathname } = new URL(request.url);
-		const logger = requestLogger(request);
 
 		return withSpan(
 			'tenant-request',
 			{ 'http.request.method': request.method, 'url.path': pathname },
-			() =>
-				withRequestCost(
-					async () => {
-						// Route handlers receive only bounded storage bindings, so a new
-						// handler cannot accidentally bypass the input-gate deadline.
-						const response = await this.app.fetch(request, this.context.env);
-						status = response.status;
-
-						return response;
-					},
-					(cost) => {
-						logRequestFinished(logger, status, cost);
-					}
-				)
+			// Route handlers receive only bounded storage bindings, so a new handler
+			// cannot accidentally bypass the input-gate deadline.
+			async () => this.app.fetch(request, this.context.env)
 		);
 	}
 
@@ -3792,20 +3783,6 @@ function unknownSessionOp(text: string): string | undefined {
 	return op;
 }
 
-// Durable Object storage is billed per row. Include row counts at `debug`; the
-// request logger and object identity already provide method, path, and tenant.
-function logRequestFinished(
-	logger: Logger,
-	status: number,
-	cost: DatabaseCost
-): void {
-	logger.debug('request finished', {
-		status,
-		rowsRead: cost.rowsRead,
-		rowsWritten: cost.rowsWritten
-	});
-}
-
 type MeteredMethod =
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
@@ -3832,9 +3809,10 @@ type MeteredMethod =
 
 // Direct RPCs have no HTTP request log. Record their storage cost at `trace`
 // because cron and queue traffic makes this the noisiest cost telemetry.
-function logMethodFinished(logger: Logger, cost: DatabaseCost): void {
-	logger.trace('method finished', {
-		rowsRead: cost.rowsRead,
-		rowsWritten: cost.rowsWritten
-	});
+function logMethodFinished(logger: Logger, cost: OperationCostRecord): void {
+	if (!hasCost(cost)) {
+		return;
+	}
+
+	logger.trace('method finished', { ...cost });
 }

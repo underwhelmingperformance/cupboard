@@ -254,7 +254,8 @@ async function rejectedBy<T extends Error>(
 const methodLineSchema = z.object({
 	method: z.string(),
 	rowsRead: z.number(),
-	rowsWritten: z.number()
+	rowsWritten: z.number(),
+	d1Calls: z.number()
 });
 
 describe('upload flow', () => {
@@ -735,7 +736,8 @@ describe('upload flow', () => {
 
 		// Migration and commit bypass `fetch`, so each must create its own metered
 		// request context. Their exact row counts depend on migration history and
-		// closure size; assert only that accounting occurred.
+		// closure size; assert only that accounting occurred. The cold start also
+		// reads the cache catalogue from D1.
 		const byMethod = capture.logs
 			.filter((entry) => entry.message === 'method finished')
 			.map((entry) => methodLineSchema.parse(entry.properties));
@@ -744,9 +746,14 @@ describe('upload flow', () => {
 
 		expect({
 			coldStartMeasured: (coldStart?.rowsWritten ?? 0) > 0,
+			coldStartReachedD1: (coldStart?.d1Calls ?? 0) > 0,
 			commitMeasured:
 				(commit?.rowsRead ?? 0) > 0 || (commit?.rowsWritten ?? 0) > 0
-		}).toStrictEqual({ coldStartMeasured: true, commitMeasured: true });
+		}).toStrictEqual({
+			coldStartMeasured: true,
+			coldStartReachedD1: true,
+			commitMeasured: true
+		});
 	});
 
 	it('routes a mixed closure through one batched negotiate', async () => {

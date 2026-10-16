@@ -38,6 +38,7 @@ import {
 	teardownEntryPrefix
 } from './cache-admin-service.ts';
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
+import { noCost } from './operation-cost.test-support.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { maintenancePassCursorKey } from './server.ts';
 import { UploadStateService } from './upload-state-service.ts';
@@ -613,7 +614,16 @@ describe('managed cache retirement', () => {
 			cacheLive: true,
 			wake: '2026-01-01T06:00:00.000Z',
 			steadyPassCost: [
-				{ method: 'garbage-collection', rowsRead: 260, rowsWritten: 8 }
+				{
+					method: 'garbage-collection',
+					...noCost,
+					rowsRead: 260,
+					rowsWritten: 8,
+					d1Calls: 2,
+					d1RowsRead: 1,
+					d1RowsWritten: 4,
+					r2List: 1
+				}
 			]
 		});
 

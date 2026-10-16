@@ -229,14 +229,14 @@ export default defineConfig(
 		}
 	},
 	{
-		// The database meter, the deadline scope, the D1 statement allowance, the
+		// The cost scope, the deadline scope, the D1 statement allowance, the
 		// Durable Object row budget and the subrequest slice use `AsyncLocalStorage`
 		// to keep interleaved requests from sharing accounting, deadlines,
 		// allowances, budgets or slices.
 		// Workerd exposes it through `nodejs_compat`; permit only
 		// `node:async_hooks` in these modules.
 		files: [
-			'packages/server/src/do/database-cost-meter.ts',
+			'packages/server/src/do/operation-cost.ts',
 			'packages/server/src/do/deadline.ts',
 			'packages/server/src/do/row-budget.ts',
 			'packages/server/src/do/statement-scope.ts',

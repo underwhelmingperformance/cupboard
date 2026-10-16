@@ -7,6 +7,8 @@ import { type Context } from '@orpc/server';
 import { ResponseHeadersPlugin } from '@orpc/server/plugins';
 import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4';
 
+import { recordRoute } from '../do/operation-cost.ts';
+
 import { type TenantOrpcContext } from './context.ts';
 import { type ControlOrpcContext, controlRouter } from './control-router.ts';
 import { tenantRouter } from './tenant-router.ts';
@@ -15,6 +17,8 @@ import { tenantRouter } from './tenant-router.ts';
  * The options for every contract handler. Smart coercion converts query-string
  * values before the contract schemas validate them. Every response to a
  * matched procedure is `no-store`, because the admin APIs return mutable state.
+ * The matched procedure's path template becomes the route in the request's
+ * cost line.
  */
 export function contractHandlerOptions<
 	T extends Context
@@ -25,6 +29,15 @@ export function contractHandlerOptions<
 			new SmartCoercionPlugin({
 				schemaConverters: [new ZodToJsonSchemaConverter()]
 			})
+		],
+		clientInterceptors: [
+			(options) => {
+				recordRoute(
+					options.procedure['~orpc'].route.path ?? options.path.join('.')
+				);
+
+				return options.next();
+			}
 		],
 		adapterInterceptors: [
 			async (options) => {

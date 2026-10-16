@@ -65,6 +65,7 @@ import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { boundedSubrequest } from './deadline.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
+import { currentOperationCost } from './operation-cost.ts';
 import { currentRowBudgetMeter } from './row-budget.ts';
 import { TransitionGate } from './transition-gate.ts';
 
@@ -197,7 +198,10 @@ export class ServerContext {
 			canUseLoopbackHttp: canUseLoopbackHttp(env)
 		});
 		this.db = drizzle(
-			meteredStorage(ctx.storage, this.dbCost, currentRowBudgetMeter),
+			meteredStorage(ctx.storage, this.dbCost, [
+				currentRowBudgetMeter,
+				() => currentOperationCost()?.sqlite
+			]),
 			{ schema }
 		);
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
