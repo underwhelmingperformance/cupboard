@@ -22,34 +22,34 @@ interface RecoverySnapshot {
 	readonly position: typeof schema.listingAdoptionCaptureState.$inferSelect;
 	readonly consumer?: typeof schema.listingAdoptionConsumer.$inferSelect;
 }
-const required: readonly TransitionId[] = [
-	'listing-adoption-capture',
-	'listing-adoption-work',
-	'listing-adoption-fact-seed',
-	'listing-adoption-parents',
-	'listing-adoption-parent-seed',
-	'listing-adoption-seed-dispatch',
-	'listing-adoption-tasks'
-];
 const databaseNow = sql`strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
 const captureStart = listingAdoptionCaptureSequenceSchema.parse(0);
 
 export class ListingAdoptionRecoveryStore {
 	constructor(private readonly database: DrizzleD1Database<typeof schema>) {}
-	private readyQuery() {
+	private completedTransition(id: TransitionId) {
 		const table = schema.deploymentTransition;
-		const installed = required.map((id) => {
-			const condition = and(eq(table.id, id), eq(table.state, 'complete'));
-			const marker = this.database
-				.select({ id: table.id })
-				.from(table)
-				.where(condition);
-			return exists(marker);
-		});
+		const condition = and(eq(table.id, id), eq(table.state, 'complete'));
+		const marker = this.database
+			.select({ id: table.id })
+			.from(table)
+			.where(condition);
+		return exists(marker);
+	}
+	private readyQuery() {
+		const installed = and(
+			this.completedTransition('listing-adoption-capture'),
+			this.completedTransition('listing-adoption-work'),
+			this.completedTransition('listing-adoption-fact-seed'),
+			this.completedTransition('listing-adoption-parents'),
+			this.completedTransition('listing-adoption-parent-seed'),
+			this.completedTransition('listing-adoption-seed-dispatch'),
+			this.completedTransition('listing-adoption-tasks')
+		);
 		return this.database
 			.select({ one: sql`1`.as('one') })
 			.from(sql`(SELECT 1) AS singleton`)
-			.where(and(...installed));
+			.where(installed);
 	}
 	private fence(snapshot: RecoverySnapshot) {
 		const table = schema.listingAdoptionConsumer;
