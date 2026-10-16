@@ -4,6 +4,7 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { recordTableWrites } from '../d1-statements.test-support.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey, verifyClaimLeaseMs } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -359,6 +360,75 @@ describe('verify alarm backstop', () => {
 		}).toStrictEqual({
 			verdict: undefined,
 			servable: false
+		});
+	});
+
+	it('keeps an abandoned claim due through the backstop alarm without marking eligibility', async () => {
+		const token = await initialise();
+		const upload = await deferFreshUpload(
+			token,
+			'backstop-abandoned-claim',
+			'h'.repeat(32)
+		);
+		const sent = await collectVerificationPasses();
+
+		const writes = await recordTableWrites(
+			env.CUPBOARD_DB,
+			'tenant_maintenance_eligibility',
+			() => currentServer().claimVerificationBatch(10, Number.MAX_SAFE_INTEGER)
+		);
+		const leaseEndsAt = await runInDurableObject(
+			currentServer(),
+			(instance) => {
+				const claimedAt = instance.context.db
+					.select({ claimedAt: schema.pendingUploads.claimedAt })
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, upload.uploadId))
+					.get()?.claimedAt;
+
+				return claimedAt === undefined || claimedAt === null
+					? undefined
+					: Date.parse(claimedAt) + verifyClaimLeaseMs;
+			}
+		);
+		const { marker } = await backstopState();
+
+		vi.setSystemTime(marker ?? Date.now());
+		await fireAlarm();
+		const reclaimed = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+
+		expect({
+			writes,
+			marker,
+			leaseEndsAt,
+			sent,
+			reclaimed: reclaimed.claims.map((claim) => claim.uploadId),
+			wake: await env.CUPBOARD_DB.prepare(
+				'SELECT next_wake_at AS wake FROM tenant_maintenance_eligibility WHERE tenant = ?'
+			)
+				.bind(fixtureTenant)
+				.first('wake')
+		}).toStrictEqual({
+			writes: [
+				{
+					scope: 'claim-verifications',
+					statement: 'insert into tenant_maintenance_eligibility',
+					written: 0
+				},
+				{
+					scope: 'claim-verifications',
+					statement: 'insert into tenant_maintenance_eligibility',
+					written: 0
+				}
+			],
+			marker: leaseEndsAt,
+			leaseEndsAt,
+			sent: [request],
+			reclaimed: [upload.uploadId],
+			wake: isoTimestamp(new Date(0))
 		});
 	});
 
