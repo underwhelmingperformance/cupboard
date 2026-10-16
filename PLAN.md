@@ -7216,8 +7216,11 @@ build traces available from a cupboard cache.
       records now coalesce native captures and support atomic transfer of sealed
       output to shared staging under a current retained-source computation
       claim. Transfer preserves the physical key and rejects stale producer and
-      cleanup owners. Producer, cleanup and executor integration, followed by
-      automatic activation, remain pending.
+      cleanup owners. Shared execution now adopts sealed output before requiring
+      local output memory or rereading the NAR. Promotion verifies the stored
+      digest, and transient failures preserve the transferred stage for retry.
+      Producer and cleanup integration, followed by automatic activation, remain
+      pending.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now

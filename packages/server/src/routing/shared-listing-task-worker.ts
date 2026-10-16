@@ -39,6 +39,7 @@ import {
 } from '../blob/shared-listing-tasks.ts';
 import * as schema from '../db/d1-schema.ts';
 import { recordedTransitions } from '../db/deployment-transitions.ts';
+import { ForwardListingStageStore } from '../db/forward-listing-staging.ts';
 import {
 	ListingFactStore,
 	type StoredNarListingFact
@@ -146,6 +147,7 @@ export class SharedListingTaskWorker {
 	private readonly tasks: SharedListingTaskStore;
 	private readonly generation: SharedListingGenerationStore;
 	private readonly stages: SharedListingStageStore;
+	private readonly forwardStages: ForwardListingStageStore;
 	private readonly completion: SharedListingCompletionStore;
 	private readonly facts: ListingFactStore;
 	private readonly staging: SharedListingStagingService;
@@ -160,6 +162,7 @@ export class SharedListingTaskWorker {
 		this.tasks = new SharedListingTaskStore(this.database);
 		this.generation = new SharedListingGenerationStore(this.database);
 		this.stages = new SharedListingStageStore(this.database);
+		this.forwardStages = new ForwardListingStageStore(this.database);
 		this.completion = new SharedListingCompletionStore(this.database);
 		this.facts = new ListingFactStore(this.database);
 		this.staging = new SharedListingStagingService(dependencies);
@@ -404,10 +407,17 @@ export class SharedListingTaskWorker {
 				failure: { kind: 'skipped', reason: 'unsupported-generator-revision' }
 			};
 		}
-		const recovered = await this.stages.recover(
+		const saved = await this.stages.recover(
 			generation.claim,
 			isoTimestamp(new Date())
 		);
+		const recovered =
+			saved.kind === 'ready'
+				? saved
+				: await this.forwardStages.adopt(
+						generation.claim,
+						isoTimestamp(new Date())
+					);
 		if (recovered.kind === 'ready') {
 			execution.stage = recovered.lease;
 			execution.preserveStage = true;

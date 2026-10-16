@@ -1,9 +1,7 @@
 import { sha256HexDigestSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import { artifactTaskOwnerSchema } from '@cupboard/protocol/artifact-jobs';
 import {
 	currentListingGeneratorRevision,
-	type ListingGeneratorRevision,
 	listingGeneratorRevisionSchema
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -12,96 +10,26 @@ import { eq } from 'drizzle-orm';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ByteBufferPool } from '../blob/byte-buffers.ts';
-import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { SharedListingStagingService } from '../blob/shared-listing-staging-service.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as schema from '../db/d1-schema.ts';
 import { ListingFactStore } from '../db/listing-facts.ts';
 import { SharedListingGenerationStore } from '../db/shared-listing-generation.ts';
-import { SharedListingJobStore } from '../db/shared-listing-jobs.ts';
 import { SharedListingStageStore } from '../db/shared-listing-staging.ts';
 import { SharedListingTaskStore } from '../db/shared-listing-tasks.ts';
-import { sharedNarDiscoveryFixture } from '../db/shared-nar-discovery.test-support.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 import { casObjectKey } from '../http/http.ts';
 
 import {
 	archive,
 	archiveTokens,
-	registerNar
+	registerNar,
+	sharedListingTaskFixture as fixture
 } from './shared-listing-task-worker.test-support.ts';
 import { SharedListingTaskWorker } from './shared-listing-task-worker.ts';
 
 const now = isoTimestamp(new Date('2026-01-01T00:00:00.000Z'));
 const retryAt = isoTimestamp(new Date(Date.parse(now) + 60_000));
-const owner = artifactTaskOwnerSchema.parse(
-	'00000000-0000-4000-8000-000000000001'
-);
-
-async function fixture(contents = 'hello', raw = archive(contents)) {
-	const { database } = await sharedNarDiscoveryFixture(0);
-	await database.insert(schema.deploymentTransition).values({
-		id: 'shared-listing-completion',
-		state: 'expanded',
-		updatedAt: now
-	});
-	const { narHash, source, compressed } = await registerNar(database, raw);
-	const jobs = new SharedListingJobStore(database);
-	async function create(
-		revision: ListingGeneratorRevision = currentListingGeneratorRevision
-	) {
-		const job = await jobs.start(revision, now);
-		const discovery = await jobs.claim(job, owner, now);
-		if (discovery.kind !== 'claimed') {
-			throw new Error('Discovery ownership was not granted');
-		}
-		await jobs.discover(discovery.claim);
-		const task = await database
-			.select()
-			.from(schema.sharedListingTask)
-			.where(eq(schema.sharedListingTask.jobId, job.id))
-			.get();
-		if (task === undefined) {
-			throw new Error('The global task is missing');
-		}
-		return {
-			job,
-			request: {
-				job: { id: job.id, generation: job.generation },
-				id: task.id,
-				owner
-			}
-		};
-	}
-	const outputBuffers = new ByteBufferPool({
-		buffers: 2,
-		bufferSize: 5 * 1024 * 1024
-	});
-	const buffers = new NarReadBufferPool({
-		buffers: 2,
-		bufferSize: 1024 * 1024
-	});
-	const dependencies = {
-		database: env.CUPBOARD_DB,
-		blobs: env.BLOBS,
-		buffers,
-		outputBuffers
-	};
-	const worker = new SharedListingTaskWorker(dependencies);
-	const first = await create();
-	return {
-		database,
-		source,
-		narHash,
-		create,
-		jobs,
-		worker,
-		first,
-		dependencies,
-		raw,
-		compressed
-	};
-}
 
 describe('global listing task execution', () => {
 	it('verifies a real stored NAR and checkpoints retained canonical listing bytes without tenant authority', async () => {

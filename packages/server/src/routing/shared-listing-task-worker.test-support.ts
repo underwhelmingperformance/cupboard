@@ -6,12 +6,27 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
+import { artifactTaskOwnerSchema } from '@cupboard/protocol/artifact-jobs';
+import {
+	currentListingGeneratorRevision,
+	type ListingGeneratorRevision
+} from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 
+import { ByteBufferPool } from '../blob/byte-buffers.ts';
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import * as schema from '../db/d1-schema.ts';
-import { type sharedNarDiscoveryFixture } from '../db/shared-nar-discovery.test-support.ts';
+import { SharedListingJobStore } from '../db/shared-listing-jobs.ts';
+import { sharedNarDiscoveryFixture } from '../db/shared-nar-discovery.test-support.ts';
 import { narObjectKey } from '../http/http.ts';
+
+import { SharedListingTaskWorker } from './shared-listing-task-worker.ts';
+
+const owner = artifactTaskOwnerSchema.parse(
+	'00000000-0000-4000-8000-000000000001'
+);
 const now = isoTimestamp(new Date('2026-01-01T00:00:00.000Z'));
 
 export function archiveTokens(values: readonly string[]): Uint8Array {
@@ -97,4 +112,72 @@ export async function registerNar(
 		})
 	]);
 	return { narHash, source, compressed };
+}
+
+export async function sharedListingTaskFixture(
+	contents = 'hello',
+	raw = archive(contents)
+) {
+	const { database } = await sharedNarDiscoveryFixture(0);
+	await database.insert(schema.deploymentTransition).values({
+		id: 'shared-listing-completion',
+		state: 'expanded',
+		updatedAt: now
+	});
+	const { narHash, source, compressed } = await registerNar(database, raw);
+	const jobs = new SharedListingJobStore(database);
+	async function create(
+		revision: ListingGeneratorRevision = currentListingGeneratorRevision
+	) {
+		const job = await jobs.start(revision, now);
+		const discovery = await jobs.claim(job, owner, now);
+		if (discovery.kind !== 'claimed') {
+			throw new Error('Discovery ownership was not granted');
+		}
+		await jobs.discover(discovery.claim);
+		const task = await database
+			.select()
+			.from(schema.sharedListingTask)
+			.where(eq(schema.sharedListingTask.jobId, job.id))
+			.get();
+		if (task === undefined) {
+			throw new Error('The global task is missing');
+		}
+		return {
+			job,
+			request: {
+				job: { id: job.id, generation: job.generation },
+				id: task.id,
+				owner
+			}
+		};
+	}
+	const outputBuffers = new ByteBufferPool({
+		buffers: 2,
+		bufferSize: 5 * 1024 * 1024
+	});
+	const buffers = new NarReadBufferPool({
+		buffers: 2,
+		bufferSize: 1024 * 1024
+	});
+	const dependencies = {
+		database: env.CUPBOARD_DB,
+		blobs: env.BLOBS,
+		buffers,
+		outputBuffers
+	};
+	const worker = new SharedListingTaskWorker(dependencies);
+	const first = await create();
+	return {
+		database,
+		source,
+		narHash,
+		create,
+		jobs,
+		worker,
+		first,
+		dependencies,
+		raw,
+		compressed
+	};
 }
