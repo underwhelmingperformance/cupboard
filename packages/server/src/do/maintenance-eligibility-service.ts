@@ -447,12 +447,15 @@ async function completion(publication: Promise<unknown>): Promise<void> {
  *
  * - `pass`: the final reconciliation of a fresh pass. It may replace any
  *   stored wake, including {@link passInProgress}.
- * - `any`: a reconciliation outside a pass, such as after a commit, an admin
- *   mutation, a token exchange or a configuration change. It leaves
- *   {@link passInProgress} in place, so a pass that stopped early keeps the
- *   tenant due until the next fresh pass ends.
+ * - `any`: a reconciliation outside a pass, such as after an admin mutation,
+ *   a token exchange or a configuration change. It may move the wake earlier
+ *   or later, but leaves {@link passInProgress} in place, so a pass that
+ *   stopped early keeps the tenant due until the next fresh pass ends.
+ * - `sooner`: a reconciliation after a commit or a continuation. It only
+ *   moves the wake earlier, and also leaves {@link passInProgress} in place.
+ *   A later wake waits for the next fresh pass.
  */
-export type WakeChange = 'pass' | 'any';
+export type WakeChange = 'pass' | 'any' | 'sooner';
 
 // Prefer an earlier wake even when reconciliation timestamps tie. Waking too
 // early costs one scheduler pass; accepting a later stale value can strand
@@ -475,6 +478,10 @@ function maintenanceWakeWins(
 		const changed = sql`${storedWake} is not ${incomingWake} and ${reconciledAt} >= ${storedReconciledAt}`;
 
 		return sql`${storedWake} = ${passInProgress} or (${changed}) or (${sooner})`;
+	}
+
+	if (change === 'sooner') {
+		return sql`${storedWake} is not ${passInProgress} and (${sooner})`;
 	}
 
 	const fresherAndChanged = sql`${storedWake} is not ${incomingWake} and ${reconciledAt} > ${storedReconciledAt}`;
@@ -514,12 +521,16 @@ export function maintenancePassSubrequests(
 /**
  * What started a maintenance pass.
  *
- * - `fresh`: a cron maintenance pass, a verification-queue pass or an admin
- *   cache teardown. The cron reruns a cron pass that stopped early only while
- *   the tenant is due, so the pass marks the eligibility row first.
- * - `continuation`: the object's alarm. Cloudflare retries an alarm handler
- *   that fails, and the durable state that made the pass due keeps it due, so
- *   the pass does not mark the row.
+ * - `fresh`: a cron maintenance pass or an admin cache teardown. The cron
+ *   reruns a pass that stopped early only while the tenant is due, so the
+ *   pass marks the eligibility row first. Its final reconciliation may move
+ *   the wake later.
+ * - `continuation`: the object's alarm or the verification queue. Cloudflare
+ *   retries an alarm handler that fails. The queue retries its message, and
+ *   the verify backstop alarm requests another pass when a claim's lease
+ *   ends. The durable state that made the pass due therefore keeps it due,
+ *   so the pass does not mark the row, and its reconciliation only moves the
+ *   wake earlier.
  */
 export type PassTrigger = 'fresh' | 'continuation';
 
@@ -543,7 +554,7 @@ export async function withMaintenanceEligibility<T>(
 		try {
 			return await withHeldSubrequests(trailingEligibilitySubrequests, body);
 		} finally {
-			await reconcileMaintenanceEligibility('any');
+			await reconcileMaintenanceEligibility('sooner');
 		}
 	}
 

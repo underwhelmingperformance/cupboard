@@ -856,21 +856,28 @@ describe('maintenance wake conflict resolution', () => {
 		});
 	});
 
+	// The tenant has no work, so each reconcile computes an idle wake.
 	it.each([
 		{
 			name: 'keeps the in-progress mark against a newer reconcile',
-			stored: earlier,
+			stored: { wake: passInProgress, reconciledAt: earlier },
 			change: 'any',
 			expected: { nextWakeAt: passInProgress, reconciledAt: earlier }
 		},
 		{
 			name: 'replaces the in-progress mark at the end of a pass at the same instant',
-			stored: later,
+			stored: { wake: passInProgress, reconciledAt: later },
 			change: 'pass',
 			expected: { nextWakeAt: undefined, reconciledAt: later }
+		},
+		{
+			name: 'does not move the wake later from a sooner-only reconcile',
+			stored: { wake: soonFuture, reconciledAt: earlier },
+			change: 'sooner',
+			expected: { nextWakeAt: soonFuture, reconciledAt: earlier }
 		}
 	] as const)('$name', async ({ stored, change, expected }) => {
-		await seedEligibility(passInProgress, stored);
+		await seedEligibility(stored.wake, stored.reconciledAt);
 
 		await runInDurableObject(currentServer(), (instance) =>
 			new MaintenanceEligibilityService(instance.context).reconcile(

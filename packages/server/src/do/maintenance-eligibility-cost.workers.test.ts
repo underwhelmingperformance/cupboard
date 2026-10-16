@@ -579,12 +579,9 @@ describe('maintenance eligibility writes', () => {
 				statement: upsert,
 				written: 2
 			},
-			{ scope: 'claim-verifications', statement: mark, written: 0 },
 			{ scope: 'claim-verifications', statement: upsert, written: 0 },
-			{ scope: 'claim-verifications', statement: mark, written: 0 },
-			{ scope: 'claim-verifications', statement: upsert, written: 2 },
-			{ scope: 'record-verifications', statement: mark, written: 2 },
-			{ scope: 'record-verifications', statement: upsert, written: 2 }
+			{ scope: 'claim-verifications', statement: upsert, written: 0 },
+			{ scope: 'record-verifications', statement: upsert, written: 0 }
 		]);
 	});
 

@@ -1666,7 +1666,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			try {
 				while (this.isReconcileDue) {
 					this.isReconcileDue = false;
-					await this.reconcileMaintenanceEligibility();
+					await this.reconcileMaintenanceEligibility('sooner');
 				}
 			} finally {
 				this.reconcileDrain = undefined;
@@ -2268,8 +2268,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			(async () => {
 				const signal = currentDeadlineSignal();
 				signal?.throwIfAborted();
-				const settled = await this.withMaintenanceEligibility('fresh', () =>
-					this.verification.processPendingWithoutDecode(logger, limit, signal)
+				const settled = await this.withMaintenanceEligibility(
+					'continuation',
+					() =>
+						this.verification.processPendingWithoutDecode(logger, limit, signal)
 				);
 				signal?.throwIfAborted();
 
@@ -2277,7 +2279,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					this.verification.listPendingForVerify(limit, maxNarBytes, signal),
 					signal
 				);
-				await this.withMaintenanceEligibility('fresh', () =>
+				await this.withMaintenanceEligibility('continuation', () =>
 					this.verification.processExhaustedUploads(logger, signal)
 				);
 				await this.armUploadRetries();
@@ -2338,7 +2340,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				let applied: number;
 
 				try {
-					applied = await this.withMaintenanceEligibility('fresh', () =>
+					applied = await this.withMaintenanceEligibility('continuation', () =>
 						this.verification.recordVerifications(
 							logger,
 							owner,
