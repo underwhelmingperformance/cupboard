@@ -119,6 +119,7 @@ import {
 	type CanonicalBlob,
 	parseStoredUploadPathMetadata
 } from './upload-metadata.ts';
+import { UploadRetrySchedule } from './upload-retry-schedule.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 import {
 	raceVerificationOperation,
@@ -212,13 +213,25 @@ export const recordedVerdictCursorKey = 'maintenance:verdict-drain-cursor';
 
 /**
  * What one page of the verdict drain did. `applied` counts the verdicts that
- * settled their upload; `resolved` also counts the ones the page discarded
- * because they no longer applied. A page that resolved none is the stall
- * signal, since the number of held verdicts can rise while a page runs.
+ * completed their upload. `resolved` also counts verdicts that the page
+ * discarded because they no longer applied. A page that resolved none is the
+ * stall signal, since the number of recorded verdicts can rise while a page
+ * runs. The page skips a verdict that another pass in this object is
+ * applying, and `beingApplied` counts those verdicts. A page that skipped
+ * every verdict that it read is not a stall.
  */
 export interface RecordedVerdictPage {
 	readonly applied: number;
 	readonly resolved: number;
+	/**
+	 * The verdicts in the page that the page tried and left in place.
+	 */
+	readonly unresolved: number;
+	/**
+	 * The verdicts in the page that another pass in this object was applying.
+	 * The page neither resolved them nor failed on them.
+	 */
+	readonly beingApplied: number;
 }
 
 function parseReadinessCursor(value: unknown): ReadinessCursor | undefined {
@@ -832,7 +845,9 @@ function chunkClaims(
 
 export class VerificationService {
 	private readonly retryPolicy = new RetryPolicy('verification');
-	private readonly applyingRecordedVerdicts = new Set<string>();
+	// Each application removes its own entry when it ends, so an entry means
+	// that the application is still running in this object.
+	private readonly applyingRecordedVerdicts = new Map<string, UploadId>();
 	constructor(
 		private readonly context: ServerContext,
 		private readonly commitPipeline: CommitPipelineService,
@@ -3002,7 +3017,10 @@ export class VerificationService {
 			return;
 		}
 
-		this.applyingRecordedVerdicts.add(this.recordedVerdictKey(current));
+		this.applyingRecordedVerdicts.set(
+			this.recordedVerdictKey(current),
+			current.id
+		);
 		return current;
 	}
 
@@ -3938,6 +3956,16 @@ export class VerificationService {
 	}
 
 	/**
+	 * When the verdict drain is next due. It ignores every verdict that another
+	 * pass in this object is applying, for as long as that pass runs.
+	 */
+	recordedVerdictDueAt(): number | undefined {
+		return new UploadRetrySchedule(this.context).recordedAt(
+			this.applyingRecordedVerdicts.values().toArray()
+		);
+	}
+
+	/**
 	 * Applies recorded verdicts within the invocation's subrequest slice. It prepares
 	 * the verdicts concurrently and flushes their materialisations together.
 	 *
@@ -3961,7 +3989,7 @@ export class VerificationService {
 		);
 
 		if (affordable === 0) {
-			return { applied: 0, resolved: 0 };
+			return { applied: 0, resolved: 0, unresolved: 0, beingApplied: 0 };
 		}
 
 		const after = parseReadinessCursor(
@@ -3972,7 +4000,12 @@ export class VerificationService {
 		if (held.length === 0) {
 			await this.context.ctx.storage.delete(recordedVerdictCursorKey);
 
-			return { applied: 0, resolved: discarded };
+			return {
+				applied: 0,
+				resolved: discarded,
+				unresolved: 0,
+				beingApplied: 0
+			};
 		}
 
 		const clock =
@@ -3983,7 +4016,12 @@ export class VerificationService {
 			));
 		signal?.throwIfAborted();
 		if (!clock?.isActive) {
-			return { applied: 0, resolved: discarded };
+			return {
+				applied: 0,
+				resolved: discarded,
+				unresolved: 0,
+				beingApplied: 0
+			};
 		}
 
 		const last = held.at(-1);
@@ -4001,12 +4039,21 @@ export class VerificationService {
 		let applied = 0;
 		// A verdict this page leaves in place is the only one it did not resolve.
 		let unresolved = 0;
+		let beingApplied = 0;
 		const ready: ReadyRecordedVerdict[] = [];
 		const claimedKeys: string[] = [];
 
 		try {
 			await mapWithConcurrency(held, maxOutgoingConnections, async (held) => {
 				signal?.throwIfAborted();
+				if (
+					this.applyingRecordedVerdicts.has(
+						this.recordedVerdictKey(held.pending)
+					)
+				) {
+					beingApplied += 1;
+					return;
+				}
 				const current = this.claimRecordedVerdict(held);
 				if (current === undefined) {
 					unresolved += 1;
@@ -4110,7 +4157,12 @@ export class VerificationService {
 			signal?.throwIfAborted();
 
 			if (ready.length === 0) {
-				return { applied, resolved: discarded + held.length - unresolved };
+				return {
+					applied,
+					resolved: discarded + held.length - unresolved - beingApplied,
+					unresolved,
+					beingApplied
+				};
 			}
 
 			// Read the shared blob rows once, then materialise each surviving upload
@@ -4167,7 +4219,12 @@ export class VerificationService {
 			});
 			signal?.throwIfAborted();
 
-			return { applied, resolved: discarded + held.length - unresolved };
+			return {
+				applied,
+				resolved: discarded + held.length - unresolved - beingApplied,
+				unresolved,
+				beingApplied
+			};
 		} finally {
 			for (const key of claimedKeys) {
 				this.applyingRecordedVerdicts.delete(key);

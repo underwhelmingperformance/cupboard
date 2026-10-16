@@ -1,3 +1,5 @@
+import { rootLogger } from '@cupboard/logger';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type UploadId,
@@ -10,11 +12,12 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { firstVersionedObjectIncarnation } from '../blob/object-incarnation.ts';
 import { resumeTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { pendingUploads } from '../db/schema.ts';
-import { requestOriginSchema } from '../http/http.ts';
+import { narObjectKey, requestOriginSchema } from '../http/http.ts';
 import { runScheduledMaintenance } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -26,16 +29,22 @@ import {
 	initialise,
 	namedCache,
 	narBytes,
+	pendingUploadVerdict,
 	pushPath,
 	putTestCache,
+	readStoredNarInfo,
 	resetTestServer,
 	resolvedCache,
 	suspendTenant,
 	syntheticStorePathHash,
 	takeStalledMaintenancePasses,
+	tenantUsageRow,
 	testBase,
 	uploadMetadata,
+	uploadStateOf,
 	useTestServer,
+	verificationOf,
+	waitUntilReached,
 	withoutAlarmArming
 } from '../test-support.ts';
 
@@ -44,12 +53,15 @@ import { boundedD1 } from './bounded-io.ts';
 import { ServerContext } from './context.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetryClockService } from './retry-clock-service.ts';
-import { maintenancePassCursorKey } from './server.ts';
+import { type CupboardServer, maintenancePassCursorKey } from './server.ts';
 import {
 	subrequestsAvailable,
 	withSubrequestSlice
 } from './subrequest-slice.ts';
-import { recordedVerdictCursorKey } from './verification-service.ts';
+import {
+	recordedVerdictCursorKey,
+	type RecordedVerdictPage
+} from './verification-service.ts';
 
 // Both passes read `blob_state`. The reconcile probe reads the current NAR
 // incarnation, and verdict application reserves the same row. A failure while
@@ -344,8 +356,577 @@ async function driveDrainDuringCommit(
 	});
 }
 
+type ParkedEnding = 'finish' | 'fail' | 'abort';
+
+class ParkedVerdictFailure extends Error {
+	constructor(public readonly uploadId: UploadId) {
+		super(`The parked application of upload ${uploadId} failed.`);
+		this.name = 'ParkedVerdictFailure';
+	}
+}
+
+interface ParkedVerdict {
+	readonly release: () => void;
+	readonly finished: Promise<unknown>;
+	readonly restore: () => void;
+}
+
+/**
+ * Starts applying the recorded verdicts and parks the application of
+ * `uploadId` until `release` is called. Applying a verdict first refreshes
+ * the upload's NAR markers, so the application parks in that call. The alarm
+ * refreshes every upload's markers without an upload ID, and a later
+ * application of the same verdict does not park.
+ *
+ * With `fail`, the parked refresh throws when it is released, which the
+ * application records as a failure of that verdict. With `abort`, releasing
+ * aborts the application's signal, so the whole application throws.
+ */
+async function parkVerdict(
+	instance: CupboardServer,
+	uploadId: UploadId,
+	ending: ParkedEnding = 'finish'
+): Promise<ParkedVerdict> {
+	const uploadState = uploadStateOf(instance);
+	const refresh = uploadState.migratePendingNarRefreshMarkers.bind(uploadState);
+	const started = Promise.withResolvers<undefined>();
+	const release = Promise.withResolvers<undefined>();
+	const abort = new AbortController();
+	let isParked = false;
+	const refreshSpy = vi
+		.spyOn(uploadState, 'migratePendingNarRefreshMarkers')
+		.mockImplementation(async (refreshed) => {
+			if (refreshed === uploadId && !isParked) {
+				isParked = true;
+				started.resolve(undefined);
+				await release.promise;
+
+				if (ending === 'fail') {
+					throw new ParkedVerdictFailure(uploadId);
+				}
+			}
+
+			await refresh(refreshed);
+		});
+	const finished = verificationOf(instance).applyRecordedVerdicts(
+		rootLogger(),
+		abort.signal
+	);
+	await waitUntilReached(
+		started.promise,
+		finished,
+		`the parked application of upload ${uploadId}`
+	);
+
+	return {
+		release: () => {
+			if (ending === 'abort') {
+				abort.abort();
+			}
+
+			release.resolve(undefined);
+		},
+		finished,
+		restore: () => {
+			release.resolve(undefined);
+			refreshSpy.mockRestore();
+		}
+	};
+}
+
+async function settlement(
+	promise: Promise<unknown>
+): Promise<'fulfilled' | 'rejected'> {
+	try {
+		await promise;
+
+		return 'fulfilled';
+	} catch {
+		return 'rejected';
+	}
+}
+
+// Records a verified verdict with the compressed hash and size of the staged
+// NAR, so applying it promotes the upload.
+function recordVerdict(
+	storage: DurableObjectStorage,
+	upload: {
+		readonly uploadId: UploadId;
+		readonly metadata: UploadPathMetadata;
+	},
+	owner: string
+): void {
+	drizzle(storage, { schema: { pendingUploads } })
+		.update(pendingUploads)
+		.set({
+			recordedVerdictJson: JSON.stringify({
+				owner,
+				verdict: {
+					kind: 'verified',
+					verification: {
+						ok: true,
+						fileHash: upload.metadata.fileHash,
+						fileSize: upload.metadata.fileSize
+					}
+				}
+			})
+		})
+		.where(eq(pendingUploads.id, upload.uploadId))
+		.run();
+}
+
+function uploadsWithRecordedVerdicts(
+	storage: DurableObjectStorage,
+	names: ReadonlyMap<string, string>
+): string[] {
+	return drizzle(storage, { schema: { pendingUploads } })
+		.select({
+			id: pendingUploads.id,
+			recordedVerdictJson: pendingUploads.recordedVerdictJson
+		})
+		.from(pendingUploads)
+		.all()
+		.filter((row) => row.recordedVerdictJson !== null)
+		.map((row) => names.get(row.id) ?? row.id)
+		.toSorted(byCodeUnit);
+}
+
+// When the verdict drain was due as an alarm began, and what the alarm left
+// behind.
+interface ParkedAlarmObservation {
+	readonly atMs: number;
+	readonly verdictDrainDueInMs: number | undefined;
+	readonly recorded: readonly string[];
+	readonly verdictDrainWaitMs: number | undefined;
+}
+
+async function observeAlarm(
+	instance: CupboardServer,
+	storage: DurableObjectStorage,
+	atMs: number,
+	names: ReadonlyMap<string, string>
+): Promise<ParkedAlarmObservation> {
+	const dueAt = verificationOf(instance).recordedVerdictDueAt();
+	const verdictDrainDueInMs =
+		dueAt === undefined ? undefined : dueAt - Date.now();
+	await storage.delete(maintenancePassCursorKey);
+	await instance.alarm();
+
+	const notBefore = await storage.get<number>(
+		maintenanceRetryKey('verdict-drain')
+	);
+
+	return {
+		atMs,
+		verdictDrainDueInMs,
+		recorded: uploadsWithRecordedVerdicts(storage, names),
+		verdictDrainWaitMs:
+			notBefore === undefined ? undefined : notBefore - Date.now()
+	};
+}
+
+// The publication state of the named uploads. A promoted fresh upload leaves
+// no pending row, and a mismatch keeps its row with the `mismatch` verdict.
+// A new NAR is stored as its first numbered version, which the published
+// narinfo's URL names.
+async function publicationOutcome(
+	uploads: ReadonlyMap<
+		string,
+		{ readonly uploadId: UploadId; readonly metadata: UploadPathMetadata }
+	>
+) {
+	const pending: { name: string; verdict: string | null }[] = [];
+	const publishedNarUrls: Record<string, string | undefined> = {};
+
+	for (const [name, { uploadId, metadata }] of uploads) {
+		const verdict = await pendingUploadVerdict(uploadId);
+
+		if (verdict !== undefined) {
+			pending.push({ name, verdict });
+		}
+
+		const { body } = await readStoredNarInfo(metadata.storePathHash);
+		publishedNarUrls[name] = body
+			.split('\n')
+			.find((line) => line.startsWith('URL: '))
+			?.slice('URL: '.length);
+	}
+
+	return {
+		pending,
+		publishedNarUrls,
+		narinfos: await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db
+				.select({ storePathHash: schema.narInfos.storePathHash })
+				.from(schema.narInfos)
+				.all()
+				.map((row) => row.storePathHash)
+				.toSorted(byCodeUnit)
+		),
+		usage: await tenantUsageRow()
+	};
+}
+
+/**
+ * Parks the application of one recorded verdict, records an unrelated ready
+ * verdict, and runs alarms as time advances well past the no-progress retry
+ * delay. The parked application continues only after the alarms have run.
+ */
+async function driveAlarmsAroundParkedVerdict(server: string) {
+	await useTestServer(server);
+
+	const token = await initialise();
+	await collectVerificationPasses();
+
+	const held = await deferFreshUpload(
+		token,
+		'retry-held',
+		syntheticStorePathHash(704)
+	);
+	const ready = await deferFreshUpload(
+		token,
+		'retry-ready',
+		syntheticStorePathHash(705)
+	);
+	const names = new Map([
+		[held.uploadId, 'held'],
+		[ready.uploadId, 'ready']
+	]);
+
+	const run = await runInDurableObject(
+		currentServer(),
+		async (instance, state) => {
+			const claim = await instance.claimVerificationBatch(
+				2,
+				Number.MAX_SAFE_INTEGER
+			);
+			recordVerdict(state.storage, held, claim.owner);
+			const startedAt = Date.now();
+			const parked = await parkVerdict(instance, held.uploadId);
+
+			try {
+				recordVerdict(state.storage, ready, claim.owner);
+				const alarms: ParkedAlarmObservation[] = [];
+
+				for (const atMs of [0, noProgressRetryMs, 2 * noProgressRetryMs]) {
+					vi.setSystemTime(startedAt + atMs);
+					alarms.push(await observeAlarm(instance, state.storage, atMs, names));
+				}
+
+				parked.release();
+
+				return {
+					alarms,
+					parkedOutcome: await settlement(parked.finished)
+				};
+			} finally {
+				parked.restore();
+			}
+		}
+	);
+
+	return {
+		...run,
+		outcome: await publicationOutcome(
+			new Map([
+				['held', held],
+				['ready', ready]
+			])
+		),
+		storePathHashes: [held, ready]
+			.map((upload) => upload.metadata.storePathHash)
+			.toSorted(byCodeUnit),
+		narHashes: { held: held.metadata.narHash, ready: ready.metadata.narHash },
+		bytes: held.metadata.fileSize + ready.metadata.fileSize
+	};
+}
+
+/**
+ * Parks the application of one recorded verdict, ends it with `ending`, and
+ * then runs alarms at once and after the no-progress retry delay.
+ */
+async function driveAlarmsAfterParkedFailure(
+	server: string,
+	ending: ParkedEnding
+) {
+	await useTestServer(server);
+
+	const token = await initialise();
+	await collectVerificationPasses();
+
+	const held = await deferFreshUpload(
+		token,
+		'retry-failed-application',
+		syntheticStorePathHash(708)
+	);
+	const names = new Map([[held.uploadId, 'held']]);
+
+	const run = await runInDurableObject(
+		currentServer(),
+		async (instance, state) => {
+			const claim = await instance.claimVerificationBatch(
+				1,
+				Number.MAX_SAFE_INTEGER
+			);
+			recordVerdict(state.storage, held, claim.owner);
+			const startedAt = Date.now();
+			const parked = await parkVerdict(instance, held.uploadId, ending);
+
+			try {
+				parked.release();
+				const parkedOutcome = await settlement(parked.finished);
+				const alarms: ParkedAlarmObservation[] = [];
+
+				for (const atMs of [0, noProgressRetryMs]) {
+					vi.setSystemTime(startedAt + atMs);
+					alarms.push(await observeAlarm(instance, state.storage, atMs, names));
+				}
+
+				return { parkedOutcome, alarms };
+			} finally {
+				parked.restore();
+			}
+		}
+	);
+
+	return {
+		...run,
+		outcome: await publicationOutcome(new Map([['held', held]])),
+		storePathHash: held.metadata.storePathHash,
+		narHash: held.metadata.narHash,
+		bytes: held.metadata.fileSize
+	};
+}
+
+// What a verdict-drain alarm left behind after the page that it reported.
+interface DrainDecision {
+	readonly maintenanceCursor: string;
+	readonly verdictDrainWaitMs: number | undefined;
+}
+
+/**
+ * Runs one verdict-drain alarm while a recorded verdict is due, with the
+ * verdict page replaced by `page`.
+ */
+async function driveDrainDecision(
+	server: string,
+	page: RecordedVerdictPage
+): Promise<DrainDecision> {
+	await useTestServer(server);
+
+	const token = await initialise();
+	await collectVerificationPasses();
+
+	const upload = await deferFreshUpload(
+		token,
+		'retry-decision',
+		syntheticStorePathHash(706)
+	);
+
+	return runInDurableObject(currentServer(), async (instance, state) => {
+		const claim = await instance.claimVerificationBatch(
+			1,
+			Number.MAX_SAFE_INTEGER
+		);
+		recordVerdict(state.storage, upload, claim.owner);
+		const applySpy = vi
+			.spyOn(verificationOf(instance), 'applyRecordedVerdicts')
+			.mockResolvedValueOnce(page);
+
+		try {
+			await state.storage.delete(maintenancePassCursorKey);
+			await instance.alarm();
+		} finally {
+			applySpy.mockRestore();
+		}
+
+		const notBefore = await state.storage.get<number>(
+			maintenanceRetryKey('verdict-drain')
+		);
+
+		return {
+			maintenanceCursor:
+				(await state.storage.get<string>(maintenancePassCursorKey)) ?? 'none',
+			verdictDrainWaitMs:
+				notBefore === undefined ? undefined : notBefore - Date.now()
+		};
+	});
+}
+
 describe('stalled maintenance passes', () => {
 	beforeEach(resetTestServer);
+
+	it('applies other verdicts while one is being applied, and never applies that one twice', async () => {
+		const driven = await driveAlarmsAroundParkedVerdict(
+			'maintenance-retry-held'
+		);
+
+		expect(driven).toStrictEqual({
+			alarms: [
+				{
+					atMs: 0,
+					verdictDrainDueInMs: 0,
+					recorded: ['held'],
+					verdictDrainWaitMs: undefined
+				},
+				{
+					atMs: noProgressRetryMs,
+					verdictDrainDueInMs: undefined,
+					recorded: ['held'],
+					verdictDrainWaitMs: undefined
+				},
+				{
+					atMs: 2 * noProgressRetryMs,
+					verdictDrainDueInMs: undefined,
+					recorded: ['held'],
+					verdictDrainWaitMs: undefined
+				}
+			],
+			parkedOutcome: 'fulfilled',
+			outcome: {
+				pending: [],
+				publishedNarUrls: {
+					held: narObjectKey(
+						driven.narHashes.held,
+						firstVersionedObjectIncarnation
+					),
+					ready: narObjectKey(
+						driven.narHashes.ready,
+						firstVersionedObjectIncarnation
+					)
+				},
+				narinfos: driven.storePathHashes,
+				usage: {
+					bytes: driven.bytes,
+					narinfos: 2,
+					blobs: 2,
+					casBytes: 0,
+					casBlobs: 0,
+					quotaBytes: undefined
+				}
+			},
+			storePathHashes: driven.storePathHashes,
+			narHashes: driven.narHashes,
+			bytes: driven.bytes
+		});
+	});
+
+	// A failed verdict waits for its retry time. An aborted application leaves
+	// its verdict due at once.
+	it.each([
+		{
+			ending: 'fail',
+			parkedOutcome: 'fulfilled',
+			alarms: [
+				{
+					atMs: 0,
+					verdictDrainDueInMs: noProgressRetryMs,
+					recorded: ['held'],
+					verdictDrainWaitMs: undefined
+				},
+				{
+					atMs: noProgressRetryMs,
+					verdictDrainDueInMs: 0,
+					recorded: [],
+					verdictDrainWaitMs: undefined
+				}
+			]
+		},
+		{
+			ending: 'abort',
+			parkedOutcome: 'rejected',
+			alarms: [
+				{
+					atMs: 0,
+					verdictDrainDueInMs: 0,
+					recorded: [],
+					verdictDrainWaitMs: undefined
+				},
+				{
+					atMs: noProgressRetryMs,
+					verdictDrainDueInMs: undefined,
+					recorded: [],
+					verdictDrainWaitMs: undefined
+				}
+			]
+		}
+	] as const)(
+		'applies a verdict once after its application ends with $ending',
+		async ({ ending, parkedOutcome, alarms }) => {
+			const driven = await driveAlarmsAfterParkedFailure(
+				`maintenance-retry-${ending}`,
+				ending
+			);
+
+			expect(driven).toStrictEqual({
+				parkedOutcome,
+				alarms,
+				outcome: {
+					pending: [],
+					publishedNarUrls: {
+						held: narObjectKey(driven.narHash, firstVersionedObjectIncarnation)
+					},
+					narinfos: [driven.storePathHash],
+					usage: {
+						bytes: driven.bytes,
+						narinfos: 1,
+						blobs: 1,
+						casBytes: 0,
+						casBlobs: 0,
+						quotaBytes: undefined
+					}
+				},
+				storePathHash: driven.storePathHash,
+				narHash: driven.narHash,
+				bytes: driven.bytes
+			});
+		}
+	);
+
+	// The recorded verdict stays due after each page, so only the page decides
+	// whether the drain stalls.
+	it.each([
+		{
+			page: 'a failed verdict',
+			beingApplied: 0,
+			unresolved: 1,
+			verdictDrainWaitMs: noProgressRetryMs,
+			stalled: [{ pass: 'verdict-drain', waitMs: noProgressRetryMs }]
+		},
+		{
+			page: 'a failed verdict beside one that is being applied',
+			beingApplied: 1,
+			unresolved: 1,
+			verdictDrainWaitMs: noProgressRetryMs,
+			stalled: [{ pass: 'verdict-drain', waitMs: noProgressRetryMs }]
+		},
+		{
+			page: 'only verdicts that are being applied',
+			beingApplied: 1,
+			unresolved: 0,
+			verdictDrainWaitMs: undefined,
+			stalled: []
+		}
+	])(
+		'decides whether the drain stalls after a page with $page',
+		async ({ beingApplied, unresolved, verdictDrainWaitMs, stalled }) => {
+			const decision = await driveDrainDecision('maintenance-retry-decision', {
+				applied: 0,
+				resolved: 0,
+				unresolved,
+				beingApplied
+			});
+
+			expect({
+				...decision,
+				stalled: await takeStalledMaintenancePasses()
+			}).toStrictEqual({
+				maintenanceCursor: 'verdict-drain',
+				verdictDrainWaitMs,
+				stalled
+			});
+		}
+	);
 
 	it('keeps the verdict drain eligible when a commit records a verdict during a pass', async () => {
 		const driven = await driveDrainDuringCommit('maintenance-retry-concurrent');

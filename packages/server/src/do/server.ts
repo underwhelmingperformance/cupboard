@@ -2335,12 +2335,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			(async () => {
 				const signal = currentDeadlineSignal();
 				signal?.throwIfAborted();
-				const applied = await this.withMaintenanceEligibility('fresh', () =>
-					this.verification.recordVerifications(logger, owner, results, signal)
-				);
-				signal?.throwIfAborted();
+				let applied: number;
 
-				await this.armUploadRetries();
+				try {
+					applied = await this.withMaintenanceEligibility('fresh', () =>
+						this.verification.recordVerifications(
+							logger,
+							owner,
+							results,
+							signal
+						)
+					);
+				} finally {
+					// The drain is not due for a verdict while this pass applies it, so
+					// arm the alarm for the verdicts that this pass leaves recorded,
+					// including after an error.
+					await this.armUploadRetries();
+				}
+				signal?.throwIfAborted();
 
 				return applied;
 			})()
@@ -2360,16 +2372,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		const dueAt = new UploadRetrySchedule(this.context).recordedAt();
-		if (dueAt === undefined || dueAt > Date.now()) {
+		const now = Date.now();
+		const dueAt = this.verification.recordedVerdictDueAt();
+		if (dueAt === undefined || dueAt > now) {
 			return 'progressed';
 		}
 
-		if (page.resolved === 0) {
+		// The drain stalls when the page resolved nothing, unless another pass was
+		// applying every verdict that the page read. Those verdicts do not make
+		// the drain due, so a due verdict is outside the page and the next alarm
+		// reads it.
+		if (
+			page.resolved === 0 &&
+			(page.unresolved > 0 || page.beingApplied === 0)
+		) {
 			return 'stalled';
 		}
 
-		await this.ctx.storage.setAlarm(Date.now());
+		await this.ctx.storage.setAlarm(now);
 
 		return 'progressed';
 	}
@@ -2442,8 +2462,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'verdict-drain',
-				workAt: () =>
-					Promise.resolve(new UploadRetrySchedule(this.context).recordedAt()),
+				workAt: () => Promise.resolve(this.verification.recordedVerdictDueAt()),
 				run: () => this.drainRecordedVerdicts()
 			},
 			{
