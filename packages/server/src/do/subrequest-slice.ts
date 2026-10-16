@@ -114,6 +114,24 @@ export function hasSubrequestsFor(subrequests: number): boolean {
 	return sliceScope.getStore()?.admits(subrequests) ?? true;
 }
 
+export interface SubrequestAdmissionOptions {
+	readonly signal?: AbortSignal;
+	/**
+	 * Optional calls must fit the unreserved subrequest allowance.
+	 */
+	readonly priority?: 'required' | 'optional';
+}
+
+export function checkSubrequestAdmission(
+	options: SubrequestAdmissionOptions,
+	subject: string
+): void {
+	options.signal?.throwIfAborted();
+	if (options.priority === 'optional' && !hasSubrequestsFor(1)) {
+		throw new SubrequestSliceExceededError(subject, 1);
+	}
+}
+
 export function subrequestsAvailable(): number {
 	return sliceScope.getStore()?.available ?? Number.MAX_SAFE_INTEGER;
 }

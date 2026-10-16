@@ -22,8 +22,10 @@ import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { type R2RequestAdmission } from '../blob/r2-request-admission.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
+import { SubrequestSliceExceededError } from '../errors.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
 import {
+	type VerificationMetadataResources,
 	type VerificationMetadataSource,
 	verifyTenant,
 	type VerifyTenantOptions
@@ -41,7 +43,11 @@ import {
 	uploadMetadata
 } from '../test-support.ts';
 
-import { boundedBlobs } from './bounded-io.ts';
+import { boundedBlobs, boundedD1, boundedWorkerEnv } from './bounded-io.ts';
+import {
+	subrequestsAvailable,
+	withSubrequestSlice
+} from './subrequest-slice.ts';
 
 async function sourceNar(contents = 'hello') {
 	const parts = [
@@ -119,10 +125,10 @@ async function fixture(isDeclared = false) {
 	return { nar, upload, storePathHash };
 }
 
-function verify(options: VerifyTenantOptions) {
+function verify(options: VerifyTenantOptions, bindings: typeof env = env) {
 	return verifyTenant(
 		rootLogger(),
-		env,
+		bindings,
 		new NarReadBufferPool(),
 		currentServerTenant(),
 		undefined,
@@ -132,8 +138,133 @@ function verify(options: VerifyTenantOptions) {
 	);
 }
 
+function bindingsAfterMetadataDrain(drained: Promise<undefined>) {
+	const stub = new Proxy(currentServer(), {
+		get(target, property) {
+			const value: unknown = Reflect.get(target, property, target);
+			if (property === 'recordVerificationsWithinBudget') {
+				return async (...arguments_: unknown[]): Promise<unknown> => {
+					await drained;
+					if (typeof value !== 'function') {
+						throw new TypeError('The native verdict RPC is unavailable');
+					}
+					const result: unknown = Reflect.apply(value, target, arguments_);
+					return result;
+				};
+			}
+			if (typeof value === 'function') {
+				// RPC method properties are remote lookups; .bind would make a remote call.
+				return (...arguments_: unknown[]): unknown =>
+					Reflect.apply(value, target, arguments_);
+			}
+			return value;
+		}
+	});
+	const namespace = new Proxy(env.CUPBOARD_DO, {
+		get(target, property) {
+			if (property === 'idFromName') {
+				return () => currentServer().id;
+			}
+			if (property === 'get') {
+				return () => stub;
+			}
+			const value: unknown = Reflect.get(target, property, target);
+			return value;
+		}
+	});
+	return new Proxy(boundedWorkerEnv(env), {
+		get(target, property) {
+			if (property === 'CUPBOARD_DO') {
+				return namespace;
+			}
+			const value: unknown = Reflect.get(target, property, target);
+			return value;
+		}
+	});
+}
+
+class OptionalIoProbe {
+	readonly drained = Promise.withResolvers<undefined>();
+	readonly deferred: Promise<void>[] = [];
+	calls = 0;
+	isRefused = false;
+	constructor(private readonly kind: 'd1' | 'r2') {}
+	private capture(
+		source: VerificationMetadataSource,
+		resources: VerificationMetadataResources
+	): NarMetadataCapture {
+		const database = boundedD1(env.CUPBOARD_DB, { priority: 'optional' });
+		const objects = new ConnectionLimitedMultipartBucket(
+			boundedBlobs(env.BLOBS),
+			resources.admission,
+			{ priority: 'optional' }
+		);
+		const operation =
+			this.kind === 'd1'
+				? () => database.prepare('SELECT 1 AS value').first()
+				: () => objects.head(source.claim.r2Key);
+		return {
+			sink: {
+				write: async () => {
+					try {
+						for (let index = 0; index < 16; index += 1) {
+							await operation();
+							this.calls += 1;
+						}
+					} finally {
+						this.drained.resolve(undefined);
+					}
+				},
+				finish: () => Promise.resolve(),
+				abort: (reason) => {
+					this.isRefused = reason instanceof SubrequestSliceExceededError;
+					return Promise.resolve();
+				}
+			},
+			defer: (completion) => {
+				this.deferred.push(completion);
+			}
+		};
+	}
+	get options(): VerifyTenantOptions {
+		return {
+			metadataFor: (source, resources) => this.capture(source, resources)
+		};
+	}
+}
+
 describe('fresh verification listing metadata', () => {
 	beforeEach(resetTestServer);
+	it.each(['d1', 'r2'] as const)(
+		'preserves verdict retries while optional %s work exhausts the remaining allowance',
+		async (kind) => {
+			const value = await fixture(true);
+			const probe = new OptionalIoProbe(kind);
+			const result = await withSubrequestSlice(
+				async () => {
+					await verify(
+						probe.options,
+						bindingsAfterMetadataDrain(probe.drained.promise)
+					);
+					await Promise.all(probe.deferred);
+					return {
+						calls: probe.calls,
+						isRefused: probe.isRefused,
+						remaining: subrequestsAvailable(),
+						deferred: probe.deferred.length
+					};
+				},
+				{ subrequests: 8, reserve: 0 }
+			);
+			await fetchNarInfo(value.storePathHash);
+			expect(result).toStrictEqual({
+				calls: 3,
+				isRefused: true,
+				remaining: 2,
+				deferred: 1
+			});
+		}
+	);
 	it.each([false, true])(
 		'publishes the NAR while optional listing sealing is blocked (isDeclared: %s)',
 		async (isDeclared) => {

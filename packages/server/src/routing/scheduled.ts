@@ -110,6 +110,7 @@ import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
 import { wakePendingAttestationLists } from './attestation-list-wakes.ts';
 import { tenantServer } from './durable-object.ts';
+import { VerificationVerdictBudget } from './verification-verdict-budget.ts';
 
 // Rotate through active tenants in bounded batches ordered by
 // `last_maintained_at`.
@@ -1486,6 +1487,7 @@ export async function verifyTenant(
 	options: VerifyTenantOptions = {}
 ): Promise<void> {
 	const deadline = new VerificationPassDeadline(budgetMs);
+	let verdictBudget: VerificationVerdictBudget | undefined;
 
 	try {
 		const server = tenantServer(env, id);
@@ -1530,6 +1532,12 @@ export async function verifyTenant(
 		}
 
 		const { claims, owner, truncated } = batch;
+		if (options.metadataFor !== undefined) {
+			verdictBudget = new VerificationVerdictBudget(
+				claims.map((claim) => claim.uploadId),
+				recordAttempts
+			);
+		}
 		const activeClaims = new ActiveVerificationClaims(
 			claims.map((claim) => claim.uploadId)
 		);
@@ -1552,6 +1560,8 @@ export async function verifyTenant(
 				const recorder = new VerdictRecorder(
 					logger.with({ job: 'verify-verdicts' }),
 					async (results) => {
+						const uploads = results.map((result) => result.uploadId);
+						verdictBudget?.consume(uploads);
 						const recordRpc = server.recordVerificationsWithinBudget(
 							owner,
 							results,
@@ -1568,7 +1578,8 @@ export async function verifyTenant(
 
 						signal.throwIfAborted();
 
-						activeClaims.recorded(results.map((result) => result.uploadId));
+						activeClaims.recorded(uploads);
+						verdictBudget?.recorded(uploads);
 
 						return result.applied;
 					},
@@ -1674,6 +1685,7 @@ export async function verifyTenant(
 			);
 		}
 	} finally {
+		verdictBudget?.dispose();
 		deadline.dispose();
 	}
 }

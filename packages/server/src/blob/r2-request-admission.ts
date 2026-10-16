@@ -1,18 +1,13 @@
 import { CountingSemaphore } from '@cupboard/shared/concurrency';
 
 import {
+	checkSubrequestAdmission,
 	holdSubrequests,
-	requireSubrequestsFor,
+	type SubrequestAdmissionOptions,
 	type SubrequestHold
 } from '../do/subrequest-slice.ts';
 
-export interface R2AdmissionOptions {
-	readonly signal?: AbortSignal;
-	/**
-	 * Optional calls must fit the unreserved subrequest allowance.
-	 */
-	readonly priority?: 'required' | 'optional';
-}
+export type R2AdmissionOptions = SubrequestAdmissionOptions;
 
 /**
  * Shares connection admission across native and metadata operations. Streamed
@@ -31,12 +26,6 @@ export class R2RequestAdmission {
 		this.connections = new CountingSemaphore(limit);
 		this.writes = new CountingSemaphore(limit - 1);
 	}
-	private check(options: R2AdmissionOptions): void {
-		options.signal?.throwIfAborted();
-		if (options.priority === 'optional') {
-			requireSubrequestsFor(1, 'optional R2 request');
-		}
-	}
 	private connect<T>(
 		admitted: SubrequestHold,
 		call: () => Promise<T>,
@@ -45,7 +34,7 @@ export class R2RequestAdmission {
 		return this.connections.run(() => {
 			// The binding counts the call at entry, so release its reservation first.
 			admitted.release();
-			this.check(options);
+			checkSubrequestAdmission(options, 'optional R2 request');
 			return call();
 		});
 	}
@@ -54,7 +43,7 @@ export class R2RequestAdmission {
 		call: () => Promise<T>,
 		options: R2AdmissionOptions
 	): Promise<T> {
-		this.check(options);
+		checkSubrequestAdmission(options, 'optional R2 request');
 		const admitted = holdSubrequests(1);
 		const release = () => {
 			admitted.release();

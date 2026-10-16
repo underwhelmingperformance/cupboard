@@ -7228,7 +7228,10 @@ build traces available from a cupboard cache.
       writes and metadata multipart operations now share one invocation's R2
       admission. Optional operations recheck subrequest capacity after queueing,
       and cancellation releases queued reservations without starting new writes.
-      Native-verdict budget protection remains part of producer integration.
+      Optional D1 operations check cancellation and unreserved subrequest
+      capacity before issuing I/O. Metadata-enabled verification reserves and
+      accounts for native verdict retries, then releases unused reservations
+      after recording or when the pass ends. The owned producer remains pending.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now
