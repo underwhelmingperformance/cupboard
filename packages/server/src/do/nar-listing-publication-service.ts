@@ -31,8 +31,11 @@ import {
 } from './artifact-retention-service.ts';
 import type { ServerContext } from './context.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
+import { hasSubrequestsFor } from './subrequest-slice.ts';
 
 type Artifact = typeof schema.artifacts.$inferSelect;
+const adoptionSubrequests = 20;
+
 const pendingPublicationLifetimeMs = 15 * 60 * 1000;
 const logger = rootLogger().with({ component: 'listing-publication' });
 
@@ -205,11 +208,18 @@ export class NarListingPublicationService {
 	async adoptManyInSection(
 		requests: readonly NarListingAdoptionRequest[]
 	): Promise<readonly ListingAdoptionOutcome[]> {
+		if (!hasSubrequestsFor(1)) {
+			return requests.map(() => ({ kind: 'capacity' }));
+		}
 		if (!(await this.canAdopt())) {
 			return requests.map(() => ({ kind: 'unavailable' }));
 		}
 		const outcomes: ListingAdoptionOutcome[] = [];
 		for (const request of requests) {
+			if (!hasSubrequestsFor(adoptionSubrequests)) {
+				outcomes.push({ kind: 'capacity' });
+				continue;
+			}
 			const cache = this.context.cacheRepository.resolve(request.cache);
 			if (cache?.generation !== request.cacheGeneration) {
 				outcomes.push({ kind: 'unavailable' });

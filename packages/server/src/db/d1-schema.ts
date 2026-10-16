@@ -62,6 +62,7 @@ import {
 	listingAdoptionSeedScopes
 } from '../blob/listing-adoption-seed-dispatch.ts';
 import type {
+	ListingAdoptionDeliveryOutcome,
 	ListingAdoptionTaskEpoch,
 	ListingAdoptionTaskId,
 	ListingAdoptionTaskSource
@@ -70,7 +71,6 @@ import type {
 	ListingAdoptionConsumerEpoch,
 	ListingAdoptionWorkId
 } from '../blob/listing-adoption-work.ts';
-import type { ListingAdoptionOutcome } from '../blob/nar-listing-adoption.ts';
 import {
 	type NarCaptureSequence,
 	narCaptureSequenceSchema
@@ -1359,7 +1359,9 @@ export const listingAdoptionTask = sqliteTable(
 		}).$type<ListingAdoptionExpansionWindow>(),
 		scanned: integer('scanned').notNull().default(0),
 		enrolled: integer('enrolled').notNull().default(0),
-		outcome: text('outcome', { mode: 'json' }).$type<ListingAdoptionOutcome>(),
+		outcome: text('outcome', {
+			mode: 'json'
+		}).$type<ListingAdoptionDeliveryOutcome>(),
 		completedAt: text('completed_at').$type<IsoTimestamp>(),
 		createdAt: text('created_at')
 			.$type<IsoTimestamp>()

@@ -94,8 +94,8 @@ ownership. The counter subquery reads only the newly inserted page through an
 index. A lost reply cannot insert or count the page twice. Cancellation revokes
 discovery ownership, and resume advances the job generation without discarding
 the cursor or tasks. Historical discovery enters catch-up; it does not declare
-the generation job complete. Global task execution and cache adoption
-projections remain pending.
+the generation job complete. Cache adoption has independent captured-source work
+and execution claims.
 
 Global tasks have independent execution claims, so consumers can claim different
 tasks from the same job while discovery continues. Readiness merges bounded
@@ -164,7 +164,8 @@ subrequests. Independent task hints from the same job can run in separate queue
 invocations with fresh owners. Artifact queue concurrency has no configured
 global cap. Message spans and failure logs include job generation and task
 identity. Shared facts and output references still grant no tenant cache
-authority; cache adoption, completion wakes and forward dispatch remain pending.
+authority. Cache adoption uses tenant DO RPCs; completion wakes and forward
+dispatch remain pending.
 
 An append-only capture sequence records retained, registered live NAR sources.
 Indexed triggers append an event when the first reference arrives or a retained
@@ -224,7 +225,8 @@ conflicting write even though those Workers do not query global leases. Current
 tenant consumers report the global lease's retry deadline. They query global
 storage only after its expansion is recorded, so tenant claims and lost-reply
 recovery also work before that table exists. Different NARs and generator
-revisions can run concurrently. Authoritative cache adoption remains pending.
+revisions can run concurrently. Cache adoption uses separate source and delivery
+claims.
 
 Global listing stages record their computation generation, multipart upload ID
 and sealed measurement in D1. They use `shared-artifact-staging/` keys and do
@@ -369,7 +371,8 @@ captured upper position fence both writes. Work records retain complete source
 payloads independently of event retention. Empty and sparse intervals advance
 without counting gaps. Overlapping consumers cannot repeat a committed page. A
 cursor behind the retained floor is reported as expired. Storage expansion
-creates empty tables; this consumer is not yet connected to queue dispatch.
+creates empty tables; cron and historical seed continuations wake the queue
+consumer.
 
 Fan-out discovery uses typed fixed windows. A parent hint first refreshes the
 current publication projection, then pages matching listing revisions. Listing
@@ -397,10 +400,33 @@ trigger. A fixed-window seed copies at most 32 older work records per
 transaction without changing existing execution claims. Deployment creates empty
 tables and starts no catalogue scan.
 
-Execution storage grants no cache authority or CAS retention. Authoritative DO
-delivery, queue dispatch, completion wakes and automatic forward producers
-remain pending. Those consumers must retry each unavailable target independently
-so other targets can continue.
+The adoption queue consumes capture and historical work in independent bounded
+turns. Cron and seed continuations send generic hints only after execution
+storage is installed. Each wake uses at most two binding calls. A dispatcher
+reserves up to eight due tasks through the deadline index. Reservation output
+has a canonical identity order after oldest-first selection. Expansion hints
+identify one source; delivery hints identify up to eight targets. Consumers
+acquire fresh D1 ownership and prepare the complete current parent tuples.
+
+Delivery groups use the actual tenant from each prepared target. The groups call
+the authoritative DO RPC concurrently and persist results independently, so a
+slow tenant cannot delay another tenant's completed targets. The RPC rechecks
+publication authority, live measured CAS bytes, quota and directed references.
+Per-item admission preserves completed results when its subrequest allowance
+cannot admit another target. Capacity refusals retry after one second; other
+transient refusals retry after sixty seconds. Each retry persists its latest
+outcome and deadline before sending a delayed hint for only the unfinished
+targets. An unusable RPC result records a generic failure, and the next attempt
+sends those targets separately so one failure cannot keep aborting valid
+siblings. Old responses cannot acknowledge a replacement execution epoch or
+expired lease. A retry after a lost committed wake still requests dispatch.
+
+Metadata invocations have a 25-second deadline. Dispatch admits twenty binding
+calls, expansion admits twenty-eight, and delivery admits eight plus four calls
+per hinted target, at most forty. Queue consumers have no configured global
+concurrency cap. Execution metadata grants no cache authority or CAS retention.
+Shared completion wakes, forward availability dispatch and acknowledgement,
+metadata pruning and automatic forward generation remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

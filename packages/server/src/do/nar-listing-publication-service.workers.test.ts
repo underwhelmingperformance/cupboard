@@ -5,23 +5,30 @@ import {
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	artifactGenerationSchema,
 	currentListingGeneratorRevision,
 	type NarListingFact
 } from '@cupboard/protocol/artifacts';
+import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { runInDurableObject } from 'cloudflare:test';
+import { env } from 'cloudflare:workers';
 import { and, eq, sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CasObjectStore } from '../blob/cas-object-store.ts';
 import { type NarListingAdoptionRequest } from '../blob/nar-listing-adoption.ts';
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { ListingFactStore } from '../db/listing-facts.ts';
 import * as schema from '../db/schema.ts';
 import { ListingFactConflictError } from '../errors.ts';
 import { casObjectKey } from '../http/http.ts';
+import { type ListingAdoptionWorkMessage } from '../routing/listing-adoption-work-message.ts';
+import { ListingAdoptionWorkQueue } from '../routing/listing-adoption-work-queue.ts';
+import { handleWorkerQueue } from '../routing/queue.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitUpload,
@@ -35,6 +42,7 @@ import {
 	recordTransition,
 	resetTestServer,
 	singleDecision,
+	testControlEnv,
 	uploadMetadata,
 	verifiableNar,
 	withoutAlarmArming
@@ -50,6 +58,10 @@ import { type ServerContext } from './context.ts';
 import { NarListingPublicationService } from './nar-listing-publication-service.ts';
 import { NarListingReadService } from './nar-listing-read-service.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
+import {
+	subrequestsAvailable,
+	withSubrequestSlice
+} from './subrequest-slice.ts';
 
 const bytes = new TextEncoder().encode(
 	JSON.stringify({ version: 1, root: { type: 'directory', entries: {} } })
@@ -1052,6 +1064,350 @@ describe('listing publication by reference', () => {
 					isRejected: failure instanceof Error,
 					state: after
 				}).toStrictEqual({ isRejected: true, state: before });
+			})
+	);
+	it.each([
+		{
+			label: 'constrained remaining',
+			subrequests: 50,
+			shouldCompleteInOneBatch: false
+		},
+		{
+			label: 'Free internal-service',
+			subrequests: workersInvocationAllowances.free.subrequests,
+			shouldCompleteInOneBatch: true
+		},
+		{
+			label: 'Paid internal-service',
+			subrequests: workersInvocationAllowances.paid.subrequests,
+			shouldCompleteInOneBatch: true
+		}
+	])(
+		'makes bounded progress through eight parents under the $label allowance',
+		({ subrequests, shouldCompleteInOneBatch }) =>
+			withoutAlarmArming(async () => {
+				const parents = await Array.fromAsync('abcdfghj', (character) =>
+					publishParent(token, character)
+				);
+				const { fact } = await runInDurableObject(currentServer(), (instance) =>
+					recordFact(instance.context)
+				);
+				let pending = parents.map((parent) => adoptionRequest(fact, parent));
+				const completed: NarListingAdoptionRequest[] = [];
+				const spent: number[] = [];
+				for (let pass = 0; pending.length > 0 && pass < 8; pass++) {
+					const requests = pending;
+					const result = await runInDurableObject(currentServer(), (instance) =>
+						withSubrequestSlice(
+							async () => {
+								const before = subrequestsAvailable();
+								const outcomes = await instance.adoptNarListings(requests);
+								return { outcomes, spent: before - subrequestsAvailable() };
+							},
+							{ subrequests, reserve: 8 }
+						)
+					);
+					const next: NarListingAdoptionRequest[] = [];
+					for (const [index, outcome] of result.outcomes.entries()) {
+						const request = requests[index];
+						if (request === undefined) {
+							throw new Error('Unexpected adoption outcome');
+						}
+						if (
+							outcome.kind === 'published' ||
+							outcome.kind === 'already-present'
+						) {
+							completed.push(request);
+							continue;
+						}
+						if (outcome.kind !== 'capacity') {
+							throw new Error(`Unexpected adoption refusal: ${outcome.kind}`);
+						}
+						next.push(request);
+					}
+					if (next.length >= pending.length) {
+						throw new Error(
+							'An adoption batch made no progress within its allowance'
+						);
+					}
+					pending = next;
+					spent.push(result.spent);
+				}
+				const state = await runInDurableObject(currentServer(), (instance) =>
+					publicationState(instance.context)
+				);
+				expect({
+					completed: completed
+						.map((item) => item.storePathHash)
+						.toSorted(byCodeUnit),
+					pending,
+					parents: state.parents
+						.map((item) => item.storePathHash)
+						.toSorted(byCodeUnit),
+					usage: state.usage
+				}).toStrictEqual({
+					completed: parents
+						.map((parent) => parent.storePathHash)
+						.toSorted(byCodeUnit),
+					pending: [],
+					parents: parents
+						.map((parent) => parent.storePathHash)
+						.toSorted(byCodeUnit),
+					usage: { bytes: fact.size, blobs: 1 }
+				});
+				expect(Math.max(...spent)).toBeLessThanOrEqual(subrequests);
+				expect(spent.length === 1).toBe(shouldCompleteInOneBatch);
+			})
+	);
+	it.each(
+		[
+			{ label: 'default', scope: defaultCache() },
+			{ label: 'named', scope: namedCache('queued-adopt') }
+		].flatMap((cache) =>
+			(['parents-first', 'fact-first'] as const).map((order) => ({
+				...cache,
+				order
+			}))
+		)
+	)(
+		'publishes queued adoption through the real Worker and DO for $label, $order',
+		({ scope, order }) =>
+			withoutAlarmArming(async () => {
+				for (const id of [
+					'listing-adoption-capture',
+					'listing-adoption-work',
+					'listing-adoption-parents',
+					'listing-adoption-tasks'
+				] as const) {
+					await recordTransition(id, 'complete');
+				}
+				if (scope.kind === 'named') {
+					await putTestCache(token, scope, 'private');
+				}
+				const sent: ListingAdoptionWorkMessage[] = [];
+				const metadata = { metrics: { backlogCount: 0, backlogBytes: 0 } };
+				const queue: Queue<ListingAdoptionWorkMessage> = {
+					metrics: () => Promise.resolve(metadata.metrics),
+					send: (body) => {
+						sent.push(body);
+						return Promise.resolve({ metadata });
+					},
+					sendBatch: (entries) => {
+						sent.push(...Array.from(entries, (entry) => entry.body));
+						return Promise.resolve({ metadata });
+					}
+				};
+				const namespace = new Proxy(env.CUPBOARD_DO, {
+					get(target, property) {
+						if (property === 'idFromName') {
+							return () => currentServer().id;
+						}
+						if (property === 'get') {
+							return () => currentServer();
+						}
+						const value: unknown = Reflect.get(target, property, target);
+						return value;
+					}
+				});
+				const workerEnv = {
+					...env,
+					...testControlEnv,
+					CUPBOARD_DO: namespace,
+					ARTIFACT_QUEUE: queue
+				};
+				const actions: string[] = [];
+				let processed = 0;
+				const drain = async () => {
+					await new ListingAdoptionWorkQueue({
+						database: env.CUPBOARD_DB,
+						queue,
+						serverFor: () => currentServer()
+					}).start();
+					for (let turn = 0; turn < 64; turn++) {
+						const body = sent.shift();
+						if (body === undefined) {
+							return;
+						}
+						processed++;
+						const message: Message = {
+							id: `queued-adopt-${processed.toString()}`,
+							body,
+							timestamp: new Date(),
+							attempts: 1,
+							ack: () => {
+								actions.push('ack');
+							},
+							retry: () => {
+								actions.push('retry');
+							}
+						};
+						await withSubrequestSlice(
+							() =>
+								handleWorkerQueue(
+									{
+										queue: 'cupboard-artifacts',
+										messages: [message],
+										metadata,
+										ackAll: () => {
+											throw new Error('Unexpected batch acknowledgement');
+										},
+										retryAll: () => {
+											throw new Error('Unexpected batch retry');
+										}
+									},
+									workerEnv,
+									new NarReadBufferPool()
+								),
+							{ subrequests: 50, reserve: 8 }
+						);
+					}
+					throw new Error('The bounded adoption fixture did not drain');
+				};
+				const captured: {
+					fact?: NarListingFact;
+					parents?: readonly [
+						ArtifactPublicationParent,
+						ArtifactPublicationParent
+					];
+				} = {};
+				const publishParents = async () => {
+					captured.parents = [
+						await publishParent(token, 'a', scope),
+						await publishParent(token, 'b', scope)
+					];
+				};
+				const publishFact = async () => {
+					const stored = await runInDurableObject(currentServer(), (instance) =>
+						recordFact(instance.context)
+					);
+					captured.fact = stored.fact;
+				};
+				const steps: readonly [() => Promise<void>, () => Promise<void>] =
+					order === 'parents-first'
+						? [publishParents, publishFact]
+						: [publishFact, publishParents];
+				await steps[0]();
+				await drain();
+				const initial = await runInDurableObject(currentServer(), (instance) =>
+					publicationState(instance.context)
+				);
+				expect({
+					artifacts: initial.artifacts,
+					references: initial.references,
+					usage: initial.usage
+				}).toStrictEqual({
+					artifacts: [],
+					references: [],
+					usage: { bytes: 0, blobs: 0 }
+				});
+				await steps[1]();
+				if (captured.fact === undefined || captured.parents === undefined) {
+					throw new Error('Expected both availability sources');
+				}
+				const { fact, parents } = captured;
+				const [first, second] = parents;
+				const io = { get: 0, put: 0 };
+				const restores: (() => void)[] = [];
+				await runInDurableObject(currentServer(), (instance) => {
+					const get = vi
+						.spyOn(instance.context.env.BLOBS, 'get')
+						.mockImplementation(() => {
+							io.get++;
+							throw new Error('Queued adoption must not read payload bytes');
+						});
+					const put = vi
+						.spyOn(instance.context.env.BLOBS, 'put')
+						.mockImplementation(() => {
+							io.put++;
+							throw new Error('Queued adoption must not upload payload bytes');
+						});
+					restores.push(
+						() => {
+							get.mockRestore();
+						},
+						() => {
+							put.mockRestore();
+						}
+					);
+				});
+				try {
+					await drain();
+					const state = await runInDurableObject(currentServer(), (instance) =>
+						publicationState(instance.context)
+					);
+					expect({
+						io,
+						queued: sent,
+						actions,
+						artifacts: state.artifacts.map((row) => ({
+							kind: row.kind,
+							state: row.state,
+							digest: row.digest
+						})),
+						parents: state.parents
+							.map((row) => ({
+								cacheId: row.cacheId,
+								storePathHash: row.storePathHash,
+								publicationGeneration: row.publicationGeneration
+							}))
+							.toSorted((left, right) =>
+								byCodeUnit(left.storePathHash, right.storePathHash)
+							),
+						references: state.references.map((row) => ({
+							tenant: row.tenant,
+							cacheKind: row.cacheKind,
+							cacheName: row.cacheName ?? undefined,
+							cacheGeneration: row.cacheGeneration,
+							kind: row.kind,
+							digest: row.digest
+						})),
+						usage: state.usage
+					}).toStrictEqual({
+						io: { get: 0, put: 0 },
+						queued: [],
+						actions: Array.from({ length: processed }, () => 'ack'),
+						artifacts: [
+							{ kind: 'listing', state: 'live', digest: fact.digest }
+						],
+						parents: [first, second].map((parent) => ({
+							cacheId: parent.cache.id,
+							storePathHash: parent.storePathHash,
+							publicationGeneration: parent.generation
+						})),
+						references: [
+							{
+								tenant: fixtureTenant,
+								cacheKind: scope.kind,
+								cacheName: scope.kind === 'named' ? scope.name : undefined,
+								cacheGeneration: first.cache.generation,
+								kind: 'listing',
+								digest: fact.digest
+							}
+						],
+						usage: { bytes: fact.size, blobs: 1 }
+					});
+				} finally {
+					for (const restore of restores) {
+						restore();
+					}
+				}
+				const response = await runInDurableObject(
+					currentServer(),
+					async (instance) => {
+						const result = await new NarListingReadService(
+							instance.context
+						).serve(
+							new Request('https://cache.example/listing'),
+							scope,
+							first.storePathHash
+						);
+						return { status: result.status, body: await result.text() };
+					}
+				);
+				expect(response).toStrictEqual({
+					status: 200,
+					body: new TextDecoder().decode(bytes)
+				});
 			})
 	);
 });

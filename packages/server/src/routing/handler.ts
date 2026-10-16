@@ -65,6 +65,7 @@ import {
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { ListingAdoptionQueue } from './listing-adoption-queue.ts';
+import { ListingAdoptionWorkQueue } from './listing-adoption-work-queue.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
 import { handleWorkerQueue } from './queue.ts';
 import { readApp, serveCacheSetup } from './read-app.ts';
@@ -580,8 +581,14 @@ export default {
 					database: env.CUPBOARD_DB,
 					queue: env.ARTIFACT_QUEUE
 				});
+				const adoptionWork = new ListingAdoptionWorkQueue({
+					database: env.CUPBOARD_DB,
+					queue: env.ARTIFACT_QUEUE,
+					serverFor: (tenant) => tenantServer(env, tenant)
+				});
 				const results = await Promise.allSettled([
 					adoption.start(),
+					adoptionWork.start(),
 					enqueueMaintenanceJobs(boundedWorkerEnv(env)),
 					cleanup.start(),
 					listings.start()

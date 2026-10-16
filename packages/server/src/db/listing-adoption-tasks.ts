@@ -1,3 +1,4 @@
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { type ArtifactTaskOwner } from '@cupboard/protocol/artifact-jobs';
 import { type TransitionId } from '@cupboard/protocol/deployment';
 import {
@@ -25,6 +26,14 @@ import {
 } from '../blob/listing-adoption-expansion.ts';
 import { type ListingAdoptionParent } from '../blob/listing-adoption-parents.ts';
 import {
+	type ListingAdoptionDelivery,
+	type ListingAdoptionDeliveryOutcome,
+	listingAdoptionDeliveryOutcomeSchema,
+	type ListingAdoptionDeliveryResolution,
+	listingAdoptionDeliveryResolutionSchema,
+	type ListingAdoptionPreparedDeliveries,
+	type ListingAdoptionReservation,
+	listingAdoptionReservationSchema,
 	type ListingAdoptionTaskAdvanceResult,
 	type ListingAdoptionTaskClaim,
 	type ListingAdoptionTaskClaimResult,
@@ -33,12 +42,8 @@ import {
 	listingAdoptionTaskIdSchema,
 	listingAdoptionTaskSourceSchema
 } from '../blob/listing-adoption-tasks.ts';
-import {
-	type ListingAdoptionOutcome,
-	listingAdoptionOutcomesSchema
-} from '../blob/nar-listing-adoption.ts';
 import { registeredLiveObjectIncarnation } from '../blob/object-incarnation.ts';
-import { jsonValueList } from '../do/json-list.ts';
+import { jsonRowList, jsonValueList } from '../do/json-list.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 
 import { cacheIdentityCondition } from './cache.ts';
@@ -73,11 +78,6 @@ export class ListingAdoptionTaskStore {
 			.select({ id: table.id })
 			.from(table)
 			.where(and(eq(table.id, id), eq(table.state, 'complete')));
-	}
-	private async installed() {
-		return (
-			(await this.transition('listing-adoption-tasks').get()) !== undefined
-		);
 	}
 	private async seedInstalled() {
 		const table = schema.deploymentTransition;
@@ -360,40 +360,15 @@ export class ListingAdoptionTaskStore {
 			.returning({ id: table.id });
 		return { kind: rows.length === 0 ? 'stale' : 'complete' };
 	}
-	async reserve(limit = 8): Promise<readonly ListingAdoptionTaskId[]> {
-		z.number().int().min(1).max(8).parse(limit);
+	private async claimMany(
+		ids: readonly ListingAdoptionTaskId[],
+		owner: ArtifactTaskOwner,
+		kind?: ListingAdoptionReservation['kind']
+	) {
+		z.array(listingAdoptionTaskIdSchema).min(1).max(8).parse(ids);
 		return this.execute(async () => {
-			if (!(await this.installed())) {
-				return [];
-			}
-			const table = schema.listingAdoptionTask;
-			const eligible = and(
-				isNull(table.completedAt),
-				this.unowned(),
-				lte(table.availableAt, databaseNow),
-				exists(this.transition('listing-adoption-tasks'))
-			);
-			const selected = this.database
-				.select({ id: table.id })
-				.from(table)
-				.where(eligible)
-				.orderBy(asc(table.availableAt), asc(table.id))
-				.limit(limit);
-			const rows = await this.database
-				.update(table)
-				.set({ availableAt: deadline })
-				.where(and(eligible, inArray(table.id, selected)))
-				.returning({ id: table.id });
-			return rows.map((row) => listingAdoptionTaskIdSchema.parse(row.id));
-		});
-	}
-	async claim(
-		id: ListingAdoptionTaskId,
-		owner: ArtifactTaskOwner
-	): Promise<ListingAdoptionTaskClaimResult> {
-		return this.execute(async () => {
-			if (!(await this.installed())) {
-				return { kind: 'unavailable' };
+			if (!(await this.isInstalled())) {
+				return { kind: 'unavailable' as const };
 			}
 			const table = schema.listingAdoptionTask;
 			const same = and(
@@ -401,7 +376,8 @@ export class ListingAdoptionTaskStore {
 				gt(table.leaseExpiresAt, databaseNow)
 			);
 			const eligibility = and(
-				eq(table.id, id),
+				inArray(table.id, jsonValueList(ids)),
+				kind === undefined ? undefined : eq(table.kind, kind),
 				isNull(table.completedAt),
 				lte(table.retryAt, databaseNow),
 				or(this.unowned(), eq(table.owner, owner)),
@@ -424,17 +400,192 @@ export class ListingAdoptionTaskStore {
 					generation: table.generation,
 					leaseExpiresAt: table.leaseExpiresAt
 				});
-			const row = rows[0];
-			return row === undefined
-				? { kind: 'idle' }
-				: { kind: 'claimed', claim: listingAdoptionTaskClaimSchema.parse(row) };
+			return {
+				kind: 'claimed' as const,
+				claims: rows.map((row) => listingAdoptionTaskClaimSchema.parse(row))
+			};
+		});
+	}
+	private deliveryUpdate(resolution: ListingAdoptionDeliveryResolution) {
+		const table = schema.listingAdoptionTask;
+		const deferred =
+			resolution.kind === 'deferred'
+				? sql`strftime('%Y-%m-%dT%H:%M:%fZ','now',${`+${resolution.delaySeconds.toString()} seconds`})`
+				: undefined;
+		const fields =
+			resolution.kind === 'finished'
+				? { outcome: resolution.outcome, completedAt: databaseNow }
+				: {
+						availableAt: deferred,
+						retryAt: deferred,
+						outcome: resolution.outcome
+					};
+		return this.database
+			.update(table)
+			.set({
+				...fields,
+				owner: sql`NULL`,
+				leaseExpiresAt: sql`NULL`,
+				updatedAt: databaseNow
+			})
+			.where(and(this.owned(resolution.claim), eq(table.kind, 'deliver')))
+			.returning({ id: table.id });
+	}
+	async isInstalled(): Promise<boolean> {
+		return this.execute(
+			async () =>
+				(await this.transition('listing-adoption-tasks').get()) !== undefined
+		);
+	}
+	async reserveWork(limit = 8): Promise<readonly ListingAdoptionReservation[]> {
+		z.number().int().min(1).max(8).parse(limit);
+		return this.execute(async () => {
+			if (!(await this.isInstalled())) {
+				return [];
+			}
+			const table = schema.listingAdoptionTask;
+			const eligible = and(
+				isNull(table.completedAt),
+				this.unowned(),
+				lte(table.availableAt, databaseNow),
+				exists(this.transition('listing-adoption-tasks'))
+			);
+			const selected = this.database
+				.select({ id: table.id })
+				.from(table)
+				.where(eligible)
+				.orderBy(asc(table.availableAt), asc(table.id))
+				.limit(limit);
+			const rows = await this.database
+				.update(table)
+				.set({ availableAt: deadline })
+				.where(and(eligible, inArray(table.id, selected)))
+				.returning({ id: table.id, kind: table.kind });
+			return rows
+				.map((row) => listingAdoptionReservationSchema.parse(row))
+				.toSorted((left, right) => byCodeUnit(left.id, right.id));
+		});
+	}
+	async reserve(limit = 8): Promise<readonly ListingAdoptionTaskId[]> {
+		const work = await this.reserveWork(limit);
+		return work.map((item) => item.id);
+	}
+	async claim(
+		id: ListingAdoptionTaskId,
+		owner: ArtifactTaskOwner,
+		kind?: ListingAdoptionReservation['kind']
+	): Promise<ListingAdoptionTaskClaimResult> {
+		const result = await this.claimMany([id], owner, kind);
+		if (result.kind === 'unavailable') {
+			return result;
+		}
+		const claim = result.claims[0];
+		return claim === undefined ? { kind: 'idle' } : { kind: 'claimed', claim };
+	}
+	async claimDeliveries(
+		ids: readonly ListingAdoptionTaskId[],
+		owner: ArtifactTaskOwner
+	) {
+		return this.claimMany(ids, owner, 'deliver');
+	}
+	async prepareDeliveries(
+		claims: readonly ListingAdoptionTaskClaim[]
+	): Promise<ListingAdoptionPreparedDeliveries> {
+		z.array(listingAdoptionTaskClaimSchema).min(1).max(8).parse(claims);
+		return this.execute(async () => {
+			if (
+				!(await this.isInstalled()) ||
+				(await this.transition('listing-adoption-parents').get()) === undefined
+			) {
+				return { kind: 'unavailable' };
+			}
+			const table = schema.listingAdoptionTask;
+			const parent = schema.listingAdoptionParent;
+			const selected = jsonRowList(claims).matches({
+				id: table.id,
+				epoch: table.epoch,
+				owner: table.owner,
+				generation: table.generation,
+				leaseExpiresAt: table.leaseExpiresAt
+			});
+			const currentParent = sql<number>`EXISTS(SELECT 1 FROM ${parent} WHERE ${parent.id}=json_extract(${table.source},'$.target.parent.id') AND ${parent.tenant}=json_extract(${table.source},'$.target.parent.tenant') AND ${parent.cacheKind}=json_extract(${table.source},'$.target.parent.cache.kind') AND ${parent.cacheName} IS json_extract(${table.source},'$.target.parent.cache.name') AND ${parent.cacheGeneration}=json_extract(${table.source},'$.target.parent.cacheGeneration') AND ${parent.storePathHash}=json_extract(${table.source},'$.target.parent.storePathHash') AND ${parent.generation}=json_extract(${table.source},'$.target.parent.generation') AND ${parent.narHash}=json_extract(${table.source},'$.target.parent.narHash'))`;
+			const eligibility = and(
+				selected,
+				eq(table.kind, 'deliver'),
+				isNull(table.completedAt),
+				gt(table.leaseExpiresAt, databaseNow),
+				exists(this.transition('listing-adoption-tasks')),
+				exists(this.transition('listing-adoption-parents'))
+			);
+			const rows = await this.database
+				.select({
+					claim: {
+						id: table.id,
+						epoch: table.epoch,
+						owner: table.owner,
+						generation: table.generation,
+						leaseExpiresAt: table.leaseExpiresAt
+					},
+					source: table.source,
+					outcome: table.outcome,
+					currentParent
+				})
+				.from(table)
+				.where(eligibility);
+			const deliveries: ListingAdoptionDelivery[] = [];
+			const obsolete: ListingAdoptionTaskClaim[] = [];
+			for (const row of rows) {
+				const claim = listingAdoptionTaskClaimSchema.parse(row.claim);
+				const source = listingAdoptionTaskSourceSchema.parse(row.source);
+				if (source.kind !== 'deliver') {
+					throw new TypeError('A delivery task requires a captured parent');
+				}
+				if (z.number().int().min(0).max(1).parse(row.currentParent) === 0) {
+					obsolete.push(claim);
+					continue;
+				}
+				deliveries.push({
+					claim,
+					target: source.target,
+					previousOutcome:
+						row.outcome === null
+							? undefined
+							: listingAdoptionDeliveryOutcomeSchema.parse(row.outcome)
+				});
+			}
+			return { kind: 'ready', deliveries, obsolete };
+		});
+	}
+	async resolveDeliveries(
+		resolutions: readonly ListingAdoptionDeliveryResolution[]
+	): Promise<readonly ListingAdoptionTaskId[]> {
+		const parsed = z
+			.array(listingAdoptionDeliveryResolutionSchema)
+			.min(1)
+			.max(8)
+			.parse(resolutions);
+		return this.execute(async () => {
+			if (!(await this.isInstalled())) {
+				return [];
+			}
+			const updates = parsed.map((resolution) =>
+				this.deliveryUpdate(resolution)
+			);
+			const first = updates[0];
+			if (first === undefined) {
+				return [];
+			}
+			const results = await this.database.batch([first, ...updates.slice(1)]);
+			return results.flatMap((rows) =>
+				rows.map((row) => listingAdoptionTaskIdSchema.parse(row.id))
+			);
 		});
 	}
 	async advance(
 		claim: ListingAdoptionTaskClaim
 	): Promise<ListingAdoptionTaskAdvanceResult> {
 		return this.execute(async () => {
-			if (!(await this.installed())) {
+			if (!(await this.isInstalled())) {
 				return { kind: 'unavailable' };
 			}
 			const row = await this.database
@@ -480,7 +631,7 @@ export class ListingAdoptionTaskStore {
 	): Promise<boolean> {
 		z.number().int().min(1).max(3600).parse(delay);
 		return this.execute(async () => {
-			if (!(await this.installed())) {
+			if (!(await this.isInstalled())) {
 				return false;
 			}
 			const table = schema.listingAdoptionTask;
@@ -500,11 +651,11 @@ export class ListingAdoptionTaskStore {
 	}
 	async finish(
 		claim: ListingAdoptionTaskClaim,
-		outcome: ListingAdoptionOutcome
+		outcome: ListingAdoptionDeliveryOutcome
 	): Promise<boolean> {
-		const parsed = listingAdoptionOutcomesSchema.element.parse(outcome);
+		const parsed = listingAdoptionDeliveryOutcomeSchema.parse(outcome);
 		return this.execute(async () => {
-			if (!(await this.installed())) {
+			if (!(await this.isInstalled())) {
 				return false;
 			}
 			const table = schema.listingAdoptionTask;

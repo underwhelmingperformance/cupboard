@@ -7219,8 +7219,14 @@ build traces available from a cupboard cache.
       tenant RPC now adopts up to eight captured parents through the existing
       authority, quota and directed-reference checks without reading payload
       bytes. Cache and publication generations fence each item; a local fact
-      conflict refuses only that item. Durable adoption delivery and producer
-      activation remain pending.
+      conflict refuses only that item. Queue consumers now claim up to eight
+      targets, prepare current parents and group requests by their actual
+      tenant. Each tenant group persists its result independently. Native RPC
+      admission reports capacity per item; deferred targets receive delayed
+      hints at their durable retry deadline. Latest refusals remain available
+      for inspection. RPC failures retry targets separately, so one failure
+      cannot keep aborting valid siblings. Forward generation and activation
+      remain pending.
 - [ ] Add an optional tenant-signed in-toto generation proof with its own
       predicate. Verify input, output and signer through the CLI. Keep
       generation evidence separate from build provenance and Sigstore
@@ -7249,7 +7255,9 @@ build traces available from a cupboard cache.
       Repaired sources refresh existing tasks without recounting them. Expired
       windows and predecessor jobs without a window restart historical discovery
       from a current capture position. Global queues now drive discovery and
-      task execution. Forward dispatch and cache adoption remain pending.
+      task execution. Captured-source queues now drive authoritative cache
+      adoption. Forward availability dispatch and completion wakes remain
+      pending.
 - [ ] Use D1 job and task records with expiring claims, source-incarnation
       fences and resumable staging cleanup. Queue messages are wake-up hints;
       persisted state decides whether work can run and complete. Staging RPCs
@@ -7428,9 +7436,14 @@ build traces available from a cupboard cache.
       completed targets receive a new execution epoch on later availability.
       Independent retry deadlines prevent duplicate hints from bypassing
       backoff. A point trigger copies new work, and a bounded historical seed
-      copies earlier work without a deployment-time scan. Queue integration,
-      authoritative adoption delivery, shared completion wakes and producer
-      activation remain pending.
+      copies earlier work without a deployment-time scan. Cron and historical
+      seed continuations now wake the adoption execution queue after storage is
+      installed. Strict messages contain source or target identities, never
+      ownership. Source discovery and delivery reservations remain independent
+      of input consumption failures. Failed sends and committed replies recover
+      through durable deadlines and fresh claims. Metadata pruning, forward
+      dispatch and acknowledgement, shared completion wakes and activation
+      remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,
@@ -7476,8 +7489,8 @@ build traces available from a cupboard cache.
       staging capacity. Shared-generation waiters persist the recorded
       computation lease deadline without retaining admissions. Legacy messages
       use that deadline as their transport retry delay. Completion-triggered
-      shared waiter wakes, cache adoption projections, activation and throughput
-      benchmarks remain pending.
+      shared waiter wakes, forward availability dispatch, activation and
+      throughput benchmarks remain pending.
 - [ ] Declare contract-first operator APIs and CLI commands to start, list,
       inspect, resume and cancel jobs. Report phase, cursor, counts, bytes, last
       progress and paged failures. The total remains unknown until discovery

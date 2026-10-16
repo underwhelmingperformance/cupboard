@@ -41,7 +41,7 @@ export type ListingPublicationOutcome = z.output<
 >;
 const listingAdoptionOutcomeSchema = z.union([
 	listingPublicationOutcomeSchema,
-	z.strictObject({ kind: z.literal('conflict') })
+	z.strictObject({ kind: z.enum(['conflict', 'capacity']) })
 ]);
 export type ListingAdoptionOutcome = z.output<
 	typeof listingAdoptionOutcomeSchema

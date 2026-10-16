@@ -7,10 +7,11 @@ import {
 import { z } from 'zod';
 
 import {
-	type ListingAdoptionParent,
 	listingAdoptionParentIdSchema,
 	listingAdoptionParentSchema
 } from './listing-adoption-parents.ts';
+import { type ListingAdoptionTarget } from './listing-adoption-tasks.ts';
+export { type ListingAdoptionTarget } from './listing-adoption-tasks.ts';
 
 const parentWindowSchema = z
 	.strictObject({
@@ -66,10 +67,6 @@ export const listingAdoptionExpansionWindowSchema = z.discriminatedUnion(
 export type ListingAdoptionExpansionWindow = z.output<
 	typeof listingAdoptionExpansionWindowSchema
 >;
-export interface ListingAdoptionTarget {
-	readonly parent: ListingAdoptionParent;
-	readonly identity: NarListingIdentity;
-}
 interface ExpansionProgress {
 	readonly scanned: number;
 	readonly isComplete: boolean;

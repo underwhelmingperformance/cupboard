@@ -7,7 +7,12 @@ import { ArtifactQueueConsumer } from './artifact-queue-consumer.ts';
 import { artifactQueueHeaderSchema } from './artifact-queue-message.ts';
 import { tenantServer } from './durable-object.ts';
 import { ListingAdoptionQueue } from './listing-adoption-queue.ts';
-import { listingAdoptionQueueHeaderSchema } from './listing-adoption-queue-message.ts';
+import {
+	listingAdoptionQueueHeaderSchema,
+	listingAdoptionQueueMessageSchema
+} from './listing-adoption-queue-message.ts';
+import { listingAdoptionWorkHeaderSchema } from './listing-adoption-work-message.ts';
+import { ListingAdoptionWorkQueue } from './listing-adoption-work-queue.ts';
 import { handleMaintenanceQueueMessage } from './scheduled.ts';
 import { sharedListingCleanupHeaderSchema } from './shared-listing-cleanup-message.ts';
 import { SharedListingCleanupQueue } from './shared-listing-cleanup-queue.ts';
@@ -47,9 +52,29 @@ export async function handleWorkerQueue(
 		database: env.CUPBOARD_DB,
 		queue: env.ARTIFACT_QUEUE
 	});
+	const adoptionWork = new ListingAdoptionWorkQueue({
+		database: env.CUPBOARD_DB,
+		queue: env.ARTIFACT_QUEUE,
+		serverFor: (tenant) => tenantServer(env, tenant)
+	});
 	for (const message of batch.messages) {
+		if (listingAdoptionWorkHeaderSchema.safeParse(message.body).success) {
+			await adoptionWork.handleMessage(message);
+			continue;
+		}
 		if (listingAdoptionQueueHeaderSchema.safeParse(message.body).success) {
 			await adoption.handleMessage(message);
+			if (listingAdoptionQueueMessageSchema.safeParse(message.body).success) {
+				try {
+					await adoptionWork.start();
+				} catch (error) {
+					logger.warn(
+						'listing adoption work wake failed; cron recovery remains due',
+						{ messageId: message.id, error }
+					);
+				}
+			}
+
 			continue;
 		}
 		if (sharedListingQueueHeaderSchema.safeParse(message.body).success) {
