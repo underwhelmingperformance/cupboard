@@ -6,25 +6,47 @@ import {
 	nixSha256HashSchema,
 	rootNameSchema,
 	sha256HexDigestSchema,
-	storePathHashSchema
+	storePathHashSchema,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import { uploadIdSchema } from '@cupboard/protocol/upload';
+import {
+	uploadActionDecisionSchema,
+	uploadIdSchema
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
+import { env } from 'cloudflare:workers';
+import { eq, sql } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { z } from 'zod';
 
+import {
+	recordTableWrites,
+	type TableWrite
+} from '../d1-statements.test-support.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
+import { runScheduledMaintenance } from '../routing/scheduled.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	commitUpload,
 	currentServer,
 	defaultCache,
+	garbageCollectionOf,
 	initialise,
+	negotiateUploads,
 	negotiateViaInstance,
+	putNarBytes,
 	resetTestServer,
 	resolvedCache,
 	underOneUnitOfWork,
+	uploadMetadata,
+	verifiableNar,
+	verificationOf,
+	waitUntilReached,
 	withoutAlarmArming
 } from '../test-support.ts';
 
@@ -512,6 +534,163 @@ describe('maintenance pass cost', () => {
 			largeBacklogCost: 267
 		});
 	});
+});
+
+const eligibilityTable = 'tenant_maintenance_eligibility';
+
+function eligibilityWrites(
+	body: () => Promise<unknown>
+): Promise<TableWrite[]> {
+	return recordTableWrites(env.CUPBOARD_DB, eligibilityTable, body);
+}
+
+const upsert = `insert into ${eligibilityTable}`;
+const mark = `update ${eligibilityTable}`;
+
+// D1 bills each row and index entry that a statement writes. The eligibility
+// row has two index entries, so a changed wake costs 2 rows and a new row 3.
+describe('maintenance eligibility writes', () => {
+	beforeEach(resetTestServer);
+
+	it('writes the row for one commit and its verification', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('eligibility-commit');
+		const metadata = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		const writes = await withoutAlarmArming(() =>
+			eligibilityWrites(async () => {
+				const negotiated = await negotiateUploads(token, [metadata]);
+				const upload = uploadActionDecisionSchema.parse(negotiated.uploads[0]);
+				await putNarBytes(upload.r2Key, nar);
+				await commitUpload(token, upload.uploadId);
+			})
+		);
+
+		expect(writes).toStrictEqual([
+			{ scope: 'request', statement: upsert, written: 2 },
+			{
+				scope: 'maintenance-eligibility-reconcile',
+				statement: upsert,
+				written: 2
+			},
+			{ scope: 'claim-verifications', statement: mark, written: 0 },
+			{ scope: 'claim-verifications', statement: upsert, written: 0 },
+			{ scope: 'claim-verifications', statement: mark, written: 0 },
+			{ scope: 'claim-verifications', statement: upsert, written: 2 },
+			{ scope: 'record-verifications', statement: mark, written: 2 },
+			{ scope: 'record-verifications', statement: upsert, written: 2 }
+		]);
+	});
+
+	// The cron runs garbage collection and verification together, then
+	// auth-key retirement. Only the first concurrent pass marks the row, and
+	// only the last one reconciles it. Collection waits for verification to
+	// start, so the two passes always overlap.
+	it.each([
+		{
+			row: 'due',
+			nextWakeAt: isoTimestampSchema.parse('1970-01-01T00:00:00.000Z'),
+			writes: [
+				{ statement: mark, written: 0 },
+				{ statement: upsert, written: 2 },
+				{ statement: mark, written: 2 },
+				{ statement: upsert, written: 2 }
+			]
+		},
+		{
+			row: 'stale and idle',
+			nextWakeAt: undefined,
+			writes: [
+				{ statement: mark, written: 2 },
+				{ statement: upsert, written: 2 },
+				{ statement: mark, written: 2 },
+				{ statement: upsert, written: 2 }
+			]
+		}
+	])(
+		'writes the row for a cron visit to a $row tenant',
+		async ({ nextWakeAt, writes }) => {
+			await initialise();
+			await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+				.update(d1Schema.tenantMaintenanceEligibility)
+				.set({
+					nextWakeAt: nextWakeAt ?? sql`null`,
+					reconciledAt: isoTimestampSchema.parse('2025-01-01T00:00:00.000Z')
+				})
+				.where(
+					eq(
+						d1Schema.tenantMaintenanceEligibility.tenant,
+						tenantIdSchema.parse(fixtureTenant)
+					)
+				)
+				.run();
+			const server = currentServer();
+			const verificationSettled = Promise.withResolvers<undefined>();
+			const restore = await runInDurableObject(server, (instance) => {
+				const garbageCollection = garbageCollectionOf(instance);
+				const verification = verificationOf(instance);
+				const verificationStarted = Promise.withResolvers<undefined>();
+				const collectGarbage =
+					garbageCollection.collectGarbage.bind(garbageCollection);
+				const processPending =
+					verification.processPendingWithoutDecode.bind(verification);
+				const collectSpy = vi
+					.spyOn(garbageCollection, 'collectGarbage')
+					.mockImplementation(async (...parameters) => {
+						await waitUntilReached(
+							verificationStarted.promise,
+							verificationSettled.promise,
+							'verification reaching processPendingWithoutDecode'
+						);
+
+						return collectGarbage(...parameters);
+					});
+				const processSpy = vi
+					.spyOn(verification, 'processPendingWithoutDecode')
+					.mockImplementation((...parameters) => {
+						verificationStarted.resolve(undefined);
+
+						return processPending(...parameters);
+					});
+
+				return () => {
+					collectSpy.mockRestore();
+					processSpy.mockRestore();
+				};
+			});
+			onTestFinished(() =>
+				runInDurableObject(server, () => {
+					restore();
+				})
+			);
+
+			const recorded = await withoutAlarmArming(() =>
+				eligibilityWrites(() =>
+					runScheduledMaintenance(
+						() => server.runGarbageCollection(),
+						async () => {
+							try {
+								await server.runVerification();
+							} finally {
+								verificationSettled.resolve(undefined);
+							}
+						},
+						() => server.runAuthKeyRetirement()
+					)
+				)
+			);
+
+			expect(
+				recorded.map(({ statement, written }) => ({ statement, written }))
+			).toStrictEqual(writes);
+		}
+	);
 });
 
 async function terminalUploadCollectionCost(

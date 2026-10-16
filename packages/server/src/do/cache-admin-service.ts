@@ -100,7 +100,7 @@ export function maxPathsTornDownPerRun(
 	return Math.min(
 		maxNarInfoDeletionsFlushedPerRun,
 		Math.floor(
-			(maintenancePassSubrequests(subrequestAllowance) -
+			(maintenancePassSubrequests(subrequestAllowance, 'continuation') -
 				revokedEdgeSweepSubrequestsPerPass -
 				(hasStagingCleanup ? stagingCleanupSubrequestsPerPass : 0)) /
 				(1 + narInfoRetirementSubrequests(maxFencedRetireRows))

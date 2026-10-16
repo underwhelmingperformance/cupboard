@@ -93,7 +93,7 @@ const subrequestsPerBackfillEntry = 5;
  */
 export function backfillEntriesPerPass(subrequestAllowance: number): number {
 	return Math.floor(
-		maintenancePassSubrequests(subrequestAllowance) /
+		maintenancePassSubrequests(subrequestAllowance, 'continuation') /
 			subrequestsPerBackfillEntry
 	);
 }

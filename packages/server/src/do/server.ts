@@ -207,6 +207,8 @@ import { type LocalStepContinuation, LocalStepRun } from './local-step-run.ts';
 import {
 	MaintenanceEligibilityService,
 	maintenancePassSubrequests,
+	type PassTrigger,
+	type WakeChange,
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
 import { applyMigrations } from './migrate.ts';
@@ -444,7 +446,7 @@ export function verifyBackstopReuseSettleLimit(
 	subrequestAllowance: number
 ): number {
 	return Math.floor(
-		(maintenancePassSubrequests(subrequestAllowance) -
+		(maintenancePassSubrequests(subrequestAllowance, 'continuation') -
 			pendingSettlePrefetchSubrequests) /
 			subrequestsPerPendingSettleRow
 	);
@@ -1608,15 +1610,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Invalidate eligibility before cron maintenance and reconcile it afterwards.
-	// The leading invalidation keeps the tenant due if the pass is interrupted.
-	// Mutating request paths reconcile only after the mutation.
 	private async withMaintenanceEligibility<T>(
+		trigger: PassTrigger,
 		body: () => Promise<T>
 	): Promise<T> {
 		return withMaintenanceEligibility(
 			this.maintenanceEligibility,
-			() => this.reconcileMaintenanceEligibility(),
+			(change) => this.reconcileMaintenanceEligibility(change),
+			trigger,
 			body
 		);
 	}
@@ -1686,12 +1687,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	private async reconcileMaintenanceEligibility(): Promise<void> {
+	private async reconcileMaintenanceEligibility(
+		change: WakeChange = 'any'
+	): Promise<void> {
 		// The conditional upsert prevents an older concurrent result from replacing
 		// a newer wake time. On failure, delete the projection so maintenance remains
 		// due.
 		try {
-			await this.maintenanceEligibility.reconcile();
+			await this.maintenanceEligibility.reconcile(new Date(), change);
 		} catch {
 			await this.invalidateMaintenanceEligibility();
 		}
@@ -1916,6 +1919,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// alarm resumes that scope under its own row budget, leaving the input gate
 	// free for requests between passes.
 	private async collectGarbageOnce(
+		trigger: PassTrigger,
 		scope: GarbageCollectionScope = tenantGarbageCollectionScope
 	): Promise<void> {
 		const target: GarbageCollectionTarget =
@@ -1930,7 +1934,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.runGarbagePass(
 			() =>
 				this.metered('garbage-collection', (logger) =>
-					this.withMaintenanceEligibility(async () => {
+					this.withMaintenanceEligibility(trigger, async () => {
 						const outcome = await this.garbageCollection.collectGarbage(
 							logger,
 							target
@@ -2117,6 +2121,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 
 			await this.collectGarbageOnce(
+				'continuation',
 				continuation.scope === 'cache'
 					? { scope: 'cache', cache: continuation.cache }
 					: { scope: 'tenant' }
@@ -2144,7 +2149,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const origin = await this.reconcileQueue.origin();
 
 		const clearedCount = await this.metered('reconcile', (logger) =>
-			this.withMaintenanceEligibility(async () => {
+			this.withMaintenanceEligibility('continuation', async () => {
 				const deferred = await this.verification.reconcileTargets(
 					logger,
 					queued.values().toArray(),
@@ -2229,7 +2234,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		await this.metered('verify-backstop', (logger) =>
-			this.withMaintenanceEligibility(() =>
+			this.withMaintenanceEligibility('continuation', () =>
 				this.verification.processPendingWithoutDecode(
 					logger,
 					verifyBackstopReuseSettleLimit(this.context.subrequestsPerInvocation)
@@ -2263,7 +2268,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			(async () => {
 				const signal = currentDeadlineSignal();
 				signal?.throwIfAborted();
-				const settled = await this.withMaintenanceEligibility(() =>
+				const settled = await this.withMaintenanceEligibility('fresh', () =>
 					this.verification.processPendingWithoutDecode(logger, limit, signal)
 				);
 				signal?.throwIfAborted();
@@ -2272,7 +2277,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					this.verification.listPendingForVerify(limit, maxNarBytes, signal),
 					signal
 				);
-				await this.withMaintenanceEligibility(() =>
+				await this.withMaintenanceEligibility('fresh', () =>
 					this.verification.processExhaustedUploads(logger, signal)
 				);
 				await this.armUploadRetries();
@@ -2330,7 +2335,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			(async () => {
 				const signal = currentDeadlineSignal();
 				signal?.throwIfAborted();
-				const applied = await this.withMaintenanceEligibility(() =>
+				const applied = await this.withMaintenanceEligibility('fresh', () =>
 					this.verification.recordVerifications(logger, owner, results, signal)
 				);
 				signal?.throwIfAborted();
@@ -2347,7 +2352,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// verdicts: a commit can record a new one while the pass runs.
 	private async drainRecordedVerdicts(): Promise<MaintenanceProgress> {
 		const page = await this.metered('verdict-drain', (logger) =>
-			this.withMaintenanceEligibility(() =>
+			this.withMaintenanceEligibility('continuation', () =>
 				(async () => {
 					await this.verification.processExhaustedUploads(logger);
 					return this.verification.applyRecordedVerdicts(logger);
@@ -2487,7 +2492,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				),
 				run: () =>
 					this.metered('read-authority-demotion', () =>
-						this.withMaintenanceEligibility(() =>
+						this.withMaintenanceEligibility('continuation', () =>
 							this.context.criticalSection(() =>
 								new PathReadAuthorityService(this.context).drain()
 							)
@@ -2853,7 +2858,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async runGarbageCollection(): Promise<void> {
 		await this.initialise();
 		await this.runCoalescedCronMaintenance('gc', () =>
-			this.collectGarbageOnce()
+			this.collectGarbageOnce('fresh')
 		);
 	}
 
@@ -2904,7 +2909,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 		const resolved = this.context.cacheRepository.require(cache);
 		await this.metered('cache-teardown', () =>
-			this.withMaintenanceEligibility(() =>
+			this.withMaintenanceEligibility('fresh', () =>
 				this.cacheAdmin.tearDownCache(resolved, origin)
 			)
 		);
@@ -2920,7 +2925,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		await this.metered('cache-teardown', () =>
-			this.withMaintenanceEligibility(() =>
+			this.withMaintenanceEligibility('continuation', () =>
 				this.cacheAdmin.resumeTeardownPass(claimed.cache, claimed.origin, limit)
 			)
 		);
@@ -2940,7 +2945,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// single-flight guard: a deferral after this point asks for its own pass.
 			this.commitPipeline.onVerificationPassStarted();
 			await this.metered('verification', (logger) =>
-				this.withMaintenanceEligibility(async () => {
+				this.withMaintenanceEligibility('fresh', async () => {
 					const retryClock = new RetryClockService(this.context);
 					if (retryClock.isBlocked()) {
 						await retryClock.read();
@@ -3268,7 +3273,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async runAuthKeyRetirement(): Promise<void> {
 		await this.initialise();
 		await this.metered('auth-key-retirement', () =>
-			this.withMaintenanceEligibility(() =>
+			this.withMaintenanceEligibility('fresh', () =>
 				this.authKeys.retireScheduledAuthKeys()
 			)
 		);

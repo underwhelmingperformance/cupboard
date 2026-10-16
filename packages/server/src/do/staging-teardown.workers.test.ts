@@ -248,7 +248,7 @@ describe('staged cache teardown', () => {
 			const deletions = vi.spyOn(env.BLOBS, 'delete');
 			await runInDurableObject(currentServer(), (instance) =>
 				withSubrequestSlice(() => instance.resumeCacheTeardown(), {
-					subrequests: 3,
+					subrequests: 2,
 					reserve: 0
 				})
 			);
@@ -276,7 +276,7 @@ describe('staged cache teardown', () => {
 			const deletions = vi.spyOn(env.BLOBS, 'delete');
 			await runInDurableObject(currentServer(), (instance) =>
 				withSubrequestSlice(() => instance.resumeCacheTeardown(), {
-					subrequests: 6,
+					subrequests: 5,
 					reserve: 0
 				})
 			);

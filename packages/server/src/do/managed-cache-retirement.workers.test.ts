@@ -661,8 +661,8 @@ describe('managed cache retirement', () => {
 					rowsRead: 260,
 					rowsWritten: 8,
 					d1Calls: 2,
-					d1RowsRead: 1,
-					d1RowsWritten: 4,
+					d1RowsRead: 2,
+					d1RowsWritten: 2,
 					r2List: 1
 				}
 			]

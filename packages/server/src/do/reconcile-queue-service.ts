@@ -54,7 +54,7 @@ export const subrequestsPerReconcileRemoval = 7;
  */
 export function maxPathsReconciledPerRun(subrequestAllowance: number): number {
 	return Math.floor(
-		(maintenancePassSubrequests(subrequestAllowance) -
+		(maintenancePassSubrequests(subrequestAllowance, 'continuation') -
 			subrequestsPerReconcileEdgeQuery -
 			subrequestsPerReconcileRemoval) /
 			subrequestsPerReconcileProbe

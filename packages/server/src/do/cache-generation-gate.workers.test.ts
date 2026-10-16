@@ -1712,11 +1712,11 @@ describe('cache generation gate', () => {
 					maxFencedRetireRows) *
 					perChunk
 		}).toStrictEqual({
-			oneChunk: 11,
-			twoChunks: 19,
+			oneChunk: 10,
+			twoChunks: 18,
 			perChunk: 8,
-			perPass: 3,
-			worstCase: 35
+			perPass: 2,
+			worstCase: 34
 		});
 	}, 240_000);
 
@@ -1736,7 +1736,7 @@ describe('cache generation gate', () => {
 			references: await attestationReferenceRows(),
 			edges: await blobReferenceRows()
 		}).toStrictEqual({
-			perPass: [88, 44],
+			perPass: [88, 42],
 			worstPass: 88,
 			usable: 100,
 			references: [],
