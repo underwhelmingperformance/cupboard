@@ -3,11 +3,13 @@ import { startCapture } from '@cupboard/logger/testing';
 import {
 	type CacheAccessMode,
 	type CacheScope,
+	isSameCacheScope,
 	narInfoGenerationSchema,
 	predicateTypeSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
-	storePathHashSchema
+	storePathHashSchema,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
@@ -44,6 +46,7 @@ import { authorisedByPathGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
+	AttestationInheritanceSourceChangedError,
 	AttestationPathNotFoundError,
 	SharedFactsUnavailableError
 } from '../errors.ts';
@@ -62,16 +65,19 @@ import {
 	cacheScopedPath,
 	cacheWriteGrants,
 	casObjectRows,
+	casObjectVersionChanges,
 	clearBlobStorage,
 	commitSessionFromResponse,
 	commitUploadViaWorker,
 	currentCasObjectKey,
 	currentNarObjectKey,
+	fileAttestationReference,
 	fixtureWorkerServer,
 	flakyD1,
 	handlerFetch,
 	hexBytes,
 	initialiseViaWorker,
+	interleaveBeforeInsert,
 	issueTokenForTenant,
 	namedCache,
 	narDigestHex,
@@ -130,6 +136,20 @@ import { WorkSequenceService } from './work-sequence-service.ts';
 
 const predicateType = 'https://slsa.dev/provenance/v1';
 const defaultCacheScope: CacheScope = { kind: 'default' };
+
+async function casIncarnation(digest: Sha256HexDigest): Promise<number> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ incarnation: d1Schema.casObject.incarnation })
+		.from(d1Schema.casObject)
+		.where(eq(d1Schema.casObject.digest, digest))
+		.get();
+
+	if (row === undefined) {
+		throw new TypeError(`No cas_object row exists for ${digest}`);
+	}
+
+	return row.incarnation;
+}
 
 // Orders by UTF-16 code unit, matching the default `<`/`>` comparison.
 function compareById(left: { id: string }, right: { id: string }): number {
@@ -232,6 +252,110 @@ describe('attestation attach and reads', () => {
 			bundleStatus: StatusCodes.OK,
 			bundleControl: 'no-store',
 			bundleBytes: [...bundle]
+		});
+	});
+
+	it.each(['collected', 'retired'] as const)(
+		'retries an attach whose bundle object version is %s before the reserve batch',
+		async (change) => {
+			const { token, metadata, bundle, digest } = await committedPathBundle();
+			const interleaving = interleaveBeforeInsert(
+				'attestation_ref_storage',
+				() => casObjectVersionChanges[change](digest)
+			);
+
+			let attempts: Awaited<ReturnType<typeof attachTwice>>;
+
+			try {
+				attempts = await attachTwice(token, metadata.storePathHash, bundle);
+			} finally {
+				interleaving.restore();
+			}
+
+			const bundleRead = await readFetch(`/attestation-bundles/${digest}`);
+
+			expect({
+				hasInterleaved: interleaving.hasInterleaved(),
+				...attempts,
+				current: await currentCasObjectKey(digest),
+				bundleStatus: bundleRead.status,
+				bundleText: await bundleRead.text()
+			}).toStrictEqual({
+				hasInterleaved: true,
+				refusal: { status: StatusCodes.SERVICE_UNAVAILABLE, retryAfter: '1' },
+				retry: {
+					status: StatusCodes.OK,
+					body: {
+						storePathHash: metadata.storePathHash,
+						digest,
+						predicateType,
+						status: 'attached'
+					}
+				},
+				current: casObjectKey(digest, 3),
+				bundleStatus: StatusCodes.OK,
+				bundleText: new TextDecoder().decode(bundle)
+			});
+		}
+	);
+
+	it("retries one tenant's attach of a shared bundle demoted before its reserve batch", async () => {
+		const { token, metadata, bundle, digest } = await committedPathBundle();
+		const acme = tenantIdSchema.parse('acme');
+		await provisionNamedTenant(acme);
+		const sharedPath = storePathHashSchema.parse('c'.repeat(32));
+		await fileAttestationReference({
+			uploadId: 'shared-acme',
+			bytes: bundle,
+			tenant: acme,
+			storePathHash: sharedPath,
+			generation: 0,
+			predicateType
+		});
+		const interleaving = interleaveBeforeInsert('attestation_ref_storage', () =>
+			casObjectVersionChanges.demoted(digest)
+		);
+
+		let attempts: Awaited<ReturnType<typeof attachTwice>>;
+
+		try {
+			attempts = await attachTwice(token, metadata.storePathHash, bundle);
+		} finally {
+			interleaving.restore();
+		}
+
+		const references = await attestationReferenceRows();
+
+		expect({
+			hasInterleaved: interleaving.hasInterleaved(),
+			...attempts,
+			current: await currentCasObjectKey(digest),
+			references: references.map((row) => ({
+				tenant: row.tenant,
+				storePathHash: row.storePathHash
+			})),
+			presence: await tenantCasBlobRows()
+		}).toStrictEqual({
+			hasInterleaved: true,
+			refusal: { status: StatusCodes.SERVICE_UNAVAILABLE, retryAfter: '1' },
+			retry: {
+				status: StatusCodes.OK,
+				body: {
+					storePathHash: metadata.storePathHash,
+					digest,
+					predicateType,
+					status: 'attached'
+				}
+			},
+			current: casObjectKey(digest, 3),
+			references: [
+				{ tenant: fixtureTenant, storePathHash: metadata.storePathHash },
+				{ tenant: acme, storePathHash: sharedPath }
+			],
+			presence: [
+				{ tenant: acme, digest, size: bundle.byteLength },
+				{ tenant: fixtureTenant, digest, size: bundle.byteLength }
+			]
 		});
 	});
 
@@ -1324,6 +1448,54 @@ describe('attestation attach and reads', () => {
 		}
 	);
 
+	it('retries an inheritance whose source bundle is demoted before the reserve batch', async () => {
+		const { destination, metadata, digest } = await reusedPathWithSourceBundle(
+			'inheritance-demoted'
+		);
+		const inherit = vi.spyOn(
+			AttestationsService.prototype,
+			'inheritFromTenant'
+		);
+		const interleaving = interleaveBeforeInsert('attestation_ref_storage', () =>
+			casObjectVersionChanges.demoted(digest)
+		);
+		let attempts: unknown[];
+
+		try {
+			await drainInheritance();
+		} finally {
+			attempts = [...inherit.mock.settledResults];
+			interleaving.restore();
+			inherit.mockRestore();
+		}
+
+		const references = await attestationReferenceRows();
+		const queued = await queuedInheritances();
+		await makeQueuedInheritancesDue();
+		const retried = await drainInheritance();
+
+		expect({
+			hasInterleaved: interleaving.hasInterleaved(),
+			attempts,
+			inherited: references.filter((row) =>
+				isSameCacheScope(row.cache, destination)
+			),
+			queued,
+			retry: { progress: retried, queued: await queuedInheritances() }
+		}).toStrictEqual({
+			hasInterleaved: true,
+			attempts: [
+				{
+					type: 'rejected',
+					value: new AttestationInheritanceSourceChangedError(digest)
+				}
+			],
+			inherited: [],
+			queued: [{ storePathHash: metadata.storePathHash, attempts: 1 }],
+			retry: { progress: 'progressed', queued: [] }
+		});
+	});
+
 	it('does not duplicate an inheritance attempt during an overlapping claimed attempt', async () => {
 		const { metadata } = await reusedPathWithSourceBundle('overlapping-retry');
 		const entered = Promise.withResolvers<undefined>();
@@ -1760,7 +1932,8 @@ describe('attestation attach and reads', () => {
 					predicateType: predicateTypeSchema.parse(predicateType),
 					digest
 				},
-				1
+				1,
+				await casIncarnation(digest)
 			);
 		});
 		const listBeforeDrain = await readFetch(
@@ -2949,7 +3122,8 @@ describe('attestation attach and reads', () => {
 							),
 							digest
 						},
-						1
+						1,
+						await casIncarnation(digest)
 					);
 					if (writer === 'preceding') {
 						await expect(
@@ -4595,6 +4769,41 @@ async function attachBundleResponse(
 		token,
 		{ method: 'POST' }
 	);
+}
+
+async function attachTwice(
+	token: string,
+	pathHash: string,
+	bundle: Uint8Array
+): Promise<{
+	readonly refusal: { readonly status: number; readonly retryAfter: unknown };
+	readonly retry: { readonly status: number; readonly body: unknown };
+}> {
+	const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
+	const decision = attestationUploadDecisionSchema.parse(
+		await negotiate(token, pathHash, digest)
+	);
+	await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
+	const attach = () =>
+		authorisedWorkerFetch(
+			cacheScopedPath(
+				defaultCacheScope,
+				`/attestations/${decision.uploadId}/attach`
+			),
+			token,
+			{ method: 'POST' }
+		);
+	const refused = await attach();
+	await refused.text();
+	const retried = await attach();
+
+	return {
+		refusal: {
+			status: refused.status,
+			retryAfter: refused.headers.get('retry-after')
+		},
+		retry: { status: retried.status, body: await retried.json() }
+	};
 }
 
 async function negotiate(

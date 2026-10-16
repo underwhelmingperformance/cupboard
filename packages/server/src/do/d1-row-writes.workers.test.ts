@@ -13,6 +13,7 @@ import {
 	armBlobReaperTimer,
 	blobStateArmTimes,
 	casObjectRows,
+	casObjectVersionChanges,
 	clearBlobStorage,
 	commitPath,
 	currentServer,
@@ -97,9 +98,12 @@ async function storedBundle(uploadId: string) {
 		new TextEncoder().encode('bundle')
 	);
 	const measured = await currentServer().measureAttestationBundle(stagingKey);
-	await currentServer().promoteAttestationBundle(stagingKey, measured);
+	const incarnation = await currentServer().promoteAttestationBundle(
+		stagingKey,
+		measured
+	);
 
-	return { stagingKey, measured };
+	return { stagingKey, measured, incarnation };
 }
 
 async function casIncarnations() {
@@ -231,7 +235,8 @@ describe('D1 rows written', () => {
 	])(
 		'clears a bundle deadline in the reserve batch only when one is set ($deadline)',
 		async ({ arm, cleared }) => {
-			const { measured } = await storedBundle('reserve-batch-rows');
+			const { measured, incarnation } =
+				await storedBundle('reserve-batch-rows');
 			await arm();
 
 			const batches = await batchCosts(() =>
@@ -246,7 +251,8 @@ describe('D1 rows written', () => {
 							),
 							digest: measured.digest
 						},
-						measured.size
+						measured.size,
+						incarnation
 					)
 				)
 			);
@@ -264,7 +270,8 @@ describe('D1 rows written', () => {
 						{ statement: 'update tenant_usage', written: 1 },
 						{ statement: 'insert into attestation_ref_storage', written: 6 },
 						{ statement: 'insert into tenant_cas_blob', written: 2 },
-						{ statement: 'update cas_object', written: cleared }
+						{ statement: 'update cas_object', written: cleared },
+						{ statement: 'select', written: 0 }
 					]
 				],
 				objects: [
@@ -273,6 +280,56 @@ describe('D1 rows written', () => {
 						size: measured.size,
 						deleteAfter: undefined
 					}
+				]
+			});
+		}
+	);
+
+	it.each(['collected', 'retired'] as const)(
+		'writes nothing in the reserve batch for a bundle whose object version is %s',
+		async (change) => {
+			const { measured, incarnation } = await storedBundle(
+				'reserve-batch-refused'
+			);
+			await armUnreferencedCasObjects();
+			await casObjectVersionChanges[change](measured.digest);
+			let outcome: unknown;
+
+			const batches = await batchCosts(async () => {
+				outcome = await runInDurableObject(currentServer(), (instance) =>
+					instance.reserveAttestationReference(
+						{
+							cache: defaultCache(),
+							storePathHash: storePathHashSchema.parse('a'.repeat(32)),
+							generation: narInfoGenerationSchema.parse(0),
+							predicateType: predicateTypeSchema.parse(
+								'https://slsa.dev/provenance/v1'
+							),
+							digest: measured.digest
+						},
+						measured.size,
+						incarnation
+					)
+				);
+			});
+
+			expect({
+				outcome,
+				reservations: batchesWith(
+					batches,
+					'insert into attestation_ref_storage'
+				)
+			}).toStrictEqual({
+				outcome: 'object-changed',
+				reservations: [
+					[
+						{ statement: 'select', written: 0 },
+						{ statement: 'update tenant_usage', written: 0 },
+						{ statement: 'insert into attestation_ref_storage', written: 0 },
+						{ statement: 'insert into tenant_cas_blob', written: 0 },
+						{ statement: 'update cas_object', written: 0 },
+						{ statement: 'select', written: 0 }
+					]
 				]
 			});
 		}
