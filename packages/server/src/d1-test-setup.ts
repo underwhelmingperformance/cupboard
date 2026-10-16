@@ -1,3 +1,6 @@
+import { configureLogging } from '@cupboard/logger';
+import { cloudflareSink } from '@cupboard/logger/sinks';
+import { stopLogging } from '@cupboard/logger/testing';
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, vi } from 'vitest';
@@ -23,6 +26,7 @@ await applyControlD1TestMigrations();
 // Fresh Durable Objects do not isolate D1 between tests. Add new shared tables
 // to resetD1TestState as the schema grows.
 beforeEach(async () => {
+	configureLogging({ sink: cloudflareSink() });
 	vi.useFakeTimers({ toFake: ['Date'] });
 	vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 
@@ -44,12 +48,20 @@ afterEach(async () => {
 	// forwarding then races the pool's teardown. Quieten them first.
 	// Use one registry snapshot for alarm cleanup and the stalled-pass audit. A
 	// server selected earlier in the test must remain visible to both phases.
-	const stalled = await finishTestServerLifecycle();
-	const first = stalled[0];
+	try {
+		const stalled = await finishTestServerLifecycle();
+		const first = stalled[0];
 
-	vi.useRealTimers();
+		if (first !== undefined) {
+			throw new StalledMaintenancePassError(first.pass, first.waitMs);
+		}
+	} finally {
+		vi.useRealTimers();
 
-	if (first !== undefined) {
-		throw new StalledMaintenancePassError(first.pass, first.waitMs);
+		// Deleting an alarm that is already due does not cancel its delivery,
+		// and an alarm can log after its test ends. Drop records until the next
+		// test configures logging, so such an alarm cannot write to the console
+		// during teardown.
+		stopLogging();
 	}
 });

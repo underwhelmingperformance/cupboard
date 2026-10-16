@@ -66,3 +66,11 @@ export function startCapture(): Capture {
 		}
 	};
 }
+
+/**
+ * Removes the LogTape configuration. Records are dropped until something
+ * configures logging again.
+ */
+export function stopLogging(): void {
+	resetSync();
+}
