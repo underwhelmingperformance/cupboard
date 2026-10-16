@@ -3340,17 +3340,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async promoteAttestationBundle(
 		stagingKey: R2ObjectKey,
 		bundle: MeasuredAttestationBundle
-	): Promise<void> {
+	): Promise<number> {
 		await this.initialise();
 		return this.attestationCas.promoteMeasuredBundle(stagingKey, bundle);
 	}
 
 	async reserveAttestationReference(
 		reference: AttestationReference,
-		size: number
+		size: number,
+		incarnation: number
 	): Promise<AttestationReferenceOutcome> {
 		await this.initialise();
-		return this.attestationCas.reserveReferenceAndCharge(reference, size);
+		return this.attestationCas.reserveReferenceAndCharge(
+			reference,
+			size,
+			incarnation
+		);
 	}
 
 	async removeAttestationReference(

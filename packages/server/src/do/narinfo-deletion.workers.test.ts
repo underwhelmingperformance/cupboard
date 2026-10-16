@@ -302,7 +302,7 @@ describe('narinfo deletion queue', () => {
 					};
 					try {
 						if (operation === 'reserve') {
-							await service.reserveReferenceAndCharge(reference, 1);
+							await service.reserveReferenceAndCharge(reference, 1, 1);
 						} else if (operation === 'remove') {
 							await service.removeCapturedReference(reference);
 						} else {

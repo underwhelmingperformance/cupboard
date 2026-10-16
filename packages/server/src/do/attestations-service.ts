@@ -73,6 +73,7 @@ import {
 	AttestationUploadExpiredError,
 	AttestationUploadNotFoundError,
 	InvalidPushIdError,
+	ObjectIncarnationReservationContendedError,
 	QuotaExceededError,
 	SharedFactsUnavailableError,
 	SubrequestSliceExceededError,
@@ -143,11 +144,13 @@ interface ValidatedAttestationBundle {
 	readonly predicateType: PredicateType;
 	readonly size: number;
 }
-interface PreparedAttestationBundle {
+type PreparedAttestationBundle = {
 	readonly cache: ResolvedCache;
 	readonly validated: ValidatedAttestationBundle;
-	readonly isPromoted: boolean;
-}
+} & (
+	| { readonly isPromoted: false }
+	| { readonly isPromoted: true; readonly incarnation: number }
+);
 
 interface PendingAttestationUpload {
 	readonly cache: ResolvedCache;
@@ -348,7 +351,10 @@ export class AttestationsService {
 			throw new QuotaExceededError(tenant);
 		}
 
-		await this.attestationCas.promoteMeasuredBundle(pending.r2Key, measured);
+		const incarnation = await this.attestationCas.promoteMeasuredBundle(
+			pending.r2Key,
+			measured
+		);
 
 		const reference: AttestationReference = {
 			cache: cache.scope,
@@ -359,12 +365,18 @@ export class AttestationsService {
 		};
 		const outcome = await this.attestationCas.reserveReferenceAndCharge(
 			reference,
-			measured.size
+			measured.size,
+			incarnation
 		);
 
 		if (outcome === 'over-quota') {
 			await this.clearPendingUploadAndStaging(pending);
 			throw new QuotaExceededError(tenant);
+		}
+
+		// The staged bundle remains, so a retry promotes it again.
+		if (outcome === 'object-changed') {
+			throw new ObjectIncarnationReservationContendedError();
 		}
 
 		await this.materialiseList(
@@ -1306,7 +1318,7 @@ export class AttestationsService {
 				incarnation
 			))
 		) {
-			return { cache, validated: known, isPromoted: true };
+			return { cache, validated: known, isPromoted: true, incarnation };
 		}
 		return undefined;
 	}
@@ -1338,9 +1350,11 @@ export class AttestationsService {
 			return { cache, validated, isPromoted: false };
 		}
 		await this.checkBundleCharge(pending.digest, measured.size);
-		await this.attestationCas.promoteMeasuredBundle(pending.r2Key, measured, {
-			restoreMissingObject: true
-		});
+		const incarnation = await this.attestationCas.promoteMeasuredBundle(
+			pending.r2Key,
+			measured,
+			{ restoreMissingObject: true }
+		);
 		const subjectRows = jsonRowList(parsed.subjects);
 		this.context.db.transaction((transaction) => {
 			transaction
@@ -1364,7 +1378,7 @@ export class AttestationsService {
 				.where(eq(schema.pendingAttestations.id, uploadId))
 				.run();
 		});
-		return { cache, validated, isPromoted: true };
+		return { cache, validated, isPromoted: true, incarnation };
 	}
 
 	private async prepareBundle(
@@ -1497,10 +1511,14 @@ export class AttestationsService {
 				predicateType: bundle.validated.predicateType,
 				digest: result.digest
 			},
-			bundle.validated.size
+			bundle.validated.size,
+			bundle.incarnation
 		);
 		if (outcome === 'over-quota') {
 			throw new QuotaExceededError(this.context.requireTenant());
+		}
+		if (outcome === 'object-changed') {
+			throw new ObjectIncarnationReservationContendedError();
 		}
 		await this.materialiseList(cache, storePathHash, row.generation);
 		return {
@@ -1992,7 +2010,11 @@ export class AttestationsService {
 					) {
 						throw new AttestationInheritanceSourceChangedError(row.digest);
 					}
-					if (object == undefined || source.size === null) {
+					if (
+						object == undefined ||
+						source.size === null ||
+						source.incarnation === null
+					) {
 						logger.warn('attestation inheritance source missing', {
 							cache: cache.scope,
 							storePathHash,
@@ -2001,7 +2023,7 @@ export class AttestationsService {
 						return 'unavailable' as const;
 					}
 
-					return this.attestationCas.reserveReferenceAndCharge(
+					const reserved = await this.attestationCas.reserveReferenceAndCharge(
 						{
 							cache: cache.scope,
 							storePathHash,
@@ -2009,8 +2031,13 @@ export class AttestationsService {
 							predicateType: source.predicateType,
 							digest: source.digest
 						},
-						source.size
+						source.size,
+						source.incarnation
 					);
+					if (reserved === 'object-changed') {
+						throw new AttestationInheritanceSourceChangedError(row.digest);
+					}
+					return reserved;
 				});
 
 				switch (outcome) {

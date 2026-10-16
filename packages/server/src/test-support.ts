@@ -160,6 +160,7 @@ import {
 } from './do/attestations-service.ts';
 import {
 	fencedBlobStateDeletion,
+	fencedCasObjectDeletion,
 	type ObjectReaperPhase
 } from './do/blob-reaper-service.ts';
 import { CacheRegistrationService } from './do/cache-registration-service.ts';
@@ -2049,6 +2050,64 @@ export const narObjectVersionChanges = {
 	}
 };
 
+async function casObjectIncarnation(digest: Sha256HexDigest): Promise<number> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ incarnation: d1Schema.casObject.incarnation })
+		.from(d1Schema.casObject)
+		.where(eq(d1Schema.casObject.digest, digest))
+		.get();
+
+	if (row === undefined) {
+		throw new TypeError(`No cas_object row exists for ${digest}`);
+	}
+
+	return row.incarnation;
+}
+
+/**
+ * Each function changes a bundle's current object version in the same way as
+ * another writer can between an attach's promotion and its reserve batch.
+ */
+export const casObjectVersionChanges = {
+	// The reaper collects the unreferenced object.
+	collected: async (digest: Sha256HexDigest): Promise<void> => {
+		const elapsed = isoTimestamp(new Date(Date.now() - 1));
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.update(d1Schema.casObject)
+			.set({ deleteAfter: elapsed })
+			.where(eq(d1Schema.casObject.digest, digest));
+		await runCasReaperToCompletion(rootLogger(), env);
+	},
+	// The demote scan finds the object missing and deletes its row.
+	demoted: async (digest: Sha256HexDigest): Promise<void> => {
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const incarnation = await casObjectIncarnation(digest);
+		const { retire, remove } = fencedCasObjectDeletion(
+			database,
+			jsonRowList([{ digest, incarnation }])
+		);
+
+		await database.batch([retire, remove]);
+	},
+	// A promotion wrote the object row after collection had set the registry
+	// state to `absent` and queued the object for deletion.
+	retired: async (digest: Sha256HexDigest): Promise<void> => {
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const incarnation = await casObjectIncarnation(digest);
+
+		await database
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'absent' })
+			.where(
+				and(
+					eq(d1Schema.objectIncarnation.kind, 'cas'),
+					eq(d1Schema.objectIncarnation.objectId, digest)
+				)
+			);
+		await queueObjectDeletion(database, 'cas', digest, incarnation);
+	}
+};
+
 /**
  * Whether the cron has stamped a tenant as maintained, for asserting which tenants a
  * pass picked up: the maintenance pass orders active tenants by `last_maintained_at`
@@ -2326,10 +2385,9 @@ export async function fileAttestationReference(options: {
 	const measured = await testServerFor(
 		options.tenant ?? fixtureTenant
 	).measureAttestationBundle(stagingKey);
-	await testServerFor(options.tenant ?? fixtureTenant).promoteAttestationBundle(
-		stagingKey,
-		measured
-	);
+	const incarnation = await testServerFor(
+		options.tenant ?? fixtureTenant
+	).promoteAttestationBundle(stagingKey, measured);
 
 	await testServerFor(
 		options.tenant ?? fixtureTenant
@@ -2343,7 +2401,8 @@ export async function fileAttestationReference(options: {
 			),
 			digest: measured.digest
 		},
-		measured.size
+		measured.size,
+		incarnation
 	);
 
 	return { ...measured, stagingKey };

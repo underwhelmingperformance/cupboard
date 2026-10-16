@@ -3,6 +3,7 @@ import {
 	cacheGenerationSchema,
 	narInfoGenerationSchema,
 	predicateTypeSchema,
+	sha256HexDigestSchema,
 	signingKeyIdSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -60,11 +61,13 @@ import {
 	bootstrap,
 	cacheWriteGrants,
 	casObjectRows,
+	casObjectVersionChanges,
 	currentCasObjectKey,
 	currentOrigin,
 	currentServer,
 	defaultCache,
 	hexBytes,
+	interleaveBeforeInsert,
 	issueServerSignedToken,
 	namedCache,
 	narBytes,
@@ -934,6 +937,83 @@ describe('tenant contract round trip', () => {
 				expiresAt: z.string().parse(reused.bundles[0]?.expiresAt)
 			}
 		]);
+	});
+
+	it('refuses a grouped attach with 503 when the bundle is collected before its reserve batch', async () => {
+		await useTestServer('contract-bundle-collected');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		const nar = await verifiableNar('contract-bundle-collected');
+		const metadata = uploadMetadata({
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPath(init.token, metadata, defaultCache(), nar);
+		const bundle = bundleForSubjects([
+			{
+				name: StorePath.basename(metadata.storePath),
+				digest: narDigestHex(nar.narHash)
+			}
+		]);
+		const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
+		const negotiated =
+			await client.attestations.negotiateBundles.inDefaultCache({
+				pushId: testPushId,
+				bundles: [{ digest }]
+			});
+		const decision = attestationBundleDecisionSchema.parse(
+			negotiated.bundles[0]
+		);
+		if (decision.action !== 'upload') {
+			throw new Error('Expected a new bundle upload');
+		}
+		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
+		const page = {
+			id: decision.uploadId,
+			storePathHashes: [metadata.storePathHash]
+		};
+		const interleaving = interleaveBeforeInsert('attestation_ref_storage', () =>
+			casObjectVersionChanges.collected(digest)
+		);
+
+		let refusal: unknown;
+
+		try {
+			[refusal] = await safe(
+				client.attestations.attachPaths.inDefaultCache(page)
+			);
+		} finally {
+			interleaving.restore();
+		}
+
+		const retried = await client.attestations.attachPaths.inDefaultCache(page);
+
+		expect({
+			hasInterleaved: interleaving.hasInterleaved(),
+			refusal:
+				refusal instanceof ORPCError
+					? { status: refusal.status, code: z.string().parse(refusal.code) }
+					: refusal,
+			paths: retried.paths,
+			current: await currentCasObjectKey(digest)
+		}).toStrictEqual({
+			hasInterleaved: true,
+			refusal: {
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				code: 'SERVICE_UNAVAILABLE'
+			},
+			paths: [
+				{
+					storePathHash: metadata.storePathHash,
+					digest,
+					predicateType: 'https://slsa.dev/provenance/v1',
+					status: 'attached'
+				}
+			],
+			current: casObjectKey(digest, 3)
+		});
 	});
 
 	it.each(['default', 'default-private', 'public', 'private'] as const)(

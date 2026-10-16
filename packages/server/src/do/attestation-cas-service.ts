@@ -10,6 +10,7 @@ import {
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, exists, isNotNull, ne, notExists, sql } from 'drizzle-orm';
+import { z } from 'zod';
 
 import {
 	activateObjectIncarnation,
@@ -17,6 +18,7 @@ import {
 	lateWriteTombstoneHorizonMs,
 	promotableStateIncarnation,
 	queueObjectDeletion,
+	referenceableObjectVersion,
 	registeredLiveObjectIncarnation,
 	reserveObjectIncarnation
 } from '../blob/object-incarnation.ts';
@@ -54,7 +56,11 @@ export interface AttestationReference {
 }
 
 export type AttestationReferenceOutcome =
-	'referenced' | 'already-present' | 'over-quota';
+	'referenced' | 'already-present' | 'over-quota' | 'object-changed';
+
+const reservedReferenceRowsSchema = z.array(
+	z.object({ digest: sha256HexDigestSchema })
+);
 
 export class AttestationCasService {
 	constructor(private readonly context: ServerContext) {}
@@ -320,11 +326,15 @@ export class AttestationCasService {
 		return isObjectIncarnationLive(this.context.d1, 'cas', digest, claimed);
 	}
 
+	/**
+	 * Stores the bundle as a live CAS object and returns its incarnation.
+	 * Callers pass this incarnation to `reserveReferenceAndCharge`.
+	 */
 	async promoteMeasuredBundle(
 		_stagingKey: R2ObjectKey,
 		bundle: MeasuredAttestationBundle,
 		options?: { readonly restoreMissingObject: true }
-	): Promise<void> {
+	): Promise<number> {
 		const claimed = await this.claimLiveIncarnation(bundle.digest);
 		const reserved =
 			claimed === undefined
@@ -383,7 +393,7 @@ export class AttestationCasService {
 				incarnation
 			)
 		) {
-			return;
+			return incarnation;
 		}
 
 		await queueObjectDeletion(
@@ -399,7 +409,8 @@ export class AttestationCasService {
 
 	async reserveReferenceAndCharge(
 		reference: AttestationReference,
-		size: number
+		size: number,
+		incarnation: number
 	): Promise<AttestationReferenceOutcome> {
 		await new PathReadAuthorityService(this.context).requireWritable();
 
@@ -439,19 +450,27 @@ export class AttestationCasService {
 				.from(d1Schema.tenant)
 				.where(chargeableTenantFilter)
 		);
+		const objectReferenceable = referenceableObjectVersion(this.context.d1, {
+			kind: 'cas',
+			digest: reference.digest,
+			incarnation
+		});
 		const chargeFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			presenceMissing,
-			tenantChargeable
+			tenantChargeable,
+			objectReferenceable
 		);
 
 		const graceClearFilter = and(
 			eq(d1Schema.casObject.digest, reference.digest),
+			eq(d1Schema.casObject.incarnation, incarnation),
 			isNotNull(d1Schema.casObject.deleteAfter),
-			tenantChargeable
+			tenantChargeable,
+			objectReferenceable
 		);
 
-		const [gateRows] = await this.context.d1.batch([
+		const results = await this.context.d1.batch([
 			this.context.d1
 				.select({
 					status: d1Schema.tenant.status,
@@ -501,7 +520,7 @@ export class AttestationCasService {
 							).as('readable')
 						})
 						.from(d1Schema.tenant)
-						.where(chargeableTenantFilter)
+						.where(and(chargeableTenantFilter, objectReferenceable))
 				)
 				.onConflictDoNothing(),
 			this.context.d1
@@ -514,15 +533,24 @@ export class AttestationCasService {
 							size: sql<number>`${size}`.as('size')
 						})
 						.from(d1Schema.tenant)
-						.where(chargeableTenantFilter)
+						.where(and(chargeableTenantFilter, objectReferenceable))
 				)
 				.onConflictDoNothing(),
 			this.context.d1
 				.update(d1Schema.casObject)
 				.set({ deleteAfter: sql`null` })
-				.where(graceClearFilter)
+				.where(graceClearFilter),
+			// A refused reservation writes nothing, and neither does a replay. The
+			// reference exists after a reservation or a replay and is missing
+			// after a refusal, so this read comes last and tells them apart.
+			this.context.d1
+				.select({ digest: d1Schema.attestationReference.digest })
+				.from(d1Schema.attestationReference)
+				.where(this.edgeFilter(tenant, reference))
 		]);
 
+		const [gateRows] = results;
+		const referenceRows = reservedReferenceRowsSchema.parse(results.at(-1));
 		const gate = gateRows[0];
 		if (gate?.status !== 'active') {
 			throw new TenantWritesStoppedError(tenant, gate?.status);
@@ -531,7 +559,7 @@ export class AttestationCasService {
 			throw new TenantUsageMissingError(tenant);
 		}
 
-		return 'referenced';
+		return referenceRows.length > 0 ? 'referenced' : 'object-changed';
 	}
 
 	// `usage` is required. Without the row there is no quota to compare against,

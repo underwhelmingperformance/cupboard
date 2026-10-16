@@ -140,7 +140,10 @@ describe('attestation CAS lifecycle', () => {
 				textEncoder.encode('bundle')
 			);
 			const measured = await currentServer().measureAttestationBundle(staging);
-			await currentServer().promoteAttestationBundle(staging, measured);
+			const incarnation = await currentServer().promoteAttestationBundle(
+				staging,
+				measured
+			);
 			const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 			const objects = await casObjectRows();
 			let expectedUsage = await tenantUsageRow();
@@ -178,7 +181,8 @@ describe('attestation CAS lifecycle', () => {
 								predicateType,
 								digest: measured.digest
 							},
-							measured.size
+							measured.size,
+							incarnation
 						)
 					).rejects.toThrow(
 						change === 'missing-usage'
@@ -584,7 +588,10 @@ describe('attestation CAS lifecycle', () => {
 		const bytes = textEncoder.encode('too large');
 		const stagingKey = await stageAttestationBundle('over-quota', bytes);
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
-		await currentServer().promoteAttestationBundle(stagingKey, measured);
+		const incarnation = await currentServer().promoteAttestationBundle(
+			stagingKey,
+			measured
+		);
 
 		const result = await currentServer().reserveAttestationReference(
 			{
@@ -594,7 +601,8 @@ describe('attestation CAS lifecycle', () => {
 				predicateType,
 				digest: measured.digest
 			},
-			measured.size
+			measured.size,
+			incarnation
 		);
 
 		expect({
