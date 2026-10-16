@@ -7216,22 +7216,25 @@ build traces available from a cupboard cache.
       records now coalesce native captures and support atomic transfer of sealed
       output to shared staging under a current retained-source computation
       claim. Transfer preserves the physical key and rejects stale producer and
-      cleanup owners. Shared execution now adopts sealed output before requiring
-      local output memory or rereading the NAR. Promotion verifies the stored
-      digest, and transient failures preserve the transferred stage for retry.
-      Shared and provisional stages now use the same physical collector. Cron
-      dispatches independent finite cleanup waves, and strict queue hints
-      acquire fresh cleanup ownership before aborting multipart uploads or
-      deleting provisional bytes. Failed deletion persists a retry deadline, and
-      late writes remain until their cleanup horizon. Producer integration,
-      followed by automatic activation, remains pending. Native reads, streamed
-      writes and metadata multipart operations now share one invocation's R2
-      admission. Optional operations recheck subrequest capacity after queueing,
-      and cancellation releases queued reservations without starting new writes.
-      Optional D1 operations check cancellation and unreserved subrequest
-      capacity before issuing I/O. Metadata-enabled verification reserves and
-      accounts for native verdict retries, then releases unused reservations
-      after recording or when the pass ends. The owned producer remains pending.
+      cleanup owners. Provisional retirement also checks the captured multipart
+      allocation, so cancellation of a rejected allocation cannot retire an
+      accepted upload under the same native lease. Shared execution now adopts
+      sealed output before requiring local output memory or rereading the NAR.
+      Promotion verifies the stored digest, and transient failures preserve the
+      transferred stage for retry. Shared and provisional stages now use the
+      same physical collector. Cron dispatches independent finite cleanup waves,
+      and strict queue hints acquire fresh cleanup ownership before aborting
+      multipart uploads or deleting provisional bytes. Failed deletion persists
+      a retry deadline, and late writes remain until their cleanup horizon.
+      Producer integration, followed by automatic activation, remains pending.
+      Native reads, streamed writes and metadata multipart operations now share
+      one invocation's R2 admission. Optional operations recheck subrequest
+      capacity after queueing, and cancellation releases queued reservations
+      without starting new writes. Optional D1 operations check cancellation and
+      unreserved subrequest capacity before issuing I/O. Metadata-enabled
+      verification reserves and accounts for native verdict retries, then
+      releases unused reservations after recording or when the pass ends. The
+      owned producer remains pending.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now

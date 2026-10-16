@@ -154,6 +154,57 @@ async function seedUnrelatedStages(
 }
 
 describe('provisional forward listing ownership', () => {
+	it('retires a captured reservation without a multipart allocation and preserves its cleanup horizon', async () => {
+		const { provisional, stage, source } = await provisionalFixture();
+		const value = await stage();
+		expect({
+			retired: await provisional.retire(value.lease, now, undefined),
+			repeated: await provisional.retire(value.lease, later, undefined),
+			canWrite: await provisional.canWrite(value.lease, later),
+			reservation: await provisional.reserve(source, later),
+			cleanup: await provisional.due(now),
+			expired: await provisional.due(value.lease.cleanupAfter)
+		}).toStrictEqual({
+			retired: true,
+			repeated: true,
+			canWrite: false,
+			reservation: { kind: 'unavailable' },
+			cleanup: { stages: [], hasMore: false },
+			expired: { stages: [value.lease.id], hasMore: false }
+		});
+	});
+	it.each([undefined, 'rejected-multipart'])(
+		'does not retire an accepted allocation when cancellation captured %s',
+		async (multipartId) => {
+			const { provisional, stage, source } = await provisionalFixture();
+			const value = await stage();
+			await provisional.registerMultipart(
+				value.lease,
+				'accepted-multipart',
+				now
+			);
+			const isRejected = await provisional.registerMultipart(
+				value.lease,
+				'rejected-multipart',
+				now
+			);
+			expect({
+				rejected: isRejected,
+				retired: await provisional.retire(value.lease, now, multipartId),
+				canWrite: await provisional.canWrite(value.lease, now),
+				reservation: await provisional.reserve(source, now)
+			}).toStrictEqual({
+				rejected: false,
+				retired: false,
+				canWrite: true,
+				reservation: {
+					kind: 'writing',
+					lease: value.lease,
+					multipartId: 'accepted-multipart'
+				}
+			});
+		}
+	);
 	it('persists the native source and replays a fixed reservation without creating authority', async () => {
 		const { provisional, source, database } = await provisionalFixture();
 		const first = forward(await provisional.reserve(source, now));
@@ -302,7 +353,7 @@ describe('provisional forward listing ownership', () => {
 		const { provisional, stage, source } = await provisionalFixture();
 		const first = await stage();
 		await provisional.registerMultipart(first.lease, 'multipart-one', now);
-		await provisional.retire(first.lease, now);
+		await provisional.retire(first.lease, now, 'multipart-one');
 		const second = forward(
 			await provisional.reserve({ ...source, owner: otherOwner }, now)
 		);
@@ -313,7 +364,7 @@ describe('provisional forward listing ownership', () => {
 			measurement,
 			now
 		);
-		await provisional.retire(second.lease, now);
+		await provisional.retire(second.lease, now, 'multipart-two');
 		expect({
 			first: await provisional.claimCleanup(first.lease.id, owner, now),
 			second: await provisional.claimCleanup(second.lease.id, owner, now)
@@ -331,7 +382,7 @@ describe('provisional forward listing ownership', () => {
 	it('rejects stale cleanup acknowledgements after lease replacement', async () => {
 		const { provisional, sealed } = await provisionalFixture();
 		const value = await sealed();
-		await provisional.retire(value.lease, now);
+		await provisional.retire(value.lease, now, 'multipart-one');
 		const first = await provisional.claimCleanup(value.lease.id, owner, now);
 		if (first === undefined) {
 			throw new Error('Expected cleanup');
@@ -374,7 +425,11 @@ describe('provisional forward listing ownership', () => {
 			expect({
 				adopted,
 				replay: await provisional.adopt(computation, later),
-				oldRetire: await provisional.retire(value.lease, later),
+				oldRetire: await provisional.retire(
+					value.lease,
+					later,
+					'multipart-one'
+				),
 				oldRegister: await provisional.registerMultipart(
 					value.lease,
 					'multipart-one',
@@ -529,7 +584,7 @@ describe('provisional forward listing ownership', () => {
 	it('persists cleanup retry progress and rejects the preceding cleanup generation', async () => {
 		const { provisional, sealed } = await provisionalFixture();
 		const value = await sealed();
-		await provisional.retire(value.lease, now);
+		await provisional.retire(value.lease, now, 'multipart-one');
 		const first = await provisional.claimCleanup(value.lease.id, owner, now);
 		if (first === undefined) {
 			throw new Error('Expected cleanup');
@@ -593,7 +648,7 @@ describe('provisional forward listing ownership', () => {
 			const value = forward(reservation);
 			await provisional.registerMultipart(value.lease, 'multipart', now);
 			await provisional.recordSeal(value.lease, 'multipart', measurement, now);
-			await provisional.retire(value.lease, now);
+			await provisional.retire(value.lease, now, 'multipart');
 			ids.push(value.lease.id);
 		}
 		await seedUnrelatedStages(database);
@@ -751,7 +806,7 @@ describe('provisional forward listing ownership', () => {
 		const { database, provisional, sealed, claim } = await provisionalFixture();
 		const value = await sealed();
 		const computation = await claim();
-		await provisional.retire(value.lease, now);
+		await provisional.retire(value.lease, now, 'multipart-one');
 		const cleanup = await provisional.claimCleanup(value.lease.id, owner, now);
 		if (cleanup === undefined) {
 			throw new Error('Expected cleanup');

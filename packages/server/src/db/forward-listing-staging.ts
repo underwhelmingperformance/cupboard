@@ -422,9 +422,13 @@ export class ForwardListingStageStore {
 	}
 	async retire(
 		input: ForwardListingStageLease,
-		now: IsoTimestamp
+		now: IsoTimestamp,
+		inputMultipartId: string | undefined
 	): Promise<boolean> {
 		const lease = forwardListingStageLeaseSchema.parse(input);
+		const multipartId = artifactMultipartIdSchema
+			.optional()
+			.parse(inputMultipartId);
 		return this.execute(async () => {
 			const cleanup = sql<IsoTimestamp>`CASE WHEN ${table.state}='retired' THEN ${table.cleanupAfter} WHEN ${table.writesSealed}=1 THEN ${now} ELSE max(${table.cleanupAfter},${now}) END`;
 			const rows = await this.database
@@ -434,7 +438,15 @@ export class ForwardListingStageStore {
 					cleanupAfter: cleanup,
 					nextCleanupAt: sql`CASE WHEN ${table.state}='retired' THEN ${table.nextCleanupAt} ELSE ${cleanup} END`
 				})
-				.where(and(this.captured(lease), eq(table.cleanupGeneration, 0)))
+				.where(
+					and(
+						this.captured(lease),
+						eq(table.cleanupGeneration, 0),
+						multipartId === undefined
+							? isNull(table.multipartId)
+							: eq(table.multipartId, multipartId)
+					)
+				)
 				.returning({ id: table.id });
 			return rows.length === 1;
 		});

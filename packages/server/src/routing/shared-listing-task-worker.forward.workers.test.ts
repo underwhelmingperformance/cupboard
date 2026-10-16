@@ -88,7 +88,7 @@ async function fixture(
 			}
 		},
 		abandon: async () => {
-			await provisional.retire(lease, now);
+			await provisional.retire(lease, now, upload.uploadId);
 		}
 	});
 	async function capture() {
@@ -187,7 +187,11 @@ describe('global execution of forward listings', () => {
 						.from(schema.artifactReference),
 					tenantPresence: await database.select().from(schema.tenantCasBlob),
 					oldOwnerCanWrite: await provisional.canWrite(lease, now),
-					oldOwnerCanRetire: await provisional.retire(lease, now)
+					oldOwnerCanRetire: await provisional.retire(
+						lease,
+						now,
+						value.upload.uploadId
+					)
 				}).toStrictEqual({
 					kind: 'recorded',
 					outcome: 'generated',
@@ -324,7 +328,7 @@ describe('global execution of forward listings', () => {
 				await value.capture();
 			}
 			if (state === 'retired') {
-				await value.provisional.retire(value.lease, now);
+				await value.provisional.retire(value.lease, now, value.upload.uploadId);
 			}
 			const at =
 				state === 'expired'
