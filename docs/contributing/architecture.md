@@ -270,6 +270,16 @@ renewal loop stops, so a heartbeat cannot reject the claim that a successful
 checkpoint has just released. Source, CAS and ownership checks still fence the
 checkpoint itself.
 
+Backfill and optional verification capture share a streaming listing parser and
+measured multipart output. Fresh verification can receive a provisional metadata
+sink for either an ordinary decode or a fused canonical write. The Worker fixes
+the capture buffer and timeout limits, and isolates setup errors. Deferred
+sealing does not delay the NAR verdict. Sealing may precede Durable Object
+approval or finish after the claim is released, so a sealed listing cannot grant
+cache authority. The sink requests both multipart abort and owner cleanup on
+failure, including after multipart completion. Automatic forward capture remains
+disabled until durable ownership and handoff are integrated.
+
 Preparation reuses retained facts before claiming computation or reading NAR
 bytes. Existing facts and sealed output can make progress with no free output
 buffer; new generation defers before allocating staging or reading a NAR.

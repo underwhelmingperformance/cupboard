@@ -1,20 +1,14 @@
-import { NarListingWriter } from '@cupboard/nix-store/nar-listing';
 import {
-	currentListingGeneratorRevision,
 	type ListingGeneratorRevision,
-	maxArtifactBytes,
-	type NarListingFact,
-	narListingFactSchema
+	type NarListingFact
 } from '@cupboard/protocol/artifacts';
 
 import type { R2ObjectKey } from '../http/http.ts';
 
-import {
-	ArtifactMultipartWriter,
-	type ArtifactOutputBuffer
-} from './artifact-multipart-writer.ts';
+import { type ArtifactOutputBuffer } from './artifact-multipart-writer.ts';
 import type { ByteBufferPool } from './byte-buffers.ts';
 import type { R2ObjectStore } from './connection-limited-bucket.ts';
+import { NarListingOutput } from './nar-listing-output.ts';
 import type { NarReadBufferPool } from './nar-read-buffers.ts';
 import {
 	type ExpectedNar,
@@ -48,20 +42,15 @@ export class StoredNarListingGenerator {
 	constructor(private readonly options: StoredNarListingOptions) {}
 
 	async run(): Promise<NarListingGeneration> {
-		const encoder = new TextEncoder();
-		const maximumBytes =
-			this.options.maximumOutputBytes ?? maxArtifactBytes.listing;
-		const output = new ArtifactMultipartWriter(this.options.upload, {
-			kind: 'listing',
-			maximumBytes,
-			pool: this.options.outputBuffers,
-			buffer: this.options.outputBuffer,
+		const output = new NarListingOutput({
+			upload: this.options.upload,
+			narHash: this.options.expected.narHash,
+			generatorRevision: this.options.generatorRevision,
+			maximumOutputBytes: this.options.maximumOutputBytes,
+			outputBuffers: this.options.outputBuffers,
+			outputBuffer: this.options.outputBuffer,
 			signal: this.options.signal,
 			assertCurrent: this.options.assertCurrent
-		});
-		const listing = new NarListingWriter({
-			write: (json) => output.write(encoder.encode(json)),
-			maxOutputBytes: maximumBytes
 		});
 		let isComplete = false;
 		try {
@@ -74,21 +63,13 @@ export class StoredNarListingGenerator {
 					buffers: this.options.buffers,
 					signal: this.options.signal,
 					progress: this.options.progress,
-					decoded: (chunk) => listing.write(chunk)
+					decoded: (chunk) => output.write(chunk)
 				}
 			);
 			if (!verification.ok) {
 				return { kind: 'mismatch', verification };
 			}
-			await listing.end();
-			const measurement = await output.finish();
-			const fact = narListingFactSchema.parse({
-				narHash: this.options.expected.narHash,
-				generatorRevision:
-					this.options.generatorRevision ?? currentListingGeneratorRevision,
-				format: 1,
-				...measurement
-			});
+			const fact = await output.finish();
 			isComplete = true;
 			return { kind: 'generated', fact };
 		} finally {

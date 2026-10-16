@@ -7208,7 +7208,12 @@ build traces available from a cupboard cache.
 - [ ] Generate `.ls` during forward verification with bounded buffering and
       incremental JSON output. An optional listing failure leaves the NAR valid.
       Record the format version, generator revision, input NAR hash and output
-      digest for every listing.
+      digest for every listing. Backfill and optional verification capture now
+      share the streaming parser and measured multipart output. Fresh-upload
+      verification accepts a provisional sink for both ordinary and fused
+      canonical writes. Capture setup failures preserve NAR publication, and
+      slow sealing does not delay the native verdict. Durable stage ownership,
+      authoritative handoff and automatic producer activation remain pending.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now

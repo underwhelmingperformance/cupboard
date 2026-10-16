@@ -6,8 +6,9 @@ import { SubrequestTimeoutError } from '../errors.ts';
 
 /**
  * Receives uncompressed bytes during verification. Writes may create staging
- * objects; only `finish` may publish metadata, after the NAR is accepted.
- * Operations must respect cancellation and fence any late publication.
+ * objects. `finish` follows byte verification and may precede the Durable
+ * Object verdict. Operations must respect cancellation and fence any late
+ * publication.
  */
 export interface NarMetadataSink {
 	write(chunk: Uint8Array, signal: AbortSignal): Promise<void>;

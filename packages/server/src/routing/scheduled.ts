@@ -27,6 +27,7 @@ import {
 	ConnectionLimitedBucket,
 	type R2ObjectStore
 } from '../blob/connection-limited-bucket.ts';
+import { type NarMetadataCapture } from '../blob/nar-metadata.ts';
 import { type NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import {
 	type DeclaredNarVerification,
@@ -1220,6 +1221,9 @@ interface FreshVerificationPass {
 	readonly reserveCanonicalWrite: CanonicalWriteReserver;
 	readonly recorder: VerdictRecorder;
 	readonly signal: AbortSignal;
+	readonly metadataFor: (
+		claim: PendingVerification
+	) => NarMetadataCapture | undefined;
 }
 
 /**
@@ -1244,6 +1248,7 @@ async function verifyFreshBytes(
 ): Promise<FreshVerification> {
 	const { blobs, buffers, signal } = pass;
 	const expected = { narHash: claim.narHash, narSize: claim.narSize };
+	const metadata = pass.metadataFor(claim);
 
 	if (reservation?.kind !== 'reserved' || claim.blob === undefined) {
 		canonicalPut?.release();
@@ -1253,6 +1258,7 @@ async function verifyFreshBytes(
 				buffers,
 				firstGet,
 				signal,
+				metadata,
 				progress
 			})
 		};
@@ -1268,7 +1274,7 @@ async function verifyFreshBytes(
 			fileHash: claim.blob.fileHash,
 			fileSize: claim.blob.fileSize
 		},
-		{ buffers, firstGet, canonicalPut, signal, progress }
+		{ buffers, firstGet, canonicalPut, signal, progress, metadata }
 	);
 
 	return {
@@ -1420,6 +1426,43 @@ async function verifyFreshClaim(
 	}
 }
 
+export interface VerificationMetadataSource {
+	readonly tenant: TenantId;
+	readonly owner: string;
+	readonly claim: PendingVerification;
+}
+
+export interface VerifyTenantOptions {
+	/**
+	 * Creates provisional metadata capture. Completion may precede the Durable
+	 * Object verdict or follow claim release, so it cannot grant cache authority.
+	 */
+	readonly metadataFor?: (
+		source: VerificationMetadataSource
+	) => Pick<NarMetadataCapture, 'sink' | 'defer'> | undefined;
+}
+
+function verificationMetadata(
+	logger: Logger,
+	options: VerifyTenantOptions,
+	source: VerificationMetadataSource
+): NarMetadataCapture | undefined {
+	try {
+		const capture = options.metadataFor?.(source);
+		if (capture === undefined) {
+			return undefined;
+		}
+		return { sink: capture.sink, defer: capture.defer };
+	} catch (error) {
+		logger.warn('verification metadata setup failed', {
+			uploadId: source.claim.uploadId,
+			narHash: source.claim.narHash,
+			error
+		});
+		return undefined;
+	}
+}
+
 // Claim a bounded batch, then fetch and decode staging objects in the queue
 // consumer so CPU-bound NAR verification does not occupy the Durable Object.
 // The Durable Object applies each verdict only while this pass owns the claim.
@@ -1431,7 +1474,8 @@ export async function verifyTenant(
 	id: TenantId,
 	batchSize: number = verifyClaimBatchSize,
 	maxNarBytes: number = verifyClaimMaxNarBytes,
-	budgetMs: number = verificationConsumerBudgetMs
+	budgetMs: number = verificationConsumerBudgetMs,
+	options: VerifyTenantOptions = {}
 ): Promise<void> {
 	const deadline = new VerificationPassDeadline(budgetMs);
 
@@ -1584,7 +1628,9 @@ export async function verifyTenant(
 					buffers,
 					reserveCanonicalWrite,
 					recorder,
-					signal
+					signal,
+					metadataFor: (claim) =>
+						verificationMetadata(logger, options, { tenant: id, owner, claim })
 				};
 
 				try {
