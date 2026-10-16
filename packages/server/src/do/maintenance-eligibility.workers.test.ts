@@ -26,7 +26,8 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	currentServer,
 	resetTestServer,
-	resolvedCache
+	resolvedCache,
+	waitUntilReached
 } from '../test-support.ts';
 
 import type { ServerContext } from './context.ts';
@@ -37,10 +38,16 @@ import {
 
 const now = new Date('2026-01-01T00:00:00.000Z');
 
+const previousReconciliation = isoTimestampSchema.parse(
+	'2025-12-01T00:00:00.000Z'
+);
+
 const wakeImmediately = isoTimestamp(new Date(0));
 
+const passInProgress = isoTimestamp(new Date(-1));
+
 class MaintenanceProjectionTestError extends Error {
-	constructor(public readonly operation: 'delete' | 'insert') {
+	constructor(public readonly operation: 'mark') {
 		super(`projection ${operation} failed`);
 	}
 }
@@ -198,58 +205,258 @@ describe('maintenance eligibility projection', () => {
 		}
 	);
 
-	it('can invalidate an idle projection before deferred work is created', async () => {
-		const projectionWriteFailure = new MaintenanceProjectionTestError('insert');
+	// The pass stops after its body and before its trailing reconciliation, as
+	// it does when the isolate is evicted.
+	it.each([
+		{ row: 'absent', stored: 'absent', expected: undefined },
+		{
+			row: 'idle',
+			stored: undefined,
+			expected: {
+				nextWakeAt: passInProgress,
+				reconciledAt: previousReconciliation
+			}
+		},
+		{
+			row: 'future',
+			stored: isoTimestampSchema.parse('2026-02-01T00:00:00.000Z'),
+			expected: {
+				nextWakeAt: passInProgress,
+				reconciledAt: previousReconciliation
+			}
+		},
+		{
+			row: 'due',
+			stored: wakeImmediately,
+			expected: {
+				nextWakeAt: wakeImmediately,
+				reconciledAt: previousReconciliation
+			}
+		}
+	] as const)(
+		'leaves a $row tenant due when a fresh pass stops before reconciling',
+		async ({ stored, expected }) => {
+			await (stored === 'absent'
+				? deleteEligibility()
+				: seedEligibility(stored, previousReconciliation));
 
-		await runInDurableObject(currentServer(), async (instance) => {
-			const maintenanceEligibility = new MaintenanceEligibilityService(
-				instance.context
-			);
-			await maintenanceEligibility.reconcile(now);
-			const result = await withMaintenanceEligibility(
-				maintenanceEligibility,
-				async () => {
-					try {
-						await maintenanceEligibility.reconcile();
-					} catch {
-						// Eligibility is an admission hint; failed reconciliation fails open.
+			await runInDurableObject(currentServer(), (instance) =>
+				withMaintenanceEligibility(
+					new MaintenanceEligibilityService(instance.context),
+					() => Promise.resolve(),
+					'fresh',
+					() => {
+						queueNarInfoDeletion(instance.context);
+
+						return Promise.resolve();
 					}
-				},
-				() => {
-					instance.context.db
-						.insert(schema.pendingUploads)
-						.values(
-							pendingUpload(
-								instance.context,
-								'verify-after-failed-refresh',
-								isoTimestamp(now),
-								'pending'
-							)
-						)
-						.run();
-					Object.defineProperty(instance.context, 'd1', {
-						value: {
-							insert() {
-								throw projectionWriteFailure;
-							}
-						},
-						configurable: true
-					});
-
-					return Promise.resolve('mutated');
-				}
+				)
 			);
 
-			expect(result).toBe('mutated');
-		});
+			expect(await eligibilityRow()).toStrictEqual(
+				expected === undefined
+					? undefined
+					: { tenant: fixtureTenant, ...expected }
+			);
+		}
+	);
 
-		expect(await eligibilityRow()).toBeUndefined();
+	// Each case lets another writer reconcile while a fresh pass runs, and then
+	// stops the pass before its own reconciliation. The other writer would
+	// publish an idle or later wake for a tenant that now has due work.
+	it.each([
+		{
+			writer: 'another fresh pass',
+			stored: isoTimestampSchema.parse('2026-02-01T00:00:00.000Z'),
+			expected: passInProgress,
+			interfere: (service: MaintenanceEligibilityService) =>
+				withMaintenanceEligibility(
+					service,
+					(change) => service.reconcile(now, change),
+					'fresh',
+					() => Promise.resolve()
+				)
+		},
+		{
+			writer: 'a mutation',
+			stored: wakeImmediately,
+			expected: wakeImmediately,
+			interfere: (service: MaintenanceEligibilityService) =>
+				service.reconcile(now)
+		}
+	])(
+		'keeps the tenant due when $writer reconciles during a fresh pass',
+		async ({ stored, expected, interfere }) => {
+			await seedEligibility(stored, previousReconciliation);
+
+			await runInDurableObject(currentServer(), (instance) => {
+				const service = new MaintenanceEligibilityService(instance.context);
+
+				return withMaintenanceEligibility(
+					service,
+					() => Promise.resolve(),
+					'fresh',
+					async () => {
+						await interfere(service);
+						queueNarInfoDeletion(instance.context);
+					}
+				);
+			});
+
+			expect(await eligibilityRow()).toStrictEqual({
+				tenant: fixtureTenant,
+				nextWakeAt: expected,
+				reconciledAt: previousReconciliation
+			});
+		}
+	);
+
+	it('marks the row only after a reconciliation in flight has finished', async () => {
+		const events = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const service = new MaintenanceEligibilityService(instance.context);
+				const realD1 = instance.context.d1;
+				const recorded: string[] = [];
+				const held = Promise.withResolvers<undefined>();
+				const publishing = Promise.withResolvers<undefined>();
+				Object.defineProperty(instance.context, 'd1', {
+					configurable: true,
+					value: {
+						insert: () => ({
+							values: () => ({
+								onConflictDoUpdate: () => ({
+									run: async () => {
+										recorded.push('publish');
+										publishing.resolve(undefined);
+										await held.promise;
+										recorded.push('published');
+									}
+								})
+							})
+						}),
+						update: (table: Parameters<typeof realD1.update>[0]) => {
+							recorded.push('mark');
+
+							return realD1.update(table);
+						}
+					}
+				});
+
+				const reconciliation = service.reconcile(now);
+				await waitUntilReached(
+					publishing.promise,
+					reconciliation,
+					"the reconciliation's D1 write"
+				);
+				const pass = withMaintenanceEligibility(
+					service,
+					() => Promise.resolve(),
+					'fresh',
+					() => {
+						recorded.push('body');
+
+						return Promise.resolve();
+					}
+				);
+				setTimeout(() => {
+					held.resolve(undefined);
+				}, 0);
+				await Promise.all([reconciliation, pass]);
+
+				return recorded;
+			}
+		);
+
+		expect(events).toStrictEqual(['publish', 'published', 'mark', 'body']);
 	});
 
-	it('does not run a mutation when eligibility cannot be invalidated', async () => {
-		const projectionDeleteFailure = new MaintenanceProjectionTestError(
-			'delete'
+	// The pass's final write, an idle wake, is delayed until the mutation has
+	// queued its work and started its own reconciliation. That reconciliation
+	// waits for the delayed write and then publishes the due wake.
+	it("keeps the tenant due when a mutation reconciles during a pass's final publication", async () => {
+		await seedEligibility(
+			isoTimestampSchema.parse('2026-02-01T00:00:00.000Z'),
+			previousReconciliation
 		);
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			const service = new MaintenanceEligibilityService(instance.context);
+			const realD1 = instance.context.d1;
+			type Table = typeof d1Schema.tenantMaintenanceEligibility;
+			type Insert = ReturnType<typeof realD1.insert<Table>>;
+			type Values = Parameters<Insert['values']>[0];
+			type Conflict = Parameters<
+				ReturnType<Insert['values']>['onConflictDoUpdate']
+			>[0];
+			const publishing = Promise.withResolvers<undefined>();
+			const release = Promise.withResolvers<undefined>();
+			let isHeld = false;
+			Object.defineProperty(instance.context, 'd1', {
+				configurable: true,
+				value: {
+					update: realD1.update.bind(realD1),
+					insert: (insertTable: Table) => {
+						const insert = realD1.insert(insertTable);
+
+						if (isHeld) {
+							return insert;
+						}
+
+						isHeld = true;
+
+						return {
+							values: (values: Values) => ({
+								onConflictDoUpdate: (conflict: Conflict) => ({
+									run: async () => {
+										publishing.resolve(undefined);
+										await release.promise;
+
+										return insert
+											.values(values)
+											.onConflictDoUpdate(conflict)
+											.run();
+									}
+								})
+							})
+						};
+					}
+				}
+			});
+
+			const pass = withMaintenanceEligibility(
+				service,
+				(change) => service.reconcile(now, change),
+				'fresh',
+				() => Promise.resolve()
+			);
+			await waitUntilReached(
+				publishing.promise,
+				pass,
+				"the pass's final D1 write"
+			);
+
+			queueNarInfoDeletion(instance.context);
+			const mutation = service.reconcile(new Date(now.getTime() + 1000));
+			await Promise.race([
+				mutation,
+				new Promise((resolve) => {
+					setTimeout(resolve, 50);
+				})
+			]);
+			release.resolve(undefined);
+			await Promise.all([pass, mutation]);
+		});
+
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: wakeImmediately,
+			reconciledAt: '2026-01-01T00:00:01.000Z'
+		});
+	});
+
+	it('does not run a pass when its mark cannot be written', async () => {
+		const projectionMarkFailure = new MaintenanceProjectionTestError('mark');
 
 		const outcome = await runInDurableObject(
 			currentServer(),
@@ -259,8 +466,8 @@ describe('maintenance eligibility projection', () => {
 				);
 				Object.defineProperty(instance.context, 'd1', {
 					value: {
-						delete() {
-							throw projectionDeleteFailure;
+						update() {
+							throw projectionMarkFailure;
 						}
 					},
 					configurable: true
@@ -273,6 +480,7 @@ describe('maintenance eligibility projection', () => {
 						async () => {
 							await maintenanceEligibility.reconcile();
 						},
+						'fresh',
 						() => {
 							instance.context.db
 								.insert(schema.pendingUploads)
@@ -308,7 +516,7 @@ describe('maintenance eligibility projection', () => {
 		);
 
 		expect(outcome).toStrictEqual({
-			error: { operation: 'delete' },
+			error: { operation: 'mark' },
 			pendingUploads: []
 		});
 	});
@@ -647,6 +855,35 @@ describe('maintenance wake conflict resolution', () => {
 			reconciledAt: expected.reconciledAt
 		});
 	});
+
+	it.each([
+		{
+			name: 'keeps the in-progress mark against a newer reconcile',
+			stored: earlier,
+			change: 'any',
+			expected: { nextWakeAt: passInProgress, reconciledAt: earlier }
+		},
+		{
+			name: 'replaces the in-progress mark at the end of a pass at the same instant',
+			stored: later,
+			change: 'pass',
+			expected: { nextWakeAt: undefined, reconciledAt: later }
+		}
+	] as const)('$name', async ({ stored, change, expected }) => {
+		await seedEligibility(passInProgress, stored);
+
+		await runInDurableObject(currentServer(), (instance) =>
+			new MaintenanceEligibilityService(instance.context).reconcile(
+				new Date(later),
+				change
+			)
+		);
+
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			...expected
+		});
+	});
 });
 
 async function seedEligibility(
@@ -663,6 +900,31 @@ async function seedEligibility(
 		.onConflictDoUpdate({
 			target: d1Schema.tenantMaintenanceEligibility.tenant,
 			set: { nextWakeAt: nextWakeAt ?? sql`null`, reconciledAt }
+		})
+		.run();
+}
+
+async function deleteEligibility(): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.delete(d1Schema.tenantMaintenanceEligibility)
+		.where(
+			eq(
+				d1Schema.tenantMaintenanceEligibility.tenant,
+				tenantIdSchema.parse(fixtureTenant)
+			)
+		)
+		.run();
+}
+
+function queueNarInfoDeletion(context: ServerContext): void {
+	context.db
+		.insert(schema.narInfoDeletions)
+		.values({
+			cacheId: resolvedCache(context).id,
+			storePathHash: storePathHashSchema.parse('a'.repeat(32)),
+			narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
+			generation: narInfoGenerationSchema.parse(0),
+			createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		})
 		.run();
 }

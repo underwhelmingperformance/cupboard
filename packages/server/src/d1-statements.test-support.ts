@@ -1,5 +1,7 @@
 import { vi } from 'vitest';
 
+import { currentOperationCost } from './do/operation-cost.ts';
+
 export interface D1StatementLog {
 	/**
 	 * Returns the SQL of a statement, or `undefined` for a statement prepared
@@ -138,4 +140,70 @@ export async function batchCosts(
 	}
 
 	return batches;
+}
+
+export interface TableWrite {
+	/**
+	 * The label of the cost scope that ran the statement.
+	 */
+	readonly scope: string | undefined;
+	readonly statement: string;
+	readonly written: number;
+}
+
+/**
+ * Runs `body` and returns, in order, every statement on `table` that ran
+ * through `run`, with the number of rows that D1 reports it wrote.
+ *
+ * The test pool freezes `Date`, so every statement would otherwise see the
+ * same instant. In production the clock moves on across each D1 call, so
+ * here it advances by one millisecond for every statement prepared on
+ * `database`.
+ */
+export async function recordTableWrites(
+	database: D1Database,
+	table: string,
+	body: () => Promise<unknown>
+): Promise<TableWrite[]> {
+	const prepare = database.prepare.bind(database);
+	const writes: TableWrite[] = [];
+	const recordRun = (
+		statement: D1PreparedStatement,
+		query: string
+	): D1PreparedStatement => {
+		const run = statement.run.bind(statement);
+		const bind = statement.bind.bind(statement);
+		statement.run = async <T>() => {
+			const result = await run<T>();
+
+			if (query.includes(`"${table}"`)) {
+				writes.push({
+					scope: currentOperationCost()?.label,
+					statement: describeStatement(query),
+					written: result.meta.rows_written
+				});
+			}
+
+			return result;
+		};
+		statement.bind = (...values: unknown[]) =>
+			recordRun(bind(...values), query);
+
+		return statement;
+	};
+	const prepareSpy = vi
+		.spyOn(database, 'prepare')
+		.mockImplementation((query) => {
+			vi.setSystemTime(Date.now() + 1);
+
+			return recordRun(prepare(query), query);
+		});
+
+	try {
+		await body();
+	} finally {
+		prepareSpy.mockRestore();
+	}
+
+	return writes;
 }

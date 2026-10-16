@@ -186,12 +186,13 @@ export function narInfoRetirementSubrequests(paths: number): number {
 }
 
 // The maximum number of attestation references that one invocation can retire
-// after paying the fixed cost for the path.
+// after paying the fixed cost for the path. Both the cron and the alarm run
+// garbage collection, so the bound includes the leading call of a fresh pass.
 function maxSinglePathAttestationRetirements(
 	subrequestAllowance: number
 ): number {
 	return Math.floor(
-		(maintenancePassSubrequests(subrequestAllowance) -
+		(maintenancePassSubrequests(subrequestAllowance, 'fresh') -
 			attestationQuerySubrequestsPerChunk -
 			narInfoRetirementSubrequests(1)) /
 			attestationRetirementSubrequests

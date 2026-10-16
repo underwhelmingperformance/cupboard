@@ -173,6 +173,8 @@ import { NarInfoObjectsService } from './do/narinfo-objects-service.ts';
 import { withRowBudget } from './do/row-budget.ts';
 import type { CupboardServer } from './do/server.ts';
 import { withSubrequestSlice } from './do/subrequest-slice.ts';
+import type { UploadStateService } from './do/upload-state-service.ts';
+import type { VerificationService } from './do/verification-service.ts';
 import {
 	attestationListObjectKey,
 	attestationStagingObjectKey,
@@ -664,6 +666,86 @@ export function garbageCollectionOf(
 	return (
 		instance as unknown as { garbageCollection: GarbageCollectionService }
 	).garbageCollection;
+}
+
+/**
+Returns the Durable Object's own verification service, which is a private
+field of `CupboardServer`.
+*/
+export function verificationOf(instance: CupboardServer): VerificationService {
+	return (instance as unknown as { verification: VerificationService })
+		.verification;
+}
+
+/**
+Returns the Durable Object's own upload-state service, which is a private field
+of `CupboardServer`. The verification service uses the same instance.
+*/
+export function uploadStateOf(instance: CupboardServer): UploadStateService {
+	return (instance as unknown as { uploadState: UploadStateService })
+		.uploadState;
+}
+
+// Leave most of Vitest's default 30-second case timeout for the test's own
+// checks and the shared after-test audit.
+const fixtureWaitDeadlineMs = 10_000;
+
+/**
+ * Identifies a fixture wait that reached its deadline.
+ */
+export class FixtureWaitTimeoutError extends Error {
+	constructor(
+		public readonly awaited: string,
+		public readonly deadlineMs: number
+	) {
+		super(
+			`The fixture waited ${String(deadlineMs)} ms for ${awaited} without reaching it.`
+		);
+		this.name = 'FixtureWaitTimeoutError';
+	}
+}
+
+/**
+ * Identifies a fixture wait whose operation finished first, so the awaited
+ * point can no longer be reached.
+ */
+export class FixtureOperationSettledError extends Error {
+	constructor(
+		public readonly awaited: string,
+		options?: ErrorOptions
+	) {
+		super(`The operation finished before it reached ${awaited}.`, options);
+		this.name = 'FixtureOperationSettledError';
+	}
+}
+
+/**
+ * Waits until `reached` resolves while `operation` runs. Rejects with
+ * {@link FixtureOperationSettledError} if `operation` finishes or fails first, and with
+ * {@link FixtureWaitTimeoutError} after {@link fixtureWaitDeadlineMs}.
+ */
+export function waitUntilReached(
+	reached: Promise<unknown>,
+	operation: Promise<unknown>,
+	awaited: string
+): Promise<void> {
+	const settledFirst = async (): Promise<never> => {
+		try {
+			await operation;
+		} catch (error) {
+			throw new FixtureOperationSettledError(awaited, { cause: error });
+		}
+
+		throw new FixtureOperationSettledError(awaited);
+	};
+
+	return withDeadline(
+		async () => {
+			await Promise.race([reached, settledFirst()]);
+		},
+		fixtureWaitDeadlineMs,
+		() => new FixtureWaitTimeoutError(awaited, fixtureWaitDeadlineMs)
+	);
 }
 
 /**

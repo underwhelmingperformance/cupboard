@@ -564,7 +564,8 @@ export const tenantMaintenanceEligibility = sqliteTable(
 	{
 		tenant: text('tenant').$type<TenantId>().primaryKey(),
 		// The tenant's next wake time: a fixed past sentinel when work is due now, the
-		// soonest deferred deadline otherwise, or null when the tenant is idle.
+		// soonest deferred deadline otherwise, or null when the tenant is idle. A
+		// fresh maintenance pass writes an earlier fixed instant while it runs.
 		nextWakeAt: text('next_wake_at').$type<IsoTimestamp>(),
 		// This records when eligibility was recomputed, but it is not monotonic.
 		// Conflict resolution can retain an older timestamp when that row has an

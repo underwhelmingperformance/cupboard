@@ -1043,9 +1043,12 @@ describe('scheduled tenant pass failure records', () => {
 		// that is due now. Seed the same value so the cron selects these rows with
 		// its `lte` query.
 		const wakeImmediately = isoTimestamp(new Date(0));
+		// A fresh maintenance pass writes this earlier instant while it runs.
+		const passInProgress = isoTimestamp(new Date(-1));
 
 		await provisionNamedTenant('delete');
 		await provisionNamedTenant('idle');
+		await provisionNamedTenant('pass');
 		await provisionNamedTenant('root');
 		await provisionNamedTenant('upload');
 		await provisionNamedTenant('verify');
@@ -1055,6 +1058,10 @@ describe('scheduled tenant pass failure records', () => {
 			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await writeEligibility('idle', {
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
+		});
+		await writeEligibility('pass', {
+			nextWakeAt: passInProgress,
 			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await writeEligibility('root', {
@@ -1079,7 +1086,7 @@ describe('scheduled tenant pass failure records', () => {
 			})
 		);
 
-		expect(seen).toStrictEqual(['delete', 'root', 'upload', 'verify']);
+		expect(seen).toStrictEqual(['delete', 'pass', 'root', 'upload', 'verify']);
 	});
 
 	it('records maintenance failures durably while maintaining later tenants', async () => {
