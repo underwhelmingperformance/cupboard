@@ -40,7 +40,8 @@ import {
 	uploadMetadata,
 	verifiableNar,
 	verifiablePath,
-	verifyCurrentTenant
+	verifyCurrentTenant,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
@@ -1197,85 +1198,90 @@ describe('batched verify fault isolation', () => {
 		}
 	});
 
-	it('bounds a stalled promotion by the verdict RPC budget', async () => {
-		const token = await initialise();
-		const upload = await deferUpload(
-			token,
-			'promotion-deadline',
-			'a'.repeat(32)
-		);
-		const claim = await currentServer().claimVerificationBatch(
-			1,
-			Number.MAX_SAFE_INTEGER
-		);
-		const result = await runInDurableObject(
-			currentServer(),
-			async (instance) => {
-				vi.useFakeTimers();
+	// While the promotion is held, the RPC is still applying the verdict, and a
+	// verdict drain that an alarm runs in that time cannot claim it. The drain
+	// then resolves nothing and reports a stall, which fails the shared
+	// teardown. Keep alarms from being armed so no drain runs during the test.
+	it('bounds a stalled promotion by the verdict RPC budget', async () =>
+		withoutAlarmArming(async () => {
+			const token = await initialise();
+			const upload = await deferUpload(
+				token,
+				'promotion-deadline',
+				'a'.repeat(32)
+			);
+			const claim = await currentServer().claimVerificationBatch(
+				1,
+				Number.MAX_SAFE_INTEGER
+			);
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					vi.useFakeTimers();
 
-				const canonicalKey = narObjectKey(upload.narHash, 2);
-				const originalPut = env.BLOBS.put.bind(env.BLOBS);
-				const promotionStarted = Promise.withResolvers<undefined>();
-				const releasePromotion = Promise.withResolvers<undefined>();
-				const pendingPromotions: Promise<R2Object>[] = [];
-				const put = vi
-					.spyOn(env.BLOBS, 'put')
-					.mockImplementation((key, value, options) => {
-						if (key === canonicalKey) {
-							const promotion = (async (): Promise<R2Object> => {
-								promotionStarted.resolve(undefined);
-								await releasePromotion.promise;
+					const canonicalKey = narObjectKey(upload.narHash, 2);
+					const originalPut = env.BLOBS.put.bind(env.BLOBS);
+					const promotionStarted = Promise.withResolvers<undefined>();
+					const releasePromotion = Promise.withResolvers<undefined>();
+					const pendingPromotions: Promise<R2Object>[] = [];
+					const put = vi
+						.spyOn(env.BLOBS, 'put')
+						.mockImplementation((key, value, options) => {
+							if (key === canonicalKey) {
+								const promotion = (async (): Promise<R2Object> => {
+									promotionStarted.resolve(undefined);
+									await releasePromotion.promise;
 
-								return originalPut(key, value, options);
-							})();
-							pendingPromotions.push(promotion);
+									return originalPut(key, value, options);
+								})();
+								pendingPromotions.push(promotion);
 
-							return promotion;
-						}
+								return promotion;
+							}
 
-						return originalPut(key, value, options);
-					});
+							return originalPut(key, value, options);
+						});
 
-				try {
-					const rpc = instance.recordVerificationsWithinBudget(
-						claim.owner,
-						[
-							{
-								uploadId: upload.uploadId,
-								verdict: {
-									kind: 'verified',
-									verification: {
-										ok: true,
-										fileHash: upload.fileHash,
-										fileSize: upload.fileSize
+					try {
+						const rpc = instance.recordVerificationsWithinBudget(
+							claim.owner,
+							[
+								{
+									uploadId: upload.uploadId,
+									verdict: {
+										kind: 'verified',
+										verification: {
+											ok: true,
+											fileHash: upload.fileHash,
+											fileSize: upload.fileSize
+										}
 									}
 								}
-							}
-						],
-						40
-					);
-					await promotionStarted.promise;
-					await vi.advanceTimersByTimeAsync(40);
-					const rpcResult = await rpc;
-					const row = instance.context.db
-						.select({ verdict: schema.pendingUploads.verdict })
-						.from(schema.pendingUploads)
-						.where(eq(schema.pendingUploads.id, upload.uploadId))
-						.get();
+							],
+							40
+						);
+						await promotionStarted.promise;
+						await vi.advanceTimersByTimeAsync(40);
+						const rpcResult = await rpc;
+						const row = instance.context.db
+							.select({ verdict: schema.pendingUploads.verdict })
+							.from(schema.pendingUploads)
+							.where(eq(schema.pendingUploads.id, upload.uploadId))
+							.get();
 
-					return {
-						kind: rpcResult.kind,
-						verdict: row?.verdict
-					};
-				} finally {
-					releasePromotion.resolve(undefined);
-					await Promise.allSettled(pendingPromotions);
-					put.mockRestore();
-					vi.useRealTimers();
+						return {
+							kind: rpcResult.kind,
+							verdict: row?.verdict
+						};
+					} finally {
+						releasePromotion.resolve(undefined);
+						await Promise.allSettled(pendingPromotions);
+						put.mockRestore();
+						vi.useRealTimers();
+					}
 				}
-			}
-		);
+			);
 
-		expect(result).toStrictEqual({ kind: 'timed-out', verdict: 'pending' });
-	});
+			expect(result).toStrictEqual({ kind: 'timed-out', verdict: 'pending' });
+		}));
 });
