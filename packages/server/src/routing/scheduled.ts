@@ -1037,6 +1037,11 @@ function migrateCacheCatalogue(env: Env, id: TenantId): Promise<void> {
 // one verification decode while the other waits for R2.
 const verifyDecodeConcurrency = 2;
 
+/**
+ * Capacity for concurrent canonical writes and a dependent source read.
+ */
+export const verificationRequiredConnections = verifyDecodeConcurrency + 1;
+
 // Retry briefly while claim leases are still valid, then fail the queue message
 // so it can be redelivered.
 const recordAttempts = 3;
@@ -1447,7 +1452,9 @@ export interface VerificationMetadataResources {
 
 export interface VerifyTenantOptions {
 	/**
-	 * Share admission when verification passes use the same invocation.
+	 * Share admission when verification passes use the same invocation. Keep a
+	 * foreground reservation across those passes so earlier deferred work cannot
+	 * consume the next pass's capacity.
 	 */
 	readonly admission?: R2RequestAdmission;
 	readonly defer?: NarMetadataCapture['defer'];
@@ -1668,6 +1675,9 @@ export async function verifyTenant(
 						)
 				};
 
+				const foreground = admission.reserveRequiredConnections(
+					Math.min(freshClaims.length, verifyDecodeConcurrency) + 1
+				);
 				try {
 					await mapWithConcurrency(
 						verifications,
@@ -1679,6 +1689,7 @@ export async function verifyTenant(
 						firstGet.release();
 						canonicalPut?.release();
 					}
+					foreground.release();
 				}
 
 				return recorder.finishRecording();

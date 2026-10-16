@@ -280,8 +280,16 @@ cache authority. The sink requests both multipart abort and owner cleanup on
 failure, including after multipart completion. The queue entrypoint supplies its
 `ExecutionContext.waitUntil` callback to metadata factories. Verification passes
 within a batch share R2 admission, including deferred work from earlier
-messages. Automatic forward capture remains disabled until provider activation
-and continuous forward enrolment are integrated.
+messages. A foreground reservation protects capacity for concurrent canonical
+writes and a dependent source read across the whole batch. Direct verification
+uses a nested reservation for its current decode concurrency. Nested
+reservations use the maximum demand. After foreground release, deferred reads
+regain idle capacity; late native writes still protect a source-read connection
+until their actual I/O finishes. Required eligible requests take priority, and
+cancelled queued requests release subrequest reservations without starting I/O.
+A caller timeout does not release connection or write admission before the
+binding finishes. Automatic forward capture remains disabled until provider
+activation and continuous forward enrolment are integrated.
 
 A separate D1 record ties each provisional forward stage to its native upload
 and verification owner. Reservation coalesces the same NAR and generator

@@ -7231,15 +7231,22 @@ build traces available from a cupboard cache.
       and cancellation registers or aborts its captured allocation without
       deleting completed objects. Queue routing supplies the actual invocation
       callback to metadata factories, and verification passes in a batch share
-      R2 admission while earlier deferred work continues. Automatic provider
-      selection, durable forward enrolment and activation remain pending. Native
-      reads, streamed writes and metadata multipart operations now share one
-      invocation's R2 admission. Optional operations recheck subrequest capacity
-      after queueing, and cancellation releases queued reservations without
-      starting new writes. Optional D1 operations check cancellation and
-      unreserved subrequest capacity before issuing I/O. Metadata-enabled
-      verification reserves and accounts for native verdict retries, then
-      releases unused reservations after recording or when the pass ends.
+      R2 admission while earlier deferred work continues. Foreground capacity
+      reservations protect concurrent canonical writes and a dependent source
+      read throughout the queue batch. Nested reservations use the maximum
+      demand, and deferred work regains idle capacity after release. Actual late
+      native writes continue to protect a source-read connection. Caller
+      timeouts retain physical admission until the underlying I/O finishes, and
+      cancelled queued calls release their reservations promptly. Automatic
+      provider selection, durable forward enrolment and activation remain
+      pending. Native reads, streamed writes and metadata multipart operations
+      now share one invocation's R2 admission. Optional operations recheck
+      subrequest capacity after queueing, and cancellation releases queued
+      reservations without starting new writes. Optional D1 operations check
+      cancellation and unreserved subrequest capacity before issuing I/O.
+      Metadata-enabled verification reserves and accounts for native verdict
+      retries, then releases unused reservations after recording or when the
+      pass ends.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now

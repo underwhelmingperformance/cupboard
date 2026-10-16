@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { boundedSubrequest } from '../do/deadline.ts';
+import { boundedSubrequest, withDeadlineBudget } from '../do/deadline.ts';
 import {
 	holdSubrequests,
 	spendSubrequests,
@@ -21,6 +21,277 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe('shared R2 request admission', () => {
+	it('preserves native progress when foreground demand exceeds a small pool', async () => {
+		const admission = new R2RequestAdmission(2);
+		const foreground = admission.reserveRequiredConnections(3);
+		const calls: string[] = [];
+		const optional = admission.read(
+			() => {
+				calls.push('optional');
+				return Promise.resolve();
+			},
+			{ priority: 'optional' }
+		);
+		await Promise.all([
+			admission.write(() => {
+				calls.push('native-write');
+				return Promise.resolve();
+			}),
+			admission.read(() => {
+				calls.push('native-read');
+				return Promise.resolve();
+			})
+		]);
+		const before = [...calls];
+		foreground.release();
+		await optional;
+		expect({ before, calls }).toStrictEqual({
+			before: ['native-write', 'native-read'],
+			calls: ['native-write', 'native-read', 'optional']
+		});
+	});
+
+	it("uses each queued caller's subrequest slice when another caller releases admission", async () => {
+		const admission = new R2RequestAdmission(2);
+		const gate = Promise.withResolvers<undefined>();
+		const first = withSubrequestSlice(
+			() =>
+				admission.write(async () => {
+					spendSubrequests(1);
+					await gate.promise;
+					return subrequestsAvailable();
+				}),
+			{ subrequests: 10, reserve: 0 }
+		);
+		const second = withSubrequestSlice(
+			() =>
+				admission.write(() => {
+					spendSubrequests(1);
+					return Promise.resolve(subrequestsAvailable());
+				}),
+			{ subrequests: 4, reserve: 0 }
+		);
+		gate.resolve(undefined);
+		const [firstRemaining, secondRemaining] = await Promise.all([
+			first,
+			second
+		]);
+		expect({ firstRemaining, secondRemaining }).toStrictEqual({
+			firstRemaining: 9,
+			secondRemaining: 3
+		});
+	});
+
+	it("checks the queued caller's expired deadline before starting its binding", async () => {
+		const admission = new R2RequestAdmission(2);
+		const gate = Promise.withResolvers<undefined>();
+		const calls: string[] = [];
+		vi.useFakeTimers();
+		const first = withDeadlineBudget(1000, () =>
+			admission.write(() => {
+				calls.push('first');
+				return gate.promise;
+			})
+		);
+		const second = withDeadlineBudget(1, () =>
+			admission.write(() =>
+				boundedSubrequest(() => {
+					calls.push('late');
+					return Promise.resolve();
+				}, 'queued-deadline')
+			)
+		);
+		const observed = Promise.allSettled([first, second]);
+		try {
+			await vi.advanceTimersByTimeAsync(2);
+			gate.resolve(undefined);
+			const outcomes = await observed;
+			const timeoutMatcher: unknown = expect.any(SubrequestTimeoutError);
+			expect({ calls, outcomes }).toStrictEqual({
+				calls: ['first'],
+				outcomes: [
+					{ status: 'fulfilled', value: undefined },
+					{ status: 'rejected', reason: timeoutMatcher }
+				]
+			});
+		} finally {
+			gate.resolve(undefined);
+			await observed;
+			vi.useRealTimers();
+		}
+	});
+
+	it('preserves streamed native writes and a source read while optional heads stall', async () => {
+		const admission = new R2RequestAdmission(6);
+		const foreground = admission.reserveRequiredConnections(3);
+		const optionalGate = Promise.withResolvers<undefined>();
+		const sourceReady = Promise.withResolvers<undefined>();
+		const calls: string[] = [];
+		let active = 0;
+		let peak = 0;
+		const optional = Array.from({ length: 6 }, (_, index) =>
+			admission.read(
+				async () => {
+					calls.push(`optional-${String(index)}`);
+					active++;
+					peak = Math.max(peak, active);
+					await optionalGate.promise;
+					active--;
+				},
+				{ priority: 'optional' }
+			)
+		);
+		const writes = Array.from({ length: 2 }, (_, index) =>
+			admission.write(async () => {
+				calls.push(`native-write-${String(index)}`);
+				active++;
+				peak = Math.max(peak, active);
+				await sourceReady.promise;
+				active--;
+			})
+		);
+		const read = admission.read(() => {
+			calls.push('native-read');
+			active++;
+			peak = Math.max(peak, active);
+			active--;
+			sourceReady.resolve(undefined);
+			return Promise.resolve();
+		});
+		await flushMicrotasks();
+		const before = [...calls];
+		foreground.release();
+		await flushMicrotasks();
+		const background = [...calls];
+		optionalGate.resolve(undefined);
+		sourceReady.resolve(undefined);
+		await Promise.all([...optional, ...writes, read]);
+		const native = ['native-write-0', 'native-write-1', 'native-read'];
+		expect({ before, background, active, peak }).toStrictEqual({
+			before: ['optional-0', 'optional-1', 'optional-2', ...native],
+			background: [
+				'optional-0',
+				'optional-1',
+				'optional-2',
+				...native,
+				'optional-3',
+				'optional-4',
+				'optional-5'
+			],
+			active: 0,
+			peak: 6
+		});
+	});
+
+	it('keeps a source-read connection for late native writes after foreground release', async () => {
+		const admission = new R2RequestAdmission(6);
+		const foreground = admission.reserveRequiredConnections(3);
+		const optionalGate = Promise.withResolvers<undefined>();
+		const nativeGate = Promise.withResolvers<undefined>();
+		const calls: string[] = [];
+		const optional = Array.from({ length: 6 }, (_, index) =>
+			admission.read(
+				async () => {
+					calls.push(`optional-${String(index)}`);
+					await optionalGate.promise;
+				},
+				{ priority: 'optional' }
+			)
+		);
+		const writes = Array.from({ length: 2 }, (_, index) =>
+			admission.write(() =>
+				boundedSubrequest(
+					async () => {
+						calls.push(`native-write-${String(index)}`);
+						await nativeGate.promise;
+					},
+					'r2.native-write',
+					10
+				)
+			)
+		);
+		const outcomes = await Promise.allSettled(writes);
+		const third = admission.write(() => {
+			calls.push('next-native-write');
+			return Promise.resolve();
+		});
+		const read = admission.read(() => {
+			calls.push('native-read');
+			return Promise.resolve();
+		});
+		await flushMicrotasks();
+		const before = [...calls];
+		foreground.release();
+		await flushMicrotasks();
+		const afterRelease = [...calls];
+		nativeGate.resolve(undefined);
+		await Promise.all([third, read]);
+		await flushMicrotasks();
+		const background = [...calls];
+		optionalGate.resolve(undefined);
+		await Promise.all(optional);
+		const expected = [
+			'optional-0',
+			'optional-1',
+			'optional-2',
+			'native-write-0',
+			'native-write-1',
+			'native-read'
+		];
+		const timeoutMatcher: unknown = expect.any(SubrequestTimeoutError);
+		expect({ outcomes, before, afterRelease, background }).toStrictEqual({
+			outcomes: Array.from({ length: 2 }, () => ({
+				status: 'rejected',
+				reason: timeoutMatcher
+			})),
+			before: expected,
+			afterRelease: expected,
+			background: [
+				...expected,
+				'next-native-write',
+				'optional-3',
+				'optional-4',
+				'optional-5'
+			]
+		});
+	});
+
+	it('uses the maximum nested reservation and restores idle background capacity once', async () => {
+		const admission = new R2RequestAdmission(6);
+		const outer = admission.reserveRequiredConnections(3);
+		const inner = admission.reserveRequiredConnections(2);
+		const gate = Promise.withResolvers<undefined>();
+		const calls: number[] = [];
+		const pending = Array.from({ length: 6 }, (_, index) =>
+			admission.read(
+				async () => {
+					calls.push(index);
+					await gate.promise;
+				},
+				{ priority: 'optional' }
+			)
+		);
+		await flushMicrotasks();
+		const nested = [...calls];
+		outer.release();
+		await flushMicrotasks();
+		const remaining = [...calls];
+		outer.release();
+		await flushMicrotasks();
+		const repeated = [...calls];
+		inner.release();
+		await flushMicrotasks();
+		const released = [...calls];
+		gate.resolve(undefined);
+		await Promise.all(pending);
+		expect({ nested, remaining, repeated, released }).toStrictEqual({
+			nested: [0, 1, 2],
+			remaining: [0, 1, 2, 3],
+			repeated: [0, 1, 2, 3],
+			released: [0, 1, 2, 3, 4, 5]
+		});
+	});
+
 	it.each([
 		{ kind: 'read', finish: 'resolve' },
 		{ kind: 'read', finish: 'reject' },
@@ -204,18 +475,26 @@ describe('shared R2 request admission', () => {
 						},
 						{ priority: 'optional', signal: controller.signal }
 					);
-					const observed = Promise.allSettled([pending]);
+					const outcomes: PromiseSettledResult<void>[] = [];
+					const observe = async () => {
+						outcomes.push(...(await Promise.allSettled([pending])));
+					};
+					const observed = observe();
 					await flushMicrotasks();
 					const queued = subrequestsAvailable();
 					controller.abort(reason);
 					const afterAbort = subrequestsAvailable();
+					await flushMicrotasks();
+					const cancelled = [...outcomes];
 					gate.resolve(undefined);
 					await Promise.all(active);
+					await observed;
 					return {
 						calls,
 						queued,
 						afterAbort,
-						outcomes: await observed,
+						cancelled,
+						outcomes,
 						remaining: subrequestsAvailable()
 					};
 				},
@@ -229,6 +508,9 @@ describe('shared R2 request admission', () => {
 				),
 				queued: 8 - count - 1,
 				afterAbort: 8 - count,
+				cancelled: [
+					{ status: 'rejected', reason: new Error('capture cancelled') }
+				],
 				outcomes: [
 					{ status: 'rejected', reason: new Error('capture cancelled') }
 				],

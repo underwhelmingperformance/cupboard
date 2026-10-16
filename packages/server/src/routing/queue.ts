@@ -17,6 +17,7 @@ import { listingAdoptionWorkHeaderSchema } from './listing-adoption-work-message
 import { ListingAdoptionWorkQueue } from './listing-adoption-work-queue.ts';
 import {
 	handleMaintenanceQueueMessage,
+	verificationRequiredConnections,
 	verifyTenant,
 	type VerifyTenantOptions
 } from './scheduled.ts';
@@ -38,10 +39,11 @@ export async function handleWorkerQueue(
 	verification: VerifyTenantOptions = {}
 ): Promise<void> {
 	const maintenanceEnv = boundedWorkerEnv(env);
+	const admission =
+		verification.admission ?? new R2RequestAdmission(maxOutgoingConnections);
 	const verificationOptions: VerifyTenantOptions = {
 		...verification,
-		admission:
-			verification.admission ?? new R2RequestAdmission(maxOutgoingConnections)
+		admission
 	};
 	const logger = rootLogger().with({ worker: 'scheduled', queue: batch.queue });
 	const artifacts = new ArtifactQueueConsumer({
@@ -73,56 +75,63 @@ export async function handleWorkerQueue(
 			env.ARTIFACT_QUEUE.send({ kind: 'listing-adoption-dispatch' }),
 		serverFor: (tenant) => tenantServer(env, tenant)
 	});
-	for (const message of batch.messages) {
-		if (listingAdoptionWorkHeaderSchema.safeParse(message.body).success) {
-			await adoptionWork.handleMessage(message);
-			continue;
-		}
-		if (listingAdoptionQueueHeaderSchema.safeParse(message.body).success) {
-			await adoption.handleMessage(message);
-			if (listingAdoptionQueueMessageSchema.safeParse(message.body).success) {
-				try {
-					await adoptionWork.start();
-				} catch (error) {
-					logger.warn(
-						'listing adoption work wake failed; cron recovery remains due',
-						{ messageId: message.id, error }
-					);
+	const foreground = admission.reserveRequiredConnections(
+		verificationRequiredConnections
+	);
+	try {
+		for (const message of batch.messages) {
+			if (listingAdoptionWorkHeaderSchema.safeParse(message.body).success) {
+				await adoptionWork.handleMessage(message);
+				continue;
+			}
+			if (listingAdoptionQueueHeaderSchema.safeParse(message.body).success) {
+				await adoption.handleMessage(message);
+				if (listingAdoptionQueueMessageSchema.safeParse(message.body).success) {
+					try {
+						await adoptionWork.start();
+					} catch (error) {
+						logger.warn(
+							'listing adoption work wake failed; cron recovery remains due',
+							{ messageId: message.id, error }
+						);
+					}
 				}
-			}
 
-			continue;
-		}
-		if (sharedListingQueueHeaderSchema.safeParse(message.body).success) {
-			await listings.handleMessage(message);
-			continue;
-		}
-		if (sharedListingCleanupHeaderSchema.safeParse(message.body).success) {
-			await sharedCleanup.handleMessage(message);
-			continue;
-		}
-		if (artifactQueueHeaderSchema.safeParse(message.body).success) {
-			await artifacts.handleMessage(message);
-			continue;
-		}
-		await handleMaintenanceQueueMessage(
-			logger,
-			maintenanceEnv,
-			buffers,
-			message,
-			{
-				verifyTenant: (passLogger, passEnv, tenant) =>
-					verifyTenant(
-						passLogger,
-						passEnv,
-						buffers,
-						tenant,
-						undefined,
-						undefined,
-						undefined,
-						verificationOptions
-					)
+				continue;
 			}
-		);
+			if (sharedListingQueueHeaderSchema.safeParse(message.body).success) {
+				await listings.handleMessage(message);
+				continue;
+			}
+			if (sharedListingCleanupHeaderSchema.safeParse(message.body).success) {
+				await sharedCleanup.handleMessage(message);
+				continue;
+			}
+			if (artifactQueueHeaderSchema.safeParse(message.body).success) {
+				await artifacts.handleMessage(message);
+				continue;
+			}
+			await handleMaintenanceQueueMessage(
+				logger,
+				maintenanceEnv,
+				buffers,
+				message,
+				{
+					verifyTenant: (passLogger, passEnv, tenant) =>
+						verifyTenant(
+							passLogger,
+							passEnv,
+							buffers,
+							tenant,
+							undefined,
+							undefined,
+							undefined,
+							verificationOptions
+						)
+				}
+			);
+		}
+	} finally {
+		foreground.release();
 	}
 }

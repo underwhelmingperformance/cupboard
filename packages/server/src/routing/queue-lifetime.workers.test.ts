@@ -43,6 +43,76 @@ describe('Worker queue invocation lifetime', () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
+	it('protects native streaming in later messages and releases batch capacity for deferred heads', async () => {
+		const gate = Promise.withResolvers<undefined>();
+		const actions: string[] = [];
+		const deferred: Promise<void>[] = [];
+		const passes: { readonly optional: number; readonly native: string[] }[] =
+			[];
+		let started = 0;
+		vi.spyOn(scheduled, 'verifyTenant').mockImplementation(
+			async (...arguments_) => {
+				const admission = arguments_[7]?.admission;
+				if (admission === undefined) {
+					throw new Error('Queue verification requires shared admission');
+				}
+				if (passes.length === 0) {
+					for (let index = 0; index < 6; index++) {
+						deferred.push(
+							admission.read(
+								async () => {
+									started++;
+									await gate.promise;
+								},
+								{ priority: 'optional' }
+							)
+						);
+					}
+				}
+				const source = Promise.withResolvers<undefined>();
+				const native: string[] = [];
+				const writes = Array.from({ length: 2 }, (_, index) =>
+					admission.write(async () => {
+						native.push(`write-${String(index)}`);
+						await source.promise;
+					})
+				);
+				const read = admission.read(() => {
+					native.push('read');
+					source.resolve(undefined);
+					return Promise.resolve();
+				});
+				await Promise.all([...writes, read]);
+				passes.push({ optional: started, native });
+			}
+		);
+		const handling = handleWorkerQueue(
+			batch(actions, 2),
+			{ ...tenantEnv, ...testControlEnv },
+			new NarReadBufferPool()
+		);
+		try {
+			await vi.waitFor(
+				() => {
+					expect(actions).toStrictEqual(['ack', 'ack']);
+				},
+				{ timeout: 5000 }
+			);
+			await handling;
+			expect({ passes, started, actions }).toStrictEqual({
+				passes: [
+					{ optional: 3, native: ['write-0', 'write-1', 'read'] },
+					{ optional: 3, native: ['write-0', 'write-1', 'read'] }
+				],
+				started: 6,
+				actions: ['ack', 'ack']
+			});
+		} finally {
+			gate.resolve(undefined);
+			await handling;
+			await Promise.all(deferred);
+		}
+	});
 	it('shares R2 admission across deferred work from separate verification passes', async () => {
 		const gate = Promise.withResolvers<undefined>();
 		const actions: string[] = [];
