@@ -18,7 +18,11 @@ import {
 	lateWriteTombstoneHorizonMs,
 	reserveObjectIncarnation
 } from '../blob/object-incarnation.ts';
-import { recordD1Statements } from '../d1-statements.test-support.ts';
+import {
+	batchCosts,
+	type BatchStatement,
+	recordD1Statements
+} from '../d1-statements.test-support.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
@@ -37,6 +41,7 @@ import {
 	expectStats,
 	fileAttestationReference,
 	initialise,
+	interleaveBeforeStatement,
 	narInfoGeneration,
 	offboardTenant,
 	provisionFixtureTenant,
@@ -488,12 +493,101 @@ describe('attestation CAS lifecycle', () => {
 		});
 	});
 
+	it("credits a tenant for a bundle when the tenant removes its last reference, without changing another tenant's charge", async () => {
+		await provisionNamedTenant('acme');
+		const bytes = textEncoder.encode('two tenants');
+		const removed = await fileAttestationReference({
+			uploadId: 'two-tenants-fixture',
+			bytes,
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+		const kept = await fileAttestationReference({
+			uploadId: 'two-tenants-acme',
+			bytes,
+			tenant: 'acme',
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+
+		await currentServer().removeAttestationReference({
+			cache: defaultCache(),
+			storePathHash,
+			generation: narInfoGenerationSchema.parse(0),
+			predicateType,
+			digest: removed.digest
+		});
+
+		const usage = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.select({
+				tenant: d1Schema.tenantUsage.tenant,
+				casBytes: d1Schema.tenantUsage.casBytes,
+				casBlobs: d1Schema.tenantUsage.casBlobs
+			})
+			.from(d1Schema.tenantUsage)
+			.orderBy(d1Schema.tenantUsage.tenant);
+		expect({
+			refs: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage
+		}).toStrictEqual({
+			refs: [
+				{
+					tenant: 'acme',
+					cache: defaultCache(),
+					storePathHash,
+					generation: 0,
+					predicateType,
+					digest: kept.digest
+				}
+			],
+			presence: [{ tenant: 'acme', digest: kept.digest, size: kept.size }],
+			usage: [
+				{ tenant: 'acme', casBytes: kept.size, casBlobs: 1 },
+				{ tenant: fixtureTenant, casBytes: 0, casBlobs: 0 }
+			]
+		});
+	});
+
 	it.each([
-		{ remaining: 'demoted references', demoted: 20, read: 1 },
-		{ remaining: 'no references', demoted: 0, read: 0 }
+		{
+			remaining: 'readable references',
+			own: 20,
+			readable: '1',
+			credit: { statement: 'update tenant_usage', read: 3, written: 0 },
+			presence: {
+				statement: 'delete from tenant_cas_blob',
+				read: 2,
+				written: 0
+			}
+		},
+		{
+			remaining: 'demoted references',
+			own: 20,
+			readable: '0',
+			credit: { statement: 'update tenant_usage', read: 3, written: 0 },
+			presence: {
+				statement: 'delete from tenant_cas_blob',
+				read: 2,
+				written: 0
+			}
+		},
+		{
+			remaining: 'no references',
+			own: 0,
+			readable: '1',
+			credit: { statement: 'update tenant_usage', read: 3, written: 1 },
+			presence: {
+				statement: 'delete from tenant_cas_blob',
+				read: 1,
+				written: 1
+			}
+		}
 	])(
 		"reads at most one of the tenant's references to a bundle when $remaining remain",
-		async ({ demoted, read }) => {
+		async ({ own, readable, credit, presence }) => {
 			await provisionNamedTenant('acme');
 			const bytes = textEncoder.encode('widely shared bundle');
 			const removed = await fileAttestationReference({
@@ -523,61 +617,67 @@ describe('attestation CAS lifecycle', () => {
 					.bind(count, tenant, path, predicateType, removed.digest, count)
 					.run();
 			await insertReferences('acme', storePathHash, 500, 'n % 2');
-			await insertReferences(fixtureTenant, 'e'.repeat(32), demoted, '0');
-			const stillReferenced =
-				'select "digest" from "attestation_ref_storage" where ("attestation_ref_storage"."tenant" = ? and "attestation_ref_storage"."digest" = ?)';
-			const statements: { query: string; values: unknown[] }[] = [];
-			const prepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
-			const spy = vi
-				.spyOn(env.CUPBOARD_DB, 'prepare')
-				.mockImplementation((query) => {
-					const statement = prepare(query);
-					if (!query.startsWith(stillReferenced)) {
-						return statement;
+			await insertReferences(fixtureTenant, 'e'.repeat(32), own, readable);
+			let creditStatement: BatchStatement | undefined;
+
+			const batches = await batchCosts(
+				env.CUPBOARD_DB,
+				() =>
+					currentServer().removeAttestationReference({
+						cache: defaultCache(),
+						storePathHash,
+						generation: narInfoGenerationSchema.parse(0),
+						predicateType,
+						digest: removed.digest
+					}),
+				{
+					reads: true,
+					beforeBatch: (statements) => {
+						creditStatement ??= statements.find(
+							({ label }) => label === 'update tenant_usage'
+						);
+
+						return Promise.resolve();
 					}
-					const bind = statement.bind.bind(statement);
-					statement.bind = (...values: unknown[]) => {
-						statements.push({ query, values });
-						return bind(...values);
-					};
-					return statement;
-				});
+				}
+			);
 
-			try {
-				await currentServer().removeAttestationReference({
-					cache: defaultCache(),
-					storePathHash,
-					generation: narInfoGenerationSchema.parse(0),
-					predicateType,
-					digest: removed.digest
-				});
-			} finally {
-				spy.mockRestore();
+			if (creditStatement === undefined) {
+				throw new Error('The removal did not send the credit.');
 			}
-
-			const [statement] = statements;
-			if (statement === undefined) {
-				throw new Error('The removal did not prepare the reference check.');
-			}
-			const measured = await env.CUPBOARD_DB.prepare(statement.query)
-				.bind(...statement.values)
-				.all();
 			const plan = await env.CUPBOARD_DB.prepare(
-				`EXPLAIN QUERY PLAN ${statement.query}`
+				`EXPLAIN QUERY PLAN ${creditStatement.sql}`
 			)
-				.bind(...statement.values)
+				.bind(...creditStatement.values)
 				.all();
 			expect({
-				statements: statements.length,
-				rows: measured.results,
-				read: measured.meta.rows_read,
+				batches,
 				plan: plan.results.map((row) => row.detail)
 			}).toStrictEqual({
-				statements: 1,
-				rows: Array.from({ length: read }, () => ({ digest: removed.digest })),
-				read,
+				batches: [
+					[
+						{
+							statement: 'delete from attestation_ref_storage',
+							written: 1,
+							read: 1
+						},
+						credit,
+						presence,
+						{
+							statement: 'delete from path_read_revocation',
+							written: 0,
+							read: 2
+						}
+					]
+				],
 				plan: [
-					'SEARCH attestation_ref_storage USING COVERING INDEX attestation_ref_digest_tenant_idx (digest=? AND tenant=?)'
+					'SEARCH tenant_usage USING INDEX sqlite_autoindex_tenant_usage_1 (tenant=?)',
+					'SCALAR SUBQUERY 2',
+					'SEARCH tenant_cas_blob USING COVERING INDEX sqlite_autoindex_tenant_cas_blob_1 (tenant=? AND digest=?)',
+					'SCALAR SUBQUERY 3',
+					'SEARCH attestation_ref_storage USING COVERING INDEX attestation_ref_digest_tenant_idx (digest=? AND tenant=?)',
+					'SCALAR SUBQUERY 1',
+					'SEARCH tenant_cas_blob USING INDEX sqlite_autoindex_tenant_cas_blob_1 (tenant=? AND digest=?)'
 				]
 			});
 		}
@@ -1171,6 +1271,81 @@ describe('attestation CAS lifecycle', () => {
 			presence: await tenantCasBlobRows(),
 			usage: await tenantUsageRow()
 		}).toStrictEqual(before);
+	});
+
+	it("keeps the charge for a reference that is added while a demote removes the tenant's last reference", async () => {
+		const bundle = await fileAttestationReference({
+			uploadId: 'demote-attach',
+			bytes: textEncoder.encode('demote attach'),
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+		const { objects } = await casLifecycleRows(bundle.digest);
+		const [object] = objects;
+		if (object === undefined) {
+			throw new Error('The bundle has no CAS object row.');
+		}
+		const attached = {
+			cache: defaultCache(),
+			storePathHash: storePathHashSchema.parse('b'.repeat(32)),
+			generation: narInfoGenerationSchema.parse(0),
+			predicateType,
+			digest: bundle.digest
+		};
+		await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
+
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				let reserved: unknown;
+				const interleaving = interleaveBeforeStatement(
+					'update "tenant_usage"',
+					async () => {
+						reserved = await instance.reserveAttestationReference(
+							attached,
+							bundle.size,
+							object.incarnation
+						);
+					}
+				);
+
+				try {
+					await instance.demoteAttestationReferences([
+						{ digest: bundle.digest, fenceIncarnation: object.incarnation }
+					]);
+				} finally {
+					interleaving.restore();
+				}
+
+				return { hasInterleaved: interleaving.hasInterleaved(), reserved };
+			}
+		);
+
+		// The demote reads the tenant's references before it removes any, so it
+		// does not remove the reference on path b. That reference stays charged
+		// although its object is missing. This is a known limitation, not the
+		// intended end state.
+		expect({
+			outcome,
+			refs: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			outcome: { hasInterleaved: true, reserved: 'referenced' },
+			refs: [{ tenant: fixtureTenant, ...attached }],
+			presence: [
+				{ tenant: fixtureTenant, digest: bundle.digest, size: bundle.size }
+			],
+			usage: {
+				bytes: 0,
+				narinfos: 0,
+				blobs: 0,
+				casBytes: bundle.size,
+				casBlobs: 1,
+				quotaBytes: undefined
+			}
+		});
 	});
 
 	it('drains attestation refs and tenant CAS presence during offboarding', async () => {

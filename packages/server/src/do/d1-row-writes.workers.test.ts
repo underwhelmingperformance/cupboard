@@ -8,7 +8,10 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { recordD1Statements } from '../d1-statements.test-support.ts';
+import {
+	batchCosts,
+	type StatementCost
+} from '../d1-statements.test-support.ts';
 import {
 	armBlobReaperTimer,
 	blobStateArmTimes,
@@ -26,62 +29,6 @@ import {
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
-
-// D1 bills each table row and each index entry that a statement writes, and
-// reports the total as `meta.rows_written`.
-
-interface StatementCost {
-	readonly statement: string;
-	readonly written: number;
-}
-
-function describeStatement(query: string): string {
-	const [, verb, table] =
-		/^(insert into|update|delete from) "(\w+)"/.exec(query) ?? [];
-
-	if (verb === undefined || table === undefined) {
-		return /^\S+/.exec(query)?.[0] ?? query;
-	}
-
-	return `${verb} ${table}`;
-}
-
-async function batchCosts(
-	body: () => Promise<unknown>,
-	beforeBatch: (statements: readonly string[]) => Promise<void> = () =>
-		Promise.resolve()
-): Promise<StatementCost[][]> {
-	const database = env.CUPBOARD_DB;
-	const batch = database.batch.bind(database);
-	const batches: StatementCost[][] = [];
-	const log = recordD1Statements(database);
-	const batchSpy = vi
-		.spyOn(database, 'batch')
-		.mockImplementation(async <T>(statements: D1PreparedStatement[]) => {
-			const labels = statements.map((statement) =>
-				describeStatement(log.sql(statement) ?? '')
-			);
-			await beforeBatch(labels);
-			const results = await batch<T>(statements);
-			batches.push(
-				results.map((result, index) => ({
-					statement: labels[index] ?? '',
-					written: result.meta.rows_written
-				}))
-			);
-
-			return results;
-		});
-
-	try {
-		await body();
-	} finally {
-		log.restore();
-		batchSpy.mockRestore();
-	}
-
-	return batches;
-}
 
 function batchesWith(
 	batches: readonly StatementCost[][],
@@ -143,10 +90,17 @@ describe('D1 rows written', () => {
 			});
 
 			const batches = await batchCosts(
+				env.CUPBOARD_DB,
 				() => commitPath(token, metadata, nar),
-				async (statements) => {
-					if (statements.includes('insert into blob_ref_storage')) {
-						await arm(nar.narHash);
+				{
+					beforeBatch: async (statements) => {
+						if (
+							statements.some(
+								({ label }) => label === 'insert into blob_ref_storage'
+							)
+						) {
+							await arm(nar.narHash);
+						}
 					}
 				}
 			);
@@ -187,18 +141,23 @@ describe('D1 rows written', () => {
 			let isChanged = false;
 
 			const batches = await batchCosts(
+				env.CUPBOARD_DB,
 				() => commitPath(token, metadata, nar),
-				async (statements) => {
-					if (
-						isChanged ||
-						!statements.includes('insert into blob_ref_storage')
-					) {
-						return;
-					}
+				{
+					beforeBatch: async (statements) => {
+						if (
+							isChanged ||
+							statements.every(
+								({ label }) => label !== 'insert into blob_ref_storage'
+							)
+						) {
+							return;
+						}
 
-					isChanged = true;
-					await armBlobReaperTimer(nar.narHash);
-					await narObjectVersionChanges[change](nar.narHash);
+						isChanged = true;
+						await armBlobReaperTimer(nar.narHash);
+						await narObjectVersionChanges[change](nar.narHash);
+					}
 				}
 			);
 
@@ -239,7 +198,7 @@ describe('D1 rows written', () => {
 				await storedBundle('reserve-batch-rows');
 			await arm();
 
-			const batches = await batchCosts(() =>
+			const batches = await batchCosts(env.CUPBOARD_DB, () =>
 				runInDurableObject(currentServer(), (instance) =>
 					instance.reserveAttestationReference(
 						{
@@ -295,7 +254,7 @@ describe('D1 rows written', () => {
 			await casObjectVersionChanges[change](measured.digest);
 			let outcome: unknown;
 
-			const batches = await batchCosts(async () => {
+			const batches = await batchCosts(env.CUPBOARD_DB, async () => {
 				outcome = await runInDurableObject(currentServer(), (instance) =>
 					instance.reserveAttestationReference(
 						{
@@ -345,7 +304,7 @@ describe('D1 rows written', () => {
 			await arm();
 			const before = await casIncarnations();
 
-			const batches = await batchCosts(() =>
+			const batches = await batchCosts(env.CUPBOARD_DB, () =>
 				currentServer().promoteAttestationBundle(stagingKey, measured)
 			);
 
