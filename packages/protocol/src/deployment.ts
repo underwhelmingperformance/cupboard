@@ -118,7 +118,8 @@ export const transitionIdSchema = z.enum([
 	'listing-adoption-parents',
 	'listing-adoption-parent-seed',
 	'listing-adoption-seed-dispatch',
-	'listing-adoption-work'
+	'listing-adoption-work',
+	'listing-adoption-tasks'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -579,6 +580,13 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		id: 'listing-adoption-work',
 		expand: ['0074_listing_adoption_work.sql'],
 		contract: [],
+		independent: true
+	},
+	{
+		id: 'listing-adoption-tasks',
+		expand: ['0075_listing_adoption_tasks.sql'],
+		contract: ['0076_listing_adoption_tasks_contract.sql'],
+		expandAfter: ['listing-adoption-work'],
 		independent: true
 	}
 ];

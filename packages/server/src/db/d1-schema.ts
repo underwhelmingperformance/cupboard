@@ -54,6 +54,7 @@ import type {
 	ListingAdoptionCaptureSequence,
 	ListingAdoptionCaptureSource
 } from '../blob/listing-adoption-capture.ts';
+import type { ListingAdoptionExpansionWindow } from '../blob/listing-adoption-expansion.ts';
 import type { ListingAdoptionParentId } from '../blob/listing-adoption-parents.ts';
 import type { ListingAdoptionSeedEpoch } from '../blob/listing-adoption-seed.ts';
 import {
@@ -61,9 +62,15 @@ import {
 	listingAdoptionSeedScopes
 } from '../blob/listing-adoption-seed-dispatch.ts';
 import type {
+	ListingAdoptionTaskEpoch,
+	ListingAdoptionTaskId,
+	ListingAdoptionTaskSource
+} from '../blob/listing-adoption-tasks.ts';
+import type {
 	ListingAdoptionConsumerEpoch,
 	ListingAdoptionWorkId
 } from '../blob/listing-adoption-work.ts';
+import type { ListingAdoptionOutcome } from '../blob/nar-listing-adoption.ts';
 import {
 	type NarCaptureSequence,
 	narCaptureSequenceSchema
@@ -1311,6 +1318,108 @@ export const listingAdoptionWork = sqliteTable(
 		uniqueIndex('listing_adoption_work_consumer_event_idx').on(
 			table.consumerEpoch,
 			table.eventId
+		)
+	]
+);
+
+export const listingAdoptionTask = sqliteTable(
+	'listing_adoption_task',
+	{
+		id: text('id')
+			.$type<ListingAdoptionTaskId>()
+			.primaryKey()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		epoch: text('epoch')
+			.$type<ListingAdoptionTaskEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		kind: text('kind', { enum: ['expand', 'deliver'] }).notNull(),
+		workId: text('work_id').$type<ListingAdoptionWorkId>(),
+		parentId: text('parent_id').$type<ListingAdoptionParentId>(),
+		generatorRevision:
+			text('generator_revision').$type<ListingGeneratorRevision>(),
+		source: text('source', { mode: 'json' })
+			.$type<ListingAdoptionTaskSource>()
+			.notNull(),
+		availableAt: text('available_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+		retryAt: text('retry_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		generation: integer('generation').notNull().default(0),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		progressRevision: integer('progress_revision').notNull().default(0),
+		window: text('window', {
+			mode: 'json'
+		}).$type<ListingAdoptionExpansionWindow>(),
+		scanned: integer('scanned').notNull().default(0),
+		enrolled: integer('enrolled').notNull().default(0),
+		outcome: text('outcome', { mode: 'json' }).$type<ListingAdoptionOutcome>(),
+		completedAt: text('completed_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_task_identity_check',
+			sql`length(${table.id})=32 AND ${table.id} NOT GLOB '*[^0-9a-f]*' AND length(${table.epoch})=32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_task_source_check',
+			sql`coalesce(json_valid(${table.source}) AND json_extract(${table.source},'$.kind')=${table.kind} AND ((${table.kind}='expand' AND ${table.workId} IS NOT NULL AND ${table.parentId} IS NULL AND ${table.generatorRevision} IS NULL AND json_extract(${table.source},'$.work.id')=${table.workId}) OR (${table.kind}='deliver' AND ${table.workId} IS NULL AND ${table.parentId} IS NOT NULL AND ${table.generatorRevision} IS NOT NULL AND ${table.window} IS NULL AND json_extract(${table.source},'$.target.parent.id')=${table.parentId} AND json_extract(${table.source},'$.target.identity.generatorRevision')=${table.generatorRevision})),0)`
+		),
+		check(
+			'listing_adoption_task_claim_check',
+			sql`typeof(${table.generation})='integer' AND ${table.generation} BETWEEN 0 AND 9007199254740991 AND (${table.owner} IS NULL)=(${table.leaseExpiresAt} IS NULL) AND (${table.owner} IS NULL OR (${table.generation}>=1 AND ${table.completedAt} IS NULL))`
+		),
+		check(
+			'listing_adoption_task_progress_check',
+			sql`typeof(${table.progressRevision})='integer' AND ${table.progressRevision} BETWEEN 0 AND 9007199254740991 AND typeof(${table.scanned})='integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991 AND typeof(${table.enrolled})='integer' AND ${table.enrolled} BETWEEN 0 AND ${table.scanned}`
+		),
+		uniqueIndex('listing_adoption_task_work_idx').on(table.workId),
+		uniqueIndex('listing_adoption_task_target_idx')
+			.on(table.parentId, table.generatorRevision)
+			.where(sql`${table.kind}='deliver'`),
+		index('listing_adoption_task_due_idx')
+			.on(table.availableAt, table.id)
+			.where(sql`${table.completedAt} IS NULL`)
+	]
+);
+export const listingAdoptionTaskSeed = sqliteTable(
+	'listing_adoption_task_seed',
+	{
+		id: integer('id').primaryKey(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionTaskEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		after: text('after').$type<ListingAdoptionWorkId>(),
+		through: text('through').$type<ListingAdoptionWorkId>(),
+		scanned: integer('scanned').notNull().default(0),
+		isComplete: integer('is_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false)
+	},
+	(table) => [
+		check('listing_adoption_task_seed_id_check', sql`${table.id}=1`),
+		check(
+			'listing_adoption_task_seed_epoch_check',
+			sql`length(${table.epoch})=32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_task_seed_progress_check',
+			sql`typeof(${table.scanned})='integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991 AND ${table.isComplete} IN (0,1) AND (${table.after} IS NULL OR (${table.through} IS NOT NULL AND ${table.after}<=${table.through})) AND (${table.through} IS NOT NULL OR (${table.isComplete}=1 AND ${table.after} IS NULL))`
 		)
 	]
 );

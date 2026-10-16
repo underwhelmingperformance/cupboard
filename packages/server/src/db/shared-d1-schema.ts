@@ -19,6 +19,8 @@ export {
 	listingAdoptionParent,
 	listingAdoptionParentSeed,
 	listingAdoptionSeedDispatch,
+	listingAdoptionTask,
+	listingAdoptionTaskSeed,
 	listingAdoptionWork,
 	listingFact,
 	listingGeneration,

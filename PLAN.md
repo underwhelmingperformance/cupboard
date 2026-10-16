@@ -7421,9 +7421,16 @@ build traces available from a cupboard cache.
       a listing's current parents and a repaired CAS digest's reverse facts.
       Indexed pages select at most 32 candidates. Parent hints refresh actual
       source metadata before opening a window. Replaced parents, removed facts
-      and mismatched CAS incarnations invalidate a window. Claimed work
-      execution, durable target enrolment, cache adoption delivery, shared
-      completion wakes and producer activation remain pending.
+      and mismatched CAS incarnations invalidate a window. Source expansion now
+      atomically enrols durable target deliveries and checkpoints each page
+      under an expiring execution claim. Each write rechecks progress, readiness
+      and source identity. Targets coalesce without resetting pending retries;
+      completed targets receive a new execution epoch on later availability.
+      Independent retry deadlines prevent duplicate hints from bypassing
+      backoff. A point trigger copies new work, and a bounded historical seed
+      copies earlier work without a deployment-time scan. Queue integration,
+      authoritative adoption delivery, shared completion wakes and producer
+      activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

@@ -380,10 +380,27 @@ boundary rows are deleted. Later candidates require their own captured input.
 Parent and CAS identity checks reject obsolete windows. Discovery reads metadata
 only and does not grant authority or retain bytes.
 
-Claimed work execution, durable per-parent delivery and retry state, completion
-wakes and automatic forward producers remain pending. Independent delivery
-retries are required so an unavailable tenant cannot block the rest of a
-listing's fan-out.
+Source expansion and per-parent delivery have independent execution records. An
+expiring claim includes the task epoch, owner, generation and deadline.
+Expansion enrols its current targets and advances the saved window in one D1
+transaction. Every write rechecks the captured lease, progress revision,
+readiness and source identity. Each target also requires the complete current
+parent tuple and an existing immutable listing fact. CAS repair pages append
+fact-specific capture events in the same transaction as their checkpoint.
+
+Pending deliveries coalesce by parent identity and generator revision without
+resetting their leases or retry deadlines. New availability can re-enrol a
+completed delivery with a fresh epoch, so old acknowledgements cannot finish the
+new execution. Dispatch reservations and retry deadlines are separate: duplicate
+queue hints cannot bypass backoff. New work enters execution through a point
+trigger. A fixed-window seed copies at most 32 older work records per
+transaction without changing existing execution claims. Deployment creates empty
+tables and starts no catalogue scan.
+
+Execution storage grants no cache authority or CAS retention. Authoritative DO
+delivery, queue dispatch, completion wakes and automatic forward producers
+remain pending. Those consumers must retry each unavailable target independently
+so other targets can continue.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.
