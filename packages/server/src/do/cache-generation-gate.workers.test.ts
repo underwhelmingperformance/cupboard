@@ -1725,7 +1725,7 @@ describe('cache generation gate', () => {
 		const perPass = await attestedTeardownPassSubrequests(
 			'gen-pass-attested',
 			3,
-			20,
+			40,
 			allowance
 		);
 
@@ -1736,8 +1736,8 @@ describe('cache generation gate', () => {
 			references: await attestationReferenceRows(),
 			edges: await blobReferenceRows()
 		}).toStrictEqual({
-			perPass: [87, 45],
-			worstPass: 87,
+			perPass: [88, 44],
+			worstPass: 88,
 			usable: 100,
 			references: [],
 			edges: []
@@ -1759,8 +1759,6 @@ describe('cache generation gate', () => {
 		await pushPath(token, torn, buildsCache, tornNar);
 		await pushPath(token, kept, otherCache, keptNar);
 
-		// One bundle both caches reference and one only the torn-down cache does,
-		// so the drain meets a three-statement retirement and a five-statement one.
 		const shared = await fileAttestationReference({
 			uploadId: attestationUploadId(1),
 			bytes: sharedBytes,

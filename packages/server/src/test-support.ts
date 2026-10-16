@@ -1950,30 +1950,29 @@ export async function blobStateArmTimes(): Promise<
 }
 
 /**
- * Runs `interleave` once, when the first D1 batch that inserts into `table`
- * reaches D1, and then runs that batch. `inserts` counts the batches that
- * insert into `table`. Call `restore` when the test ends.
+ * Runs `interleave` once, when the first D1 batch with a statement that starts
+ * with `prefix` reaches D1, and then runs that batch. `batches` counts the
+ * batches with such a statement. Call `restore` when the test ends.
  */
-export function interleaveBeforeInsert(
-	table: string,
+export function interleaveBeforeStatement(
+	prefix: string,
 	interleave: () => Promise<void>
-): { hasInterleaved(): boolean; inserts(): number; restore(): void } {
+): { hasInterleaved(): boolean; batches(): number; restore(): void } {
 	const database = env.CUPBOARD_DB;
 	const batch = database.batch.bind(database);
 	const log = recordD1Statements(database);
-	const insert = `insert into "${table}"`;
 	let hasInterleaved = false;
-	let inserts = 0;
-	const isInsert = (statement: D1PreparedStatement): boolean =>
-		log.sql(statement)?.startsWith(insert) ?? false;
+	let batches = 0;
+	const isMatch = (statement: D1PreparedStatement): boolean =>
+		log.sql(statement)?.startsWith(prefix) ?? false;
 	const spy = vi
 		.spyOn(database, 'batch')
 		.mockImplementation(async <T>(statements: D1PreparedStatement[]) => {
-			if (statements.every((statement) => !isInsert(statement))) {
+			if (statements.every((statement) => !isMatch(statement))) {
 				return batch<T>(statements);
 			}
 
-			inserts += 1;
+			batches += 1;
 
 			if (!hasInterleaved) {
 				hasInterleaved = true;
@@ -1985,10 +1984,33 @@ export function interleaveBeforeInsert(
 
 	return {
 		hasInterleaved: () => hasInterleaved,
-		inserts: () => inserts,
+		batches: () => batches,
 		restore: () => {
 			log.restore();
 			spy.mockRestore();
+		}
+	};
+}
+
+/**
+ * Runs `interleave` once, when the first D1 batch that inserts into `table`
+ * reaches D1, and then runs that batch. `inserts` counts the batches that
+ * insert into `table`. Call `restore` when the test ends.
+ */
+export function interleaveBeforeInsert(
+	table: string,
+	interleave: () => Promise<void>
+): { hasInterleaved(): boolean; inserts(): number; restore(): void } {
+	const interleaving = interleaveBeforeStatement(
+		`insert into "${table}"`,
+		interleave
+	);
+
+	return {
+		hasInterleaved: () => interleaving.hasInterleaved(),
+		inserts: () => interleaving.batches(),
+		restore: () => {
+			interleaving.restore();
 		}
 	};
 }

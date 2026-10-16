@@ -634,45 +634,21 @@ export class AttestationCasService {
 			this.edgeFilter(tenant, reference),
 			notRepromoted
 		);
-		const stillReferencedFilter = and(
+		const remainingReferenceFilter = and(
 			eq(d1Schema.attestationReference.tenant, tenant),
 			eq(d1Schema.attestationReference.digest, reference.digest)
 		);
-		const presenceFilter = this.presenceFilter(tenant, reference.digest);
-
-		// D1 executes a batch sequentially in one transaction. These reads must see
-		// the state after the edge deletion so only the last reference releases the
-		// tenant's charge.
-		const [, stillReferencedRows, presenceRows] = await this.context.d1.batch([
+		const noReferenceRemains = notExists(
 			this.context.d1
-				.delete(d1Schema.attestationReference)
-				.where(edgeDeleteFilter),
-			this.context.d1
-				.select({ digest: d1Schema.attestationReference.digest })
+				.select({ one: sql`1` })
 				.from(d1Schema.attestationReference)
-				.where(stillReferencedFilter)
-				.limit(1),
-			this.context.d1
-				.select({ size: d1Schema.tenantCasBlob.size })
-				.from(d1Schema.tenantCasBlob)
-				.where(presenceFilter),
-			reclaimPathReadFence(
-				this.context.d1,
-				tenant,
-				reference.cache,
-				jsonRowList([{ storePathHash: reference.storePathHash }])
-			)
-		]);
-
-		if (stillReferencedRows[0] !== undefined) {
-			return;
-		}
-
-		const presence = presenceRows[0];
-
-		if (presence === undefined) {
-			return;
-		}
+				.where(remainingReferenceFilter)
+		);
+		const presenceFilter = this.presenceFilter(tenant, reference.digest);
+		const presenceSize = this.context.d1
+			.select({ size: d1Schema.tenantCasBlob.size })
+			.from(d1Schema.tenantCasBlob)
+			.where(presenceFilter);
 		const presenceExists = exists(
 			this.context.d1
 				.select({ one: sql`1` })
@@ -682,21 +658,34 @@ export class AttestationCasService {
 		const creditFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			presenceExists,
-			notRepromoted
+			noReferenceRemains
 		);
 
+		// D1 executes a batch sequentially in one transaction, so the credit and
+		// the presence delete see the edge delete and any reference that a
+		// reservation committed before this batch. The credit reads the size from
+		// the presence row, so it must run before the presence delete.
 		await this.context.d1.batch([
+			this.context.d1
+				.delete(d1Schema.attestationReference)
+				.where(edgeDeleteFilter),
 			this.context.d1
 				.update(d1Schema.tenantUsage)
 				.set({
-					casBytes: sql`${d1Schema.tenantUsage.casBytes} - ${presence.size}`,
+					casBytes: sql`${d1Schema.tenantUsage.casBytes} - (${presenceSize})`,
 					casBlobs: sql`${d1Schema.tenantUsage.casBlobs} - 1`,
 					updatedAt: now
 				})
 				.where(creditFilter),
 			this.context.d1
 				.delete(d1Schema.tenantCasBlob)
-				.where(and(presenceFilter, notRepromoted))
+				.where(and(presenceFilter, noReferenceRemains)),
+			reclaimPathReadFence(
+				this.context.d1,
+				tenant,
+				reference.cache,
+				jsonRowList([{ storePathHash: reference.storePathHash }])
+			)
 		]);
 	}
 }
