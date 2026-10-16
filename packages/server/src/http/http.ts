@@ -269,6 +269,17 @@ export function parseNarInfoName(name: string): StorePathHash | undefined {
 	return parsed.success ? parsed.data : undefined;
 }
 
+export function parseNarListingName(
+	name: string | undefined
+): StorePathHash | undefined {
+	const suffix = '.ls';
+	if (!name?.endsWith(suffix)) {
+		return;
+	}
+	const parsed = storePathHashSchema.safeParse(name.slice(0, -suffix.length));
+	return parsed.success ? parsed.data : undefined;
+}
+
 export function parseAttestationDigestName(
 	name: string
 ): Sha256HexDigest | undefined {

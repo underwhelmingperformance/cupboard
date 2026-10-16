@@ -5,6 +5,7 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { currentListingGeneratorRevision } from '@cupboard/protocol/artifacts';
 import { cacheSummarySchema } from '@cupboard/protocol/caches';
 import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import {
@@ -85,6 +86,254 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('adds capacity wait metadata without changing predecessor artifact jobs', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-artifact-capacity'),
+			async (_instance, state) => {
+				await migrateThrough(state, 88);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_job(id,cache_id,cache_generation,definition,generation,state,discovered,next_dispatch_at,dispatch_revision,created_at,updated_at) VALUES ('job',1,1,?,1,'running',1,123456,7,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
+					JSON.stringify({
+						kind: 'listing',
+						generatorRevision: currentListingGeneratorRevision
+					})
+				);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_task(id,job_id,source_key,source,created_at,next_attempt_at) VALUES ('task','job','source',?,'2026-01-01T00:00:00.000Z','2026-01-01T01:00:00.000Z')",
+					JSON.stringify({
+						kind: 'nar',
+						storePathHash: 'a'.repeat(32),
+						generation: 1,
+						narHash: 'sha256:nar'
+					})
+				);
+				const before = {
+					jobs: state.storage.sql.exec('SELECT * FROM artifact_job').toArray(),
+					tasks: state.storage.sql.exec('SELECT * FROM artifact_task').toArray()
+				};
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 89)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 89)
+				);
+				const after = {
+					jobs: Array.from(
+						state.storage.sql.exec('SELECT * FROM artifact_job'),
+						(entry) => {
+							const { capacity_wait_at, ...row } = entry;
+							return { ...row, hasCapacityWait: capacity_wait_at !== null };
+						}
+					),
+					tasks: state.storage.sql.exec('SELECT * FROM artifact_task').toArray()
+				};
+				return { before, after, migrated, repeated };
+			}
+		);
+		expect(result).toStrictEqual({
+			before: result.before,
+			after: {
+				jobs: result.before.jobs.map((row) => ({
+					...row,
+					capacity_wait_bytes: 0,
+					capacity_wait_staged: 0,
+					hasCapacityWait: false
+				})),
+				tasks: result.before.tasks
+			},
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false }
+		});
+	});
+
+	it('makes predecessor artifact tasks immediately ready without changing their state', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-artifact-retry'),
+			async (_instance, state) => {
+				await migrateThrough(state, 87);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_job(id,cache_id,cache_generation,definition,generation,state,discovered,completed,created_at,updated_at) VALUES ('job',1,1,?,1,'running',3,1,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
+					JSON.stringify({
+						kind: 'listing',
+						generatorRevision: currentListingGeneratorRevision
+					})
+				);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_task(id,job_id,source_key,source,created_at) VALUES ('task','job','source',?,'2026-01-01T00:00:00.000Z')",
+					JSON.stringify({
+						kind: 'nar',
+						storePathHash: 'a'.repeat(32),
+						generation: 1,
+						narHash: 'sha256:nar'
+					})
+				);
+				const before = {
+					jobs: state.storage.sql.exec('SELECT * FROM artifact_job').toArray(),
+					tasks: state.storage.sql.exec('SELECT * FROM artifact_task').toArray()
+				};
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 88)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 88)
+				);
+				return {
+					before,
+					after: {
+						jobs: state.storage.sql
+							.exec('SELECT * FROM artifact_job')
+							.toArray(),
+						tasks: state.storage.sql
+							.exec('SELECT * FROM artifact_task')
+							.toArray()
+					},
+					ready: state.storage.sql
+						.exec(
+							"SELECT id FROM artifact_task WHERE state = 'pending' AND next_attempt_at <= '2026-01-01T00:00:00.000Z' ORDER BY next_attempt_at, id"
+						)
+						.toArray(),
+					migrated,
+					repeated
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			before: result.before,
+			after: {
+				jobs: result.before.jobs,
+				tasks: result.before.tasks.map((row) => ({
+					...row,
+					next_attempt_at: '1970-01-01T00:00:00.000Z'
+				}))
+			},
+			ready: [{ id: 'task' }],
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false }
+		});
+	});
+
+	it('adds admission records without changing existing artifact jobs and tasks', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-artifact-admission'),
+			async (_instance, state) => {
+				await migrateThrough(state, 86);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_job(id,cache_id,cache_generation,definition,generation,state,discovered,completed,created_at,updated_at) VALUES ('job',1,1,?,1,'running',3,1,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
+					JSON.stringify({
+						kind: 'listing',
+						generatorRevision: currentListingGeneratorRevision
+					})
+				);
+				state.storage.sql.exec(
+					"INSERT INTO artifact_task(id,job_id,source_key,source,created_at) VALUES ('task','job','source',?,'2026-01-01T00:00:00.000Z')",
+					JSON.stringify({
+						kind: 'nar',
+						storePathHash: 'a'.repeat(32),
+						generation: 1,
+						narHash: 'sha256:nar'
+					})
+				);
+				const before = {
+					jobs: state.storage.sql.exec('SELECT * FROM artifact_job').toArray(),
+					tasks: state.storage.sql.exec('SELECT * FROM artifact_task').toArray()
+				};
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 87)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 87)
+				);
+				return {
+					before,
+					after: {
+						jobs: state.storage.sql
+							.exec('SELECT * FROM artifact_job')
+							.toArray(),
+						tasks: state.storage.sql
+							.exec('SELECT * FROM artifact_task')
+							.toArray()
+					},
+					admissions: state.storage.sql
+						.exec('SELECT * FROM artifact_admission')
+						.toArray(),
+					migrated,
+					repeated
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			before: result.before,
+			after: result.before,
+			admissions: [],
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false }
+		});
+	});
+
+	it('adds dispatch deadlines without changing existing artifact job progress', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-artifact-dispatch'),
+			async (_instance, state) => {
+				await migrateThrough(state, 85);
+				for (const jobState of ['running', 'cancelled', 'complete']) {
+					state.storage.sql.exec(
+						"INSERT INTO artifact_job(id,cache_id,cache_generation,definition,generation,state,discovery_complete,discovered,completed,skipped,failed,created_at,updated_at,completed_at) VALUES (?,1,1,?,1,?,?,3,1,1,?, ?, ?, CASE WHEN ? = 'complete' THEN '2026-01-01T00:00:00.000Z' END)",
+						jobState,
+						JSON.stringify({
+							kind: 'listing',
+							generatorRevision: currentListingGeneratorRevision
+						}),
+						jobState,
+						jobState === 'complete' ? 1 : 0,
+						jobState === 'complete' ? 1 : 0,
+						'2026-01-01T00:00:00.000Z',
+						'2026-01-01T00:00:00.000Z',
+						jobState
+					);
+				}
+				const before = state.storage.sql
+					.exec('SELECT * FROM artifact_job ORDER BY id')
+					.toArray();
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 86)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 86)
+				);
+				return {
+					before,
+					after: state.storage.sql
+						.exec('SELECT * FROM artifact_job ORDER BY id')
+						.toArray(),
+					migrated,
+					repeated
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			before: result.before,
+			after: result.before.map((row) => ({
+				...row,
+				next_dispatch_at: 0,
+				dispatch_revision: 0
+			})),
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false }
+		});
+	});
+
 	it('adds a durable staging queue without changing pending state', async () => {
 		const result = await runInDurableObject(
 			testServerFor('migration-staging-cleanup'),

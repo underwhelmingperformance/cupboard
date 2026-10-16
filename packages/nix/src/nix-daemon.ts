@@ -1,6 +1,11 @@
 import { createConnection, type Socket } from 'node:net';
 import { performance } from 'node:perf_hooks';
 
+import {
+	BuildTrace,
+	type BuildTraceKey,
+	nixOutputNameSchema
+} from '@cupboard/nix-store/build-trace';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type StoreDirectory,
@@ -8,7 +13,8 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { isNixSignature } from '@cupboard/nix-store/signature';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { positiveSafeInteger } from '@cupboard/shared/limits';
 
@@ -22,6 +28,7 @@ import {
 	type NixDaemonTrust,
 	type NixDerivedPathString,
 	type NixMissingPartition,
+	type NixOutputRealisation,
 	type NixStoreClient,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo,
@@ -50,6 +57,7 @@ const opQuerySubstitutablePaths = 32;
 const opNarFromPath = 38;
 const opQueryMissing = 40;
 const opQueryDerivationOutputMap = 41;
+const opQueryRealisation = 43;
 const opQueryPathInfos = 50;
 const opBuildPathsWithResults = 46;
 
@@ -101,12 +109,28 @@ const maximumDaemonFeatures = 4096;
 const maximumDaemonLoggerFields = 4096;
 const maximumDaemonTraceEntries = 4096;
 const maximumDaemonDerivationOutputs = 65_536;
+const maximumDaemonTraceSignatures = 1024;
+const maximumDaemonTraceBytes = 8 * 1024 * 1024;
+const maximumDaemonTraceScalarBytes = 8192;
 
 // Offered during the handshake; a daemon that advertises it back accepts the
 // batched path-info operation. No released daemon does yet, so the batch is
 // speculative, and this client falls back to the per-path operation with
 // current daemons.
 const featureQueryPathInfos = 'queryPathInfos';
+const featureRealisationWithPath = 'realisation-with-path-not-hash';
+
+class NixDaemonTraceBudget {
+	private remainingBytes = maximumDaemonTraceBytes;
+
+	get maximumScalarBytes(): number {
+		return Math.min(maximumDaemonTraceScalarBytes, this.remainingBytes);
+	}
+
+	consume(bytes: number): void {
+		this.remainingBytes -= bytes;
+	}
+}
 
 const stderrNext = 0x6f_6c_6d_67;
 const stderrRead = 0x64_61_74_61;
@@ -238,6 +262,11 @@ export interface NixDaemonSession {
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
+	/**
+	 * Reads a registered trace for a known resolved derivation output. This does
+	 * not build paths or discover the complete base trace of a build.
+	 */
+	queryBuildTrace(key: BuildTraceKey): Promise<BuildTrace | undefined>;
 	queryValidPaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
@@ -371,6 +400,15 @@ export class UnsupportedNixDaemonOperationError extends NixDaemonError {
 			`The daemon's protocol ${String(version.major)}.${String(version.minor)} does not support ${operation}`
 		);
 		this.name = 'UnsupportedNixDaemonOperationError';
+	}
+}
+
+export class UnsupportedNixDaemonFeatureError extends NixDaemonError {
+	constructor(public readonly feature: string) {
+		super(
+			`The Nix daemon does not support the required protocol feature '${feature}'`
+		);
+		this.name = 'UnsupportedNixDaemonFeatureError';
 	}
 }
 
@@ -598,6 +636,14 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 	async queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
 		return this.withConnection((session) => session.queryPathInfo(storePath));
+	}
+
+	/**
+	 * Reads a stored native trace without realising its output. An older daemon
+	 * raises a feature error; an absent trace returns undefined.
+	 */
+	async queryBuildTrace(key: BuildTraceKey): Promise<BuildTrace | undefined> {
+		return this.withConnection((session) => session.queryBuildTrace(key));
 	}
 
 	async queryValidPaths(
@@ -890,6 +936,10 @@ class NixDaemonConnectionSession implements NixDaemonSession {
 
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
 		return this.run(() => this.connection.queryPathInfo(storePath));
+	}
+
+	queryBuildTrace(key: BuildTraceKey): Promise<BuildTrace | undefined> {
+		return this.run(() => this.connection.queryBuildTrace(key));
 	}
 
 	queryValidPaths(
@@ -1466,7 +1516,10 @@ class NixDaemonConnection {
 		}
 
 		const features = new NixDaemonWriter();
-		features.writeStringSet([featureQueryPathInfos]);
+		features.writeStringSet([
+			featureQueryPathInfos,
+			featureRealisationWithPath
+		]);
 
 		await this.transport.write(features.bytes());
 		const daemonFeatures = await this.readStringSet(
@@ -1476,6 +1529,9 @@ class NixDaemonConnection {
 
 		if (daemonFeatures.includes(featureQueryPathInfos)) {
 			this.features.add(featureQueryPathInfos);
+		}
+		if (daemonFeatures.includes(featureRealisationWithPath)) {
+			this.features.add(featureRealisationWithPath);
 		}
 	}
 
@@ -1727,7 +1783,9 @@ class NixDaemonConnection {
 	// One keyed build result at protocol 1.38: the derived path, the status
 	// and message, the 1.29 timing fields, the 1.37 optional cpu times, and
 	// the built outputs map of realisations.
-	private async readKeyedBuildResult(): Promise<NixBuildResult> {
+	private async readKeyedBuildResult(
+		budget: NixDaemonTraceBudget
+	): Promise<NixBuildResult> {
 		const target = modernDerivedPath(
 			await this.readString('build result target')
 		);
@@ -1739,16 +1797,86 @@ class NixDaemonConnection {
 		const stopTime = await this.readInteger();
 		await this.readOptionalInteger();
 		await this.readOptionalInteger();
-		const outputs = await this.readBuiltOutputs();
+		const outputRealisations = this.features.has(featureRealisationWithPath)
+			? await this.readNativeBuiltOutputs(budget)
+			: undefined;
+		const outputs =
+			outputRealisations === undefined
+				? await this.readBuiltOutputs()
+				: Object.fromEntries(
+						Object.entries(outputRealisations).map(([name, value]) => [
+							name,
+							value.outPath
+						])
+					);
 
 		return {
 			target,
 			outcome: buildOutcome(status, message, outputs),
+			...(outputRealisations !== undefined && { outputRealisations }),
 			timesBuilt,
 			nonDeterministic: isNonDeterministic,
 			startTime,
 			stopTime
 		};
+	}
+
+	private async readUnkeyedRealisation(
+		budget: NixDaemonTraceBudget
+	): Promise<NixOutputRealisation> {
+		const outPath = requireStorePath(
+			await this.readString('build-trace output path', budget)
+		);
+
+		if (!outPath.startsWith(`${this.storeDirectory}/`)) {
+			throw new NixDaemonRemoteError(
+				`build-trace output path outside ${this.storeDirectory}: ${outPath}`
+			);
+		}
+
+		const count = await this.readCount(
+			'build-trace signatures',
+			maximumDaemonTraceSignatures
+		);
+		const signatures: string[] = [];
+
+		for (let index = 0; index < count; index += 1) {
+			const signature = await this.readString('build-trace signature', budget);
+
+			if (!isNixSignature(signature)) {
+				throw new NixDaemonRemoteError('invalid build-trace signature');
+			}
+
+			signatures.push(signature);
+		}
+
+		return { outPath, signatures };
+	}
+
+	private async readNativeBuiltOutputs(
+		budget: NixDaemonTraceBudget
+	): Promise<Readonly<Record<string, NixOutputRealisation>>> {
+		const count = await this.readCount(
+			'derivation outputs',
+			maximumDaemonDerivationOutputs
+		);
+		const outputs = new Map<string, NixOutputRealisation>();
+
+		for (let index = 0; index < count; index += 1) {
+			const name = nixOutputNameSchema.parse(
+				await this.readString('derivation output name', budget)
+			);
+
+			if (outputs.has(name)) {
+				throw new NixDaemonRemoteError(
+					`keyed build result contains duplicate output name: ${name}`
+				);
+			}
+
+			outputs.set(name, await this.readUnkeyedRealisation(budget));
+		}
+
+		return Object.fromEntries(outputs);
 	}
 
 	private async readOptionalInteger(): Promise<number | undefined> {
@@ -1810,16 +1938,17 @@ class NixDaemonConnection {
 		return observedEntries;
 	}
 
-	private async readString(field: string): Promise<string> {
+	private async readString(
+		field: string,
+		budget?: NixDaemonTraceBudget
+	): Promise<string> {
 		const length = await this.readInteger();
+		const maximumBytes = budget?.maximumScalarBytes ?? maximumDaemonScalarBytes;
 
-		if (length > maximumDaemonScalarBytes) {
-			throw new NixDaemonFieldTooLargeError(
-				field,
-				maximumDaemonScalarBytes,
-				length
-			);
+		if (length > maximumBytes) {
+			throw new NixDaemonFieldTooLargeError(field, maximumBytes, length);
 		}
+		budget?.consume(length);
 
 		const bytes =
 			length === 0 ? new Uint8Array() : await this.transport.read(length);
@@ -1829,8 +1958,15 @@ class NixDaemonConnection {
 			await this.transport.read(padding);
 		}
 
-		const decoder = new TextDecoder();
-		return decoder.decode(bytes);
+		const decoder = new TextDecoder(
+			'utf-8',
+			budget === undefined ? {} : { fatal: true, ignoreBOM: true }
+		);
+		try {
+			return decoder.decode(bytes);
+		} catch {
+			throw new NixDaemonRemoteError(`invalid UTF-8 in ${field}`);
+		}
 	}
 
 	private async readBoolean(): Promise<boolean> {
@@ -2230,12 +2366,48 @@ class NixDaemonConnection {
 			Math.min(maximumDaemonCollectionEntries, new Set(targets).size)
 		);
 		const results: NixBuildResult[] = [];
+		const budget = new NixDaemonTraceBudget();
 
 		for (let index = 0; index < count; index += 1) {
-			results.push(executions.forResult(await this.readKeyedBuildResult()));
+			results.push(
+				executions.forResult(await this.readKeyedBuildResult(budget))
+			);
 		}
 
 		return results;
+	}
+
+	async queryBuildTrace(key: BuildTraceKey): Promise<BuildTrace | undefined> {
+		if (!this.features.has(featureRealisationWithPath)) {
+			throw new UnsupportedNixDaemonFeatureError(featureRealisationWithPath);
+		}
+
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQueryRealisation);
+		request.writeString(`${this.storeDirectory}/${key.drvPath}`);
+		request.writeString(key.outputName);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+		const present = await this.readInteger();
+
+		if (present === 0) {
+			return undefined;
+		}
+
+		if (present !== 1) {
+			throw new NixDaemonRemoteError('invalid optional build trace');
+		}
+
+		const value = await this.readUnkeyedRealisation(new NixDaemonTraceBudget());
+
+		return new BuildTrace({
+			key,
+			value: {
+				outPath: StorePath.basename(value.outPath),
+				signatures: value.signatures
+			}
+		});
 	}
 
 	async queryMissing(

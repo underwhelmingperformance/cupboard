@@ -1,13 +1,22 @@
+import { createHash } from 'node:crypto';
+
 import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import { cacheMetadataRequestSchema } from '@cupboard/protocol/cache-metadata';
+import {
+	cacheIntersectionRequestSchema,
+	cacheMetadataMaxNarInfoBytes,
+	cacheMetadataRequestSchema
+} from '@cupboard/protocol/cache-metadata';
+import { readUserSchema } from '@cupboard/shared/http';
 import { initialiseTracing } from '@cupboard/shared/node-tracing';
+import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { propagation, trace } from '@opentelemetry/api';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import type { TenantDependencyDiagnostic } from './metadata-diagnostics.ts';
 import {
 	tenantDependencyReferences,
 	tenantReferenceSources
@@ -28,6 +37,16 @@ afterAll(() => {
 	trace.disable();
 	propagation.disable();
 });
+
+function inputFingerprint(inputs: readonly string[]): string {
+	return createHash('sha256').update(JSON.stringify(inputs)).digest('hex');
+}
+
+function sourceDiagnostics(diagnostics: readonly TenantDependencyDiagnostic[]) {
+	return diagnostics
+		.filter((event) => event.kind === 'source')
+		.map((event) => ({ ...event, traceId: 'trace', elapsedMs: 0 }));
+}
 
 function narinfo(storePath: StorePathString): string {
 	return `StorePath: ${storePath}\nURL: nar/file.nar\nCompression: none\nFileHash: sha256:${'0'.repeat(64)}\nFileSize: 1\nNarHash: sha256:${'0'.repeat(64)}\nNarSize: 1\nReferences: \n`;
@@ -54,6 +73,427 @@ function fetcher(
 }
 
 describe('tenantDependencyReferences', () => {
+	it('emits a final result for every source before moving to the next cache', async () => {
+		const diagnostics: TenantDependencyDiagnostic[] = [];
+		const fallback = new URL(`${destination.href}/cache/falcon`);
+		await tenantDependencyReferences([wrapper, client], {
+			sources: [
+				{ url: destination, paths: [] },
+				{ url: fallback, paths: [] }
+			],
+			fetch: fetcher([], new Map([[destination.href, [wrapper]]])),
+			onDiagnostic: (event) => {
+				diagnostics.push(event);
+			}
+		});
+		expect(sourceDiagnostics(diagnostics)).toStrictEqual([
+			{
+				version: 1,
+				kind: 'source',
+				traceId: 'trace',
+				source: destination.href,
+				mode: 'legacy',
+				droppedRecords: 0,
+				status: 'complete',
+				checked: 2,
+				total: 2,
+				found: 1,
+				missing: 1,
+				remaining: 0,
+				requests: 2,
+				inFlight: 0,
+				elapsedMs: 0
+			},
+			{
+				version: 1,
+				kind: 'source',
+				traceId: 'trace',
+				source: fallback.href,
+				mode: 'legacy',
+				droppedRecords: 0,
+				status: 'complete',
+				checked: 1,
+				total: 1,
+				found: 0,
+				missing: 1,
+				remaining: 0,
+				requests: 1,
+				inFlight: 0,
+				elapsedMs: 0
+			}
+		]);
+	});
+
+	it('joins sparse intersection and transport attempts to the propagated SDK spans', async () => {
+		const diagnostics: TenantDependencyDiagnostic[] = [];
+		const contexts: string[] = [];
+		await tenantDependencyReferences([wrapper, client], {
+			tenantUrl: destination,
+			sources: [{ url: destination, paths: [] }],
+			onDiagnostic: (event) => {
+				diagnostics.push(event);
+			},
+			fetch: (_input, init) => {
+				contexts.push(new Headers(init?.headers).get('traceparent') ?? '');
+				if (typeof init?.body !== 'string') {
+					return Promise.resolve(
+						new Response(undefined, {
+							status: 404,
+							headers: {
+								'x-cupboard-read-capabilities':
+									'path-info-v1 path-intersection-v1'
+							}
+						})
+					);
+				}
+				const body = cacheIntersectionRequestSchema.parse(
+					JSON.parse(init.body)
+				);
+				const response = Response.json({
+					complete: true,
+					checked: body.storePathHashes.length,
+					matchingHashes: [],
+					scopeVersion: 'scope-1',
+					inputFingerprint: inputFingerprint(body.storePathHashes)
+				});
+				return Promise.resolve(response);
+			}
+		});
+		const attempts = diagnostics.filter((event) => event.kind === 'attempt');
+		const requests = diagnostics.filter((event) => event.kind === 'request');
+		expect(
+			attempts.map((event) => `00-${event.traceId}-${event.spanId}-01`)
+		).toStrictEqual(contexts);
+		expect(
+			attempts.map((event) => ({
+				...event,
+				requestId: 'request',
+				traceId: 'trace',
+				spanId: 'span',
+				startedAt: 0,
+				headersAt: 0,
+				finishedAt: 0,
+				elapsedMs: 0
+			}))
+		).toStrictEqual([
+			{
+				version: 1,
+				kind: 'attempt',
+				source: destination.href,
+				requestId: 'request',
+				traceId: 'trace',
+				spanId: 'span',
+				operation: 'discovery',
+				inputCount: 1,
+				inputFingerprint: inputFingerprint([wrapper]),
+				inputOrderFingerprint: inputFingerprint([wrapper]),
+				attempt: 1,
+				propagated: true,
+				startedAt: 0,
+				headersAt: 0,
+				finishedAt: 0,
+				elapsedMs: 0,
+				status: 404,
+				body: 'complete'
+			},
+			{
+				version: 1,
+				kind: 'attempt',
+				source: destination.href,
+				requestId: 'request',
+				traceId: 'trace',
+				spanId: 'span',
+				operation: 'intersection',
+				inputCount: 2,
+				inputFingerprint: inputFingerprint([
+					StorePath.hash(wrapper),
+					StorePath.hash(client)
+				]),
+				inputOrderFingerprint: inputFingerprint([
+					StorePath.hash(wrapper),
+					StorePath.hash(client)
+				]),
+				attempt: 1,
+				propagated: true,
+				startedAt: 0,
+				headersAt: 0,
+				finishedAt: 0,
+				elapsedMs: 0,
+				status: 200,
+				body: 'complete'
+			}
+		]);
+		expect(
+			requests.map((event) => ({
+				...event,
+				requestId: 'request',
+				traceId: 'trace',
+				startedAt: 0,
+				finishedAt: 0,
+				elapsedMs: 0
+			}))
+		).toStrictEqual(
+			attempts.map((event, index) => {
+				const {
+					spanId: _spanId,
+					attempt: _attempt,
+					propagated: _propagated,
+					headersAt: _headersAt,
+					status: _status,
+					body: _body,
+					...identity
+				} = event;
+				return {
+					...identity,
+					kind: 'request',
+					requestId: 'request',
+					traceId: 'trace',
+					startedAt: 0,
+					finishedAt: 0,
+					elapsedMs: 0,
+					attempts: 1,
+					outcome:
+						index === 0
+							? { status: 'capability', checked: 0, found: 0, missing: 0 }
+							: {
+									status: 'complete',
+									checked: 2,
+									found: 0,
+									missing: 2,
+									possibleMatches: 0
+								}
+				};
+			})
+		);
+		expect(requests.map((event) => event.requestId)).toStrictEqual(
+			attempts.map((event) => event.requestId)
+		);
+	});
+	it.each(['invalid', 'broken', 'oversized'] as const)(
+		'records an unvalidated %s body as a failure without missing results',
+		async (failure) => {
+			const diagnostics: TenantDependencyDiagnostic[] = [];
+			await expect(
+				tenantDependencyReferences([wrapper], {
+					sources: [
+						{
+							url: destination,
+							paths: [],
+							credential: {
+								user: readUserSchema.parse('secret-user'),
+								password: 'secret-password'
+							}
+						}
+					],
+					onDiagnostic: (event) => {
+						diagnostics.push(event);
+					},
+					fetch: () =>
+						Promise.resolve(
+							new Response(
+								failure === 'invalid'
+									? 'invalid narinfo'
+									: new ReadableStream<Uint8Array>({
+											start(controller) {
+												if (failure === 'broken') {
+													controller.error(
+														new Error('secret-response-failure')
+													);
+												} else {
+													controller.enqueue(
+														new Uint8Array(cacheMetadataMaxNarInfoBytes + 1)
+													);
+												}
+											}
+										})
+							)
+						)
+				})
+			).rejects.toThrow();
+			expect(
+				diagnostics.map((event) =>
+					event.kind === 'attempt'
+						? { kind: event.kind, body: event.body, status: event.status }
+						: event.kind === 'request'
+							? { kind: event.kind, outcome: event.outcome }
+							: { ...event, traceId: 'trace', elapsedMs: 0 }
+				)
+			).toStrictEqual([
+				{
+					kind: 'attempt',
+					body:
+						failure === 'invalid'
+							? 'complete'
+							: failure === 'broken'
+								? 'error'
+								: 'cancelled',
+					status: 200
+				},
+				{
+					kind: 'request',
+					outcome: {
+						status: 'error',
+						errorType:
+							failure === 'invalid'
+								? 'CachedClosureSourceInvalidError'
+								: failure === 'broken'
+									? 'Error'
+									: 'RemoteBodyTooLargeError'
+					}
+				},
+				{
+					version: 1,
+					kind: 'source',
+					source: destination.href,
+					traceId: 'trace',
+					mode: 'discovering',
+					status: 'error',
+					checked: 0,
+					total: 1,
+					found: 0,
+					missing: 0,
+					remaining: 1,
+					requests: 1,
+					inFlight: 0,
+					elapsedMs: 0,
+					droppedRecords: 0
+				}
+			]);
+			expect(JSON.stringify(diagnostics)).not.toMatch(
+				/secret-user|secret-password|secret-response-failure|invalid narinfo/u
+			);
+		}
+	);
+	it('records declared error names without relying on constructor names', async () => {
+		const diagnostics: TenantDependencyDiagnostic[] = [];
+		class TransportFailureError extends Error {
+			override readonly name = 'TransportFailureError';
+		}
+		const failure = new TransportFailureError('secret transport failure');
+		await expect(
+			tenantDependencyReferences([wrapper], {
+				sources: [{ url: destination, paths: [] }],
+				onDiagnostic(event) {
+					diagnostics.push(event);
+				},
+				fetch: () => Promise.reject(failure)
+			})
+		).rejects.toBe(failure);
+		expect(
+			diagnostics
+				.filter((event) => event.kind !== 'source')
+				.map((event) =>
+					event.kind === 'attempt'
+						? { kind: event.kind, body: event.body, errorType: event.errorType }
+						: { kind: event.kind, outcome: event.outcome }
+				)
+		).toStrictEqual([
+			{ kind: 'attempt', body: 'error', errorType: 'TransportFailureError' },
+			{
+				kind: 'request',
+				outcome: { status: 'error', errorType: 'TransportFailureError' }
+			}
+		]);
+		expect(JSON.stringify(diagnostics)).not.toContain(
+			'secret transport failure'
+		);
+	});
+	it('preserves lookup results when diagnostics and their error callback fail', async () => {
+		const failures: unknown[] = [];
+		const diagnostics: TenantDependencyDiagnostic[] = [];
+		const references = await tenantDependencyReferences([wrapper], {
+			sources: [{ url: destination, paths: [] }],
+			fetch: fetcher([], new Map([[destination.href, [wrapper]]])),
+			onDiagnostic(event) {
+				if (event.kind === 'source') {
+					diagnostics.push(event);
+				} else {
+					throw new Error('writer failed');
+				}
+			},
+			onDiagnosticError(error) {
+				failures.push(error);
+				throw new Error('warning failed');
+			}
+		});
+		expect(references).toStrictEqual([
+			{
+				storePath: wrapper,
+				source: destination.href,
+				narinfo: narinfo(wrapper),
+				kind: 'intermediate'
+			}
+		]);
+		expect(sourceDiagnostics(diagnostics)).toStrictEqual([
+			{
+				version: 1,
+				kind: 'source',
+				source: destination.href,
+				traceId: 'trace',
+				mode: 'legacy',
+				status: 'complete',
+				checked: 1,
+				total: 1,
+				found: 1,
+				missing: 0,
+				remaining: 0,
+				requests: 1,
+				inFlight: 0,
+				elapsedMs: 0,
+				droppedRecords: 2
+			}
+		]);
+		expect(failures).toStrictEqual([
+			new Error('writer failed'),
+			new Error('writer failed')
+		]);
+	});
+	it('finishes source accounting after concurrent requests complete on a failed lookup', async () => {
+		const diagnostics: TenantDependencyDiagnostic[] = [];
+		const requested = Promise.withResolvers<undefined>();
+		const pending = Promise.withResolvers<Response>();
+		const operation = tenantDependencyReferences([wrapper, client, upstream], {
+			sources: [{ url: destination, paths: [] }],
+			onDiagnostic: (event) => {
+				diagnostics.push(event);
+			},
+			fetch: (input) => {
+				const url = input instanceof Request ? input.url : input.toString();
+				if (url.includes(StorePath.hash(wrapper))) {
+					return Promise.resolve(new Response(narinfo(wrapper)));
+				}
+				if (url.includes(StorePath.hash(client))) {
+					return Promise.reject(new Error('query failed'));
+				}
+				requested.resolve(undefined);
+				return pending.promise;
+			}
+		});
+		const failed = expect(operation).rejects.toThrow('query failed');
+		await requested.promise;
+		expect(sourceDiagnostics(diagnostics)).toStrictEqual([]);
+		pending.resolve(new Response(undefined, { status: 404 }));
+		await failed;
+		expect(sourceDiagnostics(diagnostics)).toStrictEqual([
+			{
+				version: 1,
+				kind: 'source',
+				source: destination.href,
+				traceId: 'trace',
+				mode: 'legacy',
+				status: 'error',
+				checked: 2,
+				total: 3,
+				found: 1,
+				missing: 1,
+				remaining: 1,
+				requests: 3,
+				inFlight: 0,
+				elapsedMs: 0,
+				droppedRecords: 0
+			}
+		]);
+	});
 	it('reports completed paths before the remaining dependency requests finish', async () => {
 		const progress: {
 			checked: number;
@@ -185,6 +625,93 @@ describe('tenantDependencyReferences', () => {
 			}
 		}
 	});
+	it('finalises an incomplete attempt at the deadline without later duplicate records', async () => {
+		vi.useFakeTimers();
+		const diagnostics: TenantDependencyDiagnostic[] = [];
+		const received = Promise.withResolvers<undefined>();
+		let body: ReadableStreamDefaultController<Uint8Array> | undefined;
+		try {
+			const operation = tenantDependencyReferences([wrapper], {
+				sources: [{ url: destination, paths: [] }],
+				onDiagnostic(event) {
+					diagnostics.push(event);
+				},
+				fetch: () => {
+					received.resolve(undefined);
+					return Promise.resolve(
+						new Response(
+							new ReadableStream<Uint8Array>({
+								start(controller) {
+									body = controller;
+								}
+							})
+						)
+					);
+				}
+			});
+			const failed = expect(operation).rejects.toThrow('Timed out probing');
+			await received.promise;
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs);
+			await failed;
+			expect(
+				diagnostics.map((event) =>
+					event.kind === 'attempt'
+						? {
+								kind: event.kind,
+								body: event.body,
+								elapsedMs: event.elapsedMs,
+								status: event.status
+							}
+						: event.kind === 'request'
+							? {
+									kind: event.kind,
+									outcome: event.outcome,
+									attempts: event.attempts,
+									elapsedMs: event.elapsedMs
+								}
+							: { ...event, traceId: 'trace' }
+				)
+			).toStrictEqual([
+				{
+					kind: 'attempt',
+					body: 'incomplete',
+					elapsedMs: probeDeadlineMs,
+					status: 200
+				},
+				{
+					kind: 'request',
+					outcome: { status: 'error', errorType: 'ProbeTimeoutError' },
+					attempts: 1,
+					elapsedMs: probeDeadlineMs
+				},
+				{
+					version: 1,
+					kind: 'source',
+					traceId: 'trace',
+					source: destination.href,
+					mode: 'discovering',
+					status: 'error',
+					checked: 0,
+					total: 1,
+					found: 0,
+					missing: 0,
+					remaining: 1,
+					requests: 1,
+					inFlight: 0,
+					elapsedMs: probeDeadlineMs,
+					droppedRecords: 0
+				}
+			]);
+			const snapshot = [...diagnostics];
+			body?.enqueue(new TextEncoder().encode(narinfo(wrapper)));
+			body?.close();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(diagnostics).toStrictEqual(snapshot);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 	it('keeps requests active until a delayed metadata body finishes', async () => {
 		vi.useFakeTimers();
 		const headersReceived = Promise.withResolvers<undefined>();
@@ -231,6 +758,7 @@ describe('tenantDependencyReferences', () => {
 		}
 	});
 	it('reports bulk continuation paths once and counts transport retries separately', async () => {
+		const diagnostics: TenantDependencyDiagnostic[] = [];
 		const states: {
 			checked: number;
 			found: number;
@@ -240,6 +768,9 @@ describe('tenantDependencyReferences', () => {
 		const requests: string[][] = [];
 		let shouldRetry = true;
 		await tenantDependencyReferences([wrapper, client, upstream], {
+			onDiagnostic: (event) => {
+				diagnostics.push(event);
+			},
 			sources: [{ url: destination, paths: [] }],
 			fetch: (input, init) => {
 				if (
@@ -300,6 +831,102 @@ describe('tenantDependencyReferences', () => {
 				[upstream]
 			]
 		});
+
+		const logical = diagnostics.filter((event) => event.kind === 'request');
+		const transport = diagnostics.filter((event) => event.kind === 'attempt');
+		expect(
+			logical.map(
+				({ operation, inputCount, inputFingerprint, attempts, outcome }) => ({
+					operation,
+					inputCount,
+					inputFingerprint,
+					attempts,
+					outcome
+				})
+			)
+		).toStrictEqual([
+			{
+				operation: 'discovery',
+				inputCount: 1,
+				inputFingerprint: inputFingerprint([wrapper]),
+				attempts: 1,
+				outcome: { status: 'capability', checked: 0, found: 0, missing: 0 }
+			},
+			{
+				operation: 'metadata',
+				inputCount: 3,
+				inputFingerprint: inputFingerprint([wrapper, client, upstream]),
+				attempts: 2,
+				outcome: { status: 'continuation', checked: 1, found: 0, missing: 1 }
+			},
+			{
+				operation: 'metadata',
+				inputCount: 2,
+				inputFingerprint: inputFingerprint([client, upstream]),
+				attempts: 1,
+				outcome: { status: 'continuation', checked: 1, found: 0, missing: 1 }
+			},
+			{
+				operation: 'metadata',
+				inputCount: 1,
+				inputFingerprint: inputFingerprint([upstream]),
+				attempts: 1,
+				outcome: { status: 'complete', checked: 1, found: 0, missing: 1 }
+			}
+		]);
+		expect(
+			transport.map((event) => ({
+				request: logical.findIndex(
+					(request) => request.requestId === event.requestId
+				),
+				attempt: event.attempt,
+				status: event.status,
+				body: event.body,
+				inputFingerprint: event.inputFingerprint,
+				inputOrderFingerprint: event.inputOrderFingerprint
+			}))
+		).toStrictEqual([
+			{
+				request: 0,
+				attempt: 1,
+				status: 404,
+				body: 'complete',
+				inputFingerprint: inputFingerprint([wrapper]),
+				inputOrderFingerprint: inputFingerprint([wrapper])
+			},
+			{
+				request: 1,
+				attempt: 1,
+				status: 503,
+				body: 'complete',
+				inputFingerprint: inputFingerprint([wrapper, client, upstream]),
+				inputOrderFingerprint: inputFingerprint([wrapper, client, upstream])
+			},
+			{
+				request: 1,
+				attempt: 2,
+				status: 200,
+				body: 'complete',
+				inputFingerprint: inputFingerprint([wrapper, client, upstream]),
+				inputOrderFingerprint: inputFingerprint([wrapper, client, upstream])
+			},
+			{
+				request: 2,
+				attempt: 1,
+				status: 200,
+				body: 'complete',
+				inputFingerprint: inputFingerprint([client, upstream]),
+				inputOrderFingerprint: inputFingerprint([client, upstream])
+			},
+			{
+				request: 3,
+				attempt: 1,
+				status: 200,
+				body: 'complete',
+				inputFingerprint: inputFingerprint([upstream]),
+				inputOrderFingerprint: inputFingerprint([upstream])
+			}
+		]);
 	});
 	it('reports pending requests periodically and removes the timer after failure', async () => {
 		vi.useFakeTimers();

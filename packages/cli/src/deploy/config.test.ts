@@ -9,6 +9,8 @@ import {
 	parseDeploymentConfig,
 	WranglerConfigError
 } from './config.ts';
+import { collectResources, queueRole } from './deploy-run.ts';
+import { renameResources } from './overrides.ts';
 
 const controlSource = `{
 	// the control-plane Worker
@@ -59,7 +61,7 @@ const tenantSource = `{
 }`;
 
 describe('parseDeploymentConfig', () => {
-	it('limits production maintenance batches to one subrequest-budgeted operation', async () => {
+	it('bounds production batches and allows artifact consumers to autoscale', async () => {
 		const productionControlSource = await readFile(
 			new URL('../../../server/wrangler.jsonc', import.meta.url),
 			'utf8'
@@ -74,8 +76,60 @@ describe('parseDeploymentConfig', () => {
 				maxRetries: 3,
 				maxConcurrency: 4,
 				deadLetterQueue: 'cupboard-maintenance-dlq'
+			},
+			{
+				queue: 'cupboard-artifacts',
+				maxBatchSize: 1,
+				maxBatchTimeout: 5,
+				maxRetries: 3,
+				maxConcurrency: undefined,
+				deadLetterQueue: 'cupboard-artifacts-dlq'
 			}
 		]);
+	});
+
+	it('binds the artifact queue on both Workers and describes renamed queues by purpose', async () => {
+		const [control, tenant] = await Promise.all([
+			readFile(
+				new URL('../../../server/wrangler.jsonc', import.meta.url),
+				'utf8'
+			),
+			readFile(
+				new URL('../../../server/wrangler.tenant.jsonc', import.meta.url),
+				'utf8'
+			)
+		]);
+		const config = renameResources(parseDeploymentConfig(control, tenant), {
+			queue: new Map([
+				['cupboard-artifacts', 'sidecars'],
+				['cupboard-artifacts-dlq', 'failed-sidecars']
+			])
+		});
+		expect({
+			controlProducers: config.control.queueProducers,
+			tenantProducers: config.tenant.queueProducers,
+			queues: collectResources(config).queues.map((queue) => ({
+				queue,
+				role: queueRole(config, queue)
+			})),
+			cpuMs: config.control.cpuMs
+		}).toStrictEqual({
+			controlProducers: [
+				{ binding: 'MAINTENANCE_QUEUE', queue: 'cupboard-maintenance' },
+				{ binding: 'ARTIFACT_QUEUE', queue: 'sidecars' }
+			],
+			tenantProducers: [
+				{ binding: 'MAINTENANCE_QUEUE', queue: 'cupboard-maintenance' },
+				{ binding: 'ARTIFACT_QUEUE', queue: 'sidecars' }
+			],
+			queues: [
+				{ queue: 'cupboard-maintenance', role: 'Maintenance queue' },
+				{ queue: 'cupboard-maintenance-dlq', role: 'Dead-letter queue' },
+				{ queue: 'failed-sidecars', role: 'Artifact dead-letter queue' },
+				{ queue: 'sidecars', role: 'Artifact queue' }
+			],
+			cpuMs: 300_000
+		});
 	});
 
 	it('matches the production rate-limit binding to the protocol limit', async () => {

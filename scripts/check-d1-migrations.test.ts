@@ -96,6 +96,12 @@ const laterTransitions: readonly SchemaTransition<string>[] = [
 const sharedTransitions = schemaTransitions.filter(
 	(transition) => transition.database === undefined
 );
+const precedingSharedTransitions = sharedTransitions.slice(
+	0,
+	sharedTransitions.findIndex(
+		(transition) => transition.id === 'cas-demotion-progress'
+	)
+);
 
 describe('checkD1Migrations', () => {
 	it("accepts the repository's migrations", () => {
@@ -110,20 +116,183 @@ describe('checkD1Migrations', () => {
 				...transition.contract
 			]).length,
 			replayed: [
-				'local-step-attempts',
-				'publication-identity',
-				'blob-reference-read-authority',
-				'tenant-retry-clock',
-				'tenant-schema-progress',
-				'control-refresh-sessions',
-				'control-subject-nonces',
-				'control-database-split'
+				'cas-demotion-progress',
+				'attestation-list-revision',
+				'tenant-namespace-cleanup',
+				'native-artifact-publication',
+				'shared-listing-generation',
+				'shared-listing-jobs',
+				'nar-source-capture',
+				'shared-listing-catchup',
+				'shared-listing-task-claims',
+				'global-listing-generation',
+				'shared-listing-staging',
+				'shared-listing-output-retention',
+				'shared-listing-output-retirement',
+				'shared-listing-completion',
+				'shared-listing-task-delivery',
+				'shared-listing-dispatch',
+				'shared-listing-dispatch-seed',
+				'listing-adoption-capture',
+				'listing-adoption-fact-seed',
+				'listing-adoption-parents',
+				'listing-adoption-parent-seed',
+				'listing-adoption-seed-dispatch',
+				'listing-adoption-work',
+				'listing-adoption-tasks',
+				'forward-listing-staging'
+			]
+		});
+	});
+
+	it('installs capture after physical reference storage in a staged deployment', () => {
+		const completeCount = sharedTransitions.findIndex(
+			(transition) => transition.id === 'cas-demotion-progress'
+		);
+		const order = deployOrder(sharedTransitions, completeCount);
+		if (order === undefined) {
+			throw new Error(
+				'The source capture transition has no valid deployment order'
+			);
+		}
+		const expansion = order.files.indexOf('0055_nar_source_capture.sql');
+		const referenceStorage = order.files.indexOf(
+			'0036_path_read_authority_contract.sql'
+		);
+		const captureTriggers = order.files.indexOf(
+			'0056_nar_source_capture_contract.sql'
+		);
+		expect({
+			hasExpansion: expansion !== -1,
+			hasReferenceStorage: referenceStorage !== -1,
+			hasCaptureTriggers: captureTriggers !== -1,
+			expandsAfterReferenceStorage: expansion > referenceStorage,
+			installsTriggersAfterReferenceStorage: captureTriggers > referenceStorage
+		}).toStrictEqual({
+			hasExpansion: true,
+			hasReferenceStorage: true,
+			hasCaptureTriggers: true,
+			expandsAfterReferenceStorage: true,
+			installsTriggersAfterReferenceStorage: true
+		});
+	});
+
+	it('installs adoption capture only after reference and CAS storage contract', () => {
+		const completeCount = sharedTransitions.findIndex(
+			(transition) => transition.id === 'cas-demotion-progress'
+		);
+		const order = deployOrder(sharedTransitions, completeCount);
+		if (order === undefined) {
+			throw new Error('Adoption capture has no valid deployment order');
+		}
+		const expansion = order.files.indexOf('0067_listing_adoption_capture.sql');
+		const triggers = order.files.indexOf(
+			'0068_listing_adoption_capture_contract.sql'
+		);
+		const references = order.files.indexOf(
+			'0036_path_read_authority_contract.sql'
+		);
+		const cas = order.files.indexOf('0044_cas_storage_contract.sql');
+		expect({
+			hasAllMigrations: [expansion, triggers, references, cas].every(
+				(position) => position !== -1
+			),
+			expandsBeforeTriggers: expansion < triggers,
+			installsAfterReferences: triggers > references,
+			installsAfterCas: triggers > cas
+		}).toStrictEqual({
+			hasAllMigrations: true,
+			expandsBeforeTriggers: true,
+			installsAfterReferences: true,
+			installsAfterCas: true
+		});
+	});
+
+	it('expands adoption capture without reading the existing catalogue', () => {
+		const database = new DatabaseSync(':memory:');
+		try {
+			const migrations = readMigrationSet(repositoryMigrations);
+			database.exec(migrations.sql('0067_listing_adoption_capture.sql'));
+			const tables = database
+				.prepare(
+					"SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+				)
+				.all();
+			const state = database
+				.prepare('SELECT * FROM listing_adoption_capture_state')
+				.all();
+			expect({
+				tables: tables.map((row) => ({ ...row })),
+				state: state.map((row) => ({ ...row }))
+			}).toStrictEqual({
+				tables: [
+					{ name: 'listing_adoption_capture_event' },
+					{ name: 'listing_adoption_capture_state' },
+					{ name: 'listing_adoption_fact' }
+				],
+				state: [{ id: 1, latest: 0, pruned_through: 0, is_ready: 0 }]
+			});
+		} finally {
+			database.close();
+		}
+	});
+
+	it('installs the namespace guard before the reader transition contracts', () => {
+		const completeCount = sharedTransitions.findIndex(
+			(transition) => transition.id === 'attestation-list-revision'
+		);
+		const order = deployOrder(sharedTransitions, completeCount);
+		if (order === undefined) {
+			throw new Error('The reader transition has no valid deployment order');
+		}
+		const guardIndex = order.files.indexOf(
+			'0051_tenant_namespace_cleanup_guard.sql'
+		);
+		const readerIndex = order.files.indexOf(
+			'0050_attestation_list_revision_contract.sql'
+		);
+		expect({
+			guardPresent: guardIndex !== -1,
+			readerPresent: readerIndex !== -1,
+			guardBeforeReaders: guardIndex < readerIndex
+		}).toStrictEqual({
+			guardPresent: true,
+			readerPresent: true,
+			guardBeforeReaders: true
+		});
+	});
+
+	it('preserves replay coverage for the preceding CAS and artifact transitions', () => {
+		const full = readMigrationSet(repositoryMigrations);
+		const transitions = precedingSharedTransitions;
+		const includedFiles = new Set(
+			transitions.flatMap((transition) => [
+				...transition.expand,
+				...transition.contract
+			])
+		);
+		const preceding: MigrationSet = {
+			files: full.files.filter((file) => includedFiles.has(file)),
+			journal: full.journal.filter((file) => includedFiles.has(file)),
+			sql: full.sql
+		};
+		expect(
+			checkD1Migrations(withControlDatabaseTransfer(preceding), transitions)
+		).toStrictEqual({
+			applied: 48,
+			replayed: [
+				'cas-storage',
+				'cache-path-intersection-index',
+				'native-artifact-storage'
 			]
 		});
 	});
 
 	it('expands path authority after contracted cache identity and contracts the path index before renaming its table', () => {
-		const order = deployOrder(sharedTransitions, 1);
+		const earlierTransitions = precedingSharedTransitions.filter(
+			(transition) => transition.id !== 'cache-path-intersection-index'
+		);
+		const order = deployOrder(earlierTransitions, 1);
 		expect(order).toStrictEqual({
 			files: [
 				...(schemaTransitions[0]?.expand ?? []),
@@ -137,9 +306,13 @@ describe('checkD1Migrations', () => {
 				'0039_control_refresh_sessions.sql',
 				'0040_control_subject_nonces.sql',
 				'0041_control_database_split.sql',
+				'0043_cas_storage_expand.sql',
+				'0046_native_artifact_storage.sql',
 				'0032_attestation_ref_path_index.sql',
 				'0036_path_read_authority_contract.sql',
-				'0042_control_database_contract.sql'
+				'0042_control_database_contract.sql',
+				'0044_cas_storage_contract.sql',
+				'0047_attestation_cas_retention_index.sql'
 			],
 			ahead: [
 				'local-step-attempts',
@@ -149,7 +322,9 @@ describe('checkD1Migrations', () => {
 				'tenant-schema-progress',
 				'control-refresh-sessions',
 				'control-subject-nonces',
-				'control-database-split'
+				'control-database-split',
+				'cas-storage',
+				'native-artifact-storage'
 			]
 		});
 	});

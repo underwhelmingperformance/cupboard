@@ -27,6 +27,7 @@ import {
 	ConnectionLimitedBucket,
 	type R2ObjectStore
 } from '../blob/connection-limited-bucket.ts';
+import { type NarMetadataCapture } from '../blob/nar-metadata.ts';
 import { type NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import {
 	type DeclaredNarVerification,
@@ -36,6 +37,7 @@ import {
 	verifyStoredNar
 } from '../blob/nar-verify.ts';
 import { r2ErrorCode } from '../blob/r2-errors.ts';
+import { R2RequestAdmission } from '../blob/r2-request-admission.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	controlRefreshPrunePageSize,
@@ -59,8 +61,11 @@ import {
 	refreshTenantMembership
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
+import { tenantListRevisionsAbsent } from '../db/attestation-list-retirement.ts';
 import { cacheIdSchema } from '../db/cache.ts';
+import { readCasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { tenantNamespaceCleanupAllowed } from '../db/tenant-namespace-cleanup.ts';
 import {
 	BlobReaperService,
 	type CasReferenceDemoter,
@@ -103,7 +108,9 @@ import {
 import { queueSendBatchSize } from '../policy/queues.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
+import { wakePendingAttestationLists } from './attestation-list-wakes.ts';
 import { tenantServer } from './durable-object.ts';
+import { VerificationVerdictBudget } from './verification-verdict-budget.ts';
 
 // Rotate through active tenants in bounded batches ordered by
 // `last_maintained_at`.
@@ -217,6 +224,7 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('cas-demote') }),
 	z.object({ kind: z.literal('control-key-retirement') }),
 	z.object({ kind: z.literal('control-session-pruning') }),
+	z.object({ kind: z.literal('attestation-list-sweep') }),
 	z.object({
 		kind: z.literal('local-step'),
 		tenants: z.array(tenantIdSchema).min(1).max(localStepWakeBatchSize)
@@ -253,6 +261,7 @@ export type MaintenanceQueueMessage =
 	| { readonly kind: 'cas-demote' }
 	| { readonly kind: 'control-key-retirement' }
 	| { readonly kind: 'control-session-pruning' }
+	| { readonly kind: 'attestation-list-sweep' }
 	| { readonly kind: 'local-step-sweep' };
 
 /**
@@ -272,7 +281,8 @@ export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 		() => runCasReaperDemote(logger, env),
 		() => runControlKeyRetirement(logger, env),
 		() => runControlSessionPruning(logger, env),
-		() => enqueueLocalStepWakes(env)
+		() => enqueueLocalStepWakes(env),
+		() => wakePendingAttestationLists(logger, env)
 	]) {
 		try {
 			await pass();
@@ -330,6 +340,7 @@ export async function enqueueMaintenanceJobs(
 		{ kind: 'cas-demote' },
 		{ kind: 'control-key-retirement' },
 		{ kind: 'control-session-pruning' },
+		{ kind: 'attestation-list-sweep' },
 		...(localStepWakes.kind === 'selected' ? localStepWakes.messages : [])
 	];
 
@@ -412,33 +423,44 @@ export async function handleMaintenanceQueue(
 	const logger = rootLogger().with({ worker: 'scheduled', queue: batch.queue });
 
 	for (const message of batch.messages) {
-		const messageLogger = logger.with({
-			messageId: message.id,
-			attempts: message.attempts
-		});
-		const parsed = maintenanceQueueMessageSchema.safeParse(message.body);
-
-		if (!parsed.success) {
-			logInvalidMaintenanceQueueMessage(messageLogger, parsed.error);
-			message.ack();
-			continue;
-		}
-
-		const decision = await executeMaintenanceQueueMessage(
-			messageLogger,
-			env,
-			buffers,
-			parsed.data
-		);
-
-		if (decision.action === 'ack') {
-			message.ack();
-			continue;
-		}
-
-		logMaintenanceQueueRetry(messageLogger, parsed.data, decision);
-		message.retry({ delaySeconds: decision.delaySeconds });
+		await handleMaintenanceQueueMessage(logger, env, buffers, message);
 	}
+}
+
+export async function handleMaintenanceQueueMessage(
+	logger: Logger,
+	env: Env,
+	buffers: NarReadBufferPool,
+	message: Message,
+	options: ExecuteMaintenanceQueueOptions = {}
+): Promise<void> {
+	const messageLogger = logger.with({
+		messageId: message.id,
+		attempts: message.attempts
+	});
+	const parsed = maintenanceQueueMessageSchema.safeParse(message.body);
+
+	if (!parsed.success) {
+		logInvalidMaintenanceQueueMessage(messageLogger, parsed.error);
+		message.ack();
+		return;
+	}
+
+	const decision = await executeMaintenanceQueueMessage(
+		messageLogger,
+		env,
+		buffers,
+		parsed.data,
+		options
+	);
+
+	if (decision.action === 'ack') {
+		message.ack();
+		return;
+	}
+
+	logMaintenanceQueueRetry(messageLogger, parsed.data, decision);
+	message.retry({ delaySeconds: decision.delaySeconds });
 }
 
 export async function executeMaintenanceQueueMessage(
@@ -551,6 +573,11 @@ export async function executeMaintenanceQueueMessage(
 				);
 				return { action: 'ack' };
 			}
+			case 'attestation-list-sweep': {
+				await wakePendingAttestationLists(logger, env);
+				return { action: 'ack' };
+			}
+
 			case 'local-step-sweep': {
 				return { action: 'ack' };
 			}
@@ -852,7 +879,8 @@ async function drainTenant(
 ): Promise<void> {
 	for (let round = 0; round < rounds; round += 1) {
 		const { drained: isDrained } = await tenantServer(env, id).runOffboard(
-			drainLimit
+			drainLimit,
+			id
 		);
 		const hasRemainingObjects = await hasRemainingTenantObjects(
 			env,
@@ -886,11 +914,29 @@ async function hasRemainingTenantObjects(
 // Purge Durable Object storage before writing the terminal registry tombstone.
 // Each step is safe to repeat after an interruption.
 async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
-	await tenantServer(env, id).purgeStorage();
-
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	await finaliseOffboardedTenant(database, id);
-	await deleteTenantMember(env.TENANT_CACHE, id);
+	const references = await readCasReferenceSet(database);
+	const ready = await database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(
+			and(
+				eq(d1Schema.tenant.id, id),
+				references.artifactReferencesAbsent(id),
+				tenantNamespaceCleanupAllowed(database, id),
+				tenantListRevisionsAbsent(database, id)
+			)
+		)
+		.get();
+	if (ready === undefined) {
+		return;
+	}
+
+	await tenantServer(env, id).purgeStorage();
+	const outcome = await finaliseOffboardedTenant(database, id);
+	if (outcome.finalised) {
+		await deleteTenantMember(env.TENANT_CACHE, id);
+	}
 }
 
 /**
@@ -976,7 +1022,8 @@ function maintainTenant(logger: Logger, env: Env, id: TenantId): Promise<void> {
 	return runScheduledMaintenance(
 		() => server.runGarbageCollection(),
 		() => server.runVerification(),
-		() => server.runAuthKeyRetirement()
+		() => server.runAuthKeyRetirement(),
+		() => server.runArtifactDispatch()
 	);
 }
 
@@ -1178,6 +1225,9 @@ interface FreshVerificationPass {
 	readonly reserveCanonicalWrite: CanonicalWriteReserver;
 	readonly recorder: VerdictRecorder;
 	readonly signal: AbortSignal;
+	readonly metadataFor: (
+		claim: PendingVerification
+	) => NarMetadataCapture | undefined;
 }
 
 /**
@@ -1202,6 +1252,7 @@ async function verifyFreshBytes(
 ): Promise<FreshVerification> {
 	const { blobs, buffers, signal } = pass;
 	const expected = { narHash: claim.narHash, narSize: claim.narSize };
+	const metadata = pass.metadataFor(claim);
 
 	if (reservation?.kind !== 'reserved' || claim.blob === undefined) {
 		canonicalPut?.release();
@@ -1211,6 +1262,7 @@ async function verifyFreshBytes(
 				buffers,
 				firstGet,
 				signal,
+				metadata,
 				progress
 			})
 		};
@@ -1226,7 +1278,7 @@ async function verifyFreshBytes(
 			fileHash: claim.blob.fileHash,
 			fileSize: claim.blob.fileSize
 		},
-		{ buffers, firstGet, canonicalPut, signal, progress }
+		{ buffers, firstGet, canonicalPut, signal, progress, metadata }
 	);
 
 	return {
@@ -1378,6 +1430,60 @@ async function verifyFreshClaim(
 	}
 }
 
+export interface VerificationMetadataSource {
+	readonly tenant: TenantId;
+	readonly owner: string;
+	readonly claim: PendingVerification;
+}
+
+export interface VerificationMetadataResources {
+	readonly admission: R2RequestAdmission;
+	/**
+	 * Registers work with the calling invocation. Direct callers may omit this
+	 * callback when their factory already has its own deferred-task callback.
+	 */
+	readonly defer?: NarMetadataCapture['defer'];
+}
+
+export interface VerifyTenantOptions {
+	/**
+	 * Share admission when verification passes use the same invocation.
+	 */
+	readonly admission?: R2RequestAdmission;
+	readonly defer?: NarMetadataCapture['defer'];
+	/**
+	 * Creates provisional metadata capture. Completion may precede the Durable
+	 * Object verdict or follow claim release, so it cannot grant cache authority.
+	 * Use the shared admission for every capture R2 call.
+	 */
+	readonly metadataFor?: (
+		source: VerificationMetadataSource,
+		resources: VerificationMetadataResources
+	) => Pick<NarMetadataCapture, 'sink' | 'defer'> | undefined;
+}
+
+function verificationMetadata(
+	logger: Logger,
+	options: VerifyTenantOptions,
+	source: VerificationMetadataSource,
+	resources: VerificationMetadataResources
+): NarMetadataCapture | undefined {
+	try {
+		const capture = options.metadataFor?.(source, resources);
+		if (capture === undefined) {
+			return undefined;
+		}
+		return { sink: capture.sink, defer: capture.defer };
+	} catch (error) {
+		logger.warn('verification metadata setup failed', {
+			uploadId: source.claim.uploadId,
+			narHash: source.claim.narHash,
+			error
+		});
+		return undefined;
+	}
+}
+
 // Claim a bounded batch, then fetch and decode staging objects in the queue
 // consumer so CPU-bound NAR verification does not occupy the Durable Object.
 // The Durable Object applies each verdict only while this pass owns the claim.
@@ -1389,9 +1495,11 @@ export async function verifyTenant(
 	id: TenantId,
 	batchSize: number = verifyClaimBatchSize,
 	maxNarBytes: number = verifyClaimMaxNarBytes,
-	budgetMs: number = verificationConsumerBudgetMs
+	budgetMs: number = verificationConsumerBudgetMs,
+	options: VerifyTenantOptions = {}
 ): Promise<void> {
 	const deadline = new VerificationPassDeadline(budgetMs);
+	let verdictBudget: VerificationVerdictBudget | undefined;
 
 	try {
 		const server = tenantServer(env, id);
@@ -1436,6 +1544,12 @@ export async function verifyTenant(
 		}
 
 		const { claims, owner, truncated } = batch;
+		if (options.metadataFor !== undefined) {
+			verdictBudget = new VerificationVerdictBudget(
+				claims.map((claim) => claim.uploadId),
+				recordAttempts
+			);
+		}
 		const activeClaims = new ActiveVerificationClaims(
 			claims.map((claim) => claim.uploadId)
 		);
@@ -1458,6 +1572,8 @@ export async function verifyTenant(
 				const recorder = new VerdictRecorder(
 					logger.with({ job: 'verify-verdicts' }),
 					async (results) => {
+						const uploads = results.map((result) => result.uploadId);
+						verdictBudget?.consume(uploads);
 						const recordRpc = server.recordVerificationsWithinBudget(
 							owner,
 							results,
@@ -1474,7 +1590,8 @@ export async function verifyTenant(
 
 						signal.throwIfAborted();
 
-						activeClaims.recorded(results.map((result) => result.uploadId));
+						activeClaims.recorded(uploads);
+						verdictBudget?.recorded(uploads);
 
 						return result.applied;
 					},
@@ -1485,10 +1602,9 @@ export async function verifyTenant(
 
 				const reuseClaims = claims.filter((claim) => claim.reuse);
 				const freshClaims = claims.filter((claim) => !claim.reuse);
-				const blobs = new ConnectionLimitedBucket(
-					env.BLOBS,
-					maxOutgoingConnections
-				);
+				const admission =
+					options.admission ?? new R2RequestAdmission(maxOutgoingConnections);
+				const blobs = new ConnectionLimitedBucket(env.BLOBS, admission);
 				// A Durable Object from an earlier build has no reservation RPC. After
 				// any failure the consumer verifies the upload without the write, and
 				// the Durable Object copies its staged object.
@@ -1542,7 +1658,14 @@ export async function verifyTenant(
 					buffers,
 					reserveCanonicalWrite,
 					recorder,
-					signal
+					signal,
+					metadataFor: (claim) =>
+						verificationMetadata(
+							logger,
+							options,
+							{ tenant: id, owner, claim },
+							{ admission, defer: options.defer }
+						)
 				};
 
 				try {
@@ -1575,6 +1698,7 @@ export async function verifyTenant(
 			);
 		}
 	} finally {
+		verdictBudget?.dispose();
 		deadline.dispose();
 	}
 }
@@ -1772,36 +1896,35 @@ async function stampMaintained(
 }
 
 /**
- * Runs garbage collection, verification, and optional key retirement
- * independently. If several fail, reports the garbage-collection failure first.
+ * Runs garbage collection and verification concurrently, then the remaining
+ * maintenance passes independently. Reports the first failure in argument order.
  */
 export async function runScheduledMaintenance(
 	runGarbageCollection: () => Promise<void>,
 	runVerification: () => Promise<void>,
-	runAuthKeyRetirement?: () => Promise<void>
+	...remainingPasses: readonly (() => Promise<void>)[]
 ): Promise<void> {
 	const [gc, verify] = await Promise.allSettled([
 		runGarbageCollection(),
 		runVerification()
 	]);
-	const authKeyRetirement = await settleAuthKeyRetirement(runAuthKeyRetirement);
+	const results = [gc, verify];
+	for (const pass of remainingPasses) {
+		results.push(await settleMaintenancePass(pass));
+	}
 
-	for (const result of [gc, verify, authKeyRetirement]) {
+	for (const result of results) {
 		if (result.status === 'rejected') {
 			throw result.reason;
 		}
 	}
 }
 
-async function settleAuthKeyRetirement(
-	runAuthKeyRetirement: (() => Promise<void>) | undefined
+async function settleMaintenancePass(
+	run: () => Promise<void>
 ): Promise<PromiseSettledResult<void>> {
-	if (runAuthKeyRetirement === undefined) {
-		return { status: 'fulfilled', value: undefined };
-	}
-
 	try {
-		await runAuthKeyRetirement();
+		await run();
 		return { status: 'fulfilled', value: undefined };
 	} catch (error) {
 		return { status: 'rejected', reason: error };

@@ -236,7 +236,11 @@ function compatibilityPhaseFor<Id extends string>(
 				phase: 'native-reads',
 				requiredLocalStep: planned.transition.contractStep ?? currentLocalStep
 			}
-		: { phase: 'contracted', requiredLocalStep: currentLocalStep };
+		: {
+				phase: 'contracted',
+				requiredLocalStep:
+					planned.transition.reportableStepOnComplete ?? currentLocalStep
+			};
 }
 
 /**

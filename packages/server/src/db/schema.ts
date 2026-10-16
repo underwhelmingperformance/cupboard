@@ -1,3 +1,4 @@
+import { type BuildTraceKey } from '@cupboard/nix-store/build-trace';
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
@@ -13,11 +14,28 @@ import {
 	type Sha256HexDigest,
 	type SigningKeyGeneration,
 	signingKeyGenerationSchema,
+	type StorePathBasename,
 	type StorePathHash,
 	type StorePathString,
 	type TenantId,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import type {
+	ArtifactJobDefinition,
+	ArtifactJobGeneration,
+	ArtifactJobId,
+	ArtifactTaskClaim,
+	ArtifactTaskId,
+	ArtifactTaskOwner,
+	ArtifactTaskSource
+} from '@cupboard/protocol/artifact-jobs';
+import {
+	type ArtifactGeneration,
+	type ArtifactId,
+	type ArtifactKind,
+	artifactKinds,
+	type ListingGeneratorRevision
+} from '@cupboard/protocol/artifacts';
 import type {
 	OidcIssuer,
 	OidcSubject,
@@ -42,8 +60,15 @@ import {
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
-import type { R2ObjectKey } from '../http/http.ts';
+import type { ArtifactAdmissionId } from '../blob/artifact-admission.ts';
+import type { ArtifactStageId } from '../blob/artifact-staging.ts';
+import type {
+	AttestationListRefreshFailure,
+	AttestationListRefreshSource
+} from '../do/attestation-list-refresh-state.ts';
+import type { R2ObjectKey, RequestOrigin } from '../http/http.ts';
 
+import type { AttestationListCursor } from './attestation-list-revision.ts';
 import { type CacheId } from './cache.ts';
 import {
 	emptyRootRetentionRuleSetId,
@@ -552,9 +577,17 @@ export const pendingAttestationSubjects = sqliteTable(
 	]
 );
 
-export const cacheTeardowns = sqliteTable('cache_teardown', {
-	cacheId: integer('cache_id').$type<CacheId>().primaryKey()
-});
+export const cacheTeardowns = sqliteTable(
+	'cache_teardown',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
+		nextWorkAt: integer('next_work_at').notNull().default(0),
+		origin: text('origin').$type<RequestOrigin>()
+	},
+	(table) => [
+		index('cache_teardown_work_idx').on(table.nextWorkAt, table.cacheId)
+	]
+);
 
 export const stagingCleanup = sqliteTable(
 	'staging_cleanup',
@@ -1151,4 +1184,527 @@ export const grantContraction = sqliteTable(
 		complete: integer('complete', { mode: 'boolean' }).notNull().default(false)
 	},
 	(table) => [check('grant_contraction_singleton_check', sql`${table.id} = 1`)]
+);
+
+export const artifactStages = sqliteTable(
+	'artifact_stage',
+	{
+		id: text('id').$type<ArtifactStageId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		taskId: text('task_id').$type<ArtifactTaskId>().notNull(),
+		taskGeneration: integer('task_generation').notNull(),
+		sourceKey: text('source_key').notNull(),
+		owner: text('owner').$type<ArtifactTaskOwner>().notNull(),
+		kind: text('kind', { enum: artifactKinds }).notNull(),
+		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
+		maximumBytes: integer('maximum_bytes').notNull(),
+		state: text('state', { enum: ['pending', 'ready', 'retired'] }).notNull(),
+		multipartId: text('multipart_id'),
+		writesSealed: integer('writes_sealed', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		digest: text('digest').$type<Sha256HexDigest>(),
+		size: integer('size'),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		writeUntil: text('write_until').$type<IsoTimestamp>().notNull(),
+		cleanupAfter: text('cleanup_after').$type<IsoTimestamp>().notNull(),
+		nextCleanupAt: text('next_cleanup_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		uniqueIndex('artifact_stage_task_idx').on(
+			table.taskId,
+			table.taskGeneration
+		),
+		index('artifact_stage_cleanup_idx').on(
+			table.state,
+			table.nextCleanupAt,
+			table.id
+		),
+		check(
+			'artifact_stage_budget_check',
+			sql`${table.maximumBytes} BETWEEN 1 AND 67108864 AND (${table.size} IS NULL OR ${table.size} BETWEEN 0 AND ${table.maximumBytes})`
+		),
+		check(
+			'artifact_stage_seal_check',
+			sql`${table.writesSealed} = 0 OR (${table.multipartId} IS NOT NULL AND ${table.digest} IS NOT NULL AND ${table.size} IS NOT NULL)`
+		),
+		check(
+			'artifact_stage_ready_check',
+			sql`${table.state} != 'ready' OR ${table.writesSealed} = 1`
+		)
+	]
+);
+
+export const artifactJobs = sqliteTable(
+	'artifact_job',
+	{
+		id: text('id').$type<ArtifactJobId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		definition: text('definition', { mode: 'json' })
+			.$type<ArtifactJobDefinition>()
+			.notNull(),
+		generation: integer('generation').$type<ArtifactJobGeneration>().notNull(),
+		state: text('state', {
+			enum: ['running', 'cancelled', 'complete']
+		}).notNull(),
+		nextDispatchAt: integer('next_dispatch_at').notNull().default(0),
+		dispatchRevision: integer('dispatch_revision').notNull().default(0),
+		capacityWaitAt: integer('capacity_wait_at'),
+		capacityWaitBytes: integer('capacity_wait_bytes').notNull().default(0),
+		capacityWaitStaged: integer('capacity_wait_staged', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		discoveryComplete: integer('discovery_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		cursor: text('cursor').$type<StorePathHash>(),
+		discovered: integer('discovered').notNull().default(0),
+		completed: integer('completed').notNull().default(0),
+		skipped: integer('skipped').notNull().default(0),
+		failed: integer('failed').notNull().default(0),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+		completedAt: text('completed_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		index('artifact_job_cache_idx').on(table.cacheId, table.id),
+		index('artifact_job_state_idx').on(table.state, table.id),
+		index('artifact_job_dispatch_idx').on(
+			table.state,
+			table.nextDispatchAt,
+			table.id
+		),
+		index('artifact_job_capacity_idx')
+			.on(
+				table.state,
+				table.capacityWaitBytes,
+				table.capacityWaitStaged,
+				table.capacityWaitAt,
+				table.id
+			)
+			.where(sql`${table.capacityWaitAt} IS NOT NULL`),
+		check('artifact_job_generation_check', sql`${table.generation} >= 1`),
+		check(
+			'artifact_job_progress_check',
+			sql`${table.discovered} >= 0 AND ${table.completed} >= 0 AND ${table.skipped} >= 0 AND ${table.failed} >= 0 AND ${table.completed} + ${table.skipped} + ${table.failed} <= ${table.discovered}`
+		),
+		check(
+			'artifact_job_completion_check',
+			sql`${table.state} != 'complete' OR (${table.discoveryComplete} = 1 AND ${table.completed} + ${table.skipped} + ${table.failed} = ${table.discovered} AND ${table.completedAt} IS NOT NULL)`
+		)
+	]
+);
+
+const initialArtifactTaskAttemptAt = isoTimestamp(new Date(0));
+
+export const artifactTasks = sqliteTable(
+	'artifact_task',
+	{
+		id: text('id').$type<ArtifactTaskId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		sourceKey: text('source_key').notNull(),
+		source: text('source', { mode: 'json' })
+			.$type<ArtifactTaskSource>()
+			.notNull(),
+		state: text('state', {
+			enum: ['pending', 'claimed', 'completed', 'skipped', 'failed']
+		})
+			.notNull()
+			.default('pending'),
+		claimGeneration: integer('claim_generation').notNull().default(0),
+		jobGeneration: integer('job_generation').notNull().default(0),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		nextAttemptAt: text('next_attempt_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(initialArtifactTaskAttemptAt),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		completedAt: text('completed_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		uniqueIndex('artifact_task_source_idx').on(table.jobId, table.sourceKey),
+		index('artifact_task_state_idx').on(table.jobId, table.state, table.id),
+		index('artifact_task_retry_idx').on(
+			table.jobId,
+			table.state,
+			table.nextAttemptAt,
+			table.id
+		),
+		index('artifact_task_lease_idx').on(
+			table.jobId,
+			table.state,
+			table.leaseExpiresAt,
+			table.id
+		),
+		index('artifact_task_job_generation_idx').on(
+			table.jobId,
+			table.state,
+			table.jobGeneration,
+			table.id
+		),
+		check(
+			'artifact_task_generation_check',
+			sql`${table.claimGeneration} >= 0 AND ${table.jobGeneration} >= 0`
+		),
+		check(
+			'artifact_task_claim_check',
+			sql`${table.state} != 'claimed' OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.claimGeneration} > 0 AND ${table.jobGeneration} > 0)`
+		)
+	]
+);
+
+export const artifactAdmissions = sqliteTable(
+	'artifact_admission',
+	{
+		id: text('id').$type<ArtifactAdmissionId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		taskId: text('task_id').$type<ArtifactTaskId>().notNull(),
+		taskGeneration: integer('task_generation').notNull(),
+		sourceKey: text('source_key').notNull(),
+		kind: text('kind', { enum: artifactKinds }).$type<ArtifactKind>().notNull(),
+		maximumBytes: integer('maximum_bytes').notNull(),
+		stageId: text('stage_id').$type<ArtifactStageId>(),
+		claim: text('claim_json', { mode: 'json' }).$type<ArtifactTaskClaim>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		uniqueIndex('artifact_admission_task_idx').on(table.taskId),
+		index('artifact_admission_expiry_idx').on(table.expiresAt, table.id),
+		index('artifact_admission_stage_idx').on(table.stageId),
+		check(
+			'artifact_admission_generation_check',
+			sql`${table.jobGeneration} >= 1 AND ${table.cacheGeneration} >= 1 AND ${table.taskGeneration} >= 0`
+		),
+		check(
+			'artifact_admission_bytes_check',
+			sql`${table.maximumBytes} >= 0 AND ${table.maximumBytes} <= 67108864`
+		)
+	]
+);
+
+export const artifacts = sqliteTable(
+	'artifact',
+	{
+		id: text('id').$type<ArtifactId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		generation: integer('generation').$type<ArtifactGeneration>().notNull(),
+		kind: text('kind', { enum: artifactKinds }).$type<ArtifactKind>().notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		publicationIncarnation: integer('publication_incarnation').notNull(),
+		state: text('state', { enum: ['pending', 'live', 'retired'] }).notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		completedAt: text('completed_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		index('artifact_cache_idx').on(table.cacheId, table.id),
+		index('artifact_cache_state_idx').on(table.cacheId, table.state, table.id),
+		index('artifact_digest_idx').on(table.digest, table.id),
+		index('artifact_expiry_idx').on(table.expiresAt, table.id),
+		index('artifact_active_expiry_idx')
+			.on(table.expiresAt, table.id)
+			.where(
+				sql`${table.state} != 'retired' AND ${table.expiresAt} IS NOT NULL`
+			),
+		index('artifact_pending_idx').on(table.state, table.id),
+		check('artifact_generation_check', sql`${table.generation} >= 1`),
+		check(
+			'artifact_incarnation_check',
+			sql`${table.publicationIncarnation} >= 1`
+		),
+		check(
+			'artifact_log_expiry_check',
+			sql`${table.kind} != 'build-log' OR ${table.expiresAt} IS NOT NULL`
+		),
+		check(
+			'artifact_completion_check',
+			sql`${table.state} != 'live' OR ${table.completedAt} IS NOT NULL`
+		)
+	]
+);
+
+export const artifactParents = sqliteTable(
+	'artifact_parent',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().notNull(),
+		artifactGeneration: integer('artifact_generation')
+			.$type<ArtifactGeneration>()
+			.notNull(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		publicationGeneration: integer('publication_generation')
+			.$type<NarInfoGeneration>()
+			.notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [
+				table.artifactId,
+				table.artifactGeneration,
+				table.storePathHash,
+				table.publicationGeneration
+			]
+		}),
+		index('artifact_parent_publication_idx').on(
+			table.cacheId,
+			table.storePathHash,
+			table.publicationGeneration,
+			table.artifactId
+		)
+	]
+);
+
+export const artifactRoots = sqliteTable(
+	'artifact_root',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().notNull(),
+		artifactGeneration: integer('artifact_generation')
+			.$type<ArtifactGeneration>()
+			.notNull(),
+		kind: text('kind', { enum: ['cache-lifetime', 'expiry'] }).notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.artifactId, table.artifactGeneration, table.kind]
+		}),
+		index('artifact_root_expiry_idx').on(table.expiresAt, table.artifactId),
+		check(
+			'artifact_root_expiry_check',
+			sql`(${table.kind} = 'cache-lifetime' AND ${table.expiresAt} IS NULL) OR (${table.kind} = 'expiry' AND ${table.expiresAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const artifactReferenceDeletion = sqliteTable(
+	'artifact_reference_deletion',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().notNull(),
+		artifactGeneration: integer('artifact_generation')
+			.$type<ArtifactGeneration>()
+			.notNull(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		referenceRemoved: integer('reference_removed', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.artifactId, table.artifactGeneration] }),
+		index('artifact_reference_deletion_cache_idx').on(table.cacheId)
+	]
+);
+
+export const narListings = sqliteTable(
+	'nar_listing',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		format: integer('format').$type<1>().notNull()
+	},
+	(table) => [
+		uniqueIndex('nar_listing_identity_idx').on(
+			table.cacheId,
+			table.narHash,
+			table.generatorRevision
+		),
+		check('nar_listing_format_check', sql`${table.format} = 1`)
+	]
+);
+
+export const buildLogs = sqliteTable(
+	'build_log',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		derivation: text('derivation').$type<StorePathBasename>().notNull(),
+		attemptId: text('attempt_id'),
+		sourceKind: text('source_kind', {
+			enum: ['local-stored', 'observed', 'remote-stored']
+		}).notNull(),
+		sourceDescription: text('source_description').notNull(),
+		capturedAt: text('captured_at').$type<IsoTimestamp>().notNull(),
+		completeness: text('completeness', {
+			enum: ['complete', 'incomplete', 'truncated']
+		}).notNull(),
+		outcome: text('outcome', {
+			enum: ['success', 'failure', 'unknown']
+		}).notNull()
+	},
+	(table) => [
+		index('build_log_derivation_idx').on(
+			table.cacheId,
+			table.derivation,
+			table.capturedAt,
+			table.artifactId
+		),
+		index('build_log_attempt_idx').on(table.cacheId, table.attemptId)
+	]
+);
+
+export const buildTraceMappings = sqliteTable(
+	'build_trace_mapping',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		derivation: text('derivation').$type<StorePathBasename>().notNull(),
+		outputName: text('output_name')
+			.$type<BuildTraceKey['outputName']>()
+			.notNull(),
+		outputPath: text('output_path').$type<StorePathBasename>().notNull(),
+		artifactId: text('artifact_id').$type<ArtifactId>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.cacheId, table.derivation, table.outputName]
+		}),
+		index('build_trace_mapping_artifact_idx').on(table.artifactId)
+	]
+);
+
+export const listingGenerationProofs = sqliteTable(
+	'listing_generation_proof',
+	{
+		artifactId: text('artifact_id').$type<ArtifactId>().primaryKey(),
+		listingArtifactId: text('listing_artifact_id')
+			.$type<ArtifactId>()
+			.notNull(),
+		predicateType: text('predicate_type').$type<PredicateType>().notNull(),
+		signingKey: text('signing_key').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('listing_generation_proof_listing_idx').on(table.listingArtifactId)
+	]
+);
+
+export const attestationListRefreshJobs = sqliteTable(
+	'attestation_list_refresh_job',
+	{
+		id: text('id').primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>(),
+		slot: integer('slot').notNull().default(1),
+		source: text('source', { mode: 'json' })
+			.$type<AttestationListRefreshSource>()
+			.notNull(),
+		key: text('key').$type<R2ObjectKey>().notNull(),
+		uploadId: text('upload_id'),
+		phase: text('phase', {
+			enum: ['collecting', 'uploading', 'completing', 'publishing', 'cleanup']
+		})
+			.notNull()
+			.default('collecting'),
+		after: text('after', { mode: 'json' }).$type<AttestationListCursor>(),
+		readSequence: integer('read_sequence').notNull().default(0),
+		readOffset: integer('read_offset').notNull().default(0),
+		nextSequence: integer('next_sequence').notNull().default(0),
+		bufferedBytes: integer('buffered_bytes').notNull().default(0),
+		nextPart: integer('next_part').notNull().default(1),
+		completedBytes: integer('completed_bytes').notNull().default(0),
+		hasEntries: integer('has_entries', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		isFinal: integer('is_final', { mode: 'boolean' }).notNull().default(false),
+		cleanupNotBefore: integer('cleanup_not_before').notNull().default(0),
+		cleanupAt: integer('cleanup_at')
+	},
+	(table) => [
+		check('attestation_list_refresh_slot_check', sql`${table.slot} = 1`),
+		uniqueIndex('attestation_list_refresh_active_idx')
+			.on(table.slot)
+			.where(sql`${table.cleanupAt} IS NULL`),
+		index('attestation_list_refresh_cleanup_idx').on(table.cleanupAt, table.id),
+		index('attestation_list_refresh_key_idx').on(
+			table.key,
+			table.cleanupNotBefore
+		),
+		index('attestation_list_refresh_cache_idx').on(table.cacheId, table.id)
+	]
+);
+
+export const attestationListRefreshChunks = sqliteTable(
+	'attestation_list_refresh_chunk',
+	{
+		jobId: text('job_id').notNull(),
+		sequence: integer('sequence').notNull(),
+		body: text('body').notNull(),
+		bytes: integer('bytes').notNull()
+	},
+	(table) => [primaryKey({ columns: [table.jobId, table.sequence] })]
+);
+
+export const attestationListRefreshParts = sqliteTable(
+	'attestation_list_refresh_part',
+	{
+		jobId: text('job_id').notNull(),
+		partNumber: integer('part_number').notNull(),
+		etag: text('etag').notNull()
+	},
+	(table) => [primaryKey({ columns: [table.jobId, table.partNumber] })]
+);
+
+export const attestationListRefreshLease = sqliteTable(
+	'attestation_list_refresh_lease',
+	{
+		id: integer('id').primaryKey(),
+		owner: text('owner').notNull(),
+		expiresAt: integer('expires_at').notNull()
+	},
+	(table) => [
+		check('attestation_list_refresh_lease_singleton', sql`${table.id} = 1`)
+	]
+);
+
+export const attestationListRefreshRetries = sqliteTable(
+	'attestation_list_refresh_retry',
+	{
+		revisionId: integer('revision_id').primaryKey(),
+		revision: integer('revision').notNull(),
+		cacheId: integer('cache_id').$type<CacheId>(),
+		notBefore: integer('not_before').notNull(),
+		failure: text('failure', { mode: 'json' })
+			.$type<AttestationListRefreshFailure>()
+			.notNull()
+	},
+	(table) => [
+		index('attestation_list_refresh_retry_cache_idx').on(
+			table.cacheId,
+			table.revisionId
+		)
+	]
+);
+
+export const attestationListRefreshWake = sqliteTable(
+	'attestation_list_refresh_wake',
+	{
+		id: integer('id').primaryKey(),
+		token: text('token').notNull()
+	},
+	(table) => [
+		check('attestation_list_refresh_wake_singleton', sql`${table.id} = 1`)
+	]
 );

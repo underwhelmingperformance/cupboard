@@ -1,11 +1,22 @@
 import { rootLogger } from '@cupboard/logger';
+import {
+	type Sha256HexDigest,
+	sha256HexDigestSchema
+} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { type ArtifactKind, artifactKinds } from '@cupboard/protocol/artifacts';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
+import { drizzle } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { CasObjectStore } from '../blob/cas-object-store.ts';
 import { lateWriteTombstoneHorizonMs } from '../blob/object-incarnation.ts';
+import { sha256HexBytes } from '../crypto/crypto.ts';
+import { CasDemotionProgressRepository } from '../db/cas-demotion-progress.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
 import {
 	afterGrace,
@@ -22,6 +33,7 @@ import {
 	flakyD1,
 	initialise,
 	readFetch,
+	recordTransition,
 	resetTestServer,
 	runBlobReaperToCompletion as runBlobReaper,
 	runCasReaperToCompletion as runCasReaper,
@@ -29,11 +41,28 @@ import {
 	seedCasObjects,
 	syntheticCasDigest,
 	syntheticNarHash,
+	tenantCasBlobRows,
+	tenantUsageRow,
 	testBase,
 	uploadMetadata,
 	verifiableNar,
 	verifiableNarStored
 } from '../test-support.ts';
+
+import { BlobReaperService } from './blob-reaper-service.ts';
+
+async function fileArtifactProjection(
+	digest: Sha256HexDigest,
+	kind: ArtifactKind = 'listing'
+): Promise<unknown> {
+	return env.CUPBOARD_DB.prepare(
+		`INSERT INTO artifact_ref
+         (tenant, artifact_id, artifact_generation, cache_kind, cache_generation, kind, digest, created_at)
+         VALUES ('v1', 'artifact', 1, 'default', 1, ?, ?, '2026-01-01T00:00:00.000Z')`
+	)
+		.bind(kind, digest)
+		.run();
+}
 
 async function deletionMarkerCount(
 	kind: 'nar' | 'cas',
@@ -71,20 +100,18 @@ function failD1Batch(database: D1Database, failureNumber: number): D1Database {
 const boundStatementSchema = z.object({ statement: z.string() });
 
 /**
- * Runs `reference` once, after the reaper has read its candidates and before
- * the batch that arms deadlines on `table` reaches D1.
+ * Inserts a reference immediately before a captured mutation reaches D1.
  */
-function referenceBeforeArm(
+function referenceBeforeMutation(
 	database: D1Database,
-	table: string,
+	mutationPrefix: string,
 	reference: () => Promise<unknown>
 ): { readonly database: D1Database; hasReferenced(): boolean } {
-	const armStatement = `update "${table}" set "delete_after"`;
 	let hasReferenced = false;
 	const isArm = (statement: D1PreparedStatement): boolean =>
 		boundStatementSchema
 			.safeParse(statement)
-			.data?.statement.startsWith(armStatement) ?? false;
+			.data?.statement.startsWith(mutationPrefix) ?? false;
 
 	return {
 		database: {
@@ -106,6 +133,18 @@ function referenceBeforeArm(
 		},
 		hasReferenced: () => hasReferenced
 	};
+}
+
+function referenceBeforeArm(
+	database: D1Database,
+	table: string,
+	reference: () => Promise<unknown>
+) {
+	return referenceBeforeMutation(
+		database,
+		`update "${table}" set "delete_after"`,
+		reference
+	);
 }
 
 async function removeLateWriteTombstones(): Promise<void> {
@@ -130,7 +169,360 @@ describe('blob reaper', () => {
 		await resetTestServer();
 
 		await clearBlobStorage();
+		await recordTransition('cas-demotion-progress', 'complete');
 	});
+
+	it('resumes bounded CAS tenant discovery across restarts and failed tenants', async () => {
+		await initialise();
+		const digest = syntheticCasDigest(2025);
+		await seedCasObjects([digest]);
+		const before = await casObjectRows();
+		const tenants = Array.from(
+			{ length: 12 },
+			(_, index) => `t${String(index).padStart(2, '0')}`
+		);
+		for (const tenant of tenants) {
+			await env.CUPBOARD_DB.prepare(
+				`INSERT INTO attestation_ref_storage
+				 (tenant, cache_kind, store_path_hash, generation, predicate_type, digest)
+				 VALUES (?, 'default', ?, 0, 'test', ?)`
+			)
+				.bind(tenant, 'a'.repeat(32), digest)
+				.run();
+		}
+		const passes: string[][] = [];
+		const demoted: number[] = [];
+
+		for (let pass = 0; pass < 4; pass += 1) {
+			const routed: string[] = [];
+			const reaper = new BlobReaperService(
+				drizzle(env.CUPBOARD_DB, { schema: d1Schema }),
+				env.BLOBS,
+				{ demote: () => Promise.resolve() },
+				{
+					demote(tenant) {
+						routed.push(tenant);
+						return tenant === 't00'
+							? Promise.reject(new Error('tenant unavailable'))
+							: Promise.resolve();
+					}
+				},
+				1000
+			);
+			demoted.push(
+				await reaper.demoteMissingCasObjects(rootLogger(), 10, {
+					read: () => Promise.resolve(pass === 0 ? '' : 'f'.repeat(64)),
+					advance: () => Promise.resolve()
+				})
+			);
+			passes.push(routed);
+		}
+
+		expect({
+			passes,
+			demoted,
+			remainingObjects: await casObjectRows()
+		}).toStrictEqual({
+			passes: [
+				['t00', 't01', 't02', 't03'],
+				['t04', 't05', 't06', 't07'],
+				['t08', 't09', 't10', 't11'],
+				['t00', 't01', 't02', 't03']
+			],
+			demoted: [0, 0, 0, 0],
+			remainingObjects: before
+		});
+	});
+
+	it('seeks one indexed row per tenant despite 25,000 references in the first tenant', async () => {
+		const digest = syntheticCasDigest(2026);
+		await seedCasObjects([digest]);
+		await env.CUPBOARD_DB.prepare(
+			`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 25000)
+			 INSERT INTO attestation_ref_storage
+			 (tenant, cache_kind, store_path_hash, generation, predicate_type, digest)
+			 SELECT 't00', 'default', ?, n, 'test', ? FROM source`
+		)
+			.bind('a'.repeat(32), digest)
+			.run();
+		for (const tenant of ['t01', 't02', 't03', 't04']) {
+			await env.CUPBOARD_DB.prepare(
+				`INSERT INTO attestation_ref_storage
+				 (tenant, cache_kind, store_path_hash, generation, predicate_type, digest)
+				 VALUES (?, 'default', ?, 0, 'test', ?)`
+			)
+				.bind(tenant, 'a'.repeat(32), digest)
+				.run();
+		}
+		const probes: { query: string; parameters: unknown[] }[] = [];
+		const database = drizzle(env.CUPBOARD_DB, {
+			schema: d1Schema,
+			logger: {
+				logQuery(query, parameters) {
+					if (
+						query.startsWith('select "tenant" from "attestation_ref_storage"')
+					) {
+						probes.push({ query, parameters });
+					}
+				}
+			}
+		});
+		const progress = new CasDemotionProgressRepository(database);
+		const source = { digest, incarnation: 1 };
+		const now = isoTimestamp(new Date());
+		await progress.register(source, now);
+		const tenants = await progress.tenantPage(source, now);
+		const reads = await Promise.all(
+			probes.map(async (probe) => {
+				const result = await env.CUPBOARD_DB.prepare(probe.query)
+					.bind(...probe.parameters)
+					.all();
+				return { rows: result.results, read: result.meta.rows_read };
+			})
+		);
+		expect({ tenants, reads }).toStrictEqual({
+			tenants: ['t00', 't01', 't02', 't03'],
+			reads: [
+				{ rows: [{ tenant: 't00' }], read: 1 },
+				{ rows: [{ tenant: 't01' }], read: 1 },
+				{ rows: [{ tenant: 't02' }], read: 1 },
+				{ rows: [{ tenant: 't03' }], read: 1 },
+				{ rows: [{ tenant: 't04' }], read: 1 }
+			]
+		});
+	});
+
+	it('refuses an older source after a replacement resets its tenant cursor', async () => {
+		const digest = syntheticCasDigest(2027);
+		await seedCasObjects([digest]);
+		const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+		const progress = new CasDemotionProgressRepository(database);
+		const now = isoTimestamp(new Date());
+		const original = { digest, incarnation: 1 };
+		await progress.register(original, now);
+		await progress.tenantPage(original, now);
+		await env.CUPBOARD_DB.batch([
+			env.CUPBOARD_DB.prepare(
+				'UPDATE cas_object_storage SET incarnation = 2 WHERE digest = ?'
+			).bind(digest),
+			env.CUPBOARD_DB.prepare(
+				"UPDATE object_incarnation SET incarnation = 2 WHERE kind = 'cas' AND object_id = ?"
+			).bind(digest)
+		]);
+		const replacement = { digest, incarnation: 2 };
+		await progress.register(replacement, now);
+		await progress.register(original, now);
+		const staleTenants = await progress.tenantPage(original, now);
+		const sources = await progress.dueSources(4);
+		const rows = await database
+			.select()
+			.from(d1Schema.casDemotionProgress)
+			.all();
+		expect({
+			staleTenants,
+			sources,
+			rows: rows.map((row) => ({
+				...row,
+				afterTenant: row.afterTenant ?? undefined
+			}))
+		}).toStrictEqual({
+			staleTenants: [],
+			sources: [replacement],
+			rows: [
+				{
+					digest,
+					incarnation: 2,
+					afterTenant: undefined,
+					revision: 3,
+					updatedAt: now
+				}
+			]
+		});
+	});
+
+	it('preserves missing objects and scan hints until discovery storage is ready', async () => {
+		await env.CUPBOARD_DB.prepare(
+			'DELETE FROM deployment_transition WHERE id = ?'
+		)
+			.bind('cas-demotion-progress')
+			.run();
+		const digest = syntheticCasDigest(2028);
+		await seedCasObjects([digest]);
+		const before = await casObjectRows();
+		const read = vi.fn(() => Promise.resolve(''));
+		const advance = vi.fn(() => Promise.resolve());
+		const route = vi.fn(() => Promise.resolve());
+		const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+		const reaper = new BlobReaperService(
+			database,
+			env.BLOBS,
+			{ demote: route },
+			{ demote: route },
+			1000
+		);
+		const demoted = await reaper.demoteMissingCasObjects(rootLogger(), 10, {
+			read,
+			advance
+		});
+		expect({
+			demoted,
+			reads: read.mock.calls,
+			advances: advance.mock.calls,
+			routes: route.mock.calls,
+			progress: await database
+				.select()
+				.from(d1Schema.casDemotionProgress)
+				.all(),
+			objects: await casObjectRows()
+		}).toStrictEqual({
+			demoted: 0,
+			reads: [],
+			advances: [],
+			routes: [],
+			progress: [],
+			objects: before
+		});
+	});
+
+	it('keeps missing CAS state when a reference arrives before registry retirement', async () => {
+		await initialise();
+		const digest = syntheticCasDigest(2020);
+		await seedCasObjects([digest]);
+		const before = await casObjectRows();
+		const injection = referenceBeforeMutation(
+			env.CUPBOARD_DB,
+			'update "object_incarnation" set "state"',
+			() =>
+				env.CUPBOARD_DB.prepare(
+					`INSERT INTO attestation_ref_storage
+					 (tenant, cache_kind, store_path_hash, generation, predicate_type, digest)
+					 VALUES ('v1', 'default', ?, 0, 'test', ?)`
+				)
+					.bind('a'.repeat(32), digest)
+					.run()
+		);
+		const reaper = new BlobReaperService(
+			drizzle(injection.database, { schema: d1Schema }),
+			env.BLOBS,
+			{ demote: () => Promise.resolve() },
+			{ demote: () => Promise.resolve() },
+			1000
+		);
+		const demoted = await reaper.demoteMissingCasObjects(rootLogger(), 10, {
+			read: () => Promise.resolve(''),
+			advance: () => Promise.resolve()
+		});
+		const registry = await env.CUPBOARD_DB.prepare(
+			'SELECT incarnation, state FROM object_incarnation WHERE kind = ? AND object_id = ?'
+		)
+			.bind('cas', digest)
+			.all();
+		expect({
+			demoted,
+			injected: injection.hasReferenced(),
+			objects: await casObjectRows(),
+			registry: registry.results
+		}).toStrictEqual({
+			demoted: 0,
+			injected: true,
+			objects: before,
+			registry: [{ incarnation: 1, state: 'live' }]
+		});
+	});
+
+	it.each(artifactKinds)(
+		'preserves %s references and quota through physical loss and repair',
+		async (kind) => {
+			await initialise();
+			await recordTransition('native-artifact-storage', 'complete');
+			const bytes = Uint8Array.of(42);
+			const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bytes));
+			await seedCasObjects([digest]);
+			await fileArtifactProjection(digest, kind);
+			await env.CUPBOARD_DB.batch([
+				env.CUPBOARD_DB.prepare(
+					"INSERT INTO tenant_cas_blob_storage (tenant, digest, size) VALUES ('v1', ?, 1)"
+				).bind(digest),
+				env.CUPBOARD_DB.prepare(
+					"UPDATE tenant_usage SET cas_bytes = 1, cas_blobs = 1 WHERE tenant = 'v1'"
+				)
+			]);
+			const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+			const logicalState = async () => {
+				const references = await database
+					.select()
+					.from(d1Schema.artifactReference);
+				return {
+					references: references.map((reference) => ({
+						...reference,
+						cacheName: reference.cacheName ?? undefined
+					})),
+					presence: await tenantCasBlobRows(),
+					usage: await tenantUsageRow()
+				};
+			};
+			const before = await logicalState();
+			expect(before).toStrictEqual({
+				references: [
+					{
+						tenant: 'v1',
+						artifactId: 'artifact',
+						artifactGeneration: 1,
+						cacheKind: 'default',
+						cacheName: undefined,
+						cacheGeneration: 1,
+						kind,
+						digest,
+						createdAt: '2026-01-01T00:00:00.000Z'
+					}
+				],
+				presence: [{ tenant: 'v1', digest, size: 1 }],
+				usage: {
+					bytes: 0,
+					narinfos: 0,
+					blobs: 0,
+					casBytes: 1,
+					casBlobs: 1,
+					quotaBytes: undefined
+				}
+			});
+			const reaper = new BlobReaperService(
+				database,
+				env.BLOBS,
+				{ demote: () => Promise.resolve() },
+				{ demote: () => Promise.resolve() },
+				1000
+			);
+			const demoted = await reaper.demoteMissingCasObjects(rootLogger(), 10, {
+				read: () => Promise.resolve(''),
+				advance: () => Promise.resolve()
+			});
+			expect({
+				demoted,
+				logical: await logicalState(),
+				objects: await casObjectRows()
+			}).toStrictEqual({ demoted: 1, logical: before, objects: [] });
+			const incarnation = await new CasObjectStore(database, env.BLOBS).promote(
+				{ digest, size: bytes.byteLength, bytes },
+				{ restoreMissingObject: true }
+			);
+			const repaired = await env.BLOBS.get(casObjectKey(digest, incarnation));
+			expect({
+				incarnation,
+				logical: await logicalState(),
+				objects: await casObjectRows(),
+				bytes:
+					repaired === null
+						? undefined
+						: new Uint8Array(await repaired.arrayBuffer())
+			}).toStrictEqual({
+				incarnation: 2,
+				logical: before,
+				objects: [{ digest, size: 1, deleteAfter: undefined }],
+				bytes
+			});
+		}
+	);
 
 	it('arms an unreferenced blob and collects it only after the grace', async () => {
 		const token = await initialise();
@@ -298,6 +690,121 @@ describe('blob reaper', () => {
 		expect(await deletionMarkerCount('nar', nar.narHash)).toBe(0);
 	});
 
+	it.each(artifactKinds)(
+		'retains CAS bytes referenced only by a %s artifact',
+		async (kind) => {
+			await recordTransition('native-artifact-storage', 'complete');
+			const digest = syntheticCasDigest(2000);
+			const key = casObjectKey(digest);
+			await seedCasObjects([digest]);
+			await env.BLOBS.put(key, 'artifact');
+			await fileArtifactProjection(digest, kind);
+			const before = {
+				objects: await casObjectRows(),
+				markerCount: await deletionMarkerCount('cas', digest),
+				objectPresent: (await env.BLOBS.head(key)) !== null
+			};
+			await runCasReaper(rootLogger(), env);
+			vi.setSystemTime(afterGrace());
+			await runCasReaper(rootLogger(), env);
+			expect({
+				objects: await casObjectRows(),
+				markerCount: await deletionMarkerCount('cas', digest),
+				objectPresent: (await env.BLOBS.head(key)) !== null
+			}).toStrictEqual(before);
+		}
+	);
+
+	it('retains an armed CAS object when an artifact reference arrives before collection', async () => {
+		await recordTransition('native-artifact-storage', 'complete');
+		const digest = syntheticCasDigest(2001);
+		const key = casObjectKey(digest);
+		await seedCasObjects([digest]);
+		await env.BLOBS.put(key, 'artifact');
+		await runCasReaper(rootLogger(), env);
+		const before = {
+			objects: await casObjectRows(),
+			markerCount: await deletionMarkerCount('cas', digest),
+			objectPresent: (await env.BLOBS.head(key)) !== null
+		};
+		await fileArtifactProjection(digest);
+		vi.setSystemTime(afterGrace());
+		await runCasReaper(rootLogger(), env);
+		expect({
+			objects: await casObjectRows(),
+			markerCount: await deletionMarkerCount('cas', digest),
+			objectPresent: (await env.BLOBS.head(key)) !== null
+		}).toStrictEqual(before);
+	});
+
+	it('leaves CAS unarmed when an artifact reference arrives after candidate discovery', async () => {
+		await recordTransition('native-artifact-storage', 'complete');
+		const digest = syntheticCasDigest(2002);
+		await seedCasObjects([digest]);
+		const injection = referenceBeforeArm(
+			env.CUPBOARD_DB,
+			'cas_object_storage',
+			() => fileArtifactProjection(digest)
+		);
+		await runCasReaper(rootLogger(), {
+			...env,
+			CUPBOARD_DB: injection.database
+		});
+		expect({
+			hasReferenced: injection.hasReferenced(),
+			objects: await casObjectRows()
+		}).toStrictEqual({
+			hasReferenced: true,
+			objects: [{ digest, size: 1, deleteAfter: undefined }]
+		});
+	});
+
+	it('refuses a stale CAS mutation when artifact storage expands after candidate discovery', async () => {
+		const digest = syntheticCasDigest(2003);
+		await seedCasObjects([digest]);
+		const injection = referenceBeforeArm(
+			env.CUPBOARD_DB,
+			'cas_object_storage',
+			async () => {
+				await recordTransition('native-artifact-storage', 'complete');
+				await fileArtifactProjection(digest);
+			}
+		);
+		await runCasReaper(rootLogger(), {
+			...env,
+			CUPBOARD_DB: injection.database
+		});
+		expect({
+			hasReferenced: injection.hasReferenced(),
+			objects: await casObjectRows()
+		}).toStrictEqual({
+			hasReferenced: true,
+			objects: [{ digest, size: 1, deleteAfter: undefined }]
+		});
+	});
+
+	it('collects an unrelated CAS object while another digest has an artifact reference', async () => {
+		await recordTransition('native-artifact-storage', 'complete');
+		const retained = syntheticCasDigest(2010);
+		const unrelated = syntheticCasDigest(2011);
+		await seedCasObjects([retained, unrelated]);
+		await env.BLOBS.put(casObjectKey(retained), 'retained');
+		await env.BLOBS.put(casObjectKey(unrelated), 'unrelated');
+		await fileArtifactProjection(retained);
+		await runCasReaper(rootLogger(), env);
+		vi.setSystemTime(afterGrace());
+		await runCasReaper(rootLogger(), env);
+		expect({
+			objects: await casObjectRows(),
+			retainedPresent: (await env.BLOBS.head(casObjectKey(retained))) !== null,
+			unrelatedPresent: (await env.BLOBS.head(casObjectKey(unrelated))) !== null
+		}).toStrictEqual({
+			objects: [{ digest: retained, size: 1, deleteAfter: undefined }],
+			retainedPresent: true,
+			unrelatedPresent: false
+		});
+	});
+
 	it('retries a CAS object delete after collection loses its first response', async () => {
 		const digest = syntheticCasDigest(1000);
 		const key = casObjectKey(digest);
@@ -428,7 +935,7 @@ describe('blob reaper', () => {
 		},
 		{
 			kind: 'CAS',
-			table: 'cas_object',
+			table: 'cas_object_storage',
 			seed: () => seedCasObjects([syntheticCasDigest(1)]),
 			reference: () =>
 				env.CUPBOARD_DB.prepare(

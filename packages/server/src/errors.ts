@@ -10,6 +10,7 @@ import {
 	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { type ArtifactKind } from '@cupboard/protocol/artifacts';
 import { type AttestationInfoError } from '@cupboard/protocol/attestations';
 import {
 	type CacheMetadataError,
@@ -46,6 +47,7 @@ export abstract class InvalidRequestBodyError extends ServerHttpError {
 
 export class AttestationInfoHttpError extends ServerHttpError {
 	readonly status: number;
+	override readonly retryAfterSeconds: number | undefined;
 	constructor(
 		readonly code: AttestationInfoError['code'],
 		message: string,
@@ -54,12 +56,26 @@ export class AttestationInfoHttpError extends ServerHttpError {
 	) {
 		super(message);
 		this.name = 'AttestationInfoHttpError';
+		this.retryAfterSeconds = code === 'list-pending' ? 5 : undefined;
 		this.status =
-			code === 'scope-changed'
-				? StatusCodes.CONFLICT
-				: code === 'list-invalid'
-					? StatusCodes.BAD_GATEWAY
-					: StatusCodes.REQUEST_TOO_LONG;
+			code === 'list-pending'
+				? StatusCodes.SERVICE_UNAVAILABLE
+				: code === 'scope-changed'
+					? StatusCodes.CONFLICT
+					: code === 'list-invalid'
+						? StatusCodes.BAD_GATEWAY
+						: StatusCodes.REQUEST_TOO_LONG;
+	}
+}
+
+export class AttestationListPendingError extends AttestationInfoHttpError {
+	constructor(hash: StorePathHash) {
+		super(
+			'list-pending',
+			'Attestation list refresh is pending. Retry the request.',
+			hash
+		);
+		this.name = 'AttestationListPendingError';
 	}
 }
 
@@ -71,9 +87,9 @@ export abstract class MetadataHttpError extends ServerHttpError {
 export class MetadataRequestTooLargeError extends MetadataHttpError {
 	readonly code = cacheMetadataErrorCodes.requestTooLarge;
 	readonly status = StatusCodes.REQUEST_TOO_LONG;
-	constructor() {
+	constructor(maximumBytes = 64 * 1024) {
 		super(
-			'The metadata request exceeds 64 KiB. Split the store paths into smaller pages.'
+			`The metadata request exceeds ${String(maximumBytes / 1024)} KiB. Split the store paths into smaller pages.`
 		);
 		this.name = 'MetadataRequestTooLargeError';
 	}
@@ -106,6 +122,17 @@ export class MetadataNarInfoInvalidError extends MetadataHttpError {
 				: `The cache returned invalid narinfo metadata for ${storePath}.`
 		);
 		this.name = 'MetadataNarInfoInvalidError';
+	}
+}
+
+export class MetadataIntersectionTooManyHashesError extends MetadataHttpError {
+	readonly code = cacheMetadataErrorCodes.candidateBudget;
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+	constructor(hashes: number, maximumHashes: number) {
+		super(
+			`The intersection request has ${String(hashes)} hashes; send at most ${String(maximumHashes)} hashes per request.`
+		);
+		this.name = 'MetadataIntersectionTooManyHashesError';
 	}
 }
 
@@ -615,6 +642,16 @@ export class TenantNotFoundError extends ServerHttpError {
 	constructor(public readonly id: string) {
 		super('The requested tenant does not exist.');
 		this.name = 'TenantNotFoundError';
+	}
+}
+
+export class TenantDrainIdentityMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+	constructor() {
+		super(
+			'Offboarding recovery must target the tenant assigned to this Durable Object'
+		);
+		this.name = 'TenantDrainIdentityMismatchError';
 	}
 }
 
@@ -1613,6 +1650,87 @@ export class AttestationPathNotFoundError extends ServerHttpError {
 	}
 }
 
+export class ArtifactReferenceConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super(
+			'The artifact generation already references different immutable content or cache authority'
+		);
+		this.name = 'ArtifactReferenceConflictError';
+	}
+}
+
+export class ArtifactStorageMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super(
+			'Artifact reference storage is not ready; complete the storage transition before publishing artifacts'
+		);
+		this.name = 'ArtifactStorageMigrationPendingError';
+	}
+}
+
+export class ListingFactConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super(
+			'A listing fact already records different bytes for this NAR and generator revision'
+		);
+		this.name = 'ListingFactConflictError';
+	}
+}
+
+export class ArtifactReadChangedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super('Artifact publication changed during the read; retry the request');
+		this.name = 'ArtifactReadChangedError';
+	}
+}
+
+export class ArtifactTooLargeError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor(
+		public readonly kind: ArtifactKind,
+		public readonly size: number,
+		public readonly maxSize: number
+	) {
+		super(
+			`${kind} artifact is ${String(size)} bytes; the limit is ${String(maxSize)} bytes. Omit this optional artifact or reduce its size before publishing it.`
+		);
+		this.name = 'ArtifactTooLargeError';
+	}
+}
+
+export class ArtifactPublicationMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super(
+			'Artifact publication is not active; complete the publication transition before publishing artifacts'
+		);
+		this.name = 'ArtifactPublicationMigrationPendingError';
+	}
+}
+
+export class CasReferenceSetChangedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super('CAS reference storage changed during deletion; retry the operation');
+		this.name = 'CasReferenceSetChangedError';
+	}
+}
+
 export class AttestationInheritanceSourceChangedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;
@@ -1861,5 +1979,36 @@ export class CacheClosedError extends ServerHttpError {
 			'This cache is closed. Reopen the cache before publishing or extending retention.'
 		);
 		this.name = 'CacheClosedError';
+	}
+}
+
+export class AttestationListSourceUnavailableError extends Error {
+	constructor(public readonly digest: Sha256HexDigest) {
+		super(`Attestation metadata is unavailable for digest ${digest}`);
+		this.name = 'AttestationListSourceUnavailableError';
+	}
+}
+
+export class AttestationListStagingInvalidError extends Error {
+	constructor(
+		public readonly jobId: string,
+		public readonly reason:
+			| 'missing-chunk'
+			| 'invalid-chunk'
+			| 'part-limit'
+			| 'short-buffer'
+			| 'chunk-too-large'
+			| 'completed-size'
+			| 'completed-metadata'
+	) {
+		super(`Attestation-list staging for job ${jobId} is invalid (${reason})`);
+		this.name = 'AttestationListStagingInvalidError';
+	}
+}
+
+export class AttestationListRefreshLeaseLostError extends Error {
+	constructor() {
+		super('The attestation-list refresh lease is no longer valid');
+		this.name = 'AttestationListRefreshLeaseLostError';
 	}
 }

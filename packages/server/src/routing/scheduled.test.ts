@@ -51,6 +51,36 @@ describe('runScheduledMaintenance', () => {
 		expect(calls).toStrictEqual(['gc', 'verify']);
 	});
 
+	it.each(['none', 'gc', 'verify', 'keys', 'dispatch'] as const)(
+		'runs dispatch recovery independently when %s fails',
+		async (failed) => {
+			const calls: string[] = [];
+			const failure = new Error('scheduled pass failed');
+			const pass = (label: string) => () => {
+				calls.push(label);
+				if (label === failed) {
+					return Promise.reject(failure);
+				}
+				return Promise.resolve();
+			};
+			let error: unknown;
+			try {
+				await runScheduledMaintenance(
+					pass('gc'),
+					pass('verify'),
+					pass('keys'),
+					pass('dispatch')
+				);
+			} catch (error_) {
+				error = error_;
+			}
+			expect({ calls, error }).toStrictEqual({
+				calls: ['gc', 'verify', 'keys', 'dispatch'],
+				error: failed === 'none' ? undefined : failure
+			});
+		}
+	);
+
 	it('runs the verify and then reports the failure when the collection fails', async () => {
 		const { calls, pass, fail } = recorder();
 

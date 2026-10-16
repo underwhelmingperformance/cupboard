@@ -2,7 +2,11 @@ import { UnboundableIoError } from '../errors.ts';
 
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
 import { admitBoundParameters } from './statement-admission.ts';
-import { spendSubrequests } from './subrequest-slice.ts';
+import {
+	checkSubrequestAdmission,
+	spendSubrequests,
+	type SubrequestAdmissionOptions
+} from './subrequest-slice.ts';
 
 // Declare the call against the dispatch's subrequest slice before making it.
 // The slice refuses nothing; a pass asks `hasSubrequestsFor` before a unit of
@@ -19,12 +23,55 @@ function bounded<A extends unknown[], R>(
 	};
 }
 
-// A multipart handle issues requests outside these per-call proxies.
-// Reject the member when the wrapper cannot apply a deadline to those requests.
 function unboundable(member: string): () => never {
 	return () => {
 		throw new UnboundableIoError(member);
 	};
+}
+
+function admittedD1Operation<A extends unknown[], R>(
+	method: (...arguments_: A) => Promise<R>,
+	subrequest: string,
+	options: SubrequestAdmissionOptions
+): (...arguments_: A) => Promise<R> {
+	const call = bounded(method, subrequest);
+	return (...arguments_: A) => {
+		checkSubrequestAdmission(options, subrequest);
+		return call(...arguments_);
+	};
+}
+
+class BoundedMultipartUpload implements R2MultipartUpload {
+	constructor(private readonly upload: R2MultipartUpload) {}
+
+	get key(): string {
+		return this.upload.key;
+	}
+
+	get uploadId(): string {
+		return this.upload.uploadId;
+	}
+
+	uploadPart(
+		...arguments_: Parameters<R2MultipartUpload['uploadPart']>
+	): Promise<R2UploadedPart> {
+		return bounded(
+			this.upload.uploadPart.bind(this.upload),
+			'r2.uploadPart',
+			unboundedCapMs
+		)(...arguments_);
+	}
+
+	complete(uploadedParts: R2UploadedPart[]): Promise<R2Object> {
+		return bounded(
+			this.upload.complete.bind(this.upload),
+			'r2.complete'
+		)(uploadedParts);
+	}
+
+	abort(): Promise<void> {
+		return bounded(this.upload.abort.bind(this.upload), 'r2.abort')();
+	}
 }
 
 // Bind pass-through methods to the host object because their implementations
@@ -79,9 +126,11 @@ export function boundedWorkerEnv<
 }
 
 /**
- * Wraps an {@link R2Bucket} with deadlines. `head`, `delete` and `list` use the
- * per-call limit. `get` and `put` transfer blob bytes, so they use the enclosing
- * critical-section deadline and can continue without the input gate.
+ * Wraps an {@link R2Bucket} with deadlines and subrequest accounting. Byte
+ * transfers (`get`, `put` and multipart part uploads) use the enclosing deadline
+ * without a per-call cap. Metadata operations, including multipart creation,
+ * completion and abort, also use the per-call limit. Resuming a multipart handle
+ * does not issue a request.
  */
 export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 	return new Proxy(bucket, {
@@ -102,9 +151,24 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 				case 'list': {
 					return bounded(target.list.bind(target), 'r2.list');
 				}
-				case 'createMultipartUpload':
+				case 'createMultipartUpload': {
+					return bounded(
+						async (
+							...arguments_: Parameters<R2Bucket['createMultipartUpload']>
+						) =>
+							new BoundedMultipartUpload(
+								await target.createMultipartUpload(...arguments_)
+							),
+						'r2.createMultipartUpload'
+					);
+				}
 				case 'resumeMultipartUpload': {
-					return unboundable(`r2.${property}`);
+					return (
+						...arguments_: Parameters<R2Bucket['resumeMultipartUpload']>
+					) =>
+						new BoundedMultipartUpload(
+							target.resumeMultipartUpload(...arguments_)
+						);
 				}
 				default: {
 					return passThrough(target, property);
@@ -118,7 +182,10 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 // arguments before passing them to D1.
 const realStatement = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
 
-function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
+function boundedStatement(
+	statement: D1PreparedStatement,
+	options: SubrequestAdmissionOptions
+): D1PreparedStatement {
 	const proxy = new Proxy(statement, {
 		get(target, property) {
 			switch (property) {
@@ -126,20 +193,36 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 					return (...values: unknown[]): D1PreparedStatement => {
 						admitBoundParameters(values.length);
 
-						return boundedStatement(target.bind(...values));
+						return boundedStatement(target.bind(...values), options);
 					};
 				}
 				case 'run': {
-					return bounded(target.run.bind(target), 'd1.run');
+					return admittedD1Operation(
+						target.run.bind(target),
+						'd1.run',
+						options
+					);
 				}
 				case 'all': {
-					return bounded(target.all.bind(target), 'd1.all');
+					return admittedD1Operation(
+						target.all.bind(target),
+						'd1.all',
+						options
+					);
 				}
 				case 'first': {
-					return bounded(target.first.bind(target), 'd1.first');
+					return admittedD1Operation(
+						target.first.bind(target),
+						'd1.first',
+						options
+					);
 				}
 				case 'raw': {
-					return bounded(target.raw.bind(target), 'd1.raw');
+					return admittedD1Operation(
+						target.raw.bind(target),
+						'd1.raw',
+						options
+					);
 				}
 				default: {
 					return passThrough(target, property);
@@ -154,17 +237,19 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 }
 
 function boundedD1Client<T extends D1Database | D1DatabaseSession>(
-	database: T
+	database: T,
+	options: SubrequestAdmissionOptions
 ): T {
 	return new Proxy(database, {
 		get(target, property) {
 			switch (property) {
 				case 'prepare': {
 					return (query: string): D1PreparedStatement =>
-						boundedStatement(target.prepare(query));
+						boundedStatement(target.prepare(query), options);
 				}
 				case 'batch': {
 					return (statements: D1PreparedStatement[]) => {
+						checkSubrequestAdmission(options, 'd1.batch');
 						spendSubrequests(1, 'd1.batch');
 
 						return boundedSubrequest(
@@ -190,20 +275,29 @@ function boundedD1Client<T extends D1Database | D1DatabaseSession>(
  * Wraps a {@link D1Database} and its sessions with deadlines and subrequest
  * accounting. Each terminal statement method, batch, or exec call consumes
  * one subrequest. A batch remains atomic and consumes one call regardless
- * of its member count.
+ * of its member count. Optional clients check cancellation and reserve-aware
+ * capacity at each terminal call, including session batches. Refused calls
+ * issue no I/O and consume no subrequest.
  */
-export function boundedD1(database: D1Database): D1Database {
-	const client = boundedD1Client(database);
+export function boundedD1(
+	database: D1Database,
+	options: SubrequestAdmissionOptions = {}
+): D1Database {
+	const client = boundedD1Client(database, options);
 
 	return new Proxy(client, {
 		get(target, property) {
 			if (property === 'exec') {
-				return bounded(database.exec.bind(database), 'd1.exec');
+				return admittedD1Operation(
+					database.exec.bind(database),
+					'd1.exec',
+					options
+				);
 			}
 
 			if (property === 'withSession') {
 				return (constraint?: D1SessionBookmark): D1DatabaseSession =>
-					boundedD1Client(database.withSession(constraint));
+					boundedD1Client(database.withSession(constraint), options);
 			}
 
 			if (property === 'dump') {

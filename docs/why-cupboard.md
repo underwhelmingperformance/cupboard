@@ -15,7 +15,7 @@ current features and pricing.
 | **cupboard**                           | Nothing but a Cloudflare account        | Tied to Cloudflare. Pre-1.0.                                          |
 | **Cachix**                             | Nothing. It's a hosted service.         | A third party stores your builds.                                     |
 | **Attic**                              | A server, a database and object storage | You control the hosting, and you operate more infrastructure.         |
-| **Harmonia, nix-serve**                | A machine whose Nix store you serve     | The cache is the Nix store of that one machine.                       |
+| **nix-serve**                          | A machine whose Nix store you serve     | The cache is the Nix store of that one machine.                       |
 | **An S3 or R2 bucket**, via `nix copy` | A bucket                                | No server. Every writer that signs paths needs the cache signing key. |
 
 ## When not to use it

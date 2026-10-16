@@ -56,6 +56,8 @@ import {
 	syntheticNarHash,
 	syntheticStorePathHash,
 	takeStalledMaintenancePasses,
+	tenantCasBlobRows,
+	tenantUsageRow,
 	testBase,
 	testServerFor,
 	uploadMetadata,
@@ -1376,54 +1378,55 @@ describe('narinfo deletion queue', () => {
 		}).toStrictEqual({ queued: [], edges: [] });
 	});
 
-	it('caps a flush at its limit and reports the remaining backlog', async () => {
-		const total = 6;
-		const flushLimit = 4;
-		const entries = syntheticEntries(total);
-		await seedQueuedDeletions(entries);
+	it('caps a flush at its limit and reports the remaining backlog', () =>
+		withoutAlarmArming(async () => {
+			const total = 6;
+			const flushLimit = 4;
+			const entries = syntheticEntries(total);
+			await seedQueuedDeletions(entries);
 
-		const firstPass = await runInDurableObject(
-			currentServer(),
-			async (instance) => {
-				const queue = buildDeletionQueue(instance.context);
-				const retired = await asOneInvocation(() =>
-					instance.context.criticalSection(() =>
-						queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
-					)
-				);
+			const firstPass = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const queue = buildDeletionQueue(instance.context);
+					const retired = await asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
+						)
+					);
 
-				return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
-			}
-		);
-		const remainingAfterFirst = await narInfoDeletionRows();
+					return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
+				}
+			);
+			const remainingAfterFirst = await narInfoDeletionRows();
 
-		const secondPass = await runInDurableObject(
-			currentServer(),
-			async (instance) => {
-				const queue = buildDeletionQueue(instance.context);
-				const retired = await asOneInvocation(() =>
-					instance.context.criticalSection(() =>
-						queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
-					)
-				);
+			const secondPass = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const queue = buildDeletionQueue(instance.context);
+					const retired = await asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
+						)
+					);
 
-				return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
-			}
-		);
-		const remainingAfterSecond = await narInfoDeletionRows();
+					return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
+				}
+			);
+			const remainingAfterSecond = await narInfoDeletionRows();
 
-		expect({
-			firstPass,
-			remainingAfterFirst,
-			secondPass,
-			remainingAfterSecond
-		}).toStrictEqual({
-			firstPass: { retired: flushLimit, hasMore: true },
-			remainingAfterFirst: expectedQueueRows(entries.slice(flushLimit)),
-			secondPass: { retired: total - flushLimit, hasMore: false },
-			remainingAfterSecond: []
-		});
-	});
+			expect({
+				firstPass,
+				remainingAfterFirst,
+				secondPass,
+				remainingAfterSecond
+			}).toStrictEqual({
+				firstPass: { retired: flushLimit, hasMore: true },
+				remainingAfterFirst: expectedQueueRows(entries.slice(flushLimit)),
+				secondPass: { retired: total - flushLimit, hasMore: false },
+				remainingAfterSecond: []
+			});
+		}));
 
 	it('bounds authority revocation across 25,000 retained generations', async () => {
 		const token = await initialise();
@@ -1491,17 +1494,28 @@ describe('narinfo deletion queue', () => {
 				written: result.meta.rows_written
 			}))
 		).toStrictEqual([
-			{ rows: [], read: 116, written: 0 },
-			{ rows: [], read: 115, written: 0 },
-			{ rows: [], read: 489, written: 71 },
-			{ rows: [], read: 485, written: 69 },
+			{ rows: [], read: 270, written: 0 },
+			{ rows: [], read: 269, written: 0 },
+			{ rows: [], read: 1172, written: 180 },
+			{ rows: [], read: 1154, written: 171 },
 			{ rows: [], read: 1, written: 2 },
 			{ rows: [], read: 1, written: 2 },
-			{ rows: [], read: 116, written: 0 },
-			{ rows: [], read: 478, written: 64 },
+			{ rows: [], read: 270, written: 0 },
+			{ rows: [], read: 1133, written: 159 },
 			{ rows: [], read: 1, written: 2 }
 		]);
 
+		// Demotion searches both allocator records in row order. Initialise unused
+		// allocators and put these two last so the cost does not depend on test order.
+		await env.CUPBOARD_DB.prepare(
+			"INSERT INTO sqlite_sequence (name,seq) SELECT name,0 FROM sqlite_master AS allocator WHERE type = 'table' AND instr(upper(sql),'AUTOINCREMENT') > 0 AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE sqlite_sequence.name = allocator.name)"
+		).run();
+		await env.CUPBOARD_DB.prepare(
+			"UPDATE sqlite_sequence SET rowid = (SELECT max(rowid) + 1 FROM sqlite_sequence) WHERE name = 'attestation_list_revision'"
+		).run();
+		await env.CUPBOARD_DB.prepare(
+			"UPDATE sqlite_sequence SET rowid = (SELECT max(rowid) + 1 FROM sqlite_sequence) WHERE name = 'listing_adoption_capture_event'"
+		).run();
 		const precedingAdmission = await env.CUPBOARD_DB.prepare(
 			'SELECT count(*) AS admitted FROM cache_lifecycle WHERE tenant = ?'
 		)
@@ -1589,9 +1603,9 @@ describe('narinfo deletion queue', () => {
 			retained,
 			bundles
 		}).toStrictEqual({
-			revocationCosts: [{ read: 0, written: 4 }],
-			maxRead: 600,
-			maxWritten: 100,
+			revocationCosts: [{ read: 5, written: 4 }],
+			maxRead: 909,
+			maxWritten: 301,
 			retained: { total: 25_000, readable: 0 },
 			bundles: { total: 25_000, readable: 0 }
 		});
@@ -1997,34 +2011,35 @@ describe('narinfo deletion queue', () => {
 		]);
 	});
 
-	it('reads the same rows in a flush however many uploads are pending in the cache', async () => {
-		await initialise();
-		const entries = syntheticEntries(8);
-		const flushRowsRead = async (
-			batch: readonly TornDownNarInfo[]
-		): Promise<number> => {
-			await seedQueuedDeletions(batch);
+	it('reads the same rows in a flush however many uploads are pending in the cache', () =>
+		withoutAlarmArming(async () => {
+			await initialise();
+			const entries = syntheticEntries(8);
+			const flushRowsRead = async (
+				batch: readonly TornDownNarInfo[]
+			): Promise<number> => {
+				await seedQueuedDeletions(batch);
 
-			return runInDurableObject(currentServer(), async (instance) => {
-				const { dbCost } = instance.context;
-				dbCost.recordOutstanding();
-				const before = dbCost.rowsRead;
+				return runInDurableObject(currentServer(), async (instance) => {
+					const { dbCost } = instance.context;
+					dbCost.recordOutstanding();
+					const before = dbCost.rowsRead;
 
-				await asOneInvocation(() =>
-					instance.context.criticalSection(() =>
-						buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions()
-					)
-				);
-				dbCost.recordOutstanding();
+					await asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions()
+						)
+					);
+					dbCost.recordOutstanding();
 
-				return dbCost.rowsRead - before;
-			});
-		};
+					return dbCost.rowsRead - before;
+				});
+			};
 
-		const withoutUploads = await flushRowsRead(entries.slice(0, 4));
-		await runInDurableObject(currentServer(), (instance, state) => {
-			state.storage.sql.exec(
-				`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+			const withoutUploads = await flushRowsRead(entries.slice(0, 4));
+			await runInDurableObject(currentServer(), (instance, state) => {
+				state.storage.sql.exec(
+					`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
 				 rows(value) AS (
 				   SELECT ones.digit + tens.digit * 10 + hundreds.digit * 100
 				   FROM digits AS ones CROSS JOIN digits AS tens CROSS JOIN digits AS hundreds
@@ -2035,23 +2050,121 @@ describe('narinfo deletion queue', () => {
 				        json_object('storePathHash', printf('p%031d', value)),
 				        '2026-01-01T00:00:00.000Z', '2026-01-01T01:00:00.000Z', 'pending'
 				 FROM rows`,
-				resolvedCache(instance.context).id,
-				syntheticNarHash(0)
-			);
-		});
-		await runInDurableObject(currentServer(), (_instance, state) => {
-			state.storage.sql.exec(
-				`WITH RECURSIVE rows(value) AS (VALUES (1) UNION ALL SELECT value + 1 FROM rows WHERE value < 1000)
+					resolvedCache(instance.context).id,
+					syntheticNarHash(0)
+				);
+			});
+			await runInDurableObject(currentServer(), (_instance, state) => {
+				state.storage.sql.exec(
+					`WITH RECURSIVE rows(value) AS (VALUES (1) UNION ALL SELECT value + 1 FROM rows WHERE value < 1000)
 				 INSERT INTO cache_identity (kind, name, access, priority, created_at, deleted_at)
 				 SELECT 'named', printf('historic-%d', value), 'public', 40,
 				 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z' FROM rows`
-			);
-		});
-		const withUploads = await flushRowsRead(entries.slice(4));
+				);
+			});
+			const withUploads = await flushRowsRead(entries.slice(4));
 
-		expect({ withoutUploads, withUploads }).toStrictEqual({
-			withoutUploads: 82,
-			withUploads: 82
+			expect({ withoutUploads, withUploads }).toStrictEqual({
+				withoutUploads: 86,
+				withUploads: 86
+			});
+		}));
+
+	it('keeps the deletion queue and quota retryable across artifact storage expansion', async () => {
+		await initialise();
+		const entry = {
+			storePathHash: syntheticStorePathHash(0),
+			narHash: syntheticNarHash(0),
+			generation: narInfoGenerationSchema.parse(0)
+		};
+		await fileAttestationReference({
+			uploadId: 'queued-artifact-expansion',
+			bytes: new TextEncoder().encode('queued expansion'),
+			storePathHash: entry.storePathHash,
+			generation: entry.generation,
+			predicateType: predicateTypeSchema.parse('https://example.com/predicate')
+		});
+		await seedQueuedDeletions([entry]);
+		const before = {
+			queue: await narInfoDeletionRows(),
+			attestations: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		};
+		const drain = () =>
+			runInDurableObject(currentServer(), (instance) =>
+				asOneInvocation(() =>
+					instance.context.criticalSection(() =>
+						buildDeletionQueue(instance.context).retireTornDownNarInfos(
+							resolvedCache(instance.context),
+							[entry]
+						)
+					)
+				)
+			);
+		const statementSchema = z.object({ statement: z.string() });
+		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		let didExpand = false;
+		const spy = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementation(async (statements) => {
+				if (
+					!didExpand &&
+					statements.some((statement) =>
+						statementSchema
+							.safeParse(statement)
+							.data?.statement.startsWith('update "tenant_usage"')
+					)
+				) {
+					didExpand = true;
+					await recordTransition('native-artifact-storage', 'complete');
+				}
+				return originalBatch(statements);
+			});
+		let failure: unknown;
+		try {
+			await drain();
+		} catch (error) {
+			failure = error;
+		} finally {
+			spy.mockRestore();
+		}
+		expect({
+			didExpand,
+			failure:
+				failure instanceof ServerHttpError
+					? {
+							name: failure.name,
+							status: failure.status,
+							retryAfterSeconds: failure.retryAfterSeconds
+						}
+					: failure,
+			queue: await narInfoDeletionRows(),
+			attestations: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			didExpand: true,
+			failure: {
+				name: 'CasReferenceSetChangedError',
+				status: 503,
+				retryAfterSeconds: 1
+			},
+			...before
+		});
+
+		await drain();
+		await drain();
+		expect({
+			queue: await narInfoDeletionRows(),
+			attestations: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			queue: [],
+			attestations: [],
+			presence: [],
+			usage: { ...before.usage, casBytes: 0, casBlobs: 0 }
 		});
 	});
 

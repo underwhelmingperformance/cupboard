@@ -913,6 +913,7 @@ function settingsEnvironment(home: string): NodeJS.ProcessEnv {
 		HOME: home,
 		NIX_CONF_DIR: configDirectory,
 		NIX_USER_CONF_FILES: '/dev/null',
+		NIX_SSL_CERT_FILE: '/dev/null',
 		PATH: process.env.PATH ?? ''
 	};
 }

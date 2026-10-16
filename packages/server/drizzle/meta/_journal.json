@@ -540,6 +540,97 @@
 			"when": 1791499117285,
 			"tag": "0076_pending_upload_promotion",
 			"breakpoints": true
+		},
+		{
+			"idx": 77,
+			"version": "6",
+			"when": 1791747359405,
+			"tag": "0077_native_artifacts",
+			"breakpoints": true
+		},
+		{
+			"idx": 78,
+			"version": "6",
+			"when": 1791841669485,
+			"tag": "0078_attestation_list_refresh",
+			"breakpoints": true
+		},
+		{
+			"idx": 79,
+			"version": "6",
+			"when": 1791841669494,
+			"tag": "0079_attestation_list_cache_cleanup",
+			"breakpoints": true
+		},
+		{
+			"idx": 80,
+			"version": "6",
+			"when": 1791841669503,
+			"tag": "0080_cache_teardown_deadlines",
+			"breakpoints": true
+		},
+		{
+			"idx": 81,
+			"version": "6",
+			"when": 1791858325710,
+			"tag": "0081_artifact_reference_deletion_progress",
+			"breakpoints": true
+		},
+		{
+			"idx": 82,
+			"version": "6",
+			"when": 1791862441144,
+			"tag": "0082_artifact_cache_retirement",
+			"breakpoints": true
+		},
+		{
+			"idx": 83,
+			"version": "6",
+			"when": 1791864384739,
+			"tag": "0083_artifact_expiry_retirement",
+			"breakpoints": true
+		},
+		{
+			"idx": 84,
+			"version": "6",
+			"when": 1791971218542,
+			"tag": "0084_artifact_jobs",
+			"breakpoints": true
+		},
+		{
+			"idx": 85,
+			"version": "6",
+			"when": 1791980362652,
+			"tag": "0085_artifact_staging",
+			"breakpoints": true
+		},
+		{
+			"idx": 86,
+			"version": "6",
+			"when": 1792003187192,
+			"tag": "0086_artifact_job_dispatch",
+			"breakpoints": true
+		},
+		{
+			"idx": 87,
+			"version": "6",
+			"when": 1792006829930,
+			"tag": "0087_artifact_admission",
+			"breakpoints": true
+		},
+		{
+			"idx": 88,
+			"version": "6",
+			"when": 1792023281779,
+			"tag": "0088_artifact_task_retry",
+			"breakpoints": true
+		},
+		{
+			"idx": 89,
+			"version": "6",
+			"when": 1792026957243,
+			"tag": "0089_artifact_capacity_wakes",
+			"breakpoints": true
 		}
 	]
 }

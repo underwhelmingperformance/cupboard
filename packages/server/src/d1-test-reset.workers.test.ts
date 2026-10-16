@@ -1,18 +1,49 @@
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { getTableName, is } from 'drizzle-orm';
+import { eq, getTableName, is, sql } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/d1';
 import { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { expect, it, vi } from 'vitest';
 
 import { testControlDatabase } from './control-database.test-support.ts';
 import { resetControlD1TestState, resetD1TestState } from './d1-test-reset.ts';
 import * as schema from './db/d1-schema.ts';
-import { currentServer, resetTestServer } from './test-support.ts';
+import { fixtureTenant } from './routing/tenant-routing.test-support.ts';
+import {
+	configureFixtureTenants,
+	currentServer,
+	provisionFixtureTenant,
+	resetTestServer
+} from './test-support.ts';
 
 it('clears shared D1 facts and restores the completed transition in one batch', async () => {
 	await env.CUPBOARD_DB.batch([
 		env.CUPBOARD_DB.prepare(
+			'INSERT INTO listing_adoption_task_seed (id,is_complete) VALUES (1,1)'
+		),
+		env.CUPBOARD_DB.prepare(
+			'INSERT INTO listing_adoption_consumer (id) VALUES (1)'
+		),
+		env.CUPBOARD_DB.prepare(
+			`INSERT INTO listing_adoption_work (consumer_epoch,event_id,source) VALUES ('00000000000000000000000000000001',1,'{"kind":"listing","identity":{"narHash":"reset-nar","generatorRevision":"reset-generator"}}')`
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_adoption_seed_dispatch (scope) VALUES ('facts')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_adoption_parent_seed (cache_kind,is_complete) VALUES ('default',1)"
+		),
+		env.CUPBOARD_DB.prepare(
+			'INSERT INTO shared_listing_dispatch_seed (id, is_complete) VALUES (1, 1)'
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_adoption_fact_seed (id,after_nar_hash,after_generator_revision,through_nar_hash,through_generator_revision,scanned,captured,is_complete) VALUES (1,'reset-nar','reset-revision','reset-nar','reset-revision',1,1,1)"
+		),
+		env.CUPBOARD_DB.prepare(
 			"INSERT INTO tenant (id, status, owner_issuer, owner_subject, owner_audience, config_version, created_at) VALUES ('reset-tenant', 'active', 'issuer', 'subject', 'audience', 1, '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_adoption_parent (tenant,cache_kind,cache_generation,store_path_hash,generation,nar_hash) VALUES ('reset-tenant','default',1,'reset-path',1,'reset-nar')"
 		),
 		env.CUPBOARD_DB.prepare(
 			"INSERT INTO tenant_usage (tenant, bytes, narinfos, blobs, updated_at) VALUES ('reset-tenant', 100, 2, 1, '2025-01-01T00:00:00.000Z')"
@@ -31,6 +62,48 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		),
 		env.CUPBOARD_DB.prepare(
 			"INSERT INTO object_incarnation (kind, object_id, incarnation, state) VALUES ('nar', 'reset-object', 1, 'absent')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO artifact_ref (tenant, artifact_id, artifact_generation, cache_kind, cache_generation, kind, digest, created_at) VALUES ('reset-tenant', 'reset-artifact', 1, 'default', 1, 'listing', 'reset-digest', '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_fact (nar_hash, generator_revision, format, digest, size, created_at) VALUES ('reset-nar', 'reset-generator', 1, 'reset-digest', 100, '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO listing_generation (nar_hash, generator_revision, source_incarnation, generation, tenant, owner, lease_expires_at, updated_at) VALUES ('reset-nar', 'reset-generator', 1, 1, 'reset-tenant', 'reset-owner', '2025-01-01T00:01:00.000Z', '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO shared_listing_job (id, generator_revision, created_at, updated_at) VALUES ('reset-job', 'reset-generator', '2025-01-01T00:00:00.000Z', '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO shared_listing_task (id, job_id, nar_hash, source_incarnation, nar_size, file_size, discovery_page, created_at) VALUES ('reset-task', 'reset-job', 'reset-nar', 1, 100, 50, 'reset-page', '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			`INSERT INTO shared_listing_task_outcome (task_id, job_id, job_generation, task_generation, owner, claim, completion_id, kind, reason, completed_at) VALUES ('reset-task', 'reset-job', 1, 1, 'reset-owner', '{"id":"reset-task","job":{"id":"reset-job","generation":1},"generation":1,"owner":"reset-owner"}', 'reset-completion', 'skipped', 'source-unavailable', '2025-01-01T00:00:00.000Z')`
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO shared_listing_generation (nar_hash, generator_revision, source_incarnation, generation, job_id, job_generation, task_id, task_generation, updated_at) VALUES ('reset-nar', 'reset-generator', 1, 1, 'reset-job', 1, 'reset-task', 1, '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO forward_listing_stage (id,tenant,upload_id,owner,nar_hash,generator_revision,r2_key,maximum_bytes,state,created_at,write_until,cleanup_after,next_cleanup_at) VALUES ('reset-forward','reset-tenant','reset-upload','reset-owner','reset-nar','reset-generator','shared-artifact-staging/reset-forward',67108864,'pending','2025-01-01T00:00:00.000Z','2025-01-01T00:15:00.000Z','2025-01-01T01:26:00.000Z','2025-01-01T00:15:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO shared_listing_stage (id, nar_hash, generator_revision, source_incarnation, computation_generation, r2_key, maximum_bytes, state, created_at, expires_at, write_until, cleanup_after, next_cleanup_at) VALUES ('reset-stage', 'reset-nar', 'reset-generator', 1, 1, 'shared-artifact-staging/reset-stage', 67108864, 'pending', '2025-01-01T00:00:00.000Z', '2025-01-01T00:01:00.000Z', '2025-01-01T00:15:00.000Z', '2025-01-01T01:26:00.000Z', '2025-01-01T00:01:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO shared_listing_output_ref (nar_hash, generator_revision, epoch, source_incarnation, computation_generation, digest, size, created_at) VALUES ('reset-nar', 'reset-generator', '00000000-0000-4000-8000-000000000001', 1, 1, 'reset-digest', 100, '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO shared_listing_output_cleanup (nar_hash) VALUES ('reset-nar')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO nar_capture_event (nar_hash, source_incarnation) VALUES ('reset-nar', 1)"
+		),
+		env.CUPBOARD_DB.prepare(
+			'UPDATE nar_capture_state SET pruned_through = latest, is_ready = 0 WHERE id = 1'
+		),
+		env.CUPBOARD_DB.prepare(
+			'UPDATE listing_adoption_capture_state SET pruned_through = latest, is_ready = 0 WHERE id = 1'
 		),
 		env.CUPBOARD_DB.prepare(
 			"UPDATE deployment_transition SET state = 'pending', updated_at = '2025-01-01T00:00:00.000Z'"
@@ -84,12 +157,52 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		manifest_state: 0,
 		global_admin: 0,
 		tenant_blob: 0,
-		cas_object: 0,
+		cas_object_storage: 0,
+		cas_demotion_progress: 0,
 		attestation_ref_storage: 0,
-		tenant_cas_blob: 0,
+		attestation_list_revision: 0,
+		artifact_ref: 0,
+		listing_fact: 0,
+		listing_adoption_fact: 0,
+		listing_adoption_fact_seed: 0,
+		listing_adoption_parent: 0,
+		listing_adoption_parent_seed: 0,
+		listing_adoption_seed_dispatch: 0,
+		listing_adoption_consumer: 0,
+		listing_adoption_work: 0,
+		listing_adoption_task: 0,
+		listing_adoption_task_seed: 0,
+		listing_adoption_capture_event: 0,
+		listing_adoption_capture_state: 1,
+		listing_generation: 0,
+		shared_listing_generation: 0,
+		shared_listing_stage: 0,
+		forward_listing_stage: 0,
+		shared_listing_output_ref: 0,
+		shared_listing_output_cleanup: 0,
+		shared_listing_job: 0,
+		shared_listing_job_dispatch: 0,
+		shared_listing_dispatch_seed: 0,
+		shared_listing_task: 0,
+		shared_listing_task_delivery: 0,
+		shared_listing_task_outcome: 0,
+		nar_capture_event: 0,
+		nar_capture_state: 1,
+		tenant_cas_blob_storage: 0,
 		tenant_usage: 0,
+		tenant_namespace_cleanup_guard: 0,
 		local_step_wake_cursor: 0
 	});
+	expect(
+		await drizzle(env.CUPBOARD_DB, { schema })
+			.select()
+			.from(schema.narCaptureState)
+	).toStrictEqual([{ id: 1, latest: 0, prunedThrough: 0, isReady: true }]);
+	expect(
+		await drizzle(env.CUPBOARD_DB, { schema })
+			.select()
+			.from(schema.listingAdoptionCaptureState)
+	).toStrictEqual([{ id: 1, latest: 0, prunedThrough: 0, isReady: true }]);
 	const transition = await env.CUPBOARD_DB.prepare(
 		'SELECT id, state, updated_at, contracted_at IS NULL AS uncontracted FROM deployment_transition'
 	).all();
@@ -156,4 +269,99 @@ it('resets the isolated control database without changing shared state or exposi
 		sharedAdmin: [{ issuer: 'legacy-issuer' }],
 		tenantBindings: { controlDatabase: false, controlDatabaseService: false }
 	});
+});
+
+it('batches fixture provisioning while preserving usage and updating cache access', async () => {
+	await provisionFixtureTenant();
+	const database = drizzle(env.CUPBOARD_DB, { schema });
+	await database
+		.update(schema.tenantUsage)
+		.set({ bytes: 7, narinfos: 2, blobs: 1 })
+		.where(eq(schema.tenantUsage.tenant, fixtureTenant));
+	const batch = vi.spyOn(env.CUPBOARD_DB, 'batch');
+	let batchSizes: number[];
+	try {
+		await provisionFixtureTenant({
+			defaultCacheAccess: 'private',
+			quotaBytes: 100
+		});
+		batchSizes = batch.mock.calls.map(([statements]) => statements.length);
+	} finally {
+		batch.mockRestore();
+	}
+	const tenant = await database
+		.select({
+			status: schema.tenant.status,
+			configVersion: schema.tenant.configVersion
+		})
+		.from(schema.tenant)
+		.where(eq(schema.tenant.id, fixtureTenant))
+		.get();
+	const cache = await database
+		.select({
+			access: schema.cacheLifecycle.access,
+			generation: schema.cacheLifecycle.generation,
+			isDeleted:
+				sql<boolean>`${schema.cacheLifecycle.deletedAt} IS NOT NULL`.mapWith(
+					Boolean
+				)
+		})
+		.from(schema.cacheLifecycle)
+		.where(eq(schema.cacheLifecycle.tenant, fixtureTenant))
+		.get();
+	const usage = await database
+		.select({
+			bytes: schema.tenantUsage.bytes,
+			narinfos: schema.tenantUsage.narinfos,
+			blobs: schema.tenantUsage.blobs,
+			quotaBytes: schema.tenantUsage.quotaBytes
+		})
+		.from(schema.tenantUsage)
+		.where(eq(schema.tenantUsage.tenant, fixtureTenant))
+		.get();
+	expect({ batchSizes, tenant, cache, usage }).toStrictEqual({
+		batchSizes: [3],
+		tenant: { status: 'active', configVersion: 1 },
+		cache: { access: 'private', generation: 1, isDeleted: false },
+		usage: { bytes: 7, narinfos: 2, blobs: 1, quotaBytes: 100 }
+	});
+});
+
+it('joins both fixture configurations before reporting a failed sibling', async () => {
+	const sibling = Promise.withResolvers<undefined>();
+	const failed = new Error('fixture configuration failed');
+	let hasSiblingStarted = false;
+	let isResetSettled = false;
+	let failure: unknown;
+	const reset = (async () => {
+		try {
+			await configureFixtureTenants([
+				{ configure: () => Promise.reject(failed) },
+				{
+					configure: () => {
+						hasSiblingStarted = true;
+						return sibling.promise;
+					}
+				}
+			]);
+		} catch (error) {
+			failure = error;
+		} finally {
+			isResetSettled = true;
+		}
+	})();
+	try {
+		await scheduler.wait(0);
+		const beforeRelease = { hasSiblingStarted, isResetSettled };
+		sibling.resolve(undefined);
+		await reset;
+		expect({ beforeRelease, isResetSettled, failure }).toStrictEqual({
+			beforeRelease: { hasSiblingStarted: true, isResetSettled: false },
+			isResetSettled: true,
+			failure: failed
+		});
+	} finally {
+		sibling.resolve(undefined);
+		await reset;
+	}
 });

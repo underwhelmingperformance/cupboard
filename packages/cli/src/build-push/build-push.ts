@@ -684,6 +684,7 @@ async function runInvocation(
 			command: invocation.command,
 			environment,
 			runtimeDirectory,
+			...(dependencies.signal !== undefined && { signal: dependencies.signal }),
 			...(dependencies.signalSource !== undefined && {
 				signalSource: dependencies.signalSource
 			}),
@@ -830,6 +831,7 @@ async function runConstructedBuild(
 		attempts: build.attempts ?? defaultBuildAttempts,
 		environment,
 		runtimeDirectory,
+		...(dependencies.signal !== undefined && { signal: dependencies.signal }),
 		...(dependencies.signalSource !== undefined && {
 			signalSource: dependencies.signalSource
 		}),
@@ -1815,6 +1817,35 @@ async function publishTenantDependencies(
 					sources: tenantReferenceSources(tenantUrl, [
 						{ url: options.destinationUrl ?? tenantUrl, paths: [] }
 					]),
+					onDiagnostic(diagnostic) {
+						reporter.result({
+							kind: `dependency-metadata-${diagnostic.kind}`,
+							data: diagnostic,
+							rows:
+								diagnostic.kind === 'source'
+									? [
+											{ label: 'source', value: diagnostic.source },
+											{ label: 'status', value: diagnostic.status },
+											{
+												label: 'checked',
+												value: `${String(diagnostic.checked)}/${String(diagnostic.total)}`
+											},
+											{ label: 'found', value: String(diagnostic.found) },
+											{ label: 'missing', value: String(diagnostic.missing) },
+											{ label: 'requests', value: String(diagnostic.requests) },
+											{
+												label: 'elapsed',
+												value: formatDuration(diagnostic.elapsedMs)
+											}
+										]
+									: []
+						});
+					},
+					onDiagnosticError() {
+						reporter.warn(
+							'Dependency metadata diagnostics could not be recorded'
+						);
+					},
 					onProgress(progress) {
 						phase.fact('traceId', progress.traceId);
 						phase.fact('source', progress.source);

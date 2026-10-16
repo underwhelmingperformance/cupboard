@@ -183,11 +183,10 @@ export interface CloudflareApi {
 	r2BucketExists(name: string): Promise<boolean>;
 	ensureR2Bucket(name: string): Promise<void>;
 	/**
-	 * Asserts the lifecycle rule that reclaims a push's transient `staging/`
-	 * objects, expiring them and aborting their incomplete multipart uploads
-	 * after a day. The bucket must already exist.
+	 * Expires push and artifact staging objects after a day and aborts incomplete
+	 * staging and tenant multipart uploads after a day. The bucket must exist.
 	 */
-	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
+	ensureUploadLifecycleRules(bucketName: string): Promise<void>;
 	findD1Database(name: string): Promise<DatabaseId | undefined>;
 	/**
 	 * `undefined` when Cloudflare reports no database with this id.
@@ -438,20 +437,31 @@ const stagingReclaimRuleId = 'cupboard-staging-reclaim';
 const oneDayInSeconds = 24 * 60 * 60;
 
 /**
- * The lifecycle rule reclaiming a push's transient staging objects: it expires
- * anything under `staging/` a day after it is written, and aborts incomplete
- * multipart uploads there a day after they begin. An abandoned incomplete
- * multipart upload is not a listable object, so this rule is the only thing
- * that can recover its storage.
+ * R2 cannot list incomplete multipart uploads. Object-deletion rules therefore
+ * do not reclaim their uploaded parts.
  */
-function stagingReclaimRule(): LifecycleUpdateParams.Rule {
+function stagingReclaimRule(
+	id: string,
+	prefix: string
+): LifecycleUpdateParams.Rule {
 	return {
-		id: stagingReclaimRuleId,
+		id,
 		enabled: true,
-		conditions: { prefix: stagingPrefix },
+		conditions: { prefix },
 		deleteObjectsTransition: {
 			condition: { type: 'Age', maxAge: oneDayInSeconds }
 		},
+		abortMultipartUploadsTransition: {
+			condition: { type: 'Age', maxAge: oneDayInSeconds }
+		}
+	};
+}
+
+function tenantMultipartReclaimRule(): LifecycleUpdateParams.Rule {
+	return {
+		id: 'cupboard-tenant-multipart-reclaim',
+		enabled: true,
+		conditions: { prefix: 't/' },
 		abortMultipartUploadsTransition: {
 			condition: { type: 'Age', maxAge: oneDayInSeconds }
 		}
@@ -637,36 +647,45 @@ export function createCloudflareApi(
 			await client.r2.buckets.create({ ...account, name });
 		},
 
-		async ensureStagingLifecycleRule(bucketName) {
-			const desired = stagingReclaimRule();
-
+		async ensureUploadLifecycleRules(bucketName) {
+			const desired = [
+				stagingReclaimRule(stagingReclaimRuleId, stagingPrefix),
+				tenantMultipartReclaimRule(),
+				stagingReclaimRule(
+					'cupboard-artifact-staging-reclaim',
+					'artifact-staging/'
+				),
+				stagingReclaimRule(
+					'cupboard-shared-artifact-staging-reclaim',
+					'shared-artifact-staging/'
+				)
+			];
 			const current = await client.r2.buckets.lifecycle.get(
 				bucketName,
 				account
 			);
 			const rules = current.rules ?? [];
-
-			const existing = rules.find((rule) => rule.id === desired.id);
-
-			// Compare only the fields this rule manages, not the whole object: R2 may
-			// echo back optional fields (such as storage-class transitions) the rule
-			// never sets, and comparing those would re-PUT an already-correct rule on
-			// every deploy.
-			if (
-				existing !== undefined &&
-				isDeepStrictEqual(
-					managedLifecycleFields(existing),
-					managedLifecycleFields(desired)
-				)
-			) {
+			const managed = desired.map((rule) => {
+				const existing = rules.find((candidate) => candidate.id === rule.id);
+				if (
+					existing !== undefined &&
+					isDeepStrictEqual(
+						managedLifecycleFields(existing),
+						managedLifecycleFields(rule)
+					)
+				) {
+					return existing;
+				}
+				return rule;
+			});
+			if (managed.every((rule) => rules.includes(rule))) {
 				return;
 			}
-
-			const others = rules.filter((rule) => rule.id !== desired.id);
-
+			const managedIds = new Set(desired.map((rule) => rule.id));
+			const others = rules.filter((rule) => !managedIds.has(rule.id));
 			await client.r2.buckets.lifecycle.update(bucketName, {
 				...account,
-				rules: [...others, desired]
+				rules: [...others, ...managed]
 			});
 		},
 

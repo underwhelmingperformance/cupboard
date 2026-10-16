@@ -76,6 +76,19 @@ import m0073 from './0073_refresh_family_owner.sql';
 import m0074 from './0074_subject_nonces.sql';
 import m0075 from './0075_pending_upload_blob_declaration.sql';
 import m0076 from './0076_pending_upload_promotion.sql';
+import m0077 from './0077_native_artifacts.sql';
+import m0078 from './0078_attestation_list_refresh.sql';
+import m0079 from './0079_attestation_list_cache_cleanup.sql';
+import m0080 from './0080_cache_teardown_deadlines.sql';
+import m0081 from './0081_artifact_reference_deletion_progress.sql';
+import m0082 from './0082_artifact_cache_retirement.sql';
+import m0083 from './0083_artifact_expiry_retirement.sql';
+import m0084 from './0084_artifact_jobs.sql';
+import m0085 from './0085_artifact_staging.sql';
+import m0086 from './0086_artifact_job_dispatch.sql';
+import m0087 from './0087_artifact_admission.sql';
+import m0088 from './0088_artifact_task_retry.sql';
+import m0089 from './0089_artifact_capacity_wakes.sql';
 
 export default {
 	journal,
@@ -156,6 +169,19 @@ export default {
 		m0073,
 		m0074,
 		m0075,
-		m0076
+		m0076,
+		m0077,
+		m0078,
+		m0079,
+		m0080,
+		m0081,
+		m0082,
+		m0083,
+		m0084,
+		m0085,
+		m0086,
+		m0087,
+		m0088,
+		m0089
 	}
 };

@@ -2,7 +2,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-	currentLocalStep,
+	artifactPublicationLocalStep,
+	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	expansionLocalStep,
 	type LocalStep,
 	type SchemaTransition,
@@ -83,7 +85,7 @@ const cacheIdentity: SchemaTransition = {
 	expand: ['0000_base.sql', '0001_phase.sql', '0002_expand.sql'],
 	contract: ['0003_contract.sql'],
 	contractStep: expansionLocalStep,
-	reportableStepOnComplete: currentLocalStep,
+	reportableStepOnComplete: cacheIdentityLocalStep,
 	compatibilityPhase: true,
 	completedBy: 'v0.0.34'
 };
@@ -424,6 +426,176 @@ describe('planTransitions', () => {
 	});
 });
 
+describe('CAS storage rollout', () => {
+	it('waits for active and suspended tenant readiness before contracting, then resumes', async () => {
+		const world = fixture();
+		try {
+			await prepareTransitions(world.walk([cacheIdentity, independent]), true);
+			world.database.exec(
+				'CREATE TABLE cas_object (digest TEXT PRIMARY KEY, size INTEGER NOT NULL, incarnation INTEGER NOT NULL, stored_at TEXT NOT NULL, delete_after TEXT)'
+			);
+			world.database.exec(
+				'CREATE TABLE tenant_cas_blob (tenant TEXT NOT NULL, digest TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (tenant, digest))'
+			);
+			world.database.exec(
+				"INSERT INTO tenant (id, status, local_step) VALUES ('active', 'active', 5), ('suspended', 'suspended', 5), ('offboarding', 'offboarding', 5)"
+			);
+			const transition = schemaTransitions.find(
+				(item) => item.id === 'cas-storage'
+			);
+			if (transition === undefined) {
+				throw new Error('The CAS storage transition must be declared');
+			}
+			const directory = new URL('../../../server/drizzle-d1/', import.meta.url);
+			const storageMigrations = parseD1Migrations(
+				[...transition.expand, ...transition.contract].map((name) => ({
+					name,
+					sql: readFileSync(new URL(name, directory), 'utf8')
+				}))
+			);
+			const walk = world.walk([cacheIdentity, independent, transition], {
+				migrations: [...migrations, ...storageMigrations],
+				wakeTenants: false
+			});
+			await prepareTransitions(walk, false);
+			await expect(completeTransitions(walk)).rejects.toThrow(
+				new LocalStepUnreachedError({
+					kind: 'below-step',
+					pending: 2,
+					requiredStep: casStorageLocalStep,
+					stragglers: ['active', 'suspended']
+				})
+			);
+			const waiting = {
+				applied: applied(world.database),
+				state: recorded(world.database)['cas-storage'],
+				type: world.database
+					.prepare("SELECT type FROM sqlite_master WHERE name = 'cas_object'")
+					.get()?.type
+			};
+			world.database
+				.prepare(
+					"UPDATE tenant SET local_step = ? WHERE status IN ('active', 'suspended')"
+				)
+				.run(casStorageLocalStep);
+			await completeTransitions(walk);
+			expect({
+				waiting,
+				completed: {
+					applied: applied(world.database),
+					state: recorded(world.database)['cas-storage'],
+					type: world.database
+						.prepare("SELECT type FROM sqlite_master WHERE name = 'cas_object'")
+						.get()?.type,
+					servingChecks: world.servingChecks
+				}
+			}).toStrictEqual({
+				waiting: {
+					applied: [
+						...migrations.map((item) => item.name),
+						...transition.expand
+					],
+					state: 'expanded@2026-01-01T00:00:00.000Z',
+					type: 'table'
+				},
+				completed: {
+					applied: [
+						...migrations.map((item) => item.name),
+						...transition.expand,
+						...transition.contract
+					],
+					state:
+						'complete@2026-01-01T00:00:00.000Z;contracted@2026-01-01T00:00:00.000Z',
+					type: 'view',
+					servingChecks: 2
+				}
+			});
+		} finally {
+			world.database.close();
+		}
+	});
+});
+
+describe('artifact publication activation', () => {
+	it.each([true, false])(
+		'waits for serving Workers and ready tenants on a fresh=%s database',
+		async (fresh) => {
+			const world = fixture();
+			try {
+				await prepareTransitions(
+					world.walk([cacheIdentity, independent]),
+					true
+				);
+				world.database.exec(
+					"INSERT INTO tenant (id, status, local_step) VALUES ('active', 'active', 7), ('suspended', 'suspended', 7), ('offboarding', 'offboarding', 7)"
+				);
+				const transition = schemaTransitions.find(
+					(item) => item.id === 'native-artifact-publication'
+				);
+				if (transition === undefined) {
+					throw new Error(
+						'The artifact publication transition must be declared'
+					);
+				}
+				const walk = world.walk([cacheIdentity, independent, transition], {
+					wakeTenants: false
+				});
+				await prepareTransitions(walk, fresh);
+				const beforeUpload = {
+					state: recorded(world.database)[transition.id],
+					woken: world.woken,
+					servingChecks: world.servingChecks
+				};
+				const rolloutError = new Error('Both Workers must serve the new build');
+				await expect(
+					completeTransitions({
+						...walk,
+						hooks: {
+							...walk.hooks,
+							checkServing: () => Promise.reject(rolloutError)
+						}
+					})
+				).rejects.toBe(rolloutError);
+				expect(recorded(world.database)[transition.id]).toBe(
+					beforeUpload.state
+				);
+				await expect(completeTransitions(walk)).rejects.toThrow(
+					new LocalStepUnreachedError({
+						kind: 'below-step',
+						pending: 2,
+						requiredStep: artifactPublicationLocalStep,
+						stragglers: ['active', 'suspended']
+					})
+				);
+				const waiting = recorded(world.database)[transition.id];
+				world.database
+					.prepare(
+						"UPDATE tenant SET local_step = ? WHERE status IN ('active', 'suspended')"
+					)
+					.run(artifactPublicationLocalStep);
+				await completeTransitions(walk);
+				expect({
+					beforeUpload,
+					waiting,
+					complete: recorded(world.database)[transition.id],
+					servingChecks: world.servingChecks
+				}).toStrictEqual({
+					beforeUpload: {
+						state: 'expanded@2026-01-01T00:00:00.000Z',
+						woken: [],
+						servingChecks: 0
+					},
+					waiting: 'expanded@2026-01-01T00:00:00.000Z',
+					complete: 'complete@2026-01-01T00:00:00.000Z',
+					servingChecks: 2
+				});
+			} finally {
+				world.database.close();
+			}
+		}
+	);
+});
+
 describe('v0.0.35 path authority rollout', () => {
 	it.each([
 		{ phase: 'contracted', through: '0030', step: 5, blocked: false },
@@ -464,7 +636,11 @@ describe('v0.0.35 path authority rollout', () => {
 					schemaTransitions.filter(
 						(transition) =>
 							transition.database === undefined &&
-							transition.id !== 'control-database-split'
+							(transition.reportableStepOnComplete ?? cacheIdentityLocalStep) <=
+								cacheIdentityLocalStep &&
+							[...transition.expand, ...transition.contract].every((name) =>
+								actualMigrations.some((migration) => migration.name === name)
+							)
 					),
 					{
 						migrations: actualMigrations

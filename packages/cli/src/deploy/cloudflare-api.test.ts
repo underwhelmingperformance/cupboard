@@ -686,7 +686,7 @@ describe('R2 bucket lookup', () => {
 	});
 });
 
-describe('ensureStagingLifecycleRule', () => {
+describe('ensureUploadLifecycleRules', () => {
 	const lifecyclePath = '/accounts/acc-1/r2/buckets/cupboard-blobs/lifecycle';
 
 	const stagingRule = {
@@ -701,7 +701,36 @@ describe('ensureStagingLifecycleRule', () => {
 		}
 	};
 
-	it('writes the staging rule when the bucket has none', async () => {
+	const tenantMultipartRule = {
+		id: 'cupboard-tenant-multipart-reclaim',
+		enabled: true,
+		conditions: { prefix: 't/' },
+		abortMultipartUploadsTransition: {
+			condition: { type: 'Age', maxAge: 86_400 }
+		}
+	};
+
+	const artifactStagingRule = {
+		id: 'cupboard-artifact-staging-reclaim',
+		enabled: true,
+		conditions: { prefix: 'artifact-staging/' },
+		deleteObjectsTransition: { condition: { type: 'Age', maxAge: 86_400 } },
+		abortMultipartUploadsTransition: {
+			condition: { type: 'Age', maxAge: 86_400 }
+		}
+	};
+
+	const sharedArtifactStagingRule = {
+		id: 'cupboard-shared-artifact-staging-reclaim',
+		enabled: true,
+		conditions: { prefix: 'shared-artifact-staging/' },
+		deleteObjectsTransition: { condition: { type: 'Age', maxAge: 86_400 } },
+		abortMultipartUploadsTransition: {
+			condition: { type: 'Age', maxAge: 86_400 }
+		}
+	};
+
+	it('writes every managed upload lifecycle rule when the bucket has none', async () => {
 		const { client, requests, bodies } = fakeCloudflare({
 			[`GET ${lifecyclePath}`]: { rules: [] },
 			[`PUT ${lifecyclePath}`]: {}
@@ -710,26 +739,40 @@ describe('ensureStagingLifecycleRule', () => {
 		await createCloudflareApi(
 			client,
 			accountId('acc-1')
-		).ensureStagingLifecycleRule('cupboard-blobs');
+		).ensureUploadLifecycleRules('cupboard-blobs');
 
 		expect({ requests, putBody: bodies[1] }).toStrictEqual({
 			requests: [
 				{ method: 'GET', path: lifecyclePath },
 				{ method: 'PUT', path: lifecyclePath }
 			],
-			putBody: { rules: [stagingRule] }
+			putBody: {
+				rules: [
+					stagingRule,
+					tenantMultipartRule,
+					artifactStagingRule,
+					sharedArtifactStagingRule
+				]
+			}
 		});
 	});
 
-	it('does not write when the staging rule already matches', async () => {
+	it('does not write when every managed upload lifecycle rule matches', async () => {
 		const { client, requests } = fakeCloudflare({
-			[`GET ${lifecyclePath}`]: { rules: [stagingRule] }
+			[`GET ${lifecyclePath}`]: {
+				rules: [
+					stagingRule,
+					tenantMultipartRule,
+					artifactStagingRule,
+					sharedArtifactStagingRule
+				]
+			}
 		});
 
 		await createCloudflareApi(
 			client,
 			accountId('acc-1')
-		).ensureStagingLifecycleRule('cupboard-blobs');
+		).ensureUploadLifecycleRules('cupboard-blobs');
 
 		expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
 	});
@@ -737,14 +780,19 @@ describe('ensureStagingLifecycleRule', () => {
 	it('does not re-write when R2 echoes extra fields it did not set', async () => {
 		const { client, requests } = fakeCloudflare({
 			[`GET ${lifecyclePath}`]: {
-				rules: [{ ...stagingRule, storageClassTransitions: [] }]
+				rules: [
+					{ ...stagingRule, storageClassTransitions: [] },
+					{ ...tenantMultipartRule, storageClassTransitions: [] },
+					{ ...artifactStagingRule, storageClassTransitions: [] },
+					{ ...sharedArtifactStagingRule, storageClassTransitions: [] }
+				]
 			}
 		});
 
 		await createCloudflareApi(
 			client,
 			accountId('acc-1')
-		).ensureStagingLifecycleRule('cupboard-blobs');
+		).ensureUploadLifecycleRules('cupboard-blobs');
 
 		expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
 	});
@@ -774,14 +822,147 @@ describe('ensureStagingLifecycleRule', () => {
 		await createCloudflareApi(
 			client,
 			accountId('acc-1')
-		).ensureStagingLifecycleRule('cupboard-blobs');
+		).ensureUploadLifecycleRules('cupboard-blobs');
 
 		expect({ requests, putBody: bodies[1] }).toStrictEqual({
 			requests: [
 				{ method: 'GET', path: lifecyclePath },
 				{ method: 'PUT', path: lifecyclePath }
 			],
-			putBody: { rules: [otherRule, stagingRule] }
+			putBody: {
+				rules: [
+					otherRule,
+					stagingRule,
+					tenantMultipartRule,
+					artifactStagingRule,
+					sharedArtifactStagingRule
+				]
+			}
+		});
+	});
+	it('adds tenant multipart cleanup to an existing staging-only configuration', async () => {
+		const { client, requests, bodies } = fakeCloudflare({
+			[`GET ${lifecyclePath}`]: { rules: [stagingRule] },
+			[`PUT ${lifecyclePath}`]: {}
+		});
+		await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).ensureUploadLifecycleRules('cupboard-blobs');
+		expect({ requests, putBody: bodies[1] }).toStrictEqual({
+			requests: [
+				{ method: 'GET', path: lifecyclePath },
+				{ method: 'PUT', path: lifecyclePath }
+			],
+			putBody: {
+				rules: [
+					stagingRule,
+					tenantMultipartRule,
+					artifactStagingRule,
+					sharedArtifactStagingRule
+				]
+			}
+		});
+	});
+
+	it('preserves an unchanged managed rule when it adds the missing tenant rule', async () => {
+		const existingStaging = { ...stagingRule, storageClassTransitions: [] };
+		const { client, bodies } = fakeCloudflare({
+			[`GET ${lifecyclePath}`]: { rules: [existingStaging] },
+			[`PUT ${lifecyclePath}`]: {}
+		});
+		await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).ensureUploadLifecycleRules('cupboard-blobs');
+		expect(bodies[1]).toStrictEqual({
+			rules: [
+				existingStaging,
+				tenantMultipartRule,
+				artifactStagingRule,
+				sharedArtifactStagingRule
+			]
+		});
+	});
+
+	it.each([
+		{ description: 'disabled', change: { enabled: false } },
+		{ description: 'wrong prefix', change: { conditions: { prefix: 'nar/' } } },
+		{
+			description: 'wrong deadline',
+			change: {
+				abortMultipartUploadsTransition: {
+					condition: { type: 'Age', maxAge: 604_800 }
+				}
+			}
+		},
+		{
+			description: 'completed object expiry',
+			change: {
+				deleteObjectsTransition: { condition: { type: 'Age', maxAge: 86_400 } }
+			}
+		}
+	])(
+		'repairs tenant multipart cleanup with $description without changing unrelated rules',
+		async ({ change }) => {
+			const otherRule = {
+				id: 'operator-rule',
+				enabled: true,
+				conditions: { prefix: 'other/' },
+				storageClassTransitions: []
+			};
+			const { client, requests, bodies } = fakeCloudflare({
+				[`GET ${lifecyclePath}`]: {
+					rules: [otherRule, stagingRule, { ...tenantMultipartRule, ...change }]
+				},
+				[`PUT ${lifecyclePath}`]: {}
+			});
+			await createCloudflareApi(
+				client,
+				accountId('acc-1')
+			).ensureUploadLifecycleRules('cupboard-blobs');
+			expect({ requests, putBody: bodies[1] }).toStrictEqual({
+				requests: [
+					{ method: 'GET', path: lifecyclePath },
+					{ method: 'PUT', path: lifecyclePath }
+				],
+				putBody: {
+					rules: [
+						otherRule,
+						stagingRule,
+						tenantMultipartRule,
+						artifactStagingRule,
+						sharedArtifactStagingRule
+					]
+				}
+			});
+		}
+	);
+
+	it('adds shared artifact staging recovery to the previous upload lifecycle rules', async () => {
+		const { client, requests, bodies } = fakeCloudflare({
+			[`GET ${lifecyclePath}`]: {
+				rules: [stagingRule, tenantMultipartRule, artifactStagingRule]
+			},
+			[`PUT ${lifecyclePath}`]: {}
+		});
+		await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).ensureUploadLifecycleRules('cupboard-blobs');
+		expect({ requests, putBody: bodies[1] }).toStrictEqual({
+			requests: [
+				{ method: 'GET', path: lifecyclePath },
+				{ method: 'PUT', path: lifecyclePath }
+			],
+			putBody: {
+				rules: [
+					stagingRule,
+					tenantMultipartRule,
+					artifactStagingRule,
+					sharedArtifactStagingRule
+				]
+			}
 		});
 	});
 });

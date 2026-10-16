@@ -977,7 +977,7 @@ class EffectiveSettings {
 		const named = namedSetting(name);
 
 		if (named === undefined) {
-			return masterOnlySettings.has(canonicalSettingName(name));
+			return false;
 		}
 
 		if (!isSettingValue(named.pinnedName, named.type, value)) {
@@ -1443,8 +1443,8 @@ class EffectiveSubstitutionSettings {
 }
 
 /**
- * Builds the SetOptions override map. Scalar assignments use their pinned
- * names. Appendable settings with a locally known base use the fully resolved
+ * Builds the SetOptions override map. Scalar assignments use the daemon
+ * spelling. Appendable settings with a locally known base use the fully resolved
  * list, which prevents the daemon from appending the same base again.
  */
 class EffectiveDaemonOverrides {
@@ -1462,7 +1462,7 @@ class EffectiveDaemonOverrides {
 		}
 
 		if (!isAppendableSetting(named.pinnedName)) {
-			this.scalar.set(named.pinnedName, value);
+			this.scalar.set(forwardedSettingName(named.pinnedName), value);
 
 			return;
 		}
@@ -1535,32 +1535,16 @@ const settingAliases = new Map([
 ]);
 
 /**
- * Maps a parser name to the spelling sent to the daemon when they differ. Nix
- * renamed the transfer-retry attempts setting but retained the released
- * spelling as an alias, so daemons from either naming era accept that spelling.
+ * Nix accepts `download-attempts` as an alias of
+ * `filetransfer-retry-attempts`. Forward the alias so older daemons can
+ * read this override too.
  */
 const forwardedSettingNames = new Map([
 	['filetransfer-retry-attempts', 'download-attempts']
 ]);
 
-/**
- * Settings added on Nix master after the pinned release. The generated table
- * does not contain them, so this client recognises their current names
- * separately.
- */
-const masterOnlySettings = new Set([
-	'filetransfer-retry-delay',
-	'filetransfer-retry-delay-rate-limited',
-	'filetransfer-retry-jitter',
-	'filetransfer-retry-max-delay'
-]);
-
 function forwardedSettingName(canonicalName: string): string {
 	return forwardedSettingNames.get(canonicalName) ?? canonicalName;
-}
-
-function pinnedSettingName(name: string): string {
-	return forwardedSettingName(canonicalSettingName(name));
 }
 
 interface NamedSetting {
@@ -1577,7 +1561,7 @@ interface NamedSetting {
  * is reported as unknown.
  */
 function namedSetting(name: string): NamedSetting | undefined {
-	const pinnedName = pinnedSettingName(name);
+	const pinnedName = canonicalSettingName(name);
 	const type = nixSettingType(pinnedName);
 
 	if (type !== undefined) {
@@ -1588,7 +1572,7 @@ function namedSetting(name: string): NamedSetting | undefined {
 		return undefined;
 	}
 
-	const appendedTo = pinnedSettingName(name.slice('extra-'.length));
+	const appendedTo = canonicalSettingName(name.slice('extra-'.length));
 	const appendedType = nixSettingType(appendedTo);
 
 	return appendedType !== undefined && isAppendableSetting(appendedTo)
@@ -1640,7 +1624,7 @@ export function isEnabledSettingValue(name: string, value: string): boolean {
  * client acts on; the largest relevant setting is a byte count.
  */
 function parseSettingInteger(name: string, value: string): number {
-	const parsed = nixInteger(name, value);
+	const parsed = nixInteger(canonicalSettingName(name), value);
 
 	if (parsed === undefined) {
 		throw new NixConfigSettingError(

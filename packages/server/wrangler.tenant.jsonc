@@ -50,6 +50,10 @@
 			{
 				"binding": "MAINTENANCE_QUEUE",
 				"queue": "cupboard-maintenance"
+			},
+			{
+				"binding": "ARTIFACT_QUEUE",
+				"queue": "cupboard-artifacts"
 			}
 		]
 	},
@@ -67,6 +71,14 @@
 		"CUPBOARD_SUBREQUESTS_PER_INVOCATION": ""
 	},
 	"exports": {
+		"ArtifactPublicationRollbackGuard": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		},
+		"CasStorageRollbackGuard": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		},
 		"ControlDatabaseRollbackGuard": {
 			"type": "durable-object",
 			"storage": "sqlite"

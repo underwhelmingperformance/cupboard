@@ -1102,6 +1102,28 @@ export class ReuseViewLookupService {
 		}
 	}
 
+	private async verifiedLookup(
+		logger: Logger,
+		view: ReuseViewName,
+		access: CacheAccessMode,
+		storePathHash: StorePathHash
+	): Promise<
+		| { readonly snapshot: GateSnapshot; readonly verified: VerifiedCandidates }
+		| undefined
+	> {
+		const snapshot = await this.context.criticalSection(() =>
+			Promise.resolve(this.snapshotCandidates(view, access, storePathHash))
+		);
+		if (snapshot === undefined || snapshot.candidates.length === 0) {
+			return;
+		}
+		const verified = await this.verifyOffGate(logger, view, snapshot);
+		const current = await this.context.criticalSection(() =>
+			Promise.resolve(this.revalidateSnapshot(snapshot, view, verified))
+		);
+		return current === undefined ? undefined : { snapshot, verified: current };
+	}
+
 	/**
 	 * Builds the authority that decides which stored NARs a push into
 	 * `destination` may reuse. The authority includes the membership of each
@@ -1145,24 +1167,64 @@ export class ReuseViewLookupService {
 		access: CacheAccessMode,
 		storePathHash: StorePathHash
 	): Promise<NarInfo | undefined> {
-		const snapshot = await this.context.criticalSection(() =>
-			Promise.resolve(this.snapshotCandidates(view, access, storePathHash))
+		const result = await this.verifiedLookup(
+			logger,
+			view,
+			access,
+			storePathHash
 		);
+		return result === undefined
+			? undefined
+			: this.renderSingleCandidate(
+					logger,
+					view,
+					storePathHash,
+					result.verified
+				);
+	}
 
-		if (snapshot === undefined || snapshot.candidates.length === 0) {
-			return undefined;
-		}
-
-		const verified = await this.verifyOffGate(logger, view, snapshot);
-		const settled = await this.context.criticalSection(() =>
-			Promise.resolve(this.revalidateSnapshot(snapshot, view, verified))
+	/**
+	 * Returns agreeing, authorised sources for a listing and its view revision.
+	 */
+	async listingSources(
+		logger: Logger,
+		view: ReuseViewName,
+		access: CacheAccessMode,
+		storePathHash: StorePathHash
+	): Promise<
+		| {
+				readonly revision: ReuseViewRevision;
+				readonly caches: readonly ResolvedCache[];
+				readonly isCurrent: () => boolean;
+		  }
+		| undefined
+	> {
+		const result = await this.verifiedLookup(
+			logger,
+			view,
+			access,
+			storePathHash
 		);
-
-		if (settled === undefined) {
-			return undefined;
+		if (
+			result === undefined ||
+			!this.hasSingleSemanticCandidate(
+				logger,
+				view,
+				storePathHash,
+				result.verified.candidates
+			)
+		) {
+			return;
 		}
-
-		return this.renderSingleCandidate(logger, view, storePathHash, settled);
+		return {
+			revision: result.snapshot.revision,
+			isCurrent: () =>
+				this.revalidateSnapshot(result.snapshot, view, result.verified) !==
+				undefined,
+			caches: result.verified.candidates
+				.map((candidate) => this.candidateCache(candidate))
+				.toSorted((left, right) => left.id - right.id)
+		};
 	}
 
 	/**

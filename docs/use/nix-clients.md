@@ -34,6 +34,13 @@ cache isn't served by any other, so add every cache that you want to use.
 A cache's URL never changes, even when the tenant administrator makes it public
 or private.
 
+Open the cache URL in a browser to get a setup page with the URL, the current
+public signing keys and configuration to copy into `nix.conf`. A private cache's
+setup page requires the same read credential as its contents. See [Private
+caches][private-cache-setup] for configuring the credential in Nix.
+
+[private-cache-setup]: ./private-caches.md
+
 ## Getting the public key
 
 The public key is public even when the cache is private. You can fetch it

@@ -16,6 +16,9 @@ import { type CacheId } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
+import { ArtifactJobDispatchService } from './artifact-job-dispatch-service.ts';
+import { ArtifactRetentionService } from './artifact-retention-service.ts';
+import { ArtifactStagingService } from './artifact-staging-service.ts';
 import { type ServerContext } from './context.ts';
 import {
 	subrequestSliceReserve,
@@ -52,6 +55,25 @@ export class MaintenanceEligibilityService {
 	// Indexed existence checks keep this calculation independent of the number
 	// of pending uploads and queued deletions.
 	private hasImmediateWork(now: IsoTimestamp): boolean {
+		const wake = this.context.db
+			.select({ id: schema.attestationListRefreshWake.id })
+			.from(schema.attestationListRefreshWake)
+			.limit(1)
+			.get();
+		if (wake !== undefined) {
+			return true;
+		}
+		const refresh = this.context.db
+			.select({ id: schema.attestationListRefreshJobs.id })
+			.from(schema.attestationListRefreshJobs)
+			.where(
+				sql`${schema.attestationListRefreshJobs.cleanupAt} IS NULL OR ${schema.attestationListRefreshJobs.cleanupAt} <= ${Date.parse(now)}`
+			)
+			.limit(1)
+			.get();
+		if (refresh !== undefined) {
+			return true;
+		}
 		const retryAt = new UploadRetrySchedule(this.context).projectedAt();
 		if (retryAt !== undefined && retryAt <= Date.parse(now)) {
 			return true;
@@ -59,6 +81,15 @@ export class MaintenanceEligibilityService {
 
 		const inheritanceAt = this.earliestInheritanceWake();
 		if (inheritanceAt !== undefined && inheritanceAt <= now) {
+			return true;
+		}
+
+		const artifactRetirement = this.context.db
+			.select({ present: sql`1` })
+			.from(schema.artifactReferenceDeletion)
+			.limit(1)
+			.get();
+		if (artifactRetirement !== undefined) {
 			return true;
 		}
 
@@ -74,6 +105,7 @@ export class MaintenanceEligibilityService {
 		const teardown = this.context.db
 			.select({ present: sql`1` })
 			.from(schema.cacheTeardowns)
+			.where(lte(schema.cacheTeardowns.nextWorkAt, Date.parse(now)))
 			.limit(1)
 			.get();
 		if (teardown !== undefined) {
@@ -162,19 +194,47 @@ export class MaintenanceEligibilityService {
 			.get()?.nextCheckAt;
 	}
 
-	// Choose the earliest upload, attestation, root, grace, auth-key, or
-	// managed-cache retirement deadline when no immediate work is recorded.
+	private earliestListCleanup(): IsoTimestamp | undefined {
+		const at = this.context.db
+			.select({ at: schema.attestationListRefreshJobs.cleanupAt })
+			.from(schema.attestationListRefreshJobs)
+			.where(isNotNull(schema.attestationListRefreshJobs.cleanupAt))
+			.orderBy(asc(schema.attestationListRefreshJobs.cleanupAt))
+			.limit(1)
+			.get()?.at;
+		return at === undefined || at === null
+			? undefined
+			: isoTimestamp(new Date(at));
+	}
+
+	private earliestTeardownWake(): IsoTimestamp | undefined {
+		const at = this.context.db
+			.select({ at: schema.cacheTeardowns.nextWorkAt })
+			.from(schema.cacheTeardowns)
+			.orderBy(
+				asc(schema.cacheTeardowns.nextWorkAt),
+				asc(schema.cacheTeardowns.cacheId)
+			)
+			.limit(1)
+			.get()?.at;
+		return at === undefined ? undefined : isoTimestamp(new Date(at));
+	}
+
 	private earliestFutureWake(now: IsoTimestamp): IsoTimestamp | undefined {
 		return [
 			this.earliestSettleRetry(now),
 			this.earliestInheritanceWake(),
 			this.earliestUploadExpiry(),
 			this.earliestRootExpiry(),
+			new ArtifactRetentionService(this.context).nextExpiryAt(),
+			new ArtifactStagingService(this.context).nextCollectionAtInSection(),
 			this.earliestGraceExpiry(),
 			this.earliestAuthKeyRetirement(),
 			this.earliestManagedCacheRetirement(),
 			this.earliestRefreshMaintenance(),
-			this.earliestSubjectNonceExpiry()
+			this.earliestSubjectNonceExpiry(),
+			this.earliestListCleanup(),
+			this.earliestTeardownWake()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
@@ -223,9 +283,21 @@ export class MaintenanceEligibilityService {
 	}
 
 	private nextWakeAt(now: IsoTimestamp): IsoTimestamp | undefined {
-		return this.hasImmediateWork(now)
-			? wakeImmediately
-			: this.earliestFutureWake(now);
+		const dispatchAt = new ArtifactJobDispatchService(
+			this.context
+		).nextAtInSection();
+		if (
+			this.hasImmediateWork(now) ||
+			(dispatchAt !== undefined && dispatchAt <= Date.parse(now))
+		) {
+			return wakeImmediately;
+		}
+		return [
+			this.earliestFutureWake(now),
+			dispatchAt === undefined ? undefined : isoTimestamp(new Date(dispatchAt))
+		]
+			.filter((at) => at !== undefined)
+			.toSorted(byCodeUnit)[0];
 	}
 
 	retirementRevision(

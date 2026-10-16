@@ -3,6 +3,9 @@ import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { capturingReporter, fakeCliUi } from '@cupboard/cli-ui/testing';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
+	attestationListLocalStep,
+	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
@@ -174,8 +177,10 @@ async function deployOverPredecessor(
 	now = deployedAt
 ): Promise<void> {
 	const stage =
-		server.deploymentStage === 'current' ? 'current' : 'intermediate';
-	if (stage === 'current') {
+		server.deploymentStage === 'predecessor'
+			? 'intermediate'
+			: server.deploymentStage;
+	if (stage !== 'intermediate') {
 		await prepareTransitions(
 			server.transitionWalk({ now: () => now }, stage, 'CONTROL_DB'),
 			false
@@ -189,7 +194,60 @@ async function deployOverPredecessor(
 		await server.deployCurrent();
 		return;
 	}
+	if (stage === 'path-authority') {
+		await server.deployPathAuthority();
+		return;
+	}
+	if (stage === 'cas-storage') {
+		await server.deployCasStorage();
+		return;
+	}
 	await server.deployIntermediate();
+}
+
+async function deployPathAuthority(
+	server: StagedDeploymentServer,
+	now = deployedAt
+): Promise<void> {
+	await prepareTransitions(
+		server.transitionWalk({ now: () => now }, 'path-authority', 'CONTROL_DB'),
+		false
+	);
+	await prepareTransitions(
+		server.transitionWalk({ now: () => now }, 'path-authority'),
+		false
+	);
+	await server.deployPathAuthority();
+}
+
+async function deployCasStorage(
+	server: StagedDeploymentServer,
+	now = deployedAt,
+	shouldDeferControlTransfer = false
+): Promise<void> {
+	await prepareTransitions(
+		server.transitionWalk({ now: () => now }, 'cas-storage', 'CONTROL_DB'),
+		false
+	);
+	await prepareTransitions(
+		server.transitionWalk({ now: () => now }, 'cas-storage'),
+		false
+	);
+	await server.deployCasStorage();
+	await wakeUntilStep(
+		server,
+		await server.deploymentClient(),
+		casStorageLocalStep
+	);
+	const walk = server.transitionWalk({ now: () => now }, 'cas-storage');
+	await completeTransitions({
+		...walk,
+		transitions: shouldDeferControlTransfer
+			? walk.transitions.filter(
+					(planned) => planned.transition.id !== 'control-database-split'
+				)
+			: walk.transitions
+	});
 }
 
 /**
@@ -202,18 +260,46 @@ async function contractOverPredecessor(
 	server: StagedDeploymentServer,
 	now = deployedAt
 ): Promise<TransitionStates> {
-	if (server.deploymentStage === 'intermediate') {
-		await completeTransitions(
-			server.transitionWalk({ now: () => now }, 'intermediate')
+	if (server.deploymentStage === 'predecessor') {
+		throw new Error(
+			'Deploy intermediate Workers before completing transitions'
 		);
-		await prepareTransitions(
-			server.transitionWalk({ now: () => now }, 'current', 'CONTROL_DB'),
-			false
-		);
+	}
+	while (server.deploymentStage !== 'current') {
+		if (server.deploymentStage === 'intermediate') {
+			await completeTransitions(
+				server.transitionWalk({ now: () => now }, 'intermediate')
+			);
+			await deployPathAuthority(server, now);
+			continue;
+		}
+		if (server.deploymentStage === 'path-authority') {
+			await completeTransitions(
+				server.transitionWalk({ now: () => now }, 'path-authority')
+			);
+			await deployCasStorage(server, now);
+		} else {
+			await completeTransitions(
+				server.transitionWalk(
+					{
+						now: () => now,
+						wakeTenants: async (step) =>
+							wakeUntilStep(server, await server.deploymentClient(), step)
+					},
+					'cas-storage'
+				)
+			);
+		}
 		await prepareTransitions(server.transitionWalk({ now: () => now }), false);
 		await server.deployCurrent();
 	}
-	return completeTransitions(server.transitionWalk({ now: () => now }));
+	return completeTransitions(
+		server.transitionWalk({
+			now: () => now,
+			wakeTenants: async (step) =>
+				wakeUntilStep(server, await server.deploymentClient(), step)
+		})
+	);
 }
 
 it.each(['predecessor', 'intermediate'] as const)(
@@ -277,6 +363,52 @@ async function stoppedBeforeContract(
 	return undefined;
 }
 
+it('refuses expansion until the deployed CAS release has contracted', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+		await wakeUntilStep(
+			server,
+			await server.deploymentClient(),
+			expansionLocalStep
+		);
+		await completeTransitions(
+			server.transitionWalk({ now: () => deployedAt }, 'intermediate')
+		);
+		await deployPathAuthority(server);
+		await completeTransitions(
+			server.transitionWalk({ now: () => deployedAt }, 'path-authority')
+		);
+		const before = await server.terminalSnapshot();
+		await expect(
+			prepareTransitions(
+				server.transitionWalk({ now: () => deployedAt }),
+				false
+			)
+		).rejects.toStrictEqual(
+			new TransitionIncompleteError(
+				'cas-storage',
+				'cas-demotion-progress',
+				undefined
+			)
+		);
+		expect(await server.terminalSnapshot()).toStrictEqual(before);
+		await deployCasStorage(server);
+		await server.restart();
+		await prepareTransitions(
+			server.transitionWalk({ now: () => deployedAt }),
+			false
+		);
+		await server.deployCurrent();
+		await contractOverPredecessor(server);
+		const client = await server.deploymentClient();
+		expect(await client.transitions()).toStrictEqual(completedTransitions);
+	} finally {
+		await server.stop();
+	}
+});
+
 it('defines the dependencies of the staged schema transitions', () => {
 	expect(
 		sharedTransitions.map((transition) => ({
@@ -294,7 +426,35 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'tenant-schema-progress', independent: true },
 		{ id: 'control-refresh-sessions', independent: true },
 		{ id: 'control-subject-nonces', independent: true },
-		{ id: 'control-database-split', independent: true }
+		{ id: 'control-database-split', independent: true },
+		{ id: 'cas-storage', independent: true },
+		{ id: 'cache-path-intersection-index', independent: false },
+		{ id: 'native-artifact-storage', independent: true },
+		{ id: 'cas-demotion-progress', independent: false },
+		{ id: 'attestation-list-revision', independent: false },
+		{ id: 'tenant-namespace-cleanup', independent: true },
+		{ id: 'native-artifact-publication', independent: true },
+		{ id: 'shared-listing-generation', independent: true },
+		{ id: 'shared-listing-jobs', independent: false },
+		{ id: 'nar-source-capture', independent: false },
+		{ id: 'shared-listing-catchup', independent: false },
+		{ id: 'shared-listing-task-claims', independent: false },
+		{ id: 'global-listing-generation', independent: false },
+		{ id: 'shared-listing-staging', independent: false },
+		{ id: 'shared-listing-output-retention', independent: false },
+		{ id: 'shared-listing-output-retirement', independent: false },
+		{ id: 'shared-listing-completion', independent: false },
+		{ id: 'shared-listing-task-delivery', independent: false },
+		{ id: 'shared-listing-dispatch', independent: false },
+		{ id: 'shared-listing-dispatch-seed', independent: false },
+		{ id: 'listing-adoption-capture', independent: true },
+		{ id: 'listing-adoption-fact-seed', independent: true },
+		{ id: 'listing-adoption-parents', independent: true },
+		{ id: 'listing-adoption-parent-seed', independent: true },
+		{ id: 'listing-adoption-seed-dispatch', independent: true },
+		{ id: 'listing-adoption-work', independent: true },
+		{ id: 'listing-adoption-tasks', independent: true },
+		{ id: 'forward-listing-staging', independent: false }
 	]);
 });
 
@@ -352,7 +512,7 @@ it('upgrades a populated predecessor deployment', async () => {
 			intermediateStage: 'intermediate',
 			currentStage: 'current',
 			expandedStatus: {
-				current: currentLocalStep,
+				current: cacheIdentityLocalStep,
 				required: expansionLocalStep,
 				ready: resumableFixtureTenants,
 				...noTenantPending
@@ -467,7 +627,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 			after: await client.localStepStatus()
 		}).toStrictEqual({
 			before: {
-				current: currentLocalStep,
+				current: cacheIdentityLocalStep,
 				required: expansionLocalStep,
 				ready: 0,
 				pending: resumableFixtureTenants,
@@ -847,17 +1007,34 @@ it('completes a transfer when another deploy contracts during a source schema re
 		await completeTransitions(
 			server.transitionWalk({ now: () => deployedAt }, 'intermediate')
 		);
-		await prepareTransitions(
-			server.transitionWalk({ now: () => deployedAt }, 'current', 'CONTROL_DB'),
-			false
+		await deployPathAuthority(server);
+		const releasedWalk = server.transitionWalk(
+			{ now: () => deployedAt },
+			'path-authority'
 		);
+		await completeTransitions({
+			...releasedWalk,
+			transitions: releasedWalk.transitions.filter(
+				(planned) => planned.transition.id !== 'control-database-split'
+			)
+		});
+		await deployCasStorage(server, deployedAt, true);
 		await prepareTransitions(
 			server.transitionWalk({ now: () => deployedAt }),
 			false
 		);
 		await server.deployCurrent();
+		await wakeUntilStep(
+			server,
+			await server.deploymentClient(),
+			attestationListLocalStep
+		);
 		const controlWalk = server.transitionWalk({}, 'current', 'CONTROL_DB');
-		const other = server.transitionWalk({ now: () => deployedAt });
+		const other = server.transitionWalk({
+			now: () => deployedAt,
+			wakeTenants: async (step) =>
+				wakeUntilStep(server, await server.deploymentClient(), step)
+		});
 		let didContract = false;
 		const api: D1QueryApi = {
 			queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
@@ -875,6 +1052,8 @@ it('completes a transfer when another deploy contracts during a source schema re
 		};
 		const first = server.transitionWalk({
 			now: () => deployedAt,
+			wakeTenants: async (step) =>
+				wakeUntilStep(server, await server.deploymentClient(), step),
 			beforeContract: async (id) => {
 				if (id !== 'control-database-split') {
 					return;
@@ -930,10 +1109,18 @@ it('uses Cloudflare recovery only while a real control transfer remains frozen',
 		await completeTransitions(
 			server.transitionWalk({ now: () => deployedAt }, 'intermediate')
 		);
-		await prepareTransitions(
-			server.transitionWalk({ now: () => deployedAt }, 'current', 'CONTROL_DB'),
-			false
+		await deployPathAuthority(server);
+		const releasedWalk = server.transitionWalk(
+			{ now: () => deployedAt },
+			'path-authority'
 		);
+		await completeTransitions({
+			...releasedWalk,
+			transitions: releasedWalk.transitions.filter(
+				(planned) => planned.transition.id !== 'control-database-split'
+			)
+		});
+		await deployCasStorage(server, deployedAt, true);
 		await prepareTransitions(
 			server.transitionWalk({ now: () => deployedAt }),
 			false
@@ -1104,7 +1291,18 @@ it('uses Cloudflare recovery only while a real control transfer remains frozen',
 			ready: { state: 'ready' },
 			copied: { copied_at: undefined }
 		});
-		await completeTransitions(server.transitionWalk({ now: () => deployedAt }));
+		await wakeUntilStep(
+			server,
+			await server.deploymentClient(),
+			attestationListLocalStep
+		);
+		await completeTransitions(
+			server.transitionWalk({
+				now: () => deployedAt,
+				wakeTenants: async (step) =>
+					wakeUntilStep(server, await server.deploymentClient(), step)
+			})
+		);
 		await expect(establishAuthority(plans, world)).rejects.toBeInstanceOf(
 			AdminTokenRequiredError
 		);

@@ -10,6 +10,7 @@ import {
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
 import {
+	cacheIntersectionCapability,
 	cacheMetadataCapability,
 	cacheMetadataCapabilityHeader
 } from '@cupboard/protocol/cache-metadata';
@@ -63,9 +64,14 @@ import {
 } from './chunked-uploads.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
+import { ListingAdoptionQueue } from './listing-adoption-queue.ts';
+import { ListingAdoptionWorkQueue } from './listing-adoption-work-queue.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
-import { readApp } from './read-app.ts';
-import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
+import { handleWorkerQueue } from './queue.ts';
+import { readApp, serveCacheSetup } from './read-app.ts';
+import { enqueueMaintenanceJobs } from './scheduled.ts';
+import { SharedListingCleanupQueue } from './shared-listing-cleanup-queue.ts';
+import { SharedListingQueue } from './shared-listing-queue.ts';
 import {
 	innerRequest,
 	tenantUncachedRead,
@@ -148,7 +154,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		const headers = new Headers(context.res.headers);
 		headers.set(
 			cacheMetadataCapabilityHeader,
-			`${cacheMetadataCapability} ${attestationInfoCapability}`
+			`${cacheMetadataCapability} ${attestationInfoCapability}${/^\/(?:cache\/[^/]+\/)?(?:[^/]+\.narinfo|nix-cache-info|api\/v1\/(?:missing-paths|attestation-info|path-info))$/u.test(context.get('tenantRest')) ? ` ${cacheIntersectionCapability}` : ''}`
 		);
 		context.res = new Response(context.res.body, {
 			status: context.res.status,
@@ -305,6 +311,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		)
 	);
 
+	app.on(
+		'GET',
+		['/t/:tenant/', '/t/:tenant/cache/:cacheName/'],
+		serveCacheSetup
+	);
 	app.route('/t/:tenant', readApp);
 	app.route('/t/:tenant/cache/:cacheName', readApp);
 
@@ -341,6 +352,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		String.raw`/t/:tenant/reuse/:view/:name{[0-9a-z]+\.narinfo}`,
 		serveReuse
 	);
+	app.get(String.raw`/t/:tenant/reuse/:view/:name{[0-9a-z]+\.ls}`, serveReuse);
 	app.get('/t/:tenant/reuse/:view/nar/:name', serveReuse);
 	// The object authenticates each chunk of a private view's page as it
 	// authenticates every other read of the view.
@@ -553,15 +565,58 @@ export default {
 		// Enqueue bounded jobs so execution failures retry per message rather than
 		// repeating the whole cron plan.
 		await withSubrequestSlice(
-			() => enqueueMaintenanceJobs(boundedWorkerEnv(env)),
+			async () => {
+				const cleanup = new SharedListingCleanupQueue({
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					queue: env.ARTIFACT_QUEUE
+				});
+				const listings = new SharedListingQueue({
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					queue: env.ARTIFACT_QUEUE,
+					buffers: narReadBuffers
+				});
+				const adoption = new ListingAdoptionQueue({
+					database: env.CUPBOARD_DB,
+					queue: env.ARTIFACT_QUEUE
+				});
+				const adoptionWork = new ListingAdoptionWorkQueue({
+					database: env.CUPBOARD_DB,
+					queue: env.ARTIFACT_QUEUE,
+					wakeHistorical: () =>
+						env.ARTIFACT_QUEUE.send({ kind: 'listing-adoption-dispatch' }),
+					serverFor: (tenant) => tenantServer(env, tenant)
+				});
+				const results = await Promise.allSettled([
+					adoption.start(),
+					adoptionWork.start(),
+					enqueueMaintenanceJobs(boundedWorkerEnv(env)),
+					cleanup.start(),
+					listings.start()
+				]);
+				const errors: unknown[] = [];
+				for (const result of results) {
+					if (result.status === 'rejected') {
+						errors.push(result.reason);
+					}
+				}
+				if (errors.length > 0) {
+					throw new AggregateError(errors, 'cron queue dispatch failed');
+				}
+			},
 			{ subrequests: subrequestsPerInvocation(env) }
 		);
 	},
 
-	async queue(batch, env) {
+	async queue(batch, env, context) {
 		await withSubrequestSlice(
 			() =>
-				handleMaintenanceQueue(batch, boundedWorkerEnv(env), narReadBuffers),
+				handleWorkerQueue(batch, env, narReadBuffers, {
+					defer: (completion) => {
+						context.waitUntil(completion);
+					}
+				}),
 			{ subrequests: subrequestsPerInvocation(env) }
 		);
 	}

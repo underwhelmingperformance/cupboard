@@ -1,5 +1,9 @@
 import { type StorePathString } from '@cupboard/nix-store/scalars';
 import {
+	cacheIntersectionMaxHashes,
+	cacheIntersectionMaxRequestBytes,
+	type CacheIntersectionRequest,
+	cacheIntersectionRequestSchema,
 	type CacheMetadataEntry,
 	cacheMetadataMaxNarInfoBytes,
 	cacheMetadataMaxRequestBytes,
@@ -15,6 +19,7 @@ import {
 
 import {
 	MalformedRequestBodyError,
+	MetadataIntersectionTooManyHashesError,
 	MetadataNarInfoInvalidError,
 	MetadataNarInfoTooLargeError,
 	MetadataRequestTooLargeError
@@ -23,29 +28,70 @@ import { parseRequestValue } from '../http/parse.ts';
 
 const utf8 = new TextEncoder();
 
-export async function parseCacheMetadataRequest(
-	request: Request
-): Promise<CacheMetadataRequest> {
-	let text: string;
+async function readRequestText(
+	request: Request,
+	maximumBytes: number
+): Promise<string> {
 	try {
-		text = await readResponseText(request, {
+		return await readResponseText(request, {
 			description: 'Metadata request',
-			maximumBytes: cacheMetadataMaxRequestBytes
+			maximumBytes
 		});
 	} catch (error) {
 		if (error instanceof RemoteBodyTooLargeError) {
-			throw new MetadataRequestTooLargeError();
+			throw new MetadataRequestTooLargeError(maximumBytes);
 		}
 		throw error;
 	}
-	let value: unknown;
+}
+
+function parseRequestJson(text: string): unknown {
 	try {
-		value = JSON.parse(text);
+		return JSON.parse(text);
 	} catch (error) {
 		if (error instanceof SyntaxError) {
 			throw new MalformedRequestBodyError(error);
 		}
 		throw error;
+	}
+}
+
+export async function parseCacheMetadataRequest(
+	request: Request
+): Promise<CacheMetadataRequest> {
+	return parseRequestValue(
+		cacheMetadataRequestSchema,
+		parseRequestJson(
+			await readRequestText(request, cacheMetadataMaxRequestBytes)
+		)
+	);
+}
+
+export async function parseCachePathInfoRequest(
+	request: Request
+): Promise<CacheMetadataRequest | CacheIntersectionRequest> {
+	const text = await readRequestText(request, cacheIntersectionMaxRequestBytes);
+	const value = parseRequestJson(text);
+	if (
+		typeof value === 'object' &&
+		value !== null &&
+		'operation' in value &&
+		value.operation === 'intersection'
+	) {
+		if (
+			'storePathHashes' in value &&
+			Array.isArray(value.storePathHashes) &&
+			value.storePathHashes.length > cacheIntersectionMaxHashes
+		) {
+			throw new MetadataIntersectionTooManyHashesError(
+				value.storePathHashes.length,
+				cacheIntersectionMaxHashes
+			);
+		}
+		return parseRequestValue(cacheIntersectionRequestSchema, value);
+	}
+	if (utf8.encode(text).byteLength > cacheMetadataMaxRequestBytes) {
+		throw new MetadataRequestTooLargeError();
 	}
 	return parseRequestValue(cacheMetadataRequestSchema, value);
 }

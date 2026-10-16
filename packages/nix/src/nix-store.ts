@@ -149,6 +149,11 @@ export interface NixBuildResult {
 	readonly target: NixDerivedPathString;
 	readonly outcome: NixBuildOutcome;
 	/**
+	 * Native output records, available when the daemon negotiated the path-based
+	 * realisation format. These records do not specify resolved derivation keys.
+	 */
+	readonly outputRealisations?: Readonly<Record<string, NixOutputRealisation>>;
+	/**
 	 * Matching build activity from this operation, present only for a built
 	 * result. Remote activity takes precedence because forwarded builder logs
 	 * can also contain local activity. A remote hook can reuse existing outputs.
@@ -158,6 +163,15 @@ export interface NixBuildResult {
 	readonly nonDeterministic: boolean;
 	readonly startTime: number;
 	readonly stopTime: number;
+}
+
+/**
+ * A daemon's output record with its original named signatures. The resolved
+ * derivation identity requires a separate native build-trace record.
+ */
+export interface NixOutputRealisation {
+	readonly outPath: StorePathString;
+	readonly signatures: readonly string[];
 }
 
 export type NixBuildMode = 'normal' | 'check';

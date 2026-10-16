@@ -1,11 +1,17 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
-import { and, asc, eq, inArray, type SQL, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, not, or, type SQL, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import { type AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 
+import {
+	type CasReferenceSet,
+	readCasReferenceSet
+} from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { ListingAdoptionParentStore } from '../db/listing-adoption-parents.ts';
 import * as schema from '../db/schema.ts';
 
+import { AttestationListTeardownService } from './attestation-list-teardown-service.ts';
 import { batchNonEmpty } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import {
@@ -105,14 +111,16 @@ export function buildTenantBlobDeleteStatement(
 export function buildTenantCasBlobDeleteStatement(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
-	digests: JsonValueList<typeof d1Schema.tenantCasBlob.$inferSelect.digest>
+	digests: JsonValueList<typeof d1Schema.tenantCasBlob.$inferSelect.digest>,
+	references: CasReferenceSet
 ) {
 	return database
 		.delete(d1Schema.tenantCasBlob)
 		.where(
 			and(
 				eq(d1Schema.tenantCasBlob.tenant, tenant),
-				inArray(d1Schema.tenantCasBlob.digest, digests)
+				inArray(d1Schema.tenantCasBlob.digest, digests),
+				references.unreferenced(d1Schema.tenantCasBlob.digest, tenant)
 			)
 		);
 }
@@ -257,9 +265,47 @@ export class OffboardingService {
 		await batchNonEmpty(this.context.d1, deletes);
 	}
 
+	private async deleteArtifactReferenceBatch(
+		tenant: TenantId,
+		limit: number,
+		references: CasReferenceSet
+	): Promise<void> {
+		if (references.kinds === 'attestations') {
+			return;
+		}
+
+		const table = d1Schema.artifactReference;
+		const captured = await this.context.d1
+			.select({
+				artifactId: table.artifactId,
+				artifactGeneration: table.artifactGeneration,
+				cacheGeneration: table.cacheGeneration,
+				digest: table.digest
+			})
+			.from(table)
+			.where(eq(table.tenant, tenant))
+			.orderBy(table.artifactId, table.artifactGeneration)
+			.limit(limit);
+		const deletes = jsonRowLists(captured).map((rows) =>
+			this.context.d1.delete(table).where(
+				and(
+					eq(table.tenant, tenant),
+					rows.matches({
+						artifactId: table.artifactId,
+						artifactGeneration: table.artifactGeneration,
+						cacheGeneration: table.cacheGeneration,
+						digest: table.digest
+					})
+				)
+			)
+		);
+		await batchNonEmpty(this.context.d1, deletes);
+	}
+
 	private async deleteCasPresenceBatch(
 		tenant: TenantId,
-		limit: number
+		limit: number,
+		references: CasReferenceSet
 	): Promise<void> {
 		const blobs = await this.context.d1
 			.select({ digest: d1Schema.tenantCasBlob.digest })
@@ -274,7 +320,12 @@ export class OffboardingService {
 
 		const digests = blobs.map((blob) => blob.digest);
 		const deletes = jsonValueLists(digests).map((list) =>
-			buildTenantCasBlobDeleteStatement(this.context.d1, tenant, list)
+			buildTenantCasBlobDeleteStatement(
+				this.context.d1,
+				tenant,
+				list,
+				references
+			)
 		);
 
 		await batchNonEmpty(this.context.d1, deletes);
@@ -294,10 +345,22 @@ export class OffboardingService {
 		await this.context.d1.delete(fence).where(inArray(sql`rowid`, rows));
 	}
 
-	private async hasResidue(tenant: TenantId): Promise<boolean> {
-		// The terminal (fully-drained) pass checks all five tables anyway, so read
-		// them in one batch.
-		const [edge, presence, attestation, casPresence, fences] =
+	private async hasResidue(
+		tenant: TenantId,
+		references: CasReferenceSet
+	): Promise<boolean> {
+		const parentsAbsent = await new ListingAdoptionParentStore(
+			this.context.d1
+		).tenantAbsence(tenant);
+		const artifactResidue = or(
+			not(references.artifactReferencesAbsent(tenant)),
+			not(parentsAbsent)
+		);
+		const artifactResidueFilter = and(
+			eq(d1Schema.tenant.id, tenant),
+			artifactResidue
+		);
+		const [edge, presence, attestation, casPresence, fences, artifacts] =
 			await this.context.d1.batch([
 				this.context.d1
 					.select({ tenant: d1Schema.blobReference.tenant })
@@ -323,6 +386,11 @@ export class OffboardingService {
 					.select({ tenant: d1Schema.pathReadRevocation.tenant })
 					.from(d1Schema.pathReadRevocation)
 					.where(eq(d1Schema.pathReadRevocation.tenant, tenant))
+					.limit(1),
+				this.context.d1
+					.select({ tenant: d1Schema.tenant.id })
+					.from(d1Schema.tenant)
+					.where(artifactResidueFilter)
 					.limit(1)
 			]);
 
@@ -331,7 +399,8 @@ export class OffboardingService {
 			presence.length > 0 ||
 			attestation.length > 0 ||
 			casPresence.length > 0 ||
-			fences.length > 0
+			fences.length > 0 ||
+			artifacts.length > 0
 		);
 	}
 
@@ -340,10 +409,11 @@ export class OffboardingService {
 		this.context.offboarding = true;
 	}
 
-	// A missing identity means an earlier finalisation already purged local state.
-	// Report it as drained so the Worker can repeat the remaining D1 finalisation.
-	async drain(limit: number): Promise<{ drained: boolean }> {
-		const tenant = this.tenantSlug();
+	async drain(
+		limit: number,
+		recoveryTenant?: TenantId
+	): Promise<{ drained: boolean }> {
+		const tenant = this.tenantSlug() ?? recoveryTenant;
 
 		if (tenant === undefined) {
 			return { drained: true };
@@ -351,13 +421,27 @@ export class OffboardingService {
 
 		await new PathReadAuthorityService(this.context).requireWritable();
 		this.begin();
+		const references = await readCasReferenceSet(this.context.d1);
 
 		await this.deleteReferenceBatch(tenant, limit);
+		await new ListingAdoptionParentStore(this.context.d1).retireTenant(
+			tenant,
+			limit
+		);
 		await this.deleteAttestationReferenceBatch(tenant, limit);
+		await this.deleteArtifactReferenceBatch(tenant, limit, references);
 		await this.deletePresenceBatch(tenant, limit);
-		await this.deleteCasPresenceBatch(tenant, limit);
+		await this.deleteCasPresenceBatch(tenant, limit, references);
 		await this.deletePathFenceBatch(tenant, limit);
 
-		return { drained: !(await this.hasResidue(tenant)) };
+		if (await this.hasResidue(tenant, references)) {
+			return { drained: false };
+		}
+		return {
+			drained: await new AttestationListTeardownService(
+				this.context,
+				tenant
+			).advance(limit)
+		};
 	}
 }

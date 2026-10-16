@@ -4038,124 +4038,126 @@ describe('upload flow', () => {
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 
-	it('recovers an interrupted narinfo deletion through GC', async () => {
-		vi.setSystemTime(testBase);
+	it('recovers an interrupted narinfo deletion through GC', () =>
+		withoutAlarmArming(async () => {
+			vi.setSystemTime(testBase);
 
-		const token = await initialise();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await commitPath(token, metadata);
-		const objectKey = await currentNarObjectKey(metadata.narHash);
+			const token = await initialise();
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, metadata);
+			const objectKey = await currentNarObjectKey(metadata.narHash);
 
-		const deleteSpy = vi
-			.spyOn(env.BLOBS, 'delete')
-			.mockRejectedValueOnce(new Error('simulated R2 outage'));
+			const deleteSpy = vi
+				.spyOn(env.BLOBS, 'delete')
+				.mockRejectedValueOnce(new Error('simulated R2 outage'));
 
-		const refused = await authorisedFetch(
-			`/paths/${metadata.storePathHash}`,
-			token,
-			{ method: 'DELETE' }
-		);
+			const refused = await authorisedFetch(
+				`/paths/${metadata.storePathHash}`,
+				token,
+				{ method: 'DELETE' }
+			);
 
-		expect(refused.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
+			expect(refused.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 
-		deleteSpy.mockRestore();
+			deleteSpy.mockRestore();
 
-		// Reproduce a crash after the local row is removed and its deletion queued,
-		// but before the published narinfo object is removed. The reference edge
-		// and the accounting it credits both survive, because the deletion retires
-		// the edge only once the object is gone.
-		await expectStats(token, {
-			storePaths: 0,
-			narBlobs: 1,
-			narFileSize: narBytes.byteLength,
-			pendingUploads: 0,
-			totalFileSize: narBytes.byteLength
-		});
-		await expect(
-			env.BLOBS.head(
-				narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
-					kind: 'default'
-				})
-			)
-		).resolves.not.toBeNull();
-		await expect(env.BLOBS.head(objectKey)).resolves.not.toBeNull();
-
-		const recovered = await runGcResult();
-
-		// Replaying the deletion marker removes the object the failed pass left
-		// behind and retires the edge it kept.
-		expect(recovered.narInfosDeleted).toBe(1);
-		await expectStats(token, {
-			storePaths: 0,
-			narBlobs: 0,
-			narFileSize: 0,
-			pendingUploads: 0,
-			totalFileSize: 0
-		});
-		await expect(
-			env.BLOBS.head(
-				narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
-					kind: 'default'
-				})
-			)
-		).resolves.toBeNull();
-		await expect(env.BLOBS.head(objectKey)).resolves.not.toBeNull();
-
-		await runBlobReaper(rootLogger(), env);
-		vi.setSystemTime(afterGrace());
-		await runBlobReaper(rootLogger(), env);
-		await expect(env.BLOBS.head(objectKey)).resolves.toBeNull();
-	});
-
-	it('retains a re-pushed path left dangling by an interrupted deletion', async () => {
-		vi.setSystemTime(testBase);
-
-		const token = await initialise();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await commitPath(token, metadata);
-
-		const deleteSpy = vi
-			.spyOn(env.BLOBS, 'delete')
-			.mockRejectedValueOnce(new Error('simulated R2 outage'));
-		const refused = await authorisedFetch(
-			`/paths/${metadata.storePathHash}`,
-			token,
-			{ method: 'DELETE' }
-		);
-
-		expect(refused.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
-		deleteSpy.mockRestore();
-
-		// Recommit the path before deletion-marker replay reaches it. The failed
-		// deletion left the tenant's reference to the NAR in place, so the recommit
-		// reuses the bytes already stored.
-		await commitSharedPath(token, metadata);
-
-		const served = await readFetch(`/${metadata.storePathHash}.narinfo`);
-
-		expect(served.status).toBe(StatusCodes.OK);
-
-		const collected = await runGcResult();
-
-		// The generation check must discard the stale marker without deleting the
-		// replacement object.
-		const stillServed = await readFetch(`/${metadata.storePathHash}.narinfo`);
-
-		expect({
-			narInfosDeleted: collected.narInfosDeleted,
-			narInfoStored:
-				(await env.BLOBS.head(
+			// Reproduce a crash after the local row is removed and its deletion queued,
+			// but before the published narinfo object is removed. The reference edge
+			// and the accounting it credits both survive, because the deletion retires
+			// the edge only once the object is gone.
+			await expectStats(token, {
+				storePaths: 0,
+				narBlobs: 1,
+				narFileSize: narBytes.byteLength,
+				pendingUploads: 0,
+				totalFileSize: narBytes.byteLength
+			});
+			await expect(
+				env.BLOBS.head(
 					narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
 						kind: 'default'
 					})
-				)) !== null,
-			stillServedStatus: stillServed.status
-		}).toStrictEqual({
-			narInfosDeleted: 0,
-			narInfoStored: true,
-			stillServedStatus: StatusCodes.OK
-		});
-	});
+				)
+			).resolves.not.toBeNull();
+			await expect(env.BLOBS.head(objectKey)).resolves.not.toBeNull();
+
+			const recovered = await runGcResult();
+
+			// Replaying the deletion marker removes the object the failed pass left
+			// behind and retires the edge it kept.
+			expect(recovered.narInfosDeleted).toBe(1);
+			await expectStats(token, {
+				storePaths: 0,
+				narBlobs: 0,
+				narFileSize: 0,
+				pendingUploads: 0,
+				totalFileSize: 0
+			});
+			await expect(
+				env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+						kind: 'default'
+					})
+				)
+			).resolves.toBeNull();
+			await expect(env.BLOBS.head(objectKey)).resolves.not.toBeNull();
+
+			await runBlobReaper(rootLogger(), env);
+			vi.setSystemTime(afterGrace());
+			await runBlobReaper(rootLogger(), env);
+			await expect(env.BLOBS.head(objectKey)).resolves.toBeNull();
+		}));
+
+	it('retains a re-pushed path left dangling by an interrupted deletion', () =>
+		withoutAlarmArming(async () => {
+			vi.setSystemTime(testBase);
+
+			const token = await initialise();
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, metadata);
+
+			const deleteSpy = vi
+				.spyOn(env.BLOBS, 'delete')
+				.mockRejectedValueOnce(new Error('simulated R2 outage'));
+			const refused = await authorisedFetch(
+				`/paths/${metadata.storePathHash}`,
+				token,
+				{ method: 'DELETE' }
+			);
+
+			expect(refused.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
+			deleteSpy.mockRestore();
+
+			// Recommit the path before deletion-marker replay reaches it. The failed
+			// deletion left the tenant's reference to the NAR in place, so the recommit
+			// reuses the bytes already stored.
+			await commitSharedPath(token, metadata);
+
+			const served = await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+			expect(served.status).toBe(StatusCodes.OK);
+
+			const collected = await runGcResult();
+
+			// The generation check must discard the stale marker without deleting the
+			// replacement object.
+			const stillServed = await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+			expect({
+				narInfosDeleted: collected.narInfosDeleted,
+				narInfoStored:
+					(await env.BLOBS.head(
+						narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+							kind: 'default'
+						})
+					)) !== null,
+				stillServedStatus: stillServed.status
+			}).toStrictEqual({
+				narInfosDeleted: 0,
+				narInfoStored: true,
+				stillServedStatus: StatusCodes.OK
+			});
+		}));
 
 	describe('retention roots', () => {
 		const absentPath = '/nix/store/22222222222222222222222222222222-absent';

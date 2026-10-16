@@ -1,0 +1,1 @@
+CREATE INDEX `blob_ref_readable_cache_generation_idx` ON `blob_ref_storage` (`tenant`,`cache_kind`,`cache_name`,`cache_generation`,`store_path_hash`,`generation`) WHERE "blob_ref_storage"."readable" = true;

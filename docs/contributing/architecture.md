@@ -31,8 +31,8 @@ platform before, these are the pieces that cupboard uses:
 - A **queue** keeps jobs for a Worker to process later, with retries.
 
 A deployment has two Workers, one Durable Object class that serves tenants, two
-D1 databases, one R2 bucket, two KV namespaces, and a queue with a dead-letter
-queue. The diagram shows how they connect:
+D1 databases, one R2 bucket, two KV namespaces, and two queues, each with its
+own dead-letter queue. The diagram shows the request and maintenance paths:
 
 ```text
                   Nix clients, cupboard CLI, CI jobs
@@ -60,6 +60,566 @@ queue. The diagram shows how they connect:
 
 The D1 box represents the shared `CUPBOARD_DB` database. The control Worker also
 binds a separate `CONTROL_DB` database, which the tenant Worker never receives.
+
+Both Workers also bind `cupboard-artifacts` as `ARTIFACT_QUEUE`. Its control
+Worker consumer accepts one message per batch, and consumer invocations scale
+with demand without a configured concurrency ceiling. The queue has a separate
+`cupboard-artifacts-dlq`. These resources are installed before native artifact
+producers are activated. The consumer processes listing jobs under a 14-minute
+budget, using generation-fenced tenant RPCs. Legacy job hints send a
+continuation after a terminal task outcome. Admitted messages claim only their
+specific task, make the job durably due after completion and request a dispatch
+wake. Admitted transient outcomes use durable retry RPCs before the spent
+message is acknowledged. The consumer requests immediate requeue after a
+staging-capacity refusal, uses the recorded shared lease deadline for generation
+waiters and requests a 60-second deferral for other transient outcomes. Delayed
+tasks reserve no fresh generation credits. The dispatcher delivers replacement
+admissions and recovers failed sends. RPC failure or an invalid reply uses
+transport retry and persisted deadlines for recovery. Cancellation starts no new
+retry RPC. Discovery and initial dispatch remain disabled.
+
+The shared NAR catalogue reader scans the NAR hash key in bounded pages before
+filtering for retention and a registered live incarnation. Each page examines at
+most 33 objects, including lookahead, and returns at most 32 sources. The cursor
+advances past scanned objects even if none is eligible. Indexed retention probes
+do not enumerate tenants or duplicate a NAR for each reference. Discovery grants
+no cache authority; an executor must recheck the captured source incarnation and
+publication authority.
+
+Shared D1 jobs persist the historical cursor, generator revision, phase and
+progress counters. Discovery ownership expires after sixty seconds and uses
+increasing claim generations. Each page inserts unique NAR tasks and checkpoints
+its cursor and counters in one ownership-fenced batch, then releases discovery
+ownership. The counter subquery reads only the newly inserted page through an
+index. A lost reply cannot insert or count the page twice. Cancellation revokes
+discovery ownership, and resume advances the job generation without discarding
+the cursor or tasks. Historical discovery enters catch-up; it does not declare
+the generation job complete. Cache adoption has independent captured-source work
+and execution claims.
+
+Global tasks have independent execution claims, so consumers can claim different
+tasks from the same job while discovery continues. Readiness merges bounded
+indexed pages of pending tasks, expired leases and claims from earlier job
+generations. Job state is checked once in the same read batch, so a cancelled
+job cannot cause an unbounded scan of ready tasks. Claim writes recheck the job
+state and generation. Each claim captures the task generation, generator
+revision, NAR incarnation and sizes. Renewal is monotonic; expired or replaced
+owners cannot renew or defer. Deferral releases the lease and persists a retry
+deadline. Repeated claim and deferral requests return the stored result without
+extending its deadline. Cancellation revokes execution ownership. Resume and
+source repair allow immediate replacement claims without waiting for the old
+lease to expire. Claims grant no cache authority or physical retention.
+
+Global delivery reservations are separate from execution claims. A D1 projection
+records pending ready times and running lease deadlines. Task triggers update
+that projection transactionally for current and preceding writers, and terminal
+tasks remove their delivery metadata. Each pass reads bounded indexed candidate
+pages and reserves at most eight hints. A scheduling epoch fences intervening
+changes, including a ready time that changes and then returns to its previous
+value. Reservations postpone duplicate hints for sixty seconds without changing
+task ownership. Expired reservations recover lost sends or replies. Resume
+permits immediate redelivery of superseded running tasks while preserving
+pending retry deadlines. The additive migration does not scan existing tasks.
+
+A separate indexed job ticket schedules delivery hints and bounded metadata
+passes. Reserving a hint postpones transport retries without claiming a pass.
+Consumers claim actual eligible work independently of that transport deadline.
+Pass claims exclude another metadata pass for the same job, while NAR task
+executors retain their separate claims. Requeueing allocates a fresh ticket
+sequence so waiting jobs precede a returning job even when the clock is static.
+The checkpoint computes current task and discovery readiness within its D1
+statement. A busy discovery lease does not block ready sibling tasks.
+
+Legacy task seeding freezes the job's highest NAR hash and reads at most 33
+candidates, then checkpoints at most 32. Terminal gaps still advance the cursor.
+Insertion reads current task state and preserves existing delivery epochs and
+reservations. Cursor and boundary fences reject delayed checkpoints. New job
+writes are captured by triggers, and resume enrols a preceding cancelled job
+without a ticket. The migrations create empty dispatch storage.
+
+Global catalogue recovery persists a fixed upper job ID and keyset cursor in a
+singleton checkpoint. Each pass reads at most 33 job identities and checkpoints
+32 candidates before filtering current job state. Terminal gaps advance the
+cursor. Ticket insertion rechecks the job's current generation and preserves
+existing reservations. Enrolment and cursor progress commit atomically; delayed
+pages cannot regress the cursor, and a lost reply resumes from durable progress.
+Deleted cursor rows and upper boundaries do not prevent completion. New jobs are
+captured by the dispatch triggers.
+
+Cron and strict artifact-queue hints now drive catalogue recovery, discovery and
+NAR task execution. A global dispatch turn reserves at most eight job hints and
+continues while indexed deadlines or catalogue seeding remain ready. Sending a
+hint does not acquire execution ownership. A job consumer acquires a fresh
+metadata claim, seeds one task page, attempts one discovery page and dispatches
+at most eight ready task hints. Those independent operations run concurrently,
+so busy discovery does not block ready sibling tasks. Completing the pass
+rechecks actual deadlines and finalises finished legacy processing jobs under
+the current claim. Failed sends remain discoverable through persisted retry
+deadlines and expired leases.
+
+Metadata passes use a 25-second budget. NAR tasks use the separate executor's
+renewable ownership and at most 14 minutes within the invocation's remaining
+allowance. Consumers admit additional messages only with remaining time and
+subrequests. Independent task hints from the same job can run in separate queue
+invocations with fresh owners. Artifact queue concurrency has no configured
+global cap. Message spans and failure logs include job generation and task
+identity. Shared facts and output references still grant no tenant cache
+authority. Cache adoption uses tenant DO RPCs; completion wakes and forward
+dispatch remain pending.
+
+An append-only capture sequence records retained, registered live NAR sources.
+Indexed triggers append an event when the first reference arrives or a retained
+source becomes available after metadata registration or repair. The event and
+capture clock commit with the original reference or source transaction. Capture
+adds metadata; it does not decode a NAR or publish a listing. The contract
+migration installs every trigger before enabling readiness. Historical jobs
+capture the current sequence atomically on creation and refuse to start before
+readiness.
+
+Replay reads at most 33 events and returns at most 32 candidates through a fixed
+upper sequence. Eligibility is checked after selecting the event page so removed
+references cannot cause an unbounded scan. Superseded source incarnations are
+excluded, and repeated NAR identities are coalesced within each page. Pruning
+removes at most 128 events in one batch and advances a persisted floor without
+reusing sequence numbers. The caller must have durably recorded forward work
+through the requested boundary. Indexed minimum-cursor probes protect historical
+and catch-up jobs, including cancelled jobs that can resume. Replay reports an
+expired window explicitly if its cursor precedes the retained floor. Capture
+replay is integrated into job catch-up; forward dispatch remains pending.
+
+The final historical checkpoint records the capture clock as a fixed upper
+boundary. Catch-up claims include the phase, event cursor and upper boundary in
+addition to ownership. Cancellation and resume preserve the window. Each replay
+page refreshes or inserts unique NAR tasks and advances the event cursor in the
+same fenced batch. A repaired source can update a task's incarnation and sizes,
+but its creation page remains unchanged, so progress counts only new tasks.
+Finishing replay closes discovery and changes the phase to processing. A job
+completes once discovery has closed and all discovered tasks have terminal
+outcomes.
+
+An expired window restarts historical discovery at the current ready capture
+position and preserves existing tasks and counters. A predecessor catch-up job
+without an upper boundary also restarts historical discovery when it is claimed.
+The rescan uses bounded keyset pages, and existing tasks are not counted again.
+
+The shared D1 generation store reserves one computation lease per NAR and
+generator revision across tenants. Claim acquisition requires an active tenant
+and the registered live NAR incarnation. Sixty-second leases use monotonically
+increasing generations. Lost claim replies are idempotent, renewal cannot
+shorten a lease, and expired owners cannot renew or complete work. Completion
+checks the current claim, source incarnation and registered CAS output, then
+records the immutable listing fact and releases the claim in one D1 batch.
+Claims and facts create no cache authority or quota charge.
+
+Global jobs reserve computation through a separate D1 lease with the same NAR
+and generator identity. The lease captures the owning job and task generations
+and cannot outlast the task lease. Source checks require a registered live NAR
+with matching sizes and a retention reference. Cancellation, task replacement,
+source repair and lease expiry revoke renewal. A replacement global task can
+acquire an invalidated lease immediately. Released rows preserve the increasing
+computation generation so an earlier release cannot clear a later owner.
+
+Database guards exclude live competing tenant and global leases in both insert
+and update statements. Earlier tenant Workers receive no claim from a
+conflicting write even though those Workers do not query global leases. Current
+tenant consumers report the global lease's retry deadline. They query global
+storage only after its expansion is recorded, so tenant claims and lost-reply
+recovery also work before that table exists. Different NARs and generator
+revisions can run concurrently. Cache adoption uses separate source and delivery
+claims.
+
+Global listing stages record their computation generation, multipart upload ID
+and sealed measurement in D1. They use `shared-artifact-staging/` keys and do
+not require a tenant identity. Sealed recovery adopts existing bytes without a
+new allocation. Unsealed uploads remain tracked through the late-write horizon.
+Cleanup acknowledgement revokes only the matching computation before removing
+its allocation marker.
+
+Shared listing output references retain measured CAS bytes under a logical NAR
+and generator revision. Completion requires current job, task, computation and
+physical source ownership, plus the measured live CAS incarnation. The captured
+source incarnation fences completion; logical NAR retention continues through
+physical repair. These references grant no cache access and create no tenant
+charge. Global CAS collection includes the references, while tenant quota probes
+continue to count only that tenant's artifact and attestation references.
+
+Global completion installs or verifies output retention, records the immutable
+fact and captured task outcome, increments the matching job counter and releases
+computation ownership in one D1 transaction. The checkpoint also retires
+matching stages. Sealed stages become immediately eligible for cleanup; unsealed
+stages preserve their late-write horizon. Every checkpoint mutation requires the
+fresh outcome receipt, so retries and concurrent duplicates cannot increment
+counters twice. An immutable conflict or failed statement rolls back the whole
+batch.
+
+A task can reuse a retained fact with a live measured CAS incarnation without a
+NAR read or a computation claim. Creating a missing output reference requires a
+current computation claim. Skipped and failed outcomes record bounded reasons
+without requiring physical source availability or creating publication
+authority. Outcome records preserve captured evidence through lease expiry and
+source refresh; those records grant no retention or cache access. Finalisation
+uses persisted counters after discovery closes, without scanning the task
+catalogue. Before the completion expansion is recorded, the store refuses work
+without accessing the new outcome table.
+
+The global listing executor claims a fresh task owner for each invocation and
+renews task, computation and stage ownership while storage I/O runs. It verifies
+the captured compressed NAR, writes bounded multipart listing output, records a
+sealed measurement and promotes the bytes to CAS. Completion runs after the
+renewal loop stops, so a heartbeat cannot reject the claim that a successful
+checkpoint has just released. Source, CAS and ownership checks still fence the
+checkpoint itself.
+
+Backfill and optional verification capture share a streaming listing parser and
+measured multipart output. Fresh verification can receive a provisional metadata
+sink for either an ordinary decode or a fused canonical write. The Worker fixes
+the capture buffer and timeout limits, and isolates setup errors. Deferred
+sealing does not delay the NAR verdict. Sealing may precede Durable Object
+approval or finish after the claim is released, so a sealed listing cannot grant
+cache authority. The sink requests both multipart abort and owner cleanup on
+failure, including after multipart completion. The queue entrypoint supplies its
+`ExecutionContext.waitUntil` callback to metadata factories. Verification passes
+within a batch share R2 admission, including deferred work from earlier
+messages. Automatic forward capture remains disabled until provider activation
+and continuous forward enrolment are integrated.
+
+A separate D1 record ties each provisional forward stage to its native upload
+and verification owner. Reservation coalesces the same NAR and generator
+revision, with a fixed write window and a captured late-write horizon. Sealing
+records an immutable measurement. Cleanup uses expiring claims and bounded
+keyset pages. The store can transfer sealed output into shared staging in one D1
+batch, under the current computation, task, job and retained source incarnation.
+Transfer preserves the physical key and removes the provisional record, so an
+old producer cannot retire output after ownership changes. The transfer creates
+no cache authority or CAS reference. Input lookups include the literal
+active-state predicate because SQLite requires it to use the partial index.
+
+Preparation reuses retained facts before claiming computation or reading NAR
+bytes. Existing facts and sealed output can make progress with no free output
+buffer; new generation defers before allocating staging or reading a NAR.
+Competing jobs persist the active computation's deadline without releasing its
+owner. Independent NARs can execute concurrently through the same Worker.
+Transient storage failures preserve sealed output for another attempt. CAS
+repair preserves the logical output reference.
+
+New generation requires the supported generator revision. Recovery for an
+unknown revision requires a matching immutable fact, because its staged bytes
+alone do not establish their format. Parser resource limits have a distinct
+error type and produce skipped outcomes; malformed NARs and immutable conflicts
+produce failed outcomes. Both preserve bounded reason codes. Execution uses the
+existing connection, buffer, subrequest and deadline accounting. Spans record
+the NAR, generator revision, actual job/task generations and outcome. The
+tenant's internal adoption RPC accepts up to eight captured cache parents. It
+rechecks tenant status and publication activation, resolves each current cache
+generation and uses the publication service's parent authority, live CAS and
+quota checks. The batch publishes sequentially because several parents can refer
+to the same cache-local listing. Repeated parents reuse that artifact and attach
+directed edges without payload reads or writes. A conflicting local fact refuses
+that item without changing its publication or blocking valid siblings.
+
+Adoption capture records each new readable parent and relevant generation
+change, each new immutable fact and each matching CAS availability change in the
+source transaction. New facts also update a reverse digest projection. CAS
+repair probes that index and records one digest event without enumerating
+matching facts or parents. Registration and object metadata can be written in
+either order; capture requires a matching live incarnation. The additive
+expansion creates new storage and indexes, including a zeroed capture clock. The
+contract installs the capture clock first, then the source triggers, after
+reference and CAS storage become physical tables. Installed triggers record
+source changes before the final consumer-readiness marker. Consumer startup
+cannot suppress capture.
+
+Historical listing facts enter the reverse projection and capture stream in
+pages of 32. The seed freezes its upper NAR-hash and generator-revision pair,
+seeks the existing composite primary key and checkpoints both cursor fields.
+Projection updates, events and counters commit in one batch. The batch rechecks
+current source facts, consumer readiness and the seed epoch, so lost replies,
+deleted boundary rows and delayed pages cannot repeat or regress progress. Live
+capture covers later inserts on either side of the historical cursor. The
+additive migration creates an empty checkpoint table; the first seed turn
+initialises its window without a migration-time catalogue scan.
+
+Historical parent discovery pages unique cache paths through the existing
+partial identity indexes for default and named caches. Each turn selects at most
+32 identities with one lookahead before checking publication eligibility. A
+bounded recursive query seeks beyond every retained generation of each path.
+Typed fixed windows preserve tenant, cache-name and path order, including
+deleted cursor or boundary rows. Discovery does not select the authorised
+publication.
+
+The current-parent projection stores one candidate per tenant, cache and path.
+Refresh selects at most 32 paths through the existing read-authority query and
+rechecks readability, revocation, cache generation and tenant eligibility inside
+the write batch. An unchanged candidate preserves its identity; a different
+publication replaces that identity. Source deletion, replacement and revocation
+remove only the matching pointer and append a captured-parent hint for later
+refresh. Active and suspended tenants remain eligible. Offboarding retires
+orphaned metadata in bounded pages, and provisioning and finalisation refuse
+residue. The additive expansion creates an empty indexed table. Refresh waits
+until the cleanup contract and capture consumer are ready.
+
+Historical parent seeds append current source hints in pages of 32, with
+separate fixed windows and checkpoints for default and named caches. Each atomic
+batch rechecks source authority, tenant eligibility, readiness, the seed epoch
+and all cursor and boundary fields. A capture-clock marker identifies the page's
+events; the checkpoint counts actual appended rows and clears the marker in the
+same transaction. Deleted or ineligible sources advance discovery without
+increasing captures. Lost replies preserve committed progress, and a failed
+checkpoint rolls back both events and the marker. Expansion creates an empty
+checkpoint table; it does not scan the reference catalogue.
+
+Seed dispatch persists delivery deadlines and execution leases for facts,
+default-cache parents and named-cache parents. A checked primary key limits this
+metadata to three scopes. Deployment readiness, capture readiness and each
+seed's checkpoint decide whether work remains eligible. Reservations defer
+repeated delivery without granting ownership. A consumer acquires a fresh lease
+for its scope, independently of other scopes. Releasing a scope records the
+database time as its next delivery time, so older waiting scopes run first. The
+claim predicate checks the captured epoch, generation, owner and expiry inside a
+write batch.
+
+The capture stream and reverse projection grant no cache authority and retain no
+bytes. Seed checkpoint creation, projections, events and progress require the
+captured execution claim inside their write transaction. Consumers check storage
+readiness before preparing queries against independently expanded tables. Cron
+reserves eligible scopes and sends strict queue hints. Each seed hint acquires a
+fresh execution claim, processes one page, releases the captured lease and
+requests a generic dispatch turn. Failed sends and abandoned execution recover
+through persisted D1 deadlines. Independent scopes can execute concurrently;
+per-invocation time and subrequest admission bound each turn.
+
+A separate capture consumer copies at most 32 events into durable expansion work
+and checkpoints the input cursor in the same transaction. Its epoch, prior
+cursor and counters, deployment and capture readiness, retained floor and
+captured upper position fence both writes. Work records retain complete source
+payloads independently of event retention. Empty and sparse intervals advance
+without counting gaps. Overlapping consumers cannot repeat a committed page. A
+cursor behind the retained floor is reported as expired. Storage expansion
+creates empty tables; cron and historical seed continuations wake the queue
+consumer.
+
+Fan-out discovery uses typed fixed windows. A parent hint first refreshes the
+current publication projection, then pages matching listing revisions. Listing
+hints page current parent identities; CAS repair hints page the reverse fact
+index by NAR and generator revision. Each page selects at most 32 candidates
+through the captured upper boundary. Readers can continue after cursor and
+boundary rows are deleted. Later candidates require their own captured input.
+Parent and CAS identity checks reject obsolete windows. Discovery reads metadata
+only and does not grant authority or retain bytes.
+
+Source expansion and per-parent delivery have independent execution records. An
+expiring claim includes the task epoch, owner, generation and deadline.
+Expansion enrols its current targets and advances the saved window in one D1
+transaction. Every write rechecks the captured lease, progress revision,
+readiness and source identity. Each target also requires the complete current
+parent tuple and an existing immutable listing fact. CAS repair pages append
+fact-specific capture events in the same transaction as their checkpoint.
+
+Pending deliveries coalesce by parent identity and generator revision without
+resetting their leases or retry deadlines. New availability can re-enrol a
+completed delivery with a fresh epoch, so old acknowledgements cannot finish the
+new execution. Dispatch reservations and retry deadlines are separate: duplicate
+queue hints cannot bypass backoff. New work enters execution through a point
+trigger. A fixed-window seed copies at most 32 older work records per
+transaction without changing existing execution claims. Deployment creates empty
+tables and starts no catalogue scan.
+
+The adoption queue consumes capture and historical work in independent bounded
+turns. Cron and seed continuations send generic hints only after execution
+storage is installed. Each wake uses at most two binding calls. A dispatcher
+reserves up to eight due tasks through the deadline index. Reservation output
+has a canonical identity order after oldest-first selection. Expansion hints
+identify one source; delivery hints identify up to eight targets. Consumers
+acquire fresh D1 ownership and prepare the complete current parent tuples.
+
+Delivery groups use the actual tenant from each prepared target. The groups call
+the authoritative DO RPC concurrently and persist results independently, so a
+slow tenant cannot delay another tenant's completed targets. The RPC rechecks
+publication authority, live measured CAS bytes, quota and directed references.
+Per-item admission preserves completed results when its subrequest allowance
+cannot admit another target. Capacity refusals retry after one second; other
+transient refusals retry after sixty seconds. Each retry persists its latest
+outcome and deadline before sending a delayed hint for only the unfinished
+targets. An unusable RPC result records a generic failure, and the next attempt
+sends those targets separately so one failure cannot keep aborting valid
+siblings. Old responses cannot acknowledge a replacement execution epoch or
+expired lease. A retry after a lost committed wake still requests dispatch.
+
+Acknowledged capture input is pruned in pages of at most 32 events. Event
+deletion and the retained floor commit in one D1 batch. Both writes recheck the
+consumer epoch, its acknowledged position, readiness and the previous floor.
+Newer consumer progress remains valid, and pruning preserves unread events and
+independently persisted source work. Lost replies retry from the committed
+floor.
+
+When the consumer is behind the retained floor, recovery waits for all seven
+capture, execution and historical-seed storage transitions. One D1 batch removes
+the old fact and parent checkpoints and seed dispatch epochs, then rotates the
+consumer epoch at a fresh capture barrier. The batch preserves existing
+enrolment counters, source work and execution tasks. Every statement rechecks
+readiness, the captured consumer and counters, the retained floor and the
+barrier. Newer captures remain above that barrier. Historical seed hints restart
+fixed-window scans of current facts and parents; live capture continues from the
+barrier. A failed wake leaves the reset seed scopes discoverable by the existing
+cron dispatcher. Recovery uses seven binding calls and no payload I/O.
+
+Metadata invocations have a 25-second deadline. Dispatch admits twenty-six
+binding calls, expansion admits twenty-eight, and delivery admits eight plus
+four calls per hinted target, at most forty. Queue consumers have no configured
+global concurrency cap. Execution metadata grants no cache authority or CAS
+retention. Shared completion wakes, forward availability dispatch and
+acknowledgement, source-work and terminal-task pruning and automatic forward
+generation remain pending.
+
+Removing the last NAR reference records one durable cleanup scope. Captured
+reference epochs prevent an old removal from deleting a recreated reference.
+Each removal rechecks parent absence and resets CAS deletion grace. Database
+guards also prevent preceding collectors from arming deletion, retiring a live
+CAS incarnation or deleting its metadata while a shared reference exists.
+Retirement claims capture the scope epoch, cursor, owner and lease deadline.
+Each transaction removes at most eight captured references, clears their CAS
+deletion grace and advances the cursor. A returning logical parent discards the
+obsolete cleanup scope and preserves references. Scope recreation and lease
+replacement fence an older token even when the owner identity is reused.
+Deletion-grace updates probe captured primary keys, so unrelated references to
+the same digest do not increase the scan. New scope deadlines and discovery
+cutoffs use the D1 clock; a fixed cutoff excludes later retirement captures.
+Cron dispatches independent output-retirement waves through the artifact queue.
+Each wave preserves its D1 cutoff and an indexed deadline/hash cursor. Consumers
+claim the current scope and send a continuation after each partial checkpoint.
+Failed sends, lost database replies and expired claims recover through durable
+D1 state and fresh cron waves. Queue hints do not advance progress. Staging and
+output dispatch run independently and report each failure. Global producer
+integration remains pending.
+
+Cron starts cleanup waves with a fixed cutoff. Each indexed page selects at most
+eight stage IDs and records a continuation key for the next queue hint. The
+cutoff and key prevent a wave from repeatedly enqueueing unclaimed first-page
+stages or following new deadlines indefinitely. Cleanup uses the demand-scaled
+artifact queue. Consumers check D1 eligibility and acquire expiring cleanup
+claims before accessing R2. They abort incomplete uploads, delete staged objects
+and acknowledge the durable record only after physical deletion. Storage
+failures persist a retry deadline. A fresh cron wave recovers failed sends,
+expired claims and deferred work. Invocation time and subrequest budgets bound
+processing when an invocation receives multiple messages. Readiness checks
+require the staging expansion before selecting or collecting resources, and
+cleanup dispatch runs independently of other cron maintenance selection.
+
+Listing preparation now acquires the shared lease before source byte access or
+staging allocation and checks for a completed fact again after acquisition.
+Competing tenants receive the recorded lease deadline without reserving staging.
+The admitted consumer persists that retry deadline and releases its admission
+before acknowledging the spent message. Legacy messages retry at that deadline.
+The stage lease includes the captured shared generation token. Renewal checks
+that token before extending local ownership, and completion records the fact
+through the shared claim's fenced D1 batch. Preparation releases a computation
+claim if it cannot transfer the claim to a producer.
+
+Sealed recovery can replace the previous shared owner after the tenant's task
+generation advances. The captured owner must belong to the same tenant and the
+recoverable stage. A claim from another task or tenant remains exclusive while
+it is active. Recovery never extends an elapsed cleanup horizon, even when
+physical cleanup has not run. Shared job/task progress projections and
+completion-triggered wakes for shared waiters remain pending.
+
+The admission model records queued work in tenant SQLite before a consumer
+claims it. Admissions expire, capture the job, task, source and cache
+generations, and share the staging pool's reservation and byte budgets. A
+consumer exchanges its admission for staging in one critical section. Reuse work
+can proceed at full staging capacity, but generation must reserve space before
+writing bytes. An admitted replacement keeps sealed staging available until
+handover or expiry. Independent admissions allow consumers to execute tasks from
+the same job concurrently. Terminal task outcomes release remaining admissions
+in the transaction that updates progress. Replayed, spent or stale admissions
+cannot claim another task. Staging mutations arm the tenant alarm and update the
+cron eligibility projection. Cleanup takes its own bounded alarm turn, retains
+unsealed bytes through the late-write horizon and keeps valid admitted staging
+available for handover. Deadline queries do not change claims, admissions or
+progress.
+
+The retry service atomically returns an owned task to pending state and replaces
+its admission when capacity permits. It preserves the previous owner and claim
+generation so a repeated request after a lost reply returns the same admission.
+A newer claim fences the old request. The trusted requeue RPC validates the
+captured claim and checks that the tenant remains active before changing task
+state. Its result uses the admission service's shared runtime schema. A future
+retry deadline leaves the task pending and releases its admission without
+reserving generation capacity. Repeated requests preserve that deadline. Claims
+and dispatch skip delayed tasks, while indexed readiness selects ready siblings
+and projects the next retry wake. Resume preserves task deadlines. A separate
+RPC for delayed retries lets an older tenant Worker reject those requests
+instead of ignoring their deadline. The immediate RPC preserves existing delays.
+Retry does not change terminal counters. Up to eight unstaged admissions can
+coexist with one borrowed admission for each of the pool's eight physical
+stages. Borrowing a sealed stage reserves no new bytes, so full unstaged slots
+do not prevent its promotion. A capacity refusal keeps the task pending and the
+job due without releasing unfinished staging bytes. Producer activation remains
+pending.
+
+The listing executor reserves an output buffer before calling the tenant
+preparation RPC. Preparation attempts shared-fact reuse and sealed-stage
+promotion even when local output capacity is exhausted, then refuses generation
+before allocating staging or reading NAR bytes. The capacity-aware RPC is
+separate from the legacy method so an earlier tenant Worker rejects the new
+request instead of ignoring its capacity argument. The executor releases unused
+reservations before promotion and after preparation failure or timeout. A
+multipart writer receives ownership of a generation reservation and returns the
+buffer only after every storage operation finishes.
+
+Producer authority and staging retention are separate. A producer still needs a
+current claim and write window. Sealed bytes can remain for recovery until the
+persisted cleanup deadline while the job, cache, source, kind and task
+generation remain valid. The existing late-write horizon exceeds the dispatch
+backstop, so recovery can begin after a consumer disappears without adding a
+storage budget or migration. Handover renews that bounded deadline without
+shortening it. Expired or deferred producers cannot use retention to renew, seal
+or retire the stage. Cancellation, source replacement, cache replacement,
+offboarding and a terminal task remove recovery eligibility. Explicit retirement
+still removes sealed bytes promptly.
+
+Dispatch orders due jobs by their persisted deadlines. New and resumed jobs use
+the current time. A wake, task completion or deferral makes a future deadline
+due now and preserves an existing overdue deadline. Repeated wakes therefore
+preserve the priority of older waiting jobs. Revision fences still prevent an
+older queue-send failure from postponing a newer wake.
+
+Each dispatcher pass discovers one bounded page for at most eight due jobs and
+captures task candidates. A bulk lookup matches NAR hashes and generator
+revisions against shared listing facts with live CAS incarnations. The
+dispatcher deduplicates CAS keys and checks their physical sizes with at most
+six concurrent HEAD requests. Available listings need no generation credits,
+including when staging is full. Facts are admission hints; the consumer still
+checks authority, physical bytes and quota before publication. Missing bytes
+stop later reuse admissions until bytes are available again.
+
+Discovery commits before the asynchronous probes. After checking tenant status
+again, the dispatcher commits job deadlines and at most eight admissions in one
+SQLite transaction. It prioritises sealed recovery and gives each selected job
+an admission opportunity before another round. Shared staging limits decide
+whether generation can reserve bytes; existing tickets and ready staging reuse
+their reservations. The dispatcher sends one queue batch after releasing the
+tenant critical section. A failed send preserves its specific admissions and
+schedules a 30-second retry for each unchanged dispatch reservation. Suspended
+and offboarding tenants do not reserve or send work. Claim installation commits
+the task, its job wake deadline and a new dispatch revision in one SQLite
+transaction. Redispatch selects the next future recorded claim expiry through
+the existing per-job lease index. An empty job with active consumers waits for
+that expiry, and failed delivery cannot postpone an earlier lease wake. Deadline
+inspection does not mutate job or task state. Claim and terminal task RPCs arm
+the earliest job deadline and reconcile cron eligibility. Staging mutations arm
+both job and cleanup deadlines. The shared alarm scheduler gives dispatch one
+bounded turn, and cron invokes the same dispatcher to recover lost alarms.
+Suspended tenants keep their projected deadline for reactivation, but do not arm
+job alarms or dispatch messages.
+
+Capacity refusals record the job's wait time and required bytes or reuse slot.
+An indexed lookup selects at most eight oldest waiters whose requirements fit
+current capacity. Admission release, cancellation and successful physical
+staging cleanup make those jobs due in the same SQLite transaction. Retired
+staging remains charged until deletion succeeds. Waking a job preserves its wait
+time in the dispatch order; admission still rechecks the current capacity. Each
+dispatch pass also wakes another bounded batch if capacity remains available.
+Cleanup RPCs arm the resulting job deadline and reconcile cron recovery.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a
@@ -113,6 +673,34 @@ pages read committed versions and bounded R2 bodies. Reuse-view pages go to the
 tenant object, which verifies the selected candidates and rechecks the view
 revision before returning the page. Each page checks its source scope; the
 client's traversal across pages and sources is not an atomic closure snapshot.
+
+Direct caches advertise `path-intersection-v1` through the read capability
+header. A client can submit `operation: "intersection"` and up to 32,768 unique
+`storePathHashes` to `POST /api/v1/path-info`. Requests and responses have
+separate 2 MiB limits; ordinary metadata pages retain their 32-path and 64 KiB
+request limits. The sparse response includes `complete`, `checked`, the SHA-256
+fingerprint of the ordered unique hash list encoded as JSON, `matchingHashes`
+and `scopeVersion`. The client validates complete accounting before accepting
+misses, then reads canonical metadata only for possible matches. Full-path
+aliases remain separate metadata candidates. Reuse views retain their existing
+metadata protocol.
+
+For at least 256 input hashes, the Worker first enumerates readable reference
+rows through a covering index for the admitted tenant, cache and lifecycle
+generation. The raw-row budget is the smaller of the input count and 4,096; the
+query reads one extra row to detect overflow. Only an exhausted range can
+exclude candidates. An overflowing range falls back to the existing authority
+query for the full input. Small inputs use that query directly. Surviving
+candidates always pass the publication-generation and revocation-fence checks.
+The lookup does not read canonical objects or establish build provenance.
+
+The raw range is a conservative membership superset at its statement snapshot.
+An ordinary publication after the scan can be outside its result. `scopeVersion`
+binds lifecycle and access policy, not a snapshot of membership additions. The
+Worker revalidates lifecycle, access and private read credentials before
+returning a complete result. The complete build dependency population remains
+eligible for retention; sparse lookup only reduces the metadata requests needed
+to select dependencies from each source.
 
 `POST /api/v1/attestation-info` discovers stored attestation descriptors for a
 cache. The same route is available under a named-cache prefix. It accepts up to
@@ -259,24 +847,24 @@ and recovery requirements.
 
 The remaining tables in `CUPBOARD_DB` include:
 
-| Table                                   | What it stores                                                                                                               |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `tenant`                                | The list of tenants: status, owner identity, config version, the tenant read-credential verifier, and maintenance position.  |
-| `tenant_cache_read_credential`          | The verifier for each cache that has its own read credential.                                                                |
-| `cache_lifecycle_storage`               | Each cache's access mode, generation, read revision and deletion time.                                                       |
-| `path_read_revocation`                  | Per-path revocation fences and pending demotion of readable references.                                                      |
-| `blob_state`                            | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                   |
-| `blob_ref_storage`                      | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
-| `tenant_blob`, `tenant_cas_blob`        | Which NARs and attestation bundles each tenant uses, for counting storage.                                                   |
-| `tenant_usage`                          | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                  |
-| `cas_object`, `attestation_ref_storage` | Stored attestation bundles and their references.                                                                             |
-| `object_incarnation`, `object_deletion` | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                             |
-| `deployment_transition`                 | The state of each schema transition that the deploy has started.                                                             |
-| `deployment_phase`                      | The deployment phase that v0.0.34 and v0.0.35 read. The deploy keeps it up to date for a rollback to those releases.         |
-| `local_step_wake_cursor`                | No longer read. A later transition's contract migrations will drop it.                                                       |
-| `manifest_state`                        | Kept for older databases. Nothing reads it.                                                                                  |
-| `tenant_maintenance_eligibility`        | Hints about which tenants to wake.                                                                                           |
-| `instance_config`                       | The deployment's instance name.                                                                                              |
+| Table                                           | What it stores                                                                                                               |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `tenant`                                        | The list of tenants: status, owner identity, config version, the tenant read-credential verifier, and maintenance position.  |
+| `tenant_cache_read_credential`                  | The verifier for each cache that has its own read credential.                                                                |
+| `cache_lifecycle_storage`                       | Each cache's access mode, generation, read revision and deletion time.                                                       |
+| `path_read_revocation`                          | Per-path revocation fences and pending demotion of readable references.                                                      |
+| `blob_state`                                    | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                   |
+| `blob_ref_storage`                              | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
+| `tenant_blob`, `tenant_cas_blob_storage`        | Which NARs and attestation bundles each tenant uses, for counting storage.                                                   |
+| `tenant_usage`                                  | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                  |
+| `cas_object_storage`, `attestation_ref_storage` | Stored attestation bundles and their references.                                                                             |
+| `object_incarnation`, `object_deletion`         | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                             |
+| `deployment_transition`                         | The state of each schema transition that the deploy has started.                                                             |
+| `deployment_phase`                              | The deployment phase that v0.0.34 and v0.0.35 read. The deploy keeps it up to date for a rollback to those releases.         |
+| `local_step_wake_cursor`                        | No longer read. A later transition's contract migrations will drop it.                                                       |
+| `manifest_state`                                | Kept for older databases. Nothing reads it.                                                                                  |
+| `tenant_maintenance_eligibility`                | Hints about which tenants to wake.                                                                                           |
+| `instance_config`                               | The deployment's instance name.                                                                                              |
 
 Some of these tables are written by only one party. A tenant's Durable Object is
 the only thing that writes that tenant's `blob_ref` and `tenant_blob` rows.
@@ -318,9 +906,20 @@ and the reapers.
 Earlier releases stored private caches under a `private/` name. A migration in a
 later release moved those objects to the current keys.
 
-The deploy sets an R2 lifecycle rule on the `staging/` prefix. It deletes
-anything there a day after it's written, and aborts multipart uploads there that
-are still incomplete after a day.
+The deploy reconciles four R2 upload lifecycle rules. The `staging/`,
+`artifact-staging/` and `shared-artifact-staging/` rules delete staging objects
+and abort incomplete multipart uploads after a day. The `t/` rule only aborts
+incomplete multipart uploads after a day; completed tenant objects follow their
+publication and retention lifecycle. These rules reclaim uploads when creation
+succeeds after a timeout and the caller loses the upload ID. Matching managed
+rules and unrelated operator rules are preserved.
+
+R2 applies lifecycle actions asynchronously. The configured age is an
+eligibility threshold, not a cleanup completion deadline. See [R2 object
+lifecycles][r2-object-lifecycles].
+
+[r2-object-lifecycles]:
+  https://developers.cloudflare.com/r2/buckets/object-lifecycles/
 
 Orphan staging reconciliation and the lifecycle rule also remove late writes
 from upload requests that were already in progress when the cache was deleted.
@@ -344,6 +943,16 @@ falls back to that D1 read rather than refusing the request.
 `CRON_STATE` records where each reaper's demote scan should resume: the NAR
 reaper's under `reaper:demote-cursor`, and the attestation reaper's under
 `reaper:cas-demote-cursor`.
+
+The CAS cursor in KV is a hint for discovering missing objects. Active CAS
+demotion uses `cas_demotion_progress` in D1, with the captured object
+incarnation, last discovered tenant and a revision. Each pass polls active work
+alongside new discovery. Tenant lookup seeks one row through the digest/tenant
+index, skips duplicate references and routes at most four tenants per object.
+The cursor cycles after the last tenant, so a failed tenant does not prevent
+later tenants from progressing. Reference and incarnation predicates decide
+whether metadata can be removed; advancing discovery does not mean demotion
+completed.
 
 ## Scheduled and background work
 
@@ -464,6 +1073,18 @@ steps:
 
 Public NARs are cached for a year, marked as immutable. Public narinfos are
 cached for an hour, with `must-revalidate`.
+
+NAR responses advertise `Accept-Ranges: bytes`. Nix [checks that header before
+retrying a partially streamed download][native-download-retries]. The response
+uses `Content-Type: application/zstd` without `Content-Encoding`, so a byte
+range refers to the compressed file bytes. Private reads implement single byte
+ranges in the Worker. For an unconditional public `GET`, the Worker returns the
+complete `200` response and [Workers Cache slices the cached
+representation][worker-ranges] for a range request.
+
+[native-download-retries]:
+  https://github.com/NixOS/nix/blob/2.35.2/src/libstore/filetransfer.cc
+[worker-ranges]: https://developers.cloudflare.com/workers/cache/configuration/
 
 Public narinfo and NAR reads, and private reads authenticated by static
 credentials, do not wake the tenant's Durable Object. Token-authenticated
@@ -1269,7 +1890,7 @@ don't depend on the deploy: an object that is making progress continues after
 the deploy stops or is interrupted, and an object that has stopped waits for the
 next wake.
 
-This build defines five local steps:
+This build defines six local steps:
 
 - Step 1 projects missing lifecycle rows into D1, at most 36 caches per page.
   The local schema migrations reconcile registrations and fill identity columns
@@ -1286,6 +1907,10 @@ This build defines five local steps:
 - Step 5 rewrites stored trust rules and refresh-token grants once D1 records
   `cache-identity` complete. A page rewrites at most 100 rules and 100 families.
   Completion enables local database triggers that reject the old format.
+- Step 6 confirms that the object uses the compatible CAS storage interface
+  after the `cas-storage` expansion. The deploy requires this step from every
+  active or suspended tenant before replacing the old physical table identifiers
+  with read-only views.
 
 Each object caches its reading of the transition states for one minute, so the
 grant rewrite at local step 5 reads them again before it starts.

@@ -8,6 +8,7 @@ export type {
 	DependencyOutputOptions
 } from './dependency-outputs.ts';
 export { dependencyOutputs } from './dependency-outputs.ts';
+export type { TenantDependencyDiagnostic } from './metadata-diagnostics.ts';
 export { NarFileTooLargeError, UnexpectedNarShapeError } from './nar-file.ts';
 export type { NetrcCredential } from './netrc.ts';
 export { netrcCredentialFor } from './netrc.ts';
@@ -18,7 +19,10 @@ export type {
 } from './nix.ts';
 export { Nix } from './nix.ts';
 export type { NixDaemonSession } from './nix-daemon.ts';
-export { NixDaemonStoreClient } from './nix-daemon.ts';
+export {
+	NixDaemonStoreClient,
+	UnsupportedNixDaemonFeatureError
+} from './nix-daemon.ts';
 export type {
 	DaemonChildProcess,
 	DaemonCommandRunner
@@ -36,6 +40,7 @@ export type {
 	NixDaemonTrust,
 	NixDerivedPathString,
 	NixMissingPartition,
+	NixOutputRealisation,
 	NixStoreDirectorySource,
 	NixSubstitutablePathInfo,
 	NixValidPathInfo,

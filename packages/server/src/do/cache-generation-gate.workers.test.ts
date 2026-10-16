@@ -1658,9 +1658,15 @@ describe('cache generation gate', () => {
 				};
 
 				await instance.resumeCacheTeardown(1);
+				const afterEdgeDrain = {
+					pending: await marker(),
+					queued: queuedPaths()
+				};
+				await instance.resumeCacheTeardown(1);
 
 				return {
 					afterFullChunk,
+					afterEdgeDrain,
 					pending: await marker(),
 					queued: queuedPaths()
 				};
@@ -1677,6 +1683,7 @@ describe('cache generation gate', () => {
 				pending: origin,
 				queued: [stranded.storePathHash]
 			},
+			afterEdgeDrain: { pending: origin, queued: [] },
 			pending: undefined,
 			queued: [],
 			edges: []
@@ -1691,17 +1698,22 @@ describe('cache generation gate', () => {
 	}, 240_000);
 
 	it('measures fixed and per-chunk teardown D1 statements', async () => {
-		const oneChunk = await teardownPassStatements('gen-pass-small', 1);
+		const onePath = await teardownPassStatements('gen-pass-one', 1);
+		const oneChunk = await teardownPassStatements(
+			'gen-pass-small',
+			maxFencedRetireRows
+		);
 		const twoChunks = await teardownPassStatements(
 			'gen-pass-large',
 			maxFencedRetireRows + 1
 		);
-		// A second chunk adds only its retirement statements. The difference gives
-		// the per-chunk cost, and the remainder gives the fixed cost of a pass.
+		// Both fixtures must fill the bounded page of list revisions so its cost
+		// cancels out when calculating the per-chunk difference.
 		const perChunk = twoChunks - oneChunk;
 		const perPass = oneChunk - perChunk;
 
 		expect({
+			onePath,
 			oneChunk,
 			twoChunks,
 			perChunk,
@@ -1712,11 +1724,12 @@ describe('cache generation gate', () => {
 					maxFencedRetireRows) *
 					perChunk
 		}).toStrictEqual({
-			oneChunk: 11,
-			twoChunks: 19,
+			onePath: 16,
+			oneChunk: 61,
+			twoChunks: 69,
 			perChunk: 8,
-			perPass: 3,
-			worstCase: 35
+			perPass: 53,
+			worstCase: 85
 		});
 	}, 240_000);
 
@@ -1736,7 +1749,7 @@ describe('cache generation gate', () => {
 			references: await attestationReferenceRows(),
 			edges: await blobReferenceRows()
 		}).toStrictEqual({
-			perPass: [87, 45],
+			perPass: [87, 48],
 			worstPass: 87,
 			usable: 100,
 			references: [],

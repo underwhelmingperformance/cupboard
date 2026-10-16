@@ -35,6 +35,7 @@ import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { requireSubrequestsFor } from '../do/subrequest-slice.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
+import { requestedByteRange } from '../http/byte-range.ts';
 import { narCacheTag, narInfoCacheTag } from '../http/cache-tags.ts';
 import {
 	isNotModified,
@@ -572,19 +573,16 @@ async function serveR2(
 	isPublicCache: boolean,
 	isServable?: (object: R2Object) => boolean
 ): Promise<Response> {
-	if (!isPublicCache && request.method === 'HEAD') {
-		return r2Response(
-			request,
-			await env.BLOBS.head(key),
-			headersFor,
-			isPublicCache,
-			isServable
-		);
+	if (
+		!isPublicCache &&
+		(request.method === 'HEAD' || request.headers.has('range'))
+	) {
+		return servePrivateR2(request, env.BLOBS, key, headersFor, isServable);
 	}
 
 	const object = await env.BLOBS.get(key);
 
-	return r2Response(
+	const response = r2Response(
 		request,
 		object,
 		headersFor,
@@ -592,6 +590,70 @@ async function serveR2(
 		isServable,
 		object?.body
 	);
+	if (response.status === 304) {
+		await object?.body.cancel();
+	}
+	return response;
+}
+
+async function servePrivateR2(
+	request: Request,
+	blobs: R2Bucket,
+	key: R2ObjectKey,
+	headersFor: (object: R2Object) => Headers,
+	isServable?: (object: R2Object) => boolean
+): Promise<Response> {
+	const metadata = await blobs.head(key);
+	const response = r2Response(request, metadata, headersFor, false, isServable);
+	if (
+		metadata === null ||
+		response.status !== 200 ||
+		request.method === 'HEAD'
+	) {
+		return response;
+	}
+	const range = requestedByteRange(request, metadata);
+	const headers = response.headers;
+	headers.set('accept-ranges', 'bytes');
+	if (range.kind === 'unsatisfiable') {
+		headers.set('content-range', `bytes */${String(metadata.size)}`);
+		headers.set('content-length', '0');
+		return new Response(undefined, {
+			status: StatusCodes.REQUESTED_RANGE_NOT_SATISFIABLE,
+			headers
+		});
+	}
+	const object = await blobs.get(key, {
+		onlyIf: { etagMatches: metadata.etag },
+		...(range.kind === 'partial' && {
+			range: { offset: range.offset, length: range.length }
+		})
+	});
+	if (object === null) {
+		return uncachedNotFoundResponse();
+	}
+	if (!('body' in object)) {
+		return new Response(undefined, {
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			headers: { 'cache-control': 'no-store', 'retry-after': '1' }
+		});
+	}
+	if (isServable !== undefined && !isServable(object)) {
+		await object.body.cancel();
+		return uncachedNotFoundResponse();
+	}
+	if (range.kind === 'full') {
+		return new Response(object.body, { headers });
+	}
+	headers.set(
+		'content-range',
+		`bytes ${String(range.offset)}-${String(range.offset + range.length - 1)}/${String(metadata.size)}`
+	);
+	headers.set('content-length', String(range.length));
+	return new Response(object.body, {
+		status: StatusCodes.PARTIAL_CONTENT,
+		headers
+	});
 }
 
 function r2Response(
@@ -624,6 +686,7 @@ function r2Response(
 function privatise(headers: Headers, isPublicCache: boolean): Headers {
 	if (!isPublicCache) {
 		headers.set('cache-control', 'no-store');
+		headers.set('accept-ranges', 'bytes');
 	}
 
 	return headers;
@@ -639,6 +702,7 @@ function narHeaders(
 	cache: CacheScope | undefined
 ): Headers {
 	const headers = new Headers({
+		'accept-ranges': 'bytes',
 		'cache-control': narCacheControl,
 		'content-type': 'application/zstd',
 		etag: object.httpEtag,

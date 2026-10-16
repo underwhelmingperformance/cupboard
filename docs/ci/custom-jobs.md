@@ -126,7 +126,9 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
       - id: setup
         uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
         with:
@@ -193,8 +195,8 @@ jobs:
 
 The steps do the following:
 
-1. `nix-quick-install-action` installs Nix. The cupboard actions need Nix, but
-   they don't install it.
+1. `install-nix-action` installs Nix. The cupboard actions need Nix, but they
+   don't install it.
 2. `setup` installs the cupboard CLI. Because `cache-url` is set, it also adds
    the cache to Nix's substituters for the rest of the job.
 3. `build-paths` builds each requested output again in the selected Nix store,

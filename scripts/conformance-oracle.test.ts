@@ -1,4 +1,9 @@
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
+
+import { withTemporaryDirectory } from '../tests/support/filesystem.ts';
 
 import {
 	checkConformanceOracle,
@@ -21,7 +26,9 @@ import {
 	parseProbedOracle,
 	parseSettingTypes,
 	type ProbedOracle,
+	readNixSettingTable,
 	renderSettingTypes,
+	runNix,
 	serialiseOracleRecord,
 	SettingTypesVersionDriftError,
 	UnknownIntegerWidthError,
@@ -398,6 +405,51 @@ describe('parseSettingTypes', () => {
 		]);
 	});
 });
+
+it.each(['live', 'flake'] as const)(
+	'probes the nullable certificate path with a fixed value (%s)',
+	async (reader) => {
+		await withTemporaryDirectory('cupboard-settings-probe-', async (home) => {
+			const binary = path.join(home, 'nix');
+			await writeFile(
+				binary,
+				[
+					'#!/usr/bin/env node',
+					'const args = process.argv.slice(2);',
+					'if (args.includes("eval")) process.stdout.write("x86_64-linux");',
+					'else if (args.includes("--version")) process.stdout.write("nix (Nix) 2.35.2");',
+					'else process.stdout.write(JSON.stringify({ "ssl-cert-file": { value: process.env.NIX_SSL_CERT_FILE ?? null } }));'
+				].join('\n'),
+				{ mode: 0o755 }
+			);
+
+			let table: NixSettingTable;
+
+			if (reader === 'live') {
+				table = await readNixSettingTable(binary);
+			} else {
+				const result = await runNix(
+					process.execPath,
+					[
+						'--experimental-transform-types',
+						path.join(import.meta.dirname, 'conformance-oracle-probe.ts'),
+						binary,
+						'x86_64-linux'
+					],
+					{ env: { PATH: process.env.PATH, NIX_SSL_CERT_FILE: '/host.pem' } }
+				);
+
+				expect(result.status).toBe(0);
+				table = parseProbedOracle(result.stdout).table;
+			}
+
+			expect(table).toStrictEqual({
+				types: { 'ssl-cert-file': 'string' },
+				integerWidths: {}
+			});
+		});
+	}
+);
 
 describe('renderSettingTypes', () => {
 	it('sorts the settings and quotes only non-identifier names', () => {

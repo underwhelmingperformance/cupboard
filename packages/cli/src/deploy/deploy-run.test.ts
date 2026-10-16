@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+	cacheIdentityLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type SchemaTransition,
@@ -319,7 +320,7 @@ function recordingApi(
 				calls.push(`r2:${name}`);
 				return Promise.resolve();
 			},
-			ensureStagingLifecycleRule(name) {
+			ensureUploadLifecycleRules(name) {
 				calls.push(`lifecycle:${name}`);
 				return Promise.resolve();
 			},
@@ -995,6 +996,26 @@ describe('runDeploy', () => {
 		});
 
 		expect(routeAttempts).toBe(2);
+	});
+
+	it('refuses deployment before upload when lifecycle reconciliation fails', async () => {
+		const recording = recordingApi();
+		const failure = new Error('Lifecycle rules could not be installed');
+		const api: CloudflareApi = {
+			...recording.api,
+			ensureUploadLifecycleRules: () => Promise.reject(failure)
+		};
+		await expect(
+			runDeploy({
+				artifact,
+				api,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets: { control: [], tenant: [] } }
+			})
+		).rejects.toBe(failure);
+		expect(
+			recording.calls.filter((call) => call.startsWith('upload:'))
+		).toStrictEqual([]);
 	});
 
 	it('surfaces other Cloudflare not-found failures before upload', async () => {
@@ -2059,7 +2080,7 @@ describe('reviewed deployment plan', () => {
 				readiness: { pending: 0, stragglers: [] }
 			},
 			stage: 'complete',
-			readiness: '0 pending at local step 5'
+			readiness: `0 pending at local step ${String(cacheIdentityLocalStep)}`
 		}
 	])(
 		'describes the cache-identity transition for $name',

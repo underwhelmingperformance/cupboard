@@ -292,6 +292,37 @@ describe('readExistingConfig', () => {
 });
 
 describe('release configuration', () => {
+	it('preserves both live queue names and their independent dead-letter queues', async () => {
+		const release = await releaseConfig();
+		const existing = await readExistingConfig(
+			fakeApi({
+				bindings: [
+					{
+						type: 'queue',
+						name: 'MAINTENANCE_QUEUE',
+						queue_name: 'my-maintenance'
+					},
+					{ type: 'queue', name: 'ARTIFACT_QUEUE', queue_name: 'my-artifacts' }
+				],
+				deadLetters: {
+					'my-maintenance': 'failed-maintenance',
+					'my-artifacts': 'failed-artifacts'
+				}
+			}),
+			release
+		);
+		expect(existing).toStrictEqual(
+			renameResources(release, {
+				queue: new Map([
+					['cupboard-maintenance', 'my-maintenance'],
+					['cupboard-maintenance-dlq', 'failed-maintenance'],
+					['cupboard-artifacts', 'my-artifacts'],
+					['cupboard-artifacts-dlq', 'failed-artifacts']
+				])
+			})
+		);
+	});
+
 	it('uses each default name once per kind', async () => {
 		const release = await releaseConfig();
 

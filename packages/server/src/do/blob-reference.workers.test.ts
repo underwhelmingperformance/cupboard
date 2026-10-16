@@ -1,3 +1,4 @@
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,8 +10,11 @@ import {
 	clearBlobStorage,
 	commitPath,
 	commitSharedPath,
+	currentServer,
 	deletePath,
+	driveToCompletion,
 	initialise,
+	narInfoDeletionRows,
 	narInfoGeneration,
 	negotiateUploads,
 	queueUnflushedNarInfoDeletion,
@@ -20,7 +24,8 @@ import {
 	singleDecision,
 	tenantBlobRows,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 // Each committed narinfo generation has one `blob_ref_storage` edge. A tenant also has
@@ -248,54 +253,64 @@ describe('blob_ref_storage / tenant_blob reference edges', () => {
 		});
 	});
 
-	it('flushes queued deletion rows for each captured generation', async () => {
-		const token = await initialise();
-		const nar = await verifiableNar('queued-generation-deletion');
-		const metadata = uploadMetadata({
-			storePathHash: 'g'.repeat(32),
-			narHash: nar.narHash,
-			narSize: nar.narSize,
-			fileHash: nar.fileHash,
-			fileSize: nar.narBytes.byteLength
-		});
+	it('flushes queued deletion rows for each captured generation', () =>
+		withoutAlarmArming(async () => {
+			const token = await initialise();
+			const nar = await verifiableNar('queued-generation-deletion');
+			const metadata = uploadMetadata({
+				storePathHash: 'g'.repeat(32),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
 
-		await commitPath(token, metadata, nar);
-		await queueUnflushedNarInfoDeletion({
-			storePathHash: metadata.storePathHash
-		});
-		await commitSharedPath(token, metadata);
+			await commitPath(token, metadata, nar);
+			await queueUnflushedNarInfoDeletion({
+				storePathHash: metadata.storePathHash
+			});
+			await commitSharedPath(token, metadata);
 
-		const beforeFlush = await blobReferenceRows();
-		await deletePath(token, metadata.storePathHash);
-		await runGcResult();
-
-		expect({
-			beforeFlush,
-			edges: await blobReferenceRows(),
-			tenantBlobs: await tenantBlobRows()
-		}).toStrictEqual({
-			beforeFlush: [
-				{
-					tenant: 'v1',
-					cache: { kind: 'default' },
-					storePathHash: metadata.storePathHash,
-					generation: 0,
-					narHash: nar.narHash,
-					cacheGeneration: 1
+			const beforeFlush = await blobReferenceRows();
+			await deletePath(token, metadata.storePathHash);
+			await runGcResult();
+			await driveToCompletion(
+				() =>
+					runInDurableObject(currentServer(), (instance) => instance.alarm()),
+				async () => {
+					const rows = await narInfoDeletionRows();
+					return rows.length === 0;
 				},
-				{
-					tenant: 'v1',
-					cache: { kind: 'default' },
-					storePathHash: metadata.storePathHash,
-					generation: 1,
-					narHash: nar.narHash,
-					cacheGeneration: 1
-				}
-			],
-			edges: [],
-			tenantBlobs: []
-		});
-	});
+				16
+			);
+
+			expect({
+				beforeFlush,
+				edges: await blobReferenceRows(),
+				tenantBlobs: await tenantBlobRows()
+			}).toStrictEqual({
+				beforeFlush: [
+					{
+						tenant: 'v1',
+						cache: { kind: 'default' },
+						storePathHash: metadata.storePathHash,
+						generation: 0,
+						narHash: nar.narHash,
+						cacheGeneration: 1
+					},
+					{
+						tenant: 'v1',
+						cache: { kind: 'default' },
+						storePathHash: metadata.storePathHash,
+						generation: 1,
+						narHash: nar.narHash,
+						cacheGeneration: 1
+					}
+				],
+				edges: [],
+				tenantBlobs: []
+			});
+		}));
 
 	it('deletes a queued narinfo object before retiring its blob edge', async () => {
 		const token = await initialise();

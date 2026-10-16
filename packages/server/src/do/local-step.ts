@@ -1,5 +1,8 @@
 import {
-	currentLocalStep,
+	artifactPublicationLocalStep,
+	attestationListLocalStep,
+	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	expansionLocalStep,
 	type LocalStep,
 	localStepSchema
@@ -18,6 +21,7 @@ import {
 	retentionMigrationBatchSize
 } from '../migration/cache-retention.ts';
 
+import { AttestationListInitialisationService } from './attestation-list-initialisation-service.ts';
 import {
 	projectLocalCacheLifecycles,
 	resetCacheLifecycleProjection
@@ -241,10 +245,56 @@ export async function recordLocalStep(
 			progressed: true
 		};
 	}
-	// This mapping covers only `cache-identity`, whose contract step is
-	// `expansionLocalStep`. A later transition that declares a contract step
-	// needs its own branch here, or objects never report that step.
-	const reached = isContracted ? currentLocalStep : expansionLocalStep;
+	const hasCasStorage = await context.transitions.hasReached(
+		'cas-storage',
+		'expanded'
+	);
+	let reached = isContracted
+		? hasCasStorage
+			? casStorageLocalStep
+			: cacheIdentityLocalStep
+		: expansionLocalStep;
+	const hasListRevisions = await context.transitions.hasReached(
+		'attestation-list-revision',
+		'expanded'
+	);
+	if (
+		hasListRevisions &&
+		reached >= casStorageLocalStep &&
+		(requested === undefined || requested >= attestationListLocalStep)
+	) {
+		const initialisation = await new AttestationListInitialisationService(
+			context
+		).advance();
+		if (initialisation.status === 'pending') {
+			return {
+				kind: 'incomplete',
+				projected: initialisation.created,
+				progressed: true
+			};
+		}
+		reached = attestationListLocalStep;
+	}
+
+	if (
+		reached >= attestationListLocalStep &&
+		(requested === undefined || requested >= artifactPublicationLocalStep) &&
+		(await context.transitions.hasReached(
+			'native-artifact-storage',
+			'expanded'
+		)) &&
+		(await context.transitions.hasReached(
+			'native-artifact-publication',
+			'expanded'
+		)) &&
+		(await context.transitions.hasReached(
+			'blob-reference-read-authority',
+			'complete'
+		))
+	) {
+		reached = artifactPublicationLocalStep;
+	}
+
 	const moved = projection.projected + legacyMove.moved + incarnationMove.moved;
 	const belowReached = and(
 		eq(d1Schema.tenant.id, tenant),

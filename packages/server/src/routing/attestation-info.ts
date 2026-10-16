@@ -9,6 +9,7 @@ import {
 	type AttestationInfoResponse,
 	attestationListSchema
 } from '@cupboard/protocol/attestations';
+import { bestEffort } from '@cupboard/shared/cleanup';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
@@ -19,18 +20,26 @@ import {
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context } from 'hono';
 
+import {
+	type AttestationListPublication,
+	AttestationListRevisionRepository
+} from '../db/attestation-list-revision.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { maxOutgoingConnections } from '../do/bulk.ts';
 import {
 	AttestationInfoHttpError,
+	AttestationListPendingError,
 	MalformedRequestBodyError,
 	SharedFactsUnavailableError
 } from '../errors.ts';
 import { attestationListObjectKey } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
-import { isListOfCommittedGeneration } from '../read/attestation-generation.ts';
-import { authorisedNarInfoVersions } from '../read/read.ts';
+import {
+	isObjectOfListPublication,
+	isSameListPublication
+} from '../read/attestation-generation.ts';
 
+import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import {
 	cacheReadScopeVersion,
@@ -75,48 +84,72 @@ async function parseRequest(request: Request): Promise<AttestationInfoRequest> {
 
 async function* entriesFor(
 	context: Context<WorkerHonoEnv>,
-	request: AttestationInfoRequest
+	request: AttestationInfoRequest,
+	publications: ReadonlyMap<StorePathHash, AttestationListPublication>
 ): AsyncGenerator<AttestationInfoEntry> {
 	const scope = context.get('readScope');
 	const tenant = context.get('tenant');
-	const versions = await authorisedNarInfoVersions(
-		drizzleD1(context.env.CUPBOARD_DB, { schema: d1Schema }),
-		tenant,
-		scope.scope,
-		request.storePathHashes
-	);
+
 	for (const group of chunk(request.storePathHashes, maxOutgoingConnections)) {
 		const entries = await mapWithConcurrency(
 			group,
 			maxOutgoingConnections,
 			async (hash): Promise<AttestationInfoEntry> => {
-				const version = versions.get(hash);
-				if (version === undefined) {
+				const publication = publications.get(hash);
+				if (publication === undefined) {
 					return { storePathHash: hash, status: 'missing' };
 				}
-				let object: R2ObjectBody | null;
-				try {
-					object = await context.env.BLOBS.get(
-						attestationListObjectKey(
-							tenant,
-							hash,
-							scope.scope,
-							version.cacheGeneration
-						)
-					);
-				} catch (error) {
-					throw new SharedFactsUnavailableError(error);
+				if (publication.state.status === 'pending') {
+					throw new AttestationListPendingError(hash);
 				}
 				const found = {
 					storePathHash: hash,
 					status: 'found',
-					narHash: version.narHash
+					narHash: publication.parent.narHash
 				} as const;
-				if (object === null) {
+				const key =
+					publication.state.status === 'ready'
+						? publication.state.key
+						: attestationListObjectKey(
+								tenant,
+								hash,
+								scope.scope,
+								publication.parent.cacheGeneration
+							);
+				if (key === undefined) {
 					return { ...found, attestations: [] };
 				}
-				if (!isListOfCommittedGeneration(object, scope, version.generation)) {
+				let object: R2ObjectBody | null;
+				try {
+					object = await context.env.BLOBS.get(key);
+				} catch (error) {
+					throw new SharedFactsUnavailableError(error);
+				}
+				if (object === null) {
+					if (publication.state.status === 'ready') {
+						await bestEffort(() =>
+							tenantServer(context.env, tenant).queueAttestationListRepair(
+								scope.scope,
+								hash,
+								publication
+							)
+						);
+						throw new AttestationListPendingError(hash);
+					}
+					return { ...found, attestations: [] };
+				}
+				if (!isObjectOfListPublication(object, scope, publication)) {
 					await object.body.cancel();
+					if (publication.state.status === 'ready') {
+						await bestEffort(() =>
+							tenantServer(context.env, tenant).queueAttestationListRepair(
+								scope.scope,
+								hash,
+								publication
+							)
+						);
+						throw new AttestationListPendingError(hash);
+					}
 					return { ...found, attestations: [] };
 				}
 				let bytes: Uint8Array;
@@ -218,13 +251,35 @@ export async function answerAttestationInfo(
 	) {
 		throw scopeChanged();
 	}
+	const repository = new AttestationListRevisionRepository(
+		drizzleD1(context.env.CUPBOARD_DB, { schema: d1Schema }),
+		context.get('tenant')
+	);
+	const publications = context.get('isCacheDeleted')
+		? new Map<StorePathHash, AttestationListPublication>()
+		: await repository.publicationsFor(
+				context.get('readScope').scope,
+				request.storePathHashes
+			);
 	const source = context.get('isCacheDeleted')
 		? request.storePathHashes.map((storePathHash): AttestationInfoEntry => ({
 				storePathHash,
 				status: 'missing'
 			}))
-		: entriesFor(context, request);
+		: entriesFor(context, request, publications);
 	const response = await pageResponse(version, request.storePathHashes, source);
+	if (!context.get('isCacheDeleted')) {
+		const latest = await repository.publicationsFor(
+			context.get('readScope').scope,
+			request.storePathHashes
+		);
+		for (const [hash, publication] of publications) {
+			if (!isSameListPublication(publication, latest.get(hash))) {
+				throw new AttestationListPendingError(hash);
+			}
+		}
+	}
+
 	await revalidateCacheReadScope(context, version, scopeChanged());
 	await revalidateCacheReadAuthority(context);
 	return response;

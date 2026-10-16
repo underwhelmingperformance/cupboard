@@ -10,6 +10,19 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import {
+	type ArtifactJobVersion,
+	artifactJobVersionSchema,
+	type ArtifactTaskClaim,
+	artifactTaskClaimSchema,
+	artifactTaskOwnerSchema
+} from '@cupboard/protocol/artifact-jobs';
+import {
+	type ArtifactKind,
+	artifactKinds,
+	type NarListingFact,
+	narListingFactSchema
+} from '@cupboard/protocol/artifacts';
+import {
 	cacheAvailabilityMaxRequestBytes,
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse,
@@ -27,7 +40,11 @@ import {
 	type ReuseViewName,
 	reuseViewNameSchema
 } from '@cupboard/protocol/reuse-views';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
+import {
+	type IsoTimestamp,
+	isoTimestamp,
+	isoTimestampSchema
+} from '@cupboard/protocol/scalars';
 import {
 	type CommitBatchEntry,
 	type CommitBlobDeclaration,
@@ -59,8 +76,28 @@ import { z } from 'zod';
 
 import migrations from '../../drizzle/migrations.js';
 import { type AccessClaims } from '../auth/auth.ts';
+import {
+	type ArtifactAdmission,
+	type ArtifactAdmissionReservation,
+	artifactAdmissionSchema,
+	type ArtifactTaskRequeueResult
+} from '../blob/artifact-admission.ts';
+import {
+	artifactMultipartIdSchema,
+	type ArtifactStageLease,
+	artifactStageLeaseSchema,
+	type ArtifactStageMeasurement,
+	artifactStageMeasurementSchema
+} from '../blob/artifact-staging.ts';
+import {
+	type ListingAdoptionOutcome,
+	listingAdoptionOutcomesSchema,
+	narListingAdoptionBatchSchema,
+	type NarListingAdoptionRequest
+} from '../blob/nar-listing-adoption.ts';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
+import type { AttestationListPublication } from '../db/attestation-list-revision.ts';
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import { summariseLocalStepError } from '../db/local-step-attempts.ts';
 import * as schema from '../db/schema.ts';
@@ -76,6 +113,7 @@ import {
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	SubrequestTimeoutError,
+	TenantDrainIdentityMismatchError,
 	TenantNotConfiguredError,
 	UnauthenticatedError,
 	UploadNotFoundError,
@@ -91,10 +129,12 @@ import {
 	maxVerificationRpcRows,
 	narInfoObjectPrefix,
 	parseNarInfoName,
+	parseNarListingName,
 	parseNarName,
 	type R2ObjectKey,
 	type RequestOrigin,
 	textResponse,
+	uncachedNotFoundResponse,
 	verificationBatchSize
 } from '../http/http.ts';
 import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
@@ -142,12 +182,28 @@ import {
 	MaintenanceRetrySchedule,
 	noProgressRetryMs
 } from './alarm.ts';
+import { ArtifactJobDispatchService } from './artifact-job-dispatch-service.ts';
+import { ArtifactJobService } from './artifact-job-service.ts';
+import { ArtifactQueueDispatchService } from './artifact-queue-dispatch-service.ts';
+import { ArtifactRetentionService } from './artifact-retention-service.ts';
+import { ArtifactRetirementService } from './artifact-retirement-service.ts';
+import {
+	type ArtifactStageCollection,
+	ArtifactStagingService
+} from './artifact-staging-service.ts';
+import {
+	type ArtifactTaskClaimRpcResult,
+	type ArtifactTaskFailureOutcome,
+	artifactTaskFailureOutcomeSchema,
+	ArtifactTaskRpcService
+} from './artifact-task-rpc.ts';
 import {
 	AttestationCasService,
 	type AttestationReference,
 	type AttestationReferenceOutcome,
 	type MeasuredAttestationBundle
 } from './attestation-cas-service.ts';
+import { AttestationListRefreshService } from './attestation-list-refresh-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { AuthKeysService } from './auth-keys-service.ts';
 import {
@@ -197,6 +253,11 @@ import {
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import { LegacyRetentionService } from './legacy-retention-service.ts';
+import {
+	type ListingTaskCompletion,
+	type ListingTaskPreparation,
+	ListingTaskService
+} from './listing-task-service.ts';
 import { LocalSchemaRun } from './local-schema-run.ts';
 import {
 	type LocalStepOutcome,
@@ -210,6 +271,8 @@ import {
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
 import { applyMigrations } from './migrate.ts';
+import { NarListingPublicationService } from './nar-listing-publication-service.ts';
+import { NarListingReadService } from './nar-listing-read-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	type NegotiateHints,
@@ -324,6 +387,11 @@ export const maintenancePassCursorKey = 'maintenance:alarm-pass';
 type MaintenancePassKey =
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
+	| 'attestation-list-refresh'
+	| 'artifact-expiry'
+	| 'artifact-retirement'
+	| 'artifact-staging-cleanup'
+	| 'artifact-job-dispatch'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
 	| 'local-step'
@@ -335,13 +403,12 @@ type MaintenancePassKey =
 	| 'verify-backstop';
 
 /**
- * One bounded background task an alarm can run.
+ * One bounded background task that an alarm can run.
  *
- * `workAt` reads durable storage or local SQLite. The alarm therefore leaves
- * the complete subrequest allowance for the selected pass. `workAt` returns the
- * time from which the pass has work: now or earlier for work that is ready, a later
- * time for scheduled work, or `undefined` for none. A pass is due once that
- * time and its retry deadline have passed.
+ * `workAt` reads persisted deadlines and checks dispatch eligibility. It returns
+ * the time from which the pass has work: now or earlier for work that is ready,
+ * a later time for scheduled work, or `undefined` for none. A pass is due once
+ * that time and its retry deadline have passed.
  *
  * The result from `run` determines the next retry deadline.
  */
@@ -446,7 +513,7 @@ export function verifyBackstopReuseSettleLimit(
 	);
 }
 
-type MaintenanceKind = 'gc' | 'verify' | 'local-step';
+type MaintenanceKind = 'gc' | 'verify' | 'local-step' | 'artifact-dispatch';
 
 // The migration whose assertions require every cache to record its access.
 const cacheAccessContractMigration = '0051_cache_identity_contract_assertions';
@@ -849,6 +916,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.on(
 			'GET',
 			[
+				String.raw`/:name{[0-9a-z]+\.ls}`,
+				String.raw`/cache/:cacheName/:name{[0-9a-z]+\.ls}`
+			],
+			(context) => {
+				const hash = parseNarListingName(context.req.param('name'));
+				if (hash === undefined) {
+					return uncachedNotFoundResponse();
+				}
+				return new NarListingReadService(this.context).serve(
+					context.req.raw,
+					context.get('cache'),
+					hash
+				);
+			}
+		);
+		this.app.on(
+			'GET',
+			[
 				'/attestation-bundles/:digest',
 				'/cache/:cacheName/attestation-bundles/:digest'
 			],
@@ -924,6 +1009,45 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					'content-type': 'text/x-nix-narinfo; charset=utf-8',
 					'cache-control': 'no-store'
 				});
+			}
+		);
+
+		this.app.get(
+			String.raw`/reuse/:view/:name{[0-9a-z]+\.ls}`,
+			async (context) => {
+				const view = requestedView(context);
+				const hash = parseNarListingName(context.req.param('name'));
+				if (view === undefined || hash === undefined) {
+					return reuseNotFound();
+				}
+				const denied = await this.guardReuseViewRead(context.req.raw, view);
+				if (denied !== undefined) {
+					return denied;
+				}
+				const sources = await this.reuseLookup.listingSources(
+					context.get('logger'),
+					view.name,
+					view.access,
+					hash
+				);
+				if (sources === undefined) {
+					return reuseNotFound();
+				}
+				const isCurrent = () =>
+					sources.revision === view.revision && sources.isCurrent();
+				const reader = new NarListingReadService(this.context);
+				for (const cache of sources.caches) {
+					const response = await reader.serve(
+						context.req.raw,
+						cache.scope,
+						hash,
+						isCurrent
+					);
+					if (response.status !== 404) {
+						return response;
+					}
+				}
+				return reuseNotFound();
 			}
 		);
 
@@ -1794,7 +1918,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 		await this.assertZstdAvailable();
 
-		const tenant = explicitTenant ?? this.tenantIdentity.current()?.tenant;
+		const assigned = this.tenantIdentity.current()?.tenant;
+		if (
+			assigned !== undefined &&
+			explicitTenant !== undefined &&
+			assigned !== explicitTenant
+		) {
+			throw new TenantDrainIdentityMismatchError();
+		}
+		const tenant = explicitTenant ?? assigned;
 
 		if (tenant === undefined) {
 			throw new TenantNotConfiguredError();
@@ -2406,7 +2538,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'teardown',
-				workAt: readyWhen(() => this.cacheAdmin.hasPendingTeardown()),
+				workAt: () => this.cacheAdmin.nextTeardownWorkAt(Date.now()),
 				run: async () => {
 					await this.resumeCacheTeardown();
 
@@ -2452,7 +2584,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				// A deletion deferred for inheritance becomes work again when the
 				// pending upload that defers it expires.
 				workAt: async (now) =>
-					(await this.hasGarbageCollectionContinuation())
+					(await this.hasGarbageCollectionContinuation()) ||
+					this.deletionQueue.hasNarInfoDeletionWork(new Date(now))
 						? now
 						: this.deletionQueue.deferralWakeAt(),
 				run: async () => {
@@ -2485,6 +2618,98 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				workAt: () => Promise.resolve(this.attestations.nextInheritanceAt()),
 				run: () => this.drainAttestationInheritance()
 			},
+			{
+				key: 'attestation-list-refresh',
+				workAt: (now) =>
+					Promise.resolve(
+						new AttestationListRefreshService(this.context).nextWorkAt(now)
+					),
+				run: () =>
+					this.metered('attestation-list-refresh', () =>
+						this.withMaintenanceEligibility(() =>
+							new AttestationListRefreshService(this.context).advance()
+						)
+					)
+			},
+
+			{
+				key: 'artifact-expiry',
+				workAt: () => {
+					const at = new ArtifactRetentionService(this.context).nextExpiryAt();
+					return Promise.resolve(at === undefined ? undefined : Date.parse(at));
+				},
+				run: () =>
+					this.metered('artifact-expiry', () =>
+						this.withMaintenanceEligibility(() =>
+							this.context.criticalSection(() => {
+								const result = new ArtifactRetentionService(
+									this.context
+								).expireInSection();
+								return Promise.resolve(
+									!result.pending ||
+										result.rootsRemoved > 0 ||
+										result.artifactsRetired > 0
+										? 'progressed'
+										: 'stalled'
+								);
+							})
+						)
+					)
+			},
+
+			{
+				key: 'artifact-retirement',
+				workAt: readyWhen(() =>
+					Promise.resolve(
+						new ArtifactRetirementService(this.context).hasPending()
+					)
+				),
+				run: () =>
+					this.metered('artifact-retirement', () =>
+						this.withMaintenanceEligibility(() =>
+							this.context.criticalSection(async () => {
+								const result = await new ArtifactRetirementService(
+									this.context
+								).drainInSection();
+								return !result.pending ||
+									result.referencesRemoved > 0 ||
+									result.rowsRemoved > 0
+									? 'progressed'
+									: 'stalled';
+							})
+						)
+					)
+			},
+
+			{
+				key: 'artifact-job-dispatch',
+				workAt: () =>
+					new ArtifactJobDispatchService(this.context).nextEligibleAt(),
+				run: async () => {
+					await this.runArtifactDispatch();
+					return 'progressed';
+				}
+			},
+
+			{
+				key: 'artifact-staging-cleanup',
+				workAt: () => {
+					const at = new ArtifactStagingService(
+						this.context
+					).nextCollectionAtInSection();
+					return Promise.resolve(at === undefined ? undefined : Date.parse(at));
+				},
+				run: async () => {
+					const result = await this.collectArtifactStaging();
+					return result.removed > 0 ||
+						!result.pending ||
+						(result.nextWakeAt !== undefined &&
+							Date.parse(result.nextWakeAt) > Date.now())
+						? 'progressed'
+						: 'stalled';
+				}
+			},
+
 			{
 				key: 'local-step',
 				workAt: readyWhen(() => this.localStepRun.isPending()),
@@ -2805,6 +3030,59 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	private async armArtifactStagingCleanupInSection(): Promise<void> {
+		const at = new ArtifactStagingService(
+			this.context
+		).nextCollectionAtInSection();
+		if (at !== undefined) {
+			await armAlarmNoLaterThan(this.ctx.storage, Date.parse(at));
+		}
+	}
+	private async armArtifactDispatchInSection(): Promise<void> {
+		const at = await new ArtifactJobDispatchService(
+			this.context
+		).nextEligibleAt();
+		if (at !== undefined) {
+			await armAlarmNoLaterThan(this.ctx.storage, at);
+		}
+	}
+	private withArtifactDispatchWake<T>(operation: () => Promise<T>): Promise<T> {
+		return this.withMaintenanceEligibility(() =>
+			this.context.criticalSection(async () => {
+				try {
+					return await operation();
+				} finally {
+					await this.armArtifactDispatchInSection();
+				}
+			})
+		);
+	}
+	private withArtifactStagingWake<T>(operation: () => Promise<T>): Promise<T> {
+		return this.withArtifactDispatchWake(async () => {
+			try {
+				return await operation();
+			} finally {
+				await this.armArtifactStagingCleanupInSection();
+			}
+		});
+	}
+
+	private async requeueOwnedArtifactTask(
+		claim: ArtifactTaskClaim,
+		notBefore?: IsoTimestamp
+	): Promise<ArtifactTaskRequeueResult> {
+		const parsedClaim = artifactTaskClaimSchema.parse(claim);
+		await this.initialise();
+		return this.metered('artifact-task-requeue', () =>
+			this.withArtifactDispatchWake(() =>
+				new ArtifactTaskRpcService(this.context).requeueInSection(
+					parsedClaim,
+					notBefore
+				)
+			)
+		);
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		try {
 			await this.initialise();
@@ -2912,18 +3190,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async resumeCacheTeardown(limit?: number): Promise<void> {
 		const claimed = await this.cacheAdmin.claimTeardown();
 
-		if (claimed === undefined) {
-			return;
+		if (claimed !== undefined) {
+			await this.metered('cache-teardown', () =>
+				this.withMaintenanceEligibility(() =>
+					this.cacheAdmin.resumeTeardownPass(
+						claimed.cache,
+						claimed.origin,
+						limit
+					)
+				)
+			);
 		}
-
-		await this.metered('cache-teardown', () =>
-			this.withMaintenanceEligibility(() =>
-				this.cacheAdmin.resumeTeardownPass(claimed.cache, claimed.origin, limit)
-			)
-		);
-
-		if (await this.cacheAdmin.hasPendingTeardown()) {
-			await this.ctx.storage.setAlarm(Date.now());
+		const next = await this.cacheAdmin.nextTeardownWorkAt(Date.now());
+		if (next !== undefined) {
+			await armAlarmNoLaterThan(this.ctx.storage, next);
 		}
 	}
 
@@ -2961,6 +3241,252 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				})
 			);
 		});
+	}
+
+	async claimArtifactTask(
+		version: ArtifactJobVersion,
+		owner: string,
+		expectedKind?: ArtifactKind
+	): Promise<ArtifactTaskClaimRpcResult> {
+		const parsedVersion = artifactJobVersionSchema.parse(version);
+		const parsedOwner = artifactTaskOwnerSchema.parse(owner);
+		const parsedKind = z.enum(artifactKinds).optional().parse(expectedKind);
+		await this.initialise();
+		return this.metered('artifact-task-claim', () =>
+			this.withArtifactDispatchWake(() =>
+				new ArtifactTaskRpcService(this.context).claimInSection(
+					parsedVersion,
+					parsedOwner,
+					parsedKind
+				)
+			)
+		);
+	}
+
+	async requeueArtifactTask(
+		claim: ArtifactTaskClaim
+	): Promise<ArtifactAdmissionReservation> {
+		const result = await this.requeueOwnedArtifactTask(claim);
+		return result.kind === 'deferred' ? { kind: 'unavailable' } : result;
+	}
+
+	async requeueArtifactTaskWithDeadline(
+		claim: ArtifactTaskClaim,
+		notBefore: IsoTimestamp
+	): Promise<ArtifactTaskRequeueResult> {
+		return this.requeueOwnedArtifactTask(
+			claim,
+			isoTimestampSchema.parse(notBefore)
+		);
+	}
+
+	async claimAdmittedArtifactTask(
+		admission: ArtifactAdmission,
+		owner: string,
+		expectedKind: ArtifactKind
+	): Promise<ArtifactTaskClaimRpcResult> {
+		const parsedAdmission = artifactAdmissionSchema.parse(admission);
+		const parsedOwner = artifactTaskOwnerSchema.parse(owner);
+		const parsedKind = z.enum(artifactKinds).parse(expectedKind);
+		await this.initialise();
+		return this.metered('artifact-task-claim', () =>
+			this.withArtifactDispatchWake(() =>
+				new ArtifactTaskRpcService(this.context).claimInSection(
+					parsedAdmission.job,
+					parsedOwner,
+					parsedKind,
+					parsedAdmission
+				)
+			)
+		);
+	}
+
+	async runArtifactDispatch(): Promise<void> {
+		await this.initialise();
+		await this.runCoalescedCronMaintenance('artifact-dispatch', () =>
+			this.metered('artifact-job-dispatch', () =>
+				this.withMaintenanceEligibility(async () => {
+					try {
+						await new ArtifactQueueDispatchService(this.context).run();
+					} finally {
+						await this.context.criticalSection(() =>
+							this.armArtifactDispatchInSection()
+						);
+					}
+				})
+			)
+		);
+	}
+
+	async requestArtifactDispatch(version: ArtifactJobVersion): Promise<boolean> {
+		const parsedVersion = artifactJobVersionSchema.parse(version);
+		await this.initialise();
+		return this.metered('artifact-job-dispatch-wake', () =>
+			this.withArtifactDispatchWake(() =>
+				Promise.resolve(
+					new ArtifactJobDispatchService(this.context).wakeInSection(
+						parsedVersion
+					)
+				)
+			)
+		);
+	}
+
+	async adoptNarListings(
+		requests: readonly NarListingAdoptionRequest[]
+	): Promise<readonly ListingAdoptionOutcome[]> {
+		const parsed = narListingAdoptionBatchSchema.parse(requests);
+		await this.initialise();
+		return this.metered('listing-adopt', () =>
+			this.withArtifactDispatchWake(async () => {
+				const result = await new NarListingPublicationService(
+					this.context
+				).adoptManyInSection(parsed);
+				return listingAdoptionOutcomesSchema.parse(result);
+			})
+		);
+	}
+
+	async prepareListingTask(
+		claim: ArtifactTaskClaim
+	): Promise<ListingTaskPreparation> {
+		return this.prepareListingTaskWithCapacity(claim, true);
+	}
+
+	async prepareListingTaskWithCapacity(
+		claim: ArtifactTaskClaim,
+		canGenerate: boolean
+	): Promise<ListingTaskPreparation> {
+		const parsedClaim = artifactTaskClaimSchema.parse(claim);
+		const isParsedCapacity = z.boolean().parse(canGenerate);
+		await this.initialise();
+		return this.metered('listing-task-prepare', () =>
+			this.withArtifactStagingWake(() =>
+				new ListingTaskService(this.context).prepareInSection(
+					parsedClaim,
+					isParsedCapacity
+				)
+			)
+		);
+	}
+
+	async registerArtifactMultipart(
+		lease: ArtifactStageLease,
+		multipartId: string
+	): Promise<boolean> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		const parsedId = artifactMultipartIdSchema.parse(multipartId);
+		await this.initialise();
+		return this.metered('artifact-stage-register', () =>
+			this.withArtifactStagingWake(() =>
+				Promise.resolve(
+					new ArtifactStagingService(this.context).registerMultipartInSection(
+						parsedLease,
+						parsedId
+					)
+				)
+			)
+		);
+	}
+
+	async sealArtifactStaging(
+		lease: ArtifactStageLease,
+		multipartId: string,
+		measurement: ArtifactStageMeasurement
+	): Promise<boolean> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		const parsedId = artifactMultipartIdSchema.parse(multipartId);
+		const parsedMeasurement = artifactStageMeasurementSchema.parse(measurement);
+		await this.initialise();
+		return this.metered('artifact-stage-seal', () =>
+			this.withArtifactStagingWake(() =>
+				new ArtifactStagingService(this.context).sealInSection(
+					parsedLease,
+					parsedId,
+					parsedMeasurement
+				)
+			)
+		);
+	}
+
+	async renewListingTask(
+		lease: ArtifactStageLease
+	): Promise<IsoTimestamp | undefined> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		await this.initialise();
+		return this.metered('listing-task-renew', () =>
+			this.withArtifactStagingWake(() =>
+				new ListingTaskService(this.context).renewInSection(parsedLease)
+			)
+		);
+	}
+
+	async completeListingTask(
+		lease: ArtifactStageLease,
+		fact: NarListingFact
+	): Promise<ListingTaskCompletion> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		const parsedFact = narListingFactSchema.parse(fact);
+		await this.initialise();
+		return this.metered('listing-task-complete', () =>
+			this.withArtifactStagingWake(() =>
+				new ListingTaskService(this.context).completeInSection(
+					parsedLease,
+					parsedFact
+				)
+			)
+		);
+	}
+
+	async retireArtifactStaging(lease: ArtifactStageLease): Promise<boolean> {
+		const parsedLease = artifactStageLeaseSchema.parse(lease);
+		await this.initialise();
+		return this.metered('artifact-stage-retire', () =>
+			this.withArtifactStagingWake(async () => {
+				const isRetired = new ArtifactStagingService(
+					this.context
+				).retireInSection(parsedLease);
+				if (isRetired) {
+					await new ListingTaskService(this.context).releaseGenerationInSection(
+						parsedLease
+					);
+				}
+				return isRetired;
+			})
+		);
+	}
+
+	async finishArtifactTask(
+		claim: ArtifactTaskClaim,
+		outcome: ArtifactTaskFailureOutcome
+	): Promise<boolean> {
+		const parsedClaim = artifactTaskClaimSchema.parse(claim);
+		const parsedOutcome = artifactTaskFailureOutcomeSchema.parse(outcome);
+		await this.initialise();
+		return this.metered('artifact-task-finish', () =>
+			this.withArtifactDispatchWake(() =>
+				Promise.resolve(
+					new ArtifactJobService(this.context).finishInSection(
+						parsedClaim,
+						parsedOutcome
+					)
+				)
+			)
+		);
+	}
+
+	async collectArtifactStaging(): Promise<ArtifactStageCollection> {
+		await this.initialise();
+		return this.metered('artifact-stage-collect', () =>
+			this.withMaintenanceEligibility(async () => {
+				const result = await new ArtifactStagingService(this.context).collect();
+				await this.context.criticalSection(async () => {
+					await this.armArtifactStagingCleanupInSection();
+					await this.armArtifactDispatchInSection();
+				});
+				return result;
+			})
+		);
 	}
 
 	// Keep CPU-bound NAR decoding in the queue consumer, off the Durable Object
@@ -3327,6 +3853,35 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	async wakeAttestationListRefresh(): Promise<void> {
+		await this.initialise();
+		if (this.context.offboarding) {
+			return;
+		}
+		await this.metered('attestation-list-refresh', () =>
+			this.withMaintenanceEligibility(() =>
+				new AttestationListRefreshService(this.context).requestWake()
+			)
+		);
+	}
+
+	async queueAttestationListRepair(
+		cache: CacheScope,
+		hash: StorePathHash,
+		observed: AttestationListPublication
+	): Promise<void> {
+		await this.initialise();
+		await this.metered('attestation-list-repair', () =>
+			this.withMaintenanceEligibility(async () => {
+				await new AttestationListRefreshService(this.context).repairObserved(
+					cache,
+					hash,
+					observed
+				);
+			})
+		);
+	}
+
 	async measureAttestationBundle(
 		stagingKey: R2ObjectKey
 	): Promise<MeasuredAttestationBundle> {
@@ -3380,11 +3935,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Drain only the reference and ownership rows assigned to this tenant writer.
 	// The Worker repeats bounded passes; the global reaper collects shared blobs.
-	async runOffboard(limit: number): Promise<{ drained: boolean }> {
-		await this.initialise();
+	async runOffboard(
+		limit: number,
+		recoveryTenant?: TenantId
+	): Promise<{ drained: boolean }> {
+		await this.initialise(recoveryTenant);
+
+		const assigned = this.tenantIdentity.current()?.tenant;
+		if (
+			assigned !== undefined &&
+			recoveryTenant !== undefined &&
+			assigned !== recoveryTenant
+		) {
+			throw new TenantDrainIdentityMismatchError();
+		}
 
 		return this.metered('offboard', () =>
-			this.context.criticalSection(() => this.offboarding.drain(limit))
+			this.context.criticalSection(() =>
+				this.offboarding.drain(limit, recoveryTenant)
+			)
 		);
 	}
 
@@ -3807,8 +4376,25 @@ function logRequestFinished(
 }
 
 type MeteredMethod =
+	| 'artifact-job-dispatch'
+	| 'artifact-task-claim'
+	| 'artifact-task-requeue'
+	| 'artifact-job-dispatch-wake'
+	| 'artifact-task-finish'
+	| 'artifact-stage-register'
+	| 'artifact-stage-seal'
+	| 'artifact-stage-retire'
+	| 'artifact-stage-collect'
+	| 'listing-task-prepare'
+	| 'listing-task-renew'
+	| 'listing-task-complete'
+	| 'listing-adopt'
+	| 'attestation-list-repair'
 	| 'read-authority-demotion'
 	| 'attestation-inheritance'
+	| 'attestation-list-refresh'
+	| 'artifact-expiry'
+	| 'artifact-retirement'
 	| 'auth-key-retirement'
 	| 'cache-teardown'
 	| 'claim-verifications'

@@ -8,30 +8,28 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
+import { casObjectNotRepromoted } from '../blob/cas-object-state.ts';
 import {
-	activateObjectIncarnation,
-	isObjectIncarnationLive,
-	lateWriteTombstoneHorizonMs,
-	promotableStateIncarnation,
-	queueObjectDeletion,
-	registeredLiveObjectIncarnation,
-	reserveObjectIncarnation
-} from '../blob/object-incarnation.ts';
+	CasObjectStore,
+	type MeasuredCasObject
+} from '../blob/cas-object-store.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { pathReferenceReadability } from '../db/cache-generation.ts';
+import { readCasReferenceSet } from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
+	CasReferenceSetChangedError,
 	TenantUsageMissingError,
 	TenantWritesStoppedError,
 	UploadedObjectNotFoundError
 } from '../errors.ts';
-import { casObjectKey, type R2ObjectKey } from '../http/http.ts';
+import { type R2ObjectKey } from '../http/http.ts';
 
+import { CasQuotaService } from './cas-quota-service.ts';
 import { type ServerContext } from './context.ts';
 import { jsonRowList } from './json-list.ts';
 import {
@@ -39,11 +37,7 @@ import {
 	reclaimPathReadFence
 } from './path-read-authority-service.ts';
 
-export interface MeasuredAttestationBundle {
-	readonly digest: Sha256HexDigest;
-	readonly size: number;
-	readonly bytes: Uint8Array;
-}
+export type MeasuredAttestationBundle = MeasuredCasObject;
 
 export interface AttestationReference {
 	readonly cache: CacheScope;
@@ -58,145 +52,6 @@ export type AttestationReferenceOutcome =
 
 export class AttestationCasService {
 	constructor(private readonly context: ServerContext) {}
-
-	private async ensureCasObject(
-		bundle: MeasuredAttestationBundle,
-		incarnation: number,
-		canCreate: boolean,
-		replaceMissingIncarnation?: number
-	): Promise<number> {
-		const key = casObjectKey(bundle.digest, incarnation);
-		const existing = await this.context.env.BLOBS.head(key);
-
-		if (existing !== null) {
-			return incarnation;
-		}
-
-		if (!canCreate) {
-			throw new UploadedObjectNotFoundError(key);
-		}
-
-		if (replaceMissingIncarnation !== undefined) {
-			const replacement = await this.reserveRepairIncarnation(
-				bundle.digest,
-				replaceMissingIncarnation
-			);
-
-			return this.ensureCasObject(bundle, replacement, true);
-		}
-
-		const written = await this.context.env.BLOBS.put(key, bundle.bytes, {
-			sha256: bundle.digest,
-			onlyIf: { etagDoesNotMatch: '*' }
-		});
-
-		if (written !== null) {
-			return incarnation;
-		}
-
-		const winner = await this.context.env.BLOBS.head(key);
-
-		if (winner === null) {
-			throw new UploadedObjectNotFoundError(key);
-		}
-
-		return incarnation;
-	}
-
-	private async reserveRepairIncarnation(
-		digest: Sha256HexDigest,
-		incarnation: number
-	): Promise<number> {
-		const now = isoTimestamp(new Date());
-		const removalDeadline = isoTimestamp(
-			new Date(Date.now() + lateWriteTombstoneHorizonMs)
-		);
-		const captured = and(
-			eq(d1Schema.objectIncarnation.kind, 'cas'),
-			eq(d1Schema.objectIncarnation.objectId, digest),
-			eq(d1Schema.objectIncarnation.incarnation, incarnation),
-			eq(d1Schema.objectIncarnation.state, 'live')
-		);
-		const replacement = and(
-			eq(d1Schema.objectIncarnation.kind, 'cas'),
-			eq(d1Schema.objectIncarnation.objectId, digest),
-			eq(d1Schema.objectIncarnation.incarnation, incarnation + 1),
-			eq(d1Schema.objectIncarnation.state, 'pending')
-		);
-		const reserve = this.context.d1
-			.update(d1Schema.objectIncarnation)
-			.set({
-				incarnation: incarnation + 1,
-				state: 'pending',
-				reservationOwner: sql`null`,
-				updatedAt: now
-			})
-			.where(captured);
-		const superseded = this.context.d1
-			.select({
-				kind: d1Schema.objectIncarnation.kind,
-				objectId: d1Schema.objectIncarnation.objectId,
-				incarnation: sql<number>`${incarnation}`.as('incarnation'),
-				removeAfter: sql<typeof removalDeadline>`${removalDeadline}`.as(
-					'remove_after'
-				)
-			})
-			.from(d1Schema.objectIncarnation)
-			.where(replacement);
-		const queueSuperseded = this.context.d1
-			.insert(d1Schema.objectDeletion)
-			.select(superseded)
-			.onConflictDoUpdate({
-				target: [
-					d1Schema.objectDeletion.kind,
-					d1Schema.objectDeletion.objectId,
-					d1Schema.objectDeletion.incarnation
-				],
-				set: {
-					removeAfter: sql`max(${d1Schema.objectDeletion.removeAfter}, excluded.remove_after)`
-				}
-			});
-
-		await this.context.d1.batch([reserve, queueSuperseded]);
-
-		const reserved = await reserveObjectIncarnation(
-			this.context.d1,
-			'cas',
-			digest
-		);
-
-		return reserved.incarnation;
-	}
-
-	private async overQuota(
-		tenant: TenantId,
-		digest: Sha256HexDigest,
-		size: number
-	): Promise<boolean> {
-		const usageFilter = eq(d1Schema.tenantUsage.tenant, tenant);
-		const [usageRows, ownedRows] = await this.context.d1.batch([
-			this.context.d1
-				.select({
-					bytes: d1Schema.tenantUsage.bytes,
-					casBytes: d1Schema.tenantUsage.casBytes,
-					quotaBytes: d1Schema.tenantUsage.quotaBytes
-				})
-				.from(d1Schema.tenantUsage)
-				.where(usageFilter),
-			this.context.d1
-				.select({ digest: d1Schema.tenantCasBlob.digest })
-				.from(d1Schema.tenantCasBlob)
-				.where(this.presenceFilter(tenant, digest))
-		]);
-
-		const usage = usageRows[0];
-
-		if (usage === undefined) {
-			throw new TenantUsageMissingError(tenant);
-		}
-
-		return this.overQuotaForCharge(usage, ownedRows.length > 0, size);
-	}
 
 	private edgeFilter(tenant: TenantId, reference: AttestationReference) {
 		return and(
@@ -224,39 +79,6 @@ export class AttestationCasService {
 			.get();
 
 		return existing !== undefined;
-	}
-
-	private presenceFilter(tenant: TenantId, digest: Sha256HexDigest) {
-		return and(
-			eq(d1Schema.tenantCasBlob.tenant, tenant),
-			eq(d1Schema.tenantCasBlob.digest, digest)
-		);
-	}
-
-	private async claimLiveIncarnation(
-		digest: Sha256HexDigest,
-		incarnation?: number
-	): Promise<number | undefined> {
-		const [claimed] = await this.context.d1
-			.update(d1Schema.casObject)
-			.set({ deleteAfter: sql`null` })
-			.where(
-				and(
-					eq(d1Schema.casObject.digest, digest),
-					incarnation === undefined
-						? undefined
-						: eq(d1Schema.casObject.incarnation, incarnation),
-					registeredLiveObjectIncarnation(
-						this.context.d1,
-						'cas',
-						digest,
-						d1Schema.casObject.incarnation
-					)
-				)
-			)
-			.returning({ incarnation: d1Schema.casObject.incarnation });
-
-		return claimed?.incarnation;
 	}
 
 	async measureStagedBundle(
@@ -304,13 +126,10 @@ export class AttestationCasService {
 		digest: Sha256HexDigest,
 		incarnation: number
 	): Promise<boolean> {
-		const claimed = await this.claimLiveIncarnation(digest, incarnation);
-
-		if (claimed === undefined) {
-			return false;
-		}
-
-		return isObjectIncarnationLive(this.context.d1, 'cas', digest, claimed);
+		return new CasObjectStore(this.context.d1, this.context.env.BLOBS).reuse(
+			digest,
+			incarnation
+		);
 	}
 
 	async promoteMeasuredBundle(
@@ -318,75 +137,9 @@ export class AttestationCasService {
 		bundle: MeasuredAttestationBundle,
 		options?: { readonly restoreMissingObject: true }
 	): Promise<void> {
-		const claimed = await this.claimLiveIncarnation(bundle.digest);
-		const reserved =
-			claimed === undefined
-				? await reserveObjectIncarnation(this.context.d1, 'cas', bundle.digest)
-				: { incarnation: claimed };
-
-		const incarnation = await this.ensureCasObject(
+		await new CasObjectStore(this.context.d1, this.context.env.BLOBS).promote(
 			bundle,
-			reserved.incarnation,
-			claimed === undefined || options?.restoreMissingObject === true,
-			options?.restoreMissingObject === true ? claimed : undefined
-		);
-
-		const activation = await activateObjectIncarnation(
-			this.context.d1,
-			'cas',
-			bundle.digest,
-			incarnation
-		);
-
-		if (activation === 'retired') {
-			throw new UploadedObjectNotFoundError(
-				casObjectKey(bundle.digest, incarnation)
-			);
-		}
-
-		const now = isoTimestamp(new Date());
-		await this.context.d1
-			.insert(d1Schema.casObject)
-			.values({
-				digest: bundle.digest,
-				size: bundle.size,
-				incarnation,
-				storedAt: now
-			})
-			.onConflictDoUpdate({
-				target: d1Schema.casObject.digest,
-				set: {
-					size: bundle.size,
-					incarnation,
-					deleteAfter: sql`null`,
-					storedAt: now
-				},
-				setWhere: promotableStateIncarnation(
-					d1Schema.casObject.incarnation,
-					incarnation
-				)
-			})
-			.run();
-
-		if (
-			await isObjectIncarnationLive(
-				this.context.d1,
-				'cas',
-				bundle.digest,
-				incarnation
-			)
-		) {
-			return;
-		}
-
-		await queueObjectDeletion(
-			this.context.d1,
-			'cas',
-			bundle.digest,
-			incarnation
-		);
-		throw new UploadedObjectNotFoundError(
-			casObjectKey(bundle.digest, incarnation)
+			options
 		);
 	}
 
@@ -402,67 +155,21 @@ export class AttestationCasService {
 			return 'already-present';
 		}
 
-		if (await this.overQuota(tenant, reference.digest, size)) {
+		if (
+			await new CasQuotaService(this.context).overQuota(reference.digest, size)
+		) {
 			return 'over-quota';
 		}
 
-		const now = isoTimestamp(new Date());
 		const cache = this.context.cacheRepository.require(reference.cache);
 		const cacheIdentity = cacheIdentityColumns(cache.scope);
-		const presenceMissing = notExists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenantCasBlob)
-				.where(this.presenceFilter(tenant, reference.digest))
+		const charge = new CasQuotaService(this.context).chargeStatements(
+			reference.digest,
+			size
 		);
-		const usagePresent = exists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenantUsage)
-				.where(eq(d1Schema.tenantUsage.tenant, tenant))
-		);
-		const chargeableTenantFilter = and(
-			eq(d1Schema.tenant.id, tenant),
-			eq(d1Schema.tenant.status, 'active'),
-			usagePresent
-		);
-		const tenantChargeable = exists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenant)
-				.where(chargeableTenantFilter)
-		);
-		const chargeFilter = and(
-			eq(d1Schema.tenantUsage.tenant, tenant),
-			presenceMissing,
-			tenantChargeable
-		);
-
-		const graceClearFilter = and(
-			eq(d1Schema.casObject.digest, reference.digest),
-			tenantChargeable
-		);
-
 		const [gateRows] = await this.context.d1.batch([
-			this.context.d1
-				.select({
-					status: d1Schema.tenant.status,
-					usageTenant: d1Schema.tenantUsage.tenant
-				})
-				.from(d1Schema.tenant)
-				.leftJoin(
-					d1Schema.tenantUsage,
-					eq(d1Schema.tenantUsage.tenant, d1Schema.tenant.id)
-				)
-				.where(eq(d1Schema.tenant.id, tenant)),
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					casBytes: sql`${d1Schema.tenantUsage.casBytes} + ${size}`,
-					casBlobs: sql`${d1Schema.tenantUsage.casBlobs} + 1`,
-					updatedAt: now
-				})
-				.where(chargeFilter),
+			charge.tenantGate,
+			charge.charge,
 			this.context.d1
 				.insert(d1Schema.attestationReference)
 				.select((qb) =>
@@ -493,26 +200,11 @@ export class AttestationCasService {
 							).as('readable')
 						})
 						.from(d1Schema.tenant)
-						.where(chargeableTenantFilter)
+						.where(charge.tenantCondition)
 				)
 				.onConflictDoNothing(),
-			this.context.d1
-				.insert(d1Schema.tenantCasBlob)
-				.select((qb) =>
-					qb
-						.select({
-							tenant: sql<TenantId>`${tenant}`.as('tenant'),
-							digest: sql<Sha256HexDigest>`${reference.digest}`.as('digest'),
-							size: sql<number>`${size}`.as('size')
-						})
-						.from(d1Schema.tenant)
-						.where(chargeableTenantFilter)
-				)
-				.onConflictDoNothing(),
-			this.context.d1
-				.update(d1Schema.casObject)
-				.set({ deleteAfter: sql`null` })
-				.where(graceClearFilter)
+			charge.presenceInsert,
+			charge.graceClear
 		]);
 
 		const gate = gateRows[0];
@@ -526,8 +218,6 @@ export class AttestationCasService {
 		return 'referenced';
 	}
 
-	// `usage` is required. Without the row there is no quota to compare against,
-	// and the caller refuses with `TenantUsageMissingError`.
 	overQuotaForCharge(
 		usage: {
 			readonly bytes: number;
@@ -537,11 +227,11 @@ export class AttestationCasService {
 		isOwned: boolean,
 		size: number
 	): boolean {
-		if (isOwned || usage.quotaBytes === null) {
-			return false;
-		}
-
-		return usage.bytes + usage.casBytes + size > usage.quotaBytes;
+		return new CasQuotaService(this.context).overQuotaForCharge(
+			usage,
+			isOwned,
+			size
+		);
 	}
 
 	async hasCapturedReference(
@@ -557,109 +247,44 @@ export class AttestationCasService {
 		await new PathReadAuthorityService(this.context).requireWritable();
 
 		const tenant = this.context.requireTenant();
-		const now = isoTimestamp(new Date());
-
-		// A pending repair has advanced the registry but has not yet published its
-		// CAS row. Check the registry too while the CAS row describes the old version.
-		const repromotedFilter =
-			fenceIncarnation === undefined
-				? undefined
-				: and(
-						eq(d1Schema.casObject.digest, reference.digest),
-						ne(d1Schema.casObject.incarnation, fenceIncarnation)
-					);
-		const repromotedRegistryFilter =
-			fenceIncarnation === undefined
-				? undefined
-				: and(
-						eq(d1Schema.objectIncarnation.kind, 'cas'),
-						eq(d1Schema.objectIncarnation.objectId, reference.digest),
-						ne(d1Schema.objectIncarnation.incarnation, fenceIncarnation)
-					);
-		const notRepromoted =
-			fenceIncarnation === undefined
-				? undefined
-				: and(
-						notExists(
-							this.context.d1
-								.select({ one: sql`1` })
-								.from(d1Schema.casObject)
-								.where(repromotedFilter)
-						),
-						notExists(
-							this.context.d1
-								.select({ one: sql`1` })
-								.from(d1Schema.objectIncarnation)
-								.where(repromotedRegistryFilter)
-						)
-					);
-
+		const references = await readCasReferenceSet(this.context.d1);
+		const mutationFence = references.mutationFence();
+		const notRepromoted = casObjectNotRepromoted(
+			this.context.d1,
+			reference.digest,
+			fenceIncarnation
+		);
 		const edgeDeleteFilter = and(
 			this.edgeFilter(tenant, reference),
-			notRepromoted
+			notRepromoted,
+			mutationFence
 		);
-		const stillReferencedFilter = and(
-			eq(d1Schema.attestationReference.tenant, tenant),
-			eq(d1Schema.attestationReference.digest, reference.digest)
+		const release = new CasQuotaService(this.context).releaseStatements(
+			reference.digest,
+			references,
+			fenceIncarnation
 		);
-		const presenceFilter = this.presenceFilter(tenant, reference.digest);
-
-		// D1 executes a batch sequentially in one transaction. These reads must see
-		// the state after the edge deletion so only the last reference releases the
-		// tenant's charge.
-		const [, stillReferencedRows, presenceRows] = await this.context.d1.batch([
+		const [mutationRows] = await this.context.d1.batch([
+			this.context.d1
+				.select({
+					allowed: sql<number>`case when ${mutationFence ?? sql`true`} then 1 else 0 end`
+				})
+				.from(sql`(select 1) mutation_gate`),
 			this.context.d1
 				.delete(d1Schema.attestationReference)
 				.where(edgeDeleteFilter),
-			this.context.d1
-				.select({ digest: d1Schema.attestationReference.digest })
-				.from(d1Schema.attestationReference)
-				.where(stillReferencedFilter),
-			this.context.d1
-				.select({ size: d1Schema.tenantCasBlob.size })
-				.from(d1Schema.tenantCasBlob)
-				.where(presenceFilter),
 			reclaimPathReadFence(
 				this.context.d1,
 				tenant,
 				reference.cache,
 				jsonRowList([{ storePathHash: reference.storePathHash }])
-			)
+			),
+			release.credit,
+			release.presenceDelete
 		]);
 
-		if (stillReferencedRows[0] !== undefined) {
-			return;
+		if (mutationRows[0]?.allowed !== 1) {
+			throw new CasReferenceSetChangedError();
 		}
-
-		const presence = presenceRows[0];
-
-		if (presence === undefined) {
-			return;
-		}
-		const presenceExists = exists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenantCasBlob)
-				.where(presenceFilter)
-		);
-		const creditFilter = and(
-			eq(d1Schema.tenantUsage.tenant, tenant),
-			presenceExists,
-			notRepromoted
-		);
-
-		await this.context.d1.batch([
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					casBytes: sql`${d1Schema.tenantUsage.casBytes} - ${presence.size}`,
-					casBlobs: sql`${d1Schema.tenantUsage.casBlobs} - 1`,
-					updatedAt: now
-				})
-				.where(creditFilter),
-			this.context.d1
-				.delete(d1Schema.tenantCasBlob)
-				.where(and(presenceFilter, notRepromoted))
-		]);
 	}
 }

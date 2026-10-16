@@ -2,7 +2,10 @@ import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
 import {
-	currentLocalStep,
+	artifactPublicationLocalStep,
+	attestationListLocalStep,
+	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	deferredTransition,
 	expansionLocalStep,
 	hasReachedTransitionState,
@@ -24,6 +27,35 @@ function states(
 }
 
 describe('schemaTransitions', () => {
+	it('waits for compatible tenant objects before contracting CAS storage', () => {
+		expect(
+			schemaTransitions.find((transition) => transition.id === 'cas-storage')
+		).toStrictEqual({
+			id: 'cas-storage',
+			expand: ['0043_cas_storage_expand.sql'],
+			contract: ['0044_cas_storage_contract.sql'],
+			independent: true,
+			contractStep: 6,
+			reportableStepOnComplete: 6
+		});
+	});
+
+	it('activates artifact publication only after Worker upload and tenant lifecycle readiness', () => {
+		expect(
+			schemaTransitions.find(
+				(transition) => transition.id === 'native-artifact-publication'
+			)
+		).toStrictEqual({
+			id: 'native-artifact-publication',
+			expand: [],
+			contract: [],
+			independent: true,
+			contractAfterUpload: true,
+			contractStep: 8,
+			reportableStepOnComplete: 8
+		});
+	});
+
 	it.each(['CUPBOARD_DB', 'CONTROL_DB'])(
 		'lists every %s migration once, in name order',
 		(binding) => {
@@ -104,7 +136,7 @@ describe('schemaTransitions', () => {
 					'0030_cache_credential_lifecycle.sql'
 				],
 				contractStep: expansionLocalStep,
-				reportableStepOnComplete: currentLocalStep,
+				reportableStepOnComplete: cacheIdentityLocalStep,
 				compatibilityPhase: true
 			},
 			{
@@ -132,13 +164,6 @@ describe('schemaTransitions', () => {
 		).toStrictEqual(['cache-identity']);
 	});
 
-	// A contract step identifies the object work that must finish before the
-	// transition's contract migrations run. An object's `recordLocalStep`
-	// (packages/server/src/do/local-step.ts) does such work only for
-	// `cache-identity`: it reports `expansionLocalStep` until that transition is
-	// complete and `currentLocalStep` afterwards. Any other contract step would
-	// refer to work that no object does. Extend `recordLocalStep` before extending
-	// this list.
 	it('declares only contract steps that an object can record', () => {
 		expect(
 			new Set(
@@ -146,7 +171,14 @@ describe('schemaTransitions', () => {
 					transition.contractStep === undefined ? [] : [transition.contractStep]
 				)
 			)
-		).toStrictEqual(new Set([expansionLocalStep]));
+		).toStrictEqual(
+			new Set([
+				expansionLocalStep,
+				casStorageLocalStep,
+				attestationListLocalStep,
+				artifactPublicationLocalStep
+			])
+		);
 	});
 });
 
@@ -162,7 +194,13 @@ describe('path authority rollout', () => {
 				state === undefined
 					? new Map<TransitionId, TransitionState>()
 					: states([['cache-identity', state]]);
-			const result = deferredTransition(schemaTransitions, recorded);
+			const authorityTransitions = schemaTransitions.slice(
+				0,
+				schemaTransitions.findIndex(
+					(transition) => transition.id === 'blob-reference-read-authority'
+				) + 1
+			);
+			const result = deferredTransition(authorityTransitions, recorded);
 			expect(
 				result === undefined
 					? undefined
@@ -196,9 +234,15 @@ describe('tenant retry clock rollout', () => {
 		if (authority === undefined || retry === undefined) {
 			throw new Error('Both transitions must be declared');
 		}
+		const retryTransitions = schemaTransitions.slice(
+			0,
+			schemaTransitions.findIndex(
+				(transition) => transition.id === 'tenant-retry-clock'
+			) + 1
+		);
 		expect(
 			deferredTransition(
-				schemaTransitions,
+				retryTransitions,
 				states([
 					['cache-identity', 'complete'],
 					[authority.id, 'expanded']
@@ -328,6 +372,15 @@ describe('hasReachedTransitionState', () => {
 });
 
 describe('requiredLocalStepFrom', () => {
+	it('requires revision initialisation before activating the new readers', () => {
+		const recorded = states([
+			['cache-identity', 'complete'],
+			['cas-storage', 'complete'],
+			['attestation-list-revision', 'expanded']
+		]);
+		expect(requiredLocalStepFrom(recorded)).toBe(attestationListLocalStep);
+	});
+
 	it.each([
 		{
 			name: 'nothing recorded',
@@ -342,7 +395,23 @@ describe('requiredLocalStepFrom', () => {
 		{
 			name: 'cache-identity complete',
 			recorded: states([['cache-identity', 'complete']]),
-			step: currentLocalStep
+			step: cacheIdentityLocalStep
+		},
+		{
+			name: 'CAS storage expanded after cache identity completes',
+			recorded: states([
+				['cache-identity', 'complete'],
+				['cas-storage', 'expanded']
+			]),
+			step: casStorageLocalStep
+		},
+		{
+			name: 'CAS storage complete after cache identity completes',
+			recorded: states([
+				['cache-identity', 'complete'],
+				['cas-storage', 'complete']
+			]),
+			step: casStorageLocalStep
 		},
 		{
 			name: 'only the transition without a contract step complete',
@@ -381,13 +450,64 @@ describe('requiredLocalStepFrom', () => {
 				['cache-identity', 'complete'],
 				['later', 'expanded']
 			] as const),
-			step: currentLocalStep
+			step: cacheIdentityLocalStep
 		}
 	])(
 		'requires $step with a later incomplete transition and $name',
 		({ recorded, step }) => {
 			expect(requiredLocalStepAmong([cacheIdentity, later], recorded)).toBe(
 				step
+			);
+		}
+	);
+});
+
+describe('cache intersection index rollout', () => {
+	it.each(['expanded', 'complete'] as const)(
+		'requires contracted path authority when it is %s',
+		(state) => {
+			const recorded = new Map<TransitionId, TransitionState>(
+				schemaTransitions.map((transition) => [transition.id, 'expanded'])
+			);
+			recorded.set('cache-identity', 'complete');
+			recorded.set('cas-storage', 'complete');
+			recorded.set('blob-reference-read-authority', state);
+			recorded.delete('cache-path-intersection-index');
+			const result = deferredTransition(schemaTransitions, recorded);
+			expect(
+				result === undefined
+					? undefined
+					: { transition: result.transition.id, waitsFor: result.waitsFor.id }
+			).toStrictEqual(
+				state === 'complete'
+					? undefined
+					: {
+							transition: 'cache-path-intersection-index',
+							waitsFor: 'blob-reference-read-authority'
+						}
+			);
+		}
+	);
+});
+
+describe('CAS demotion discovery rollout', () => {
+	it.each(['expanded', 'complete'] as const)(
+		'waits for CAS storage contraction when it is %s',
+		(state) => {
+			const recorded = new Map<TransitionId, TransitionState>(
+				schemaTransitions.map((transition) => [transition.id, 'complete'])
+			);
+			recorded.set('cas-storage', state);
+			recorded.delete('cas-demotion-progress');
+			const result = deferredTransition(schemaTransitions, recorded);
+			expect(
+				result === undefined
+					? undefined
+					: { transition: result.transition.id, waitsFor: result.waitsFor.id }
+			).toStrictEqual(
+				state === 'complete'
+					? undefined
+					: { transition: 'cas-demotion-progress', waitsFor: 'cas-storage' }
 			);
 		}
 	);

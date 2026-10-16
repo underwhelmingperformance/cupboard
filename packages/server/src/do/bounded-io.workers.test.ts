@@ -2,7 +2,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { SubrequestTimeoutError, UnboundableIoError } from '../errors.ts';
+import { SubrequestTimeoutError } from '../errors.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { currentServer, initialise, resetTestServer } from '../test-support.ts';
 
@@ -63,18 +63,142 @@ describe('bounded gated subrequest', () => {
 	});
 });
 
-describe('unboundable members', () => {
-	it('refuses an R2 multipart handle through the bounded bucket', () => {
+describe('bounded multipart uploads', () => {
+	it.each(['create', 'resume'] as const)(
+		'counts every request through a %s handle and preserves complete bytes',
+		async (mode) => {
+			const key = `bounded-multipart-${mode}`;
+			const original =
+				mode === 'resume'
+					? await env.BLOBS.createMultipartUpload(key)
+					: undefined;
+			const first = new Uint8Array(5 * 1024 * 1024).fill(17);
+			const last = new Uint8Array(3 * 1024 * 1024).fill(29);
+			const expected = new Uint8Array(first.byteLength + last.byteLength);
+			expected.set(first);
+			expected.set(last, first.byteLength);
+			const blobs = boundedBlobs(env.BLOBS);
+			const result = await withSubrequestSlice(
+				async () => {
+					const upload =
+						original === undefined
+							? await blobs.createMultipartUpload(key)
+							: blobs.resumeMultipartUpload(key, original.uploadId);
+					const parts = [
+						await upload.uploadPart(1, first),
+						await upload.uploadPart(2, last)
+					];
+					const object = await upload.complete(parts);
+					return {
+						key: object.key,
+						size: object.size,
+						parts: parts.map((part) => part.partNumber),
+						hasRemaining: hasSubrequestsFor(1)
+					};
+				},
+				{ subrequests: mode === 'create' ? 4 : 3, reserve: 0 }
+			);
+			const stored = await env.BLOBS.get(key);
+			if (stored === null) {
+				throw new Error('The completed multipart object is missing');
+			}
+			const actualDigest = new Uint8Array(
+				await crypto.subtle.digest('SHA-256', await stored.arrayBuffer())
+			);
+			const expectedDigest = new Uint8Array(
+				await crypto.subtle.digest('SHA-256', expected)
+			);
+			expect({ result, digest: actualDigest }).toStrictEqual({
+				result: {
+					key,
+					size: expected.byteLength,
+					parts: [1, 2],
+					hasRemaining: false
+				},
+				digest: expectedDigest
+			});
+			await env.BLOBS.delete(key);
+		}
+	);
+
+	it.each(['uploadPart', 'complete', 'abort'] as const)(
+		'times out a hung %s within the collective deadline and counts the call',
+		async (member) => {
+			const native = await env.BLOBS.createMultipartUpload(
+				`hung-multipart-${member}`
+			);
+			const stalled = new Proxy(native, {
+				get(target, property) {
+					if (property === member) {
+						return () => Promise.race([]);
+					}
+					const value: unknown = Reflect.get(target, property, target);
+					return typeof value === 'function'
+						? (...arguments_: unknown[]): unknown =>
+								Reflect.apply(value, target, arguments_)
+						: value;
+				}
+			});
+			const resume = vi
+				.spyOn(env.BLOBS, 'resumeMultipartUpload')
+				.mockReturnValue(stalled);
+			try {
+				const upload = boundedBlobs(env.BLOBS).resumeMultipartUpload(
+					native.key,
+					native.uploadId
+				);
+				const operations: Record<typeof member, () => Promise<unknown>> = {
+					uploadPart: () => upload.uploadPart(1, 'part'),
+					complete: () => upload.complete([]),
+					abort: () => upload.abort()
+				};
+				const result = await withSubrequestSlice(
+					async () => {
+						let rejection: unknown;
+						try {
+							await withDeadlineBudget(100, operations[member]);
+						} catch (error: unknown) {
+							rejection = error;
+						}
+						return {
+							subrequest:
+								rejection instanceof SubrequestTimeoutError
+									? rejection.subrequest
+									: undefined,
+							hasRemaining: hasSubrequestsFor(1)
+						};
+					},
+					{ subrequests: 1, reserve: 0 }
+				);
+				expect(result).toStrictEqual({
+					subrequest: `r2.${member}`,
+					hasRemaining: false
+				});
+			} finally {
+				resume.mockRestore();
+				await native.abort();
+			}
+		}
+	);
+
+	it('counts creation and abort without publishing an object', async () => {
 		const blobs = boundedBlobs(env.BLOBS);
-
-		expect(() => blobs.createMultipartUpload('unbounded-key')).toThrow(
-			UnboundableIoError
+		const hasRemaining = await withSubrequestSlice(
+			async () => {
+				const upload = await blobs.createMultipartUpload('bounded-abort');
+				await upload.abort();
+				return hasSubrequestsFor(1);
+			},
+			{ subrequests: 2, reserve: 0 }
 		);
-		expect(() =>
-			blobs.resumeMultipartUpload('unbounded-key', 'upload-id')
-		).toThrow(UnboundableIoError);
+		expect({
+			hasRemaining,
+			isPublished: (await env.BLOBS.head('bounded-abort')) !== null
+		}).toStrictEqual({ hasRemaining: false, isPublished: false });
 	});
+});
 
+describe('bounded D1 sessions', () => {
 	it('bounds and counts a primary D1 session', async () => {
 		const session = boundedD1(env.CUPBOARD_DB).withSession('first-primary');
 		const result = await withSubrequestSlice(

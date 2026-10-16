@@ -132,6 +132,7 @@ import {
 	RunRootRequiredError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
+import { metadataDiagnostics } from '../metadata-diagnostics.ts';
 import { copyNixPaths, type NixCopyDependencies } from '../nix-copy.ts';
 import {
 	isEnabled,
@@ -1964,6 +1965,7 @@ async function settleCohortBuild(
 				'Checking tenant dependency metadata',
 				(phase) =>
 					context.tenantDependencyReferences(paths, {
+						...metadataDiagnostics(environment, context.reporter),
 						tenantUrl: parseTenantCacheUrl(inputs.url).tenantUrl,
 						sources,
 						onProgress(progress) {

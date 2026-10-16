@@ -1,6 +1,8 @@
 import { capturingReporter as reporter } from '@cupboard/cli-ui/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
+	cacheIdentityLocalStep,
+	casStorageLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
@@ -61,7 +63,83 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'control-refresh-sessions', state: 'complete', updatedAt: recorded },
 		{ id: 'control-subject-nonces', state: 'complete', updatedAt: recorded },
 		{ id: 'control-database-split', state: 'complete', updatedAt: recorded },
-		{ id: 'control-database-initial', state: 'complete', updatedAt: recorded }
+		{ id: 'control-database-initial', state: 'complete', updatedAt: recorded },
+		{ id: 'cas-storage', state: 'complete', updatedAt: recorded },
+		{
+			id: 'cache-path-intersection-index',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{ id: 'native-artifact-storage', state: 'complete', updatedAt: recorded },
+		{ id: 'cas-demotion-progress', state: 'complete', updatedAt: recorded },
+		{ id: 'attestation-list-revision', state: 'complete', updatedAt: recorded },
+		{ id: 'tenant-namespace-cleanup', state: 'complete', updatedAt: recorded },
+		{
+			id: 'native-artifact-publication',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{ id: 'shared-listing-generation', state: 'complete', updatedAt: recorded },
+		{ id: 'shared-listing-jobs', state: 'complete', updatedAt: recorded },
+		{ id: 'nar-source-capture', state: 'complete', updatedAt: recorded },
+		{ id: 'shared-listing-catchup', state: 'complete', updatedAt: recorded },
+		{
+			id: 'shared-listing-task-claims',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{ id: 'global-listing-generation', state: 'complete', updatedAt: recorded },
+		{ id: 'shared-listing-staging', state: 'complete', updatedAt: recorded },
+		{
+			id: 'shared-listing-output-retention',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{
+			id: 'shared-listing-output-retirement',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{ id: 'shared-listing-completion', state: 'complete', updatedAt: recorded },
+		{
+			id: 'shared-listing-task-delivery',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{ id: 'shared-listing-dispatch', state: 'complete', updatedAt: recorded },
+		{
+			id: 'shared-listing-dispatch-seed',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{
+			id: 'listing-adoption-capture',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{
+			id: 'listing-adoption-fact-seed',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{
+			id: 'listing-adoption-parents',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{
+			id: 'listing-adoption-parent-seed',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{
+			id: 'listing-adoption-seed-dispatch',
+			state: 'complete',
+			updatedAt: recorded
+		},
+		{ id: 'listing-adoption-work', state: 'complete', updatedAt: recorded },
+		{ id: 'listing-adoption-tasks', state: 'complete', updatedAt: recorded },
+		{ id: 'forward-listing-staging', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -570,8 +648,120 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition control-database-initial',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition cas-storage',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition cache-path-intersection-index',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition native-artifact-storage',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition cas-demotion-progress',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition attestation-list-revision',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition tenant-namespace-cleanup',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition native-artifact-publication',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-generation',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-jobs',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition nar-source-capture',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-catchup',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-task-claims',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition global-listing-generation',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-staging',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-output-retention',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-output-retirement',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-completion',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-task-delivery',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-dispatch',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition shared-listing-dispatch-seed',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition listing-adoption-capture',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition listing-adoption-fact-seed',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition listing-adoption-parents',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition listing-adoption-parent-seed',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition listing-adoption-seed-dispatch',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition listing-adoption-work',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition listing-adoption-tasks',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition forward-listing-staging',
+							value: `complete ${since}`
+						},
 						{ label: `Transition ${row.id}`, value },
-						{ label: 'Required local step', value: '5' },
+						{ label: 'Required local step', value: String(currentLocalStep) },
 						{
 							label: 'Pending tenant diagnostics',
 							value: '0 (working 0, stalled 0, unwoken 0)'
@@ -725,6 +915,72 @@ describe('runDeploymentResume', () => {
 			transitions: complete,
 			step: currentLocalStep,
 			info: 'Every active or suspended tenant has completed the required schema and data updates. All deployment database changes are complete.'
+		},
+		{
+			name: 'CAS storage has not expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.filter(
+					(transition) =>
+						transition.id !== 'cas-storage' &&
+						transition.id !== 'attestation-list-revision' &&
+						transition.id !== 'native-artifact-publication'
+				)
+			},
+			step: cacheIdentityLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+		},
+		{
+			name: 'CAS storage is expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.map((transition) =>
+					transition.id === 'cas-storage'
+						? { ...transition, state: 'expanded' as const }
+						: transition
+				)
+			},
+			step: currentLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+		},
+		{
+			name: 'list revisions have not expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.filter(
+					(transition) =>
+						transition.id !== 'attestation-list-revision' &&
+						transition.id !== 'native-artifact-publication'
+				)
+			},
+			step: casStorageLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+		},
+		{
+			name: 'list revisions are expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.map((transition) =>
+					transition.id === 'attestation-list-revision'
+						? { ...transition, state: 'expanded' as const }
+						: transition
+				)
+			},
+			step: currentLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+		},
+		{
+			name: 'adoption capture is expanded',
+			transitions: {
+				...complete,
+				transitions: complete.transitions.map((transition) =>
+					transition.id === 'listing-adoption-capture'
+						? { ...transition, state: 'expanded' as const }
+						: transition
+				)
+			},
+			step: currentLocalStep,
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
 		},
 		{
 			name: 'cache-identity is still expanded',

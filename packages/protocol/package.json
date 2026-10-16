@@ -48,7 +48,9 @@
 		"./signup": "./src/signup.ts",
 		"./subject-binding": "./src/subject-binding.ts",
 		"./tenants": "./src/tenants.ts",
-		"./upload": "./src/upload.ts"
+		"./upload": "./src/upload.ts",
+		"./artifacts": "./src/artifacts.ts",
+		"./artifact-jobs": "./src/artifact-jobs.ts"
 	},
 	"license": "AGPL-3.0-or-later",
 	"private": true,

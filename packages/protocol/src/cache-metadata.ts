@@ -1,4 +1,8 @@
-import { storePathSchema } from '@cupboard/nix-store/scalars';
+import {
+	sha256HexDigestSchema,
+	storePathHashSchema,
+	storePathSchema
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 export const cacheMetadataMaxPaths = 32;
@@ -71,4 +75,42 @@ export const cacheMetadataResponseSchema = z
 	);
 export type CacheMetadataResponse = z.output<
 	typeof cacheMetadataResponseSchema
+>;
+
+export const cacheIntersectionCapability = 'path-intersection-v1';
+export const cacheIntersectionMaxHashes = 32_768;
+export const cacheIntersectionMaxRequestBytes = 2 * 1024 * 1024;
+export const cacheIntersectionMaxResponseBytes = 2 * 1024 * 1024;
+
+export const cacheIntersectionRequestSchema = z.strictObject({
+	operation: z.literal('intersection'),
+	storePathHashes: z
+		.array(storePathHashSchema)
+		.min(1)
+		.max(cacheIntersectionMaxHashes)
+		.refine(
+			(hashes) => new Set(hashes).size === hashes.length,
+			'Each store path hash must appear once in the intersection'
+		),
+	expectedScopeVersion: cacheMetadataRequestSchema.shape.expectedScopeVersion
+});
+export type CacheIntersectionRequest = z.output<
+	typeof cacheIntersectionRequestSchema
+>;
+
+export const cacheIntersectionResponseSchema = z.strictObject({
+	complete: z.literal(true),
+	scopeVersion: cacheMetadataResponseSchema.shape.scopeVersion,
+	checked: z.number().int().positive().max(cacheIntersectionMaxHashes),
+	inputFingerprint: sha256HexDigestSchema,
+	matchingHashes: z
+		.array(storePathHashSchema)
+		.max(cacheIntersectionMaxHashes)
+		.refine(
+			(hashes) => new Set(hashes).size === hashes.length,
+			'Each matching hash must appear once in the intersection'
+		)
+});
+export type CacheIntersectionResponse = z.output<
+	typeof cacheIntersectionResponseSchema
 >;

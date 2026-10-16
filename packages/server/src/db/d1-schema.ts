@@ -11,6 +11,22 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import {
+	type ArtifactJobGeneration,
+	artifactJobGenerationSchema,
+	type ArtifactJobId,
+	type ArtifactTaskGeneration,
+	type ArtifactTaskId,
+	type ArtifactTaskOwner
+} from '@cupboard/protocol/artifact-jobs';
+import {
+	type ArtifactGeneration,
+	type ArtifactId,
+	type ArtifactKind,
+	artifactKinds,
+	type ListingGeneratorRevision,
+	type NarListingFact
+} from '@cupboard/protocol/artifacts';
 import type { LocalStep } from '@cupboard/protocol/deployment';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import type {
@@ -33,6 +49,43 @@ import {
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
+import type { ArtifactStageId } from '../blob/artifact-staging.ts';
+import type {
+	ListingAdoptionCaptureSequence,
+	ListingAdoptionCaptureSource
+} from '../blob/listing-adoption-capture.ts';
+import type { ListingAdoptionExpansionWindow } from '../blob/listing-adoption-expansion.ts';
+import type { ListingAdoptionParentId } from '../blob/listing-adoption-parents.ts';
+import type { ListingAdoptionSeedEpoch } from '../blob/listing-adoption-seed.ts';
+import {
+	type ListingAdoptionSeedDispatchEpoch,
+	listingAdoptionSeedScopes
+} from '../blob/listing-adoption-seed-dispatch.ts';
+import type {
+	ListingAdoptionDeliveryOutcome,
+	ListingAdoptionTaskEpoch,
+	ListingAdoptionTaskId,
+	ListingAdoptionTaskSource
+} from '../blob/listing-adoption-tasks.ts';
+import type {
+	ListingAdoptionConsumerEpoch,
+	ListingAdoptionWorkId
+} from '../blob/listing-adoption-work.ts';
+import {
+	type NarCaptureSequence,
+	narCaptureSequenceSchema
+} from '../blob/nar-source-capture.ts';
+import type {
+	SharedListingCompletionId,
+	SharedListingTaskOutcome,
+	SharedListingTaskReason
+} from '../blob/shared-listing-completion.ts';
+import type { SharedListingDispatchId } from '../blob/shared-listing-dispatch.ts';
+import type { SharedListingJobSummary } from '../blob/shared-listing-jobs.ts';
+import type { SharedListingOutputEpoch } from '../blob/shared-listing-outputs.ts';
+import type { SharedListingTaskClaim } from '../blob/shared-listing-tasks.ts';
+import type { SharedListingTaskState } from '../blob/shared-listing-tasks.ts';
+import type { R2ObjectKey } from '../http/http.ts';
 import {
 	type ReadPasswordHash,
 	type ReadPasswordSalt
@@ -56,7 +109,7 @@ export const instanceConfig = sqliteTable('instance_config', {
 // `incarnation` column.
 // `pending` has reserved the versioned R2 key, `live` has completed the R2
 // write, and `absent` has no current object. Maintenance can recover or retire
-// an abandoned promotion when its `blob_state` or `cas_object` row is missing.
+// an abandoned promotion when its `blob_state` or `cas_object_storage` row is missing.
 export const objectIncarnation = sqliteTable(
 	'object_incarnation',
 	{
@@ -84,7 +137,7 @@ export const objectIncarnation = sqliteTable(
 );
 
 // Each row schedules deletion of one versioned R2 object after its `blob_state`
-// or `cas_object` row has been deleted. Maintenance deletes the exact R2 key at
+// or `cas_object_storage` row has been deleted. Maintenance deletes the exact R2 key at
 // `remove_after` and then removes the marker. A replacement uses a deadline that
 // outlives preceding Workers and cached narinfos.
 export const objectDeletion = sqliteTable(
@@ -180,6 +233,16 @@ export const blobReference = sqliteTable(
 				table.cacheName,
 				table.storePathHash,
 				table.cacheGeneration,
+				table.generation
+			)
+			.where(sql`${table.readable} = true`),
+		index('blob_ref_readable_cache_generation_idx')
+			.on(
+				table.tenant,
+				table.cacheKind,
+				table.cacheName,
+				table.cacheGeneration,
+				table.storePathHash,
 				table.generation
 			)
 			.where(sql`${table.readable} = true`),
@@ -642,11 +705,10 @@ export const tenantBlob = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.narHash] })]
 );
 
-// A row records measured attestation bytes stored at the physical R2 key for one
-// object version of `cas/<digest>`. It does not mean that the bundle passed
-// Sigstore, DSSE, or trust-root verification.
+// A row records measured bytes at the physical R2 key for one CAS incarnation.
+// The logical publication services validate the bytes before granting access.
 export const casObject = sqliteTable(
-	'cas_object',
+	'cas_object_storage',
 	{
 		digest: text('digest').$type<Sha256HexDigest>().primaryKey(),
 		size: integer('size').notNull(),
@@ -655,6 +717,29 @@ export const casObject = sqliteTable(
 		deleteAfter: text('delete_after').$type<IsoTimestamp>()
 	},
 	(table) => [index('cas_object_delete_after_idx').on(table.deleteAfter)]
+);
+
+export const casDemotionProgress = sqliteTable(
+	'cas_demotion_progress',
+	{
+		digest: text('digest').$type<Sha256HexDigest>().primaryKey(),
+		incarnation: integer('incarnation').notNull(),
+		afterTenant: text('after_tenant').$type<TenantId>(),
+		revision: integer('revision').notNull().default(1),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('cas_demotion_progress_ready_idx').on(
+			table.updatedAt,
+			table.revision,
+			table.digest
+		),
+		check(
+			'cas_demotion_progress_incarnation_check',
+			sql`${table.incarnation} >= 1`
+		),
+		check('cas_demotion_progress_revision_check', sql`${table.revision} >= 1`)
+	]
 );
 
 // One attestation reference for one committed narinfo generation. Like `blob_ref`,
@@ -725,14 +810,61 @@ export const attestationReference = sqliteTable(
 				table.generation
 			)
 			.where(sql`${table.readable} = true`),
-		index('attestation_ref_digest_idx').on(table.digest)
+		index('attestation_ref_digest_idx').on(table.digest),
+		index('attestation_ref_digest_tenant_idx').on(table.digest, table.tenant),
+		index('attestation_ref_tenant_digest_idx').on(table.tenant, table.digest)
 	]
 );
 
-// Per-tenant unique-bundle presence: a tenant references this bundle via at least
-// one live attestation edge. This drives once-per-tenant-per-bundle CAS accounting.
+export const attestationListRevision = sqliteTable(
+	'attestation_list_revision',
+	{
+		id: integer('id').primaryKey({ autoIncrement: true }),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		revision: integer('revision').notNull().default(1),
+		publishedRevision: integer('published_revision'),
+		publishedCacheGeneration: integer(
+			'published_cache_generation'
+		).$type<CacheGeneration>(),
+		publishedNarHash: text('published_nar_hash').$type<NixSha256HashString>(),
+		publishedKey: text('published_key').$type<R2ObjectKey>(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		check(
+			'attestation_list_revision_cache_identity_check',
+			cacheIdentityConstraint(table.cacheKind, table.cacheName)
+		),
+		check(
+			'attestation_list_revision_number_check',
+			sql`${table.revision} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'attestation_list_revision_publication_check',
+			sql`(${table.publishedRevision} IS NULL AND ${table.publishedCacheGeneration} IS NULL AND ${table.publishedNarHash} IS NULL AND ${table.publishedKey} IS NULL) OR (${table.publishedRevision} IS NOT NULL AND ${table.publishedRevision} BETWEEN 1 AND ${table.revision} AND ${table.publishedCacheGeneration} >= 1 AND ${table.publishedCacheGeneration} IS NOT NULL AND ${table.publishedNarHash} IS NOT NULL)`
+		),
+		uniqueIndex('attestation_list_revision_default_idx')
+			.on(table.tenant, table.storePathHash, table.generation)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('attestation_list_revision_named_idx')
+			.on(table.tenant, table.cacheName, table.storePathHash, table.generation)
+			.where(sql`${table.cacheKind} = 'named'`),
+		index('attestation_list_revision_pending_idx')
+			.on(table.tenant, table.id)
+			.where(
+				sql`${table.publishedRevision} IS NULL OR ${table.publishedRevision} != ${table.revision}`
+			)
+	]
+);
+
+// Each tenant has one presence row per CAS digest across all reference kinds.
+// The presence row determines the size charged to that tenant.
 export const tenantCasBlob = sqliteTable(
-	'tenant_cas_blob',
+	'tenant_cas_blob_storage',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
@@ -741,9 +873,26 @@ export const tenantCasBlob = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.digest] })]
 );
 
+export const precedingCasObject = sqliteView('cas_object').as((query) =>
+	query.select().from(casObject)
+);
+
+export const precedingTenantCasBlob = sqliteView('tenant_cas_blob').as(
+	(query) => query.select().from(tenantCasBlob)
+);
+
+export const tenantNamespaceCleanupGuard = sqliteTable(
+	'tenant_namespace_cleanup_guard',
+	{
+		tenant: text('tenant').$type<TenantId>().primaryKey(),
+		startedAt: text('started_at').$type<IsoTimestamp>().notNull(),
+		notBefore: text('not_before').$type<IsoTimestamp>().notNull()
+	}
+);
+
 // The authoritative per-tenant usage and quota counter. `bytes`/`blobs` are NAR
-// storage only, matching `tenant_blob`; `cas_bytes`/`cas_blobs` are attestation CAS
-// storage only, matching `tenant_cas_blob`. `narinfos` is the committed-narinfo
+// storage only, matching `tenant_blob`; `cas_bytes`/`cas_blobs` are shared CAS
+// storage only, matching `tenant_cas_blob_storage`. `narinfos` is the committed-narinfo
 // count. The quota applies to total charged bytes (`bytes + cas_bytes`). The
 // counters are maintained incrementally by the owning tenant's Durable Object as it
 // charges on 0-to-1 presence transitions and credits on 1-to-0 transitions.
@@ -812,3 +961,1113 @@ export const controlDatabaseSplit = sqliteTable('control_database_split', {
 	frozenAt: text('frozen_at').notNull(),
 	copiedAt: text('copied_at')
 });
+
+export const artifactReference = sqliteTable(
+	'artifact_ref',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		artifactId: text('artifact_id').$type<ArtifactId>().notNull(),
+		artifactGeneration: integer('artifact_generation')
+			.$type<ArtifactGeneration>()
+			.notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		kind: text('kind', { enum: artifactKinds }).$type<ArtifactKind>().notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.tenant, table.artifactId, table.artifactGeneration]
+		}),
+		index('artifact_ref_digest_idx').on(table.digest, table.tenant),
+		index('artifact_ref_tenant_digest_idx').on(table.tenant, table.digest),
+		index('artifact_ref_cache_idx').on(
+			table.tenant,
+			table.cacheKind,
+			table.cacheName,
+			table.cacheGeneration,
+			table.artifactId,
+			table.artifactGeneration
+		),
+		check(
+			'artifact_ref_cache_identity_check',
+			cacheIdentityConstraint(table.cacheKind, table.cacheName)
+		),
+		check(
+			'artifact_ref_generation_check',
+			sql`${table.artifactGeneration} >= 1`
+		),
+		check(
+			'artifact_ref_cache_generation_check',
+			sql`${table.cacheGeneration} >= 1`
+		)
+	]
+);
+
+export const listingFact = sqliteTable(
+	'listing_fact',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		format: integer('format').$type<1>().notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		size: integer('size').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		check('listing_fact_format_check', sql`${table.format} = 1`),
+		check('listing_fact_size_check', sql`${table.size} > 0`)
+	]
+);
+
+export const listingAdoptionFact = sqliteTable(
+	'listing_adoption_fact',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		index('listing_adoption_fact_digest_identity_idx').on(
+			table.digest,
+			table.narHash,
+			table.generatorRevision
+		)
+	]
+);
+
+export const listingAdoptionParent = sqliteTable(
+	'listing_adoption_parent',
+	{
+		id: text('id')
+			.$type<ListingAdoptionParentId>()
+			.primaryKey()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_parent_id_check',
+			sql`length(${table.id}) = 32 AND ${table.id} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_parent_cache_identity_check',
+			cacheIdentityConstraint(table.cacheKind, table.cacheName)
+		),
+		check(
+			'listing_adoption_parent_generation_check',
+			sql`typeof(${table.generation}) = 'integer' AND ${table.generation} BETWEEN 0 AND 9007199254740991 AND typeof(${table.cacheGeneration}) = 'integer' AND ${table.cacheGeneration} BETWEEN 1 AND 9007199254740991`
+		),
+		uniqueIndex('listing_adoption_parent_default_identity_idx')
+			.on(table.tenant, table.storePathHash)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('listing_adoption_parent_named_identity_idx')
+			.on(table.tenant, table.cacheName, table.storePathHash)
+			.where(sql`${table.cacheKind} = 'named'`),
+		index('listing_adoption_parent_nar_id_idx').on(table.narHash, table.id),
+		index('listing_adoption_parent_tenant_id_idx').on(table.tenant, table.id)
+	]
+);
+
+export const listingAdoptionFactSeed = sqliteTable(
+	'listing_adoption_fact_seed',
+	{
+		id: integer('id').primaryKey(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionSeedEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		afterNarHash: text('after_nar_hash').$type<NixSha256HashString>(),
+		afterGeneratorRevision: text(
+			'after_generator_revision'
+		).$type<ListingGeneratorRevision>(),
+		throughNarHash: text('through_nar_hash').$type<NixSha256HashString>(),
+		throughGeneratorRevision: text(
+			'through_generator_revision'
+		).$type<ListingGeneratorRevision>(),
+		scanned: integer('scanned').notNull().default(0),
+		captured: integer('captured').notNull().default(0),
+		isComplete: integer('is_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check('listing_adoption_fact_seed_id_check', sql`${table.id} = 1`),
+		check(
+			'listing_adoption_fact_seed_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_fact_seed_cursor_check',
+			sql`${table.isComplete} IN (0,1) AND (${table.afterNarHash} IS NULL) = (${table.afterGeneratorRevision} IS NULL)
+ AND (${table.throughNarHash} IS NULL) = (${table.throughGeneratorRevision} IS NULL)
+ AND (${table.throughNarHash} IS NOT NULL OR ${table.isComplete} = 1)
+ AND (${table.afterNarHash} IS NULL OR (${table.throughNarHash} IS NOT NULL AND (${table.afterNarHash},${table.afterGeneratorRevision}) <= (${table.throughNarHash},${table.throughGeneratorRevision})))
+ AND (${table.isComplete} = 0 OR ${table.throughNarHash} IS NULL OR (${table.afterNarHash} IS NOT NULL AND (${table.afterNarHash},${table.afterGeneratorRevision}) = (${table.throughNarHash},${table.throughGeneratorRevision})))`
+		),
+		check(
+			'listing_adoption_fact_seed_counts_check',
+			sql`typeof(${table.scanned}) = 'integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991
+ AND typeof(${table.captured}) = 'integer' AND ${table.captured} BETWEEN 0 AND ${table.scanned}`
+		)
+	]
+);
+
+export const listingAdoptionParentSeed = sqliteTable(
+	'listing_adoption_parent_seed',
+	{
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] })
+			.primaryKey()
+			.notNull(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionSeedEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		afterTenant: text('after_tenant').$type<TenantId>(),
+		afterCacheName: text('after_cache_name').$type<CacheName>(),
+		afterStorePathHash: text('after_store_path_hash').$type<StorePathHash>(),
+		throughTenant: text('through_tenant').$type<TenantId>(),
+		throughCacheName: text('through_cache_name').$type<CacheName>(),
+		throughStorePathHash: text(
+			'through_store_path_hash'
+		).$type<StorePathHash>(),
+		pageCaptureAfter:
+			integer('page_capture_after').$type<ListingAdoptionCaptureSequence>(),
+		scanned: integer('scanned').notNull().default(0),
+		captured: integer('captured').notNull().default(0),
+		isComplete: integer('is_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_parent_seed_kind_check',
+			sql`${table.cacheKind} IN ('default','named')`
+		),
+		check(
+			'listing_adoption_parent_seed_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_parent_seed_cursor_check',
+			sql`${table.isComplete} IN (0,1)
+ AND (${table.afterTenant} IS NULL) = (${table.afterStorePathHash} IS NULL)
+ AND (${table.throughTenant} IS NULL) = (${table.throughStorePathHash} IS NULL)
+ AND (${table.throughTenant} IS NOT NULL OR (${table.isComplete} = 1 AND ${table.afterTenant} IS NULL))
+ AND (${table.afterTenant} IS NULL OR ${table.throughTenant} IS NOT NULL)
+ AND ((${table.cacheKind} = 'default' AND ${table.afterCacheName} IS NULL AND ${table.throughCacheName} IS NULL
+   AND (${table.afterTenant} IS NULL OR (${table.afterTenant},${table.afterStorePathHash}) <= (${table.throughTenant},${table.throughStorePathHash}))
+   AND (${table.isComplete} = 0 OR ${table.throughTenant} IS NULL OR (${table.afterTenant} IS NOT NULL AND (${table.afterTenant},${table.afterStorePathHash}) = (${table.throughTenant},${table.throughStorePathHash}))))
+ OR (${table.cacheKind} = 'named'
+   AND (${table.afterTenant} IS NULL) = (${table.afterCacheName} IS NULL)
+   AND (${table.throughTenant} IS NULL) = (${table.throughCacheName} IS NULL)
+   AND (${table.afterTenant} IS NULL OR (${table.afterTenant},${table.afterCacheName},${table.afterStorePathHash}) <= (${table.throughTenant},${table.throughCacheName},${table.throughStorePathHash}))
+   AND (${table.isComplete} = 0 OR ${table.throughTenant} IS NULL OR (${table.afterTenant} IS NOT NULL AND (${table.afterTenant},${table.afterCacheName},${table.afterStorePathHash}) = (${table.throughTenant},${table.throughCacheName},${table.throughStorePathHash})))))`
+		),
+		check(
+			'listing_adoption_parent_seed_counts_check',
+			sql`typeof(${table.scanned}) = 'integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991
+ AND typeof(${table.captured}) = 'integer' AND ${table.captured} BETWEEN 0 AND ${table.scanned}
+ AND (${table.pageCaptureAfter} IS NULL OR (typeof(${table.pageCaptureAfter}) = 'integer' AND ${table.pageCaptureAfter} BETWEEN 0 AND 9007199254740991 AND ${table.isComplete} = 0))`
+		)
+	]
+);
+
+export const listingAdoptionSeedDispatch = sqliteTable(
+	'listing_adoption_seed_dispatch',
+	{
+		scope: text('scope', { enum: listingAdoptionSeedScopes })
+			.primaryKey()
+			.notNull(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionSeedDispatchEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		availableAt: text('available_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		generation: integer('generation').notNull().default(0),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_seed_dispatch_scope_check',
+			sql`${table.scope} IN ('facts','default-parents','named-parents')`
+		),
+		check(
+			'listing_adoption_seed_dispatch_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_seed_dispatch_claim_check',
+			sql`typeof(${table.generation}) = 'integer' AND ${table.generation} BETWEEN 0 AND 9007199254740991
+ AND (${table.owner} IS NULL) = (${table.leaseExpiresAt} IS NULL)
+ AND (${table.owner} IS NULL OR ${table.generation} >= 1)`
+		)
+	]
+);
+
+export const listingAdoptionConsumer = sqliteTable(
+	'listing_adoption_consumer',
+	{
+		id: integer('id').primaryKey(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionConsumerEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		after: integer('after')
+			.$type<ListingAdoptionCaptureSequence>()
+			.notNull()
+			.default(sql`0`),
+		scanned: integer('scanned').notNull().default(0),
+		enrolled: integer('enrolled').notNull().default(0),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check('listing_adoption_consumer_id_check', sql`${table.id} = 1`),
+		check(
+			'listing_adoption_consumer_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_consumer_progress_check',
+			sql`typeof(${table.after}) = 'integer' AND ${table.after} BETWEEN 0 AND 9007199254740991 AND typeof(${table.scanned}) = 'integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991 AND typeof(${table.enrolled}) = 'integer' AND ${table.enrolled} BETWEEN 0 AND ${table.scanned}`
+		)
+	]
+);
+
+export const listingAdoptionWork = sqliteTable(
+	'listing_adoption_work',
+	{
+		id: text('id')
+			.$type<ListingAdoptionWorkId>()
+			.primaryKey()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		consumerEpoch: text('consumer_epoch')
+			.$type<ListingAdoptionConsumerEpoch>()
+			.notNull(),
+		eventId: integer('event_id')
+			.$type<ListingAdoptionCaptureSequence>()
+			.notNull(),
+		source: text('source', { mode: 'json' })
+			.$type<ListingAdoptionCaptureSource>()
+			.notNull(),
+		createdAt: text('created_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_work_id_check',
+			sql`length(${table.id}) = 32 AND ${table.id} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_work_epoch_check',
+			sql`length(${table.consumerEpoch}) = 32 AND ${table.consumerEpoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_work_event_check',
+			sql`typeof(${table.eventId}) = 'integer' AND ${table.eventId} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'listing_adoption_work_source_check',
+			sql`coalesce(json_valid(${table.source}) AND json_type(${table.source}) = 'object' AND json_extract(${table.source}, '$.kind') IN ('parent','listing','cas'), 0)`
+		),
+		uniqueIndex('listing_adoption_work_consumer_event_idx').on(
+			table.consumerEpoch,
+			table.eventId
+		)
+	]
+);
+
+export const listingAdoptionTask = sqliteTable(
+	'listing_adoption_task',
+	{
+		id: text('id')
+			.$type<ListingAdoptionTaskId>()
+			.primaryKey()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		epoch: text('epoch')
+			.$type<ListingAdoptionTaskEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		kind: text('kind', { enum: ['expand', 'deliver'] }).notNull(),
+		workId: text('work_id').$type<ListingAdoptionWorkId>(),
+		parentId: text('parent_id').$type<ListingAdoptionParentId>(),
+		generatorRevision:
+			text('generator_revision').$type<ListingGeneratorRevision>(),
+		source: text('source', { mode: 'json' })
+			.$type<ListingAdoptionTaskSource>()
+			.notNull(),
+		availableAt: text('available_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+		retryAt: text('retry_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		generation: integer('generation').notNull().default(0),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		progressRevision: integer('progress_revision').notNull().default(0),
+		window: text('window', {
+			mode: 'json'
+		}).$type<ListingAdoptionExpansionWindow>(),
+		scanned: integer('scanned').notNull().default(0),
+		enrolled: integer('enrolled').notNull().default(0),
+		outcome: text('outcome', {
+			mode: 'json'
+		}).$type<ListingAdoptionDeliveryOutcome>(),
+		completedAt: text('completed_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_task_identity_check',
+			sql`length(${table.id})=32 AND ${table.id} NOT GLOB '*[^0-9a-f]*' AND length(${table.epoch})=32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_task_source_check',
+			sql`coalesce(json_valid(${table.source}) AND json_extract(${table.source},'$.kind')=${table.kind} AND ((${table.kind}='expand' AND ${table.workId} IS NOT NULL AND ${table.parentId} IS NULL AND ${table.generatorRevision} IS NULL AND json_extract(${table.source},'$.work.id')=${table.workId}) OR (${table.kind}='deliver' AND ${table.workId} IS NULL AND ${table.parentId} IS NOT NULL AND ${table.generatorRevision} IS NOT NULL AND ${table.window} IS NULL AND json_extract(${table.source},'$.target.parent.id')=${table.parentId} AND json_extract(${table.source},'$.target.identity.generatorRevision')=${table.generatorRevision})),0)`
+		),
+		check(
+			'listing_adoption_task_claim_check',
+			sql`typeof(${table.generation})='integer' AND ${table.generation} BETWEEN 0 AND 9007199254740991 AND (${table.owner} IS NULL)=(${table.leaseExpiresAt} IS NULL) AND (${table.owner} IS NULL OR (${table.generation}>=1 AND ${table.completedAt} IS NULL))`
+		),
+		check(
+			'listing_adoption_task_progress_check',
+			sql`typeof(${table.progressRevision})='integer' AND ${table.progressRevision} BETWEEN 0 AND 9007199254740991 AND typeof(${table.scanned})='integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991 AND typeof(${table.enrolled})='integer' AND ${table.enrolled} BETWEEN 0 AND ${table.scanned}`
+		),
+		uniqueIndex('listing_adoption_task_work_idx').on(table.workId),
+		uniqueIndex('listing_adoption_task_target_idx')
+			.on(table.parentId, table.generatorRevision)
+			.where(sql`${table.kind}='deliver'`),
+		index('listing_adoption_task_due_idx')
+			.on(table.availableAt, table.id)
+			.where(sql`${table.completedAt} IS NULL`)
+	]
+);
+export const listingAdoptionTaskSeed = sqliteTable(
+	'listing_adoption_task_seed',
+	{
+		id: integer('id').primaryKey(),
+		epoch: text('epoch')
+			.$type<ListingAdoptionTaskEpoch>()
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		after: text('after').$type<ListingAdoptionWorkId>(),
+		through: text('through').$type<ListingAdoptionWorkId>(),
+		scanned: integer('scanned').notNull().default(0),
+		isComplete: integer('is_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false)
+	},
+	(table) => [
+		check('listing_adoption_task_seed_id_check', sql`${table.id}=1`),
+		check(
+			'listing_adoption_task_seed_epoch_check',
+			sql`length(${table.epoch})=32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'listing_adoption_task_seed_progress_check',
+			sql`typeof(${table.scanned})='integer' AND ${table.scanned} BETWEEN 0 AND 9007199254740991 AND ${table.isComplete} IN (0,1) AND (${table.after} IS NULL OR (${table.through} IS NOT NULL AND ${table.after}<=${table.through})) AND (${table.through} IS NOT NULL OR (${table.isComplete}=1 AND ${table.after} IS NULL))`
+		)
+	]
+);
+
+export const listingAdoptionCaptureEvent = sqliteTable(
+	'listing_adoption_capture_event',
+	{
+		id: integer('id')
+			.$type<ListingAdoptionCaptureSequence>()
+			.primaryKey({ autoIncrement: true }),
+		source: text('source', { mode: 'json' })
+			.$type<ListingAdoptionCaptureSource>()
+			.notNull(),
+		createdAt: text('created_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'listing_adoption_capture_event_id_check',
+			sql`${table.id} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'listing_adoption_capture_event_source_check',
+			sql`coalesce(json_valid(${table.source}) AND json_type(${table.source}) = 'object' AND json_extract(${table.source}, '$.kind') IN ('parent','listing','cas'), 0)`
+		)
+	]
+);
+
+export const listingAdoptionCaptureState = sqliteTable(
+	'listing_adoption_capture_state',
+	{
+		id: integer('id').primaryKey(),
+		latest: integer('latest')
+			.$type<ListingAdoptionCaptureSequence>()
+			.notNull()
+			.default(sql`0`),
+		prunedThrough: integer('pruned_through')
+			.$type<ListingAdoptionCaptureSequence>()
+			.notNull()
+			.default(sql`0`),
+		isReady: integer('is_ready', { mode: 'boolean' }).notNull().default(false)
+	},
+	(table) => [
+		check('listing_adoption_capture_state_id_check', sql`${table.id} = 1`),
+		check(
+			'listing_adoption_capture_state_position_check',
+			sql`${table.prunedThrough} BETWEEN 0 AND ${table.latest} AND ${table.latest} <= 9007199254740991`
+		)
+	]
+);
+
+export const sharedListingOutputReference = sqliteTable(
+	'shared_listing_output_ref',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		epoch: text('epoch').$type<SharedListingOutputEpoch>().notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		computationGeneration: integer('computation_generation').notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		size: integer('size').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		index('shared_listing_output_ref_digest_idx').on(table.digest),
+		check(
+			'shared_listing_output_ref_generation_check',
+			sql`typeof(${table.sourceIncarnation}) = 'integer' AND ${table.sourceIncarnation} BETWEEN 1 AND 9007199254740991
+  AND typeof(${table.computationGeneration}) = 'integer' AND ${table.computationGeneration} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_output_ref_size_check',
+			sql`typeof(${table.size}) = 'integer' AND ${table.size} BETWEEN 1 AND 67108864`
+		)
+	]
+);
+
+export const sharedListingOutputCleanup = sqliteTable(
+	'shared_listing_output_cleanup',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().primaryKey(),
+		epoch: text('epoch')
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		cursor: text('cursor').$type<ListingGeneratorRevision>(),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		nextAttemptAt: text('next_attempt_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`'1970-01-01T00:00:00.000Z'`)
+	},
+	(table) => [
+		index('shared_listing_output_cleanup_due_idx').on(
+			table.nextAttemptAt,
+			table.narHash
+		),
+		check(
+			'shared_listing_output_cleanup_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		),
+		check(
+			'shared_listing_output_cleanup_owner_check',
+			sql`(${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const sharedListingStage = sqliteTable(
+	'shared_listing_stage',
+	{
+		id: text('id').$type<ArtifactStageId>().primaryKey(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		computationGeneration: integer('computation_generation').notNull(),
+		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
+		maximumBytes: integer('maximum_bytes').notNull(),
+		state: text('state', { enum: ['pending', 'ready', 'retired'] }).notNull(),
+		multipartId: text('multipart_id'),
+		writesSealed: integer('writes_sealed', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		digest: text('digest').$type<Sha256HexDigest>(),
+		size: integer('size'),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		writeUntil: text('write_until').$type<IsoTimestamp>().notNull(),
+		cleanupAfter: text('cleanup_after').$type<IsoTimestamp>().notNull(),
+		nextCleanupAt: text('next_cleanup_at').$type<IsoTimestamp>().notNull(),
+		cleanupGeneration: integer('cleanup_generation').notNull().default(0),
+		cleanupOwner: text('cleanup_owner').$type<ArtifactTaskOwner>(),
+		cleanupLeaseExpiresAt: text(
+			'cleanup_lease_expires_at'
+		).$type<IsoTimestamp>()
+	},
+	(table) => [
+		uniqueIndex('shared_listing_stage_computation_idx').on(
+			table.narHash,
+			table.generatorRevision,
+			table.computationGeneration
+		),
+		index('shared_listing_stage_recovery_idx').on(
+			table.narHash,
+			table.generatorRevision,
+			table.state,
+			table.cleanupAfter,
+			table.id
+		),
+		index('shared_listing_stage_cleanup_idx').on(table.nextCleanupAt, table.id),
+		check(
+			'shared_listing_stage_state_check',
+			sql`${table.state} IN ('pending', 'ready', 'retired')`
+		),
+		check(
+			'shared_listing_stage_generation_check',
+			sql`typeof(${table.sourceIncarnation}) = 'integer' AND ${table.sourceIncarnation} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.computationGeneration}) = 'integer' AND ${table.computationGeneration} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.cleanupGeneration}) = 'integer' AND ${table.cleanupGeneration} BETWEEN 0 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_stage_budget_check',
+			sql`typeof(${table.maximumBytes}) = 'integer' AND ${table.maximumBytes} BETWEEN 1 AND 67108864
+		AND (${table.size} IS NULL OR (typeof(${table.size}) = 'integer' AND ${table.size} BETWEEN 0 AND ${table.maximumBytes}))`
+		),
+		check(
+			'shared_listing_stage_seal_check',
+			sql`(${table.writesSealed} = 0 AND ${table.digest} IS NULL AND ${table.size} IS NULL)
+		OR (${table.writesSealed} = 1 AND ${table.multipartId} IS NOT NULL AND ${table.digest} IS NOT NULL AND ${table.size} IS NOT NULL)`
+		),
+		check(
+			'shared_listing_stage_ready_check',
+			sql`${table.state} <> 'ready' OR ${table.writesSealed} = 1`
+		),
+		check(
+			'shared_listing_stage_cleanup_claim_check',
+			sql`(${table.cleanupGeneration} = 0 AND ${table.cleanupOwner} IS NULL AND ${table.cleanupLeaseExpiresAt} IS NULL)
+		OR (${table.cleanupGeneration} > 0 AND ${table.cleanupOwner} IS NOT NULL AND ${table.state} = 'retired')`
+		)
+	]
+);
+
+export const listingGeneration = sqliteTable(
+	'listing_generation',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		generation: integer('generation').notNull(),
+		tenant: text('tenant').$type<TenantId>(),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		index('listing_generation_tenant_idx').on(
+			table.tenant,
+			table.narHash,
+			table.generatorRevision
+		),
+		check(
+			'listing_generation_version_check',
+			sql`${table.sourceIncarnation} >= 1 AND ${table.generation} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'listing_generation_ownership_check',
+			sql`(${table.tenant} IS NULL AND ${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.tenant} IS NOT NULL AND ${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const sharedListingJob = sqliteTable(
+	'shared_listing_job',
+	{
+		id: text('id').$type<ArtifactJobId>().primaryKey(),
+		generation: integer('generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull()
+			.default(artifactJobGenerationSchema.parse(1)),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		state: text('state')
+			.$type<SharedListingJobSummary['state']>()
+			.notNull()
+			.default('running'),
+		phase: text('phase')
+			.$type<SharedListingJobSummary['phase']>()
+			.notNull()
+			.default('historical'),
+		cursor: text('cursor').$type<NixSha256HashString>(),
+		eventCursor: integer('event_cursor')
+			.$type<NarCaptureSequence>()
+			.notNull()
+			.default(narCaptureSequenceSchema.parse(0)),
+		eventThrough: integer('event_through').$type<NarCaptureSequence>(),
+		discovered: integer('discovered').notNull().default(0),
+		completed: integer('completed').notNull().default(0),
+		skipped: integer('skipped').notNull().default(0),
+		failed: integer('failed').notNull().default(0),
+		claimGeneration: integer('claim_generation').notNull().default(0),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('shared_listing_job_capture_idx').on(table.phase, table.eventCursor),
+		check(
+			'shared_listing_job_generation_check',
+			sql`${table.generation} BETWEEN 1 AND 9007199254740991 AND ${table.claimGeneration} BETWEEN 0 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_job_state_check',
+			sql`${table.state} IN ('running', 'cancelled', 'complete') AND ${table.phase} IN ('historical', 'catchup', 'processing')`
+		),
+		check(
+			'shared_listing_job_progress_check',
+			sql`${table.completed} >= 0 AND ${table.skipped} >= 0 AND ${table.failed} >= 0 AND ${table.discovered} BETWEEN 0 AND 9007199254740991 AND ${table.discovered} >= ${table.completed} + ${table.skipped} + ${table.failed}`
+		),
+		check(
+			'shared_listing_job_owner_check',
+			sql`(${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const sharedListingJobDispatch = sqliteTable(
+	'shared_listing_job_dispatch',
+	{
+		id: integer('id')
+			.$type<SharedListingDispatchId>()
+			.primaryKey({ autoIncrement: true }),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		nextDeliveryAt: text('next_delivery_at').$type<IsoTimestamp>(),
+		claimGeneration: integer('claim_generation').notNull().default(0),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		isSeeded: integer('is_seeded', { mode: 'boolean' }).notNull().default(true),
+		seedAfter: text('seed_after').$type<NixSha256HashString>(),
+		seedThrough: text('seed_through').$type<NixSha256HashString>()
+	},
+	(table) => [
+		uniqueIndex('shared_listing_job_dispatch_job_idx').on(table.jobId),
+		index('shared_listing_job_dispatch_due_idx').on(
+			table.nextDeliveryAt,
+			table.id
+		),
+		check(
+			'shared_listing_job_dispatch_version_check',
+			sql`typeof(${table.id}) = 'integer' AND ${table.id} BETWEEN 1 AND 9007199254740991 AND typeof(${table.jobGeneration}) = 'integer' AND ${table.jobGeneration} BETWEEN 1 AND 9007199254740991 AND typeof(${table.claimGeneration}) = 'integer' AND ${table.claimGeneration} BETWEEN 0 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_job_dispatch_owner_check',
+			sql`(${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.nextDeliveryAt} IS NOT NULL AND ${table.claimGeneration} >= 1 AND ${table.nextDeliveryAt} = ${table.leaseExpiresAt})`
+		),
+		check(
+			'shared_listing_job_dispatch_seed_check',
+			sql`${table.isSeeded} IN (0,1) AND (${table.seedAfter} IS NULL OR (${table.seedThrough} IS NOT NULL AND ${table.seedAfter} <= ${table.seedThrough}))`
+		)
+	]
+);
+
+export const sharedListingDispatchSeed = sqliteTable(
+	'shared_listing_dispatch_seed',
+	{
+		id: integer('id').primaryKey(),
+		after: text('after').$type<ArtifactJobId>(),
+		through: text('through').$type<ArtifactJobId>(),
+		isComplete: integer('is_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false)
+	},
+	(table) => [
+		check('shared_listing_dispatch_seed_id_check', sql`${table.id} = 1`),
+		check(
+			'shared_listing_dispatch_seed_cursor_check',
+			sql`${table.isComplete} IN (0,1) AND (${table.after} IS NULL OR (${table.through} IS NOT NULL AND ${table.after} <= ${table.through})) AND (${table.through} IS NOT NULL OR ${table.isComplete} = 1)`
+		)
+	]
+);
+
+export const sharedListingTask = sqliteTable(
+	'shared_listing_task',
+	{
+		id: text('id').$type<ArtifactTaskId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		narSize: integer('nar_size').notNull(),
+		fileSize: integer('file_size').notNull(),
+		discoveryPage: text('discovery_page').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		state: text('state')
+			.$type<SharedListingTaskState>()
+			.notNull()
+			.default('pending'),
+		claimGeneration: integer('claim_generation').notNull().default(0),
+		claimJobGeneration: integer('claim_job_generation').notNull().default(0),
+		claimOwner: text('claim_owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		readyAt: text('ready_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`'1970-01-01T00:00:00.000Z'`),
+		updatedAt: text('updated_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		uniqueIndex('shared_listing_task_source_idx').on(
+			table.jobId,
+			table.narHash
+		),
+		index('shared_listing_task_page_idx').on(table.discoveryPage),
+		index('shared_listing_task_ready_idx').on(
+			table.jobId,
+			table.state,
+			table.readyAt,
+			table.id
+		),
+		index('shared_listing_task_lease_idx').on(
+			table.jobId,
+			table.state,
+			table.leaseExpiresAt,
+			table.id
+		),
+		index('shared_listing_task_job_claim_idx').on(
+			table.jobId,
+			table.state,
+			table.claimJobGeneration,
+			table.id
+		),
+		check(
+			'shared_listing_task_source_check',
+			sql`${table.sourceIncarnation} >= 1 AND ${table.narSize} >= 0 AND ${table.fileSize} >= 0`
+		)
+	]
+);
+
+export const sharedListingTaskDelivery = sqliteTable(
+	'shared_listing_task_delivery',
+	{
+		taskId: text('task_id').$type<ArtifactTaskId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		state: text('state', { enum: ['pending', 'running'] }).notNull(),
+		epoch: text('epoch')
+			.notNull()
+			.default(sql`(lower(hex(randomblob(16))))`),
+		nextAt: text('next_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('shared_listing_task_delivery_due_idx').on(
+			table.jobId,
+			table.state,
+			table.nextAt,
+			table.taskId
+		),
+		index('shared_listing_task_delivery_generation_idx').on(
+			table.jobId,
+			table.state,
+			table.jobGeneration,
+			table.nextAt,
+			table.taskId
+		),
+		check(
+			'shared_listing_task_delivery_generation_check',
+			sql`typeof(${table.jobGeneration}) = 'integer' AND ${table.jobGeneration} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_task_delivery_state_check',
+			sql`${table.state} IN ('pending', 'running')`
+		),
+		check(
+			'shared_listing_task_delivery_epoch_check',
+			sql`length(${table.epoch}) = 32 AND ${table.epoch} NOT GLOB '*[^0-9a-f]*'`
+		)
+	]
+);
+
+export const sharedListingTaskOutcome = sqliteTable(
+	'shared_listing_task_outcome',
+	{
+		taskId: text('task_id').$type<ArtifactTaskId>().primaryKey(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		taskGeneration: integer('task_generation')
+			.$type<ArtifactTaskGeneration>()
+			.notNull(),
+		owner: text('owner').$type<ArtifactTaskOwner>().notNull(),
+		claim: text('claim', { mode: 'json' })
+			.$type<SharedListingTaskClaim>()
+			.notNull(),
+		completionId: text('completion_id')
+			.$type<SharedListingCompletionId>()
+			.notNull(),
+		kind: text('kind').$type<SharedListingTaskOutcome['kind']>().notNull(),
+		fact: text('fact', { mode: 'json' }).$type<NarListingFact>(),
+		incarnation: integer('incarnation'),
+		referenceEpoch: text('reference_epoch').$type<SharedListingOutputEpoch>(),
+		computationGeneration: integer('computation_generation'),
+		stageId: text('stage_id').$type<ArtifactStageId>(),
+		reason: text('reason').$type<SharedListingTaskReason>(),
+		completedAt: text('completed_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('shared_listing_task_outcome_job_idx').on(table.jobId, table.taskId),
+		check(
+			'shared_listing_task_outcome_generation_check',
+			sql`typeof(${table.jobGeneration}) = 'integer' AND ${table.jobGeneration} BETWEEN 1 AND 9007199254740991
+ AND typeof(${table.taskGeneration}) = 'integer' AND ${table.taskGeneration} BETWEEN 1 AND 9007199254740991
+ AND (${table.computationGeneration} IS NULL OR (typeof(${table.computationGeneration}) = 'integer' AND ${table.computationGeneration} BETWEEN 1 AND 9007199254740991))
+ AND (${table.incarnation} IS NULL OR (typeof(${table.incarnation}) = 'integer' AND ${table.incarnation} BETWEEN 1 AND 9007199254740991))`
+		),
+		check(
+			'shared_listing_task_outcome_claim_check',
+			sql`coalesce(json_valid(${table.claim}) AND json_extract(${table.claim}, '$.id') = ${table.taskId}
+ AND json_extract(${table.claim}, '$.job.id') = ${table.jobId} AND json_extract(${table.claim}, '$.job.generation') = ${table.jobGeneration}
+ AND json_extract(${table.claim}, '$.generation') = ${table.taskGeneration} AND json_extract(${table.claim}, '$.owner') = ${table.owner}, 0)`
+		),
+		check(
+			'shared_listing_task_outcome_fact_check',
+			sql`${table.fact} IS NULL OR coalesce(json_valid(${table.fact})
+ AND json_extract(${table.fact}, '$.narHash') = json_extract(${table.claim}, '$.narHash')
+ AND json_extract(${table.fact}, '$.generatorRevision') = json_extract(${table.claim}, '$.generatorRevision')
+ AND json_extract(${table.fact}, '$.format') = 1
+ AND json_type(${table.fact}, '$.size') = 'integer' AND json_extract(${table.fact}, '$.size') BETWEEN 1 AND 9007199254740991
+ AND length(json_extract(${table.fact}, '$.digest')) = 64 AND json_extract(${table.fact}, '$.digest') NOT GLOB '*[^0-9a-f]*', 0)`
+		),
+		check(
+			'shared_listing_task_outcome_kind_check',
+			sql`coalesce((${table.kind} = 'generated' AND ${table.fact} IS NOT NULL AND ${table.incarnation} IS NOT NULL AND ${table.referenceEpoch} IS NOT NULL AND ${table.computationGeneration} IS NOT NULL AND ${table.stageId} IS NOT NULL AND ${table.reason} IS NULL)
+ OR (${table.kind} = 'reused' AND ${table.fact} IS NOT NULL AND ${table.incarnation} IS NOT NULL AND ${table.referenceEpoch} IS NOT NULL AND ${table.stageId} IS NULL AND ${table.reason} IS NULL)
+ OR (${table.kind} IN ('skipped','failed') AND ${table.fact} IS NULL AND ${table.incarnation} IS NULL AND ${table.referenceEpoch} IS NULL AND ${table.computationGeneration} IS NULL AND ${table.stageId} IS NULL AND ${table.reason} IN ('source-unavailable','source-mismatch','unsupported-source','unsupported-generator-revision','resource-limit','generation-failed')), 0)`
+		)
+	]
+);
+
+export const sharedListingGeneration = sqliteTable(
+	'shared_listing_generation',
+	{
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		generation: integer('generation').notNull(),
+		jobId: text('job_id').$type<ArtifactJobId>().notNull(),
+		jobGeneration: integer('job_generation')
+			.$type<ArtifactJobGeneration>()
+			.notNull(),
+		taskId: text('task_id').$type<ArtifactTaskId>().notNull(),
+		taskGeneration: integer('task_generation')
+			.$type<ArtifactTaskGeneration>()
+			.notNull(),
+		owner: text('owner').$type<ArtifactTaskOwner>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.narHash, table.generatorRevision] }),
+		check(
+			'shared_listing_generation_integer_check',
+			sql`typeof(${table.generation}) = 'integer' AND ${table.generation} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.sourceIncarnation}) = 'integer' AND ${table.sourceIncarnation} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.jobGeneration}) = 'integer' AND ${table.jobGeneration} BETWEEN 1 AND 9007199254740991
+		AND typeof(${table.taskGeneration}) = 'integer' AND ${table.taskGeneration} BETWEEN 1 AND 9007199254740991`
+		),
+		check(
+			'shared_listing_generation_ownership_check',
+			sql`(${table.owner} IS NULL AND ${table.leaseExpiresAt} IS NULL) OR (${table.owner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL)`
+		)
+	]
+);
+
+export const narCaptureState = sqliteTable(
+	'nar_capture_state',
+	{
+		id: integer('id').primaryKey(),
+		latest: integer('latest')
+			.$type<NarCaptureSequence>()
+			.notNull()
+			.default(narCaptureSequenceSchema.parse(0)),
+		prunedThrough: integer('pruned_through')
+			.$type<NarCaptureSequence>()
+			.notNull()
+			.default(narCaptureSequenceSchema.parse(0)),
+		isReady: integer('is_ready', { mode: 'boolean' }).notNull().default(false)
+	},
+	(table) => [
+		check('nar_capture_state_identity_check', sql`${table.id} = 1`),
+		check(
+			'nar_capture_state_position_check',
+			sql`${table.prunedThrough} BETWEEN 0 AND ${table.latest} AND ${table.latest} <= 9007199254740991`
+		)
+	]
+);
+
+export const narCaptureEvent = sqliteTable(
+	'nar_capture_event',
+	{
+		id: integer('id')
+			.$type<NarCaptureSequence>()
+			.primaryKey({ autoIncrement: true }),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		sourceIncarnation: integer('source_incarnation').notNull(),
+		createdAt: text('created_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	(table) => [
+		check(
+			'nar_capture_event_position_check',
+			sql`${table.id} BETWEEN 1 AND 9007199254740991 AND ${table.sourceIncarnation} BETWEEN 1 AND 9007199254740991`
+		)
+	]
+);
+
+export const forwardListingStage = sqliteTable(
+	'forward_listing_stage',
+	{
+		id: text('id').$type<ArtifactStageId>().primaryKey(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		uploadId: text('upload_id').$type<UploadId>().notNull(),
+		owner: text('owner').notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
+		maximumBytes: integer('maximum_bytes').notNull(),
+		state: text('state', { enum: ['pending', 'ready', 'retired'] }).notNull(),
+		multipartId: text('multipart_id'),
+		writesSealed: integer('writes_sealed', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		digest: text('digest').$type<Sha256HexDigest>(),
+		size: integer('size'),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		writeUntil: text('write_until').$type<IsoTimestamp>().notNull(),
+		cleanupAfter: text('cleanup_after').$type<IsoTimestamp>().notNull(),
+		nextCleanupAt: text('next_cleanup_at').$type<IsoTimestamp>().notNull(),
+		cleanupGeneration: integer('cleanup_generation').notNull().default(0),
+		cleanupOwner: text('cleanup_owner').$type<ArtifactTaskOwner>(),
+		cleanupLeaseExpiresAt: text(
+			'cleanup_lease_expires_at'
+		).$type<IsoTimestamp>()
+	},
+	(table) => [
+		uniqueIndex('forward_listing_stage_native_owner_idx').on(
+			table.tenant,
+			table.uploadId,
+			table.owner,
+			table.generatorRevision
+		),
+		uniqueIndex('forward_listing_stage_active_input_idx')
+			.on(table.narHash, table.generatorRevision)
+			.where(sql`${table.state} <> 'retired'`),
+		index('forward_listing_stage_cleanup_idx').on(
+			table.nextCleanupAt,
+			table.id
+		),
+		check(
+			'forward_listing_stage_state_check',
+			sql`${table.state} IN ('pending','ready','retired')`
+		),
+		check(
+			'forward_listing_stage_key_check',
+			sql`${table.r2Key} = 'shared-artifact-staging/' || ${table.id}`
+		),
+		check(
+			'forward_listing_stage_budget_check',
+			sql`typeof(${table.maximumBytes}) = 'integer' AND ${table.maximumBytes} BETWEEN 1 AND 67108864 AND (${table.size} IS NULL OR (typeof(${table.size}) = 'integer' AND ${table.size} BETWEEN 0 AND ${table.maximumBytes}))`
+		),
+		check(
+			'forward_listing_stage_seal_check',
+			sql`(${table.writesSealed} = 0 AND ${table.digest} IS NULL AND ${table.size} IS NULL) OR (${table.writesSealed} = 1 AND ${table.multipartId} IS NOT NULL AND ${table.digest} IS NOT NULL AND ${table.size} IS NOT NULL)`
+		),
+		check(
+			'forward_listing_stage_ready_check',
+			sql`${table.state} <> 'ready' OR ${table.writesSealed} = 1`
+		),
+		check(
+			'forward_listing_stage_cleanup_generation_check',
+			sql`typeof(${table.cleanupGeneration}) = 'integer' AND ${table.cleanupGeneration} BETWEEN 0 AND 9007199254740991`
+		),
+		check(
+			'forward_listing_stage_cleanup_claim_check',
+			sql`(${table.cleanupGeneration} = 0 AND ${table.cleanupOwner} IS NULL AND ${table.cleanupLeaseExpiresAt} IS NULL) OR (${table.cleanupGeneration} > 0 AND ${table.cleanupOwner} IS NOT NULL AND ${table.state} = 'retired')`
+		)
+	]
+);

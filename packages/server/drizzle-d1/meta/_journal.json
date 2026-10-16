@@ -302,6 +302,251 @@
 			"when": 1791526946879,
 			"tag": "0042_control_database_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 43,
+			"version": "6",
+			"when": 1791741593160,
+			"tag": "0043_cas_storage_expand",
+			"breakpoints": true
+		},
+		{
+			"idx": 44,
+			"version": "6",
+			"when": 1791741593161,
+			"tag": "0044_cas_storage_contract",
+			"breakpoints": true
+		},
+		{
+			"idx": 45,
+			"version": "6",
+			"when": 1791744021544,
+			"tag": "0045_cache_path_intersection_index",
+			"breakpoints": true
+		},
+		{
+			"idx": 46,
+			"version": "6",
+			"when": 1791747359406,
+			"tag": "0046_native_artifact_storage",
+			"breakpoints": true
+		},
+		{
+			"idx": 47,
+			"version": "6",
+			"when": 1791748246367,
+			"tag": "0047_attestation_cas_retention_index",
+			"breakpoints": true
+		},
+		{
+			"idx": 48,
+			"version": "6",
+			"when": 1791769686096,
+			"tag": "0048_cas_demotion_progress",
+			"breakpoints": true
+		},
+		{
+			"idx": 49,
+			"version": "6",
+			"when": 1791841418930,
+			"tag": "0049_attestation_list_revision",
+			"breakpoints": true
+		},
+		{
+			"idx": 50,
+			"version": "6",
+			"when": 1791841668370,
+			"tag": "0050_attestation_list_revision_contract",
+			"breakpoints": true
+		},
+		{
+			"idx": 51,
+			"version": "6",
+			"when": 1791841669384,
+			"tag": "0051_tenant_namespace_cleanup_guard",
+			"breakpoints": true
+		},
+		{
+			"idx": 52,
+			"version": "6",
+			"when": 1791841669386,
+			"tag": "0052_attestation_list_retirement_guard",
+			"breakpoints": true
+		},
+		{
+			"idx": 53,
+			"version": "6",
+			"when": 1792029988955,
+			"tag": "0053_listing_generation_claims",
+			"breakpoints": true
+		},
+		{
+			"idx": 54,
+			"version": "6",
+			"when": 1792036278402,
+			"tag": "0054_shared_listing_jobs",
+			"breakpoints": true
+		},
+		{
+			"idx": 55,
+			"version": "6",
+			"when": 1792038669986,
+			"tag": "0055_nar_source_capture",
+			"breakpoints": true
+		},
+		{
+			"idx": 56,
+			"version": "6",
+			"when": 1792038670855,
+			"tag": "0056_nar_source_capture_contract",
+			"breakpoints": true
+		},
+		{
+			"idx": 57,
+			"version": "6",
+			"when": 1792041351999,
+			"tag": "0057_shared_listing_catchup",
+			"breakpoints": true
+		},
+		{
+			"idx": 58,
+			"version": "6",
+			"when": 1792043859415,
+			"tag": "0058_shared_listing_task_claims",
+			"breakpoints": true
+		},
+		{
+			"idx": 59,
+			"version": "6",
+			"when": 1792045932022,
+			"tag": "0059_shared_listing_generation",
+			"breakpoints": true
+		},
+		{
+			"idx": 60,
+			"version": "6",
+			"when": 1792050296859,
+			"tag": "0060_shared_listing_staging",
+			"breakpoints": true
+		},
+		{
+			"idx": 61,
+			"version": "6",
+			"when": 1792058966807,
+			"tag": "0061_shared_listing_output_retention",
+			"breakpoints": true
+		},
+		{
+			"idx": 62,
+			"version": "6",
+			"when": 1792061121304,
+			"tag": "0062_shared_listing_output_retirement",
+			"breakpoints": true
+		},
+		{
+			"idx": 63,
+			"version": "6",
+			"when": 1792065569278,
+			"tag": "0063_shared_listing_completion",
+			"breakpoints": true
+		},
+		{
+			"idx": 64,
+			"version": "6",
+			"when": 1792071922117,
+			"tag": "0064_shared_listing_task_delivery",
+			"breakpoints": true
+		},
+		{
+			"idx": 65,
+			"version": "6",
+			"when": 1792075397710,
+			"tag": "0065_shared_listing_dispatch",
+			"breakpoints": true
+		},
+		{
+			"idx": 66,
+			"version": "6",
+			"when": 1792078068751,
+			"tag": "0066_shared_listing_dispatch_seed",
+			"breakpoints": true
+		},
+		{
+			"idx": 67,
+			"version": "6",
+			"when": 1792084512843,
+			"tag": "0067_listing_adoption_capture",
+			"breakpoints": true
+		},
+		{
+			"idx": 68,
+			"version": "6",
+			"when": 1792084524664,
+			"tag": "0068_listing_adoption_capture_contract",
+			"breakpoints": true
+		},
+		{
+			"idx": 69,
+			"version": "6",
+			"when": 1792088686166,
+			"tag": "0069_listing_adoption_fact_seed",
+			"breakpoints": true
+		},
+		{
+			"idx": 70,
+			"version": "6",
+			"when": 1792092826048,
+			"tag": "0070_listing_adoption_parents",
+			"breakpoints": true
+		},
+		{
+			"idx": 71,
+			"version": "6",
+			"when": 1792092826684,
+			"tag": "0071_listing_adoption_parents_contract",
+			"breakpoints": true
+		},
+		{
+			"idx": 72,
+			"version": "6",
+			"when": 1792097468831,
+			"tag": "0072_listing_adoption_parent_seed",
+			"breakpoints": true
+		},
+		{
+			"idx": 73,
+			"version": "6",
+			"when": 1792100120873,
+			"tag": "0073_listing_adoption_seed_dispatch",
+			"breakpoints": true
+		},
+		{
+			"idx": 74,
+			"version": "6",
+			"when": 1792104287211,
+			"tag": "0074_listing_adoption_work",
+			"breakpoints": true
+		},
+		{
+			"idx": 75,
+			"version": "6",
+			"when": 1792108726610,
+			"tag": "0075_listing_adoption_tasks",
+			"breakpoints": true
+		},
+		{
+			"idx": 76,
+			"version": "6",
+			"when": 1792108727188,
+			"tag": "0076_listing_adoption_tasks_contract",
+			"breakpoints": true
+		},
+		{
+			"idx": 77,
+			"version": "6",
+			"when": 1792122375793,
+			"tag": "0077_forward_listing_staging",
+			"breakpoints": true
 		}
 	]
 }

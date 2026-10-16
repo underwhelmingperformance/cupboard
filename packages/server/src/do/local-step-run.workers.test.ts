@@ -4,6 +4,7 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import {
+	casStorageLocalStep,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
@@ -15,7 +16,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { controlLocalStepStatus } from '../control/local-step.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -50,6 +51,10 @@ import {
 import { CupboardServer } from './server.ts';
 
 const start = testBase.getTime();
+
+beforeEach(async () => {
+	await recordTransition('cas-storage', 'expanded');
+});
 
 class InjectedPageFault extends Error {
 	constructor() {
@@ -315,14 +320,14 @@ describe('local-step work on the alarm', () => {
 		const server = await serverBeforePublicationRecovery('schema-wake');
 
 		await withRecordedAlarm(async (alarm) => {
-			const first = await wake(currentLocalStep, server);
+			const first = await wake(casStorageLocalStep, server);
 			const status = await controlLocalStepStatus(env);
 
 			expect({ first, status }).toStrictEqual({
 				first: { kind: 'incomplete', projected: 0, progressed: true },
 				status: {
 					current: currentLocalStep,
-					required: currentLocalStep,
+					required: casStorageLocalStep,
 					ready: 0,
 					pending: 1,
 					working: 1,
@@ -366,7 +371,7 @@ describe('local-step work on the alarm', () => {
 			}).toStrictEqual({
 				finished: {
 					current: currentLocalStep,
-					required: currentLocalStep,
+					required: casStorageLocalStep,
 					ready: 1,
 					pending: 0,
 					working: 0,
@@ -376,7 +381,7 @@ describe('local-step work on the alarm', () => {
 					unwokenSample: [],
 					workingSample: []
 				},
-				row: { step: localStep(5), schema: currentLocalSchemaVersion },
+				row: { step: casStorageLocalStep, schema: currentLocalSchemaVersion },
 				pending: false
 			});
 		}, server);
@@ -673,7 +678,7 @@ describe('local-step work on the alarm', () => {
 			await recordTransition('cache-identity', 'complete');
 
 			const value = await withRecordedAlarm(async (alarm) => {
-				const first = await wake(currentLocalStep);
+				const first = await wake(casStorageLocalStep);
 				let alarms = 0;
 
 				// Each alarm arrives thirty seconds after the previous one, as it would
@@ -698,7 +703,7 @@ describe('local-step work on the alarm', () => {
 				outlastsStallWindow: true,
 				pending: false,
 				row: {
-					localStep: currentLocalStep,
+					localStep: casStorageLocalStep,
 					attemptedAt: undefined,
 					progressedAt: at(finishedAt),
 					error: undefined

@@ -29,6 +29,7 @@ import {
 	currentNarObjectKey,
 	currentServer,
 	defaultCache,
+	drainAttestationInheritance,
 	driveToCompletion,
 	namedCache,
 	narBytes,
@@ -45,7 +46,12 @@ import {
 	withoutAlarmArming
 } from '../test-support.ts';
 
+import { AttestationCasService } from './attestation-cas-service.ts';
+import { AttestationsService } from './attestations-service.ts';
 import { teardownEntryPrefix } from './cache-admin-service.ts';
+import { CacheRegistrationService } from './cache-registration-service.ts';
+import { DeletionQueueService } from './deletion-queue-service.ts';
+import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 const buildsCache = namedCache('builds');
 const otherCache = namedCache('other');
@@ -377,53 +383,110 @@ describe('cache teardown', () => {
 		});
 	});
 
-	it('clears only the generations a chunk actually retired', async () => {
+	it('preserves queued generations outside a retirement chunk', async () => {
 		await useTestServer('teardown-generations');
-		const { token } = await bootstrap({
-			caches: [{ scope: buildsCache }, { scope: otherCache }]
-		});
-		const path = buildMetadata('a');
+		await withoutAlarmArming(async () => {
+			const { token } = await bootstrap({
+				caches: [{ scope: buildsCache }, { scope: otherCache }]
+			});
+			const path = buildMetadata('a');
 
-		// A delete whose queued cleanup never flushed, then a recommit: the queue
-		// holds two generations of the one path. A cap of one splits them across
-		// drain chunks, so the first chunk's clear must remove only the generation
-		// it retired; wiping the path's other row would drop the second
-		// generation's edge retirement and credits on the floor.
-		await pushPath(token, path, buildsCache);
-		await queueUnflushedNarInfoDeletion({
-			storePathHash: path.storePathHash,
-			cache: buildsCache
-		});
-		await pushPath(token, path, buildsCache);
+			await pushPath(token, path, buildsCache);
+			await queueUnflushedNarInfoDeletion({
+				storePathHash: path.storePathHash,
+				cache: buildsCache
+			});
+			await pushPath(token, path, buildsCache);
 
-		await currentServer().runCacheTeardown(buildsCache, origin);
+			const first = {
+				cache: buildsCache,
+				storePathHash: path.storePathHash,
+				narHash: path.narHash,
+				generation: 0
+			};
+			const second = { ...first, generation: 1 };
+			expect({
+				generation: await narInfoGeneration(path.storePathHash),
+				queued: await narInfoDeletionRows()
+			}).toStrictEqual({ generation: 1, queued: [first] });
 
-		await driveToCompletion(
-			() => currentServer().resumeCacheTeardown(1),
-			async () => (await teardownPending(buildsCache)) === undefined,
-			3
-		);
+			await currentServer().runCacheTeardown(buildsCache, origin);
+			const queued = await narInfoDeletionRows();
+			expect(
+				queued.toSorted((left, right) => left.generation - right.generation)
+			).toStrictEqual([first, second]);
 
-		const usage = await tenantUsageRow();
+			const firstChunk = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const context = instance.context;
+					const cache = context.cacheRepository.lastDeleted(buildsCache);
+					if (cache === undefined) {
+						throw new Error('The deleted cache is missing');
+					}
+					const objects = new NarInfoObjectsService(context);
+					const cas = new AttestationCasService(context);
+					const attestations = new AttestationsService(
+						context,
+						new CacheRegistrationService(context),
+						cas,
+						objects
+					);
+					const deletion = new DeletionQueueService(
+						context,
+						cas,
+						attestations,
+						objects
+					);
+					await context.criticalSection(() =>
+						deletion.retireTornDownNarInfos(
+							cache,
+							[
+								{
+									storePathHash: first.storePathHash,
+									narHash: first.narHash,
+									generation: narInfoGenerationSchema.parse(first.generation)
+								}
+							],
+							origin,
+							false
+						)
+					);
+					return context.db
+						.select({ generation: schema.narInfoDeletions.generation })
+						.from(schema.narInfoDeletions)
+						.all();
+				}
+			);
+			expect(firstChunk).toStrictEqual([{ generation: 1 }]);
 
-		expect({
-			queued: await narInfoDeletionRows(),
-			edges: await blobReferenceRows(),
-			presence: await tenantBlobRows(),
-			pending: await teardownPending(buildsCache),
-			object: await isNarInfoObjectPresent(path.storePathHash, buildsCache),
-			usage: {
-				bytes: usage?.bytes,
-				narinfos: usage?.narinfos,
-				blobs: usage?.blobs
-			}
-		}).toStrictEqual({
-			queued: [],
-			edges: [],
-			presence: [],
-			pending: undefined,
-			object: false,
-			usage: { bytes: 0, narinfos: 0, blobs: 0 }
+			await driveToCompletion(
+				() => currentServer().resumeCacheTeardown(1),
+				async () => (await teardownPending(buildsCache)) === undefined,
+				2
+			);
+
+			const usage = await tenantUsageRow();
+
+			expect({
+				queued: await narInfoDeletionRows(),
+				edges: await blobReferenceRows(),
+				presence: await tenantBlobRows(),
+				pending: await teardownPending(buildsCache),
+				object: await isNarInfoObjectPresent(path.storePathHash, buildsCache),
+				usage: {
+					bytes: usage?.bytes,
+					narinfos: usage?.narinfos,
+					blobs: usage?.blobs
+				}
+			}).toStrictEqual({
+				queued: [],
+				edges: [],
+				presence: [],
+				pending: undefined,
+				object: false,
+				usage: { bytes: 0, narinfos: 0, blobs: 0 }
+			});
 		});
 	});
 
@@ -517,35 +580,51 @@ describe('cache teardown', () => {
 
 	it('keeps a path recommitted above a queued retirement generation', async () => {
 		await useTestServer('teardown-fence');
-		const { token } = await bootstrap({
-			caches: [{ scope: buildsCache }, { scope: otherCache }]
-		});
-		const path = buildMetadata('a');
+		await withoutAlarmArming(async () => {
+			const { token } = await bootstrap({
+				caches: [{ scope: buildsCache }, { scope: otherCache }]
+			});
+			const path = buildMetadata('a');
 
-		await pushPath(token, path);
+			await pushPath(token, path);
 
-		// Model the state a teardown leaves for one path: its row is gone and its
-		// retirement is queued at the committed generation. The recommit then lands a
-		// fresh row at a higher generation while that retirement is still queued.
-		await queueUnflushedNarInfoDeletion({ storePathHash: path.storePathHash });
-		await pushPath(token, path);
+			await queueUnflushedNarInfoDeletion({
+				storePathHash: path.storePathHash
+			});
+			await pushPath(token, path);
 
-		const recommittedGeneration = await narInfoGeneration(path.storePathHash);
+			const recommittedGeneration = await narInfoGeneration(path.storePathHash);
+			expect({
+				generation: recommittedGeneration,
+				queued: await narInfoDeletionRows()
+			}).toStrictEqual({
+				generation: 1,
+				queued: [
+					{
+						cache: defaultCache(),
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						generation: 0
+					}
+				]
+			});
+			await drainAttestationInheritance();
 
-		const response = await authorisedFetch('/gc', token, { method: 'POST' });
+			const response = await authorisedFetch('/gc', token, { method: 'POST' });
 
-		expect({
-			status: response.status,
-			recommittedGeneration,
-			generation: await narInfoGeneration(path.storePathHash),
-			object: await isNarInfoObjectPresent(path.storePathHash),
-			queued: await narInfoDeletionRows()
-		}).toStrictEqual({
-			status: StatusCodes.OK,
-			recommittedGeneration: 1,
-			generation: 1,
-			object: true,
-			queued: []
+			expect({
+				status: response.status,
+				recommittedGeneration,
+				generation: await narInfoGeneration(path.storePathHash),
+				object: await isNarInfoObjectPresent(path.storePathHash),
+				queued: await narInfoDeletionRows()
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				recommittedGeneration: 1,
+				generation: 1,
+				object: true,
+				queued: []
+			});
 		});
 	});
 

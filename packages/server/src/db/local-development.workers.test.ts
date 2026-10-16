@@ -114,6 +114,31 @@ describe('local development bootstrap', () => {
 		});
 	});
 
+	it('reads deployment states once per bootstrap check', async () => {
+		const query = vi.spyOn(database, 'query');
+		try {
+			await bootstrapLocalDevelopment(database, applyMigrations);
+			expect({
+				stateReads: query.mock.calls.filter(
+					([statement]) =>
+						statement.includes('FROM deployment_transition') ||
+						statement.includes('FROM deployment_phase')
+				).length,
+				transitions: await transitions()
+			}).toStrictEqual({
+				stateReads: 2,
+				transitions: transitionIds.toSorted(byCodeUnit).map((id) => ({
+					id,
+					state: 'complete',
+					updated_at: now,
+					contracted_at: now
+				}))
+			});
+		} finally {
+			query.mockRestore();
+		}
+	});
+
 	it('refuses populated control state before either database applies migrations', async () => {
 		const binding = testControlDatabase();
 		const control: LocalDevelopmentDatabase = {
@@ -180,6 +205,36 @@ describe('local development bootstrap', () => {
 			tenants: await database.query('SELECT id FROM tenant')
 		}).toStrictEqual({ transitions: before, tenants: [{ id: fixtureTenant }] });
 	});
+
+	it.each([
+		['nar_capture_state', 0],
+		['nar_capture_state', 1],
+		['listing_adoption_capture_state', 0],
+		['listing_adoption_capture_state', 1]
+	])(
+		'refuses %s history with prune floor %s before applying migrations',
+		async (table, prunedThrough) => {
+			await env.CUPBOARD_DB.prepare(
+				`UPDATE ${table} SET latest = 1, pruned_through = ? WHERE id = 1`
+			)
+				.bind(prunedThrough)
+				.run();
+			const before = await database.query(`SELECT * FROM ${table}`);
+			const migrate = vi.fn(applyMigrations);
+			await expect(
+				bootstrapLocalDevelopment(database, migrate)
+			).rejects.toStrictEqual(new LocalDevelopmentBootstrapRefusedError());
+			expect({
+				migrationCalls: migrate.mock.calls,
+				capture: await database.query(`SELECT * FROM ${table}`),
+				transitions: await transitions()
+			}).toStrictEqual({
+				migrationCalls: [],
+				capture: before,
+				transitions: []
+			});
+		}
+	);
 
 	it.each([
 		[

@@ -1,11 +1,23 @@
+import { createHash } from 'node:crypto';
+
 import {
 	type NarInfoOffer,
 	offerFromNarInfo
 } from '@cupboard/nix-store/narinfo-reader';
-import { type StorePathString } from '@cupboard/nix-store/scalars';
+import {
+	type StorePathHash,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
+	cacheIntersectionCapability,
+	cacheIntersectionMaxHashes,
+	cacheIntersectionMaxRequestBytes,
+	cacheIntersectionMaxResponseBytes,
+	cacheIntersectionRequestSchema,
+	type CacheIntersectionResponse,
+	cacheIntersectionResponseSchema,
 	cacheMetadataCapability,
 	cacheMetadataCapabilityHeader,
 	type CacheMetadataError,
@@ -29,6 +41,12 @@ import {
 	readResponseText
 } from '@cupboard/shared/response-body';
 import { fetchWithProbeDeadline } from '@cupboard/shared/timeout';
+
+import type {
+	MetadataProbeInput,
+	MetadataProbeObserver,
+	MetadataProbeResult
+} from './metadata-diagnostics.ts';
 
 const narInfoConcurrency = 6;
 const utf8 = new TextEncoder();
@@ -141,11 +159,12 @@ export class CachedClosureMetadataTooLargeError extends Error {
 	constructor(
 		source: URL,
 		public readonly storePaths: readonly StorePathString[],
-		public readonly code: MetadataSizeErrorCode
+		public readonly code: MetadataSizeErrorCode,
+		maximumRequestBytes = cacheMetadataMaxRequestBytes
 	) {
 		const reason =
 			code === cacheMetadataErrorCodes.requestTooLarge
-				? `The request exceeds ${String(cacheMetadataMaxRequestBytes)} bytes. Reduce the number of store paths per metadata page before retrying.`
+				? `The request exceeds ${String(maximumRequestBytes)} bytes. Reduce the number of store paths per metadata page before retrying.`
 				: `A narinfo exceeds ${String(cacheMetadataMaxNarInfoBytes)} bytes. Smaller pages cannot resolve an oversized metadata entry. Ask the cache operator to inspect these paths.`;
 		super(
 			`The cache at ${sourceLabel(source)} rejected metadata for ${storePaths.join(', ')}. ${reason}`
@@ -208,7 +227,11 @@ async function sourceOffer(
 	fetcher: typeof fetch,
 	signal?: AbortSignal,
 	shouldDiscoverCapability = false
-): Promise<{ readonly bulk: boolean; readonly offer?: CachedClosureOffer }> {
+): Promise<{
+	readonly bulk: boolean;
+	readonly intersection: boolean;
+	readonly offer?: CachedClosureOffer;
+}> {
 	const url = `${canonicalHref(source.url)}/${StorePath.hash(storePath)}.narinfo`;
 	const document = await fetchWithProbeDeadline(
 		fetcher,
@@ -230,7 +253,14 @@ async function sourceOffer(
 				// This response has no scope version. Read the path through the probe
 				// before using its references.
 				await discardResponseBody(response);
-				return { bulk: true };
+				return {
+					bulk: true,
+					intersection: (
+						response.headers.get(cacheMetadataCapabilityHeader) ?? ''
+					)
+						.split(/[\s,]+/u)
+						.includes(cacheIntersectionCapability)
+				};
 			}
 			if (response.status === 404) {
 				await discardResponseBody(response);
@@ -256,6 +286,7 @@ async function sourceOffer(
 	);
 	return {
 		bulk: document.bulk,
+		intersection: 'intersection' in document && document.intersection === true,
 		...(document.body !== undefined && {
 			offer: parseSourceOffer(source, storePath, document.body)
 		})
@@ -303,26 +334,65 @@ async function readMetadataJson(
 }
 
 export class CachedClosureReader {
-	#mode: 'bulk' | 'legacy' | undefined;
+	#mode: 'intersection' | 'bulk' | 'legacy' | undefined;
 	#scopeVersion: string | undefined;
 
 	constructor(
 		readonly source: CachedClosureSource,
 		readonly fetcher: typeof fetch,
 		readonly signal?: AbortSignal,
-		readonly onProgress?: (progress: CachedClosureProgress) => void
+		readonly onProgress?: (progress: CachedClosureProgress) => void,
+		readonly observer?: MetadataProbeObserver
 	) {}
+
+	async #observe<T>(
+		input: MetadataProbeInput,
+		operation: (fetcher: typeof fetch) => Promise<MetadataProbeResult<T>>
+	): Promise<T> {
+		if (this.observer !== undefined) {
+			return this.observer.run(input, operation);
+		}
+		const result = await operation(this.fetcher);
+		return result.value;
+	}
+
+	async #sourceOffer(
+		storePath: StorePathString,
+		shouldDiscover = false
+	): Promise<Awaited<ReturnType<typeof sourceOffer>>> {
+		return this.#observe(
+			{
+				operation: shouldDiscover ? 'discovery' : 'legacy',
+				inputs: [storePath]
+			},
+			async (fetcher) => {
+				const value = await sourceOffer(
+					this.source,
+					storePath,
+					fetcher,
+					this.signal,
+					shouldDiscover
+				);
+				return {
+					value,
+					outcome: value.bulk
+						? { status: 'capability', checked: 0, found: 0, missing: 0 }
+						: {
+								status: 'complete',
+								checked: 1,
+								found: value.offer === undefined ? 0 : 1,
+								missing: value.offer === undefined ? 1 : 0
+							}
+				};
+			}
+		);
+	}
 
 	async #legacy(
 		paths: readonly StorePathString[]
 	): Promise<readonly (CachedClosureOffer | undefined)[]> {
 		return mapWithConcurrency(paths, narInfoConcurrency, async (storePath) => {
-			const result = await sourceOffer(
-				this.source,
-				storePath,
-				this.fetcher,
-				this.signal
-			);
+			const result = await this.#sourceOffer(storePath);
 			this.onProgress?.({
 				mode: 'legacy',
 				checked: 1,
@@ -339,8 +409,9 @@ export class CachedClosureReader {
 		let remaining = paths;
 		while (remaining.length > 0) {
 			let response: CacheMetadataResponse;
+			let pageOffers: readonly (CachedClosureOffer | undefined)[];
 			try {
-				response = await this.#request(remaining);
+				({ response, pageOffers } = await this.#metadataPage(remaining));
 			} catch (error) {
 				if (
 					!(error instanceof CachedClosureMetadataBudgetError) ||
@@ -355,31 +426,7 @@ export class CachedClosureReader {
 					...(await this.#bulkPage(remaining.slice(midpoint)))
 				];
 			}
-			if (
-				this.#scopeVersion !== undefined &&
-				response.scopeVersion !== this.#scopeVersion
-			) {
-				throw new CachedClosureSourceChangedError(this.source.url);
-			}
-			this.#scopeVersion ??= response.scopeVersion;
-			if (
-				response.entries.some(
-					(entry, index) => entry.storePath !== remaining[index]
-				) ||
-				(response.nextIndex === undefined
-					? response.entries.length !== remaining.length
-					: response.nextIndex >= remaining.length)
-			) {
-				throw new CachedClosureSourceInvalidError(
-					this.source.url,
-					'the metadata response does not match the requested prefix'
-				);
-			}
-			const pageOffers = response.entries.map((entry) =>
-				entry.status === 'missing'
-					? undefined
-					: parseSourceOffer(this.source, entry.storePath, entry.narinfo)
-			);
+
 			offers.push(...pageOffers);
 			this.onProgress?.({
 				mode: 'bulk',
@@ -394,8 +441,57 @@ export class CachedClosureReader {
 		return offers;
 	}
 
+	async #metadataPage(paths: readonly StorePathString[]): Promise<{
+		response: CacheMetadataResponse;
+		pageOffers: readonly (CachedClosureOffer | undefined)[];
+	}> {
+		return this.#observe(
+			{ operation: 'metadata', inputs: paths },
+			async (fetcher) => {
+				const response = await this.#request(paths, fetcher);
+				if (
+					this.#scopeVersion !== undefined &&
+					response.scopeVersion !== this.#scopeVersion
+				) {
+					throw new CachedClosureSourceChangedError(this.source.url);
+				}
+				this.#scopeVersion ??= response.scopeVersion;
+				if (
+					response.entries.some(
+						(entry, index) => entry.storePath !== paths[index]
+					) ||
+					(response.nextIndex === undefined
+						? response.entries.length !== paths.length
+						: response.nextIndex >= paths.length)
+				) {
+					throw new CachedClosureSourceInvalidError(
+						this.source.url,
+						'the metadata response does not match the requested prefix'
+					);
+				}
+				const pageOffers = response.entries.map((entry) =>
+					entry.status === 'missing'
+						? undefined
+						: parseSourceOffer(this.source, entry.storePath, entry.narinfo)
+				);
+				const found = pageOffers.filter((offer) => offer !== undefined).length;
+				return {
+					value: { response, pageOffers },
+					outcome: {
+						status:
+							response.nextIndex === undefined ? 'complete' : 'continuation',
+						checked: pageOffers.length,
+						found,
+						missing: pageOffers.length - found
+					}
+				};
+			}
+		);
+	}
+
 	async #request(
-		paths: readonly StorePathString[]
+		paths: readonly StorePathString[],
+		fetcher: typeof fetch
 	): Promise<CacheMetadataResponse> {
 		const request = cacheMetadataRequestSchema.parse({
 			storePaths: paths,
@@ -411,7 +507,7 @@ export class CachedClosureReader {
 			);
 		}
 		return fetchWithProbeDeadline(
-			this.fetcher,
+			fetcher,
 			`${canonicalHref(this.source.url)}/api/v1/path-info`,
 			{
 				method: 'POST',
@@ -486,10 +582,11 @@ export class CachedClosureReader {
 		return parsed.data;
 	}
 
-	async #readResponse(
+	async #checkResponse(
 		response: Response,
-		paths: readonly StorePathString[]
-	): Promise<CacheMetadataResponse> {
+		paths: readonly StorePathString[],
+		maximumRequestBytes = cacheMetadataMaxRequestBytes
+	): Promise<void> {
 		const first = paths[0];
 		if (first === undefined) {
 			throw new CachedClosureSourceInvalidError(
@@ -497,34 +594,43 @@ export class CachedClosureReader {
 				'a metadata request must contain a store path'
 			);
 		}
-		if (!response.ok) {
-			const errorBody = await this.#readError(response, paths);
-			if (
-				response.status === 409 ||
-				errorBody?.code === cacheMetadataErrorCodes.scopeChanged
-			) {
-				throw new CachedClosureSourceChangedError(this.source.url);
-			}
-			if (response.status === 413) {
-				if (errorBody?.code === cacheMetadataErrorCodes.candidateBudget) {
-					throw new CachedClosureMetadataBudgetError(this.source.url, first);
-				}
-				if (
-					errorBody?.code === cacheMetadataErrorCodes.requestTooLarge ||
-					errorBody?.code === cacheMetadataErrorCodes.narInfoTooLarge
-				) {
-					throw new CachedClosureMetadataTooLargeError(
-						this.source.url,
-						errorBody.storePath === undefined ? paths : [errorBody.storePath],
-						errorBody.code
-					);
-				}
-			}
-			throw new CachedClosureMetadataUnavailableError(this.source.url, paths, {
-				status: response.status,
-				...(errorBody && { error: errorBody })
-			});
+		if (response.ok) {
+			return;
 		}
+		const errorBody = await this.#readError(response, paths);
+		if (
+			response.status === 409 ||
+			errorBody?.code === cacheMetadataErrorCodes.scopeChanged
+		) {
+			throw new CachedClosureSourceChangedError(this.source.url);
+		}
+		if (response.status === 413) {
+			if (errorBody?.code === cacheMetadataErrorCodes.candidateBudget) {
+				throw new CachedClosureMetadataBudgetError(this.source.url, first);
+			}
+			if (
+				errorBody?.code === cacheMetadataErrorCodes.requestTooLarge ||
+				errorBody?.code === cacheMetadataErrorCodes.narInfoTooLarge
+			) {
+				throw new CachedClosureMetadataTooLargeError(
+					this.source.url,
+					errorBody.storePath === undefined ? paths : [errorBody.storePath],
+					errorBody.code,
+					maximumRequestBytes
+				);
+			}
+		}
+		throw new CachedClosureMetadataUnavailableError(this.source.url, paths, {
+			status: response.status,
+			...(errorBody && { error: errorBody })
+		});
+	}
+
+	async #readResponse(
+		response: Response,
+		paths: readonly StorePathString[]
+	): Promise<CacheMetadataResponse> {
+		await this.#checkResponse(response, paths);
 		try {
 			return cacheMetadataResponseSchema.parse(
 				await readMetadataJson(response, {
@@ -541,34 +647,166 @@ export class CachedClosureReader {
 			);
 		}
 	}
-	async offers(
+	async #intersectionRequest(
+		hashes: readonly StorePathHash[],
+		paths: readonly StorePathString[]
+	): Promise<CacheIntersectionResponse> {
+		return this.#observe(
+			{ operation: 'intersection', inputs: hashes },
+			async (fetcher) => {
+				const value = await this.#readIntersectionRequest(
+					hashes,
+					paths,
+					fetcher
+				);
+				return {
+					value,
+					outcome: {
+						status: 'complete',
+						checked: hashes.length,
+						found: 0,
+						missing: hashes.length - value.matchingHashes.length,
+						possibleMatches: value.matchingHashes.length
+					}
+				};
+			}
+		);
+	}
+
+	async #readIntersectionRequest(
+		hashes: readonly StorePathHash[],
+		paths: readonly StorePathString[],
+		fetcher: typeof fetch
+	): Promise<CacheIntersectionResponse> {
+		const request = cacheIntersectionRequestSchema.parse({
+			operation: 'intersection',
+			storePathHashes: hashes,
+			...(this.#scopeVersion !== undefined && {
+				expectedScopeVersion: this.#scopeVersion
+			})
+		});
+		const body = JSON.stringify(request);
+		if (utf8.encode(body).byteLength > cacheIntersectionMaxRequestBytes) {
+			throw new CachedClosureSourceInvalidError(
+				this.source.url,
+				'the intersection request exceeds the byte limit'
+			);
+		}
+		return fetchWithProbeDeadline(
+			fetcher,
+			`${canonicalHref(this.source.url)}/api/v1/path-info`,
+			{
+				method: 'POST',
+				headers: {
+					accept: 'application/json',
+					'content-type': 'application/json',
+					...(this.source.credential && basicAuthHeader(this.source.credential))
+				},
+				body,
+				...(this.signal && { signal: this.signal })
+			},
+			async (response) => {
+				await this.#checkResponse(
+					response,
+					paths,
+					cacheIntersectionMaxRequestBytes
+				);
+				let result: CacheIntersectionResponse;
+				try {
+					const value = await readMetadataJson(response, {
+						description: `cache intersection from ${sourceLabel(this.source.url)}`,
+						maximumBytes: cacheIntersectionMaxResponseBytes,
+						...(this.signal && { signal: this.signal })
+					});
+					if (
+						typeof value === 'object' &&
+						value !== null &&
+						'matchingHashes' in value &&
+						Array.isArray(value.matchingHashes) &&
+						value.matchingHashes.length > cacheIntersectionMaxHashes
+					) {
+						throw new CachedClosureSourceInvalidError(
+							this.source.url,
+							`the intersection response exceeds the ${String(cacheIntersectionMaxHashes)}-hash limit`
+						);
+					}
+					result = cacheIntersectionResponseSchema.parse(value);
+				} catch (error) {
+					this.signal?.throwIfAborted();
+					if (error instanceof CachedClosureSourceInvalidError) {
+						throw error;
+					}
+					throw new CachedClosureSourceInvalidError(
+						this.source.url,
+						`the intersection response is invalid: ${String(error)}`
+					);
+				}
+				const input = new Set(hashes);
+				const fingerprint = createHash('sha256')
+					.update(JSON.stringify(hashes))
+					.digest('hex');
+				if (
+					result.checked !== hashes.length ||
+					result.inputFingerprint !== fingerprint ||
+					result.matchingHashes.some((hash) => !input.has(hash))
+				) {
+					throw new CachedClosureSourceInvalidError(
+						this.source.url,
+						'the intersection response does not account for the complete input'
+					);
+				}
+				if (
+					this.#scopeVersion !== undefined &&
+					result.scopeVersion !== this.#scopeVersion
+				) {
+					throw new CachedClosureSourceChangedError(this.source.url);
+				}
+				this.#scopeVersion ??= result.scopeVersion;
+				return result;
+			}
+		);
+	}
+
+	async #intersectionOffers(
 		paths: readonly StorePathString[]
 	): Promise<readonly (CachedClosureOffer | undefined)[]> {
-		const first = paths[0];
+		const hashes = [...new Set(paths.map((path) => StorePath.hash(path)))];
+		const pages = chunk(hashes, cacheIntersectionMaxHashes);
+		const matches = new Set<StorePathHash>();
+		const first = pages.shift();
 		if (first === undefined) {
 			return [];
 		}
-		if (this.#mode === undefined) {
-			const discovery = await sourceOffer(
-				this.source,
-				first,
-				this.fetcher,
-				this.signal,
-				true
-			);
-			this.#mode = discovery.bulk ? 'bulk' : 'legacy';
-			if (!discovery.bulk) {
-				this.onProgress?.({
-					mode: 'legacy',
-					checked: 1,
-					found: discovery.offer === undefined ? 0 : 1
-				});
-				return [discovery.offer, ...(await this.#legacy(paths.slice(1)))];
+		const initial = await this.#intersectionRequest(first, paths);
+		for (const hash of initial.matchingHashes) {
+			matches.add(hash);
+		}
+		const results = await mapWithConcurrency(
+			pages,
+			narInfoConcurrency,
+			(page) => this.#intersectionRequest(page, paths)
+		);
+		for (const result of results) {
+			for (const hash of result.matchingHashes) {
+				matches.add(hash);
 			}
 		}
-		if (this.#mode === 'legacy') {
-			return this.#legacy(paths);
-		}
+		const possible = paths.filter((path) => matches.has(StorePath.hash(path)));
+		this.onProgress?.({
+			mode: 'bulk',
+			checked: paths.length - possible.length,
+			found: 0
+		});
+		const offers = await this.#bulkOffers(possible);
+		let index = 0;
+		return paths.map((path) =>
+			matches.has(StorePath.hash(path)) ? offers[index++] : undefined
+		);
+	}
+
+	async #bulkOffers(
+		paths: readonly StorePathString[]
+	): Promise<readonly (CachedClosureOffer | undefined)[]> {
 		const pages = chunk(paths, cacheMetadataMaxPaths);
 		const initial: (CachedClosureOffer | undefined)[] = [];
 		if (this.#scopeVersion === undefined) {
@@ -583,5 +821,37 @@ export class CachedClosureReader {
 			(page) => this.#bulkPage(page)
 		);
 		return [...initial, ...results.flat()];
+	}
+
+	async offers(
+		paths: readonly StorePathString[]
+	): Promise<readonly (CachedClosureOffer | undefined)[]> {
+		const first = paths[0];
+		if (first === undefined) {
+			return [];
+		}
+		if (this.#mode === undefined) {
+			const discovery = await this.#sourceOffer(first, true);
+			this.#mode = discovery.intersection
+				? 'intersection'
+				: discovery.bulk
+					? 'bulk'
+					: 'legacy';
+			if (!discovery.bulk) {
+				this.onProgress?.({
+					mode: 'legacy',
+					checked: 1,
+					found: discovery.offer === undefined ? 0 : 1
+				});
+				return [discovery.offer, ...(await this.#legacy(paths.slice(1)))];
+			}
+		}
+		if (this.#mode === 'legacy') {
+			return this.#legacy(paths);
+		}
+		if (this.#mode === 'intersection') {
+			return this.#intersectionOffers(paths);
+		}
+		return this.#bulkOffers(paths);
 	}
 }

@@ -48,8 +48,8 @@ const remoteStoreDockerfile = new URL(
 );
 
 const checkoutAction = 'actions/checkout';
-const nixInstaller = 'nixbuild/nix-quick-install-action';
-const nixClientVersion = '2.34.7';
+const nixInstaller = 'cachix/install-nix-action';
+const nixClientVersion = '2.35.2';
 const cloudGuardStep = 'Require GitHub Cloud workflow identity';
 const reservationStep = 'Reserve the cupboard workflow checkout';
 const workflowCheckoutPath = '.cupboard-workflow';
@@ -1849,23 +1849,44 @@ describe('pinned Nix client', () => {
 			readFile(remoteStoreDockerfile, 'utf8')
 		]);
 		const installs = workflows.flatMap((workflow) =>
-			stepsUsing(workflow, nixInstaller).map(({ step }) => step.with)
+			stepsUsing(workflow, nixInstaller).map(({ job, step }) => ({
+				job,
+				inputs: step.with
+			}))
 		);
 
 		expect({
 			installs,
+			installerCount: installs.length,
 			// The composite action is not a workflow, so its pinned step is read
 			// from the file.
-			prepareInstalls: action.includes(`nix_version: ${nixClientVersion}`),
+			prepareInstalls: action.includes(
+				`install_url: https://releases.nixos.org/nix/nix-${nixClientVersion}/install`
+			),
 			otherInstallers: workflows.flatMap((workflow) =>
 				allSteps(workflow)
 					.map(({ step }) => step.uses)
-					.filter((uses) => uses?.includes('nix-installer-action'))
+					.filter((uses) => {
+						if (uses === undefined) {
+							return false;
+						}
+						return (
+							uses.includes('nix-installer-action') ||
+							uses.includes('nix-quick-install-action')
+						);
+					})
 			),
 			// The e2e daemon image is the matching release of the same series.
-			remoteDaemon: dockerfile.includes('FROM nixos/nix:2.34.8@sha256:')
+			remoteDaemon: dockerfile.includes('FROM nixos/nix:2.35.2@sha256:')
 		}).toStrictEqual({
-			installs: installs.map(() => ({ nix_version: nixClientVersion })),
+			installs: installs.map(({ job }) => ({
+				job,
+				inputs: {
+					install_url: `https://releases.nixos.org/nix/nix-${nixClientVersion}/install`,
+					...(job === 'e2e' && { install_options: '--no-daemon' })
+				}
+			})),
+			installerCount: 13,
 			prepareInstalls: true,
 			otherInstallers: [],
 			remoteDaemon: true

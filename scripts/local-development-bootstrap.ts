@@ -16,6 +16,10 @@ import { withCleanup } from '@cupboard/shared/cleanup';
 import { z } from 'zod';
 
 import {
+	type LocalDevelopmentBinding,
+	LocalDevelopmentSession
+} from '../packages/server/scripts/local-development-session.ts';
+import {
 	bootstrapLocalDevelopmentDatabases,
 	type LocalDevelopmentDatabase
 } from '../packages/server/src/db/local-development.ts';
@@ -53,13 +57,15 @@ const queryResults = z.array(commandResult);
 export class LocalWranglerDatabase implements LocalDevelopmentDatabase {
 	constructor(
 		private readonly persistTo?: string,
-		readonly binding = 'CUPBOARD_DB'
+		readonly binding: LocalDevelopmentBinding = 'CUPBOARD_DB',
+		private readonly session?: LocalDevelopmentSession
 	) {}
 
 	private async wrangler(
 		command: readonly string[],
 		configuration = 'wrangler.jsonc'
 	): Promise<string> {
+		await this.session?.dispose();
 		const commandArguments = [
 			path.join(serverDirectory, 'node_modules/wrangler/bin/wrangler.js'),
 			'd1',
@@ -84,6 +90,9 @@ export class LocalWranglerDatabase implements LocalDevelopmentDatabase {
 	}
 
 	async query(sql: string): Promise<readonly unknown[]> {
+		if (this.session !== undefined) {
+			return this.session.query(this.binding, sql);
+		}
 		const stdout = await this.wrangler(['execute', '--command', sql, '--json']);
 		return queryResults
 			.parse(JSON.parse(stdout))
@@ -91,6 +100,10 @@ export class LocalWranglerDatabase implements LocalDevelopmentDatabase {
 	}
 
 	async execute(sql: string): Promise<void> {
+		if (this.session !== undefined) {
+			await this.session.execute(this.binding, sql);
+			return;
+		}
 		await this.query(sql);
 	}
 
@@ -155,25 +168,40 @@ export class LocalWranglerDatabase implements LocalDevelopmentDatabase {
 }
 
 export async function setupLocalDatabases(persistTo?: string): Promise<void> {
-	const shared = new LocalWranglerDatabase(persistTo);
-	const control = new LocalWranglerDatabase(persistTo, 'CONTROL_DB');
-	await bootstrapLocalDevelopmentDatabases(
-		[
-			{
-				database: shared,
-				applyMigrations: () => shared.applyExpandMigrations()
-			},
-			{ database: control, applyMigrations: () => control.applyMigrations() }
-		],
-		async () => {
-			await control.execute(
-				"INSERT INTO control_database_ready (id, source_database_id, state) VALUES ('current', 'local-shared', 'ready') ON CONFLICT(id) DO NOTHING"
-			);
-			await shared.execute(
-				"INSERT INTO control_database_split (id, target_database_id, frozen_at, copied_at) VALUES ('current', 'local-control', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT(id) DO NOTHING"
-			);
-			await shared.applyMigrations();
-		}
+	const directory = path.resolve(
+		serverDirectory,
+		persistTo ?? '.wrangler/state'
+	);
+	const session = new LocalDevelopmentSession(
+		path.join(serverDirectory, 'wrangler.jsonc'),
+		directory
+	);
+	const shared = new LocalWranglerDatabase(directory, 'CUPBOARD_DB', session);
+	const control = new LocalWranglerDatabase(directory, 'CONTROL_DB', session);
+	await withCleanup(
+		() =>
+			bootstrapLocalDevelopmentDatabases(
+				[
+					{
+						database: shared,
+						applyMigrations: () => shared.applyExpandMigrations()
+					},
+					{
+						database: control,
+						applyMigrations: () => control.applyMigrations()
+					}
+				],
+				async () => {
+					await control.execute(
+						"INSERT INTO control_database_ready (id, source_database_id, state) VALUES ('current', 'local-shared', 'ready') ON CONFLICT(id) DO NOTHING"
+					);
+					await shared.execute(
+						"INSERT INTO control_database_split (id, target_database_id, frozen_at, copied_at) VALUES ('current', 'local-control', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT(id) DO NOTHING"
+					);
+					await shared.applyMigrations();
+				}
+			),
+		() => session.dispose()
 	);
 }
 

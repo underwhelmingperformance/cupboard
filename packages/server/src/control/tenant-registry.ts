@@ -31,13 +31,20 @@ import {
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
+import { tenantListRevisionsAbsent } from '../db/attestation-list-retirement.ts';
 import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import {
 	type CacheLifecycleWriteTable,
 	writeCacheLifecycle
 } from '../db/cache-lifecycle-write.ts';
+import {
+	type CasReferenceSet,
+	readCasReferenceSet
+} from '../db/cas-reference-set.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { ListingAdoptionParentStore } from '../db/listing-adoption-parents.ts';
+import { tenantNamespaceCleanupAllowed } from '../db/tenant-namespace-cleanup.ts';
 import {
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
@@ -175,6 +182,7 @@ export async function ensureTenant(
 	now: IsoTimestamp
 ): Promise<TenantSummary> {
 	const verifier = await readVerifierColumnsForInsert(body.read);
+	const references = await readCasReferenceSet(database);
 
 	// The usage row carries the quota and the CHECK that enforces it, so a tenant
 	// row without one accepts writes that nothing counts or limits. Write the
@@ -186,12 +194,13 @@ export async function ensureTenant(
 
 	if (!isClaimed) {
 		await writeCacheLifecycle(database, async (table) => {
-			const provisioning = provisioningStatements(
+			const provisioning = await provisioningStatements(
 				database,
 				body,
 				verifier,
 				now,
-				table
+				table,
+				references
 			);
 			await database.batch([
 				provisioning.tenant,
@@ -227,12 +236,13 @@ export async function ensureTenant(
 	// configuration is known to match. Only an empty tenant can start at zero.
 	if (isClaimed) {
 		await writeCacheLifecycle(database, async (table) => {
-			const provisioning = provisioningStatements(
+			const provisioning = await provisioningStatements(
 				database,
 				body,
 				verifier,
 				now,
-				table
+				table,
+				references
 			);
 			await database.batch([provisioning.cache, provisioning.usage]);
 		});
@@ -259,13 +269,17 @@ export async function ensureTenant(
  * Every statement leaves a stored row alone, so a repair can run the cache and
  * usage statements again for a tenant that already has its row.
  */
-function provisioningStatements(
+async function provisioningStatements(
 	database: Database,
 	body: TenantCreateBody,
 	verifier: ReadVerifierColumns,
 	now: IsoTimestamp,
-	table: CacheLifecycleWriteTable
+	table: CacheLifecycleWriteTable,
+	references: CasReferenceSet
 ) {
+	const parentsAbsent = await new ListingAdoptionParentStore(
+		database
+	).tenantAbsence(body.id);
 	const identity = cacheIdentityColumns({ kind: 'default' });
 	const tenantFilter = liveTenantFilter(body.id);
 	const cacheKind = sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
@@ -317,7 +331,10 @@ function provisioningStatements(
 		noStoredState(d1Schema.tenantBlob),
 		noStoredState(d1Schema.tenantCasBlob),
 		noStoredState(d1Schema.blobReference),
-		noStoredState(d1Schema.attestationReference)
+		noStoredState(d1Schema.attestationReference),
+		tenantListRevisionsAbsent(database, body.id),
+		parentsAbsent,
+		references.artifactReferencesAbsent(body.id)
 	);
 	const usageRow = database
 		.select({
@@ -800,9 +817,51 @@ async function updateLiveTenant(
 export async function finaliseOffboardedTenant(
 	database: Database,
 	id: TenantId
-): Promise<void> {
-	await writeCacheLifecycle(database, async (table) => {
-		await database.batch([
+): Promise<{ readonly finalised: boolean }> {
+	const references = await readCasReferenceSet(database);
+	const parentsAbsent = await new ListingAdoptionParentStore(
+		database
+	).tenantAbsence(id);
+	const noArtifacts = and(
+		references.artifactReferencesAbsent(id),
+		parentsAbsent,
+		tenantListRevisionsAbsent(database, id)
+	);
+	const namespaceReady = tenantNamespaceCleanupAllowed(database, id);
+	const terminalTenantFilter = and(
+		eq(d1Schema.tenant.id, id),
+		eq(d1Schema.tenant.status, 'offboarded')
+	);
+	const terminalTenant = exists(
+		database
+			.select({ id: d1Schema.tenant.id })
+			.from(d1Schema.tenant)
+			.where(terminalTenantFilter)
+	);
+
+	const tenantFilter = and(
+		eq(d1Schema.tenant.id, id),
+		noArtifacts,
+		namespaceReady
+	);
+	const usageFilter = and(
+		eq(d1Schema.tenantUsage.tenant, id),
+		noArtifacts,
+		terminalTenant
+	);
+	const eligibilityFilter = and(
+		eq(d1Schema.tenantMaintenanceEligibility.tenant, id),
+		noArtifacts,
+		terminalTenant
+	);
+	const credentialFilter = and(
+		eq(d1Schema.tenantCacheReadCredential.tenant, id),
+		noArtifacts,
+		terminalTenant
+	);
+	return writeCacheLifecycle(database, async (table) => {
+		const cacheFilter = and(eq(table.tenant, id), noArtifacts, terminalTenant);
+		const [updated] = await database.batch([
 			database
 				.update(d1Schema.tenant)
 				.set({
@@ -814,20 +873,20 @@ export async function finaliseOffboardedTenant(
 					ownerSubject: '',
 					ownerAudience: ''
 				})
-				.where(eq(d1Schema.tenant.id, id)),
-			database
-				.delete(d1Schema.tenantUsage)
-				.where(eq(d1Schema.tenantUsage.tenant, id)),
+				.where(tenantFilter)
+				.returning({ id: d1Schema.tenant.id }),
+			database.delete(d1Schema.tenantUsage).where(usageFilter),
 			database
 				.delete(d1Schema.tenantMaintenanceEligibility)
-				.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, id)),
+				.where(eligibilityFilter),
 			database
 				.delete(d1Schema.tenantCacheReadCredential)
-				.where(eq(d1Schema.tenantCacheReadCredential.tenant, id)),
+				.where(credentialFilter),
 			// An absent lifecycle row means generation one. Finalisation deletes these
 			// rows only after the tenant drain has removed every reference edge, so
 			// the deletion cannot reauthorise a first-generation edge.
-			database.delete(table).where(eq(table.tenant, id))
+			database.delete(table).where(cacheFilter)
 		]);
+		return { finalised: updated.length > 0 };
 	});
 }

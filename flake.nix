@@ -240,7 +240,7 @@
         let
           pkgs = packageSets.${system};
           cupboard = mkCupboard packageSets.${system};
-          conformanceNix = pkgs.nix.out;
+          conformanceNix = pkgs.nixVersions.nix_2_35.out;
         in
         {
           inherit cupboard;

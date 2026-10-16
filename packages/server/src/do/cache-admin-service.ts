@@ -60,6 +60,8 @@ import {
 } from '../http/http.ts';
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
+import { ArtifactRetentionService } from './artifact-retention-service.ts';
+import { AttestationListTeardownService } from './attestation-list-teardown-service.ts';
 import { drainObjectDeletionPages } from './bulk.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
 import { CacheCreationDefaultsService } from './cache-creation-defaults-service.ts';
@@ -181,30 +183,62 @@ export class CacheAdminService {
 		);
 	}
 
+	private ensureTeardownHeader(
+		cache: ResolvedCache,
+		origin: RequestOrigin | undefined
+	): void {
+		this.context.db
+			.insert(schema.cacheTeardowns)
+			.values({ cacheId: cache.id, ...(origin !== undefined && { origin }) })
+			.onConflictDoNothing()
+			.run();
+		if (origin === undefined) {
+			return;
+		}
+		this.context.db
+			.update(schema.cacheTeardowns)
+			.set({ origin })
+			.where(
+				and(
+					eq(schema.cacheTeardowns.cacheId, cache.id),
+					isNull(schema.cacheTeardowns.origin)
+				)
+			)
+			.run();
+	}
+
 	private durableTeardownCacheId(): CacheId | undefined {
 		return this.context.db
 			.select({ cacheId: schema.cacheTeardowns.cacheId })
 			.from(schema.cacheTeardowns)
-			.orderBy(schema.cacheTeardowns.cacheId)
 			.limit(1)
 			.get()?.cacheId;
 	}
 
 	private async recoverTeardownMarker(): Promise<
-		{ cache: ResolvedCache; origin: undefined } | undefined
+		{ cache: ResolvedCache; origin: RequestOrigin | undefined } | undefined
 	> {
-		const cacheId = this.durableTeardownCacheId();
-		if (cacheId === undefined) {
-			return undefined;
+		const due = this.context.db
+			.select()
+			.from(schema.cacheTeardowns)
+			.where(lte(schema.cacheTeardowns.nextWorkAt, Date.now()))
+			.orderBy(schema.cacheTeardowns.nextWorkAt, schema.cacheTeardowns.cacheId)
+			.limit(1)
+			.get();
+		if (due === undefined) {
+			return;
 		}
-
-		const cache = this.context.cacheRepository.resolvedForId(cacheId);
-		await this.context.ctx.storage.put(this.teardownKey(cache), {});
+		const cache = this.context.cacheRepository.resolvedForId(due.cacheId);
+		const origin = due.origin ?? undefined;
+		await this.context.ctx.storage.put(
+			this.teardownKey(cache),
+			origin === undefined ? {} : { origin }
+		);
 		await this.context.ctx.storage.put(
 			teardownCursorKey,
 			this.teardownKey(cache)
 		);
-		return { cache, origin: undefined };
+		return { cache, origin };
 	}
 
 	private drainStagingCleanup(cache: ResolvedCache): Promise<number> {
@@ -433,7 +467,7 @@ export class CacheAdminService {
 		// deletion cannot remove.
 		const removedUploads = this.context.db.transaction((tx) => {
 			tx.insert(schema.cacheTeardowns)
-				.values({ cacheId: cache.id })
+				.values({ cacheId: cache.id, ...(origin !== undefined && { origin }) })
 				.onConflictDoNothing()
 				.run();
 			for (const table of [schema.pendingUploads, schema.pendingAttestations]) {
@@ -1305,8 +1339,21 @@ export class CacheAdminService {
 			const cacheId = cacheIdSchema.safeParse(Number(suffix));
 			if (cacheId.success) {
 				const cache = this.context.cacheRepository.resolvedForId(cacheId.data);
+				this.ensureTeardownHeader(cache, origin);
+				const header = this.context.db
+					.select({
+						at: schema.cacheTeardowns.nextWorkAt,
+						origin: schema.cacheTeardowns.origin
+					})
+					.from(schema.cacheTeardowns)
+					.where(eq(schema.cacheTeardowns.cacheId, cache.id))
+					.get();
+				if (header !== undefined && header.at > Date.now()) {
+					await this.context.ctx.storage.delete(key);
+					return this.recoverTeardownMarker();
+				}
 				await this.context.ctx.storage.put(teardownCursorKey, key);
-				return { cache, origin };
+				return { cache, origin: header?.origin ?? origin };
 			}
 
 			if (origin === undefined) {
@@ -1317,6 +1364,7 @@ export class CacheAdminService {
 
 			const cache = await this.adoptLegacyTeardownMarker(key, suffix, origin);
 			if (cache !== undefined) {
+				this.ensureTeardownHeader(cache, origin);
 				await this.context.ctx.storage.put(
 					teardownCursorKey,
 					this.teardownKey(cache)
@@ -1371,6 +1419,9 @@ export class CacheAdminService {
 		)
 	): Promise<void> {
 		await this.context.criticalSection(async () => {
+			const artifacts = new ArtifactRetentionService(
+				this.context
+			).retireCacheInSection(cache);
 			const hasSweptEdges = await this.drainTeardownChunk(cache, origin, limit);
 			await this.drainStagingCleanup(cache);
 
@@ -1383,11 +1434,28 @@ export class CacheAdminService {
 				limit
 			);
 			if (
-				!hasSweptEdges ||
 				hasMoreHistory ||
+				!hasSweptEdges ||
+				artifacts.pending ||
 				this.hasQueuedDeletions(cache) ||
 				this.hasStagingCleanup(cache)
 			) {
+				return;
+			}
+
+			const lists = await new AttestationListTeardownService(
+				this.context,
+				this.context.requireTenant()
+			).advanceCache(cache, limit);
+			if (lists.status === 'pending') {
+				this.context.db
+					.update(schema.cacheTeardowns)
+					.set({ nextWorkAt: lists.nextWorkAt })
+					.where(eq(schema.cacheTeardowns.cacheId, cache.id))
+					.run();
+				if (lists.nextWorkAt > Date.now()) {
+					await this.context.ctx.storage.delete(this.teardownKey(cache));
+				}
 				return;
 			}
 
@@ -1400,5 +1468,21 @@ export class CacheAdminService {
 				.where(eq(schema.cacheTeardowns.cacheId, cache.id))
 				.run();
 		});
+	}
+	async nextTeardownWorkAt(now: number): Promise<number | undefined> {
+		const hints = await this.context.ctx.storage.list({
+			prefix: teardownEntryPrefix,
+			limit: 1
+		});
+		if (hints.size > 0) {
+			return now;
+		}
+		const row = this.context.db
+			.select({ at: schema.cacheTeardowns.nextWorkAt })
+			.from(schema.cacheTeardowns)
+			.orderBy(schema.cacheTeardowns.nextWorkAt, schema.cacheTeardowns.cacheId)
+			.limit(1)
+			.get();
+		return row === undefined ? undefined : Math.max(now, row.at);
 	}
 }

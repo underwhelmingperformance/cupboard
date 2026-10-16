@@ -71,16 +71,21 @@ export class NixStore {
 		return stdout.trim();
 	}
 
-	async addReference(name: string, reference: string): Promise<string> {
+	async addTextReference(
+		name: string,
+		contents: string
+	): Promise<{ readonly root: string; readonly dependency: string }> {
 		const { stdout } = await this.run('nix', [
 			'eval',
-			'--raw',
+			'--json',
 			'--impure',
 			'--expr',
-			`builtins.toFile ${JSON.stringify(name)} (builtins.storePath ${JSON.stringify(reference)})`
+			`let dependency = builtins.toFile "cupboard-known-dependency" ${JSON.stringify(contents)}; in { inherit dependency; root = builtins.toFile ${JSON.stringify(name)} (builtins.storePath dependency); }`
 		]);
 
-		return stdout.trim();
+		return z
+			.object({ root: z.string(), dependency: z.string() })
+			.parse(JSON.parse(stdout));
 	}
 
 	async build(expression: string): Promise<string> {

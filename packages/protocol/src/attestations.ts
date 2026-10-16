@@ -105,6 +105,7 @@ export const attestationInfoErrorSchema = z.strictObject({
 		'request-too-large',
 		'list-too-large',
 		'list-invalid',
+		'list-pending',
 		'scope-changed'
 	]),
 	message: z.string(),

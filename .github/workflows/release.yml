@@ -66,9 +66,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          nix_version: 2.34.7
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
 
       - name: Check flake reproducibility
         shell: bash

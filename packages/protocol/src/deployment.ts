@@ -25,19 +25,44 @@ export function localStep(value: number): LocalStep {
 }
 
 /**
- * The final local step this build asks each tenant to reach.
+ * The final local step that this build asks each tenant to reach.
  *
  * Step 1 projects missing cache lifecycle rows into D1. Steps 2 and 3 move
  * private-cache objects and later cache generations to their current R2 keys.
  * Step 4 imports legacy retention and grace policies in bounded batches.
  * Step 5 rewrites stored grants once the `cache-identity` transition is
- * complete.
+ * complete. Step 6 confirms that the object writes through the compatible
+ * CAS storage interface after expansion. Step 7 initialises content revisions
+ * for existing NAR publications after forward capture is installed. Step 8
+ * confirms the compatible artifact lifecycle before publication activates.
  *
- * Objects report at most step 4 before that transition completes. Afterwards
- * they stay below this watermark until the control plane wakes them for the
- * grant rewrite.
+ * Objects report at most step 4 before cache identity completes, then step 5
+ * after the grant rewrite. They can report step 6 once CAS storage has expanded.
+ * Step 7 also requires completed attestation-list initialisation. Step 8
+ * requires expanded artifact storage and publication transitions, with path
+ * read authority complete.
  */
-export const currentLocalStep: LocalStep = localStep(5);
+export const currentLocalStep: LocalStep = localStep(8);
+
+/**
+The completed grant rewrite, before the CAS storage transition.
+*/
+export const cacheIdentityLocalStep: LocalStep = localStep(5);
+
+/**
+The compatible CAS storage interface required before contraction.
+*/
+export const casStorageLocalStep: LocalStep = localStep(6);
+
+/**
+The revision initialisation required before attestation-list reader activation.
+*/
+export const attestationListLocalStep: LocalStep = localStep(7);
+
+/**
+The compatible artifact lifecycle required before publication activation.
+*/
+export const artifactPublicationLocalStep: LocalStep = localStep(8);
 
 /**
 The local data work that must finish before the deploy contracts D1.
@@ -67,7 +92,35 @@ export const transitionIdSchema = z.enum([
 	'control-refresh-sessions',
 	'control-subject-nonces',
 	'control-database-split',
-	'control-database-initial'
+	'control-database-initial',
+	'cas-storage',
+	'cache-path-intersection-index',
+	'native-artifact-storage',
+	'cas-demotion-progress',
+	'attestation-list-revision',
+	'tenant-namespace-cleanup',
+	'native-artifact-publication',
+	'shared-listing-generation',
+	'shared-listing-jobs',
+	'nar-source-capture',
+	'shared-listing-catchup',
+	'shared-listing-task-claims',
+	'global-listing-generation',
+	'shared-listing-staging',
+	'shared-listing-output-retention',
+	'shared-listing-output-retirement',
+	'shared-listing-completion',
+	'shared-listing-task-delivery',
+	'shared-listing-dispatch',
+	'shared-listing-dispatch-seed',
+	'listing-adoption-capture',
+	'listing-adoption-fact-seed',
+	'listing-adoption-parents',
+	'listing-adoption-parent-seed',
+	'listing-adoption-seed-dispatch',
+	'listing-adoption-work',
+	'listing-adoption-tasks',
+	'forward-listing-staging'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -287,7 +340,7 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 			'0030_cache_credential_lifecycle.sql'
 		],
 		contractStep: expansionLocalStep,
-		reportableStepOnComplete: currentLocalStep,
+		reportableStepOnComplete: cacheIdentityLocalStep,
 		compatibilityPhase: true,
 		completedBy: 'v0.0.34'
 	},
@@ -321,7 +374,8 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		id: 'blob-reference-read-authority',
 		expand: ['0035_blob_reference_read_authority.sql'],
 		contract: ['0036_path_read_authority_contract.sql'],
-		expandAfter: ['cache-identity']
+		expandAfter: ['cache-identity'],
+		completedBy: 'v0.0.44'
 	},
 	{
 		id: 'tenant-retry-clock',
@@ -360,6 +414,187 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0000_control_database.sql'],
 		contract: [],
 		independent: true
+	},
+	{
+		id: 'cas-storage',
+		expand: ['0043_cas_storage_expand.sql'],
+		contract: ['0044_cas_storage_contract.sql'],
+		independent: true,
+		contractStep: casStorageLocalStep,
+		reportableStepOnComplete: casStorageLocalStep
+	},
+	{
+		id: 'cache-path-intersection-index',
+		expand: ['0045_cache_path_intersection_index.sql'],
+		contract: [],
+		expandAfter: ['blob-reference-read-authority']
+	},
+	{
+		id: 'native-artifact-storage',
+		expand: ['0046_native_artifact_storage.sql'],
+		// The storage identifier is a view until path authority contracts.
+		contract: ['0047_attestation_cas_retention_index.sql'],
+		independent: true
+	},
+	{
+		id: 'cas-demotion-progress',
+		expand: ['0048_cas_demotion_progress.sql'],
+		contract: [],
+		expandAfter: ['cas-storage']
+	},
+	{
+		id: 'attestation-list-revision',
+		expand: ['0049_attestation_list_revision.sql'],
+		contract: ['0050_attestation_list_revision_contract.sql'],
+		contractAfterUpload: true,
+		contractStep: attestationListLocalStep,
+		reportableStepOnComplete: attestationListLocalStep,
+		expandAfter: ['blob-reference-read-authority']
+	},
+	{
+		id: 'tenant-namespace-cleanup',
+		expand: [
+			'0051_tenant_namespace_cleanup_guard.sql',
+			'0052_attestation_list_retirement_guard.sql'
+		],
+		contract: [],
+		independent: true
+	},
+	{
+		id: 'native-artifact-publication',
+		expand: [],
+		contract: [],
+		independent: true,
+		contractAfterUpload: true,
+		contractStep: artifactPublicationLocalStep,
+		reportableStepOnComplete: artifactPublicationLocalStep
+	},
+	{
+		id: 'shared-listing-generation',
+		expand: ['0053_listing_generation_claims.sql'],
+		contract: [],
+		independent: true
+	},
+	{
+		id: 'shared-listing-jobs',
+		expand: ['0054_shared_listing_jobs.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-generation']
+	},
+	{
+		id: 'nar-source-capture',
+		expand: ['0055_nar_source_capture.sql'],
+		contract: ['0056_nar_source_capture_contract.sql'],
+		expandAfter: ['shared-listing-jobs']
+	},
+	{
+		id: 'shared-listing-catchup',
+		expand: ['0057_shared_listing_catchup.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-jobs']
+	},
+	{
+		id: 'shared-listing-task-claims',
+		expand: ['0058_shared_listing_task_claims.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-jobs']
+	},
+	{
+		id: 'global-listing-generation',
+		expand: ['0059_shared_listing_generation.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-generation', 'shared-listing-task-claims']
+	},
+	{
+		id: 'shared-listing-staging',
+		expand: ['0060_shared_listing_staging.sql'],
+		contract: [],
+		expandAfter: ['global-listing-generation']
+	},
+	{
+		id: 'shared-listing-output-retention',
+		expand: ['0061_shared_listing_output_retention.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-staging']
+	},
+	{
+		id: 'shared-listing-output-retirement',
+		expand: ['0062_shared_listing_output_retirement.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-output-retention']
+	},
+	{
+		id: 'shared-listing-completion',
+		expand: ['0063_shared_listing_completion.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-output-retirement']
+	},
+	{
+		id: 'shared-listing-task-delivery',
+		expand: ['0064_shared_listing_task_delivery.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-completion']
+	},
+	{
+		id: 'shared-listing-dispatch',
+		expand: ['0065_shared_listing_dispatch.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-task-delivery']
+	},
+	{
+		id: 'shared-listing-dispatch-seed',
+		expand: ['0066_shared_listing_dispatch_seed.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-dispatch']
+	},
+	{
+		id: 'listing-adoption-capture',
+		expand: ['0067_listing_adoption_capture.sql'],
+		contract: ['0068_listing_adoption_capture_contract.sql'],
+		independent: true
+	},
+	{
+		id: 'listing-adoption-fact-seed',
+		expand: ['0069_listing_adoption_fact_seed.sql'],
+		contract: [],
+		independent: true
+	},
+	{
+		id: 'listing-adoption-parents',
+		expand: ['0070_listing_adoption_parents.sql'],
+		contract: ['0071_listing_adoption_parents_contract.sql'],
+		independent: true
+	},
+	{
+		id: 'listing-adoption-parent-seed',
+		expand: ['0072_listing_adoption_parent_seed.sql'],
+		contract: [],
+		independent: true
+	},
+	{
+		id: 'listing-adoption-seed-dispatch',
+		expand: ['0073_listing_adoption_seed_dispatch.sql'],
+		contract: [],
+		independent: true
+	},
+	{
+		id: 'listing-adoption-work',
+		expand: ['0074_listing_adoption_work.sql'],
+		contract: [],
+		independent: true
+	},
+	{
+		id: 'listing-adoption-tasks',
+		expand: ['0075_listing_adoption_tasks.sql'],
+		contract: ['0076_listing_adoption_tasks_contract.sql'],
+		expandAfter: ['listing-adoption-work'],
+		independent: true
+	},
+	{
+		id: 'forward-listing-staging',
+		expand: ['0077_forward_listing_staging.sql'],
+		contract: [],
+		expandAfter: ['shared-listing-staging']
 	}
 ];
 
@@ -371,18 +606,11 @@ export const transitionIds: readonly TransitionId[] = schemaTransitions.map(
 );
 
 /**
- * Returns the required local step: the local step that every active or
- * suspended tenant must reach now. This is the contract step of the first
- * incomplete transition that has one, or `currentLocalStep` when every such
- * transition is complete. It is never lower than the `reportableStepOnComplete`
- * of a complete transition.
- *
- * Objects cannot record past step 4 until the deploy records `cache-identity`
- * complete, so the count of tenants below `currentLocalStep` would never reach
- * zero before then. Once it is complete, objects can record
- * `currentLocalStep`, so an incomplete later transition with a lower contract
- * step does not stop the control Worker's cron trigger from waking the
- * tenants that are still below `currentLocalStep`.
+ * Returns the local step that every active or suspended tenant must reach now.
+ * The first incomplete transition with a contract step requires that step
+ * after expansion. Before expansion, tenants need only the highest reportable
+ * step of completed transitions, or the baseline expansion step. Once every
+ * transition with a contract step is complete, tenants need `currentLocalStep`.
  */
 export function requiredLocalStepFrom(recorded: TransitionStates): LocalStep {
 	return requiredLocalStepAmong(schemaTransitions, recorded);
@@ -403,15 +631,21 @@ export function requiredLocalStepAmong<Id extends string>(
 			.filter((transition) => isComplete(transition))
 			.map((transition) => transition.reportableStepOnComplete ?? 0)
 	);
-	const contractStep = transitions.find(
+	const incomplete = transitions.find(
 		(transition) =>
 			transition.contractStep !== undefined && !isComplete(transition)
-	)?.contractStep;
+	);
 
-	if (contractStep === undefined) {
+	if (incomplete === undefined) {
 		return currentLocalStep;
 	}
 
+	const contractStep = hasReachedTransitionState(
+		recorded.get(incomplete.id),
+		'expanded'
+	)
+		? (incomplete.contractStep ?? 0)
+		: 0;
 	return localStep(Math.max(contractStep, reportable));
 }
 

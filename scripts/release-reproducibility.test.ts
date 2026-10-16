@@ -45,7 +45,7 @@ const workflowFile = new URL(
 );
 const barrierName = 'Check flake reproducibility';
 const nixInstaller =
-	'nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c';
+	'cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24';
 
 async function loadWorkflow() {
 	const document: unknown = parse(await readFile(workflowFile, 'utf8'));
@@ -103,7 +103,9 @@ describe('release reproducibility', () => {
 			failFast: false,
 			build: { needs: 'validate', if: undefined, continueOnError: undefined },
 			draft: { needs: 'build', if: undefined, continueOnError: undefined },
-			installer: { nix_version: '2.34.7' },
+			installer: {
+				install_url: 'https://releases.nixos.org/nix/nix-2.35.2/install'
+			},
 			barrier: {
 				name: barrierName,
 				shell: 'bash',

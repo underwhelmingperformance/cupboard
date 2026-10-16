@@ -1,11 +1,12 @@
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
-	storePathSchema,
-	type StorePathString
+	storePathHashSchema,
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import {
+	cacheIntersectionCapability,
 	cacheMetadataCapability,
 	cacheMetadataCapabilityHeader,
 	cacheMetadataErrorCodes,
@@ -23,10 +24,14 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { sha256Hex } from '../crypto/crypto.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import { batchNonEmpty } from '../do/bulk.ts';
 import { committedPath, setView } from '../do/reuse-view-read.test-support.ts';
 import { type SpanAttributes } from '../observability/span.ts';
 import {
@@ -366,7 +371,7 @@ describe('cache metadata probe', () => {
 			}).toStrictEqual({
 				status: StatusCodes.OK,
 				cacheControl: 'no-store',
-				discoveryCapability: `${cacheMetadataCapability} ${attestationInfoCapability}`,
+				discoveryCapability: `${cacheMetadataCapability} ${attestationInfoCapability}${kind === 'reuse' ? '' : ` ${cacheIntersectionCapability}`}`,
 				body: {
 					scopeVersion: stringMatcher,
 					entries: [
@@ -554,18 +559,34 @@ describe('cache metadata probe', () => {
 		});
 		const original = await readFetch(`/${path.storePathHash}.narinfo`);
 		const narinfo = await original.text();
-		const paths: StorePathString[] = [];
-		for (let index = 0; index < 32; index += 1) {
-			const committed = await committedPath(
-				`metadata-canonical-${String(index)}`,
-				defaultCache(),
-				{
-					storePathHash: index.toString(2).padStart(32, '0'),
-					name: 'metadata'
-				}
-			);
-			paths.push(storePathSchema.parse(committed.storePath));
+		const paths = Array.from({ length: 32 }, (_, index) =>
+			storePathSchema.parse(
+				`/nix/store/${index.toString(2).padStart(32, '0')}-metadata`
+			)
+		);
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const reference = await database
+			.select()
+			.from(d1Schema.blobReference)
+			.where(
+				eq(
+					d1Schema.blobReference.storePathHash,
+					storePathHashSchema.parse(path.storePathHash)
+				)
+			)
+			.get();
+		if (reference === undefined) {
+			throw new Error('The published fixture must have a committed reference');
 		}
+		await batchNonEmpty(
+			database,
+			paths.map((storePath) =>
+				database.insert(d1Schema.blobReference).values({
+					...reference,
+					storePathHash: StorePath.hash(storePath)
+				})
+			)
+		);
 		const narinfos = new Map(
 			paths.map((storePath) => [
 				storePath,

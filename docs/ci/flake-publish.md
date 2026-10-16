@@ -452,6 +452,37 @@ The rebuild applies to each requested output. Nix may still fetch its
 dependencies from substituters. `publish: closure` includes those dependencies
 when the output is published.
 
+### Dependency metadata accounting
+
+Each consulted tenant source produces a final metadata result with checked,
+found, missing and remaining path counts, transport request count and elapsed
+time. A failed source reports partial progress and an error status. Interim
+progress remains throttled; final source results are emitted before discovery
+moves to another source.
+
+The client also records each logical lookup and every transport attempt. Records
+include an input fingerprint, request ID, operation, attempt number, HTTP
+status, header and body timing, and SDK trace/span IDs. Logical results report
+validated outcomes, including continuation and possible intersection matches.
+Header receipt or body completion alone does not establish a valid lookup.
+Cancellation, incomplete consumption and validation errors remain separate
+outcomes. Metadata fingerprints use sorted full paths, matching the server's
+page fingerprint; intersection fingerprints use ordered hashes.
+
+CLI callers can retain these records with `--result-file`. The actions write
+`dependency-metadata-attempt`, `dependency-metadata-request` and
+`dependency-metadata-source` result events into the existing publication result
+artefacts. Records are written as requests finish, without sampling or retaining
+the full history in memory. Credentials, narinfo contents and raw error messages
+are excluded. A diagnostics write failure produces a warning and does not change
+the lookup result; the source result includes a dropped-record count.
+
+Source elapsed time includes retries, backoff and validation. Summed concurrent
+attempt durations are not client wall time. Intersection counts describe hashes;
+source counts describe distinct full paths, including aliases. Possible matches
+still require canonical metadata validation before the client can publish their
+references. The complete build-only dependency population remains unchanged.
+
 ### Building without publication
 
 `publish: none` disables publication and signing. The boolean `push` input is

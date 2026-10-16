@@ -30,6 +30,7 @@ import {
 	type R2ObjectKey
 } from '../http/http.ts';
 
+import { publishCasObjectState } from './cas-object-state.ts';
 import {
 	isObjectIncarnationLive,
 	type SharedObjectKind
@@ -55,7 +56,7 @@ function objectKey(row: ObjectIncarnationIdentity): R2ObjectKey {
 }
 
 /**
- * Retries deletion of R2 objects after their `blob_state` or `cas_object` rows
+ * Retries deletion of R2 objects after their `blob_state` or `cas_object_storage` rows
  * have been deleted. Each marker identifies one immutable R2 key, so deleting
  * that key cannot remove an object created by a later promotion. A future
  * removal deadline keeps the old object available while a preceding Worker or
@@ -360,20 +361,12 @@ async function didRecoverCas(
 		return false;
 	}
 
-	await database.run(sql`
-		INSERT INTO cas_object
-			(digest, size, incarnation, stored_at, delete_after)
-		SELECT ${row.objectId}, ${object.size}, ${row.incarnation}, ${now}, NULL
-		FROM object_incarnation
-		WHERE kind = 'cas' AND object_id = ${row.objectId}
-			AND incarnation = ${row.incarnation} AND state = 'live'
-		ON CONFLICT(digest) DO UPDATE SET
-			size = excluded.size,
-			incarnation = excluded.incarnation,
-			delete_after = NULL,
-			stored_at = excluded.stored_at
-		WHERE cas_object.incarnation <= excluded.incarnation
-	`);
+	await publishCasObjectState(database, {
+		digest: sha256HexDigestSchema.parse(row.objectId),
+		size: object.size,
+		incarnation: row.incarnation,
+		storedAt: now
+	});
 
 	return isObjectIncarnationLive(
 		database,

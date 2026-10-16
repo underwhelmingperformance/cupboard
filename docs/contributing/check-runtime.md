@@ -66,7 +66,7 @@ alarm cleanup and stalled-pass auditing remain in the setup path.
 
 ## Linux coverage and gate structure
 
-The CI runner starts pinned Nix 2.34.7 as the non-root runner, verifies trusted
+The CI runner starts pinned Nix 2.35.2 as the non-root runner, verifies trusted
 access, and stops its daemon on success, failure or cancellation. It refuses an
 existing standard daemon. Cleanup removes only the socket with the recorded
 device and inode. The general test command receives `NIX_REMOTE=daemon`; private

@@ -1,0 +1,216 @@
+import type {
+	ArtifactJobDefinition,
+	ArtifactJobVersion
+} from '@cupboard/protocol/artifact-jobs';
+import type { ArtifactKind } from '@cupboard/protocol/artifacts';
+import { and, asc, eq, lte, sql } from 'drizzle-orm';
+
+import * as d1Schema from '../db/d1-schema.ts';
+import * as schema from '../db/schema.ts';
+
+import { noProgressRetryMs } from './alarm.ts';
+import { ArtifactJobService } from './artifact-job-service.ts';
+import type { ServerContext } from './context.ts';
+
+export interface ArtifactJobDispatchCandidate {
+	readonly job: ArtifactJobVersion;
+	readonly definition: ArtifactJobDefinition;
+	readonly discoveryComplete: boolean;
+}
+
+export interface ArtifactJobDispatch {
+	readonly job: ArtifactJobVersion;
+	readonly artifactKind: ArtifactKind;
+	readonly revision: number;
+	readonly notBefore: number;
+}
+export type ArtifactJobDispatchResult =
+	| { readonly kind: 'idle' }
+	| { readonly kind: 'progressed' }
+	| { readonly kind: 'dispatch'; readonly dispatch: ArtifactJobDispatch };
+
+const redispatchDelayMs = 15 * 60 * 1000;
+const maximumJobs = 8;
+
+export class ArtifactJobDispatchService {
+	constructor(private readonly context: ServerContext) {}
+
+	wakeInSection(version: ArtifactJobVersion): boolean {
+		if (this.context.offboarding) {
+			return false;
+		}
+		const job = this.context.db
+			.select()
+			.from(schema.artifactJobs)
+			.where(eq(schema.artifactJobs.id, version.id))
+			.get();
+		if (job?.generation !== version.generation || job.state !== 'running') {
+			return false;
+		}
+		const scope = this.context.cacheRepository.scopeForId(job.cacheId);
+		const cache = this.context.cacheRepository.resolve(scope);
+		if (cache?.id !== job.cacheId || cache.generation !== job.cacheGeneration) {
+			return false;
+		}
+		this.context.db
+			.update(schema.artifactJobs)
+			.set({
+				nextDispatchAt: Math.min(job.nextDispatchAt, Date.now()),
+				dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`
+			})
+			.where(eq(schema.artifactJobs.id, version.id))
+			.run();
+		return true;
+	}
+
+	nextAtInSection(): number | undefined {
+		if (this.context.offboarding) {
+			return undefined;
+		}
+		return this.context.db
+			.select({ at: schema.artifactJobs.nextDispatchAt })
+			.from(schema.artifactJobs)
+			.where(eq(schema.artifactJobs.state, 'running'))
+			.orderBy(
+				asc(schema.artifactJobs.nextDispatchAt),
+				asc(schema.artifactJobs.id)
+			)
+			.limit(1)
+			.get()?.at;
+	}
+
+	async nextEligibleAt(): Promise<number | undefined> {
+		const at = this.nextAtInSection();
+		if (at === undefined) {
+			return undefined;
+		}
+		const tenant = await this.context.d1
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, this.context.requireTenant()))
+			.get();
+		return tenant?.status === 'active' ? at : undefined;
+	}
+
+	dueInSection(): readonly ArtifactJobDispatchCandidate[] {
+		if (this.context.offboarding) {
+			return [];
+		}
+		const now = Date.now();
+		return this.context.db
+			.select({
+				id: schema.artifactJobs.id,
+				generation: schema.artifactJobs.generation,
+				definition: schema.artifactJobs.definition,
+				discoveryComplete: schema.artifactJobs.discoveryComplete
+			})
+			.from(schema.artifactJobs)
+			.where(
+				and(
+					eq(schema.artifactJobs.state, 'running'),
+					lte(schema.artifactJobs.nextDispatchAt, now)
+				)
+			)
+			.orderBy(
+				asc(schema.artifactJobs.nextDispatchAt),
+				asc(schema.artifactJobs.id)
+			)
+			.limit(maximumJobs)
+			.all()
+			.map((row) => ({
+				job: { id: row.id, generation: row.generation },
+				definition: row.definition,
+				discoveryComplete: row.discoveryComplete
+			}));
+	}
+
+	reserveInSection(version?: ArtifactJobVersion): ArtifactJobDispatchResult {
+		const identity =
+			version === undefined
+				? undefined
+				: and(
+						eq(schema.artifactJobs.id, version.id),
+						eq(schema.artifactJobs.generation, version.generation)
+					);
+		const job = this.context.db
+			.select()
+			.from(schema.artifactJobs)
+			.where(and(eq(schema.artifactJobs.state, 'running'), identity))
+			.orderBy(
+				asc(schema.artifactJobs.nextDispatchAt),
+				asc(schema.artifactJobs.id)
+			)
+			.limit(1)
+			.get();
+		if (job === undefined || job.nextDispatchAt > Date.now()) {
+			return { kind: 'idle' };
+		}
+		const jobs = new ArtifactJobService(this.context);
+		const scope = this.context.cacheRepository.scopeForId(job.cacheId);
+		const cache = this.context.cacheRepository.resolve(scope);
+		if (cache?.id !== job.cacheId || cache.generation !== job.cacheGeneration) {
+			jobs.cancelInSection(job.id);
+			return { kind: 'progressed' };
+		}
+		const claimExpiry = jobs.nextClaimExpiryInSection(job.id);
+		const backstop = Date.now() + redispatchDelayMs;
+		const retryAt = jobs.nextRetryAtInSection(job.id);
+		const notBefore = Math.min(
+			backstop,
+			claimExpiry === undefined ? backstop : Date.parse(claimExpiry),
+			retryAt === undefined ? backstop : Date.parse(retryAt)
+		);
+		const reserved = this.context.db
+			.update(schema.artifactJobs)
+			.set({
+				nextDispatchAt: notBefore,
+				dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`
+			})
+			.where(
+				and(
+					eq(schema.artifactJobs.id, job.id),
+					eq(schema.artifactJobs.generation, job.generation),
+					eq(schema.artifactJobs.state, 'running')
+				)
+			)
+			.returning({ revision: schema.artifactJobs.dispatchRevision })
+			.all()[0];
+		if (reserved === undefined) {
+			return { kind: 'idle' };
+		}
+		return {
+			kind: 'dispatch',
+			dispatch: {
+				job: { id: job.id, generation: job.generation },
+				artifactKind: job.definition.kind,
+				revision: reserved.revision,
+				notBefore
+			}
+		};
+	}
+
+	retryInSection(dispatch: ArtifactJobDispatch): boolean {
+		return (
+			this.context.db
+				.update(schema.artifactJobs)
+				.set({
+					nextDispatchAt: Math.min(
+						dispatch.notBefore,
+						Date.now() + noProgressRetryMs
+					),
+					dispatchRevision: sql`${schema.artifactJobs.dispatchRevision} + 1`
+				})
+				.where(
+					and(
+						eq(schema.artifactJobs.id, dispatch.job.id),
+						eq(schema.artifactJobs.generation, dispatch.job.generation),
+						eq(schema.artifactJobs.state, 'running'),
+						eq(schema.artifactJobs.dispatchRevision, dispatch.revision),
+						eq(schema.artifactJobs.nextDispatchAt, dispatch.notBefore)
+					)
+				)
+				.returning({ id: schema.artifactJobs.id })
+				.all().length > 0
+		);
+	}
+}
