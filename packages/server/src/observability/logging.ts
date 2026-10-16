@@ -9,6 +9,7 @@ import { StatusCodes } from 'http-status-codes';
 import {
 	currentOperationCost,
 	hasCost,
+	type OperationCostRecord,
 	withOperationCost
 } from '../do/operation-cost.ts';
 
@@ -42,6 +43,21 @@ export const loggerMiddleware = createMiddleware<{
 	context.set('logger', requestLogger(context.req.raw));
 	await next();
 });
+
+/**
+ * Logs the billed storage that a pass, RPC or queue message used as
+ * `method finished`. The logger supplies the `method` field.
+ */
+export function logMethodFinished(
+	logger: Logger,
+	cost: OperationCostRecord
+): void {
+	if (!hasCost(cost)) {
+		return;
+	}
+
+	logger.info('method finished', { ...cost });
+}
 
 // `app.use` registers a middleware for every method, so a handler is a route
 // with a specific method. Fall back to the route that ran for a request that

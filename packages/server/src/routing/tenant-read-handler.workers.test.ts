@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import { firstCacheGeneration } from '@cupboard/nix-store/scalars';
 import {
 	createExecutionContext,
@@ -8,6 +9,8 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
+import { boundedWorkerEnv } from '../do/bounded-io.ts';
+import { noCost } from '../do/operation-cost.test-support.ts';
 import { narInfoCacheControl } from '../http/http.ts';
 import {
 	bootstrap,
@@ -63,5 +66,43 @@ describe('tenant Worker reads', () => {
 			versioned: { status: StatusCodes.OK, cacheControl: narInfoCacheControl },
 			unversioned: { status: StatusCodes.NOT_FOUND, cacheControl: 'no-store' }
 		});
+	});
+
+	it('logs the cost of a read under its route', async () => {
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPath(init.token, metadata);
+		const path = `/t/${fixtureTenant}/${metadata.storePathHash}.narinfo`;
+		const unversioned = new Request(new URL(path, currentOrigin()));
+		const request = canonicalCacheRequest(unversioned, {
+			generation: firstCacheGeneration,
+			readRevision: firstCacheReadRevision
+		});
+		const ctx = createExecutionContext();
+		const capture = startCapture();
+
+		try {
+			await tenantReadFetch(request, boundedWorkerEnv(env), ctx);
+			await waitOnExecutionContext(ctx);
+		} finally {
+			capture.stop();
+		}
+
+		expect(
+			capture.logs
+				.filter((entry) => entry.message === 'request finished')
+				.map((entry) => entry.properties)
+		).toStrictEqual([
+			{
+				method: 'GET',
+				path,
+				route: String.raw`/t/:tenant/:name{[0-9a-z]+\.narinfo}`,
+				status: StatusCodes.OK,
+				...noCost,
+				d1Calls: 1,
+				d1RowsRead: 4,
+				r2Get: 1
+			}
+		]);
 	});
 });

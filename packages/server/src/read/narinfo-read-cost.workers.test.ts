@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	storePathHashSchema,
@@ -8,6 +9,7 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { noCost } from '../do/operation-cost.test-support.ts';
 import { committedPath } from '../do/reuse-view-read.test-support.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -122,6 +124,41 @@ describe('public narinfo read cost', () => {
 			status: response.status,
 			roundTrips: counting.roundTrips()
 		}).toStrictEqual({ status: StatusCodes.OK, roundTrips: 2 });
+	});
+
+	// Without a `CUPBOARD_TENANT` binding the control Worker runs the tenant read
+	// app in process, so the read app's request scope joins the control Worker's
+	// and this one line contains both Workers' calls.
+	it('logs the control Worker cost of a hit under its route', async () => {
+		const token = await initialiseViaWorker();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPathToTenant(fixtureTenant, token, metadata);
+		const path = `/t/${fixtureTenant}/${metadata.storePathHash}.narinfo`;
+
+		const capture = startCapture();
+
+		try {
+			await readFetch(`/${metadata.storePathHash}.narinfo`);
+		} finally {
+			capture.stop();
+		}
+
+		expect(
+			capture.logs
+				.filter((entry) => entry.message === 'request finished')
+				.map((entry) => entry.properties)
+		).toStrictEqual([
+			{
+				method: 'GET',
+				path,
+				route: String.raw`/t/:tenant/:name{[0-9a-z]+\.narinfo}`,
+				status: StatusCodes.OK,
+				...noCost,
+				d1Calls: 2,
+				d1RowsRead: 6,
+				r2Get: 1
+			}
+		]);
 	});
 });
 

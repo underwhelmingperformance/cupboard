@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { noCost } from '../do/operation-cost.test-support.ts';
 import {
 	flakyD1,
 	offboardTenant,
@@ -831,6 +832,96 @@ describe('scheduled tenant pass failure records', () => {
 				]
 			]
 		});
+	});
+
+	it.each<{
+		readonly name: string;
+		readonly body: Readonly<Record<string, unknown>>;
+		readonly line: Readonly<Record<string, unknown>>;
+	}>([
+		{
+			name: 'a shared reaper',
+			body: { kind: 'cas-reaper' },
+			line: {
+				method: 'cas-reaper',
+				...noCost,
+				d1Calls: 2,
+				d1RowsRead: 1,
+				d1CallsWithoutRows: 1
+			}
+		},
+		{
+			name: "one tenant's offboarding",
+			body: { kind: 'offboard', tenant: 'absent' },
+			line: {
+				method: 'offboard',
+				tenant: 'absent',
+				...noCost,
+				d1Calls: 1,
+				d1CallsWithoutRows: 1
+			}
+		}
+	])(
+		'logs the cost of $name under its message kind',
+		async ({ body, line }) => {
+			const actions: QueueMessageAction[] = [];
+			const batch = queueBatch([queueMessage('cost', body, actions)], actions);
+			const capture = startCapture();
+
+			try {
+				await worker.queue(batch, env);
+			} finally {
+				capture.stop();
+			}
+
+			expect(
+				capture.logs
+					.filter(
+						(entry) =>
+							entry.message === 'method finished' &&
+							entry.properties.method === line.method
+					)
+					.map((entry) => entry.properties)
+			).toStrictEqual([
+				{
+					worker: 'scheduled',
+					queue: 'cupboard-maintenance',
+					messageId: 'cost',
+					attempts: 1,
+					...line
+				}
+			]);
+		}
+	);
+
+	it('logs the cost of enqueuing the cron jobs', async () => {
+		const capture = startCapture();
+
+		try {
+			await worker.scheduled(scheduledController(), {
+				...env,
+				MAINTENANCE_QUEUE: queueCollector([])
+			});
+		} finally {
+			capture.stop();
+		}
+
+		expect(
+			capture.logs
+				.filter(
+					(entry) =>
+						entry.message === 'method finished' &&
+						entry.properties.method === 'cron-enqueue'
+				)
+				.map((entry) => entry.properties)
+		).toStrictEqual([
+			{
+				method: 'cron-enqueue',
+				...noCost,
+				d1Calls: 6,
+				d1CallsWithoutRows: 6
+			}
+		]);
 	});
 
 	it('logs the reaper phase when a continuation fails', async () => {
