@@ -13,6 +13,12 @@ The additive `shared-listing-staging` transition records provisional global
 listing resources separately from tenant staging. Expansion does not start
 global generation.
 
+The additive `forward-listing-staging` transition creates an empty D1 table for
+provisional captures owned by native verification attempts. Sealed records can
+transfer to shared staging under a current retained-source computation claim.
+Expansion leaves producers disabled and does not enqueue forward work. The
+migration adds the table and its indexes without rewriting existing staging.
+
 The additive `listing-adoption-parents` transition creates an empty index of
 current cache-publication candidates. Its contract installs point cleanup for
 source deletion, replacement and revocation, plus a tenant-finalisation guard.

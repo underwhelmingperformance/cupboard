@@ -278,7 +278,18 @@ sealing does not delay the NAR verdict. Sealing may precede Durable Object
 approval or finish after the claim is released, so a sealed listing cannot grant
 cache authority. The sink requests both multipart abort and owner cleanup on
 failure, including after multipart completion. Automatic forward capture remains
-disabled until durable ownership and handoff are integrated.
+disabled until the producer, cleanup and executor integrations are complete.
+
+A separate D1 record ties each provisional forward stage to its native upload
+and verification owner. Reservation coalesces the same NAR and generator
+revision, with a fixed write window and a captured late-write horizon. Sealing
+records an immutable measurement. Cleanup uses expiring claims and bounded
+keyset pages. The store can transfer sealed output into shared staging in one D1
+batch, under the current computation, task, job and retained source incarnation.
+Transfer preserves the physical key and removes the provisional record, so an
+old producer cannot retire output after ownership changes. The transfer creates
+no cache authority or CAS reference. Input lookups include the literal
+active-state predicate because SQLite requires it to use the partial index.
 
 Preparation reuses retained facts before claiming computation or reading NAR
 bytes. Existing facts and sealed output can make progress with no free output

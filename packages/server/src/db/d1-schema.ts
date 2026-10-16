@@ -1996,3 +1996,78 @@ export const narCaptureEvent = sqliteTable(
 		)
 	]
 );
+
+export const forwardListingStage = sqliteTable(
+	'forward_listing_stage',
+	{
+		id: text('id').$type<ArtifactStageId>().primaryKey(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		uploadId: text('upload_id').$type<UploadId>().notNull(),
+		owner: text('owner').notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generatorRevision: text('generator_revision')
+			.$type<ListingGeneratorRevision>()
+			.notNull(),
+		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
+		maximumBytes: integer('maximum_bytes').notNull(),
+		state: text('state', { enum: ['pending', 'ready', 'retired'] }).notNull(),
+		multipartId: text('multipart_id'),
+		writesSealed: integer('writes_sealed', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		digest: text('digest').$type<Sha256HexDigest>(),
+		size: integer('size'),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		writeUntil: text('write_until').$type<IsoTimestamp>().notNull(),
+		cleanupAfter: text('cleanup_after').$type<IsoTimestamp>().notNull(),
+		nextCleanupAt: text('next_cleanup_at').$type<IsoTimestamp>().notNull(),
+		cleanupGeneration: integer('cleanup_generation').notNull().default(0),
+		cleanupOwner: text('cleanup_owner').$type<ArtifactTaskOwner>(),
+		cleanupLeaseExpiresAt: text(
+			'cleanup_lease_expires_at'
+		).$type<IsoTimestamp>()
+	},
+	(table) => [
+		uniqueIndex('forward_listing_stage_native_owner_idx').on(
+			table.tenant,
+			table.uploadId,
+			table.owner,
+			table.generatorRevision
+		),
+		uniqueIndex('forward_listing_stage_active_input_idx')
+			.on(table.narHash, table.generatorRevision)
+			.where(sql`${table.state} <> 'retired'`),
+		index('forward_listing_stage_cleanup_idx').on(
+			table.nextCleanupAt,
+			table.id
+		),
+		check(
+			'forward_listing_stage_state_check',
+			sql`${table.state} IN ('pending','ready','retired')`
+		),
+		check(
+			'forward_listing_stage_key_check',
+			sql`${table.r2Key} = 'shared-artifact-staging/' || ${table.id}`
+		),
+		check(
+			'forward_listing_stage_budget_check',
+			sql`typeof(${table.maximumBytes}) = 'integer' AND ${table.maximumBytes} BETWEEN 1 AND 67108864 AND (${table.size} IS NULL OR (typeof(${table.size}) = 'integer' AND ${table.size} BETWEEN 0 AND ${table.maximumBytes}))`
+		),
+		check(
+			'forward_listing_stage_seal_check',
+			sql`(${table.writesSealed} = 0 AND ${table.digest} IS NULL AND ${table.size} IS NULL) OR (${table.writesSealed} = 1 AND ${table.multipartId} IS NOT NULL AND ${table.digest} IS NOT NULL AND ${table.size} IS NOT NULL)`
+		),
+		check(
+			'forward_listing_stage_ready_check',
+			sql`${table.state} <> 'ready' OR ${table.writesSealed} = 1`
+		),
+		check(
+			'forward_listing_stage_cleanup_generation_check',
+			sql`typeof(${table.cleanupGeneration}) = 'integer' AND ${table.cleanupGeneration} BETWEEN 0 AND 9007199254740991`
+		),
+		check(
+			'forward_listing_stage_cleanup_claim_check',
+			sql`(${table.cleanupGeneration} = 0 AND ${table.cleanupOwner} IS NULL AND ${table.cleanupLeaseExpiresAt} IS NULL) OR (${table.cleanupGeneration} > 0 AND ${table.cleanupOwner} IS NOT NULL AND ${table.state} = 'retired')`
+		)
+	]
+);

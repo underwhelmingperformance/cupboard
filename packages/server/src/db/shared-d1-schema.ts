@@ -10,6 +10,7 @@ export {
 	controlDatabaseSplit,
 	deploymentPhase,
 	deploymentTransition,
+	forwardListingStage,
 	instanceConfig,
 	listingAdoptionCaptureEvent,
 	listingAdoptionCaptureState,

@@ -540,6 +540,13 @@
 			"when": 1792108727188,
 			"tag": "0076_listing_adoption_tasks_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 77,
+			"version": "6",
+			"when": 1792122375793,
+			"tag": "0077_forward_listing_staging",
+			"breakpoints": true
 		}
 	]
 }

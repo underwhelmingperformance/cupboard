@@ -7212,8 +7212,12 @@ build traces available from a cupboard cache.
       share the streaming parser and measured multipart output. Fresh-upload
       verification accepts a provisional sink for both ordinary and fused
       canonical writes. Capture setup failures preserve NAR publication, and
-      slow sealing does not delay the native verdict. Durable stage ownership,
-      authoritative handoff and automatic producer activation remain pending.
+      slow sealing does not delay the native verdict. Durable provisional
+      records now coalesce native captures and support atomic transfer of sealed
+      output to shared staging under a current retained-source computation
+      claim. Transfer preserves the physical key and rejects stale producer and
+      cleanup owners. Producer, cleanup and executor integration, followed by
+      automatic activation, remain pending.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now
