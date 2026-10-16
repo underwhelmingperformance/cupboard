@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,11 +17,12 @@ import {
 import { hasSubrequestsFor, withSubrequestSlice } from './subrequest-slice.ts';
 
 async function costOf(
-	body: () => Promise<unknown>
+	body: () => Promise<unknown>,
+	label = 'test'
 ): Promise<OperationCostRecord> {
 	let cost: OperationCostRecord | undefined;
 
-	await withOperationCost('test', body, (settled) => {
+	await withOperationCost(label, body, (settled) => {
 		cost = settled;
 	});
 
@@ -262,12 +264,12 @@ describe('binding cost', () => {
 				inner = await costOf(async () => {
 					await blobs.head('inner-key');
 					await blobs.head('inner-key');
-				});
+				}, 'inner');
 				await blobs.head('outer-key');
-			}),
+			}, 'outer'),
 			costOf(async () => {
 				await blobs.head('concurrent-key');
-			})
+			}, 'concurrent')
 		]);
 
 		expect({ outer, inner, concurrent }).toStrictEqual({
@@ -275,6 +277,67 @@ describe('binding cost', () => {
 			inner: { ...noCost, r2Head: 2 },
 			concurrent: { ...noCost, r2Head: 1 }
 		});
+	});
+
+	it('joins an enclosing scope with the same label', async () => {
+		const blobs = boundedBlobs(env.BLOBS);
+		const reports: OperationCostRecord[] = [];
+		const report = (cost: OperationCostRecord): void => {
+			reports.push(cost);
+		};
+
+		await withOperationCost(
+			'pass',
+			async () => {
+				await blobs.head('outer-key');
+				await withOperationCost(
+					'pass',
+					async () => {
+						await blobs.head('inner-key');
+					},
+					report
+				);
+			},
+			report
+		);
+
+		expect(reports).toStrictEqual([{ ...noCost, r2Head: 2 }]);
+	});
+
+	it('logs the cost of each call that reaches a scope after it finished', async () => {
+		const blobs = boundedBlobs(env.BLOBS);
+		const release = Promise.withResolvers<undefined>();
+		let detached: Promise<unknown> = Promise.resolve();
+		const capture = startCapture();
+
+		try {
+			await costOf(() => {
+				detached = (async () => {
+					await release.promise;
+					await blobs.head('late-key');
+					await blobs.head('late-key');
+				})();
+
+				return Promise.resolve();
+			}, 'finished');
+			release.resolve(undefined);
+			await detached;
+		} finally {
+			capture.stop();
+		}
+
+		expect(
+			capture.logs.filter(
+				(entry) => entry.message === 'cost recorded after scope finished'
+			)
+		).toStrictEqual(
+			Array.from({ length: 2 }, () => ({
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'cost recorded after scope finished',
+				properties: { method: 'finished', ...noCost, r2Head: 1 }
+			}))
+		);
 	});
 });
 

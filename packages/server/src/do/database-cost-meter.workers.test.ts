@@ -1,4 +1,8 @@
-import { type Capture, startCapture } from '@cupboard/logger/testing';
+import {
+	type Capture,
+	type CapturedLog,
+	startCapture
+} from '@cupboard/logger/testing';
 import { nixSha256HashSchema } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
@@ -256,7 +260,16 @@ describe('dispatch cost', () => {
 		);
 
 		expect(lines).toStrictEqual([
-			{ method: 'authoriseCacheContentRead', ...noCost, rowsRead: 2 }
+			{
+				level: 'info',
+				category: ['cupboard'],
+				message: 'method finished',
+				properties: {
+					method: 'authoriseCacheContentRead',
+					...noCost,
+					rowsRead: 2
+				}
+			}
 		]);
 	});
 
@@ -277,7 +290,7 @@ describe('dispatch cost', () => {
 async function methodLines(
 	method: string,
 	run: () => Promise<unknown>
-): Promise<readonly Record<string, unknown>[]> {
+): Promise<readonly CapturedLog[]> {
 	const capture = startCapture();
 
 	try {
@@ -286,13 +299,10 @@ async function methodLines(
 		capture.stop();
 	}
 
-	return capture.logs
-		.filter(
-			(entry) =>
-				entry.message === 'method finished' &&
-				entry.properties.method === method
-		)
-		.map((entry) => entry.properties);
+	return capture.logs.filter(
+		(entry) =>
+			entry.message === 'method finished' && entry.properties.method === method
+	);
 }
 
 function scanUploads(

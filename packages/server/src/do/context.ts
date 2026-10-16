@@ -200,7 +200,7 @@ export class ServerContext {
 		this.db = drizzle(
 			meteredStorage(ctx.storage, this.dbCost, [
 				currentRowBudgetMeter,
-				() => currentOperationCost()?.sqlite
+				currentOperationCost
 			]),
 			{ schema }
 		);

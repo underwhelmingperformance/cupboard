@@ -479,6 +479,47 @@ describe('managed cache retirement', () => {
 		});
 	});
 
+	it('logs the retirement alarm pass under its pass key', async () => {
+		await createManagedCache('managed-retirement-cost');
+		await makeRetirementDue();
+		const capture = startCapture();
+
+		try {
+			await withoutAlarmArming(async () => {
+				await scheduleRetirement();
+				await runAlarm();
+				capture.logs.length = 0;
+				await runAlarm();
+			});
+		} finally {
+			capture.stop();
+		}
+
+		const lines = capture.logs.filter(
+			(entry) =>
+				entry.message === 'method finished' &&
+				entry.properties.method === 'managed-retirement'
+		);
+
+		expect(lines).toStrictEqual([
+			{
+				level: 'info',
+				category: ['cupboard'],
+				message: 'method finished',
+				properties: {
+					method: 'managed-retirement',
+					...noCost,
+					rowsRead: 17,
+					rowsWritten: 4,
+					d1Calls: 2,
+					d1RowsRead: 1,
+					d1RowsWritten: 1,
+					d1CallsWithoutRows: 1
+				}
+			}
+		]);
+	});
+
 	it('refuses a negotiation when retirement deletes its cache during classification', async () => {
 		const token = await createManagedCache('managed-retirement-negotiate-race');
 		await makeRetirementDue();

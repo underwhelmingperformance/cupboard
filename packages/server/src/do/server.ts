@@ -1673,7 +1673,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 		};
 
-		this.reconcileDrain = drain();
+		// The drain outlives the request that starts it, so it has its own cost
+		// scope.
+		this.reconcileDrain = withOperationCost(
+			'maintenance-eligibility-reconcile',
+			drain,
+			(cost) => {
+				logMethodFinished(
+					rootLogger().with({ method: 'maintenance-eligibility-reconcile' }),
+					cost
+				);
+			}
+		);
 	}
 
 	private async reconcileMaintenanceEligibility(): Promise<void> {
@@ -2518,7 +2529,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 
 			await this.ctx.storage.put(maintenancePassCursorKey, pass.key);
-			const progress = await pass.run();
+			const progress = await withOperationCost(pass.key, pass.run, (cost) => {
+				logMethodFinished(rootLogger().with({ method: pass.key }), cost);
+			});
 			await this.recordMaintenanceProgress(pass.key, progress);
 			break;
 		}
@@ -3807,12 +3820,10 @@ type MeteredMethod =
 	| 'verification'
 	| 'verify-backstop';
 
-// Direct RPCs have no HTTP request log. Record their storage cost at `trace`
-// because cron and queue traffic makes this the noisiest cost telemetry.
 function logMethodFinished(logger: Logger, cost: OperationCostRecord): void {
 	if (!hasCost(cost)) {
 		return;
 	}
 
-	logger.trace('method finished', { ...cost });
+	logger.info('method finished', { ...cost });
 }

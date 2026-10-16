@@ -756,6 +756,38 @@ describe('upload flow', () => {
 		});
 	});
 
+	// A commit publishes maintenance eligibility after it replies, so that work
+	// outlives the commit's own cost scope.
+	it('logs the eligibility publication after a commit as maintenance-eligibility-reconcile', async () => {
+		const init = await bootstrap();
+		const capture = startCapture();
+		const methods = (): unknown[] =>
+			capture.logs
+				.filter((entry) => entry.message === 'method finished')
+				.map((entry) => entry.properties.method);
+
+		try {
+			await pushPath(
+				init.token,
+				uploadMetadata({ fileSize: narBytes.byteLength })
+			);
+			await vi.waitFor(
+				() => {
+					expect(methods()).toContain('maintenance-eligibility-reconcile');
+				},
+				{ timeout: 10_000, interval: 20 }
+			);
+		} finally {
+			capture.stop();
+		}
+
+		const lateCosts = capture.logs.filter(
+			(entry) => entry.message === 'cost recorded after scope finished'
+		);
+
+		expect(lateCosts).toStrictEqual([]);
+	});
+
 	it('routes a mixed closure through one batched negotiate', async () => {
 		const init = await bootstrap();
 

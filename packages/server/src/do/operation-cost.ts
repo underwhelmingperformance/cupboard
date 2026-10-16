@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
+import { rootLogger } from '@cupboard/logger';
+
 import { DatabaseCostMeter } from './database-cost-meter.ts';
 import { wrapDispatchedMethods } from './dispatch-scope.ts';
 
@@ -30,6 +32,10 @@ export interface OperationCostRecord {
 /**
  * The cost of one scope. Counts go to the innermost open scope only, so every
  * binding call and SQLite row appears in at most one scope.
+ *
+ * Work that a scope starts without awaiting keeps the scope in its async
+ * context. A count that arrives after the scope has reported is logged on its
+ * own, as a warning with the scope's label.
  */
 export class OperationCost {
 	private d1Calls = 0;
@@ -43,8 +49,8 @@ export class OperationCost {
 		delete: 0,
 		list: 0
 	};
-
-	readonly sqlite = new DatabaseCostMeter();
+	private readonly sqlite = new DatabaseCostMeter();
+	private isSettled = false;
 
 	/**
 	 * The route template of the request that this scope measures, when a router
@@ -54,26 +60,58 @@ export class OperationCost {
 
 	constructor(readonly label: string) {}
 
+	/**
+	 * Applies `record` to this scope. After the scope has reported, applies it
+	 * to a separate cost instead and logs that cost.
+	 */
+	private record(record: (cost: OperationCost) => void): void {
+		if (!this.isSettled) {
+			record(this);
+
+			return;
+		}
+
+		const late = new OperationCost(this.label);
+		record(late);
+		rootLogger().warn('cost recorded after scope finished', {
+			method: this.label,
+			...late.settle()
+		});
+	}
+
+	track(cursor: SqlStorageCursor<Record<string, SqlStorageValue>>): void {
+		this.record((cost) => {
+			cost.sqlite.track(cursor);
+		});
+	}
+
 	recordR2Call(operation: R2Operation): void {
-		this.r2Calls[operation] += 1;
+		this.record((cost) => {
+			cost.r2Calls[operation] += 1;
+		});
 	}
 
 	recordD1Call(hasRowCounts: boolean): void {
-		this.d1Calls += 1;
+		this.record((cost) => {
+			cost.d1Calls += 1;
 
-		if (!hasRowCounts) {
-			this.d1CallsWithoutRows += 1;
-		}
+			if (!hasRowCounts) {
+				cost.d1CallsWithoutRows += 1;
+			}
+		});
 	}
 
 	recordD1Rows(results: readonly D1Response[]): void {
-		for (const { meta } of results) {
-			this.d1RowsRead += meta.rows_read;
-			this.d1RowsWritten += meta.rows_written;
-		}
+		this.record((cost) => {
+			for (const { meta } of results) {
+				cost.d1RowsRead += meta.rows_read;
+				cost.d1RowsWritten += meta.rows_written;
+			}
+		});
 	}
 
 	settle(): OperationCostRecord {
+		this.isSettled = true;
 		this.sqlite.recordOutstanding();
 
 		return {
@@ -111,12 +149,19 @@ export function hasCost(cost: OperationCostRecord): boolean {
 /**
  * Runs `body` in a new scope labelled `label` and reports the scope's cost when
  * `body` resolves or rejects.
+ *
+ * When the enclosing scope already has the same label, `body` joins it and
+ * `report` is not called.
  */
 export async function withOperationCost<T>(
 	label: string,
 	body: () => Promise<T>,
 	report: (cost: OperationCostRecord) => void
 ): Promise<T> {
+	if (scope.getStore()?.label === label) {
+		return body();
+	}
+
 	const cost = new OperationCost(label);
 
 	return scope.run(cost, async () => {
