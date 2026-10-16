@@ -7,6 +7,7 @@ import {
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { listingGeneratorRevisionSchema } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { createExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { asc, eq, sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -202,11 +203,15 @@ describe('listing adoption queue', () => {
 		const actions: Action[] = [];
 		await Promise.all(
 			hints.map((hint) =>
-				worker.queue(batch([transport(hint, actions)]), {
-					...env,
-					...testControlEnv,
-					ARTIFACT_QUEUE: queue
-				})
+				worker.queue(
+					batch([transport(hint, actions)]),
+					{
+						...env,
+						...testControlEnv,
+						ARTIFACT_QUEUE: queue
+					},
+					createExecutionContext()
+				)
 			)
 		);
 		const claims = [...facts.mock.calls, ...parents.mock.calls].map(

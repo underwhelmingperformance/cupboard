@@ -6,6 +6,7 @@ import {
 } from '@cupboard/protocol/artifact-jobs';
 import { currentListingGeneratorRevision } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { createExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { asc, eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -462,11 +463,15 @@ describe('global listing work queue', () => {
 				break;
 			}
 			const messageId = `message-${String(turn)}`;
-			await worker.queue(batch([transport(next, actions, messageId)]), {
-				...env,
-				...testControlEnv,
-				ARTIFACT_QUEUE: queue
-			});
+			await worker.queue(
+				batch([transport(next, actions, messageId)]),
+				{
+					...env,
+					...testControlEnv,
+					ARTIFACT_QUEUE: queue
+				},
+				createExecutionContext()
+			);
 		}
 		const expected =
 			'{"version":1,"root":{"type":"regular","size":5,"narOffset":96}}';
@@ -563,7 +568,8 @@ describe('global listing work queue', () => {
 								task.id
 							)
 						]),
-						{ ...env, ...testControlEnv, ARTIFACT_QUEUE: queue }
+						{ ...env, ...testControlEnv, ARTIFACT_QUEUE: queue },
+						createExecutionContext()
 					)
 				)
 			);

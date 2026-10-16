@@ -3,7 +3,7 @@ import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { currentLocalStep } from '@cupboard/protocol/deployment';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
-import { runInDurableObject } from 'cloudflare:test';
+import { createExecutionContext, runInDurableObject } from 'cloudflare:test';
 import { env as tenantEnv } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -769,7 +769,7 @@ describe('scheduled tenant pass failure records', () => {
 			],
 			actions
 		);
-		await worker.queue(batch, env);
+		await worker.queue(batch, env, createExecutionContext());
 		expect(actions).toStrictEqual([
 			{ target: 'message', id: 'artifact', action: 'ack' },
 			{ target: 'message', id: 'maintenance', action: 'ack' }
@@ -789,13 +789,17 @@ describe('scheduled tenant pass failure records', () => {
 		const capture = startCapture();
 
 		try {
-			await worker.queue(batch, {
-				...env,
-				CRON_STATE: {
-					...env.CRON_STATE,
-					get: () => Promise.reject(new Error('kv unavailable'))
-				}
-			});
+			await worker.queue(
+				batch,
+				{
+					...env,
+					CRON_STATE: {
+						...env.CRON_STATE,
+						get: () => Promise.reject(new Error('kv unavailable'))
+					}
+				},
+				createExecutionContext()
+			);
 		} finally {
 			capture.stop();
 		}
@@ -890,13 +894,17 @@ describe('scheduled tenant pass failure records', () => {
 		const capture = startCapture();
 
 		try {
-			await worker.queue(batch, {
-				...env,
-				MAINTENANCE_QUEUE: {
-					...env.MAINTENANCE_QUEUE,
-					sendBatch: () => Promise.reject(new Error('queue unavailable'))
-				}
-			});
+			await worker.queue(
+				batch,
+				{
+					...env,
+					MAINTENANCE_QUEUE: {
+						...env.MAINTENANCE_QUEUE,
+						sendBatch: () => Promise.reject(new Error('queue unavailable'))
+					}
+				},
+				createExecutionContext()
+			);
 		} finally {
 			capture.stop();
 		}

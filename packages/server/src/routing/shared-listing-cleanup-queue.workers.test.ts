@@ -5,6 +5,7 @@ import {
 	maxArtifactBytes
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { createExecutionContext } from 'cloudflare:test';
 import { env as tenantEnv } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
@@ -245,7 +246,8 @@ describe('durable shared staging cleanup dispatch', () => {
 					actions
 				)
 			]),
-			{ ...env, ARTIFACT_QUEUE: queue }
+			{ ...env, ARTIFACT_QUEUE: queue },
+			createExecutionContext()
 		);
 		const remaining = await database.select().from(schema.sharedListingStage);
 		expect({
@@ -491,7 +493,8 @@ describe('durable shared staging cleanup dispatch', () => {
 						actions
 					)
 				]),
-				{ ...env, ARTIFACT_QUEUE: queue }
+				{ ...env, ARTIFACT_QUEUE: queue },
+				createExecutionContext()
 			);
 			expect({ sent, actions }).toStrictEqual({
 				sent: [],

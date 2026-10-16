@@ -431,7 +431,8 @@ export async function handleMaintenanceQueueMessage(
 	logger: Logger,
 	env: Env,
 	buffers: NarReadBufferPool,
-	message: Message
+	message: Message,
+	options: ExecuteMaintenanceQueueOptions = {}
 ): Promise<void> {
 	const messageLogger = logger.with({
 		messageId: message.id,
@@ -449,7 +450,8 @@ export async function handleMaintenanceQueueMessage(
 		messageLogger,
 		env,
 		buffers,
-		parsed.data
+		parsed.data,
+		options
 	);
 
 	if (decision.action === 'ack') {
@@ -1436,9 +1438,19 @@ export interface VerificationMetadataSource {
 
 export interface VerificationMetadataResources {
 	readonly admission: R2RequestAdmission;
+	/**
+	 * Registers work with the calling invocation. Direct callers may omit this
+	 * callback when their factory already has its own deferred-task callback.
+	 */
+	readonly defer?: NarMetadataCapture['defer'];
 }
 
 export interface VerifyTenantOptions {
+	/**
+	 * Share admission when verification passes use the same invocation.
+	 */
+	readonly admission?: R2RequestAdmission;
+	readonly defer?: NarMetadataCapture['defer'];
 	/**
 	 * Creates provisional metadata capture. Completion may precede the Durable
 	 * Object verdict or follow claim release, so it cannot grant cache authority.
@@ -1590,7 +1602,8 @@ export async function verifyTenant(
 
 				const reuseClaims = claims.filter((claim) => claim.reuse);
 				const freshClaims = claims.filter((claim) => !claim.reuse);
-				const admission = new R2RequestAdmission(maxOutgoingConnections);
+				const admission =
+					options.admission ?? new R2RequestAdmission(maxOutgoingConnections);
 				const blobs = new ConnectionLimitedBucket(env.BLOBS, admission);
 				// A Durable Object from an earlier build has no reservation RPC. After
 				// any failure the consumer verifies the upload without the write, and
@@ -1651,7 +1664,7 @@ export async function verifyTenant(
 							logger,
 							options,
 							{ tenant: id, owner, claim },
-							{ admission }
+							{ admission, defer: options.defer }
 						)
 				};
 

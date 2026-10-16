@@ -10,7 +10,11 @@ import {
 	type NarListingFact
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { runInDurableObject } from 'cloudflare:test';
+import {
+	createExecutionContext,
+	runInDurableObject,
+	waitOnExecutionContext
+} from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
@@ -29,6 +33,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SubrequestSliceExceededError } from '../errors.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
+import { handleWorkerQueue } from '../routing/queue.ts';
 import {
 	type VerificationMetadataResources,
 	type VerificationMetadataSource,
@@ -143,7 +148,10 @@ function verify(options: VerifyTenantOptions, bindings: typeof env = env) {
 	);
 }
 
-function bindingsAfterMetadataDrain(drained: Promise<undefined>) {
+function bindingsAfterMetadataDrain(
+	drained: Promise<undefined>,
+	bindings = boundedWorkerEnv(env)
+) {
 	const stub = new Proxy(currentServer(), {
 		get(target, property) {
 			const value: unknown = Reflect.get(target, property, target);
@@ -177,7 +185,7 @@ function bindingsAfterMetadataDrain(drained: Promise<undefined>) {
 			return value;
 		}
 	});
-	return new Proxy(boundedWorkerEnv(env), {
+	return new Proxy(bindings, {
 		get(target, property) {
 			if (property === 'CUPBOARD_DO') {
 				return namespace;
@@ -240,6 +248,145 @@ class OptionalIoProbe {
 
 describe('fresh verification listing metadata', () => {
 	beforeEach(resetTestServer);
+	it.each([false, true])(
+		'defers owned capture after queue acknowledgement (declared=%s)',
+		async (isDeclared) => {
+			const value = await fixture(isDeclared);
+			const database = drizzle(env.CUPBOARD_DB, { schema: d1Schema });
+			await database.insert(d1Schema.deploymentTransition).values({
+				id: 'forward-listing-staging',
+				state: 'complete',
+				updatedAt: isoTimestamp(new Date())
+			});
+			const context = createExecutionContext();
+			const outputBuffers = new ByteBufferPool({
+				buffers: 1,
+				bufferSize: 5 * 1024 * 1024
+			});
+			const gate = Promise.withResolvers<undefined>();
+			const started = Promise.withResolvers<undefined>();
+			const head = env.BLOBS.head.bind(env.BLOBS);
+			const sealing = vi
+				.spyOn(env.BLOBS, 'head')
+				.mockImplementation(async (key) => {
+					if (key.startsWith('shared-artifact-staging/')) {
+						started.resolve(undefined);
+						await gate.promise;
+					}
+					return head(key);
+				});
+			const deferred = vi.fn((completion: Promise<void>) => {
+				context.waitUntil(completion);
+			});
+			const actions: string[] = [];
+			const metadataFor: NonNullable<VerifyTenantOptions['metadataFor']> = (
+				source,
+				resources
+			) => {
+				if (resources.defer === undefined) {
+					throw new Error('The queue capture lifetime is unavailable');
+				}
+				return new ForwardListingCaptureProducer({
+					database: env.CUPBOARD_DB,
+					blobs: env.BLOBS,
+					outputBuffers,
+					defer: resources.defer
+				}).capture(
+					{
+						tenant: source.tenant,
+						uploadId: source.claim.uploadId,
+						owner: source.owner,
+						narHash: source.claim.narHash,
+						generatorRevision: currentListingGeneratorRevision
+					},
+					resources.admission
+				);
+			};
+			try {
+				await handleWorkerQueue(
+					{
+						queue: 'cupboard-maintenance',
+						metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+						messages: [
+							{
+								id: 'owned-verify',
+								body: { kind: 'tenant-verify', tenant: currentServerTenant() },
+								timestamp: new Date(),
+								attempts: 1,
+								ack: () => {
+									actions.push('ack');
+								},
+								retry: () => {
+									actions.push('retry');
+								}
+							}
+						],
+						ackAll: () => {
+							throw new Error('Unexpected batch acknowledgement');
+						},
+						retryAll: () => {
+							throw new Error('Unexpected batch retry');
+						}
+					},
+					bindingsAfterMetadataDrain(Promise.resolve(undefined), env),
+					new NarReadBufferPool(),
+					{ metadataFor, defer: deferred }
+				);
+				if (deferred.mock.calls.length === 0) {
+					throw new Error(
+						'The queue did not supply its invocation lifetime to the metadata factory'
+					);
+				}
+				await started.promise;
+				await fetchNarInfo(value.storePathHash);
+				let isComplete = false;
+				const waiting = waitOnExecutionContext(context);
+				void waiting.then(() => {
+					isComplete = true;
+				});
+				await Promise.resolve();
+				const before = {
+					isComplete,
+					actions: [...actions],
+					deferred: deferred.mock.calls.length,
+					ready: await database
+						.select()
+						.from(d1Schema.forwardListingStage)
+						.where(eq(d1Schema.forwardListingStage.state, 'ready'))
+				};
+				gate.resolve(undefined);
+				await waiting;
+				const stages = await database
+					.select({
+						state: d1Schema.forwardListingStage.state,
+						uploadId: d1Schema.forwardListingStage.uploadId
+					})
+					.from(d1Schema.forwardListingStage);
+				expect({
+					before,
+					isComplete,
+					actions,
+					stages,
+					pool: outputBuffers.state
+				}).toStrictEqual({
+					before: {
+						isComplete: false,
+						actions: ['ack'],
+						deferred: 1,
+						ready: []
+					},
+					isComplete: true,
+					actions: ['ack'],
+					stages: [{ state: 'ready', uploadId: value.upload.uploadId }],
+					pool: { free: 1, allocations: 1 }
+				});
+			} finally {
+				gate.resolve(undefined);
+				await waitOnExecutionContext(context);
+				sealing.mockRestore();
+			}
+		}
+	);
 	it.each([
 		{ isDeclared: false, budget: 8 },
 		{ isDeclared: true, budget: 8 },

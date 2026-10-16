@@ -277,8 +277,11 @@ the capture buffer and timeout limits, and isolates setup errors. Deferred
 sealing does not delay the NAR verdict. Sealing may precede Durable Object
 approval or finish after the claim is released, so a sealed listing cannot grant
 cache authority. The sink requests both multipart abort and owner cleanup on
-failure, including after multipart completion. Automatic forward capture remains
-disabled until the producer, cleanup and executor integrations are complete.
+failure, including after multipart completion. The queue entrypoint supplies its
+`ExecutionContext.waitUntil` callback to metadata factories. Verification passes
+within a batch share R2 admission, including deferred work from earlier
+messages. Automatic forward capture remains disabled until provider activation
+and continuous forward enrolment are integrated.
 
 A separate D1 record ties each provisional forward stage to its native upload
 and verification owner. Reservation coalesces the same NAR and generator

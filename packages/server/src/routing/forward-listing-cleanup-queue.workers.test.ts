@@ -10,6 +10,7 @@ import {
 } from '@cupboard/protocol/artifacts';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
+import { createExecutionContext } from 'cloudflare:test';
 import { env as tenantEnv } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
@@ -255,7 +256,8 @@ describe('durable forward staging cleanup', () => {
 								id
 							)
 						]),
-						{ ...env, ARTIFACT_QUEUE: queue }
+						{ ...env, ARTIFACT_QUEUE: queue },
+						createExecutionContext()
 					);
 				}
 				expect({
@@ -453,7 +455,8 @@ describe('durable forward staging cleanup', () => {
 						actions
 					)
 				]),
-				{ ...env, ARTIFACT_QUEUE: value.queue }
+				{ ...env, ARTIFACT_QUEUE: value.queue },
+				createExecutionContext()
 			);
 			const object = await env.BLOBS.head(lease.key);
 			expect({
@@ -600,7 +603,8 @@ describe('durable forward staging cleanup', () => {
 						actions
 					)
 				]),
-				{ ...env, ARTIFACT_QUEUE: queue }
+				{ ...env, ARTIFACT_QUEUE: queue },
+				createExecutionContext()
 			);
 			expect({ sent, actions }).toStrictEqual({
 				sent: [],

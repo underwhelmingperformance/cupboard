@@ -7229,15 +7229,17 @@ build traces available from a cupboard cache.
       owned producer now reserves output memory before staging and allocates
       multipart uploads lazily. Deferred completion includes actual late I/O,
       and cancellation registers or aborts its captured allocation without
-      deleting completed objects. Queue-entrypoint integration, durable forward
-      enrolment and automatic activation remain pending. Native reads, streamed
-      writes and metadata multipart operations now share one invocation's R2
-      admission. Optional operations recheck subrequest capacity after queueing,
-      and cancellation releases queued reservations without starting new writes.
-      Optional D1 operations check cancellation and unreserved subrequest
-      capacity before issuing I/O. Metadata-enabled verification reserves and
-      accounts for native verdict retries, then releases unused reservations
-      after recording or when the pass ends.
+      deleting completed objects. Queue routing supplies the actual invocation
+      callback to metadata factories, and verification passes in a batch share
+      R2 admission while earlier deferred work continues. Automatic provider
+      selection, durable forward enrolment and activation remain pending. Native
+      reads, streamed writes and metadata multipart operations now share one
+      invocation's R2 admission. Optional operations recheck subrequest capacity
+      after queueing, and cancellation releases queued reservations without
+      starting new writes. Optional D1 operations check cancellation and
+      unreserved subrequest capacity before issuing I/O. Metadata-enabled
+      verification reserves and accounts for native verdict retries, then
+      releases unused reservations after recording or when the pass ends.
 - [ ] Serve listings through cache authority and reuse views with GET, HEAD and
       ETag support. Reuse immutable listing facts for the same NAR and generator
       revision without treating those facts as read credentials. Dispatch now

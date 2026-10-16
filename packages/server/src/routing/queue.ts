@@ -1,7 +1,9 @@
 import { rootLogger } from '@cupboard/logger';
 
 import { type NarReadBufferPool } from '../blob/nar-read-buffers.ts';
+import { R2RequestAdmission } from '../blob/r2-request-admission.ts';
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
+import { maxOutgoingConnections } from '../do/bulk.ts';
 
 import { ArtifactQueueConsumer } from './artifact-queue-consumer.ts';
 import { artifactQueueHeaderSchema } from './artifact-queue-message.ts';
@@ -13,7 +15,11 @@ import {
 } from './listing-adoption-queue-message.ts';
 import { listingAdoptionWorkHeaderSchema } from './listing-adoption-work-message.ts';
 import { ListingAdoptionWorkQueue } from './listing-adoption-work-queue.ts';
-import { handleMaintenanceQueueMessage } from './scheduled.ts';
+import {
+	handleMaintenanceQueueMessage,
+	verifyTenant,
+	type VerifyTenantOptions
+} from './scheduled.ts';
 import { sharedListingCleanupHeaderSchema } from './shared-listing-cleanup-message.ts';
 import { SharedListingCleanupQueue } from './shared-listing-cleanup-queue.ts';
 import { SharedListingQueue } from './shared-listing-queue.ts';
@@ -21,14 +27,22 @@ import { sharedListingQueueHeaderSchema } from './shared-listing-queue-message.t
 
 /**
  * Routes messages to maintenance or artifact processing. Pass the raw Worker
- * environment so each processor applies its own I/O wrappers.
+ * environment so each processor applies its own I/O wrappers. Verification
+ * passes share R2 admission, and metadata factories receive the supplied
+ * deferred-task callback.
  */
 export async function handleWorkerQueue(
 	batch: MessageBatch,
 	env: Env,
-	buffers: NarReadBufferPool
+	buffers: NarReadBufferPool,
+	verification: VerifyTenantOptions = {}
 ): Promise<void> {
 	const maintenanceEnv = boundedWorkerEnv(env);
+	const verificationOptions: VerifyTenantOptions = {
+		...verification,
+		admission:
+			verification.admission ?? new R2RequestAdmission(maxOutgoingConnections)
+	};
 	const logger = rootLogger().with({ worker: 'scheduled', queue: batch.queue });
 	const artifacts = new ArtifactQueueConsumer({
 		blobs: env.BLOBS,
@@ -95,7 +109,20 @@ export async function handleWorkerQueue(
 			logger,
 			maintenanceEnv,
 			buffers,
-			message
+			message,
+			{
+				verifyTenant: (passLogger, passEnv, tenant) =>
+					verifyTenant(
+						passLogger,
+						passEnv,
+						buffers,
+						tenant,
+						undefined,
+						undefined,
+						undefined,
+						verificationOptions
+					)
+			}
 		);
 	}
 }

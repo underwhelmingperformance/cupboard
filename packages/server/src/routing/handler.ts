@@ -609,9 +609,14 @@ export default {
 		);
 	},
 
-	async queue(batch, env) {
+	async queue(batch, env, context) {
 		await withSubrequestSlice(
-			() => handleWorkerQueue(batch, env, narReadBuffers),
+			() =>
+				handleWorkerQueue(batch, env, narReadBuffers, {
+					defer: (completion) => {
+						context.waitUntil(completion);
+					}
+				}),
 			{ subrequests: subrequestsPerInvocation(env) }
 		);
 	}

@@ -7,6 +7,7 @@ import {
 } from '@cupboard/protocol/artifacts';
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { createExecutionContext } from 'cloudflare:test';
 import { env as tenantEnv } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { describe, expect, it, vi } from 'vitest';
@@ -203,10 +204,14 @@ describe('shared output retirement queue', () => {
 	it('routes real Worker hints and continues from each durable revision checkpoint', async () => {
 		const { database, leaf, queue, sent } = await fixture();
 		const actions: Action[] = [];
-		await worker.queue(batch([transport(leaf, actions, 'first')]), {
-			...env,
-			ARTIFACT_QUEUE: queue
-		});
+		await worker.queue(
+			batch([transport(leaf, actions, 'first')]),
+			{
+				...env,
+				ARTIFACT_QUEUE: queue
+			},
+			createExecutionContext()
+		);
 		const afterFirst = await database
 			.select({ revision: schema.sharedListingOutputCleanup.cursor })
 			.from(schema.sharedListingOutputCleanup);
@@ -214,22 +219,34 @@ describe('shared output retirement queue', () => {
 		if (next === undefined) {
 			throw new Error('The retirement continuation is missing');
 		}
-		await worker.queue(batch([transport(next, actions, 'second')]), {
-			...env,
-			ARTIFACT_QUEUE: queue
-		});
+		await worker.queue(
+			batch([transport(next, actions, 'second')]),
+			{
+				...env,
+				ARTIFACT_QUEUE: queue
+			},
+			createExecutionContext()
+		);
 		const last = sent.shift();
 		if (last === undefined) {
 			throw new Error('The final retirement continuation is missing');
 		}
-		await worker.queue(batch([transport(last, actions, 'third')]), {
-			...env,
-			ARTIFACT_QUEUE: queue
-		});
-		await worker.queue(batch([transport(leaf, actions, 'duplicate')]), {
-			...env,
-			ARTIFACT_QUEUE: queue
-		});
+		await worker.queue(
+			batch([transport(last, actions, 'third')]),
+			{
+				...env,
+				ARTIFACT_QUEUE: queue
+			},
+			createExecutionContext()
+		);
+		await worker.queue(
+			batch([transport(leaf, actions, 'duplicate')]),
+			{
+				...env,
+				ARTIFACT_QUEUE: queue
+			},
+			createExecutionContext()
+		);
 		expect({
 			afterFirst,
 			references: await database
