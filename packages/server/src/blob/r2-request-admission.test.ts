@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
+import { boundedSubrequest } from '../do/deadline.ts';
 import {
 	holdSubrequests,
 	spendSubrequests,
 	subrequestsAvailable,
 	withSubrequestSlice
 } from '../do/subrequest-slice.ts';
-import { SubrequestSliceExceededError } from '../errors.ts';
+import {
+	SubrequestSliceExceededError,
+	SubrequestTimeoutError
+} from '../errors.ts';
 
 import { R2RequestAdmission } from './r2-request-admission.ts';
 
@@ -17,6 +21,79 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe('shared R2 request admission', () => {
+	it.each([
+		{ kind: 'read', finish: 'resolve' },
+		{ kind: 'read', finish: 'reject' },
+		{ kind: 'write', finish: 'resolve' },
+		{ kind: 'write', finish: 'reject' }
+	] as const)(
+		'counts a timed-out $kind until its binding finishes with $finish',
+		async ({ kind, finish }) => {
+			const admission = new R2RequestAdmission(6);
+			const gate = Promise.withResolvers<undefined>();
+			const count = kind === 'read' ? 6 : 5;
+			const initialCalls = Array.from(
+				{ length: count },
+				(_, index) => `initial-${String(index)}`
+			);
+			const calls: string[] = [];
+			let active = 0;
+			let peak = 0;
+			const timed = initialCalls.map((label) =>
+				admission[kind](
+					() =>
+						boundedSubrequest(
+							async () => {
+								calls.push(label);
+								active += 1;
+								peak = Math.max(peak, active);
+								await gate.promise;
+								active -= 1;
+								if (finish === 'reject') {
+									throw new Error('late binding failure');
+								}
+							},
+							'r2.pending-headers',
+							10
+						),
+					{ priority: 'optional' }
+				)
+			);
+			const outcomes = await Promise.allSettled(timed);
+			const followup = admission[kind](() => {
+				calls.push('followup');
+				active += 1;
+				peak = Math.max(peak, active);
+				active -= 1;
+				return Promise.resolve();
+			});
+			await flushMicrotasks();
+			const before = { calls: [...calls], active };
+			gate.resolve(undefined);
+			await followup;
+			const timeoutMatcher: unknown = expect.any(SubrequestTimeoutError);
+			expect({
+				outcomes,
+				before,
+				after: { calls, active, peak }
+			}).toStrictEqual({
+				outcomes: Array.from({ length: count }, () => ({
+					status: 'rejected',
+					reason: timeoutMatcher
+				})),
+				before: {
+					calls: initialCalls,
+					active: count
+				},
+				after: {
+					calls: [...initialCalls, 'followup'],
+					active: 0,
+					peak: count
+				}
+			});
+		}
+	);
+
 	it('keeps reserved native calls available when optional work exhausts its allowance', async () => {
 		const result = await withSubrequestSlice(
 			async () => {

@@ -6,13 +6,15 @@ import {
 	type SubrequestAdmissionOptions,
 	type SubrequestHold
 } from '../do/subrequest-slice.ts';
+import { SubrequestTimeoutError } from '../errors.ts';
 
 export type R2AdmissionOptions = SubrequestAdmissionOptions;
 
 /**
  * Shares connection admission across native and metadata operations. Streamed
  * writes leave one connection for reads because their input may depend on a
- * read that starts after the write.
+ * read that starts after the write. A caller timeout keeps admission until
+ * the underlying binding call finishes.
  */
 export class R2RequestAdmission {
 	private readonly connections: CountingSemaphore;
@@ -25,6 +27,19 @@ export class R2RequestAdmission {
 		}
 		this.connections = new CountingSemaphore(limit);
 		this.writes = new CountingSemaphore(limit - 1);
+	}
+	private async perform<T>(
+		call: () => Promise<T>,
+		outcome: PromiseWithResolvers<T>
+	): Promise<void> {
+		try {
+			outcome.resolve(await call());
+		} catch (error) {
+			outcome.reject(error);
+			if (error instanceof SubrequestTimeoutError) {
+				await error.abandoned;
+			}
+		}
 	}
 	private connect<T>(
 		admitted: SubrequestHold,
@@ -50,8 +65,13 @@ export class R2RequestAdmission {
 		};
 		options.signal?.addEventListener('abort', release, { once: true });
 		try {
-			const connect = () => this.connect(admitted, call, options);
-			return await (kind === 'write' ? this.writes.run(connect) : connect());
+			const outcome = Promise.withResolvers<T>();
+			const connect = () =>
+				this.connect(admitted, () => this.perform(call, outcome), options);
+			const completion =
+				kind === 'write' ? this.writes.run(connect) : connect();
+			void completion.catch(outcome.reject);
+			return await outcome.promise;
 		} finally {
 			admitted.release();
 			options.signal?.removeEventListener('abort', release);
