@@ -289,20 +289,65 @@ objects.
 cupboard stores every object in one bucket, `cupboard-blobs`, bound as `BLOBS`.
 The key tells you what an object is:
 
-| Key                                                         | What's stored there                                                                     |
-| ----------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `nar/<narHash>.nar.zst`                                     | Verified NARs, compressed with zstd. They're shared between tenants.                    |
-| `nar/<narHash>.<n>.nar.zst`                                 | A later copy (incarnation) of the same NAR, written after an earlier one was deleted.   |
-| `staging/<pushId>/<uploadId>.nar.zst`                       | Uploads that haven't been verified yet. This is the only place where clients can write. |
-| `staging/<pushId>/attestations/<uploadId>`                  | Attestation bundles awaiting attachment, removed on session expiry or by R2 lifecycle.  |
-| `cas/<sha256>[.<n>]`                                        | Attestation bundles, stored by the hash of their content and shared.                    |
-| `t/<tenant>/narinfo/[generation/<g>/][<cache>/]<hash>`      | Signed narinfos, ready to serve, one for each tenant and cache.                         |
-| `t/<tenant>/attestations/[generation/<g>/][<cache>/]<hash>` | The list of attestations for each store path.                                           |
+| Key                                                         | What's stored there                                                                                 |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `nar/<narHash>.<n>.nar.zst`                                 | Verified NARs, compressed with zstd. They're shared between tenants. `<n>` is the incarnation.      |
+| `nar/<narHash>.nar.zst`                                     | Incarnation 1 of a NAR, in the legacy key form.                                                     |
+| `staging/<pushId>/<uploadId>.nar.zst`                       | Uploads that haven't been verified yet. Clients can write only below `staging/<pushId>/`.           |
+| `staging/<pushId>/attestations/<uploadId>`                  | Attestation bundles awaiting attachment, removed when their pending row expires or by R2 lifecycle. |
+| `cas/<sha256>.<n>`                                          | Attestation bundles, stored by the hash of their content and shared. `<n>` is the incarnation.      |
+| `cas/<sha256>`                                              | Incarnation 1 of an attestation bundle, in the legacy key form.                                     |
+| `t/<tenant>/narinfo/[generation/<g>/][<cache>/]<hash>`      | Signed narinfos, ready to serve, one for each tenant and cache.                                     |
+| `t/<tenant>/attestations/[generation/<g>/][<cache>/]<hash>` | The list of attestations for each store path.                                                       |
 
 The `generation/<g>/` part of a key only appears from a cache name's second
 generation onwards. When you delete a cache, its generation goes up by one. A
 new cache with the same name then uses different keys, so it can't read anything
 left over from the old one.
+
+A shared NAR or attestation bundle is stored as a numbered version, its
+**incarnation**. The `object_incarnation` table records the current incarnation
+of each object and whether it is pending, live or absent. A tenant's Durable
+Object reserves an incarnation before it writes a shared object.
+
+Incarnation 1 uses the legacy key form, without a number. Releases from before
+the table wrote objects under that form, and the migration that created the
+table registered them at incarnation 1. A Worker of such a release can still
+write one during an upgrade, and the reapers register it. An object stays at
+incarnation 1 while it is live, so its narinfos use the unnumbered URL.
+
+When an object has no row in `object_incarnation`, the first reservation creates
+a row at incarnation 2 (`firstVersionedObjectIncarnation` in
+`blob/object-incarnation.ts`), so every new object is written under a numbered
+key. The same reservation queues any incarnation-1 object of that hash for
+deletion after the late-write horizon (`lateWriteTombstoneHorizonMs`, 86
+minutes). The `blob_state` or `cas_object` row of an incarnation-1 object may
+already be deleted while an edge cache still serves a response for its immutable
+key. Without the row, nothing records that the old object existed, so a new
+object under the unnumbered key would share its URL with the cached response.
+Numbering from 2 avoids that.
+
+Once the current incarnation is absent, the next reservation takes the next
+number. A caller can supply a reservation owner. When it does and another
+owner's reservation is still pending, the reservation also advances to the next
+number and queues the other owner's incarnation for deletion. A new object
+therefore never reuses the key of an earlier one. A narinfo's URL contains the
+incarnation, so a cached narinfo refers to the object version that existed when
+the narinfo was written.
+
+A reference to a shared object is written only while that version remains. Every
+write in an entry of the commit pipeline's charge batch, and every write of the
+attestation reserve batch, requires two things. The `blob_state` or `cas_object`
+row must still record the incarnation that the caller checked, and the
+`object_incarnation` row, if one exists, must record that incarnation as live.
+Each write in an entry checks the same condition, so an entry is applied
+completely or not at all. A refused NAR entry becomes a `deferred` commit (see
+step 6 of [Pushing store paths][pushing-store-paths]). A refused attestation
+attach returns 503 with `Retry-After: 1`, and the client retries it. The retry
+uses a live version of the bundle if one exists by then, and otherwise promotes
+the staged bundle as a new version.
+
+[pushing-store-paths]: #pushing-store-paths
 
 Cache deletion revokes access before removing local state. Its local transaction
 copies pending staging keys into `staging_cleanup`, removes the pending rows,
@@ -318,9 +363,9 @@ and the reapers.
 Earlier releases stored private caches under a `private/` name. A migration in a
 later release moved those objects to the current keys.
 
-The deploy sets an R2 lifecycle rule on the `staging/` prefix. It deletes
-anything there a day after it's written, and aborts multipart uploads there that
-are still incomplete after a day.
+The deploy sets an R2 lifecycle rule, `cupboard-staging-reclaim`, on the
+`staging/` prefix. It deletes anything there a day after it's written, and
+aborts multipart uploads there that are still incomplete after a day.
 
 A push credential can write any key below `staging/<pushId>/`, so a client can
 leave objects that no pending row tracks. Each tenant's garbage-collection pass
@@ -328,15 +373,21 @@ reconciles these orphan objects. It deletes an object when no pending row tracks
 it, it is more than 15 minutes old, and its push ID verifies for the tenant.
 Staging keys don't contain the tenant, but the push ID's HMAC covers it, so one
 tenant's pass never deletes another tenant's staged objects. A push ID that has
-expired still verifies for this check. Keys whose first segment is not a push
-ID, such as `staging/<name>.nar.zst` and `staging/attestations/<id>` from
-earlier releases, are left to the lifecycle rule. If the tenant identity or
-`PUSH_ID_SIGNING_KEY` is missing, the pass skips the scan and logs a warning.
+expired still verifies for this check. The pass skips keys in the layouts of
+earlier releases, such as `staging/<name>.nar.zst` and
+`staging/attestations/<id>`, because they don't start with `staging/<pushId>/`.
+The lifecycle rule deletes them.
 
 One pass lists at most six pages of 1,000 keys and deletes at most 1,000
-objects. It stores the last key that it examined, and the next pass lists from
-the key after it. A pass that reaches the end of the prefix clears the stored
-key, so the next pass starts again from the beginning.
+objects. It stores the last key that it examined as its resume position, and the
+next pass lists from the key after it. A pass that reaches the end of the prefix
+clears the resume position, so the next pass starts again from the beginning.
+
+The pass needs the tenant identity and `PUSH_ID_SIGNING_KEY` only when it checks
+the push ID of an untracked, aged object. If either is missing when the scan
+reaches such an object, the pass deletes nothing from the scan, keeps the stored
+resume position and logs a warning. The rest of the garbage-collection pass
+still completes.
 
 Orphan staging reconciliation and the lifecycle rule also remove late writes
 from upload requests that were already in progress when the cache was deleted.
@@ -474,9 +525,10 @@ steps:
    deletion and objects from a different commit.
 6. For a NAR, the Worker checks that there's a `blob_ref` reference from the
    addressed cache to that hash, at the cache's current generation and access
-   mode. It then streams `nar/<hash>.nar.zst` from R2. If the cache doesn't
-   refer to the NAR, the response is the same 404 as for a NAR that doesn't
-   exist.
+   mode. It then streams the NAR object from R2. The request path contains the
+   incarnation, so the key is `nar/<hash>.<n>.nar.zst`, or `nar/<hash>.nar.zst`
+   for incarnation 1. If the cache doesn't refer to the NAR, the response is the
+   same 404 as for a NAR that doesn't exist.
 
 Public NARs are cached for a year, marked as immutable. Public narinfos are
 cached for an hour, with `must-revalidate`.
@@ -772,11 +824,27 @@ requests below are all under the tenant URL.
    the canonical object, the tenant's object reads only that object's metadata
    and copies nothing. Otherwise the tenant's object copies the bytes to
    `nar/<narHash>.<n>.nar.zst`, and asks R2 to check the SHA-256 again and to
-   write the object only if the key doesn't already exist. In one D1 batch, the
-   tenant's object then records the `blob_state` row, the `blob_ref` reference,
-   and the charge to the tenant's usage. Finally it publishes the path: it
-   writes the signed narinfo to R2, and sends the result to the CLI over the
-   waiting WebSocket.
+   write the object only if the key doesn't already exist. The tenant's object
+   then marks a newly reserved incarnation live and writes the `blob_state` row.
+   The commit pipeline then runs its charge batch in one D1 batch. The batch
+   inserts the `blob_ref_storage` reference, the `publication` row and the
+   `tenant_blob` row, charges the tenant's usage, and clears any reaper deadline
+   on the `blob_state` row. Finally the object publishes the path: it writes the
+   signed narinfo to R2, and sends the result to the CLI over the waiting
+   WebSocket.
+
+   Each write for an entry of the charge batch requires that `blob_state` still
+   records the incarnation that the commit pipeline probed, and that the
+   `object_incarnation` row, if one exists, records that incarnation as live.
+   The batch ends by reading each entry's reference, so a refusal can be told
+   apart from an idempotent replay. A refused entry becomes a `deferred` commit.
+   For a reuse commit, verification then reports the path `absent` and records
+   the NAR as missing, so the next negotiation asks for an upload. For an upload
+   that verification is promoting, the object keeps the verdict and applies it
+   again from its alarm. A `copy` verdict then uses a live version of the NAR if
+   one exists, and otherwise promotes the staged object as a new version. A
+   `written` verdict finds its object missing or its incarnation retired, so the
+   verdict is discarded and a later pass verifies the staged bytes again.
 
    When a received verdict reports a write for a claim that the consumer no
    longer owns, the tenant's object marks its version absent only while that
@@ -1033,36 +1101,89 @@ contract migrations remove what the preceding build reads, and run once both
 Workers' deployments send all traffic to the new build.
 
 The transitions are listed in order in `schemaTransitions` in
-`@cupboard/protocol/deployment`, and every migration file belongs to exactly one
-of them. Concatenating each transition's expand then contract migrations, in
-list order, must give the migration files in name order. The deploy stops with
-an error when the artifact's files don't match the transitions. Once a release
-has shipped a transition, its migration lists don't change, and a new migration
-goes in a new transition.
+`@cupboard/protocol/deployment`. Each transition applies to one D1 database:
+`CUPBOARD_DB`, or the binding in its `database` field. Every migration file of a
+database belongs to exactly one of that database's transitions. For each
+database, concatenating each transition's expand then contract migrations, in
+list order, must give the database's migration files in name order. The deploy
+stops with an error when the artifact's files don't match the transitions. Once
+a release has shipped a transition, its migration lists don't change, and a new
+migration goes in a new transition.
 
-The current build defines five transitions:
+The deploy runs the transitions of `CONTROL_DB` first, then those of
+`CUPBOARD_DB`. On an existing deployment, it applies a database's expand
+migrations before the upload and its contract migrations after the upload, each
+in list order. A migration that must run after an earlier transition's contract
+migrations can go in one of two places:
 
-- `cache-identity`: migrations `0000` to `0027` are its expand migrations and
-  `0028` to `0030` its contract migrations. Its expand migrations include the
-  base schema (`0000` to `0019`), because no transition comes before it. Its
-  contract step is local step 4.
-- `deployment-transitions`: migration `0031` creates the `deployment_transition`
-  table. It has no contract migrations and no contract step.
-- `attestation-path-index`: migration `0032` adds an index on `attestation_ref`
-  by tenant, store path and generation, which attestation inheritance searches.
-  It has no expand migrations and no contract step, and `0032` is its contract
-  migration. Migration `0028`, a contract migration of `cache-identity`,
-  rebuilds `attestation_ref` and drops every index that it doesn't recreate, so
-  the index must be created after it. The deploy applies `0032` after the
-  upload, once both Workers serve the new build, and the inheritance lookup
-  scans `attestation_ref` until then.
-- `local-step-attempts`: migration `0033` adds the columns of the `tenant` table
-  that record each tenant's last attempt at its local-step work. It has no
-  contract migrations and no contract step.
-- `publication-identity`: migration `0034` creates the independent `publication`
-  table, which records the upload that committed each NAR reference. The earlier
-  cache-identity contract rebuilds the reference table, so upload ownership uses
-  a separate table. This transition has no contract migrations or contract step.
+- In the expand migrations of a dependent transition. The migration runs before
+  the upload, but the deploy is blocked until the earlier transition is
+  complete, as described below. `blob-reference-read-authority` uses this form.
+- In the contract migrations of a later independent transition. The migration
+  never blocks a deploy, but runs only after the upload.
+  `attestation-path-index` and `attestation-digest-index` use this form.
+
+Five transitions of `CUPBOARD_DB` have contract migrations. On an existing
+deployment, the deploy applies their contract migrations in this order. (On a
+fresh deployment, it applies `0043` before the upload and `0042` after it.)
+
+1. `cache-identity`: migrations `0000` to `0027` are its expand migrations and
+   `0028` to `0030` its contract migrations. Its expand migrations include the
+   base schema (`0000` to `0019`), because no transition comes before it. Its
+   contract step is local step 4.
+2. `attestation-path-index`: migration `0032` adds an index on `attestation_ref`
+   by tenant, store path and generation, which attestation inheritance searches.
+   It has no expand migrations and no contract step, and `0032` is its contract
+   migration. Migration `0028`, a contract migration of `cache-identity`,
+   rebuilds `attestation_ref` and drops every index that it doesn't recreate, so
+   the index must be created after it. The deploy applies `0032` after the
+   upload, once both Workers serve the new build, and the inheritance lookup
+   scans `attestation_ref` until then.
+3. `blob-reference-read-authority`: expand migration `0035` adds
+   `path_read_revocation`, the `readable` columns, and read-only aliases under
+   the `_storage` names. Contract migration `0036` renames the physical tables
+   to those names and replaces the old names with views, as [The tenant
+   Worker][the-tenant-worker] describes.
+4. `control-database-split`: expand migration `0041` creates
+   `control_database_split` and triggers that refuse writes to the control
+   tables once the split has started. Before contract migration `0042` runs, the
+   deploy copies the control tables to `CONTROL_DB` and has the control Worker
+   validate the wrapped signing keys. Migration `0042` then checks that the copy
+   has finished and drops the control tables from `CUPBOARD_DB`. The transition
+   sets `contractAfterUpload`, so its contract migration runs after the upload
+   even on a fresh deployment. See [Control database
+   cutover][control-database-cutover].
+5. `attestation-digest-index`: contract migration `0043` replaces the index on
+   `attestation_ref_storage` by digest with one by digest and tenant. The table
+   has that name only after `0036`, and an independent transition's expand
+   migrations can run before `0036`. The migration is therefore a contract
+   migration, and its place in the list puts it after `0036`.
+
+[the-tenant-worker]: #the-tenant-worker
+
+Every other transition has no contract migrations and no contract step, so it is
+complete as soon as its expand migrations run. In `CUPBOARD_DB` these are:
+
+- `deployment-transitions`: `0031` creates the `deployment_transition` table.
+- `local-step-attempts`: `0033` adds the columns of the `tenant` table that
+  record each tenant's last attempt at its local-step work.
+- `publication-identity`: `0034` creates the `publication` table, which records
+  the upload that committed each NAR reference. The deploy can apply this expand
+  migration before the `cache-identity` contract migrations, which rebuild the
+  reference table and keep only the columns that they recreate. A column added
+  to the reference table would be lost, so upload ownership uses a separate
+  table.
+- `tenant-retry-clock`: `0037` adds two columns and two triggers to `tenant`.
+  The triggers measure how long each tenant has been active.
+- `tenant-schema-progress`: `0038` adds `local_schema_version` and
+  `local_schema_migration` to `tenant`.
+- `control-refresh-sessions`: `0039` creates the control plane's refresh-session
+  tables.
+- `control-subject-nonces`: `0040` creates `control_consumed_subject_nonce`.
+
+`CONTROL_DB` has one transition, `control-database-initial`. Its migration,
+`0000` in `packages/server/drizzle-control-d1`, creates the control database's
+tables.
 
 A transition is **independent** when its expand migrations don't depend on the
 contract migrations of the transitions before it and don't change existing rows.
@@ -1080,13 +1201,13 @@ creates the index before `0036` renames the indexed table to
 `attestation_ref_storage`. A deployment with incomplete cache identity still
 requires an earlier release to complete that transition. Without the required
 contracts, the expand migrations could run only after the upload, and the new
-Workers would run without them until then. `deployment-transitions`,
-`attestation-path-index` and `local-step-attempts` are independent, so their
-expansions do not require cache identity to be complete. A later release that
+Workers would run without them until then. Every transition after
+`cache-identity` except `blob-reference-read-authority` is independent, so its
+expansion does not require cache identity to be complete. A later release that
 adds a dependent transition can be blocked, and its error lists the releases
 that complete the earlier transition, aren't older than the deployed release,
 and don't include the later transition. A fresh deployment is never blocked,
-because every transition completes on it before the upload.
+because the deploy doesn't check for a blocked transition on a fresh database.
 
 The `deployment_transition` table has one row for each transition that the
 deploy has started. The state is `expanded` once the transition's expand
@@ -1117,7 +1238,8 @@ it. The Workers of the current build don't read the row.
 
 ### One deploy run
 
-One `cupboard init` run applies the transitions in list order:
+One `cupboard init` run applies each database's transitions in list order,
+`CONTROL_DB` first, in each of these steps:
 
 1. Read the recorded states, before applying a migration or uploading a Worker,
    and stop with an error in any of these cases:
@@ -1141,11 +1263,13 @@ One `cupboard init` run applies the transitions in list order:
    Cloudflare resource or R2 key.
 
 2. Before the upload, on a fresh deployment, apply every transition's expand and
-   contract migrations and record each transition complete. A deployment is
-   fresh when its database has no `tenant` table, or when the table has no rows
-   and neither Worker script exists. A first deploy that stops before the upload
-   leaves one of those states. No Workers of an earlier build use such a
-   database, and it has no tenants to wake.
+   contract migrations and record each transition complete. The exception is a
+   transition with `contractAfterUpload`: it is recorded `expanded`, and its
+   contract migrations run in step 5. A deployment is fresh when `CUPBOARD_DB`
+   has no `tenant` table, or when the table has no rows and neither Worker
+   script exists. A first deploy that stops before the upload leaves one of
+   those states. No Workers of an earlier build use such a database, and it has
+   no tenants to wake.
 3. Before the upload, otherwise, apply the expand migrations of every transition
    that isn't complete and record it `expanded`. A transition with no contract
    migrations and no contract step is complete immediately.
@@ -1337,16 +1461,36 @@ Database triggers then enforce the scope format.
 
 ### Checking the migrations
 
-For each N, `pnpm check:migrations` takes a deployment whose first N transitions
-are complete and whose later ones are pending, and replays the migrations in the
-order that the deploy would apply them. It fails if any of those orders fails to
-apply, or if one produces a different schema from name order. It also fails when
-the drizzle journal lists the migrations in a different order from their names.
-It compares schemas, not rows. It doesn't cover one case. Suppose an independent
-transition has contract migrations, and a deploy expands it before an earlier
-transition's contract migrations run and then stops. If a later release adds
-another transition before that transition completes, the later deploy applies
-the files in an order that the check doesn't replay.
+`pnpm check:migrations` checks each D1 binding in the two Wrangler
+configurations separately, with the migration directory and transitions of the
+binding's database. It runs the migrations in SQLite in memory. For each
+database it fails when:
+
+- the drizzle journal lists the migrations in a different order from their
+  names;
+- a transition's contract migrations don't sort after its expand migrations;
+- the transitions don't list the migration files in name order;
+- a migration fails to apply in name order from an empty database.
+
+Then, for each N from zero to one less than the number of transitions, it takes
+a deployment whose first N transitions are complete and whose later ones are
+pending. It replays the migrations in the order that the deploy would apply
+them, and fails if that order fails to apply or produces a different schema from
+name order. It skips an order that the deploy would refuse because a transition
+is blocked, and an order that equals name order. For `CUPBOARD_DB`, the check
+records a finished control-database copy before migration `0042`, because the
+deploy copies the control tables before that migration runs.
+
+The check compares schemas, not rows. It doesn't replay two kinds of order:
+
+- A fresh deployment's order. The check models only existing deployments, so it
+  never replays a fresh deployment in which `0043` runs before the upload and
+  `0042`, a `contractAfterUpload` migration, after it.
+- An order after an interrupted deploy. Suppose an independent transition has
+  contract migrations, and a deploy expands it before an earlier transition's
+  contract migrations run and then stops. If a later release adds another
+  transition before that transition completes, the later deploy applies the
+  files in an order that the check doesn't replay.
 
 ### Rollbacks
 
