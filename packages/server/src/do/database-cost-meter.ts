@@ -41,11 +41,15 @@ export class DatabaseCostMeter {
 	}
 }
 
+interface CursorTracker {
+	track(cursor: AnyCursor): unknown;
+}
+
 /**
- * Returns the meter for the scope that is open when a statement runs, or
+ * Returns the tracker for the scope that is open when a statement runs, or
  * undefined when no such scope is open.
  */
-type ScopedMeter = () => DatabaseCostMeter | undefined;
+type ScopedMeter = () => CursorTracker | undefined;
 
 // Keep the platform cursor unchanged. Drizzle consumes it before the next
 // statement, which is when the lifetime and scoped meters record it.
