@@ -414,7 +414,7 @@ describe('claiming a verification batch', () => {
 
 				expect(result).toStrictEqual({
 					first: 0,
-					second: { applied: 0, resolved: 0 },
+					second: { applied: 0, resolved: 0, unresolved: 0, beingApplied: 0 },
 					attempts: 1,
 					row: {
 						failures: 1,
@@ -1717,7 +1717,12 @@ it.each([false, true])(
 				}
 			);
 			const expected = {
-				result: { applied: hasDue ? 1 : 0, resolved: hasDue ? 1 : 0 },
+				result: {
+					applied: hasDue ? 1 : 0,
+					resolved: hasDue ? 1 : 0,
+					unresolved: 0,
+					beingApplied: 0
+				},
 				rowsRead: hasDue ? 14 : 1
 			};
 			expect(measured).toStrictEqual({ small: expected, large: expected });

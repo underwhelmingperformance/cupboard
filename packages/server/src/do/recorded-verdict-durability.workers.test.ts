@@ -1070,7 +1070,7 @@ describe('recorded verdict fencing', () => {
 		const driven = await driveVerdictAfterRevoke('verify-fence-revoke');
 
 		expect(driven).toStrictEqual({
-			page: { applied: 0, resolved: 0 },
+			page: { applied: 0, resolved: 0, unresolved: 1, beingApplied: 0 },
 			didInterleave: true,
 			claimOwner: replacementOwner,
 			recordedVerdictJson: replacementVerdictJson
