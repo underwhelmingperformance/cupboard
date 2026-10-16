@@ -72,6 +72,7 @@ import {
 } from '../do/blob-reaper-service.ts';
 import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
+import { withOperationCost } from '../do/operation-cost.ts';
 import { logPromotionAttemptFailed } from '../do/promotion-record.ts';
 import type { VerificationRecordRpcResult } from '../do/server.ts';
 import {
@@ -100,6 +101,7 @@ import {
 	verifyClaimBatchSize,
 	verifyClaimMaxNarBytes
 } from '../http/http.ts';
+import { logMethodFinished } from '../observability/logging.ts';
 import { queueSendBatchSize } from '../policy/queues.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
@@ -424,11 +426,17 @@ export async function handleMaintenanceQueue(
 			continue;
 		}
 
-		const decision = await executeMaintenanceQueueMessage(
-			messageLogger,
-			env,
-			buffers,
-			parsed.data
+		const job = parsed.data;
+		const costLogger = messageLogger.with({
+			method: job.kind,
+			...('tenant' in job && { tenant: job.tenant })
+		});
+		const decision = await withOperationCost(
+			job.kind,
+			() => executeMaintenanceQueueMessage(messageLogger, env, buffers, job),
+			(cost) => {
+				logMethodFinished(costLogger, cost);
+			}
 		);
 
 		if (decision.action === 'ack') {

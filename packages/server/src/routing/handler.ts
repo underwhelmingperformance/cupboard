@@ -28,6 +28,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
+import { withOperationCost } from '../do/operation-cost.ts';
 import {
 	subrequestsAvailable,
 	withSubrequestSlice
@@ -46,7 +47,12 @@ import {
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestBody } from '../http/parse.ts';
-import { loggerMiddleware } from '../observability/logging.ts';
+import {
+	loggerMiddleware,
+	logMethodFinished,
+	requestCostMiddleware,
+	rootLogger
+} from '../observability/logging.ts';
 import { canUseLoopbackHttp } from '../oidc/issuer-policy.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import { uploadRequestSubrequestsFor } from '../policy/upload-pages.ts';
@@ -121,6 +127,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 	app.onError(serverErrorHandler);
 	app.notFound(() => notFoundResponse());
+	app.use(requestCostMiddleware);
 
 	// Initialise logging before admission so early refusals include request fields.
 	// Add the tenant field only after the slug is admitted.
@@ -553,7 +560,17 @@ export default {
 		// Enqueue bounded jobs so execution failures retry per message rather than
 		// repeating the whole cron plan.
 		await withSubrequestSlice(
-			() => enqueueMaintenanceJobs(boundedWorkerEnv(env)),
+			() =>
+				withOperationCost(
+					'cron-enqueue',
+					() => enqueueMaintenanceJobs(boundedWorkerEnv(env)),
+					(cost) => {
+						logMethodFinished(
+							rootLogger().with({ method: 'cron-enqueue' }),
+							cost
+						);
+					}
+				),
 			{ subrequests: subrequestsPerInvocation(env) }
 		);
 	},

@@ -14,6 +14,7 @@ import {
 	parseNarInfoName,
 	parseNarName
 } from '../http/http.ts';
+import { requestCostMiddleware } from '../observability/logging.ts';
 import {
 	narAuthorityForScope,
 	type ReadEnv,
@@ -131,6 +132,7 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 
 	app.onError(serverErrorHandler);
 	app.notFound(() => noStore(notFoundResponse()));
+	app.use(requestCostMiddleware);
 	app.use('*', async (context, next) => {
 		await next();
 

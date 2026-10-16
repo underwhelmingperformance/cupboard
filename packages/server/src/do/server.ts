@@ -106,6 +106,7 @@ import {
 } from '../migration/cache-access.ts';
 import {
 	loggerMiddleware,
+	logMethodFinished,
 	requestCostMiddleware,
 	rootLogger
 } from '../observability/logging.ts';
@@ -221,8 +222,6 @@ import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import {
 	enterOperationCostOnDispatch,
-	hasCost,
-	type OperationCostRecord,
 	withOperationCost
 } from './operation-cost.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
@@ -3819,11 +3818,3 @@ type MeteredMethod =
 	| 'verdict-drain'
 	| 'verification'
 	| 'verify-backstop';
-
-function logMethodFinished(logger: Logger, cost: OperationCostRecord): void {
-	if (!hasCost(cost)) {
-		return;
-	}
-
-	logger.info('method finished', { ...cost });
-}
