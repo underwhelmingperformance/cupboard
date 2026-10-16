@@ -19,13 +19,16 @@ import {
 	listingAdoptionCapturedWorkSchema,
 	listingAdoptionConsumerEpochSchema
 } from '../blob/listing-adoption-work.ts';
+import { boundedD1 } from '../do/bounded-io.ts';
 import { jsonValueList } from '../do/json-list.ts';
+import { withSubrequestSlice } from '../do/subrequest-slice.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 
 import * as schema from './d1-schema.ts';
 import {
 	type ListingAdoptionConsumeResult,
-	ListingAdoptionConsumerStore
+	ListingAdoptionConsumerStore,
+	type ListingAdoptionPruneResult
 } from './listing-adoption-consumer.ts';
 import { sharedNarSource } from './shared-nar-discovery.test-support.ts';
 
@@ -711,4 +714,423 @@ describe('listing adoption capture consumer', () => {
 			work: []
 		});
 	});
+});
+
+describe('listing adoption capture retention', () => {
+	it('prunes acknowledged prefixes in bounded pages without changing durable work or counters', async () => {
+		const { database, rows, store } = await fixture();
+		await store.advance();
+		await store.advance();
+		await store.advance();
+		const before = {
+			work: await work(database),
+			progress: await progress(database)
+		};
+		const first = await store.prune();
+		const second = await new ListingAdoptionConsumerStore(database).prune();
+		const third = await store.prune();
+		const again = await store.prune();
+		expect({
+			first,
+			second,
+			third,
+			again,
+			events: await database.select().from(schema.listingAdoptionCaptureEvent),
+			state: await database.select().from(schema.listingAdoptionCaptureState),
+			work: await work(database),
+			progress: await progress(database)
+		}).toStrictEqual({
+			first: {
+				kind: 'pruned',
+				removed: 32,
+				through: rows[31]?.id,
+				hasMore: true
+			},
+			second: {
+				kind: 'pruned',
+				removed: 32,
+				through: rows[63]?.id,
+				hasMore: true
+			},
+			third: {
+				kind: 'pruned',
+				removed: 1,
+				through: rows[64]?.id,
+				hasMore: false
+			},
+			again: { kind: 'idle' },
+			events: [],
+			state: [
+				{
+					id: 1,
+					latest: rows[64]?.id,
+					prunedThrough: rows[64]?.id,
+					isReady: true
+				}
+			],
+			...before
+		});
+	});
+	it('preserves every unread event and continues consumption after pruning', async () => {
+		const { database, rows, store } = await fixture();
+		await store.advance();
+		const result = await store.prune();
+		const remaining = await database
+			.select()
+			.from(schema.listingAdoptionCaptureEvent)
+			.orderBy(asc(schema.listingAdoptionCaptureEvent.id));
+		const continued = await store.advance();
+		const stored = await work(database);
+		expect({
+			result,
+			remaining,
+			continued,
+			ids: stored.map((row) => row.eventId)
+		}).toStrictEqual({
+			result: {
+				kind: 'pruned',
+				removed: 32,
+				through: rows[31]?.id,
+				hasMore: false
+			},
+			remaining: rows.slice(32),
+			continued: {
+				kind: 'advanced',
+				scanned: 32,
+				enrolled: 32,
+				after: rows[63]?.id,
+				hasMore: true
+			},
+			ids: rows.slice(0, 64).map((row) => row.id)
+		});
+	});
+	it.each(['epoch', 'readiness', 'floor'] as const)(
+		'refuses a selected prefix after its %s changes',
+		async (change) => {
+			const { database, rows, store } = await fixture(2);
+			await store.advance();
+			const through = rows[1]?.id;
+			if (through === undefined) {
+				throw new Error('The retention fixture has no boundary');
+			}
+			const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+			const interrupted = vi
+				.spyOn(env.CUPBOARD_DB, 'batch')
+				.mockImplementationOnce(async (queries) => {
+					switch (change) {
+						case 'epoch': {
+							await database.update(schema.listingAdoptionConsumer).set({
+								epoch: listingAdoptionConsumerEpochSchema.parse('c'.repeat(32))
+							});
+							break;
+						}
+						case 'readiness': {
+							await database
+								.update(schema.listingAdoptionCaptureState)
+								.set({ isReady: false });
+							break;
+						}
+						case 'floor': {
+							await database
+								.update(schema.listingAdoptionCaptureState)
+								.set({ prunedThrough: through });
+							break;
+						}
+					}
+					return original(queries);
+				});
+			let result: ListingAdoptionPruneResult;
+			try {
+				result = await store.prune();
+			} finally {
+				interrupted.mockRestore();
+			}
+			expect({
+				result,
+				events: await database
+					.select()
+					.from(schema.listingAdoptionCaptureEvent)
+					.orderBy(asc(schema.listingAdoptionCaptureEvent.id))
+			}).toStrictEqual({ result: { kind: 'stale' }, events: rows });
+		}
+	);
+	it('recovers a lost committed pruning reply without repeating durable enrolment', async () => {
+		const { database, rows, store } = await fixture();
+		await store.advance();
+		await store.advance();
+		await store.advance();
+		const before = {
+			work: await work(database),
+			progress: await progress(database)
+		};
+		const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		const lost = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementationOnce(async (queries) => {
+				await original(queries);
+				throw new Error('Pruning reply lost');
+			});
+		try {
+			await expect(store.prune()).rejects.toBeInstanceOf(
+				SharedFactsUnavailableError
+			);
+		} finally {
+			lost.mockRestore();
+		}
+		expect({
+			retry: await new ListingAdoptionConsumerStore(database).prune(),
+			events: await database
+				.select()
+				.from(schema.listingAdoptionCaptureEvent)
+				.orderBy(asc(schema.listingAdoptionCaptureEvent.id)),
+			work: await work(database),
+			progress: await progress(database)
+		}).toStrictEqual({
+			retry: {
+				kind: 'pruned',
+				removed: 32,
+				through: rows[63]?.id,
+				hasMore: true
+			},
+			events: rows.slice(64),
+			...before
+		});
+	});
+	it('commits event deletion and the retained floor atomically', async () => {
+		const { database, rows, store } = await fixture(2);
+		await store.advance();
+		await env.CUPBOARD_DB.prepare(
+			"CREATE TRIGGER reject_capture_floor BEFORE UPDATE OF pruned_through ON listing_adoption_capture_state BEGIN SELECT RAISE(ABORT, 'floor refused'); END"
+		).run();
+		try {
+			await expect(store.prune()).rejects.toBeInstanceOf(
+				SharedFactsUnavailableError
+			);
+		} finally {
+			await env.CUPBOARD_DB.prepare('DROP TRIGGER reject_capture_floor').run();
+		}
+		expect({
+			events: await database
+				.select()
+				.from(schema.listingAdoptionCaptureEvent)
+				.orderBy(asc(schema.listingAdoptionCaptureEvent.id)),
+			state: await database.select().from(schema.listingAdoptionCaptureState)
+		}).toStrictEqual({
+			events: rows,
+			state: [{ id: 1, latest: rows[1]?.id, prunedThrough: 0, isReady: true }]
+		});
+	});
+	it('preserves captures appended after its selected acknowledged boundary', async () => {
+		const { database, rows, store } = await fixture(2);
+		await store.advance();
+		const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		const appended = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementationOnce(async (queries) => {
+				await database
+					.insert(schema.listingAdoptionCaptureEvent)
+					.values({ source: source(99) });
+				return original(queries);
+			});
+		let result: ListingAdoptionPruneResult;
+		try {
+			result = await store.prune();
+		} finally {
+			appended.mockRestore();
+		}
+		const events = await database
+			.select()
+			.from(schema.listingAdoptionCaptureEvent);
+		const next = await store.advance();
+		const stored = await work(database);
+		expect({
+			result,
+			sources: events.map((event) => event.source),
+			next,
+			work: stored.map((item) => item.source)
+		}).toStrictEqual({
+			result: {
+				kind: 'pruned',
+				removed: 2,
+				through: rows[1]?.id,
+				hasMore: false
+			},
+			sources: [source(99)],
+			next: {
+				kind: 'advanced',
+				scanned: 1,
+				enrolled: 1,
+				after: events[0]?.id,
+				hasMore: false
+			},
+			work: [...rows.map((row) => row.source), source(99)]
+		});
+	});
+	it('advances the retained floor across an already deleted acknowledged prefix', async () => {
+		const { database, rows, store } = await fixture();
+		await store.advance();
+		const through = rows[31]?.id;
+		if (through === undefined) {
+			throw new Error('The retention fixture has no full page');
+		}
+		await database
+			.delete(schema.listingAdoptionCaptureEvent)
+			.where(lte(schema.listingAdoptionCaptureEvent.id, through));
+		expect({
+			result: await store.prune(),
+			state: await database.select().from(schema.listingAdoptionCaptureState),
+			events: await database
+				.select()
+				.from(schema.listingAdoptionCaptureEvent)
+				.orderBy(asc(schema.listingAdoptionCaptureEvent.id))
+		}).toStrictEqual({
+			result: { kind: 'pruned', removed: 0, through, hasMore: false },
+			state: [
+				{ id: 1, latest: rows[64]?.id, prunedThrough: through, isReady: true }
+			],
+			events: rows.slice(32)
+		});
+	});
+	it('allows newer consumer progress while deleting only its captured prefix', async () => {
+		const { database, rows, store } = await fixture();
+		await store.advance();
+		const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		const advanced = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementationOnce(async (queries) => {
+				await store.advance();
+				return original(queries);
+			});
+		let result: ListingAdoptionPruneResult;
+		try {
+			result = await store.prune();
+		} finally {
+			advanced.mockRestore();
+		}
+		const stored = await work(database);
+		expect({
+			result,
+			progress: await progress(database),
+			ids: stored.map((item) => item.eventId),
+			events: await database
+				.select()
+				.from(schema.listingAdoptionCaptureEvent)
+				.orderBy(asc(schema.listingAdoptionCaptureEvent.id))
+		}).toStrictEqual({
+			result: {
+				kind: 'pruned',
+				removed: 32,
+				through: rows[31]?.id,
+				hasMore: false
+			},
+			progress: [{ after: rows[63]?.id, scanned: 64, enrolled: 64 }],
+			ids: rows.slice(0, 64).map((row) => row.id),
+			events: rows.slice(32)
+		});
+	});
+	it('bounds acknowledged prefix deletion among 25,000 capture events', async () => {
+		const { rows, store } = await fixture(25_000);
+		await store.advance();
+		const statements: {
+			readonly query: string;
+			readonly parameters: unknown[];
+		}[] = [];
+		const database = drizzle(boundedD1(env.CUPBOARD_DB), {
+			schema,
+			logger: {
+				logQuery(query, parameters) {
+					statements.push({ query, parameters });
+				}
+			}
+		});
+		const original = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		let batchReads = 0;
+		let batchStatements = 0;
+		let selected: D1Result<{ id: number }> | undefined;
+		const measured = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementationOnce(async (queries) => {
+				const page = statements.find(
+					({ query }) =>
+						query.startsWith('select ') &&
+						query.includes('from "listing_adoption_capture_event"') &&
+						query.includes(' limit ')
+				);
+				if (page === undefined) {
+					throw new Error('The pruning page query was not recorded');
+				}
+				const parameters = z
+					.array(z.union([z.string(), z.number()]))
+					.parse(page.parameters);
+				selected = await env.CUPBOARD_DB.prepare(page.query)
+					.bind(...parameters)
+					.all<{ id: number }>();
+				const result = await original(queries);
+				batchReads = result.reduce(
+					(total, row) => total + row.meta.rows_read,
+					0
+				);
+				batchStatements = queries.length;
+				return result;
+			});
+		let result: ListingAdoptionPruneResult;
+		try {
+			result = await withSubrequestSlice(
+				() => new ListingAdoptionConsumerStore(database).prune(),
+				{ subrequests: 14, reserve: 8 }
+			);
+		} finally {
+			measured.mockRestore();
+		}
+		if (selected === undefined) {
+			throw new Error('The pruning selection measurement is missing');
+		}
+		expect({
+			result,
+			batchStatements,
+			boundedBatchReads: batchReads > 0 && batchReads <= 256,
+			boundedPageReads: selected.meta.rows_read <= 33,
+			parametersBounded: statements.every(
+				(statement) => statement.parameters.length <= 100
+			),
+			queryBytesBounded: statements.every(
+				(statement) =>
+					new TextEncoder().encode(statement.query).byteLength <= 100_000
+			),
+			selected: selected.results
+		}).toStrictEqual({
+			result: {
+				kind: 'pruned',
+				removed: 32,
+				through: rows[31]?.id,
+				hasMore: false
+			},
+			batchStatements: 2,
+			boundedBatchReads: true,
+			boundedPageReads: true,
+			parametersBounded: true,
+			queryBytesBounded: true,
+			selected: rows.slice(0, 32).map(({ id }) => ({ id }))
+		});
+	});
+	it('does not prune before a consumer acknowledges input', async () => {
+		const { database, rows, store } = await fixture(1);
+		expect({
+			result: await store.prune(),
+			events: await database.select().from(schema.listingAdoptionCaptureEvent),
+			consumers: await database.select().from(schema.listingAdoptionConsumer)
+		}).toStrictEqual({ result: { kind: 'idle' }, events: rows, consumers: [] });
+	});
+	it.each(['capture', 'storage'] as const)(
+		'waits while %s readiness is paused',
+		async (phase) => {
+			const { database, rows, store } = await fixture(1);
+			await store.advance();
+			await pauseReadiness(database, phase);
+			expect({
+				result: await store.prune(),
+				events: await database.select().from(schema.listingAdoptionCaptureEvent)
+			}).toStrictEqual({ result: { kind: 'unavailable' }, events: rows });
+		}
+	);
 });

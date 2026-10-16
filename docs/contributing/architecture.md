@@ -421,12 +421,20 @@ sends those targets separately so one failure cannot keep aborting valid
 siblings. Old responses cannot acknowledge a replacement execution epoch or
 expired lease. A retry after a lost committed wake still requests dispatch.
 
-Metadata invocations have a 25-second deadline. Dispatch admits twenty binding
-calls, expansion admits twenty-eight, and delivery admits eight plus four calls
-per hinted target, at most forty. Queue consumers have no configured global
-concurrency cap. Execution metadata grants no cache authority or CAS retention.
-Shared completion wakes, forward availability dispatch and acknowledgement,
-metadata pruning and automatic forward generation remain pending.
+Acknowledged capture input is pruned in pages of at most 32 events. Event
+deletion and the retained floor commit in one D1 batch. Both writes recheck the
+consumer epoch, its acknowledged position, readiness and the previous floor.
+Newer consumer progress remains valid, and pruning preserves unread events and
+independently persisted source work. Lost replies retry from the committed
+floor.
+
+Metadata invocations have a 25-second deadline. Dispatch admits twenty-six
+binding calls, expansion admits twenty-eight, and delivery admits eight plus
+four calls per hinted target, at most forty. Queue consumers have no configured
+global concurrency cap. Execution metadata grants no cache authority or CAS
+retention. Shared completion wakes, forward availability dispatch and
+acknowledgement, source-work and terminal-task pruning, expired-prefix recovery
+and automatic forward generation remain pending.
 
 Removing the last NAR reference records one durable cleanup scope. Captured
 reference epochs prevent an old removal from deleting a recreated reference.

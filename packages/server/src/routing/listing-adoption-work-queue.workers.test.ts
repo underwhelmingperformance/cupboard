@@ -249,6 +249,34 @@ describe('listing adoption execution queue', () => {
 			}))
 		).toStrictEqual([{ kind: 'expand', owner: undefined, generation: 0 }]);
 	});
+	it('prunes durable capture input during a bounded dispatch turn', async () => {
+		const { database, consumer } = await fixture(1);
+		await new ListingAdoptionConsumerStore(database).advance();
+		const before = await database.select().from(schema.listingAdoptionWork);
+		const position = await database
+			.select()
+			.from(schema.listingAdoptionCaptureState)
+			.get();
+		const actions: Action[] = [];
+		await withSubrequestSlice(
+			() =>
+				consumer().handleMessage(
+					message({ kind: 'listing-adoption-work-dispatch' }, actions)
+				),
+			{ subrequests: 50, reserve: 8 }
+		);
+		expect({
+			actions,
+			events: await database.select().from(schema.listingAdoptionCaptureEvent),
+			work: await database.select().from(schema.listingAdoptionWork),
+			state: await database.select().from(schema.listingAdoptionCaptureState)
+		}).toStrictEqual({
+			actions: [{ action: 'ack' }],
+			events: [],
+			work: before,
+			state: [{ ...position, prunedThrough: position?.latest }]
+		});
+	});
 	it('uses the authoritative RPC once per tenant for independent captured targets', async () => {
 		const { database, rpc, consumer, deliveries } = await fixture(3, 2);
 		const ids = await deliveries();

@@ -7441,9 +7441,12 @@ build traces available from a cupboard cache.
       installed. Strict messages contain source or target identities, never
       ownership. Source discovery and delivery reservations remain independent
       of input consumption failures. Failed sends and committed replies recover
-      through durable deadlines and fresh claims. Metadata pruning, forward
-      dispatch and acknowledgement, shared completion wakes and activation
-      remain pending.
+      through durable deadlines and fresh claims. Capture pruning now removes at
+      most 32 acknowledged events per turn and commits the retained floor with
+      deletion. Consumer epochs and acknowledged positions fence both writes,
+      and unread events and durable source work remain intact. Source-work and
+      terminal-task pruning, expired-prefix recovery, forward dispatch and
+      acknowledgement, shared completion wakes and activation remain pending.
 - [ ] Add a dedicated artifact queue whose consumers scale with demand. Bound
       decoding, multipart staging, connections, memory, subrequests and elapsed
       time within each invocation. Dispatch independent tasks in parallel,

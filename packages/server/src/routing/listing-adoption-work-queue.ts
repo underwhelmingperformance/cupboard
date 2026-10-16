@@ -42,7 +42,7 @@ export interface ListingAdoptionWorkDependencies {
 	) => Pick<CupboardServer, 'adoptNarListings'>;
 }
 const budgetMs = 25_000;
-const dispatchSubrequests = 20;
+const dispatchSubrequests = 26;
 const expansionSubrequests = 28;
 const deliveryBaseSubrequests = 8;
 const deliveryTargetSubrequests = 4;
@@ -86,12 +86,23 @@ export class ListingAdoptionWorkQueue {
 					'Listing adoption capture expired before durable enrolment; historical recovery is required'
 				);
 			}
-			if (progress.kind !== 'advanced') {
+			if (progress.kind !== 'advanced' && progress.kind !== 'idle') {
 				return false;
 			}
-			span.setAttribute('scanned', progress.scanned);
-			span.setAttribute('enrolled', progress.enrolled);
-			return progress.hasMore;
+			if (progress.kind === 'advanced') {
+				span.setAttribute('scanned', progress.scanned);
+				span.setAttribute('enrolled', progress.enrolled);
+			}
+			const retention = await this.captures.prune();
+			span.setAttribute('retention.outcome', retention.kind);
+			if (retention.kind === 'pruned') {
+				span.setAttribute('retention.removed', retention.removed);
+				span.setAttribute('retention.through', retention.through);
+			}
+			return (
+				(progress.kind === 'advanced' && progress.hasMore) ||
+				(retention.kind === 'pruned' && retention.hasMore)
+			);
 		});
 	}
 	private async seed(): Promise<boolean> {

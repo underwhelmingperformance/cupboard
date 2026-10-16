@@ -33,6 +33,14 @@ export type ListingAdoptionConsumeResult =
 			readonly prunedThrough: ListingAdoptionCaptureSequence;
 	  }
 	| { readonly kind: 'idle' | 'stale' | 'unavailable' };
+export type ListingAdoptionPruneResult =
+	| {
+			readonly kind: 'pruned';
+			readonly removed: number;
+			readonly through: ListingAdoptionCaptureSequence;
+			readonly hasMore: boolean;
+	  }
+	| { readonly kind: 'idle' | 'stale' | 'unavailable' };
 
 /**
 Copies bounded capture pages into durable expansion work before acknowledging
@@ -128,6 +136,32 @@ export class ListingAdoptionConsumerStore {
 			exists(this.captured(row.after, through))
 		);
 	}
+	private pruneFence(row: Checkpoint, floor: ListingAdoptionCaptureSequence) {
+		const consumer = schema.listingAdoptionConsumer;
+		const current = this.database
+			.select({ id: consumer.id })
+			.from(consumer)
+			.where(
+				and(
+					eq(consumer.id, 1),
+					eq(consumer.epoch, row.epoch),
+					gte(consumer.after, row.after)
+				)
+			);
+		const state = schema.listingAdoptionCaptureState;
+		const position = this.database
+			.select({ id: state.id })
+			.from(state)
+			.where(
+				and(
+					eq(state.id, 1),
+					eq(state.isReady, true),
+					eq(state.prunedThrough, floor),
+					gte(state.latest, row.after)
+				)
+			);
+		return and(exists(current), exists(position), exists(this.readyQuery()));
+	}
 
 	private async enrol(
 		row: Checkpoint,
@@ -190,6 +224,72 @@ export class ListingAdoptionConsumerStore {
 		};
 	}
 
+	async prune(): Promise<ListingAdoptionPruneResult> {
+		try {
+			if ((await this.readyQuery().get()) === undefined) {
+				return { kind: 'unavailable' };
+			}
+			const position = await this.positionQuery().get();
+			if (position?.isReady !== true) {
+				return { kind: 'unavailable' };
+			}
+			const row = await this.stateQuery().get();
+			if (row === undefined) {
+				return { kind: 'idle' };
+			}
+			if (row.after < position.prunedThrough) {
+				return { kind: 'unavailable' };
+			}
+			const events = schema.listingAdoptionCaptureEvent;
+			const rows = await this.database
+				.select({ id: events.id })
+				.from(events)
+				.where(lte(events.id, row.after))
+				.orderBy(asc(events.id))
+				.limit(pageSize + 1);
+			const ids = rows.slice(0, pageSize).map((event) => event.id);
+			const hasMore = rows.length > pageSize;
+			const boundary = hasMore ? ids.at(-1) : row.after;
+			if (boundary === undefined) {
+				throw new Error('The adoption retention boundary is missing');
+			}
+			const through = listingAdoptionCaptureSequenceSchema.parse(
+				Math.max(position.prunedThrough, boundary)
+			);
+			if (ids.length === 0 && through === position.prunedThrough) {
+				return { kind: 'idle' };
+			}
+			const state = schema.listingAdoptionCaptureState;
+			const current = this.pruneFence(row, position.prunedThrough);
+			const selected = and(inArray(events.id, jsonValueList(ids)), current);
+			const eligibleState = and(eq(state.id, 1), current);
+			const [deleted, saved] = await this.database.batch([
+				this.database
+					.delete(events)
+					.where(selected)
+					.returning({ id: events.id }),
+				this.database
+					.update(state)
+					.set({ prunedThrough: through })
+					.where(eligibleState)
+					.returning({ through: state.prunedThrough })
+			]);
+			const progress = saved[0];
+			return progress === undefined
+				? { kind: 'stale' }
+				: {
+						kind: 'pruned',
+						removed: deleted.length,
+						through: progress.through,
+						hasMore
+					};
+		} catch (error) {
+			if (error instanceof SharedFactsUnavailableError) {
+				throw error;
+			}
+			throw new SharedFactsUnavailableError(error);
+		}
+	}
 	async advance(): Promise<ListingAdoptionConsumeResult> {
 		try {
 			if ((await this.readyQuery().get()) === undefined) {
