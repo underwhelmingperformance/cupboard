@@ -176,6 +176,30 @@ export function expiredRootTargetSelect(
 // the remainder without a separate cursor.
 export const maxPendingRowsDeletedPerRun = 1000;
 
+interface ExpiredRowCollection {
+	readonly pendingUploadsDeleted: number;
+	readonly pendingAttestationsDeleted: number;
+	readonly hasMorePendingRows: boolean;
+	readonly hasMoreWork: boolean;
+	readonly stagingKeys: readonly R2ObjectKey[];
+}
+
+interface ReachabilityCollection {
+	readonly collectionCache: ResolvedCache | undefined;
+	readonly retirementRecheck?: {
+		readonly incarnation: string;
+		readonly revision: number;
+	};
+	readonly rootsExpired: number;
+	readonly pathsCollected: number;
+	readonly hasMoreExpiredRoots: boolean;
+	// Whether the scan of the collection cache has more work.
+	readonly hasMoreCacheWork: boolean;
+	// Whether the target has more work: the scan of the collection cache, or a
+	// later cache of a tenant-wide collection.
+	readonly hasMoreWork: boolean;
+}
+
 interface ExpiredRefreshFamilyCollection {
 	readonly familiesDeleted: number;
 	readonly hasMoreWork: boolean;
@@ -1642,19 +1666,10 @@ export class GarbageCollectionService {
 		});
 	}
 
-	async collectGarbage(
-		logger: Logger,
-		target: GarbageCollectionTarget,
-		purgeOrigin?: RequestOrigin
-	): Promise<GarbageCollectionOutcome> {
-		const cache = target.scope === 'cache' ? target.cache : undefined;
-		const log = logger.with({
-			job: 'garbage-collection',
-			...(cache !== undefined && { cache: cache.scope })
-		});
-		const startedAt = new Date();
-		const now = isoTimestamp(startedAt);
-
+	private collectExpiredRows(
+		log: Logger,
+		now: IsoTimestamp
+	): ExpiredRowCollection {
 		const hasMoreRefreshCredentialMaintenance =
 			this.collectRefreshCredentialMaintenance(now);
 		const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
@@ -1722,70 +1737,98 @@ export class GarbageCollectionService {
 			...expiredAttestations.map((upload) => upload.r2Key)
 		];
 
-		// Tenant-wide collection advances through registered caches one at a time.
-		// Scoped collection uses only the requested cache. Persistent mark and
-		// frontier state resumes each pass without rereading earlier chunks.
+		return {
+			pendingUploadsDeleted: expiredUploads.length,
+			pendingAttestationsDeleted: expiredAttestations.length,
+			hasMorePendingRows,
+			hasMoreWork:
+				hasMoreRefreshCredentialMaintenance ||
+				expiredRefreshFamilies.hasMoreWork ||
+				hasMoreExpiredSubjectNonces ||
+				hasMorePendingRows,
+			stagingKeys
+		};
+	}
+
+	/**
+	Advances the reachability scan of the target. A tenant-wide collection
+	advances through registered caches one at a time, and a scoped collection
+	uses only the requested cache. Persistent mark and frontier state resumes
+	each pass without rereading earlier chunks.
+	*/
+	private collectReachability(
+		target: GarbageCollectionTarget,
+		now: IsoTimestamp
+	): ReachabilityCollection {
 		const collectionCache =
 			target.scope === 'cache' ? target.cache : this.tenantCollectionCache();
-		const collected =
-			collectionCache === undefined
-				? {
-						rootsExpired: 0,
-						pathsCollected: 0,
-						hasMoreExpiredRoots: false,
-						hasMoreWork: false
-					}
-				: this.collectUnreachable(collectionCache, now);
-		const retirementRecheck =
-			collectionCache === undefined
-				? undefined
-				: this.context.db
-						.select({
-							incarnation: schema.managedCacheRetirements.incarnation,
-							revision: schema.managedCacheRetirements.revision
-						})
-						.from(schema.managedCacheRetirements)
-						.where(
-							and(
-								eq(schema.managedCacheRetirements.cacheId, collectionCache.id),
-								lte(schema.managedCacheRetirements.eligibleAfter, now)
-							)
-						)
-						.get();
-		const hasMoreCollectionWork =
-			collectionCache !== undefined &&
-			!collected.hasMoreWork &&
-			target.scope === 'tenant'
+
+		if (collectionCache === undefined) {
+			return {
+				collectionCache,
+				rootsExpired: 0,
+				pathsCollected: 0,
+				hasMoreExpiredRoots: false,
+				hasMoreCacheWork: false,
+				hasMoreWork: false
+			};
+		}
+
+		const collected = this.collectUnreachable(collectionCache, now);
+		const retirementRecheck = this.context.db
+			.select({
+				incarnation: schema.managedCacheRetirements.incarnation,
+				revision: schema.managedCacheRetirements.revision
+			})
+			.from(schema.managedCacheRetirements)
+			.where(
+				and(
+					eq(schema.managedCacheRetirements.cacheId, collectionCache.id),
+					lte(schema.managedCacheRetirements.eligibleAfter, now)
+				)
+			)
+			.get();
+		const hasMoreWork =
+			!collected.hasMoreWork && target.scope === 'tenant'
 				? this.advanceTenantCollection(collectionCache)
 				: collected.hasMoreWork;
-		const hasMoreWork =
-			hasMoreRefreshCredentialMaintenance ||
-			expiredRefreshFamilies.hasMoreWork ||
-			hasMoreExpiredSubjectNonces ||
-			hasMorePendingRows ||
-			hasMoreCollectionWork;
 
-		// R2 narinfo keys do not include the narinfo generation. Keep the gate
-		// between the live-generation check and object deletion so a recommit
-		// cannot replace the object while an older queued deletion is in progress.
-		const narInfosDeleted = await this.context.criticalSection(async () => {
+		return {
+			collectionCache,
+			...(retirementRecheck !== undefined && { retirementRecheck }),
+			rootsExpired: collected.rootsExpired,
+			pathsCollected: collected.pathsCollected,
+			hasMoreExpiredRoots: collected.hasMoreExpiredRoots,
+			hasMoreCacheWork: collected.hasMoreWork,
+			hasMoreWork
+		};
+	}
+
+	// R2 narinfo keys do not include the narinfo generation. Keep the gate
+	// between the live-generation check and object deletion so a recommit
+	// cannot replace the object while an older queued deletion is in progress.
+	private flushNarInfoDeletions(
+		purgeOrigin: RequestOrigin | undefined,
+		afterFlush: () => Promise<void> = () => Promise.resolve()
+	): Promise<number> {
+		return this.context.criticalSection(async () => {
 			const deleted =
 				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);
 
-			if (collectionCache !== undefined && !collected.hasMoreWork) {
-				await this.cacheAdmin.scheduleManagedRetirement(
-					collectionCache,
-					purgeOrigin
-				);
-			}
+			await afterFlush();
 
 			return deleted;
 		});
+	}
 
-		// Delete R2 objects outside the critical section. The orphan scan then reads
-		// current pending rows and applies the age fence, so a concurrent upload is
-		// not mistaken for an orphan. A failed first delete must not discard the
-		// collection counters or prevent that reconciliation.
+	// Delete R2 objects outside the critical section. The orphan scan then reads
+	// current pending rows and applies the age fence, so a concurrent upload is
+	// not mistaken for an orphan. A failed first delete must not discard the
+	// collection counters or prevent that reconciliation.
+	private async deleteStagingObjects(
+		log: Logger,
+		stagingKeys: readonly R2ObjectKey[]
+	): Promise<void> {
 		try {
 			await deleteObjects(this.context.env.BLOBS, stagingKeys);
 		} catch (error) {
@@ -1797,6 +1840,66 @@ export class GarbageCollectionService {
 				}
 			);
 		}
+	}
+
+	/**
+	Runs the bounded deletes of a pass without its reachability scan: expired
+	rows, the narinfo deletion queue, and the staging objects of the deleted
+	uploads. The alarm runs this when a pending upload that deferred a
+	narinfo deletion expires, because that deletion is the only work due.
+	Orphan staging reconciliation lists R2, and every full pass runs it, so
+	this does not.
+	*/
+	async collectExpiredRowsWithoutScan(
+		logger: Logger,
+		purgeOrigin?: RequestOrigin
+	): Promise<GarbageCollectionOutcome> {
+		const log = logger.with({ job: 'garbage-collection' });
+		const expired = this.collectExpiredRows(log, isoTimestamp(new Date()));
+		const narInfosDeleted = await this.flushNarInfoDeletions(purgeOrigin);
+
+		await this.deleteStagingObjects(log, expired.stagingKeys);
+
+		return {
+			pendingUploadsDeleted: expired.pendingUploadsDeleted,
+			pendingAttestationsDeleted: expired.pendingAttestationsDeleted,
+			rootsExpired: 0,
+			pathsCollected: 0,
+			hasMoreExpiredRoots: false,
+			hasMoreWork: expired.hasMoreWork,
+			narInfosDeleted,
+			orphanStagingDeleted: 0
+		};
+	}
+
+	async collectGarbage(
+		logger: Logger,
+		target: GarbageCollectionTarget,
+		purgeOrigin?: RequestOrigin
+	): Promise<GarbageCollectionOutcome> {
+		const cache = target.scope === 'cache' ? target.cache : undefined;
+		const log = logger.with({
+			job: 'garbage-collection',
+			...(cache !== undefined && { cache: cache.scope })
+		});
+		const startedAt = new Date();
+		const now = isoTimestamp(startedAt);
+		const expired = this.collectExpiredRows(log, now);
+		const collected = this.collectReachability(target, now);
+		const { collectionCache } = collected;
+		const narInfosDeleted = await this.flushNarInfoDeletions(
+			purgeOrigin,
+			async () => {
+				if (collectionCache !== undefined && !collected.hasMoreCacheWork) {
+					await this.cacheAdmin.scheduleManagedRetirement(
+						collectionCache,
+						purgeOrigin
+					);
+				}
+			}
+		);
+
+		await this.deleteStagingObjects(log, expired.stagingKeys);
 
 		const budget: StagingCollectionBudget = {
 			pages: maxOrphanListPages,
@@ -1820,21 +1923,21 @@ export class GarbageCollectionService {
 		await this.context.ctx.storage.put(rotationKey, !hasV2First);
 
 		return {
-			...(retirementRecheck !== undefined &&
+			...(collected.retirementRecheck !== undefined &&
 				collectionCache !== undefined && {
 					retirementRecheck: {
 						cacheId: collectionCache.id,
-						...retirementRecheck,
-						cacheGraphComplete: !collected.hasMoreWork,
-						pendingExpiryBacklog: hasMorePendingRows
+						...collected.retirementRecheck,
+						cacheGraphComplete: !collected.hasMoreCacheWork,
+						pendingExpiryBacklog: expired.hasMorePendingRows
 					}
 				}),
-			pendingUploadsDeleted: expiredUploads.length,
-			pendingAttestationsDeleted: expiredAttestations.length,
+			pendingUploadsDeleted: expired.pendingUploadsDeleted,
+			pendingAttestationsDeleted: expired.pendingAttestationsDeleted,
 			rootsExpired: collected.rootsExpired,
 			pathsCollected: collected.pathsCollected,
 			hasMoreExpiredRoots: collected.hasMoreExpiredRoots,
-			hasMoreWork,
+			hasMoreWork: expired.hasMoreWork || collected.hasMoreWork,
 			narInfosDeleted,
 			orphanStagingDeleted
 		};

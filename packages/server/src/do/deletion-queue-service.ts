@@ -122,7 +122,7 @@ function crossCacheInheritanceCondition(now: IsoTimestamp): SQL<boolean> {
 
 // The time at which garbage collection runs again because a pending upload that
 // defers a withdrawn narinfo deletion expires.
-const gcDeferralWakeKey = 'maintenance:gc-deferral-wake';
+export const gcDeferralWakeKey = 'maintenance:gc-deferral-wake';
 
 function deletionKey(entry: {
 	readonly storePathHash: StorePathHash;

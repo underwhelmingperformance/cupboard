@@ -2110,11 +2110,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// successful pass updates or clears it from the returned backlog state.
 	private async runGarbagePass(
 		collect: () => Promise<GarbageCollectionOutcome>,
-		continuation: GarbageCollectionContinuation
+		continuation: GarbageCollectionContinuation,
+		isScanning = true
 	): Promise<GarbageCollectionOutcome> {
 		try {
 			const outcome = await collect();
-			await this.settleGarbageContinuation(outcome, continuation);
+			await this.settleGarbageContinuation(outcome, continuation, isScanning);
 
 			return outcome;
 		} catch (error) {
@@ -2126,7 +2127,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async settleGarbageContinuation(
 		outcome: GarbageCollectionOutcome,
-		continuation: GarbageCollectionContinuation
+		continuation: GarbageCollectionContinuation,
+		isScanning: boolean
 	): Promise<void> {
 		// A withdrawn deferred deletion is not work until its deferral ends. When a
 		// pending upload defers it, collection runs again when that upload expires.
@@ -2137,7 +2139,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 
-		await this.clearGarbageContinuation(continuation);
+		// Clearing the tenant-wide continuation deletes every pending
+		// continuation, including a cache-scoped one that another pass armed. A
+		// pass without a scan advances no cache, so it leaves them in place.
+		if (isScanning) {
+			await this.clearGarbageContinuation(continuation);
+		}
+
 		await this.deletionQueue.clearDeferralWake();
 
 		// Decide from one instant after both markers are cleared. An upload can
@@ -2152,6 +2160,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		await this.deletionQueue.armDeferralWake(now);
+	}
+
+	// A deferral wake has only expiry work, so it runs the bounded deletes
+	// without a reachability scan. If the deletes leave a backlog, a tenant-wide
+	// collection resumes it.
+	private async collectWithoutScanOnce(): Promise<void> {
+		await this.runExclusiveMaintenance('gc', () =>
+			this.runGarbagePass(
+				() =>
+					this.metered('garbage-collection', (logger) =>
+						this.withMaintenanceEligibility('continuation', () =>
+							this.garbageCollection.collectExpiredRowsWithoutScan(logger)
+						)
+					),
+				garbageCollectionContinuation({ scope: 'tenant' }),
+				false
+			)
+		);
 	}
 
 	// Use the same serial chain and durable continuation as cron and alarm-driven
@@ -2641,12 +2667,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						? now
 						: this.deletionQueue.deferralWakeAt(),
 				run: async () => {
-					if (!(await this.hasGarbageCollectionContinuation())) {
-						await this.deletionQueue.clearDeferralWake();
-						await this.armGarbageContinuation({ scope: 'tenant' });
+					if (await this.hasGarbageCollectionContinuation()) {
+						await this.resumeGarbageCollection();
+
+						return 'progressed';
 					}
 
-					await this.resumeGarbageCollection();
+					await this.deletionQueue.clearDeferralWake();
+					await this.collectWithoutScanOnce();
 
 					return 'progressed';
 				}

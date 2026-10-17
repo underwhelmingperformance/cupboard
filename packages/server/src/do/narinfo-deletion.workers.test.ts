@@ -6,9 +6,12 @@ import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
+	rootNameSchema,
 	sha256HexDigestSchema,
 	type StorePathHash,
-	storePathHashSchema
+	storePathHashSchema,
+	storePathSchema,
+	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
@@ -27,7 +30,9 @@ import {
 	attestationInheritances,
 	narInfoDeletions,
 	narInfos,
-	pendingUploads
+	pendingUploads,
+	retentionRoots,
+	retentionRootTargets
 } from '../db/schema.ts';
 import { ServerHttpError, SubrequestTimeoutError } from '../errors.ts';
 import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
@@ -72,10 +77,14 @@ import { ServerContext } from './context.ts';
 import {
 	deferredDeletionCondition,
 	DeletionQueueService,
+	gcDeferralWakeKey,
 	maxFencedRetireRows,
 	type TornDownNarInfo
 } from './deletion-queue-service.ts';
-import { GarbageCollectionService } from './garbage-collection-service.ts';
+import {
+	GarbageCollectionService,
+	maxPendingRowsDeletedPerRun
+} from './garbage-collection-service.ts';
 import { jsonRowList } from './json-list.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { OffboardingService } from './offboarding-service.ts';
@@ -95,6 +104,73 @@ function syntheticEntries(count: number): TornDownNarInfo[] {
 		storePathHash: syntheticStorePathHash(index),
 		generation: narInfoGenerationSchema.parse(1),
 		narHash: syntheticNarHash(index)
+	}));
+}
+
+function storePathString(storePathHash: StorePathHash): StorePathString {
+	return storePathSchema.parse(`/nix/store/${storePathHash}-app`);
+}
+
+const keptPath = syntheticStorePathHash(1);
+const unreachablePath = syntheticStorePathHash(2);
+const insertExpiredUploads = `WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM sequence WHERE n < ?2)
+	INSERT INTO pending_upload (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at)
+	SELECT printf('expired-%d', n), ?1, 'sha256:nar', printf('staging/expired/%d', n), '{}', '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z'
+	FROM sequence`;
+const countUploads = 'SELECT count(*) AS count FROM pending_upload';
+
+// A permanent root keeps one path and nothing keeps the other, so a scan of
+// the default cache would collect the second path.
+function seedUnreachablePath(context: ServerContext): void {
+	const cache = resolvedCache(context);
+	const rootName = rootNameSchema.parse('channel');
+	const createdAt = isoTimestamp(testBase);
+
+	for (const [index, storePathHash] of [keptPath, unreachablePath].entries()) {
+		context.db
+			.insert(narInfos)
+			.values({
+				cacheId: cache.id,
+				storePathHash,
+				storePath: storePathString(storePathHash),
+				narHash: syntheticNarHash(index),
+				narSize: 1,
+				referencesJson: '[]',
+				createdAt
+			})
+			.run();
+	}
+
+	context.db
+		.insert(retentionRoots)
+		.values({
+			cacheId: cache.id,
+			name: rootName,
+			createdAt,
+			updatedAt: createdAt
+		})
+		.run();
+	context.db
+		.insert(retentionRootTargets)
+		.values({
+			cacheId: cache.id,
+			rootName,
+			storePathHash: keptPath,
+			storePath: storePathString(keptPath)
+		})
+		.run();
+}
+
+async function collectionMarkers(): Promise<unknown> {
+	return runInDurableObject(currentServer(), async (instance, state) => ({
+		narInfos: instance.context.db
+			.select({ storePathHash: narInfos.storePathHash })
+			.from(narInfos)
+			.orderBy(narInfos.storePathHash)
+			.all()
+			.map((row) => row.storePathHash),
+		continuation: await state.storage.get(gcContinuationKey),
+		deferralWake: await state.storage.get(gcDeferralWakeKey)
 	}));
 }
 
@@ -157,8 +233,8 @@ async function seedQueuedDeletions(
 }
 
 // Runs maintenance alarms, each starting its rotation at the first pass.
-async function runMaintenanceAlarms(): Promise<void> {
-	for (let alarm = 0; alarm < 6; alarm += 1) {
+async function runMaintenanceAlarms(count = 6): Promise<void> {
+	for (let alarm = 0; alarm < count; alarm += 1) {
 		await runInDurableObject(currentServer(), async (instance, state) => {
 			await state.storage.delete(maintenancePassCursorKey);
 			await instance.alarm();
@@ -1186,6 +1262,158 @@ describe('narinfo deletion queue', () => {
 				queued: [],
 				edges: [],
 				stalled: []
+			});
+		}));
+
+	it('flushes a deferred deletion without a scan when the deferring upload expires', async () =>
+		withoutAlarmArming(async () => {
+			const token = await initialise();
+			const nar = await verifiableNar('deferral-without-scan');
+			const metadata = uploadMetadata({
+				storePathHash: 'k'.repeat(32),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			const first = singleDecision(await negotiateUploads(token, [metadata]));
+			const second = singleDecision(await negotiateUploads(token, [metadata]));
+
+			if (first.action !== 'upload' || second.action !== 'upload') {
+				throw new Error('both negotiations must plan an upload');
+			}
+
+			await putNarBytes(first.r2Key, nar);
+			await commitUpload(token, first.uploadId);
+			const expiresAt = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					await buildAttestations(instance.context).drainInheritanceQueue(
+						rootLogger()
+					);
+					const cache = resolvedCache(instance.context);
+
+					instance.context.db
+						.delete(narInfos)
+						.where(
+							and(
+								eq(narInfos.cacheId, cache.id),
+								eq(narInfos.storePathHash, metadata.storePathHash)
+							)
+						)
+						.run();
+					instance.context.db
+						.insert(narInfoDeletions)
+						.values({
+							cacheId: cache.id,
+							storePathHash: metadata.storePathHash,
+							narHash: metadata.narHash,
+							generation: narInfoGenerationSchema.parse(0),
+							createdAt: isoTimestamp(new Date())
+						})
+						.run();
+					await asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							buildDeletionQueue(instance.context).retireQueuedNarInfoEdge(
+								cache,
+								metadata.storePathHash,
+								narInfoGenerationSchema.parse(0)
+							)
+						)
+					);
+					seedUnreachablePath(instance.context);
+
+					return instance.context.db
+						.select({ expiresAt: pendingUploads.expiresAt })
+						.from(pendingUploads)
+						.where(eq(pendingUploads.id, second.uploadId))
+						.get()?.expiresAt;
+				}
+			);
+
+			if (expiresAt === undefined) {
+				throw new Error('the second upload must still be pending');
+			}
+
+			const beforeExpiry = await narInfoDeletionRows();
+
+			vi.setSystemTime(Date.parse(expiresAt) + 1);
+			await runMaintenanceAlarms(3);
+
+			expect({
+				beforeExpiry: beforeExpiry.length,
+				queued: await narInfoDeletionRows(),
+				edges: await blobReferenceRows(),
+				collection: await collectionMarkers()
+			}).toStrictEqual({
+				beforeExpiry: 1,
+				queued: [],
+				edges: [],
+				collection: {
+					narInfos: [keptPath, unreachablePath],
+					continuation: undefined,
+					deferralWake: undefined
+				}
+			});
+		}));
+
+	it('arms a tenant-wide continuation when a deferral wake leaves a backlog', async () =>
+		withoutAlarmArming(async () => {
+			await initialise();
+			await runInDurableObject(currentServer(), async (instance, state) => {
+				state.storage.sql.exec(
+					insertExpiredUploads,
+					resolvedCache(instance.context).id,
+					maxPendingRowsDeletedPerRun + 1
+				);
+				await state.storage.put(gcDeferralWakeKey, Date.now() - 1);
+			});
+
+			await runMaintenanceAlarms(1);
+
+			expect(
+				await runInDurableObject(currentServer(), async (_instance, state) => ({
+					remaining: state.storage.sql
+						.exec<{ count: number }>(countUploads)
+						.one().count,
+					continuation: await state.storage.get(gcContinuationKey)
+				}))
+			).toStrictEqual({
+				remaining: 1,
+				continuation: [{ scope: 'tenant' }]
+			});
+		}));
+
+	it('keeps a continuation that another pass armed while the deferral wake waited', async () =>
+		withoutAlarmArming(async () => {
+			await initialise();
+			const armedWhileWaiting = [{ scope: 'cache', cache: defaultCache() }];
+			const clearWake = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					seedUnreachablePath(instance.context);
+					await state.storage.put(gcDeferralWakeKey, Date.now() - 1);
+					const queue = buildDeletionQueue(instance.context);
+
+					return vi
+						.spyOn(DeletionQueueService.prototype, 'clearDeferralWake')
+						.mockImplementationOnce(async () => {
+							await queue.clearDeferralWake();
+							await state.storage.put(gcContinuationKey, armedWhileWaiting);
+						});
+				}
+			);
+
+			try {
+				await runMaintenanceAlarms(1);
+			} finally {
+				clearWake.mockRestore();
+			}
+
+			expect(await collectionMarkers()).toStrictEqual({
+				narInfos: [keptPath, unreachablePath],
+				continuation: armedWhileWaiting,
+				deferralWake: undefined
 			});
 		}));
 
