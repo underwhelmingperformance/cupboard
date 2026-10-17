@@ -20,7 +20,7 @@ permissions:
 jobs:
   validate:
     name: validate release version
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -105,7 +105,7 @@ jobs:
   draft:
     name: assemble draft release
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write # create and update the draft GitHub release
       id-token: write # OIDC token for the checksums attestation
