@@ -4,8 +4,15 @@ import {
 	type NixSha256HashString,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
-import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { type UploadGraceFact } from '@cupboard/protocol/upload';
+import {
+	type IsoTimestamp,
+	isoTimestamp,
+	isoTimestampSchema
+} from '@cupboard/protocol/scalars';
+import {
+	type UploadGraceFact,
+	uploadIdSchema
+} from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 
@@ -15,6 +22,7 @@ import * as schema from '../db/schema.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
 import { type ServerContext } from './context.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
+import { PublicationStore } from './publication-store.ts';
 import { type RetentionService } from './retention-service.ts';
 
 // Each pending upload stores the cache grace resolved during negotiation.
@@ -24,7 +32,9 @@ import { type RetentionService } from './retention-service.ts';
 export const graceDecisionSchema = z.strictObject({
 	reportsGrace: z.boolean(),
 	graceSeconds: graceSecondsSchema.optional(),
-	retentionEpoch: z.number().int().nonnegative().optional()
+	retentionEpoch: z.number().int().nonnegative().optional(),
+	publicationId: uploadIdSchema.optional(),
+	recoveryDeadline: isoTimestampSchema.optional()
 });
 
 export type GraceDecision = z.output<typeof graceDecisionSchema>;
@@ -145,11 +155,18 @@ export function confirmGraceBatch(
 	);
 	// Compute one deadline before batching so every matched row receives the same
 	// extension.
-	const retainUntil =
+	const candidate =
 		close?.graceUntil ??
 		(graceSeconds === undefined || graceSeconds === 0
 			? undefined
 			: isoTimestamp(new Date(Date.now() + graceSeconds * 1000)));
+	const retainUntil =
+		candidate === undefined || decision?.publicationId === undefined
+			? candidate
+			: new PublicationStore(context).graceDeadline(
+					decision.publicationId,
+					candidate
+				);
 	const matched: StorePathHash[] = [];
 
 	// Check identity and apply each list's writes in one transaction. A row that

@@ -51,6 +51,7 @@ import {
 	type PromotionRecord,
 	type UploadConclusion
 } from './promotion-record.ts';
+import { PublicationStore } from './publication-store.ts';
 import {
 	readableReferenceSelect,
 	type ReusableReference,
@@ -318,7 +319,8 @@ export class UploadStateService {
 	 * recently found missing. Expired records are deleted.
 	 */
 	async withoutMissingCanonicalNars<T>(
-		reusable: ReadonlyMap<NixSha256HashString, T>
+		reusable: ReadonlyMap<NixSha256HashString, T>,
+		shouldCleanup = true
 	): Promise<ReadonlyMap<NixSha256HashString, T>> {
 		const now = Date.now();
 		const missing = new Set<NixSha256HashString>();
@@ -349,7 +351,7 @@ export class UploadStateService {
 			}
 		}
 
-		if (expired.length > 0) {
+		if (shouldCleanup && expired.length > 0) {
 			await this.context.ctx.storage.delete(expired);
 		}
 
@@ -410,19 +412,36 @@ export class UploadStateService {
 		conclusion: UploadConclusion,
 		owner?: string
 	): Promise<boolean> {
-		const [deleted] = this.context.db
-			.delete(schema.pendingUploads)
-			.where(
-				and(
-					eq(schema.pendingUploads.id, uploadId),
-					owner === undefined
-						? isNull(schema.pendingUploads.claimOwner)
-						: eq(schema.pendingUploads.claimOwner, owner)
+		const deleted = this.context.db.transaction(() => {
+			const [deleted] = this.context.db
+				.delete(schema.pendingUploads)
+				.where(
+					and(
+						eq(schema.pendingUploads.id, uploadId),
+						owner === undefined
+							? isNull(schema.pendingUploads.claimOwner)
+							: eq(schema.pendingUploads.claimOwner, owner)
+					)
 				)
-			)
-			.returning()
-			.all();
+				.returning()
+				.all();
 
+			if (deleted === undefined) {
+				return;
+			}
+
+			const operations = new PublicationStore(this.context);
+			if (conclusion.outcome === 'servable') {
+				operations.complete(deleted);
+			} else {
+				operations.finish(
+					uploadId,
+					conclusion.outcome === 'absent' ? 'accepted' : 'failed'
+				);
+			}
+
+			return deleted;
+		});
 		if (deleted === undefined) {
 			return false;
 		}
@@ -578,20 +597,36 @@ export class UploadStateService {
 				? isNull(schema.pendingUploads.claimOwner)
 				: eq(schema.pendingUploads.claimOwner, owner);
 
-		const updated = this.context.db
-			.update(schema.pendingUploads)
-			.set({
-				verdict,
-				acceptedExpiresAt: sql`coalesce(${schema.pendingUploads.acceptedExpiresAt}, ${schema.pendingUploads.expiresAt})`,
-				expiresAt: isoTimestamp(expiresAt)
-			})
-			.where(
-				and(eq(schema.pendingUploads.id, uploadId), awaitingFilter, ownerFilter)
-			)
-			.returning()
-			.all();
-		const [settled] = updated;
+		const settled = this.context.db.transaction(() => {
+			const updated = this.context.db
+				.update(schema.pendingUploads)
+				.set({
+					verdict,
+					acceptedExpiresAt: sql`coalesce(${schema.pendingUploads.acceptedExpiresAt}, ${schema.pendingUploads.expiresAt})`,
+					expiresAt: isoTimestamp(expiresAt)
+				})
+				.where(
+					and(
+						eq(schema.pendingUploads.id, uploadId),
+						awaitingFilter,
+						ownerFilter
+					)
+				)
+				.returning()
+				.all();
+			const [settled] = updated;
 
+			if (settled === undefined) {
+				return;
+			}
+
+			if (verdict === 'servable') {
+				new PublicationStore(this.context).complete(settled);
+			} else {
+				new PublicationStore(this.context).finish(uploadId, 'failed');
+			}
+			return settled;
+		});
 		if (settled === undefined) {
 			return false;
 		}

@@ -100,6 +100,7 @@ import {
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { ProtectedInheritanceService } from './protected-inheritance-service.ts';
+import { PublicationStore } from './publication-store.ts';
 import { type RetentionService } from './retention-service.ts';
 import {
 	readableReferenceSelect,
@@ -180,6 +181,7 @@ interface MaterialisationCharge {
 	readonly generation: NarInfoGeneration;
 	readonly blob: CanonicalBlobFacts;
 	readonly publication: PublicationColumns;
+	readonly recoveryDeadline?: string;
 }
 
 export interface MaterialiseRequest {
@@ -803,6 +805,9 @@ export class CommitPipelineService {
 				.where(eq(d1Schema.tenantUsage.tenant, tenant))
 		);
 		const chargeableTenantFilter = and(
+			charge.recoveryDeadline === undefined
+				? undefined
+				: sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now') < ${charge.recoveryDeadline}`,
 			eq(d1Schema.tenant.id, tenant),
 			eq(d1Schema.tenant.status, 'active'),
 			usageRowPresent
@@ -1224,6 +1229,13 @@ export class CommitPipelineService {
 				continue;
 			}
 
+			if (
+				request.graceDecision?.recoveryDeadline !== undefined &&
+				Date.parse(request.graceDecision.recoveryDeadline) <= Date.now()
+			) {
+				outcomes[index] = { kind: 'gone' };
+				continue;
+			}
 			const fenced = this.materialiseFence(request, account);
 
 			if ('outcome' in fenced) {
@@ -1252,7 +1264,8 @@ export class CommitPipelineService {
 				metadata: charge.request.metadata,
 				generation: charge.request.generation,
 				blob: charge.blob,
-				publication: charge.publication
+				publication: charge.publication,
+				recoveryDeadline: charge.request.graceDecision?.recoveryDeadline
 			}))
 		);
 
@@ -1263,7 +1276,8 @@ export class CommitPipelineService {
 					metadata: charge.request.metadata,
 					generation: charge.request.generation,
 					blob: charge.blob,
-					publication: charge.publication
+					publication: charge.publication,
+					recoveryDeadline: charge.request.graceDecision?.recoveryDeadline
 				});
 				outcomes[charge.index] = settledOutcome(single, charge.narInfo);
 			}
@@ -1330,9 +1344,16 @@ export class CommitPipelineService {
 				continue;
 			}
 
-			const retainUntil =
+			const candidate =
 				close?.graceUntil ??
 				isoTimestamp(new Date(settledAt + (graceSeconds ?? 0) * 1000));
+			const retainUntil =
+				request.graceDecision?.publicationId === undefined
+					? candidate
+					: new PublicationStore(this.context).graceDeadline(
+							request.graceDecision.publicationId,
+							candidate
+						);
 			const key = `${String(request.cache.id)} ${retainUntil}`;
 			const group = extensions.get(key) ?? {
 				cache: request.cache,
@@ -1741,6 +1762,7 @@ export class CommitPipelineService {
 			);
 		}
 
+		new PublicationStore(this.context).assertLive(uploadId);
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 		const nowIso = isoTimestamp(new Date());
 
@@ -1765,7 +1787,9 @@ export class CommitPipelineService {
 			this.recordBlobDeclaration(pending, blob);
 		}
 
-		const renewedExpiry = new Date(Date.now() + 15 * 60 * 1000);
+		const renewedExpiry = new Date(
+			pending.recoveryDeadline ?? Date.now() + 15 * 60 * 1000
+		);
 
 		this.context.db
 			.update(schema.pendingUploads)

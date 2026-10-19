@@ -101,6 +101,7 @@ import {
 	type PromotedPath,
 	type PromotionRecord
 } from './promotion-record.ts';
+import { PublicationStore } from './publication-store.ts';
 import {
 	ReconcileQueueService,
 	type ReconcileTarget,
@@ -134,6 +135,8 @@ type PendingUploadRow = typeof schema.pendingUploads.$inferSelect;
 // distinct NAR hashes allowed in one `IN (...)` list, so each read requires one
 // D1 call.
 export const pendingSettlePrefetchSubrequests = 2;
+
+const maxExpiredPublicationsPerRun = 25;
 
 // Classifying one committed-recovery candidate reads the path's committed
 // reference edge. A reuse row skips this read.
@@ -400,6 +403,7 @@ export interface PendingVerification {
 	readonly narSize: number;
 	readonly reuse: boolean;
 	readonly blob?: CommitBlobDeclaration;
+	readonly recoveryDeadline?: string;
 }
 
 function promotionOf(
@@ -767,7 +771,8 @@ function claimableFilter(now: Date) {
 
 	return and(
 		sql`(${schema.pendingUploads.verdict} = 'pending' OR ${schema.pendingUploads.verdict} = 'committing') AND (${schema.pendingUploads.recordedVerdictJson} IS NULL OR ${schema.pendingUploads.claimOwner} IS NULL) AND ${schema.pendingUploads.settleExhaustion} IS NULL`,
-		lte(claimableReadyAt(), nowIso)
+		lte(claimableReadyAt(), nowIso),
+		sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${nowIso})`
 	);
 }
 
@@ -834,6 +839,9 @@ function chunkClaims(
 			narHash: metadata.narHash,
 			narSize: metadata.narSize,
 			reuse: isReuse,
+			...(pending.recoveryDeadline !== null && {
+				recoveryDeadline: pending.recoveryDeadline
+			}),
 			...(blob !== undefined && { blob })
 		});
 		bytes += cost;
@@ -939,6 +947,9 @@ export class VerificationService {
 		) {
 			return false;
 		}
+		if (resolution.verdict === 'absent') {
+			new PublicationStore(this.context).finish(pending.id, 'failed');
+		}
 		await this.deleteStagingObject(pending);
 		signal?.throwIfAborted();
 		if (!this.ownsActiveClaim(owner, pending, signal)) {
@@ -997,6 +1008,7 @@ export class VerificationService {
 					and(
 						eq(schema.pendingUploads.id, pending.id),
 						eq(schema.pendingUploads.claimOwner, owner),
+						sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`,
 						this.recordedVerdictFilter(pending),
 						awaitingFilter
 					)
@@ -1121,6 +1133,7 @@ export class VerificationService {
 				and(
 					eq(schema.pendingUploads.id, uploadId),
 					eq(schema.pendingUploads.claimOwner, owner),
+					sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`,
 					this.recordedVerdictFilter(captured)
 				)
 			)
@@ -2671,6 +2684,7 @@ export class VerificationService {
 				and(
 					eq(schema.pendingUploads.id, uploadId),
 					eq(schema.pendingUploads.claimOwner, owner),
+					sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`,
 					pending === undefined
 						? isNull(schema.pendingUploads.recordedVerdictJson)
 						: this.recordedVerdictFilter(pending),
@@ -2699,6 +2713,7 @@ export class VerificationService {
 			const owned = and(
 				eq(schema.pendingUploads.id, pending.id),
 				eq(schema.pendingUploads.claimOwner, owner),
+				sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`,
 				this.recordedVerdictFilter(pending),
 				awaitingFilter
 			);
@@ -2728,6 +2743,7 @@ export class VerificationService {
 				and(
 					eq(schema.pendingUploads.id, pending.id),
 					eq(schema.pendingUploads.claimOwner, owner),
+					sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`,
 					this.recordedVerdictFilter(pending),
 					awaitingFilter
 				)
@@ -2750,6 +2766,7 @@ export class VerificationService {
 		const ownedRow = and(
 			eq(schema.pendingUploads.id, pending.id),
 			eq(schema.pendingUploads.claimOwner, owner),
+			sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`,
 			this.recordedVerdictFilter(pending),
 			awaitingFilter
 		);
@@ -2862,6 +2879,7 @@ export class VerificationService {
 					and(
 						eq(schema.pendingUploads.id, uploadId),
 						eq(schema.pendingUploads.claimOwner, owner),
+						sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`,
 						awaitingFilter,
 						verdictFilter
 					)
@@ -2999,6 +3017,7 @@ export class VerificationService {
 		const filter = and(
 			eq(schema.pendingUploads.id, pending.id),
 			eq(schema.pendingUploads.claimOwner, owner),
+			sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`,
 			eq(
 				schema.pendingUploads.recordedVerdictJson,
 				pending.recordedVerdictJson
@@ -3486,6 +3505,118 @@ export class VerificationService {
 	// rows without yielding, which prevents an overlapping alarm or cron pass from
 	// claiming the same uploads.
 
+	async expirePublications(logger: Logger): Promise<void> {
+		const store = new PublicationStore(this.context);
+		try {
+			const now = new Date().toISOString();
+			const due = this.context.db
+				.select()
+				.from(schema.publicationOperations)
+				.where(
+					and(
+						eq(schema.publicationOperations.state, 'accepted'),
+						lte(schema.publicationOperations.recoveryDeadline, now)
+					)
+				)
+				.limit(maxExpiredPublicationsPerRun)
+				.all();
+			for (const operation of due) {
+				await this.context.criticalSection(async () => {
+					const current = store.get(operation.id);
+					if (current?.state !== 'accepted') {
+						return;
+					}
+					const pending = this.context.db
+						.select()
+						.from(schema.pendingUploads)
+						.where(eq(schema.pendingUploads.id, operation.id))
+						.get();
+					if (pending !== undefined) {
+						const metadata = parseStoredUploadPathMetadata(
+							pending.id,
+							pending.metadataJson
+						);
+						const cache = this.context.cacheRepository.resolve(
+							this.context.cacheRepository.scopeForId(pending.cacheId)
+						);
+						if (cache !== undefined) {
+							const row = this.narInfoRow(cache.id, metadata.storePathHash);
+							if (
+								row !== undefined &&
+								(await this.commitPipeline.isGenerationCommitted(
+									cache,
+									metadata,
+									row.generation
+								))
+							) {
+								confirmGrace(
+									this.context,
+									this.retention,
+									cache,
+									metadata.storePathHash,
+									row.generation,
+									metadata.narHash,
+									parseStoredGraceDecision(pending.graceDecisionJson)
+								);
+								this.commitPipeline.attachRootTarget(
+									cache,
+									pending.attachRootName,
+									metadata.storePathHash,
+									metadata.storePath,
+									pending.retentionEpoch
+								);
+								this.context.db
+									.update(schema.pendingUploads)
+									.set({ claimOwner: sql`null` })
+									.where(eq(schema.pendingUploads.id, pending.id))
+									.run();
+								await this.uploadState.clearPendingUpload(pending.id, {
+									logger,
+									outcome: 'servable'
+								});
+								this.notifyWaiters(pending, 'servable');
+								return;
+							}
+							if (row !== undefined) {
+								const result = await this.commitPipeline.reclaimReservedRow(
+									cache,
+									metadata.storePathHash,
+									row.generation,
+									row.narHash
+								);
+								if (result === 'reclaimed') {
+									this.pruneRetentionTargets(cache, metadata.storePathHash);
+								}
+							}
+						}
+						this.context.db
+							.update(schema.pendingUploads)
+							.set({ claimOwner: sql`null` })
+							.where(eq(schema.pendingUploads.id, pending.id))
+							.run();
+						await this.uploadState.clearPendingUploadAndStaging(
+							pending.id,
+							pending.r2Key,
+							pending.narHash,
+							{ logger, outcome: 'absent' }
+						);
+						this.notifyWaiters(pending, 'absent');
+					}
+					store.finish(operation.id, 'expired');
+					logger.debug('publication recovery expired', {
+						operationId: operation.id,
+						recoveryDeadline: operation.recoveryDeadline
+					});
+				});
+			}
+			store.prune(now);
+		} catch (error) {
+			await store.armRecoveryAlarm(Date.now() + 10 * 60 * 1000);
+			throw error;
+		}
+		await store.armRecoveryAlarm();
+	}
+
 	async beginVerificationBatch(
 		batch: PendingVerificationBatch,
 		signal?: AbortSignal
@@ -3922,6 +4053,7 @@ export class VerificationService {
 						and(
 							eq(schema.pendingUploads.id, pending.id),
 							eq(schema.pendingUploads.claimOwner, owner),
+							sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`,
 							this.recordedVerdictFilter(pending),
 							awaitingFilter
 						)

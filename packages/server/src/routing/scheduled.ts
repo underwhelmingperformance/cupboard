@@ -91,6 +91,7 @@ import {
 	type PendingVerificationBatch,
 	type VerificationResult
 } from '../do/verification-service.ts';
+import { PublicationRecoveryExpiredError } from '../errors.ts';
 import {
 	SubrequestTimeoutError,
 	UploadedObjectNotFoundError
@@ -1208,7 +1209,17 @@ async function verifyFreshBytes(
 	reservation: CanonicalWriteReservation | undefined,
 	progress: NarVerifyProgress
 ): Promise<FreshVerification> {
-	const { blobs, buffers, signal } = pass;
+	const { blobs, buffers } = pass;
+	const remainingMs =
+		claim.recoveryDeadline === undefined
+			? undefined
+			: Math.max(0, Date.parse(claim.recoveryDeadline) - Date.now());
+	const signal =
+		remainingMs === undefined
+			? pass.signal
+			: remainingMs === 0
+				? AbortSignal.abort(new PublicationRecoveryExpiredError())
+				: AbortSignal.any([pass.signal, AbortSignal.timeout(remainingMs)]);
 	const expected = { narHash: claim.narHash, narSize: claim.narSize };
 
 	if (reservation?.kind !== 'reserved' || claim.blob === undefined) {
@@ -1269,6 +1280,17 @@ async function verifyFreshClaim(
 
 	try {
 		signal.throwIfAborted();
+		if (
+			claim.recoveryDeadline !== undefined &&
+			Date.parse(claim.recoveryDeadline) <= Date.now()
+		) {
+			outcome = 'abandoned';
+			recorder.add({
+				uploadId: claim.uploadId,
+				verdict: { kind: 'abandoned' }
+			});
+			return;
+		}
 		const reservation =
 			claim.blob === undefined ? undefined : await reserveCanonicalWrite(claim);
 		signal.throwIfAborted();
