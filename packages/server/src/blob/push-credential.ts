@@ -3,6 +3,7 @@ import {
 	type TtlSeconds,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
+import { publicationPushPrefix } from '@cupboard/protocol/publication';
 import type { PushCredentialInput, PushId } from '@cupboard/protocol/upload';
 
 import {
@@ -29,9 +30,6 @@ import {
 } from './temporary-credentials.ts';
 
 export const pushCredentialMaxTtlSeconds = 6 * 60 * 60;
-// R2 removes staged bytes after one day. A push ID remains valid for that
-// period so a fresh access token can renew the credential for the same staging
-// prefix.
 const pushIdTtlSeconds = 24 * 60 * 60;
 
 /**
@@ -90,7 +88,8 @@ export class PushCredentialIssuer {
 	async issueFor(
 		pushId: PushId,
 		ttlSeconds: TtlSeconds,
-		now: Date
+		now: Date,
+		hasPublication = false
 	): Promise<PushCredentialInput> {
 		const expiresAtSeconds = pushIdExpiresAtSeconds(pushId);
 
@@ -110,7 +109,12 @@ export class PushCredentialIssuer {
 			this.configuration(),
 			{
 				actions: pushUploadActions,
-				prefixPaths: [stagingPushPrefix(pushId)],
+				prefixPaths: [
+					stagingPushPrefix(pushId),
+					...(hasPublication
+						? [publicationPushPrefix(this.tenant, pushId)]
+						: [])
+				],
 				ttlSeconds: r2CredentialTtlSecondsSchema.parse(boundedTtl)
 			},
 			now
@@ -119,14 +123,19 @@ export class PushCredentialIssuer {
 		return { pushId, ...credential };
 	}
 
-	async issue(ttlSeconds: TtlSeconds, now: Date): Promise<PushCredentialInput> {
+	async issue(
+		ttlSeconds: TtlSeconds,
+		now: Date,
+		hasPublication = false
+	): Promise<PushCredentialInput> {
 		const expiresAtSeconds =
 			Math.floor(now.getTime() / 1000) + pushIdTtlSeconds;
 
 		return this.issueFor(
 			await createPushId(this.signingKey, this.tenant, expiresAtSeconds),
 			ttlSeconds,
-			now
+			now,
+			hasPublication
 		);
 	}
 
