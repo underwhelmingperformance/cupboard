@@ -5,7 +5,12 @@ import {
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import {
+	publicationStagingKey,
+	publicationStagingPrefix
+} from '@cupboard/protocol/publication';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { pushIdSchema, uploadIdSchema } from '@cupboard/protocol/upload';
 import { type PushId } from '@cupboard/protocol/upload';
 import {
 	and,
@@ -197,6 +202,10 @@ export const maxOrphanListPages = maxOutgoingConnections;
 
 const orphanStagingResumeStorageKey = 'maintenance:orphan-staging-resume-key';
 
+interface StagingCollectionBudget {
+	pages: number;
+	keys: number;
+}
 interface OrphanStagingScan {
 	readonly keys: R2ObjectKey[];
 	// Undefined when the scan reached the end of the prefix, so the next scan
@@ -1195,7 +1204,12 @@ export class GarbageCollectionService {
 			const uploadMatches = this.context.db
 				.select({ r2Key: schema.pendingUploads.r2Key })
 				.from(schema.pendingUploads)
-				.where(inArray(schema.pendingUploads.r2Key, keys))
+				.where(
+					and(
+						inArray(schema.pendingUploads.r2Key, keys),
+						sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${new Date().toISOString()})`
+					)
+				)
 				.all();
 			const attestationMatches = this.context.db
 				.select({ r2Key: schema.pendingAttestations.r2Key })
@@ -1205,6 +1219,39 @@ export class GarbageCollectionService {
 
 			for (const match of [...uploadMatches, ...attestationMatches]) {
 				tracked.add(match.r2Key);
+			}
+		}
+
+		const operationIds = keys.flatMap((key) => {
+			if (!key.startsWith(publicationStagingPrefix)) {
+				return [];
+			}
+			const parsed = uploadIdSchema.safeParse(
+				key.split('/', 4)[3]?.replace(/\.nar\.zst$/u, '')
+			);
+			return parsed.success ? [parsed.data] : [];
+		});
+		for (const page of jsonValueLists(operationIds)) {
+			const operations = this.context.db
+				.select()
+				.from(schema.publicationOperations)
+				.where(
+					and(
+						inArray(schema.publicationOperations.id, page),
+						eq(schema.publicationOperations.state, 'accepted'),
+						sql`${schema.publicationOperations.recoveryDeadline} > ${new Date().toISOString()}`
+					)
+				)
+				.all();
+			for (const operation of operations) {
+				const key = publicationStagingKey(
+					this.context.requireTenant(),
+					pushIdSchema.parse(operation.pushId),
+					operation.id
+				);
+				if (keys.includes(key)) {
+					tracked.add(key);
+				}
 			}
 		}
 
@@ -1221,24 +1268,35 @@ export class GarbageCollectionService {
 		return !tracked.has(object.key) && object.uploaded.getTime() < orphanBefore;
 	}
 
-	private async orphanStagingResumeKey(): Promise<string | undefined> {
+	private async orphanStagingResumeKey(
+		prefix: string
+	): Promise<string | undefined> {
 		const stored = await this.context.ctx.storage.get(
-			orphanStagingResumeStorageKey
+			prefix === stagingPrefix
+				? orphanStagingResumeStorageKey
+				: `${orphanStagingResumeStorageKey}:v2`
 		);
 
 		return typeof stored === 'string' ? stored : undefined;
 	}
 
 	private async saveOrphanStagingResumeKey(
-		resumeAfter: string | undefined
+		resumeAfter: string | undefined,
+		prefix: string
 	): Promise<void> {
 		if (resumeAfter === undefined) {
-			await this.context.ctx.storage.delete(orphanStagingResumeStorageKey);
+			await this.context.ctx.storage.delete(
+				prefix === stagingPrefix
+					? orphanStagingResumeStorageKey
+					: `${orphanStagingResumeStorageKey}:v2`
+			);
 			return;
 		}
 
 		await this.context.ctx.storage.put(
-			orphanStagingResumeStorageKey,
+			prefix === stagingPrefix
+				? orphanStagingResumeStorageKey
+				: `${orphanStagingResumeStorageKey}:v2`,
 			resumeAfter
 		);
 	}
@@ -1248,38 +1306,42 @@ export class GarbageCollectionService {
 	// staging prefix reads no rows. Later passes and the lifecycle rule handle
 	// the remainder.
 	private async collectOrphanStagingKeys(
-		orphanBefore: number
+		orphanBefore: number,
+		prefix: string,
+		budget: StagingCollectionBudget
 	): Promise<OrphanStagingScan> {
 		const keys: R2ObjectKey[] = [];
 		const ownership = new StagingKeyOwnership(() =>
 			this.context.pushCredentials()
 		);
-		const startAfter = await this.orphanStagingResumeKey();
+		const startAfter = await this.orphanStagingResumeKey(prefix);
 		let resumeAfter = startAfter;
 		let cursor: string | undefined;
-		let pages = 0;
 
 		do {
 			const listed = await this.context.env.BLOBS.list({
-				prefix: stagingPrefix,
+				prefix,
 				limit: orphanListPageSize,
 				...(cursor === undefined ? { startAfter } : { cursor })
 			});
-			pages += 1;
+			budget.pages -= 1;
 			const tracked = this.trackedStagingKeys(
 				listed.objects.map((object) => object.key)
 			);
 
 			for (const object of listed.objects) {
-				if (keys.length >= maxOrphanReclaim) {
+				if (budget.keys === 0) {
 					return { keys, resumeAfter, wasCapped: true };
 				}
 
 				if (
 					this.isReclaimableOrphan(object, tracked, orphanBefore) &&
-					(await ownership.isOwn(object.key))
+					(prefix === stagingPrefix
+						? await ownership.isOwn(object.key)
+						: !(await this.hasPublicationLease(object.key)))
 				) {
 					keys.push(r2ObjectKeySchema.parse(object.key));
+					budget.keys -= 1;
 				}
 
 				resumeAfter = object.key;
@@ -1287,7 +1349,7 @@ export class GarbageCollectionService {
 
 			cursor = listed.truncated ? listed.cursor : undefined;
 
-			if (cursor !== undefined && pages === maxOrphanListPages) {
+			if (cursor !== undefined && budget.pages === 0) {
 				return { keys, resumeAfter, wasCapped: true };
 			}
 		} while (cursor !== undefined);
@@ -1295,15 +1357,37 @@ export class GarbageCollectionService {
 		return { keys, resumeAfter: undefined, wasCapped: false };
 	}
 
+	private async hasPublicationLease(key: string): Promise<boolean> {
+		const segment = key.split('/', 3)[2];
+		if (segment === undefined) {
+			return false;
+		}
+		const push = wellFormedPushId(segment);
+		return (
+			push !== undefined && (await this.context.pushCredentials().verify(push))
+		);
+	}
+
 	private async reclaimOrphanStaging(
 		logger: Logger,
-		now: Date
+		now: Date,
+		prefix: string,
+		budget: StagingCollectionBudget
 	): Promise<number> {
+		if (budget.pages === 0 || budget.keys === 0) {
+			return 0;
+		}
 		const orphanBefore = now.getTime() - orphanStagingGraceMs;
 		let scan: OrphanStagingScan;
 
 		try {
-			scan = await this.collectOrphanStagingKeys(orphanBefore);
+			scan = await this.collectOrphanStagingKeys(
+				orphanBefore,
+				prefix === publicationStagingPrefix
+					? `${prefix}${this.context.requireTenant()}/`
+					: prefix,
+				budget
+			);
 		} catch (error) {
 			if (
 				!(error instanceof TenantNotConfiguredError) &&
@@ -1313,8 +1397,7 @@ export class GarbageCollectionService {
 			}
 
 			// Without the issuer, the scan cannot tell which keys belong to this
-			// tenant. Skip the scan so the rest of the pass still completes. The R2
-			// lifecycle rule deletes the keys a day after they are written.
+			// tenant. Skip the scan so the rest of the pass still completes.
 			logger.warn('orphan staging scan cannot check push ID ownership', {
 				error
 			});
@@ -1324,8 +1407,16 @@ export class GarbageCollectionService {
 
 		const { keys, resumeAfter, wasCapped } = scan;
 
-		await deleteObjects(this.context.env.BLOBS, keys);
-		await this.saveOrphanStagingResumeKey(resumeAfter);
+		if (keys.length > 0) {
+			await this.context.criticalSection(async () => {
+				const owned = this.trackedStagingKeys(keys);
+				await deleteObjects(
+					this.context.env.BLOBS,
+					keys.filter((key) => !owned.has(key))
+				);
+			});
+		}
+		await this.saveOrphanStagingResumeKey(resumeAfter, prefix);
 
 		if (wasCapped) {
 			logger.debug('orphan staging scan hit the per-run cap', {
@@ -1707,10 +1798,26 @@ export class GarbageCollectionService {
 			);
 		}
 
-		const orphanStagingDeleted = await this.reclaimOrphanStaging(
-			log,
-			startedAt
-		);
+		const budget: StagingCollectionBudget = {
+			pages: maxOrphanListPages,
+			keys: maxOrphanReclaim
+		};
+		const rotationKey = 'maintenance:orphan-staging-next-namespace';
+		const hasV2First =
+			(await this.context.ctx.storage.get(rotationKey)) === true;
+		const prefixes = hasV2First
+			? [publicationStagingPrefix, stagingPrefix]
+			: [stagingPrefix, publicationStagingPrefix];
+		let orphanStagingDeleted = 0;
+		for (const prefix of prefixes) {
+			orphanStagingDeleted += await this.reclaimOrphanStaging(
+				log,
+				startedAt,
+				prefix,
+				budget
+			);
+		}
+		await this.context.ctx.storage.put(rotationKey, !hasV2First);
 
 		return {
 			...(retirementRecheck !== undefined &&

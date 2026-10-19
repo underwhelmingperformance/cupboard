@@ -509,7 +509,7 @@ describe('managed cache retirement', () => {
 				properties: {
 					method: 'managed-retirement',
 					...noCost,
-					rowsRead: 17,
+					rowsRead: 18,
 					rowsWritten: 4,
 					d1Calls: 2,
 					d1RowsRead: 1,
@@ -658,12 +658,12 @@ describe('managed cache retirement', () => {
 				{
 					method: 'garbage-collection',
 					...noCost,
-					rowsRead: 260,
+					rowsRead: 265,
 					rowsWritten: 8,
 					d1Calls: 2,
 					d1RowsRead: 2,
 					d1RowsWritten: 2,
-					r2List: 1
+					r2List: 2
 				}
 			]
 		});

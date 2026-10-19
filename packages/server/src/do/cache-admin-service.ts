@@ -21,6 +21,7 @@ import {
 	type CacheSummary,
 	type CacheUpdateBody
 } from '@cupboard/protocol/caches';
+import { publicationStagingPrefix } from '@cupboard/protocol/publication';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	and,
@@ -432,6 +433,15 @@ export class CacheAdminService {
 		// retirement. A later recommit creates a new generation that the queued
 		// deletion cannot remove.
 		const removedUploads = this.context.db.transaction((tx) => {
+			tx.update(schema.publicationOperations)
+				.set({ state: 'failed' })
+				.where(
+					and(
+						eq(schema.publicationOperations.cacheId, cache.id),
+						eq(schema.publicationOperations.state, 'accepted')
+					)
+				)
+				.run();
 			tx.insert(schema.cacheTeardowns)
 				.values({ cacheId: cache.id })
 				.onConflictDoNothing()
@@ -440,7 +450,7 @@ export class CacheAdminService {
 				tx.run(sql`INSERT INTO staging_cleanup (cache_id, r2_key)
 					SELECT cache_id, r2_key FROM ${table}
 					WHERE cache_id = ${cache.id}
-						AND substr(r2_key, 1, ${stagingPrefix.length}) = ${stagingPrefix}
+						AND (substr(r2_key, 1, ${stagingPrefix.length}) = ${stagingPrefix} OR substr(r2_key, 1, ${publicationStagingPrefix.length}) = ${publicationStagingPrefix})
 					ON CONFLICT (cache_id, r2_key) DO NOTHING`);
 			}
 			tx.run(

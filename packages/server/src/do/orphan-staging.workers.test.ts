@@ -6,8 +6,9 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { publicationStagingKey } from '@cupboard/protocol/publication';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import { uploadIdSchema } from '@cupboard/protocol/upload';
+import { pushIdSchema, uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -135,8 +136,8 @@ function recordingOnePerPage(target: R2Bucket, pass: ListingPass): R2Bucket {
 		get(bucketTarget, property) {
 			if (property === 'list') {
 				return async (options?: R2ListOptions) => {
-					if (isFirstCall) {
-						pass.startAfter = options?.startAfter;
+					if (isFirstCall && options?.prefix === 'staging/') {
+						pass.startAfter = options.startAfter;
 						isFirstCall = false;
 					}
 
@@ -164,6 +165,33 @@ describe('orphan staging reconciliation', () => {
 	beforeEach(async () => {
 		await resetTestServer();
 		await clearBlobStorage();
+	});
+
+	it('protects new staging with an authentic push lease and reclaims expired or forged leases', async () => {
+		const realNow = await realUploadInstant();
+		const expiry = Math.floor(realNow / 1000) + 3600;
+		const push = await testPushIdFor(fixtureTenant, 2, expiry);
+		const forged = pushIdSchema.parse(
+			`${push.slice(0, -1)}${push.endsWith('0') ? '1' : '0'}`
+		);
+		const id = 'a'.repeat(64);
+		const liveKey = publicationStagingKey(fixtureTenant, push, id);
+		const forgedKey = publicationStagingKey(fixtureTenant, forged, id);
+		await env.BLOBS.put(liveKey, new Uint8Array([1]));
+		await env.BLOBS.put(forgedKey, new Uint8Array([1]));
+		vi.setSystemTime(new Date(realNow + 20 * 60 * 1000));
+		await initialise();
+		const first = await collectGarbageIn(currentServer());
+		expect({
+			deleted: first.outcome.orphanStagingDeleted,
+			present: await presentKeys([liveKey, forgedKey])
+		}).toStrictEqual({ deleted: 1, present: [liveKey] });
+		vi.setSystemTime(new Date((expiry + 1) * 1000));
+		const second = await collectGarbageIn(currentServer());
+		expect({
+			deleted: second.outcome.orphanStagingDeleted,
+			present: await presentKeys([liveKey])
+		}).toStrictEqual({ deleted: 1, present: [] });
 	});
 
 	it('reclaims an un-negotiated staging object and spares the negotiated one', async () => {

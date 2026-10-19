@@ -69,32 +69,38 @@ describe('PushCredentialIssuer', () => {
 	const ttlSeconds = ttlSecondsSchema.parse(900);
 	const issuedAt = Math.floor(now.getTime() / 1000);
 
-	it('grants only write actions within the staging prefix', async () => {
-		// R2 rejects a credential with both a scope and an actions claim, so
-		// the push grants by the write-only action set alone and confines it with
-		// the staging prefix.
-		const credential = await issuer.issue(ttlSeconds, now);
+	it.each([false, true])(
+		'grants only write actions within the staging prefixes with publication=%s',
+		async (hasPublication) => {
+			// R2 rejects a credential with both a scope and an actions claim, so
+			// the push grants by the write-only action set alone and confines it with
+			// the staging prefix.
+			const credential = await issuer.issue(ttlSeconds, now, hasPublication);
 
-		expect(jwtPayload(credential.sessionToken)).toStrictEqual({
-			bucket: 'cupboard-blobs',
-			actions: [
-				'PutObject',
-				'CreateMultipartUpload',
-				'UploadPart',
-				'CompleteMultipartUpload',
-				'AbortMultipartUpload'
-			],
-			paths: {
-				prefixPaths: [`staging/${credential.pushId}/`],
-				objectPaths: []
-			},
-			sub: 'acct-123',
-			iss: 'parent-access-key',
-			aud: 'acct-123.r2.cloudflarestorage.com',
-			iat: issuedAt,
-			exp: issuedAt + ttlSeconds
-		});
-	});
+			expect(jwtPayload(credential.sessionToken)).toStrictEqual({
+				bucket: 'cupboard-blobs',
+				actions: [
+					'PutObject',
+					'CreateMultipartUpload',
+					'UploadPart',
+					'CompleteMultipartUpload',
+					'AbortMultipartUpload'
+				],
+				paths: {
+					prefixPaths: [
+						`staging/${credential.pushId}/`,
+						...(hasPublication ? [`staging-v2/acme/${credential.pushId}/`] : [])
+					],
+					objectPaths: []
+				},
+				sub: 'acct-123',
+				iss: 'parent-access-key',
+				aud: 'acct-123.r2.cloudflarestorage.com',
+				iat: issuedAt,
+				exp: issuedAt + ttlSeconds
+			});
+		}
+	);
 
 	it('renews a push after the access token that started it has expired', async () => {
 		const initialTtl = ttlSecondsSchema.parse(60);

@@ -1,6 +1,11 @@
 import { isDeepStrictEqual } from 'node:util';
 
 import {
+	publicationLifecycleSeconds,
+	publicationMultipartSeconds,
+	publicationStagingPrefix
+} from '@cupboard/protocol/publication';
+import {
 	filterProgressively,
 	findProgressively,
 	type ProgressivePage
@@ -183,9 +188,9 @@ export interface CloudflareApi {
 	r2BucketExists(name: string): Promise<boolean>;
 	ensureR2Bucket(name: string): Promise<void>;
 	/**
-	 * Asserts the lifecycle rule that reclaims a push's transient `staging/`
-	 * objects, expiring them and aborting their incomplete multipart uploads
-	 * after a day. The bucket must already exist.
+	 * Configures the one-day legacy staging rule and publication staging's
+	 * seven-day expiry and 48-hour multipart abort. Refuses overlapping rules
+	 * that reclaim publication staging earlier. The bucket must already exist.
 	 */
 	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
 	findD1Database(name: string): Promise<DatabaseId | undefined>;
@@ -341,6 +346,8 @@ async function filterCloudflareItems<T>(
 		cloudflareCollectionLimits(description)
 	);
 }
+
+const lifecyclePrefixSchema = z.string().default('');
 
 /**
  * A queue consumer as the live API returns it. The published schema (and the
@@ -638,35 +645,75 @@ export function createCloudflareApi(
 		},
 
 		async ensureStagingLifecycleRule(bucketName) {
-			const desired = stagingReclaimRule();
-
+			const desired = [
+				stagingReclaimRule(),
+				{
+					id: 'cupboard-publication-staging-reclaim',
+					enabled: true,
+					conditions: { prefix: publicationStagingPrefix },
+					deleteObjectsTransition: {
+						condition: {
+							type: 'Age' as const,
+							maxAge: publicationLifecycleSeconds
+						}
+					},
+					abortMultipartUploadsTransition: {
+						condition: {
+							type: 'Age' as const,
+							maxAge: publicationMultipartSeconds
+						}
+					}
+				}
+			];
 			const current = await client.r2.buckets.lifecycle.get(
 				bucketName,
 				account
 			);
 			const rules = current.rules ?? [];
-
-			const existing = rules.find((rule) => rule.id === desired.id);
-
-			// Compare only the fields this rule manages, not the whole object: R2 may
-			// echo back optional fields (such as storage-class transitions) the rule
-			// never sets, and comparing those would re-PUT an already-correct rule on
-			// every deploy.
+			const others = rules.filter((rule) =>
+				desired.every((managed) => managed.id !== rule.id)
+			);
+			for (const rule of others) {
+				const prefix = lifecyclePrefixSchema.parse(rule.conditions.prefix);
+				if (
+					!rule.enabled ||
+					(!publicationStagingPrefix.startsWith(prefix) &&
+						!prefix.startsWith(publicationStagingPrefix))
+				) {
+					continue;
+				}
+				const expiry = rule.deleteObjectsTransition?.condition;
+				const abort = rule.abortMultipartUploadsTransition?.condition;
+				if (
+					(expiry !== undefined &&
+						(expiry.type !== 'Age' ||
+							expiry.maxAge < publicationLifecycleSeconds)) ||
+					(abort !== undefined && abort.maxAge < publicationMultipartSeconds)
+				) {
+					throw new Error(
+						`R2 lifecycle rule ${rule.id} reclaims publication staging earlier than the supported recovery bound. Change that rule before deployment.`
+					);
+				}
+			}
 			if (
-				existing !== undefined &&
-				isDeepStrictEqual(
-					managedLifecycleFields(existing),
-					managedLifecycleFields(desired)
-				)
+				desired.every((rule) => {
+					const existing = rules.find(
+						(currentRule) => currentRule.id === rule.id
+					);
+					return (
+						existing !== undefined &&
+						isDeepStrictEqual(
+							managedLifecycleFields(existing),
+							managedLifecycleFields(rule)
+						)
+					);
+				})
 			) {
 				return;
 			}
-
-			const others = rules.filter((rule) => rule.id !== desired.id);
-
 			await client.r2.buckets.lifecycle.update(bucketName, {
 				...account,
-				rules: [...others, desired]
+				rules: [...others, ...desired]
 			});
 		},
 

@@ -701,6 +701,42 @@ describe('ensureStagingLifecycleRule', () => {
 		}
 	};
 
+	const publicationRule = {
+		id: 'cupboard-publication-staging-reclaim',
+		enabled: true,
+		conditions: { prefix: 'staging-v2/' },
+		deleteObjectsTransition: { condition: { type: 'Age', maxAge: 604_800 } },
+		abortMultipartUploadsTransition: {
+			condition: { type: 'Age', maxAge: 172_800 }
+		}
+	};
+	it.each(['', undefined, 'staging-v2/', 'staging-v2/acme/'])(
+		'rejects an early expiry overlapping %s',
+		async (prefix) => {
+			const { client, requests } = fakeCloudflare({
+				[`GET ${lifecyclePath}`]: {
+					rules: [
+						{
+							id: 'early',
+							enabled: true,
+							conditions: { ...(prefix !== undefined && { prefix }) },
+							deleteObjectsTransition: {
+								condition: { type: 'Age', maxAge: 86_400 }
+							}
+						}
+					]
+				}
+			});
+			await expect(
+				createCloudflareApi(
+					client,
+					accountId('acc-1')
+				).ensureStagingLifecycleRule('cupboard-blobs')
+			).rejects.toThrow('early');
+			expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
+		}
+	);
+
 	it('writes the staging rule when the bucket has none', async () => {
 		const { client, requests, bodies } = fakeCloudflare({
 			[`GET ${lifecyclePath}`]: { rules: [] },
@@ -717,13 +753,13 @@ describe('ensureStagingLifecycleRule', () => {
 				{ method: 'GET', path: lifecyclePath },
 				{ method: 'PUT', path: lifecyclePath }
 			],
-			putBody: { rules: [stagingRule] }
+			putBody: { rules: [stagingRule, publicationRule] }
 		});
 	});
 
 	it('does not write when the staging rule already matches', async () => {
 		const { client, requests } = fakeCloudflare({
-			[`GET ${lifecyclePath}`]: { rules: [stagingRule] }
+			[`GET ${lifecyclePath}`]: { rules: [stagingRule, publicationRule] }
 		});
 
 		await createCloudflareApi(
@@ -737,7 +773,10 @@ describe('ensureStagingLifecycleRule', () => {
 	it('does not re-write when R2 echoes extra fields it did not set', async () => {
 		const { client, requests } = fakeCloudflare({
 			[`GET ${lifecyclePath}`]: {
-				rules: [{ ...stagingRule, storageClassTransitions: [] }]
+				rules: [
+					{ ...stagingRule, storageClassTransitions: [] },
+					publicationRule
+				]
 			}
 		});
 
@@ -781,7 +820,7 @@ describe('ensureStagingLifecycleRule', () => {
 				{ method: 'GET', path: lifecyclePath },
 				{ method: 'PUT', path: lifecyclePath }
 			],
-			putBody: { rules: [otherRule, stagingRule] }
+			putBody: { rules: [otherRule, stagingRule, publicationRule] }
 		});
 	});
 });
