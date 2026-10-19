@@ -2014,3 +2014,34 @@ export class BuildPublicationFailedError extends CliError {
 		return this.code;
 	}
 }
+
+export class PublicationUploadRequiredError extends CliError {
+	constructor(readonly uploadId: string) {
+		super(
+			'Publication bytes are required. Upload the NAR and resubmit this operation.'
+		);
+		this.name = 'PublicationUploadRequiredError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+export class PublicationRefusedError extends CliError {
+	constructor(
+		readonly reason: string,
+		readonly status: number,
+		message: string
+	) {
+		super(message);
+		this.name = 'PublicationRefusedError';
+	}
+
+	override get exitCode(): number {
+		return this.status >= 500
+			? transientExitCode
+			: this.status === 403 || this.status === 401
+				? authExitCode
+				: genericExitCode;
+	}
+}

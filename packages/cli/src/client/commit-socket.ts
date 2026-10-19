@@ -16,6 +16,9 @@ import {
 	commitCreditGrantAttribute,
 	commitSessionFrameSchema,
 	type CommitSessionRequestInput,
+	publicationCapability,
+	type PublicationEntry,
+	publicationMaxFrameBytes,
 	type PushId,
 	retentionMarkerAttribute,
 	retentionMarkerAttributeValue,
@@ -36,6 +39,8 @@ import {
 	CommitCapacityTimeoutError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
+	PublicationRefusedError,
+	PublicationUploadRequiredError,
 	QuotaExceededError,
 	TokenProviderError,
 	UploadVerificationFailedError,
@@ -114,6 +119,10 @@ export interface CommitSocketCredentials {
  * it asks a capable server to return the stored grace fact.
  */
 export interface CommitSessionTarget {
+	readonly publication?: {
+		readonly pushId: PushId;
+		readonly entry: PublicationEntry;
+	};
 	readonly uploadId: UploadId;
 	readonly storePathHash: StorePathHash;
 	readonly narHash: NixSha256HashString;
@@ -139,6 +148,10 @@ export interface CommitSessionOptions {
 	readonly maxReconnects?: number;
 	readonly reconnectBackoffMs?: number;
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
+	/**
+	Reports a terminal failure, including a refused handshake.
+	*/
+	readonly onFailure?: (error: Error) => void;
 	/**
 	 * Called when the session starts waiting for the server to grant commit
 	 * capacity, and again when it stops. It reports only the state transition:
@@ -200,6 +213,7 @@ interface SessionEntry {
 	// subscribe to acknowledged entries, but resend unacknowledged entries because
 	// their original commit might not have reached the server.
 	acked: boolean;
+	accepted?: boolean;
 	deadline?: NodeJS.Timeout;
 	retryAttempts: number;
 	retryTimer?: NodeJS.Timeout;
@@ -270,7 +284,10 @@ const knownEvs = new Set([
 	'unsupported',
 	'credit',
 	'queued',
-	'renewed'
+	'renewed',
+	'publication-accepted',
+	'upload-required',
+	'publication-refused'
 ]);
 
 // Observe `settled` when the caller chooses not to wait, preventing a later
@@ -484,6 +501,7 @@ export function runCommitSession(
 	// Mark a grace-aware upload only when the current connection advertises the
 	// `retention` marker for `commit-batch` or `subscribe-identity`. After a
 	// reconnect, the server can then return the stored grace fact.
+	let hasPublication = false;
 	let hasBatchRetentionMarker = false;
 	let hasIdentityRetentionMarker = false;
 	let hasBatchBlobDeclaration = false;
@@ -537,10 +555,94 @@ export function runCommitSession(
 	const uploadIdToChunkKey = new Map<UploadId, string>();
 	let pendingBatchChunks: CommitSessionTarget[][] = [];
 
+	const sendPublication = (
+		batch: readonly CommitSessionTarget[],
+		shouldSubscribe = false
+	): void => {
+		if (batch.length === 0) {
+			return;
+		}
+		if (!hasPublication) {
+			failSession(
+				new CommitSocketProtocolError(
+					options.path,
+					'The server no longer supports accepted publications. Retry with a capable server.'
+				)
+			);
+			return;
+		}
+		let entries: PublicationEntry[] = [];
+		let pushId: PushId | undefined;
+		const flush = () => {
+			if (pushId !== undefined && entries.length > 0) {
+				sendNow({
+					op: shouldSubscribe ? 'subscribe-publication' : 'publish-batch',
+					pushId,
+					entries
+				});
+			}
+			entries = [];
+		};
+		for (const target of batch) {
+			const publication = target.publication;
+			if (publication === undefined) {
+				continue;
+			}
+			const entry = {
+				...publication.entry,
+				...(target.blob !== undefined && { blob: target.blob })
+			};
+			const candidate = {
+				op: shouldSubscribe ? 'subscribe-publication' : 'publish-batch',
+				pushId: publication.pushId,
+				entries: [...entries, entry]
+			};
+			if (
+				pushId !== undefined &&
+				(pushId !== publication.pushId ||
+					entries.length === commitBatchMaxEntries ||
+					Buffer.byteLength(JSON.stringify(candidate)) >
+						publicationMaxFrameBytes)
+			) {
+				flush();
+			}
+			pushId = publication.pushId;
+			if (
+				Buffer.byteLength(JSON.stringify({ ...candidate, entries: [entry] })) >
+				publicationMaxFrameBytes
+			) {
+				failSession(
+					new CommitSocketProtocolError(
+						options.path,
+						'One publication exceeds the 4 MiB message limit.'
+					)
+				);
+				return;
+			}
+			entries.push(entry);
+		}
+		flush();
+	};
 	const sendBatchMessage = (batch: readonly CommitSessionTarget[]): void => {
+		const publications = batch.filter(
+			(target) => target.publication !== undefined
+		);
+		if (publications.length > 0) {
+			sendPublication(publications);
+		}
+		const legacy = batch.filter((target) => target.publication === undefined);
+		if (legacy.length === 0) {
+			return;
+		}
+		if (effectiveBatchSize === undefined) {
+			for (const target of legacy) {
+				sendNow({ op: 'commit', uploadId: target.uploadId });
+			}
+			return;
+		}
 		sendNow({
 			op: 'commit-batch',
-			commits: batch.map((target) => ({
+			commits: legacy.map((target) => ({
 				uploadId: target.uploadId,
 				storePathHash: target.storePathHash,
 				narHash: target.narHash,
@@ -780,7 +882,10 @@ export function runCommitSession(
 				inFlightEntries.add(target.uploadId);
 			}
 
-			if (effectiveBatchSize === undefined) {
+			if (
+				effectiveBatchSize === undefined &&
+				batch.every((target) => target.publication === undefined)
+			) {
 				for (const target of batch) {
 					sendNow({ op: 'commit', uploadId: target.uploadId });
 				}
@@ -812,7 +917,10 @@ export function runCommitSession(
 			return;
 		}
 
-		if (effectiveBatchSize === undefined) {
+		if (
+			effectiveBatchSize === undefined &&
+			targets.every((target) => target.publication === undefined)
+		) {
 			for (const target of targets) {
 				inFlightEntries.add(target.uploadId);
 				sendNow({ op: 'commit', uploadId: target.uploadId });
@@ -821,7 +929,8 @@ export function runCommitSession(
 			return;
 		}
 
-		for (const batch of chunk(targets, effectiveBatchSize)) {
+		const batches = chunk(targets, effectiveBatchSize ?? commitBatchMaxEntries);
+		for (const batch of batches) {
 			if (inFlightChunks.size < maxInFlightBatchMessages) {
 				sendBatchChunk(batch);
 			} else {
@@ -951,6 +1060,7 @@ export function runCommitSession(
 				entry.rejectAck(error);
 			}
 		}
+		options.onFailure?.(error);
 	};
 
 	const finishEntry = (
@@ -1045,6 +1155,44 @@ export function runCommitSession(
 		}
 
 		switch (frame.ev) {
+			case 'publication-accepted': {
+				const entry = outstanding.get(frame.uploadId);
+				if (entry !== undefined) {
+					entry.accepted = true;
+				}
+				return;
+			}
+			case 'upload-required':
+			case 'publication-refused': {
+				if (
+					frame.ev === 'publication-refused' &&
+					frame.reason === 'temporary-failure'
+				) {
+					onFrame(
+						JSON.stringify({
+							ev: 'error',
+							uploadId: frame.uploadId,
+							status: frame.status,
+							message: frame.message
+						})
+					);
+					return;
+				}
+				finishEntry(frame.uploadId, (entry) => {
+					const error =
+						frame.ev === 'upload-required'
+							? new PublicationUploadRequiredError(frame.uploadId)
+							: new PublicationRefusedError(
+									frame.reason,
+									frame.status,
+									frame.message
+								);
+					entry.settleFailed(error);
+					entry.rejectAck(error);
+				});
+				return;
+			}
+
 			case 'settled': {
 				// Ignore stale frames before recording capacity progress. They do not
 				// return credit for any current entry.
@@ -1291,7 +1439,7 @@ export function runCommitSession(
 		const unacked: CommitSessionTarget[] = [];
 
 		for (const [, entry] of outstanding) {
-			if (entry.acked) {
+			if (entry.acked || entry.accepted === true) {
 				ackedTargets.push(entry.target);
 				continue;
 			}
@@ -1305,8 +1453,18 @@ export function runCommitSession(
 			return;
 		}
 
+		const publications = ackedTargets.filter(
+			(target) => target.publication !== undefined
+		);
+		sendPublication(publications, true);
+		const legacyTargets = ackedTargets.filter(
+			(target) => target.publication === undefined
+		);
+		if (legacyTargets.length === 0) {
+			return;
+		}
 		if (hasSubscribeIdentity) {
-			for (const batch of chunk(ackedTargets, commitBatchMaxEntries)) {
+			for (const batch of chunk(legacyTargets, commitBatchMaxEntries)) {
 				sendNow({
 					op: 'subscribe-identity',
 					entries: batch.map((target) => ({
@@ -1323,7 +1481,7 @@ export function runCommitSession(
 		} else {
 			sendNow({
 				op: 'subscribe',
-				uploadIds: ackedTargets.map((target) => target.uploadId)
+				uploadIds: legacyTargets.map((target) => target.uploadId)
 			});
 		}
 	};
@@ -1642,6 +1800,7 @@ export function runCommitSession(
 			const raw = response.headers[commitCapabilitiesHeader];
 			const headerValue = Array.isArray(raw) ? raw.join(',') : (raw ?? '');
 			connectionCaps = parseCapabilities(headerValue);
+			hasPublication = connectionCaps.has(publicationCapability);
 			effectiveBatchSize = resolvedBatchSize(connectionCaps);
 			hasSubscribeIdentity = connectionCaps.has(subscribeIdentityCapability);
 			hasBatchRetentionMarker = hasRetentionMarker(

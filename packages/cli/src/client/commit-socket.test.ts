@@ -1,4 +1,5 @@
 import {
+	cacheGenerationSchema,
 	nixSha256HashSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -8,9 +9,11 @@ import {
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
 	type CommitSessionFrameInput,
+	publicationMaxFrameBytes,
 	type PushId,
 	pushIdSchema,
-	uploadIdSchema
+	uploadIdSchema,
+	uploadPathNegotiationSchema
 } from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,6 +22,8 @@ import {
 	CommitCapacityTimeoutError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
+	PublicationRefusedError,
+	PublicationUploadRequiredError,
 	QuotaExceededError,
 	UploadVerificationFailedError,
 	UploadWaitTimeoutError
@@ -104,6 +109,7 @@ interface SessionTestOptions {
 	readonly maxReconnects?: number;
 	readonly reconnectBackoffMs?: number;
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
+	readonly onFailure?: (error: Error) => void;
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 	readonly pushId?: () => Promise<PushId>;
 	// Record each connection time so tests can measure reconnect delays.
@@ -156,6 +162,7 @@ function openSessionOver(
 			maxReconnects: options.maxReconnects,
 			reconnectBackoffMs: options.reconnectBackoffMs,
 			onCapabilities: options.onCapabilities,
+			onFailure: options.onFailure,
 			onWaiting: options.onWaiting,
 			pushId: options.pushId
 		}
@@ -4226,4 +4233,246 @@ describe('a session that declares credit to a server that offers none', () => {
 
 		expect(error.path).toBe(path);
 	});
+});
+
+describe('publication operations', () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+	const operationId = uploadIdSchema.parse('a'.repeat(64));
+	const metadata = uploadPathNegotiationSchema.parse({
+		storePathHash,
+		storePath: `/nix/store/${storePathHash}-app`,
+		narHash,
+		narSize: 1,
+		references: []
+	});
+	const publication = {
+		pushId: pushIdSchema.parse('push-1'),
+		entry: {
+			operationId,
+			cacheGeneration: cacheGenerationSchema.parse(1),
+			metadata
+		}
+	};
+	const publicationTarget = { ...target, uploadId: operationId, publication };
+	it.each([
+		{ hasBatch: false, hasCredit: false },
+		{ hasBatch: false, hasCredit: true },
+		{ hasBatch: true, hasCredit: false },
+		{ hasBatch: true, hasCredit: true }
+	])(
+		'uses the advertised legacy operation in a mixed batch with batch=$hasBatch and credit=$hasCredit',
+		async ({ hasBatch, hasCredit }) => {
+			const socket = new FakeCommitSocket();
+			const session = openSession(socket, {
+				headers: hasCredit ? creditDeclaringHeaders : {}
+			});
+			const commits = [
+				session.commit(publicationTarget),
+				session.commit(target)
+			];
+			const capabilities = [
+				'publication-v1',
+				...(hasBatch ? ['commit-batch;max=100'] : []),
+				...(hasCredit ? ['commit-credit;grant=2'] : [])
+			].join(',');
+			socket.emit('upgrade', {
+				headers: { 'x-cupboard-commit-capabilities': capabilities }
+			});
+			socket.emit('open');
+			await Promise.resolve();
+			for (const uploadId of [operationId, target.uploadId]) {
+				socket.emit(
+					'message',
+					frame({
+						ev: 'settled',
+						uploadId,
+						response: { storePathHash, narHash, status: 'committed' }
+					})
+				);
+			}
+			const outcomes = await Promise.all(
+				commits.map((commit) => ackOf(commit))
+			);
+			session.close();
+			expect({ sent: socket.sent, outcomes }).toStrictEqual({
+				sent: [
+					JSON.stringify({
+						op: 'publish-batch',
+						pushId: publication.pushId,
+						entries: [publication.entry]
+					}),
+					JSON.stringify(
+						hasBatch
+							? {
+									op: 'commit-batch',
+									commits: [target]
+								}
+							: { op: 'commit', uploadId: target.uploadId }
+					)
+				],
+				outcomes: [
+					{ storePathHash, narHash, status: 'committed' },
+					{ storePathHash, narHash, status: 'committed' }
+				]
+			});
+		}
+	);
+	it('reports a refused capability probe before any commit is queued', () => {
+		const socket = new FakeCommitSocket();
+		const onFailure = vi.fn();
+		const session = openSession(socket, { onFailure });
+		const response = new FakeUpgradeFailure(404);
+		socket.emit('unexpected-response', undefined, response);
+		response.emit('end');
+		expect(onFailure).toHaveBeenCalledExactlyOnceWith(
+			new CupboardHttpError('GET', path, 404, '')
+		);
+		expect(socket.sent).toStrictEqual([]);
+		session.close();
+	});
+	it('splits publication batches by their encoded byte size', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const entries = ['b', 'c'].map((character) => ({
+			...publication.entry,
+			operationId: uploadIdSchema.parse(character.repeat(64)),
+			metadata: uploadPathNegotiationSchema.parse({
+				...metadata,
+				references: Array.from(
+					{ length: 10_000 },
+					() => `${storePathHash}-${'a'.repeat(211)}`
+				)
+			})
+		}));
+		const commits = entries.map((entry) =>
+			session.commit({
+				...target,
+				uploadId: entry.operationId,
+				publication: { ...publication, entry }
+			})
+		);
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		socket.emit('open');
+		await Promise.resolve();
+		expect(socket.sent).toStrictEqual(
+			entries.map((entry) =>
+				JSON.stringify({
+					op: 'publish-batch',
+					pushId: publication.pushId,
+					entries: [entry]
+				})
+			)
+		);
+		expect(
+			socket.sent.every(
+				(message) => Buffer.byteLength(message) <= publicationMaxFrameBytes
+			)
+		).toBe(true);
+		for (const entry of entries) {
+			socket.emit(
+				'message',
+				frame({
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: { storePathHash, narHash, status: 'already-present' }
+				})
+			);
+		}
+		await Promise.all(commits);
+		session.close();
+	});
+	it('resubscribes with complete metadata after durable acceptance and a lost result', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const result = session.commit(publicationTarget);
+		first.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		first.emit('open');
+		await Promise.resolve();
+		expect(first.sent).toStrictEqual([
+			JSON.stringify({
+				op: 'publish-batch',
+				pushId: publication.pushId,
+				entries: [publication.entry]
+			})
+		]);
+		first.emit(
+			'message',
+			frame({ ev: 'publication-accepted', uploadId: operationId })
+		);
+		first.emit('close', 1006, 'lost result');
+		await vi.advanceTimersByTimeAsync(5000);
+		second.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		second.emit('open');
+		expect(second.sent).toStrictEqual([
+			JSON.stringify({
+				op: 'subscribe-publication',
+				pushId: publication.pushId,
+				entries: [publication.entry]
+			})
+		]);
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId: operationId,
+				response: { storePathHash, narHash, status: 'already-present' }
+			})
+		);
+		await expect(ackOf(result)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'already-present'
+		});
+		session.close();
+	});
+	it.each(['upload-required', 'recovery-expired'] as const)(
+		'reports %s without retrying the operation',
+		async (reason) => {
+			const socket = new FakeCommitSocket();
+			const session = openSession(socket);
+			const result = session.commit(publicationTarget);
+			const rejected = expect(result).rejects.toBeInstanceOf(
+				reason === 'upload-required'
+					? PublicationUploadRequiredError
+					: PublicationRefusedError
+			);
+			socket.emit('upgrade', {
+				headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+			});
+			socket.emit('open');
+			await Promise.resolve();
+			socket.emit(
+				'message',
+				frame(
+					reason === 'upload-required'
+						? { ev: 'upload-required', uploadId: operationId }
+						: {
+								ev: 'publication-refused',
+								uploadId: operationId,
+								reason,
+								status: 503,
+								message: 'Start a fresh push.'
+							}
+				)
+			);
+			await rejected;
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(socket.sent).toStrictEqual([
+				JSON.stringify({
+					op: 'publish-batch',
+					pushId: publication.pushId,
+					entries: [publication.entry]
+				})
+			]);
+			session.close();
+		}
+	);
 });
