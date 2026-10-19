@@ -33,6 +33,7 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import type { CommitOptions } from '../client/client.ts';
 import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
+import { PublicationUploadRequiredError } from '../errors.ts';
 import {
 	PushNarMetadataMismatchError,
 	UploadVerificationFailedError
@@ -433,7 +434,21 @@ async function uploadAndAcknowledge(
 			narHash: decision.narHash,
 			...(blob !== undefined && { blob })
 		});
+		requireMatchingBuildOutput(info, {
+			action: 'skip',
+			storePathHash: outcome.storePathHash,
+			narHash: outcome.narHash
+		});
 	} catch (error) {
+		if (
+			error instanceof PublicationUploadRequiredError &&
+			decision.action !== 'upload'
+		) {
+			const upload = options.client.publicationFor?.(decision);
+			if (upload !== undefined) {
+				return uploadAndAcknowledge(upload, info, isTarget, options, ledger);
+			}
+		}
 		return { info, verdict: Promise.resolve({ kind: 'failed', error }) };
 	}
 
@@ -500,7 +515,7 @@ async function publishNegotiated(
 		return;
 	}
 
-	const { decision } = item;
+	let { decision } = item;
 
 	if (decision.action === 'skip') {
 		try {
@@ -510,10 +525,13 @@ async function publishNegotiated(
 			return;
 		}
 
-		ledger.servable.add(info.storePath);
-		return;
+		const publication = options.client.publicationFor?.(decision);
+		if (publication === undefined) {
+			ledger.servable.add(info.storePath);
+			return;
+		}
+		decision = { ...publication, action: 'commit' };
 	}
-
 	const acknowledgement = await uploadAndAcknowledge(
 		decision,
 		info,

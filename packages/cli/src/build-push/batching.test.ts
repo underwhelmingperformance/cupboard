@@ -11,6 +11,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
+	uploadActionDecisionSchema,
 	uploadAttachRootSchema,
 	type UploadDecisionInput,
 	uploadDecisionSchema,
@@ -23,7 +24,11 @@ import type {
 	CommitSession,
 	CommitSessionTarget
 } from '../client/commit-socket.ts';
-import { CliAbortError, UploadVerificationFailedError } from '../errors.ts';
+import {
+	CliAbortError,
+	PublicationUploadRequiredError,
+	UploadVerificationFailedError
+} from '../errors.ts';
 import { byteStream } from '../io/byte-stream.ts';
 import { SequentialNarSource } from '../nix/nar-source.ts';
 import type { PushClient } from '../push/push.ts';
@@ -107,6 +112,7 @@ function emptyStream(): ReadableStream<Uint8Array> {
 }
 
 interface HarnessOptions {
+	readonly publicationFor?: PushClient['publicationFor'];
 	readonly actions?: ReadonlyMap<
 		StorePathString,
 		UploadDecisionInput['action']
@@ -176,6 +182,9 @@ function harness(options: HarnessOptions = {}): Harness {
 		[StorePath.hash(pathB), pathB]
 	]);
 	const client: PushClient = {
+		...(options.publicationFor !== undefined && {
+			publicationFor: options.publicationFor
+		}),
 		negotiate: (body) => {
 			events.push('negotiate');
 			negotiations.push(body);
@@ -289,6 +298,129 @@ afterEach(() => {
 });
 
 describe('BuildOutputBatcher', () => {
+	it('refuses a divergent committed NAR through the legacy protocol', async () => {
+		const { batcher, outcomes, failures } = harness({
+			actions: new Map([[pathA, 'commit']]),
+			commitSession: {
+				commit: (target) =>
+					Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: divergentNarHash.value,
+						status: 'committed',
+						settled: Promise.resolve()
+					}),
+				close: vi.fn()
+			}
+		});
+		batcher.enqueue(pathA);
+		await vi.advanceTimersByTimeAsync(500);
+		await batcher.settled();
+		expect({
+			outcomes,
+			candidates: batcher.candidates,
+			failures: failures.map((failure) => ({
+				storePath: failure.storePath,
+				name: failure.reason instanceof Error ? failure.reason.name : undefined
+			}))
+		}).toStrictEqual({
+			outcomes: [],
+			candidates: [pathA],
+			failures: [{ storePath: pathA, name: 'BuildOutputDivergedError' }]
+		});
+	});
+	it.each([
+		{ action: 'skip', refusals: 0, succeeds: true, transfers: 0, attempts: 1 },
+		{ action: 'skip', refusals: 1, succeeds: true, transfers: 1, attempts: 2 },
+		{
+			action: 'commit',
+			refusals: 1,
+			succeeds: true,
+			transfers: 1,
+			attempts: 2
+		},
+		{
+			action: 'commit',
+			refusals: 2,
+			succeeds: false,
+			transfers: 1,
+			attempts: 2
+		},
+		{
+			action: 'upload',
+			refusals: 1,
+			succeeds: false,
+			transfers: 1,
+			attempts: 1
+		}
+	] as const)(
+		'publishes $action with $refusals upload-required responses',
+		async ({ action, refusals, succeeds, transfers, attempts }) => {
+			const upload = uploadActionDecisionSchema.parse(
+				decisionFor(pathA, 'upload')
+			);
+			const required = new PublicationUploadRequiredError(upload.uploadId);
+			const compressedBody = Buffer.from('nar');
+			let commitAttempts = 0;
+			const commit = vi.fn<CommitSession['commit']>((target) => {
+				commitAttempts += 1;
+				if (commitAttempts <= refusals) {
+					return Promise.reject(required);
+				}
+				return Promise.resolve({
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
+					status: transfers === 0 ? 'already-present' : 'committed',
+					settled: Promise.resolve()
+				});
+			});
+			const { batcher, outcomes, failures, events } = harness({
+				actions: new Map([[pathA, action]]),
+				publicationFor: () => upload,
+				commitSession: { commit, close: vi.fn() },
+				compressedBody
+			});
+			batcher.enqueue(pathA);
+			await vi.advanceTimersByTimeAsync(500);
+			await batcher.settled();
+			const identity = {
+				uploadId: upload.uploadId,
+				storePathHash: upload.storePathHash,
+				narHash: upload.narHash
+			};
+			const blob = {
+				fileHash: NixSha256Hash.fromDigest(
+					createHash('sha256').update(compressedBody).digest()
+				).value,
+				fileSize: compressedBody.byteLength
+			};
+			expect({
+				commits: commit.mock.calls.flat(),
+				uploads: events.filter((event) => event.startsWith('upload:')),
+				outcomes,
+				failures,
+				candidates: batcher.candidates
+			}).toStrictEqual({
+				commits: Array.from({ length: attempts }, (_, index) => ({
+					...identity,
+					...((action === 'upload' || index > 0) && { blob })
+				})),
+				uploads: Array.from(
+					{ length: transfers },
+					() => `upload:${upload.r2Key}`
+				),
+				outcomes: succeeds
+					? [
+							{
+								outcome: transfers === 0 ? 'destination-served' : 'published',
+								storePath: pathA
+							}
+						]
+					: [],
+				failures: succeeds ? [] : [{ storePath: pathA, reason: required }],
+				candidates: succeeds ? [] : [pathA]
+			});
+		}
+	);
 	it('returns every path to the candidate set when negotiation omits decisions', async () => {
 		const { batcher, failures } = harness({ decisions: () => [] });
 
