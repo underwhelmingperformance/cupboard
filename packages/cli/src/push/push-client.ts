@@ -1,4 +1,8 @@
-import { type CacheScope } from '@cupboard/nix-store/scalars';
+import { rootLogger } from '@cupboard/logger';
+import {
+	type CacheScope,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import {
 	subrequestSafetyReserve,
@@ -6,12 +10,19 @@ import {
 } from '@cupboard/protocol/platform';
 import {
 	acceptCapabilitiesHeader,
+	publicationCapability,
+	type PublicationEntry,
+	type UploadActionDecision,
+	uploadAttachRootSchema,
 	uploadCapabilitiesHeader,
+	type UploadDecision,
 	uploadGraceFactsCapability,
+	type UploadId,
 	uploadNegotiateMaxPaths,
+	uploadPathNegotiationSchema,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
-import { discardResponseBody } from '@cupboard/shared/cleanup';
+import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
 import {
 	type DeadlineOptions,
 	lookupPage,
@@ -21,9 +32,12 @@ import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 
 import { callInCache } from '../client/cache-scoped.ts';
+import type { CommitTarget } from '../client/client.ts';
 import { CupboardClient } from '../client/client.ts';
+import type { CommitSession } from '../client/commit-socket.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
+import { CupboardHttpError } from '../errors.ts';
 
 import { credentialSession } from './credential-session.ts';
 import { type PushClient } from './push.ts';
@@ -107,10 +121,34 @@ export function pushClientFor(
 
 		return { result, hasUploadGraceFacts };
 	};
+	let hasCredentialPublication = false;
+	let protocolSelection: Promise<'publication' | 'legacy'> | undefined;
+	const entries = new Map<
+		UploadId,
+		{
+			readonly pushId: Awaited<ReturnType<typeof session.pushId>>;
+			readonly entry: PublicationEntry;
+			readonly upload: UploadActionDecision;
+		}
+	>();
+	const skips = new Map<StorePathHash, UploadActionDecision>();
 	const rpc = tenantRpc(url, {
 		credential,
 		signal: options.signal,
-		fetcher: options.fetcher
+		fetcher: async (input, init) => {
+			const request = new Request(input, init);
+			const headers = new Headers(request.headers);
+			headers.set(acceptCapabilitiesHeader, publicationCapability);
+			const response = await baseFetcher(new Request(request, { headers }));
+			if (request.url.endsWith('/uploads/credential')) {
+				hasCredentialPublication =
+					response.headers
+						.get(uploadCapabilitiesHeader)
+						?.split(',')
+						.some((value) => value.trim() === publicationCapability) ?? false;
+			}
+			return response;
+		}
 	});
 	const raw = new CupboardClient(
 		new URL(url),
@@ -148,9 +186,8 @@ export function pushClientFor(
 		{ signal: options.signal }
 	);
 	// Sends the paths in pages of at most `pageSize`, which a response can
-	// change. A request without paths still reaches the server: it can bind a
-	// run root, and its response shows whether the server acknowledges grace
-	// facts.
+	// change. A request without paths still reaches the server for capability
+	// and lifecycle information.
 	const decisionPages = async <Path, Decision>(
 		paths: readonly Path[],
 		deadline: DeadlineOptions,
@@ -167,8 +204,153 @@ export function pushClientFor(
 		});
 	};
 
+	const publicationTarget = (target: CommitTarget): CommitTarget => {
+		const publication = entries.get(target.uploadId);
+		return publication === undefined
+			? target
+			: {
+					...target,
+					publication: { pushId: publication.pushId, entry: publication.entry }
+				};
+	};
+	const wrapSession = (commitSession: CommitSession): CommitSession => ({
+		...commitSession,
+		commit: (target) => commitSession.commit(publicationTarget(target))
+	});
+
+	const selectPublicationProtocol = async (): Promise<
+		'publication' | 'legacy'
+	> => {
+		await session.provider();
+		if (!hasCredentialPublication) {
+			rootLogger().debug('publication protocol selected', {
+				protocol: 'legacy',
+				hasCredentialCapability: false
+			});
+			return 'legacy';
+		}
+		const ready = Promise.withResolvers<boolean>();
+		const probe = await raw.openCommitSession(credential, {
+			onFailure: (error) => {
+				ready.reject(error);
+			},
+			onCapabilities: (capabilities) => {
+				ready.resolve(capabilities.has(publicationCapability));
+			}
+		});
+		try {
+			const hasCapability = await requestWithDeadline(() => ready.promise, {
+				target: { procedure: 'publication capability' },
+				deadlineMs: probeDeadlineMs,
+				signal: options.signal,
+				replaySafety: 'replay-unsafe'
+			});
+			rootLogger().debug('publication protocol selected', {
+				protocol: hasCapability ? publicationCapability : 'legacy',
+				hasCredentialCapability: true,
+				hasSocketCapability: hasCapability
+			});
+			return hasCapability ? 'publication' : 'legacy';
+		} catch (error) {
+			if (
+				!(error instanceof CupboardHttpError) ||
+				error.status !== notFoundStatus
+			) {
+				throw error;
+			}
+			rootLogger().debug('publication protocol selected', {
+				protocol: 'legacy',
+				reason: 'commit-probe-not-found'
+			});
+			return 'legacy';
+		} finally {
+			probe.close();
+		}
+	};
+	const publicationProtocol = (): Promise<'publication' | 'legacy'> =>
+		(protocolSelection ??= selectPublicationProtocol());
+
+	const planDeadline = procedureDeadline(
+		'uploads.plan',
+		tenantContract.uploads.plan.inDefaultCache,
+		{ signal: options.signal }
+	);
+	const plan = async (body: Parameters<PushClient['negotiate']>[0]) => {
+		const pushId = await session.pushId();
+		const uploads = await decisionPages(
+			body.paths,
+			planDeadline,
+			async (paths, signal) => {
+				const result = await callInCache(
+					rpc.uploads.plan,
+					cache,
+					{
+						pushId,
+						paths,
+						...(body.attachRoot !== undefined && {
+							attachRoot: body.attachRoot
+						})
+					},
+					{ signal }
+				);
+				return result.uploads.map((decision, index): UploadDecision => {
+					const requested = paths[index];
+					const metadata =
+						requested === undefined
+							? undefined
+							: uploadPathNegotiationSchema.parse(requested);
+					if (metadata === undefined) {
+						throw new Error('The publication plan omitted path metadata.');
+					}
+					const entry: PublicationEntry = {
+						operationId: decision.operationId,
+						cacheGeneration: result.cacheGeneration,
+						metadata,
+						...(body.attachRoot !== undefined && {
+							attachRoot: uploadAttachRootSchema.parse(body.attachRoot)
+						})
+					};
+					const upload: UploadActionDecision = {
+						action: 'upload',
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash,
+						uploadId: decision.operationId,
+						r2Key: decision.r2Key,
+						expiresAt: result.pushExpiresAt
+					};
+					entries.set(entry.operationId, { pushId, entry, upload });
+					if (decision.action === 'skip') {
+						const skip: UploadDecision = {
+							action: 'skip',
+							storePathHash: decision.storePathHash,
+							narHash: decision.narHash
+						};
+						skips.set(skip.storePathHash, upload);
+						return skip;
+					}
+					return decision.action === 'upload'
+						? upload
+						: {
+								action: 'commit',
+								storePathHash: decision.storePathHash,
+								narHash: decision.narHash,
+								uploadId: decision.operationId
+							};
+				});
+			}
+		);
+		return { uploads, hasUploadGraceFacts: true };
+	};
+
 	return {
+		publicationFor: (decision) =>
+			decision.action === 'skip'
+				? skips.get(decision.storePathHash)
+				: entries.get(decision.uploadId)?.upload,
 		negotiate: async (body) => {
+			if ((await publicationProtocol()) === 'publication') {
+				return plan(body);
+			}
 			const pushId = await session.pushId();
 			let hasGraceFactsForEveryPage = true;
 
@@ -231,6 +413,9 @@ export function pushClientFor(
 				return probe.hasUploadGraceFacts;
 			}
 
+			if ((await publicationProtocol()) === 'publication') {
+				return true;
+			}
 			const pushId = await session.pushId();
 			const probe = await requestWithDeadline(
 				(signal) =>
@@ -270,12 +455,42 @@ export function pushClientFor(
 			return uploader.uploadNar(r2Key, source, narSize, observer);
 		},
 		commit: (target, commitOptions) =>
-			raw.commit(credential, target, commitOptions),
-		openCommitSession: (commitOptions) =>
-			raw.openCommitSession(credential, {
-				...commitOptions,
-				pushId: () => session.pushId()
-			}),
+			raw.commit(credential, publicationTarget(target), commitOptions),
+		openCommitSession: (commitOptions) => {
+			let connection: Promise<CommitSession> | undefined;
+			let isClosed = false;
+			const open = async (): Promise<CommitSession> =>
+				wrapSession(
+					await raw.openCommitSession(credential, {
+						...commitOptions,
+						pushId: () => session.pushId()
+					})
+				);
+			const get = (): Promise<CommitSession> => {
+				if (isClosed) {
+					throw new Error('The commit session is closed.');
+				}
+				connection ??= open();
+				return connection;
+			};
+			return Promise.resolve({
+				commit: async (target) => {
+					const opened = await get();
+					return opened.commit(target);
+				},
+				renewUploads: async (ids) => {
+					const opened = await get();
+					await opened.renewUploads?.(ids);
+				},
+				close: () => {
+					isClosed = true;
+					void bestEffort(async () => {
+						const opened = await connection;
+						opened?.close();
+					});
+				}
+			});
+		},
 		negotiateAttestations: async (body) =>
 			callInCache(rpc.attestations.negotiate, cache, {
 				pushId: await session.pushId(),

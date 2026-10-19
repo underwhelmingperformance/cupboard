@@ -1328,12 +1328,6 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		});
 	});
 
-	// A publication whose demand far outruns the tenant's budget of commit
-	// credit. The server paces it rather than refusing any of it: every path
-	// still lands, the `credit` frames prove the run really was paced rather
-	// than merely small, and the single upgrade proves it waited on the socket
-	// it already held rather than re-dialling for capacity.
-	//
 	// A `queued` frame needs the budget to be exhausted at the instant a
 	// session asks for more, which needs entries in flight from more than one
 	// commit at a time. A run publishes its paths a few at a time, so whether
@@ -1375,17 +1369,9 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		}).toStrictEqual({
 			cohortStatuses: [0],
 			served: claimed.map(() => 200),
-			// The streamed build-push always opens one session: the seeded paths
-			// are new, so it has entries to commit. The retention push that
-			// follows is a separate process, and it opens a session of its own
-			// only when a path's verdict is still pending when it negotiates;
-			// when every path has settled by then, negotiation returns skip
-			// for each and the push never dials. A client that re-dialled for
-			// capacity would add an upgrade per starved wait on top.
-			upgrades: expect.toSatisfy(
-				(count: number) => count === 1 || count === 2,
-				'one session per committing process'
-			) as number,
+			// Both build-push and the retention push probe capabilities, then
+			// publish over their own session. Already-present paths also commit.
+			upgrades: 4,
 			wasPaced: true
 		});
 	});

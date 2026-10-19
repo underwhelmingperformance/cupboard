@@ -1,8 +1,10 @@
+import { publicationCapability } from '@cupboard/protocol/upload';
 import { uploadPathNegotiationSchema } from '@cupboard/protocol/upload';
 import {
 	acceptCapabilitiesHeader,
 	uploadCapabilitiesHeader,
 	uploadGraceFactsCapability,
+	uploadIdSchema,
 	uploadNegotiateRequestSchema,
 	uploadPreviewRequestSchema,
 	uploadRequestMaxPathsHeader
@@ -12,7 +14,9 @@ import { ORPCError } from '@orpc/client';
 import { describe, expect, it, vi } from 'vitest';
 
 import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
+import { CupboardClient } from '../client/client.ts';
 import { translateRpcError } from '../client/rpc-errors.ts';
+import { CupboardHttpError } from '../errors.ts';
 import { errorExitCode } from '../exit-code.ts';
 
 import { pushClientFor } from './push-client.ts';
@@ -575,3 +579,236 @@ describe('pushClientFor', () => {
 });
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { attestationBundleNegotiateRequestSchema } from '@cupboard/protocol/attestations';
+
+it.each([
+	{
+		credentialCapability: true,
+		socketCapability: true,
+		expected: '/uploads/plan'
+	},
+	{ credentialCapability: true, socketCapability: false, expected: '/uploads' },
+	{
+		credentialCapability: true,
+		socketCapability: false,
+		socketRefused: true,
+		expected: '/uploads'
+	},
+	{ credentialCapability: false, socketCapability: true, expected: '/uploads' },
+	{ credentialCapability: false, socketCapability: false, expected: '/uploads' }
+])(
+	'selects $expected with credential=$credentialCapability, socket=$socketCapability and refused=$socketRefused',
+	async ({
+		credentialCapability,
+		socketCapability,
+		socketRefused,
+		expected
+	}) => {
+		const operationId = 'a'.repeat(64);
+		const metadata = uploadPathNegotiationSchema.parse({
+			storePathHash: '0'.repeat(32),
+			storePath: `/nix/store/${'0'.repeat(32)}-app`,
+			narHash: `sha256:${'1'.repeat(52)}`,
+			narSize: 1,
+			references: []
+		});
+		const paths: string[] = [];
+		const open = vi
+			.spyOn(CupboardClient.prototype, 'openCommitSession')
+			.mockImplementation((_credential, options) => {
+				if (socketRefused === true) {
+					options?.onFailure?.(
+						new CupboardHttpError(
+							'GET',
+							'/cache/new/commit',
+							404,
+							'Cache not found'
+						)
+					);
+				}
+				options?.onCapabilities?.(
+					new Map(socketCapability ? [[publicationCapability, {}]] : [])
+				);
+				return Promise.resolve({
+					commit: () => Promise.reject(new Error('No commit expected')),
+					close: vi.fn()
+				});
+			});
+		const client = pushClientFor(new URL('https://cupboard.test'), 'token', {
+			cache: { kind: 'default' },
+			fetcher: async (input, init) => {
+				const request = new Request(input, init);
+				await request.json();
+				const pathname = new URL(request.url).pathname;
+				paths.push(pathname);
+				if (pathname === '/uploads/credential') {
+					return Response.json(
+						{
+							pushId: 'push-1',
+							accessKeyId: 'access',
+							secretAccessKey: 'secret',
+							sessionToken: 'session',
+							endpoint: 'https://r2.test',
+							bucket: 'blobs',
+							expiresAt: '2099-01-01T00:00:00.000Z'
+						},
+						{
+							headers: credentialCapability
+								? { [uploadCapabilitiesHeader]: publicationCapability }
+								: {}
+						}
+					);
+				}
+				if (pathname === '/uploads/plan') {
+					return Response.json({
+						cacheGeneration: 1,
+						pushExpiresAt: '2099-01-01T00:00:00.000Z',
+						uploads: [
+							{
+								action: 'skip',
+								storePathHash: metadata.storePathHash,
+								narHash: metadata.narHash,
+								operationId,
+								r2Key: `staging-v2/acme/push-1/${operationId}.nar.zst`
+							}
+						]
+					});
+				}
+				return Response.json({
+					uploads: [
+						{
+							action: 'skip',
+							storePathHash: metadata.storePathHash,
+							narHash: metadata.narHash
+						}
+					]
+				});
+			}
+		});
+		try {
+			const result = await client.negotiate({ paths: [metadata] });
+			expect({ paths, uploads: result.uploads }).toStrictEqual({
+				paths: ['/uploads/credential', expected],
+				uploads: [
+					{
+						action: 'skip',
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash
+					}
+				]
+			});
+			const decision = result.uploads[0];
+			if (decision === undefined) {
+				throw new Error('Expected a decision');
+			}
+			expect({
+				original: client.publicationFor?.(decision)?.uploadId,
+				clone: client.publicationFor?.({ ...decision })?.uploadId
+			}).toStrictEqual({
+				original: expected === '/uploads/plan' ? operationId : undefined,
+				clone: expected === '/uploads/plan' ? operationId : undefined
+			});
+			const onCapabilities = vi.fn();
+			const opensBefore = open.mock.calls.length;
+			const session = await client.openCommitSession?.({ onCapabilities });
+			if (session === undefined) {
+				throw new Error('Expected a commit session');
+			}
+			expect(open.mock.calls.length).toBe(opensBefore);
+			await expect(
+				session.commit({
+					uploadId: uploadIdSchema.parse(operationId),
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				})
+			).rejects.toThrow('No commit expected');
+			expect({
+				opens: open.mock.calls.length,
+				callback: open.mock.lastCall?.[1]?.onCapabilities
+			}).toStrictEqual({ opens: opensBefore + 1, callback: onCapabilities });
+			session.close();
+		} finally {
+			open.mockRestore();
+		}
+	}
+);
+
+it.each([false, true])(
+	'keeps an empty publication plan read-only with root=%s',
+	async (hasRoot) => {
+		const commit = vi.fn(() => Promise.reject(new Error('No commit expected')));
+		const close = vi.fn();
+		const open = vi
+			.spyOn(CupboardClient.prototype, 'openCommitSession')
+			.mockImplementation((_credential, options) => {
+				options?.onCapabilities?.(new Map([[publicationCapability, {}]]));
+				return Promise.resolve({ commit, close });
+			});
+		const requests: { path: string; body: unknown }[] = [];
+		const attachRoot = {
+			name: 'run',
+			retention: { kind: 'duration' as const, seconds: 3600 }
+		};
+		const client = pushClientFor(new URL('https://cupboard.test'), 'token', {
+			cache: { kind: 'default' },
+			fetcher: async (input, init) => {
+				const request = new Request(input, init);
+				const path = new URL(request.url).pathname;
+				const body: unknown = await request.json();
+				requests.push({ path, body });
+				if (path === '/uploads/credential') {
+					return Response.json(
+						{
+							pushId: 'push-1',
+							accessKeyId: 'access',
+							secretAccessKey: 'secret',
+							sessionToken: 'session',
+							endpoint: 'https://r2.test',
+							bucket: 'blobs',
+							expiresAt: '2099-01-01T00:00:00.000Z'
+						},
+						{ headers: { [uploadCapabilitiesHeader]: publicationCapability } }
+					);
+				}
+				if (path === '/uploads/plan') {
+					return Response.json({
+						cacheGeneration: 1,
+						pushExpiresAt: '2099-01-01T00:00:00.000Z',
+						uploads: []
+					});
+				}
+				throw new Error(`Unexpected request: ${path}`);
+			}
+		});
+		try {
+			const result = await client.negotiate({
+				paths: [],
+				...(hasRoot && { attachRoot })
+			});
+			expect({
+				result,
+				requests,
+				opens: open.mock.calls.length,
+				commits: commit.mock.calls,
+				closes: close.mock.calls
+			}).toStrictEqual({
+				result: { uploads: [], hasUploadGraceFacts: true },
+				requests: [
+					{ path: '/uploads/credential', body: {} },
+					{
+						path: '/uploads/plan',
+						body: {
+							pushId: 'push-1',
+							paths: [],
+							...(hasRoot && { attachRoot })
+						}
+					}
+				],
+				opens: 1,
+				commits: [],
+				closes: [[]]
+			});
+		} finally {
+			open.mockRestore();
+		}
+	}
+);
