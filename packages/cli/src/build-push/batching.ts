@@ -14,6 +14,7 @@ import { abortable } from '../abort.ts';
 import type { CommitOptions } from '../client/client.ts';
 import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
+import { PublicationUploadRequiredError } from '../errors.ts';
 import { PushNarMetadataMismatchError } from '../errors.ts';
 import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
@@ -285,7 +286,7 @@ export class BuildOutputBatcher {
 			return;
 		}
 
-		const { decision } = item;
+		let { decision } = item;
 
 		if (decision.action === 'skip') {
 			try {
@@ -295,13 +296,19 @@ export class BuildOutputBatcher {
 				return;
 			}
 
-			remaining.delete(storePath);
-			this.recordOutcome({ outcome: 'destination-served', storePath });
-			return;
+			const publication = this.options.client.publicationFor?.(decision);
+			if (publication === undefined) {
+				remaining.delete(storePath);
+				this.recordOutcome({ outcome: 'destination-served', storePath });
+				return;
+			}
+			decision = { ...publication, action: 'commit' };
 		}
 
+		let wasAlreadyPresent: boolean;
 		try {
 			const outcome = await this.uploadAndCommit(decision, item.path);
+			wasAlreadyPresent = outcome.status === 'already-present';
 			this.pendingVerdicts.add(storePath);
 			this.verdicts.set(
 				storePath,
@@ -322,7 +329,10 @@ export class BuildOutputBatcher {
 		}
 
 		remaining.delete(storePath);
-		this.recordOutcome({ outcome: 'published', storePath });
+		this.recordOutcome({
+			outcome: wasAlreadyPresent ? 'destination-served' : 'published',
+			storePath
+		});
 	}
 
 	private async uploadAndCommit(
@@ -353,12 +363,32 @@ export class BuildOutputBatcher {
 			this.options.uploadReport?.completed(info.storePath, upload);
 		}
 
-		return commitOverSession(this.options, {
-			uploadId: decision.uploadId,
-			storePathHash: decision.storePathHash,
-			narHash: decision.narHash,
-			...(blob !== undefined && { blob })
-		});
+		try {
+			const outcome = await commitOverSession(this.options, {
+				uploadId: decision.uploadId,
+				storePathHash: decision.storePathHash,
+				narHash: decision.narHash,
+				...(blob !== undefined && { blob })
+			});
+			requireMatchingBuildOutput(info, {
+				action: 'skip',
+				storePathHash: outcome.storePathHash,
+				narHash: outcome.narHash
+			});
+			return outcome;
+		} catch (error) {
+			if (
+				!(error instanceof PublicationUploadRequiredError) ||
+				decision.action === 'upload'
+			) {
+				throw error;
+			}
+			const upload = this.options.client.publicationFor?.(decision);
+			if (upload === undefined) {
+				throw error;
+			}
+			return this.uploadAndCommit(upload, info);
+		}
 	}
 
 	get outcomes(): ReadonlyMap<StorePathString, BatchPathOutcome> {

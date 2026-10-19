@@ -79,6 +79,7 @@ import {
 	type WaitTimeoutSeconds,
 	waitTimeoutSecondsSchema
 } from '../duration.ts';
+import { PublicationUploadRequiredError } from '../errors.ts';
 import {
 	type FailedPushPath,
 	type PushCommand,
@@ -237,6 +238,9 @@ export type Acknowledged<Response> = Response & {
 };
 
 export interface PushClient extends Partial<AttestationBundleClient> {
+	publicationFor?(
+		decision: UploadDecision
+	): Extract<UploadDecision, { action: 'upload' }> | undefined;
 	negotiate(
 		body: Omit<UploadNegotiateRequestInput, 'pushId'>
 	): Promise<Acknowledged<UploadNegotiateResponse>>;
@@ -883,7 +887,7 @@ async function runPushFlow(
 	// A re-drive can change the action, for example when a reused blob is
 	// collected and the next negotiation requests an upload. Keep only the
 	// latest action for the summary counts.
-	const effectiveActions = new Map<string, UploadDecision['action']>();
+	const effectiveActions = new Map<StorePathHash, UploadDecision['action']>();
 
 	const negotiateGroup = async (
 		paths: readonly UploadPathNegotiationFields[]
@@ -1033,13 +1037,12 @@ async function runPushFlow(
 				// can be negotiated again. Identify the outcome by store-path hash
 				// because a re-drive receives a new upload ID.
 				const pending: PendingCommit[] = [];
-				let uploaded = 0;
 				let committed = 0;
 				let skipped = 0;
 				const now = dependencies.now ?? Date.now;
 				const uploadingStartedAt = now();
 				const reportCounts = (): void => {
-					bar.fact('uploaded', formatCount(uploaded), {
+					bar.fact('uploaded', formatCount(completedUploads.size), {
 						humanLabel: 'uploaded'
 					});
 					bar.fact('committed', formatCount(committed), {
@@ -1060,9 +1063,14 @@ async function runPushFlow(
 				};
 
 				const publishDecision = async (
-					decision: UploadDecision,
+					initialDecision: UploadDecision,
 					hasGraceFacts: boolean
 				): Promise<void> => {
+					const publication = client.publicationFor?.(initialDecision);
+					const decision: UploadDecision =
+						publication !== undefined && initialDecision.action === 'skip'
+							? { ...publication, action: 'commit' }
+							: initialDecision;
 					if (isSkip(decision)) {
 						skipped += 1;
 						return;
@@ -1079,7 +1087,6 @@ async function runPushFlow(
 							const upload = await streamNarUpload(decision, uploadContext);
 							blob = upload.blob;
 							completedUploads.add(decision.storePathHash);
-							uploaded += 1;
 							reportUpload(storePath, upload);
 						} catch (error) {
 							if (isAbortError(error)) {
@@ -1129,6 +1136,27 @@ async function runPushFlow(
 							hasGraceFacts,
 							blob
 						);
+						const actualDifference = divergentSkips(resolved, [
+							{
+								action: 'skip',
+								storePathHash: outcome.storePathHash,
+								narHash: outcome.narHash
+							}
+						]);
+						requireReferenceSnapshotIdentity(resolved, actualDifference);
+						const unreported = new Map(
+							[...actualDifference].filter(
+								([hash, difference]) =>
+									divergent.get(hash)?.cacheNarHash !== difference.cacheNarHash
+							)
+						);
+						warnDivergentSkips(reporter, unreported);
+						if (actualDifference.size === 0) {
+							divergent.delete(outcome.storePathHash);
+						}
+						for (const [hash, difference] of actualDifference) {
+							divergent.set(hash, difference);
+						}
 					} catch (error) {
 						if (isAbortError(error)) {
 							throw error;
@@ -1161,7 +1189,11 @@ async function runPushFlow(
 						return;
 					}
 
-					committed += 1;
+					if (outcome.status === 'already-present') {
+						skipped += 1;
+					} else {
+						committed += 1;
+					}
 				};
 				const publishCounted = async (
 					decision: UploadDecision,
@@ -1312,13 +1344,20 @@ async function runPushFlow(
 		const actions = effectiveActions.values().toArray();
 		const uploadedPaths = completedUploads.size;
 		const reusedBlobs = actions.filter((action) => action === 'commit').length;
-		const skipped = actions.filter((action) => action === 'skip').length;
 		const failedStorePathHashes = new Set(
 			failures.map((failure) => failure.storePathHash)
 		);
+		const skipped = [...effectiveActions].filter(
+			([hash, action]) => action === 'skip' && !failedStorePathHashes.has(hash)
+		).length;
 		const summaryPaths: PushSummaryPathInput[] = [
 			...decisions
-				.filter((decision) => isSkip(decision))
+				.filter(
+					(decision) =>
+						isSkip(decision) &&
+						!failedStorePathHashes.has(decision.storePathHash) &&
+						!outcomes.has(decision.storePathHash)
+				)
 				.map((decision) => ({
 					storePathHash: decision.storePathHash,
 					storePath: storePathByHash.get(decision.storePathHash),
@@ -2233,6 +2272,19 @@ async function commitNegotiated(
 			commitTarget(decision, hasGraceFacts, blob)
 		);
 	} catch (error) {
+		if (error instanceof PublicationUploadRequiredError) {
+			const uploadDecision = context.client.publicationFor?.(decision);
+			if (uploadDecision === undefined) {
+				throw error;
+			}
+			const upload = await streamNarUpload(uploadDecision, context);
+			context.onRedriven(uploadDecision);
+			context.onUploaded(decision.storePathHash, upload);
+			return commitVia(
+				context,
+				commitTarget(uploadDecision, hasGraceFacts, upload.blob)
+			);
+		}
 		if (!isStaleUploadError(error) && !isAbsentVerdict(error)) {
 			throw error;
 		}
@@ -2301,6 +2353,13 @@ async function redriveExpiredCommit(
 	}
 
 	if (isSkip(fresh)) {
+		const publication = context.client.publicationFor?.(fresh);
+		if (publication !== undefined) {
+			return commitVia(
+				context,
+				commitTarget({ ...publication, action: 'commit' }, hasGraceFacts)
+			);
+		}
 		// A skip is already servable and has no deferred verdict.
 		return {
 			storePathHash: fresh.storePathHash,

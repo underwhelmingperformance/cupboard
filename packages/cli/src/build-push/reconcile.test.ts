@@ -23,6 +23,7 @@ import {
 import type { RootSetBodyInput } from '@cupboard/protocol/retention';
 import {
 	commitBatchMaxEntries,
+	uploadActionDecisionSchema,
 	type UploadDecisionInput,
 	uploadDecisionSchema,
 	type UploadNegotiateResponse,
@@ -40,6 +41,7 @@ import type {
 } from '../client/commit-socket.ts';
 import {
 	BuildOutputDivergedError,
+	PublicationUploadRequiredError,
 	UploadNegotiationMismatchError,
 	UploadVerificationFailedError
 } from '../errors.ts';
@@ -349,6 +351,149 @@ function reconcileWith(
 }
 
 describe('reconcileBuild', () => {
+	it.each([
+		{ action: 'skip', refusals: 0, succeeds: true, transfers: 0, attempts: 1 },
+		{ action: 'skip', refusals: 1, succeeds: true, transfers: 1, attempts: 2 },
+		{
+			action: 'commit',
+			refusals: 1,
+			succeeds: true,
+			transfers: 1,
+			attempts: 2
+		},
+		{
+			action: 'commit',
+			refusals: 2,
+			succeeds: false,
+			transfers: 1,
+			attempts: 2
+		},
+		{
+			action: 'upload',
+			refusals: 1,
+			succeeds: false,
+			transfers: 1,
+			attempts: 1
+		}
+	] as const)(
+		'reconciles $action with $refusals upload-required responses',
+		async ({ action, refusals, succeeds, transfers, attempts }) => {
+			const fixture = harness({
+				valid: [pathA],
+				actions: new Map([[pathA, action]])
+			});
+			const upload = uploadActionDecisionSchema.parse(
+				decisionFor(pathA, 'upload')
+			);
+			const required = new PublicationUploadRequiredError(upload.uploadId);
+			let commitAttempts = 0;
+			const commit = vi.fn<CommitSession['commit']>((target) => {
+				commitAttempts += 1;
+				if (commitAttempts <= refusals) {
+					return Promise.reject(required);
+				}
+				return Promise.resolve({
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
+					status: transfers === 0 ? 'already-present' : 'committed',
+					settled: Promise.resolve()
+				});
+			});
+			const result = await reconcileWith(fixture, {
+				targets: [target(pathA)],
+				client: { ...fixture.client, publicationFor: () => upload },
+				session: { commit, close: vi.fn() }
+			});
+			const identity = {
+				uploadId: upload.uploadId,
+				storePathHash: upload.storePathHash,
+				narHash: upload.narHash
+			};
+			const blob = {
+				fileHash: NixSha256Hash.fromDigest(createHash('sha256').digest()).value,
+				fileSize: 0
+			};
+			expect({
+				result,
+				commits: commit.mock.calls.flat(),
+				uploads: fixture.uploadedKeys
+			}).toStrictEqual({
+				result: {
+					receipt: {
+						version: 3,
+						paths: succeeds ? [pathA] : [],
+						subjects: succeeds ? heldSubjects([pathA]) : [],
+						outcomes: [
+							{
+								outcome: succeeds
+									? transfers === 0
+										? 'destination-served'
+										: 'built'
+									: 'failed',
+								storePath: pathA,
+								...(!succeeds && { reason: 'verification' })
+							}
+						],
+						uploaded: succeeds && transfers > 0 ? [pathA] : [],
+						failed: succeeds ? [] : [pathA],
+						collected: []
+					},
+					roots: [],
+					failures: succeeds
+						? []
+						: [{ storePath: pathA, reason: 'verification', cause: required }]
+				},
+				commits: Array.from({ length: attempts }, (_, index) => ({
+					...identity,
+					...((action === 'upload' || index > 0) && { blob })
+				})),
+				uploads: Array.from({ length: transfers }, () => upload.r2Key)
+			});
+		}
+	);
+
+	it('refuses a divergent committed NAR through the legacy protocol', async () => {
+		const fixture = harness({
+			valid: [pathA],
+			actions: new Map([[pathA, 'commit']])
+		});
+		const result = await reconcileWith(fixture, {
+			targets: [target(pathA)],
+			client: {
+				...fixture.client,
+				commit: (target) =>
+					Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: divergentNarHash.value,
+						status: 'committed',
+						settled: Promise.resolve()
+					})
+			}
+		});
+		expect({
+			paths: result.receipt.paths,
+			subjects: result.receipt.subjects,
+			outcomes: result.receipt.outcomes,
+			failures: result.failures.map((failure) => ({
+				storePath: failure.storePath,
+				reason: failure.reason,
+				name: failure.cause instanceof Error ? failure.cause.name : undefined
+			}))
+		}).toStrictEqual({
+			paths: [],
+			subjects: [],
+			outcomes: [
+				{ storePath: pathA, outcome: 'failed', reason: 'verification' }
+			],
+			failures: [
+				{
+					storePath: pathA,
+					reason: 'verification',
+					name: 'BuildOutputDivergedError'
+				}
+			]
+		});
+	});
 	it('refuses a destination copy whose NAR differs from the build output', async () => {
 		const fixture = harness({
 			valid: [pathA],

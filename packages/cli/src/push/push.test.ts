@@ -19,6 +19,7 @@ import {
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { AttestationNegotiateRequestInput } from '@cupboard/protocol/attestations';
 import {
+	autoBuildStore,
 	type BuildReceiptV3,
 	nixStoreUriSchema
 } from '@cupboard/protocol/build';
@@ -29,6 +30,7 @@ import {
 	type RootSetResponseInput
 } from '@cupboard/protocol/retention';
 import {
+	uploadActionDecisionSchema,
 	type UploadNegotiateRequestInput,
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadataFields,
@@ -59,6 +61,7 @@ import {
 	CupboardHttpError,
 	type FailedPushPath,
 	type IncompletePushExitStatus,
+	PublicationUploadRequiredError,
 	type PushFailureStage,
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
@@ -82,6 +85,7 @@ import {
 	runPush
 } from './push.ts';
 import type { ReferenceMetadata } from './reference.ts';
+import { ReferenceSnapshotDivergedError } from './reference-manifest.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
 
@@ -138,6 +142,17 @@ function fallbackCommitResponse() {
 	};
 }
 
+function publicationUpload() {
+	return uploadActionDecisionSchema.parse({
+		action: 'upload',
+		storePathHash: StorePath.hash(appPath),
+		narHash: appDigest.narHash.toString(),
+		uploadId: 'publication-app',
+		r2Key: 'staging-v2/acme/push/publication-app.nar.zst',
+		expiresAt: '2099-01-01T00:00:00.000Z'
+	});
+}
+
 function unexpectedPreviewCall(): Promise<UploadPreviewResponse> {
 	return Promise.reject(
 		new Error('preview should not be called during a mutating push')
@@ -169,6 +184,331 @@ function unexpectedSetRootCall(): Promise<never> {
 }
 
 describe('runPush', () => {
+	it.each(['upload-required', 'diverged'] as const)(
+		'refuses a captured reference publication when commit returns %s',
+		async (response) => {
+			const payloads: ResultPayload[] = [];
+			const other = digest(9, 999).narHash.value;
+			const upload = publicationUpload();
+			const nar = vi.fn(() => new FakeNarArchive(appDigest));
+			const expected =
+				response === 'upload-required'
+					? new ReferenceUploadRequiredError(appPath)
+					: new ReferenceSnapshotDivergedError(
+							appPath,
+							appDigest.narHash.value,
+							other
+						);
+			const collection = PublicationCollection.of({
+				targets: [],
+				references: [
+					{
+						storePath: appPath,
+						kind: 'target',
+						source: new URL('https://cache.example.workers.dev/t/acme'),
+						metadata: referenceMetadata()
+					}
+				]
+			});
+			await expect(
+				runPush(collection, reporter([], [], payloads), {
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					retain: false,
+					attest: false,
+					client: {
+						...skipClient([], []),
+						publicationFor: () => upload,
+						commit: () =>
+							response === 'upload-required'
+								? Promise.reject(
+										new PublicationUploadRequiredError(upload.uploadId)
+									)
+								: Promise.resolve({
+										...fallbackCommitResponse(),
+										narHash: other,
+										status: 'already-present'
+									})
+					},
+					createNarArchive: nar
+				})
+			).rejects.toBeInstanceOf(PushIncompleteError);
+			expect({
+				narReads: nar.mock.calls,
+				summary: payloads.at(-1)?.data
+			}).toStrictEqual({
+				narReads: [],
+				summary: {
+					uploadedPaths: 0,
+					uploadedBytes: 0,
+					reusedBlobs: 0,
+					skipped: 0,
+					paths: [],
+					failures: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							stage: 'commit',
+							reason: expected.message
+						}
+					]
+				}
+			});
+		}
+	);
+	it.each([false, true])(
+		'rechecks publication divergence before attestations when divergence clears=%s',
+		async (clears) => {
+			const other = digest(9, 999).narHash;
+			const initial = clears ? other : appDigest.narHash;
+			const committed = clears ? appDigest.narHash : other;
+			const negotiations: Omit<AttestationNegotiateRequestInput, 'pushId'>[] =
+				[];
+			const bundle = sigstoreBundleBytes(
+				bundleSubject(appPath, appDigest.narHash)
+			);
+			const result = runPush(publication([appPath]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				retain: false,
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+				attestations: [{ path: 'app.sigstore.json' }],
+				readAttestationBundle: () => Promise.resolve(bundle),
+				client: {
+					...divergentSkipClient(initial.toString(), [], []),
+					publicationFor: () => publicationUpload(),
+					commit: () =>
+						Promise.resolve({
+							...fallbackCommitResponse(),
+							narHash: committed.value,
+							status: 'already-present'
+						}),
+					attachAttestation: () =>
+						Promise.reject(new Error('No bundle upload expected')),
+					negotiateAttestations: (body) => {
+						negotiations.push(body);
+						return Promise.resolve({
+							bundles: body.bundles.map((pair) => ({ ...pair, action: 'skip' }))
+						});
+					}
+				}
+			});
+			if (clears) {
+				await result;
+			} else {
+				await expect(result).rejects.toBeInstanceOf(
+					AttestationDivergedPathError
+				);
+			}
+			expect(
+				negotiations.map((body) =>
+					body.bundles.map((pair) => pair.storePathHash)
+				)
+			).toStrictEqual(clears ? [[StorePath.hash(appPath)]] : []);
+		}
+	);
+	it.each(['already-present', 'committed'] as const)(
+		'reports a committed skip exactly once with status %s',
+		async (status) => {
+			const payloads: ResultPayload[] = [];
+			const commit = vi.fn<PushClient['commit']>(() =>
+				Promise.resolve({ ...fallbackCommitResponse(), status })
+			);
+			const receipt = await runPush(
+				publication([appPath]),
+				reporter([], [], payloads),
+				{
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					retain: false,
+					attest: false,
+					buildStore: autoBuildStore,
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+					client: {
+						...skipClient([], []),
+						publicationFor: () => publicationUpload(),
+						commit
+					}
+				}
+			);
+			expect({
+				summary: payloads.at(-1)?.data,
+				receipt,
+				commits: commit.mock.calls.map(([target]) => ({
+					uploadId: target.uploadId,
+					storePathHash: target.storePathHash,
+					narHash: target.narHash
+				}))
+			}).toStrictEqual({
+				summary: {
+					uploadedPaths: 0,
+					reusedBlobs: 0,
+					skipped: 1,
+					uploadedBytes: 0,
+					failures: [],
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							outcome: status
+						}
+					]
+				},
+				receipt: {
+					version: 3,
+					paths: [appPath],
+					uploaded: status === 'committed' ? [appPath] : [],
+					subjects: [
+						{
+							origin: 'store-held',
+							storePath: appPath,
+							narHash: appDigest.narHash.digestHex(),
+							buildStore: 'auto'
+						}
+					]
+				},
+				commits: [
+					{
+						uploadId: publicationUpload().uploadId,
+						storePathHash: StorePath.hash(appPath),
+						narHash: appDigest.narHash.value
+					}
+				]
+			});
+		}
+	);
+
+	it.each([
+		{ action: 'skip', refusesRetry: false },
+		{ action: 'commit', refusesRetry: false },
+		{ action: 'skip', refusesRetry: true },
+		{ action: 'commit', refusesRetry: true }
+	] as const)(
+		'recovers $action once when upload becomes necessary and retry refusal=$refusesRetry',
+		async ({ action, refusesRetry }) => {
+			const upload = publicationUpload();
+			const events: string[] = [];
+			let commitAttempts = 0;
+			const commit = vi.fn<PushClient['commit']>((target) => {
+				commitAttempts += 1;
+				events.push(`commit:${target.uploadId}`);
+				return commitAttempts === 1 || refusesRetry
+					? Promise.reject(new PublicationUploadRequiredError(target.uploadId))
+					: Promise.resolve(fallbackCommitResponse());
+			});
+			const push = runPush(publication([appPath]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				retain: false,
+				attest: false,
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+				client: {
+					...skipClient([], []),
+					negotiate: () =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: [
+									{
+										action,
+										storePathHash: upload.storePathHash,
+										narHash: upload.narHash,
+										...(action === 'commit' && { uploadId: upload.uploadId })
+									}
+								]
+							})
+						),
+					publicationFor: () => upload,
+					uploadNar: async (key, body) => {
+						await collectReadableStream(body);
+						events.push(`upload:${key}`);
+					},
+					commit
+				},
+				createNarArchive: () => new FakeNarArchive(appDigest),
+				compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+			});
+			if (refusesRetry) {
+				await expect(push).rejects.toBeInstanceOf(PushIncompleteError);
+			} else {
+				await push;
+			}
+			const identity = {
+				uploadId: upload.uploadId,
+				storePathHash: upload.storePathHash,
+				narHash: upload.narHash
+			};
+			expect({
+				events,
+				commits: commit.mock.calls.map(([target]) => ({
+					uploadId: target.uploadId,
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
+					...(target.blob !== undefined && { blob: target.blob })
+				}))
+			}).toStrictEqual({
+				events: [
+					`commit:${upload.uploadId}`,
+					`upload:${upload.r2Key}`,
+					`commit:${upload.uploadId}`
+				],
+				commits: [
+					identity,
+					{
+						...identity,
+						blob: {
+							fileHash: NixSha256Hash.fromDigest(
+								createHash('sha256').update(compressedNarBytes).digest()
+							).value,
+							fileSize: compressedNarBytes.byteLength
+						}
+					}
+				]
+			});
+		}
+	);
+	it('omits a planned skip from available paths when its publication commit fails', async () => {
+		const payloads: ResultPayload[] = [];
+		const failure = new Error('publication refused');
+		const upload = uploadActionDecisionSchema.parse({
+			action: 'upload',
+			storePathHash: StorePath.hash(appPath),
+			narHash: appDigest.narHash.toString(),
+			uploadId: 'publication-app',
+			r2Key: 'staging-v2/acme/push/publication-app.nar.zst',
+			expiresAt: '2099-01-01T00:00:00.000Z'
+		});
+		const collection = publication([appPath]);
+		const nix = nixStore({ [appPath]: pathInfo(appPath, appDigest, []) });
+		await expect(
+			runPush(collection, reporter([], [], payloads), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				retain: false,
+				attest: false,
+				nix,
+				client: {
+					...skipClient([], []),
+					publicationFor: () => upload,
+					commit: () => Promise.reject(failure)
+				}
+			})
+		).rejects.toBeInstanceOf(PushIncompleteError);
+		expect(payloads.at(-1)?.data).toStrictEqual({
+			uploadedPaths: 0,
+			reusedBlobs: 0,
+			skipped: 0,
+			uploadedBytes: 0,
+			failures: [
+				{
+					storePathHash: StorePath.hash(appPath),
+					storePath: appPath,
+					stage: 'commit',
+					reason: 'publication refused'
+				}
+			],
+			paths: []
+		});
+	});
 	it('reports confirmed and uncertain attestation pairs before propagating publication attachment failures', async () => {
 		const bundle = sigstoreBundleBytes(
 			bundleSubject(appPath, appDigest.narHash)
