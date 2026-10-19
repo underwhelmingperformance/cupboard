@@ -32,6 +32,8 @@ import {
 	commitBatchCapability,
 	type CommitBlobDeclaration,
 	commitCreditCapability,
+	publicationCapability,
+	type PublicationEntry,
 	type PushId,
 	type UploadId
 } from '@cupboard/protocol/upload';
@@ -166,6 +168,7 @@ export class CupboardClient {
 				timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
 				signal: this.signal,
 				onCapabilities: options.onCapabilities,
+				onFailure: options.onFailure,
 				onWaiting: options.onWaiting,
 				pushId: options.pushId
 			}
@@ -179,7 +182,7 @@ export class CupboardClient {
 		// declaration even if an intermediary strips the response capability. An
 		// `unsupported` frame is the only signal that permits the local window.
 		const headers = {
-			[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability}`
+			[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability},${publicationCapability}`
 		};
 		const authorise = () => bearerAttempt(credential, headers);
 
@@ -263,10 +266,9 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Opens a commit session over one WebSocket. The upgrade request includes the
-	 * write token. Every path in the push commits over the returned session, and
-	 * a deferred upload waits on the same socket for the server's verification
-	 * verdict. With `wait` disabled, the upload returns `pending` immediately.
+	 * Opens one authenticated WebSocket for path commits and their deferred
+	 * verification results. Each commit resolves after durable acknowledgement;
+	 * its `settled` promise reports final availability.
 	 */
 	async openCommitSession(
 		token: AccessCredential,
@@ -474,6 +476,10 @@ export interface CupboardClientOptions {
  * to return the stored grace fact after the pending row has been cleared.
  */
 export interface CommitTarget {
+	readonly publication?: {
+		readonly pushId: PushId;
+		readonly entry: PublicationEntry;
+	};
 	readonly uploadId: UploadId;
 	readonly storePathHash: StorePathHash;
 	readonly narHash: NixSha256HashString;
@@ -488,6 +494,10 @@ export interface CommitOptions {
 	 */
 	readonly timeoutSeconds?: number;
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
+	/**
+	Reports a terminal failure, including a refused handshake.
+	*/
+	readonly onFailure?: (error: Error) => void;
 	/**
 	 * Called when the session starts waiting for commit capacity, and again when
 	 * it stops, so a progress display can report the fact.
