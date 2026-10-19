@@ -1,0 +1,13 @@
+name: Install Nix
+description:
+  Install Cupboard's pinned single-user Nix on a GitHub-hosted runner.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nix in single-user mode
+      shell: bash
+      env:
+        INSTALLER: ${{ github.action_path }}/install.sh
+        GITHUB_ACCESS_TOKEN: ${{ github.token }}
+      run: bash "$INSTALLER"

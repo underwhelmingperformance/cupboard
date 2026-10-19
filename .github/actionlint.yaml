@@ -23,6 +23,12 @@
 # unknown-property messages in those workflow files.
 # Remove the entry once the pinned actionlint release models the properties.
 paths:
+  .github/workflows/release.yml:
+    ignore:
+      - 'specifying action "\$/[^"]*" in invalid format because ref is missing'
+  .github/workflows/release-cache.yml:
+    ignore:
+      - 'specifying action "\$/[^"]*" in invalid format because ref is missing'
   .github/workflows/ci.yml:
     ignore:
       - 'specifying action "\$/[^"]*" in invalid format because ref is missing'
