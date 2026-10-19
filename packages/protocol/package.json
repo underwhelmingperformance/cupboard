@@ -37,6 +37,7 @@
 		"./oidc-trust-selection": "./src/oidc-trust-selection.ts",
 		"./plan": "./src/plan.ts",
 		"./platform": "./src/platform.ts",
+		"./publication": "./src/publication.ts",
 		"./read-access": "./src/read-access.ts",
 		"./cache-credentials": "./src/cache-credentials.ts",
 		"./reports": "./src/reports.ts",

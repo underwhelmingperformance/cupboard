@@ -1,6 +1,8 @@
 import {
+	cacheGenerationSchema,
 	compressionSchema,
 	graceSecondsSchema,
+	narInfoGenerationSchema,
 	narInfoLineSchema,
 	nixSha256HashSchema,
 	positiveIntSchema,
@@ -402,6 +404,8 @@ export function commitCreditCapabilityToken(openingGrant: number): string {
 	return `${commitCreditCapability};${commitCreditGrantAttribute}=${String(openingGrant)}`;
 }
 
+export const publicationCapability = 'publication-v1';
+
 export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken},${uploadRenewalCapability}`;
 
 export function commitCapabilitiesValueWithCredit(
@@ -417,6 +421,38 @@ export const commitBlobDeclarationSchema = z.strictObject({
 export type CommitBlobDeclaration = z.output<
 	typeof commitBlobDeclarationSchema
 >;
+
+export const publicationMaxFrameBytes = 4 * 1024 * 1024;
+export const publicationIdSchema = uploadIdSchema.refine((value) =>
+	/^[0-9a-f]{64}$/u.test(value)
+);
+export const publicationResultSchema = z.strictObject({
+	generation: narInfoGenerationSchema,
+	storePathHash: storePathHashSchema,
+	narHash: nixSha256HashSchema
+});
+export const uploadPlanRequestSchema = uploadNegotiateRequestSchema;
+export const publicationEntrySchema = z.strictObject({
+	operationId: publicationIdSchema,
+	cacheGeneration: cacheGenerationSchema,
+	metadata: uploadPathNegotiationSchema,
+	attachRoot: uploadAttachRootSchema.optional(),
+	blob: commitBlobDeclarationSchema.optional()
+});
+export type PublicationEntry = z.output<typeof publicationEntrySchema>;
+const uploadPlanDecisionSchema = z.strictObject({
+	action: z.enum(['skip', 'commit', 'upload']),
+	storePathHash: storePathHashSchema,
+	narHash: nixSha256HashSchema,
+	operationId: publicationIdSchema,
+	r2Key: z.string()
+});
+export const uploadPlanResponseSchema = z.strictObject({
+	cacheGeneration: cacheGenerationSchema,
+	pushExpiresAt: isoTimestampSchema,
+	uploads: z.array(uploadPlanDecisionSchema)
+});
+export type UploadPlanResponse = z.output<typeof uploadPlanResponseSchema>;
 
 // Entries for `commit-batch` and `subscribe-identity` include the upload and the
 // path identity from negotiation. A reconnect can therefore resend an entry
