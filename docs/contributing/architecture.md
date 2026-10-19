@@ -215,7 +215,8 @@ The object owns everything that belongs to one tenant alone. That includes:
   audience, owner, and a configuration version that only ever goes up;
 - its caches, in `cache_identity`;
 - its committed narinfos, each with a generation counter per store path;
-- pending uploads, and the result of verifying each one;
+- pending uploads, their verification results, and durable publication
+  operations;
 - staged-object cleanup queued for deleted cache identities;
 - retention roots, what they point at, grace deadlines, and the state of garbage
   collection;
@@ -293,7 +294,8 @@ The key tells you what an object is:
 | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `nar/<narHash>.<n>.nar.zst`                                 | Verified NARs, compressed with zstd. They're shared between tenants. `<n>` is the incarnation.      |
 | `nar/<narHash>.nar.zst`                                     | Incarnation 1 of a NAR, in the legacy key form.                                                     |
-| `staging/<pushId>/<uploadId>.nar.zst`                       | Uploads that haven't been verified yet. Clients can write only below `staging/<pushId>/`.           |
+| `staging-v2/<tenant>/<pushId>/<operationId>.nar.zst`        | NARs awaiting an idempotent publication commit.                                                     |
+| `staging/<pushId>/<uploadId>.nar.zst`                       | Legacy uploads awaiting verification. Their credentials permit writes below `staging/<pushId>/`.    |
 | `staging/<pushId>/attestations/<uploadId>`                  | Attestation bundles awaiting attachment, removed when their pending row expires or by R2 lifecycle. |
 | `cas/<sha256>.<n>`                                          | Attestation bundles, stored by the hash of their content and shared. `<n>` is the incarnation.      |
 | `cas/<sha256>`                                              | Incarnation 1 of an attestation bundle, in the legacy key form.                                     |
@@ -363,20 +365,41 @@ and the reapers.
 Earlier releases stored private caches under a `private/` name. A migration in a
 later release moved those objects to the current keys.
 
-The deploy sets an R2 lifecycle rule, `cupboard-staging-reclaim`, on the
-`staging/` prefix. It deletes anything there a day after it's written, and
-aborts multipart uploads there that are still incomplete after a day.
+Deployment preserves the legacy `cupboard-staging-reclaim` rule: completed
+objects and incomplete multipart uploads under `staging/` expire after one day.
+The `cupboard-publication-staging-reclaim` rule applies to `staging-v2/`:
+completed objects expire after seven days and incomplete multipart uploads are
+aborted after 48 hours. Deployment rejects unrelated overlapping rules if they
+would reclaim new staging sooner. The rules operate independently of tenant
+activity and application records.
 
-A push credential can write any key below `staging/<pushId>/`, so a client can
-leave objects that no pending row tracks. Each tenant's garbage-collection pass
-reconciles these orphan objects. It deletes an object when no pending row tracks
-it, it is more than 15 minutes old, and its push ID verifies for the tenant.
-Staging keys don't contain the tenant, but the push ID's HMAC covers it, so one
-tenant's pass never deletes another tenant's staged objects. A push ID that has
-expired still verifies for this check. The pass skips keys in the layouts of
-earlier releases, such as `staging/<name>.nar.zst` and
-`staging/attestations/<id>`, because they don't start with `staging/<pushId>/`.
-The lifecycle rule deletes them.
+Before commit, an authentic, unexpired push ID protects completed new staging
+objects from tenant collection. After acceptance, the durable operation protects
+its staging key until completion or its immutable recovery deadline. Collection
+rechecks ownership under the admission gate before deleting an object. Unowned
+objects require an expired or unverifiable lease and an object age of at least
+15 minutes. The two namespaces share a bounded listing and deletion budget and
+alternate which namespace is scanned first. Each namespace has its own resume
+position. An empty pass makes two R2 list calls, one for each namespace; the
+publication listing is scoped to the tenant. Tracked rows are read only when a
+listing returns objects, and publication-operation queries run only for returned
+`staging-v2/` keys. R2 lifecycle rules reclaim abandoned objects even after
+offboarding.
+
+A legacy push credential can write any key below `staging/<pushId>/`. A
+publication credential also permits writes below
+`staging-v2/<tenant>/<pushId>/`. A client can therefore leave objects that no
+pending row tracks. Each tenant's garbage-collection pass reconciles these
+orphan objects.
+
+For legacy objects, collection requires an object age of more than 15 minutes,
+no pending row and a push ID that verifies for the tenant. Legacy staging keys
+do not include the tenant, but the push ID's HMAC covers the tenant, so one
+tenant's pass never deletes another tenant's staged objects. An expired push ID
+still verifies for this ownership check. Legacy collection skips keys in the
+layouts of earlier releases, such as `staging/<name>.nar.zst` and
+`staging/attestations/<id>`, because those keys do not start with
+`staging/<pushId>/`. The lifecycle rule deletes those objects.
 
 One pass lists at most six pages of 1,000 keys and deletes at most 1,000
 objects. It stores the last key that it examined as its resume position, and the
@@ -558,8 +581,77 @@ per-token revocation state.
 
 ### Pushing store paths
 
-When you run `cupboard push`, the CLI and the server go through these steps. The
-requests below are all under the tenant URL.
+Current clients select `publication-v1` only when both the credential response
+and the commit WebSocket advertise support. Credential issuance and
+`POST /uploads/plan` do not create a named cache. Planning validates the push
+ID, reads the authoritative cache lifecycle generation, and returns advisory
+`skip`, `commit` or `upload` decisions. Planning creates no pending uploads,
+roots or retention decisions, and does not repair publications or claim reusable
+blobs. An empty plan still returns the expected generation and no entries. A
+requested run root on an empty plan is neither created nor renewed. Explicit
+retention-root replacements with no targets continue through `setRoot`.
+
+Each plan includes a SHA-256 operation ID. The canonical UTF-8 JSON array has
+these fields, in order: protocol version `cupboard/publication/v1`, tenant,
+cache kind, cache name, expected cache generation, push ID, path metadata, and
+requested root. Absent values encode as JSON `null`. Path metadata is an array
+of store-path hash, store path, NAR hash, NAR size, sorted deduplicated
+references, deriver and content address. A requested root is an array of root
+name, retention kind and duration in seconds, with `null` for a non-duration
+policy. Omitted retention becomes `inherit`. Paging, advisory availability,
+resolved policy defaults and compressed blob declarations do not affect
+identity.
+
+Clients stage NARs at `staging-v2/<tenant>/<pushId>/<operationId>.nar.zst`.
+Temporary R2 credentials permit this push's new prefix and its legacy prefix,
+which unchanged attestation operations still use. Credentials remain write-only,
+last at most six hours, and cannot outlast the access token or the 24-hour push
+lease.
+
+The paced WebSocket accepts `publish-batch` with complete metadata and expected
+generation. Clients commit every selected path, including `skip` decisions. The
+server derives staging keys and rechecks availability and reuse authority. A
+`publication-accepted` frame follows durable SQLite admission. `upload-required`
+asks the client to send bytes and resubmit the same operation. A reference-only
+publication fails if bytes are required and it has no NAR source. Batches
+contain one to 100 entries and encoded messages are limited to 4 MiB.
+
+First admission creates or adopts the expected cache generation and captures
+retention. Deletion between planning and admission produces a generation
+conflict. The durable `publication_operation` record and pending-work ownership
+are written in one SQLite transaction. Cache registration, D1 references and R2
+writes retain their existing recoverable transitions. Replays do not create
+another pending upload, change a supplied compressed declaration or extend the
+original grace decision. Every first accepted operation captures a grace
+decision, including an operation that confirms an already-served path. That
+confirmation can therefore extend the path's retention to the confirmation time
+plus grace; legacy skips leave its deadline unchanged. Completed operations
+retain their resulting path identity after pending cleanup.
+
+Unfinished recovery stops 24 hours after first acceptance. Push expiry does not
+cancel accepted work, but prevents new operations and new transfers. Claims,
+verification requests and the D1 publication fence enforce the recovery
+deadline; late workers cannot publish. Expiry first checks durable completion,
+then releases unfinished reservations through recoverable cleanup. Successful
+publications use ordinary canonical-object retention. Terminal operation records
+are pruned after the later of push expiry and recovery expiry, plus 15 minutes.
+A completed replay rechecks availability; repair requires the original lease and
+recovery window. Otherwise the client must start a fresh push.
+
+Reconnects resend complete unacknowledged entries and use
+`subscribe-publication` for acknowledged operations. Capability loss after an
+ambiguous acceptance fails explicitly. Compatibility fallback occurs before
+new-protocol uploads or commits. Confirming existing availability does not count
+as uploading or building a path, and existing divergence and provenance rules
+still apply.
+
+For both protocols, the client opens its publication session on the first commit
+or upload renewal. Capability probing uses a separate connection and completes
+before selecting the protocol.
+
+The following walkthrough describes the compatibility protocol. Compression,
+verification and canonical promotion use the same machinery for both protocols.
+The requests are under the tenant URL.
 
 1. The CLI asks for an upload credential with `POST /uploads/credential`. The
    tenant's object returns two things:

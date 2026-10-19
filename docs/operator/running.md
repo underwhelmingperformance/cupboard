@@ -196,6 +196,14 @@ the same identifiers, `mode`, `bytes`, `durationMs` and `r2ErrorCode`. Its
 `outcome` is `failed` for an exception or `aborted` when the pass ends during
 the write.
 
+Publication operations negotiated with `publication-v1` have a hard recovery
+deadline 24 hours after first commit acceptance. Retries, credential renewal,
+reconnects, progress and suspension do not extend that deadline. Accepted work
+can finish after its push lease expires, but an expired push cannot start new
+transfers or publications. A recovery-expired result returns temporary failure
+status 75 and requires a fresh push. Completed publications keep their normal
+retention; the recovery deadline does not expire canonical objects.
+
 Upload verification and attestation inheritance stop after twelve failed
 attempts or 24 hours of eligible time. Eligible time starts with the first
 attempt and includes active backoff time. Suspension stops this clock. Budget
