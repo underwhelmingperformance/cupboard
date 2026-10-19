@@ -212,9 +212,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
-        with:
-          nix_version: 2.34.7
+      - uses: $/actions/install-nix
 
       # A source acquisition builds cupboard from a git checkout, so fetch the
       # workflow's own source for that case. Reserve the path first so
@@ -389,9 +387,7 @@ jobs:
       contents: read
       id-token: write # authenticate cache closure through GitHub OIDC
     steps:
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
-        with:
-          nix_version: 2.34.7
+      - uses: $/actions/install-nix
 
       # A source acquisition builds cupboard from a git checkout, so fetch the
       # workflow's own source for that case. Reserve the path first so

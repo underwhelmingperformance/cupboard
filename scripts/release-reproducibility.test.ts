@@ -44,8 +44,7 @@ const workflowFile = new URL(
 	import.meta.url
 );
 const barrierName = 'Check flake reproducibility';
-const nixInstaller =
-	'nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c';
+const nixInstaller = '$/actions/install-nix';
 
 async function loadWorkflow() {
 	const document: unknown = parse(await readFile(workflowFile, 'utf8'));
@@ -86,7 +85,7 @@ describe('release reproducibility', () => {
 				if: jobs.draft.if,
 				continueOnError: jobs.draft['continue-on-error']
 			},
-			installer: jobs.build.steps[installer]?.with,
+			installer: jobs.build.steps[installer],
 			barrier: jobs.build.steps[checkIndex],
 			order:
 				installer !== -1 &&
@@ -103,7 +102,7 @@ describe('release reproducibility', () => {
 			failFast: false,
 			build: { needs: 'validate', if: undefined, continueOnError: undefined },
 			draft: { needs: 'build', if: undefined, continueOnError: undefined },
-			installer: { nix_version: '2.34.7' },
+			installer: { uses: nixInstaller },
 			barrier: {
 				name: barrierName,
 				shell: 'bash',

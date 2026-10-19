@@ -48,7 +48,6 @@ const remoteStoreDockerfile = new URL(
 );
 
 const checkoutAction = 'actions/checkout';
-const nixInstaller = 'nixbuild/nix-quick-install-action';
 const nixClientVersion = '2.34.7';
 const cloudGuardStep = 'Require GitHub Cloud workflow identity';
 const reservationStep = 'Reserve the cupboard workflow checkout';
@@ -57,6 +56,7 @@ const sourceCheckoutDirectory = '${{ github.workspace }}/.cupboard-workflow';
 const cupboardActionPrefix = '$/actions/';
 
 const cupboardAction = (name: string) => `${cupboardActionPrefix}${name}`;
+const nixInstaller = cupboardAction('install-nix');
 
 /**
  * The scalar forms GitHub accepts for a step input or an environment value.
@@ -1839,13 +1839,20 @@ describe('resolved publication inputs', () => {
 
 describe('pinned Nix client', () => {
 	it('installs one Nix version everywhere it installs Nix', async () => {
-		const [workflows, action, dockerfile] = await Promise.all([
+		const [workflows, action, versions, dockerfile] = await Promise.all([
 			Promise.all(
-				[ciWorkflow, publishWorkflow, releaseCacheWorkflow].map((file) =>
-					loadWorkflow(file)
-				)
+				[
+					ciWorkflow,
+					publishWorkflow,
+					releaseCacheWorkflow,
+					releaseWorkflow
+				].map((file) => loadWorkflow(file))
 			),
 			readFile(prepareAction, 'utf8'),
+			readFile(
+				new URL('../actions/install-nix/versions.env', import.meta.url),
+				'utf8'
+			),
 			readFile(remoteStoreDockerfile, 'utf8')
 		]);
 		const installs = workflows.flatMap((workflow) =>
@@ -1854,19 +1861,24 @@ describe('pinned Nix client', () => {
 
 		expect({
 			installs,
-			// The composite action is not a workflow, so its pinned step is read
-			// from the file.
-			prepareInstalls: action.includes(`nix_version: ${nixClientVersion}`),
+			prepareInstalls: action.includes(`uses: ${nixInstaller}`),
+			versions,
 			otherInstallers: workflows.flatMap((workflow) =>
 				allSteps(workflow)
 					.map(({ step }) => step.uses)
-					.filter((uses) => uses?.includes('nix-installer-action'))
+					.filter(
+						(uses) =>
+							uses !== undefined &&
+							(uses.includes('nix-installer-action') ||
+								uses.includes('nix-quick-install-action'))
+					)
 			),
 			// The e2e daemon image is the matching release of the same series.
 			remoteDaemon: dockerfile.includes('FROM nixos/nix:2.34.8@sha256:')
 		}).toStrictEqual({
-			installs: installs.map(() => ({ nix_version: nixClientVersion })),
+			installs: Array.from({ length: 14 }),
 			prepareInstalls: true,
+			versions: `nix_version=${nixClientVersion}\narchive_release=v35\n`,
 			otherInstallers: [],
 			remoteDaemon: true
 		});

@@ -42,6 +42,7 @@ const publicActions = [
 	'attest-attach'
 ] as const;
 const internalActions = [
+	'install-nix',
 	'evaluate-targets',
 	'plan',
 	'build-cohort',

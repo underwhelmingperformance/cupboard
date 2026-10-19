@@ -146,9 +146,7 @@ runs:
     # Evaluation and builds must run as this user so they read the Git and
     # builder SSH configurations from this job. A multi-user daemon would read
     # neither configuration.
-    - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
-      with:
-        nix_version: 2.34.7
+    - uses: $/actions/install-nix
 
     # Nix rebuilds a derivation that sets `allowSubstitutes = false` even when a
     # substituter already serves its output path. This workflow publishes such
