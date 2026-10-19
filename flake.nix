@@ -80,7 +80,7 @@
             pnpm
             pkgs.pnpmConfigHook
           ]
-          ++ lib.optional stdenv.isDarwin pkgs.darwin.sigtool;
+          ++ lib.optional stdenv.hostPlatform.isDarwin pkgs.darwin.sigtool;
 
           env.CUPBOARD_BUILD_VERSION = version;
 
