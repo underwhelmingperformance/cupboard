@@ -44,6 +44,34 @@ export abstract class InvalidRequestBodyError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 }
 
+export class PublicationConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+	constructor(
+		message: string,
+		readonly reason:
+			'generation-conflict' | 'invalid-publication' = 'invalid-publication'
+	) {
+		super(message);
+		this.name = 'PublicationConflictError';
+	}
+}
+
+export class PublicationPushExpiredError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	constructor() {
+		super('The push lease expired. Start a fresh push.');
+		this.name = 'PublicationPushExpiredError';
+	}
+}
+
+export class PublicationRecoveryExpiredError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	constructor() {
+		super('The upload recovery deadline expired. Start a fresh push.');
+		this.name = 'PublicationRecoveryExpiredError';
+	}
+}
+
 export class AttestationInfoHttpError extends ServerHttpError {
 	readonly status: number;
 	constructor(

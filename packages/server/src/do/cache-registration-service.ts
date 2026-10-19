@@ -1,5 +1,6 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
+	type CacheGeneration,
 	cachePrioritySchema,
 	type CacheReadRevision,
 	type CacheScope,
@@ -16,6 +17,7 @@ import {
 } from '../db/cache.ts';
 import {
 	type CacheLifecycleVersion,
+	currentCacheGeneration,
 	firstCacheReadRevision
 } from '../db/cache-generation.ts';
 import {
@@ -24,7 +26,11 @@ import {
 } from '../db/cache-lifecycle-write.ts';
 import { type CacheCreation } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { CacheAlreadyExistsError, CacheNotFoundError } from '../errors.ts';
+import {
+	CacheAlreadyExistsError,
+	CacheNotFoundError,
+	PublicationConflictError
+} from '../errors.ts';
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
 import { CacheClosureService } from './cache-closure-service.ts';
@@ -171,10 +177,22 @@ export class CacheRegistrationService {
 	 * the tenant's default cache: a tenant whose reads are private gets private
 	 * caches from its writes, and a public one public caches.
 	 */
-	async forWrite(scope: CacheScope): Promise<ResolvedCache> {
+	async forWrite(
+		scope: CacheScope,
+		expectedGeneration?: CacheGeneration
+	): Promise<ResolvedCache> {
 		const existing = this.context.cacheRepository.resolve(scope);
 
 		if (existing !== undefined) {
+			if (
+				expectedGeneration !== undefined &&
+				existing.generation !== expectedGeneration
+			) {
+				throw new PublicationConflictError(
+					'The cache generation changed. Start a fresh push.',
+					'generation-conflict'
+				);
+			}
 			new CacheClosureService(this.context).assertWritable(existing);
 			return existing;
 		}
@@ -188,7 +206,23 @@ export class CacheRegistrationService {
 		}).access;
 
 		try {
-			return await this.context.criticalSection(() => {
+			return await this.context.criticalSection(async () => {
+				if (expectedGeneration !== undefined) {
+					const tenant = this.context.requireTenant();
+					const version = await this.context.d1
+						.select({ generation: currentCacheGeneration(tenant, scope) })
+						.from(d1Schema.tenant)
+						.where(eq(d1Schema.tenant.id, tenant))
+						.get();
+					if (
+						(version?.generation ?? firstCacheGeneration) !== expectedGeneration
+					) {
+						throw new PublicationConflictError(
+							'The cache generation changed. Start a fresh push.',
+							'generation-conflict'
+						);
+					}
+				}
 				const defaults = new CacheCreationDefaultsService(this.context).get();
 				return this.createInSection(scope, {
 					access,
@@ -202,6 +236,15 @@ export class CacheRegistrationService {
 			// Another write created the cache while this one waited at the gate.
 			if (error instanceof CacheAlreadyExistsError) {
 				const current = this.context.cacheRepository.require(scope);
+				if (
+					expectedGeneration !== undefined &&
+					current.generation !== expectedGeneration
+				) {
+					throw new PublicationConflictError(
+						'The cache generation changed. Start a fresh push.',
+						'generation-conflict'
+					);
+				}
 				new CacheClosureService(this.context).assertWritable(current);
 				return current;
 			}

@@ -29,7 +29,11 @@ import { requireServedStorePaths } from '../policy/served-store.ts';
 
 import { CacheClosureService } from './cache-closure-service.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
-import { type RootSetCommand, type ServerContext } from './context.ts';
+import {
+	type RootSetCommand,
+	type SchemaWriter,
+	type ServerContext
+} from './context.ts';
 import { jsonRowLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
@@ -357,13 +361,13 @@ export class RootsService {
 		});
 	}
 
-	// The first negotiation creates a run root; later negotiations can only extend
-	// its expiry. They do not replace targets or release paths into grace. Commits
-	// add their paths as they finish.
+	// Binding can extend an existing root's expiry without replacing targets or
+	// releasing paths into grace. Commits add their paths as they finish.
 	bindRunRoot(
 		cache: ResolvedCache,
 		name: RootName,
-		retention: RootRetentionRequest
+		retention: RootRetentionRequest,
+		database: SchemaWriter = this.context.db
 	): void {
 		const closure = new CacheClosureService(this.context);
 		closure.assertWritable(cache);
@@ -376,7 +380,7 @@ export class RootsService {
 				: retention;
 		const expiresAt = rootExpiry(resolvedRetention, now);
 
-		this.context.db
+		database
 			.insert(schema.retentionRoots)
 			.values({
 				cacheId: cache.id,

@@ -391,6 +391,40 @@ export const workSequence = sqliteTable('work_sequence', {
 	value: integer('value').notNull().default(0)
 });
 
+export const publicationOperations = sqliteTable(
+	'publication_operation',
+	{
+		id: text('id').$type<UploadId>().primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		pushId: text('push_id').notNull(),
+		canonicalJson: text('canonical_json').notNull(),
+		acceptedAt: text('accepted_at').notNull(),
+		pushExpiresAt: text('push_expires_at').notNull(),
+		recoveryDeadline: text('recovery_deadline').notNull(),
+		pruneAfter: text('prune_after').notNull(),
+		blobJson: text('blob_json'),
+		graceDecisionJson: text('grace_decision_json').notNull(),
+		graceDeadline: text('grace_deadline').$type<IsoTimestamp>(),
+		rootExpiresAt: text('root_expires_at').$type<IsoTimestamp>(),
+		state: text('state', {
+			enum: ['accepted', 'servable', 'failed', 'expired']
+		})
+			.notNull()
+			.default('accepted'),
+		resultJson: text('result_json')
+	},
+	(table) => [
+		index('publication_operation_prune_idx').on(table.state, table.pruneAfter),
+		index('publication_operation_deadline_idx').on(
+			table.state,
+			table.recoveryDeadline
+		)
+	]
+);
+
 export const pendingUploads = sqliteTable(
 	'pending_upload',
 	{
@@ -403,6 +437,7 @@ export const pendingUploads = sqliteTable(
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
+		recoveryDeadline: text('recovery_deadline'),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
 		// This marker survives an interrupted commit so `push --wait` can report the
