@@ -1,5 +1,9 @@
 import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
-import { sessionIdSchema } from '@cupboard/protocol/upload';
+import {
+	publicationCapability,
+	sessionIdSchema,
+	uploadIdSchema
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -43,51 +47,66 @@ const manyReadGrants = authorizationDetailsSchema.parse(
 describe('commit session reuse grants', () => {
 	beforeEach(resetTestServer);
 
-	it('opens a commit session with more read grants than an attachment can store', async () => {
-		await initialise();
-		const token = await issueServerSignedToken([
-			...cacheWriteGrants(),
-			...manyReadGrants
-		]);
-		const session = await openCommitSession(
-			token,
-			defaultCache(),
-			commitCreditAccept
-		);
-
-		try {
-			const authority = await runInDurableObject(
-				currentServer(),
-				async (_instance, state) => {
-					const socket = state.getWebSockets()[0];
-					const attachment =
-						socket === undefined
-							? undefined
-							: readCommitSessionAttachment(socket);
-
-					if (attachment === undefined) {
-						throw new Error('Expected the opened session attachment');
-					}
-
-					return {
-						inline: attachment.reuseGrants,
-						persisted: attachment.reuseGrantsStored,
-						grants: await new CommitReuseGrantsService(state.storage).read(
-							attachment,
-							Date.now()
-						)
-					};
-				}
+	it.each([false, true])(
+		'persists hibernation authority after legacy operations with publication=%s',
+		async (publication) => {
+			await initialise();
+			const grants = [...cacheWriteGrants(), ...manyReadGrants];
+			const token = await issueServerSignedToken(grants);
+			const session = await openCommitSession(
+				token,
+				defaultCache(),
+				publication
+					? `${commitCreditAccept},${publicationCapability}`
+					: commitCreditAccept
 			);
-			expect(authority).toStrictEqual({
-				inline: undefined,
-				persisted: true,
-				grants: manyReadGrants
-			});
-		} finally {
-			session.socket.close();
+
+			try {
+				session.send({
+					op: 'subscribe',
+					uploadIds: [uploadIdSchema.parse('missing-legacy-upload')]
+				});
+				const legacy = await session.nextFrame();
+				const authority = await runInDurableObject(
+					currentServer(),
+					async (_instance, state) => {
+						const socket = state.getWebSockets()[0];
+						const attachment =
+							socket === undefined
+								? undefined
+								: readCommitSessionAttachment(socket);
+
+						if (attachment === undefined) {
+							throw new Error('Expected the opened session attachment');
+						}
+
+						return {
+							inline: attachment.reuseGrants,
+							persisted: attachment.reuseGrantsStored,
+							grants: await new CommitReuseGrantsService(state.storage).read(
+								attachment,
+								Date.now()
+							)
+						};
+					}
+				);
+				expect({ legacy, authority }).toStrictEqual({
+					legacy: {
+						ev: 'verdict',
+						uploadId: 'missing-legacy-upload',
+						status: 'servable'
+					},
+					authority: {
+						inline: undefined,
+						persisted: true,
+						grants: publication ? grants : manyReadGrants
+					}
+				});
+			} finally {
+				session.socket.close();
+			}
 		}
-	});
+	);
 
 	it('reads the same authority after the Durable Object restarts', async () => {
 		const sessionId = sessionIdSchema.parse('persisted-session');

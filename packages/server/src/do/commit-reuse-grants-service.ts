@@ -25,9 +25,11 @@ function sessionKey(sessionId: SessionId, expiresAt: number): string {
 }
 
 /**
- * Persists a commit session's read grants across hibernation without adding
- * them to its size-limited WebSocket attachment. Expiry-sorted keys let a
- * bounded cleanup remove expired records before any live records.
+ * Persists a commit session's authority across hibernation without adding it
+ * to the size-limited WebSocket attachment. A session that negotiates
+ * publication retains all upgrade grants because it may publish after legacy
+ * operations, and root and write checks still need those grants after
+ * hibernation. Expiry-sorted keys permit bounded cleanup of expired records.
  */
 export class CommitReuseGrantsService {
 	constructor(private readonly storage: DurableObjectStorage) {}
@@ -35,12 +37,13 @@ export class CommitReuseGrantsService {
 	async save(
 		sessionId: SessionId,
 		expiresAt: number,
-		grants: AuthorizationDetails
+		grants: AuthorizationDetails,
+		hasPublication = false
 	): Promise<void> {
 		await armAlarmNoLaterThan(this.storage, expiresAt);
 		await this.storage.put(
 			sessionKey(sessionId, expiresAt),
-			reuseGrants(grants)
+			hasPublication ? grants : reuseGrants(grants)
 		);
 	}
 

@@ -406,7 +406,7 @@ export function commitCreditCapabilityToken(openingGrant: number): string {
 
 export const publicationCapability = 'publication-v1';
 
-export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken},${uploadRenewalCapability}`;
+export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken},${uploadRenewalCapability},${publicationCapability}`;
 
 export function commitCapabilitiesValueWithCredit(
 	openingGrant: number
@@ -480,6 +480,16 @@ export const commitBatchEntrySchema = z.strictObject({
 export type CommitBatchEntry = z.output<typeof commitBatchEntrySchema>;
 
 export const commitSessionRequestSchema = z.discriminatedUnion('op', [
+	z.strictObject({
+		op: z.literal('publish-batch'),
+		pushId: pushIdSchema,
+		entries: z.array(publicationEntrySchema).min(1).max(commitBatchMaxEntries)
+	}),
+	z.strictObject({
+		op: z.literal('subscribe-publication'),
+		pushId: pushIdSchema,
+		entries: z.array(publicationEntrySchema).min(1).max(commitBatchMaxEntries)
+	}),
 	z.strictObject({ op: z.literal('commit'), uploadId: uploadIdSchema }),
 	z.strictObject({
 		op: z.literal('commit-batch'),
@@ -519,6 +529,28 @@ export type CommitSessionRequestInput = z.input<
 >;
 
 export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
+	z.strictObject({
+		ev: z.literal('publication-accepted'),
+		uploadId: publicationIdSchema
+	}),
+	z.strictObject({
+		ev: z.literal('upload-required'),
+		uploadId: publicationIdSchema
+	}),
+	z.strictObject({
+		ev: z.literal('publication-refused'),
+		uploadId: publicationIdSchema,
+		reason: z.enum([
+			'recovery-expired',
+			'push-expired',
+			'generation-conflict',
+			'invalid-publication',
+			'forbidden',
+			'temporary-failure'
+		]),
+		status: z.number().int(),
+		message: z.string()
+	}),
 	// The optional `grace` fields below are sent only for an upload whose
 	// negotiation accepted the upload-grace-facts capability. A client that did
 	// not opt in receives exactly the legacy shapes.

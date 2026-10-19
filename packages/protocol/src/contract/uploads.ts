@@ -8,6 +8,8 @@ import {
 	uploadIdSchema,
 	uploadNegotiateRequestSchema,
 	uploadNegotiateResponseSchema,
+	uploadPlanRequestSchema,
+	uploadPlanResponseSchema,
 	uploadPreviewRequestSchema,
 	uploadPreviewResponseSchema,
 	uploadRequestLimitErrorCode,
@@ -62,6 +64,16 @@ const preview = cacheScopedProcedure(
 );
 
 export const uploadsContract = {
+	plan: cacheScopedProcedure(
+		{
+			method: 'POST',
+			suffix: '/uploads/plan',
+			requires: 'upload:negotiate',
+			replaySafety: 'replay-safe'
+		},
+		uploadPlanRequestSchema.shape,
+		uploadPlanResponseSchema
+	),
 	// Issues temporary R2 credentials for a push. Without a `pushId`, the server
 	// creates and signs a new identifier. With an existing `pushId`, the server
 	// issues replacement credentials for the same staging prefix after authorising

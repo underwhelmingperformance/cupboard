@@ -8,6 +8,8 @@ import {
 	commitCapabilitiesValue,
 	commitCapabilitiesValueWithCredit,
 	type CommitSessionRequest,
+	publicationCapability,
+	publicationMaxFrameBytes,
 	type SessionId,
 	type UploadId,
 	uploadIdSchema
@@ -346,6 +348,32 @@ async function openHoldingPool(
 
 describe('commit session credit', () => {
 	beforeEach(resetTestServer);
+	it.each([false, true])(
+		'applies the publication message bound only with negotiated publication=%s',
+		async (publication) => {
+			const token = await initialise();
+			const session = await openCommitSession(
+				token,
+				defaultCache(),
+				publication ? publicationCapability : undefined
+			);
+			const response = publication
+				? closeDetails(session)
+				: session.nextFrame();
+			session.socket.send(
+				JSON.stringify({
+					op: 'future-operation',
+					padding: 'x'.repeat(publicationMaxFrameBytes)
+				})
+			);
+			expect(await response).toStrictEqual(
+				publication
+					? { code: 1009, reason: 'commit message too large' }
+					: { ev: 'unsupported', op: 'future-operation' }
+			);
+			session.socket.close();
+		}
+	);
 
 	it.each([
 		{
