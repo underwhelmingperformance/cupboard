@@ -37,6 +37,10 @@ import {
 	commitCreditCapability,
 	type CommitSessionRequest,
 	commitSessionRequestSchema,
+	publicationCapability,
+	type PublicationEntry,
+	publicationMaxFrameBytes,
+	type PushId,
 	type SessionId,
 	sessionIdSchema,
 	uploadCapabilitiesHeader,
@@ -70,9 +74,13 @@ import {
 	CommitSessionLimitError,
 	CommitUpgradeRequiredError,
 	DatabaseOverloadedError,
+	InsufficientScopeError,
 	InvalidAccessTokenError,
 	LocalSchemaMigrationPendingError,
 	MetadataScopeChangedError,
+	PublicationConflictError,
+	PublicationPushExpiredError,
+	PublicationRecoveryExpiredError,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	SubrequestTimeoutError,
@@ -227,6 +235,7 @@ import {
 	withOperationCost
 } from './operation-cost.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
+import { PublicationStore } from './publication-store.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RefreshSessionsService } from './refresh-sessions-service.ts';
 import { RetentionService } from './retention-service.ts';
@@ -304,7 +313,8 @@ export type VerificationRecordRpcResult =
 // The negotiate and preview routes on both paths: the bare default-cache path
 // and the named-cache path. A response to one of these advertises the
 // grace-facts capability when the client accepted it.
-const uploadGracePathPattern = /^(?:\/cache\/[^/]+)?\/uploads(?:\/preview)?$/u;
+const uploadGracePathPattern =
+	/^(?:\/cache\/[^/]+)?\/uploads(?:\/(?:preview|plan))?$/u;
 
 // Reuse misses must be `no-store`. A view update or commit can make the same
 // lookup succeed, and no purge key covers the cached 404.
@@ -723,6 +733,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					});
 				}
 
+				if (
+					pathname.endsWith('/uploads/credential') &&
+					hasAcceptedCapability(context.req.raw, publicationCapability)
+				) {
+					response.headers.set(uploadCapabilitiesHeader, publicationCapability);
+				}
 				return response;
 			}
 
@@ -1149,7 +1165,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			commitEntryCreditBudget(this.context.env);
 		}
 
-		this.context.cacheRepository.require(cache);
+		const hasPublication = hasAcceptedCapability(
+			request,
+			publicationCapability
+		);
+		if (!hasPublication) {
+			this.context.cacheRepository.require(cache);
+		}
 
 		const pair = new WebSocketPair();
 		const client = pair[0];
@@ -1159,7 +1181,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await new CommitReuseGrantsService(this.ctx.storage).save(
 			sessionId,
 			claims.expiresAt.getTime(),
-			claims.grants
+			claims.grants,
+			hasPublication
 		);
 		this.ctx.acceptWebSocket(server, [sessionId]);
 		const openingGrant = this.commitCredit.openSession(
@@ -1168,7 +1191,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				cache,
 				sessionId,
 				authenticatedUntil: claims.expiresAt.getTime(),
-				reuseGrantsStored: true
+				reuseGrantsStored: true,
+				...(hasPublication && { publication: true as const })
 			},
 			hasNegotiatedCredit,
 			Date.now()
@@ -1259,6 +1283,106 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Fail only the affected upload and keep the session open for other entries.
 	// An identity-bearing retry can resolve a missing pending row against the
 	// current committed narinfo generation.
+
+	private async runPublication(command: {
+		readonly socket: WebSocket;
+		readonly attachment: CommitSessionAttachment;
+		readonly pushId: PushId;
+		readonly entry: PublicationEntry;
+		readonly grants: AccessClaims['grants'];
+		readonly subscribe: boolean;
+	}): Promise<void> {
+		const { socket, attachment, pushId, entry, grants } = command;
+		try {
+			const scope = attachment.cache;
+			if (
+				!isCoveredByToken(grants, 'upload:commit', { cache: scope }) ||
+				!isCoveredByToken(grants, 'upload:negotiate', { cache: scope }) ||
+				(entry.attachRoot !== undefined &&
+					!isCoveredByToken(grants, 'root:attach', {
+						cache: scope,
+						root: entry.attachRoot.name
+					}))
+			) {
+				throw new InsufficientScopeError();
+			}
+			if (
+				command.subscribe &&
+				new PublicationStore(this.context).get(entry.operationId) === undefined
+			) {
+				throw new UploadNotFoundError(entry.operationId);
+			}
+			const admission = await this.afterHotMutation(scope, () =>
+				this.uploads.admitPublication(scope, pushId, entry, grants)
+			);
+			sendCommitSessionFrame(socket, {
+				ev: 'publication-accepted',
+				uploadId: entry.operationId
+			});
+			if (admission.kind === 'needs-upload') {
+				sendCommitSessionFrame(socket, {
+					ev: 'upload-required',
+					uploadId: entry.operationId
+				});
+				return;
+			}
+			if (admission.kind === 'servable') {
+				await this.resolveGoneCommit(
+					socket,
+					admission.cache,
+					entry.operationId,
+					{
+						storePathHash: entry.metadata.storePathHash,
+						narHash: admission.result?.narHash ?? entry.metadata.narHash,
+						retention: true
+					}
+				);
+				return;
+			}
+			await this.runSessionCommit(
+				rootLogger(),
+				socket,
+				admission.cache,
+				attachment.sessionId,
+				entry.operationId,
+				this.reuseLookup.reuseAuthority(scope, grants),
+				{
+					storePathHash: entry.metadata.storePathHash,
+					narHash: entry.metadata.narHash,
+					retention: true
+				},
+				undefined,
+				entry.blob
+			);
+		} catch (error) {
+			const isKnown = error instanceof ServerHttpError;
+			if (!isKnown) {
+				rootLogger().error('publication admission failed', {
+					operationId: entry.operationId,
+					error
+				});
+			}
+			sendCommitSessionFrame(socket, {
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason:
+					error instanceof PublicationRecoveryExpiredError
+						? 'recovery-expired'
+						: error instanceof PublicationPushExpiredError
+							? 'push-expired'
+							: error instanceof PublicationConflictError
+								? error.reason
+								: error instanceof InsufficientScopeError
+									? 'forbidden'
+									: isKnown && error.status < 500
+										? 'invalid-publication'
+										: 'temporary-failure',
+				status: isKnown ? error.status : 500,
+				message: isKnown ? error.message : 'internal error'
+			});
+		}
+	}
+
 	private async runSessionCommit(
 		sessionLogger: Logger,
 		socket: WebSocket,
@@ -1314,6 +1438,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				...(outcome.grace !== undefined && { grace: outcome.grace })
 			});
 		} catch (error) {
+			if (error instanceof PublicationRecoveryExpiredError) {
+				sendCommitSessionFrame(socket, {
+					ev: 'publication-refused',
+					uploadId,
+					reason: 'recovery-expired',
+					status: error.status,
+					message: error.message
+				});
+				return;
+			}
 			if (identity !== undefined && error instanceof UploadNotFoundError) {
 				await this.resolveGoneCommit(socket, cache, uploadId, identity);
 				return;
@@ -2915,6 +3049,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.commitCredit.closeIdleSessions(now, () =>
 			this.uploadState.sessionsAwaitingVerdict()
 		);
+		await this.verification.expirePublications(rootLogger());
 		await this.clearClosedSessionReuseGrants();
 		await new CommitReuseGrantsService(this.ctx.storage).cleanupExpired(now);
 		await this.armCommitSocketClose();
@@ -2971,6 +3106,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					if (retryClock.isBlocked()) {
 						await retryClock.read();
 					}
+					await this.verification.expirePublications(logger);
 					await this.verification.processPendingWithoutDecode(
 						logger,
 						verificationBatchSize
@@ -3520,6 +3656,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		const text =
 			typeof message === 'string' ? message : new TextDecoder().decode(message);
+		if (
+			attachment.publication === true &&
+			new TextEncoder().encode(text).byteLength > publicationMaxFrameBytes
+		) {
+			socket.close(1009, 'commit message too large');
+			return;
+		}
 		const parsed = commitSessionRequestSchema.safeParse(safeJsonParse(text));
 
 		if (!parsed.success) {
@@ -3559,8 +3702,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 
-		const cache = this.context.cacheRepository.require(cacheScope);
-
 		const decision = this.commitCredit.admitMessage(
 			socket,
 			attachment,
@@ -3593,6 +3734,48 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// finish. The `finally` also returns credit when sending the frame fails.
 		const isAccounted = decision === 'accounted';
 
+		if (
+			request.op === 'publish-batch' ||
+			request.op === 'subscribe-publication'
+		) {
+			if (attachment.publication !== true) {
+				if (isAccounted) {
+					this.commitCredit.release(
+						sessionId,
+						Date.now(),
+						request.entries.length
+					);
+				}
+				sendCommitSessionFrame(socket, { ev: 'unsupported', op: request.op });
+				return;
+			}
+			const grants = await new CommitReuseGrantsService(this.ctx.storage).read(
+				attachment,
+				Date.now()
+			);
+			await Promise.all(
+				request.entries.map(async (entry) => {
+					await this.commitEntrySemaphore.acquire();
+					try {
+						await this.runPublication({
+							socket,
+							attachment,
+							pushId: request.pushId,
+							entry,
+							grants,
+							subscribe: request.op === 'subscribe-publication'
+						});
+					} finally {
+						this.commitEntrySemaphore.release();
+						if (isAccounted) {
+							this.commitCredit.release(sessionId, Date.now());
+						}
+					}
+				})
+			);
+			return;
+		}
+		const cache = this.context.cacheRepository.require(cacheScope);
 		if (request.op === 'commit') {
 			// Apply the same tenant-wide semaphore to individual commit messages and
 			// batch entries so neither form can bypass the concurrency limit.
@@ -3788,6 +3971,9 @@ function commitEntryCount(request: CommitSessionRequest): number {
 		return 1;
 	}
 
+	if (request.op === 'publish-batch') {
+		return request.entries.length;
+	}
 	if (request.op === 'commit-batch') {
 		return request.commits.length;
 	}

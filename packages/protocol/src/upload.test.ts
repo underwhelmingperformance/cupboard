@@ -593,7 +593,7 @@ describe('commit session schemas', () => {
 			capability: 'commit-credit',
 			granted: 'commit-credit;grant=200',
 			saturated: 'commit-credit;grant=0',
-			header: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},renew-uploads,commit-credit;grant=200`
+			header: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},renew-uploads,publication-v1,commit-credit;grant=200`
 		});
 	});
 
@@ -644,7 +644,7 @@ describe('commit session schemas', () => {
 		}).toStrictEqual({
 			commitBatchCapabilityToken: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue}`,
 			subscribeIdentityCapabilityToken: `subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue}`,
-			commitCapabilitiesValue: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},renew-uploads`
+			commitCapabilitiesValue: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},renew-uploads,publication-v1`
 		});
 	});
 

@@ -3,6 +3,7 @@ import { type RootName, type StorePathHash } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type VerifyReportInput } from '@cupboard/protocol/reports';
 import { type GcResponseInput } from '@cupboard/protocol/retention';
+import { publicationCapability } from '@cupboard/protocol/upload';
 import {
 	uploadGraceFactsCapability,
 	type UploadNegotiateRequest,
@@ -326,19 +327,29 @@ export const tenantRouter = os.router({
 		)
 	},
 	uploads: {
+		plan: {
+			inDefaultCache: os.uploads.plan.inDefaultCache.handler(
+				({ input, context }) => planUpload(context, input)
+			),
+			inNamedCache: os.uploads.plan.inNamedCache.handler(({ input, context }) =>
+				planUpload(context, input)
+			)
+		},
 		credential: {
 			inDefaultCache: os.uploads.credential.inDefaultCache.handler(
 				({ input, context }) =>
 					context.services.uploads.issuePushCredential(
 						context.claims.expiresAt,
-						input.pushId
+						input.pushId,
+						hasAcceptedCapability(context.request, publicationCapability)
 					)
 			),
 			inNamedCache: os.uploads.credential.inNamedCache.handler(
 				({ input, context }) =>
 					context.services.uploads.issuePushCredential(
 						context.claims.expiresAt,
-						input.pushId
+						input.pushId,
+						hasAcceptedCapability(context.request, publicationCapability)
 					)
 			)
 		},
@@ -480,6 +491,20 @@ function removeStorePath(context: TenantOrpcContext, hash: StorePathHash) {
 		context.cache,
 		hash,
 		origin
+	);
+}
+
+function planUpload(
+	context: TenantOrpcContext & { readonly claims: AccessClaims },
+	input: UploadNegotiateRequest
+) {
+	if (input.attachRoot !== undefined) {
+		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
+	}
+	return context.services.uploads.plan(
+		context.cache,
+		input,
+		context.claims.grants
 	);
 }
 

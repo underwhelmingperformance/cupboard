@@ -1,12 +1,22 @@
 import {
 	type CacheScope,
+	firstCacheGeneration,
 	type NixSha256HashString,
 	type RootName,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import {
+	publicationCleanupMarginMs,
+	publicationIdentity,
+	publicationRecoveryMs,
+	publicationStagingKey
+} from '@cupboard/protocol/publication';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
+	commitBlobDeclarationSchema,
+	type PublicationEntry,
+	publicationResultSchema,
 	type PushCredentialInput,
 	type PushId,
 	type UploadConfirmResponse,
@@ -18,6 +28,7 @@ import {
 	type UploadNegotiateResponse,
 	type UploadPathMetadata,
 	type UploadPathNegotiation,
+	type UploadPlanResponse,
 	type UploadPreviewDecision,
 	type UploadPreviewRequest,
 	type UploadPreviewResponse,
@@ -29,27 +40,37 @@ import {
 	pushCredentialMaxTtlSeconds,
 	pushCredentialTtlSeconds
 } from '../blob/push-credential.ts';
+import { pushIdExpiresAtSeconds } from '../blob/push-id.ts';
 import { type ResolvedCache } from '../db/cache.ts';
+import { currentCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	CacheNotFoundError,
 	InvalidPushIdError,
+	PublicationConflictError,
+	PublicationPushExpiredError,
+	PublicationRecoveryExpiredError,
+	TenantWritesStoppedError,
 	UploadPageSplitRequiredError
 } from '../errors.ts';
 import {
 	narObjectKey,
+	r2ObjectKeySchema,
 	type RequestOrigin,
 	stagingObjectKey
 } from '../http/http.ts';
+import { rootLogger } from '../observability/logging.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
+import { armAlarmNoLaterThan } from './alarm.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import {
 	confirmGraceBatch,
 	type GraceDecision,
+	parseStoredGraceDecision,
 	serialiseGraceDecision,
 	storedGraceDeadlines
 } from './grace-decision.ts';
@@ -60,6 +81,8 @@ import {
 	type NegotiateFacts,
 	type NegotiateHints
 } from './negotiate-hints.ts';
+import { PathReadAuthorityService } from './path-read-authority-service.ts';
+import { PublicationStore } from './publication-store.ts';
 import {
 	type ReconcileQueueService,
 	subrequestsPerReconcileRemoval
@@ -184,6 +207,31 @@ export class UploadsService {
 		private readonly roots: RootsService
 	) {}
 
+	private async publicationGeneration(
+		scope: CacheScope,
+		shouldRequireWrite = false
+	) {
+		const tenant = this.context.requireTenant();
+		const row = await this.context.d1
+			.select({
+				generation: currentCacheGeneration(tenant, scope),
+				status: d1Schema.tenant.status
+			})
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, tenant))
+			.get();
+		if (
+			shouldRequireWrite &&
+			(this.context.offboarding || row?.status !== 'active')
+		) {
+			throw new TenantWritesStoppedError(
+				tenant,
+				this.context.offboarding ? 'offboarding' : row?.status
+			);
+		}
+		return row?.generation ?? firstCacheGeneration;
+	}
+
 	private existingNarInfos(
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
@@ -272,9 +320,27 @@ export class UploadsService {
 		};
 	}
 
-	private requireCurrentCache(cache: ResolvedCache): void {
-		new CacheClosureService(this.context).assertWritable(cache);
+	private requireCurrentCache(
+		cache: ResolvedCache,
+		hasPublication = false
+	): void {
+		if (hasPublication && this.context.offboarding) {
+			throw new TenantWritesStoppedError(
+				this.context.requireTenant(),
+				'offboarding'
+			);
+		}
 		const current = this.context.cacheRepository.resolve(cache.scope);
+		if (
+			hasPublication &&
+			(current?.id !== cache.id || current.generation !== cache.generation)
+		) {
+			throw new PublicationConflictError(
+				'The cache generation changed. Start a fresh push.',
+				'generation-conflict'
+			);
+		}
+		new CacheClosureService(this.context).assertWritable(cache);
 
 		if (current?.id !== cache.id || current.generation !== cache.generation) {
 			throw new CacheNotFoundError(cache.scope);
@@ -366,7 +432,8 @@ export class UploadsService {
 						: this.uploadState.peekReusableBlobs(
 								candidateNarHashes,
 								authority
-							)))
+							))),
+				shouldClaim
 			);
 		const missingCanonicalNarStrings = new Set<string>(missingCanonicalNars);
 		const presentReusable = new Map(
@@ -411,6 +478,420 @@ export class UploadsService {
 	 * expires 15 minutes from `now`, up to the limit in {@link renewedExpiry}.
 	 * If the push ID does not verify, every upload is refused.
 	 */
+	async plan(
+		scope: CacheScope,
+		body: UploadNegotiateRequest,
+		grants: AuthorizationDetails
+	): Promise<UploadPlanResponse> {
+		const expiresAtSeconds = pushIdExpiresAtSeconds(body.pushId);
+		if (
+			expiresAtSeconds === undefined ||
+			!(await this.context.pushCredentials().verify(body.pushId))
+		) {
+			throw new InvalidPushIdError();
+		}
+		const cacheGeneration = await this.publicationGeneration(scope);
+		const preview = await this.preview(
+			scope,
+			{ paths: body.paths },
+			undefined,
+			false,
+			grants
+		);
+		const tenant = this.context.requireTenant();
+		const uploads = await Promise.all(
+			body.paths.map(async (metadata, index) => {
+				const identity = await publicationIdentity({
+					tenant,
+					cache: scope,
+					cacheGeneration,
+					pushId: body.pushId,
+					metadata,
+					attachRoot: body.attachRoot
+				});
+				const decision = preview.uploads[index];
+				return {
+					action: decision?.action ?? 'upload',
+					storePathHash: metadata.storePathHash,
+					narHash: decision?.narHash ?? metadata.narHash,
+					operationId: identity.id,
+					r2Key: publicationStagingKey(tenant, body.pushId, identity.id)
+				};
+			})
+		);
+		rootLogger().debug('upload planning finished', {
+			cache: scope,
+			cacheGeneration,
+			paths: uploads.length
+		});
+		return {
+			cacheGeneration,
+			pushExpiresAt: isoTimestamp(new Date(expiresAtSeconds * 1000)),
+			uploads
+		};
+	}
+
+	async admitPublication(
+		scope: CacheScope,
+		pushId: PushId,
+		entry: PublicationEntry,
+		grants: AuthorizationDetails
+	): Promise<{
+		readonly cache: ResolvedCache;
+		readonly kind: 'pending' | 'servable' | 'needs-upload';
+		readonly result?: {
+			readonly storePathHash: StorePathHash;
+			readonly narHash: NixSha256HashString;
+		};
+	}> {
+		requireServedStorePaths([entry.metadata.storePath]);
+		const tenant = this.context.requireTenant();
+		const identity = await publicationIdentity({
+			tenant,
+			cache: scope,
+			cacheGeneration: entry.cacheGeneration,
+			pushId,
+			metadata: entry.metadata,
+			attachRoot: entry.attachRoot
+		});
+		if (identity.id !== entry.operationId) {
+			throw new PublicationConflictError(
+				'The publication identity does not match its parameters.'
+			);
+		}
+		const operations = new PublicationStore(this.context);
+		const original = operations.get(entry.operationId);
+		if (
+			original?.blobJson !== null &&
+			original?.blobJson !== undefined &&
+			entry.blob !== undefined &&
+			original.blobJson !== JSON.stringify(entry.blob)
+		) {
+			throw new PublicationConflictError('The compressed declaration changed.');
+		}
+		if (
+			original !== undefined &&
+			original.canonicalJson !== identity.canonical
+		) {
+			throw new PublicationConflictError('The publication parameters changed.');
+		}
+		if (
+			original === undefined &&
+			!(await this.context.pushCredentials().verify(pushId))
+		) {
+			throw new InvalidPushIdError();
+		}
+		if (original?.state === 'failed') {
+			throw new PublicationConflictError(
+				'The publication failed. Start a fresh push.'
+			);
+		}
+		if (
+			(await this.publicationGeneration(scope, true)) !== entry.cacheGeneration
+		) {
+			throw new PublicationConflictError(
+				'The cache generation changed. Start a fresh push.',
+				'generation-conflict'
+			);
+		}
+		await new PathReadAuthorityService(this.context).requireWritable();
+		const cache =
+			original === undefined
+				? await this.registration.forWrite(scope, entry.cacheGeneration)
+				: this.context.cacheRepository.resolve(scope);
+		if (
+			cache?.generation !== entry.cacheGeneration ||
+			(original !== undefined && original.cacheId !== cache.id)
+		) {
+			throw new PublicationConflictError(
+				'The cache generation changed. Start a fresh push.',
+				'generation-conflict'
+			);
+		}
+		const present = await this.narInfoObjects.servableStorePathHashes(cache, [
+			entry.metadata.storePathHash
+		]);
+		if (
+			original?.state === 'servable' &&
+			present.has(entry.metadata.storePathHash)
+		) {
+			return {
+				cache,
+				kind: 'servable',
+				result:
+					original.resultJson === null
+						? undefined
+						: publicationResultSchema.parse(JSON.parse(original.resultJson))
+			};
+		}
+		operations.assertLive(entry.operationId);
+		if (
+			original !== undefined &&
+			Date.parse(original.recoveryDeadline) <= Date.now()
+		) {
+			throw new PublicationRecoveryExpiredError();
+		}
+		const reusable = await this.uploadState.peekReusableBlobs(
+			[entry.metadata.narHash],
+			this.reuseAuthority(scope, grants)
+		);
+		const backed = await this.uploadState.presentCanonicalNars([
+			entry.metadata.narHash
+		]);
+		const blob = backed.has(entry.metadata.narHash)
+			? reusable.get(entry.metadata.narHash)
+			: undefined;
+		if (original !== undefined && blob === undefined) {
+			await this.context.criticalSection(async () => {
+				this.requireCurrentCache(cache, true);
+				const pending = this.context.db
+					.select()
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, entry.operationId))
+					.get();
+				if (
+					pending?.r2Key !== narObjectKey(entry.metadata.narHash) ||
+					operations.get(entry.operationId)?.state !== 'accepted'
+				) {
+					return;
+				}
+				operations.assertLive(entry.operationId);
+				await this.uploadState.clearPendingUpload(
+					entry.operationId,
+					{ logger: rootLogger(), outcome: 'absent' },
+					pending.claimOwner ?? undefined
+				);
+			});
+		}
+
+		const pushExpiry = pushIdExpiresAtSeconds(pushId);
+		if (pushExpiry === undefined) {
+			throw new InvalidPushIdError();
+		}
+		const now = new Date();
+		if (original?.state === 'servable' && now.getTime() >= pushExpiry * 1000) {
+			throw new PublicationPushExpiredError();
+		}
+		const deadline =
+			original?.recoveryDeadline ??
+			new Date(now.getTime() + publicationRecoveryMs).toISOString();
+		const pruneAfter = new Date(
+			Math.max(pushExpiry * 1000, Date.parse(deadline)) +
+				publicationCleanupMarginMs
+		).toISOString();
+		const staged = r2ObjectKeySchema.parse(
+			publicationStagingKey(tenant, pushId, entry.operationId)
+		);
+		await this.context.criticalSection(async () => {
+			this.requireCurrentCache(cache, true);
+			if (operations.get(entry.operationId)?.state === 'servable') {
+				const available = await this.narInfoObjects.servableStorePathHashes(
+					cache,
+					[entry.metadata.storePathHash]
+				);
+				if (available.has(entry.metadata.storePathHash)) {
+					return;
+				}
+			}
+			if (Date.now() >= Date.parse(deadline)) {
+				throw new PublicationRecoveryExpiredError();
+			}
+			this.context.db.transaction((tx) => {
+				const current = operations.get(entry.operationId);
+				if (current?.state === 'failed') {
+					throw new PublicationConflictError(
+						'The publication failed. Start a fresh push.'
+					);
+				}
+				if (current?.state === 'expired') {
+					throw new PublicationRecoveryExpiredError();
+				}
+				const declared =
+					entry.blob === undefined ? undefined : JSON.stringify(entry.blob);
+				if (
+					declared !== undefined &&
+					current?.blobJson !== null &&
+					current?.blobJson !== undefined &&
+					current.blobJson !== declared
+				) {
+					throw new PublicationConflictError(
+						'The compressed declaration changed.'
+					);
+				}
+				const graceSeconds = this.retention.resolveGraceSeconds(cache);
+				const graceDecision: GraceDecision = {
+					reportsGrace: true,
+					graceSeconds,
+					retentionEpoch: new CacheClosureService(this.context).epoch(cache),
+					publicationId: entry.operationId,
+					recoveryDeadline: isoTimestamp(new Date(deadline))
+				};
+				const graceJson =
+					current?.graceDecisionJson ?? serialiseGraceDecision(graceDecision);
+				if (current === undefined) {
+					if (Date.now() >= pushExpiry * 1000) {
+						throw new InvalidPushIdError();
+					}
+					tx.insert(schema.publicationOperations)
+						.values({
+							id: entry.operationId,
+							cacheId: cache.id,
+							cacheGeneration: cache.generation,
+							pushId,
+							canonicalJson: identity.canonical,
+							acceptedAt: now.toISOString(),
+							pushExpiresAt: new Date(pushExpiry * 1000).toISOString(),
+							recoveryDeadline: deadline,
+							pruneAfter,
+							blobJson: declared,
+							graceDecisionJson: graceJson
+						})
+						.run();
+					if (entry.attachRoot !== undefined) {
+						this.roots.bindRunRoot(
+							cache,
+							entry.attachRoot.name,
+							entry.attachRoot.retention,
+							tx
+						);
+						const root = tx
+							.select({ expiresAt: schema.retentionRoots.expiresAt })
+							.from(schema.retentionRoots)
+							.where(
+								and(
+									eq(schema.retentionRoots.cacheId, cache.id),
+									eq(schema.retentionRoots.name, entry.attachRoot.name)
+								)
+							)
+							.get();
+						tx.update(schema.publicationOperations)
+							.set({ rootExpiresAt: root?.expiresAt })
+							.where(eq(schema.publicationOperations.id, entry.operationId))
+							.run();
+					}
+				} else if (declared !== undefined && current.blobJson === null) {
+					tx.update(schema.publicationOperations)
+						.set({ blobJson: declared })
+						.where(eq(schema.publicationOperations.id, entry.operationId))
+						.run();
+				}
+				const savedBlob =
+					current?.blobJson === null || current?.blobJson === undefined
+						? entry.blob
+						: commitBlobDeclarationSchema.parse(JSON.parse(current.blobJson));
+				const pending = tx
+					.select()
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, entry.operationId))
+					.get();
+				if (pending !== undefined) {
+					if (savedBlob !== undefined && pending.declaredFileHash === null) {
+						tx.update(schema.pendingUploads)
+							.set({
+								declaredFileHash: savedBlob.fileHash,
+								declaredFileSize: savedBlob.fileSize
+							})
+							.where(eq(schema.pendingUploads.id, entry.operationId))
+							.run();
+					}
+					return;
+				}
+				const captured = parseStoredGraceDecision(graceJson);
+				tx.update(schema.publicationOperations)
+					.set({ state: 'accepted' })
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				tx.insert(schema.pendingUploads)
+					.values({
+						id: entry.operationId,
+						cacheId: cache.id,
+						acceptedSequence: new WorkSequenceService(tx).allocate(),
+						acceptedExpiresAt: isoTimestamp(new Date(deadline)),
+						narHash: entry.metadata.narHash,
+						r2Key:
+							blob === undefined
+								? staged
+								: narObjectKey(entry.metadata.narHash),
+						metadataJson: JSON.stringify(
+							blob === undefined
+								? entry.metadata
+								: commitMetadataFromPathAndBlob(
+										{ ...entry.metadata, narSize: blob.narSize },
+										blob
+									)
+						),
+						createdAt: isoTimestamp(now),
+						expiresAt: isoTimestamp(new Date(deadline)),
+						recoveryDeadline: deadline,
+						declaredFileHash: savedBlob?.fileHash,
+						declaredFileSize: savedBlob?.fileSize,
+						graceDecisionJson: graceJson,
+						retentionEpoch: captured?.retentionEpoch,
+						attachRootName: entry.attachRoot?.name
+					})
+					.onConflictDoNothing()
+					.run();
+			});
+			return;
+		});
+		await armAlarmNoLaterThan(this.context.ctx.storage, Date.parse(deadline));
+		if (blob !== undefined) {
+			await this.uploadState.clearReaperTimers([entry.metadata.narHash]);
+		}
+		if (!present.has(entry.metadata.storePathHash)) {
+			await this.context.criticalSection(async () => {
+				this.requireCurrentCache(cache, true);
+				operations.assertLive(entry.operationId);
+				const available = await this.narInfoObjects.servableStorePathHashes(
+					cache,
+					[entry.metadata.storePathHash]
+				);
+				if (available.has(entry.metadata.storePathHash)) {
+					return;
+				}
+				const existing = this.existingNarInfos(cache, [
+					entry.metadata.storePathHash
+				]).get(entry.metadata.storePathHash);
+				if (
+					existing !== undefined &&
+					(await this.narInfoObjects.hasCommittedReference(cache, existing))
+				) {
+					await this.deletionQueue.reconcileMissingNar(
+						existing,
+						undefined,
+						true
+					);
+				}
+			});
+		}
+
+		const stored = operations.get(entry.operationId);
+		if (stored?.state === 'servable') {
+			return {
+				cache,
+				kind: 'servable',
+				result:
+					stored.resultJson === null
+						? undefined
+						: publicationResultSchema.parse(JSON.parse(stored.resultJson))
+			};
+		}
+		const requiresUpload =
+			!present.has(entry.metadata.storePathHash) &&
+			blob === undefined &&
+			(await this.context.env.BLOBS.head(staged)) === null;
+		if (requiresUpload && Date.now() >= pushExpiry * 1000) {
+			throw new PublicationPushExpiredError();
+		}
+		rootLogger().debug('publication accepted', {
+			operationId: entry.operationId,
+			isReplay: original !== undefined,
+			recoveryDeadline: stored?.recoveryDeadline,
+			requiresUpload
+		});
+		return { cache, kind: requiresUpload ? 'needs-upload' : 'pending' };
+	}
+
 	async renewUploads(
 		cache: ResolvedCache,
 		pushId: PushId,
@@ -860,20 +1341,21 @@ export class UploadsService {
 	// expiry cannot exceed the access-token expiry.
 	async issuePushCredential(
 		tokenExpiresAt: Date,
-		pushId?: PushId
+		pushId?: PushId,
+		hasPublication = false
 	): Promise<PushCredentialInput> {
 		const now = new Date();
 		const ttlSeconds = pushCredentialTtlSeconds(tokenExpiresAt, now);
 		const issuer = this.context.pushCredentials();
 
 		if (pushId === undefined) {
-			return issuer.issue(ttlSeconds, now);
+			return issuer.issue(ttlSeconds, now, hasPublication);
 		}
 
 		if (!(await issuer.verify(pushId))) {
 			throw new InvalidPushIdError();
 		}
 
-		return issuer.issueFor(pushId, ttlSeconds, now);
+		return issuer.issueFor(pushId, ttlSeconds, now, hasPublication);
 	}
 }

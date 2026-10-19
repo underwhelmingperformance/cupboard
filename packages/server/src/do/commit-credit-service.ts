@@ -53,6 +53,7 @@ export const commitSessionAttachmentSchema = z.object({
 	// Older sessions store grants inline; new sessions use durable storage.
 	reuseGrants: authorizationDetailsSchema.optional(),
 	reuseGrantsStored: z.literal(true).optional(),
+	publication: z.literal(true).optional(),
 	isClosing: z.boolean().optional(),
 	credit: commitCreditStateSchema.optional(),
 	lastActivityAt: epochMillisSchema.optional()
