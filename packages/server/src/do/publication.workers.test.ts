@@ -1553,6 +1553,53 @@ describe('publication commit credit', () => {
 			});
 		}
 	);
+
+	it('returns commit credit and answers every entry of a commit batch whose grants cannot be read', async () => {
+		const token = await initialise();
+		const commits = ['1', '2', '3'].map((character) => ({
+			uploadId: uploadIdSchema.parse(`missing-${character}`),
+			storePathHash: distinctPath(character).storePathHash,
+			narHash: nixSha256Hash(character)
+		}));
+		const session = await openCommitSession(
+			token,
+			defaultCache(),
+			creditedPublication
+		);
+		const read = vi
+			.spyOn(CommitReuseGrantsService.prototype, 'read')
+			.mockRejectedValueOnce(new GrantStorageFault());
+		let frames: unknown[];
+		try {
+			session.send({ op: 'commit-batch', commits });
+			frames = [];
+			for (const _commit of commits) {
+				const frame = await session.nextFrame();
+				frames.push(
+					frame.ev === 'error'
+						? { ev: frame.ev, uploadId: frame.uploadId, status: frame.status }
+						: frame
+				);
+			}
+		} finally {
+			await closeSessionAndWait(session.socket);
+			read.mockRestore();
+		}
+		const next = await openCommitSession(
+			token,
+			defaultCache(),
+			creditedPublication
+		);
+		await closeSessionAndWait(next.socket);
+		expect({ frames, capabilities: next.capabilities }).toStrictEqual({
+			frames: commits.map((commit) => ({
+				ev: 'error',
+				uploadId: commit.uploadId,
+				status: StatusCodes.SERVICE_UNAVAILABLE
+			})),
+			capabilities: commitCapabilitiesValueWithCredit(openingGrant)
+		});
+	});
 });
 
 describe('publication subscriptions', () => {
