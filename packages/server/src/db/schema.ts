@@ -1058,8 +1058,10 @@ export const garbageCollectionMarks = sqliteTable(
 	(table) => [primaryKey({ columns: [table.cacheId, table.storePathHash] })]
 );
 
-// One row per cache. `inputs_changed` records whether a write that can change
-// which paths a collection scan keeps has happened since the last scan started.
+// One row per cache. Collection deletes the row of a deleted cache that has
+// nothing left to collect, and an input trigger recreates it on a later write.
+// `inputs_changed` records whether a write that can change which paths a
+// collection scan keeps has happened since the last scan started.
 // `scan_completed_at` records when the last scan completed; a new cache counts
 // as scanned when it is created. Triggers set `inputs_changed`, and
 // `GarbageCollectionInputs` clears it. The index finds the changed cache that
@@ -1081,9 +1083,12 @@ export const garbageCollectionInputs = sqliteTable(
 	]
 );
 
-// A tenant-wide collection advances through one cache at a time. The current
-// cache remains here until its incremental scan completes, then the next cache
-// is selected lexicographically without loading the complete cache registry.
+// A tenant-wide collection advances through the caches that have a
+// `garbage_collection_input` row, in identity order. This table's single row
+// records the cache that the next pass visits first: a cache whose scan or
+// close-history cleanup is in progress, or the cache after the last one that a
+// pass visited. The next cache is selected without loading the complete cache
+// registry.
 export const garbageCollectionTenantRuns = sqliteTable(
 	'garbage_collection_tenant_run',
 	{

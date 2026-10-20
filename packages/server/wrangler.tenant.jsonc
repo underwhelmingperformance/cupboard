@@ -64,6 +64,11 @@
 		// Empty means the built-in budget of commit-entry credit. A test binds a
 		// small value so that it can saturate the budget by arrangement.
 		"CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET": "",
+		// The shortest time between the completion of one garbage-collection
+		// scan of a cache and the start of the next, in seconds, at most 30 days.
+		// Empty means six hours. The tests bind 0 so that the next pass collects
+		// a change.
+		"CUPBOARD_GC_MIN_SCAN_INTERVAL_SECONDS": "",
 		"CUPBOARD_SUBREQUESTS_PER_INVOCATION": ""
 	},
 	"exports": {

@@ -121,10 +121,10 @@ root that keeps just that one path.
 The other way is **grace**. If a cache has a grace period, cupboard keeps each
 newly published or released path for that long, even if no root keeps it.
 
-cupboard runs **garbage collection** on each active tenant at least every six
-hours, and soon after one of the tenant's roots expires or a grace period ends.
-It removes expired roots, then deletes every path that no root or grace period
-is keeping.
+cupboard runs **garbage collection** on a cache when its contents or retention
+have changed, or when one of its roots expires or a grace period ends. Automatic
+collection of a cache runs at most once every six hours by default. It removes
+expired roots, then deletes every path that no root or grace period is keeping.
 
 CI runs use a special kind of root, called a **run root**. It collects every
 path that the run publishes, so later jobs in the same run can substitute them.

@@ -19,6 +19,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
 import { type ServerContext } from './context.ts';
+import { GarbageCollectionInputs } from './garbage-collection-inputs.ts';
 import {
 	subrequestSliceReserve,
 	withHeldSubrequests
@@ -128,29 +129,6 @@ export class MaintenanceEligibilityService {
 			.toSorted(byCodeUnit)[0];
 	}
 
-	private earliestRootExpiry(): IsoTimestamp | undefined {
-		return (
-			this.context.db
-				.select({ expiresAt: schema.retentionRoots.expiresAt })
-				.from(schema.retentionRoots)
-				.where(isNotNull(schema.retentionRoots.expiresAt))
-				.orderBy(asc(schema.retentionRoots.expiresAt))
-				.limit(1)
-				.get()?.expiresAt ?? undefined
-		);
-	}
-
-	private earliestGraceExpiry(): IsoTimestamp | undefined {
-		return (
-			this.context.db
-				.select({ retainUntil: schema.retentionGrace.retainUntil })
-				.from(schema.retentionGrace)
-				.orderBy(asc(schema.retentionGrace.retainUntil))
-				.limit(1)
-				.get()?.retainUntil ?? undefined
-		);
-	}
-
 	private earliestAuthKeyRetirement(): IsoTimestamp | undefined {
 		return (
 			this.context.db
@@ -177,15 +155,14 @@ export class MaintenanceEligibilityService {
 			.get()?.nextCheckAt;
 	}
 
-	// Choose the earliest upload, attestation, root, grace, auth-key, or
+	// Choose the earliest upload, attestation, collection scan, auth-key, or
 	// managed-cache retirement deadline when no immediate work is recorded.
 	private earliestFutureWake(now: IsoTimestamp): IsoTimestamp | undefined {
 		return [
 			this.earliestSettleRetry(now),
 			this.earliestInheritanceWake(),
 			this.earliestUploadExpiry(),
-			this.earliestRootExpiry(),
-			this.earliestGraceExpiry(),
+			new GarbageCollectionInputs(this.context).nextScanAt(),
 			this.earliestAuthKeyRetirement(),
 			this.earliestManagedCacheRetirement(),
 			this.earliestRefreshMaintenance(),
@@ -309,16 +286,14 @@ export class MaintenanceEligibilityService {
 	completeRetirementRecheck(
 		cacheId: CacheId,
 		observed: { readonly incarnation: string; readonly revision: number },
-		now = new Date()
+		now = new Date(),
+		retryAt = new Date(now.getTime() + managedRetirementRetryMs)
 	): void {
-		const retryAt = isoTimestamp(
-			new Date(now.getTime() + managedRetirementRetryMs)
-		);
 		const checkedAt = isoTimestamp(now);
 
 		this.context.db
 			.update(schema.managedCacheRetirements)
-			.set({ nextCheckAt: retryAt })
+			.set({ nextCheckAt: isoTimestamp(retryAt) })
 			.where(
 				and(
 					eq(schema.managedCacheRetirements.cacheId, cacheId),

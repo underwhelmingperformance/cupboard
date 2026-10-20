@@ -33,6 +33,7 @@ import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
 	GarbageCollectionBarrierMissingError,
+	GarbageCollectionMarksBeforeSeedError,
 	PushIdSigningKeyMissingError,
 	StoredReferencesInvalidError,
 	StoredReferencesJsonMalformedError,
@@ -57,7 +58,10 @@ import {
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
-import { GarbageCollectionInputs } from './garbage-collection-inputs.ts';
+import {
+	GarbageCollectionInputs,
+	type ScanDecision
+} from './garbage-collection-inputs.ts';
 import {
 	jsonRowLists,
 	type JsonValueList,
@@ -174,6 +178,23 @@ export const inputTriggers: readonly {
 	table
 }));
 
+const graceProjectionTriggerPrefix = 'retention_grace_by_deadline_';
+
+/**
+The triggers that keep `retention_grace_by_deadline` equal to
+`retention_grace`. The skip decision reads grace deadlines from the
+projection, and the maintenance wake reads them from `retention_grace`. If
+the two disagree, a grace deadline can wake the tenant on every cron without
+starting a scan.
+*/
+export const graceProjectionTriggers: readonly {
+	readonly name: string;
+	readonly table: string;
+}[] = (['insert', 'update', 'delete'] as const).map((event) => ({
+	name: `${graceProjectionTriggerPrefix}${event}`,
+	table: 'retention_grace'
+}));
+
 /**
 Every trigger that collection depends on. Without the barrier triggers, a
 scan can delete reachable paths. Without the input triggers, a pass can
@@ -182,7 +203,7 @@ skip a cache whose inputs have changed.
 export const collectionTriggers: readonly {
 	readonly name: string;
 	readonly table: string;
-}[] = [...barrierTriggers, ...inputTriggers];
+}[] = [...barrierTriggers, ...inputTriggers, ...graceProjectionTriggers];
 
 /**
 Builds one ordered page of targets for roots that have just expired. The
@@ -239,8 +260,8 @@ interface ExpiredRowCollection {
 	readonly stagingKeys: readonly R2ObjectKey[];
 }
 
-interface ReachabilityCollection {
-	readonly collectionCache: ResolvedCache | undefined;
+interface VisitedCache {
+	readonly cache: ResolvedCache;
 	readonly retirementRecheck?: {
 		readonly incarnation: string;
 		readonly revision: number;
@@ -248,10 +269,22 @@ interface ReachabilityCollection {
 	readonly rootsExpired: number;
 	readonly pathsCollected: number;
 	readonly hasMoreExpiredRoots: boolean;
-	// Whether the scan of the collection cache has more work.
-	readonly hasMoreCacheWork: boolean;
-	// Whether the target has more work: the scan of the collection cache, or a
-	// later cache of a tenant-wide collection.
+	readonly wasScanned: boolean;
+	// Whether the scan of this cache, or the cleaning of its close history, has
+	// more work.
+	readonly hasMoreScanWork: boolean;
+	// Whether this pass completed a scan of the cache and no write changed its
+	// inputs during the scan, or the cache needs no scan.
+	readonly isGraphCurrent: boolean;
+	// When the minimum interval allows a scan that the cache needs.
+	readonly scanAllowedAt?: IsoTimestamp;
+}
+
+interface ReachabilityCollection {
+	// The caches that the pass looked at, in order, scanned or not.
+	readonly visited: readonly VisitedCache[];
+	// Whether the target has more work: a scan in progress, or a later cache
+	// of a tenant-wide collection.
 	readonly hasMoreWork: boolean;
 }
 
@@ -280,6 +313,10 @@ const maxOrphanReclaim = 1000;
 export const maxOrphanListPages = maxOutgoingConnections;
 
 const orphanStagingResumeStorageKey = 'maintenance:orphan-staging-resume-key';
+
+function sum(values: readonly number[]): number {
+	return values.reduce((total, value) => total + value, 0);
+}
 
 interface StagingCollectionBudget {
 	pages: number;
@@ -1125,7 +1162,8 @@ export class GarbageCollectionService {
 					sql`SELECT name FROM sqlite_master
 					    WHERE type = 'trigger'
 					      AND (name GLOB ${`${barrierTriggerPrefix}*`}
-					        OR name GLOB ${`${inputTriggerPrefix}*`})`
+					        OR name GLOB ${`${inputTriggerPrefix}*`}
+					        OR name GLOB ${`${graceProjectionTriggerPrefix}*`})`
 				)
 				.map((row) => row.name)
 		);
@@ -1151,13 +1189,15 @@ export class GarbageCollectionService {
 		cache: ResolvedCache,
 		now: IsoTimestamp
 	): UnreachableCollection {
-		this.assertTriggersPresent();
-
 		const isStartingScan = this.scanRow(cache) === undefined;
 		const scan = this.scan(cache);
 
+		// A pass that skipped the cache can leave the close-history cursor in
+		// the middle of the events. The scan's root expiry must read the events
+		// from the first one, or it misses an event that a removed root needed.
 		if (isStartingScan) {
 			this.inputs.clearChanged(cache);
+			new CacheClosureService(this.context).restartHistory(cache);
 		}
 
 		const isClearOnEntry =
@@ -1227,6 +1267,18 @@ export class GarbageCollectionService {
 
 			if (scan.phase === 'expire-grace') {
 				const expired = this.expireGraceStep(cache, now);
+
+				// Emptying the frontier is safe only before the seed phases. No path
+				// is marked yet, so every entry comes from a root-target or grace
+				// barrier, and the seed phases queue those paths again. Refuse if a
+				// mark exists, because a later phase order could then lose a path.
+				if (!expired.hasMoreDeadlines) {
+					this.assertNoMarks(cache);
+					this.context.db
+						.delete(schema.garbageCollectionFrontier)
+						.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
+						.run();
+				}
 
 				this.updateScan(cache, {
 					allowEmptyCollection:
@@ -1555,12 +1607,12 @@ export class GarbageCollectionService {
 			return this.context.cacheRepository.resolvedForId(current.cache);
 		}
 
-		// advanceTenantCollection visits only larger identities. Start in the
+		// nextCacheIdentity visits only larger identities. Start in the
 		// same order so no cache is skipped.
 		const first = this.context.db
-			.select({ cache: schema.cacheIdentities.id })
-			.from(schema.cacheIdentities)
-			.orderBy(asc(schema.cacheIdentities.id))
+			.select({ cache: schema.garbageCollectionInputs.cacheId })
+			.from(schema.garbageCollectionInputs)
+			.orderBy(asc(schema.garbageCollectionInputs.cacheId))
 			.limit(1)
 			.get();
 
@@ -1581,32 +1633,34 @@ export class GarbageCollectionService {
 		return cache;
 	}
 
-	private advanceTenantCollection(cache: ResolvedCache): boolean {
+	private nextCacheIdentity(after: ResolvedCache): ResolvedCache | undefined {
 		const row = this.context.db
-			.select({ cache: schema.cacheIdentities.id })
-			.from(schema.cacheIdentities)
-			.where(gt(schema.cacheIdentities.id, cache.id))
-			.orderBy(asc(schema.cacheIdentities.id))
+			.select({ cache: schema.garbageCollectionInputs.cacheId })
+			.from(schema.garbageCollectionInputs)
+			.where(gt(schema.garbageCollectionInputs.cacheId, after.id))
+			.orderBy(asc(schema.garbageCollectionInputs.cacheId))
 			.limit(1)
 			.get();
 
-		if (row === undefined) {
+		return row === undefined
+			? undefined
+			: this.context.cacheRepository.resolvedForId(row.cache);
+	}
+
+	private saveTenantCollection(next: ResolvedCache | undefined): void {
+		if (next === undefined) {
 			this.context.db
 				.delete(schema.garbageCollectionTenantRuns)
 				.where(eq(schema.garbageCollectionTenantRuns.id, 1))
 				.run();
-			return false;
+			return;
 		}
-
-		const next = this.context.cacheRepository.resolvedForId(row.cache);
 
 		this.context.db
 			.update(schema.garbageCollectionTenantRuns)
 			.set({ cacheId: next.id })
 			.where(eq(schema.garbageCollectionTenantRuns.id, 1))
 			.run();
-
-		return true;
 	}
 
 	private collectRefreshCredentialMaintenance(now: IsoTimestamp): boolean {
@@ -1844,30 +1898,37 @@ export class GarbageCollectionService {
 	}
 
 	/**
-	Advances the reachability scan of the target. A tenant-wide collection
-	advances through registered caches one at a time, and a scoped collection
-	uses only the requested cache. Persistent mark and frontier state resumes
-	each pass without rereading earlier chunks.
+	Advances the scan of one cache if it has a scan in progress, or needs a
+	new one and the minimum interval allows it, and reads its
+	managed-retirement state.
+	
+	A scan also deletes close events that no root or pending upload of an
+	older retention epoch needs any more. Such an upload can expire after the
+	scan completes, and deleting an expired terminal upload does not set the
+	flag. A cache that is not scanned therefore still has one
+	page of its close history cleaned, and a full page counts as more work,
+	so that its managed retirement can complete.
 	*/
-	private collectReachability(
-		target: GarbageCollectionTarget,
-		now: IsoTimestamp
-	): ReachabilityCollection {
-		const collectionCache =
-			target.scope === 'cache' ? target.cache : this.tenantCollectionCache();
-
-		if (collectionCache === undefined) {
-			return {
-				collectionCache,
-				rootsExpired: 0,
-				pathsCollected: 0,
-				hasMoreExpiredRoots: false,
-				hasMoreCacheWork: false,
-				hasMoreWork: false
-			};
-		}
-
-		const collected = this.collectUnreachable(collectionCache, now);
+	private visitCache(cache: ResolvedCache, now: IsoTimestamp): VisitedCache {
+		const decision =
+			this.scanRow(cache) === undefined
+				? this.inputs.scanDecision(cache, now)
+				: 'due';
+		const isDue = decision === 'due';
+		const hasMoreHistory =
+			!isDue &&
+			new CacheClosureService(this.context).cleanHistory(
+				cache,
+				maxRootsExpiredPerRun
+			);
+		const collected = isDue
+			? this.collectUnreachable(cache, now)
+			: {
+					rootsExpired: 0,
+					pathsCollected: 0,
+					hasMoreExpiredRoots: false,
+					hasMoreWork: false
+				};
 		const retirementRecheck = this.context.db
 			.select({
 				incarnation: schema.managedCacheRetirements.incarnation,
@@ -1876,25 +1937,99 @@ export class GarbageCollectionService {
 			.from(schema.managedCacheRetirements)
 			.where(
 				and(
-					eq(schema.managedCacheRetirements.cacheId, collectionCache.id),
+					eq(schema.managedCacheRetirements.cacheId, cache.id),
 					lte(schema.managedCacheRetirements.eligibleAfter, now)
 				)
 			)
 			.get();
-		const hasMoreWork =
-			!collected.hasMoreWork && target.scope === 'tenant'
-				? this.advanceTenantCollection(collectionCache)
-				: collected.hasMoreWork;
+		const hasMoreScanWork = collected.hasMoreWork || hasMoreHistory;
+		const afterVisit = isDue
+			? this.decisionAfterScan(cache, collected.hasMoreWork)
+			: decision;
+
+		if (decision === 'current' && !hasMoreHistory) {
+			this.inputs.forgetIfDeleted(cache);
+		}
 
 		return {
-			collectionCache,
+			cache,
 			...(retirementRecheck !== undefined && { retirementRecheck }),
 			rootsExpired: collected.rootsExpired,
 			pathsCollected: collected.pathsCollected,
 			hasMoreExpiredRoots: collected.hasMoreExpiredRoots,
-			hasMoreCacheWork: collected.hasMoreWork,
-			hasMoreWork
+			wasScanned: isDue,
+			hasMoreScanWork,
+			isGraphCurrent: !hasMoreScanWork && afterVisit === 'current',
+			...(afterVisit === 'waiting' && {
+				scanAllowedAt: this.inputs.scanAllowedAt(cache)
+			})
 		};
+	}
+
+	private assertNoMarks(cache: ResolvedCache): void {
+		const mark = this.context.db
+			.select({ storePathHash: schema.garbageCollectionMarks.storePathHash })
+			.from(schema.garbageCollectionMarks)
+			.where(eq(schema.garbageCollectionMarks.cacheId, cache.id))
+			.limit(1)
+			.get();
+
+		if (mark !== undefined) {
+			throw new GarbageCollectionMarksBeforeSeedError(cache.id);
+		}
+	}
+
+	// A write between two invocations of a scan leaves the input flag set, so
+	// the completed scan does not reflect the cache's current inputs.
+	private decisionAfterScan(
+		cache: ResolvedCache,
+		hasMoreWork: boolean
+	): ScanDecision {
+		if (hasMoreWork) {
+			return 'due';
+		}
+
+		return this.inputs.state(cache)?.inputsChanged === false
+			? 'current'
+			: 'waiting';
+	}
+
+	private collectReachability(
+		target: GarbageCollectionTarget,
+		now: IsoTimestamp
+	): ReachabilityCollection {
+		this.assertTriggersPresent();
+
+		if (target.scope === 'cache') {
+			const visit = this.visitCache(target.cache, now);
+
+			return { visited: [visit], hasMoreWork: visit.hasMoreScanWork };
+		}
+
+		const visited: VisitedCache[] = [];
+		let cache = this.tenantCollectionCache();
+
+		while (cache !== undefined) {
+			const visit = this.visitCache(cache, now);
+
+			visited.push(visit);
+
+			if (visit.hasMoreScanWork) {
+				return { visited, hasMoreWork: true };
+			}
+
+			const next = this.nextCacheIdentity(cache);
+
+			this.saveTenantCollection(next);
+
+			if (next === undefined || visit.wasScanned || isRowBudgetExhausted()) {
+				return { visited, hasMoreWork: next !== undefined };
+			}
+
+			cache = next;
+		}
+
+		return { visited, hasMoreWork: false };
 	}
 
 	// R2 narinfo keys do not include the narinfo generation. Keep the gate
@@ -1954,6 +2089,7 @@ export class GarbageCollectionService {
 		await this.deleteStagingObjects(log, expired.stagingKeys);
 
 		return {
+			retirementRechecks: [],
 			pendingUploadsDeleted: expired.pendingUploadsDeleted,
 			pendingAttestationsDeleted: expired.pendingAttestationsDeleted,
 			rootsExpired: 0,
@@ -1978,16 +2114,17 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = isoTimestamp(startedAt);
 		const expired = this.collectExpiredRows(log, now);
-		const collected = this.collectReachability(target, now);
-		const { collectionCache } = collected;
+		const { visited, hasMoreWork } = this.collectReachability(target, now);
 		const narInfosDeleted = await this.flushNarInfoDeletions(
 			purgeOrigin,
 			async () => {
-				if (collectionCache !== undefined && !collected.hasMoreCacheWork) {
-					await this.cacheAdmin.scheduleManagedRetirement(
-						collectionCache,
-						purgeOrigin
-					);
+				for (const visit of visited) {
+					if (!visit.hasMoreScanWork) {
+						await this.cacheAdmin.scheduleManagedRetirement(
+							visit.cache,
+							purgeOrigin
+						);
+					}
 				}
 			}
 		);
@@ -2016,23 +2153,48 @@ export class GarbageCollectionService {
 		await this.context.ctx.storage.put(rotationKey, !hasV2First);
 
 		return {
-			...(collected.retirementRecheck !== undefined &&
-				collectionCache !== undefined && {
-					retirementRecheck: {
-						cacheId: collectionCache.id,
-						...collected.retirementRecheck,
-						cacheGraphComplete: !collected.hasMoreCacheWork,
-						pendingExpiryBacklog: expired.hasMorePendingRows
-					}
-				}),
+			retirementRechecks: visited.flatMap(
+				({ cache, retirementRecheck, isGraphCurrent, scanAllowedAt }) =>
+					retirementRecheck === undefined
+						? []
+						: {
+								cacheId: cache.id,
+								...retirementRecheck,
+								cacheGraphComplete: isGraphCurrent,
+								...(scanAllowedAt !== undefined && { scanAllowedAt }),
+								pendingExpiryBacklog: expired.hasMorePendingRows
+							}
+			),
 			pendingUploadsDeleted: expired.pendingUploadsDeleted,
 			pendingAttestationsDeleted: expired.pendingAttestationsDeleted,
-			rootsExpired: collected.rootsExpired,
-			pathsCollected: collected.pathsCollected,
-			hasMoreExpiredRoots: collected.hasMoreExpiredRoots,
-			hasMoreWork: expired.hasMoreWork || collected.hasMoreWork,
+			rootsExpired: sum(visited.map((visit) => visit.rootsExpired)),
+			pathsCollected: sum(visited.map((visit) => visit.pathsCollected)),
+			hasMoreExpiredRoots: visited.some((visit) => visit.hasMoreExpiredRoots),
+			hasMoreWork: expired.hasMoreWork || hasMoreWork,
 			narInfosDeleted,
 			orphanStagingDeleted
 		};
+	}
+
+	/**
+	Makes the next pass start a new scan of each cache of the target, whatever
+	its inputs and however recently it was scanned. A scan in progress is
+	discarded, because it may have marked a path before a later change
+	released the path, and that scan would keep the path.
+	*/
+	requestScan(target: GarbageCollectionTarget): void {
+		if (target.scope === 'cache') {
+			this.clearScan(target.cache);
+			this.inputs.requestScan(target.cache.id);
+			return;
+		}
+
+		this.context.db.transaction((tx) => {
+			tx.delete(schema.garbageCollectionFrontier).run();
+			tx.delete(schema.garbageCollectionMarks).run();
+			tx.delete(schema.garbageCollectionScans).run();
+			tx.delete(schema.garbageCollectionTenantRuns).run();
+		});
+		this.inputs.requestScan();
 	}
 }

@@ -103,13 +103,17 @@ export interface OwnerConfig {
 }
 
 export interface GarbageCollectionOutcome {
-	readonly retirementRecheck?: {
+	// One entry for each visited cache with an eligible managed retirement.
+	// `scanAllowedAt` is present when the cache needs a scan that the minimum
+	// interval delays.
+	readonly retirementRechecks: readonly {
 		readonly cacheId: CacheId;
 		readonly incarnation: string;
 		readonly revision: number;
 		readonly cacheGraphComplete: boolean;
+		readonly scanAllowedAt?: IsoTimestamp;
 		readonly pendingExpiryBacklog: boolean;
-	};
+	}[];
 	readonly pendingUploadsDeleted: number;
 	readonly pendingAttestationsDeleted: number;
 	readonly rootsExpired: number;

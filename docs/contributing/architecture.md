@@ -448,7 +448,14 @@ These are the jobs that the cron trigger adds:
   hasn't been migrated yet.
 - `tenant-maintenance`, for up to 100 active tenants that are due, oldest first.
   Each job runs the tenant's garbage collection, its verification pass, and the
-  retirement of old access-token keys.
+  retirement of old access-token keys. Garbage collection scans a cache only
+  when triggers have recorded a write that can change which paths the scan
+  keeps, or a root or grace deadline has passed. It also waits
+  `CUPBOARD_GC_MIN_SCAN_INTERVAL_SECONDS` (six hours by default) after the
+  cache's previous scan. A pass still deletes the close events of a cache that
+  it does not scan once nothing needs them, and stops visiting a deleted cache
+  once it has no narinfo, root, grace row, close event or pending upload and no
+  change to scan. See `do/garbage-collection-inputs.ts`.
 - `offboard`, for up to 10 tenants that are being removed. Each job deletes the
   tenant's rows and objects.
 - `blob-reaper` and `cas-reaper`. These delete NAR and attestation objects that

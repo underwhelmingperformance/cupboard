@@ -649,6 +649,12 @@ describe('maintenance eligibility projection', () => {
 				})
 				.run();
 
+			// A scan after these writes leaves only their deadlines as work.
+			instance.context.db
+				.update(schema.garbageCollectionInputs)
+				.set({ inputsChanged: false })
+				.run();
+
 			const service = new MaintenanceEligibilityService(instance.context);
 
 			return service.reconcile(now);
@@ -680,6 +686,12 @@ describe('maintenance eligibility projection', () => {
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 					updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
+				.run();
+
+			// A scan after these writes leaves only their deadlines as work.
+			instance.context.db
+				.update(schema.garbageCollectionInputs)
+				.set({ inputsChanged: false })
 				.run();
 
 			const service = new MaintenanceEligibilityService(instance.context);

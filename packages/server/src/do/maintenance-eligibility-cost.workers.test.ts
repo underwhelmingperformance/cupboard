@@ -120,8 +120,26 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 23,
-			largeBacklogCost: 23
+			smallBacklogCost: 25,
+			largeBacklogCost: 25
+		});
+	});
+
+	// Cache identities are never removed, so the collection wake must not read
+	// one row per identity. Half of each backlog is changed and half has a
+	// root deadline.
+	it('reconciles without reading every cache identity', async () => {
+		await initialise();
+
+		await seedCacheIdentities(4, 'small');
+		const smallBacklogCost = await reconcileCost();
+
+		await seedCacheIdentities(196, 'large');
+		const largeBacklogCost = await reconcileCost();
+
+		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
+			smallBacklogCost: 25,
+			largeBacklogCost: 25
 		});
 	});
 
@@ -406,6 +424,9 @@ describe('maintenance pass cost', () => {
 	// index. A live-family backlog must not increase the number of rows read.
 	it('checks for expired refresh-token families without scanning the live backlog', async () => {
 		await initialise();
+		// The first pass reads once whether the cache listing projection is
+		// complete, and later passes reuse the answer. Measure later passes.
+		await currentServer().runGarbageCollection();
 
 		await seedRefreshTokenFamilies(3, 'small', '2099-01-01T00:00:00.000Z');
 		const smallBacklog = await maintenancePassCost('garbage-collection', () =>
@@ -421,8 +442,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 285,
-			largeBacklogCost: 285
+			smallBacklogCost: 264,
+			largeBacklogCost: 264
 		});
 	});
 
@@ -432,12 +453,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 268,
+				rowsRead: 248,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 268,
+				rowsRead: 248,
 				usesIndex: true,
 				sorts: false
 			}
@@ -474,8 +495,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 276,
-			largeBacklogCost: 276
+			smallBacklogCost: 274,
+			largeBacklogCost: 274
 		});
 	});
 
@@ -506,13 +527,16 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 908, rowsWritten: 133 },
-			largeBacklog: { rowsRead: 908, rowsWritten: 133 }
+			smallBacklog: { rowsRead: 906, rowsWritten: 130 },
+			largeBacklog: { rowsRead: 906, rowsWritten: 130 }
 		});
 	});
 
 	it('finds expired roots without scanning the live-root backlog', async () => {
 		await initialise();
+		// The first pass reads once whether the cache listing projection is
+		// complete, and later passes reuse the answer. Measure later passes.
+		await currentServer().runGarbageCollection();
 
 		await seedLiveRoots(3, 'small');
 		await seedExpiredRoot('expired-small');
@@ -530,8 +554,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 294,
-			largeBacklogCost: 294
+			smallBacklogCost: 300,
+			largeBacklogCost: 300
 		});
 	});
 });
@@ -856,6 +880,28 @@ async function oneUnitCollectionCost(): Promise<{
 			underOneUnitOfWork(() => instance.runGarbageCollection())
 		)
 	);
+}
+
+async function seedCacheIdentities(
+	count: number,
+	label: string
+): Promise<void> {
+	const insertIdentity =
+		"INSERT INTO cache_identity (kind, name, access, priority, created_at) VALUES ('named', ?, 'public', 40, '2026-01-01T00:00:00.000Z') RETURNING id";
+	const markChanged =
+		'UPDATE garbage_collection_input SET inputs_changed = 1 WHERE cache_id = ?';
+	const insertRoot =
+		"INSERT INTO retention_root (cache_id, name, expires_at, created_at, updated_at) VALUES (?, 'nightly', '2099-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')";
+
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		for (let index = 0; index < count; index += 1) {
+			const { id } = state.storage.sql
+				.exec<{ id: number }>(insertIdentity, `${label}-${String(index)}`)
+				.one();
+
+			state.storage.sql.exec(index % 2 === 0 ? markChanged : insertRoot, id);
+		}
+	});
 }
 
 // Rows read while the Durable Object rebuilds the eligibility projection,

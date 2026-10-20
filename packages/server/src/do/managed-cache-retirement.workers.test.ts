@@ -37,6 +37,14 @@ import {
 	managedRetirementEntryPrefix,
 	teardownEntryPrefix
 } from './cache-admin-service.ts';
+import {
+	collectOneUnitOfWork,
+	driveScanTo,
+	inputState,
+	insertNarInfo,
+	insertRoot,
+	useMinScanInterval
+} from './garbage-collection.test-support.ts';
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
 import { noCost } from './operation-cost.test-support.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
@@ -47,6 +55,10 @@ const managedCache = namedCache('pr-1');
 const secondManagedCache = namedCache('pr-2');
 const origin = requestOriginSchema.parse('https://cache.example');
 const expiredDeadline = '2025-12-31T23:59:59.000Z';
+const keptPath = storePathHashSchema.parse('c'.repeat(32));
+const releasedPath = storePathHashSchema.parse('d'.repeat(32));
+const sixHours = 6 * 60 * 60;
+const twoHours = 2 * 60 * 60;
 const eligibilityBlockers = [
 	{
 		name: 'live grace',
@@ -236,12 +248,6 @@ async function stageRetirementClaim(
 	});
 }
 
-async function maintenancePass(): Promise<string | undefined> {
-	return runInDurableObject(currentServer(), (_instance, state) =>
-		state.storage.get<string>(maintenancePassCursorKey)
-	);
-}
-
 async function retirementState(): Promise<{
 	readonly local: readonly {
 		readonly id: number;
@@ -364,6 +370,18 @@ async function pendingWorkState(): Promise<{
 	});
 }
 
+async function nextRetirementCheckAt(): Promise<string | undefined> {
+	return runInDurableObject(currentServer(), (instance) => {
+		const cache = instance.context.cacheRepository.require(managedCache);
+
+		return instance.context.db
+			.select({ nextCheckAt: schema.managedCacheRetirements.nextCheckAt })
+			.from(schema.managedCacheRetirements)
+			.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+			.get()?.nextCheckAt;
+	});
+}
+
 async function seedEligibilityBlocker(statement: string): Promise<void> {
 	await runInDurableObject(currentServer(), (instance, state) => {
 		const cache = instance.context.cacheRepository.require(managedCache);
@@ -435,21 +453,14 @@ describe('managed cache retirement', () => {
 		await makeRetirementDue();
 
 		await withoutAlarmArming(async () => {
+			// The pass skips the empty default cache and reaches the managed cache
+			// in the same invocation.
 			await scheduleRetirement();
 
 			expect({
 				isCacheLive: await isCacheLive(),
 				claims: await retirementClaims()
-			}).toStrictEqual({ isCacheLive: true, claims: [] });
-
-			await runAlarm();
-
-			expect({
-				pass: await maintenancePass(),
-				isCacheLive: await isCacheLive(),
-				claims: await retirementClaims()
 			}).toStrictEqual({
-				pass: 'garbage-collection',
 				isCacheLive: true,
 				claims: [
 					{
@@ -484,7 +495,6 @@ describe('managed cache retirement', () => {
 		try {
 			await withoutAlarmArming(async () => {
 				await scheduleRetirement();
-				await runAlarm();
 				capture.logs.length = 0;
 				await runAlarm();
 			});
@@ -627,8 +637,9 @@ describe('managed cache retirement', () => {
 			VALUES (?, 'permanent', NULL, '2026-01-01T00:00:00.000Z',
 				'2026-01-01T00:00:00.000Z')`);
 
+		// The first pass reaches the cache and completes its recheck.
 		await scheduleRetirement();
-		expect(await maintenanceWakeAt()).toBe(expiredDeadline);
+		expect(await maintenanceWakeAt()).toBe('2026-01-01T06:00:00.000Z');
 		await driveRetirementPasses();
 		const capture = startCapture();
 		try {
@@ -655,11 +666,11 @@ describe('managed cache retirement', () => {
 				{
 					method: 'garbage-collection',
 					...noCost,
-					rowsRead: 286,
-					rowsWritten: 12,
+					rowsRead: 279,
+					rowsWritten: 3,
 					d1Calls: 2,
 					d1RowsRead: 2,
-					d1RowsWritten: 2,
+					d1RowsWritten: 4,
 					r2List: 2
 				}
 			]
@@ -681,6 +692,108 @@ describe('managed cache retirement', () => {
 			status: StatusCodes.OK,
 			body: { name: 'permanent', removed: true },
 			wake: expiredDeadline
+		});
+	});
+
+	it('rechecks a changed cache when the interval allows its scan', async () => {
+		const token = await createManagedCache('managed-retirement-changed');
+		await runInDurableObject(currentServer(), (instance) => {
+			insertNarInfo(instance.context, keptPath, 1, managedCache);
+			insertRoot(instance.context, {
+				name: 'permanent',
+				target: keptPath,
+				scope: managedCache
+			});
+		});
+		await makeRetirementDue();
+		await scheduleRetirement();
+		await useMinScanInterval(sixHours);
+		const removed = await authorisedFetch(
+			'/cache/pr-1/roots/permanent',
+			token,
+			{ method: 'DELETE' }
+		);
+		vi.setSystemTime(new Date('2026-01-01T02:00:00.000Z'));
+		await scheduleRetirement();
+		const afterSkip = {
+			content: await retainedContentState(),
+			nextCheckAt: await nextRetirementCheckAt(),
+			wake: await maintenanceWakeAt()
+		};
+		vi.setSystemTime(new Date('2026-01-01T03:00:00.000Z'));
+		await runInDurableObject(currentServer(), async (instance) => {
+			await new MaintenanceEligibilityService(instance.context).reconcile(
+				new Date()
+			);
+		});
+		const wakeWithinInterval = await maintenanceWakeAt();
+		vi.setSystemTime(new Date('2026-01-01T06:00:00.000Z'));
+		await scheduleRetirement();
+		const afterInterval = {
+			inputs: await runInDurableObject(currentServer(), (instance) =>
+				inputState(instance.context, managedCache)
+			),
+			nextCheckAt: await nextRetirementCheckAt()
+		};
+
+		expect({
+			removed: removed.status,
+			afterSkip,
+			wakeWithinInterval,
+			afterInterval
+		}).toStrictEqual({
+			removed: StatusCodes.OK,
+			afterSkip: {
+				content: { narInfos: 1, roots: 0, targets: 0 },
+				nextCheckAt: '2026-01-01T06:00:00.000Z',
+				wake: '2026-01-01T06:00:00.000Z'
+			},
+			wakeWithinInterval: '2026-01-01T06:00:00.000Z',
+			afterInterval: {
+				inputs: {
+					inputsChanged: false,
+					scanCompletedAt: '2026-01-01T06:00:00.000Z'
+				},
+				nextCheckAt: '2026-01-01T12:00:00.000Z'
+			}
+		});
+	});
+
+	it('defers the recheck of a cache whose scan ended with its inputs changed', async () => {
+		await createManagedCache('managed-retirement-scan-changed');
+		await runInDurableObject(currentServer(), (instance) => {
+			insertNarInfo(instance.context, keptPath, 1, managedCache);
+			insertNarInfo(instance.context, releasedPath, 2, managedCache);
+			insertRoot(instance.context, {
+				name: 'permanent',
+				target: keptPath,
+				scope: managedCache
+			});
+			insertRoot(instance.context, {
+				name: 'other',
+				target: releasedPath,
+				scope: managedCache
+			});
+		});
+		await makeRetirementDue();
+		await withoutAlarmArming(async () => {
+			await driveScanTo(collectOneUnitOfWork, 'mark', managedCache);
+			await useMinScanInterval(twoHours);
+			await runInDurableObject(currentServer(), (instance, state) => {
+				state.storage.sql.exec(
+					"DELETE FROM retention_root_target WHERE cache_id = ? AND root_name = 'other'",
+					instance.context.cacheRepository.require(managedCache).id
+				);
+			});
+			await driveScanTo(collectOneUnitOfWork, undefined, managedCache);
+		});
+
+		expect({
+			content: await retainedContentState(),
+			nextCheckAt: await nextRetirementCheckAt()
+		}).toStrictEqual({
+			content: { narInfos: 2, roots: 2, targets: 1 },
+			nextCheckAt: '2026-01-01T02:00:00.000Z'
 		});
 	});
 
@@ -896,7 +1009,9 @@ describe('managed cache retirement', () => {
 		}).toStrictEqual({
 			afterFirst: 1,
 			afterSecond: 0,
-			dueWake: expiredDeadline,
+			// The second pass revisits the cache without a backlog and completes
+			// its recheck, so the next wake is the second cache's first check.
+			dueWake: '2026-01-01T00:01:00.000Z',
 			cacheLive: false
 		});
 	});
@@ -1003,7 +1118,6 @@ describe('managed cache retirement', () => {
 
 		await withoutAlarmArming(async () => {
 			await scheduleRetirement();
-			await runAlarm();
 
 			const metadata = uploadMetadata({
 				fileSize: narBytes.byteLength,
@@ -1042,7 +1156,6 @@ describe('managed cache retirement', () => {
 
 		await withoutAlarmArming(async () => {
 			await scheduleRetirement();
-			await runAlarm();
 
 			const metadata = uploadMetadata({
 				fileSize: narBytes.byteLength,
@@ -1079,7 +1192,6 @@ describe('managed cache retirement', () => {
 
 		await withoutAlarmArming(async () => {
 			await scheduleRetirement();
-			await runAlarm();
 			await currentServer().runCacheTeardown(managedCache, origin);
 
 			const recreated = await putManagedCache(token);

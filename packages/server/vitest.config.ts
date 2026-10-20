@@ -123,6 +123,9 @@ export default defineConfig(async () => {
 									// must stay above the concurrency any other suite pushes
 									// with, or that suite's seeding would be refused.
 									CUPBOARD_COMMIT_SOCKET_CEILING: '10',
+									// Collect a change at the next pass. Tests of the minimum
+									// interval set their own.
+									CUPBOARD_GC_MIN_SCAN_INTERVAL_SECONDS: '0',
 									// Pool bindings override Wrangler's `.dev.vars`. Keep the
 									// test allowance independent of local deployment settings.
 									CUPBOARD_SUBREQUESTS_PER_INVOCATION: String(

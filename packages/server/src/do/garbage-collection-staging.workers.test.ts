@@ -172,6 +172,7 @@ describe('garbage collection best-effort staging deletes', () => {
 			orphanPresent: (await env.BLOBS.head(orphanKey)) !== null
 		}).toStrictEqual({
 			outcome: {
+				retirementRechecks: [],
 				pendingUploadsDeleted: 1,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,

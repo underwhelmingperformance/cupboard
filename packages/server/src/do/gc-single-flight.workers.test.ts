@@ -19,6 +19,7 @@ import { gcContinuationKey } from './server.ts';
 import { VerificationService } from './verification-service.ts';
 
 const gcOutcome = {
+	retirementRechecks: [],
 	pendingUploadsDeleted: 0,
 	pendingAttestationsDeleted: 0,
 	rootsExpired: 0,
