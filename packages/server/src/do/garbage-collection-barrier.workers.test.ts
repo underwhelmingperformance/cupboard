@@ -15,7 +15,7 @@ import {
 	withoutAlarmArming
 } from '../test-support.ts';
 
-import { barrierTriggers } from './garbage-collection-service.ts';
+import { collectionTriggers } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
@@ -38,7 +38,7 @@ describe('garbage collection write barrier', () => {
 	beforeEach(resetTestServer);
 	afterEach(clearAbandonedAlarms);
 
-	it.each(barrierTriggers)(
+	it.each(collectionTriggers)(
 		'preserves narinfo rows while $name is missing',
 		async ({ name }) => {
 			await withoutAlarmArming(async () => {

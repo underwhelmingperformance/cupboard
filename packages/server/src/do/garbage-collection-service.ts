@@ -57,6 +57,7 @@ import {
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
+import { GarbageCollectionInputs } from './garbage-collection-inputs.ts';
 import {
 	jsonRowLists,
 	type JsonValueList,
@@ -137,6 +138,52 @@ export const barrierTriggers: readonly {
 	}));
 });
 
+const inputTriggerPrefix = 'garbage_collection_input_';
+
+/**
+The triggers that mark the collection inputs of a cache as changed, and
+the tables that they watch. Migration 0078 creates them.
+
+While one of them is missing, writes to its table set no flag. A migration
+that restores a missing input trigger must therefore also set
+`inputs_changed` on every row of `garbage_collection_input`.
+*/
+export const inputTriggers: readonly {
+	readonly name: string;
+	readonly table: string;
+}[] = (
+	[
+		['cache_identity', 'insert'],
+		['cache_identity', 'grace_managed'],
+		['cache_identity', 'undelete'],
+		['cache_close_event', 'insert'],
+		['narinfo', 'insert'],
+		['narinfo', 'update'],
+		['narinfo', 'delete'],
+		['retention_root_target', 'insert'],
+		['retention_root_target', 'update'],
+		['retention_root_target', 'delete'],
+		['retention_grace', 'insert'],
+		['retention_grace', 'update'],
+		['retention_grace', 'delete'],
+		['pending_upload', 'update'],
+		['pending_upload', 'delete']
+	] as const
+).map(([table, event]) => ({
+	name: `${inputTriggerPrefix}${table}_${event}`,
+	table
+}));
+
+/**
+Every trigger that collection depends on. Without the barrier triggers, a
+scan can delete reachable paths. Without the input triggers, a pass can
+skip a cache whose inputs have changed.
+*/
+export const collectionTriggers: readonly {
+	readonly name: string;
+	readonly table: string;
+}[] = [...barrierTriggers, ...inputTriggers];
+
 /**
 Builds one ordered page of targets for roots that have just expired. The
 query must include every root from the expiry pass so its ordering and limit
@@ -175,6 +222,14 @@ export function expiredRootTargetSelect(
 // from the next indexed expiry query, so the existing alarm continuation drains
 // the remainder without a separate cursor.
 export const maxPendingRowsDeletedPerRun = 1000;
+
+interface UnreachableCollection {
+	readonly rootsExpired: number;
+	readonly rootTargetsExpired: number;
+	readonly pathsCollected: number;
+	readonly hasMoreExpiredRoots: boolean;
+	readonly hasMoreWork: boolean;
+}
 
 interface ExpiredRowCollection {
 	readonly pendingUploadsDeleted: number;
@@ -274,6 +329,8 @@ class StagingKeyOwnership {
 import { CacheClosureService } from './cache-closure-service.ts';
 
 export class GarbageCollectionService {
+	private readonly inputs: GarbageCollectionInputs;
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService,
@@ -282,7 +339,9 @@ export class GarbageCollectionService {
 			CacheAdminService,
 			'scheduleManagedRetirement'
 		>
-	) {}
+	) {
+		this.inputs = new GarbageCollectionInputs(context);
+	}
 
 	private clearScan(cache: ResolvedCache): void {
 		this.context.db.transaction((tx) => {
@@ -1056,19 +1115,21 @@ export class GarbageCollectionService {
 
 	/**
 	SQLite drops a table's triggers when a migration rebuilds it. Do not
-	collect against marks until every write-barrier trigger is restored.
+	collect against marks, or decide that a cache needs no scan, until every
+	collection trigger is restored.
 	*/
-	private assertBarrierPresent(): void {
+	private assertTriggersPresent(): void {
 		const present = new Set(
 			this.context.db
 				.all<{ name: string }>(
 					sql`SELECT name FROM sqlite_master
 					    WHERE type = 'trigger'
-					      AND name GLOB ${`${barrierTriggerPrefix}*`}`
+					      AND (name GLOB ${`${barrierTriggerPrefix}*`}
+					        OR name GLOB ${`${inputTriggerPrefix}*`})`
 				)
 				.map((row) => row.name)
 		);
-		const missing = barrierTriggers
+		const missing = collectionTriggers
 			.map((trigger) => trigger.name)
 			.filter((name) => !present.has(name));
 
@@ -1078,9 +1139,47 @@ export class GarbageCollectionService {
 	}
 
 	/**
+	Advances the collection scan of one cache. Clears the input flag of the
+	cache when a new scan starts and after the scan's own writes.
+	
+	This method must stay synchronous. No request can write while it runs, so
+	every write to an input table during the call is the scan's own, which the
+	scan already accounts for. The explicit return type makes an `async`
+	version fail to compile.
+	*/
+	private collectUnreachable(
+		cache: ResolvedCache,
+		now: IsoTimestamp
+	): UnreachableCollection {
+		this.assertTriggersPresent();
+
+		const isStartingScan = this.scanRow(cache) === undefined;
+		const scan = this.scan(cache);
+
+		if (isStartingScan) {
+			this.inputs.clearChanged(cache);
+		}
+
+		const isClearOnEntry =
+			isStartingScan || this.inputs.state(cache)?.inputsChanged === false;
+		const advanced = this.advanceScan(cache, now, scan);
+		const hasMoreWork = this.scanRow(cache) !== undefined;
+
+		if (isClearOnEntry && this.inputs.state(cache)?.inputsChanged === true) {
+			this.inputs.clearChanged(cache);
+		}
+
+		if (!hasMoreWork) {
+			this.inputs.recordCompletion(cache, now);
+		}
+
+		return { ...advanced, hasMoreWork };
+	}
+
+	/**
 	Advances one cache's collection scan until the invocation's row budget is
 	spent, leaving the phase it stopped in recorded for the next invocation.
-
+	
 	The phases draw on one budget in sequence, so an expensive early phase can
 	leave a later one nothing to spend. That does not starve the later phase,
 	because the input of each phase drains within a scan: a root expires once,
@@ -1090,24 +1189,17 @@ export class GarbageCollectionService {
 	invocation, which follows immediately because the pass re-arms its alarm
 	while work remains.
 	*/
-	private collectUnreachable(
+	private advanceScan(
 		cache: ResolvedCache,
-		now: IsoTimestamp
-	): {
-		rootsExpired: number;
-		rootTargetsExpired: number;
-		pathsCollected: number;
-		hasMoreExpiredRoots: boolean;
-		hasMoreWork: boolean;
-	} {
-		this.assertBarrierPresent();
-
+		now: IsoTimestamp,
+		started: typeof schema.garbageCollectionScans.$inferSelect
+	): Omit<UnreachableCollection, 'hasMoreWork'> {
 		let rootsExpired = 0;
 		let rootTargetsExpired = 0;
 		let pathsCollected = 0;
 		let hasMoreExpiredRoots = false;
 		let scan: typeof schema.garbageCollectionScans.$inferSelect | undefined =
-			this.scan(cache);
+			started;
 
 		while (scan !== undefined) {
 			if (scan.phase === 'expire-roots') {
@@ -1203,13 +1295,7 @@ export class GarbageCollectionService {
 			rootsExpired,
 			rootTargetsExpired,
 			pathsCollected,
-			hasMoreExpiredRoots,
-			hasMoreWork:
-				this.context.db
-					.select({ cache: schema.garbageCollectionScans.cacheId })
-					.from(schema.garbageCollectionScans)
-					.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
-					.get() !== undefined
+			hasMoreExpiredRoots
 		};
 	}
 
