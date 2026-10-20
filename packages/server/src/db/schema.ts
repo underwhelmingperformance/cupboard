@@ -408,6 +408,8 @@ export const publicationOperations = sqliteTable(
 		blobJson: text('blob_json'),
 		graceDecisionJson: text('grace_decision_json').notNull(),
 		graceDeadline: text('grace_deadline').$type<IsoTimestamp>(),
+		// No code uses this column. Dropping it needs a migration in every
+		// tenant's Durable Object.
 		rootExpiresAt: text('root_expires_at').$type<IsoTimestamp>(),
 		state: text('state', {
 			enum: ['accepted', 'servable', 'failed', 'expired']

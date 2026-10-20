@@ -764,20 +764,6 @@ export class UploadsService {
 							entry.attachRoot.retention,
 							tx
 						);
-						const root = tx
-							.select({ expiresAt: schema.retentionRoots.expiresAt })
-							.from(schema.retentionRoots)
-							.where(
-								and(
-									eq(schema.retentionRoots.cacheId, cache.id),
-									eq(schema.retentionRoots.name, entry.attachRoot.name)
-								)
-							)
-							.get();
-						tx.update(schema.publicationOperations)
-							.set({ rootExpiresAt: root?.expiresAt })
-							.where(eq(schema.publicationOperations.id, entry.operationId))
-							.run();
 					}
 				} else if (declared !== undefined && current.blobJson === null) {
 					tx.update(schema.publicationOperations)
