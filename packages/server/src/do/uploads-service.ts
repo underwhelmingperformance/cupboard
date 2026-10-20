@@ -876,9 +876,14 @@ export class UploadsService {
 						: publicationResultSchema.parse(JSON.parse(stored.resultJson))
 			};
 		}
+		const pending = this.context.db
+			.select({ r2Key: schema.pendingUploads.r2Key })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, entry.operationId))
+			.get();
 		const requiresUpload =
 			!present.has(entry.metadata.storePathHash) &&
-			blob === undefined &&
+			pending?.r2Key === staged &&
 			(await this.context.env.BLOBS.head(staged)) === null;
 		if (requiresUpload && Date.now() >= pushExpiry * 1000) {
 			throw new PublicationPushExpiredError();
