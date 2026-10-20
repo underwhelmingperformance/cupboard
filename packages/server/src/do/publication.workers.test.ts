@@ -1,37 +1,55 @@
+import { publicationStagingKey } from '@cupboard/protocol/publication';
 import {
 	acceptCapabilitiesHeader,
+	commitBatchMaxEntries,
+	commitCapabilitiesValueWithCredit,
+	type CommitSessionFrame,
 	publicationCapability,
+	type PublicationEntry,
+	publicationRefusalReasonsCapability,
 	pushCredentialSchema,
 	uploadCapabilitiesHeader,
+	type UploadPathNegotiation,
 	uploadPlanResponseSchema
 } from '@cupboard/protocol/upload';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
+import { CountingSemaphore } from '@cupboard/shared/concurrency';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
+import { StatusCodes } from 'http-status-codes';
 import { decodeJwt } from 'jose';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as schema from '../db/schema.ts';
+import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
+	closeSessionAndWait,
+	commitCreditAccept,
 	commitPath,
 	commitUpload,
 	currentNarObjectKey,
 	currentServer,
+	defaultCache,
+	deletePath,
 	initialise,
 	namedCache,
+	nixSha256Hash,
 	openCommitSession,
 	putNarBytes,
+	recordClaimedVerification,
 	resetTestServer,
 	testPushId,
+	testPushIdFor,
 	uploadMetadata,
 	uploadPathNegotiation,
 	verifiableNar
 } from '../test-support.ts';
 
 import { PublicationStore } from './publication-store.ts';
+import { UploadsService } from './uploads-service.ts';
 
 it.each(
 	[false, true].flatMap((accepted) =>
@@ -78,6 +96,8 @@ it.each(
 		});
 	}
 );
+
+const publicationSession = `${publicationCapability},${publicationRefusalReasonsCapability}`;
 
 async function snapshot() {
 	return runInDurableObject(currentServer(), (instance) =>
@@ -196,7 +216,7 @@ it('accepts one durable operation when a complete publication is replayed', asyn
 	const conversation = await openCommitSession(
 		token,
 		namedCache('lazy'),
-		publicationCapability
+		publicationSession
 	);
 	try {
 		const request = {
@@ -266,7 +286,7 @@ it('admits concurrent commits into the same lazily created generation', async ()
 	};
 	const conversations = await Promise.all(
 		[0, 1].map(() =>
-			openCommitSession(token, namedCache('concurrent'), publicationCapability)
+			openCommitSession(token, namedCache('concurrent'), publicationSession)
 		)
 	);
 	try {
@@ -332,7 +352,7 @@ it('refuses a plan after its cache is deleted and reports the next generation', 
 	const conversation = await openCommitSession(
 		token,
 		namedCache('recreated'),
-		publicationCapability
+		publicationSession
 	);
 	try {
 		conversation.send({
@@ -394,7 +414,7 @@ it('replays a completed publication after pending cleanup and recovery expiry', 
 	const conversation = await openCommitSession(
 		token,
 		undefined,
-		publicationCapability
+		publicationSession
 	);
 	const request = {
 		op: 'publish-batch' as const,
@@ -480,7 +500,7 @@ it.each(['skip', 'commit'] as const)(
 		const conversation = await openCommitSession(
 			token,
 			scope,
-			publicationCapability
+			publicationSession
 		);
 		try {
 			conversation.send({
@@ -599,7 +619,7 @@ it('recovers a newly uploaded publication after disconnect and rejects a changed
 	const conversation = await openCommitSession(
 		token,
 		undefined,
-		publicationCapability
+		publicationSession
 	);
 	try {
 		conversation.send({
@@ -627,17 +647,13 @@ it('recovers a newly uploaded publication after disconnect and rejects a changed
 	const reconnected = await openCommitSession(
 		token,
 		undefined,
-		publicationCapability
+		publicationSession
 	);
 	try {
 		reconnected.send({
 			op: 'subscribe-publication',
 			pushId: testPushId,
 			entries: [entry]
-		});
-		expect(await reconnected.nextFrame()).toStrictEqual({
-			ev: 'publication-accepted',
-			uploadId: first.operationId
 		});
 		expect(await reconnected.nextFrame()).toMatchObject({
 			ev: 'settled',
@@ -687,7 +703,7 @@ it.each([-1, 0])(
 		const conversation = await openCommitSession(
 			token,
 			undefined,
-			publicationCapability
+			publicationSession
 		);
 		try {
 			conversation.send({
@@ -785,3 +801,667 @@ it.each([-1, 0])(
 		}
 	}
 );
+
+async function plannedEntries(
+	token: string,
+	planPath: string,
+	paths: readonly UploadPathNegotiation[]
+): Promise<PublicationEntry[]> {
+	const response = await authorisedFetch(planPath, token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ pushId: testPushId, paths })
+	});
+	const plan = uploadPlanResponseSchema.parse(await response.json());
+	return paths.map((metadata, index) => {
+		const planned = plan.uploads[index];
+		if (planned === undefined) {
+			throw new Error('Expected a planned entry for every path');
+		}
+		return {
+			operationId: planned.operationId,
+			cacheGeneration: plan.cacheGeneration,
+			metadata
+		};
+	});
+}
+
+function distinctPath(character: string): UploadPathNegotiation {
+	return uploadPathNegotiation(
+		uploadMetadata({
+			fileSize: 1,
+			name: `publication-${character}`,
+			storePathHash: character.repeat(32),
+			narHash: nixSha256Hash(character)
+		})
+	);
+}
+
+/**
+A point where code inside the Durable Object stops until the test releases it.
+A promise continues in the I/O context that resolves it, and the test cannot
+use the object's I/O context. The test therefore waits inside the object
+through `runInDurableObject`, whose result returns in the test's context.
+*/
+class DurableObjectPause {
+	private isReached = false;
+	private isReleased = false;
+	private onReached: (() => void) | undefined;
+	private onReleased: (() => void) | undefined;
+
+	// Called inside the Durable Object.
+	async stop(): Promise<void> {
+		this.isReached = true;
+		this.onReached?.();
+		if (this.isReleased) {
+			return;
+		}
+		const { promise, resolve } = Promise.withResolvers<undefined>();
+		this.onReleased = () => {
+			resolve(undefined);
+		};
+		await promise;
+	}
+
+	reached(): Promise<void> {
+		return runInDurableObject(currentServer(), async () => {
+			if (this.isReached) {
+				return;
+			}
+			const { promise, resolve } = Promise.withResolvers<undefined>();
+			this.onReached = () => {
+				resolve(undefined);
+			};
+			await promise;
+		});
+	}
+
+	release(): Promise<void> {
+		this.isReleased = true;
+		return runInDurableObject(currentServer(), () => {
+			this.onReleased?.();
+			return Promise.resolve();
+		});
+	}
+}
+
+function refusalFacts(frame: CommitSessionFrame) {
+	if (frame.ev !== 'publication-refused') {
+		return frame;
+	}
+	const { message, ...facts } = frame;
+	return { ...facts, hasMessage: message.length > 0 };
+}
+
+// The v0.0.47 to v0.0.49 releases accept these capabilities.
+const releasedPublication = `${commitCreditAccept},${publicationCapability}`;
+const creditedPublication = `${releasedPublication},${publicationRefusalReasonsCapability}`;
+const openingGrant = Math.floor(defaultCommitEntryCreditBudget / 2);
+
+describe('publication commit credit', () => {
+	beforeEach(resetTestServer);
+
+	it('replays accepted publications on subscribe without charging credit or starting commits', async () => {
+		const token = await initialise();
+		const [uncommitted, committed] = await plannedEntries(
+			token,
+			'/uploads/plan',
+			[distinctPath('1'), distinctPath('2')]
+		);
+		if (uncommitted === undefined || committed === undefined) {
+			throw new Error('Expected two planned entries');
+		}
+		const session = await openCommitSession(
+			token,
+			defaultCache(),
+			creditedPublication
+		);
+		let frames: unknown[];
+		let before: Awaited<ReturnType<typeof snapshot>>;
+		try {
+			for (const entry of [uncommitted, committed]) {
+				session.send({
+					op: 'publish-batch',
+					pushId: testPushId,
+					entries: [entry]
+				});
+				expect([
+					await session.nextFrame(),
+					await session.nextFrame()
+				]).toStrictEqual([
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				]);
+			}
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.update(schema.pendingUploads)
+					.set({ verdict: 'pending' })
+					.where(eq(schema.pendingUploads.id, committed.operationId))
+					.run();
+				return Promise.resolve();
+			});
+			before = await snapshot();
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [uncommitted, committed]
+			});
+			frames = [
+				refusalFacts(await session.nextFrame()),
+				refusalFacts(await session.nextFrame())
+			];
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+		const after = await snapshot();
+		const next = await openCommitSession(
+			token,
+			defaultCache(),
+			creditedPublication
+		);
+		await closeSessionAndWait(next.socket);
+		expect({
+			frames,
+			pending: after.pending.map((row) => ({
+				id: row.id,
+				verdict: row.verdict
+			})),
+			operations: after.operations,
+			capabilities: next.capabilities
+		}).toStrictEqual({
+			frames: [
+				{
+					ev: 'publication-refused',
+					uploadId: uncommitted.operationId,
+					reason: 'resend',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				},
+				{
+					ev: 'deferred',
+					uploadId: committed.operationId,
+					storePathHash: committed.metadata.storePathHash,
+					narHash: committed.metadata.narHash,
+					grace: {}
+				}
+			],
+			pending: before.pending.map((row) => ({
+				id: row.id,
+				verdict: row.verdict
+			})),
+			operations: before.operations,
+			capabilities: commitCapabilitiesValueWithCredit(openingGrant)
+		});
+	});
+	it("admits a released client's subscription to an operation whose commit has not started", async () => {
+		vi.setSystemTime(vi.getRealSystemTime());
+		const token = await initialise();
+		const nar = await verifiableNar('publication-released-subscription');
+		const [planned] = await plannedEntries(token, '/uploads/plan', [
+			uploadPathNegotiation(
+				uploadMetadata({
+					fileSize: nar.narBytes.byteLength,
+					fileHash: nar.fileHash,
+					narHash: nar.narHash,
+					narSize: nar.narSize
+				})
+			)
+		]);
+		if (planned === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const entry = {
+			...planned,
+			blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+		};
+		const first = await openCommitSession(
+			token,
+			defaultCache(),
+			releasedPublication
+		);
+		try {
+			first.send({ op: 'publish-batch', pushId: testPushId, entries: [entry] });
+			expect([await first.nextFrame(), await first.nextFrame()]).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{ ev: 'upload-required', uploadId: entry.operationId }
+			]);
+		} finally {
+			await closeSessionAndWait(first.socket);
+		}
+		// The bytes arrive, and the connection drops before the client sends the
+		// entry again.
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			nar
+		);
+		const admission = new DurableObjectPause();
+		const admit = vi
+			.spyOn(UploadsService.prototype, 'admitPublication')
+			.mockImplementationOnce(async function (
+				this: UploadsService,
+				...arguments_
+			) {
+				admit.mockRestore();
+				await admission.stop();
+				return this.admitPublication(...arguments_);
+			});
+		const reconnected = await openCommitSession(
+			token,
+			defaultCache(),
+			releasedPublication
+		);
+		try {
+			reconnected.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			const firstFrame = reconnected.nextFrame();
+			const answered = async () => refusalFacts(await firstFrame);
+			const isAdmitted = async () => {
+				await admission.reached();
+				return true;
+			};
+			expect(await Promise.race([isAdmitted(), answered()])).toBe(true);
+			// Admission takes one entry of the tenant's credit while it runs.
+			const during = await openCommitSession(
+				token,
+				defaultCache(),
+				creditedPublication
+			);
+			await closeSessionAndWait(during.socket);
+			await admission.release();
+			expect([await firstFrame, await reconnected.nextFrame()]).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'deferred',
+					uploadId: entry.operationId,
+					storePathHash: entry.metadata.storePathHash,
+					narHash: entry.metadata.narHash,
+					grace: {}
+				}
+			]);
+			await recordClaimedVerification(entry.operationId, {
+				ok: true,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			const verdict = await reconnected.nextFrame();
+			const after = await openCommitSession(
+				token,
+				defaultCache(),
+				creditedPublication
+			);
+			await closeSessionAndWait(after.socket);
+			const { operations } = await snapshot();
+			expect({
+				verdict,
+				during: during.capabilities,
+				after: after.capabilities,
+				states: operations.map((operation) => operation.state)
+			}).toStrictEqual({
+				verdict: {
+					ev: 'verdict',
+					uploadId: entry.operationId,
+					status: 'servable',
+					grace: {}
+				},
+				during: commitCapabilitiesValueWithCredit(
+					Math.floor((defaultCommitEntryCreditBudget - openingGrant - 1) / 2)
+				),
+				after: commitCapabilitiesValueWithCredit(
+					Math.floor((defaultCommitEntryCreditBudget - openingGrant) / 2)
+				),
+				states: ['servable']
+			});
+		} finally {
+			admit.mockRestore();
+			await admission.release();
+			await closeSessionAndWait(reconnected.socket);
+		}
+	});
+
+	it("admits the entries of a released client's subscription concurrently", async () => {
+		vi.setSystemTime(vi.getRealSystemTime());
+		const token = await initialise();
+		const entries = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('m'),
+			distinctPath('n')
+		]);
+		const first = await openCommitSession(
+			token,
+			defaultCache(),
+			releasedPublication
+		);
+		try {
+			first.send({ op: 'publish-batch', pushId: testPushId, entries });
+			for (let frame = 0; frame < 2 * entries.length; frame += 1) {
+				await first.nextFrame();
+			}
+		} finally {
+			await closeSessionAndWait(first.socket);
+		}
+		// The client reconnects before it uploads any bytes.
+		const acquire = vi.spyOn(CountingSemaphore.prototype, 'acquire');
+		const acquiredAtAdmission: number[] = [];
+		const admission = vi
+			.spyOn(UploadsService.prototype, 'admitPublication')
+			.mockImplementation(function (this: UploadsService, ...arguments_) {
+				acquiredAtAdmission.push(acquire.mock.calls.length);
+				admission.mockRestore();
+				return this.admitPublication(...arguments_);
+			});
+		const reconnected = await openCommitSession(
+			token,
+			defaultCache(),
+			releasedPublication
+		);
+		try {
+			reconnected.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries
+			});
+			const frames: CommitSessionFrame[] = [];
+			for (let frame = 0; frame < 2 * entries.length; frame += 1) {
+				frames.push(await reconnected.nextFrame());
+			}
+			expect({
+				acquiredAtAdmission,
+				frames: entries.map((entry) =>
+					frames.filter(
+						(frame) =>
+							'uploadId' in frame && frame.uploadId === entry.operationId
+					)
+				)
+			}).toStrictEqual({
+				acquiredAtAdmission: [entries.length],
+				frames: entries.map((entry) => [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				])
+			});
+		} finally {
+			admission.mockRestore();
+			acquire.mockRestore();
+			await closeSessionAndWait(reconnected.socket);
+		}
+	});
+
+	it("admits a released client's subscription when the tenant has no unallocated credit", async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('r')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const first = await openCommitSession(
+			token,
+			defaultCache(),
+			releasedPublication
+		);
+		try {
+			first.send({ op: 'publish-batch', pushId: testPushId, entries: [entry] });
+			await first.nextFrame();
+			await first.nextFrame();
+		} finally {
+			await closeSessionAndWait(first.socket);
+		}
+		const before = await snapshot();
+		// Another session has the tenant's whole credit budget.
+		const holder = await openCommitSession(
+			token,
+			defaultCache(),
+			creditedPublication
+		);
+		holder.send({
+			op: 'request-credit',
+			entries: defaultCommitEntryCreditBudget
+		});
+		const grants = [];
+		for (
+			let remaining = defaultCommitEntryCreditBudget;
+			remaining > 0;
+			remaining -= commitBatchMaxEntries
+		) {
+			grants.push(await holder.nextFrame());
+		}
+		const reconnected = await openCommitSession(
+			token,
+			defaultCache(),
+			releasedPublication
+		);
+		try {
+			reconnected.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			const answer = [
+				refusalFacts(await reconnected.nextFrame()),
+				refusalFacts(await reconnected.nextFrame())
+			];
+			expect({ grants, answer, state: await snapshot() }).toStrictEqual({
+				grants: [
+					{ ev: 'credit', grant: commitBatchMaxEntries },
+					{ ev: 'credit', grant: commitBatchMaxEntries }
+				],
+				answer: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				],
+				state: before
+			});
+		} finally {
+			await closeSessionAndWait(reconnected.socket);
+			await closeSessionAndWait(holder.socket);
+		}
+	});
+});
+
+describe('publication subscriptions', () => {
+	beforeEach(resetTestServer);
+
+	it('asks for a resend when a completed publication is no longer served, and repairs it from the resend', async () => {
+		vi.setSystemTime(vi.getRealSystemTime());
+		const token = await initialise();
+		const nar = await verifiableNar('publication-subscribe-repair');
+		const path = uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		);
+		const [planned] = await plannedEntries(token, '/uploads/plan', [path]);
+		if (planned === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const entry = {
+			...planned,
+			blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+		};
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			nar
+		);
+		const first = await openCommitSession(token, undefined, publicationSession);
+		try {
+			first.send({ op: 'publish-batch', pushId: testPushId, entries: [entry] });
+			await first.nextFrame();
+			await first.nextFrame();
+		} finally {
+			await closeSessionAndWait(first.socket);
+		}
+		await commitUpload(token, entry.operationId);
+		await deletePath(token, path.storePathHash);
+		const reconnected = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			reconnected.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			const subscribed = refusalFacts(await reconnected.nextFrame());
+			reconnected.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			const resent = [
+				await reconnected.nextFrame(),
+				await reconnected.nextFrame()
+			];
+			expect({ subscribed, resent }).toStrictEqual({
+				subscribed: {
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'resend',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				},
+				resent: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				]
+			});
+		} finally {
+			await closeSessionAndWait(reconnected.socket);
+		}
+	});
+
+	it('refuses a subscription with push-expired when an expired push has no operation record', async () => {
+		const token = await initialise();
+		const expiresAt = Math.floor(Date.now() / 1000) + 60;
+		const pushId = await testPushIdFor(fixtureTenant, 4, expiresAt);
+		const metadata = distinctPath('1');
+		const response = await authorisedFetch('/uploads/plan', token, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ pushId, paths: [metadata] })
+		});
+		const plan = uploadPlanResponseSchema.parse(await response.json());
+		const planned = plan.uploads[0];
+		if (planned === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const entry = {
+			operationId: planned.operationId,
+			cacheGeneration: plan.cacheGeneration,
+			metadata
+		};
+		vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({ op: 'subscribe-publication', pushId, entries: [entry] });
+			expect(refusalFacts(await session.nextFrame())).toStrictEqual({
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'push-expired',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				hasMessage: true
+			});
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('takes the commit entry semaphore for each subscribed entry', async () => {
+		const token = await initialise();
+		const entries = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('1'),
+			distinctPath('2')
+		]);
+		const [published] = entries;
+		if (published === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		const acquire = vi.spyOn(CountingSemaphore.prototype, 'acquire');
+		let semaphores: unknown[];
+		try {
+			// A publish-batch entry takes the commit entry semaphore.
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [published]
+			});
+			await session.nextFrame();
+			await session.nextFrame();
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries
+			});
+			await session.nextFrame();
+			await session.nextFrame();
+			semaphores = [...acquire.mock.contexts];
+		} finally {
+			acquire.mockRestore();
+			await closeSessionAndWait(session.socket);
+		}
+		const [commitEntries, ...subscribed] = semaphores;
+		expect({
+			subscribed: subscribed.length,
+			isCommitEntrySemaphore: subscribed.every(
+				(semaphore) => semaphore === commitEntries
+			)
+		}).toStrictEqual({
+			subscribed: entries.length,
+			isCommitEntrySemaphore: true
+		});
+	});
+
+	it.each([
+		{ subject: 'an operation that was never accepted', cacheName: undefined },
+		{ subject: 'a cache that does not exist', cacheName: 'absent' }
+	])('refuses a subscription to $subject', async ({ cacheName }) => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(
+			token,
+			cacheName === undefined
+				? '/uploads/plan'
+				: `/cache/${cacheName}/uploads/plan`,
+			[distinctPath('1')]
+		);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const session = await openCommitSession(
+			token,
+			cacheName === undefined ? undefined : namedCache(cacheName),
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			expect(refusalFacts(await session.nextFrame())).toStrictEqual({
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'invalid-publication',
+				status: StatusCodes.NOT_FOUND,
+				hasMessage: true
+			});
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+	});
+});

@@ -15,6 +15,7 @@ import {
 	uploadIdSchema,
 	uploadPathNegotiationSchema
 } from '@cupboard/protocol/upload';
+import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
@@ -4433,6 +4434,231 @@ describe('publication operations', () => {
 		});
 		session.close();
 	});
+	it('sends a subscribed entry again in a publish batch when the server asks for a resend', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const result = session.commit(publicationTarget);
+		first.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		first.emit('open');
+		await Promise.resolve();
+		first.emit(
+			'message',
+			frame({ ev: 'publication-accepted', uploadId: operationId })
+		);
+		first.emit('close', 1006, 'lost result');
+		await vi.advanceTimersByTimeAsync(5000);
+		second.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'publication-refused',
+				uploadId: operationId,
+				reason: 'resend',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				message: 'Send it again.'
+			})
+		);
+		await Promise.resolve();
+		const publish = JSON.stringify({
+			op: 'publish-batch',
+			pushId: publication.pushId,
+			entries: [publication.entry]
+		});
+		expect(second.sent).toStrictEqual([
+			JSON.stringify({
+				op: 'subscribe-publication',
+				pushId: publication.pushId,
+				entries: [publication.entry]
+			}),
+			publish
+		]);
+		second.emit(
+			'message',
+			frame({
+				ev: 'publication-refused',
+				uploadId: operationId,
+				reason: 'resend',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				message: 'Send it again.'
+			})
+		);
+		await expect(ackOf(result)).rejects.toStrictEqual(
+			new PublicationRefusedError(
+				'resend',
+				StatusCodes.SERVICE_UNAVAILABLE,
+				'Send it again.'
+			)
+		);
+		expect(second.sent).toStrictEqual([
+			JSON.stringify({
+				op: 'subscribe-publication',
+				pushId: publication.pushId,
+				entries: [publication.entry]
+			}),
+			publish
+		]);
+		session.close();
+	});
+
+	it.each([
+		{ name: 'a resubscription answers resend', isAcceptedAgain: false },
+		{
+			name: 'each resend is accepted again and the connection drops',
+			isAcceptedAgain: true
+		}
+	])('spends the reconnect budget when $name', async ({ isAcceptedAgain }) => {
+		const sockets = [
+			new FakeCommitSocket(),
+			new FakeCommitSocket(),
+			new FakeCommitSocket()
+		];
+		const [first, second] = sockets;
+		if (first === undefined || second === undefined) {
+			throw new Error('Expected scripted sockets');
+		}
+		const connectedAt: number[] = [];
+		const session = openSessionOver(sockets, {
+			maxReconnects: 1,
+			connectedAt
+		});
+		const result = session.commit(publicationTarget);
+		let settled: unknown = 'pending';
+		const observed = (async () => {
+			try {
+				await ackOf(result);
+				settled = 'resolved';
+			} catch (error) {
+				// A spent reconnect budget fails the entry as a protocol error.
+				settled =
+					error instanceof CommitSocketProtocolError
+						? 'reconnect budget spent'
+						: error;
+			}
+		})();
+		first.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		first.emit('open');
+		await Promise.resolve();
+		first.emit(
+			'message',
+			frame({ ev: 'publication-accepted', uploadId: operationId })
+		);
+		first.emit('close', 1006, 'lost result');
+		await vi.advanceTimersByTimeAsync(5000);
+		second.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'publication-refused',
+				uploadId: operationId,
+				reason: 'resend',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				message: 'Send it again.'
+			})
+		);
+		if (isAcceptedAgain) {
+			second.emit(
+				'message',
+				frame({ ev: 'publication-accepted', uploadId: operationId })
+			);
+		}
+		second.emit('close', 1006, 'lost result');
+		await vi.advanceTimersByTimeAsync(5000);
+		expect({ connections: connectedAt.length, settled }).toStrictEqual({
+			connections: 2,
+			settled: 'reconnect budget spent'
+		});
+		session.close();
+		await observed;
+	});
+
+	it('queues a resend behind the credit grant on a paced connection', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second], {
+			headers: creditDeclaringHeaders
+		});
+		const result = session.commit(publicationTarget);
+		first.emit('upgrade', {
+			headers: {
+				'x-cupboard-commit-capabilities': `${commitCapabilitiesValue},commit-credit;grant=1`
+			}
+		});
+		first.emit('open');
+		await Promise.resolve();
+		first.emit(
+			'message',
+			frame({ ev: 'publication-accepted', uploadId: operationId })
+		);
+		first.emit('close', 1006, 'lost result');
+		await vi.advanceTimersByTimeAsync(5000);
+		second.emit('upgrade', {
+			headers: {
+				'x-cupboard-commit-capabilities': `${commitCapabilitiesValue},commit-credit;grant=0`
+			}
+		});
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'publication-refused',
+				uploadId: operationId,
+				reason: 'resend',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				message: 'Send it again.'
+			})
+		);
+		await Promise.resolve();
+		const waiting = [...second.sent];
+		second.emit('message', frame({ ev: 'credit', grant: 1 }));
+		await Promise.resolve();
+		const subscribe = JSON.stringify({
+			op: 'subscribe-publication',
+			pushId: publication.pushId,
+			entries: [publication.entry]
+		});
+		const publish = JSON.stringify({
+			op: 'publish-batch',
+			pushId: publication.pushId,
+			entries: [publication.entry]
+		});
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId: operationId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+		expect({
+			waiting,
+			granted: second.sent,
+			outcome: await ackOf(result)
+		}).toStrictEqual({
+			waiting: [
+				subscribe,
+				JSON.stringify({ op: 'request-credit', entries: 1 })
+			],
+			granted: [
+				subscribe,
+				JSON.stringify({ op: 'request-credit', entries: 1 }),
+				publish
+			],
+			outcome: { storePathHash, narHash, status: 'committed' }
+		});
+		session.close();
+	});
+
 	it.each(['upload-required', 'recovery-expired'] as const)(
 		'reports %s without retrying the operation',
 		async (reason) => {

@@ -3225,7 +3225,7 @@ export async function openCommitSession(
 // Closes a session socket and waits for the close handshake to complete, so
 // the server has handled the close before the caller opens another session; a
 // close still in flight counts against the commit sockets the tenant holds.
-function closeSessionAndWait(socket: WebSocket): Promise<void> {
+export function closeSessionAndWait(socket: WebSocket): Promise<void> {
 	if (socket.readyState === WebSocket.READY_STATE_CLOSED) {
 		return Promise.resolve();
 	}

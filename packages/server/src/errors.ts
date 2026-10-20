@@ -72,6 +72,16 @@ export class PublicationRecoveryExpiredError extends ServerHttpError {
 	}
 }
 
+export class PublicationResendRequiredError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	constructor() {
+		super(
+			'The server needs this publication in a `publish-batch` message to continue it.'
+		);
+		this.name = 'PublicationResendRequiredError';
+	}
+}
+
 export class AttestationInfoHttpError extends ServerHttpError {
 	readonly status: number;
 	constructor(

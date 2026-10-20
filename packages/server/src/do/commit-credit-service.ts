@@ -58,6 +58,7 @@ export const commitSessionAttachmentSchema = z.object({
 	reuseGrants: authorizationDetailsSchema.optional(),
 	reuseGrantsStored: z.literal(true).optional(),
 	publication: z.literal(true).optional(),
+	publicationRefusalReasons: z.literal(true).optional(),
 	isClosing: z.boolean().optional(),
 	credit: commitCreditStateSchema.optional(),
 	lastActivityAt: epochMillisSchema.optional(),
@@ -156,7 +157,9 @@ total. Sending the entry's first frame removes it from the in-flight total and
 immediately makes that unit available to another waiting session.
 
 This bounds parsed commit work across all sessions for a tenant. Subscribe
-operations resume durable work and therefore consume no entry credit.
+operations resume durable work and therefore consume none of a session's
+balance. A subscription entry that runs admission counts as one in-flight
+entry of the tenant through `admitSubscribedEntry`.
 */
 export class CommitCreditService {
 	// `undefined` means this instance has not rebuilt the unused balances from
@@ -385,8 +388,9 @@ export class CommitCreditService {
 		return opening;
 	}
 
-	// Subscribe operations pass zero because they resume durable work and have no
-	// entry whose first result frame could release credit.
+	// Subscribe operations pass zero because they resume durable work. A
+	// subscription entry that runs admission is accounted separately, by
+	// `admitSubscribedEntry`.
 	admitMessage(
 		socket: WebSocket,
 		attachment: CommitSessionAttachment,
@@ -450,6 +454,33 @@ export class CommitCreditService {
 				(this.inFlightPerSession.get(attachment.sessionId) ?? 0) + entries
 			);
 		}
+
+		return 'accounted';
+	}
+
+	/**
+	Counts a subscription entry that runs admission as one in-flight entry of
+	the tenant. The client does not count subscriptions against its grant, so
+	the session's balance stays as it is. A session without credit is not
+	paced. The caller releases an accounted entry with {@link release}.
+
+	The entry is counted even when the tenant has no unallocated credit, so
+	the tenant's in-flight entries can exceed its budget. The caller runs the
+	entry after it acquires the tenant-wide commit entry semaphore, so the
+	excess is at most the semaphore's size.
+	*/
+	admitSubscribedEntry(
+		attachment: CommitSessionAttachment
+	): 'accounted' | 'unaccounted' {
+		if (attachment.credit === undefined) {
+			return 'unaccounted';
+		}
+
+		this.inFlightTotal += 1;
+		this.inFlightPerSession.set(
+			attachment.sessionId,
+			(this.inFlightPerSession.get(attachment.sessionId) ?? 0) + 1
+		);
 
 		return 'accounted';
 	}

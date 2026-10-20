@@ -19,6 +19,7 @@ import {
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type LocalStep } from '@cupboard/protocol/deployment';
 import { isCoveredByToken } from '@cupboard/protocol/grants';
+import { publicationIdentity } from '@cupboard/protocol/publication';
 import type {
 	R2CredentialCheck,
 	VerifyReportInput
@@ -35,11 +36,14 @@ import {
 	commitCapabilitiesValue,
 	commitCapabilitiesValueWithCredit,
 	commitCreditCapability,
+	type CommitSessionFrameInput,
 	type CommitSessionRequest,
 	commitSessionRequestSchema,
 	publicationCapability,
 	type PublicationEntry,
 	publicationMaxFrameBytes,
+	publicationRefusalReasonsCapability,
+	publicationResultSchema,
 	type PushId,
 	type SessionId,
 	sessionIdSchema,
@@ -64,6 +68,7 @@ import { z } from 'zod';
 import migrations from '../../drizzle/migrations.js';
 import { type AccessClaims } from '../auth/auth.ts';
 import { type NarVerification } from '../blob/nar-verify.ts';
+import { pushIdExpiresAtSeconds } from '../blob/push-id.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import { summariseLocalStepError } from '../db/local-step-attempts.ts';
@@ -81,6 +86,7 @@ import {
 	PublicationConflictError,
 	PublicationPushExpiredError,
 	PublicationRecoveryExpiredError,
+	PublicationResendRequiredError,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	SubrequestTimeoutError,
@@ -1179,6 +1185,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			request,
 			publicationCapability
 		);
+		const hasRefusalReasons =
+			hasPublication &&
+			hasAcceptedCapability(request, publicationRefusalReasonsCapability);
 		if (!hasPublication) {
 			this.context.cacheRepository.require(cache);
 		}
@@ -1203,7 +1212,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				authenticatedUntil: claims.expiresAt.getTime(),
 				correlation: requestCorrelation(request),
 				reuseGrantsStored: true,
-				...(hasPublication && { publication: true as const })
+				...(hasPublication && { publication: true as const }),
+				...(hasRefusalReasons && { publicationRefusalReasons: true as const })
 			},
 			hasNegotiatedCredit,
 			Date.now()
@@ -1301,28 +1311,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		readonly pushId: PushId;
 		readonly entry: PublicationEntry;
 		readonly grants: AccessClaims['grants'];
-		readonly subscribe: boolean;
 	}): Promise<void> {
 		const { socket, attachment, pushId, entry, grants } = command;
 		try {
 			const scope = attachment.cache;
-			if (
-				!isCoveredByToken(grants, 'upload:commit', { cache: scope }) ||
-				!isCoveredByToken(grants, 'upload:negotiate', { cache: scope }) ||
-				(entry.attachRoot !== undefined &&
-					!isCoveredByToken(grants, 'root:attach', {
-						cache: scope,
-						root: entry.attachRoot.name
-					}))
-			) {
-				throw new InsufficientScopeError();
-			}
-			if (
-				command.subscribe &&
-				new PublicationStore(this.context).get(entry.operationId) === undefined
-			) {
-				throw new UploadNotFoundError(entry.operationId);
-			}
+			requirePublicationScope(grants, scope, entry);
 			const admission = await this.afterHotMutation(scope, () =>
 				this.uploads.admitPublication(scope, pushId, entry, grants)
 			);
@@ -1366,31 +1359,136 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				entry.blob
 			);
 		} catch (error) {
-			const isKnown = error instanceof ServerHttpError;
-			if (!isKnown) {
-				rootLogger().error('publication admission failed', {
-					operationId: entry.operationId,
-					error
-				});
+			refusePublication(
+				socket,
+				attachment,
+				entry.operationId,
+				'publish',
+				error
+			);
+		}
+	}
+
+	// Admits a subscription entry from a client without
+	// `publication-refusal-reasons`. That client does not count the entry against
+	// its grant, so the entry counts against the tenant's credit. A refusal
+	// would use one of the entry's error retries, so the entry runs even when
+	// the tenant has no unallocated credit. The caller has acquired the commit
+	// entry semaphore, which bounds how far such entries exceed the tenant's
+	// budget.
+	private async runSubscribedPublication(command: {
+		readonly socket: WebSocket;
+		readonly attachment: CommitSessionAttachment;
+		readonly pushId: PushId;
+		readonly entry: PublicationEntry;
+		readonly grants: AccessClaims['grants'];
+	}): Promise<void> {
+		const { attachment } = command;
+		const decision = this.commitCredit.admitSubscribedEntry(attachment);
+		try {
+			await this.runPublication(command);
+		} finally {
+			if (decision === 'accounted') {
+				this.commitCredit.release(attachment.sessionId, Date.now());
 			}
-			sendCommitSessionFrame(socket, {
-				ev: 'publication-refused',
-				uploadId: entry.operationId,
-				reason:
-					error instanceof PublicationRecoveryExpiredError
-						? 'recovery-expired'
-						: error instanceof PublicationPushExpiredError
-							? 'push-expired'
-							: error instanceof PublicationConflictError
-								? error.reason
-								: error instanceof InsufficientScopeError
-									? 'forbidden'
-									: isKnown && error.status < serverErrorStatus
-										? 'invalid-publication'
-										: 'temporary-failure',
-				status: isKnown ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
-				message: isKnown ? error.message : 'internal error'
+		}
+	}
+
+	// A subscription reports the durable state of an accepted operation. Commit
+	// credit paces admission and commits, and the client sends a subscription
+	// without spending credit, so a subscription from a client that accepts
+	// `publication-refusal-reasons` never admits or commits work. When the
+	// operation needs that work, because its commit has not started or its
+	// completed path is no longer served, the server refuses such an entry with
+	// `resend`. The client then sends it again in a `publish-batch` message,
+	// which is charged. For a client without that capability, the caller admits
+	// the entry.
+	private async replayPublication(
+		socket: WebSocket,
+		attachment: CommitSessionAttachment,
+		pushId: PushId,
+		entry: PublicationEntry,
+		grants: AccessClaims['grants']
+	): Promise<'admit' | undefined> {
+		try {
+			const scope = attachment.cache;
+			requirePublicationScope(grants, scope, entry);
+			const cache = this.context.cacheRepository.resolve(scope);
+			const operations = new PublicationStore(this.context);
+			const operation = operations.get(entry.operationId);
+			if (cache === undefined || operation?.cacheId !== cache.id) {
+				// Pruning removes an operation record only after its push has expired.
+				const pushExpiry = pushIdExpiresAtSeconds(pushId);
+				if (
+					pushExpiry !== undefined &&
+					Date.now() >= pushExpiry * 1000 &&
+					(await this.context.pushCredentials().isIssuedToTenant(pushId))
+				) {
+					throw new PublicationPushExpiredError();
+				}
+				throw new UploadNotFoundError(entry.operationId);
+			}
+			const identity = await publicationIdentity({
+				tenant: this.context.requireTenant(),
+				cache: scope,
+				cacheGeneration: entry.cacheGeneration,
+				pushId,
+				metadata: entry.metadata,
+				attachRoot: entry.attachRoot
 			});
+			if (
+				identity.id !== entry.operationId ||
+				identity.canonical !== operation.canonicalJson
+			) {
+				throw new PublicationConflictError(
+					'The publication parameters changed.'
+				);
+			}
+			if (operation.state === 'servable') {
+				const served = await this.narInfoObjects.servableStorePathHashes(
+					cache,
+					[entry.metadata.storePathHash]
+				);
+				if (!served.has(entry.metadata.storePathHash)) {
+					return needsWork(attachment);
+				}
+				const result =
+					operation.resultJson === null
+						? undefined
+						: publicationResultSchema.parse(JSON.parse(operation.resultJson));
+				await this.resolveGoneCommit(socket, cache, entry.operationId, {
+					storePathHash: entry.metadata.storePathHash,
+					narHash: result?.narHash ?? entry.metadata.narHash,
+					retention: true
+				});
+				return undefined;
+			}
+			operations.assertLive(entry.operationId);
+			const row = this.context.db
+				.select()
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, entry.operationId))
+				.get();
+			if (row?.verdict === undefined || row.verdict === null) {
+				return needsWork(attachment);
+			}
+			this.replaySubscribedRow(
+				socket,
+				cache,
+				attachment.sessionId,
+				entry.operationId,
+				row
+			);
+			return undefined;
+		} catch (error) {
+			refusePublication(
+				socket,
+				attachment,
+				entry.operationId,
+				'subscribe',
+				error
+			);
+			return undefined;
 		}
 	}
 
@@ -3188,7 +3286,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			request.op === 'subscribe-publication'
 		) {
 			if (attachment.publication !== true) {
-				if (isAccounted) {
+				if (isAccounted && request.op === 'publish-batch') {
 					this.commitCredit.release(
 						sessionId,
 						Date.now(),
@@ -3202,6 +3300,36 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				attachment,
 				Date.now()
 			);
+			if (request.op === 'subscribe-publication') {
+				// Subscriptions spend no credit, so the tenant-wide semaphore is the
+				// only bound on the D1 and R2 reads that replay makes.
+				await Promise.all(
+					request.entries.map(async (entry) => {
+						await this.commitEntrySemaphore.acquire();
+						try {
+							const next = await this.replayPublication(
+								socket,
+								attachment,
+								request.pushId,
+								entry,
+								grants
+							);
+							if (next === 'admit') {
+								await this.runSubscribedPublication({
+									socket,
+									attachment,
+									pushId: request.pushId,
+									entry,
+									grants
+								});
+							}
+						} finally {
+							this.commitEntrySemaphore.release();
+						}
+					})
+				);
+				return;
+			}
 			await Promise.all(
 				request.entries.map(async (entry) => {
 					await this.commitEntrySemaphore.acquire();
@@ -3211,8 +3339,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 							attachment,
 							pushId: request.pushId,
 							entry,
-							grants,
-							subscribe: request.op === 'subscribe-publication'
+							grants
 						});
 					} finally {
 						this.commitEntrySemaphore.release();
@@ -4113,8 +4240,99 @@ function reclaimCommitCredit(
 	credit.closeSession(attachment.sessionId, Date.now());
 }
 
+function requirePublicationScope(
+	grants: AccessClaims['grants'],
+	scope: CacheScope,
+	entry: PublicationEntry
+): void {
+	if (
+		!isCoveredByToken(grants, 'upload:commit', { cache: scope }) ||
+		!isCoveredByToken(grants, 'upload:negotiate', { cache: scope }) ||
+		(entry.attachRoot !== undefined &&
+			!isCoveredByToken(grants, 'root:attach', {
+				cache: scope,
+				root: entry.attachRoot.name
+			}))
+	) {
+		throw new InsufficientScopeError();
+	}
+}
+
+// A client without `publication-refusal-reasons` fails its session on
+// `resend`, so the server admits that client's subscription entry itself.
+function needsWork(attachment: CommitSessionAttachment): 'admit' {
+	if (attachment.publicationRefusalReasons === true) {
+		throw new PublicationResendRequiredError();
+	}
+	return 'admit';
+}
+
+type PublicationRefusalReason = Extract<
+	CommitSessionFrameInput,
+	{ ev: 'publication-refused' }
+>['reason'];
+
+// Clients without `publication-refusal-reasons` parse only the six reasons that
+// the first releases with `publication-v1` know.
+function releasedRefusalReason(
+	reason: PublicationRefusalReason
+): PublicationRefusalReason {
+	switch (reason) {
+		case 'resend': {
+			return 'temporary-failure';
+		}
+		default: {
+			return reason;
+		}
+	}
+}
+
+function refusePublication(
+	socket: WebSocket,
+	attachment: CommitSessionAttachment,
+	uploadId: UploadId,
+	operation: 'publish' | 'subscribe',
+	error: unknown
+): void {
+	const isKnown = error instanceof ServerHttpError;
+	if (!isKnown) {
+		rootLogger().error('publication failed', {
+			operationId: uploadId,
+			operation,
+			error
+		});
+	}
+	const reason: PublicationRefusalReason =
+		error instanceof PublicationResendRequiredError
+			? 'resend'
+			: error instanceof PublicationRecoveryExpiredError
+				? 'recovery-expired'
+				: error instanceof PublicationPushExpiredError
+					? 'push-expired'
+					: error instanceof PublicationConflictError
+						? error.reason
+						: error instanceof InsufficientScopeError
+							? 'forbidden'
+							: isKnown && error.status < serverErrorStatus
+								? 'invalid-publication'
+								: 'temporary-failure';
+	sendCommitSessionFrame(socket, {
+		ev: 'publication-refused',
+		uploadId,
+		reason:
+			attachment.publicationRefusalReasons === true
+				? reason
+				: releasedRefusalReason(reason),
+		status: isKnown ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
+		message: isKnown ? error.message : 'internal error'
+	});
+}
+
 // Debit credit only for entries that start commits. Subscription operations
-// retain their separate request-size bounds and consume no commit credit.
+// retain their separate request-size bounds and are not charged to the
+// session's balance. A subscription entry that runs admission counts as one
+// in-flight entry of the tenant instead, even when the tenant has no
+// unallocated credit.
 function commitEntryCount(request: CommitSessionRequest): number {
 	if (request.op === 'commit') {
 		return 1;

@@ -223,6 +223,10 @@ interface SessionEntry {
 	// their original commit might not have reached the server.
 	acked: boolean;
 	accepted?: boolean;
+	// Set when this connection sent the entry in `subscribe-publication`. The
+	// client honours `resend` only while this flag is set, and clears the flag
+	// when it honours one, so each subscription causes at most one resend.
+	isSubscribed?: boolean;
 	deadline?: NodeJS.Timeout;
 	retryAttempts: number;
 	retryTimer?: NodeJS.Timeout;
@@ -1156,14 +1160,20 @@ export function runCommitSession(
 		}
 
 		// Restore the reconnect budget only when the server first acknowledges
-		// outstanding work. Replay deliberately elicits repeated `deferred` frames;
+		// outstanding work. Replay deliberately elicits repeated
+		// `publication-accepted` and `deferred` frames and `resend` refusals;
 		// counting those as progress would permit an endless reconnect loop.
 		const answered =
 			'uploadId' in frame ? outstanding.get(frame.uploadId) : undefined;
 
 		if (
 			answered !== undefined &&
-			!(frame.ev === 'deferred' && answered.acked)
+			!(frame.ev === 'deferred' && answered.acked) &&
+			!(
+				frame.ev === 'publication-accepted' &&
+				(answered.accepted === true || answered.acked)
+			) &&
+			!(frame.ev === 'publication-refused' && frame.reason === 'resend')
 		) {
 			reconnectsLeft = maxReconnects;
 			reconnectAttempt = 0;
@@ -1179,6 +1189,17 @@ export function runCommitSession(
 			}
 			case 'upload-required':
 			case 'publication-refused': {
+				const refused = outstanding.get(frame.uploadId);
+				if (
+					frame.ev === 'publication-refused' &&
+					frame.reason === 'resend' &&
+					refused?.isSubscribed === true
+				) {
+					refused.isSubscribed = false;
+					inFlightEntries.delete(frame.uploadId);
+					sendCommits([refused.target]);
+					return;
+				}
 				if (
 					frame.ev === 'publication-refused' &&
 					frame.reason === 'temporary-failure'
@@ -1456,6 +1477,7 @@ export function runCommitSession(
 		for (const [, entry] of outstanding) {
 			if (entry.acked || entry.accepted === true) {
 				ackedTargets.push(entry.target);
+				entry.isSubscribed = entry.target.publication !== undefined;
 				continue;
 			}
 
