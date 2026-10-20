@@ -90,6 +90,10 @@ class LoopbackSsh {
 		return file;
 	}
 
+	get builderUri(): string {
+		return `ssh-ng://${this.username}@${alias}:${String(this.port)}?remote-program=/nix/var/nix/profiles/default/bin/nix-daemon`;
+	}
+
 	async start(): Promise<void> {
 		for (const key of [this.identity, this.hostKey, this.otherKey]) {
 			await run('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
@@ -207,7 +211,7 @@ class LoopbackSsh {
 			INPUT_KNOWN_HOSTS: await this.knownHosts(hostKey),
 			REMOTE: mode === 'builder' ? 'true' : 'false',
 			STORE: '',
-			BUILDERS: `ssh-ng://${this.username}@${alias}:${String(this.port)}?remote-program=/nix/var/nix/profiles/default/bin/nix-daemon ${process.env.NIX_SYSTEM ?? ''} - 1 1`,
+			BUILDERS: `${this.builderUri} ${process.env.NIX_SYSTEM ?? ''} - 1 1`,
 			BUILDER_SSH_KEY: await readFile(key, 'utf8'),
 			BUILDER_KNOWN_HOSTS: await this.knownHosts(hostKey),
 			BUILDER_SSH_CONFIG: `Host ${alias}\n  HostName 127.0.0.1\n`,
@@ -389,6 +393,11 @@ describe('NixOS installer compatibility', () => {
 		it('builds through job-scoped SSH configuration with local builds disabled', async () => {
 			const { ssh } = prepared();
 			const environment = await ssh.environment('builder');
+			await run(
+				'nix',
+				['store', 'info', '--json', '--store', ssh.builderUri],
+				environment
+			);
 			const before = await readFile(ssh.commands, 'utf8');
 			const marker = randomUUID();
 			const result = await run(
