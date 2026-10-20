@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -10,6 +10,63 @@ import { z } from 'zod';
 import { withTemporaryDirectory } from '../tests/support/filesystem.ts';
 
 const execute = promisify(execFile);
+
+it.each(['local-filesystem', 'daemon'] as const)(
+	'checks nested cleanup for a %s store',
+	async (store) => {
+		await withTemporaryDirectory('cupboard-lifecycle-', async (directory) => {
+			const adapterDirectory = path.join(directory, 'adapter');
+			const hook = path.join(adapterDirectory, 'build-hook');
+			const configuration = 'max-jobs = 2\nbuild-hook = /existing/hook\n';
+			await mkdir(adapterDirectory);
+			await writeFile(hook, '');
+			const original = {
+				NIX_CONFIG: configuration,
+				NIX_USER_CONF_FILES: '/existing/config',
+				NIX_SSHOPTS: 'original-options'
+			};
+			for (const [key, value] of Object.entries(original)) {
+				await writeFile(path.join(directory, key), value);
+			}
+			const recorded = await execute(
+				process.execPath,
+				[path.resolve('tests/installer/lifecycle/record.ts'), store],
+				{
+					env: {
+						...process.env,
+						TRIAL_LIFECYCLE_DIRECTORY: directory,
+						GITHUB_ENV: path.join(directory, 'environment'),
+						NIX_CONFIG:
+							store === 'daemon'
+								? `${configuration}build-hook = ${hook}\n`
+								: configuration
+					}
+				}
+			);
+			const recordedHook = await readFile(path.join(directory, 'hook'), 'utf8');
+			await rm(adapterDirectory, { recursive: true });
+			const cleaned = await execute(
+				process.execPath,
+				[path.resolve('tests/installer/lifecycle/post.ts')],
+				{
+					env: { ...process.env, STATE_directory: directory }
+				}
+			);
+			expect({
+				recorded: recorded.stdout,
+				hook: recordedHook,
+				cleaned: cleaned.stdout
+			}).toStrictEqual({
+				recorded: '',
+				hook: store === 'daemon' ? hook : '',
+				cleaned:
+					store === 'daemon'
+						? 'Nested builder action cleanup verified after its post step.\n'
+						: 'Single-user builder preparation left the build hook unchanged.\n'
+			});
+		});
+	}
+);
 
 const stepSchema = z.looseObject({
 	id: z.string().optional(),
@@ -107,7 +164,31 @@ const jobSchema = z.looseObject({
 	steps: z.array(stepSchema)
 });
 const jobsSchema = z.object({ trial: jobSchema, production: jobSchema });
-const workflowSchema = z.looseObject({ jobs: jobsSchema });
+const pathFilterSchema = z.object({ paths: z.array(z.string()) });
+const workflowSchema = z.looseObject({
+	jobs: jobsSchema,
+	on: z.object({ pull_request: pathFilterSchema })
+});
+
+it.each(['actions/src/inputs.ts', 'packages/shared/src/errors.ts'])(
+	'runs the installer trial when %s changes',
+	async (file) => {
+		const document: unknown = parse(
+			await readFile(
+				new URL(
+					'../.github/workflows/nix-installer-trial.yml',
+					import.meta.url
+				),
+				'utf8'
+			)
+		);
+		const workflow = workflowSchema.parse(document);
+		const shouldTrigger = workflow.on.pull_request.paths.some((pattern) =>
+			path.matchesGlob(file, pattern)
+		);
+		expect(shouldTrigger).toBe(true);
+	}
+);
 
 it('trials the pinned NixOS installer independently of the production installer', async () => {
 	const document: unknown = parse(
@@ -193,7 +274,7 @@ it('exercises the production prepare action before testing the production store'
 			.filter(
 				(step) =>
 					(step.uses ?? '').startsWith('$/') ||
-					/^(?:Record|Test) /u.test(step.name ?? '')
+					/^(?:Record|Test|Verify) /u.test(step.name ?? '')
 			)
 			.map(({ name, uses, if: condition }) => ({ name, uses, condition }))
 	}).toStrictEqual({
@@ -219,7 +300,7 @@ it('exercises the production prepare action before testing the production store'
 				condition: undefined
 			},
 			{
-				name: 'Record the nested adapter and restore the test environment',
+				name: 'Verify single-user builder preparation and restore the test environment',
 				uses: undefined,
 				condition: undefined
 			},

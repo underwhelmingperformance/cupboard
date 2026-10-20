@@ -35,11 +35,12 @@ machines. The plan job also gets the builders, because evaluating the flake can
 require building something.
 
 Remote builders require a local store or a local Nix daemon that trusts the
-runner user. Each job has its own SSH configuration and build-hook adapter. The
-daemon must accept the job's build-hook override. Before exporting the override,
-the action checks that the store process can execute the adapter in `/tmp` and
-resolves the configured hook with that process's permissions and `PATH`. The
-action removes the adapter after the job.
+runner user. Each job has its own SSH configuration. Local filesystem stores
+inherit that configuration directly. For daemon stores, the action creates a
+job-specific build-hook adapter, and the daemon must accept the override. Before
+exporting the override, the action checks that the daemon can execute the
+adapter in `/tmp` and resolves the configured hook with the daemon's permissions
+and `PATH`. The action removes the adapter after the job.
 
 When you write the specification:
 

@@ -5,6 +5,9 @@ import { builderHookStateKey, prepareBuilderHook } from './hook.ts';
 
 async function main(): Promise<void> {
 	const hook = await prepareBuilderHook(process.env);
+	if (hook === undefined) {
+		return;
+	}
 	saveState(builderHookStateKey, hook.directory);
 	exportVariable('NIX_CONFIG', hook.nixConfig);
 }

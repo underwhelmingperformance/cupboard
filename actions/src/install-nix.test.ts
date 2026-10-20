@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +51,60 @@ const darwinTrace = [
 ];
 
 describe('in-tree Nix installer', () => {
+	it.each([
+		{ system: 'x86_64-linux', failure: '', commands: 3 },
+		{ system: 'aarch64-linux', failure: '', commands: 3 },
+		{ system: 'aarch64-darwin', failure: '', commands: 0 },
+		{ system: 'x86_64-linux', failure: 'tee', commands: 1 },
+		{ system: 'x86_64-linux', failure: 'udevadm control', commands: 2 },
+		{ system: 'x86_64-linux', failure: 'udevadm trigger', commands: 3 }
+	])(
+		'enables KVM on $system with failure "$failure"',
+		async ({ system, failure, commands }) => {
+			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-kvm-'));
+			onTestFinished(() => rm(directory, { recursive: true, force: true }));
+			const trace = path.join(directory, 'commands');
+			const rule = path.join(directory, 'rule');
+			await writeFile(trace, '');
+			await writeFile(rule, '');
+			const result = run(
+				String.raw`
+sudo() {
+  printf '%s\n' "$*" >> "$FIXTURE/commands"
+  if [[ "$1" == tee ]]; then cat >> "$FIXTURE/rule"; fi
+  [[ -z "$FAIL_COMMAND" || "$*" != "$FAIL_COMMAND"* ]]
+}
+enable_kvm "$SYSTEM"
+`,
+				{ FIXTURE: directory, SYSTEM: system, FAIL_COMMAND: failure }
+			);
+			expect({
+				...result,
+				commands: await readFile(trace, 'utf8'),
+				rule: await readFile(rule, 'utf8')
+			}).toStrictEqual({
+				status: 0,
+				stdout: '',
+				stderr:
+					failure === ''
+						? ''
+						: '::warning::Could not enable KVM; continuing Nix installation\n',
+				commands: [
+					'tee /etc/udev/rules.d/99-install-nix-action-kvm.rules',
+					'udevadm control --reload-rules',
+					'udevadm trigger --name-match=kvm'
+				]
+					.slice(0, commands)
+					.map((command) => `${command}\n`)
+					.join(''),
+				rule:
+					commands === 0
+						? ''
+						: 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n'
+			});
+		}
+	);
+
 	it.each([0, 1, 77])('continues after Spotlight exits %i', (status) => {
 		expect(
 			run(darwinCommands, { USER: 'runner', SPOTLIGHT_STATUS: String(status) })

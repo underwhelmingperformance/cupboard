@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { access, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -21,10 +22,31 @@ const execute = promisify(execFile);
 const probeWorkerPath = fileURLToPath(
 	new URL('../../prepare-builders/dist/probe-worker.cjs', import.meta.url)
 );
-const localStore = {
-	storeKind: 'local-filesystem' as const,
-	daemonTrust: () => Promise.resolve('unknown' as const)
+const trustedDaemon = {
+	storeKind: 'daemon' as const,
+	daemonTrust: () => Promise.resolve('trusted' as const)
 };
+
+it('leaves local filesystem stores unchanged without reading or probing the hook', async () => {
+	const result = await prepareBuilderHook(
+		{ NIX_CONFIG: 'build-hook = /existing/hook\n', NIX_SSHOPTS: 'job-options' },
+		{
+			store: {
+				storeKind: 'local-filesystem',
+				daemonTrust: () => {
+					throw new Error('Local stores do not require daemon trust');
+				}
+			},
+			readHook: () => {
+				throw new Error('Local stores do not require hook lookup');
+			},
+			executeProbe: () => {
+				throw new Error('Local stores do not require a probe');
+			}
+		}
+	);
+	expect(result).toBeUndefined();
+});
 
 it('preserves the hook arguments, SSH options and protocol file descriptors', async () => {
 	await withTemporaryDirectory("cupboard-hook 'quoted' ", async (directory) => {
@@ -38,7 +60,7 @@ it('preserves the hook arguments, SSH options and protocol file descriptors', as
 		const result = await prepareBuilderHook(
 			{ ...process.env, NIX_SSHOPTS: sshOptions, NIX_CONFIG: 'max-jobs = 0' },
 			{
-				store: localStore,
+				store: trustedDaemon,
 				probeWorkerPath,
 				readHook: () => Promise.resolve([command, "argument 'with quotes'"]),
 				executeProbe: async (hook) => {
@@ -46,6 +68,7 @@ it('preserves the hook arguments, SSH options and protocol file descriptors', as
 				}
 			}
 		);
+		assert.ok(result !== undefined);
 		try {
 			const hook = path.join(result.directory, 'build-hook');
 			const child = spawn(hook, ['17'], {
@@ -120,6 +143,7 @@ it('keeps concurrent jobs independent and resolves the existing hook through PAT
 	try {
 		const output = await Promise.all(
 			results.map(async (result) => {
+				assert.ok(result !== undefined);
 				const { stdout } = await execute(
 					path.join(result.directory, 'build-hook')
 				);
@@ -129,7 +153,10 @@ it('keeps concurrent jobs independent and resolves the existing hook through PAT
 		expect(output).toStrictEqual(['first-job\n', 'second-job\n']);
 	} finally {
 		await Promise.all(
-			results.map((result) => removeBuilderHook(result.directory))
+			results.map(async (result) => {
+				assert.ok(result !== undefined);
+				await removeBuilderHook(result.directory);
+			})
 		);
 	}
 });
@@ -175,7 +202,7 @@ it('resolves the hook in the store process instead of the action PATH', async ()
 				NIX_SSHOPTS: 'job-options'
 			},
 			{
-				store: localStore,
+				store: trustedDaemon,
 				probeWorkerPath,
 				readHook: () => Promise.resolve(['store-only-hook']),
 				executeProbe: async (hook) => {
@@ -183,6 +210,7 @@ it('resolves the hook in the store process instead of the action PATH', async ()
 				}
 			}
 		);
+		assert.ok(result !== undefined);
 		try {
 			const { stdout } = await execute(
 				path.join(result.directory, 'build-hook')
@@ -200,7 +228,7 @@ it('refuses a store that cannot execute the adapter and removes its files', asyn
 		prepareBuilderHook(
 			{ ...process.env, NIX_SSHOPTS: 'job-options' },
 			{
-				store: localStore,
+				store: trustedDaemon,
 				probeWorkerPath,
 				readHook: () => Promise.resolve(['/usr/bin/true']),
 				executeProbe: (hook) => {
@@ -213,18 +241,68 @@ it('refuses a store that cannot execute the adapter and removes its files', asyn
 	await expect(access(directory)).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
-it('preserves the Nix error when the store cannot start the probe', async () => {
-	const failure = Object.assign(
-		new Error('The fixture could not evaluate the probe'),
-		{ code: 1 }
-	);
+it.each([1, 100])(
+	'preserves exit %i when the store cannot start the probe',
+	async (code) => {
+		const failure = Object.assign(
+			new Error('The fixture could not evaluate the probe'),
+			{ code }
+		);
+		await expect(
+			prepareBuilderHook(
+				{ ...process.env, NIX_SSHOPTS: 'job-options' },
+				{
+					store: trustedDaemon,
+					readHook: () => Promise.resolve(['/usr/bin/true']),
+					executeProbe: () => Promise.reject(failure)
+				}
+			)
+		).rejects.toMatchObject({
+			name: 'BuilderHookCapabilityError',
+			cause: failure
+		});
+	}
+);
+
+it.each([1, 100])(
+	'accepts a completed probe after Nix exits %i',
+	async (code) => {
+		const result = await prepareBuilderHook(
+			{ ...process.env, NIX_SSHOPTS: 'job-options' },
+			{
+				store: trustedDaemon,
+				probeWorkerPath,
+				readHook: () => Promise.resolve(['/usr/bin/true']),
+				executeProbe: async (hook) => {
+					await execute(hook);
+					throw Object.assign(new Error('The probe declined the build'), {
+						code
+					});
+				}
+			}
+		);
+		assert.ok(result !== undefined);
+		await removeBuilderHook(result.directory);
+	}
+);
+
+it('rejects an interrupted process even after the probe writes its result', async () => {
+	const failure = Object.assign(new Error('The probe timed out'), {
+		code: 143,
+		killed: true,
+		signal: 'SIGTERM'
+	});
 	await expect(
 		prepareBuilderHook(
 			{ ...process.env, NIX_SSHOPTS: 'job-options' },
 			{
-				store: localStore,
+				store: trustedDaemon,
+				probeWorkerPath,
 				readHook: () => Promise.resolve(['/usr/bin/true']),
-				executeProbe: () => Promise.reject(failure)
+				executeProbe: async (hook) => {
+					await execute(hook);
+					throw failure;
+				}
 			}
 		)
 	).rejects.toMatchObject({

@@ -14,6 +14,19 @@ nix_system() {
   esac
 }
 
+enable_kvm() {
+  if [[ "$1" != *-linux ]]; then
+    return
+  fi
+  if printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+      | sudo tee /etc/udev/rules.d/99-install-nix-action-kvm.rules >/dev/null \
+    && sudo udevadm control --reload-rules \
+    && sudo udevadm trigger --name-match=kvm; then
+    return
+  fi
+  echo '::warning::Could not enable KVM; continuing Nix installation' >&2
+}
+
 create_darwin_store() {
   local disk
   disk=$(stat -f '%Sd' /)
@@ -67,6 +80,7 @@ main() {
   # shellcheck source=versions.env
   source "${BASH_SOURCE[0]%/*}/versions.env"
   system=$(nix_system "$(uname -m)" "$(uname -s)")
+  enable_kvm "$system"
   prepare_store "$system"
 
   tar=tar

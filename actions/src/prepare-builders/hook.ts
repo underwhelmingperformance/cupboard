@@ -72,20 +72,24 @@ async function readBuildHook(
 
 /**
  * Wraps the effective build hook with the job's SSH options. The override is
- * passed through NIX_CONFIG to the store connection that performs the build.
+ * passed through NIX_CONFIG to a trusted daemon. Local filesystem stores
+ * inherit the job's environment and do not require an adapter.
  */
 export async function prepareBuilderHook(
 	environment: Environment,
 	dependencies: BuilderHookDependencies = {}
-): Promise<BuilderHook> {
-	const sshOptions = requireEnvironment(environment, 'NIX_SSHOPTS');
+): Promise<BuilderHook | undefined> {
 	const store = dependencies.store ?? Nix.open();
+	if (store.storeKind === 'local-filesystem') {
+		return;
+	}
 	if (
-		store.storeKind !== 'local-filesystem' &&
-		!(store.storeKind === 'daemon' && (await store.daemonTrust()) === 'trusted')
+		store.storeKind !== 'daemon' ||
+		(await store.daemonTrust()) !== 'trusted'
 	) {
 		throw new BuilderHookTrustError();
 	}
+	const sshOptions = requireEnvironment(environment, 'NIX_SSHOPTS');
 	const [command, ...arguments_] = await (
 		dependencies.readHook ?? (() => readBuildHook(environment))
 	)();

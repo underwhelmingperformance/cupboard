@@ -98,7 +98,14 @@ export async function probeBuildHook(options: {
 		);
 	} catch (error) {
 		// The probe declines the build and max-jobs=0 prevents a local fallback.
-		if (!(error instanceof Error) || !('code' in error) || error.code !== 1) {
+		if (
+			!(error instanceof Error) ||
+			!('code' in error) ||
+			typeof error.code !== 'number' ||
+			error.code <= 0 ||
+			('killed' in error && error.killed === true) ||
+			('signal' in error && error.signal !== null && error.signal !== undefined)
+		) {
 			throw new BuilderHookCapabilityError({ cause: error });
 		}
 		failure = error;

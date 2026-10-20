@@ -8,9 +8,13 @@ if (directory === undefined) {
 }
 try {
 	const hook = await readFile(path.join(directory, 'hook'), 'utf8');
-	await assert.rejects(access(path.dirname(hook)), { code: 'ENOENT' });
+	if (hook !== '') {
+		await assert.rejects(access(path.dirname(hook)), { code: 'ENOENT' });
+	}
 	process.stdout.write(
-		'Nested builder action cleanup verified after its post step.\n'
+		hook === ''
+			? 'Single-user builder preparation left the build hook unchanged.\n'
+			: 'Nested builder action cleanup verified after its post step.\n'
 	);
 } finally {
 	await rm(directory, { recursive: true, force: true });

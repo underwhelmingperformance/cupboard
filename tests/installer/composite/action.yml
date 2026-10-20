@@ -6,4 +6,4 @@ runs:
   steps:
     - uses: $/actions/prepare-builders
     - shell: bash
-      run: node tests/installer/lifecycle/record.ts
+      run: node tests/installer/lifecycle/record.ts daemon
