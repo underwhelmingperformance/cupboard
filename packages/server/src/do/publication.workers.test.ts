@@ -1,3 +1,5 @@
+import { rootLogger } from '@cupboard/logger';
+import { rootNameSchema } from '@cupboard/nix-store/scalars';
 import { publicationStagingKey } from '@cupboard/protocol/publication';
 import {
 	acceptCapabilitiesHeader,
@@ -25,6 +27,7 @@ import * as schema from '../db/schema.ts';
 import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	asOneInvocation,
 	authorisedFetch,
 	closeSessionAndWait,
 	commitCreditAccept,
@@ -45,7 +48,8 @@ import {
 	testPushIdFor,
 	uploadMetadata,
 	uploadPathNegotiation,
-	verifiableNar
+	verifiableNar,
+	verificationOf
 } from '../test-support.ts';
 
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
@@ -806,12 +810,13 @@ it.each([-1, 0])(
 async function plannedEntries(
 	token: string,
 	planPath: string,
-	paths: readonly UploadPathNegotiation[]
+	paths: readonly UploadPathNegotiation[],
+	attachRoot?: PublicationEntry['attachRoot']
 ): Promise<PublicationEntry[]> {
 	const response = await authorisedFetch(planPath, token, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ pushId: testPushId, paths })
+		body: JSON.stringify({ pushId: testPushId, paths, attachRoot })
 	});
 	const plan = uploadPlanResponseSchema.parse(await response.json());
 	return paths.map((metadata, index) => {
@@ -822,7 +827,8 @@ async function plannedEntries(
 		return {
 			operationId: planned.operationId,
 			cacheGeneration: plan.cacheGeneration,
-			metadata
+			metadata,
+			...(attachRoot !== undefined && { attachRoot })
 		};
 	});
 }
@@ -1680,4 +1686,231 @@ it('requires bytes on a replay when a reusable NAR appears after a staged accept
 	} finally {
 		session.socket.close();
 	}
+});
+
+it("keeps another operation's reservation when an operation without bytes expires", async () => {
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-shared-path');
+	const path = uploadPathNegotiation(
+		uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		})
+	);
+	const [expiring] = await plannedEntries(token, '/uploads/plan', [path]);
+	const [live] = await plannedEntries(token, '/uploads/plan', [path], {
+		name: rootNameSchema.parse('run'),
+		retention: { kind: 'inherit' }
+	});
+	if (expiring === undefined || live === undefined) {
+		throw new Error('Expected two planned entries');
+	}
+	await putNarBytes(
+		publicationStagingKey(fixtureTenant, testPushId, live.operationId),
+		nar
+	);
+	const session = await openCommitSession(token, undefined, publicationSession);
+	try {
+		session.send({
+			op: 'publish-batch',
+			pushId: testPushId,
+			entries: [expiring]
+		});
+		expect([
+			await session.nextFrame(),
+			await session.nextFrame()
+		]).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: expiring.operationId },
+			{ ev: 'upload-required', uploadId: expiring.operationId }
+		]);
+		session.send({
+			op: 'publish-batch',
+			pushId: testPushId,
+			entries: [
+				{
+					...live,
+					blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+				}
+			]
+		});
+		expect([
+			await session.nextFrame(),
+			await session.nextFrame()
+		]).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: live.operationId },
+			{
+				ev: 'deferred',
+				uploadId: live.operationId,
+				storePathHash: path.storePathHash,
+				narHash: path.narHash,
+				grace: {}
+			}
+		]);
+	} finally {
+		session.socket.close();
+	}
+	const reservation = () =>
+		runInDurableObject(currentServer(), (instance) =>
+			Promise.resolve({
+				narInfos: instance.context.db
+					.select({
+						storePathHash: schema.narInfos.storePathHash,
+						generation: schema.narInfos.generation
+					})
+					.from(schema.narInfos)
+					.all(),
+				targets: instance.context.db
+					.select({
+						rootName: schema.retentionRootTargets.rootName,
+						storePathHash: schema.retentionRootTargets.storePathHash
+					})
+					.from(schema.retentionRootTargets)
+					.all()
+			})
+		);
+	// A root can include the path while the live operation's bytes are being
+	// verified.
+	await runInDurableObject(currentServer(), (instance) => {
+		const cache = instance.context.cacheRepository.require(defaultCache());
+		instance.context.db
+			.insert(schema.retentionRootTargets)
+			.values({
+				cacheId: cache.id,
+				rootName: rootNameSchema.parse('run'),
+				storePathHash: path.storePathHash,
+				storePath: path.storePath
+			})
+			.onConflictDoNothing()
+			.run();
+		return Promise.resolve();
+	});
+	const reserved = await reservation();
+	await runInDurableObject(currentServer(), (instance) => {
+		const deadline = new Date(Date.now() - 1).toISOString();
+		instance.context.db
+			.update(schema.publicationOperations)
+			.set({ recoveryDeadline: deadline })
+			.where(eq(schema.publicationOperations.id, expiring.operationId))
+			.run();
+		instance.context.db
+			.update(schema.pendingUploads)
+			.set({ recoveryDeadline: deadline })
+			.where(eq(schema.pendingUploads.id, expiring.operationId))
+			.run();
+		return Promise.resolve();
+	});
+	await currentServer().runVerification();
+	const after = await snapshot();
+	expect({
+		reservation: await reservation(),
+		pending: after.pending.map((row) => row.id),
+		operations: after.operations
+			.map((operation) => ({ id: operation.id, state: operation.state }))
+			.toSorted((left, right) => left.id.localeCompare(right.id))
+	}).toStrictEqual({
+		reservation: reserved,
+		pending: [live.operationId],
+		operations: [
+			{ id: expiring.operationId, state: 'expired' },
+			{ id: live.operationId, state: 'accepted' }
+		].toSorted((left, right) => left.id.localeCompare(right.id))
+	});
+});
+
+it('reclaims an expiring reservation when another upload for the path has a different NAR', async () => {
+	await resetTestServer();
+	const token = await initialise();
+	const nars = [
+		await verifiableNar('publication-reserved-x'),
+		await verifiableNar('publication-reserved-y')
+	];
+	const paths = nars.map((nar) =>
+		uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		)
+	);
+	const entries = [];
+	for (const [index, path] of paths.entries()) {
+		const nar = nars[index];
+		const [planned] = await plannedEntries(token, '/uploads/plan', [path]);
+		if (nar === undefined || planned === undefined) {
+			throw new Error('Expected a planned entry for each NAR');
+		}
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, planned.operationId),
+			nar
+		);
+		entries.push({
+			...planned,
+			blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+		});
+	}
+	const [expiring, other] = entries;
+	if (expiring === undefined || other === undefined) {
+		throw new Error('Expected two entries');
+	}
+	const session = await openCommitSession(token, undefined, publicationSession);
+	try {
+		for (const entry of entries) {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			await session.nextFrame();
+			await session.nextFrame();
+		}
+	} finally {
+		await closeSessionAndWait(session.socket);
+	}
+	const outcome = await runInDurableObject(
+		currentServer(),
+		async (instance) => {
+			const reserved = instance.context.db
+				.select({ narHash: schema.narInfos.narHash })
+				.from(schema.narInfos)
+				.all();
+			const deadline = new Date(Date.now() - 1).toISOString();
+			instance.context.db
+				.update(schema.publicationOperations)
+				.set({ recoveryDeadline: deadline })
+				.where(eq(schema.publicationOperations.id, expiring.operationId))
+				.run();
+			instance.context.db
+				.update(schema.pendingUploads)
+				.set({ recoveryDeadline: deadline })
+				.where(eq(schema.pendingUploads.id, expiring.operationId))
+				.run();
+			await asOneInvocation(() =>
+				verificationOf(instance).expirePublications(rootLogger())
+			);
+			return {
+				reserved,
+				after: instance.context.db
+					.select({ narHash: schema.narInfos.narHash })
+					.from(schema.narInfos)
+					.all(),
+				pending: instance.context.db
+					.select({
+						id: schema.pendingUploads.id,
+						verdict: schema.pendingUploads.verdict
+					})
+					.from(schema.pendingUploads)
+					.all()
+			};
+		}
+	);
+	expect(outcome).toStrictEqual({
+		reserved: [{ narHash: expiring.metadata.narHash }],
+		after: [],
+		pending: [{ id: other.operationId, verdict: 'pending' }]
+	});
 });

@@ -2106,6 +2106,36 @@ export class VerificationService {
 			.get();
 	}
 
+	// `pending_upload_gc_path_idx` covers the cache, the metadata's store path
+	// hash and the verdict, so keep those predicates in this form. The NAR hash
+	// then filters the rows that the index finds.
+	private hasOtherStartedCommit(
+		uploadId: UploadId,
+		cache: ResolvedCache,
+		metadata: UploadPathNegotiation
+	): boolean {
+		const uploadPath = sql`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
+		const startedVerdict = or(
+			eq(schema.pendingUploads.verdict, 'committing'),
+			eq(schema.pendingUploads.verdict, 'pending')
+		);
+		const other = this.context.db
+			.select({ id: schema.pendingUploads.id })
+			.from(schema.pendingUploads)
+			.where(
+				and(
+					eq(schema.pendingUploads.cacheId, cache.id),
+					eq(uploadPath, metadata.storePathHash),
+					eq(schema.pendingUploads.narHash, metadata.narHash),
+					startedVerdict,
+					ne(schema.pendingUploads.id, uploadId)
+				)
+			)
+			.get();
+
+		return other !== undefined;
+	}
+
 	private async probeRow(
 		logger: Logger,
 		row: NarInfoRow,
@@ -3577,7 +3607,13 @@ export class VerificationService {
 								this.notifyWaiters(pending, 'servable');
 								return;
 							}
-							if (row !== undefined) {
+							// Only a started commit reserves a narinfo row, and started
+							// commits of the same path and NAR share one reservation.
+							if (
+								row?.narHash === metadata.narHash &&
+								pending.verdict !== null &&
+								!this.hasOtherStartedCommit(pending.id, cache, metadata)
+							) {
 								const result = await this.commitPipeline.reclaimReservedRow(
 									cache,
 									metadata.storePathHash,
