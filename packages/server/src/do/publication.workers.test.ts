@@ -1632,3 +1632,52 @@ describe('publication subscriptions', () => {
 		}
 	});
 });
+
+it('requires bytes on a replay when a reusable NAR appears after a staged acceptance', async () => {
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-late-reuse');
+	const narFields = {
+		fileSize: nar.narBytes.byteLength,
+		fileHash: nar.fileHash,
+		narHash: nar.narHash,
+		narSize: nar.narSize
+	};
+	const [entry] = await plannedEntries(token, '/uploads/plan', [
+		uploadPathNegotiation(uploadMetadata(narFields))
+	]);
+	if (entry === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	const session = await openCommitSession(token, undefined, publicationSession);
+	try {
+		const request = {
+			op: 'publish-batch' as const,
+			pushId: testPushId,
+			entries: [entry]
+		};
+		session.send(request);
+		const accepted = [await session.nextFrame(), await session.nextFrame()];
+		await commitPath(
+			token,
+			uploadMetadata({
+				...narFields,
+				name: 'late-reuse',
+				storePathHash: '2'.repeat(32)
+			}),
+			nar
+		);
+		session.send(request);
+		const replayed = [await session.nextFrame(), await session.nextFrame()];
+		const expected = [
+			{ ev: 'publication-accepted', uploadId: entry.operationId },
+			{ ev: 'upload-required', uploadId: entry.operationId }
+		];
+		expect({ accepted, replayed }).toStrictEqual({
+			accepted: expected,
+			replayed: expected
+		});
+	} finally {
+		session.socket.close();
+	}
+});
