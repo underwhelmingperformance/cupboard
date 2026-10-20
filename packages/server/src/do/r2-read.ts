@@ -18,13 +18,24 @@ const r2GetBudgetMs = 15_000;
 const maximumAttempts = 3;
 const logger = getLogger(['cupboard', 'storage', 'read']);
 
+// An R2 binding call that fails with one of these codes can succeed when
+// retried.
+const transientFailure = /^(\w+): [^\r\n]+ \((10001|10043|10058)\)$/u;
+
 function transientReadCode(error: unknown): number | undefined {
 	if (!(error instanceof Error)) {
 		return undefined;
 	}
 
-	const match = /^get: [^\r\n]+ \((10001|10043|10058)\)$/u.exec(error.message);
-	return match === null ? undefined : Number(match[1]);
+	const match = transientFailure.exec(error.message);
+	return match?.[1] === 'get' ? Number(match[2]) : undefined;
+}
+
+/**
+Whether an R2 binding call failed with a code for which a retry can succeed.
+*/
+export function isTransientR2Error(error: unknown): boolean {
+	return error instanceof Error && transientFailure.test(error.message);
 }
 
 async function cancelLateBody(object: R2ReadResult): Promise<void> {
