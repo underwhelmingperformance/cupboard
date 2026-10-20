@@ -1,0 +1,137 @@
+name: NixOS installer trial
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/nix-installer-trial.yml
+      - tests/installer/**
+      - actions/prepare/**
+      - scripts/nix-installer-trial.test.ts
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  trial:
+    name: NixOS installer (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-15
+    env:
+      NIX_SYSTEM: ${{ matrix.system }}
+      CUPBOARD_NIX_INSTALLER_TRIAL: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install candidate Nix
+        id: install
+        uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6 # v1.0.0
+        with:
+          installer-version: '2.35.3'
+          enable-kvm: 'false'
+
+      - name: Configure job authentication
+        env:
+          GITHUB_ACCESS_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          configuration="${XDG_CONFIG_HOME:-$HOME/.config}/nix/nix.conf"
+          mkdir -p "$(dirname "$configuration")"
+          touch "$configuration" "$HOME/.netrc"
+          chmod 600 "$configuration" "$HOME/.netrc"
+          printf '\naccess-tokens = github.com=%s\naccept-flake-config = true\n' "$GITHUB_ACCESS_TOKEN" >> "$configuration"
+          printf 'machine github.com\nlogin github-token\npassword %s\n' "$GITHUB_ACCESS_TOKEN" >> "$HOME/.netrc"
+
+      - name: Record installed runtime
+        run: |
+          set -euo pipefail
+          export TRIAL_RESULTS="$RUNNER_TEMP/nix-installer-trial"
+          printf 'TRIAL_RESULTS=%s\n' "$TRIAL_RESULTS" >> "$GITHUB_ENV"
+          mkdir -p "$TRIAL_RESULTS"
+          {
+            git rev-parse HEAD
+            command -v nix
+            nix --version
+            nix store info --json
+            nix config show trusted-users
+            nix config show experimental-features
+            nix config show ssl-cert-file
+          } | tee "$TRIAL_RESULTS/runtime.txt"
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+        id: dependencies
+
+      - name: Prepare Linux fixture prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /run/sshd
+          docker info > "$TRIAL_RESULTS/docker.txt"
+
+      - name: Test installation and SSH compatibility
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: pnpm exec vitest run --config tests/installer/vitest.config.ts
+
+      - name: Test publication and build observation
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          pnpm --filter @cupboard/server build-info
+          pnpm exec vitest run --config tests/installer/pipeline.vitest.config.ts
+
+      - name: Test direct remote stores
+        if:
+          ${{ !cancelled() && steps.dependencies.outcome == 'success' &&
+          runner.os == 'Linux' }}
+        run: |
+          set -euo pipefail
+          pnpm --filter @cupboard/server build-info
+          pnpm exec vitest run --config tests/installer/remote-store.vitest.config.ts
+
+      - name: Collect installation diagnostics
+        if: ${{ !cancelled() }}
+        run: |
+          export TRIAL_RESULTS="$RUNNER_TEMP/nix-installer-trial"
+          mkdir -p "$TRIAL_RESULTS"
+          {
+            if [ -x /nix/nix-installer ]; then /nix/nix-installer --version; fi
+            if sudo test -f /nix/receipt.json; then
+              sudo install -m 0600 -o "$(id -u)" /nix/receipt.json "$TRIAL_RESULTS/receipt.json"
+            fi
+            if [ "$RUNNER_OS" = Linux ]; then
+              sudo journalctl --no-pager -u nix-daemon.service -n 150
+            else
+              sudo launchctl print system/org.nixos.nix-daemon
+            fi
+          } > "$TRIAL_RESULTS/installation.txt" 2>&1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: nix-installer-trial-${{ matrix.system }}
+          path: ${{ runner.temp }}/nix-installer-trial
+          if-no-files-found: error

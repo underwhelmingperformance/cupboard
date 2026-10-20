@@ -11,6 +11,7 @@
 		"tests/conformance/**/*.ts",
 		"tests/e2e/**/*.ts",
 		"tests/fixtures/**/*.ts",
+		"tests/installer/**/*.ts",
 		"tests/support/**/*.ts"
 	],
 	"exclude": ["tests/fixtures/cache-deployment-predecessor/**/*.ts"]
