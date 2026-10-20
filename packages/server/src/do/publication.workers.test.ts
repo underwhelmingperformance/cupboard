@@ -48,6 +48,7 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
+import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { PublicationStore } from './publication-store.ts';
 import { UploadsService } from './uploads-service.ts';
 
@@ -893,6 +894,23 @@ function refusalFacts(frame: CommitSessionFrame) {
 	return { ...facts, hasMessage: message.length > 0 };
 }
 
+class GrantStorageFault extends Error {}
+
+function isGrantsFailureRecord(
+	record: unknown
+): record is { readonly level: string; readonly op: string } {
+	return (
+		typeof record === 'object' &&
+		record !== null &&
+		'errorName' in record &&
+		record.errorName === 'CommitSessionGrantsUnavailableError' &&
+		'level' in record &&
+		typeof record.level === 'string' &&
+		'op' in record &&
+		typeof record.op === 'string'
+	);
+}
+
 // The v0.0.47 to v0.0.49 releases accept these capabilities.
 const releasedPublication = `${commitCreditAccept},${publicationCapability}`;
 const creditedPublication = `${releasedPublication},${publicationRefusalReasonsCapability}`;
@@ -994,6 +1012,7 @@ describe('publication commit credit', () => {
 			capabilities: commitCapabilitiesValueWithCredit(openingGrant)
 		});
 	});
+
 	it("admits a released client's subscription to an operation whose commit has not started", async () => {
 		vi.setSystemTime(vi.getRealSystemTime());
 		const token = await initialise();
@@ -1259,6 +1278,154 @@ describe('publication commit credit', () => {
 			await closeSessionAndWait(holder.socket);
 		}
 	});
+
+	it.each(['commit', 'commit-batch'] as const)(
+		"answers each entry of a %s message whose cache does not exist, and leaves the session's credit equal to the client's count",
+		async (op) => {
+			const token = await initialise();
+			const commits = (op === 'commit' ? ['1'] : ['1', '2', '3']).map(
+				(character) => ({
+					uploadId: uploadIdSchema.parse(`missing-${character}`),
+					storePathHash: distinctPath(character).storePathHash,
+					narHash: nixSha256Hash(character)
+				})
+			);
+			const [first] = commits;
+			if (first === undefined) {
+				throw new Error('Expected a commit');
+			}
+			const session = await openCommitSession(
+				token,
+				namedCache('absent'),
+				creditedPublication
+			);
+			const answers: unknown[] = [];
+			let capabilities: string | null;
+			try {
+				session.send(
+					op === 'commit' ? { op, uploadId: first.uploadId } : { op, commits }
+				);
+				for (const _commit of commits) {
+					const answer = await session.nextFrame();
+					answers.push(
+						answer.ev === 'error'
+							? {
+									ev: answer.ev,
+									uploadId: answer.uploadId,
+									status: answer.status
+								}
+							: answer
+					);
+				}
+				// The client spent credit on the message. Another session opens while
+				// this session still has unspent credit.
+				const next = await openCommitSession(
+					token,
+					defaultCache(),
+					creditedPublication
+				);
+				capabilities = next.capabilities;
+				await closeSessionAndWait(next.socket);
+			} finally {
+				await closeSessionAndWait(session.socket);
+			}
+			expect({ answers, capabilities }).toStrictEqual({
+				answers: commits.map(({ uploadId }) => ({
+					ev: 'error',
+					uploadId,
+					status: StatusCodes.NOT_FOUND
+				})),
+				capabilities: commitCapabilitiesValueWithCredit(
+					Math.floor(
+						(defaultCommitEntryCreditBudget - (openingGrant - commits.length)) /
+							2
+					)
+				)
+			});
+		}
+	);
+
+	it.each(['publish-batch', 'subscribe-publication'] as const)(
+		"refuses every entry of a %s message whose grants cannot be read, and leaves the session's credit equal to the client's count",
+		async (op) => {
+			const token = await initialise();
+			const entries = await plannedEntries(token, '/uploads/plan', [
+				distinctPath('1'),
+				distinctPath('2')
+			]);
+			const session = await openCommitSession(
+				token,
+				defaultCache(),
+				creditedPublication
+			);
+			const read = vi
+				.spyOn(CommitReuseGrantsService.prototype, 'read')
+				.mockRejectedValueOnce(new GrantStorageFault());
+			const logged = vi.spyOn(console, 'error');
+			const records: unknown[] = [];
+			const refused: unknown[] = [];
+			const resent: unknown[] = [];
+			let capabilities: string | null;
+			try {
+				session.send({ op, pushId: testPushId, entries });
+				for (const _entry of entries) {
+					refused.push(refusalFacts(await session.nextFrame()));
+				}
+				// The client spent credit on a publish-batch message. Another session
+				// opens while this session still has unspent credit.
+				const next = await openCommitSession(
+					token,
+					defaultCache(),
+					creditedPublication
+				);
+				capabilities = next.capabilities;
+				await closeSessionAndWait(next.socket);
+				session.send({ op, pushId: testPushId, entries });
+				const answers =
+					op === 'publish-batch' ? [...entries, ...entries] : entries;
+				for (const _answer of answers) {
+					resent.push(refusalFacts(await session.nextFrame()));
+				}
+			} finally {
+				await closeSessionAndWait(session.socket);
+				read.mockRestore();
+				records.push(...logged.mock.calls.map(([record]: unknown[]) => record));
+				logged.mockRestore();
+			}
+			const failures = records
+				.filter((record) => isGrantsFailureRecord(record))
+				.map((record) => ({ level: record.level, op: record.op }));
+			const spent = op === 'publish-batch' ? entries.length : 0;
+			expect({ refused, capabilities, resent, failures }).toStrictEqual({
+				refused: entries.map((entry) => ({
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'temporary-failure',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				})),
+				capabilities: commitCapabilitiesValueWithCredit(
+					Math.floor(
+						(defaultCommitEntryCreditBudget - (openingGrant - spent)) / 2
+					)
+				),
+				resent:
+					op === 'publish-batch'
+						? entries.flatMap((entry) => [
+								{ ev: 'publication-accepted', uploadId: entry.operationId },
+								{ ev: 'upload-required', uploadId: entry.operationId }
+							])
+						: entries.map((entry) => ({
+								ev: 'publication-refused',
+								uploadId: entry.operationId,
+								reason: 'invalid-publication',
+								status: StatusCodes.NOT_FOUND,
+								hasMessage: true
+							})),
+				failures: [{ level: 'error', op }]
+			});
+		}
+	);
 });
 
 describe('publication subscriptions', () => {

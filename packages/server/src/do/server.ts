@@ -76,6 +76,8 @@ import * as schema from '../db/schema.ts';
 import { isD1Overload } from '../db/transient.ts';
 import {
 	CacheCatalogueMigrationPendingError,
+	CacheNotFoundError,
+	CommitSessionGrantsUnavailableError,
 	CommitSessionLimitError,
 	CommitUpgradeRequiredError,
 	DatabaseOverloadedError,
@@ -1299,6 +1301,197 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				await store.clear(attachment);
 			}
 		}
+	}
+
+	private async chargeCommitMessage(
+		socket: WebSocket,
+		attachment: CommitSessionAttachment,
+		entries: number
+	): Promise<'accounted' | 'unaccounted' | undefined> {
+		const { sessionId } = attachment;
+		const decision = this.commitCredit.admitMessage(
+			socket,
+			attachment,
+			entries,
+			Date.now()
+		);
+
+		// Reclaim before initiating either close. The socket remains listed until
+		// the peer acknowledges it, and another grant could otherwise reach a
+		// closing session.
+		if (decision === 'overdrawn') {
+			// A negotiated client knows its exact grant. Exceeding it is a terminal
+			// protocol error, so close with 1002.
+			this.commitCredit.closeSession(sessionId, Date.now());
+			socket.close(1002, 'commit credit exceeded');
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+			return;
+		}
+
+		if (decision === 'refused') {
+			// The tenant has no capacity for another unpaced session. Use retryable
+			// close code 1013 so the client reconnects and negotiates again.
+			this.commitCredit.closeSession(sessionId, Date.now());
+			socket.close(1013, 'too many unpaced commit sessions');
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+			return;
+		}
+
+		return decision;
+	}
+
+	// The client counts every commit message against its credit, including one
+	// for a cache that does not exist. Charge the message and return the credit
+	// after each entry has its answer, so the server's count stays equal to the
+	// client's.
+	private async refuseCommitsWithoutCache(
+		socket: WebSocket,
+		attachment: CommitSessionAttachment,
+		request: Extract<CommitSessionRequest, { op: 'commit' | 'commit-batch' }>,
+		error: CacheNotFoundError
+	): Promise<void> {
+		const decision = await this.chargeCommitMessage(
+			socket,
+			attachment,
+			commitEntryCount(request)
+		);
+		if (decision === undefined) {
+			return;
+		}
+		const uploadIds =
+			request.op === 'commit'
+				? [request.uploadId]
+				: request.commits.map((entry) => entry.uploadId);
+		try {
+			for (const uploadId of uploadIds) {
+				sendCommitSessionFrame(socket, {
+					ev: 'error',
+					uploadId,
+					status: error.status,
+					message: error.message
+				});
+			}
+		} finally {
+			if (decision === 'accounted') {
+				this.commitCredit.release(
+					attachment.sessionId,
+					Date.now(),
+					uploadIds.length
+				);
+			}
+		}
+	}
+
+	private async runPublicationMessage(
+		socket: WebSocket,
+		attachment: CommitSessionAttachment,
+		request: Extract<
+			CommitSessionRequest,
+			{ op: 'publish-batch' | 'subscribe-publication' }
+		>
+	): Promise<void> {
+		const { sessionId } = attachment;
+		const operation = request.op === 'publish-batch' ? 'publish' : 'subscribe';
+		const decision = await this.chargeCommitMessage(
+			socket,
+			attachment,
+			commitEntryCount(request)
+		);
+
+		if (decision === undefined) {
+			return;
+		}
+
+		const isAccounted = decision === 'accounted';
+		const releaseAll = () => {
+			if (isAccounted && request.op === 'publish-batch') {
+				this.commitCredit.release(
+					sessionId,
+					Date.now(),
+					request.entries.length
+				);
+			}
+		};
+
+		if (attachment.publication !== true) {
+			releaseAll();
+			sendCommitSessionFrame(socket, { ev: 'unsupported', op: request.op });
+			return;
+		}
+		let grants: AccessClaims['grants'];
+		try {
+			grants = await new CommitReuseGrantsService(this.ctx.storage).read(
+				attachment,
+				Date.now()
+			);
+		} catch (error) {
+			const unavailable = new CommitSessionGrantsUnavailableError(error);
+			rootLogger().error('commit session grants could not be read', {
+				sessionId,
+				op: request.op,
+				error: unavailable
+			});
+			for (const entry of request.entries) {
+				refusePublication(
+					socket,
+					attachment,
+					entry.operationId,
+					operation,
+					unavailable
+				);
+			}
+			releaseAll();
+			return;
+		}
+		if (request.op === 'subscribe-publication') {
+			// Subscriptions spend no credit, so the tenant-wide semaphore is the only
+			// bound on the D1 and R2 reads that replay makes.
+			await Promise.all(
+				request.entries.map(async (entry) => {
+					await this.commitEntrySemaphore.acquire();
+					try {
+						const next = await this.replayPublication(
+							socket,
+							attachment,
+							request.pushId,
+							entry,
+							grants
+						);
+						if (next === 'admit') {
+							await this.runSubscribedPublication({
+								socket,
+								attachment,
+								pushId: request.pushId,
+								entry,
+								grants
+							});
+						}
+					} finally {
+						this.commitEntrySemaphore.release();
+					}
+				})
+			);
+			return;
+		}
+		await Promise.all(
+			request.entries.map(async (entry) => {
+				await this.commitEntrySemaphore.acquire();
+				try {
+					await this.runPublication({
+						socket,
+						attachment,
+						pushId: request.pushId,
+						entry,
+						grants
+					});
+				} finally {
+					this.commitEntrySemaphore.release();
+					if (isAccounted) {
+						this.commitCredit.release(sessionId, Date.now());
+					}
+				}
+			})
+		);
 	}
 
 	// Fail only the affected upload and keep the session open for other entries.
@@ -3249,31 +3442,37 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 
-		const decision = this.commitCredit.admitMessage(
-			socket,
-			attachment,
-			commitEntryCount(request),
-			Date.now()
-		);
-
-		// Reclaim before initiating either close. The socket remains listed until
-		// the peer acknowledges it, and another grant could otherwise reach a
-		// closing session.
-		if (decision === 'overdrawn') {
-			// A negotiated client knows its exact grant. Exceeding it is a terminal
-			// protocol error, so close with 1002.
-			this.commitCredit.closeSession(sessionId, Date.now());
-			socket.close(1002, 'commit credit exceeded');
-			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+		if (
+			request.op === 'publish-batch' ||
+			request.op === 'subscribe-publication'
+		) {
+			await this.runPublicationMessage(socket, attachment, request);
 			return;
 		}
 
-		if (decision === 'refused') {
-			// The tenant has no capacity for another unpaced session. Use retryable
-			// close code 1013 so the client reconnects and negotiates again.
-			this.commitCredit.closeSession(sessionId, Date.now());
-			socket.close(1013, 'too many unpaced commit sessions');
-			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+		if (
+			cache === undefined &&
+			(request.op === 'commit' || request.op === 'commit-batch')
+		) {
+			await this.refuseCommitsWithoutCache(
+				socket,
+				attachment,
+				request,
+				new CacheNotFoundError(cacheScope)
+			);
+			return;
+		}
+		if (cache === undefined) {
+			throw new CacheNotFoundError(cacheScope);
+		}
+		const decision = await this.chargeCommitMessage(
+			socket,
+			attachment,
+			commitEntryCount(request)
+		);
+
+		if (decision === undefined) {
 			return;
 		}
 
@@ -3281,77 +3480,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// finish. The `finally` also returns credit when sending the frame fails.
 		const isAccounted = decision === 'accounted';
 
-		if (
-			request.op === 'publish-batch' ||
-			request.op === 'subscribe-publication'
-		) {
-			if (attachment.publication !== true) {
-				if (isAccounted && request.op === 'publish-batch') {
-					this.commitCredit.release(
-						sessionId,
-						Date.now(),
-						request.entries.length
-					);
-				}
-				sendCommitSessionFrame(socket, { ev: 'unsupported', op: request.op });
-				return;
-			}
-			const grants = await new CommitReuseGrantsService(this.ctx.storage).read(
-				attachment,
-				Date.now()
-			);
-			if (request.op === 'subscribe-publication') {
-				// Subscriptions spend no credit, so the tenant-wide semaphore is the
-				// only bound on the D1 and R2 reads that replay makes.
-				await Promise.all(
-					request.entries.map(async (entry) => {
-						await this.commitEntrySemaphore.acquire();
-						try {
-							const next = await this.replayPublication(
-								socket,
-								attachment,
-								request.pushId,
-								entry,
-								grants
-							);
-							if (next === 'admit') {
-								await this.runSubscribedPublication({
-									socket,
-									attachment,
-									pushId: request.pushId,
-									entry,
-									grants
-								});
-							}
-						} finally {
-							this.commitEntrySemaphore.release();
-						}
-					})
-				);
-				return;
-			}
-			await Promise.all(
-				request.entries.map(async (entry) => {
-					await this.commitEntrySemaphore.acquire();
-					try {
-						await this.runPublication({
-							socket,
-							attachment,
-							pushId: request.pushId,
-							entry,
-							grants
-						});
-					} finally {
-						this.commitEntrySemaphore.release();
-						if (isAccounted) {
-							this.commitCredit.release(sessionId, Date.now());
-						}
-					}
-				})
-			);
-			return;
-		}
-		const cache = this.context.cacheRepository.require(cacheScope);
 		if (request.op === 'commit') {
 			// Apply the same tenant-wide semaphore to individual commit messages and
 			// batch entries so neither form can bypass the concurrency limit.
