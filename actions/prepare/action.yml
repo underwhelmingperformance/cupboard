@@ -143,9 +143,6 @@ runs:
         hatchet-protocol: holster
         nix-permission-edict: true
 
-    # Evaluation and builds must run as this user so they read the Git and
-    # builder SSH configurations from this job. A multi-user daemon would read
-    # neither configuration.
     - uses: $/actions/install-nix
 
     # Nix rebuilds a derivation that sets `allowSubstitutes = false` even when a
@@ -211,3 +208,7 @@ runs:
         STORE_AMBIENT_IDENTITY: ${{ inputs.store-ambient-identity }}
       run: | # zizmor: ignore[github-env]
         bash "${GITHUB_ACTION_PATH}/ssh-transport.sh" configure
+
+    - name: Configure the remote build hook
+      if: ${{ inputs.remote == 'true' }}
+      uses: $/actions/prepare-builders

@@ -48,6 +48,7 @@ const internalActions = [
 	'build-cohort',
 	'attest-status',
 	'prepare',
+	'prepare-builders',
 	'resolve-cupboard',
 	'publication-settings'
 ] as const;

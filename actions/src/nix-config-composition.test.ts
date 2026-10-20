@@ -52,7 +52,8 @@ describe('prepare and setup Nix configuration', () => {
 			configurationSteps: [
 				'Configure Nix substitution',
 				'Configure extra Nix settings',
-				'Configure Nix SSH transport'
+				'Configure Nix SSH transport',
+				'Configure the remote build hook'
 			]
 		});
 	});

@@ -1,0 +1,9 @@
+name: Configure Nix remote builders
+description:
+  Passes job-scoped SSH configuration to the Nix build hook. Requires a local
+  store or a trusted local daemon. Removes the adapter after the job.
+runs:
+  using: node24
+  main: dist/main.cjs
+  post: dist/post.cjs
+  post-if: always()

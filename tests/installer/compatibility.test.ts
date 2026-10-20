@@ -2,6 +2,7 @@ import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import {
+	access,
 	chmod,
 	copyFile,
 	mkdir,
@@ -30,6 +31,10 @@ const transportScript = new URL(
 const alias = 'cupboard-installer-trial.invalid';
 const outputsSchema = z.object({ out: z.string() });
 const buildResultSchema = z.array(z.object({ outputs: outputsSchema }));
+const builderAction = new URL(
+	'../../actions/prepare-builders/dist/',
+	import.meta.url
+);
 
 async function run(
 	command: string,
@@ -73,6 +78,7 @@ class LoopbackSsh {
 	readonly hostKey: string;
 	readonly otherKey: string;
 	readonly commands: string;
+	readonly outputLock: string;
 
 	constructor(
 		readonly directory: string,
@@ -82,6 +88,7 @@ class LoopbackSsh {
 		this.hostKey = path.join(directory, 'host-key');
 		this.otherKey = path.join(directory, 'other-key');
 		this.commands = path.join(directory, 'commands');
+		this.outputLock = path.join(directory, 'output-lock');
 	}
 
 	private async directKnownHosts(): Promise<string> {
@@ -99,10 +106,11 @@ class LoopbackSsh {
 			await run('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
 		}
 		await writeFile(this.commands, '');
+		await writeFile(this.outputLock, '');
 		const wrapper = path.join(this.directory, 'command.cjs');
 		await writeFile(
 			wrapper,
-			`#!${process.execPath}\nconst fs = require('node:fs');\nconst { spawnSync } = require('node:child_process');\nconst command = process.env.SSH_ORIGINAL_COMMAND;\nif (!command) process.exit(1);\nfs.appendFileSync(${JSON.stringify(this.commands)}, command + '\\n');\nconst child = spawnSync('/bin/sh', ['-c', command], { stdio: 'inherit' });\nprocess.exit(child.status ?? 1);\n`,
+			`#!${process.execPath}\nconst fs = require('node:fs');\nconst { spawnSync } = require('node:child_process');\nconst command = process.env.SSH_ORIGINAL_COMMAND;\nif (!command) process.exit(1);\nfs.appendFileSync(${JSON.stringify(this.commands)}, command + '\\n');\nconst lock = fs.readFileSync(${JSON.stringify(this.outputLock)}, 'utf8');\nif (command.includes('nix-daemon') && lock && fs.existsSync(lock)) {\n  const moved = spawnSync('sudo', ['-n', 'mv', '-f', lock, ${JSON.stringify(path.join(this.directory, 'scheduled-output.lock'))}], { stdio: 'inherit' });\n  if (moved.status !== 0) process.exit(moved.status ?? 1);\n}\nconst child = spawnSync('/bin/sh', ['-c', command], { stdio: 'inherit' });\nprocess.exit(child.status ?? 1);\n`,
 			{ mode: 0o700 }
 		);
 		const authorisedKeys = path.join(this.directory, 'authorized_keys');
@@ -244,6 +252,18 @@ class LoopbackSsh {
 
 function derivation(marker: string): string {
 	return `derivation { name = "cupboard-installer-${marker}"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "printf '${marker}' > $out" ]; preferLocalBuild = false; allowSubstitutes = false; }`;
+}
+
+async function actionFileValue(file: string, key: string): Promise<string> {
+	const contents = await readFile(file, 'utf8');
+	const headerEnd = contents.indexOf('\n');
+	const header = contents.slice(0, headerEnd);
+	const delimiter = header.slice(`${key}<<`.length);
+	const end = contents.lastIndexOf(`\n${delimiter}\n`);
+	if (delimiter === '' || end < headerEnd || !header.startsWith(`${key}<<`)) {
+		throw new Error(`The builder action did not export ${key}`);
+	}
+	return contents.slice(headerEnd + 1, end);
 }
 
 describe('NixOS installer compatibility', () => {
@@ -390,42 +410,105 @@ describe('NixOS installer compatibility', () => {
 			}
 		);
 
-		it('builds through job-scoped SSH configuration with local builds disabled', async () => {
-			const { ssh } = prepared();
-			const environment = await ssh.environment('builder');
-			await run(
-				'nix',
-				['store', 'info', '--json', '--store', ssh.builderUri],
-				environment
-			);
-			const before = await readFile(ssh.commands, 'utf8');
-			const marker = randomUUID();
-			const result = await run(
-				'nix',
-				[
-					'build',
-					'--no-link',
-					'--json',
-					'--impure',
-					'--max-jobs',
-					'0',
-					'--option',
-					'sandbox',
-					'false',
-					'--expr',
-					derivation(marker)
-				],
-				environment
-			);
-			const [built] = buildResultSchema.parse(JSON.parse(result.stdout));
-			if (built === undefined) {
-				throw new Error('The remote build returned no output');
+		it.each(['wrong key', 'wrong host pin', 'valid credentials'] as const)(
+			'builds through job-scoped SSH configuration with local builds disabled and %s',
+			async (scenario) => {
+				const { ssh } = prepared();
+				const configured = await ssh.environment(
+					'builder',
+					scenario === 'wrong key' ? ssh.otherKey : ssh.identity,
+					scenario === 'wrong host pin' ? ssh.otherKey : ssh.hostKey
+				);
+				const directory = configured.RUNNER_TEMP;
+				if (directory === undefined) {
+					throw new Error('The SSH fixture did not configure RUNNER_TEMP');
+				}
+				const stateFile = path.join(directory, 'hook-state');
+				const environmentFile = path.join(directory, 'hook-environment');
+				await writeFile(stateFile, '');
+				await writeFile(environmentFile, '');
+				const actionEnvironment = {
+					...configured,
+					GITHUB_ENV: environmentFile,
+					GITHUB_STATE: stateFile
+				};
+				await run(
+					process.execPath,
+					[new URL('main.cjs', builderAction).pathname],
+					actionEnvironment
+				);
+				const hookDirectory = await actionFileValue(
+					stateFile,
+					'cupboard-builder-hook'
+				);
+				const environment = {
+					...actionEnvironment,
+					NIX_CONFIG: await actionFileValue(environmentFile, 'NIX_CONFIG')
+				};
+				try {
+					const marker = randomUUID();
+					const expression = derivation(marker);
+					const output = await run(
+						'nix',
+						['eval', '--impure', '--raw', '--expr', `(${expression}).outPath`],
+						environment
+					);
+					// Both sides share /nix/store. Give the remote build its own lock inode
+					// for this fresh fixture output; the scheduler keeps its original lock.
+					await writeFile(ssh.outputLock, `${output.stdout}.lock`);
+					const connection = run(
+						'nix',
+						['store', 'info', '--json', '--store', ssh.builderUri],
+						environment
+					);
+					if (scenario === 'valid credentials') {
+						await connection;
+					} else {
+						await expect(connection).rejects.toMatchObject({ code: 1 });
+					}
+					const before = await readFile(ssh.commands, 'utf8');
+					const build = run(
+						'nix',
+						[
+							'build',
+							'--no-link',
+							'--json',
+							'--impure',
+							'--max-jobs',
+							'0',
+							'--option',
+							'sandbox',
+							'false',
+							'--expr',
+							expression
+						],
+						environment
+					);
+					if (scenario !== 'valid credentials') {
+						await expect(build).rejects.toMatchObject({ code: 1 });
+						return;
+					}
+					const result = await build;
+					const [built] = buildResultSchema.parse(JSON.parse(result.stdout));
+					if (built === undefined) {
+						throw new Error('The remote build returned no output');
+					}
+					const commands = await readFile(ssh.commands, 'utf8');
+					expect({
+						output: await readFile(built.outputs.out, 'utf8'),
+						usedSsh: commands.slice(before.length).includes('nix-daemon')
+					}).toStrictEqual({ output: marker, usedSsh: true });
+				} finally {
+					await run(
+						process.execPath,
+						[new URL('post.cjs', builderAction).pathname],
+						{ ...environment, 'STATE_cupboard-builder-hook': hookDirectory }
+					);
+					await expect(access(hookDirectory)).rejects.toMatchObject({
+						code: 'ENOENT'
+					});
+				}
 			}
-			const commands = await readFile(ssh.commands, 'utf8');
-			expect({
-				output: await readFile(built.outputs.out, 'utf8'),
-				usedSsh: commands.slice(before.length).includes('nix-daemon')
-			}).toStrictEqual({ output: marker, usedSsh: true });
-		});
+		);
 	});
 });

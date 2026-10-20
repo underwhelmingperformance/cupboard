@@ -423,4 +423,4 @@ uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
 
 ## Internal actions
 
-`actions/install-nix`, `actions/evaluate-targets`, `actions/plan`, `actions/build-cohort`, `actions/attest-status`, `actions/prepare`, `actions/resolve-cupboard`, `actions/publication-settings` are building blocks of the reusable workflows. Their inputs can change in any release, so don't call them directly. Use the reusable workflows instead.
+`actions/install-nix`, `actions/evaluate-targets`, `actions/plan`, `actions/build-cohort`, `actions/attest-status`, `actions/prepare`, `actions/prepare-builders`, `actions/resolve-cupboard`, `actions/publication-settings` are building blocks of the reusable workflows. Their inputs can change in any release, so don't call them directly. Use the reusable workflows instead.
