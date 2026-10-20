@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	firstCacheGeneration,
 	graceSecondsSchema,
@@ -5,6 +6,7 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { cacheSummarySchema } from '@cupboard/protocol/caches';
 import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import {
@@ -12,7 +14,7 @@ import {
 	reuseViewPrioritySchema,
 	reuseViewRevisionSchema
 } from '@cupboard/protocol/reuse-views';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { sql } from 'drizzle-orm';
@@ -28,6 +30,8 @@ import closeSnapshot from '../../drizzle/meta/0071_snapshot.json' with { type: '
 import stagingCleanupSnapshot from '../../drizzle/meta/0072_snapshot.json' with { type: 'json' };
 import refreshFamilyOwnerSnapshot from '../../drizzle/meta/0073_snapshot.json' with { type: 'json' };
 import subjectNoncesSnapshot from '../../drizzle/meta/0074_snapshot.json' with { type: 'json' };
+import publicationOperationSnapshot from '../../drizzle/meta/0077_snapshot.json' with { type: 'json' };
+import collectionInputsSnapshot from '../../drizzle/meta/0078_snapshot.json' with { type: 'json' };
 import migrations from '../../drizzle/migrations.js';
 import { cacheIdSchema, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -39,6 +43,7 @@ import {
 } from '../db/schema.ts';
 import { advanceCacheRetentionMigration } from '../migration/cache-retention.ts';
 import {
+	asOneInvocation,
 	beforeCacheIdentityContract,
 	bootstrap,
 	currentServer,
@@ -49,17 +54,27 @@ import {
 	withoutAlarmArming
 } from '../test-support.ts';
 
+import { AttestationCasService } from './attestation-cas-service.ts';
+import { AttestationsService } from './attestations-service.ts';
 import { runBoundedLocalMigration } from './bounded-migration.ts';
 import { chunk } from './bulk.ts';
 import {
 	projectLocalCacheLifecycles,
 	resetCacheLifecycleProjection
 } from './cache-lifecycle-projection.ts';
+import { CacheRegistrationService } from './cache-registration-service.ts';
 import { ServerContext } from './context.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
-import { barrierTriggers } from './garbage-collection-service.ts';
+import { DeletionQueueService } from './deletion-queue-service.ts';
+import {
+	barrierTriggers,
+	GarbageCollectionService,
+	inputTriggers
+} from './garbage-collection-service.ts';
 import { applyMigrations, migrationsThrough } from './migrate.ts';
 import { localMigrationRecipe } from './migration-recipes.ts';
+import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { RetentionService } from './retention-service.ts';
 
 const insertSigningKey =
 	"INSERT INTO signing_key (id, private_jwk_json, public_key, created_at) VALUES ('active', '{}', 'cupboard-1:cHVi', '2026-01-01T00:00:00.000Z')";
@@ -82,6 +97,31 @@ function insertRootGrantRule(id: string, resources: unknown): string {
 
 function queued(storePathHash: string): unknown {
 	return { store_path_hash: storePathHash };
+}
+
+function buildGarbageCollection(
+	context: ServerContext
+): GarbageCollectionService {
+	const narInfoObjects = new NarInfoObjectsService(context);
+	const attestationCas = new AttestationCasService(context);
+	const attestations = new AttestationsService(
+		context,
+		new CacheRegistrationService(context),
+		attestationCas,
+		narInfoObjects
+	);
+
+	return new GarbageCollectionService(
+		context,
+		new DeletionQueueService(
+			context,
+			attestationCas,
+			attestations,
+			narInfoObjects
+		),
+		new RetentionService(context),
+		{ scheduleManagedRetirement: () => Promise.resolve() }
+	);
 }
 
 describe('migrations', () => {
@@ -2107,6 +2147,224 @@ describe('migrations', () => {
 		);
 
 		expect(migrated).toStrictEqual([{ id: 'u1', hasRecordedVerdict: false }]);
+	});
+
+	it('marks every existing cache with content or a close as changed at 0078', async () => {
+		// 10 has a path, 11 is deleted, 12 has a close event, and 13 has a root
+		// whose close has not been applied.
+		const insertIdentities =
+			"INSERT INTO cache_identity (id, kind, name, access, priority, generation, retention_epoch, created_at, deleted_at) VALUES (10, 'named', 'live', 'public', 40, 1, 0, '2026-01-01T00:00:00.000Z', NULL), (11, 'named', 'gone', 'public', 40, 1, 0, '2026-01-02T00:00:00.000Z', '2026-01-03T00:00:00.000Z'), (12, 'named', 'closed', 'public', 40, 1, 1, '2026-01-04T00:00:00.000Z', NULL), (13, 'named', 'unapplied', 'public', 40, 1, 1, '2026-01-05T00:00:00.000Z', NULL)";
+		const insertCloseEvent =
+			"INSERT INTO cache_close_event (cache_id, epoch, closed_at, grace_until) VALUES (12, 1, '2026-01-04T01:00:00.000Z', '2026-01-04T01:00:00.000Z')";
+		const insertUnappliedRoot =
+			"INSERT INTO retention_root (cache_id, name, close_applied_epoch, created_at, updated_at) VALUES (13, 'run', 0, '2026-01-05T00:00:00.000Z', '2026-01-05T00:00:00.000Z')";
+		const insertNarInfo =
+			"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES (10, '00000000000000000000000000000001', '/nix/store/00000000000000000000000000000001-app', 'sha256:nar', 1, '[]', '2026-01-01T00:00:00.000Z')";
+		const selectInputs =
+			'SELECT cache_id, inputs_changed, scan_completed_at FROM garbage_collection_input WHERE cache_id >= 10 ORDER BY cache_id';
+		const selectInputTriggers =
+			"SELECT name FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'garbage_collection_input_*' ORDER BY name";
+
+		const result = await runInDurableObject(
+			testServerFor('migration-collection-inputs'),
+			async (_instance, state) => {
+				await migrateThrough(state, 77);
+				state.storage.sql.exec(insertIdentities);
+				state.storage.sql.exec(insertCloseEvent);
+				state.storage.sql.exec(insertUnappliedRoot);
+				state.storage.sql.exec(insertNarInfo);
+
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 78)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 78)
+				);
+
+				return {
+					migrated,
+					repeated,
+					inputs: state.storage.sql.exec(selectInputs).toArray(),
+					triggers: Array.from(
+						state.storage.sql.exec<{ name: string }>(selectInputTriggers),
+						(row) => row.name
+					)
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false },
+			inputs: [
+				{
+					cache_id: 10,
+					inputs_changed: 1,
+					scan_completed_at: '2026-01-01T00:00:00.000Z'
+				},
+				{
+					cache_id: 11,
+					inputs_changed: 0,
+					scan_completed_at: '2026-01-02T00:00:00.000Z'
+				},
+				{
+					cache_id: 12,
+					inputs_changed: 1,
+					scan_completed_at: '2026-01-04T00:00:00.000Z'
+				},
+				{
+					cache_id: 13,
+					inputs_changed: 1,
+					scan_completed_at: '2026-01-05T00:00:00.000Z'
+				}
+			],
+			triggers: inputTriggers
+				.map((trigger) => trigger.name)
+				.toSorted(byCodeUnit)
+		});
+		expect(collectionInputsSnapshot).toStrictEqual({
+			...publicationOperationSnapshot,
+			id: collectionInputsSnapshot.id,
+			prevId: publicationOperationSnapshot.id,
+			tables: {
+				...publicationOperationSnapshot.tables,
+				garbage_collection_input:
+					collectionInputsSnapshot.tables.garbage_collection_input
+			}
+		});
+	});
+
+	it('completes a scan in progress across 0078 with the flag set', async () => {
+		const insertIdentity =
+			"INSERT INTO cache_identity (id, kind, name, access, priority, generation, created_at) VALUES (10, 'named', 'live', 'public', 40, 1, '2026-01-01T00:00:00.000Z')";
+		const insertScan =
+			"INSERT INTO garbage_collection_scan (cache_id, phase, cursor, reference_cursor, allow_empty_collection) VALUES (10, 'collect', 'aa', -1, 1)";
+		// The cursor is past this path, so the scan leaves it in place.
+		const insertNarInfo =
+			"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES (10, '00000000000000000000000000000001', '/nix/store/00000000000000000000000000000001-app', 'sha256:nar', 1, '[]', '2026-01-01T00:00:00.000Z')";
+		const selectInputs =
+			'SELECT cache_id, inputs_changed, scan_completed_at FROM garbage_collection_input WHERE cache_id = 10';
+		const selectScans =
+			'SELECT cache_id, phase, cursor FROM garbage_collection_scan';
+
+		const result = await runInDurableObject(
+			testServerFor('migration-collection-inputs-scan'),
+			async (instance, state) => {
+				await migrateThrough(state, 77);
+				state.storage.sql.exec(insertIdentity);
+				state.storage.sql.exec(insertNarInfo);
+				state.storage.sql.exec(insertScan);
+				await migrateThrough(state, 78);
+
+				const scans = state.storage.sql.exec(selectScans).toArray();
+				const cache = instance.context.cacheRepository.resolvedForId(
+					cacheIdSchema.parse(10)
+				);
+
+				await asOneInvocation(() =>
+					buildGarbageCollection(instance.context).collectGarbage(
+						rootLogger(),
+						{ scope: 'cache', cache }
+					)
+				);
+
+				return {
+					beforeScan: scans,
+					afterScan: {
+						inputs: state.storage.sql.exec(selectInputs).toArray(),
+						scans: state.storage.sql.exec(selectScans).toArray()
+					}
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			beforeScan: [{ cache_id: 10, phase: 'collect', cursor: 'aa' }],
+			afterScan: {
+				inputs: [
+					{
+						cache_id: 10,
+						inputs_changed: 1,
+						scan_completed_at: isoTimestamp(new Date())
+					}
+				],
+				scans: []
+			}
+		});
+	});
+
+	it('backfills the collection inputs of more cache identities than one page at 0078', async () => {
+		// Identities 10 to 1009 have a path; 1010 has none.
+		const insertIdentities = `WITH RECURSIVE sequence(n) AS (SELECT 10 UNION ALL SELECT n + 1 FROM sequence WHERE n < 1010)
+			INSERT INTO cache_identity (id, kind, name, access, priority, generation, created_at)
+			SELECT n, 'named', printf('cache-%d', n), 'public', 40, 1, '2026-01-01T00:00:00.000Z' FROM sequence`;
+		const insertNarInfos = `INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at)
+			SELECT id, printf('%032d', id), printf('/nix/store/%032d-app', id), 'sha256:nar', 1, '[]', '2026-01-01T00:00:00.000Z'
+			FROM cache_identity WHERE id BETWEEN 10 AND 1009`;
+		const selectInputs =
+			'SELECT count(*) AS rows, sum(inputs_changed) AS changed FROM garbage_collection_input WHERE cache_id >= 10';
+		// An identity and a path that arrive between the two pages.
+		const insertIdentityBetweenPages =
+			"INSERT INTO cache_identity (id, kind, name, access, priority, generation, created_at) VALUES (2000, 'named', 'late', 'public', 40, 1, '2026-01-02T00:00:00.000Z')";
+		const insertNarInfoBetweenPages =
+			"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES (2000, '00000000000000000000000000002000', '/nix/store/00000000000000000000000000002000-app', 'sha256:nar', 1, '[]', '2026-01-02T00:00:00.000Z')";
+		const selectAddedInput =
+			'SELECT cache_id, inputs_changed, scan_completed_at FROM garbage_collection_input WHERE cache_id = 2000';
+
+		const result = await runInDurableObject(
+			testServerFor('migration-collection-inputs-pages'),
+			async (_instance, state) => {
+				await migrateThrough(state, 77);
+				state.storage.sql.exec(insertIdentities);
+				state.storage.sql.exec(insertNarInfos);
+
+				const database = drizzle(state.storage);
+				const first = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 78)
+				);
+				const afterFirst = state.storage.sql.exec(selectInputs).one();
+				state.storage.sql.exec(insertIdentityBetweenPages);
+				state.storage.sql.exec(insertNarInfoBetweenPages);
+				const second = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 78)
+				);
+
+				return {
+					first,
+					afterFirst,
+					second,
+					afterSecond: state.storage.sql.exec(selectInputs).one(),
+					added: state.storage.sql.exec(selectAddedInput).toArray()
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			first: {
+				kind: 'pending',
+				migration: '0078_gc_inputs',
+				stage: 'backfill-garbage-collection-inputs',
+				cursor: 1009,
+				sourceRows: 1000,
+				declaredSourceWrites: 1000,
+				hasCommitted: true
+			},
+			afterFirst: { rows: 1000, changed: 1000 },
+			second: { kind: 'complete', hasCommitted: true },
+			afterSecond: { rows: 1002, changed: 1001 },
+			added: [
+				{
+					cache_id: 2000,
+					inputs_changed: 1,
+					scan_completed_at: '2026-01-02T00:00:00.000Z'
+				}
+			]
+		});
 	});
 
 	it('leaves the blob declaration, commit time and promotion record null for a pending upload created before 0075', async () => {

@@ -1058,6 +1058,29 @@ export const garbageCollectionMarks = sqliteTable(
 	(table) => [primaryKey({ columns: [table.cacheId, table.storePathHash] })]
 );
 
+// One row per cache. `inputs_changed` records whether a write that can change
+// which paths a collection scan keeps has happened since the last scan started.
+// `scan_completed_at` records when the last scan completed; a new cache counts
+// as scanned when it is created. Triggers set `inputs_changed`, and
+// `GarbageCollectionInputs` clears it. The index finds the changed cache that
+// can be scanned first.
+export const garbageCollectionInputs = sqliteTable(
+	'garbage_collection_input',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
+		inputsChanged: integer('inputs_changed', { mode: 'boolean' })
+			.notNull()
+			.default(true),
+		scanCompletedAt: text('scan_completed_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		index('garbage_collection_input_changed_idx').on(
+			table.inputsChanged,
+			table.scanCompletedAt
+		)
+	]
+);
+
 // A tenant-wide collection advances through one cache at a time. The current
 // cache remains here until its incremental scan completes, then the next cache
 // is selected lexicographically without loading the complete cache registry.

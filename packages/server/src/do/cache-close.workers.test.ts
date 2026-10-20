@@ -204,6 +204,61 @@ describe('cache close', () => {
 		}
 	);
 
+	// Collection learns of a close only from the close event, so the epoch
+	// change must not commit without it.
+	it('advances the retention epoch only together with the close event', async () => {
+		const token = await createCache();
+		const identity = () =>
+			runInDurableObject(currentServer(), (instance) => {
+				const resolved = instance.context.cacheRepository.require(cache);
+
+				return {
+					identity: instance.context.db
+						.select({
+							retentionEpoch: schema.cacheIdentities.retentionEpoch,
+							graceManaged: schema.cacheIdentities.graceManaged
+						})
+						.from(schema.cacheIdentities)
+						.where(eq(schema.cacheIdentities.id, resolved.id))
+						.get(),
+					closeEvents: instance.context.db
+						.select({ epoch: schema.cacheCloseEvents.epoch })
+						.from(schema.cacheCloseEvents)
+						.where(eq(schema.cacheCloseEvents.cacheId, resolved.id))
+						.all()
+				};
+			});
+		const refuseCloseEvent =
+			"CREATE TRIGGER refuse_close_event BEFORE INSERT ON cache_close_event BEGIN SELECT RAISE(ABORT, 'refused'); END";
+		const before = await identity();
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(refuseCloseEvent);
+		});
+		const refused = await authorisedFetch('/caches/pr-1/close', token, {
+			method: 'POST'
+		});
+		const afterRefusal = await identity();
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec('DROP TRIGGER refuse_close_event');
+		});
+		await lifecycle(token, 'close');
+
+		expect({
+			status: refused.status,
+			afterRefusal,
+			afterClose: await identity()
+		}).toStrictEqual({
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			afterRefusal: before,
+			afterClose: {
+				identity: { retentionEpoch: 1, graceManaged: true },
+				closeEvents: [{ epoch: 1 }]
+			}
+		});
+	});
+
 	it('repeats close without changing its expiry, generation or read authority', async () => {
 		const token = await createCache();
 		const decision = await negotiate(token);

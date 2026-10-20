@@ -1725,7 +1725,7 @@ it.each([false, true])(
 					unresolved: 0,
 					beingApplied: 0
 				},
-				rowsRead: hasDue ? 14 : 1
+				rowsRead: hasDue ? 15 : 1
 			};
 			expect(measured).toStrictEqual({ small: expected, large: expected });
 		});

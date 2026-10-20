@@ -1850,10 +1850,59 @@ function cacheCloseRecipe(
 	};
 }
 
+// Statement 2 backfills one input row per cache identity. The triggers are
+// created before the backfill pages, so an identity that is inserted between
+// two pages gets its row from the insert trigger.
+function collectionInputsRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const backfill = statementAt(statements, 2);
+	const source = 'FROM `cache_identity`;';
+
+	if (!backfill.endsWith(source)) {
+		throw new Error(
+			'Bounded migration recipe expects the collection input backfill'
+		);
+	}
+
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-garbage-collection-inputs',
+				statements: [
+					statementAt(statements, 0),
+					statementAt(statements, 1),
+					...statements.slice(3)
+				]
+			},
+			{
+				kind: 'page',
+				name: 'backfill-garbage-collection-inputs',
+				source: 'cache_identity',
+				writesPerSourceRow: 1,
+				statements: (cursor, last) => [
+					`${backfill.slice(0, -1)}
+WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
+				]
+			}
+		]
+	};
+}
+
 export function localMigrationRecipe(
 	tag: string,
 	statements: readonly string[]
 ): LocalMigrationRecipe | undefined {
+	if (tag === '0078_gc_inputs') {
+		return collectionInputsRecipe(tag, statements);
+	}
+
 	if (tag === '0071_cache_close') {
 		return cacheCloseRecipe(tag, statements);
 	}
