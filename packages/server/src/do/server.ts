@@ -2528,6 +2528,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				if (retryClock.isBlocked()) {
 					await retryClock.read();
 				}
+				await this.withMaintenanceEligibility('fresh', () =>
+					this.verification.expirePublications(logger)
+				);
 				await this.verification.processPendingWithoutDecode(logger, limit);
 
 				if (this.verification.hasPendingUploads()) {
@@ -2755,13 +2758,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				signal?.throwIfAborted();
 				const settled = await this.withMaintenanceEligibility(
 					'continuation',
-					() =>
-						this.verification.processPendingWithoutDecode(logger, limit, signal)
+					async () => {
+						await this.verification.expirePublications(logger, signal);
+						signal?.throwIfAborted();
+						return this.verification.processPendingWithoutDecode(
+							logger,
+							limit,
+							signal
+						);
+					}
 				);
 				signal?.throwIfAborted();
 
 				const batch = await this.verification.beginVerificationBatch(
-					this.verification.listPendingForVerify(limit, maxNarBytes, signal),
+					await this.verification.claimPendingForVerify(
+						limit,
+						maxNarBytes,
+						signal
+					),
 					signal
 				);
 				await this.withMaintenanceEligibility('continuation', () =>

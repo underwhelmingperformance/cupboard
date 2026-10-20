@@ -147,7 +147,7 @@ describe('terminal verdicts against straggling verifications', () => {
 						(instance as unknown as { verification: VerificationService })
 							.verification
 					);
-					const replacement = verification.listPendingForVerify(
+					const replacement = await verification.claimPendingForVerify(
 						10,
 						Number.MAX_SAFE_INTEGER
 					);
@@ -237,7 +237,7 @@ describe('terminal verdicts against straggling verifications', () => {
 					(instance as unknown as { verification: VerificationService })
 						.verification
 				);
-				const replacement = verification.listPendingForVerify(
+				const replacement = await verification.claimPendingForVerify(
 					10,
 					Number.MAX_SAFE_INTEGER
 				);
@@ -1257,7 +1257,7 @@ describe('terminal verdicts against straggling verifications', () => {
 						new UploadStateService(instance.context).markUploadPending(
 							upload.uploadId
 						);
-						const replacement = verification.listPendingForVerify(
+						const replacement = await verification.claimPendingForVerify(
 							10,
 							Number.MAX_SAFE_INTEGER
 						);
@@ -1356,7 +1356,7 @@ describe('terminal verdicts against straggling verifications', () => {
 						new UploadStateService(instance.context).markUploadPending(
 							upload.uploadId
 						);
-						const replacement = verification.listPendingForVerify(
+						const replacement = await verification.claimPendingForVerify(
 							10,
 							Number.MAX_SAFE_INTEGER
 						);
@@ -1521,7 +1521,7 @@ describe('terminal verdicts against straggling verifications', () => {
 						new UploadStateService(instance.context).markUploadPending(
 							upload.uploadId
 						);
-						const replacement = verification.listPendingForVerify(
+						const replacement = await verification.claimPendingForVerify(
 							10,
 							Number.MAX_SAFE_INTEGER
 						);
@@ -1830,7 +1830,7 @@ describe('terminal verdicts against straggling verifications', () => {
 									.where(eq(pendingUploads.id, upload.uploadId))
 									.run();
 							}
-							const replacement = verification.listPendingForVerify(
+							const replacement = await verification.claimPendingForVerify(
 								10,
 								Number.MAX_SAFE_INTEGER
 							);
@@ -1966,7 +1966,7 @@ describe('terminal verdicts against straggling verifications', () => {
 						new UploadStateService(instance.context).markUploadPending(
 							upload.uploadId
 						);
-						const replacement = verification.listPendingForVerify(
+						const replacement = await verification.claimPendingForVerify(
 							10,
 							Number.MAX_SAFE_INTEGER
 						);

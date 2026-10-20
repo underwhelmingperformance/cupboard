@@ -20,19 +20,20 @@ import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { CountingSemaphore } from '@cupboard/shared/concurrency';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { eq, isNotNull } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { decodeJwt } from 'jose';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as schema from '../db/schema.ts';
-import { r2ObjectKeySchema } from '../http/http.ts';
+import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,
 	authorisedFetch,
 	closeSessionAndWait,
+	collectVerificationPasses,
 	commitCreditAccept,
 	commitPath,
 	commitUpload,
@@ -52,14 +53,17 @@ import {
 	uploadMetadata,
 	uploadPathNegotiation,
 	verifiableNar,
-	verificationOf
+	verificationOf,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
+import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { PublicationStore } from './publication-store.ts';
 import { type CupboardServer } from './server.ts';
 import { UploadsService } from './uploads-service.ts';
 import { VerificationService } from './verification-service.ts';
+import { WorkSequenceService } from './work-sequence-service.ts';
 
 it.each(
 	[false, true].flatMap((accepted) =>
@@ -2157,6 +2161,8 @@ describe('publication expiry failures', () => {
 					await asOneInvocation(() =>
 						verificationOf(instance).expirePublications(rootLogger())
 					);
+					// A run that only failed waits ten minutes before the next one.
+					vi.setSystemTime(new Date(Date.now() + 10 * 60 * 1000));
 				}
 				return instance.context.db
 					.select({ state: schema.publicationOperations.state })
@@ -2172,6 +2178,87 @@ describe('publication expiry failures', () => {
 		const small = await expiryRunRowsRead(100);
 		const large = await expiryRunRowsRead(1000);
 		expect(large).toStrictEqual(small);
+	});
+
+	it('skips expiry until the retry time after a run that expired no operation and had a failure', async () => {
+		await initialise();
+		const states = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				insertExpiringOperation(
+					instance,
+					'b',
+					new Date(Date.now() - 2000),
+					true
+				);
+				const verification = verificationOf(instance);
+				await asOneInvocation(() =>
+					verification.expirePublications(rootLogger())
+				);
+				const expiring = insertExpiringOperation(
+					instance,
+					'c',
+					new Date(Date.now() - 1000),
+					false
+				);
+				const state = () =>
+					instance.context.db
+						.select({ state: schema.publicationOperations.state })
+						.from(schema.publicationOperations)
+						.where(eq(schema.publicationOperations.id, expiring))
+						.get()?.state;
+				await asOneInvocation(() =>
+					verification.expirePublications(rootLogger())
+				);
+				const beforeRetry = state();
+				vi.setSystemTime(new Date(Date.now() + 10 * 60 * 1000));
+				await asOneInvocation(() =>
+					verification.expirePublications(rootLogger())
+				);
+				return { beforeRetry, afterRetry: state() };
+			}
+		);
+		expect(states).toStrictEqual({
+			beforeRetry: 'accepted',
+			afterRetry: 'expired'
+		});
+	});
+
+	it('ends expiry at once when the pass is aborted', async () => {
+		await initialise();
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const expiring = insertExpiringOperation(
+					instance,
+					'c',
+					new Date(Date.now() - 1000),
+					false
+				);
+				const controller = new AbortController();
+				controller.abort(new ExpiryAbortReason());
+				let failure: unknown;
+				try {
+					await asOneInvocation(() =>
+						verificationOf(instance).expirePublications(
+							rootLogger(),
+							controller.signal
+						)
+					);
+				} catch (error) {
+					failure = error;
+				}
+				return {
+					isAborted: failure instanceof ExpiryAbortReason,
+					state: instance.context.db
+						.select({ state: schema.publicationOperations.state })
+						.from(schema.publicationOperations)
+						.where(eq(schema.publicationOperations.id, expiring))
+						.get()?.state
+				};
+			}
+		);
+		expect(outcome).toStrictEqual({ isAborted: true, state: 'accepted' });
 	});
 
 	it('ends expiry without throwing when it cannot arm its next alarm', async () => {
@@ -2216,6 +2303,48 @@ describe('publication expiry failures', () => {
 		});
 	});
 
+	it('ends expiry without throwing when it cannot read its retry time', async () => {
+		await initialise();
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const expiring = insertExpiringOperation(
+					instance,
+					'c',
+					new Date(Date.now() - 1000),
+					false
+				);
+				const storageRead = vi
+					.spyOn(state.storage, 'get')
+					.mockRejectedValueOnce(new PublicationExpiryFault());
+				let failure: unknown;
+				try {
+					await asOneInvocation(() =>
+						verificationOf(instance).expirePublications(rootLogger())
+					);
+				} catch (error) {
+					failure = error;
+				}
+				const reads = [...storageRead.mock.calls];
+				storageRead.mockRestore();
+				return {
+					reads,
+					isFault: failure instanceof PublicationExpiryFault,
+					state: instance.context.db
+						.select({ state: schema.publicationOperations.state })
+						.from(schema.publicationOperations)
+						.where(eq(schema.publicationOperations.id, expiring))
+						.get()?.state
+				};
+			}
+		);
+		expect(outcome).toStrictEqual({
+			reads: [['maintenance:publication-expiry-retry-at']],
+			isFault: false,
+			state: 'accepted'
+		});
+	});
+
 	it('arms a delayed retry when every due operation fails', async () => {
 		await initialise();
 		const alarm = await runInDurableObject(
@@ -2236,9 +2365,41 @@ describe('publication expiry failures', () => {
 		);
 		expect(alarm).toBe(Date.now() + 10 * 60 * 1000);
 	});
+
+	it('keeps the retry alarm when an earlier alarm runs expiry before the retry time', async () => {
+		await initialise();
+		const alarms = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				insertExpiringOperation(
+					instance,
+					'b',
+					new Date(Date.now() - 1000),
+					true
+				);
+				const verification = verificationOf(instance);
+				await asOneInvocation(() =>
+					verification.expirePublications(rootLogger())
+				);
+				const armed = await state.storage.getAlarm();
+				// Delivering an earlier alarm clears the stored alarm.
+				await state.storage.deleteAlarm();
+				await asOneInvocation(() =>
+					verification.expirePublications(rootLogger())
+				);
+				return { armed, rearmed: await state.storage.getAlarm() };
+			}
+		);
+		expect(alarms).toStrictEqual({
+			armed: Date.now() + 10 * 60 * 1000,
+			rearmed: Date.now() + 10 * 60 * 1000
+		});
+	});
 });
 
 class PublicationExpiryFault extends Error {}
+
+class ExpiryAbortReason extends Error {}
 
 it.each([
 	{
@@ -2356,4 +2517,550 @@ it('leaves an exhausted publication accepted when cleanup loses its claim', asyn
 		pending: [{ owner: 'another-pass' }],
 		operations: [{ state: 'accepted' }]
 	});
+});
+
+function insertCommittedUploads(
+	instance: CupboardServer,
+	count: number,
+	label: string,
+	recoveryDeadline: Date,
+	kind: 'fresh' | 'reuse' = 'fresh'
+): void {
+	const cache = instance.context.db.select().from(schema.cacheIdentities).get();
+	if (cache === undefined) {
+		throw new Error('Expected the default cache');
+	}
+	const now = isoTimestamp(new Date());
+	const deadline = isoTimestamp(recoveryDeadline);
+	for (let index = 0; index < count; index += 1) {
+		const id = uploadIdSchema.parse(`${label}-${String(index)}`);
+		instance.context.db
+			.insert(schema.pendingUploads)
+			.values({
+				id,
+				cacheId: cache.id,
+				narHash: nixSha256Hash('1'),
+				r2Key:
+					kind === 'reuse'
+						? narObjectKey(nixSha256Hash('1'))
+						: r2ObjectKeySchema.parse(`staging/${label}/${id}`),
+				metadataJson: JSON.stringify(distinctPath('1')),
+				createdAt: now,
+				expiresAt: deadline,
+				recoveryDeadline: deadline,
+				verdict: 'pending'
+			})
+			.run();
+	}
+}
+
+async function repeatedClaimRowsRead(backlog: number): Promise<{
+	readonly hasPending: boolean;
+	readonly rowsRead: number;
+}> {
+	await resetTestServer();
+	await initialise();
+	return runInDurableObject(currentServer(), (instance) => {
+		const day = 24 * 60 * 60 * 1000;
+		insertCommittedUploads(
+			instance,
+			backlog,
+			'expired',
+			new Date(Date.now() - day)
+		);
+		insertCommittedUploads(instance, 1, 'live', new Date(Date.now() + day));
+		const verification = verificationOf(instance);
+		verification.hasPendingUploads();
+		const { dbCost } = instance.context;
+		dbCost.recordOutstanding();
+		const before = dbCost.rowsRead;
+		const hasPending = verification.hasPendingUploads();
+		dbCost.recordOutstanding();
+		return Promise.resolve({ hasPending, rowsRead: dbCost.rowsRead - before });
+	});
+}
+
+it('reports expired uploads as work and reads the same rows whatever the expired backlog', async () => {
+	const small = await repeatedClaimRowsRead(100);
+	const large = await repeatedClaimRowsRead(1000);
+	expect({
+		hasPending: large.hasPending,
+		rowsRead: large.rowsRead
+	}).toStrictEqual({ hasPending: true, rowsRead: small.rowsRead });
+});
+
+it('claims a live upload behind more than one window of expired uploads that expiry cannot remove', async () => {
+	await resetTestServer();
+	await initialise();
+	await runInDurableObject(currentServer(), (instance) => {
+		const day = 24 * 60 * 60 * 1000;
+		for (let index = 0; index < 70; index += 1) {
+			insertExpiringOperation(
+				instance,
+				index.toString(16).padStart(2, '0'),
+				new Date(Date.now() - day),
+				true
+			);
+		}
+		insertCommittedUploads(instance, 1, 'live', new Date(Date.now() + day));
+		return Promise.resolve();
+	});
+	const claimed: string[][] = [];
+	for (let pass = 0; pass < 2; pass += 1) {
+		const batch = await currentServer().claimVerificationBatch(
+			10,
+			1_000_000_000
+		);
+		claimed.push(batch.claims.map((claim) => claim.uploadId));
+	}
+	expect(claimed).toStrictEqual([[], ['live-0']]);
+});
+
+it('requests another verification pass when a claim passes a window of expired uploads', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	await initialise();
+	await runInDurableObject(currentServer(), (instance) => {
+		const day = 24 * 60 * 60 * 1000;
+		for (let index = 0; index < 200; index += 1) {
+			insertExpiringOperation(
+				instance,
+				index.toString(16).padStart(2, '0'),
+				new Date(Date.now() - day),
+				true
+			);
+		}
+		insertCommittedUploads(instance, 1, 'live', new Date(Date.now() + day));
+		return Promise.resolve();
+	});
+	const sent = await collectVerificationPasses();
+	const live = uploadIdSchema.parse('live-0');
+	const liveVerdict = () =>
+		runInDurableObject(currentServer(), (instance) =>
+			Promise.resolve(
+				instance.context.db
+					.select({ verdict: schema.pendingUploads.verdict })
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, live))
+					.get()?.verdict
+			)
+		);
+	// Each pass of the queue consumer claims once. A pass that only moves past
+	// expired uploads must request the next pass, as the queue would deliver it.
+	const passes: { readonly requested: number; readonly verdict: unknown }[] =
+		[];
+	let delivered = 0;
+	for (let pass = 0; pass < 10; pass += 1) {
+		await verifyCurrentTenant();
+		passes.push({
+			requested: sent.length - delivered,
+			verdict: await liveVerdict()
+		});
+		delivered = sent.length;
+		if (passes.at(-1)?.requested === 0) {
+			break;
+		}
+	}
+	expect({
+		reachesLive: passes.at(-1)?.verdict,
+		isChained: passes.slice(0, -1).every((pass) => pass.requested === 1)
+	}).toStrictEqual({ reachesLive: 'mismatch', isChained: true });
+});
+
+it('releases the leases of a claim whose request for the next pass fails', async () => {
+	await resetTestServer();
+	await initialise();
+	const outcome = await runInDurableObject(
+		currentServer(),
+		async (instance) => {
+			const day = 24 * 60 * 60 * 1000;
+			// The live uploads sort between two runs of expired uploads, so the
+			// claim takes them from a full window and stores a position.
+			for (let index = 0; index < 50; index += 1) {
+				// Hexadecimal IDs sort before the live uploads, and IDs that start
+				// with `m` sort after them.
+				const prefix = index < 20 ? '' : 'm';
+				insertExpiringOperation(
+					instance,
+					`${prefix}${index.toString(16).padStart(2, '0')}`,
+					new Date(Date.now() - day),
+					true
+				);
+			}
+			insertCommittedUploads(instance, 5, 'live', new Date(Date.now() + day));
+			const request = vi
+				.spyOn(CommitPipelineService.prototype, 'requestVerification')
+				.mockRejectedValueOnce(new PublicationExpiryFault());
+			try {
+				let failure: unknown;
+				try {
+					await asOneInvocation(() =>
+						verificationOf(instance).claimPendingForVerify(10, 1_000_000_000)
+					);
+				} catch (error) {
+					failure = error;
+				}
+				return {
+					failed: failure instanceof PublicationExpiryFault,
+					requested: request.mock.calls.length,
+					leased: instance.context.db
+						.select({ id: schema.pendingUploads.id })
+						.from(schema.pendingUploads)
+						.where(isNotNull(schema.pendingUploads.claimOwner))
+						.all()
+				};
+			} finally {
+				request.mockRestore();
+			}
+		}
+	);
+	expect(outcome).toStrictEqual({ failed: true, requested: 1, leased: [] });
+});
+
+it('stops requesting passes through expired uploads while expiry waits, until new work starts', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	await initialise();
+	const day = 24 * 60 * 60 * 1000;
+	await runInDurableObject(currentServer(), (instance) => {
+		for (let index = 0; index < 200; index += 1) {
+			insertExpiringOperation(
+				instance,
+				index.toString(16).padStart(2, '0'),
+				new Date(Date.now() - day),
+				true
+			);
+		}
+		insertCommittedUploads(instance, 1, 'live', new Date(Date.now() + day));
+		return Promise.resolve();
+	});
+	const sent = await collectVerificationPasses();
+	const verdict = (id: string) => {
+		const uploadId = uploadIdSchema.parse(id);
+		return runInDurableObject(currentServer(), (instance) =>
+			Promise.resolve(
+				instance.context.db
+					.select({ verdict: schema.pendingUploads.verdict })
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, uploadId))
+					.get()?.verdict
+			)
+		);
+	};
+	// Runs queue passes, as the queue would deliver them, until a pass
+	// requests no other pass, and returns the number of passes.
+	const scan = async () => {
+		for (let pass = 1; pass <= 10; pass += 1) {
+			const before = sent.length;
+			await verifyCurrentTenant();
+			if (sent.length === before) {
+				return pass;
+			}
+		}
+		return Infinity;
+	};
+	const first = {
+		isChained: (await scan()) > 1,
+		live: await verdict('live-0')
+	};
+	// Expiry is waiting for its retry time and nothing new has started, so a
+	// later trigger makes one claim.
+	const idle = await scan();
+	// A new commit starts behind the expired uploads.
+	await runInDurableObject(currentServer(), (instance) => {
+		insertCommittedUploads(instance, 1, 'next', new Date(Date.now() + day));
+		new WorkSequenceService(instance.context.db).allocate();
+		return Promise.resolve();
+	});
+	const next = { isChained: (await scan()) > 1, next: await verdict('next-0') };
+	// Another operation is accepted. The scan through the expired uploads
+	// finds nothing, starts again after its first window, and stops there.
+	await runInDurableObject(currentServer(), (instance) => {
+		new WorkSequenceService(instance.context.db).allocate();
+		return Promise.resolve();
+	});
+	const empty = await scan();
+	expect({
+		first,
+		idle,
+		next,
+		isEmptyScanFinite: Number.isFinite(empty)
+	}).toStrictEqual({
+		first: { isChained: true, live: 'mismatch' },
+		idle: 1,
+		next: { isChained: true, next: 'mismatch' },
+		isEmptyScanFinite: true
+	});
+});
+
+it('claims every live upload behind a backlog of expired uploads after one empty claim', async () => {
+	await resetTestServer();
+	await initialise();
+	const outcome = await runInDurableObject(
+		currentServer(),
+		async (instance) => {
+			const day = 24 * 60 * 60 * 1000;
+			for (let index = 0; index < 70; index += 1) {
+				insertExpiringOperation(
+					instance,
+					index.toString(16).padStart(2, '0'),
+					new Date(Date.now() - day),
+					true
+				);
+			}
+			insertCommittedUploads(instance, 30, 'live', new Date(Date.now() + day));
+			const verification = verificationOf(instance);
+			const passes: string[][] = [];
+			for (let pass = 0; pass < 5; pass += 1) {
+				const batch = await asOneInvocation(() =>
+					verification.claimPendingForVerify(10, 1_000_000_000)
+				);
+				passes.push(batch.claims.map((claim) => claim.uploadId));
+			}
+			return passes;
+		}
+	);
+	const live = Array.from(
+		{ length: 30 },
+		(_, index) => `live-${String(index)}`
+	).toSorted((left, right) => left.localeCompare(right));
+	expect(outcome).toStrictEqual([
+		[],
+		live.slice(0, 10),
+		live.slice(10, 20),
+		live.slice(20, 30),
+		[]
+	]);
+});
+
+it('claims a fresh upload at once while the claim position is stored after it', async () => {
+	await resetTestServer();
+	await initialise();
+	const claimed = await runInDurableObject(
+		currentServer(),
+		async (instance) => {
+			const day = 24 * 60 * 60 * 1000;
+			for (let index = 0; index < 40; index += 1) {
+				insertExpiringOperation(
+					instance,
+					index.toString(16).padStart(2, '0'),
+					new Date(Date.now() - day),
+					true
+				);
+			}
+			insertCommittedUploads(instance, 30, 'live', new Date(Date.now() + day));
+			const verification = verificationOf(instance);
+			const first = await asOneInvocation(() =>
+				verification.claimPendingForVerify(10, 1_000_000_000)
+			);
+			// The fresh upload sorts before the expired uploads and the stored
+			// position.
+			insertCommittedUploads(
+				instance,
+				1,
+				'0-fresh',
+				new Date(Date.now() + day)
+			);
+			const second = await asOneInvocation(() =>
+				verification.claimPendingForVerify(10, 1_000_000_000)
+			);
+			return [first, second].map((batch) =>
+				batch.claims.map((claim) => claim.uploadId)
+			);
+		}
+	);
+	const live = Array.from(
+		{ length: 30 },
+		(_, index) => `live-${String(index)}`
+	).toSorted((left, right) => left.localeCompare(right));
+	expect(claimed).toStrictEqual([
+		live.slice(0, 7),
+		['0-fresh-0', ...live.slice(7, 16)]
+	]);
+});
+
+it('leases no rows when a claim is aborted while it stores its position', async () => {
+	await resetTestServer();
+	await initialise();
+	const outcome = await runInDurableObject(
+		currentServer(),
+		async (instance, state) => {
+			const day = 24 * 60 * 60 * 1000;
+			for (let index = 0; index < 40; index += 1) {
+				insertExpiringOperation(
+					instance,
+					index.toString(16).padStart(2, '0'),
+					new Date(Date.now() - day),
+					true
+				);
+			}
+			insertCommittedUploads(instance, 30, 'live', new Date(Date.now() + day));
+			const controller = new AbortController();
+			// The claim's deadline passes while it stores its position.
+			const put = vi.spyOn(state.storage, 'put').mockImplementation(() => {
+				controller.abort(new Error('The claim deadline passed.'));
+				return Promise.resolve();
+			});
+			let failure: unknown;
+			try {
+				await verificationOf(instance).claimPendingForVerify(
+					10,
+					1_000_000_000,
+					controller.signal
+				);
+			} catch (error) {
+				failure = error;
+			} finally {
+				put.mockRestore();
+			}
+			return {
+				isAborted: failure !== undefined,
+				leased: instance.context.db
+					.select({ id: schema.pendingUploads.id })
+					.from(schema.pendingUploads)
+					.where(isNotNull(schema.pendingUploads.claimOwner))
+					.all()
+			};
+		}
+	);
+	expect(outcome).toStrictEqual({ isAborted: true, leased: [] });
+});
+
+it('writes no storage when a decode-free pass claims no rows', async () => {
+	await resetTestServer();
+	await initialise();
+	const writes = await runInDurableObject(
+		currentServer(),
+		async (instance, state) => {
+			const put = vi.spyOn(state.storage, 'put');
+			const remove = vi.spyOn(state.storage, 'delete');
+			try {
+				await asOneInvocation(() =>
+					verificationOf(instance).processPendingWithoutDecode(rootLogger(), 10)
+				);
+				return {
+					puts: put.mock.calls.length,
+					deletes: remove.mock.calls.length
+				};
+			} finally {
+				put.mockRestore();
+				remove.mockRestore();
+			}
+		}
+	);
+	expect(writes).toStrictEqual({ puts: 0, deletes: 0 });
+});
+
+it('writes no storage when publication expiry finds nothing due', async () => {
+	await resetTestServer();
+	await initialise();
+	const writes = await runInDurableObject(
+		currentServer(),
+		async (instance, state) => {
+			const put = vi.spyOn(state.storage, 'put');
+			const remove = vi.spyOn(state.storage, 'delete');
+			try {
+				await asOneInvocation(() =>
+					verificationOf(instance).expirePublications(rootLogger())
+				);
+				return {
+					puts: put.mock.calls.length,
+					deletes: remove.mock.calls.length
+				};
+			} finally {
+				put.mockRestore();
+				remove.mockRestore();
+			}
+		}
+	);
+	expect(writes).toStrictEqual({ puts: 0, deletes: 0 });
+});
+
+it('claims a fresh upload behind more than one window of reuse uploads', async () => {
+	await resetTestServer();
+	await initialise();
+	const claimed = await runInDurableObject(
+		currentServer(),
+		async (instance) => {
+			const day = 24 * 60 * 60 * 1000;
+			insertCommittedUploads(
+				instance,
+				70,
+				'a-reuse',
+				new Date(Date.now() + day),
+				'reuse'
+			);
+			insertCommittedUploads(
+				instance,
+				1,
+				'b-fresh',
+				new Date(Date.now() + day)
+			);
+			const verification = verificationOf(instance);
+			const passes: string[][] = [];
+			for (let pass = 0; pass < 2; pass += 1) {
+				const batch = await asOneInvocation(() =>
+					verification.claimPendingForVerify(10, 1_000_000_000)
+				);
+				passes.push(batch.claims.map((claim) => claim.uploadId));
+			}
+			return passes;
+		}
+	);
+	expect(claimed).toStrictEqual([[], ['b-fresh-0']]);
+});
+
+it('claims a live upload behind more than one window of expired uploads once claiming passes have run expiry', async () => {
+	await resetTestServer();
+	await initialise();
+	await runInDurableObject(currentServer(), (instance) => {
+		const day = 24 * 60 * 60 * 1000;
+		for (let index = 0; index < 70; index += 1) {
+			insertExpiringOperation(
+				instance,
+				index.toString(16).padStart(2, '0'),
+				new Date(Date.now() - day),
+				false
+			);
+		}
+		insertCommittedUploads(instance, 1, 'live', new Date(Date.now() + day));
+		const cache = instance.context.db
+			.select()
+			.from(schema.cacheIdentities)
+			.get();
+		if (cache === undefined) {
+			throw new Error('Expected the default cache');
+		}
+		const deadline = isoTimestamp(new Date(Date.now() - day));
+		const operations = instance.context.db
+			.select({ id: schema.publicationOperations.id })
+			.from(schema.publicationOperations)
+			.all();
+		for (const operation of operations) {
+			instance.context.db
+				.insert(schema.pendingUploads)
+				.values({
+					id: operation.id,
+					cacheId: cache.id,
+					narHash: nixSha256Hash('1'),
+					r2Key: r2ObjectKeySchema.parse(`staging/expired/${operation.id}`),
+					metadataJson: JSON.stringify(distinctPath('1')),
+					createdAt: deadline,
+					expiresAt: deadline,
+					recoveryDeadline: deadline,
+					verdict: 'pending'
+				})
+				.run();
+		}
+		return Promise.resolve();
+	});
+	const claimed: string[][] = [];
+	for (let pass = 0; pass < 2; pass += 1) {
+		const batch = await currentServer().claimVerificationBatch(
+			10,
+			1_000_000_000
+		);
+		claimed.push(batch.claims.map((claim) => claim.uploadId));
+	}
+	expect(claimed).toStrictEqual([['live-0'], []]);
 });

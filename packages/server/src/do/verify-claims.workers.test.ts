@@ -1792,9 +1792,10 @@ it.each(
 						}
 					};
 					const measure = async <T>(run: () => Promise<T> | T) => {
-						await instance.context.ctx.storage.delete(
-							'maintenance:verification-decode-free-cursor'
-						);
+						await instance.context.ctx.storage.delete([
+							'maintenance:verification-decode-free-cursor',
+							'maintenance:verification-claim-cursor'
+						]);
 						instance.context.db
 							.delete(schema.pendingUploads)
 							.where(eq(schema.pendingUploads.id, dueId))
@@ -1816,9 +1817,12 @@ it.each(
 						};
 					};
 					const all = async () => ({
-						fresh: await measure(() =>
+						fresh: await measure(async () =>
 							withoutOwner(
-								verification.listPendingForVerify(10, Number.MAX_SAFE_INTEGER)
+								await verification.claimPendingForVerify(
+									10,
+									Number.MAX_SAFE_INTEGER
+								)
 							)
 						),
 						decodeFree: await measure(() =>
