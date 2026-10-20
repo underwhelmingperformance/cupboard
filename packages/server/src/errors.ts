@@ -56,6 +56,14 @@ export class PublicationConflictError extends ServerHttpError {
 	}
 }
 
+export class CommitSessionGrantsUnavailableError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	constructor(public override readonly cause: unknown) {
+		super('The commit session could not read its grants. Retry the entry.');
+		this.name = 'CommitSessionGrantsUnavailableError';
+	}
+}
+
 export class PublicationPushExpiredError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {
