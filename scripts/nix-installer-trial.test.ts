@@ -63,7 +63,7 @@ it.each([
 				);
 				await writeFile(
 					configPath,
-					`export default { test: { root: ${JSON.stringify(directory)}, include: ['fixture.test.ts'], reporters: [['junit', { outputFile: ${JSON.stringify(reportPath)} }], [${JSON.stringify(reporter)}, ${JSON.stringify(expectedTests)}]], maxWorkers: 1 } };\n`
+					`import RequiredInstallerTestsReporter from ${JSON.stringify(reporter)};\nexport default { test: { root: ${JSON.stringify(directory)}, include: ['fixture.test.ts'], reporters: [['junit', { outputFile: ${JSON.stringify(reportPath)} }], new RequiredInstallerTestsReporter(${JSON.stringify(expectedTests)})], maxWorkers: 1 } };\n`
 				);
 				let result = 0;
 				try {
@@ -75,7 +75,13 @@ it.each([
 							'--config',
 							configPath
 						],
-						{ timeout: 30_000 }
+						{
+							timeout: 30_000,
+							env: {
+								...process.env,
+								NODE_OPTIONS: '--no-experimental-transform-types'
+							}
+						}
 					);
 				} catch (error) {
 					result = z.object({ code: z.number() }).parse(error).code;
