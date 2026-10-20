@@ -3529,7 +3529,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// Prefetch D1 facts once for the batch. They remain advisory; the charge
 			// batch decides status and quota. On failure, each entry reads fresh facts.
 			const narHashes = request.commits.map((entry) => entry.narHash);
-			const authority = await this.sessionReuseAuthority(cache, attachment);
 			let batchPrefetched: Map<string, PrefetchedCommitFacts> | undefined;
 			let batchAccount: TenantAccount | undefined;
 
@@ -3550,6 +3549,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const answered = new Set<UploadId>();
 
 			try {
+				const authority = await this.sessionReuseAuthority(cache, attachment);
 				await mapWithConcurrency(
 					request.commits,
 					maxOutgoingConnections,
