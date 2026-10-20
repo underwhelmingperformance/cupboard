@@ -9,7 +9,7 @@ const repositoryRoot = path.resolve(import.meta.dirname, '..');
 const actions = [
 	{ name: 'build-paths', entrypoints: ['main', 'post', 'worker'] },
 	{ name: 'evaluate-targets', entrypoints: ['main', 'worker'] },
-	{ name: 'prepare-builders', entrypoints: ['main', 'post'] }
+	{ name: 'prepare-builders', entrypoints: ['main', 'post', 'probe-worker'] }
 ] as const;
 
 class ActionBundleGenerationError extends CodedError {

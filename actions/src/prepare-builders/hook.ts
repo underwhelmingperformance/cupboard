@@ -1,6 +1,5 @@
 import { execFile } from 'node:child_process';
-import { constants } from 'node:fs';
-import { access, chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -9,6 +8,8 @@ import { CodedError } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
 import { type Environment, requireEnvironment } from '../inputs.ts';
+
+import { type ExecuteHookProbe, probeBuildHook, shellQuote } from './probe.ts';
 
 const execute = promisify(execFile);
 // Nix splits build-hook on whitespace without unquoting its arguments.
@@ -22,6 +23,8 @@ const configurationSchema = z.object({ 'build-hook': hookSettingSchema });
 interface BuilderHookDependencies {
 	readonly store?: Pick<Nix, 'storeKind' | 'daemonTrust'>;
 	readonly readHook?: () => Promise<readonly string[]>;
+	readonly executeProbe?: ExecuteHookProbe;
+	readonly probeWorkerPath?: string;
 }
 
 interface BuilderHook {
@@ -47,15 +50,6 @@ export class BuilderHookCleanupError extends CodedError {
 	}
 }
 
-class BuilderHookExecutableError extends CodedError {
-	constructor(command: string) {
-		super(
-			`Cannot find an executable for the configured Nix build hook: ${command}`
-		);
-		this.name = 'BuilderHookExecutableError';
-	}
-}
-
 class BuilderHookEmptyError extends CodedError {
 	constructor() {
 		super(
@@ -74,39 +68,6 @@ async function readBuildHook(
 	});
 	const configuration: unknown = JSON.parse(stdout);
 	return configurationSchema.parse(configuration)['build-hook'].value;
-}
-
-async function resolveExecutable(
-	command: string,
-	environment: Environment
-): Promise<string> {
-	const candidates = command.includes('/')
-		? [path.resolve(command)]
-		: (environment.PATH ?? '')
-				.split(path.delimiter)
-				.map((directory) => path.resolve(directory, command));
-	for (const candidate of candidates) {
-		try {
-			await access(candidate, constants.X_OK);
-			const metadata = await stat(candidate);
-			if (metadata.isFile()) {
-				return candidate;
-			}
-		} catch (error) {
-			if (
-				!(error instanceof Error) ||
-				!('code' in error) ||
-				!['ENOENT', 'EACCES', 'ENOTDIR'].includes(String(error.code))
-			) {
-				throw error;
-			}
-		}
-	}
-	throw new BuilderHookExecutableError(command);
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", String.raw`'\''`)}'`;
 }
 
 /**
@@ -131,10 +92,20 @@ export async function prepareBuilderHook(
 	if (command === undefined) {
 		throw new BuilderHookEmptyError();
 	}
-	const executable = await resolveExecutable(command, environment);
 	const directory = await mkdtemp(path.join(temporaryRoot, directoryPrefix));
 	try {
 		await chmod(directory, 0o700);
+		const executable = await probeBuildHook({
+			directory,
+			command,
+			environment,
+			...(dependencies.probeWorkerPath !== undefined && {
+				workerPath: dependencies.probeWorkerPath
+			}),
+			...(dependencies.executeProbe !== undefined && {
+				executeProbe: dependencies.executeProbe
+			})
+		});
 		const hook = path.join(directory, 'build-hook');
 		// exec preserves descriptors 4 and 5, which Nix uses for builder output.
 		await writeFile(

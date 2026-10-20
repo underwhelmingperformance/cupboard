@@ -4,7 +4,20 @@ on:
   pull_request:
     paths:
       - .github/workflows/nix-installer-trial.yml
+      - .node-version
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
       - tests/installer/**
+      - tests/e2e/**
+      - tests/support/**
+      - tests/fixtures/nix-ssh-store/**
+      - packages/nix-store/**
+      - packages/protocol/**
+      - packages/nix/**
+      - packages/cli/hook-helper/**
+      - scripts/action-bundles.ts
+      - actions/install-nix/**
       - actions/prepare/**
       - actions/prepare-builders/**
       - actions/src/prepare-builders/**
@@ -94,6 +107,14 @@ jobs:
           sudo install -d -m 0755 /run/sshd
           docker info > "$TRIAL_RESULTS/docker.txt"
 
+      - name: Register the composite cleanup check
+        uses: $/tests/installer/lifecycle
+
+      - name: Exercise the nested builder action
+        uses: $/tests/installer/composite
+        env:
+          NIX_SSHOPTS: -F /dev/null
+
       - name: Test installation and SSH compatibility
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: pnpm exec vitest run --config tests/installer/vitest.config.ts
@@ -113,6 +134,13 @@ jobs:
           set -euo pipefail
           pnpm --filter @cupboard/server build-info
           pnpm exec vitest run --config tests/installer/remote-store.vitest.config.ts
+
+      - name: Test separate builder transfers and observation
+        if:
+          ${{ !cancelled() && steps.dependencies.outcome == 'success' &&
+          runner.os == 'Linux' }}
+        run:
+          pnpm exec vitest run --config tests/installer/builder.vitest.config.ts
 
       - name: Collect installation diagnostics
         if: ${{ !cancelled() }}
@@ -136,4 +164,59 @@ jobs:
         with:
           name: nix-installer-trial-${{ matrix.system }}
           path: ${{ runner.temp }}/nix-installer-trial
+          if-no-files-found: error
+
+  production:
+    name: Production installer (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-15
+    env:
+      NIX_SYSTEM: ${{ matrix.system }}
+      CUPBOARD_NIX_INSTALLER_TRIAL: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: $/tests/installer/lifecycle
+      - name: Exercise the production prepare action
+        uses: $/actions/prepare
+        with:
+          remote: 'true'
+          builders: ssh-ng://unused.invalid ${{ matrix.system }} - 1 1
+          builder-known-hosts: unused.invalid fixture-not-used-for-connections
+      - name: Record the nested adapter and restore the test environment
+        run: node tests/installer/lifecycle/record.ts
+      - run: pnpm install --frozen-lockfile
+      - name: Record the production store
+        run: |
+          set -euo pipefail
+          export TRIAL_RESULTS="$RUNNER_TEMP/nix-installer-production"
+          mkdir -p "$TRIAL_RESULTS"
+          { git rev-parse HEAD; nix --version; nix store info --json; } | tee "$TRIAL_RESULTS/runtime.txt"
+          printf 'TRIAL_RESULTS=%s\n' "$TRIAL_RESULTS" >> "$GITHUB_ENV"
+          node --experimental-transform-types tests/installer/production.ts
+      - name: Test separate builder transfers and observation
+        if: runner.os == 'Linux'
+        run:
+          pnpm exec vitest run --config tests/installer/builder.vitest.config.ts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: nix-installer-production-${{ matrix.system }}
+          path: ${{ runner.temp }}/nix-installer-production
           if-no-files-found: error

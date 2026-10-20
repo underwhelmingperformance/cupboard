@@ -1,0 +1,9 @@
+name: Verify nested builder action cleanup
+description:
+  Checks that the nested builder action removes its adapter before earlier post
+  steps run.
+runs:
+  using: node24
+  main: main.ts
+  post: post.ts
+  post-if: always()

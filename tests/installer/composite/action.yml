@@ -1,0 +1,9 @@
+name: Exercise the builder action inside a composite
+description:
+  Runs the production action through GitHub's composite action lifecycle.
+runs:
+  using: composite
+  steps:
+    - uses: $/actions/prepare-builders
+    - shell: bash
+      run: node tests/installer/lifecycle/record.ts

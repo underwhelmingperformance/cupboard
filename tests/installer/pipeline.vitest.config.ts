@@ -2,6 +2,7 @@ import { defineConfig, mergeConfig } from 'vitest/config';
 
 import pipeline from '../e2e/pipeline.vitest.config.ts';
 
+import { pipelineTests } from './required-tests.ts';
 import RequiredInstallerTestsReporter from './required-tests-reporter.ts';
 
 export default mergeConfig(
@@ -19,7 +20,7 @@ export default mergeConfig(
 						outputFile: `${process.env.TRIAL_RESULTS ?? '.tmp-installer-trial'}/pipeline.xml`
 					}
 				],
-				new RequiredInstallerTestsReporter()
+				new RequiredInstallerTestsReporter(pipelineTests)
 			]
 		}
 	})

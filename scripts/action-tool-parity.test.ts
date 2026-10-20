@@ -202,39 +202,39 @@ describe('composite action toolchain derivation', () => {
 });
 
 describe('native build action runtime', () => {
-	it('uses the workspace Node major with generated main and post bundles', () => {
-		const document: unknown = parse(
-			readFileSync(
-				path.join(actionsDirectory, 'build-paths', 'action.yml'),
+	it.each(['build-paths', 'prepare-builders'])(
+		'%s uses the workspace Node major with generated main and post bundles',
+		(name) => {
+			const document: unknown = parse(
+				readFileSync(path.join(actionsDirectory, name, 'action.yml'), 'utf8')
+			);
+			const action = z
+				.object({
+					runs: z.object({
+						using: z.string(),
+						main: z.string(),
+						post: z.string(),
+						'post-if': z.string()
+					})
+				})
+				.parse(document);
+			const [major] = readFileSync(
+				path.join(repositoryRoot, '.node-version'),
 				'utf8'
 			)
-		);
-		const action = z
-			.object({
-				runs: z.object({
-					using: z.string(),
-					main: z.string(),
-					post: z.string(),
-					'post-if': z.string()
-				})
-			})
-			.parse(document);
-		const [major] = readFileSync(
-			path.join(repositoryRoot, '.node-version'),
-			'utf8'
-		)
-			.trim()
-			.split('.', 1);
-		if (major === undefined) {
-			throw new Error('The workspace must specify its Node major version');
+				.trim()
+				.split('.', 1);
+			if (major === undefined) {
+				throw new Error('The workspace must specify its Node major version');
+			}
+			expect(action.runs).toStrictEqual({
+				using: `node${major}`,
+				main: 'dist/main.cjs',
+				post: 'dist/post.cjs',
+				'post-if': 'always()'
+			});
 		}
-		expect(action.runs).toStrictEqual({
-			using: `node${major}`,
-			main: 'dist/main.cjs',
-			post: 'dist/post.cjs',
-			'post-if': 'always()'
-		});
-	});
+	);
 });
 
 describe('native evaluation action runtime', () => {
