@@ -889,13 +889,17 @@ export class VerificationService {
 			pending.id,
 			pending.metadataJson
 		);
+		const failed = {
+			verdict: 'absent' as const,
+			absentPublication: 'fail-publication' as const
+		};
 		const resolution = await this.context.criticalSection(async () => {
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return;
 			}
 			const row = this.narInfoRow(pending.cacheId, metadata.storePathHash);
 			if (row?.narHash !== metadata.narHash) {
-				return { verdict: 'absent' as const };
+				return failed;
 			}
 			const result = await this.commitPipeline.reclaimReservedRow(
 				this.cache(pending.cacheId),
@@ -914,7 +918,7 @@ export class VerificationService {
 						metadata.storePathHash
 					);
 				}
-				return { verdict: 'absent' as const };
+				return failed;
 			}
 			const grace = parseStoredGraceDecision(pending.graceDecisionJson);
 			const confirmed = confirmGrace(
@@ -940,12 +944,16 @@ export class VerificationService {
 			await new ReconcileQueueService(this.context).enqueue(undefined, [
 				{ cacheId: pending.cacheId, storePathHash: metadata.storePathHash }
 			]);
+			// The path is published with this upload's NAR. When another upload
+			// made the charge, the verdict is `absent`, and the operation stays
+			// accepted so that a resend is answered from the published path.
 			return {
 				verdict: await this.publicationVerdict(
 					pending,
 					metadata,
 					row.generation
-				)
+				),
+				absentPublication: 'keep-publication-accepted' as const
 			};
 		});
 		if (
@@ -953,9 +961,6 @@ export class VerificationService {
 			!this.ownsActiveClaim(owner, pending, signal)
 		) {
 			return false;
-		}
-		if (resolution.verdict === 'absent') {
-			new PublicationStore(this.context).finish(pending.id, 'failed');
 		}
 		await this.deleteStagingObject(pending);
 		signal?.throwIfAborted();
@@ -968,7 +973,8 @@ export class VerificationService {
 			!(await this.uploadState.clearPendingUpload(
 				pending.id,
 				{ logger, outcome: resolution.verdict },
-				owner
+				owner,
+				resolution.absentPublication
 			))
 		) {
 			return false;
