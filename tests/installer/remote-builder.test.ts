@@ -59,7 +59,7 @@ it('copies inputs and outputs through a separate builder while observing the com
 				import.meta.url
 			).pathname
 		});
-		hookDirectory = hook.directory;
+		hookDirectory = hook?.directory;
 		const helper = path.join(directory, 'cupboard-hook-relay');
 		await execute('cc', [
 			'-std=c11',
@@ -88,7 +88,7 @@ it('copies inputs and outputs through a separate builder while observing the com
 			{ mode: 0o700 }
 		);
 		const buildEnvironment = environmentWithPostBuildHook(
-			{ ...environment, NIX_CONFIG: hook.nixConfig },
+			{ ...environment, NIX_CONFIG: hook?.nixConfig ?? environment.NIX_CONFIG },
 			postHook
 		);
 		const expression = String.raw`derivation { name = "cupboard-separate-builder-${seed}"; system = "${system}"; input = builtins.toFile "input-${seed}" "${seed}\n"; builder = "/bin/sh"; args = [ "-c" "read -r content < $input; printf '%s' \"$content\" > $out; : > ${marker}" ]; preferLocalBuild = false; allowSubstitutes = false; }`;

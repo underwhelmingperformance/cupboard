@@ -12,15 +12,9 @@ on:
       - tests/e2e/**
       - tests/support/**
       - tests/fixtures/nix-ssh-store/**
-      - packages/nix-store/**
-      - packages/protocol/**
-      - packages/nix/**
-      - packages/cli/hook-helper/**
+      - packages/**
       - scripts/action-bundles.ts
-      - actions/install-nix/**
-      - actions/prepare/**
-      - actions/prepare-builders/**
-      - actions/src/prepare-builders/**
+      - actions/**
       - scripts/nix-installer-trial.test.ts
   workflow_dispatch:
 
@@ -199,8 +193,10 @@ jobs:
           remote: 'true'
           builders: ssh-ng://unused.invalid ${{ matrix.system }} - 1 1
           builder-known-hosts: unused.invalid fixture-not-used-for-connections
-      - name: Record the nested adapter and restore the test environment
-        run: node tests/installer/lifecycle/record.ts
+      - name:
+          Verify single-user builder preparation and restore the test
+          environment
+        run: node tests/installer/lifecycle/record.ts local-filesystem
       - run: pnpm install --frozen-lockfile
       - name: Record the production store
         run: |

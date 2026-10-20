@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -359,6 +360,7 @@ describe('NixOS installer compatibility', () => {
 				},
 				{ probeWorkerPath: new URL('probe-worker.cjs', builderAction).pathname }
 			);
+			assert.ok(hook !== undefined);
 			try {
 				await expect(
 					access(path.join(hook.directory, 'build-hook'))

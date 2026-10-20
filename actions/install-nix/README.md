@@ -15,12 +15,14 @@ Local changes:
 - Spotlight configuration emits a warning on failure. Volume creation and
   ownership changes must succeed.
 - `versions.env` pins the archive release and Nix version. There are no inputs
-  for other versions, archive locations, tmpfs, KVM or additional `nix.conf`
+  for other versions, archive locations, tmpfs or additional `nix.conf`
   contents. The workflows configure Nix after installation.
 - Only the four runner systems in `packages/nix/src/nix-systems.json` are
   supported. The pinned Nix version enables flakes without a version check.
 - Database registration makes at most three attempts and reports exhaustion
   explicitly. HTTP download failures are fatal.
+
+On Linux, the installer enables KVM when available and warns if setup fails.
 
 To update Nix, select a version available in the upstream archive release and
 update both pins in `versions.env` as needed. Review upstream installer changes
