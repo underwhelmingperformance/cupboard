@@ -137,7 +137,7 @@ runs:
 
         df -h /
 
-    - uses: wimpysworld/nothing-but-nix@107c493df981130c9b02eb3ec7a8ff1d300853e9 # https://github.com/wimpysworld/nothing-but-nix/pull/52
+    - uses: underwhelmingperformance/nothing-but-nix@535748d2b794cacd337dcf68b0d7266e2a735566 # v10.0.1
       if: ${{ inputs.maximise-space == 'true' && runner.os == 'Linux' }}
       with:
         hatchet-protocol: holster
