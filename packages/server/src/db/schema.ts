@@ -420,7 +420,8 @@ export const publicationOperations = sqliteTable(
 		index('publication_operation_prune_idx').on(table.state, table.pruneAfter),
 		index('publication_operation_deadline_idx').on(
 			table.state,
-			table.recoveryDeadline
+			table.recoveryDeadline,
+			table.id
 		)
 	]
 );

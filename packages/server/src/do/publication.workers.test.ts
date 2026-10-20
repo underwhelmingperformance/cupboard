@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { rootNameSchema } from '@cupboard/nix-store/scalars';
 import { publicationStagingKey } from '@cupboard/protocol/publication';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	acceptCapabilitiesHeader,
 	commitBatchMaxEntries,
@@ -11,6 +12,7 @@ import {
 	publicationRefusalReasonsCapability,
 	pushCredentialSchema,
 	uploadCapabilitiesHeader,
+	type UploadId,
 	type UploadPathNegotiation,
 	uploadPlanResponseSchema
 } from '@cupboard/protocol/upload';
@@ -24,6 +26,7 @@ import { decodeJwt } from 'jose';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as schema from '../db/schema.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
 import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -56,6 +59,7 @@ import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { PublicationStore } from './publication-store.ts';
 import { type CupboardServer } from './server.ts';
 import { UploadsService } from './uploads-service.ts';
+import { VerificationService } from './verification-service.ts';
 
 it.each(
 	[false, true].flatMap((accepted) =>
@@ -1995,3 +1999,293 @@ describe('terminal publication pruning', () => {
 		expect(result).toStrictEqual({ remaining: 1, isArmedNow: true });
 	});
 });
+
+// A pending row whose metadata does not parse makes its operation's expiry
+// throw.
+function insertExpiringOperation(
+	instance: CupboardServer,
+	idPrefix: string,
+	recoveryDeadline: Date,
+	hasBrokenUpload: boolean
+): UploadId {
+	const cache = instance.context.db.select().from(schema.cacheIdentities).get();
+	if (cache === undefined) {
+		throw new Error('Expected the default cache');
+	}
+	const id = uploadIdSchema.parse(idPrefix.padEnd(64, idPrefix.slice(-1)));
+	const deadline = isoTimestamp(recoveryDeadline);
+	const pruneAfter = isoTimestamp(new Date(Date.now() + 60 * 60 * 1000));
+	instance.context.db
+		.insert(schema.publicationOperations)
+		.values({
+			id,
+			cacheId: cache.id,
+			cacheGeneration: cache.generation,
+			pushId: testPushId,
+			canonicalJson: '[]',
+			acceptedAt: deadline,
+			pushExpiresAt: deadline,
+			recoveryDeadline: deadline,
+			pruneAfter,
+			graceDecisionJson: '{"reportsGrace":true}'
+		})
+		.run();
+	if (hasBrokenUpload) {
+		instance.context.db
+			.insert(schema.pendingUploads)
+			.values({
+				id,
+				cacheId: cache.id,
+				narHash: nixSha256Hash('1'),
+				r2Key: r2ObjectKeySchema.parse(`staging/broken/${id}`),
+				metadataJson: '{}',
+				createdAt: deadline,
+				expiresAt: deadline,
+				recoveryDeadline: deadline,
+				verdict: 'pending'
+			})
+			.run();
+	}
+	return id;
+}
+
+// Returns the rows that two expiry runs read when `backlog` failing operations
+// share one recovery deadline. The first run reads the first page, and the
+// second run reads the page after the position that the first run stores.
+async function expiryRunRowsRead(backlog: number): Promise<{
+	readonly first: number;
+	readonly next: number;
+}> {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	await initialise();
+	return runInDurableObject(currentServer(), async (instance) => {
+		const deadline = new Date(Date.now() - 1000);
+		for (let index = 0; index < backlog; index += 1) {
+			insertExpiringOperation(
+				instance,
+				index.toString(16).padStart(3, '0'),
+				deadline,
+				true
+			);
+		}
+		const { dbCost } = instance.context;
+		const run = async () => {
+			dbCost.recordOutstanding();
+			const before = dbCost.rowsRead;
+			await asOneInvocation(() =>
+				verificationOf(instance).expirePublications(rootLogger())
+			);
+			dbCost.recordOutstanding();
+			return dbCost.rowsRead - before;
+		};
+		const first = await run();
+		// A run that only failed waits ten minutes before the next one.
+		vi.setSystemTime(new Date(Date.now() + 10 * 60 * 1000));
+		const next = await run();
+		return { first, next };
+	});
+}
+
+describe('publication expiry failures', () => {
+	// Durable Object alarms use the real clock, so these tests run on it.
+	beforeEach(async () => {
+		vi.setSystemTime(vi.getRealSystemTime());
+		await resetTestServer();
+	});
+
+	it('expires the other operations and prunes when one operation fails', async () => {
+		await initialise();
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const broken = insertExpiringOperation(
+					instance,
+					'b',
+					new Date(Date.now() - 2000),
+					true
+				);
+				const expiring = insertExpiringOperation(
+					instance,
+					'c',
+					new Date(Date.now() - 1000),
+					false
+				);
+				insertServable(instance, 1, new Date().toISOString());
+				await asOneInvocation(() =>
+					verificationOf(instance).expirePublications(rootLogger())
+				);
+				return {
+					operations: instance.context.db
+						.select({
+							id: schema.publicationOperations.id,
+							state: schema.publicationOperations.state
+						})
+						.from(schema.publicationOperations)
+						.orderBy(schema.publicationOperations.id)
+						.all(),
+					expected: [
+						{ id: broken, state: 'accepted' },
+						{ id: expiring, state: 'expired' }
+					]
+				};
+			}
+		);
+		expect(outcome.operations).toStrictEqual(outcome.expected);
+	});
+
+	it('reaches an expirable operation behind a full page of failing operations', async () => {
+		await initialise();
+		const state = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				for (let index = 0; index < 26; index += 1) {
+					insertExpiringOperation(
+						instance,
+						index.toString(16).padStart(2, '0'),
+						new Date(Date.now() - 100_000 + index),
+						true
+					);
+				}
+				const expiring = insertExpiringOperation(
+					instance,
+					'ff',
+					new Date(Date.now() - 1000),
+					false
+				);
+				for (let run = 0; run < 2; run += 1) {
+					await asOneInvocation(() =>
+						verificationOf(instance).expirePublications(rootLogger())
+					);
+				}
+				return instance.context.db
+					.select({ state: schema.publicationOperations.state })
+					.from(schema.publicationOperations)
+					.where(eq(schema.publicationOperations.id, expiring))
+					.get();
+			}
+		);
+		expect(state).toStrictEqual({ state: 'expired' });
+	});
+
+	it('reads the same rows for a page of due operations whatever the number that share its deadline', async () => {
+		const small = await expiryRunRowsRead(100);
+		const large = await expiryRunRowsRead(1000);
+		expect(large).toStrictEqual(small);
+	});
+
+	it('ends expiry without throwing when it cannot arm its next alarm', async () => {
+		await initialise();
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const expiring = insertExpiringOperation(
+					instance,
+					'c',
+					new Date(Date.now() - 1000),
+					false
+				);
+				const arming = vi
+					.spyOn(PublicationStore.prototype, 'armRecoveryAlarm')
+					.mockRejectedValueOnce(new PublicationExpiryFault());
+				let failure: unknown;
+				try {
+					await asOneInvocation(() =>
+						verificationOf(instance).expirePublications(rootLogger())
+					);
+				} catch (error) {
+					failure = error;
+				}
+				const arms = arming.mock.calls.length;
+				arming.mockRestore();
+				return {
+					arms,
+					isFault: failure instanceof PublicationExpiryFault,
+					state: instance.context.db
+						.select({ state: schema.publicationOperations.state })
+						.from(schema.publicationOperations)
+						.where(eq(schema.publicationOperations.id, expiring))
+						.get()?.state
+				};
+			}
+		);
+		expect(outcome).toStrictEqual({
+			arms: 1,
+			isFault: false,
+			state: 'expired'
+		});
+	});
+
+	it('arms a delayed retry when every due operation fails', async () => {
+		await initialise();
+		const alarm = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				insertExpiringOperation(
+					instance,
+					'b',
+					new Date(Date.now() - 1000),
+					true
+				);
+				await state.storage.deleteAlarm();
+				await asOneInvocation(() =>
+					verificationOf(instance).expirePublications(rootLogger())
+				);
+				return state.storage.getAlarm();
+			}
+		);
+		expect(alarm).toBe(Date.now() + 10 * 60 * 1000);
+	});
+});
+
+class PublicationExpiryFault extends Error {}
+
+it.each([
+	{
+		pass: 'alarm',
+		run: (instance: CupboardServer) => instance.alarm(),
+		laterStep: () =>
+			vi.spyOn(CommitReuseGrantsService.prototype, 'cleanupExpired')
+	},
+	{
+		pass: 'verification pass',
+		run: (instance: CupboardServer) => instance.runVerification(),
+		laterStep: () =>
+			vi.spyOn(VerificationService.prototype, 'processPendingWithoutDecode')
+	}
+])(
+	'continues the $pass after publication expiry fails',
+	async ({ run, laterStep }) => {
+		await resetTestServer();
+		await initialise();
+		const prune = vi
+			.spyOn(PublicationStore.prototype, 'prune')
+			.mockImplementation(() => {
+				throw new PublicationExpiryFault();
+			});
+		const later = laterStep();
+		try {
+			const outcome = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					try {
+						await run(instance);
+						return 'completed';
+					} catch (error) {
+						return error instanceof PublicationExpiryFault
+							? 'expiry failed'
+							: 'other failure';
+					}
+				}
+			);
+			expect({
+				outcome,
+				prunes: prune.mock.calls.length,
+				laterSteps: later.mock.calls.length
+			}).toStrictEqual({ outcome: 'completed', prunes: 1, laterSteps: 1 });
+		} finally {
+			prune.mockRestore();
+			later.mockRestore();
+		}
+	}
+);
