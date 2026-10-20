@@ -3,6 +3,7 @@ import { access, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { text } from 'node:stream/consumers';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { expect, it } from 'vitest';
@@ -17,6 +18,9 @@ import {
 } from './hook.ts';
 
 const execute = promisify(execFile);
+const probeWorkerPath = fileURLToPath(
+	new URL('../../prepare-builders/dist/probe-worker.cjs', import.meta.url)
+);
 const localStore = {
 	storeKind: 'local-filesystem' as const,
 	daemonTrust: () => Promise.resolve('unknown' as const)
@@ -35,7 +39,11 @@ it('preserves the hook arguments, SSH options and protocol file descriptors', as
 			{ ...process.env, NIX_SSHOPTS: sshOptions, NIX_CONFIG: 'max-jobs = 0' },
 			{
 				store: localStore,
-				readHook: () => Promise.resolve([command, "argument 'with quotes'"])
+				probeWorkerPath,
+				readHook: () => Promise.resolve([command, "argument 'with quotes'"]),
+				executeProbe: async (hook) => {
+					await execute(hook);
+				}
 			}
 		);
 		try {
@@ -96,11 +104,15 @@ it('keeps concurrent jobs independent and resolves the existing hook through PAT
 			prepareBuilderHook(
 				{ ...process.env, NIX_SSHOPTS: sshOptions },
 				{
+					probeWorkerPath,
 					store: {
 						storeKind: 'daemon',
 						daemonTrust: () => Promise.resolve('trusted')
 					},
-					readHook: () => Promise.resolve(['printenv', 'NIX_SSHOPTS'])
+					readHook: () => Promise.resolve(['printenv', 'NIX_SSHOPTS']),
+					executeProbe: async (hook) => {
+						await execute(hook);
+					}
 				}
 			)
 		)
@@ -129,6 +141,7 @@ it.each(['not-trusted', 'unknown'] as const)(
 			prepareBuilderHook(
 				{ NIX_SSHOPTS: '-F /fixture/config' },
 				{
+					probeWorkerPath,
 					store: {
 						storeKind: 'daemon',
 						daemonTrust: () => Promise.resolve(trust)
@@ -148,3 +161,74 @@ it.each(['/tmp', '/tmp/cupboard-builder-invalid/child', '/home/runner'])(
 		);
 	}
 );
+
+it('resolves the hook in the store process instead of the action PATH', async () => {
+	await withTemporaryDirectory('cupboard-store-path-', async (directory) => {
+		const command = path.join(directory, 'store-only-hook');
+		await writeFile(command, '#!/bin/sh\nprintf "%s" "$NIX_SSHOPTS"\n', {
+			mode: 0o700
+		});
+		const result = await prepareBuilderHook(
+			{
+				...process.env,
+				PATH: '/missing-action-path',
+				NIX_SSHOPTS: 'job-options'
+			},
+			{
+				store: localStore,
+				probeWorkerPath,
+				readHook: () => Promise.resolve(['store-only-hook']),
+				executeProbe: async (hook) => {
+					await execute(hook, [], { env: { PATH: directory } });
+				}
+			}
+		);
+		try {
+			const { stdout } = await execute(
+				path.join(result.directory, 'build-hook')
+			);
+			expect(stdout).toBe('job-options');
+		} finally {
+			await removeBuilderHook(result.directory);
+		}
+	});
+});
+
+it('refuses a store that cannot execute the adapter and removes its files', async () => {
+	let directory = '';
+	await expect(
+		prepareBuilderHook(
+			{ ...process.env, NIX_SSHOPTS: 'job-options' },
+			{
+				store: localStore,
+				probeWorkerPath,
+				readHook: () => Promise.resolve(['/usr/bin/true']),
+				executeProbe: (hook) => {
+					directory = path.dirname(hook);
+					return Promise.resolve();
+				}
+			}
+		)
+	).rejects.toMatchObject({ name: 'BuilderHookCapabilityError' });
+	await expect(access(directory)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('preserves the Nix error when the store cannot start the probe', async () => {
+	const failure = Object.assign(
+		new Error('The fixture could not evaluate the probe'),
+		{ code: 1 }
+	);
+	await expect(
+		prepareBuilderHook(
+			{ ...process.env, NIX_SSHOPTS: 'job-options' },
+			{
+				store: localStore,
+				readHook: () => Promise.resolve(['/usr/bin/true']),
+				executeProbe: () => Promise.reject(failure)
+			}
+		)
+	).rejects.toMatchObject({
+		name: 'BuilderHookCapabilityError',
+		cause: failure
+	});
+});

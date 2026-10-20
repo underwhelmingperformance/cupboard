@@ -21,6 +21,10 @@ import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import {
+	prepareBuilderHook,
+	removeBuilderHook
+} from '../../actions/src/prepare-builders/hook.ts';
 import { Nix } from '../../packages/nix/src/nix.ts';
 
 const execute = promisify(execFile);
@@ -196,6 +200,31 @@ class LoopbackSsh {
 		);
 	}
 
+	get connectionLog(): string {
+		return this.stderr;
+	}
+
+	async expectRefusal(
+		before: string,
+		scenario: 'wrong key' | 'wrong host pin'
+	): Promise<void> {
+		await expect
+			.poll(() => {
+				const events = this.stderr.slice(before.length);
+				return {
+					connected: /^Connection from 127\.0\.0\.1 /mu.test(events),
+					refused:
+						scenario === 'wrong key'
+							? /^Failed publickey /mu.test(events)
+							: /^Connection closed by 127\.0\.0\.1 .*\[preauth\]/mu.test(
+									events
+								),
+					authenticated: /^Accepted publickey /mu.test(events)
+				};
+			})
+			.toStrictEqual({ connected: true, refused: true, authenticated: false });
+	}
+
 	async knownHosts(key = this.hostKey): Promise<string> {
 		return `[127.0.0.1]:${String(this.port)} ${await readFile(`${key}.pub`, 'utf8')}`;
 	}
@@ -316,6 +345,32 @@ describe('NixOS installer compatibility', () => {
 		});
 	});
 
+	it('accepts a hook executable available only to the trusted daemon', async () => {
+		const directory = await mkdtemp('/tmp/cupboard-root-hook-');
+		try {
+			const command = path.join(directory, 'root-only');
+			await writeFile(command, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+			await run('sudo', ['chown', '0', command]);
+			const hook = await prepareBuilderHook(
+				{
+					...process.env,
+					NIX_SSHOPTS: '-F /dev/null',
+					NIX_CONFIG: `${process.env.NIX_CONFIG ?? ''}\nbuild-hook = ${command}\n`
+				},
+				{ probeWorkerPath: new URL('probe-worker.cjs', builderAction).pathname }
+			);
+			try {
+				await expect(
+					access(path.join(hook.directory, 'build-hook'))
+				).resolves.toBeUndefined();
+			} finally {
+				await removeBuilderHook(hook.directory);
+			}
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it('builds and realises a local derivation as the runner user', async () => {
 		const marker = randomUUID();
 		const result = await run('nix', [
@@ -409,6 +464,7 @@ describe('NixOS installer compatibility', () => {
 					scenario === 'wrong host pin' ? ssh.otherKey : ssh.hostKey
 				);
 				const uri = `git+ssh://${ssh.username}@127.0.0.1:${String(ssh.port)}${input}?ref=main`;
+				const before = ssh.connectionLog;
 				const evaluation = run(
 					'nix',
 					['eval', '--refresh', '--raw', `${uri}#value`],
@@ -416,6 +472,7 @@ describe('NixOS installer compatibility', () => {
 				);
 				if (scenario !== 'valid credentials') {
 					await expect(evaluation).rejects.toMatchObject({ code: 1 });
+					await ssh.expectRefusal(before, scenario);
 					return;
 				}
 				const result = await evaluation;
@@ -469,16 +526,14 @@ describe('NixOS installer compatibility', () => {
 					// Both sides share /nix/store. Give the remote build its own lock inode
 					// for this fresh fixture output; the scheduler keeps its original lock.
 					await writeFile(ssh.outputLock, `${output.stdout}.lock`);
-					const connection = run(
-						'nix',
-						['store', 'info', '--json', '--store', ssh.builderUri],
-						environment
-					);
 					if (scenario === 'valid credentials') {
-						await connection;
-					} else {
-						await expect(connection).rejects.toMatchObject({ code: 1 });
+						await run(
+							'nix',
+							['store', 'info', '--json', '--store', ssh.builderUri],
+							environment
+						);
 					}
+					const connectionLog = ssh.connectionLog;
 					const before = await readFile(ssh.commands, 'utf8');
 					const build = run(
 						'nix',
@@ -499,6 +554,8 @@ describe('NixOS installer compatibility', () => {
 					);
 					if (scenario !== 'valid credentials') {
 						await expect(build).rejects.toMatchObject({ code: 1 });
+						await ssh.expectRefusal(connectionLog, scenario);
+						expect(await readFile(ssh.commands, 'utf8')).toBe(before);
 						return;
 					}
 					const result = await build;

@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 
+import { compatibilityTests } from './required-tests.ts';
 import RequiredInstallerTestsReporter from './required-tests-reporter.ts';
 
 export default defineConfig({
@@ -16,7 +17,7 @@ export default defineConfig({
 					outputFile: `${process.env.TRIAL_RESULTS ?? '.tmp-installer-trial'}/compatibility.xml`
 				}
 			],
-			new RequiredInstallerTestsReporter()
+			new RequiredInstallerTestsReporter(compatibilityTests)
 		]
 	}
 });

@@ -27,18 +27,26 @@ it.each([
 		expectedCode: 0
 	},
 	{
+		scenario: 'a removed required test',
+		source: "it('different', () => expect(true).toBe(true));",
+		expectedCode: 1
+	},
+	{
 		scenario: 'a skipped prerequisite',
 		source: "describe.skip('missing daemon', () => it('runs', () => {}));",
+		expectedTests: ['missing daemon > runs'],
 		expectedCode: 1
 	},
 	{
 		scenario: 'a dynamic skip',
-		source: "it('missing fixture', (context) => context.skip());",
+		source: "it('runs', (context) => context.skip());",
 		expectedCode: 1
 	}
 ])(
 	'requires an executed trial for $scenario',
-	async ({ source, expectedCode }) => {
+	async ({ source, expectedCode, ...scenario }) => {
+		const expectedTests =
+			'expectedTests' in scenario ? scenario.expectedTests : ['runs'];
 		await withTemporaryDirectory(
 			'cupboard-installer-reporter-',
 			async (directory) => {
@@ -55,7 +63,7 @@ it.each([
 				);
 				await writeFile(
 					configPath,
-					`export default { test: { root: ${JSON.stringify(directory)}, include: ['fixture.test.ts'], reporters: [['junit', { outputFile: ${JSON.stringify(reportPath)} }], ${JSON.stringify(reporter)}], maxWorkers: 1 } };\n`
+					`export default { test: { root: ${JSON.stringify(directory)}, include: ['fixture.test.ts'], reporters: [['junit', { outputFile: ${JSON.stringify(reportPath)} }], [${JSON.stringify(reporter)}, ${JSON.stringify(expectedTests)}]], maxWorkers: 1 } };\n`
 				);
 				let result = 0;
 				try {
@@ -92,7 +100,7 @@ const jobSchema = z.looseObject({
 	strategy: strategySchema,
 	steps: z.array(stepSchema)
 });
-const jobsSchema = z.object({ trial: jobSchema });
+const jobsSchema = z.object({ trial: jobSchema, production: jobSchema });
 const workflowSchema = z.looseObject({ jobs: jobsSchema });
 
 it('trials the pinned NixOS installer independently of the production installer', async () => {
@@ -151,6 +159,73 @@ it('trials the pinned NixOS installer independently of the production installer'
 				name: 'Test direct remote stores',
 				condition:
 					"${{ !cancelled() && steps.dependencies.outcome == 'success' && runner.os == 'Linux' }}"
+			},
+			{
+				name: 'Test separate builder transfers and observation',
+				condition:
+					"${{ !cancelled() && steps.dependencies.outcome == 'success' && runner.os == 'Linux' }}"
+			}
+		]
+	});
+});
+
+it('exercises the production prepare action before testing the production store', async () => {
+	const document: unknown = parse(
+		await readFile(
+			new URL('../.github/workflows/nix-installer-trial.yml', import.meta.url),
+			'utf8'
+		)
+	);
+	const { trial, production } = workflowSchema.parse(document).jobs;
+	const prepare = production.steps.find(
+		(step) => step.uses === '$/actions/prepare'
+	);
+	expect({
+		matrix: production.strategy.matrix.include,
+		prepare,
+		stages: production.steps
+			.filter(
+				(step) =>
+					(step.uses ?? '').startsWith('$/') ||
+					/^(?:Record|Test) /u.test(step.name ?? '')
+			)
+			.map(({ name, uses, if: condition }) => ({ name, uses, condition }))
+	}).toStrictEqual({
+		matrix: trial.strategy.matrix.include,
+		prepare: {
+			name: 'Exercise the production prepare action',
+			uses: '$/actions/prepare',
+			with: {
+				remote: 'true',
+				builders: 'ssh-ng://unused.invalid ${{ matrix.system }} - 1 1',
+				'builder-known-hosts': 'unused.invalid fixture-not-used-for-connections'
+			}
+		},
+		stages: [
+			{
+				name: undefined,
+				uses: '$/tests/installer/lifecycle',
+				condition: undefined
+			},
+			{
+				name: 'Exercise the production prepare action',
+				uses: '$/actions/prepare',
+				condition: undefined
+			},
+			{
+				name: 'Record the nested adapter and restore the test environment',
+				uses: undefined,
+				condition: undefined
+			},
+			{
+				name: 'Record the production store',
+				uses: undefined,
+				condition: undefined
+			},
+			{
+				name: 'Test separate builder transfers and observation',
+				uses: undefined,
+				condition: "runner.os == 'Linux'"
 			}
 		]
 	});
