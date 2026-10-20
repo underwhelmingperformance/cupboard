@@ -78,6 +78,7 @@ import {
 import { jsonValueLists } from './json-list.ts';
 import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 import { concludePromotion } from './promotion-record.ts';
+import { publicationFailureJson } from './publication-store.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionRuleService } from './retention-rule-service.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
@@ -434,7 +435,7 @@ export class CacheAdminService {
 		// deletion cannot remove.
 		const removedUploads = this.context.db.transaction((tx) => {
 			tx.update(schema.publicationOperations)
-				.set({ state: 'failed' })
+				.set({ state: 'failed', resultJson: publicationFailureJson('absent') })
 				.where(
 					and(
 						eq(schema.publicationOperations.cacheId, cache.id),

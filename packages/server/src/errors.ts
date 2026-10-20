@@ -83,6 +83,26 @@ export class PublicationRecoveryExpiredError extends ServerHttpError {
 	}
 }
 
+export class PublicationExpiryPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	constructor(public override readonly cause?: unknown) {
+		super(
+			"The server could not finish this publication's expiry yet. Retry the entry."
+		);
+		this.name = 'PublicationExpiryPendingError';
+	}
+}
+
+export class PublicationStateChangedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	constructor() {
+		super(
+			'The publication changed state while the server answered it. Retry the entry.'
+		);
+		this.name = 'PublicationStateChangedError';
+	}
+}
+
 export class PublicationResendRequiredError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {

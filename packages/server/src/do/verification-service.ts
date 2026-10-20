@@ -59,6 +59,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	ObjectIncarnationReservationContendedError,
+	PublicationExpiryPendingError,
 	StagedObjectDigestMismatchError,
 	SubrequestSliceExceededError,
 	TenantWritesStoppedError,
@@ -4119,6 +4120,33 @@ export class VerificationService {
 				throw error;
 			}
 			logger.error('publication expiry failed', { error });
+		}
+	}
+
+	/**
+	Runs publication expiry for one accepted operation whose recovery deadline
+	has passed, as the expiry pass would. The expiry pass's retry wait stops
+	every claiming pass from retrying the same operations during an overload.
+	A replay calls this for one client entry, so the cost is bounded, and this
+	method runs even during that wait.
+	*/
+	async expireOperation(logger: Logger, id: UploadId): Promise<void> {
+		const store = new PublicationStore(this.context);
+		const operation = store.get(id);
+		if (
+			operation?.state !== 'accepted' ||
+			Date.parse(operation.recoveryDeadline) > Date.now()
+		) {
+			return;
+		}
+		// A failure leaves the operation accepted, and the next expiry run can
+		// still confirm it. The caller refuses the entry with a retryable error,
+		// and the client sends the entry again.
+		try {
+			await this.expirePublication(logger, store, operation);
+		} catch (error) {
+			logger.error('publication expiry failed', { operationId: id, error });
+			throw new PublicationExpiryPendingError(error);
 		}
 	}
 

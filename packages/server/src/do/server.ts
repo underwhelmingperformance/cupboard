@@ -89,6 +89,7 @@ import {
 	PublicationPushExpiredError,
 	PublicationRecoveryExpiredError,
 	PublicationResendRequiredError,
+	PublicationStateChangedError,
 	R2PresignConfigurationMissingError,
 	R2UnavailableError,
 	ServerHttpError,
@@ -246,7 +247,7 @@ import {
 	withOperationCost
 } from './operation-cost.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
-import { PublicationStore } from './publication-store.ts';
+import { publicationFailure, PublicationStore } from './publication-store.ts';
 import { isTransientR2Error } from './r2-read.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RefreshSessionsService } from './refresh-sessions-service.ts';
@@ -1509,6 +1510,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		try {
 			const scope = attachment.cache;
 			requirePublicationScope(grants, scope, entry);
+			const operation = new PublicationStore(this.context).get(
+				entry.operationId
+			);
+			if (
+				(operation?.state === 'failed' ||
+					(operation?.state === 'accepted' &&
+						Date.parse(operation.recoveryDeadline) <= Date.now())) &&
+				(await this.replayPublication(
+					socket,
+					attachment,
+					pushId,
+					entry,
+					grants,
+					'publish'
+				)) !== 'admit'
+			) {
+				return;
+			}
 			const admission = await this.afterHotMutation(scope, () =>
 				this.uploads.admitPublication(scope, pushId, entry, grants)
 			);
@@ -1587,40 +1606,73 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// A subscription reports the durable state of an accepted operation. Commit
-	// credit paces admission and commits, and the client sends a subscription
-	// without spending credit, so a subscription from a client that accepts
-	// `publication-refusal-reasons` never admits or commits work. When the
-	// operation needs that work, because its commit has not started or its
-	// completed path is no longer served, the server refuses such an entry with
-	// `resend`. The client then sends it again in a `publish-batch` message,
-	// which is charged. For a client without that capability, the caller admits
-	// the entry.
+	// Send the verdict that a live session received when the operation failed.
+	// The pending row keeps a failed verification's verdict until garbage
+	// collection removes the row. The operation record also keeps the verdict, so
+	// a subscription can send it after the row is removed.
+	private replayFailedPublication(
+		socket: WebSocket,
+		attachment: CommitSessionAttachment,
+		operation: typeof schema.publicationOperations.$inferSelect
+	): void {
+		const cache = this.context.cacheRepository.resolve(attachment.cache);
+		const row = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, operation.id))
+			.get();
+		if (
+			cache !== undefined &&
+			row?.cacheId === cache.id &&
+			(row.verdict === 'mismatch' || row.verdict === 'over-quota')
+		) {
+			this.replaySubscribedRow(
+				socket,
+				cache,
+				attachment.sessionId,
+				operation.id,
+				row
+			);
+			return;
+		}
+		const graceDecision = parseStoredGraceDecision(operation.graceDecisionJson);
+		sendCommitSessionFrame(socket, {
+			ev: 'verdict',
+			uploadId: operation.id,
+			status: publicationFailure(operation.resultJson),
+			...(graceDecision?.reportsGrace === true && { grace: {} })
+		});
+	}
+
+	// Answers a subscription, and a `publish-batch` entry for a concluded
+	// operation, from the operation's current state. Commit credit paces admission
+	// and commits, and the client sends a subscription without spending credit, so
+	// a subscription from a client that accepts `publication-refusal-reasons`
+	// never admits or commits work. When the operation needs that work, because
+	// its commit has not started or its completed path is no longer served, such a
+	// subscription is refused with `resend` and the client sends the entry again
+	// in a charged `publish-batch` message. For a `publish-batch` entry, and for a
+	// subscription from a client without that capability, the caller runs
+	// admission instead.
+	//
+	// Every answer uses the operation record, the pending row, the cache and the
+	// path's local narinfo row as they are after the last await that the answer
+	// depends on. When any of them changes during those awaits, or the path is
+	// recommitted between the replay's reads of it, the replay reads them again.
+	// For an accepted operation past its recovery deadline, the replay runs the
+	// expiry pass for that operation first, so the answer uses the grace that the
+	// expiry pass confirms and the run root that it attaches.
 	private async replayPublication(
 		socket: WebSocket,
 		attachment: CommitSessionAttachment,
 		pushId: PushId,
 		entry: PublicationEntry,
-		grants: AccessClaims['grants']
+		grants: AccessClaims['grants'],
+		operationKind: 'publish' | 'subscribe' = 'subscribe'
 	): Promise<'admit' | undefined> {
 		try {
 			const scope = attachment.cache;
 			requirePublicationScope(grants, scope, entry);
-			const cache = this.context.cacheRepository.resolve(scope);
-			const operations = new PublicationStore(this.context);
-			const operation = operations.get(entry.operationId);
-			if (cache === undefined || operation?.cacheId !== cache.id) {
-				// Pruning removes an operation record only after its push has expired.
-				const pushExpiry = pushIdExpiresAtSeconds(pushId);
-				if (
-					pushExpiry !== undefined &&
-					Date.now() >= pushExpiry * 1000 &&
-					(await this.context.pushCredentials().isIssuedToTenant(pushId))
-				) {
-					throw new PublicationPushExpiredError();
-				}
-				throw new UploadNotFoundError(entry.operationId);
-			}
 			const identity = await publicationIdentity({
 				tenant: this.context.requireTenant(),
 				cache: scope,
@@ -1629,61 +1681,294 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				metadata: entry.metadata,
 				attachRoot: entry.attachRoot
 			});
-			if (
-				identity.id !== entry.operationId ||
-				identity.canonical !== operation.canonicalJson
-			) {
+			if (identity.id !== entry.operationId) {
 				throw new PublicationConflictError(
 					'The publication parameters changed.',
 					'parameters-changed'
 				);
 			}
-			if (operation.state === 'servable') {
-				const served = await this.narInfoObjects.servableStorePathHashes(
-					cache,
-					[entry.metadata.storePathHash]
+			for (let read = 0; read < maxPublicationReplayReads; read += 1) {
+				const before = this.publicationReplayState(scope, entry);
+				const facts = await this.publicationReplayFacts(
+					scope,
+					pushId,
+					entry,
+					before
 				);
-				if (!served.has(entry.metadata.storePathHash)) {
-					return needsWork(attachment);
+				const after = this.publicationReplayState(scope, entry);
+				if (
+					facts.kind !== 'changed' &&
+					replayStateKey(before) === replayStateKey(after)
+				) {
+					return this.answerPublication({
+						socket,
+						attachment,
+						pushId,
+						entry,
+						canonical: identity.canonical,
+						state: after,
+						facts,
+						operationKind
+					});
 				}
-				const result =
-					operation.resultJson === null
-						? undefined
-						: publicationResultSchema.parse(JSON.parse(operation.resultJson));
-				await this.resolveGoneCommit(socket, cache, entry.operationId, {
-					storePathHash: entry.metadata.storePathHash,
-					narHash: result?.narHash ?? entry.metadata.narHash,
-					retention: true
-				});
-				return undefined;
 			}
-			operations.assertLive(entry.operationId);
-			const row = this.context.db
-				.select()
-				.from(schema.pendingUploads)
-				.where(eq(schema.pendingUploads.id, entry.operationId))
-				.get();
-			if (row?.verdict === undefined || row.verdict === null) {
-				return needsWork(attachment);
-			}
-			this.replaySubscribedRow(
-				socket,
-				cache,
-				attachment.sessionId,
-				entry.operationId,
-				row
-			);
-			return undefined;
+			throw new PublicationStateChangedError();
 		} catch (error) {
 			refusePublication(
 				socket,
 				attachment,
 				entry.operationId,
-				'subscribe',
+				operationKind,
 				error
 			);
 			return undefined;
 		}
+	}
+
+	private publicationReplayState(
+		scope: CacheScope,
+		entry: PublicationEntry
+	): PublicationReplayState {
+		const id = entry.operationId;
+		const operation = new PublicationStore(this.context).get(id);
+		const pending = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, id))
+			.get();
+		const cache = this.context.cacheRepository.resolve(scope);
+		const narInfo =
+			cache === undefined
+				? undefined
+				: this.context.db
+						.select({
+							generation: schema.narInfos.generation,
+							narHash: schema.narInfos.narHash
+						})
+						.from(schema.narInfos)
+						.where(
+							and(
+								eq(schema.narInfos.cacheId, cache.id),
+								eq(schema.narInfos.storePathHash, entry.metadata.storePathHash)
+							)
+						)
+						.get();
+		return {
+			...(operation !== undefined && { operation }),
+			...(pending !== undefined && { pending }),
+			...(cache !== undefined && {
+				cache: { id: cache.id, generation: cache.generation }
+			}),
+			...(narInfo !== undefined && { narInfo }),
+			isPastDeadline:
+				operation !== undefined &&
+				Date.parse(operation.recoveryDeadline) <= Date.now()
+		};
+	}
+
+	// Reads the D1 and R2 facts that the answer for this state needs, including
+	// the frame for a served path. For an accepted operation past its deadline,
+	// this runs the expiry pass, which changes the state, so the replay reads the
+	// state again.
+	private async publicationReplayFacts(
+		scope: CacheScope,
+		pushId: PushId,
+		entry: PublicationEntry,
+		state: PublicationReplayState
+	): Promise<PublicationReplayFacts> {
+		const { operation } = state;
+		const { storePathHash } = entry.metadata;
+		if (operation === undefined) {
+			if (!isExpiredPushId(pushId)) {
+				return { kind: 'none' };
+			}
+			const isIssued = await this.context
+				.pushCredentials()
+				.isIssuedToTenant(pushId);
+			const cache = this.context.cacheRepository.resolve(scope);
+			const isCurrentGeneration = cache?.generation === entry.cacheGeneration;
+			if (!isIssued || cache === undefined || !isCurrentGeneration) {
+				return { kind: 'pruned', isIssued, isCurrentGeneration };
+			}
+			const path = await this.servedPath(cache, entry.operationId, {
+				storePathHash,
+				narHash: entry.metadata.narHash,
+				retention: true
+			});
+			if (path.kind === 'changed') {
+				return path;
+			}
+			return {
+				kind: 'pruned',
+				isIssued,
+				isCurrentGeneration,
+				...(path.kind === 'served' && { frame: path.frame })
+			};
+		}
+		if (operation.state === 'servable') {
+			const cache = this.context.cacheRepository.resolve(scope);
+			if (cache?.id !== operation.cacheId) {
+				return { kind: 'none' };
+			}
+			const result =
+				operation.resultJson === null
+					? undefined
+					: publicationResultSchema.parse(JSON.parse(operation.resultJson));
+			const path = await this.servedPath(cache, entry.operationId, {
+				storePathHash,
+				narHash: result?.narHash ?? entry.metadata.narHash,
+				retention: true
+			});
+			switch (path.kind) {
+				case 'changed': {
+					return path;
+				}
+				case 'missing': {
+					return { kind: 'served' };
+				}
+				case 'replaced': {
+					return {
+						kind: 'served',
+						frame: {
+							ev: 'verdict',
+							uploadId: entry.operationId,
+							status: 'absent'
+						}
+					};
+				}
+				case 'served': {
+					return { kind: 'served', frame: path.frame };
+				}
+			}
+		}
+		if (operation.state === 'accepted' && state.isPastDeadline) {
+			await this.verification.expireOperation(rootLogger(), operation.id);
+		}
+		return { kind: 'none' };
+	}
+
+	// Whether the entry's run root includes its path. An entry without a run root
+	// needs none.
+	private isRootTarget(scope: CacheScope, entry: PublicationEntry): boolean {
+		if (entry.attachRoot === undefined) {
+			return true;
+		}
+		const cache = this.context.cacheRepository.resolve(scope);
+		if (cache === undefined) {
+			return false;
+		}
+		const target = this.context.db
+			.select({ rootName: schema.retentionRootTargets.rootName })
+			.from(schema.retentionRootTargets)
+			.where(
+				and(
+					eq(schema.retentionRootTargets.cacheId, cache.id),
+					eq(schema.retentionRootTargets.rootName, entry.attachRoot.name),
+					eq(
+						schema.retentionRootTargets.storePathHash,
+						entry.metadata.storePathHash
+					)
+				)
+			)
+			.get();
+		return target !== undefined;
+	}
+
+	// Decides the answer from the state as it is after the last await. An entry
+	// whose path is served receives the frame that `publicationReplayFacts` read.
+	private answerPublication(answer: {
+		readonly socket: WebSocket;
+		readonly attachment: CommitSessionAttachment;
+		readonly pushId: PushId;
+		readonly entry: PublicationEntry;
+		readonly canonical: string;
+		readonly state: PublicationReplayState;
+		readonly facts: PublicationReplayFacts;
+		readonly operationKind: 'publish' | 'subscribe';
+	}): 'admit' | undefined {
+		const { socket, attachment, entry, state, facts } = answer;
+		const { operation } = state;
+		const id = entry.operationId;
+		if (operation === undefined) {
+			// Pruning removes an operation record only after its push has expired.
+			// For an authentic expired push ID, report the committed path when it is
+			// served with the entry's NAR, as `subscribe-identity` does for a missing
+			// row, and report the expired push otherwise. When the operation was
+			// never recorded, the entry never attached the path to its run root, so
+			// the path counts as the entry's result only when that root includes it.
+			if (
+				!isExpiredPushId(answer.pushId) ||
+				facts.kind !== 'pruned' ||
+				!facts.isIssued
+			) {
+				throw new UploadNotFoundError(id);
+			}
+			if (!facts.isCurrentGeneration) {
+				throw new PublicationConflictError(
+					'The cache generation changed. Start a fresh push.',
+					'generation-conflict'
+				);
+			}
+			if (
+				facts.frame === undefined ||
+				!this.isRootTarget(attachment.cache, entry)
+			) {
+				throw new PublicationPushExpiredError();
+			}
+			sendCommitSessionFrame(socket, facts.frame);
+			return undefined;
+		}
+		if (answer.canonical !== operation.canonicalJson) {
+			throw new PublicationConflictError(
+				'The publication parameters changed.',
+				'parameters-changed'
+			);
+		}
+		if (
+			entry.blob !== undefined &&
+			operation.blobJson !== null &&
+			operation.blobJson !== JSON.stringify(entry.blob)
+		) {
+			throw new PublicationConflictError(
+				'The compressed declaration changed.',
+				'declaration-changed'
+			);
+		}
+		if (operation.state === 'failed') {
+			this.replayFailedPublication(socket, attachment, operation);
+			return undefined;
+		}
+		if (operation.state === 'expired') {
+			throw new PublicationRecoveryExpiredError();
+		}
+		const cache = this.context.cacheRepository.resolve(attachment.cache);
+		if (cache?.id !== operation.cacheId) {
+			throw new PublicationConflictError(
+				'The cache generation changed. Start a fresh push.',
+				'generation-conflict'
+			);
+		}
+		if (operation.state === 'servable') {
+			if (facts.kind !== 'served') {
+				throw new PublicationStateChangedError();
+			}
+			if (facts.frame === undefined) {
+				return needsWork(answer);
+			}
+			sendCommitSessionFrame(socket, facts.frame);
+			return undefined;
+		}
+		// The expiry pass left the operation accepted past its deadline, so the
+		// replay refuses it as retryable.
+		if (state.isPastDeadline) {
+			throw new PublicationStateChangedError();
+		}
+		const { pending } = state;
+		if (pending?.verdict === undefined || pending.verdict === null) {
+			return needsWork(answer);
+		}
+		this.replaySubscribedRow(socket, cache, attachment.sessionId, id, pending);
+		return undefined;
 	}
 
 	// Fail only the affected upload and keep the session open for other entries.
@@ -1805,30 +2090,75 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		uploadId: UploadId,
 		identity: Pick<CommitBatchEntry, 'storePathHash' | 'narHash' | 'retention'>
 	): Promise<void> {
+		sendCommitSessionFrame(
+			socket,
+			await this.goneCommitFrame(cache, uploadId, identity)
+		);
+	}
+
+	private async goneCommitFrame(
+		cache: ResolvedCache,
+		uploadId: UploadId,
+		identity: Pick<CommitBatchEntry, 'storePathHash' | 'narHash' | 'retention'>
+	): Promise<CommitSessionFrameInput> {
+		const path = await this.servedPath(cache, uploadId, identity);
+		return path.kind === 'served'
+			? path.frame
+			: { ev: 'verdict', uploadId, status: 'absent' };
+	}
+
+	// Reads whether the cache serves the path with the identity's NAR. The path
+	// is `replaced` when it is served or committed with another NAR, and
+	// `changed` when it was recommitted between the two reads.
+	private async servedPath(
+		cache: ResolvedCache,
+		uploadId: UploadId,
+		identity: Pick<CommitBatchEntry, 'storePathHash' | 'narHash' | 'retention'>
+	): Promise<ServedPath> {
 		const servable = await this.narInfoObjects.servableNarInfoVersions(cache, [
 			identity.storePathHash
 		]);
 		const proven = servable.get(identity.storePathHash);
 
-		if (proven?.narHash === identity.narHash) {
+		if (proven === undefined) {
+			// A committed row with another NAR replaces the path even when that NAR
+			// is not served.
 			const committed = await this.narInfoObjects.committedNarInfoRow(
 				cache,
 				identity.storePathHash
 			);
+			return {
+				kind:
+					committed === undefined || committed.narHash === identity.narHash
+						? 'missing'
+						: 'replaced'
+			};
+		}
 
-			if (
-				committed?.generation !== proven.generation ||
-				committed.narHash !== proven.narHash
-			) {
-				sendCommitSessionFrame(socket, {
-					ev: 'verdict',
-					uploadId,
-					status: 'absent'
-				});
+		if (proven.narHash !== identity.narHash) {
+			return { kind: 'replaced' };
+		}
 
-				return;
-			}
-			sendCommitSessionFrame(socket, {
+		const committed = await this.narInfoObjects.committedNarInfoRow(
+			cache,
+			identity.storePathHash
+		);
+
+		if (committed === undefined) {
+			return { kind: 'missing' };
+		}
+
+		if (committed.narHash !== identity.narHash) {
+			return { kind: 'replaced' };
+		}
+
+		if (committed.generation !== proven.generation) {
+			return { kind: 'changed' };
+		}
+
+		return {
+			kind: 'served',
+			frame: {
 				ev: 'settled',
 				uploadId,
 				response: {
@@ -1843,16 +2173,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						committed.storePathHash
 					)
 				})
-			});
-
-			return;
-		}
-
-		sendCommitSessionFrame(socket, {
-			ev: 'verdict',
-			uploadId,
-			status: 'absent'
-		});
+			}
+		};
 	}
 
 	// Enforce cache isolation and attach the current session before replaying the
@@ -4411,6 +4733,86 @@ function reclaimCommitCredit(
 	credit.closeSession(attachment.sessionId, Date.now());
 }
 
+// A replay reads the state again when it changes during the replay's awaits.
+// Each read after the first follows a change, such as the expiry that the
+// replay runs itself.
+const maxPublicationReplayReads = 3;
+
+interface PublicationReplayState {
+	readonly operation?: typeof schema.publicationOperations.$inferSelect;
+	readonly pending?: typeof schema.pendingUploads.$inferSelect;
+	readonly cache?: { readonly id: CacheId; readonly generation: number };
+	readonly narInfo?: {
+		readonly generation: number;
+		readonly narHash: NixSha256HashString;
+	};
+	readonly isPastDeadline: boolean;
+}
+
+type ServedPath =
+	| { readonly kind: 'served'; readonly frame: CommitSessionFrameInput }
+	| { readonly kind: 'replaced' }
+	| { readonly kind: 'missing' }
+	| { readonly kind: 'changed' };
+
+// For a pruned record, `frame` is the `settled` frame for a path served with the
+// entry's NAR. For a completed operation, it is the `settled` frame or the
+// `absent` verdict.
+type PublicationReplayFacts =
+	| { readonly kind: 'none' }
+	| { readonly kind: 'changed' }
+	| {
+			readonly kind: 'pruned';
+			readonly isIssued: boolean;
+			readonly isCurrentGeneration: boolean;
+			readonly frame?: CommitSessionFrameInput;
+	  }
+	| { readonly kind: 'served'; readonly frame?: CommitSessionFrameInput };
+
+function replayStateKey(state: PublicationReplayState): string {
+	const { operation, pending } = state;
+	return JSON.stringify({
+		operation:
+			operation === undefined
+				? undefined
+				: {
+						state: operation.state,
+						resultJson: operation.resultJson,
+						blobJson: operation.blobJson,
+						canonicalJson: operation.canonicalJson,
+						cacheId: operation.cacheId,
+						recoveryDeadline: operation.recoveryDeadline
+					},
+		pending:
+			pending === undefined
+				? undefined
+				: { verdict: pending.verdict, cacheId: pending.cacheId },
+		cache: state.cache,
+		narInfo: state.narInfo,
+		isPastDeadline: state.isPastDeadline
+	});
+}
+
+function isExpiredPushId(pushId: PushId): boolean {
+	const expiry = pushIdExpiresAtSeconds(pushId);
+	return expiry !== undefined && Date.now() >= expiry * 1000;
+}
+
+// A client without `publication-refusal-reasons` fails its session on
+// `resend`, so the server admits that client's subscription entry itself.
+function needsWork(answer: {
+	readonly attachment: CommitSessionAttachment;
+	readonly operationKind: 'publish' | 'subscribe';
+}): 'admit' {
+	if (
+		answer.operationKind === 'subscribe' &&
+		answer.attachment.publicationRefusalReasons === true
+	) {
+		throw new PublicationResendRequiredError();
+	}
+	return 'admit';
+}
+
 function requirePublicationScope(
 	grants: AccessClaims['grants'],
 	scope: CacheScope,
@@ -4427,15 +4829,6 @@ function requirePublicationScope(
 	) {
 		throw new InsufficientScopeError();
 	}
-}
-
-// A client without `publication-refusal-reasons` fails its session on
-// `resend`, so the server admits that client's subscription entry itself.
-function needsWork(attachment: CommitSessionAttachment): 'admit' {
-	if (attachment.publicationRefusalReasons === true) {
-		throw new PublicationResendRequiredError();
-	}
-	return 'admit';
 }
 
 type PublicationRefusalReason = Extract<

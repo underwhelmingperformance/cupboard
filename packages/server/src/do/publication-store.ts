@@ -1,6 +1,7 @@
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { publicationIdSchema, type UploadId } from '@cupboard/protocol/upload';
 import { and, asc, eq, lte, sql } from 'drizzle-orm';
+import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
 import {
@@ -15,6 +16,31 @@ import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 const maxTerminalPublicationsPrunedPerRun = 1000;
 
 const terminalPublicationStates = ['servable', 'failed', 'expired'] as const;
+
+// The verdict that a live session received when the operation failed. A failed
+// operation stores it in `result_json` so a subscription can send it again.
+const publicationFailureSchema = z.strictObject({
+	verdict: z.enum(['mismatch', 'over-quota', 'absent'])
+});
+
+export type PublicationFailure = z.infer<
+	typeof publicationFailureSchema
+>['verdict'];
+
+export function publicationFailureJson(verdict: PublicationFailure): string {
+	return JSON.stringify({ verdict });
+}
+
+// Operations that failed before their verdict was stored report `absent`.
+export function publicationFailure(
+	resultJson: string | null
+): PublicationFailure {
+	const parsed =
+		resultJson === null
+			? undefined
+			: publicationFailureSchema.safeParse(JSON.parse(resultJson)).data;
+	return parsed?.verdict ?? 'absent';
+}
 
 export class PublicationStore {
 	constructor(private readonly context: ServerContext) {}
@@ -106,6 +132,10 @@ export class PublicationStore {
 				)
 			)
 			.run();
+	}
+
+	fail(id: UploadId, verdict: PublicationFailure): void {
+		this.finish(id, 'failed', publicationFailureJson(verdict));
 	}
 
 	prune(now: string, limit = maxTerminalPublicationsPrunedPerRun): void {
