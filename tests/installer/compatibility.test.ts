@@ -136,9 +136,22 @@ class LoopbackSsh {
 				''
 			].join('\n')
 		);
+		const effectiveConfig = await run('sudo', [
+			'-n',
+			'/usr/sbin/sshd',
+			'-T',
+			'-f',
+			config
+		]);
+		// Intentional authentication failures must not throttle later loopback cases.
+		const penaltyOptions = effectiveConfig.stdout
+			.split('\n')
+			.some((line) => line.startsWith('persourcepenalties '))
+			? ['-o', 'PerSourcePenalties=no']
+			: [];
 		this.child = spawn(
 			'sudo',
-			['-n', '/usr/sbin/sshd', '-D', '-e', '-f', config],
+			['-n', '/usr/sbin/sshd', '-D', '-e', '-f', config, ...penaltyOptions],
 			{ stdio: ['ignore', 'ignore', 'pipe'] }
 		);
 		this.child.on('error', (error) => {
