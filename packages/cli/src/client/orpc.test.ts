@@ -352,9 +352,9 @@ describe('tenantRpc', () => {
 			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
 				credential: 'admin-token',
 				...(clientSignal !== undefined && { signal: clientSignal }),
-				fetcher: (input, init) => {
+				fetcher: (_input, init) => {
 					requests += 1;
-					return stalledResponse(new Request(input, init).signal);
+					return stalledResponse(init?.signal);
 				}
 			});
 
