@@ -138,6 +138,13 @@ export const pendingSettlePrefetchSubrequests = 2;
 
 const maxExpiredPublicationsPerRun = 25;
 
+const publicationExpiryCursorKey = 'maintenance:publication-expiry-cursor';
+
+const publicationExpiryCursorSchema = z.object({
+	recoveryDeadline: z.string(),
+	id: z.string()
+});
+
 // Classifying one committed-recovery candidate reads the path's committed
 // reference edge. A reuse row skips this read.
 const settleClassifySubrequests = 1;
@@ -2106,6 +2113,188 @@ export class VerificationService {
 			.get();
 	}
 
+	// A run in which an operation failed stores the last operation that it
+	// examined. The next run starts after that operation and wraps to the start
+	// for the rest of its page, so persistent failures do not prevent later
+	// operations from expiring.
+	private async duePublications(now: string) {
+		const stored = publicationExpiryCursorSchema.safeParse(
+			await this.context.ctx.storage.get(publicationExpiryCursorKey)
+		).data;
+		const due = (after?: SQL, limit = maxExpiredPublicationsPerRun) =>
+			this.context.db
+				.select()
+				.from(schema.publicationOperations)
+				.where(
+					and(
+						eq(schema.publicationOperations.state, 'accepted'),
+						lte(schema.publicationOperations.recoveryDeadline, now),
+						after
+					)
+				)
+				.orderBy(
+					asc(schema.publicationOperations.recoveryDeadline),
+					asc(schema.publicationOperations.id)
+				)
+				.limit(limit)
+				.all();
+		if (stored === undefined) {
+			return due();
+		}
+		const position = sql`(${schema.publicationOperations.recoveryDeadline}, ${schema.publicationOperations.id})`;
+		const cursor = sql`(${stored.recoveryDeadline}, ${stored.id})`;
+		const later = due(sql`${position} > ${cursor}`);
+		if (later.length === maxExpiredPublicationsPerRun) {
+			return later;
+		}
+		return [
+			...later,
+			...due(
+				sql`${position} <= ${cursor}`,
+				maxExpiredPublicationsPerRun - later.length
+			)
+		];
+	}
+
+	private async expirePublication(
+		logger: Logger,
+		store: PublicationStore,
+		operation: typeof schema.publicationOperations.$inferSelect
+	): Promise<void> {
+		await this.context.criticalSection(async () => {
+			const current = store.get(operation.id);
+			if (current?.state !== 'accepted') {
+				return;
+			}
+			const pending = this.context.db
+				.select()
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, operation.id))
+				.get();
+			if (pending !== undefined) {
+				const metadata = parseStoredUploadPathMetadata(
+					pending.id,
+					pending.metadataJson
+				);
+				const cache = this.context.cacheRepository.resolve(
+					this.context.cacheRepository.scopeForId(pending.cacheId)
+				);
+				if (cache !== undefined) {
+					const row = this.narInfoRow(cache.id, metadata.storePathHash);
+					if (
+						row !== undefined &&
+						(await this.commitPipeline.isGenerationCommitted(
+							cache,
+							metadata,
+							row.generation
+						))
+					) {
+						confirmGrace(
+							this.context,
+							this.retention,
+							cache,
+							metadata.storePathHash,
+							row.generation,
+							metadata.narHash,
+							parseStoredGraceDecision(pending.graceDecisionJson)
+						);
+						this.commitPipeline.attachRootTarget(
+							cache,
+							pending.attachRootName,
+							metadata.storePathHash,
+							metadata.storePath,
+							pending.retentionEpoch
+						);
+						this.context.db
+							.update(schema.pendingUploads)
+							.set({ claimOwner: sql`null` })
+							.where(eq(schema.pendingUploads.id, pending.id))
+							.run();
+						await this.uploadState.clearPendingUpload(pending.id, {
+							logger,
+							outcome: 'servable'
+						});
+						this.notifyWaiters(pending, 'servable');
+						return;
+					}
+					// Only a started commit reserves a narinfo row, and started
+					// commits of the same path and NAR share one reservation.
+					if (
+						row?.narHash === metadata.narHash &&
+						pending.verdict !== null &&
+						!this.hasOtherStartedCommit(pending.id, cache, metadata)
+					) {
+						const result = await this.commitPipeline.reclaimReservedRow(
+							cache,
+							metadata.storePathHash,
+							row.generation,
+							row.narHash
+						);
+						if (result === 'reclaimed') {
+							this.pruneRetentionTargets(cache, metadata.storePathHash);
+						}
+					}
+				}
+				this.context.db
+					.update(schema.pendingUploads)
+					.set({ claimOwner: sql`null` })
+					.where(eq(schema.pendingUploads.id, pending.id))
+					.run();
+				await this.uploadState.clearPendingUploadAndStaging(
+					pending.id,
+					pending.r2Key,
+					pending.narHash,
+					{ logger, outcome: 'absent' }
+				);
+				this.notifyWaiters(pending, 'absent');
+			}
+			store.finish(operation.id, 'expired');
+			logger.debug('publication recovery expired', {
+				operationId: operation.id,
+				recoveryDeadline: operation.recoveryDeadline
+			});
+		});
+	}
+
+	private async runPublicationExpiry(logger: Logger): Promise<void> {
+		const store = new PublicationStore(this.context);
+		const now = new Date().toISOString();
+		let completed = 0;
+		let failures = 0;
+		try {
+			const due = await this.duePublications(now);
+			for (const operation of due) {
+				try {
+					await this.expirePublication(logger, store, operation);
+					completed += 1;
+				} catch (error) {
+					failures += 1;
+					logger.error('publication expiry failed', {
+						operationId: operation.id,
+						error
+					});
+				}
+			}
+			store.prune(now);
+			const last = due.at(-1);
+			await (failures === 0 || last === undefined
+				? this.context.ctx.storage.delete(publicationExpiryCursorKey)
+				: this.context.ctx.storage.put(publicationExpiryCursorKey, {
+						recoveryDeadline: last.recoveryDeadline,
+						id: last.id
+					}));
+		} catch (error) {
+			failures += 1;
+			logger.error('publication expiry failed', { error });
+		}
+		// A failed operation stays due. Retry it from a later alarm when this run
+		// completed nothing, so a run that only fails does not wake the object at
+		// once.
+		await store.armRecoveryAlarm(
+			completed === 0 && failures > 0 ? Date.now() + 10 * 60 * 1000 : Date.now()
+		);
+	}
+
 	// `pending_upload_gc_path_idx` covers the cache, the metadata's store path
 	// hash and the verdict, so keep those predicates in this form. The NAR hash
 	// then filters the rows that the index finds.
@@ -3535,122 +3724,14 @@ export class VerificationService {
 	// rows without yielding, which prevents an overlapping alarm or cron pass from
 	// claiming the same uploads.
 
+	// The alarm and the verification pass run unrelated work after this call,
+	// so a failure is logged and not thrown.
 	async expirePublications(logger: Logger): Promise<void> {
-		const store = new PublicationStore(this.context);
 		try {
-			const now = new Date().toISOString();
-			const due = this.context.db
-				.select()
-				.from(schema.publicationOperations)
-				.where(
-					and(
-						eq(schema.publicationOperations.state, 'accepted'),
-						lte(schema.publicationOperations.recoveryDeadline, now)
-					)
-				)
-				.limit(maxExpiredPublicationsPerRun)
-				.all();
-			for (const operation of due) {
-				await this.context.criticalSection(async () => {
-					const current = store.get(operation.id);
-					if (current?.state !== 'accepted') {
-						return;
-					}
-					const pending = this.context.db
-						.select()
-						.from(schema.pendingUploads)
-						.where(eq(schema.pendingUploads.id, operation.id))
-						.get();
-					if (pending !== undefined) {
-						const metadata = parseStoredUploadPathMetadata(
-							pending.id,
-							pending.metadataJson
-						);
-						const cache = this.context.cacheRepository.resolve(
-							this.context.cacheRepository.scopeForId(pending.cacheId)
-						);
-						if (cache !== undefined) {
-							const row = this.narInfoRow(cache.id, metadata.storePathHash);
-							if (
-								row !== undefined &&
-								(await this.commitPipeline.isGenerationCommitted(
-									cache,
-									metadata,
-									row.generation
-								))
-							) {
-								confirmGrace(
-									this.context,
-									this.retention,
-									cache,
-									metadata.storePathHash,
-									row.generation,
-									metadata.narHash,
-									parseStoredGraceDecision(pending.graceDecisionJson)
-								);
-								this.commitPipeline.attachRootTarget(
-									cache,
-									pending.attachRootName,
-									metadata.storePathHash,
-									metadata.storePath,
-									pending.retentionEpoch
-								);
-								this.context.db
-									.update(schema.pendingUploads)
-									.set({ claimOwner: sql`null` })
-									.where(eq(schema.pendingUploads.id, pending.id))
-									.run();
-								await this.uploadState.clearPendingUpload(pending.id, {
-									logger,
-									outcome: 'servable'
-								});
-								this.notifyWaiters(pending, 'servable');
-								return;
-							}
-							// Only a started commit reserves a narinfo row, and started
-							// commits of the same path and NAR share one reservation.
-							if (
-								row?.narHash === metadata.narHash &&
-								pending.verdict !== null &&
-								!this.hasOtherStartedCommit(pending.id, cache, metadata)
-							) {
-								const result = await this.commitPipeline.reclaimReservedRow(
-									cache,
-									metadata.storePathHash,
-									row.generation,
-									row.narHash
-								);
-								if (result === 'reclaimed') {
-									this.pruneRetentionTargets(cache, metadata.storePathHash);
-								}
-							}
-						}
-						this.context.db
-							.update(schema.pendingUploads)
-							.set({ claimOwner: sql`null` })
-							.where(eq(schema.pendingUploads.id, pending.id))
-							.run();
-						await this.uploadState.clearPendingUploadAndStaging(
-							pending.id,
-							pending.r2Key,
-							pending.narHash,
-							{ logger, outcome: 'absent' }
-						);
-						this.notifyWaiters(pending, 'absent');
-					}
-					store.finish(operation.id, 'expired');
-					logger.debug('publication recovery expired', {
-						operationId: operation.id,
-						recoveryDeadline: operation.recoveryDeadline
-					});
-				});
-			}
-			store.prune(now);
+			await this.runPublicationExpiry(logger);
 		} catch (error) {
-			await store.armRecoveryAlarm(Date.now() + 10 * 60 * 1000);
-			throw error;
+			logger.error('publication expiry failed', { error });
 		}
-		await store.armRecoveryAlarm();
 	}
 
 	async beginVerificationBatch(

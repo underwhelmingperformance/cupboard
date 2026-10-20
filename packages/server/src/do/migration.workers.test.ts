@@ -2367,6 +2367,40 @@ describe('migrations', () => {
 		});
 	});
 
+	it('keeps publication operations at 0079 and ends their deadline index with the operation ID', async () => {
+		const insertOperation =
+			"INSERT INTO publication_operation (id, cache_id, cache_generation, push_id, canonical_json, accepted_at, push_expires_at, recovery_deadline, prune_after, grace_decision_json) VALUES ('op', 1, 1, 'push', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T01:00:00.000Z', '2026-01-02T00:00:00.000Z', '2026-01-02T00:15:00.000Z', '{}')";
+		const selectOperations =
+			'SELECT id, state, recovery_deadline FROM publication_operation';
+		const selectIndexColumns =
+			"SELECT name FROM pragma_index_info('publication_operation_deadline_idx') ORDER BY seqno";
+
+		const result = await runInDurableObject(
+			testServerFor('migration-publication-deadline-id'),
+			async (_instance, state) => {
+				await migrateThrough(state, 78);
+				state.storage.sql.exec(insertOperation);
+				await migrateThrough(state, 79);
+
+				return {
+					operations: state.storage.sql.exec(selectOperations).toArray(),
+					index: state.storage.sql.exec(selectIndexColumns).toArray()
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			operations: [
+				{
+					id: 'op',
+					state: 'accepted',
+					recovery_deadline: '2026-01-02T00:00:00.000Z'
+				}
+			],
+			index: [{ name: 'state' }, { name: 'recovery_deadline' }, { name: 'id' }]
+		});
+	});
+
 	it('leaves the blob declaration, commit time and promotion record null for a pending upload created before 0075', async () => {
 		const insertUndeclaredPendingUpload =
 			"INSERT INTO pending_upload (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES ('u1', 0, 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', 'committing')";
