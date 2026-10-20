@@ -60,6 +60,7 @@ import {
 
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
+import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { PublicationStore } from './publication-store.ts';
 import { type CupboardServer } from './server.ts';
 import { UploadsService } from './uploads-service.ts';
@@ -1760,6 +1761,82 @@ describe('publication subscriptions', () => {
 			await closeSessionAndWait(session.socket);
 		}
 	});
+
+	it.each(['publish-batch', 'subscribe-publication'] as const)(
+		'refuses a %s entry as a retryable failure when a D1-backed read is overloaded',
+		async (op) => {
+			vi.setSystemTime(vi.getRealSystemTime());
+			const token = await initialise();
+			const nar = await verifiableNar(`publication-overload-${op}`);
+			const path = uploadPathNegotiation(
+				uploadMetadata({
+					fileSize: nar.narBytes.byteLength,
+					fileHash: nar.fileHash,
+					narHash: nar.narHash,
+					narSize: nar.narSize
+				})
+			);
+			const [planned] = await plannedEntries(token, '/uploads/plan', [path]);
+			if (planned === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			const entry = {
+				...planned,
+				blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+			};
+			await putNarBytes(
+				publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+				nar
+			);
+			const first = await openCommitSession(
+				token,
+				undefined,
+				publicationSession
+			);
+			try {
+				first.send({
+					op: 'publish-batch',
+					pushId: testPushId,
+					entries: [entry]
+				});
+				await first.nextFrame();
+				await first.nextFrame();
+			} finally {
+				await closeSessionAndWait(first.socket);
+			}
+			await commitUpload(token, entry.operationId);
+			// Both messages read the completed path's availability from D1 and R2.
+			const fault = vi
+				.spyOn(NarInfoObjectsService.prototype, 'servableStorePathHashes')
+				.mockRejectedValueOnce(
+					new Error('D1_ERROR: D1 DB is overloaded. Too many requests queued.')
+				);
+			const session = await openCommitSession(
+				token,
+				undefined,
+				publicationSession
+			);
+			try {
+				session.send({ op, pushId: testPushId, entries: [entry] });
+				expect({
+					frame: refusalFacts(await session.nextFrame()),
+					reads: fault.mock.calls.length
+				}).toStrictEqual({
+					frame: {
+						ev: 'publication-refused',
+						uploadId: entry.operationId,
+						reason: 'temporary-failure',
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						hasMessage: true
+					},
+					reads: 1
+				});
+			} finally {
+				fault.mockRestore();
+				await closeSessionAndWait(session.socket);
+			}
+		}
+	);
 
 	it('takes the commit entry semaphore for each subscribed entry', async () => {
 		const token = await initialise();

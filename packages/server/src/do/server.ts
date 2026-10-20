@@ -90,6 +90,7 @@ import {
 	PublicationRecoveryExpiredError,
 	PublicationResendRequiredError,
 	R2PresignConfigurationMissingError,
+	R2UnavailableError,
 	ServerHttpError,
 	SubrequestTimeoutError,
 	TenantNotConfiguredError,
@@ -246,6 +247,7 @@ import {
 } from './operation-cost.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { PublicationStore } from './publication-store.ts';
+import { isTransientR2Error } from './r2-read.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RefreshSessionsService } from './refresh-sessions-service.ts';
 import { RetentionService } from './retention-service.ts';
@@ -4465,8 +4467,13 @@ function refusePublication(
 	attachment: CommitSessionAttachment,
 	uploadId: UploadId,
 	operation: 'publish' | 'subscribe',
-	error: unknown
+	failure: unknown
 ): void {
+	const error = isD1Overload(failure)
+		? new DatabaseOverloadedError(failure)
+		: isTransientR2Error(failure)
+			? new R2UnavailableError(failure)
+			: failure;
 	const isKnown = error instanceof ServerHttpError;
 	if (!isKnown) {
 		rootLogger().error('publication failed', {
