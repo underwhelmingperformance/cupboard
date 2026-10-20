@@ -14,6 +14,8 @@ import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
 const maxTerminalPublicationsPrunedPerRun = 1000;
 
+const terminalPublicationStates = ['servable', 'failed', 'expired'] as const;
+
 export class PublicationStore {
 	constructor(private readonly context: ServerContext) {}
 
@@ -125,20 +127,36 @@ export class PublicationStore {
 				.run();
 		}
 	}
+
+	// Wake for the next recovery deadline or the next terminal record to prune.
+	// A pass that reached its prune limit leaves records that are already due,
+	// so the alarm then fires at `notBefore` and the next pass continues.
 	async armRecoveryAlarm(notBefore = Date.now()): Promise<void> {
-		const next = this.context.db
-			.select({ deadline: schema.publicationOperations.recoveryDeadline })
+		const deadline = this.context.db
+			.select({ at: schema.publicationOperations.recoveryDeadline })
 			.from(schema.publicationOperations)
 			.where(eq(schema.publicationOperations.state, 'accepted'))
 			.orderBy(asc(schema.publicationOperations.recoveryDeadline))
 			.limit(1)
 			.get();
-		if (next === undefined) {
+		const pruneTimes = terminalPublicationStates.map((state) =>
+			this.context.db
+				.select({ at: schema.publicationOperations.pruneAfter })
+				.from(schema.publicationOperations)
+				.where(eq(schema.publicationOperations.state, state))
+				.orderBy(asc(schema.publicationOperations.pruneAfter))
+				.limit(1)
+				.get()
+		);
+		const times = [deadline, ...pruneTimes]
+			.filter((next) => next !== undefined)
+			.map((next) => Date.parse(next.at));
+		if (times.length === 0) {
 			return;
 		}
 		await armAlarmNoLaterThan(
 			this.context.ctx.storage,
-			Math.max(notBefore, Date.parse(next.deadline))
+			Math.max(notBefore, Math.min(...times))
 		);
 	}
 }

@@ -54,6 +54,7 @@ import {
 
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { PublicationStore } from './publication-store.ts';
+import { type CupboardServer } from './server.ts';
 import { UploadsService } from './uploads-service.ts';
 
 it.each(
@@ -1912,5 +1913,85 @@ it('reclaims an expiring reservation when another upload for the path has a diff
 		reserved: [{ narHash: expiring.metadata.narHash }],
 		after: [],
 		pending: [{ id: other.operationId, verdict: 'pending' }]
+	});
+});
+
+function insertServable(
+	instance: CupboardServer,
+	count: number,
+	pruneAfter: string
+): void {
+	const cache = instance.context.db.select().from(schema.cacheIdentities).get();
+	if (cache === undefined) {
+		throw new Error('Expected the default cache');
+	}
+	const now = new Date().toISOString();
+	for (let index = 0; index < count; index += 1) {
+		instance.context.db
+			.insert(schema.publicationOperations)
+			.values({
+				id: uploadIdSchema.parse(index.toString(16).padStart(64, '0')),
+				cacheId: cache.id,
+				cacheGeneration: cache.generation,
+				pushId: testPushId,
+				canonicalJson: '[]',
+				acceptedAt: now,
+				pushExpiresAt: now,
+				recoveryDeadline: now,
+				pruneAfter,
+				graceDecisionJson: '{"reportsGrace":true}',
+				state: 'servable'
+			})
+			.run();
+	}
+}
+
+describe('terminal publication pruning', () => {
+	// Durable Object alarms use the real clock, so these tests run on it.
+	beforeEach(async () => {
+		vi.setSystemTime(vi.getRealSystemTime());
+		await resetTestServer();
+	});
+
+	it('arms an alarm for the next terminal record to prune', async () => {
+		await initialise();
+		const pruneAfter = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+		const alarm = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				insertServable(instance, 1, pruneAfter);
+				await state.storage.deleteAlarm();
+				await new PublicationStore(instance.context).armRecoveryAlarm();
+				return state.storage.getAlarm();
+			}
+		);
+		expect(alarm).toBe(Date.parse(pruneAfter));
+	});
+
+	it('continues pruning when one pass reaches its limit', async () => {
+		await initialise();
+		const passedAt = Date.now();
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				insertServable(instance, 1001, new Date().toISOString());
+				await state.storage.deleteAlarm();
+				await instance.alarm();
+				const remaining = instance.context.db
+					.select({ id: schema.publicationOperations.id })
+					.from(schema.publicationOperations)
+					.all().length;
+				const next = await state.storage.getAlarm();
+				return {
+					remaining,
+					// The pass arms the alarm at once. Durable Object storage keeps
+					// real time, so the stored alarm lies between the frozen test
+					// clock and the real clock.
+					isArmedNow:
+						next !== null && next >= passedAt && next <= vi.getRealSystemTime()
+				};
+			}
+		);
+		expect(result).toStrictEqual({ remaining: 1, isArmedNow: true });
 	});
 });
