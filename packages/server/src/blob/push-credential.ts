@@ -30,6 +30,13 @@ import {
 } from './temporary-credentials.ts';
 
 export const pushCredentialMaxTtlSeconds = 6 * 60 * 60;
+// A push ID stays valid for one day, longer than the six-hour credential, so a
+// fresh access token can renew the credential for the same staging prefixes.
+// R2 removes legacy staged bytes after one day. The seven-day lifecycle rule
+// for publication staging relies on this push ID expiry and the 24-hour
+// recovery window. A client can stage bytes early in the push and first submit
+// the publication just before the push expires, so the recovery window can end
+// almost 48 hours after the first staging write.
 const pushIdTtlSeconds = 24 * 60 * 60;
 
 /**
