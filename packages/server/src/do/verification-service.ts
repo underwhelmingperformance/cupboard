@@ -94,7 +94,11 @@ import {
 	parseStoredGraceDecision,
 	storedGraceFact
 } from './grace-decision.ts';
-import { type JsonValueList, jsonValueLists } from './json-list.ts';
+import {
+	type JsonValueList,
+	jsonValueList,
+	jsonValueLists
+} from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	logPromotionAttemptFailed,
@@ -126,6 +130,7 @@ import {
 	raceVerificationOperation,
 	withRenewedVerificationClaim
 } from './verification-claim-lease.ts';
+import { WorkSequenceService } from './work-sequence-service.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 type PendingUploadRow = typeof schema.pendingUploads.$inferSelect;
@@ -138,7 +143,16 @@ export const pendingSettlePrefetchSubrequests = 2;
 
 const maxExpiredPublicationsPerRun = 25;
 
+// A claim reads this many claimable rows beyond the rows that it needs, so it
+// can skip the expired rows of up to 25 operations, which is the number that
+// one expiry run removes.
+const claimWindowMargin = maxExpiredPublicationsPerRun;
+
 const publicationExpiryCursorKey = 'maintenance:publication-expiry-cursor';
+
+const publicationExpiryRetryKey = 'maintenance:publication-expiry-retry-at';
+
+const publicationExpiryRetryMs = 10 * 60 * 1000;
 
 const publicationExpiryCursorSchema = z.object({
 	recoveryDeadline: z.string(),
@@ -217,6 +231,10 @@ export const subrequestsPerRecordedVerdict =
 const pendingDecodeFreeCursorKey =
 	'maintenance:verification-decode-free-cursor';
 
+// Where the queue consumer's next claim continues reading when expired rows,
+// or rows of another kind, fill the start of the readiness order.
+const verificationClaimCursorKey = 'maintenance:verification-claim-cursor';
+
 // The rotating cursor uses readiness and upload ID, in the query's order.
 // Rescheduling or removing a row must not change the saved position.
 export const recordedVerdictCursorKey = 'maintenance:verdict-drain-cursor';
@@ -267,12 +285,110 @@ interface ClaimablePage {
 	readonly limit: number;
 	readonly filter?: SQL;
 	readonly after?: ReadinessCursor;
+	// The rows to read beyond `limit`. The default is `claimWindowMargin`.
+	readonly margin?: number;
 }
 
 interface DecodeFreeCursorState {
 	readonly next: DecodeFreeCandidateKind;
 	readonly reuse?: ReadinessCursor;
 	readonly recovery?: ReadinessCursor;
+}
+
+interface ClaimableWindow {
+	readonly ids: readonly UploadId[];
+	// The window's last row, when the window was full.
+	readonly scannedTo?: ReadinessCursor;
+}
+
+interface DecodeFreeCandidatePage {
+	readonly rows: readonly ReadyPendingUploadRow[];
+	readonly scannedTo?: ReadinessCursor;
+}
+
+interface ClaimableTail {
+	readonly start: ReadinessCursor;
+	readonly window: ClaimableWindow;
+	// Whether the scan reached the last claimable row, including a scan after
+	// the stored position that starts again after the first window.
+	readonly isScanEnd: boolean;
+}
+
+interface VerifyClaim {
+	readonly batch: PendingVerificationBatch;
+	readonly continuation?: ReadinessCursor;
+	readonly isScanEnd: boolean;
+	readonly now: Date;
+}
+
+// A scan through the claimable rows that reached the end while publication
+// expiry waited for its retry time. `sequence` is the work sequence at that
+// time.
+interface FinishedScan {
+	readonly until: number;
+	readonly sequence: number;
+}
+
+function compareReadiness(
+	left: ReadinessCursor,
+	right: ReadinessCursor
+): number {
+	if (left.readyAt !== right.readyAt) {
+		return left.readyAt < right.readyAt ? -1 : 1;
+	}
+	if (left.id === right.id) {
+		return 0;
+	}
+	return left.id < right.id ? -1 : 1;
+}
+
+// Where the next claim's second window starts. When the batch took every row
+// that the window yielded, the next claim continues after the window. When
+// this window also reached the last claimable row, the next claim continues
+// after its own first window. When the batch took some of the window's rows,
+// the next claim continues after the last of them. When the batch took none,
+// the next claim starts where this window started.
+function tailContinuation(
+	tail: ClaimableTail,
+	batch: { readonly claims: readonly { readonly uploadId: UploadId }[] },
+	pendings: readonly { readonly id: UploadId; readonly readyAt: string }[]
+): ReadinessCursor | undefined {
+	const claimed = new Set(batch.claims.map((claim) => claim.uploadId));
+	if (tail.window.ids.every((id) => claimed.has(id))) {
+		return tail.window.scannedTo;
+	}
+	const last = pendings.findLast(
+		(pending) => claimed.has(pending.id) && tail.window.ids.includes(pending.id)
+	);
+	return last === undefined
+		? tail.start
+		: readinessCursorSchema.parse({ id: last.id, readyAt: last.readyAt });
+}
+
+// A page that reached its limit resumes after its last row. A shorter page
+// resumes after its window when the window was full. When the window was not
+// full, the scan reached the last claimable row, so the next claim wraps to the
+// start.
+function withDecodeFreePosition(
+	state: DecodeFreeCursorState,
+	kind: DecodeFreeCandidateKind,
+	page: DecodeFreeCandidatePage,
+	limit: number
+): DecodeFreeCursorState {
+	const last = page.rows.at(-1);
+	const position =
+		page.rows.length < limit && page.scannedTo !== undefined
+			? page.scannedTo
+			: last === undefined
+				? undefined
+				: readinessCursorSchema.parse({ id: last.id, readyAt: last.readyAt });
+	const reuse = kind === 'reuse' ? position : state.reuse;
+	const recovery = kind === 'recovery' ? position : state.recovery;
+	return {
+		next: state.next,
+		...(reuse !== undefined && { reuse }),
+		...(recovery !== undefined && { recovery })
+	};
 }
 
 function parseDecodeFreeCursorState(value: unknown): DecodeFreeCursorState {
@@ -778,9 +894,33 @@ function claimableFilter(now: Date) {
 
 	return and(
 		sql`(${schema.pendingUploads.verdict} = 'pending' OR ${schema.pendingUploads.verdict} = 'committing') AND (${schema.pendingUploads.recordedVerdictJson} IS NULL OR ${schema.pendingUploads.claimOwner} IS NULL) AND ${schema.pendingUploads.settleExhaustion} IS NULL`,
-		lte(claimableReadyAt(), nowIso),
-		sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${nowIso})`
+		lte(claimableReadyAt(), nowIso)
 	);
+}
+
+// Selects up to `size` claimable rows after `after`, in readiness order.
+// SQLite does not seek the index on a row-value comparison with the readiness
+// expression, so a position becomes two seeks: rows with the same readiness
+// and a later ID, and rows with a later readiness.
+function claimableWindowRows(
+	now: Date,
+	after: ReadinessCursor | undefined,
+	size: number
+): SQL {
+	const columns = sql`${schema.pendingUploads.id} AS id, ${claimableReadyAt()} AS ready_at`;
+	const source = sql`${schema.pendingUploads} INDEXED BY pending_upload_fresh_ready_idx`;
+	if (after === undefined) {
+		return sql`SELECT ${columns} FROM ${source}
+			WHERE ${claimableFilter(now)} ORDER BY ${claimableReadyAt()}, ${schema.pendingUploads.id} LIMIT ${size}`;
+	}
+	const sameReadiness = sql`SELECT ${columns} FROM ${source}
+		WHERE ${claimableFilter(now)} AND ${claimableReadyAt()} = ${after.readyAt} AND ${schema.pendingUploads.id} > ${after.id}
+		ORDER BY ${schema.pendingUploads.id} LIMIT ${size}`;
+	const laterReadiness = sql`SELECT ${columns} FROM ${source}
+		WHERE ${claimableFilter(now)} AND ${claimableReadyAt()} > ${after.readyAt}
+		ORDER BY ${claimableReadyAt()}, ${schema.pendingUploads.id} LIMIT ${size}`;
+	return sql`SELECT id, ready_at FROM (SELECT * FROM (${sameReadiness}) UNION ALL SELECT * FROM (${laterReadiness}))
+		ORDER BY ready_at, id LIMIT ${size}`;
 }
 
 /**
@@ -863,6 +1003,7 @@ export class VerificationService {
 	// Each application removes its own entry when it ends, so an entry means
 	// that the application is still running in this object.
 	private readonly applyingRecordedVerdicts = new Map<string, UploadId>();
+	private finishedScan: FinishedScan | undefined;
 	constructor(
 		private readonly context: ServerContext,
 		private readonly commitPipeline: CommitPipelineService,
@@ -2123,10 +2264,11 @@ export class VerificationService {
 	// examined. The next run starts after that operation and wraps to the start
 	// for the rest of its page, so persistent failures do not prevent later
 	// operations from expiring.
-	private async duePublications(now: string) {
-		const stored = publicationExpiryCursorSchema.safeParse(
-			await this.context.ctx.storage.get(publicationExpiryCursorKey)
-		).data;
+	private duePublications(
+		now: string,
+		stored:
+			{ readonly recoveryDeadline: string; readonly id: string } | undefined
+	) {
 		const due = (after?: SQL, limit = maxExpiredPublicationsPerRun) =>
 			this.context.db
 				.select()
@@ -2262,18 +2404,36 @@ export class VerificationService {
 		});
 	}
 
-	private async runPublicationExpiry(logger: Logger): Promise<void> {
+	private async runPublicationExpiry(
+		logger: Logger,
+		signal?: AbortSignal
+	): Promise<void> {
 		const store = new PublicationStore(this.context);
+		const { storage } = this.context.ctx;
+		const retryAt = await storage.get(publicationExpiryRetryKey);
+		if (typeof retryAt === 'number' && Date.now() < retryAt) {
+			// An earlier alarm can run this pass and clear the stored alarm, so arm
+			// the retry again.
+			await store.armRecoveryAlarm(retryAt);
+			return;
+		}
 		const now = new Date().toISOString();
 		let completed = 0;
 		let failures = 0;
 		try {
-			const due = await this.duePublications(now);
+			const storedCursor = publicationExpiryCursorSchema.safeParse(
+				await storage.get(publicationExpiryCursorKey)
+			).data;
+			const due = this.duePublications(now, storedCursor);
 			for (const operation of due) {
+				signal?.throwIfAborted();
 				try {
 					await this.expirePublication(logger, store, operation);
 					completed += 1;
 				} catch (error) {
+					if (signal?.aborted === true) {
+						throw error;
+					}
 					failures += 1;
 					logger.error('publication expiry failed', {
 						operationId: operation.id,
@@ -2283,22 +2443,33 @@ export class VerificationService {
 			}
 			store.prune(now);
 			const last = due.at(-1);
-			await (failures === 0 || last === undefined
-				? this.context.ctx.storage.delete(publicationExpiryCursorKey)
-				: this.context.ctx.storage.put(publicationExpiryCursorKey, {
-						recoveryDeadline: last.recoveryDeadline,
-						id: last.id
-					}));
+			if (last !== undefined && failures > 0) {
+				await storage.put(publicationExpiryCursorKey, {
+					recoveryDeadline: last.recoveryDeadline,
+					id: last.id
+				});
+			} else if (storedCursor !== undefined) {
+				await storage.delete(publicationExpiryCursorKey);
+			}
 		} catch (error) {
+			if (signal?.aborted === true) {
+				throw error;
+			}
 			failures += 1;
 			logger.error('publication expiry failed', { error });
 		}
-		// A failed operation stays due. Retry it from a later alarm when this run
-		// completed nothing, so a run that only fails does not wake the object at
-		// once.
-		await store.armRecoveryAlarm(
-			completed === 0 && failures > 0 ? Date.now() + 10 * 60 * 1000 : Date.now()
-		);
+		// A failed operation stays due. When this run completed nothing and expiry
+		// or pruning failed, wait before the next run: the alarm waits, and claiming
+		// passes skip expiry until then, so a D1 overload does not make every pass
+		// retry the same operations.
+		const isStalled = completed === 0 && failures > 0;
+		const retryAfter = Date.now() + publicationExpiryRetryMs;
+		if (isStalled) {
+			await storage.put(publicationExpiryRetryKey, retryAfter);
+		} else if (retryAt !== undefined) {
+			await storage.delete(publicationExpiryRetryKey);
+		}
+		await store.armRecoveryAlarm(isStalled ? retryAfter : Date.now());
 	}
 
 	// `pending_upload_gc_path_idx` covers the cache, the metadata's store path
@@ -2646,9 +2817,10 @@ export class VerificationService {
 		return 'unchanged';
 	}
 
-	// Lease only the rows returned to this pass. Selection and leasing are
-	// synchronous on the single writer, so another pass cannot claim them between
-	// those operations.
+	// Lease only the rows returned to this pass. A claim runs only Durable Object
+	// storage operations between selecting its rows and leasing them. The input
+	// gate delivers no other event while a storage operation runs, so another
+	// pass cannot claim the same rows in between.
 	//
 	private leaseRows(
 		uploadIds: readonly UploadId[],
@@ -2660,16 +2832,128 @@ export class VerificationService {
 		}
 	}
 
-	private claimableIds(page: ClaimablePage): SQL {
-		const filter = and(
-			claimableFilter(page.now),
-			page.filter,
-			page.after === undefined
-				? undefined
-				: sql`(${claimableReadyAt()}, ${schema.pendingUploads.id}) > (${page.after.readyAt}, ${page.after.id})`
-		);
-		return sql`(SELECT ${schema.pendingUploads.id} FROM ${schema.pendingUploads} INDEXED BY pending_upload_fresh_ready_idx
-			WHERE ${filter} ORDER BY ${claimableReadyAt()}, ${schema.pendingUploads.id} LIMIT ${page.limit})`;
+	// The index does not contain the recovery deadline or the columns that a
+	// page's filter tests. The claim therefore reads claimable rows from the index
+	// in readiness order, at most `claimWindowMargin` more than it needs, and then
+	// drops the expired rows and the rows that the filter rejects. The window's
+	// `LIMIT` bounds the rows read. A full window reports its last row, so a
+	// caller whose window yields fewer rows than it asked for can continue after
+	// it.
+	private claimableWindow(page: ClaimablePage): ClaimableWindow {
+		const size = page.limit + (page.margin ?? claimWindowMargin);
+		const window = claimableWindowRows(page.now, page.after, size);
+		const matches =
+			and(
+				sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${isoTimestamp(page.now)})`,
+				page.filter
+			) ?? sql`1`;
+		const rows = this.context.db.all<{
+			readonly id: string;
+			readonly readyAt: string;
+			readonly isMatch: number;
+		}>(sql`SELECT claimable.id AS id, claimable.ready_at AS readyAt, (${matches}) AS isMatch
+			FROM (${window}) AS claimable
+			JOIN ${schema.pendingUploads} ON ${schema.pendingUploads.id} = claimable.id
+			ORDER BY claimable.ready_at, claimable.id`);
+		const last = rows.at(-1);
+		return {
+			ids: rows
+				.filter((row) => row.isMatch === 1)
+				.slice(0, page.limit)
+				.map((row) => uploadIdSchema.parse(row.id)),
+			...(rows.length === size &&
+				last !== undefined && {
+					scannedTo: readinessCursorSchema.parse({
+						id: last.id,
+						readyAt: last.readyAt
+					})
+				})
+		};
+	}
+
+	// Selects a bounded batch of fresh rows for the queue consumer to fetch and
+	// decode outside the Durable Object. The caller stores the claim's position
+	// and then leases the rows.
+	//
+	// Every claim first reads as many rows as it needs from the start of the
+	// readiness order, so the next claim takes a row that becomes ready there.
+	// When those rows include expired rows or rows of another kind, the claim
+	// reads a second window, with the usual margin, after the stored position,
+	// or after the first window when no later position is stored, and stores
+	// where it stopped. The rows beyond the first window are therefore read once
+	// for all the claims that pass them.
+	private claimForVerify(
+		limit: number,
+		maxNarBytes: number,
+		after: ReadinessCursor | undefined,
+		signal?: AbortSignal
+	): VerifyClaim {
+		signal?.throwIfAborted();
+		const now = new Date();
+		const page = {
+			now,
+			limit: limit + 1,
+			filter: ne(
+				schema.pendingUploads.r2Key,
+				sql`${narObjectKeyPrefix} || ${schema.pendingUploads.narHash} || ${narObjectKeySuffix}`
+			)
+		};
+		const head = this.claimableWindow({ ...page, margin: 0 });
+		const tail =
+			head.ids.length < page.limit && head.scannedTo !== undefined
+				? this.claimableTail(page, head.scannedTo, after)
+				: undefined;
+		const ids = [...head.ids, ...(tail?.window.ids ?? [])].slice(0, page.limit);
+		const pendings = this.context.db
+			.select({
+				...getTableColumns(schema.pendingUploads),
+				readyAt: claimableReadyAt()
+			})
+			.from(schema.pendingUploads)
+			.where(inArray(schema.pendingUploads.id, jsonValueList(ids)))
+			.orderBy(asc(claimableReadyAt()), asc(schema.pendingUploads.id))
+			.all();
+		const batch = chunkClaims(pendings, limit, maxNarBytes);
+		const owner = crypto.randomUUID();
+		const continuation =
+			tail === undefined ? undefined : tailContinuation(tail, batch, pendings);
+		return {
+			batch: { ...batch, owner },
+			...(continuation !== undefined && { continuation }),
+			isScanEnd: tail?.isScanEnd === true,
+			now
+		};
+	}
+
+	// Reads the claim's second window, after the stored position when it is
+	// later than the first window. A scan after the stored position that reaches
+	// the last claimable row starts again after the first window.
+	private claimableTail(
+		page: ClaimablePage,
+		headEnd: ReadinessCursor,
+		after: ReadinessCursor | undefined
+	): ClaimableTail {
+		if (after === undefined || compareReadiness(after, headEnd) <= 0) {
+			const window = this.claimableWindow({ ...page, after: headEnd });
+			return {
+				start: headEnd,
+				window,
+				isScanEnd: window.scannedTo === undefined
+			};
+		}
+		const window = this.claimableWindow({ ...page, after });
+		if (window.ids.length > 0 || window.scannedTo !== undefined) {
+			return {
+				start: after,
+				window,
+				isScanEnd: window.scannedTo === undefined
+			};
+		}
+		return {
+			start: headEnd,
+			window: this.claimableWindow({ ...page, after: headEnd }),
+			isScanEnd: true
+		};
 	}
 
 	private decodeFreeCandidatePage(
@@ -2677,7 +2961,7 @@ export class VerificationService {
 		kind: DecodeFreeCandidateKind,
 		after: ReadinessCursor | undefined,
 		limit: number
-	): ReadyPendingUploadRow[] {
+	): DecodeFreeCandidatePage {
 		const pendingStorePathHash = sql<StorePathHash>`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
 		const matchingNarInfo = and(
 			eq(schema.narInfos.cacheId, schema.pendingUploads.cacheId),
@@ -2695,33 +2979,43 @@ export class VerificationService {
 		);
 		const decodeFreeCandidate =
 			kind === 'reuse' ? reuseCandidate : recoveryCandidate;
-		const ids = this.claimableIds({
+		const window = this.claimableWindow({
 			now,
 			filter: decodeFreeCandidate,
 			after,
 			limit
 		});
-
-		return this.context.db
+		const rows = this.context.db
 			.select({
 				...getTableColumns(schema.pendingUploads),
 				readyAt: claimableReadyAt()
 			})
 			.from(schema.pendingUploads)
-			.where(inArray(schema.pendingUploads.id, ids))
+			.where(inArray(schema.pendingUploads.id, jsonValueList(window.ids)))
 			.orderBy(asc(claimableReadyAt()), asc(schema.pendingUploads.id))
 			.all();
+
+		return {
+			rows,
+			...(window.scannedTo !== undefined && { scannedTo: window.scannedTo })
+		};
 	}
 
+	// Wrap to the start only when the scan after the cursor reached the end of
+	// the claimable rows.
 	private decodeFreeCandidatePageFromCursor(
 		now: Date,
 		kind: DecodeFreeCandidateKind,
 		cursor: ReadinessCursor | undefined,
 		limit: number
-	): ReadyPendingUploadRow[] {
+	): DecodeFreeCandidatePage {
 		const afterCursor = this.decodeFreeCandidatePage(now, kind, cursor, limit);
 
-		if (cursor === undefined || afterCursor.length > 0) {
+		if (
+			cursor === undefined ||
+			afterCursor.rows.length > 0 ||
+			afterCursor.scannedTo !== undefined
+		) {
 			return afterCursor;
 		}
 
@@ -2729,16 +3023,12 @@ export class VerificationService {
 	}
 
 	private async persistDecodeFreeCursor(
-		cursor: DecodeFreeCursorState | undefined
+		cursor: DecodeFreeCursorState
 	): Promise<void> {
-		if (cursor === undefined) {
-			await this.context.ctx.storage.delete(pendingDecodeFreeCursorKey);
-			return;
-		}
-
 		await this.context.ctx.storage.put(pendingDecodeFreeCursorKey, cursor);
 	}
 
+	// `cursor` is undefined when the claim leaves the stored state unchanged.
 	private async commitDecodeFreeClaim(
 		candidates: readonly PendingUploadRow[],
 		now: Date,
@@ -2747,10 +3037,12 @@ export class VerificationService {
 		signal?: AbortSignal
 	): Promise<void> {
 		signal?.throwIfAborted();
-		await raceVerificationOperation(
-			this.persistDecodeFreeCursor(cursor),
-			signal
-		);
+		if (cursor !== undefined) {
+			await raceVerificationOperation(
+				this.persistDecodeFreeCursor(cursor),
+				signal
+			);
+		}
 		signal?.throwIfAborted();
 		this.leaseRows(
 			candidates.map((pending) => pending.id),
@@ -2778,22 +3070,25 @@ export class VerificationService {
 			signal?.throwIfAborted();
 			const cursor = parseDecodeFreeCursorState(storedCursor);
 			let kind = cursor.next;
-			let candidates = this.decodeFreeCandidatePageFromCursor(
+			let page = this.decodeFreeCandidatePageFromCursor(
 				now,
 				kind,
 				cursor[kind],
 				limit
 			);
+			let next = withDecodeFreePosition(cursor, kind, page, limit);
 
-			if (candidates.length === 0) {
+			if (page.rows.length === 0) {
 				kind = otherDecodeFreeCandidateKind(kind);
-				candidates = this.decodeFreeCandidatePageFromCursor(
+				page = this.decodeFreeCandidatePageFromCursor(
 					now,
 					kind,
 					cursor[kind],
 					limit
 				);
+				next = withDecodeFreePosition(next, kind, page, limit);
 			}
+			const candidates = page.rows;
 
 			const reuse = candidates.filter(
 				(pending) => pending.r2Key === narObjectKey(pending.narHash)
@@ -2802,21 +3097,15 @@ export class VerificationService {
 				(pending) => pending.r2Key !== narObjectKey(pending.narHash)
 			);
 
-			const lastCandidate = candidates.at(-1);
+			const state =
+				candidates.length === 0
+					? next
+					: { ...next, next: otherDecodeFreeCandidateKind(kind) };
 			await this.commitDecodeFreeClaim(
 				candidates,
 				now,
 				owner,
-				lastCandidate === undefined
-					? undefined
-					: ({
-							...cursor,
-							[kind]: readinessCursorSchema.parse({
-								id: lastCandidate.id,
-								readyAt: lastCandidate.readyAt
-							}),
-							next: otherDecodeFreeCandidateKind(kind)
-						} satisfies DecodeFreeCursorState),
+				JSON.stringify(state) === JSON.stringify(cursor) ? undefined : state,
 				signal
 			);
 
@@ -3373,6 +3662,39 @@ export class VerificationService {
 		return cleared.length > 0;
 	}
 
+	// While publication expiry waits for its retry time, the expired rows stay
+	// claimable, and each pass that a trigger starts would scan through all of
+	// them again. After one scan reaches the end during the wait, claims stop
+	// requesting the next pass until the wait ends or the work sequence moves.
+	// Every accepted upload and every started commit moves the sequence. The
+	// backstop alarm and the other triggers still make one claim each.
+	private async recordFinishedScan(signal?: AbortSignal): Promise<void> {
+		const retryAt = await raceVerificationOperation(
+			this.context.ctx.storage.get(publicationExpiryRetryKey),
+			signal
+		);
+		this.finishedScan =
+			typeof retryAt === 'number' && Date.now() < retryAt
+				? {
+						until: retryAt,
+						sequence: new WorkSequenceService(this.context.db).current()
+					}
+				: undefined;
+	}
+
+	private isScanFinished(): boolean {
+		const scan = this.finishedScan;
+		if (
+			scan === undefined ||
+			Date.now() >= scan.until ||
+			new WorkSequenceService(this.context.db).current() !== scan.sequence
+		) {
+			this.finishedScan = undefined;
+			return false;
+		}
+		return true;
+	}
+
 	/**
 	Releases the specified leases only while `owner` still owns them.
 	*/
@@ -3789,12 +4111,18 @@ export class VerificationService {
 	// rows without yielding, which prevents an overlapping alarm or cron pass from
 	// claiming the same uploads.
 
-	// The alarm and the verification pass run unrelated work after this call,
+	// The alarm and the verification passes run unrelated work after this call,
 	// so a failure is logged and not thrown.
-	async expirePublications(logger: Logger): Promise<void> {
+	async expirePublications(
+		logger: Logger,
+		signal?: AbortSignal
+	): Promise<void> {
 		try {
-			await this.runPublicationExpiry(logger);
+			await this.runPublicationExpiry(logger, signal);
 		} catch (error) {
+			if (signal?.aborted === true) {
+				throw error;
+			}
 			logger.error('publication expiry failed', { error });
 		}
 	}
@@ -3845,47 +4173,80 @@ export class VerificationService {
 		};
 	}
 
-	listPendingForVerify(
+	/**
+	Claims a batch for the queue consumer, continuing after the position that
+	the previous claim stored.
+	*/
+	async claimPendingForVerify(
 		limit: number,
 		maxNarBytes: number,
 		signal?: AbortSignal
-	): PendingVerificationBatch {
-		signal?.throwIfAborted();
-		const now = new Date();
-		const ids = this.claimableIds({
-			now,
-			limit: limit + 1,
-			filter: ne(
-				schema.pendingUploads.r2Key,
-				sql`${narObjectKeyPrefix} || ${schema.pendingUploads.narHash} || ${narObjectKeySuffix}`
+	): Promise<PendingVerificationBatch> {
+		const { storage } = this.context.ctx;
+		const after = parseReadinessCursor(
+			await raceVerificationOperation(
+				storage.get(verificationClaimCursorKey),
+				signal
 			)
-		});
-		const pendings = this.context.db
-			.select()
-			.from(schema.pendingUploads)
-			.where(inArray(schema.pendingUploads.id, ids))
-			.orderBy(asc(claimableReadyAt()), asc(schema.pendingUploads.id))
-			.all();
-		const batch = chunkClaims(pendings, limit, maxNarBytes);
-		const owner = crypto.randomUUID();
-
-		signal?.throwIfAborted();
-		this.leaseRows(
-			batch.claims.map((claim) => claim.uploadId),
-			now,
-			owner
 		);
-
-		return { ...batch, owner };
+		const claim = this.claimForVerify(limit, maxNarBytes, after, signal);
+		// Store the position before leasing, so a deadline that ends the write
+		// leaves no leased rows that the queue consumer never receives.
+		if (claim.continuation !== undefined) {
+			await raceVerificationOperation(
+				storage.put(verificationClaimCursorKey, claim.continuation),
+				signal
+			);
+		} else if (after !== undefined) {
+			await raceVerificationOperation(
+				storage.delete(verificationClaimCursorKey),
+				signal
+			);
+		}
+		if (claim.isScanEnd) {
+			await this.recordFinishedScan(signal);
+		}
+		signal?.throwIfAborted();
+		const leased = claim.batch.claims.map((pending) => pending.uploadId);
+		this.leaseRows(leased, claim.now, claim.batch.owner);
+		// The queue consumer requests another pass only after it applies a
+		// verdict from a full batch. A claim that moved past a window without
+		// filling its batch requests the next pass itself, so the scan reaches
+		// the rows beyond without waiting for the backstop alarm. The caller does
+		// not receive the batch when the request fails or the claim's deadline
+		// ends, so the claim releases its leases.
+		if (
+			claim.continuation !== undefined &&
+			claim.batch.claims.length < limit &&
+			!this.isScanFinished()
+		) {
+			try {
+				await raceVerificationOperation(
+					this.commitPipeline.requestVerification(
+						rootLogger(),
+						this.context.requireTenant()
+					),
+					signal
+				);
+			} catch (error) {
+				this.releaseClaimLeases(claim.batch.owner, leased);
+				throw error;
+			}
+		}
+		return claim.batch;
 	}
 
+	// An expired row is work as well: the next claiming pass runs publication
+	// expiry, which removes it unless expiry is waiting for its retry time or
+	// keeps failing for that operation.
 	hasPendingUploads(): boolean {
-		const ids = this.claimableIds({ now: new Date(), limit: 1 });
+		const first = sql`(SELECT ${schema.pendingUploads.id} FROM ${schema.pendingUploads} INDEXED BY pending_upload_fresh_ready_idx
+			WHERE ${claimableFilter(new Date())} LIMIT 1)`;
 		return (
 			this.context.db
 				.select({ id: schema.pendingUploads.id })
 				.from(schema.pendingUploads)
-				.where(inArray(schema.pendingUploads.id, ids))
+				.where(inArray(schema.pendingUploads.id, first))
 				.get() !== undefined
 		);
 	}
