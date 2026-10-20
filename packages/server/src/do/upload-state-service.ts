@@ -447,14 +447,13 @@ export class UploadStateService {
 			const operations = new PublicationStore(this.context);
 			if (conclusion.outcome === 'servable') {
 				operations.complete(deleted);
+			} else if (
+				absentPublication === 'keep-publication-accepted' &&
+				conclusion.outcome === 'absent'
+			) {
+				operations.finish(uploadId, 'accepted');
 			} else {
-				operations.finish(
-					uploadId,
-					absentPublication === 'keep-publication-accepted' &&
-						conclusion.outcome === 'absent'
-						? 'accepted'
-						: 'failed'
-				);
+				operations.fail(uploadId, conclusion.outcome);
 			}
 
 			return deleted;
@@ -638,7 +637,7 @@ export class UploadStateService {
 			if (verdict === 'servable') {
 				new PublicationStore(this.context).complete(settled);
 			} else {
-				new PublicationStore(this.context).finish(uploadId, 'failed');
+				new PublicationStore(this.context).fail(uploadId, verdict);
 			}
 			return settled;
 		});

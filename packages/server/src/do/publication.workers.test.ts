@@ -1,5 +1,10 @@
 import { rootLogger } from '@cupboard/logger';
-import { rootNameSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheGenerationSchema,
+	type CacheScope,
+	narInfoGenerationSchema,
+	rootNameSchema
+} from '@cupboard/nix-store/scalars';
 import { publicationStagingKey } from '@cupboard/protocol/publication';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
@@ -11,6 +16,7 @@ import {
 	type PublicationEntry,
 	publicationRefusalReasonsCapability,
 	pushCredentialSchema,
+	type PushId,
 	uploadCapabilitiesHeader,
 	type UploadId,
 	type UploadPathNegotiation,
@@ -20,7 +26,7 @@ import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { CountingSemaphore } from '@cupboard/shared/concurrency';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq, isNotNull } from 'drizzle-orm';
+import { eq, isNotNull, sql } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { decodeJwt } from 'jose';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -35,6 +41,7 @@ import {
 	authorisedFetch,
 	closeSessionAndWait,
 	collectVerificationPasses,
+	type CommitConversation,
 	commitCreditAccept,
 	commitPath,
 	commitUpload,
@@ -53,6 +60,7 @@ import {
 	testPushIdFor,
 	uploadMetadata,
 	uploadPathNegotiation,
+	uploadStateOf,
 	verifiableNar,
 	verificationOf,
 	verifyCurrentTenant
@@ -1322,45 +1330,31 @@ describe('publication commit credit', () => {
 		}
 	});
 
-	it.each([
-		{
-			capabilities: releasedPublication,
-			declaration: 'invalid-publication',
-			parameters: 'invalid-publication'
-		},
-		{
-			capabilities: creditedPublication,
-			declaration: 'declaration-changed',
-			parameters: 'parameters-changed'
-		}
-	] as const)(
-		'refuses changed publication inputs with $declaration and $parameters for a session that accepts $capabilities',
-		async ({ capabilities, declaration, parameters }) => {
+	it.each(
+		(['publish-batch', 'subscribe-publication'] as const).flatMap((op) => [
+			{
+				op,
+				capabilities: releasedPublication,
+				declaration: 'invalid-publication',
+				parameters: 'invalid-publication'
+			},
+			{
+				op,
+				capabilities: creditedPublication,
+				declaration: 'declaration-changed',
+				parameters: 'parameters-changed'
+			}
+		])
+	)(
+		'refuses changed publication inputs in $op with $declaration and $parameters for a session that accepts $capabilities',
+		async ({ op, capabilities, declaration, parameters }) => {
 			vi.setSystemTime(vi.getRealSystemTime());
 			const token = await initialise();
-			const nar = await verifiableNar('publication-changed-inputs');
-			const [planned] = await plannedEntries(token, '/uploads/plan', [
-				uploadPathNegotiation(
-					uploadMetadata({
-						fileSize: nar.narBytes.byteLength,
-						fileHash: nar.fileHash,
-						narHash: nar.narHash,
-						narSize: nar.narSize
-					})
-				)
-			]);
-			if (planned === undefined) {
-				throw new Error('Expected a planned entry');
-			}
-			const blob = {
-				fileHash: nar.fileHash,
-				fileSize: nar.narBytes.byteLength
-			};
-			const entry = { ...planned, blob };
-			await putNarBytes(
-				publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
-				nar
+			const { entry, pushId } = await completedPublication(
+				token,
+				'publication-changed-inputs'
 			);
+			const { blob } = entry;
 			const session = await openCommitSession(
 				token,
 				defaultCache(),
@@ -1368,13 +1362,6 @@ describe('publication commit credit', () => {
 			);
 			const answers = [];
 			try {
-				session.send({
-					op: 'publish-batch',
-					pushId: testPushId,
-					entries: [entry]
-				});
-				await session.nextFrame();
-				await session.nextFrame();
 				for (const changed of [
 					{ ...entry, blob: { ...blob, fileSize: blob.fileSize + 1 } },
 					{
@@ -1385,11 +1372,7 @@ describe('publication commit credit', () => {
 						}
 					}
 				]) {
-					session.send({
-						op: 'publish-batch',
-						pushId: testPushId,
-						entries: [changed]
-					});
+					session.send({ op, pushId, entries: [changed] });
 					answers.push(refusalFacts(await session.nextFrame()));
 				}
 			} finally {
@@ -1403,6 +1386,55 @@ describe('publication commit credit', () => {
 					status: StatusCodes.CONFLICT,
 					hasMessage: true
 				}))
+			);
+		}
+	);
+
+	it.each([
+		{ capabilities: releasedPublication, isReleased: true },
+		{ capabilities: creditedPublication, isReleased: false }
+	])(
+		'answers a subscription to a completed operation whose path is gone for a session that accepts $capabilities',
+		async ({ capabilities, isReleased }) => {
+			vi.setSystemTime(vi.getRealSystemTime());
+			const token = await initialise();
+			const { entry, pushId } = await completedPublication(
+				token,
+				'publication-subscribed-path-gone'
+			);
+			await deletePath(token, entry.metadata.storePathHash);
+			const session = await openCommitSession(
+				token,
+				defaultCache(),
+				capabilities
+			);
+			const answers = [];
+			try {
+				session.send({ op: 'subscribe-publication', pushId, entries: [entry] });
+				answers.push(refusalFacts(await session.nextFrame()));
+				if (isReleased) {
+					answers.push(refusalFacts(await session.nextFrame()));
+				}
+			} finally {
+				await closeSessionAndWait(session.socket);
+			}
+			// A released session never receives `resend`. The server repairs the
+			// operation, which needs the bytes again.
+			expect(answers).toStrictEqual(
+				isReleased
+					? [
+							{ ev: 'publication-accepted', uploadId: entry.operationId },
+							{ ev: 'upload-required', uploadId: entry.operationId }
+						]
+					: [
+							{
+								ev: 'publication-refused',
+								uploadId: entry.operationId,
+								reason: 'resend',
+								status: StatusCodes.SERVICE_UNAVAILABLE,
+								hasMessage: true
+							}
+						]
 			);
 		}
 	);
@@ -1807,7 +1839,7 @@ describe('publication subscriptions', () => {
 			await commitUpload(token, entry.operationId);
 			// Both messages read the completed path's availability from D1 and R2.
 			const fault = vi
-				.spyOn(NarInfoObjectsService.prototype, 'servableStorePathHashes')
+				.spyOn(NarInfoObjectsService.prototype, 'servableNarInfoVersions')
 				.mockRejectedValueOnce(
 					new Error('D1_ERROR: D1 DB is overloaded. Too many requests queued.')
 				);
@@ -1837,6 +1869,107 @@ describe('publication subscriptions', () => {
 			}
 		}
 	);
+
+	it('sends the verdict of a failed verification to a subscription', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('1')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			await session.nextFrame();
+			await session.nextFrame();
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.update(schema.pendingUploads)
+					.set({ verdict: 'pending' })
+					.where(eq(schema.pendingUploads.id, entry.operationId))
+					.run();
+				return uploadStateOf(instance).markUploadTerminal(
+					entry.operationId,
+					'mismatch',
+					rootLogger()
+				);
+			});
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			expect(await session.nextFrame()).toStrictEqual({
+				ev: 'verdict',
+				uploadId: entry.operationId,
+				status: 'mismatch',
+				grace: {}
+			});
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('sends the absent verdict to a subscription whose cache was deleted', async () => {
+		const token = await initialise();
+		const created = await authorisedFetch('/caches/removed', token, {
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ access: 'public', priority: 50 })
+		});
+		expect(created.status).toBe(StatusCodes.OK);
+		const [entry] = await plannedEntries(token, '/cache/removed/uploads/plan', [
+			distinctPath('1')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const first = await openCommitSession(
+			token,
+			namedCache('removed'),
+			publicationSession
+		);
+		try {
+			first.send({ op: 'publish-batch', pushId: testPushId, entries: [entry] });
+			await first.nextFrame();
+			await first.nextFrame();
+		} finally {
+			await closeSessionAndWait(first.socket);
+		}
+		const removed = await authorisedFetch('/caches/removed?force=true', token, {
+			method: 'DELETE'
+		});
+		expect(removed.status).toBe(StatusCodes.OK);
+		const session = await openCommitSession(
+			token,
+			namedCache('removed'),
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			expect(await session.nextFrame()).toStrictEqual({
+				ev: 'verdict',
+				uploadId: entry.operationId,
+				status: 'absent',
+				grace: {}
+			});
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+	});
 
 	it('takes the commit entry semaphore for each subscribed entry', async () => {
 		const token = await initialise();
@@ -1888,6 +2021,111 @@ describe('publication subscriptions', () => {
 		});
 	});
 
+	it('sends the verdict that verification records while a subscription computes its identity', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('1')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		const digest = crypto.subtle.digest.bind(crypto.subtle);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			await session.nextFrame();
+			await session.nextFrame();
+			const failVerification = await runInDurableObject(
+				currentServer(),
+				(instance) => {
+					instance.context.db
+						.update(schema.pendingUploads)
+						.set({ verdict: 'pending' })
+						.where(eq(schema.pendingUploads.id, entry.operationId))
+						.run();
+					return Promise.resolve(async () => {
+						await uploadStateOf(instance).markUploadTerminal(
+							entry.operationId,
+							'mismatch',
+							rootLogger()
+						);
+					});
+				}
+			);
+			// Verification records the verdict while the identity hash runs.
+			vi.spyOn(crypto.subtle, 'digest').mockImplementationOnce(
+				async (algorithm, data) => {
+					await failVerification();
+					return digest(algorithm, data);
+				}
+			);
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			expect(await session.nextFrame()).toStrictEqual({
+				ev: 'verdict',
+				uploadId: entry.operationId,
+				status: 'mismatch',
+				grace: {}
+			});
+		} finally {
+			vi.restoreAllMocks();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('refuses a subscription with a changed compressed declaration', async () => {
+		const token = await initialise();
+		const [planned] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('1')
+		]);
+		if (planned === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const entry = {
+			...planned,
+			blob: { fileHash: nixSha256Hash('3'), fileSize: 10 }
+		};
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			await session.nextFrame();
+			await session.nextFrame();
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [{ ...entry, blob: { ...entry.blob, fileSize: 11 } }]
+			});
+			expect(refusalFacts(await session.nextFrame())).toStrictEqual({
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'declaration-changed',
+				status: StatusCodes.CONFLICT,
+				hasMessage: true
+			});
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
 	it.each([
 		{ subject: 'an operation that was never accepted', cacheName: undefined },
 		{ subject: 'a cache that does not exist', cacheName: 'absent' }
@@ -1925,6 +2163,815 @@ describe('publication subscriptions', () => {
 			await closeSessionAndWait(session.socket);
 		}
 	});
+});
+
+// With `isConfirmationPending`, verification has committed the generation, but
+// the operation is still accepted and its pending row remains, as when the
+// recovery deadline passes before anything confirms the operation.
+async function completedPublication(
+	token: string,
+	label: string,
+	options: {
+		readonly cacheName?: string;
+		readonly pushId?: PushId;
+		readonly isConfirmationPending?: boolean;
+	} = {}
+) {
+	const nar = await verifiableNar(label);
+	const path = uploadPathNegotiation(
+		uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		})
+	);
+	const pushId = options.pushId ?? testPushId;
+	const cache =
+		options.cacheName === undefined ? undefined : namedCache(options.cacheName);
+	const [planned] = await plannedEntries(
+		token,
+		options.cacheName === undefined
+			? '/uploads/plan'
+			: `/cache/${options.cacheName}/uploads/plan`,
+		[path],
+		undefined,
+		pushId
+	);
+	if (planned === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	const entry = {
+		...planned,
+		blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+	};
+	await putNarBytes(
+		publicationStagingKey(fixtureTenant, pushId, entry.operationId),
+		nar
+	);
+	const session = await openCommitSession(token, cache, publicationSession);
+	try {
+		session.send({ op: 'publish-batch', pushId, entries: [entry] });
+		await session.nextFrame();
+		await session.nextFrame();
+	} finally {
+		await closeSessionAndWait(session.socket);
+	}
+	const pending =
+		options.isConfirmationPending === true
+			? await runInDurableObject(currentServer(), (instance) =>
+					Promise.resolve(
+						instance.context.db
+							.select()
+							.from(schema.pendingUploads)
+							.where(eq(schema.pendingUploads.id, entry.operationId))
+							.get()
+					)
+				)
+			: undefined;
+	await commitUpload(token, entry.operationId, cache);
+	if (pending !== undefined) {
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.pendingUploads)
+				.values({ ...pending, verdict: 'committing' })
+				.run();
+			instance.context.db
+				.update(schema.publicationOperations)
+				.set({ state: 'accepted' })
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+			return Promise.resolve();
+		});
+	}
+	return { entry, path, pushId, cache };
+}
+
+async function subscribe(
+	token: string,
+	cache: CacheScope | undefined,
+	pushId: PushId,
+	entry: PublicationEntry,
+	op: 'subscribe-publication' | 'publish-batch' = 'subscribe-publication'
+) {
+	const session = await openCommitSession(token, cache, publicationSession);
+	try {
+		session.send({ op, pushId, entries: [entry] });
+		const answer = refusalFacts(await session.nextFrame());
+		await expectNoFurtherFrame(session, pushId, entry);
+		return answer;
+	} finally {
+		await closeSessionAndWait(session.socket);
+	}
+}
+
+// Sends the entry in `publish-batch` and returns every frame for it. An
+// accepted entry receives a second frame: the request for its bytes or the
+// answer of its commit.
+async function admit(token: string, pushId: PushId, entry: PublicationEntry) {
+	const session = await openCommitSession(token, undefined, publicationSession);
+	try {
+		session.send({ op: 'publish-batch', pushId, entries: [entry] });
+		const first = refusalFacts(await session.nextFrame());
+		const frames =
+			first.ev === 'publication-accepted'
+				? [first, refusalFacts(await session.nextFrame())]
+				: [first];
+		await expectNoFurtherFrame(session, pushId, entry);
+		return frames;
+	} finally {
+		await closeSessionAndWait(session.socket);
+	}
+}
+
+// Subscribes to an operation whose identity does not match its entry, and
+// fails when any frame arrives before the refusal of that subscription.
+async function expectNoFurtherFrame(
+	session: CommitConversation,
+	pushId: PushId,
+	entry: PublicationEntry
+) {
+	const sentinel = uploadIdSchema.parse('f'.repeat(64));
+	session.send({
+		op: 'subscribe-publication',
+		pushId,
+		entries: [{ ...entry, operationId: sentinel }]
+	});
+	expect(refusalFacts(await session.nextFrame())).toStrictEqual({
+		ev: 'publication-refused',
+		uploadId: sentinel,
+		reason: 'parameters-changed',
+		status: StatusCodes.CONFLICT,
+		hasMessage: true
+	});
+}
+
+describe('publication subscriptions to terminal operations', () => {
+	beforeEach(async () => {
+		vi.setSystemTime(vi.getRealSystemTime());
+		await resetTestServer();
+	});
+
+	it('refuses with generation-conflict a subscription to a completed operation whose cache was deleted', async () => {
+		const token = await initialise();
+		const created = await authorisedFetch('/caches/gone', token, {
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ access: 'public', priority: 50 })
+		});
+		expect(created.status).toBe(StatusCodes.OK);
+		const { entry, pushId, cache } = await completedPublication(
+			token,
+			'publication-gone-cache',
+			{ cacheName: 'gone' }
+		);
+		const removed = await authorisedFetch('/caches/gone?force=true', token, {
+			method: 'DELETE'
+		});
+		expect(removed.status).toBe(StatusCodes.OK);
+		expect(await subscribe(token, cache, pushId, entry)).toStrictEqual({
+			ev: 'publication-refused',
+			uploadId: entry.operationId,
+			reason: 'generation-conflict',
+			status: StatusCodes.CONFLICT,
+			hasMessage: true
+		});
+	});
+
+	it('refuses an expired operation with recovery-expired', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('1')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		expect(await admit(token, testPushId, entry)).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: entry.operationId },
+			{ ev: 'upload-required', uploadId: entry.operationId }
+		]);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(schema.publicationOperations)
+				.set({ state: 'expired' })
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+			return Promise.resolve();
+		});
+		expect(await subscribe(token, undefined, testPushId, entry)).toStrictEqual({
+			ev: 'publication-refused',
+			uploadId: entry.operationId,
+			reason: 'recovery-expired',
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			hasMessage: true
+		});
+	});
+
+	it.each([
+		{ op: 'subscribe-publication', when: 'before expiry runs' },
+		{ op: 'publish-batch', when: 'before expiry runs' },
+		{
+			op: 'subscribe-publication',
+			when: 'while expiry waits for its retry time'
+		}
+	] as const)(
+		'answers $op for a committed generation after the recovery deadline $when',
+		async ({ op, when }) => {
+			const token = await initialise();
+			const { entry, path, pushId } = await completedPublication(
+				token,
+				`publication-late-${op}-${when}`,
+				{ isConfirmationPending: true }
+			);
+			await runInDurableObject(currentServer(), async (instance, state) => {
+				instance.context.db
+					.update(schema.publicationOperations)
+					.set({ recoveryDeadline: new Date(Date.now() - 1).toISOString() })
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				if (when !== 'before expiry runs') {
+					await state.storage.put(
+						'maintenance:publication-expiry-retry-at',
+						Date.now() + 10 * 60 * 1000
+					);
+				}
+			});
+			const answer = await subscribe(token, undefined, pushId, entry, op);
+			const { operations } = await snapshot();
+			expect({
+				answer,
+				states: operations.map((operation) => operation.state)
+			}).toStrictEqual({
+				answer: {
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: {
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						status: 'already-present'
+					},
+					grace: {}
+				},
+				states: ['servable']
+			});
+		}
+	);
+
+	it('refuses with parameters-changed a subscription with no record whose identity does not match', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('1')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		expect(
+			await subscribe(token, undefined, testPushId, {
+				...entry,
+				metadata: { ...entry.metadata, narSize: entry.metadata.narSize + 1 }
+			})
+		).toStrictEqual({
+			ev: 'publication-refused',
+			uploadId: entry.operationId,
+			reason: 'parameters-changed',
+			status: StatusCodes.CONFLICT,
+			hasMessage: true
+		});
+	});
+
+	it('answers a subscription from the state after a repair during the reads for a served path', async () => {
+		const token = await initialise();
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-replay-repaired'
+		);
+		// A repair accepts the operation again while the replay reads the
+		// narinfo for its served path, and the path is deleted.
+		const read = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const cache = db.select().from(schema.cacheIdentities).get();
+			if (cache === undefined) {
+				throw new Error('Expected the default cache');
+			}
+			const staged = r2ObjectKeySchema.parse(
+				publicationStagingKey(fixtureTenant, pushId, entry.operationId)
+			);
+			const createdAt = isoTimestamp(new Date());
+			const expiresAt = isoTimestamp(new Date(Date.now() + 60_000));
+			const spy = vi.spyOn(
+				NarInfoObjectsService.prototype,
+				'committedNarInfoRow'
+			);
+			spy.mockImplementationOnce(() => {
+				db.update(schema.publicationOperations)
+					.set({ state: 'accepted' })
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				db.insert(schema.pendingUploads)
+					.values({
+						id: entry.operationId,
+						cacheId: cache.id,
+						narHash: entry.metadata.narHash,
+						r2Key: staged,
+						metadataJson: JSON.stringify(entry.metadata),
+						createdAt,
+						expiresAt
+					})
+					.run();
+				return Promise.resolve(undefined);
+			});
+			return Promise.resolve(spy);
+		});
+		try {
+			expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual({
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'resend',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				hasMessage: true
+			});
+		} finally {
+			read.mockRestore();
+		}
+	});
+
+	it('asks a subscription to resend when its completed path is deleted after the replay proves it served', async () => {
+		const token = await initialise();
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-replay-deleted-late'
+		);
+		const committed = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const spy = vi.spyOn(
+				NarInfoObjectsService.prototype,
+				'committedNarInfoRow'
+			);
+			spy.mockImplementationOnce(function (
+				this: NarInfoObjectsService,
+				...arguments_
+			) {
+				spy.mockRestore();
+				// The path is deleted after the replay proves it served.
+				db.delete(schema.narInfos)
+					.where(
+						eq(schema.narInfos.storePathHash, entry.metadata.storePathHash)
+					)
+					.run();
+				return this.committedNarInfoRow(...arguments_);
+			});
+			return Promise.resolve(spy);
+		});
+		try {
+			expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual({
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'resend',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				hasMessage: true
+			});
+		} finally {
+			committed.mockRestore();
+		}
+	});
+
+	it('sends a settled frame when a completed path is recommitted with its NAR during the replay', async () => {
+		const token = await initialise();
+		const { entry, path, pushId } = await completedPublication(
+			token,
+			'publication-replay-recommitted'
+		);
+		const committed = await runInDurableObject(currentServer(), () => {
+			const spy = vi.spyOn(
+				NarInfoObjectsService.prototype,
+				'committedNarInfoRow'
+			);
+			spy.mockImplementationOnce(async function (
+				this: NarInfoObjectsService,
+				...arguments_
+			) {
+				spy.mockRestore();
+				const row = await this.committedNarInfoRow(...arguments_);
+				// A recommit of the same NAR gives the path a later generation
+				// after the replay proved the earlier one.
+				return row === undefined
+					? undefined
+					: {
+							...row,
+							generation: narInfoGenerationSchema.parse(row.generation + 1)
+						};
+			});
+			return Promise.resolve(spy);
+		});
+		try {
+			expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual({
+				ev: 'settled',
+				uploadId: entry.operationId,
+				response: {
+					storePathHash: path.storePathHash,
+					narHash: path.narHash,
+					status: 'already-present'
+				},
+				grace: {}
+			});
+		} finally {
+			committed.mockRestore();
+		}
+	});
+
+	it('refuses a replay as retryable when its path is recommitted during every read', async () => {
+		const token = await initialise();
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-replay-always-recommitted'
+		);
+		const servable = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const spy = vi.spyOn(
+				NarInfoObjectsService.prototype,
+				'servableNarInfoVersions'
+			);
+			// Another push recommits the path during every read of it. The replay
+			// discards a read when the path changes, so the read finds nothing.
+			spy.mockImplementation(() => {
+				db.update(schema.narInfos)
+					.set({ generation: sql`${schema.narInfos.generation} + 1` })
+					.where(
+						eq(schema.narInfos.storePathHash, entry.metadata.storePathHash)
+					)
+					.run();
+				return Promise.resolve(new Map());
+			});
+			return Promise.resolve(spy);
+		});
+		try {
+			const answer = await subscribe(token, undefined, pushId, entry);
+			expect({ answer, reads: servable.mock.calls.length }).toStrictEqual({
+				answer: {
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'temporary-failure',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				},
+				reads: 3
+			});
+		} finally {
+			servable.mockRestore();
+		}
+	});
+
+	it('refuses a replay as retryable when R2 fails transiently during its reads', async () => {
+		const token = await initialise();
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-replay-transient-r2'
+		);
+		const head = await runInDurableObject(currentServer(), (instance) => {
+			const blobs = instance.context.env.BLOBS;
+			return Promise.resolve(
+				vi
+					.spyOn(blobs, 'head')
+					.mockRejectedValue(
+						new Error(
+							'head: We encountered an internal error. Please try again. (10001)'
+						)
+					)
+			);
+		});
+		try {
+			expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual({
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'temporary-failure',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				hasMessage: true
+			});
+		} finally {
+			head.mockRestore();
+		}
+	});
+
+	it('refuses a pruned operation with generation-conflict when the cache is recreated during the replay', async () => {
+		const token = await initialise();
+		const expiresAt = Math.floor(Date.now() / 1000) + 60;
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-pruned-recreated',
+			{ pushId: await testPushIdFor(fixtureTenant, 10, expiresAt) }
+		);
+		const versions = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			db.delete(schema.publicationOperations)
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+			const spy = vi.spyOn(
+				NarInfoObjectsService.prototype,
+				'servableNarInfoVersions'
+			);
+			spy.mockImplementationOnce(async function (
+				this: NarInfoObjectsService,
+				...arguments_
+			) {
+				spy.mockRestore();
+				const proven = await this.servableNarInfoVersions(...arguments_);
+				// The cache is recreated while the replay reads the path.
+				db.update(schema.cacheIdentities)
+					.set({
+						generation: cacheGenerationSchema.parse(entry.cacheGeneration + 1)
+					})
+					.run();
+				return proven;
+			});
+			return Promise.resolve(spy);
+		});
+		vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+		try {
+			expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual({
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'generation-conflict',
+				status: StatusCodes.CONFLICT,
+				hasMessage: true
+			});
+		} finally {
+			versions.mockRestore();
+		}
+	});
+
+	it('answers absent when a completed path has a committed replacement whose NAR is not served', async () => {
+		const token = await initialise();
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-replay-replacement'
+		);
+		const spies = await runInDurableObject(currentServer(), () => {
+			// The path was recommitted with another NAR, and that NAR's canonical
+			// object is missing, so no NAR is served for the path.
+			const versions = vi
+				.spyOn(NarInfoObjectsService.prototype, 'servableNarInfoVersions')
+				.mockResolvedValueOnce(new Map());
+			const committed = vi.spyOn(
+				NarInfoObjectsService.prototype,
+				'committedNarInfoRow'
+			);
+			committed.mockImplementationOnce(async function (
+				this: NarInfoObjectsService,
+				...arguments_
+			) {
+				committed.mockRestore();
+				const row = await this.committedNarInfoRow(...arguments_);
+				return row === undefined
+					? undefined
+					: { ...row, narHash: nixSha256Hash('9') };
+			});
+			return Promise.resolve([versions, committed]);
+		});
+		try {
+			expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual({
+				ev: 'verdict',
+				uploadId: entry.operationId,
+				status: 'absent'
+			});
+		} finally {
+			for (const spy of spies) {
+				spy.mockRestore();
+			}
+		}
+	});
+
+	it('admits a publish-batch replay of a completed operation whose path is gone', async () => {
+		const token = await initialise();
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-replay-admits'
+		);
+		await deletePath(token, entry.metadata.storePathHash);
+		// The operation is accepted past its deadline when the entry arrives,
+		// and the replay's expiry pass completes it. The alarm's expiry pass
+		// does not run.
+		const alarmExpiry = vi
+			.spyOn(VerificationService.prototype, 'expirePublications')
+			.mockResolvedValue(undefined);
+		const expiry = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			db.update(schema.publicationOperations)
+				.set({ state: 'accepted', recoveryDeadline: new Date(0).toISOString() })
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+			const deadline = new Date(Date.now() + 60_000).toISOString();
+			return Promise.resolve(
+				vi
+					.spyOn(VerificationService.prototype, 'expireOperation')
+					.mockImplementation((_logger, id) => {
+						if (id === entry.operationId) {
+							db.update(schema.publicationOperations)
+								.set({ state: 'servable', recoveryDeadline: deadline })
+								.where(eq(schema.publicationOperations.id, id))
+								.run();
+						}
+						return Promise.resolve();
+					})
+			);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({ op: 'publish-batch', pushId, entries: [entry] });
+			expect([
+				refusalFacts(await session.nextFrame()),
+				refusalFacts(await session.nextFrame())
+			]).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{ ev: 'upload-required', uploadId: entry.operationId }
+			]);
+		} finally {
+			expiry.mockRestore();
+			alarmExpiry.mockRestore();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it.each([
+		{ name: 'fails', isWaiting: false },
+		{ name: 'fails while it waits for its retry time', isWaiting: true }
+	])(
+		'refuses a subscription as a retryable failure when expiry $name',
+		async ({ name, isWaiting }) => {
+			const token = await initialise();
+			const { entry, pushId } = await completedPublication(
+				token,
+				`publication-expiry-${name}`,
+				{ isConfirmationPending: true }
+			);
+			const isGenerationCommitted = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					instance.context.db
+						.update(schema.publicationOperations)
+						.set({ recoveryDeadline: new Date(0).toISOString() })
+						.where(eq(schema.publicationOperations.id, entry.operationId))
+						.run();
+					if (isWaiting) {
+						await state.storage.put(
+							'maintenance:publication-expiry-retry-at',
+							Date.now() + 10 * 60 * 1000
+						);
+					}
+					return vi
+						.spyOn(CommitPipelineService.prototype, 'isGenerationCommitted')
+						.mockRejectedValue(new PublicationExpiryFault());
+				}
+			);
+			try {
+				const answer = await subscribe(token, undefined, pushId, entry);
+				const { operations } = await snapshot();
+				expect({
+					answer,
+					states: operations.map((operation) => operation.state)
+				}).toStrictEqual({
+					answer: {
+						ev: 'publication-refused',
+						uploadId: entry.operationId,
+						reason: 'temporary-failure',
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						hasMessage: true
+					},
+					states: ['accepted']
+				});
+			} finally {
+				isGenerationCommitted.mockRestore();
+			}
+		}
+	);
+
+	it('refuses a pruned operation with generation-conflict when the cache generation changed', async () => {
+		const token = await initialise();
+		const expiresAt = Math.floor(Date.now() / 1000) + 60;
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-pruned-generation',
+			{ pushId: await testPushIdFor(fixtureTenant, 9, expiresAt) }
+		);
+		await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			db.delete(schema.publicationOperations)
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+			db.update(schema.cacheIdentities)
+				.set({
+					generation: cacheGenerationSchema.parse(entry.cacheGeneration + 1)
+				})
+				.run();
+			return Promise.resolve();
+		});
+		vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+		expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual({
+			ev: 'publication-refused',
+			uploadId: entry.operationId,
+			reason: 'generation-conflict',
+			status: StatusCodes.CONFLICT,
+			hasMessage: true
+		});
+	});
+
+	it('answers a pruned operation with its served path after the push expires', async () => {
+		const token = await initialise();
+		const expiresAt = Math.floor(Date.now() / 1000) + 60;
+		const { entry, path, pushId } = await completedPublication(
+			token,
+			'publication-pruned-served',
+			{ pushId: await testPushIdFor(fixtureTenant, 5, expiresAt) }
+		);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.delete(schema.publicationOperations)
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+			return Promise.resolve();
+		});
+		vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+		expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual({
+			ev: 'settled',
+			uploadId: entry.operationId,
+			response: {
+				storePathHash: path.storePathHash,
+				narHash: path.narHash,
+				status: 'already-present'
+			},
+			grace: {}
+		});
+	});
+
+	it.each([
+		{ name: 'includes', isRootTarget: true },
+		{ name: 'does not include', isRootTarget: false }
+	])(
+		'answers an entry with no record whose run root $name its served path after the push expires',
+		async ({ isRootTarget }) => {
+			const token = await initialise();
+			const { path } = await completedPublication(
+				token,
+				'publication-unrecorded-root'
+			);
+			const expiresAt = Math.floor(Date.now() / 1000) + 60;
+			const pushId = await testPushIdFor(fixtureTenant, 9, expiresAt);
+			const root = rootNameSchema.parse('run');
+			// Another push published the path. This push's entry for it never
+			// reached the server, so its run root has the path only when another
+			// operation attached it.
+			const [entry] = await plannedEntries(
+				token,
+				'/uploads/plan',
+				[path],
+				{ name: root, retention: { kind: 'inherit' } },
+				pushId
+			);
+			if (entry === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			if (isRootTarget) {
+				await runInDurableObject(currentServer(), (instance) => {
+					const cache =
+						instance.context.cacheRepository.require(defaultCache());
+					instance.context.db
+						.insert(schema.retentionRootTargets)
+						.values({
+							cacheId: cache.id,
+							rootName: root,
+							storePathHash: path.storePathHash,
+							storePath: path.storePath
+						})
+						.run();
+					return Promise.resolve();
+				});
+			}
+			vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+			expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual(
+				isRootTarget
+					? {
+							ev: 'settled',
+							uploadId: entry.operationId,
+							response: {
+								storePathHash: path.storePathHash,
+								narHash: path.narHash,
+								status: 'already-present'
+							},
+							grace: {}
+						}
+					: {
+							ev: 'publication-refused',
+							uploadId: entry.operationId,
+							reason: 'push-expired',
+							status: StatusCodes.SERVICE_UNAVAILABLE,
+							hasMessage: true
+						}
+			);
+		}
+	);
 });
 
 it('requires bytes on a replay when a reusable NAR appears after a staged acceptance', async () => {

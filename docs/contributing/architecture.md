@@ -654,12 +654,13 @@ as uploading or building a path, and existing divergence and provenance rules
 still apply.
 
 Commit credit paces admission and commits, and the client sends
-`subscribe-publication` without spending credit. The server therefore replies to
-a client that accepts `publication-refusal-reasons` with the durable state of
-each operation and starts no work for it. When an operation needs work, because
-its commit has not started or its completed path is no longer served, the server
-refuses the entry with the reason `resend`. The client then sends the entry
-again in a `publish-batch` message, which admission handles like any other
+`subscribe-publication` without spending credit. The server therefore does not
+admit an operation or start a commit for a subscription from a client that
+accepts `publication-refusal-reasons`. The server does run the expiry pass for
+an accepted operation past its recovery deadline before it answers. An operation
+that needs work, because its commit has not started or its completed path is no
+longer served, is refused with the reason `resend`. The client then sends the
+entry again in a `publish-batch` message, which admission handles like any other
 replay. A resend does not use one of the entry's error retries, and the client
 accepts one `resend` for each subscription.
 
@@ -677,6 +678,44 @@ unallocated credit. Every subscribed entry runs under the tenant's commit entry
 semaphore, so these entries exceed the tenant's credit budget by at most the
 semaphore's size. A changed declaration and changed parameters are refused with
 `invalid-publication` and status 409.
+
+The server answers every subscription, and a `publish-batch` entry for a
+concluded operation, as follows. A `publish-batch` entry whose operation needs
+work goes through admission and never receives `resend`.
+
+- Pruning removes an operation record only after its push expires, so an
+  operation without a record and with an unexpired push was never accepted. An
+  entry with no operation record is refused with `invalid-publication` 404,
+  unless its push ID is authentic and has expired. For an entry with an expired
+  authentic push ID, the server refuses with `generation-conflict` if the cache
+  was deleted or recreated. Otherwise the entry receives the `settled` frame for
+  the path if the path is served with its NAR and, for an entry with a run root,
+  the root includes the path. It receives `push-expired` in every other case.
+- A failed operation receives the verdict frame that a live session received. It
+  keeps that verdict, including `absent`, when another operation later publishes
+  its path and NAR, until its record is pruned.
+- An expired operation is refused with `recovery-expired`.
+- A completed operation whose cache was deleted or recreated is refused with
+  `generation-conflict`. Cache deletion fails an accepted operation, which then
+  receives the `absent` verdict.
+- A completed operation whose path is served with its NAR receives the `settled`
+  frame for the path. One whose path is served or committed with another NAR
+  receives the `absent` verdict. A completed operation whose path is not served
+  and has no committed replacement needs work.
+- For an accepted operation past its recovery deadline, the server first runs
+  the expiry pass for that operation, even while the tenant's expiry pass waits
+  for its retry time. When verification has already committed the generation,
+  the entry then receives the `settled` frame for the path. When the expiry pass
+  fails, the entry is refused with `temporary-failure`.
+- An accepted operation whose commit has started receives `deferred`, or the
+  verdict that verification recorded. One whose commit has not started needs
+  work.
+
+A replay reads the operation record, the pending row, the cache and the path's
+local narinfo row after the D1 and R2 reads that its answer needs. If any of
+them has changed, or the path was recommitted between the replay's reads, it
+tries again, and after three attempts it refuses the entry with
+`temporary-failure`.
 
 For both protocols, the client opens its publication session on the first commit
 or upload renewal. Capability probing uses a separate connection and completes
