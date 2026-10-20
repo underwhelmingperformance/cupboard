@@ -37,3 +37,8 @@ CUPBOARD_SUBREQUESTS_PER_INVOCATION=
 # any other value must be a positive integer.
 CUPBOARD_COMMIT_SOCKET_CEILING=
 CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET=
+
+# The shortest time from the end of one garbage-collection scan of a cache to
+# the start of the next, in seconds. An empty value selects six hours; any other
+# value must be a whole number from 0 to 2592000 (30 days).
+CUPBOARD_GC_MIN_SCAN_INTERVAL_SECONDS=

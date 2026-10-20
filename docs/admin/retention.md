@@ -217,8 +217,15 @@ Some things to know about these settings:
 
 ### When an expired root disappears
 
-The next garbage collection removes an expired root. Until then, which can be up
-to an hour or so, `cupboard root list` still shows it, marked as expired.
+The next garbage collection of the cache removes an expired root. That
+collection can start once the root has expired and the [collection interval][]
+has passed since the cache was last collected. The interval is six hours by
+default. The first hourly job after that time usually queues the tenant. If
+another cache in the tenant has an earlier root expiry or grace deadline, the
+removal can wait up to one more interval. Until then, `cupboard root list` still
+shows the root, marked as expired.
+
+[collection interval]: ../operator/running.md#the-collection-interval
 
 ## Grace periods
 
@@ -279,9 +286,26 @@ cache.
 
 An hourly job queues up to 100 active tenants that are due for maintenance. A
 tenant becomes due when its maintenance eligibility was last refreshed six hours
-ago, or earlier when a root expires or a grace deadline passes. The next hourly
-job can queue the work, but a backlog, queue delivery or a failed pass can delay
-collection. Suspended tenants aren't collected.
+ago, or earlier when the collection interval of a cache that needs collection
+ends. The next hourly job can queue the work, but a backlog, queue delivery or a
+failed pass can delay collection. Suspended tenants aren't collected.
+
+A cache needs collection when a change since its last collection can leave a
+store path that nothing keeps, or when one of its roots expires or a grace
+deadline passes. Publishing or deleting a store path, changing the targets of a
+root, closing the cache and finishing an upload are such changes. Automatic
+collection doesn't start on such a cache until the collection interval, six
+hours by default, has passed since its last collection, and then waits for an
+hourly job. A store path that nothing keeps any more can therefore stay for up
+to the interval after the cache's last collection, and longer if the hourly job
+is delayed. A new cache counts as collected when it's created.
+
+A tenant administrator, or another caller with a grant for the `gc:run` action,
+can request a collection through the admin API: `POST /gc` for the whole tenant,
+or `POST /cache/<name>/gc` for one named cache. The request ignores the
+collection interval and starts a new scan of every cache in its scope. It also
+discards any scan in progress in that scope, so a request that arrives while a
+large cache is being scanned starts that scan again.
 
 For each cache, a garbage collection:
 
@@ -316,9 +340,12 @@ are permanent by default.
 The cache becomes eligible to retire one default root TTL after you set this. If
 you set it again, the wait starts again. Once the cache is eligible, a
 maintenance pass removes it when it has no store paths, roots, grace deadlines
-or work in progress. If the cache is not empty, it becomes due for another check
-six hours later. The hourly job and maintenance queue determine when that check
-runs.
+or work in progress. If the cache is not empty and needs a collection, it
+becomes due for another check when the [collection interval][] after its last
+collection ends. That can be sooner than six hours, or up to 30 days later with
+a long configured interval. Any other cache that is not empty becomes due for
+another check six hours later. The hourly job and maintenance queue determine
+when that check runs.
 
 ## Legacy retention policies
 

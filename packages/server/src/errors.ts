@@ -323,6 +323,17 @@ export class CommitCreditBudgetInvalidError extends ServerHttpError {
 	}
 }
 
+export class MinScanIntervalInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly value: string) {
+		super(
+			'CUPBOARD_GC_MIN_SCAN_INTERVAL_SECONDS is not a valid number of seconds'
+		);
+		this.name = 'MinScanIntervalInvalidError';
+	}
+}
+
 export class CommitSocketCeilingInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -1334,6 +1345,19 @@ export class GarbageCollectionBarrierMissingError extends ServerHttpError {
 	constructor(public readonly missingTriggers: readonly string[]) {
 		super('The garbage-collection write barrier is incomplete');
 		this.name = 'GarbageCollectionBarrierMissingError';
+	}
+}
+
+/**
+A collection scan has marks before its seed phases, so emptying its frontier
+could drop a path that a mark depends on.
+*/
+export class GarbageCollectionMarksBeforeSeedError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly cacheId: number) {
+		super('A garbage-collection scan has marks before its seed phases');
+		this.name = 'GarbageCollectionMarksBeforeSeedError';
 	}
 }
 

@@ -1,10 +1,4 @@
-import {
-	type CacheScope,
-	rootNameSchema,
-	type StorePathHash,
-	storePathSchema,
-	type StorePathString
-} from '@cupboard/nix-store/scalars';
+import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
@@ -14,7 +8,6 @@ import * as schema from '../db/schema.ts';
 import {
 	currentServer,
 	defaultCache,
-	driveToCompletion,
 	initialise,
 	namedCache,
 	putTestCache,
@@ -22,86 +15,27 @@ import {
 	resolvedCache,
 	syntheticNarHash,
 	syntheticStorePathHash,
-	underOneUnitOfWork,
 	withoutAlarmArming
 } from '../test-support.ts';
 
 import { type ServerContext } from './context.ts';
 import {
-	type CollectionInputState,
-	GarbageCollectionInputs
-} from './garbage-collection-inputs.ts';
-import { gcContinuationKey } from './server.ts';
+	collectionState,
+	collectOneUnitOfWork,
+	collectTenant,
+	driveScanTo,
+	futureInstant as future,
+	inputState,
+	insertNarInfo,
+	insertRoot,
+	pastInstant as past,
+	storePathString
+} from './garbage-collection.test-support.ts';
 
 const kept = syntheticStorePathHash(1);
 const released = syntheticStorePathHash(2);
 const graced = syntheticStorePathHash(3);
 const added = syntheticStorePathHash(4);
-const past = '2020-01-01T00:00:00.000Z';
-const future = '2099-01-01T00:00:00.000Z';
-
-// Enough unit-budget passes for the fixtures below to finish a scan.
-const maxDrivenPasses = 32;
-
-function storePathString(storePathHash: StorePathHash): StorePathString {
-	return storePathSchema.parse(`/nix/store/${storePathHash}-app`);
-}
-
-function inputState(context: ServerContext): CollectionInputState | undefined {
-	return new GarbageCollectionInputs(context).state(resolvedCache(context));
-}
-
-function insertNarInfo(
-	context: ServerContext,
-	storePathHash: StorePathHash,
-	index: number
-): void {
-	context.db
-		.insert(schema.narInfos)
-		.values({
-			cacheId: resolvedCache(context).id,
-			storePathHash,
-			storePath: storePathString(storePathHash),
-			narHash: syntheticNarHash(index),
-			narSize: 1,
-			referencesJson: '[]',
-			createdAt: isoTimestamp(new Date(past))
-		})
-		.run();
-}
-
-function insertRoot(
-	context: ServerContext,
-	name: string,
-	expiresAt: string | undefined,
-	target: StorePathHash
-): void {
-	const cacheId = resolvedCache(context).id;
-	const rootName = rootNameSchema.parse(name);
-	const createdAt = isoTimestamp(new Date(past));
-
-	context.db
-		.insert(schema.retentionRoots)
-		.values({
-			cacheId,
-			name: rootName,
-			...(expiresAt !== undefined && {
-				expiresAt: isoTimestamp(new Date(expiresAt))
-			}),
-			createdAt,
-			updatedAt: createdAt
-		})
-		.run();
-	context.db
-		.insert(schema.retentionRootTargets)
-		.values({
-			cacheId,
-			rootName,
-			storePathHash: target,
-			storePath: storePathString(target)
-		})
-		.run();
-}
 
 function cacheCreatedAt(
 	context: ServerContext,
@@ -134,7 +68,7 @@ function seedRetainedCache(context: ServerContext, sql: SqlStorage): void {
 	const verdictUpdate = 'UPDATE pending_upload SET verdict = ? WHERE id = ?';
 
 	insertNarInfo(context, kept, 1);
-	insertRoot(context, 'channel', future, kept);
+	insertRoot(context, { name: 'channel', expiresAt: future, target: kept });
 	context.db
 		.insert(schema.retentionGrace)
 		.values({
@@ -383,48 +317,6 @@ const writes: readonly InputWrite[] = [
 	}
 ];
 
-// Runs one unit of collection work and drops the continuation that it arms,
-// so a stray alarm delivery cannot advance the scan under another budget.
-async function collectOneUnitOfWork(): Promise<void> {
-	await runInDurableObject(currentServer(), async (instance, state) => {
-		await underOneUnitOfWork(() => instance.runGarbageCollection());
-		await state.storage.delete(gcContinuationKey);
-		await state.storage.deleteAlarm();
-	});
-}
-
-async function collectPass(): Promise<void> {
-	await currentServer().runGarbageCollection();
-}
-
-async function scanPhase(): Promise<string | undefined> {
-	return runInDurableObject(
-		currentServer(),
-		(instance) =>
-			instance.context.db
-				.select({ phase: schema.garbageCollectionScans.phase })
-				.from(schema.garbageCollectionScans)
-				.where(
-					eq(
-						schema.garbageCollectionScans.cacheId,
-						resolvedCache(instance.context).id
-					)
-				)
-				.get()?.phase
-	);
-}
-
-async function driveScan(
-	pass: () => Promise<void>,
-	isDone: (phase: string | undefined) => boolean
-): Promise<void> {
-	await driveToCompletion(
-		pass,
-		async () => isDone(await scanPhase()),
-		maxDrivenPasses
-	);
-}
-
 // A cache whose next scan writes to every kind of input table: it expires a
 // root, marks the cache grace-managed, expires a grace deadline and collects
 // two paths. A permanent root keeps one path.
@@ -439,8 +331,12 @@ async function seedScanWithOwnWrites(): Promise<void> {
 		insertNarInfo(instance.context, kept, 1);
 		insertNarInfo(instance.context, released, 2);
 		insertNarInfo(instance.context, graced, 3);
-		insertRoot(instance.context, 'live', undefined, kept);
-		insertRoot(instance.context, 'expired', past, released);
+		insertRoot(instance.context, { name: 'live', target: kept });
+		insertRoot(instance.context, {
+			name: 'expired',
+			expiresAt: past,
+			target: released
+		});
 		instance.context.db
 			.insert(schema.retentionGrace)
 			.values({
@@ -452,21 +348,10 @@ async function seedScanWithOwnWrites(): Promise<void> {
 	});
 }
 
-async function collectionState(): Promise<unknown> {
-	return runInDurableObject(currentServer(), (instance) => ({
-		narInfos: instance.context.db
-			.select({ storePathHash: schema.narInfos.storePathHash })
-			.from(schema.narInfos)
-			.orderBy(schema.narInfos.storePathHash)
-			.all()
-			.map((row) => row.storePathHash),
-		roots: instance.context.db
-			.select({ name: schema.retentionRoots.name })
-			.from(schema.retentionRoots)
-			.all()
-			.map((row) => row.name),
-		inputs: inputState(instance.context)
-	}));
+async function defaultCacheState(): Promise<unknown> {
+	return runInDurableObject(currentServer(), (instance) =>
+		collectionState(instance.context)
+	);
 }
 
 describe('garbage collection inputs', () => {
@@ -499,9 +384,7 @@ describe('garbage collection inputs', () => {
 
 					return {
 						inputs: inputState(instance.context),
-						other: new GarbageCollectionInputs(instance.context).state(
-							resolvedCache(instance.context, otherCache)
-						),
+						other: inputState(instance.context, otherCache),
 						createdAt: cacheCreatedAt(instance.context),
 						otherCreatedAt: cacheCreatedAt(instance.context, otherCache)
 					};
@@ -527,9 +410,7 @@ describe('garbage collection inputs', () => {
 		await putTestCache(token, namedCache('builds'));
 
 		const recorded = await runInDurableObject(currentServer(), (instance) => ({
-			inputs: new GarbageCollectionInputs(instance.context).state(
-				resolvedCache(instance.context, namedCache('builds'))
-			),
+			inputs: inputState(instance.context, namedCache('builds')),
 			createdAt: cacheCreatedAt(instance.context, namedCache('builds'))
 		}));
 
@@ -599,10 +480,9 @@ describe('garbage collection inputs', () => {
 			await initialise();
 			await seedScanWithOwnWrites();
 
-			await collectPass();
-			await driveScan(collectPass, (phase) => phase === undefined);
+			await collectTenant();
 
-			expect(await collectionState()).toStrictEqual({
+			expect(await defaultCacheState()).toStrictEqual({
 				narInfos: [kept],
 				roots: ['live'],
 				inputs: {
@@ -617,16 +497,16 @@ describe('garbage collection inputs', () => {
 			await initialise();
 			await seedScanWithOwnWrites();
 
-			await driveScan(collectOneUnitOfWork, (phase) => phase === 'mark');
+			await driveScanTo(collectOneUnitOfWork, 'mark');
 			await runInDurableObject(currentServer(), (instance, state) => {
 				state.storage.sql.exec(
 					"DELETE FROM retention_root_target WHERE cache_id = ? AND root_name = 'live'",
 					resolvedCache(instance.context).id
 				);
 			});
-			await driveScan(collectOneUnitOfWork, (phase) => phase === undefined);
+			await driveScanTo(collectOneUnitOfWork, undefined);
 
-			expect(await collectionState()).toStrictEqual({
+			expect(await defaultCacheState()).toStrictEqual({
 				narInfos: [kept],
 				roots: ['live'],
 				inputs: {

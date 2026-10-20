@@ -743,6 +743,7 @@ describe('orphan staging reconciliation', () => {
 					}))
 			}).toStrictEqual({
 				outcome: {
+					retirementRechecks: [],
 					pendingUploadsDeleted: 1,
 					pendingAttestationsDeleted: 0,
 					rootsExpired: 0,

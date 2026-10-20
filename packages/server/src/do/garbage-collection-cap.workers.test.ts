@@ -17,6 +17,7 @@ import { cacheIdSchema } from '../db/cache.ts';
 import {
 	cacheIdentities,
 	garbageCollectionFrontier,
+	garbageCollectionInputs,
 	garbageCollectionMarks,
 	garbageCollectionScans,
 	garbageCollectionTenantRuns,
@@ -41,7 +42,6 @@ import {
 	putTestCache,
 	resetTestServer,
 	resolvedCache,
-	runGcResult,
 	setRoot,
 	syntheticNarHash,
 	syntheticStorePathHash,
@@ -55,6 +55,11 @@ import { chunk } from './bulk.ts';
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 import type { ServerContext } from './context.ts';
 import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
+import {
+	collectionState,
+	insertNarInfo,
+	insertRoot
+} from './garbage-collection.test-support.ts';
 import { phaseStepSize } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
@@ -438,11 +443,24 @@ describe('garbage collection cap', () => {
 		);
 
 		// The default cache sorts first in both orders and would hide the mismatch.
+		// The tenant sweep visits the caches that have an input row, so delete the
+		// default cache's row with its identity.
 		await runInDurableObject(currentServer(), (_instance, state) => {
-			drizzle(state.storage, { schema: { cacheIdentities } })
+			const database = drizzle(state.storage, {
+				schema: { cacheIdentities, garbageCollectionInputs }
+			});
+			const removed = database
 				.delete(cacheIdentities)
 				.where(eq(cacheIdentities.kind, 'default'))
-				.run();
+				.returning({ id: cacheIdentities.id })
+				.all();
+
+			for (const { id } of removed) {
+				database
+					.delete(garbageCollectionInputs)
+					.where(eq(garbageCollectionInputs.cacheId, id))
+					.run();
+			}
 		});
 
 		await driven.collectOneUnitOfWork();
@@ -1165,6 +1183,9 @@ describe('garbage collection identity columns', () => {
 		const { token } = await bootstrap({
 			caches: [{ scope: namedCache('builds') }, { scope: namedCache('docs') }]
 		});
+		const nextCache = namedCache('docs');
+		const kept = syntheticStorePathHash(1);
+		const released = syntheticStorePathHash(2);
 		const markers = (): Promise<number> =>
 			runInDurableObject(currentServer(), async (_instance, state) => {
 				const entries = await state.storage.list({
@@ -1175,35 +1196,56 @@ describe('garbage collection identity columns', () => {
 				return entries.size;
 			});
 
-		await authorisedFetch('/caches/builds?force=true', token, {
-			method: 'DELETE'
-		});
-		await driveToCompletion(
-			() => currentServer().resumeCacheTeardown(),
-			async () => (await markers()) === 0,
-			3
-		);
-		// The run row a pass left pointing at `builds` before its teardown. The
-		// identities are numbered in creation order: the default cache, `builds`,
-		// `docs`.
-		await runInDurableObject(currentServer(), (instance) => {
-			instance.context.db
-				.insert(garbageCollectionTenantRuns)
-				.values({
-					id: 1,
-					cacheId: cacheIdSchema.parse(2)
-				})
-				.run();
+		await withoutAlarmArming(async () => {
+			await authorisedFetch('/caches/builds?force=true', token, {
+				method: 'DELETE'
+			});
+			await driveToCompletion(
+				() => currentServer().resumeCacheTeardown(),
+				async () => (await markers()) === 0,
+				3
+			);
+			// The run row a pass left pointing at `builds` before its teardown. The
+			// identities are numbered in creation order: the default cache,
+			// `builds`, `docs`. The root in `docs` keeps one path, so a scan of
+			// `docs` collects the other.
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.insert(garbageCollectionTenantRuns)
+					.values({
+						id: 1,
+						cacheId: cacheIdSchema.parse(2)
+					})
+					.run();
+				insertNarInfo(instance.context, kept, 1, nextCache);
+				insertRoot(instance.context, {
+					name: 'live',
+					target: kept,
+					scope: nextCache
+				});
+				insertNarInfo(instance.context, released, 2, nextCache);
+			});
+
+			await currentServer().runGarbageCollection();
+			await drainContinuation();
 		});
 
-		// The run continues on the alarm until every cache has been walked and
-		// the run row is removed.
-		const result = await runGcResult();
-		await drainContinuation();
-		const state = await collectionStateIdentities();
+		const identities = await collectionStateIdentities();
 
-		expect({ ok: result.ok, tenantRun: state.tenantRun }).toStrictEqual({
-			ok: true,
+		expect({
+			docs: await runInDurableObject(currentServer(), (instance) =>
+				collectionState(instance.context, nextCache)
+			),
+			tenantRun: identities.tenantRun
+		}).toStrictEqual({
+			docs: {
+				narInfos: [kept],
+				roots: ['live'],
+				inputs: {
+					inputsChanged: false,
+					scanCompletedAt: isoTimestamp(new Date())
+				}
+			},
 			tenantRun: []
 		});
 	});

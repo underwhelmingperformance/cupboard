@@ -1840,7 +1840,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// due.
 		try {
 			await this.maintenanceEligibility.reconcile(new Date(), change);
-		} catch {
+		} catch (error) {
+			rootLogger().error('maintenance eligibility reconciliation failed', {
+				error
+			});
 			await this.invalidateMaintenanceEligibility();
 		}
 	}
@@ -2085,17 +2088,33 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 							target
 						);
 
-						const recheck = outcome.retirementRecheck;
-						if (
-							target.scope === 'tenant' &&
-							recheck?.cacheGraphComplete === true &&
-							!recheck.pendingExpiryBacklog &&
-							!this.deletionQueue.hasQueuedNarInfoDeletions()
-						) {
-							this.maintenanceEligibility.completeRetirementRecheck(
-								recheck.cacheId,
-								recheck
-							);
+						for (const recheck of outcome.retirementRechecks) {
+							if (
+								target.scope !== 'tenant' ||
+								recheck.pendingExpiryBacklog ||
+								this.deletionQueue.hasQueuedNarInfoDeletions()
+							) {
+								continue;
+							}
+
+							if (recheck.cacheGraphComplete) {
+								this.maintenanceEligibility.completeRetirementRecheck(
+									recheck.cacheId,
+									recheck
+								);
+								continue;
+							}
+
+							// The next scan of the cache is the only progress for its
+							// recheck, so check again when the interval allows it.
+							if (recheck.scanAllowedAt !== undefined) {
+								this.maintenanceEligibility.completeRetirementRecheck(
+									recheck.cacheId,
+									recheck,
+									new Date(),
+									new Date(recheck.scanAllowedAt)
+								);
+							}
 						}
 
 						return outcome;
@@ -2188,11 +2207,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		purgeOrigin: RequestOrigin | undefined
 	): Promise<GarbageCollectionOutcome> {
 		return this.runExclusiveMaintenance('gc', () =>
-			this.runGarbagePass(
-				() =>
-					this.garbageCollection.collectGarbage(logger, target, purgeOrigin),
-				garbageCollectionContinuation(target)
-			)
+			this.runGarbagePass(() => {
+				this.garbageCollection.requestScan(target);
+
+				return this.garbageCollection.collectGarbage(
+					logger,
+					target,
+					purgeOrigin
+				);
+			}, garbageCollectionContinuation(target))
 		);
 	}
 

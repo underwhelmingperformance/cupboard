@@ -21,11 +21,33 @@ The control Worker has a cron trigger that runs every hour. Each run:
 - refreshes the list of tenants that the Workers use to decide which requests to
   accept.
 
-An active tenant becomes due for maintenance when it has work to do, such as an
-expired retention root or grace period, or six hours have passed since its
-maintenance eligibility was last reconciled. Each hourly run queues at most 100
-due tenants. Queue delivery, other due tenants and maintenance failures can
-delay completion. Suspended tenants are skipped.
+An active tenant becomes due for maintenance when it has work to do, or when six
+hours have passed since its maintenance eligibility was last reconciled. For
+garbage collection, a cache of the tenant must have changed or have an expired
+retention root or grace period, and the [collection interval][] must have passed
+since the cache was last collected. See [Garbage collection][]. Each hourly run
+queues at most 100 due tenants. Queue delivery, other due tenants and
+maintenance failures can delay completion. Suspended tenants are skipped.
+
+[collection interval]: #the-collection-interval
+[Garbage collection]: ../admin/retention.md#garbage-collection
+
+### The collection interval
+
+The tenant Worker's `CUPBOARD_GC_MIN_SCAN_INTERVAL_SECONDS` variable sets the
+collection interval: the shortest time from the end of one garbage collection of
+a cache to the start of the next automatic one. It's a whole number of seconds
+from 0 to 2592000 (30 days). An empty value selects six hours.
+
+Any other value is an error once a cache of the tenant needs collection.
+Automatic garbage collection of the tenant then fails, and the tenant Worker
+logs the error each time it updates the tenant's maintenance eligibility. The
+tenant stays due for maintenance until the value is corrected.
+
+`cupboard init` deploys the variable empty on every run, so a value that you set
+in the Cloudflare dashboard lasts only until the next deploy. A longer interval
+leaves unretained store paths in storage for longer, and it delays the
+retirement of empty caches.
 
 ## Maintenance and the queues
 
