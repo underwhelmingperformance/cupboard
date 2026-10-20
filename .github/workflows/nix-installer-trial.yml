@@ -6,6 +6,8 @@ on:
       - .github/workflows/nix-installer-trial.yml
       - tests/installer/**
       - actions/prepare/**
+      - actions/prepare-builders/**
+      - actions/src/prepare-builders/**
       - scripts/nix-installer-trial.test.ts
   workflow_dispatch:
 

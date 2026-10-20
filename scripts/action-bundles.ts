@@ -8,7 +8,8 @@ import { build } from 'esbuild';
 const repositoryRoot = path.resolve(import.meta.dirname, '..');
 const actions = [
 	{ name: 'build-paths', entrypoints: ['main', 'post', 'worker'] },
-	{ name: 'evaluate-targets', entrypoints: ['main', 'worker'] }
+	{ name: 'evaluate-targets', entrypoints: ['main', 'worker'] },
+	{ name: 'prepare-builders', entrypoints: ['main', 'post'] }
 ] as const;
 
 class ActionBundleGenerationError extends CodedError {

@@ -34,6 +34,11 @@ Only targets with `remote = true` in the manifest send their builds to these
 machines. The plan job also gets the builders, because evaluating the flake can
 require building something.
 
+Remote builders require a local store or a local Nix daemon that trusts the
+runner user. Each job has its own SSH configuration and build-hook adapter. The
+daemon must accept the job's build-hook override, and the action removes the
+adapter after the job.
+
 When you write the specification:
 
 - Separate several builders with semicolons.
