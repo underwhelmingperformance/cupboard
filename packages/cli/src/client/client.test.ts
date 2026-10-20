@@ -12,9 +12,14 @@ import {
 } from '@cupboard/protocol/oidc';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import {
+	commitAcceptCapabilitiesHeader,
 	commitAuthenticationExpiredCloseCode,
 	commitAuthenticationExpiredCloseReason,
+	commitBatchCapability,
+	commitCreditCapability,
 	type CommitSessionFrame,
+	publicationCapability,
+	publicationRefusalReasonsCapability,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
@@ -521,7 +526,10 @@ describe('CupboardClient token endpoint redirects', () => {
 interface CapturedConnection {
 	readonly url: string;
 	readonly authorization: string | undefined;
+	readonly capabilities: string | undefined;
 }
+
+const acceptedCommitCapabilities = `${commitBatchCapability},${commitCreditCapability},${publicationCapability},${publicationRefusalReasonsCapability}`;
 
 // A client whose commit sockets are scripted: the nth connection plays the nth
 // script against its listeners once they are attached.
@@ -543,7 +551,8 @@ function commitClient(
 			const script = scripts[connections.length];
 			connections.push({
 				url: url.href,
-				authorization: headers.authorization
+				authorization: headers.authorization,
+				capabilities: headers[commitAcceptCapabilitiesHeader]
 			});
 
 			const socket = new FakeCommitSocket();
@@ -631,7 +640,8 @@ describe('CupboardClient.commit', () => {
 			connections: [
 				{
 					url: 'wss://cupboard.test/commit',
-					authorization: 'Bearer write-token'
+					authorization: 'Bearer write-token',
+					capabilities: acceptedCommitCapabilities
 				}
 			]
 		});
@@ -657,7 +667,8 @@ describe('CupboardClient.commit', () => {
 		expect(connections()).toStrictEqual([
 			{
 				url: 'wss://cupboard.test/cache/builds/commit',
-				authorization: 'Bearer write-token'
+				authorization: 'Bearer write-token',
+				capabilities: acceptedCommitCapabilities
 			}
 		]);
 	});
@@ -700,11 +711,13 @@ describe('CupboardClient.commit', () => {
 			connections: [
 				{
 					url: 'wss://cupboard.test/commit',
-					authorization: 'Bearer stale-token'
+					authorization: 'Bearer stale-token',
+					capabilities: acceptedCommitCapabilities
 				},
 				{
 					url: 'wss://cupboard.test/commit',
-					authorization: 'Bearer fresh-token'
+					authorization: 'Bearer fresh-token',
+					capabilities: acceptedCommitCapabilities
 				}
 			]
 		});
@@ -756,11 +769,13 @@ describe('CupboardClient.commit', () => {
 			connections: [
 				{
 					url: 'wss://cupboard.test/commit',
-					authorization: 'Bearer initial-token'
+					authorization: 'Bearer initial-token',
+					capabilities: acceptedCommitCapabilities
 				},
 				{
 					url: 'wss://cupboard.test/commit',
-					authorization: 'Bearer renewed-token'
+					authorization: 'Bearer renewed-token',
+					capabilities: acceptedCommitCapabilities
 				}
 			],
 			getCalls: 2,

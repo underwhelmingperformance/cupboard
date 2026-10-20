@@ -406,6 +406,13 @@ export function commitCreditCapabilityToken(openingGrant: number): string {
 
 export const publicationCapability = 'publication-v1';
 
+// A client accepts this token when it parses the publication refusal reason
+// `resend`. Clients that accept only `publication-v1` fail the whole session on
+// a reason that they do not know, so the server sends `resend` only to a client
+// that accepts this token.
+export const publicationRefusalReasonsCapability =
+	'publication-refusal-reasons';
+
 export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken},${uploadRenewalCapability},${publicationCapability}`;
 
 export function commitCapabilitiesValueWithCredit(
@@ -546,6 +553,7 @@ export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 			'generation-conflict',
 			'invalid-publication',
 			'forbidden',
+			'resend',
 			'temporary-failure'
 		]),
 		status: z.number().int(),

@@ -687,8 +687,9 @@ deadline; late workers cannot publish. Expiry first checks durable completion,
 then releases unfinished reservations through recoverable cleanup. Successful
 publications use ordinary canonical-object retention. Terminal operation records
 are pruned after the later of push expiry and recovery expiry, plus 15 minutes.
-A completed replay rechecks availability; repair requires the original lease and
-recovery window. Otherwise the client must start a fresh push.
+A completed replay in `publish-batch` rechecks availability; repair requires the
+original lease and recovery window. Otherwise the client must start a fresh
+push.
 
 Reconnects resend complete unacknowledged entries and use
 `subscribe-publication` for acknowledged operations. Capability loss after an
@@ -696,6 +697,27 @@ ambiguous acceptance fails explicitly. Compatibility fallback occurs before
 new-protocol uploads or commits. Confirming existing availability does not count
 as uploading or building a path, and existing divergence and provenance rules
 still apply.
+
+Commit credit paces admission and commits, and the client sends
+`subscribe-publication` without spending credit. The server therefore replies to
+a client that accepts `publication-refusal-reasons` with the durable state of
+each operation and starts no work for it. When an operation needs work, because
+its commit has not started or its completed path is no longer served, the server
+refuses the entry with the reason `resend`. The client then sends the entry
+again in a `publish-batch` message, which admission handles like any other
+replay. A resend does not use one of the entry's error retries, and the client
+accepts one `resend` for each subscription.
+
+The releases v0.0.47 to v0.0.49 accept `publication-v1` but not
+`publication-refusal-reasons`. They know only six refusal reasons and fail the
+whole session on any other reason, so the server does not send them `resend`.
+When such a client subscribes to an operation that needs work, the server admits
+the entry as it admits a `publish-batch` entry. The client does not count a
+subscription against its grant, so the entry counts as one in-flight entry of
+the tenant's commit credit while it runs, even when the tenant has no
+unallocated credit. Every subscribed entry runs under the tenant's commit entry
+semaphore, so these entries exceed the tenant's credit budget by at most the
+semaphore's size.
 
 For both protocols, the client opens its publication session on the first commit
 or upload renewal. Capability probing uses a separate connection and completes
