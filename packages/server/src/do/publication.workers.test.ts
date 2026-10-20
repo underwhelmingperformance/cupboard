@@ -2289,3 +2289,71 @@ it.each([
 		}
 	}
 );
+
+it('leaves an exhausted publication accepted when cleanup loses its claim', async () => {
+	await resetTestServer();
+	const token = await initialise();
+	const [entry] = await plannedEntries(token, '/uploads/plan', [
+		distinctPath('1')
+	]);
+	if (entry === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	const session = await openCommitSession(token, undefined, publicationSession);
+	try {
+		session.send({ op: 'publish-batch', pushId: testPushId, entries: [entry] });
+		expect([
+			await session.nextFrame(),
+			await session.nextFrame()
+		]).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: entry.operationId },
+			{ ev: 'upload-required', uploadId: entry.operationId }
+		]);
+	} finally {
+		session.socket.close();
+	}
+	const outcome = await runInDurableObject(
+		currentServer(),
+		async (instance) => {
+			const entryRow = eq(schema.pendingUploads.id, entry.operationId);
+			instance.context.db
+				.update(schema.pendingUploads)
+				.set({ verdict: 'pending', settleExhaustion: 'attempt-limit' })
+				.where(entryRow)
+				.run();
+			const blobs = instance.context.env.BLOBS;
+			const originalDelete = blobs.delete.bind(blobs);
+			const deletion = vi.spyOn(blobs, 'delete').mockImplementation((keys) => {
+				instance.context.db
+					.update(schema.pendingUploads)
+					.set({ claimOwner: 'another-pass' })
+					.where(entryRow)
+					.run();
+				return originalDelete(keys);
+			});
+			try {
+				const completed = await asOneInvocation(() =>
+					verificationOf(instance).processExhaustedUploads(rootLogger())
+				);
+				return {
+					completed,
+					pending: instance.context.db
+						.select({ owner: schema.pendingUploads.claimOwner })
+						.from(schema.pendingUploads)
+						.all(),
+					operations: instance.context.db
+						.select({ state: schema.publicationOperations.state })
+						.from(schema.publicationOperations)
+						.all()
+				};
+			} finally {
+				deletion.mockRestore();
+			}
+		}
+	);
+	expect(outcome).toStrictEqual({
+		completed: 0,
+		pending: [{ owner: 'another-pass' }],
+		operations: [{ state: 'accepted' }]
+	});
+});

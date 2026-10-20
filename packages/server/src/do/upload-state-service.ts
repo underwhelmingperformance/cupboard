@@ -82,6 +82,11 @@ function missingCanonicalNarKey(narHash: NixSha256HashString): string {
 	return `${missingCanonicalNarPrefix}${narHash}`;
 }
 
+// What clearing an upload with an `absent` outcome does to its publication
+// operation.
+export type AbsentPublication =
+	'keep-publication-accepted' | 'fail-publication';
+
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
 
@@ -411,11 +416,15 @@ export class UploadStateService {
 	Removes the upload row while `owner` owns its claim, or while nobody does
 	when `owner` is absent. When the row was still in verification, this
 	concludes the upload's promotion with `conclusion`.
+
+	An `absent` outcome leaves a publication operation accepted so the client
+	can publish it again, unless `absentPublication` is `fail-publication`.
 	*/
 	async clearPendingUpload(
 		uploadId: UploadId,
 		conclusion: UploadConclusion,
-		owner?: string
+		owner?: string,
+		absentPublication: AbsentPublication = 'keep-publication-accepted'
 	): Promise<boolean> {
 		const deleted = this.context.db.transaction(() => {
 			const [deleted] = this.context.db
@@ -441,7 +450,10 @@ export class UploadStateService {
 			} else {
 				operations.finish(
 					uploadId,
-					conclusion.outcome === 'absent' ? 'accepted' : 'failed'
+					absentPublication === 'keep-publication-accepted' &&
+						conclusion.outcome === 'absent'
+						? 'accepted'
+						: 'failed'
 				);
 			}
 
