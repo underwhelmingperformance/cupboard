@@ -1,5 +1,11 @@
-import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import type { Reporter, TestModule } from 'vitest/node';
+
+function compareTestNames(left: string, right: string): number {
+	if (left === right) {
+		return 0;
+	}
+	return left < right ? -1 : 1;
+}
 
 export default class RequiredInstallerTestsReporter implements Reporter {
 	constructor(private readonly expectedTests?: readonly string[]) {}
@@ -23,8 +29,10 @@ export default class RequiredInstallerTestsReporter implements Reporter {
 							name.includes('against an ssh-ng remote store')
 						)
 				)
-				.toSorted(byCodeUnit);
-			const actual = required.map((test) => test.fullName).toSorted(byCodeUnit);
+				.toSorted(compareTestNames);
+			const actual = required
+				.map((test) => test.fullName)
+				.toSorted(compareTestNames);
 			if (JSON.stringify(actual) !== JSON.stringify(expected)) {
 				throw new Error(
 					`The installer trial test inventory changed. Expected ${JSON.stringify(expected)}, collected ${JSON.stringify(actual)}`
