@@ -473,11 +473,6 @@ export class UploadsService {
 		return { status: uploadStatusOf(pending) };
 	}
 
-	/**
-	Extends uploads whose bytes are still being sent. Each renewed upload
-	expires 15 minutes from `now`, up to the limit in {@link renewedExpiry}.
-	If the push ID does not verify, every upload is refused.
-	*/
 	async plan(
 		scope: CacheScope,
 		body: UploadNegotiateRequest,
@@ -901,6 +896,11 @@ export class UploadsService {
 		return { cache, kind: requiresUpload ? 'needs-upload' : 'pending' };
 	}
 
+	/**
+	Extends uploads whose bytes are still being sent. Each renewed upload
+	expires 15 minutes from `now`, up to the limit in {@link renewedExpiry}.
+	If the push ID does not verify, every upload is refused.
+	*/
 	async renewUploads(
 		cache: ResolvedCache,
 		pushId: PushId,

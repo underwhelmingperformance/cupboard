@@ -4047,11 +4047,6 @@ export class VerificationService {
 		});
 	}
 
-	// Claim a bounded batch of fresh rows for the queue consumer to fetch and
-	// decode outside the Durable Object. The single writer selects and leases the
-	// rows without yielding, which prevents an overlapping alarm or cron pass from
-	// claiming the same uploads.
-
 	// The alarm and the verification passes run unrelated work after this call,
 	// so a failure is logged and not thrown.
 	async expirePublications(
@@ -4068,6 +4063,9 @@ export class VerificationService {
 		}
 	}
 
+	// Starts the retry observation for each row that a claim leased. When the
+	// retry clock is not active, it releases the leases and returns an empty
+	// batch.
 	async beginVerificationBatch(
 		batch: PendingVerificationBatch,
 		signal?: AbortSignal

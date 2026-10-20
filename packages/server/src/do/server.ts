@@ -1494,10 +1494,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Fail only the affected upload and keep the session open for other entries.
-	// An identity-bearing retry can resolve a missing pending row against the
-	// current committed narinfo generation.
-
 	private async runPublication(command: {
 		readonly socket: WebSocket;
 		readonly attachment: CommitSessionAttachment;
@@ -1686,6 +1682,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	// Fail only the affected upload and keep the session open for other entries.
+	// An identity-bearing retry can resolve a missing pending row against the
+	// current committed narinfo generation.
 	private async runSessionCommit(
 		sessionLogger: Logger,
 		socket: WebSocket,
