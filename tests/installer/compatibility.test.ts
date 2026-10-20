@@ -21,7 +21,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { Nix } from '../../packages/nix/src/nix.ts';
-import { temporaryRoot } from '../support/filesystem.ts';
 
 const execute = promisify(execFile);
 const transportScript = new URL(
@@ -286,6 +285,7 @@ describe('NixOS installer compatibility', () => {
 			'build',
 			'--no-link',
 			'--json',
+			'--impure',
 			'--expr',
 			derivation(marker),
 			'--option',
@@ -324,7 +324,7 @@ describe('NixOS installer compatibility', () => {
 
 		beforeAll(async () => {
 			const workspace = await mkdtemp(
-				path.join(temporaryRoot, 'cupboard-installer-')
+				path.join(userInfo().homedir, '.cupboard-installer-')
 			);
 			await chmod(workspace, 0o700);
 			const ssh = new LoopbackSsh(workspace, await unusedPort());
@@ -397,6 +397,7 @@ describe('NixOS installer compatibility', () => {
 					'build',
 					'--no-link',
 					'--json',
+					'--impure',
 					'--max-jobs',
 					'0',
 					'--option',
