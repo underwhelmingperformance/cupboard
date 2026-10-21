@@ -554,14 +554,19 @@ export class CommitPipelineService {
 		}
 
 		if (outcome.kind === 'tenant-inactive') {
-			await this.context.criticalSection(() =>
-				this.reclaimReservedRow(
+			// Started commits of the same path and NAR share one reservation, and
+			// the tenant can be resumed, so another started commit keeps the row.
+			await this.context.criticalSection(async () => {
+				if (this.uploadState.hasOtherStartedCommit(uploadId, cache, metadata)) {
+					return;
+				}
+				await this.reclaimReservedRow(
 					cache,
 					metadata.storePathHash,
 					generation,
 					metadata.narHash
-				)
-			);
+				);
+			});
 			await this.uploadState.clearPendingUpload(uploadId, {
 				logger,
 				outcome: 'absent'
@@ -2389,24 +2394,8 @@ export class CommitPipelineService {
 		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration
 	): Promise<boolean> {
-		const tenant = this.context.requireTenant();
-		const edgeFilter = and(
-			eq(d1Schema.blobReference.tenant, tenant),
-			cacheIdentityCondition(
-				d1Schema.blobReference.cacheKind,
-				d1Schema.blobReference.cacheName,
-				cache.scope
-			),
-			eq(d1Schema.blobReference.storePathHash, metadata.storePathHash),
-			eq(d1Schema.blobReference.generation, generation),
-			eq(d1Schema.blobReference.narHash, metadata.narHash)
-		);
-		const [edge, isCurrentObject] = await Promise.all([
-			this.context.d1
-				.select({ narHash: d1Schema.blobReference.narHash })
-				.from(d1Schema.blobReference)
-				.where(edgeFilter)
-				.get(),
+		const [isCharged, isCurrentObject] = await Promise.all([
+			this.isGenerationCharged(cache, metadata, generation),
 			this.narInfoObjects.isCurrentPublishedVersion(
 				cache,
 				metadata.storePathHash,
@@ -2415,7 +2404,37 @@ export class CommitPipelineService {
 			)
 		]);
 
-		return edge !== undefined && isCurrentObject;
+		return isCharged && isCurrentObject;
+	}
+
+	// Whether a commit of the generation charged its exact D1 edge. The commit
+	// publishes the narinfo object after the charge, so a charged generation can
+	// still lack its object.
+	async isGenerationCharged(
+		cache: ResolvedCache,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration
+	): Promise<boolean> {
+		const tenant = this.context.requireTenant();
+		const edge = await this.context.d1
+			.select({ narHash: d1Schema.blobReference.narHash })
+			.from(d1Schema.blobReference)
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, tenant),
+					cacheIdentityCondition(
+						d1Schema.blobReference.cacheKind,
+						d1Schema.blobReference.cacheName,
+						cache.scope
+					),
+					eq(d1Schema.blobReference.storePathHash, metadata.storePathHash),
+					eq(d1Schema.blobReference.generation, generation),
+					eq(d1Schema.blobReference.narHash, metadata.narHash)
+				)
+			)
+			.get();
+
+		return edge !== undefined;
 	}
 
 	// Share one input gate and charge batch across concurrent socket and

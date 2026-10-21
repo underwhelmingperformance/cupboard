@@ -18,6 +18,7 @@ import {
 	inArray,
 	isNotNull,
 	isNull,
+	ne,
 	or,
 	sql
 } from 'drizzle-orm';
@@ -32,6 +33,7 @@ import {
 	stagePromotedBlob,
 	stageWrittenBlob
 } from '../blob/promote-blob.ts';
+import { type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
@@ -583,6 +585,38 @@ export class UploadStateService {
 			.all();
 
 		return new Set(rows.flatMap((row) => row.sessionId ?? []));
+	}
+
+	// Started commits of the same path and NAR share one reservation.
+	// `pending_upload_gc_path_idx` covers the cache, the metadata's store path
+	// hash and the verdict, so keep those predicates in this form. The NAR hash
+	// then filters the rows that the index finds.
+	hasOtherStartedCommit(
+		uploadId: UploadId,
+		cache: ResolvedCache,
+		metadata: Pick<UploadPathNegotiation, 'storePathHash' | 'narHash'>
+	): boolean {
+		const uploadPath = sql`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
+		const startedVerdict = or(
+			eq(schema.pendingUploads.verdict, 'committing'),
+			eq(schema.pendingUploads.verdict, 'pending')
+		);
+		const other = this.context.db
+			.select({ id: schema.pendingUploads.id })
+			.from(schema.pendingUploads)
+			.where(
+				and(
+					eq(schema.pendingUploads.cacheId, cache.id),
+					eq(uploadPath, metadata.storePathHash),
+					eq(schema.pendingUploads.narHash, metadata.narHash),
+					startedVerdict,
+					ne(schema.pendingUploads.id, uploadId)
+				)
+			)
+			.limit(1)
+			.get();
+
+		return other !== undefined;
 	}
 
 	// Set this marker before reservation or promotion. After a crash, verification

@@ -456,6 +456,12 @@ public read serves it.
 */
 type NarInfoObjectState = 'current' | 'missing' | 'obsolete' | 'unrecorded';
 
+// The generation that verification had committed when the caller read a
+// shared reservation, or nothing when it had not.
+interface SharedReservation {
+	readonly committed?: NarInfoGeneration;
+}
+
 interface RowObservation {
 	readonly row: NarInfoRow;
 	readonly isNarPresent: boolean;
@@ -1021,6 +1027,57 @@ export class VerificationService {
 		) => void
 	) {}
 
+	// Reads, before the caller's input gate, whether verification charged the
+	// commit of a reservation that another started commit shares. A charged
+	// generation is committed even before its narinfo object is published, and
+	// it stays committed while the path's row keeps it, so `reclaimUnsharedRow`
+	// can use the result inside the gate.
+	private async sharedReservation(
+		pending: PendingUploadRow,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration
+	): Promise<SharedReservation> {
+		const cache = this.cache(pending.cacheId);
+		if (
+			!this.uploadState.hasOtherStartedCommit(pending.id, cache, metadata) ||
+			!(await this.commitPipeline.isGenerationCharged(
+				cache,
+				metadata,
+				generation
+			))
+		) {
+			return {};
+		}
+		return { committed: generation };
+	}
+
+	// Started commits of the same path and NAR share one reservation, so a
+	// failed upload keeps the row while another started commit uses it.
+	private async reclaimUnsharedRow(
+		pending: PendingUploadRow,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration,
+		isStillSettleable: () => boolean,
+		shared: SharedReservation
+	): Promise<'reclaimed' | 'committed-current' | 'superseded' | 'shared'> {
+		const cache = this.cache(pending.cacheId);
+		if (!this.uploadState.hasOtherStartedCommit(pending.id, cache, metadata)) {
+			return this.commitPipeline.reclaimReservedRow(
+				cache,
+				metadata.storePathHash,
+				generation,
+				metadata.narHash,
+				isStillSettleable
+			);
+		}
+		const row = this.narInfoRow(cache.id, metadata.storePathHash);
+		return shared.committed === generation &&
+			row?.generation === generation &&
+			row.narHash === metadata.narHash
+			? 'committed-current'
+			: 'shared';
+	}
+
 	private async finishExhaustedUpload(
 		logger: Logger,
 		pending: PendingUploadRow,
@@ -1031,6 +1088,11 @@ export class VerificationService {
 			pending.id,
 			pending.metadataJson
 		);
+		const reserved = this.narInfoRow(pending.cacheId, metadata.storePathHash);
+		const shared =
+			reserved?.narHash === metadata.narHash
+				? await this.sharedReservation(pending, metadata, reserved.generation)
+				: {};
 		const failed = {
 			verdict: 'absent' as const,
 			absentPublication: 'fail-publication' as const
@@ -1043,12 +1105,12 @@ export class VerificationService {
 			if (row?.narHash !== metadata.narHash) {
 				return failed;
 			}
-			const result = await this.commitPipeline.reclaimReservedRow(
-				this.cache(pending.cacheId),
-				metadata.storePathHash,
+			const result = await this.reclaimUnsharedRow(
+				pending,
+				metadata,
 				row.generation,
-				metadata.narHash,
-				() => this.ownsActiveClaim(owner, pending, signal)
+				() => this.ownsActiveClaim(owner, pending, signal),
+				shared
 			);
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return;
@@ -1954,17 +2016,22 @@ export class VerificationService {
 			// identity proof: the input gate reopens the moment that callback
 			// completes, so a confirmation outside it could race a delete or
 			// recommit queued behind the gate.
+			const shared = await this.sharedReservation(
+				pending,
+				metadata,
+				generation
+			);
 			const reclaim = await this.context.criticalSection(async () => {
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return 'superseded' as const;
 				}
 
-				const result = await this.commitPipeline.reclaimReservedRow(
-					this.cache(pending.cacheId),
-					metadata.storePathHash,
+				const result = await this.reclaimUnsharedRow(
+					pending,
+					metadata,
 					generation,
-					metadata.narHash,
-					() => this.ownsActiveClaim(owner, pending, signal)
+					() => this.ownsActiveClaim(owner, pending, signal),
+					shared
 				);
 
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
@@ -2184,17 +2251,18 @@ export class VerificationService {
 		signal?: AbortSignal
 	): Promise<boolean> {
 		signal?.throwIfAborted();
+		const shared = await this.sharedReservation(pending, metadata, generation);
 		const reclaim = await this.context.criticalSection(async () => {
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return 'superseded' as const;
 			}
 
-			const result = await this.commitPipeline.reclaimReservedRow(
-				this.cache(pending.cacheId),
-				metadata.storePathHash,
+			const result = await this.reclaimUnsharedRow(
+				pending,
+				metadata,
 				generation,
-				metadata.narHash,
-				() => this.ownsActiveClaim(owner, pending, signal)
+				() => this.ownsActiveClaim(owner, pending, signal),
+				shared
 			);
 
 			return this.ownsActiveClaim(owner, pending, signal)
@@ -2413,7 +2481,7 @@ export class VerificationService {
 					if (
 						row?.narHash === metadata.narHash &&
 						pending.verdict !== null &&
-						!this.hasOtherStartedCommit(pending.id, cache, metadata)
+						!this.uploadState.hasOtherStartedCommit(pending.id, cache, metadata)
 					) {
 						const result = await this.commitPipeline.reclaimReservedRow(
 							cache,
@@ -2513,36 +2581,6 @@ export class VerificationService {
 			await storage.delete(publicationExpiryRetryKey);
 		}
 		await store.armRecoveryAlarm(isStalled ? retryAfter : Date.now());
-	}
-
-	// `pending_upload_gc_path_idx` covers the cache, the metadata's store path
-	// hash and the verdict, so keep those predicates in this form. The NAR hash
-	// then filters the rows that the index finds.
-	private hasOtherStartedCommit(
-		uploadId: UploadId,
-		cache: ResolvedCache,
-		metadata: UploadPathNegotiation
-	): boolean {
-		const uploadPath = sql`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
-		const startedVerdict = or(
-			eq(schema.pendingUploads.verdict, 'committing'),
-			eq(schema.pendingUploads.verdict, 'pending')
-		);
-		const other = this.context.db
-			.select({ id: schema.pendingUploads.id })
-			.from(schema.pendingUploads)
-			.where(
-				and(
-					eq(schema.pendingUploads.cacheId, cache.id),
-					eq(uploadPath, metadata.storePathHash),
-					eq(schema.pendingUploads.narHash, metadata.narHash),
-					startedVerdict,
-					ne(schema.pendingUploads.id, uploadId)
-				)
-			)
-			.get();
-
-		return other !== undefined;
 	}
 
 	private async probeRow(
@@ -4942,10 +4980,15 @@ export class VerificationService {
 			// dropping the marker.
 			const reserved = this.narInfoRow(pending.cacheId, metadata.storePathHash);
 
-			let reclaim: 'reclaimed' | 'committed-current' | 'superseded' =
+			let reclaim: 'reclaimed' | 'committed-current' | 'superseded' | 'shared' =
 				'superseded';
 
 			if (reserved?.narHash === metadata.narHash) {
+				const shared = await this.sharedReservation(
+					pending,
+					metadata,
+					reserved.generation
+				);
 				// The grace confirmation runs inside the same gated callback as
 				// the identity proof: the input gate reopens the moment that
 				// callback completes, so a confirmation outside it could race a
@@ -4955,12 +4998,12 @@ export class VerificationService {
 						return 'superseded' as const;
 					}
 
-					const result = await this.commitPipeline.reclaimReservedRow(
-						this.cache(pending.cacheId),
-						metadata.storePathHash,
+					const result = await this.reclaimUnsharedRow(
+						pending,
+						metadata,
 						reserved.generation,
-						metadata.narHash,
-						() => this.ownsActiveClaim(owner, pending, signal)
+						() => this.ownsActiveClaim(owner, pending, signal),
+						shared
 					);
 
 					if (!this.ownsActiveClaim(owner, pending, signal)) {

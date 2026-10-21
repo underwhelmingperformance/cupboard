@@ -397,12 +397,18 @@ continuations and active claim leases do not increase the failure count, and a
 client retry does not reset either limit. Alarms use the earliest retry or lease
 deadline.
 
-An exhausted upload that has no committed reference releases its reservation and
-staging object, then reports `absent`. The CLI returns temporary failure status
-75 so the client can negotiate a new upload. A committed upload keeps its
-reference, charge and retention decision. Durable cleanup queues publication
-repair and inheritance before removing its pending marker. Failed cleanup
-retries after ten minutes without another verification attempt.
+An exhausted upload that has no committed reference deletes its staging object
+and reports `absent`. It releases its reservation, unless another started upload
+of the same path and NAR shares it. The CLI returns temporary failure status 75.
+A legacy upload can then negotiate a new upload. An exhausted publication
+without a committed reference fails, so a resend of the same operation receives
+the stored `absent` verdict and the client must start a fresh push. A committed
+upload keeps its reference, charge and retention decision. When another upload
+of the same path and NAR made the charge, the exhausted publication stays
+accepted: its session receives `absent`, and a resend of the same operation
+receives `settled`. Durable cleanup queues publication repair and inheritance
+before removing its pending marker. Failed cleanup retries after ten minutes
+without another verification attempt.
 
 Inheritance retries start after one minute and double up to one hour. Exhausted
 inheritance releases the queued source-deletion deferral and retains safe
