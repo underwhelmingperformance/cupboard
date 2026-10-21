@@ -1104,25 +1104,41 @@ export class VerificationService {
 		) {
 			return false;
 		}
-		await this.deleteStagingObject(pending);
-		signal?.throwIfAborted();
-		if (!this.ownsActiveClaim(owner, pending, signal)) {
-			return false;
+		// A failed delete of a legacy upload's staged object keeps its row for
+		// another attempt. A publication's staged object is deleted after the
+		// clear has recorded the operation's outcome, and orphan staging collection
+		// removes the object if that delete fails.
+		const isPublication =
+			new PublicationStore(this.context).get(pending.id) !== undefined;
+		if (!isPublication) {
+			await this.deleteStagingObject(pending);
+			signal?.throwIfAborted();
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
+				return false;
+			}
 		}
-		await this.uploadState.clearDeliveredNarRefresh(pending.id);
-		if (
-			!this.ownsActiveClaim(owner, pending, signal) ||
-			!(await this.uploadState.clearPendingUpload(
-				pending.id,
-				{ logger, outcome: resolution.verdict },
-				owner,
-				resolution.absentPublication
-			))
-		) {
-			return false;
-		}
-		this.notifyWaiters(pending, resolution.verdict);
-		return true;
+		const didClearAndDelete = async () => {
+			await this.uploadState.clearDeliveredNarRefresh(pending.id);
+			if (
+				!this.ownsActiveClaim(owner, pending, signal) ||
+				!(await this.uploadState.clearPendingUpload(
+					pending.id,
+					{ logger, outcome: resolution.verdict },
+					owner,
+					resolution.absentPublication
+				))
+			) {
+				return false;
+			}
+			this.notifyWaiters(pending, resolution.verdict);
+			if (isPublication) {
+				await this.deleteStagingObjectBestEffort(pending, signal);
+			}
+			return true;
+		};
+		return isPublication
+			? this.whileDeletingStaging(pending, didClearAndDelete)
+			: didClearAndDelete();
 	}
 
 	private cache(cacheId: CacheId): ResolvedCache {
@@ -1534,22 +1550,24 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<FinaliseCommittedResult> {
-		const result = await this.context.criticalSection(() =>
-			this.finaliseIfAlreadyCommittedLocked(
-				logger,
-				pending,
-				metadata,
-				generation,
-				owner,
-				signal
-			)
-		);
+		return this.whileDeletingStaging(pending, async () => {
+			const result = await this.context.criticalSection(() =>
+				this.finaliseIfAlreadyCommittedLocked(
+					logger,
+					pending,
+					metadata,
+					generation,
+					owner,
+					signal
+				)
+			);
 
-		if (result === 'applied') {
-			await this.deleteStagingObjectBestEffort(pending, signal);
-		}
+			if (result === 'applied') {
+				await this.deleteStagingObjectBestEffort(pending, signal);
+			}
 
-		return result;
+			return result;
+		});
 	}
 
 	private async finaliseIfAlreadyCommittedLocked(
@@ -2062,44 +2080,65 @@ export class VerificationService {
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return 'ignored';
 			}
-			const wasCleared = await this.uploadState.clearPendingUpload(
-				pending.id,
-				{ logger, outcome: verdict },
-				owner
-			);
+			return this.whileDeletingStaging(pending, async () => {
+				const wasCleared = await this.uploadState.clearPendingUpload(
+					pending.id,
+					{ logger, outcome: verdict },
+					owner
+				);
 
-			if (!wasCleared) {
-				return 'ignored';
-			}
+				if (!wasCleared) {
+					return 'ignored';
+				}
 
-			this.notifyWaiters(pending, verdict);
-			await this.deleteStagingObjectBestEffort(pending, signal);
+				this.notifyWaiters(pending, verdict);
+				await this.deleteStagingObjectBestEffort(pending, signal);
 
-			return 'applied';
+				return 'applied';
+			});
 		}
 
 		// A concurrent commit took the path or the blob disappeared. Remove this
 		// upload row; the reaper collects any unreferenced object it promoted.
 		signal?.throwIfAborted();
-		if (
-			!this.ownsActiveClaim(owner, pending, signal) ||
-			!(await this.uploadState.clearPendingUpload(
-				pending.id,
-				{ logger, outcome: 'absent' },
-				owner
-			))
-		) {
-			return 'ignored';
-		}
+		return this.whileDeletingStaging(pending, async () => {
+			if (
+				!this.ownsActiveClaim(owner, pending, signal) ||
+				!(await this.uploadState.clearPendingUpload(
+					pending.id,
+					{ logger, outcome: 'absent' },
+					owner
+				))
+			) {
+				return 'ignored';
+			}
 
-		this.notifyWaiters(pending, 'absent');
-		await this.deleteStagingObject(pending);
+			this.notifyWaiters(pending, 'absent');
+			await this.deleteStagingObject(pending);
 
-		return 'applied';
+			return 'applied';
+		});
+	}
+
+	// Keeps a publication's staged key in `stagingDeletes` while `run` clears the
+	// pending row and deletes the object, so admission does not track the key
+	// again before the delete finishes.
+	private whileDeletingStaging<T>(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		run: () => Promise<T>
+	): Promise<T> {
+		return pending.r2Key === narObjectKey(pending.narHash)
+			? run()
+			: this.context.stagingDeletes.around(pending.r2Key, run);
 	}
 
 	// Never delete a reuse row's shared canonical object. Other paths can refer to
 	// it, and the blob reaper owns its lifetime.
+	//
+	// For a publication upload, call this only after the transaction that clears
+	// the pending row has recorded the operation's outcome. Admission reads the
+	// operation after it finds the staged object missing and, when a live
+	// operation's object is missing, asks the client to upload the bytes again.
 	private async deleteStagingObject(
 		pending: typeof schema.pendingUploads.$inferSelect
 	): Promise<void> {
@@ -2107,7 +2146,10 @@ export class VerificationService {
 			return;
 		}
 
-		await this.context.env.BLOBS.delete(pending.r2Key);
+		await this.context.stagingDeletes.delete(
+			this.context.env.BLOBS,
+			pending.r2Key
+		);
 	}
 
 	// Do not replace a terminal verdict with a staging-cleanup failure. The orphan

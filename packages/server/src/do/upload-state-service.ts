@@ -191,6 +191,20 @@ export class UploadStateService {
 		}
 	}
 
+	private async clearPendingUploadAndRefresh(
+		uploadId: UploadId,
+		conclusion: UploadConclusion,
+		owner?: string
+	): Promise<boolean> {
+		if (!(await this.clearPendingUpload(uploadId, conclusion, owner))) {
+			return false;
+		}
+		await this.context.ctx.storage.delete(
+			`${pendingNarRefreshPrefix}${uploadId}`
+		);
+		return true;
+	}
+
 	// Negotiation and admission clear armed timers before they answer a reuse
 	// entry. The reaper can arm a timer again if the blob loses its last
 	// reference before the commit adds a new one.
@@ -514,19 +528,18 @@ export class UploadStateService {
 		conclusion: UploadConclusion,
 		owner?: string
 	): Promise<boolean> {
-		if (!(await this.clearPendingUpload(uploadId, conclusion, owner))) {
-			return false;
+		if (r2Key === narObjectKey(narHash)) {
+			return this.clearPendingUploadAndRefresh(uploadId, conclusion, owner);
 		}
-
-		await this.context.ctx.storage.delete(
-			`${pendingNarRefreshPrefix}${uploadId}`
-		);
-
-		if (r2Key !== narObjectKey(narHash)) {
-			await this.context.env.BLOBS.delete(r2Key);
-		}
-
-		return true;
+		return this.context.stagingDeletes.around(r2Key, async () => {
+			if (
+				!(await this.clearPendingUploadAndRefresh(uploadId, conclusion, owner))
+			) {
+				return false;
+			}
+			await this.context.stagingDeletes.delete(this.context.env.BLOBS, r2Key);
+			return true;
+		});
 	}
 
 	// A new verification drive supersedes the claim lease. The retry deadline
