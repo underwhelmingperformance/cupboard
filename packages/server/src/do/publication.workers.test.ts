@@ -4888,6 +4888,76 @@ it('reports expired uploads as work and reads the same rows whatever the expired
 	}).toStrictEqual({ hasPending: true, rowsRead: small.rowsRead });
 });
 
+it('refuses a repair of an operation that completes during admission when its push ID does not verify', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	const token = await initialise();
+	const [entry] = await plannedEntries(token, '/uploads/plan', [
+		distinctPath('r')
+	]);
+	if (entry === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	expect(await admit(token, testPushId, entry)).toStrictEqual([
+		{ ev: 'publication-accepted', uploadId: entry.operationId },
+		{ ev: 'upload-required', uploadId: entry.operationId }
+	]);
+	// The push ID no longer verifies, although its expiry time has not passed.
+	const isPushIdVerified = vi
+		.spyOn(PushCredentialIssuer.prototype, 'verify')
+		.mockResolvedValue(false);
+	// Admission reads the operation as accepted. The operation then completes,
+	// and its path is removed, before admission's gate.
+	let completions = 0;
+	const peek = await runInDurableObject(currentServer(), (instance) => {
+		const { db } = instance.context;
+		const spy = vi
+			.spyOn(UploadStateService.prototype, 'peekReusableBlobs')
+			.mockImplementationOnce(function (
+				this: UploadStateService,
+				...arguments_
+			) {
+				spy.mockRestore();
+				completions += 1;
+				db.update(schema.publicationOperations)
+					.set({ state: 'servable' })
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				db.delete(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, entry.operationId))
+					.run();
+				return this.peekReusableBlobs(...arguments_);
+			});
+		return Promise.resolve(spy);
+	});
+	try {
+		const answer = await admit(token, testPushId, entry);
+		const { operations, pending } = await snapshot();
+		expect({
+			completions,
+			answer,
+			states: operations.map((operation) => operation.state),
+			pending
+		}).toStrictEqual({
+			completions: 1,
+			answer: [
+				{
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'push-expired',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				}
+			],
+			states: ['servable'],
+			pending: []
+		});
+	} finally {
+		peek.mockRestore();
+		isPushIdVerified.mockRestore();
+	}
+});
+
 it('refuses a repair whose push expires before admission records it', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
