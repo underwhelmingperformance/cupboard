@@ -16,7 +16,6 @@ import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	commitBlobDeclarationSchema,
 	type PublicationEntry,
-	publicationResultSchema,
 	type PushCredentialInput,
 	type PushId,
 	type UploadConfirmResponse,
@@ -49,6 +48,7 @@ import {
 	CacheNotFoundError,
 	InvalidPushIdError,
 	PublicationConflictError,
+	PublicationPathChangedError,
 	PublicationPushExpiredError,
 	PublicationRecoveryExpiredError,
 	TenantWritesStoppedError,
@@ -463,6 +463,25 @@ export class UploadsService {
 		);
 	}
 
+	// The path's narinfo row. A commit or deletion of the path by another
+	// operation changes it.
+	private pathRowKey(cache: ResolvedCache, entry: PublicationEntry): string {
+		const row = this.context.db
+			.select({
+				generation: schema.narInfos.generation,
+				narHash: schema.narInfos.narHash
+			})
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cacheId, cache.id),
+					eq(schema.narInfos.storePathHash, entry.metadata.storePathHash)
+				)
+			)
+			.get();
+		return JSON.stringify(row ?? 'none');
+	}
+
 	uploadStatus(uploadId: UploadId): UploadStatusResponse {
 		const pending = this.context.db
 			.select({ verdict: schema.pendingUploads.verdict })
@@ -533,11 +552,7 @@ export class UploadsService {
 		grants: AuthorizationDetails
 	): Promise<{
 		readonly cache: ResolvedCache;
-		readonly kind: 'pending' | 'servable' | 'needs-upload';
-		readonly result?: {
-			readonly storePathHash: StorePathHash;
-			readonly narHash: NixSha256HashString;
-		};
+		readonly kind: 'pending' | 'needs-upload' | 'concluded';
 	}> {
 		requireServedStorePaths([entry.metadata.storePath]);
 		const tenant = this.context.requireTenant();
@@ -610,21 +625,17 @@ export class UploadsService {
 				'generation-conflict'
 			);
 		}
+		let pathRow = this.pathRowKey(cache, entry);
 		const present = await this.narInfoObjects.servableStorePathHashes(cache, [
 			entry.metadata.storePathHash
 		]);
+		// The record was read before the availability check, so the replay
+		// answers a completed operation from the record as it is now.
 		if (
 			original?.state === 'servable' &&
 			present.has(entry.metadata.storePathHash)
 		) {
-			return {
-				cache,
-				kind: 'servable',
-				result:
-					original.resultJson === null
-						? undefined
-						: publicationResultSchema.parse(JSON.parse(original.resultJson))
-			};
+			return { cache, kind: 'concluded' };
 		}
 		operations.assertLive(entry.operationId);
 		if (
@@ -837,7 +848,8 @@ export class UploadsService {
 		if (blob !== undefined) {
 			await this.uploadState.clearReaperTimers([entry.metadata.narHash]);
 		}
-		if (!present.has(entry.metadata.storePathHash)) {
+		let isServed = present.has(entry.metadata.storePathHash);
+		if (!isServed) {
 			await this.context.criticalSection(async () => {
 				this.requireCurrentCache(cache, true);
 				operations.assertLive(entry.operationId);
@@ -845,45 +857,64 @@ export class UploadsService {
 					cache,
 					[entry.metadata.storePathHash]
 				);
-				if (available.has(entry.metadata.storePathHash)) {
+				isServed = available.has(entry.metadata.storePathHash);
+				pathRow = this.pathRowKey(cache, entry);
+				if (isServed) {
 					return;
 				}
 				const existing = this.existingNarInfos(cache, [
 					entry.metadata.storePathHash
 				]).get(entry.metadata.storePathHash);
 				if (
-					existing !== undefined &&
-					(await this.narInfoObjects.hasCommittedReference(cache, existing))
+					existing === undefined ||
+					!(await this.narInfoObjects.hasCommittedReference(cache, existing))
 				) {
-					await this.deletionQueue.reconcileMissingNar(
-						existing,
-						undefined,
-						true
-					);
+					return;
 				}
+				await this.deletionQueue.reconcileMissingNar(existing, undefined, true);
+				pathRow = this.pathRowKey(cache, entry);
 			});
 		}
 
-		const stored = operations.get(entry.operationId);
-		if (stored?.state === 'servable') {
-			return {
-				cache,
-				kind: 'servable',
-				result:
-					stored.resultJson === null
-						? undefined
-						: publicationResultSchema.parse(JSON.parse(stored.resultJson))
-			};
-		}
-		const pending = this.context.db
-			.select({ r2Key: schema.pendingUploads.r2Key })
-			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, entry.operationId))
-			.get();
-		const requiresUpload =
-			!present.has(entry.metadata.storePathHash) &&
-			pending?.r2Key === staged &&
+		const stagedKey = () =>
+			this.context.db
+				.select({ r2Key: schema.pendingUploads.r2Key })
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, entry.operationId))
+				.get()?.r2Key;
+		const isStagedMissing =
+			!isServed &&
+			stagedKey() === staged &&
 			(await this.context.env.BLOBS.head(staged)) === null;
+		// Another operation's verification commits a reservation without changing
+		// the path's narinfo row, so read the reservation's D1 edge before asking
+		// for bytes.
+		const reservation = isStagedMissing
+			? this.existingNarInfos(cache, [entry.metadata.storePathHash]).get(
+					entry.metadata.storePathHash
+				)
+			: undefined;
+		const isReservationCommitted =
+			reservation !== undefined &&
+			(await this.narInfoObjects.hasCommittedReference(cache, reservation));
+		// Read the operation and its pending row after checking the staged object.
+		// Verification can complete the operation and delete the object while the
+		// R2 check waits.
+		const stored = operations.get(entry.operationId);
+		if (
+			stored !== undefined &&
+			(stored.state !== 'accepted' ||
+				Date.parse(stored.recoveryDeadline) <= Date.now())
+		) {
+			return { cache, kind: 'concluded' };
+		}
+		// The last availability check decided whether the path is served. A commit
+		// or deletion of the path since then changes its narinfo row or commits its
+		// reservation, so admission runs again and checks the path again.
+		if (isReservationCommitted || this.pathRowKey(cache, entry) !== pathRow) {
+			throw new PublicationPathChangedError();
+		}
+		const requiresUpload = isStagedMissing && stagedKey() === staged;
 		if (requiresUpload && Date.now() >= pushExpiry * 1000) {
 			throw new PublicationPushExpiredError();
 		}

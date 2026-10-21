@@ -74,6 +74,7 @@ import {
 	PublicationStore
 } from './publication-store.ts';
 import { type CupboardServer } from './server.ts';
+import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService } from './uploads-service.ts';
 import { VerificationService } from './verification-service.ts';
 import { WorkSequenceService } from './work-sequence-service.ts';
@@ -482,10 +483,6 @@ it('replays a completed publication after pending cleanup and recovery expiry', 
 		});
 		const before = await snapshot();
 		conversation.send(request);
-		expect(await conversation.nextFrame()).toStrictEqual({
-			ev: 'publication-accepted',
-			uploadId: first.operationId
-		});
 		expect(await conversation.nextFrame()).toStrictEqual(outcome);
 		expect(await snapshot()).toStrictEqual(before);
 	} finally {
@@ -3257,6 +3254,347 @@ describe('publication admission of an operation that changes state', () => {
 		}
 	});
 
+	it('admits again a replay whose path another operation publishes during the staged object check', async () => {
+		const token = await initialise();
+		const expiresAt = Math.floor(Date.now() / 1000) + 60;
+		const pushId = await testPushIdFor(fixtureTenant, 11, expiresAt);
+		const nar = await verifiableNar('publication-admission-path-published');
+		const path = uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		);
+		const [waiting] = await plannedEntries(
+			token,
+			'/uploads/plan',
+			[path],
+			undefined,
+			pushId
+		);
+		const [publishing] = await plannedEntries(token, '/uploads/plan', [path], {
+			name: rootNameSchema.parse('run'),
+			retention: { kind: 'inherit' }
+		});
+		if (waiting === undefined || publishing === undefined) {
+			throw new Error('Expected two planned entries');
+		}
+		// The waiting operation is accepted, and its bytes never arrive. The
+		// publishing operation starts its commit with the same path and NAR.
+		expect(await admit(token, pushId, waiting)).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: waiting.operationId },
+			{ ev: 'upload-required', uploadId: waiting.operationId }
+		]);
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, publishing.operationId),
+			nar
+		);
+		const first = await openCommitSession(token, undefined, publicationSession);
+		try {
+			first.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [
+					{
+						...publishing,
+						blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+					}
+				]
+			});
+			await first.nextFrame();
+			await first.nextFrame();
+		} finally {
+			await closeSessionAndWait(first.socket);
+		}
+		const staged = publicationStagingKey(
+			fixtureTenant,
+			pushId,
+			waiting.operationId
+		);
+		const replay = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		const pause = new DurableObjectPause();
+		let isPaused = false;
+		const head = await runInDurableObject(currentServer(), (instance) => {
+			const blobs = instance.context.env.BLOBS;
+			const originalHead = blobs.head.bind(blobs);
+			return Promise.resolve(
+				vi.spyOn(blobs, 'head').mockImplementation(async (key) => {
+					if (key !== staged || isPaused) {
+						return originalHead(key);
+					}
+					isPaused = true;
+					await pause.stop();
+					return originalHead(key);
+				})
+			);
+		});
+		try {
+			vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+			replay.send({ op: 'publish-batch', pushId, entries: [waiting] });
+			await pause.reached();
+			// Verification completes the publishing operation while the waiting
+			// operation's admission checks its staged object.
+			await commitUpload(token, publishing.operationId);
+			await pause.release();
+			expect([
+				refusalFacts(await replay.nextFrame()),
+				refusalFacts(await replay.nextFrame())
+			]).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: waiting.operationId },
+				{
+					ev: 'settled',
+					uploadId: waiting.operationId,
+					response: {
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						status: 'already-present'
+					},
+					grace: {}
+				}
+			]);
+		} finally {
+			await pause.release();
+			head.mockRestore();
+			await closeSessionAndWait(replay.socket);
+		}
+	});
+
+	it('commits again from the canonical NAR an entry whose served path is deleted during admission', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-admission-path-deleted');
+		const metadata = uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		});
+		await commitPath(token, metadata, nar);
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			uploadPathNegotiation(metadata)
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const reuse = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const spy = vi.spyOn(UploadStateService.prototype, 'peekReusableBlobs');
+			spy.mockImplementationOnce(function (
+				this: UploadStateService,
+				...arguments_
+			) {
+				spy.mockRestore();
+				// The path is deleted after the availability check found it served.
+				db.delete(schema.narInfos)
+					.where(
+						eq(schema.narInfos.storePathHash, entry.metadata.storePathHash)
+					)
+					.run();
+				return this.peekReusableBlobs(...arguments_);
+			});
+			return Promise.resolve(spy);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			// Admission runs again and reads the path again.
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			expect([
+				refusalFacts(await session.nextFrame()),
+				refusalFacts(await session.nextFrame())
+			]).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: {
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash,
+						status: 'committed'
+					},
+					grace: {}
+				}
+			]);
+		} finally {
+			reuse.mockRestore();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('refuses as retryable an entry whose path changes during every admission', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('g')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const staged = publicationStagingKey(
+			fixtureTenant,
+			testPushId,
+			entry.operationId
+		);
+		const head = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const cache = db.select().from(schema.cacheIdentities).get();
+			if (cache === undefined) {
+				throw new Error('Expected the default cache');
+			}
+			const blobs = instance.context.env.BLOBS;
+			const originalHead = blobs.head.bind(blobs);
+			// Another push commits or deletes the path during each admission's
+			// staged object check.
+			return Promise.resolve(
+				vi.spyOn(blobs, 'head').mockImplementation(async (key) => {
+					const object = await originalHead(key);
+					if (key !== staged) {
+						return object;
+					}
+					const rows = db
+						.delete(schema.narInfos)
+						.where(
+							eq(schema.narInfos.storePathHash, entry.metadata.storePathHash)
+						)
+						.returning()
+						.all();
+					if (rows.length === 0) {
+						db.insert(schema.narInfos)
+							.values({
+								cacheId: cache.id,
+								storePathHash: entry.metadata.storePathHash,
+								storePath: entry.metadata.storePath,
+								narHash: entry.metadata.narHash,
+								narSize: entry.metadata.narSize,
+								referencesJson: '[]',
+								createdAt: isoTimestamp(new Date())
+							})
+							.run();
+					}
+					return object;
+				})
+			);
+		});
+		try {
+			const answer = await subscribe(
+				token,
+				undefined,
+				testPushId,
+				entry,
+				'publish-batch'
+			);
+			expect({
+				answer,
+				admissions: head.mock.calls.filter(([key]) => key === staged).length
+			}).toStrictEqual({
+				answer: {
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'temporary-failure',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				},
+				admissions: 3
+			});
+		} finally {
+			head.mockRestore();
+		}
+	});
+
+	it('admits an entry while other operations of its path are admitted during every admission', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('h')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const staged = publicationStagingKey(
+			fixtureTenant,
+			testPushId,
+			entry.operationId
+		);
+		const head = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const cache = db.select().from(schema.cacheIdentities).get();
+			if (cache === undefined) {
+				throw new Error('Expected the default cache');
+			}
+			const blobs = instance.context.env.BLOBS;
+			const originalHead = blobs.head.bind(blobs);
+			// Other pushes record operations for the path, and their verdicts
+			// change, during each admission's staged object check.
+			return Promise.resolve(
+				vi.spyOn(blobs, 'head').mockImplementation(async (key) => {
+					const object = await originalHead(key);
+					if (key !== staged) {
+						return object;
+					}
+					const now = isoTimestamp(new Date());
+					db.update(schema.pendingUploads)
+						.set({ verdict: 'pending' })
+						.where(isNotNull(schema.pendingUploads.attachRootName))
+						.run();
+					db.insert(schema.pendingUploads)
+						.values({
+							id: uploadIdSchema.parse(crypto.randomUUID()),
+							cacheId: cache.id,
+							narHash: entry.metadata.narHash,
+							r2Key: r2ObjectKeySchema.parse(`staging/${crypto.randomUUID()}`),
+							metadataJson: JSON.stringify(entry.metadata),
+							createdAt: now,
+							expiresAt: now,
+							attachRootName: rootNameSchema.parse('other')
+						})
+						.run();
+					return object;
+				})
+			);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			// A refusal is the only frame for the entry.
+			const first = refusalFacts(await session.nextFrame());
+			const answer =
+				first.ev === 'publication-accepted'
+					? [first, refusalFacts(await session.nextFrame())]
+					: [first];
+			expect({
+				answer,
+				admissions: head.mock.calls.filter(([key]) => key === staged).length
+			}).toStrictEqual({
+				answer: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				],
+				admissions: 1
+			});
+		} finally {
+			head.mockRestore();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
 	it('answers a publish-batch entry as a subscription does when its push expires during admission', async () => {
 		const token = await initialise();
 		const expiresAt = Math.floor(Date.now() / 1000) + 60;
@@ -3360,6 +3698,253 @@ describe('publication admission of an operation that changes state', () => {
 			);
 		}
 	);
+
+	it('answers from the current state when a repair accepts a completed operation during the availability check', async () => {
+		const token = await initialise();
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-repair-during-check'
+		);
+		const availability = await runInDurableObject(
+			currentServer(),
+			(instance) => {
+				const { db } = instance.context;
+				const cache = db.select().from(schema.cacheIdentities).get();
+				if (cache === undefined) {
+					throw new Error('Expected the default cache');
+				}
+				const staged = r2ObjectKeySchema.parse(
+					publicationStagingKey(fixtureTenant, pushId, entry.operationId)
+				);
+				const createdAt = isoTimestamp(new Date());
+				const expiresAt = isoTimestamp(new Date(Date.now() + 60_000));
+				let isRepaired = false;
+				const spy = vi.spyOn(
+					NarInfoObjectsService.prototype,
+					'servableStorePathHashes'
+				);
+				spy.mockImplementation(function (
+					this: NarInfoObjectsService,
+					...arguments_
+				) {
+					const [, hashes] = arguments_;
+					if (!isRepaired && hashes.includes(entry.metadata.storePathHash)) {
+						isRepaired = true;
+						db.update(schema.publicationOperations)
+							.set({ state: 'accepted' })
+							.where(eq(schema.publicationOperations.id, entry.operationId))
+							.run();
+						db.insert(schema.pendingUploads)
+							.values({
+								id: entry.operationId,
+								cacheId: cache.id,
+								narHash: entry.metadata.narHash,
+								r2Key: staged,
+								metadataJson: JSON.stringify(entry.metadata),
+								createdAt,
+								expiresAt
+							})
+							.run();
+					}
+					spy.mockRestore();
+					const served = this.servableStorePathHashes(...arguments_);
+					return served;
+				});
+				return Promise.resolve(spy);
+			}
+		);
+		try {
+			expect(
+				await subscribe(token, undefined, pushId, entry, 'publish-batch')
+			).toStrictEqual({
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'temporary-failure',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				hasMessage: true
+			});
+		} finally {
+			availability.mockRestore();
+		}
+	});
+
+	it.each([
+		{
+			name: 'a mismatch',
+			change: (database: CupboardServer['context']['db'], id: UploadId) => {
+				database
+					.update(schema.pendingUploads)
+					.set({ verdict: 'mismatch' })
+					.where(eq(schema.pendingUploads.id, id))
+					.run();
+				database
+					.update(schema.publicationOperations)
+					.set({
+						state: 'failed',
+						resultJson: publicationFailureJson('mismatch')
+					})
+					.where(eq(schema.publicationOperations.id, id))
+					.run();
+			},
+			answer: (id: UploadId) => ({
+				ev: 'verdict',
+				uploadId: id,
+				status: 'mismatch',
+				grace: {}
+			})
+		},
+		{
+			name: 'an expiry',
+			change: (database: CupboardServer['context']['db'], id: UploadId) => {
+				database
+					.delete(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, id))
+					.run();
+				database
+					.update(schema.publicationOperations)
+					.set({ state: 'expired' })
+					.where(eq(schema.publicationOperations.id, id))
+					.run();
+			},
+			answer: (id: UploadId) => ({
+				ev: 'publication-refused',
+				uploadId: id,
+				reason: 'recovery-expired',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				hasMessage: true
+			})
+		}
+	])(
+		'answers from the state when $name is recorded during the staged object check',
+		async ({ change, answer }) => {
+			const token = await initialise();
+			const [entry] = await plannedEntries(token, '/uploads/plan', [
+				distinctPath('1')
+			]);
+			if (entry === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			expect(await admit(token, testPushId, entry)).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{ ev: 'upload-required', uploadId: entry.operationId }
+			]);
+			const staged = publicationStagingKey(
+				fixtureTenant,
+				testPushId,
+				entry.operationId
+			);
+			const head = await runInDurableObject(currentServer(), (instance) => {
+				const { db } = instance.context;
+				const blobs = instance.context.env.BLOBS;
+				const originalHead = blobs.head.bind(blobs);
+				return Promise.resolve(
+					vi.spyOn(blobs, 'head').mockImplementation((key) => {
+						if (key === staged) {
+							change(db, entry.operationId);
+						}
+						return originalHead(key);
+					})
+				);
+			});
+			try {
+				expect(
+					await subscribe(token, undefined, testPushId, entry, 'publish-batch')
+				).toStrictEqual(answer(entry.operationId));
+			} finally {
+				head.mockRestore();
+			}
+		}
+	);
+
+	it('answers a replay that verification completes during the staged object check', async () => {
+		const token = await initialise();
+		const expiresAt = Math.floor(Date.now() / 1000) + 60;
+		const pushId = await testPushIdFor(fixtureTenant, 6, expiresAt);
+		const nar = await verifiableNar('publication-admission-staged-race');
+		const path = uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		);
+		const [planned] = await plannedEntries(
+			token,
+			'/uploads/plan',
+			[path],
+			undefined,
+			pushId
+		);
+		if (planned === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const entry = {
+			...planned,
+			blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+		};
+		const staged = publicationStagingKey(
+			fixtureTenant,
+			pushId,
+			entry.operationId
+		);
+		await putNarBytes(staged, nar);
+		expect(await admit(token, pushId, entry)).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: entry.operationId },
+			{
+				ev: 'deferred',
+				uploadId: entry.operationId,
+				storePathHash: path.storePathHash,
+				narHash: path.narHash,
+				grace: {}
+			}
+		]);
+		const replay = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		// Admission reads the staged object through the Durable Object's binding.
+		const pause = new DurableObjectPause();
+		let isPaused = false;
+		const head = await runInDurableObject(currentServer(), (instance) => {
+			const blobs = instance.context.env.BLOBS;
+			const originalHead = blobs.head.bind(blobs);
+			return Promise.resolve(
+				vi.spyOn(blobs, 'head').mockImplementation(async (key) => {
+					if (key !== staged || isPaused) {
+						return originalHead(key);
+					}
+					isPaused = true;
+					await pause.stop();
+					return originalHead(key);
+				})
+			);
+		});
+		try {
+			vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+			replay.send({ op: 'publish-batch', pushId, entries: [entry] });
+			await pause.reached();
+			await commitUpload(token, entry.operationId);
+			await pause.release();
+			expect([refusalFacts(await replay.nextFrame())]).toStrictEqual([
+				{
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: {
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						status: 'already-present'
+					},
+					grace: {}
+				}
+			]);
+		} finally {
+			await pause.release();
+			head.mockRestore();
+			await closeSessionAndWait(replay.socket);
+		}
+	});
 });
 
 it('requires bytes on a replay when a reusable NAR appears after a staged acceptance', async () => {
