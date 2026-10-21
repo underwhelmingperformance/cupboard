@@ -99,6 +99,27 @@ export class CacheClosureService {
 		return candidates.length > limit;
 	}
 
+	restartHistory(cache: ResolvedCache): void {
+		this.context.db
+			.update(schema.cacheIdentities)
+			.set({ closeHistoryCursor: 0 })
+			.where(
+				and(
+					eq(schema.cacheIdentities.id, cache.id),
+					gt(schema.cacheIdentities.closeHistoryCursor, 0)
+				)
+			)
+			.run();
+	}
+
+	/**
+	Deletes the close events on one page that no root or pending upload of an
+	older retention epoch needs any more. `close_history_cursor` keeps the
+	position between calls, and a short page resets it to the first event.
+	Returns true after a full page, when more events may follow. A caller
+	that repeats the call until it returns false therefore visits every event
+	once, and stops even when every event is still needed.
+	*/
 	cleanHistory(cache: ResolvedCache, limit: number): boolean {
 		const cursor =
 			this.context.db
@@ -118,16 +139,6 @@ export class CacheClosureService {
 			.orderBy(asc(schema.cacheCloseEvents.epoch))
 			.limit(limit)
 			.all();
-		if (page.length === 0) {
-			if (cursor !== 0) {
-				this.context.db
-					.update(schema.cacheIdentities)
-					.set({ closeHistoryCursor: 0 })
-					.where(eq(schema.cacheIdentities.id, cache.id))
-					.run();
-			}
-			return false;
-		}
 		for (const event of page) {
 			this.context.db
 				.run(sql`DELETE FROM cache_close_event WHERE cache_id = ${cache.id} AND epoch = ${event.epoch}
@@ -138,14 +149,17 @@ export class CacheClosureService {
      AND retention_epoch >= coalesce((SELECT epoch FROM cache_close_event WHERE cache_id = ${cache.id} AND epoch < ${event.epoch} ORDER BY epoch DESC LIMIT 1), 0)
      AND retention_epoch < ${event.epoch})`);
 		}
-		const last = page.at(-1);
-		if (last !== undefined) {
+		const hasMore = page.length === limit;
+		const next = hasMore ? (page.at(-1)?.epoch ?? 0) : 0;
+
+		if (next !== cursor) {
 			this.context.db
 				.update(schema.cacheIdentities)
-				.set({ closeHistoryCursor: last.epoch })
+				.set({ closeHistoryCursor: next })
 				.where(eq(schema.cacheIdentities.id, cache.id))
 				.run();
 		}
-		return page.length === limit;
+
+		return hasMore;
 	}
 }

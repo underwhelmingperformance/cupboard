@@ -519,6 +519,13 @@ export class GarbageCollectionService {
 
 			rootsExpired = completedRoots.length;
 		});
+
+		// An event on a page that the cursor has passed can lose its last root
+		// in this step.
+		if (rootsExpired > 0) {
+			closure.restartHistory(cache);
+		}
+
 		const hasMoreHistory = closure.cleanHistory(cache, rootPage);
 		const hasMoreExpiredRoots =
 			hasMoreClosedRoots ||
