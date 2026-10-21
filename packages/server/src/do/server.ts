@@ -3827,13 +3827,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await this.commitEntrySemaphore.acquire();
 
 			try {
+				let authority: ReuseAuthority;
+				try {
+					authority = await this.sessionReuseAuthority(cache, attachment);
+				} catch (error) {
+					const unavailable = new CommitSessionGrantsUnavailableError(error);
+					logger.error('commit session grants could not be read', { error });
+					sendCommitSessionFrame(socket, {
+						ev: 'error',
+						uploadId: request.uploadId,
+						status: unavailable.status,
+						message: unavailable.message
+					});
+					return;
+				}
 				await this.runSessionCommit(
 					logger,
 					socket,
 					cache,
 					sessionId,
 					request.uploadId,
-					await this.sessionReuseAuthority(cache, attachment)
+					authority
 				);
 			} finally {
 				this.commitEntrySemaphore.release();
