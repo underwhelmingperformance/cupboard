@@ -3075,6 +3075,57 @@ describe('publication admission of an operation that changes state', () => {
 		}
 	);
 
+	it('sends the settled frame when an operation completes during admission and then passes its recovery deadline', async () => {
+		const token = await initialise();
+		const { entry, path, pushId } = await completedPublication(
+			token,
+			'publication-admission-completed-late'
+		);
+		const live = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			db.update(schema.publicationOperations)
+				.set({ state: 'accepted' })
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+			const spy = vi.spyOn(PublicationStore.prototype, 'assertLive');
+			spy.mockImplementationOnce(function (this: PublicationStore, id, now) {
+				db.update(schema.publicationOperations)
+					.set({
+						state: 'servable',
+						recoveryDeadline: new Date(0).toISOString()
+					})
+					.where(eq(schema.publicationOperations.id, id))
+					.run();
+				spy.mockRestore();
+				this.assertLive(id, now);
+			});
+			return Promise.resolve(spy);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({ op: 'publish-batch', pushId, entries: [entry] });
+			expect([refusalFacts(await session.nextFrame())]).toStrictEqual([
+				{
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: {
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						status: 'already-present'
+					},
+					grace: {}
+				}
+			]);
+		} finally {
+			live.mockRestore();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
 	it('answers a commit from the current state when its recovery deadline passes after admission', async () => {
 		const token = await initialise();
 		const { entry, path, pushId } = await completedPublication(
