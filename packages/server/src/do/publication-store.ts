@@ -58,7 +58,7 @@ export class PublicationStore {
 
 	assertLive(id: UploadId, now = Date.now()): void {
 		const operation = this.get(id);
-		if (operation === undefined) {
+		if (operation === undefined || operation.state === 'servable') {
 			return;
 		}
 		if (operation.state === 'failed') {

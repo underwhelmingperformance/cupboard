@@ -638,12 +638,6 @@ export class UploadsService {
 			return { cache, kind: 'concluded' };
 		}
 		operations.assertLive(entry.operationId);
-		if (
-			original !== undefined &&
-			Date.parse(original.recoveryDeadline) <= Date.now()
-		) {
-			throw new PublicationRecoveryExpiredError();
-		}
 		const reusable = await this.uploadState.peekReusableBlobs(
 			[entry.metadata.narHash],
 			this.reuseAuthority(scope, grants)
