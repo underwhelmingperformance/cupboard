@@ -32,7 +32,7 @@ function run(script: string, environment: NodeJS.ProcessEnv = {}) {
 }
 
 const darwinCommands = `
-stat() { printf 'disk3s1\\n'; }
+darwin_root_device() { printf 'disk3s1\\n'; }
 sudo() {
   printf '%s\\n' "$*"
   if [[ "$1" == tee ]]; then cat >/dev/null; fi
@@ -51,6 +51,16 @@ const darwinTrace = [
 ];
 
 describe('in-tree Nix installer', () => {
+	it('uses the absolute BSD stat path for root-device lookup', () => {
+		expect(
+			run(String.raw`
+stat() { return 42; }
+/usr/bin/stat() { printf '%s\n' "$*"; }
+darwin_root_device
+`)
+		).toStrictEqual({ status: 0, stdout: '-f %Sd /\n', stderr: '' });
+	});
+
 	it.each([
 		{ system: 'x86_64-linux', failure: '', commands: 3 },
 		{ system: 'aarch64-linux', failure: '', commands: 3 },

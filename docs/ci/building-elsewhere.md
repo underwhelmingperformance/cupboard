@@ -34,13 +34,9 @@ Only targets with `remote = true` in the manifest send their builds to these
 machines. The plan job also gets the builders, because evaluating the flake can
 require building something.
 
-Remote builders require a local store or a local Nix daemon that trusts the
-runner user. Each job has its own SSH configuration. Local filesystem stores
-inherit that configuration directly. For daemon stores, the action creates a
-job-specific build-hook adapter, and the daemon must accept the override. Before
-exporting the override, the action checks that the daemon can execute the
-adapter in `/tmp` and resolves the configured hook with the daemon's permissions
-and `PATH`. The action removes the adapter after the job.
+The workflow installs single-user Nix on the runner. An existing `/nix` must be
+writable by the runner user; the workflow does not reuse an existing multi-user
+daemon installation. The local Nix process inherits the job's SSH configuration.
 
 When you write the specification:
 
