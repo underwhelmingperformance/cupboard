@@ -33,6 +33,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { PushCredentialIssuer } from '../blob/push-credential.ts';
 import * as schema from '../db/schema.ts';
+import { SubrequestTimeoutError } from '../errors.ts';
 import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -3750,6 +3751,241 @@ describe('publication admission of an operation that changes state', () => {
 		}
 	);
 
+	it('refuses a repair as a retryable failure when the delete of its staged object outlasts the wait', async () => {
+		const token = await initialise();
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-repair-deleting'
+		);
+		await deletePath(token, entry.metadata.storePathHash);
+		const staged = r2ObjectKeySchema.parse(
+			publicationStagingKey(fixtureTenant, pushId, entry.operationId)
+		);
+		const ending = () =>
+			runInDurableObject(currentServer(), (instance) => {
+				instance.context.stagingDeletes.end(staged);
+				return Promise.resolve();
+			});
+		// The wait for the delete reaches its bound. `staging-deletes.test.ts`
+		// tests the bound itself.
+		const wait = await runInDurableObject(currentServer(), (instance) => {
+			instance.context.stagingDeletes.begin(staged);
+			return Promise.resolve(
+				vi
+					.spyOn(instance.context.stagingDeletes, 'finished')
+					.mockRejectedValueOnce(
+						new SubrequestTimeoutError('r2.staging-delete-wait')
+					)
+			);
+		});
+		try {
+			const refused = await subscribe(
+				token,
+				undefined,
+				pushId,
+				entry,
+				'publish-batch'
+			);
+			const during = await snapshot();
+			const waits = wait.mock.calls.map(([key]) => key);
+			await ending();
+			// Once the delete finishes, the same repair is accepted.
+			const accepted = await admit(token, pushId, entry);
+			expect({
+				refused,
+				waits,
+				states: during.operations.map((operation) => operation.state),
+				pending: during.pending.length,
+				accepted
+			}).toStrictEqual({
+				refused: {
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'temporary-failure',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				},
+				waits: [staged],
+				states: ['servable'],
+				pending: 0,
+				accepted: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				]
+			});
+		} finally {
+			wait.mockRestore();
+			await ending();
+		}
+	});
+
+	it('waits for a staging delete that outlived its timeout and then accepts the repair', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('d')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		// The first admission accepts the operation, and its bytes never arrive.
+		expect(await admit(token, testPushId, entry)).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: entry.operationId },
+			{ ev: 'upload-required', uploadId: entry.operationId }
+		]);
+		const staged = r2ObjectKeySchema.parse(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId)
+		);
+		const { promise: abandoned, resolve: finish } =
+			Promise.withResolvers<undefined>();
+		// Verification completes the operation, and the R2 delete of its staged
+		// object outlives the bounded wait.
+		const cleared = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const blobs = instance.context.env.BLOBS;
+				const originalDelete = blobs.delete.bind(blobs);
+				const deletion = vi
+					.spyOn(blobs, 'delete')
+					.mockImplementation((keys) =>
+						keys === staged
+							? Promise.reject(
+									new SubrequestTimeoutError('r2.delete', abandoned)
+								)
+							: originalDelete(keys)
+					);
+				try {
+					await new UploadStateService(
+						instance.context
+					).clearPendingUploadAndStaging(
+						entry.operationId,
+						staged,
+						entry.metadata.narHash,
+						{ logger: rootLogger(), outcome: 'servable' }
+					);
+					return 'resolved';
+				} catch (error) {
+					return error instanceof SubrequestTimeoutError
+						? 'timed out'
+						: 'other';
+				} finally {
+					deletion.mockRestore();
+				}
+			}
+		);
+		const isTrackedBefore = await runInDurableObject(
+			currentServer(),
+			(instance) => Promise.resolve(instance.context.stagingDeletes.has(staged))
+		);
+		// Admission starts to wait for the abandoned delete. The test finishes
+		// the delete after it has seen the wait.
+		const waiting = new DurableObjectPause();
+		const wait = await runInDurableObject(currentServer(), (instance) => {
+			const deletes = instance.context.stagingDeletes;
+			const finished = deletes.finished.bind(deletes);
+			return Promise.resolve(
+				vi.spyOn(deletes, 'finished').mockImplementationOnce((key) => {
+					const done = finished(key);
+					void waiting.stop();
+					return done;
+				})
+			);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			const first = session.nextFrame();
+			await waiting.reached();
+			// Admission has not accepted the repair while it waits.
+			const during = await snapshot();
+			finish(undefined);
+			const answer = [
+				refusalFacts(await first),
+				refusalFacts(await session.nextFrame())
+			];
+			const after = await snapshot();
+			const states = (state: typeof after) => ({
+				operations: state.operations.map((operation) => operation.state),
+				pending: state.pending.length
+			});
+			expect({
+				cleared,
+				isTrackedBefore,
+				during: states(during),
+				answer,
+				after: states(after)
+			}).toStrictEqual({
+				cleared: 'timed out',
+				isTrackedBefore: true,
+				during: { operations: ['servable'], pending: 0 },
+				answer: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				],
+				after: { operations: ['accepted'], pending: 1 }
+			});
+		} finally {
+			wait.mockRestore();
+			finish(undefined);
+			await waiting.release();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('refuses an entry as a retryable failure when a delete of its staged object starts after the wait', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('g')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const staged = r2ObjectKeySchema.parse(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId)
+		);
+		// The wait finds no delete, and a delete of the key starts before the gate.
+		const wait = await runInDurableObject(currentServer(), (instance) => {
+			const deletes = instance.context.stagingDeletes;
+			const finished = deletes.finished.bind(deletes);
+			return Promise.resolve(
+				vi.spyOn(deletes, 'finished').mockImplementationOnce(async (key) => {
+					await finished(key);
+					deletes.begin(key);
+				})
+			);
+		});
+		try {
+			const answer = await admit(token, testPushId, entry);
+			const { operations, pending } = await snapshot();
+			expect({ answer, operations, pending }).toStrictEqual({
+				answer: [
+					{
+						ev: 'publication-refused',
+						uploadId: entry.operationId,
+						reason: 'temporary-failure',
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						hasMessage: true
+					}
+				],
+				operations: [],
+				pending: []
+			});
+		} finally {
+			wait.mockRestore();
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.stagingDeletes.end(staged);
+				return Promise.resolve();
+			});
+		}
+	});
+
 	it('answers from the current state when a repair accepts a completed operation during the availability check', async () => {
 		const token = await initialise();
 		const { entry, pushId } = await completedPublication(
@@ -4832,15 +5068,18 @@ it('leaves an exhausted publication accepted when cleanup loses its claim', asyn
 				.set({ verdict: 'pending', settleExhaustion: 'attempt-limit' })
 				.where(entryRow)
 				.run();
-			const blobs = instance.context.env.BLOBS;
-			const originalDelete = blobs.delete.bind(blobs);
-			const deletion = vi.spyOn(blobs, 'delete').mockImplementation((keys) => {
+			const deletion = vi.spyOn(
+				UploadStateService.prototype,
+				'clearDeliveredNarRefresh'
+			);
+			deletion.mockImplementationOnce(function (this: UploadStateService, id) {
 				instance.context.db
 					.update(schema.pendingUploads)
 					.set({ claimOwner: 'another-pass' })
 					.where(entryRow)
 					.run();
-				return originalDelete(keys);
+				deletion.mockRestore();
+				return this.clearDeliveredNarRefresh(id);
 			});
 			try {
 				const completed = await asOneInvocation(() =>
@@ -4866,6 +5105,94 @@ it('leaves an exhausted publication accepted when cleanup loses its claim', asyn
 		completed: 0,
 		pending: [{ owner: 'another-pass' }],
 		operations: [{ state: 'accepted' }]
+	});
+});
+
+it("deletes an exhausted upload's staged object only after its operation is terminal, and tracks the key until the delete finishes", async () => {
+	await resetTestServer();
+	const token = await initialise();
+	const [entry] = await plannedEntries(token, '/uploads/plan', [
+		distinctPath('1')
+	]);
+	if (entry === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	expect(await admit(token, testPushId, entry)).toStrictEqual([
+		{ ev: 'publication-accepted', uploadId: entry.operationId },
+		{ ev: 'upload-required', uploadId: entry.operationId }
+	]);
+	const staged = publicationStagingKey(
+		fixtureTenant,
+		testPushId,
+		entry.operationId
+	);
+	const atDelete = await runInDurableObject(
+		currentServer(),
+		async (instance) => {
+			const { db } = instance.context;
+			db.update(schema.pendingUploads)
+				.set({ verdict: 'pending', settleExhaustion: 'attempt-limit' })
+				.where(eq(schema.pendingUploads.id, entry.operationId))
+				.run();
+			const observed: unknown[] = [];
+			const isKeyTracked = () =>
+				instance.context.stagingDeletes.has(r2ObjectKeySchema.parse(staged));
+			const isPendingUploadCleared = vi.spyOn(
+				UploadStateService.prototype,
+				'clearPendingUpload'
+			);
+			isPendingUploadCleared.mockImplementationOnce(function (
+				this: UploadStateService,
+				...arguments_
+			) {
+				observed.push({ step: 'clear', isTracked: isKeyTracked() });
+				isPendingUploadCleared.mockRestore();
+				return this.clearPendingUpload(...arguments_);
+			});
+			const blobs = instance.context.env.BLOBS;
+			const originalDelete = blobs.delete.bind(blobs);
+			const deletion = vi.spyOn(blobs, 'delete').mockImplementation((keys) => {
+				if (keys === staged) {
+					observed.push({
+						step: 'delete',
+						isTracked: isKeyTracked(),
+						states: db
+							.select({ state: schema.publicationOperations.state })
+							.from(schema.publicationOperations)
+							.all(),
+						pending: db.select().from(schema.pendingUploads).all().length
+					});
+				}
+				return originalDelete(keys);
+			});
+			try {
+				await asOneInvocation(() =>
+					verificationOf(instance).processExhaustedUploads(rootLogger())
+				);
+			} finally {
+				deletion.mockRestore();
+			}
+			return observed;
+		}
+	);
+	expect({
+		observed: atDelete,
+		isTrackedAfter: await runInDurableObject(currentServer(), (instance) =>
+			Promise.resolve(
+				instance.context.stagingDeletes.has(r2ObjectKeySchema.parse(staged))
+			)
+		)
+	}).toStrictEqual({
+		observed: [
+			{ step: 'clear', isTracked: true },
+			{
+				step: 'delete',
+				isTracked: true,
+				states: [{ state: 'failed' }],
+				pending: 0
+			}
+		],
+		isTrackedAfter: false
 	});
 });
 

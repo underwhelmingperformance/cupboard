@@ -51,6 +51,7 @@ import {
 	PublicationPathChangedError,
 	PublicationPushExpiredError,
 	PublicationRecoveryExpiredError,
+	PublicationStagingDeletePendingError,
 	TenantWritesStoppedError,
 	UploadPageSplitRequiredError
 } from '../errors.ts';
@@ -690,6 +691,11 @@ export class UploadsService {
 		const staged = r2ObjectKeySchema.parse(
 			publicationStagingKey(tenant, pushId, entry.operationId)
 		);
+		// Wait before entering the gate, which would otherwise stay closed to
+		// every other request for as long as the R2 delete takes.
+		if (blob === undefined) {
+			await this.context.stagingDeletes.finished(staged);
+		}
 		await this.context.criticalSection(async () => {
 			this.requireCurrentCache(cache, true);
 			if (operations.get(entry.operationId)?.state === 'servable') {
@@ -799,6 +805,12 @@ export class UploadsService {
 							.run();
 					}
 					return;
+				}
+				// A pass that cleared this operation's pending row can still be
+				// deleting its staged object, which would remove the bytes that this
+				// admission tracks again.
+				if (blob === undefined && this.context.stagingDeletes.has(staged)) {
+					throw new PublicationStagingDeletePendingError();
 				}
 				const captured = parseStoredGraceDecision(graceJson);
 				tx.update(schema.publicationOperations)

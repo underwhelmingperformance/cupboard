@@ -68,6 +68,7 @@ import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
 import { currentOperationCost } from './operation-cost.ts';
 import { currentRowBudgetMeter } from './row-budget.ts';
+import { StagingDeletes } from './staging-deletes.ts';
 import { TransitionGate } from './transition-gate.ts';
 
 // Cloudflare accepts at most 100 operations in one purge request, on every
@@ -178,6 +179,7 @@ export class ServerContext {
 	readonly subrequestsPerInvocation: number;
 	gateBudgetMs = criticalSectionBudgetMs;
 	readonly dbCost = new DatabaseCostMeter();
+	readonly stagingDeletes = new StagingDeletes();
 	env: RuntimeEnv;
 	readonly ctx: DurableObjectState;
 	discovery: OidcDiscoveryStore;

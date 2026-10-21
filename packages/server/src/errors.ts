@@ -93,6 +93,16 @@ export class PublicationExpiryPendingError extends ServerHttpError {
 	}
 }
 
+export class PublicationStagingDeletePendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	constructor() {
+		super(
+			'The server is still deleting staged bytes for this publication. Retry the entry.'
+		);
+		this.name = 'PublicationStagingDeletePendingError';
+	}
+}
+
 export class PublicationStateChangedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {
