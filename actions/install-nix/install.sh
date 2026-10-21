@@ -27,9 +27,13 @@ enable_kvm() {
   echo '::warning::Could not enable KVM; continuing Nix installation' >&2
 }
 
+darwin_root_device() {
+  /usr/bin/stat -f '%Sd' /
+}
+
 create_darwin_store() {
   local disk
-  disk=$(stat -f '%Sd' /)
+  disk=$(darwin_root_device)
   disk=${disk%s[0-9]*}
   printf 'nix\nrun\tprivate/var/run\n' | sudo tee -a /etc/synthetic.conf
   sudo /System/Library/Filesystems/apfs.fs/Contents/Resources/apfs.util -B &>/dev/null \
