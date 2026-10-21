@@ -141,6 +141,7 @@ runs:
       if: ${{ inputs.maximise-space == 'true' && runner.os == 'Linux' }}
       with:
         hatchet-protocol: holster
+        mnt-safe-haven: '4096'
         nix-permission-edict: true
 
     - uses: $/actions/install-nix
