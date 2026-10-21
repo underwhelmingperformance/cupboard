@@ -11,6 +11,7 @@ import {
 	commitUpload,
 	currentServer,
 	defaultCache,
+	driveToCompletion,
 	initialise,
 	migrateThroughConvertedCatalogue,
 	namedCache,
@@ -28,8 +29,52 @@ import {
 } from '../test-support.ts';
 
 import { CacheClosureService } from './cache-closure-service.ts';
+import { phaseStepSize } from './garbage-collection-service.ts';
+import { gcContinuationKey } from './server.ts';
 
 const cache = namedCache('pr-1');
+const insertRunRoot =
+	"INSERT INTO retention_root (cache_id, name, created_at, updated_at) VALUES (?1, 'run', ?2, ?2)";
+const insertRunTargets = `WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM sequence WHERE n < ?2)
+	INSERT INTO retention_root_target (cache_id, root_name, store_path_hash, store_path)
+	SELECT ?1, 'run', printf('%032d', n), printf('/nix/store/%032d-app', n) FROM sequence`;
+const insertOldRunRoot =
+	"INSERT INTO retention_root (cache_id, name, retention_epoch, created_at, updated_at) VALUES (?1, 'run', ?2, ?3, ?3)";
+const insertCloseEvent =
+	'INSERT INTO cache_close_event (cache_id, epoch, closed_at, grace_until) VALUES (?1, ?2, ?3, ?3)';
+// A pending upload that never expires keeps the close event of the next
+// retention epoch.
+const insertHeldUpload =
+	"INSERT INTO pending_upload (id, cache_id, retention_epoch, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES (?1, ?2, ?3, 'sha256:nar', 'staging/fixture/' || ?1, '{}', ?4, '2099-01-01T00:00:00.000Z', 'pending')";
+const retentionEpochUpdate =
+	'UPDATE cache_identity SET retention_epoch = ? WHERE id = ?';
+// Enough passes for the scan of one small cache to finish.
+const maxCollectionPasses = 16;
+
+async function collectTenant(): Promise<void> {
+	await currentServer().runGarbageCollection();
+	await driveToCompletion(
+		() => currentServer().runGarbageCollection(),
+		() =>
+			runInDurableObject(
+				currentServer(),
+				async (_instance, state) =>
+					(await state.storage.get(gcContinuationKey)) === undefined
+			),
+		maxCollectionPasses
+	);
+}
+
+async function closeEpochs(): Promise<number[]> {
+	return runInDurableObject(currentServer(), (_instance, state) =>
+		Array.from(
+			state.storage.sql.exec<{ epoch: number }>(
+				'SELECT epoch FROM cache_close_event ORDER BY epoch'
+			),
+			(row) => row.epoch
+		)
+	);
+}
 
 async function createCache(): Promise<string> {
 	const token = await initialise();
@@ -748,6 +793,68 @@ describe('cache close', () => {
 		}
 		expect(costs[1]).toStrictEqual(costs[0]);
 	});
+
+	it('deletes the close event in the collection that expires a root over several steps', async () =>
+		withoutAlarmArming(async () => {
+			const token = await createCache();
+
+			await runInDurableObject(currentServer(), (instance, state) => {
+				const cacheId = instance.context.cacheRepository.require(cache).id;
+
+				state.storage.sql.exec(insertRunRoot, cacheId, testBase.toISOString());
+				state.storage.sql.exec(insertRunTargets, cacheId, phaseStepSize + 1);
+			});
+			await lifecycle(token, 'close');
+			await collectTenant();
+
+			expect(await closeEpochs()).toStrictEqual([]);
+		}));
+
+	it('deletes a close event on an earlier page in the collection that expires its root over several steps', async () =>
+		withoutAlarmArming(async () => {
+			const eventCount = 40;
+			const rootEpoch = 4;
+
+			await createCache();
+			await runInDurableObject(currentServer(), (instance, state) => {
+				const cacheId = instance.context.cacheRepository.require(cache).id;
+
+				for (let epoch = 1; epoch <= eventCount; epoch += 1) {
+					state.storage.sql.exec(
+						insertCloseEvent,
+						cacheId,
+						epoch,
+						testBase.toISOString()
+					);
+
+					if (epoch !== rootEpoch + 1) {
+						state.storage.sql.exec(
+							insertHeldUpload,
+							`held-${String(epoch)}`,
+							cacheId,
+							epoch - 1,
+							testBase.toISOString()
+						);
+					}
+				}
+
+				state.storage.sql.exec(retentionEpochUpdate, eventCount, cacheId);
+				state.storage.sql.exec(
+					insertOldRunRoot,
+					cacheId,
+					rootEpoch,
+					testBase.toISOString()
+				);
+				state.storage.sql.exec(insertRunTargets, cacheId, phaseStepSize + 1);
+			});
+			await collectTenant();
+
+			expect(await closeEpochs()).toStrictEqual(
+				Array.from({ length: eventCount }, (_, index) => index + 1).filter(
+					(epoch) => epoch !== rootEpoch + 1
+				)
+			);
+		}));
 
 	it('cleans history in bounded pages while keeping an old pending upload anchor', async () => {
 		const token = await createCache();
