@@ -1454,21 +1454,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				request.entries.map(async (entry) => {
 					await this.commitEntrySemaphore.acquire();
 					try {
-						const next = await this.replayPublication(
+						const command = {
 							socket,
 							attachment,
-							request.pushId,
+							pushId: request.pushId,
 							entry,
 							grants
-						);
+						};
+						const next = await this.replayPublication({
+							...command,
+							operationKind: 'subscribe'
+						});
 						if (next === 'admit') {
-							await this.runSubscribedPublication({
-								socket,
-								attachment,
-								pushId: request.pushId,
-								entry,
-								grants
-							});
+							await this.runSubscribedPublication(command);
 						}
 					} finally {
 						this.commitEntrySemaphore.release();
@@ -1505,13 +1503,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// the tenant has no unallocated credit. The caller has acquired the commit
 	// entry semaphore, which bounds how far such entries exceed the tenant's
 	// budget.
-	private async runSubscribedPublication(command: {
-		readonly socket: WebSocket;
-		readonly attachment: CommitSessionAttachment;
-		readonly pushId: PushId;
-		readonly entry: PublicationEntry;
-		readonly grants: AccessClaims['grants'];
-	}): Promise<void> {
+	private async runSubscribedPublication(
+		command: PublicationCommand
+	): Promise<void> {
 		const { attachment } = command;
 		const decision = this.commitCredit.admitSubscribedEntry(attachment);
 		try {
@@ -1523,27 +1517,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	private async runPublication(command: {
-		readonly socket: WebSocket;
-		readonly attachment: CommitSessionAttachment;
-		readonly pushId: PushId;
-		readonly entry: PublicationEntry;
-		readonly grants: AccessClaims['grants'];
-	}): Promise<void> {
+	private async runPublication(command: PublicationCommand): Promise<void> {
 		const { socket, attachment, pushId, entry, grants } = command;
 		try {
 			const scope = attachment.cache;
 			requirePublicationScope(grants, scope, entry);
 			if (
 				this.answersFromState(entry.operationId, pushId) &&
-				(await this.replayPublication(
-					socket,
-					attachment,
-					pushId,
-					entry,
-					grants,
-					'publish'
-				)) !== 'admit'
+				(await this.replayPublication({
+					...command,
+					operationKind: 'publish'
+				})) !== 'admit'
 			) {
 				return;
 			}
@@ -1563,22 +1547,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				});
 				return;
 			}
-			await this.runSessionCommit(
-				rootLogger(),
+			await this.runSessionCommit({
+				logger: rootLogger(),
 				socket,
-				admission.cache,
-				attachment.sessionId,
-				entry.operationId,
-				this.reuseLookup.reuseAuthority(scope, grants),
-				{
+				cache: admission.cache,
+				sessionId: attachment.sessionId,
+				uploadId: entry.operationId,
+				authority: this.reuseLookup.reuseAuthority(scope, grants),
+				identity: {
 					storePathHash: entry.metadata.storePathHash,
 					narHash: entry.metadata.narHash,
 					retention: true
 				},
-				undefined,
-				entry.blob,
-				() => this.replayAfterAdmission(command)
-			);
+				...(entry.blob !== undefined && { blob: entry.blob }),
+				answerFromState: () => this.replayAfterAdmission(command)
+			});
 		} catch (error) {
 			// The operation can fail or pass its deadline, and the push can expire,
 			// while admission runs.
@@ -1600,12 +1583,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// admission runs. Admission then refuses the entry, and running it again
 	// reads the path again, so the server retries before the client sees the
 	// refusal.
-	private async admitPublicationEntry(command: {
-		readonly attachment: CommitSessionAttachment;
-		readonly pushId: PushId;
-		readonly entry: PublicationEntry;
-		readonly grants: AccessClaims['grants'];
-	}) {
+	private async admitPublicationEntry(command: PublicationCommand) {
 		const { attachment, pushId, entry, grants } = command;
 		const scope = attachment.cache;
 		for (let attempt = 1; ; attempt += 1) {
@@ -1627,22 +1605,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Answers an entry whose operation concluded after admission started.
 	// Running admission again could repeat without bound, so an operation that
 	// needs work again is refused as a retryable temporary failure.
-	private async replayAfterAdmission(command: {
-		readonly socket: WebSocket;
-		readonly attachment: CommitSessionAttachment;
-		readonly pushId: PushId;
-		readonly entry: PublicationEntry;
-		readonly grants: AccessClaims['grants'];
-	}): Promise<void> {
-		const { socket, attachment, pushId, entry, grants } = command;
-		const next = await this.replayPublication(
-			socket,
-			attachment,
-			pushId,
-			entry,
-			grants,
-			'publish'
-		);
+	private async replayAfterAdmission(
+		command: PublicationCommand
+	): Promise<void> {
+		const { socket, attachment, entry } = command;
+		const next = await this.replayPublication({
+			...command,
+			operationKind: 'publish'
+		});
 		if (next === 'admit') {
 			refusePublication(
 				socket,
@@ -1731,13 +1701,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// expiry pass for that operation first, so the answer uses the grace that the
 	// expiry pass confirms and the run root that it attaches.
 	private async replayPublication(
-		socket: WebSocket,
-		attachment: CommitSessionAttachment,
-		pushId: PushId,
-		entry: PublicationEntry,
-		grants: AccessClaims['grants'],
-		operationKind: 'publish' | 'subscribe' = 'subscribe'
+		command: PublicationReplay
 	): Promise<'admit' | undefined> {
+		const { socket, attachment, pushId, entry, grants, operationKind } =
+			command;
 		try {
 			const scope = attachment.cache;
 			requirePublicationScope(grants, scope, entry);
@@ -2042,25 +2009,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Fail only the affected upload and keep the session open for other entries.
 	// An identity-bearing retry can resolve a missing pending row against the
 	// current committed narinfo generation.
-	private async runSessionCommit(
-		sessionLogger: Logger,
-		socket: WebSocket,
-		cache: ResolvedCache,
-		sessionId: SessionId,
-		uploadId: UploadId,
-		authority: ReuseAuthority,
-		identity?: Pick<
-			CommitBatchEntry,
-			'storePathHash' | 'narHash' | 'retention'
-		>,
-		advisory?: {
-			readonly prefetched?: PrefetchedMaterialisationFacts;
-			readonly account?: TenantAccount;
-			readonly reuseReferences?: readonly ReusableReference[];
-		},
-		blob?: CommitBlobDeclaration,
-		answerFromState?: () => Promise<void>
-	): Promise<void> {
+	private async runSessionCommit(command: SessionCommit): Promise<void> {
+		const {
+			logger: sessionLogger,
+			socket,
+			cache,
+			sessionId,
+			uploadId,
+			authority,
+			identity,
+			advisory,
+			blob,
+			answerFromState
+		} = command;
 		try {
 			// Record the session before the commit can defer, so a verdict reached
 			// before this returns still routes here.
@@ -3923,14 +3884,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					});
 					return;
 				}
-				await this.runSessionCommit(
+				await this.runSessionCommit({
 					logger,
 					socket,
 					cache,
 					sessionId,
-					request.uploadId,
+					uploadId: request.uploadId,
 					authority
-				);
+				});
 			} finally {
 				this.commitEntrySemaphore.release();
 
@@ -3979,27 +3940,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						await this.commitEntrySemaphore.acquire();
 
 						try {
-							await this.runSessionCommit(
+							await this.runSessionCommit({
 								logger,
 								socket,
 								cache,
 								sessionId,
-								entry.uploadId,
+								uploadId: entry.uploadId,
 								authority,
-								{
+								identity: {
 									storePathHash: entry.storePathHash,
 									narHash: entry.narHash,
 									retention: entry.retention
 								},
-								{
+								advisory: {
 									prefetched: batchPrefetched?.get(entry.narHash)
 										?.materialisation,
 									account: batchAccount,
 									reuseReferences: batchPrefetched?.get(entry.narHash)
 										?.reuseReferences
 								},
-								entry.blob
-							);
+								...(entry.blob !== undefined && { blob: entry.blob })
+							});
 							answered.add(entry.uploadId);
 						} finally {
 							this.commitEntrySemaphore.release();
@@ -4829,6 +4790,40 @@ type ServedPath =
 	| { readonly kind: 'replaced' }
 	| { readonly kind: 'missing' }
 	| { readonly kind: 'changed' };
+
+interface PublicationCommand {
+	readonly socket: WebSocket;
+	readonly attachment: CommitSessionAttachment;
+	readonly pushId: PushId;
+	readonly entry: PublicationEntry;
+	readonly grants: AccessClaims['grants'];
+}
+
+interface PublicationReplay extends PublicationCommand {
+	readonly operationKind: 'publish' | 'subscribe';
+}
+
+interface SessionCommit {
+	readonly logger: Logger;
+	readonly socket: WebSocket;
+	readonly cache: ResolvedCache;
+	readonly sessionId: SessionId;
+	readonly uploadId: UploadId;
+	readonly authority: ReuseAuthority;
+	readonly identity?: Pick<
+		CommitBatchEntry,
+		'storePathHash' | 'narHash' | 'retention'
+	>;
+	readonly advisory?: {
+		readonly prefetched?: PrefetchedMaterialisationFacts;
+		readonly account?: TenantAccount;
+		readonly reuseReferences?: readonly ReusableReference[];
+	};
+	readonly blob?: CommitBlobDeclaration;
+	// For a publication entry: answers the entry from the operation's state when
+	// the commit finds that the operation has changed.
+	readonly answerFromState?: () => Promise<void>;
+}
 
 // For a pruned record, `frame` is the `settled` frame for a path served with the
 // entry's NAR. For a completed operation, it is the `settled` frame or the
