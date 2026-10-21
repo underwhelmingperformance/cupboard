@@ -1587,6 +1587,41 @@ describe('publication commit credit', () => {
 		}
 	);
 
+	it('returns commit credit and answers a single commit whose grants cannot be read', async () => {
+		const token = await initialise();
+		const uploadId = uploadIdSchema.parse('missing-1');
+		const session = await openCommitSession(
+			token,
+			defaultCache(),
+			creditedPublication
+		);
+		const read = vi
+			.spyOn(CommitReuseGrantsService.prototype, 'read')
+			.mockRejectedValueOnce(new GrantStorageFault());
+		let frame: unknown;
+		try {
+			session.send({ op: 'commit', uploadId });
+			const answer = await session.nextFrame();
+			frame =
+				answer.ev === 'error'
+					? { ev: answer.ev, uploadId: answer.uploadId, status: answer.status }
+					: answer;
+		} finally {
+			await closeSessionAndWait(session.socket);
+			read.mockRestore();
+		}
+		const next = await openCommitSession(
+			token,
+			defaultCache(),
+			creditedPublication
+		);
+		await closeSessionAndWait(next.socket);
+		expect({ frame, capabilities: next.capabilities }).toStrictEqual({
+			frame: { ev: 'error', uploadId, status: StatusCodes.SERVICE_UNAVAILABLE },
+			capabilities: commitCapabilitiesValueWithCredit(openingGrant)
+		});
+	});
+
 	it('returns commit credit and answers every entry of a commit batch whose grants cannot be read', async () => {
 		const token = await initialise();
 		const commits = ['1', '2', '3'].map((character) => ({
