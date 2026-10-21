@@ -103,6 +103,16 @@ export class PublicationStateChangedError extends ServerHttpError {
 	}
 }
 
+export class PublicationPathChangedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	constructor() {
+		super(
+			'Another publication changed this path while the server admitted the entry. Retry the entry.'
+		);
+		this.name = 'PublicationPathChangedError';
+	}
+}
+
 export class PublicationResendRequiredError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {

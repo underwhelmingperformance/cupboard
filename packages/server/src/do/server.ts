@@ -86,6 +86,7 @@ import {
 	LocalSchemaMigrationPendingError,
 	MetadataScopeChangedError,
 	PublicationConflictError,
+	PublicationPathChangedError,
 	PublicationPushExpiredError,
 	PublicationRecoveryExpiredError,
 	PublicationResendRequiredError,
@@ -1548,9 +1549,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			) {
 				return;
 			}
-			const admission = await this.afterHotMutation(scope, () =>
-				this.uploads.admitPublication(scope, pushId, entry, grants)
-			);
+			const admission = await this.admitPublicationEntry(command);
+			if (admission.kind === 'concluded') {
+				await this.replayAfterAdmission(command);
+				return;
+			}
 			sendCommitSessionFrame(socket, {
 				ev: 'publication-accepted',
 				uploadId: entry.operationId
@@ -1560,19 +1563,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					ev: 'upload-required',
 					uploadId: entry.operationId
 				});
-				return;
-			}
-			if (admission.kind === 'servable') {
-				await this.resolveGoneCommit(
-					socket,
-					admission.cache,
-					entry.operationId,
-					{
-						storePathHash: entry.metadata.storePathHash,
-						narHash: admission.result?.narHash ?? entry.metadata.narHash,
-						retention: true
-					}
-				);
 				return;
 			}
 			await this.runSessionCommit(
@@ -1605,6 +1595,34 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				return;
 			}
 			await this.replayAfterAdmission(command);
+		}
+	}
+
+	// Another operation can commit, delete or verify the entry's path while
+	// admission runs. Admission then refuses the entry, and running it again
+	// reads the path again, so the server retries before the client sees the
+	// refusal.
+	private async admitPublicationEntry(command: {
+		readonly attachment: CommitSessionAttachment;
+		readonly pushId: PushId;
+		readonly entry: PublicationEntry;
+		readonly grants: AccessClaims['grants'];
+	}) {
+		const { attachment, pushId, entry, grants } = command;
+		const scope = attachment.cache;
+		for (let attempt = 1; ; attempt += 1) {
+			try {
+				return await this.afterHotMutation(scope, () =>
+					this.uploads.admitPublication(scope, pushId, entry, grants)
+				);
+			} catch (error) {
+				if (
+					!(error instanceof PublicationPathChangedError) ||
+					attempt >= maxPublicationAdmissions
+				) {
+					throw error;
+				}
+			}
 		}
 	}
 
@@ -4817,6 +4835,10 @@ function reclaimCommitCredit(
 // Each read after the first follows a change, such as the expiry that the
 // replay runs itself.
 const maxPublicationReplayReads = 3;
+
+// The most times that admission runs for one entry when another operation
+// keeps changing the entry's path.
+const maxPublicationAdmissions = 3;
 
 interface PublicationReplayState {
 	readonly operation?: typeof schema.publicationOperations.$inferSelect;
