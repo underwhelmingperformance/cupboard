@@ -69,7 +69,10 @@ import {
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
-import { PublicationStore } from './publication-store.ts';
+import {
+	publicationFailureJson,
+	PublicationStore
+} from './publication-store.ts';
 import { type CupboardServer } from './server.ts';
 import { UploadsService } from './uploads-service.ts';
 import { VerificationService } from './verification-service.ts';
@@ -2993,6 +2996,356 @@ describe('publication subscriptions to terminal operations', () => {
 							response: {
 								storePathHash: path.storePathHash,
 								narHash: path.narHash,
+								status: 'already-present'
+							},
+							grace: {}
+						}
+					: {
+							ev: 'publication-refused',
+							uploadId: entry.operationId,
+							reason: 'push-expired',
+							status: StatusCodes.SERVICE_UNAVAILABLE,
+							hasMessage: true
+						}
+			);
+		}
+	);
+});
+
+describe('publication admission of an operation that changes state', () => {
+	beforeEach(async () => {
+		vi.setSystemTime(vi.getRealSystemTime());
+		await resetTestServer();
+	});
+
+	it.each([
+		{
+			name: 'fails',
+			change: {
+				state: 'failed' as const,
+				resultJson: publicationFailureJson('mismatch')
+			},
+			answer: (entry: PublicationEntry) => ({
+				ev: 'verdict',
+				uploadId: entry.operationId,
+				status: 'mismatch',
+				grace: {}
+			})
+		},
+		{
+			name: 'passes its recovery deadline with its generation committed',
+			change: { recoveryDeadline: new Date(0).toISOString() },
+			answer: (entry: PublicationEntry, path: UploadPathNegotiation) => ({
+				ev: 'settled',
+				uploadId: entry.operationId,
+				response: {
+					storePathHash: path.storePathHash,
+					narHash: path.narHash,
+					status: 'already-present'
+				},
+				grace: {}
+			})
+		}
+	])(
+		'answers from the current state when an operation $name during admission',
+		async ({ name, change, answer }) => {
+			const token = await initialise();
+			const { entry, path, pushId } = await completedPublication(
+				token,
+				`publication-admission-${name}`,
+				{ isConfirmationPending: true }
+			);
+			const live = await runInDurableObject(currentServer(), (instance) => {
+				const { db } = instance.context;
+				const spy = vi.spyOn(PublicationStore.prototype, 'assertLive');
+				spy.mockImplementationOnce(function (this: PublicationStore, id, now) {
+					db.update(schema.publicationOperations)
+						.set(change)
+						.where(eq(schema.publicationOperations.id, id))
+						.run();
+					spy.mockRestore();
+					this.assertLive(id, now);
+				});
+				return Promise.resolve(spy);
+			});
+			try {
+				expect(
+					await subscribe(token, undefined, pushId, entry, 'publish-batch')
+				).toStrictEqual(answer(entry, path));
+			} finally {
+				live.mockRestore();
+			}
+		}
+	);
+
+	it('answers a commit from the current state when its recovery deadline passes after admission', async () => {
+		const token = await initialise();
+		const { entry, path, pushId } = await completedPublication(
+			token,
+			'publication-commit-late',
+			{ isConfirmationPending: true }
+		);
+		const commit = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const spy = vi.spyOn(CommitPipelineService.prototype, 'commit');
+			spy.mockImplementationOnce(function (
+				this: CommitPipelineService,
+				...arguments_
+			) {
+				db.update(schema.publicationOperations)
+					.set({ recoveryDeadline: new Date(0).toISOString() })
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				spy.mockRestore();
+				return this.commit(...arguments_);
+			});
+			return Promise.resolve(spy);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({ op: 'publish-batch', pushId, entries: [entry] });
+			// The expiry pass that the replay runs also notifies the session that
+			// started the commit.
+			expect([
+				refusalFacts(await session.nextFrame()),
+				refusalFacts(await session.nextFrame()),
+				refusalFacts(await session.nextFrame())
+			]).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'verdict',
+					uploadId: entry.operationId,
+					status: 'servable',
+					grace: {}
+				},
+				{
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: {
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						status: 'already-present'
+					},
+					grace: {}
+				}
+			]);
+		} finally {
+			commit.mockRestore();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('answers a commit from the current state when its pending row is cleared but its operation remains accepted', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('9')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			await verifiableNar('publication-commit-cleared')
+		);
+		const commit = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const spy = vi.spyOn(CommitPipelineService.prototype, 'commit');
+			spy.mockImplementationOnce(function (
+				this: CommitPipelineService,
+				...arguments_
+			) {
+				db.delete(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, entry.operationId))
+					.run();
+				spy.mockRestore();
+				return this.commit(...arguments_);
+			});
+			return Promise.resolve(spy);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			expect([
+				refusalFacts(await session.nextFrame()),
+				refusalFacts(await session.nextFrame())
+			]).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'temporary-failure',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				}
+			]);
+		} finally {
+			commit.mockRestore();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('answers a commit from the current state when verification completes its operation after admission and its path is gone', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('a')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			await verifiableNar('publication-commit-completed')
+		);
+		const commit = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const spy = vi.spyOn(CommitPipelineService.prototype, 'commit');
+			spy.mockImplementationOnce(function (
+				this: CommitPipelineService,
+				...arguments_
+			) {
+				db.delete(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, entry.operationId))
+					.run();
+				db.update(schema.publicationOperations)
+					.set({ state: 'servable' })
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				spy.mockRestore();
+				return this.commit(...arguments_);
+			});
+			return Promise.resolve(spy);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			expect([
+				refusalFacts(await session.nextFrame()),
+				refusalFacts(await session.nextFrame())
+			]).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'temporary-failure',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				}
+			]);
+		} finally {
+			commit.mockRestore();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('answers a publish-batch entry as a subscription does when its push expires during admission', async () => {
+		const token = await initialise();
+		const expiresAt = Math.floor(Date.now() / 1000) + 60;
+		const pushId = await testPushIdFor(fixtureTenant, 8, expiresAt);
+		const { entry, path } = await completedPublication(
+			token,
+			'publication-push-expires',
+			{ pushId }
+		);
+		const isPushIdVerified = await runInDurableObject(
+			currentServer(),
+			(instance) => {
+				instance.context.db
+					.delete(schema.publicationOperations)
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				const isVerified = vi.spyOn(PushCredentialIssuer.prototype, 'verify');
+				isVerified.mockImplementationOnce(function (
+					this: PushCredentialIssuer,
+					...arguments_
+				) {
+					vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+					isVerified.mockRestore();
+					return this.verify(...arguments_);
+				});
+				return Promise.resolve(isVerified);
+			}
+		);
+		try {
+			expect(
+				await subscribe(token, undefined, pushId, entry, 'publish-batch')
+			).toStrictEqual({
+				ev: 'settled',
+				uploadId: entry.operationId,
+				response: {
+					storePathHash: path.storePathHash,
+					narHash: path.narHash,
+					status: 'already-present'
+				},
+				grace: {}
+			});
+		} finally {
+			isPushIdVerified.mockRestore();
+		}
+	});
+
+	it.each([
+		{ name: 'served', isServed: true },
+		{ name: 'not served', isServed: false }
+	])(
+		'answers a publish-batch entry with no record and an expired push as a subscription does when the path is $name',
+		async ({ name, isServed }) => {
+			const token = await initialise();
+			const expiresAt = Math.floor(Date.now() / 1000) + 60;
+			const pushId = await testPushIdFor(fixtureTenant, 7, expiresAt);
+			const completed = isServed
+				? await completedPublication(token, `publication-pruned-${name}`, {
+						pushId
+					})
+				: undefined;
+			const planned = await plannedEntries(
+				token,
+				'/uploads/plan',
+				[distinctPath('1')],
+				undefined,
+				pushId
+			);
+			const entry = completed?.entry ?? planned[0];
+			if (entry === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.delete(schema.publicationOperations)
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				return Promise.resolve();
+			});
+			vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+			expect(
+				await subscribe(token, undefined, pushId, entry, 'publish-batch')
+			).toStrictEqual(
+				isServed
+					? {
+							ev: 'settled',
+							uploadId: entry.operationId,
+							response: {
+								storePathHash: entry.metadata.storePathHash,
+								narHash: entry.metadata.narHash,
 								status: 'already-present'
 							},
 							grace: {}

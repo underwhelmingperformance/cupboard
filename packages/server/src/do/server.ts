@@ -1497,6 +1497,31 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	// Admits a subscription entry from a client without
+	// `publication-refusal-reasons`. That client does not count the entry against
+	// its grant, so the entry counts against the tenant's credit. A refusal
+	// would use one of the entry's error retries, so the entry runs even when
+	// the tenant has no unallocated credit. The caller has acquired the commit
+	// entry semaphore, which bounds how far such entries exceed the tenant's
+	// budget.
+	private async runSubscribedPublication(command: {
+		readonly socket: WebSocket;
+		readonly attachment: CommitSessionAttachment;
+		readonly pushId: PushId;
+		readonly entry: PublicationEntry;
+		readonly grants: AccessClaims['grants'];
+	}): Promise<void> {
+		const { attachment } = command;
+		const decision = this.commitCredit.admitSubscribedEntry(attachment);
+		try {
+			await this.runPublication(command);
+		} finally {
+			if (decision === 'accounted') {
+				this.commitCredit.release(attachment.sessionId, Date.now());
+			}
+		}
+	}
+
 	private async runPublication(command: {
 		readonly socket: WebSocket;
 		readonly attachment: CommitSessionAttachment;
@@ -1508,13 +1533,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		try {
 			const scope = attachment.cache;
 			requirePublicationScope(grants, scope, entry);
-			const operation = new PublicationStore(this.context).get(
-				entry.operationId
-			);
 			if (
-				(operation?.state === 'failed' ||
-					(operation?.state === 'accepted' &&
-						Date.parse(operation.recoveryDeadline) <= Date.now())) &&
+				this.answersFromState(entry.operationId, pushId) &&
 				(await this.replayPublication(
 					socket,
 					attachment,
@@ -1566,42 +1586,74 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					retention: true
 				},
 				undefined,
-				entry.blob
+				entry.blob,
+				() => this.replayAfterAdmission(command)
 			);
 		} catch (error) {
-			refusePublication(
-				socket,
-				attachment,
-				entry.operationId,
-				'publish',
-				error
-			);
+			// The operation can fail or pass its deadline, and the push can expire,
+			// while admission runs.
+			if (!this.answersFromState(entry.operationId, pushId)) {
+				refusePublication(
+					socket,
+					attachment,
+					entry.operationId,
+					'publish',
+					error
+				);
+				return;
+			}
+			await this.replayAfterAdmission(command);
 		}
 	}
 
-	// Admits a subscription entry from a client without
-	// `publication-refusal-reasons`. That client does not count the entry against
-	// its grant, so the entry counts against the tenant's credit. A refusal
-	// would use one of the entry's error retries, so the entry runs even when
-	// the tenant has no unallocated credit. The caller has acquired the commit
-	// entry semaphore, which bounds how far such entries exceed the tenant's
-	// budget.
-	private async runSubscribedPublication(command: {
+	// Answers an entry whose operation concluded after admission started.
+	// Running admission again could repeat without bound, so an operation that
+	// needs work again is refused as a retryable temporary failure.
+	private async replayAfterAdmission(command: {
 		readonly socket: WebSocket;
 		readonly attachment: CommitSessionAttachment;
 		readonly pushId: PushId;
 		readonly entry: PublicationEntry;
 		readonly grants: AccessClaims['grants'];
 	}): Promise<void> {
-		const { attachment } = command;
-		const decision = this.commitCredit.admitSubscribedEntry(attachment);
-		try {
-			await this.runPublication(command);
-		} finally {
-			if (decision === 'accounted') {
-				this.commitCredit.release(attachment.sessionId, Date.now());
-			}
+		const { socket, attachment, pushId, entry, grants } = command;
+		const next = await this.replayPublication(
+			socket,
+			attachment,
+			pushId,
+			entry,
+			grants,
+			'publish'
+		);
+		if (next === 'admit') {
+			refusePublication(
+				socket,
+				attachment,
+				entry.operationId,
+				'publish',
+				new PublicationStateChangedError()
+			);
 		}
+	}
+
+	// A concluded operation, and an entry with no record whose push has expired,
+	// get the answer that a subscription gives.
+	private answersFromState(id: UploadId, pushId: PushId): boolean {
+		return (
+			this.isConcludedPublication(id) ||
+			(new PublicationStore(this.context).get(id) === undefined &&
+				isExpiredPushId(pushId))
+		);
+	}
+
+	private isConcludedPublication(id: UploadId): boolean {
+		const operation = new PublicationStore(this.context).get(id);
+		return (
+			operation?.state === 'failed' ||
+			operation?.state === 'expired' ||
+			(operation?.state === 'accepted' &&
+				Date.parse(operation.recoveryDeadline) <= Date.now())
+		);
 	}
 
 	// Send the verdict that a live session received when the operation failed.
@@ -1988,7 +2040,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			readonly account?: TenantAccount;
 			readonly reuseReferences?: readonly ReusableReference[];
 		},
-		blob?: CommitBlobDeclaration
+		blob?: CommitBlobDeclaration,
+		answerFromState?: () => Promise<void>
 	): Promise<void> {
 		try {
 			// Record the session before the commit can defer, so a verdict reached
@@ -2027,6 +2080,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				...(outcome.grace !== undefined && { grace: outcome.grace })
 			});
 		} catch (error) {
+			// The commit can find that the operation failed, expired or passed its
+			// recovery deadline after admission accepted it. It can also find the
+			// pending row gone, because verification completed the operation or a
+			// pass cleared the row. The replay reads the record again and answers
+			// from it.
+			if (
+				answerFromState !== undefined &&
+				(this.isConcludedPublication(uploadId) ||
+					error instanceof UploadNotFoundError)
+			) {
+				await answerFromState();
+				return;
+			}
 			if (error instanceof PublicationRecoveryExpiredError) {
 				sendCommitSessionFrame(socket, {
 					ev: 'publication-refused',
