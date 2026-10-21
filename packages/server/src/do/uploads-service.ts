@@ -682,13 +682,10 @@ export class UploadsService {
 			throw new InvalidPushIdError();
 		}
 		const now = new Date();
-		if (
-			original?.state === 'servable' &&
-			(now.getTime() >= pushExpiry * 1000 ||
-				!(await this.context.pushCredentials().verify(pushId)))
-		) {
-			throw new PublicationPushExpiredError();
-		}
+		// The record can become completed after the first read. Verify the push ID
+		// for every entry, so the gate can refuse a repair whose push ID did not
+		// verify.
+		const isPushVerified = await this.context.pushCredentials().verify(pushId);
 		const deadline =
 			original?.recoveryDeadline ??
 			new Date(now.getTime() + publicationRecoveryMs).toISOString();
@@ -726,7 +723,10 @@ export class UploadsService {
 				// Orphan staging collection deletes a staging object outside the
 				// gate once its push expires, so a repair must not start tracking
 				// the object after the push expires.
-				if (current?.state === 'servable' && Date.now() >= pushExpiry * 1000) {
+				if (
+					current?.state === 'servable' &&
+					(!isPushVerified || Date.now() >= pushExpiry * 1000)
+				) {
 					throw new PublicationPushExpiredError();
 				}
 				const declared =
