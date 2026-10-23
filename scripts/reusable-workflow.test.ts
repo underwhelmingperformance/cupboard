@@ -540,12 +540,42 @@ describe('cupboard acquisition', () => {
 		});
 	});
 
+	it('preserves the evaluation default and forwards concurrency through the trusted workflow', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const trusted = await loadWorkflow(
+			new URL(
+				'../.github/workflows/cupboard-flake-publish-trusted.yml',
+				import.meta.url
+			)
+		);
+		expect({
+			policies: [workflow, trusted].map((entry) => {
+				const input = entry.on.workflow_call?.inputs['evaluation-concurrency'];
+				return {
+					default: input?.default,
+					required: input?.required,
+					type: input?.type
+				};
+			}),
+			forwarded: Object.values(trusted.jobs).find((job) =>
+				job.uses?.includes('cupboard-flake-publish.yml')
+			)?.with?.['evaluation-concurrency']
+		}).toStrictEqual({
+			policies: [
+				{ default: '4', required: false, type: 'string' },
+				{ default: '4', required: false, type: 'string' }
+			],
+			forwarded: '${{ inputs.evaluation-concurrency }}'
+		});
+	});
+
 	it('passes the complete manifest evaluation inputs to the packaged action', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		expect(
 			inputsOf(workflow, cupboardAction('evaluate-targets'))
 		).toStrictEqual([
 			{
+				concurrency: '${{ inputs.evaluation-concurrency }}',
 				targets: '${{ inputs.targets }}',
 				publish: '${{ needs.configure.outputs.publish }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
@@ -739,7 +769,7 @@ describe('SSH credential isolation', () => {
 
 		expect({ planPrepare, cohortPrepare }).toStrictEqual({
 			// Evaluating a closure root can realise derivations, so the plan job
-			// takes the builders the caller configured.
+			// uses the configured builders.
 			planPrepare: {
 				'ssh-key': '${{ secrets.input_ssh_key }}',
 				'input-known-hosts': '${{ inputs.input-known-hosts }}',

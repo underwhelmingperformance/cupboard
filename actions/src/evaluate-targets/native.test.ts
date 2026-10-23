@@ -1,8 +1,10 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import { stopLogging } from '@cupboard/logger/testing';
 import { observeChildProcess } from '@cupboard/shared/child-process';
@@ -18,6 +20,7 @@ import {
 import {
 	evaluationInputs,
 	nativeEvaluationMain,
+	nativeEvaluationWorker,
 	runNativeEvaluation
 } from './native.ts';
 
@@ -37,6 +40,137 @@ const raw = [
 		rootSuffix: '/package/'
 	}
 ];
+
+it.each(['0', '1'])(
+	'runs the packaged action with runner debug=%s',
+	async (debug) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-evaluation-bundle-')
+		);
+		onTestFinished(() => rm(directory, { recursive: true, force: true }));
+		const nix = path.join(directory, 'nix');
+		await writeFile(
+			nix,
+			`#!${process.execPath}\nsetTimeout(() => process.stdout.write(process.argv.at(-1) === 'builtins.length' ? '1' : ${JSON.stringify(JSON.stringify(raw[0]))}), 100);\n`
+		);
+		await chmod(nix, 0o755);
+		const output = path.join(directory, 'output');
+		const result = await promisify(execFile)(
+			process.execPath,
+			[
+				fileURLToPath(
+					new URL('../../evaluate-targets/dist/main.cjs', import.meta.url)
+				)
+			],
+			{
+				env: {
+					...process.env,
+					PATH: `${directory}${path.delimiter}${process.env.PATH ?? ''}`,
+					INPUT_TARGETS: '.#targets',
+					INPUT_CONCURRENCY: '1',
+					RUNNER_DEBUG: debug,
+					GITHUB_OUTPUT: output
+				}
+			}
+		);
+		expect({
+			stdout: result.stdout,
+			manifest: await readFile(output, 'utf8'),
+			progress: result.stderr.includes('"phase":"target"'),
+			resources: result.stderr.includes('[evaluation resource-sample]')
+		}).toStrictEqual({
+			stdout: '',
+			manifest: `manifest=${JSON.stringify(raw)}\n`,
+			progress: debug === '1',
+			resources: debug === '1'
+		});
+	}
+);
+
+it.each(['', '0', '1'])(
+	'writes progress only to stderr in runner debug mode %j',
+	async (debug) => {
+		const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+		onTestFinished(() => {
+			now.mockRestore();
+		});
+		const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+		try {
+			await nativeEvaluationWorker(
+				{
+					INPUT_TARGETS: '.#targets',
+					INPUT_CONCURRENCY: '1',
+					RUNNER_DEBUG: debug
+				},
+				new AbortController().signal,
+				{
+					capture: (command) =>
+						Promise.resolve(
+							command.arguments.at(-1) === 'builtins.length'
+								? '1'
+								: JSON.stringify(raw[0])
+						)
+				}
+			);
+			expect({
+				stdout: stdout.mock.calls,
+				stderr: stderr.mock.calls.map(([value]): unknown =>
+					JSON.parse(String(value))
+				)
+			}).toStrictEqual({
+				stdout: [[`${JSON.stringify(raw)}\n`]],
+				stderr:
+					debug === '1'
+						? [
+								{ phase: 'configuration', concurrency: 1 },
+								{
+									phase: 'count',
+									status: 'started',
+									elapsedMs: 0
+								},
+								{
+									phase: 'count',
+									status: 'completed',
+									elapsedMs: 0
+								},
+								{
+									phase: 'target',
+									status: 'started',
+									index: 0,
+									total: 1,
+									completed: 0,
+									elapsedMs: 0
+								},
+								{
+									phase: 'target',
+									status: 'completed',
+									index: 0,
+									total: 1,
+									completed: 1,
+									elapsedMs: 0
+								}
+							]
+						: []
+			});
+		} finally {
+			stdout.mockRestore();
+			stderr.mockRestore();
+		}
+	}
+);
+
+it('rejects invalid concurrency before starting a credential wrapper', async () => {
+	const capture = vi.fn();
+	await expect(
+		nativeEvaluationMain(
+			{ INPUT_TARGETS: '.#targets', INPUT_CONCURRENCY: '0' },
+			undefined,
+			{ capture }
+		)
+	).rejects.toThrow('positive safe integer');
+	expect(capture).not.toHaveBeenCalled();
+});
 
 it('reads manifest inputs without changing the publication mode', () => {
 	expect(

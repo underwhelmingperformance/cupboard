@@ -271,6 +271,13 @@ on:
         required: false
         default: ubuntu-latest
         type: string
+      evaluation-concurrency:
+        description:
+          Maximum simultaneous Nix evaluations. auto uses the number of
+          available processors. Lower this value if evaluation exhausts memory.
+        required: false
+        default: '4'
+        type: string
       enable-packing:
         description:
           Pack small single-target cohorts into as few jobs as fit within
@@ -414,6 +421,7 @@ jobs:
       store-ambient-identity: ${{ inputs.store-ambient-identity }}
       store: ${{ inputs.store }}
       plan-runner: ${{ inputs.plan-runner }}
+      evaluation-concurrency: ${{ inputs.evaluation-concurrency }}
       enable-packing: ${{ inputs.enable-packing }}
       pack-capacity: ${{ inputs.pack-capacity }}
       merged-pull-request: ${{ needs.lookup.outputs.pull-request }}

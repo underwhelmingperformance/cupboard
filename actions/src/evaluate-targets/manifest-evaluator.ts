@@ -8,15 +8,31 @@ import {
 } from '@cupboard/shared/child-process';
 import { drainWithConcurrency } from '@cupboard/shared/concurrency';
 import { CodedError } from '@cupboard/shared/errors';
+import { positiveSafeInteger } from '@cupboard/shared/limits';
 
 import type { Environment } from '../inputs.ts';
 import { publishTargetsSchema } from '../publish-plan.ts';
 
 const maximumCapturedOutputBytes = 256 * 1024 * 1024;
 
+export type ManifestEvaluationProgress = {
+	readonly status: 'started' | 'completed';
+	readonly elapsedMs: number;
+} & (
+	| { readonly phase: 'count' }
+	| {
+			readonly phase: 'target';
+			readonly index: number;
+			readonly total: number;
+			readonly completed: number;
+	  }
+);
+
 export interface ManifestEvaluationOptions {
 	readonly targets: string;
 	readonly publish: string;
+	readonly concurrency?: number;
+	readonly onProgress?: (event: ManifestEvaluationProgress) => void;
 	readonly maximumOutputBytes?: number;
 }
 
@@ -202,6 +218,11 @@ export async function evaluateTargetManifest(
 	runner: ManifestRunner,
 	externalSignal?: AbortSignal
 ): Promise<string> {
+	const concurrency = positiveSafeInteger(
+		options.concurrency ?? 4,
+		'evaluation concurrency'
+	);
+	const startedAt = performance.now();
 	const controller = new AbortController();
 	const fail = (error: unknown): void => {
 		controller.abort(error);
@@ -216,6 +237,11 @@ export async function evaluateTargetManifest(
 	const limit = options.maximumOutputBytes ?? maximumCapturedOutputBytes;
 	try {
 		controller.signal.throwIfAborted();
+		options.onProgress?.({
+			phase: 'count',
+			status: 'started',
+			elapsedMs: performance.now() - startedAt
+		});
 		const countOutput = await runner(
 			['eval', '--json', options.targets, '--apply', 'builtins.length'],
 			controller.signal,
@@ -235,7 +261,13 @@ export async function evaluateTargetManifest(
 			throw new ManifestCountInvalidError();
 		}
 		const targetCount = count;
+		options.onProgress?.({
+			phase: 'count',
+			status: 'completed',
+			elapsedMs: performance.now() - startedAt
+		});
 		const values: unknown[] = [];
+		let completed = 0;
 		let bytes = 2;
 		let nextIndex = 0;
 		const indices: AsyncIterator<number> = {
@@ -248,36 +280,57 @@ export async function evaluateTargetManifest(
 				return Promise.resolve({ done: false, value: index });
 			}
 		};
-		await drainWithConcurrency(indices, 4, async (index) => {
-			try {
-				controller.signal.throwIfAborted();
-				const expression =
-					options.publish === 'none'
-						? `targets: builtins.removeAttrs (builtins.elemAt targets ${String(index)}) [ "rootDrvPath" ]`
-						: `targets: builtins.elemAt targets ${String(index)}`;
-				const output = await runner(
-					['eval', '--json', options.targets, '--apply', expression],
-					controller.signal,
-					fail
-				);
-				let value: unknown;
+		await drainWithConcurrency(
+			indices,
+			Math.min(concurrency, targetCount),
+			async (index) => {
 				try {
-					value = JSON.parse(output);
+					controller.signal.throwIfAborted();
+					options.onProgress?.({
+						phase: 'target',
+						status: 'started',
+						index,
+						total: targetCount,
+						completed,
+						elapsedMs: performance.now() - startedAt
+					});
+					const expression =
+						options.publish === 'none'
+							? `targets: builtins.removeAttrs (builtins.elemAt targets ${String(index)}) [ "rootDrvPath" ]`
+							: `targets: builtins.elemAt targets ${String(index)}`;
+					const output = await runner(
+						['eval', '--json', options.targets, '--apply', expression],
+						controller.signal,
+						fail
+					);
+					let value: unknown;
+					try {
+						value = JSON.parse(output);
+					} catch (error) {
+						throw new ManifestJsonInvalidError(index, { cause: error });
+					}
+					const addition =
+						Buffer.byteLength(JSON.stringify(value)) + (index === 0 ? 0 : 1);
+					if (bytes + addition > limit) {
+						throw new ManifestOutputLimitError(limit);
+					}
+					bytes += addition;
+					values[index] = value;
+					completed += 1;
+					options.onProgress?.({
+						phase: 'target',
+						status: 'completed',
+						index,
+						total: targetCount,
+						completed,
+						elapsedMs: performance.now() - startedAt
+					});
 				} catch (error) {
-					throw new ManifestJsonInvalidError(index, { cause: error });
+					controller.abort(error);
+					throw controller.signal.reason;
 				}
-				const addition =
-					Buffer.byteLength(JSON.stringify(value)) + (index === 0 ? 0 : 1);
-				if (bytes + addition > limit) {
-					throw new ManifestOutputLimitError(limit);
-				}
-				bytes += addition;
-				values[index] = value;
-			} catch (error) {
-				controller.abort(error);
-				throw controller.signal.reason;
 			}
-		});
+		);
 		controller.signal.throwIfAborted();
 		const validation = publishTargetsSchema.safeParse(values);
 		if (!validation.success) {

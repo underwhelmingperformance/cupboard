@@ -527,6 +527,10 @@ configuration:
   a cohort has published. This only happens on GitHub-hosted runners using their
   own store. It mostly helps best-effort cohorts, which build their targets one
   at a time.
+- `evaluation-concurrency` limits simultaneous Nix processes during manifest
+  evaluation. It defaults to `4`. Set it to `1` if evaluation exhausts memory,
+  or to `auto` to use the number of available processors. The automatic setting
+  does not account for the memory required by each evaluation.
 - `plan-runner` sets the runner label for the configure, plan and cache-removal
   jobs.
 - `nix-config` specifies a flake attribute containing extra `nix.conf` text for
@@ -535,6 +539,14 @@ configuration:
 
 For outputs too large for a GitHub-hosted runner, see
 [Building elsewhere](./building-elsewhere.md).
+
+When runner debug logging is enabled, manifest evaluation reports the resolved
+concurrency, count and target progress, and elapsed times to stderr. A resource
+monitor also samples process memory, available memory, swap, pressure and cgroup
+counters where supported. On Linux, the monitor includes available kernel and
+out-of-memory service logs. Resource samples are collected every five seconds.
+Normal runs do not collect these diagnostics. Monitor failures do not fail the
+evaluation.
 
 ## Common tasks
 

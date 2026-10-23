@@ -9,12 +9,14 @@ import { cupboardDebugArguments } from '../cupboard-run.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { publishTargetsSchema } from '../publish-plan.ts';
 
+import { resolveEvaluationConcurrency } from './concurrency.ts';
 import {
 	type CapturedCommand,
 	captureEvaluationProcess,
 	evaluateTargetManifest,
 	type ManifestEvaluationOptions
 } from './manifest-evaluator.ts';
+import { withEvaluationMonitor } from './monitor.ts';
 
 export interface NativeEvaluationDependencies {
 	readonly workerPath?: string;
@@ -54,6 +56,7 @@ export async function nativeEvaluationMain(
 	dependencies: NativeEvaluationDependencies = {}
 ): Promise<void> {
 	evaluationInputs(environment);
+	await resolveEvaluationConcurrency(environment.INPUT_CONCURRENCY);
 	const worker: readonly [string, string] = [
 		process.execPath,
 		dependencies.workerPath ??
@@ -86,12 +89,14 @@ export async function nativeEvaluationMain(
 		];
 	}
 	const [executable, ...arguments_] = command;
-	const stdout = await (dependencies.capture ?? captureEvaluationProcess)({
-		executable,
-		arguments: arguments_,
-		environment,
-		...(signal !== undefined && { signal })
-	});
+	const stdout = await withEvaluationMonitor(environment, () =>
+		(dependencies.capture ?? captureEvaluationProcess)({
+			executable,
+			arguments: arguments_,
+			environment,
+			...(signal !== undefined && { signal })
+		})
+	);
 	signal?.throwIfAborted();
 	const manifest: unknown = JSON.parse(stdout);
 	publishTargetsSchema.parse(manifest);
@@ -103,12 +108,27 @@ export async function nativeEvaluationMain(
  */
 export async function nativeEvaluationWorker(
 	environment: Environment,
-	signal: AbortSignal
+	signal: AbortSignal,
+	dependencies: NativeEvaluationDependencies = {}
 ): Promise<void> {
+	const concurrency = await resolveEvaluationConcurrency(
+		environment.INPUT_CONCURRENCY
+	);
+	const diagnostic =
+		environment.RUNNER_DEBUG === '1'
+			? (event: unknown): void => {
+					process.stderr.write(`${JSON.stringify(event)}\n`);
+				}
+			: undefined;
+	diagnostic?.({ phase: 'configuration', concurrency });
 	const manifest = await evaluateTargetManifest(
-		evaluationInputs(environment),
+		{
+			...evaluationInputs(environment),
+			concurrency,
+			...(diagnostic !== undefined && { onProgress: diagnostic })
+		},
 		(arguments_, internalSignal, onFailure) =>
-			captureEvaluationProcess({
+			(dependencies.capture ?? captureEvaluationProcess)({
 				executable: 'nix',
 				arguments: arguments_,
 				environment,
