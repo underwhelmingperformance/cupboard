@@ -373,17 +373,22 @@ describe('canonical acquisition composition', () => {
 	});
 
 	it.each(['setup', 'push'])(
-		'%s passes the release repository the caller named',
+		'%s passes the release selector separately from the action repository',
 		(action) => {
 			const steps = actionSteps(action).filter(
 				(step) => step.env?.RELEASE_REPOSITORY !== undefined
 			);
 
-			// A fallback to `github.action_repository` would look for releases in the
-			// repository the caller pinned the action from, which is not always the
-			// repository that publishes them.
-			expect(steps.map((step) => step.env?.RELEASE_REPOSITORY)).toStrictEqual([
-				'${{ inputs.release-repository }}'
+			expect(
+				steps.map((step) => ({
+					releaseRepository: step.env?.RELEASE_REPOSITORY,
+					actionRepository: step.env?.CUPBOARD_ACTION_REPOSITORY
+				}))
+			).toStrictEqual([
+				{
+					releaseRepository: '${{ inputs.release-repository }}',
+					actionRepository: '${{ github.action_repository }}'
+				}
 			]);
 		}
 	);

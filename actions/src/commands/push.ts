@@ -467,8 +467,9 @@ export function resolvePushInputs(
 		githubToken: provided(options.githubToken) ?? '',
 		releaseRepository:
 			provided(options.releaseRepository) ??
-			environment.GITHUB_ACTION_REPOSITORY ??
-			environment.GITHUB_REPOSITORY ??
+			provided(environment.CUPBOARD_ACTION_REPOSITORY) ??
+			provided(environment.GITHUB_ACTION_REPOSITORY) ??
+			provided(environment.GITHUB_REPOSITORY) ??
 			fallbackReleaseRepository,
 		expectedSourceCommit: provided(options.expectedSourceCommit) ?? '',
 		installDirectory:

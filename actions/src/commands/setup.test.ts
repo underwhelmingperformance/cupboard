@@ -146,7 +146,10 @@ describe('setupAction acquisition outputs', () => {
 				installDir: path.join(directory, 'bin'),
 				addToPath: 'false'
 			},
-			{ GITHUB_OUTPUT: outputFile },
+			{
+				GITHUB_OUTPUT: outputFile,
+				CUPBOARD_ACTION_REPOSITORY: 'actions/cupboard'
+			},
 			createGithubReporter(),
 			{
 				acquire: () =>
@@ -316,6 +319,64 @@ describe('resolveSetupInputs', () => {
 		nixConfigFile: '',
 		checkoutDirectory: ''
 	};
+
+	it.each([
+		{
+			scenario: 'an explicit release repository',
+			input: 'releases/cupboard',
+			context: { CUPBOARD_ACTION_REPOSITORY: 'actions/cupboard' },
+			expected: 'releases/cupboard'
+		},
+		{
+			scenario: 'the composite action repository',
+			input: '',
+			context: { CUPBOARD_ACTION_REPOSITORY: ' actions/cupboard ' },
+			expected: 'actions/cupboard'
+		},
+		{
+			scenario: 'the legacy action repository after a blank context',
+			input: '',
+			context: { CUPBOARD_ACTION_REPOSITORY: '' },
+			expected: 'owner/cupboard'
+		},
+		{
+			scenario: 'the workflow repository after empty action contexts',
+			input: '',
+			context: {
+				CUPBOARD_ACTION_REPOSITORY: '',
+				GITHUB_ACTION_REPOSITORY: '',
+				GITHUB_REPOSITORY: 'caller/cupboard'
+			},
+			expected: 'caller/cupboard'
+		},
+		{
+			scenario: 'the fallback after empty repository contexts',
+			input: '',
+			context: {
+				CUPBOARD_ACTION_REPOSITORY: '',
+				GITHUB_ACTION_REPOSITORY: '',
+				GITHUB_REPOSITORY: ''
+			},
+			expected: 'cupboard/cupboard'
+		},
+		{
+			scenario: 'the fallback after whitespace-only repository contexts',
+			input: ' ',
+			context: {
+				CUPBOARD_ACTION_REPOSITORY: ' ',
+				GITHUB_ACTION_REPOSITORY: ' ',
+				GITHUB_REPOSITORY: ' '
+			},
+			expected: 'cupboard/cupboard'
+		}
+	])('selects $scenario', ({ input, context, expected }) => {
+		expect(
+			resolveSetupInputs(
+				{ ...baseOptions, releaseRepository: input },
+				{ ...environment, ...context }
+			)
+		).toStrictEqual({ ...defaults, releaseRepository: expected });
+	});
 
 	it('applies defaults when optional flags are absent', () => {
 		expect(resolveSetupInputs(baseOptions, environment)).toStrictEqual(
