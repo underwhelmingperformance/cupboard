@@ -19,7 +19,7 @@ export type ManifestEvaluationProgress = {
 	readonly status: 'started' | 'completed';
 	readonly elapsedMs: number;
 } & (
-	| { readonly phase: 'count' }
+	| { readonly phase: 'count' | 'manifest' }
 	| {
 			readonly phase: 'target';
 			readonly index: number;
@@ -340,4 +340,57 @@ export async function evaluateTargetManifest(
 	} finally {
 		externalSignal?.removeEventListener('abort', abort);
 	}
+}
+
+/**
+ * Evaluates every requested target within one Nix process.
+ */
+export async function evaluateWholeManifest(
+	options: ManifestEvaluationOptions,
+	runner: ManifestRunner,
+	externalSignal?: AbortSignal
+): Promise<string> {
+	const controller = new AbortController();
+	const signal =
+		externalSignal === undefined
+			? controller.signal
+			: AbortSignal.any([controller.signal, externalSignal]);
+	const startedAt = performance.now();
+	signal.throwIfAborted();
+	options.onProgress?.({ phase: 'manifest', status: 'started', elapsedMs: 0 });
+	const expression =
+		options.publish === 'none'
+			? 'targets: builtins.map (target: builtins.removeAttrs target [ "rootDrvPath" ]) targets'
+			: 'targets: targets';
+	const output = await runner(
+		['eval', '--json', options.targets, '--apply', expression],
+		signal,
+		(error) => {
+			controller.abort(error);
+		}
+	);
+	signal.throwIfAborted();
+	const limit = options.maximumOutputBytes ?? maximumCapturedOutputBytes;
+	if (Buffer.byteLength(output) > limit) {
+		throw new ManifestOutputLimitError(limit);
+	}
+	let values: unknown;
+	try {
+		values = JSON.parse(output);
+	} catch (error) {
+		throw new ManifestJsonInvalidError(0, { cause: error });
+	}
+	const validation = publishTargetsSchema.safeParse(values);
+	if (!validation.success) {
+		throw new ManifestSchemaInvalidError({ cause: validation.error });
+	}
+	if (validation.data.length === 0) {
+		throw new ManifestCountInvalidError();
+	}
+	options.onProgress?.({
+		phase: 'manifest',
+		status: 'completed',
+		elapsedMs: performance.now() - startedAt
+	});
+	return JSON.stringify(values);
 }

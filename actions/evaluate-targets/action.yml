@@ -1,6 +1,10 @@
 name: Evaluate cupboard target manifest
 description: Evaluates the target manifest with bounded Nix process concurrency.
 inputs:
+  whole-manifest:
+    description: Evaluate every target in one Nix process for this experiment.
+    required: false
+    default: 'false'
   concurrency:
     description:
       Maximum simultaneous Nix evaluations. auto uses the number of available

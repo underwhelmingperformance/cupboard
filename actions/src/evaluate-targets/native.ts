@@ -14,6 +14,7 @@ import {
 	type CapturedCommand,
 	captureEvaluationProcess,
 	evaluateTargetManifest,
+	evaluateWholeManifest,
 	type ManifestEvaluationOptions
 } from './manifest-evaluator.ts';
 import { withEvaluationMonitor } from './monitor.ts';
@@ -120,8 +121,16 @@ export async function nativeEvaluationWorker(
 					process.stderr.write(`${JSON.stringify(event)}\n`);
 				}
 			: undefined;
-	diagnostic?.({ phase: 'configuration', concurrency });
-	const manifest = await evaluateTargetManifest(
+	diagnostic?.({
+		phase: 'configuration',
+		concurrency:
+			environment['INPUT_WHOLE-MANIFEST'] === 'true' ? 1 : concurrency
+	});
+	const evaluate =
+		environment['INPUT_WHOLE-MANIFEST'] === 'true'
+			? evaluateWholeManifest
+			: evaluateTargetManifest;
+	const manifest = await evaluate(
 		{
 			...evaluationInputs(environment),
 			concurrency,
