@@ -379,7 +379,6 @@ jobs:
         id: setup
         with:
           cupboard-version: latest
-          release-repository: ${{ github.repository }}
           github-token: ${{ github.token }}
 
       - name: Run the installed binary

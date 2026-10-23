@@ -494,8 +494,9 @@ export function resolveSetupInputs(
 		githubToken: provided(options.githubToken ?? environment.GH_TOKEN) ?? '',
 		releaseRepository:
 			provided(options.releaseRepository) ??
-			environment.GITHUB_ACTION_REPOSITORY ??
-			environment.GITHUB_REPOSITORY ??
+			provided(environment.CUPBOARD_ACTION_REPOSITORY) ??
+			provided(environment.GITHUB_ACTION_REPOSITORY) ??
+			provided(environment.GITHUB_REPOSITORY) ??
 			fallbackReleaseRepository,
 		expectedSourceCommit: provided(options.expectedSourceCommit) ?? '',
 		installDirectory:
