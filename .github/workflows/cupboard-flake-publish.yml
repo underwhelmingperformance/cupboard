@@ -483,7 +483,7 @@ jobs:
     needs: configure
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ${{ inputs.plan-runner }}
-    timeout-minutes: ${{ inputs.evaluation-only && 180 || 30 }}
+    timeout-minutes: ${{ inputs.evaluation-only && 360 || 30 }}
     permissions:
       attestations: read # verify a selected cupboard release
       contents: read # check out the flake source
