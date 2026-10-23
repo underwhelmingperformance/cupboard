@@ -98,7 +98,7 @@ it.each([false, true])(
 			await writeFile(
 				path.join(directory, 'nix'),
 				String.raw`#!${process.execPath}
-const fs=require('node:fs');const args=process.argv.slice(2);fs.appendFileSync(process.env.CALLS,JSON.stringify({ kind:'nix',args })+'\n');const raw=${JSON.stringify(raw)};const expression=args.at(-1);process.stdout.write(expression==='builtins.length'?'6':JSON.stringify(raw[Number(expression.match(/builtins\.elemAt targets (\d+)/)[1])]));
+const fs=require('node:fs');const args=process.argv.slice(2);fs.appendFileSync(process.env.CALLS,JSON.stringify({ kind:'nix',args })+'\n');const raw=${JSON.stringify(raw)};process.stdout.write(JSON.stringify(raw));
 `,
 				{ mode: 0o700 }
 			);
@@ -134,27 +134,11 @@ const fs=require('node:fs');const cp=require('node:child_process');const args=pr
 			expect({
 				result,
 				output: await readFile(output, 'utf8'),
-				calls: observed.toSorted((left, right) =>
-					JSON.stringify(left).localeCompare(JSON.stringify(right))
-				)
+				calls: observed
 			}).toStrictEqual({
 				result: { stdout: '', stderr: '' },
 				output: `manifest=${JSON.stringify(raw)}\n`,
 				calls: [
-					...Array.from({ length: 6 }, (_, index) => ({
-						kind: 'nix',
-						args: [
-							'eval',
-							'--json',
-							'.#targets',
-							'--apply',
-							`targets: builtins.removeAttrs (builtins.elemAt targets ${String(index)}) [ "rootDrvPath" ]`
-						]
-					})),
-					{
-						kind: 'nix',
-						args: ['eval', '--json', '.#targets', '--apply', 'builtins.length']
-					},
 					...(privateRead
 						? [
 								{
@@ -171,10 +155,18 @@ const fs=require('node:fs');const cp=require('node:child_process');const args=pr
 									]
 								}
 							]
-						: [])
-				].toSorted((left, right) =>
-					JSON.stringify(left).localeCompare(JSON.stringify(right))
-				)
+						: []),
+					{
+						kind: 'nix',
+						args: [
+							'eval',
+							'--json',
+							'.#targets',
+							'--apply',
+							'targets: builtins.map (target: builtins.removeAttrs target [ "rootDrvPath" ]) targets'
+						]
+					}
+				]
 			});
 		} finally {
 			await rm(directory, { recursive: true, force: true });
