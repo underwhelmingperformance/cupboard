@@ -1,8 +1,11 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { setImmediate } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import { stopLogging } from '@cupboard/logger/testing';
 import { observeChildProcess } from '@cupboard/shared/child-process';
@@ -18,6 +21,7 @@ import {
 import {
 	evaluationInputs,
 	nativeEvaluationMain,
+	nativeEvaluationWorker,
 	runNativeEvaluation
 } from './native.ts';
 
@@ -37,6 +41,98 @@ const raw = [
 		rootSuffix: '/package/'
 	}
 ];
+
+it.each(['0', '1'])(
+	'runs the packaged action with runner debug=%s',
+	async (debug) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-evaluation-bundle-')
+		);
+		onTestFinished(() => rm(directory, { recursive: true, force: true }));
+		const nix = path.join(directory, 'nix');
+		await writeFile(
+			nix,
+			`#!${process.execPath}\nsetTimeout(() => process.stdout.write(${JSON.stringify(JSON.stringify(raw))}), 100);\n`
+		);
+		await chmod(nix, 0o755);
+		const output = path.join(directory, 'output');
+		const result = await promisify(execFile)(
+			process.execPath,
+			[
+				fileURLToPath(
+					new URL('../../evaluate-targets/dist/main.cjs', import.meta.url)
+				)
+			],
+			{
+				env: {
+					...process.env,
+					PATH: `${directory}${path.delimiter}${process.env.PATH ?? ''}`,
+					INPUT_TARGETS: '.#targets',
+					RUNNER_DEBUG: debug,
+					GITHUB_OUTPUT: output
+				}
+			}
+		);
+		expect({
+			stdout: result.stdout,
+			manifest: await readFile(output, 'utf8'),
+			progress: result.stderr.includes('"phase":"manifest"'),
+			resources: result.stderr.includes('[evaluation resource-sample]')
+		}).toStrictEqual({
+			stdout: '',
+			manifest: `manifest=${JSON.stringify(raw)}\n`,
+			progress: debug === '1',
+			resources: debug === '1'
+		});
+	}
+);
+
+it.each(['', '0', '1'])(
+	'writes progress only to stderr in runner debug mode %j',
+	async (debug) => {
+		const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+		onTestFinished(() => {
+			now.mockRestore();
+		});
+		const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+		try {
+			await nativeEvaluationWorker(
+				{
+					INPUT_TARGETS: '.#targets',
+					RUNNER_DEBUG: debug
+				},
+				new AbortController().signal,
+				{
+					capture: () => Promise.resolve(JSON.stringify(raw))
+				}
+			);
+			expect({
+				stdout: stdout.mock.calls,
+				stderr: stderr.mock.calls.map(([value]): unknown =>
+					JSON.parse(String(value))
+				)
+			}).toStrictEqual({
+				stdout: [[`${JSON.stringify(raw)}\n`]],
+				stderr:
+					debug === '1'
+						? [
+								{ phase: 'manifest', status: 'started', elapsedMs: 0 },
+								{
+									phase: 'manifest',
+									status: 'completed',
+									targets: 1,
+									elapsedMs: 0
+								}
+							]
+						: []
+			});
+		} finally {
+			stdout.mockRestore();
+			stderr.mockRestore();
+		}
+	}
+);
 
 it('reads manifest inputs without changing the publication mode', () => {
 	expect(
@@ -576,64 +672,49 @@ it('prevents output if cancellation arrives after the wrapper closes successfull
 	});
 });
 
-it('stops all peers on a captured-byte overflow before the overflowing child closes', async () => {
-	const children = Array.from({ length: 4 }, () => new ControlledProcess());
-	const calls: number[] = [];
-	const started = Promise.withResolvers<undefined>();
+it('terminates an overflowing evaluation and waits for process closure', async () => {
+	const child = new ControlledProcess();
+	const calls: string[][] = [];
 	onTestFinished(() => {
-		for (const child of children) {
-			child.close(1);
-		}
-	});
-	const result = resultOrError(
-		evaluateTargetManifest(
-			{ targets: '.#targets', publish: 'outputs' },
-			(arguments_, signal, onFailure: (error: unknown) => void) => {
-				if (arguments_.at(-1) === 'builtins.length') {
-					return Promise.resolve('6');
-				}
-				const index = Number(arguments_.at(-1)?.match(/ (\d+)$/u)?.[1]);
-				calls.push(index);
-				const child = children[index];
-				if (child === undefined) {
-					return Promise.reject(new Error('A target launched after failure'));
-				}
-				const captured = captureEvaluationProcess(
-					{
-						executable: 'nix',
-						arguments: arguments_,
-						environment: {},
-						signal,
-						maximumOutputBytes: 3,
-						onFailure
-					},
-					{ spawn: () => child }
-				);
-				if (calls.length === children.length) {
-					started.resolve(undefined);
-				}
-				return captured;
-			}
-		)
-	);
-	await started.promise;
-	expect(calls).toStrictEqual([0, 1, 2, 3]);
-	children[0]?.write('four');
-	expect(children.map((child) => child.events)).toStrictEqual(
-		Array.from({ length: 4 }, () => ['SIGTERM'])
-	);
-	for (const child of children) {
 		child.close(1);
-	}
+	});
+	const run = async (): Promise<unknown> => {
+		const error = await resultOrError(
+			evaluateTargetManifest(
+				{ targets: '.#targets', publish: 'outputs' },
+				(arguments_, signal, onFailure) => {
+					calls.push([...arguments_]);
+					return captureEvaluationProcess(
+						{
+							executable: 'nix',
+							arguments: arguments_,
+							environment: {},
+							signal,
+							maximumOutputBytes: 3,
+							onFailure
+						},
+						{ spawn: () => child }
+					);
+				}
+			)
+		);
+		child.events.push('returned');
+		return error;
+	};
+	const result = run();
+	child.write('four');
+	await setImmediate();
+	expect(child.events).toStrictEqual(['SIGTERM']);
+	child.close(1);
 	const error = await result;
 	expect({
-		name: error instanceof Error ? error.name : undefined,
+		error: error instanceof Error ? error.name : undefined,
 		calls,
-		events: children.map((child) => child.events)
+		events: child.events
 	}).toStrictEqual({
-		name: 'ManifestOutputLimitError',
-		calls: [0, 1, 2, 3],
-		events: Array.from({ length: 4 }, () => ['SIGTERM', 'close'])
+		error: 'ManifestOutputLimitError',
+		calls: [['eval', '--json', '.#targets', '--apply', 'targets: targets']],
+		events: ['SIGTERM', 'close', 'returned']
 	});
 });
 

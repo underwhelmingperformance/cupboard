@@ -536,6 +536,18 @@ configuration:
 For outputs too large for a GitHub-hosted runner, see
 [Building elsewhere](./building-elsewhere.md).
 
+The complete manifest is evaluated in one Nix process so targets can share
+evaluation state. The `nix-config` input applies to this evaluation as well as
+the cohort builds.
+
+When runner debug logging is enabled, manifest evaluation reports its start,
+completion, target count and elapsed time to stderr. A resource monitor also
+samples process memory, available memory, swap, pressure and cgroup counters
+where supported. The monitor also reports disk space and the processes with the
+largest resident memory use. Resource samples are collected at five-second
+intervals, and monitoring stops when evaluation finishes. Normal runs do not
+collect these diagnostics. Monitor failures do not fail the evaluation.
+
 ## Common tasks
 
 ### Moving to a new cupboard release

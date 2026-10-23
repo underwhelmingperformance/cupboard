@@ -1,5 +1,5 @@
 name: Evaluate cupboard target manifest
-description: Evaluates the target manifest with at most four Nix processes.
+description: Evaluates the complete target manifest in one Nix process.
 inputs:
   targets:
     description: Nix attribute that produces the target manifest.

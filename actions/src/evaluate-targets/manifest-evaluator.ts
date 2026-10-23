@@ -6,7 +6,6 @@ import {
 	observeChildProcess,
 	waitForAbortableChildProcess
 } from '@cupboard/shared/child-process';
-import { drainWithConcurrency } from '@cupboard/shared/concurrency';
 import { CodedError } from '@cupboard/shared/errors';
 
 import type { Environment } from '../inputs.ts';
@@ -14,9 +13,23 @@ import { publishTargetsSchema } from '../publish-plan.ts';
 
 const maximumCapturedOutputBytes = 256 * 1024 * 1024;
 
+export type ManifestEvaluationProgress =
+	| {
+			readonly phase: 'manifest';
+			readonly status: 'started';
+			readonly elapsedMs: number;
+	  }
+	| {
+			readonly phase: 'manifest';
+			readonly status: 'completed';
+			readonly elapsedMs: number;
+			readonly targets: number;
+	  };
+
 export interface ManifestEvaluationOptions {
 	readonly targets: string;
 	readonly publish: string;
+	readonly onProgress?: (event: ManifestEvaluationProgress) => void;
 	readonly maximumOutputBytes?: number;
 }
 
@@ -45,19 +58,9 @@ export interface CaptureDependencies {
 	readonly escalationScheduler?: ChildProcessEscalationScheduler;
 }
 
-class ManifestCountInvalidError extends CodedError {
-	constructor(options?: ErrorOptions) {
-		super(
-			'The target manifest length must be a positive safe integer.',
-			options
-		);
-		this.name = 'ManifestCountInvalidError';
-	}
-}
-
 class ManifestJsonInvalidError extends CodedError {
-	constructor(index: number, options: ErrorOptions) {
-		super(`Target ${String(index)} returned invalid JSON.`, options);
+	constructor(options: ErrorOptions) {
+		super('The target manifest returned invalid JSON.', options);
 		this.name = 'ManifestJsonInvalidError';
 	}
 }
@@ -194,8 +197,7 @@ export async function captureEvaluationProcess(
 }
 
 /**
- * Evaluates a complete manifest with bounded concurrency while preserving the
- * original JSON objects and their order.
+ * Evaluates every requested target within one Nix process.
  */
 export async function evaluateTargetManifest(
 	options: ManifestEvaluationOptions,
@@ -203,88 +205,44 @@ export async function evaluateTargetManifest(
 	externalSignal?: AbortSignal
 ): Promise<string> {
 	const controller = new AbortController();
-	const fail = (error: unknown): void => {
-		controller.abort(error);
-	};
-	const abort = (): void => {
-		fail(externalSignal?.reason);
-	};
-	externalSignal?.addEventListener('abort', abort, { once: true });
-	if (externalSignal?.aborted === true) {
-		abort();
-	}
+	const signal =
+		externalSignal === undefined
+			? controller.signal
+			: AbortSignal.any([controller.signal, externalSignal]);
+	const startedAt = performance.now();
+	signal.throwIfAborted();
+	options.onProgress?.({ phase: 'manifest', status: 'started', elapsedMs: 0 });
+	const expression =
+		options.publish === 'none'
+			? 'targets: builtins.map (target: builtins.removeAttrs target [ "rootDrvPath" ]) targets'
+			: 'targets: targets';
+	const output = await runner(
+		['eval', '--json', options.targets, '--apply', expression],
+		signal,
+		(error) => {
+			controller.abort(error);
+		}
+	);
+	signal.throwIfAborted();
 	const limit = options.maximumOutputBytes ?? maximumCapturedOutputBytes;
-	try {
-		controller.signal.throwIfAborted();
-		const countOutput = await runner(
-			['eval', '--json', options.targets, '--apply', 'builtins.length'],
-			controller.signal,
-			fail
-		);
-		let count: unknown;
-		try {
-			count = JSON.parse(countOutput);
-		} catch (error) {
-			throw new ManifestCountInvalidError({ cause: error });
-		}
-		if (
-			typeof count !== 'number' ||
-			!Number.isSafeInteger(count) ||
-			count <= 0
-		) {
-			throw new ManifestCountInvalidError();
-		}
-		const targetCount = count;
-		const values: unknown[] = [];
-		let bytes = 2;
-		let nextIndex = 0;
-		const indices: AsyncIterator<number> = {
-			next() {
-				if (nextIndex === targetCount) {
-					return Promise.resolve({ done: true, value: undefined });
-				}
-				const index = nextIndex;
-				nextIndex += 1;
-				return Promise.resolve({ done: false, value: index });
-			}
-		};
-		await drainWithConcurrency(indices, 4, async (index) => {
-			try {
-				controller.signal.throwIfAborted();
-				const expression =
-					options.publish === 'none'
-						? `targets: builtins.removeAttrs (builtins.elemAt targets ${String(index)}) [ "rootDrvPath" ]`
-						: `targets: builtins.elemAt targets ${String(index)}`;
-				const output = await runner(
-					['eval', '--json', options.targets, '--apply', expression],
-					controller.signal,
-					fail
-				);
-				let value: unknown;
-				try {
-					value = JSON.parse(output);
-				} catch (error) {
-					throw new ManifestJsonInvalidError(index, { cause: error });
-				}
-				const addition =
-					Buffer.byteLength(JSON.stringify(value)) + (index === 0 ? 0 : 1);
-				if (bytes + addition > limit) {
-					throw new ManifestOutputLimitError(limit);
-				}
-				bytes += addition;
-				values[index] = value;
-			} catch (error) {
-				controller.abort(error);
-				throw controller.signal.reason;
-			}
-		});
-		controller.signal.throwIfAborted();
-		const validation = publishTargetsSchema.safeParse(values);
-		if (!validation.success) {
-			throw new ManifestSchemaInvalidError({ cause: validation.error });
-		}
-		return JSON.stringify(values);
-	} finally {
-		externalSignal?.removeEventListener('abort', abort);
+	if (Buffer.byteLength(output) > limit) {
+		throw new ManifestOutputLimitError(limit);
 	}
+	let values: unknown;
+	try {
+		values = JSON.parse(output);
+	} catch (error) {
+		throw new ManifestJsonInvalidError({ cause: error });
+	}
+	const validation = publishTargetsSchema.safeParse(values);
+	if (!validation.success) {
+		throw new ManifestSchemaInvalidError({ cause: validation.error });
+	}
+	options.onProgress?.({
+		phase: 'manifest',
+		status: 'completed',
+		targets: validation.data.length,
+		elapsedMs: performance.now() - startedAt
+	});
+	return JSON.stringify(values);
 }
