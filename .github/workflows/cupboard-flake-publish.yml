@@ -281,6 +281,19 @@ on:
         required: false
         default: ubuntu-latest
         type: string
+      evaluation-concurrency:
+        description:
+          Maximum simultaneous Nix evaluations. auto uses the number of
+          available processors.
+        required: false
+        default: auto
+        type: string
+      evaluation-only:
+        description:
+          Stop after manifest evaluation without planning builds or publishing.
+        required: false
+        default: false
+        type: boolean
       enable-packing:
         description:
           Pack small single-target cohorts into as few jobs as fit within
@@ -570,6 +583,7 @@ jobs:
         uses: $/actions/evaluate-targets
         id: targets
         with:
+          concurrency: ${{ inputs.evaluation-concurrency }}
           targets: ${{ inputs.targets }}
           publish: ${{ needs.configure.outputs.publish }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
@@ -580,6 +594,7 @@ jobs:
 
       - uses: $/actions/plan
         id: plan
+        if: ${{ !inputs.evaluation-only }}
         with:
           targets: ${{ steps.targets.outputs.manifest }}
           url: ${{ inputs.url }}
@@ -614,7 +629,7 @@ jobs:
 
   cohort:
     needs: [configure, plan]
-    if: ${{ needs.plan.outputs.cohort-count != '0' }}
+    if: ${{ !inputs.evaluation-only && needs.plan.outputs.cohort-count != '0' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.cohort-matrix) }}

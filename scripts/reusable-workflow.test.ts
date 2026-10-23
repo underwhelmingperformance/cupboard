@@ -547,6 +547,7 @@ describe('cupboard acquisition', () => {
 		).toStrictEqual([
 			{
 				targets: '${{ inputs.targets }}',
+				concurrency: '${{ inputs.evaluation-concurrency }}',
 				publish: '${{ needs.configure.outputs.publish }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
@@ -555,6 +556,25 @@ describe('cupboard acquisition', () => {
 				'read-session-view': '${{ steps.setup.outputs.read-session-view }}'
 			}
 		]);
+	});
+
+	it('can stop after manifest evaluation before the planner changes retention roots', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const plan = workflow.jobs.plan?.steps.find((step) => step.id === 'plan');
+		expect({
+			defaultConcurrency:
+				workflow.on.workflow_call?.inputs['evaluation-concurrency']?.default,
+			defaultEvaluationOnly:
+				workflow.on.workflow_call?.inputs['evaluation-only']?.default,
+			plannerCondition: plan?.if,
+			cohortCondition: workflow.jobs.cohort?.if
+		}).toStrictEqual({
+			defaultConcurrency: 'auto',
+			defaultEvaluationOnly: false,
+			plannerCondition: '${{ !inputs.evaluation-only }}',
+			cohortCondition:
+				"${{ !inputs.evaluation-only && needs.plan.outputs.cohort-count != '0' }}"
+		});
 	});
 
 	it('creates the pull-request cache from the plan job alone', async () => {
@@ -830,7 +850,7 @@ describe('cohort planning and publication', () => {
 			].filter((value) => value !== undefined)
 		}).toStrictEqual({
 			name: '${{ matrix.name }}',
-			if: "${{ needs.plan.outputs.cohort-count != '0' }}",
+			if: "${{ !inputs.evaluation-only && needs.plan.outputs.cohort-count != '0' }}",
 			strategy: {
 				'fail-fast': false,
 				matrix: '${{ fromJSON(needs.plan.outputs.cohort-matrix) }}'

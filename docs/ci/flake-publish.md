@@ -529,12 +529,24 @@ configuration:
   at a time.
 - `plan-runner` sets the runner label for the configure, plan and cache-removal
   jobs.
+- `evaluation-concurrency` limits simultaneous Nix evaluations of the target
+  manifest. The default, `auto`, uses the number of available processors. Set it
+  to `1` to evaluate targets serially.
+- `evaluation-only: true` stops after manifest evaluation, before the planner
+  updates retention roots or starts build jobs. Use it with a branch run when
+  comparing evaluation settings.
 - `nix-config` specifies a flake attribute containing extra `nix.conf` text for
   the plan and cohort jobs. For example, `.#ciNixConfig` might evaluate to
   `"http-connections = 64\n"`.
 
 For outputs too large for a GitHub-hosted runner, see
 [Building elsewhere](./building-elsewhere.md).
+
+When GitHub runner debug logging is enabled, manifest evaluation logs each Nix
+process's arguments, PID and exit status. It also streams resource samples every
+five seconds and follows Linux kernel and memory-manager journal messages when
+the runner permits access. These diagnostics go to the job log so the available
+samples can be read after a runner shutdown.
 
 ## Common tasks
 

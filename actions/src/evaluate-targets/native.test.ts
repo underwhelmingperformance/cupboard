@@ -13,7 +13,8 @@ import {
 	type CapturedCommand,
 	type CapturedEvaluationProcess,
 	captureEvaluationProcess,
-	evaluateTargetManifest
+	evaluateTargetManifest,
+	type EvaluationProcessEvent
 } from './manifest-evaluator.ts';
 import {
 	evaluationInputs,
@@ -181,6 +182,7 @@ class ControlledProcess implements CapturedEvaluationProcess {
 		| ((status: number | null, signal: NodeJS.Signals | undefined) => void)
 		| undefined;
 	private stdoutListener: ((chunk: Buffer) => void) | undefined;
+	readonly pid = 123;
 	readonly events: string[] = [];
 	kill(signal: NodeJS.Signals): boolean {
 		this.events.push(signal);
@@ -214,6 +216,50 @@ class ControlledProcess implements CapturedEvaluationProcess {
 		this.errorListener?.(value);
 	}
 }
+
+it('reports evaluation process identity and completion without changing stdout', async () => {
+	const child = new ControlledProcess();
+	const events: EvaluationProcessEvent[] = [];
+	const arguments_ = [
+		'eval',
+		'--json',
+		'.#targets',
+		'--apply',
+		'builtins.length'
+	];
+	const result = captureEvaluationProcess(
+		{
+			executable: 'nix',
+			arguments: arguments_,
+			environment: {},
+			diagnostic: (event) => {
+				events.push(event);
+			}
+		},
+		{ spawn: () => child }
+	);
+	child.write('6');
+	child.close(0);
+	expect({ stdout: await result, events }).toStrictEqual({
+		stdout: '6',
+		events: [
+			{
+				phase: 'started',
+				pid: 123,
+				arguments: arguments_,
+				status: undefined,
+				signal: undefined
+			},
+			{
+				phase: 'closed',
+				pid: 123,
+				arguments: arguments_,
+				status: 0,
+				signal: undefined
+			}
+		]
+	});
+});
 
 it.each([1, 3])(
 	'upgrades all %i active children after external cancellation during internal grace',

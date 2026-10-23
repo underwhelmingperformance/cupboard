@@ -17,6 +17,7 @@ const maximumCapturedOutputBytes = 256 * 1024 * 1024;
 export interface ManifestEvaluationOptions {
 	readonly targets: string;
 	readonly publish: string;
+	readonly concurrency?: number;
 	readonly maximumOutputBytes?: number;
 }
 
@@ -27,6 +28,7 @@ export type ManifestRunner = (
 ) => Promise<string>;
 
 export interface CapturedEvaluationProcess extends AbortableChildProcessLifecycle {
+	readonly pid?: number;
 	onStdout(listener: (chunk: Buffer) => void): void;
 }
 
@@ -38,6 +40,15 @@ export interface CapturedCommand {
 	readonly externalSignal?: AbortSignal;
 	readonly maximumOutputBytes?: number;
 	readonly onFailure?: (error: unknown) => void;
+	readonly diagnostic?: (event: EvaluationProcessEvent) => void;
+}
+
+export interface EvaluationProcessEvent {
+	readonly phase: 'started' | 'closed';
+	readonly pid: number | undefined;
+	readonly arguments: readonly string[];
+	readonly status: number | null | undefined;
+	readonly signal: NodeJS.Signals | undefined;
 }
 
 export interface CaptureDependencies {
@@ -100,6 +111,7 @@ function spawnCapturedProcess(
 	});
 	return {
 		...observeChildProcess(child),
+		...(child.pid !== undefined && { pid: child.pid }),
 		onStdout(listener) {
 			child.stdout.on('data', listener);
 		}
@@ -125,6 +137,13 @@ export async function captureEvaluationProcess(
 	];
 	const signal = AbortSignal.any(signals);
 	const child = (dependencies.spawn ?? spawnCapturedProcess)(command);
+	command.diagnostic?.({
+		phase: 'started',
+		pid: child.pid,
+		arguments: command.arguments,
+		status: undefined,
+		signal: undefined
+	});
 	let termination: 'none' | 'graceful' | 'forced' = 'none';
 	let isClosed = false;
 	const owner: AbortableChildProcessLifecycle = {
@@ -152,6 +171,13 @@ export async function captureEvaluationProcess(
 		onceClose(listener) {
 			child.onceClose((status, terminationSignal) => {
 				isClosed = true;
+				command.diagnostic?.({
+					phase: 'closed',
+					pid: child.pid,
+					arguments: command.arguments,
+					status,
+					signal: terminationSignal
+				});
 				listener(status, terminationSignal);
 			});
 		}
@@ -248,36 +274,40 @@ export async function evaluateTargetManifest(
 				return Promise.resolve({ done: false, value: index });
 			}
 		};
-		await drainWithConcurrency(indices, 4, async (index) => {
-			try {
-				controller.signal.throwIfAborted();
-				const expression =
-					options.publish === 'none'
-						? `targets: builtins.removeAttrs (builtins.elemAt targets ${String(index)}) [ "rootDrvPath" ]`
-						: `targets: builtins.elemAt targets ${String(index)}`;
-				const output = await runner(
-					['eval', '--json', options.targets, '--apply', expression],
-					controller.signal,
-					fail
-				);
-				let value: unknown;
+		await drainWithConcurrency(
+			indices,
+			Math.min(options.concurrency ?? 4, targetCount),
+			async (index) => {
 				try {
-					value = JSON.parse(output);
+					controller.signal.throwIfAborted();
+					const expression =
+						options.publish === 'none'
+							? `targets: builtins.removeAttrs (builtins.elemAt targets ${String(index)}) [ "rootDrvPath" ]`
+							: `targets: builtins.elemAt targets ${String(index)}`;
+					const output = await runner(
+						['eval', '--json', options.targets, '--apply', expression],
+						controller.signal,
+						fail
+					);
+					let value: unknown;
+					try {
+						value = JSON.parse(output);
+					} catch (error) {
+						throw new ManifestJsonInvalidError(index, { cause: error });
+					}
+					const addition =
+						Buffer.byteLength(JSON.stringify(value)) + (index === 0 ? 0 : 1);
+					if (bytes + addition > limit) {
+						throw new ManifestOutputLimitError(limit);
+					}
+					bytes += addition;
+					values[index] = value;
 				} catch (error) {
-					throw new ManifestJsonInvalidError(index, { cause: error });
+					controller.abort(error);
+					throw controller.signal.reason;
 				}
-				const addition =
-					Buffer.byteLength(JSON.stringify(value)) + (index === 0 ? 0 : 1);
-				if (bytes + addition > limit) {
-					throw new ManifestOutputLimitError(limit);
-				}
-				bytes += addition;
-				values[index] = value;
-			} catch (error) {
-				controller.abort(error);
-				throw controller.signal.reason;
 			}
-		});
+		);
 		controller.signal.throwIfAborted();
 		const validation = publishTargetsSchema.safeParse(values);
 		if (!validation.success) {

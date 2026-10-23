@@ -9,12 +9,14 @@ import { cupboardDebugArguments } from '../cupboard-run.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { publishTargetsSchema } from '../publish-plan.ts';
 
+import { resolveEvaluationConcurrency } from './concurrency.ts';
 import {
 	type CapturedCommand,
 	captureEvaluationProcess,
 	evaluateTargetManifest,
 	type ManifestEvaluationOptions
 } from './manifest-evaluator.ts';
+import { withEvaluationMonitor } from './monitor.ts';
 
 export interface NativeEvaluationDependencies {
 	readonly workerPath?: string;
@@ -86,12 +88,14 @@ export async function nativeEvaluationMain(
 		];
 	}
 	const [executable, ...arguments_] = command;
-	const stdout = await (dependencies.capture ?? captureEvaluationProcess)({
-		executable,
-		arguments: arguments_,
-		environment,
-		...(signal !== undefined && { signal })
-	});
+	const stdout = await withEvaluationMonitor(environment, () =>
+		(dependencies.capture ?? captureEvaluationProcess)({
+			executable,
+			arguments: arguments_,
+			environment,
+			...(signal !== undefined && { signal })
+		})
+	);
 	signal?.throwIfAborted();
 	const manifest: unknown = JSON.parse(stdout);
 	publishTargetsSchema.parse(manifest);
@@ -105,8 +109,24 @@ export async function nativeEvaluationWorker(
 	environment: Environment,
 	signal: AbortSignal
 ): Promise<void> {
+	const concurrency = await resolveEvaluationConcurrency(
+		environment.INPUT_CONCURRENCY
+	);
+	const diagnostic =
+		environment.RUNNER_DEBUG === '1'
+			? (event: unknown): void => {
+					process.stderr.write(
+						`${JSON.stringify({ timestamp: new Date().toISOString(), event })}\n`
+					);
+				}
+			: undefined;
+	diagnostic?.({
+		phase: 'configuration',
+		requested: environment.INPUT_CONCURRENCY ?? 'auto',
+		concurrency
+	});
 	const manifest = await evaluateTargetManifest(
-		evaluationInputs(environment),
+		{ ...evaluationInputs(environment), concurrency },
 		(arguments_, internalSignal, onFailure) =>
 			captureEvaluationProcess({
 				executable: 'nix',
@@ -114,7 +134,8 @@ export async function nativeEvaluationWorker(
 				environment,
 				signal: internalSignal,
 				externalSignal: signal,
-				onFailure
+				onFailure,
+				...(diagnostic !== undefined && { diagnostic })
 			}),
 		signal
 	);

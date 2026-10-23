@@ -29,6 +29,41 @@ const errorName = (error: unknown): string | undefined =>
 	error instanceof Error ? error.name : undefined;
 
 describe('target manifest evaluation', () => {
+	it.each([1, 2, 4])('limits active evaluations to %i', async (concurrency) => {
+		const release = Promise.withResolvers<undefined>();
+		const ready = Promise.withResolvers<undefined>();
+		let active = 0;
+		let maximumActive = 0;
+		const runner: ManifestRunner = async (arguments_) => {
+			if (arguments_.at(-1) === 'builtins.length') {
+				return '4';
+			}
+			const index = Number(arguments_.at(-1)?.match(/ (\d+)$/u)?.[1]);
+			active += 1;
+			maximumActive = Math.max(maximumActive, active);
+			if (active === concurrency) {
+				ready.resolve(undefined);
+			}
+			await release.promise;
+			active -= 1;
+			return JSON.stringify(target(index));
+		};
+		const evaluation = evaluateTargetManifest(
+			{ ...options, concurrency },
+			runner
+		);
+		await ready.promise;
+		const initialActive = active;
+		release.resolve(undefined);
+		const manifest: unknown = JSON.parse(await evaluation);
+		expect({ initialActive, maximumActive, active, manifest }).toStrictEqual({
+			initialActive: concurrency,
+			maximumActive: concurrency,
+			active: 0,
+			manifest: Array.from({ length: 4 }, (_, index) => target(index))
+		});
+	});
+
 	it('discovers the count, bounds evaluation and preserves raw manifest order', async () => {
 		const pending = Array.from({ length: 6 }, () =>
 			Promise.withResolvers<string>()
