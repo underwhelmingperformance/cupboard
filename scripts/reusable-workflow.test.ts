@@ -548,6 +548,7 @@ describe('cupboard acquisition', () => {
 			{
 				targets: '${{ inputs.targets }}',
 				concurrency: '${{ inputs.evaluation-concurrency }}',
+				'batch-size': '${{ inputs.evaluation-batch-size }}',
 				publish: '${{ needs.configure.outputs.publish }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',

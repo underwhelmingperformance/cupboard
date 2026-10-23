@@ -41,6 +41,12 @@ export function evaluationInputs(
 ): ManifestEvaluationOptions {
 	return {
 		targets: requireEnvironment(environment, 'INPUT_TARGETS'),
+		batchSize: z.coerce
+			.number()
+			.int()
+			.positive()
+			.max(Number.MAX_SAFE_INTEGER)
+			.parse(environment['INPUT_BATCH-SIZE'] ?? '1'),
 		publish: z
 			.enum(['none', 'outputs', 'built', 'closure'])
 			.parse(environment.INPUT_PUBLISH ?? 'outputs')
@@ -112,6 +118,7 @@ export async function nativeEvaluationWorker(
 	const concurrency = await resolveEvaluationConcurrency(
 		environment.INPUT_CONCURRENCY
 	);
+	const inputs = evaluationInputs(environment);
 	const diagnostic =
 		environment.RUNNER_DEBUG === '1'
 			? (event: unknown): void => {
@@ -123,10 +130,11 @@ export async function nativeEvaluationWorker(
 	diagnostic?.({
 		phase: 'configuration',
 		requested: environment.INPUT_CONCURRENCY ?? 'auto',
-		concurrency
+		concurrency,
+		batchSize: inputs.batchSize
 	});
 	const manifest = await evaluateTargetManifest(
-		{ ...evaluationInputs(environment), concurrency },
+		{ ...inputs, concurrency },
 		(arguments_, internalSignal, onFailure) =>
 			captureEvaluationProcess({
 				executable: 'nix',

@@ -1,6 +1,10 @@
 name: Evaluate cupboard target manifest
 description: Evaluates the target manifest with configurable Nix concurrency.
 inputs:
+  batch-size:
+    description: Maximum number of targets evaluated by each Nix process.
+    required: false
+    default: '1'
   concurrency:
     description:
       Maximum simultaneous Nix evaluations. auto uses the number of available

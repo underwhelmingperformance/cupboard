@@ -29,6 +29,72 @@ const errorName = (error: unknown): string | undefined =>
 	error instanceof Error ? error.name : undefined;
 
 describe('target manifest evaluation', () => {
+	it.each(['outputs', 'none'])(
+		'evaluates batches with shared Nix state and preserves publish=%s',
+		async (publish) => {
+			const fixture = `builtins.genList (index: {
+				attr = ".#package" + builtins.toString index;
+				system = "x86_64-linux";
+				os = "ubuntu-latest";
+				rootSuffix = "/package" + builtins.toString index + "/";
+				${publish === 'none' ? 'rootDrvPath = throw "derivation forced";' : ''}
+				outputs = [ "out" ];
+			}) 9`;
+			const calls: string[][] = [];
+			const runner: ManifestRunner = async (arguments_) => {
+				calls.push([...arguments_]);
+				const result = await execFileAsync(
+					'nix',
+					['eval', '--json', '--expr', fixture, ...arguments_.slice(3)],
+					{ encoding: 'utf8', maxBuffer: 1024 * 1024 }
+				);
+				return result.stdout;
+			};
+			const manifest = await evaluateTargetManifest(
+				{ ...options, publish, concurrency: 1, batchSize: 8 },
+				runner
+			);
+			const parsed: unknown = JSON.parse(manifest);
+			expect({
+				manifest: parsed,
+				processes: calls.length
+			}).toStrictEqual({
+				manifest: Array.from({ length: 9 }, (_, index) => ({
+					...target(index),
+					outputs: ['out']
+				})),
+				processes: 3
+			});
+		}
+	);
+
+	it('rejects an incomplete batch before scheduling more targets', async () => {
+		const calls: string[][] = [];
+		await expect(
+			evaluateTargetManifest(
+				{ ...options, concurrency: 1, batchSize: 2 },
+				(arguments_) => {
+					calls.push([...arguments_]);
+					return Promise.resolve(
+						arguments_.at(-1) === 'builtins.length'
+							? '3'
+							: JSON.stringify([target(0)])
+					);
+				}
+			)
+		).rejects.toThrow();
+		expect(calls).toStrictEqual([
+			['eval', '--json', '.#targets', '--apply', 'builtins.length'],
+			[
+				'eval',
+				'--json',
+				'.#targets',
+				'--apply',
+				'targets: builtins.genList (offset: builtins.elemAt targets (0 + offset)) 2'
+			]
+		]);
+	});
+
 	it.each([1, 2, 4])('limits active evaluations to %i', async (concurrency) => {
 		const release = Promise.withResolvers<undefined>();
 		const ready = Promise.withResolvers<undefined>();

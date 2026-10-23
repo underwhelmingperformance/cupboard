@@ -284,6 +284,11 @@ on:
         required: false
         default: false
         type: boolean
+      evaluation-batch-size:
+        description: Maximum number of targets evaluated by each Nix process.
+        required: false
+        default: 1
+        type: number
       enable-packing:
         description:
           Pack small single-target cohorts into as few jobs as fit within
@@ -429,6 +434,7 @@ jobs:
       plan-runner: ${{ inputs.plan-runner }}
       evaluation-concurrency: ${{ inputs.evaluation-concurrency }}
       evaluation-only: ${{ inputs.evaluation-only }}
+      evaluation-batch-size: ${{ inputs.evaluation-batch-size }}
       enable-packing: ${{ inputs.enable-packing }}
       pack-capacity: ${{ inputs.pack-capacity }}
       merged-pull-request: ${{ needs.lookup.outputs.pull-request }}

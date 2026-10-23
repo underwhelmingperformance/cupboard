@@ -294,6 +294,11 @@ on:
         required: false
         default: false
         type: boolean
+      evaluation-batch-size:
+        description: Maximum number of targets evaluated by each Nix process.
+        required: false
+        default: 1
+        type: number
       enable-packing:
         description:
           Pack small single-target cohorts into as few jobs as fit within
@@ -478,7 +483,7 @@ jobs:
     needs: configure
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ${{ inputs.plan-runner }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.evaluation-only && 180 || 30 }}
     permissions:
       attestations: read # verify a selected cupboard release
       contents: read # check out the flake source
@@ -584,6 +589,7 @@ jobs:
         id: targets
         with:
           concurrency: ${{ inputs.evaluation-concurrency }}
+          batch-size: ${{ inputs.evaluation-batch-size }}
           targets: ${{ inputs.targets }}
           publish: ${{ needs.configure.outputs.publish }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}

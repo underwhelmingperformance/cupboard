@@ -532,6 +532,9 @@ configuration:
 - `evaluation-concurrency` limits simultaneous Nix evaluations of the target
   manifest. The default, `auto`, uses the number of available processors. Set it
   to `1` to evaluate targets serially.
+- `evaluation-batch-size` sets the maximum number of targets per Nix process. It
+  defaults to `1`. Larger batches reuse evaluation state between targets but can
+  use more memory within each process.
 - `evaluation-only: true` stops after manifest evaluation, before the planner
   updates retention roots or starts build jobs. Use it with a branch run when
   comparing evaluation settings.

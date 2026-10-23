@@ -62,6 +62,7 @@ The calling job must grant:
 | `plan-runner` | string | `ubuntu-latest` | Runner label for the configure, plan and cache-removal jobs. The plan job evaluates the flake with the input SSH key and can request an OIDC token. If your repository has self-hosted runners, keep this on a GitHub-hosted label or restrict the job with runner groups. See docs/security.md#runners. |
 | `evaluation-concurrency` | string | `auto` | Maximum simultaneous Nix evaluations. auto uses the number of available processors. |
 | `evaluation-only` | boolean | `false` | Stop after manifest evaluation without planning builds or publishing. |
+| `evaluation-batch-size` | number | `1` | Maximum number of targets evaluated by each Nix process. |
 | `enable-packing` | boolean | `false` | Pack small single-target cohorts into as few jobs as fit within pack-capacity, using measured closure sizes. Without packing, each cohort gets its own job. Off by default. A cohort without a measurement is not packed. |
 | `pack-capacity` | string |  | Disk space in bytes that each packed job can use. Required when enable-packing is true. |
 
@@ -136,6 +137,7 @@ The calling job must grant:
 | `plan-runner` | string | `ubuntu-latest` | Runner label for the configure, plan and cache-removal jobs. The plan job evaluates the flake with the input SSH key and can request an OIDC token. If your repository has self-hosted runners, keep this on a GitHub-hosted label or restrict the job with runner groups. See docs/security.md#runners. |
 | `evaluation-concurrency` | string | `auto` | Maximum simultaneous Nix evaluations. auto uses the number of available processors. |
 | `evaluation-only` | boolean | `false` | Stop after manifest evaluation without planning builds or publishing. |
+| `evaluation-batch-size` | number | `1` | Maximum number of targets evaluated by each Nix process. |
 | `enable-packing` | boolean | `false` | Pack small single-target cohorts into as few jobs as fit within pack-capacity, using measured closure sizes. Without packing, each cohort gets its own job. Off by default. A cohort without a measurement is not packed. |
 | `pack-capacity` | string |  | Disk space in bytes that each packed job can use. Required when enable-packing is true. |
 

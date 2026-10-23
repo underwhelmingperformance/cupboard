@@ -42,8 +42,30 @@ const raw = [
 it('reads manifest inputs without changing the publication mode', () => {
 	expect(
 		evaluationInputs({ INPUT_TARGETS: '.#targets', INPUT_PUBLISH: 'none' })
-	).toStrictEqual({ targets: '.#targets', publish: 'none' });
+	).toStrictEqual({ targets: '.#targets', publish: 'none', batchSize: 1 });
 });
+
+it('reads an explicit evaluation batch size', () => {
+	expect(
+		evaluationInputs({ INPUT_TARGETS: '.#targets', 'INPUT_BATCH-SIZE': '8' })
+	).toStrictEqual({
+		targets: '.#targets',
+		publish: 'outputs',
+		batchSize: 8
+	});
+});
+
+it.each(['0', '-1', '1.5', '9007199254740992'])(
+	'rejects invalid evaluation batch size %s',
+	(batchSize) => {
+		expect(() =>
+			evaluationInputs({
+				INPUT_TARGETS: '.#targets',
+				'INPUT_BATCH-SIZE': batchSize
+			})
+		).toThrow();
+	}
+);
 
 it.each(['', '  audience  '])(
 	'runs one credential wrapper and publishes only after it completes: %j',

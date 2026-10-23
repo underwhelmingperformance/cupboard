@@ -8,6 +8,7 @@ import {
 } from '@cupboard/shared/child-process';
 import { drainWithConcurrency } from '@cupboard/shared/concurrency';
 import { CodedError } from '@cupboard/shared/errors';
+import { z } from 'zod';
 
 import type { Environment } from '../inputs.ts';
 import { publishTargetsSchema } from '../publish-plan.ts';
@@ -18,6 +19,7 @@ export interface ManifestEvaluationOptions {
 	readonly targets: string;
 	readonly publish: string;
 	readonly concurrency?: number;
+	readonly batchSize?: number;
 	readonly maximumOutputBytes?: number;
 }
 
@@ -228,6 +230,12 @@ export async function evaluateTargetManifest(
 	runner: ManifestRunner,
 	externalSignal?: AbortSignal
 ): Promise<string> {
+	const batchSize = z
+		.number()
+		.int()
+		.positive()
+		.max(Number.MAX_SAFE_INTEGER)
+		.parse(options.batchSize ?? 1);
 	const controller = new AbortController();
 	const fail = (error: unknown): void => {
 		controller.abort(error);
@@ -270,20 +278,26 @@ export async function evaluateTargetManifest(
 					return Promise.resolve({ done: true, value: undefined });
 				}
 				const index = nextIndex;
-				nextIndex += 1;
+				nextIndex = Math.min(nextIndex + batchSize, targetCount);
 				return Promise.resolve({ done: false, value: index });
 			}
 		};
 		await drainWithConcurrency(
 			indices,
-			Math.min(options.concurrency ?? 4, targetCount),
+			Math.min(options.concurrency ?? 4, Math.ceil(targetCount / batchSize)),
 			async (index) => {
 				try {
 					controller.signal.throwIfAborted();
-					const expression =
+					const length = Math.min(batchSize, targetCount - index);
+					const element = `builtins.elemAt targets ${batchSize === 1 ? String(index) : `(${String(index)} + offset)`}`;
+					const projection =
 						options.publish === 'none'
-							? `targets: builtins.removeAttrs (builtins.elemAt targets ${String(index)}) [ "rootDrvPath" ]`
-							: `targets: builtins.elemAt targets ${String(index)}`;
+							? `builtins.removeAttrs (${element}) [ "rootDrvPath" ]`
+							: element;
+					const expression =
+						batchSize === 1
+							? `targets: ${projection}`
+							: `targets: builtins.genList (offset: ${projection}) ${String(length)}`;
 					const output = await runner(
 						['eval', '--json', options.targets, '--apply', expression],
 						controller.signal,
@@ -295,13 +309,21 @@ export async function evaluateTargetManifest(
 					} catch (error) {
 						throw new ManifestJsonInvalidError(index, { cause: error });
 					}
-					const addition =
-						Buffer.byteLength(JSON.stringify(value)) + (index === 0 ? 0 : 1);
-					if (bytes + addition > limit) {
-						throw new ManifestOutputLimitError(limit);
+					const batch =
+						batchSize === 1
+							? [value]
+							: z.array(z.unknown()).length(length).parse(value);
+					for (const [offset, entry] of batch.entries()) {
+						const targetIndex = index + offset;
+						const addition =
+							Buffer.byteLength(JSON.stringify(entry)) +
+							(targetIndex === 0 ? 0 : 1);
+						if (bytes + addition > limit) {
+							throw new ManifestOutputLimitError(limit);
+						}
+						bytes += addition;
+						values[targetIndex] = entry;
 					}
-					bytes += addition;
-					values[index] = value;
 				} catch (error) {
 					controller.abort(error);
 					throw controller.signal.reason;
