@@ -66,11 +66,14 @@ alarm cleanup and stalled-pass auditing remain in the setup path.
 
 ## Linux coverage and gate structure
 
-The CI runner starts pinned Nix 2.34.7 as the non-root runner, verifies trusted
-access, and stops its daemon on success, failure or cancellation. It refuses an
-existing standard daemon. Cleanup removes only the socket with the recorded
-device and inode. The general test command receives `NIX_REMOTE=daemon`; private
-daemonless fixtures supply their own environment.
+The CI runner starts Nix as the non-root runner, using the version pinned in
+[`actions/install-nix/versions.env`][nix-installer-versions]. It verifies
+trusted access and stops its daemon on success, failure or cancellation. It
+refuses an existing standard daemon. Cleanup removes only the socket with the
+recorded device and inode. The general test command receives
+`NIX_REMOTE=daemon`; private daemonless fixtures supply their own environment.
+
+[nix-installer-versions]: ../../actions/install-nix/versions.env
 
 Tests that previously used Node as a store path now create a unique Nix store
 path and a dependency. Tests remove temporary source files and never collect the
@@ -123,8 +126,7 @@ includes the new reset, worker-budget and verification-acknowledgement cases.
 
 The first isolated Linux run executed 155 cases with zero skips in 533.42s. This
 includes the previously skipped daemon cases and uses Node outside `/nix/store`.
-The environment uses Node 24.21.0 and Nix 2.34.7 on local ARM Linux; it is not
-equivalent to a hosted GitHub runner.
+The run used local ARM Linux, which is not equivalent to a hosted GitHub runner.
 
 The final Linux run executed all 163 general end-to-end cases with zero skips in
 522.34s. Two additional daemon tests verified trusted access and socket cleanup.
