@@ -7,6 +7,9 @@ import {
 } from '@cupboard/shared/github-actions';
 import { type LogRecord, type Sink } from '@logtape/logtape';
 
+import { redactingSink, redactLogProperties } from './redaction.ts';
+import { renderValue, serialiseLogProperties } from './serialisation.ts';
+
 function consoleMethodFor(
 	level: LogRecord['level']
 ): 'debug' | 'info' | 'warn' | 'error' {
@@ -34,101 +37,13 @@ function messageOf(record: LogRecord): string {
 		.join('');
 }
 
-function renderValue(value: unknown): string {
-	if (typeof value === 'string') {
-		return value;
-	}
-
-	if (
-		typeof value === 'number' ||
-		typeof value === 'boolean' ||
-		typeof value === 'bigint'
-	) {
-		return String(value);
-	}
-
-	if (typeof value === 'object' && value !== null) {
-		try {
-			return JSON.stringify(value);
-		} catch {
-			return Object.prototype.toString.call(value);
-		}
-	}
-
-	return Object.prototype.toString.call(value);
-}
-
-// Drizzle can wrap the useful D1 message in a generic `Failed query` error.
-// Follow at most eight causes so the log retains the underlying messages, and
-// stop early if the chain contains a cycle.
-function causeChain(
-	error: Error
-): { readonly message: string; readonly stack?: string } | undefined {
-	const messages: string[] = [];
-	const seen = new Set<unknown>([error]);
-	let current: unknown = error.cause;
-	let root: Error | undefined;
-
-	while (current !== undefined && !seen.has(current) && messages.length < 8) {
-		seen.add(current);
-
-		if (current instanceof Error) {
-			messages.push(`${current.name}: ${current.message}`);
-			root = current;
-			current = current.cause;
-			continue;
-		}
-
-		messages.push(renderValue(current));
-		current = undefined;
-	}
-
-	if (messages.length === 0) {
-		return undefined;
-	}
-
-	return {
-		message: messages.join(' <- '),
-		...(root?.stack !== undefined && { stack: root.stack })
-	};
-}
-
-// Workers Logs can index the name, message, stack and cause only when they are
-// separate fields rather than properties of an Error object.
-function expandError(
-	properties: Record<string, unknown>
-): Record<string, unknown> {
-	if (!('error' in properties)) {
-		return properties;
-	}
-
-	const { error, ...rest } = properties;
-
-	if (error instanceof Error) {
-		const cause = causeChain(error);
-
-		return {
-			...rest,
-			errorName: error.name,
-			errorMessage: error.message,
-			...(error.stack !== undefined && { errorStack: error.stack }),
-			...(cause !== undefined && {
-				errorCause: cause.message,
-				...(cause.stack !== undefined && { errorCauseStack: cause.stack })
-			})
-		};
-	}
-
-	return { ...rest, errorMessage: String(error) };
-}
-
 function logObject(record: LogRecord): Record<string, unknown> {
-	return {
+	return redactLogProperties({
 		level: record.level,
 		category: record.category.join('.'),
 		msg: messageOf(record),
-		...expandError(record.properties)
-	};
+		...serialiseLogProperties(record.properties)
+	});
 }
 
 export interface ConsoleLike {
@@ -164,7 +79,7 @@ export function jsonLinesSink(write: (line: string) => void): Sink {
 
 function actionFields(properties: Record<string, unknown>): string {
 	const parts: string[] = [];
-	const fields = expandError(properties);
+	const fields = redactLogProperties(serialiseLogProperties(properties));
 
 	for (const [key, value] of Object.entries(fields)) {
 		if (value === undefined) {
@@ -215,7 +130,7 @@ export function githubActionsSink(streams: WorkflowCommandStreams = {}): Sink {
 	const commands = workflowCommands(streams);
 	const out = streams.stdout ?? process.stdout;
 
-	return (record) => {
+	return redactingSink((record) => {
 		emitToActions(commands, out, record);
-	};
+	});
 }
