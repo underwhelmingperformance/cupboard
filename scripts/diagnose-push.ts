@@ -47,6 +47,7 @@ const observabilityScope =
 const repoRoot = path.resolve(fileURLToPath(import.meta.url), '..', '..');
 
 const pageLimit = 1000;
+const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
 // The window is cut into slices, each paged on its own and fetched concurrently:
 // about `sliceTargetMinutes` per slice, capped at `maxSlices`, with
@@ -948,7 +949,7 @@ export function analyse(
 		bucket.rowsRead += log.rowsRead;
 		bucket.rowsWritten += log.rowsWritten;
 
-		if (log.status !== undefined && log.status >= 500) {
+		if (log.status !== undefined && log.status >= serverErrorThreshold) {
 			bucket.errors += 1;
 		}
 	}
@@ -2004,6 +2005,8 @@ const defaultSleep: Sleep = (ms) =>
 
 const telemetryQueryAttempts = 5;
 const telemetryRetryBaseDelayMs = 500;
+const unauthorisedStatus: number = StatusCodes.UNAUTHORIZED;
+const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
 
 export const minPageLimit = 25;
 const relaxAfterCleanPages = 4;
@@ -2012,7 +2015,11 @@ const relaxAfterCleanPages = 4;
 // and 429/5xx are ordinary transient refusals; all are worth a few retries
 // before the run fails.
 function isRetryableTelemetryStatus(status: number): boolean {
-	return status === 401 || status === 429 || status >= 500;
+	return (
+		status === unauthorisedStatus ||
+		status === tooManyRequestsStatus ||
+		status >= serverErrorThreshold
+	);
 }
 
 function telemetryErrorStatus(error: unknown): number | undefined {
