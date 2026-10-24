@@ -16,7 +16,8 @@
 	"exports": {
 		".": "./src/config.ts",
 		"./sinks": "./src/sinks.ts",
-		"./testing": "./src/testing.ts"
+		"./testing": "./src/testing.ts",
+		"./file": "./src/file.ts"
 	},
 	"license": "AGPL-3.0-or-later",
 	"private": true,
