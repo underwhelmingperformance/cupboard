@@ -102,20 +102,20 @@ describe('HTTP status queries', () => {
 		['100', StatusCodes.CONTINUE],
 		['599', 599]
 	] as const)('accepts HTTP status %s', (status, expected) => {
-		expect(parseOptions(['--since', '2880', '--status', status])).toStrictEqual(
-			{
-				worker: 'cupboard-tenant',
-				searchMinutes: 120,
-				sinceMinutes: 2880,
-				gapMs: 60_000,
-				account: undefined,
-				mode: 'json',
-				forceLogin: false,
-				githubJob: undefined,
-				status: expected,
-				hostname: undefined
-			}
-		);
+		expect(
+			parseOptions(['--since', '2880', '--status', status, '--json'])
+		).toStrictEqual({
+			worker: 'cupboard-tenant',
+			searchMinutes: 120,
+			sinceMinutes: 2880,
+			gapMs: 60_000,
+			account: undefined,
+			mode: 'json',
+			forceLogin: false,
+			githubJob: undefined,
+			status: expected,
+			hostname: undefined
+		});
 	});
 
 	it('accepts a fixed status query and hostname', () => {
@@ -288,6 +288,57 @@ describe('HTTP status queries', () => {
 										{ label: 'HTTP status', value: '500' },
 										{ label: 'Matching requests', value: '0' }
 									]
+								}
+							]
+						}
+			);
+		}
+	);
+
+	it.each(['terminal', 'json'] as const)(
+		'renders a matching request in %s mode',
+		(mode) => {
+			const { ui, captured } = fakeCliUi();
+			const request = parseHttpRequest(httpEvent);
+			const analysis = {
+				worker: 'cupboard',
+				window: { from: 0, to: 1000 },
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				hostname: undefined,
+				requests: [request]
+			};
+
+			renderHttpStatusAnalysis(ui, ui.reporter(), mode, analysis);
+
+			expect({
+				data: captured.data,
+				results: captured.results,
+				notes: captured.notes
+			}).toStrictEqual(
+				mode === 'json'
+					? { data: [JSON.stringify(analysis)], results: [], notes: [] }
+					: {
+							data: [],
+							results: [
+								{
+									kind: 'http-status-diagnostic',
+									data: analysis,
+									rows: [
+										{ label: 'Worker', value: 'cupboard' },
+										{
+											label: 'Window',
+											value:
+												'1970-01-01T00:00:00.000Z to 1970-01-01T00:00:01.000Z'
+										},
+										{ label: 'HTTP status', value: '500' },
+										{ label: 'Matching requests', value: '1' }
+									]
+								}
+							],
+							notes: [
+								{
+									title: 'Matching requests',
+									body: '1970-01-01T00:00:01.000Z POST https://cupboard.example.workers.dev/t/acme/token\trequest request-1 · trace trace-1 · outcome ok'
 								}
 							]
 						}
