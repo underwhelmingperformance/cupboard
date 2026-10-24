@@ -14,7 +14,11 @@ import {
 	parseNarInfoName,
 	parseNarName
 } from '../http/http.ts';
-import { requestCostMiddleware } from '../observability/logging.ts';
+import {
+	loggerMiddleware,
+	requestCostMiddleware
+} from '../observability/logging.ts';
+import { withoutCachedCorrelation } from '../observability/request-context.ts';
 import {
 	narAuthorityForScope,
 	type ReadEnv,
@@ -133,6 +137,7 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 	app.onError(serverErrorHandler);
 	app.notFound(() => noStore(notFoundResponse()));
 	app.use(requestCostMiddleware);
+	app.use(loggerMiddleware);
 	app.use('*', async (context, next) => {
 		await next();
 
@@ -203,10 +208,12 @@ const tenantReadApp = buildTenantReadApp();
 /**
 Serves public cacheable reads after the control Worker admits the tenant.
 */
-export function tenantReadFetch(
+export async function tenantReadFetch(
 	request: Request,
 	env: ReadEnv,
 	ctx: Parameters<typeof tenantReadApp.fetch>[2]
 ): Promise<Response> {
-	return Promise.resolve(tenantReadApp.fetch(request, env, ctx));
+	const response = await tenantReadApp.fetch(request, env, ctx);
+
+	return withoutCachedCorrelation(response);
 }

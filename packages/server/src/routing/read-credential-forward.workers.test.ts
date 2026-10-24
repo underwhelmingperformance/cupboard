@@ -88,7 +88,10 @@ describe('read forwards to the cache-owning tenant Worker', () => {
 			forwarded: [
 				{
 					url: `${currentOrigin()}/t/${fixtureTenant}/${metadata.storePathHash}.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1`,
-					headers: { accept: 'text/x-nix-narinfo' }
+					headers: {
+						accept: 'text/x-nix-narinfo',
+						'x-request-id': response.headers.get('x-request-id')
+					}
 				}
 			]
 		});
