@@ -305,12 +305,12 @@ function advanceCaches(
 }
 
 /**
- * Advances one bounded batch of the legacy retention migration.
- *
- * Root-prefix policies are imported into one rule set shared by all caches,
- * so a tenant with many caches stores each rule once. Cache defaults and
- * grace are then copied in cache-id order, matching the stored cursor.
- */
+Advances one bounded batch of the legacy retention migration.
+
+Root-prefix policies are imported into one rule set shared by all caches,
+so a tenant with many caches stores each rule once. Cache defaults and
+grace are then copied in cache-id order, matching the stored cursor.
+*/
 export async function advanceCacheRetentionMigration(
 	database: SchemaDatabase,
 	batchSize = retentionMigrationBatchSize

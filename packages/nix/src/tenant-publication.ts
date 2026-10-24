@@ -293,7 +293,7 @@ export function tenantReferenceSources(
 				return [];
 			}
 			url.search = '';
-			return [{ url, paths: [] }];
+			return { url, paths: [] };
 		})
 	]) {
 		const url = canonicalHref(source.url);

@@ -110,9 +110,9 @@ const uploadTtlMs = 15 * 60 * 1000;
 type PendingUploadRow = typeof schema.pendingUploads.$inferSelect;
 
 /**
- * The result of a `renew-uploads` request: the uploads with a new expiry and
- * the uploads that the server refused to extend.
- */
+The result of a `renew-uploads` request: the uploads with a new expiry and
+the uploads that the server refused to extend.
+*/
 export interface UploadRenewal {
 	readonly renewed: UploadId[];
 	readonly refused: UploadId[];
@@ -474,10 +474,10 @@ export class UploadsService {
 	}
 
 	/**
-	 * Extends uploads whose bytes are still being sent. Each renewed upload
-	 * expires 15 minutes from `now`, up to the limit in {@link renewedExpiry}.
-	 * If the push ID does not verify, every upload is refused.
-	 */
+	Extends uploads whose bytes are still being sent. Each renewed upload
+	expires 15 minutes from `now`, up to the limit in {@link renewedExpiry}.
+	If the push ID does not verify, every upload is refused.
+	*/
 	async plan(
 		scope: CacheScope,
 		body: UploadNegotiateRequest,
@@ -1303,13 +1303,11 @@ export class UploadsService {
 				return [];
 			}
 
-			return [
-				{
-					storePathHash: existing.storePathHash,
-					generation: existing.generation,
-					narHash: existing.narHash
-				}
-			];
+			return {
+				storePathHash: existing.storePathHash,
+				generation: existing.generation,
+				narHash: existing.narHash
+			};
 		});
 		// The shared-fact reads allow a concurrent publication to replace a row.
 		// Re-check identity while applying grace and confirm only unchanged rows.

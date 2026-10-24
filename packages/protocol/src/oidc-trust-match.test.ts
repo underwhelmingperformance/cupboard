@@ -41,14 +41,14 @@ const ownerRule: OidcTrustRule = {
 	claims: { sub: 'owner-subject' },
 	permittedGrants: wildcard
 };
-const repoRule: OidcTrustRule = {
+const repositoryRule: OidcTrustRule = {
 	id: trustRuleIdSchema.parse('repo'),
 	issuer: github,
 	audience,
 	claims: { repository_owner_id: '5678' },
 	permittedGrants: ciGrant('owner-ci')
 };
-const exactRepoRule: OidcTrustRule = {
+const exactRepositoryRule: OidcTrustRule = {
 	id: trustRuleIdSchema.parse('exact-repo'),
 	issuer: github,
 	audience,
@@ -56,7 +56,7 @@ const exactRepoRule: OidcTrustRule = {
 	permittedGrants: ciGrant('owner-repo-ci')
 };
 
-const rules = [ownerRule, repoRule, exactRepoRule];
+const rules = [ownerRule, repositoryRule, exactRepositoryRule];
 
 describe('matchModelledOidcTrust', () => {
 	it.each([
@@ -261,7 +261,7 @@ describe('matchModelledOidcTrust', () => {
 describe('oidcTrustVerificationTarget', () => {
 	it('returns one shared target for several rules in the same trust domain', () => {
 		expect(
-			oidcTrustVerificationTarget([repoRule, exactRepoRule], {
+			oidcTrustVerificationTarget([repositoryRule, exactRepositoryRule], {
 				iss: github,
 				aud: audience
 			})
@@ -282,19 +282,25 @@ describe('oidcTrustVerificationTarget', () => {
 			'https://other.example.workers.dev'
 		);
 		const otherRule: OidcTrustRule = {
-			...repoRule,
+			...repositoryRule,
 			id: trustRuleIdSchema.parse('other-audience'),
 			audience: otherAudience
 		};
 		const claims = { iss: github, aud: [otherAudience, audience] };
 
 		expect({
-			forward: oidcTrustVerificationTarget([repoRule, otherRule], claims),
-			reversed: oidcTrustVerificationTarget([otherRule, repoRule], claims),
-			authorisedParty: oidcTrustVerificationTarget([repoRule, otherRule], {
-				...claims,
-				azp: otherAudience
-			})
+			forward: oidcTrustVerificationTarget([repositoryRule, otherRule], claims),
+			reversed: oidcTrustVerificationTarget(
+				[otherRule, repositoryRule],
+				claims
+			),
+			authorisedParty: oidcTrustVerificationTarget(
+				[repositoryRule, otherRule],
+				{
+					...claims,
+					azp: otherAudience
+				}
+			)
 		}).toStrictEqual({
 			forward: { issuer: github, audience },
 			reversed: { issuer: github, audience },

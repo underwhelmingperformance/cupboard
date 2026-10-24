@@ -11,8 +11,8 @@ import type { AddressInfo } from 'node:net';
 import { StatusCodes } from 'http-status-codes';
 
 /**
- * The S3 operations that the fake serves.
- */
+The S3 operations that the fake serves.
+*/
 export type FakeS3Operation =
 	| 'CreateMultipartUpload'
 	| 'UploadPart'
@@ -22,23 +22,23 @@ export type FakeS3Operation =
 	| 'HeadObject';
 
 /**
- * A failure that the fake returns once, for the next request that matches
- * `operation` and, for `UploadPart`, `partNumber`:
- *
- * - `reset` closes the connection once `afterBytes` bytes of the body have
- *   arrived, as R2 does to a body that stops or ends early.
- * - `error` returns the status and S3 error code once `afterBytes` bytes have
- *   arrived, or after the whole body. It closes the connection once the
- *   client has sent the rest of the body or stopped sending it, as an HTTP
- *   server's lingering close does, so the client can read the response.
- * - `refuse-before-body` answers a request that expects `100 Continue` with the
- *   status and code, so its body is never sent.
- * - `lost-response` performs the request and then closes the connection
- *   without responding.
- * - `error-after-effect` performs the request and then returns the status and
- *   code, as an edge server can after R2 has completed the request.
- * - `no-response` performs the request and never responds.
- */
+A failure that the fake returns once, for the next request that matches
+`operation` and, for `UploadPart`, `partNumber`:
+
+- `reset` closes the connection once `afterBytes` bytes of the body have
+  arrived, as R2 does to a body that stops or ends early.
+- `error` returns the status and S3 error code once `afterBytes` bytes have
+  arrived, or after the whole body. It closes the connection once the
+  client has sent the rest of the body or stopped sending it, as an HTTP
+  server's lingering close does, so the client can read the response.
+- `refuse-before-body` answers a request that expects `100 Continue` with the
+  status and code, so its body is never sent.
+- `lost-response` performs the request and then closes the connection
+  without responding.
+- `error-after-effect` performs the request and then returns the status and
+  code, as an edge server can after R2 has completed the request.
+- `no-response` performs the request and never responds.
+*/
 export interface FakeS3Fault {
 	readonly operation: FakeS3Operation;
 	readonly partNumber?: number;
@@ -55,11 +55,11 @@ export interface FakeS3Fault {
 }
 
 /**
- * One request that the fake handled. `outcome` is `reset` when the fake closed
- * the connection, `aborted` when the client did, `error` when the fake
- * returned an S3 error, and `ok` otherwise. `bytes` counts the body bytes that
- * arrived.
- */
+One request that the fake handled. `outcome` is `reset` when the fake closed
+the connection, `aborted` when the client did, `error` when the fake
+returned an S3 error, and `ok` otherwise. `bytes` counts the body bytes that
+arrived.
+*/
 export interface FakeS3Request {
 	readonly operation: FakeS3Operation;
 	readonly key: string;
@@ -71,37 +71,37 @@ export interface FakeS3Request {
 }
 
 /**
- * Schedules `run` after `ms` milliseconds and returns a function that cancels
- * it. Tests pass a manual scheduler so no assertion depends on a real clock.
- */
+Schedules `run` after `ms` milliseconds and returns a function that cancels
+it. Tests pass a manual scheduler so no assertion depends on a real clock.
+*/
 export type FakeS3Schedule = (run: () => void, ms: number) => () => void;
 
 export interface FakeS3Options {
 	/**
-	 * Closes the connection of a request whose body receives no bytes for this
-	 * long, as R2 does after about 15 seconds. Without it, the fake waits.
-	 */
+	Closes the connection of a request whose body receives no bytes for this
+	long, as R2 does after about 15 seconds. Without it, the fake waits.
+	*/
 	readonly idleTimeoutMs?: number;
 	readonly schedule?: FakeS3Schedule;
 	/**
-	 * Receives each stored object, from a `PutObject` or a completed multipart
-	 * upload.
-	 */
+	Receives each stored object, from a `PutObject` or a completed multipart
+	upload.
+	*/
 	readonly onObject?: (key: string, bytes: Uint8Array) => Promise<void>;
 	/**
-	 * Keeps only the length and digest of each part and object when false, so
-	 * a measurement can send gigabytes through the fake.
-	 */
+	Keeps only the length and digest of each part and object when false, so
+	a measurement can send gigabytes through the fake.
+	*/
 	readonly retainBytes?: boolean;
 	/**
-	 * Limits each request body to this many bytes per second.
-	 */
+	Limits each request body to this many bytes per second.
+	*/
 	readonly bytesPerSecond?: number;
 	/**
-	 * Receives each event as it happens: `start` when a request's headers
-	 * arrive, `data` for each piece of a body, and `end` with the handled
-	 * request.
-	 */
+	Receives each event as it happens: `start` when a request's headers
+	arrive, `data` for each piece of a body, and `end` with the handled
+	request.
+	*/
 	readonly onEvent?: (event: FakeS3Event) => void;
 }
 
@@ -198,13 +198,13 @@ class FakeS3RequestError extends Error {
 }
 
 /**
- * An S3 endpoint on the loopback interface that serves the operations of a
- * multipart upload and enforces the rules that R2 applies to them: every part
- * except the last has the same length, the last part is no longer than the
- * others, a body that stops for longer than the idle timeout is reset, and an
- * aborted upload stores nothing. It ignores request signatures, but records
- * the access key that signed each request.
- */
+An S3 endpoint on the loopback interface that serves the operations of a
+multipart upload and enforces the rules that R2 applies to them: every part
+except the last has the same length, the last part is no longer than the
+others, a body that stops for longer than the idle timeout is reset, and an
+aborted upload stores nothing. It ignores request signatures, but records
+the access key that signed each request.
+*/
 export class FakeS3 {
 	static async start(options: FakeS3Options = {}): Promise<FakeS3> {
 		const handler: { fake?: FakeS3 } = {};
@@ -606,15 +606,15 @@ export class FakeS3 {
 	}
 
 	/**
-	 * Fails the next request that matches `fault`.
-	 */
+	Fails the next request that matches `fault`.
+	*/
 	fail(fault: FakeS3Fault): void {
 		this.faults.push(fault);
 	}
 
 	/**
-	 * Returns the bytes of each stored object, by key.
-	 */
+	Returns the bytes of each stored object, by key.
+	*/
 	objects(): ReadonlyMap<string, Uint8Array> {
 		return new Map(
 			[...this.stored].map(([key, object]) => [
@@ -625,10 +625,10 @@ export class FakeS3 {
 	}
 
 	/**
-	 * Stores `bytes` at `key` as a single `PutObject` would, or removes the
-	 * object when `bytes` is undefined. A test uses it to simulate another
-	 * writer.
-	 */
+	Stores `bytes` at `key` as a single `PutObject` would, or removes the
+	object when `bytes` is undefined. A test uses it to simulate another
+	writer.
+	*/
 	replaceObject(key: string, bytes: Uint8Array | undefined): void {
 		if (bytes === undefined) {
 			this.stored.delete(key);
@@ -644,8 +644,8 @@ export class FakeS3 {
 	}
 
 	/**
-	 * The keys of multipart uploads that were neither completed nor aborted.
-	 */
+	The keys of multipart uploads that were neither completed nor aborted.
+	*/
 	openUploads(): string[] {
 		return this.uploads
 			.values()

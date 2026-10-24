@@ -185,9 +185,9 @@ export function resolveAttestAttachInputs(
 }
 
 /**
- * Attaching uses GitHub OIDC and operates on paths already published by the
- * run. The command must not include upload or retention flags.
- */
+Attaching uses GitHub OIDC and operates on paths already published by the
+run. The command must not include upload or retention flags.
+*/
 export function attestAttachArguments(
 	inputs: AttestAttachInputs,
 	paths: readonly string[],

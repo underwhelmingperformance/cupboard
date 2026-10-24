@@ -28,10 +28,10 @@ const comparisonKey = crypto.subtle.importKey(
 );
 
 /**
- * Compares two strings of the required UTF-8 byte length through Web Crypto's
- * HMAC verifier. Returns false before invoking Web Crypto if either input has a
- * different length.
- */
+Compares two strings of the required UTF-8 byte length through Web Crypto's
+HMAC verifier. Returns false before invoking Web Crypto if either input has a
+different length.
+*/
 export async function isConstantTimeEqual(
 	left: string,
 	right: string,

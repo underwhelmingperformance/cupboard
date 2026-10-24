@@ -26,12 +26,12 @@ describe('hook failure detection', () => {
 
 	it('retains only marker overlap across a large unrelated stream', () => {
 		const detector = new HookFailureDetector();
-		const scan = vi.spyOn(RegExp.prototype, 'test');
+		const hasScanned = vi.spyOn(RegExp.prototype, 'test');
 		const chunk = 'unrelated stderr\n'.repeat(4096);
 		const overlap = Math.max(...markers.map((marker) => marker.length)) - 1;
 		const results = Array.from({ length: 128 }, () => detector.accept(chunk));
-		const scannedLengths = scan.mock.calls.map(([text]) => text.length);
-		scan.mockRestore();
+		const scannedLengths = hasScanned.mock.calls.map(([text]) => text.length);
+		hasScanned.mockRestore();
 
 		expect({ results, scannedLengths }).toStrictEqual({
 			results: Array.from({ length: 128 }, () => false),

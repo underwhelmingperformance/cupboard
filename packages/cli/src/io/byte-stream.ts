@@ -10,10 +10,10 @@ export function byteStream(source: ByteSource): ReadableStream<Uint8Array> {
 }
 
 /**
- * Wraps a byte stream so `onChunk` sees each chunk's length as the consumer
- * pulls it through, leaving the bytes themselves untouched. Used to follow an
- * upload's progress as each chunk is sent.
- */
+Wraps a byte stream so `onChunk` sees each chunk's length as the consumer
+pulls it through, leaving the bytes themselves untouched. Used to follow an
+upload's progress as each chunk is sent.
+*/
 export function countingByteStream(
 	source: ReadableStream<Uint8Array>,
 	onChunk: (byteLength: number) => void
@@ -29,10 +29,10 @@ export function countingByteStream(
 }
 
 /**
- * Copies written bytes into pieces of exactly `size` bytes. A piece is
- * allocated when its first byte is written, and the last, shorter piece is
- * returned in a buffer of its own length.
- */
+Copies written bytes into pieces of exactly `size` bytes. A piece is
+allocated when its first byte is written, and the last, shorter piece is
+returned in a buffer of its own length.
+*/
 export class ByteAccumulator {
 	private piece: Buffer | undefined;
 
@@ -45,8 +45,8 @@ export class ByteAccumulator {
 	constructor(private readonly size: number) {}
 
 	/**
-	 * How many bytes have been written in total.
-	 */
+	How many bytes have been written in total.
+	*/
 	get written(): number {
 		return this.total;
 	}
@@ -76,8 +76,8 @@ export class ByteAccumulator {
 	}
 
 	/**
-	 * Returns the complete pieces and removes them from the accumulator.
-	 */
+	Returns the complete pieces and removes them from the accumulator.
+	*/
 	*takeComplete(): Iterable<Uint8Array> {
 		for (
 			let piece = this.complete.shift();
@@ -89,9 +89,9 @@ export class ByteAccumulator {
 	}
 
 	/**
-	 * Returns the complete pieces and then the remaining bytes, and removes
-	 * them from the accumulator.
-	 */
+	Returns the complete pieces and then the remaining bytes, and removes
+	them from the accumulator.
+	*/
 	*takeAll(): Iterable<Uint8Array> {
 		yield* this.takeComplete();
 
@@ -108,9 +108,9 @@ export class ByteAccumulator {
 }
 
 /**
- * Returns `source` as an async iterable, so chunks that are already in memory
- * can go where a stream of chunks is read with `for await`.
- */
+Returns `source` as an async iterable, so chunks that are already in memory
+can go where a stream of chunks is read with `for await`.
+*/
 export function asyncChunks(
 	source: Iterable<Uint8Array> | AsyncIterable<Uint8Array>
 ): AsyncIterable<Uint8Array> {

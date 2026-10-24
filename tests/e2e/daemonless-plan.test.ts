@@ -19,11 +19,11 @@ import { runCommand } from '../support/process.ts';
 import { FakeSubstituter, servedNarSize } from '../support/substituter.ts';
 
 /**
- * A store of this test's own: its own store directory, its own database, and
- * no daemon socket anywhere near it. This is what a tarball install of Nix
- * gives you, and what every GitHub-hosted runner using
- * `nix-quick-install-action` gets.
- */
+A store of this test's own: its own store directory, its own database, and
+no daemon socket anywhere near it. This is what a tarball install of Nix
+gives you, and what every GitHub-hosted runner using
+`nix-quick-install-action` gets.
+*/
 interface DaemonlessStore {
 	readonly root: string;
 	readonly storeDirectory: string;
@@ -144,10 +144,10 @@ function nixSystem(): string {
 }
 
 /**
- * Opens the store the way a cohort job does, over an environment naming this
- * test's store and substituter. No daemon socket exists for it, which is the
- * condition under test.
- */
+Opens the store the way a cohort job does, over an environment naming this
+test's store and substituter. No daemon socket exists for it, which is the
+condition under test.
+*/
 function openStore(overrides: Readonly<Record<string, string>> = {}): Nix {
 	const prepared = store();
 

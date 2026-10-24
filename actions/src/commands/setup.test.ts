@@ -239,19 +239,16 @@ async function readActionOutputs(
 	);
 }
 
-async function readEnvironmentValue(
-	environmentFile: string,
-	name: string
-): Promise<string> {
+async function readEnvironmentValue(environmentFile: string): Promise<string> {
 	const contents = await readFile(environmentFile, 'utf8');
 	const headerEnd = contents.indexOf('\n');
 
 	if (headerEnd === -1) {
-		throw new Error(`Environment file has no value for ${name}`);
+		throw new Error(`Environment file has no value for NIX_CONFIG`);
 	}
 
 	const header = contents.slice(0, headerEnd);
-	const prefix = `${name}<<`;
+	const prefix = `NIX_CONFIG<<`;
 
 	if (!header.startsWith(prefix)) {
 		throw new Error(`Environment file does not start with ${prefix}`);
@@ -261,7 +258,7 @@ async function readEnvironmentValue(
 	const terminator = `${delimiter}\n`;
 
 	if (!contents.endsWith(terminator)) {
-		throw new Error(`Environment file has no closing delimiter for ${name}`);
+		throw new Error(`Environment file has no closing delimiter for NIX_CONFIG`);
 	}
 
 	return contents.slice(headerEnd + 1, -terminator.length);
@@ -1700,10 +1697,7 @@ describe('setupAction Nix configuration', () => {
 				throw new Error('setup did not output the generated Nix config path');
 			}
 
-			const exportedConfig = await readEnvironmentValue(
-				environmentFile,
-				'NIX_CONFIG'
-			);
+			const exportedConfig = await readEnvironmentValue(environmentFile);
 			vi.stubEnv('NIX_CONFIG', exportedConfig);
 			const subsequent = await withReadAuthentication(fetcher, { tenantUrl })(
 				new URL(`${tenantUrl.href}/cache/builds/nix-cache-info`)
@@ -1834,8 +1828,7 @@ describe('setupAction Nix configuration', () => {
 					target: outputs['read-session-target'],
 					view: outputs['read-session-view'],
 					exportedConfig: await readEnvironmentValue(
-						path.join(directory, 'github-env'),
-						'NIX_CONFIG'
+						path.join(directory, 'github-env')
 					),
 					config: await readFile(configFile, 'utf8')
 				}).toStrictEqual({
@@ -1986,10 +1979,7 @@ describe('setupAction Nix configuration', () => {
 
 		const credentialUrl = `https://${credential.user}:${credential.password}@cache.example.test/t/acme/cache/release`;
 		const generatedConfig = await readFile(generatedConfigFile, 'utf8');
-		const environmentConfig = await readEnvironmentValue(
-			environmentFile,
-			'NIX_CONFIG'
-		);
+		const environmentConfig = await readEnvironmentValue(environmentFile);
 		const callerConfig = await readFile(callerConfigFile, 'utf8');
 		const generatedConfigStats = await stat(generatedConfigFile);
 
@@ -3155,7 +3145,7 @@ describe('setupAction cache provisioning', () => {
 		{ alias: 'public', provisioning: true, modern: 'public', warned: true }
 	])('warns for the provisioning alias: %j', async (selection) => {
 		const warnings: string[] = [];
-		const stream = vi
+		const canWriteStream = vi
 			.spyOn(process.stderr, 'write')
 			.mockImplementation((value) => {
 				warnings.push(String(value));
@@ -3195,7 +3185,7 @@ describe('setupAction cache provisioning', () => {
 					: []
 			});
 		} finally {
-			stream.mockRestore();
+			canWriteStream.mockRestore();
 		}
 	});
 
@@ -3633,7 +3623,7 @@ it.each([
 	{ audience: '', expected: '' },
 	{ audience: ' '.repeat(3), expected: '' },
 	{ audience: '  custom-audience  ', expected: 'custom-audience' },
-	{ audience: ' custom-audience ', expected: 'custom-audience' }
+	{ audience: '\u{A0}custom-audience\u{A0}', expected: 'custom-audience' }
 ])(
 	'outputs the normalised audience for install-only setup: $audience',
 	async ({ audience, expected }) => {

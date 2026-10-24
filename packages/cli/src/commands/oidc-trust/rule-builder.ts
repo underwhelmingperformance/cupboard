@@ -17,12 +17,12 @@ import {
 } from '../github/convention.ts';
 
 /**
- * Builds a matcher for a `job_workflow_ref` value. A value with `@ref` matches
- * exactly, except that a `refs/tags/<glob>` ref becomes a pattern for matching
- * tags. A value without `@ref` accepts the workflow file at any ref. This last
- * form supports reusable workflows because the claim contains the called
- * workflow's ref, not the ref that triggered the caller.
- */
+Builds a matcher for a `job_workflow_ref` value. A value with `@ref` matches
+exactly, except that a `refs/tags/<glob>` ref becomes a pattern for matching
+tags. A value without `@ref` accepts the workflow file at any ref. This last
+form supports reusable workflows because the claim contains the called
+workflow's ref, not the ref that triggered the caller.
+*/
 export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 	if (value.includes('*')) {
 		return workflowReferenceClaim(parseWorkflowReference(value));

@@ -8,13 +8,13 @@ import { wrapDispatchedMethods } from './dispatch-scope.ts';
 export type R2Operation = 'head' | 'get' | 'put' | 'delete' | 'list';
 
 /**
- * What one request or pass spent on billed storage.
- *
- * `rowsRead` and `rowsWritten` count Durable Object SQLite rows. The D1 row
- * fields count only the calls whose results include `meta`: `run`, `all` and
- * `batch`. `raw`, `first` and `exec` results have no row counts, so those calls
- * are counted in `d1CallsWithoutRows`. Drizzle runs selects through `raw`.
- */
+What one request or pass spent on billed storage.
+
+`rowsRead` and `rowsWritten` count Durable Object SQLite rows. The D1 row
+fields count only the calls whose results include `meta`: `run`, `all` and
+`batch`. `raw`, `first` and `exec` results have no row counts, so those calls
+are counted in `d1CallsWithoutRows`. Drizzle runs selects through `raw`.
+*/
 export interface OperationCostRecord {
 	readonly rowsRead: number;
 	readonly rowsWritten: number;
@@ -30,13 +30,13 @@ export interface OperationCostRecord {
 }
 
 /**
- * The cost of one scope. Counts go to the innermost open scope only, so every
- * binding call and SQLite row appears in at most one scope.
- *
- * Work that a scope starts without awaiting keeps the scope in its async
- * context. A count that arrives after the scope has reported is logged on its
- * own, as a warning with the scope's label.
- */
+The cost of one scope. Counts go to the innermost open scope only, so every
+binding call and SQLite row appears in at most one scope.
+
+Work that a scope starts without awaiting keeps the scope in its async
+context. A count that arrives after the scope has reported is logged on its
+own, as a warning with the scope's label.
+*/
 export class OperationCost {
 	private d1Calls = 0;
 	private d1RowsRead = 0;
@@ -53,17 +53,17 @@ export class OperationCost {
 	private isSettled = false;
 
 	/**
-	 * The route template of the request that this scope measures, when a router
-	 * more specific than the request middleware matched it.
-	 */
+	The route template of the request that this scope measures, when a router
+	more specific than the request middleware matched it.
+	*/
 	route: string | undefined;
 
 	constructor(readonly label: string) {}
 
 	/**
-	 * Applies `record` to this scope. After the scope has reported, applies it
-	 * to a separate cost instead and logs that cost.
-	 */
+	Applies `record` to this scope. After the scope has reported, applies it
+	to a separate cost instead and logs that cost.
+	*/
 	private record(record: (cost: OperationCost) => void): void {
 		if (!this.isSettled) {
 			record(this);
@@ -139,20 +139,20 @@ export function currentOperationCost(): OperationCost | undefined {
 }
 
 /**
- * Whether any counter in `cost` is above zero. A scope that touched no billed
- * storage is not logged.
- */
+Whether any counter in `cost` is above zero. A scope that touched no billed
+storage is not logged.
+*/
 export function hasCost(cost: OperationCostRecord): boolean {
 	return Object.values(cost).some((count) => count > 0);
 }
 
 /**
- * Runs `body` in a new scope labelled `label` and reports the scope's cost when
- * `body` resolves or rejects.
- *
- * When the enclosing scope already has the same label, `body` joins it and
- * `report` is not called.
- */
+Runs `body` in a new scope labelled `label` and reports the scope's cost when
+`body` resolves or rejects.
+
+When the enclosing scope already has the same label, `body` joins it and
+`report` is not called.
+*/
 export async function withOperationCost<T>(
 	label: string,
 	body: () => Promise<T>,
@@ -183,11 +183,11 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 }
 
 /**
- * Runs a dispatched method in a scope labelled `label`, or in the enclosing
- * scope when one is open. A dispatched method may be synchronous: Durable
- * Object SQLite runs synchronously, so a method that never awaits still spends
- * rows.
- */
+Runs a dispatched method in a scope labelled `label`, or in the enclosing
+scope when one is open. A dispatched method may be synchronous: Durable
+Object SQLite runs synchronously, so a method that never awaits still spends
+rows.
+*/
 function withDispatchOperationCost(
 	label: string,
 	body: () => unknown,
@@ -233,10 +233,10 @@ async function reportWhenSettled(
 }
 
 /**
- * Wraps every method on `prototype` so each dispatch opens a scope labelled with
- * the dispatched method. Costs that no narrower scope claims are reported
- * there.
- */
+Wraps every method on `prototype` so each dispatch opens a scope labelled with
+the dispatched method. Costs that no narrower scope claims are reported
+there.
+*/
 export function enterOperationCostOnDispatch(
 	prototype: object,
 	report: (method: string, cost: OperationCostRecord) => void
@@ -249,10 +249,10 @@ export function enterOperationCostOnDispatch(
 }
 
 /**
- * Records the route template that the current request matched. A router that
- * dispatches below the request middleware calls this, because `routePath`
- * returns only the catch-all pattern of the middleware that runs the router.
- */
+Records the route template that the current request matched. A router that
+dispatches below the request middleware calls this, because `routePath`
+returns only the catch-all pattern of the middleware that runs the router.
+*/
 export function recordRoute(route: string): void {
 	const cost = scope.getStore();
 

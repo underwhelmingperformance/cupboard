@@ -110,9 +110,9 @@ function spawnCapturedProcess(
 }
 
 /**
- * Captures stdout only after complete process closure. External cancellation
- * force-terminates an evaluation even during internal graceful shutdown.
- */
+Captures stdout only after complete process closure. External cancellation
+force-terminates an evaluation even during internal graceful shutdown.
+*/
 export async function captureEvaluationProcess(
 	command: CapturedCommand,
 	dependencies: CaptureDependencies = {}
@@ -197,8 +197,8 @@ export async function captureEvaluationProcess(
 }
 
 /**
- * Evaluates every requested target within one Nix process.
- */
+Evaluates every requested target within one Nix process.
+*/
 export async function evaluateTargetManifest(
 	options: ManifestEvaluationOptions,
 	runner: ManifestRunner,

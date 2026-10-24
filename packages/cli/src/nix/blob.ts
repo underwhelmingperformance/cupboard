@@ -17,9 +17,9 @@ export interface NarUploadStream {
 	readonly body: ReadableStream<Uint8Array>;
 	digest(): NarDigest;
 	/**
-	 * Returns the NAR's compression facts. They are complete once the body has
-	 * been read to the end.
-	 */
+	Returns the NAR's compression facts. They are complete once the body has
+	been read to the end.
+	*/
 	compression?(): NarCompressionFacts;
 }
 
@@ -28,31 +28,31 @@ export interface NarCompressionFacts {
 	readonly compressedBytes: number;
 	readonly frames: number;
 	/**
-	 * How long the body's reader waited for the NAR to be read and compressed,
-	 * in milliseconds.
-	 */
+	How long the body's reader waited for the NAR to be read and compressed,
+	in milliseconds.
+	*/
 	readonly compressionMs: number;
 }
 
 /**
- * Creates the stream that compresses one frame of a NAR, given the number of
- * NAR bytes that will be written to it.
- */
+Creates the stream that compresses one frame of a NAR, given the number of
+NAR bytes that will be written to it.
+*/
 export type ZstdFrameCompressorFactory = (frameLength: number) => Transform;
 
 export interface NarCompressionOptions {
 	readonly createFrameCompressor: ZstdFrameCompressorFactory;
 	/**
-	 * Returns the current time in milliseconds.
-	 */
+	Returns the current time in milliseconds.
+	*/
 	readonly now: () => number;
 }
 
 /**
- * Fails a NAR whose size differs from its declared size. With `ending` set to
- * `ended`, the NAR ended after exactly `actual` bytes. With `continued`, it had
- * at least `actual` bytes.
- */
+Fails a NAR whose size differs from its declared size. With `ending` set to
+`ended`, the NAR ended after exactly `actual` bytes. With `continued`, it had
+at least `actual` bytes.
+*/
 export class NarSizeChangedError extends NarError {
 	constructor(
 		public readonly expected: number,
@@ -86,10 +86,10 @@ export const defaultNarCompression: NarCompressionOptions = {
 };
 
 /**
- * Compresses a NAR of `narSize` bytes into one independent zstd frame for
- * every 16 MiB of NAR, the layout that Nix 2.35 writes, and returns the
- * compressed bytes as a stream. `FramedNarCompressor` describes the frames.
- */
+Compresses a NAR of `narSize` bytes into one independent zstd frame for
+every 16 MiB of NAR, the layout that Nix 2.35 writes, and returns the
+compressed bytes as a stream. `FramedNarCompressor` describes the frames.
+*/
 export function compressNarToStream(
 	nar: NarSource,
 	narSize: number,
@@ -121,11 +121,11 @@ async function* compressedChunks(
 }
 
 /**
- * Raised when recompressed bytes differ from the bytes that the first read
- * produced. `frame` is the frame whose bytes differ, and `position` is the
- * compressed offset at which the difference was found. The NAR or its source
- * changed between the two reads.
- */
+Raised when recompressed bytes differ from the bytes that the first read
+produced. `frame` is the frame whose bytes differ, and `position` is the
+compressed offset at which the difference was found. The NAR or its source
+changed between the two reads.
+*/
 export class RecompressedNarMismatchError extends NarError {
 	constructor(
 		public readonly frame: number,
@@ -139,9 +139,9 @@ export class RecompressedNarMismatchError extends NarError {
 }
 
 /**
- * Fails `FramedNarCompressor.checkpoint` when no compressed byte follows
- * `position`. A checkpoint is taken only after `hasMore` resolves to true.
- */
+Fails `FramedNarCompressor.checkpoint` when no compressed byte follows
+`position`. A checkpoint is taken only after `hasMore` resolves to true.
+*/
 export class CheckpointUnavailableError extends NarError {
 	constructor(public readonly position: number) {
 		super(
@@ -152,9 +152,9 @@ export class CheckpointUnavailableError extends NarError {
 }
 
 /**
- * Fails a rewind to the frame that starts at NAR offset `offset` when the NAR
- * hash has not reached that frame, so its state there is unknown.
- */
+Fails a rewind to the frame that starts at NAR offset `offset` when the NAR
+hash has not reached that frame, so its state there is unknown.
+*/
 export class NarHashStateMissingError extends NarError {
 	constructor(public readonly offset: number) {
 		super(`The NAR hash has not reached the frame at offset ${String(offset)}`);
@@ -163,10 +163,10 @@ export class NarHashStateMissingError extends NarError {
 }
 
 /**
- * A compressed position, the frame that contains the byte at that position,
- * the number of the frame's bytes before the position, and the SHA-256
- * digest, in hex, of those bytes.
- */
+A compressed position, the frame that contains the byte at that position,
+the number of the frame's bytes before the position, and the SHA-256
+digest, in hex, of those bytes.
+*/
 export interface CompressedCheckpoint {
 	readonly position: number;
 	readonly frame: number;
@@ -193,30 +193,30 @@ interface Replay {
 }
 
 /**
- * Compresses a NAR of `narSize` bytes into one independent zstd frame for
- * every 16 MiB of NAR, the layout that Nix 2.35 writes, and returns the
- * compressed bytes as the caller reads them. Each frame has its content size
- * in its header and, unlike Nix's frames, a content checksum. Decoders that
- * follow RFC 8878, including Nix's decoder and the server's verifier, decode
- * the concatenated frames as one stream. Node's zstd decompressor stops after
- * the first frame.
- *
- * The frames are compressed one after another, each by its own zstd stream,
- * and the NAR's bytes go into the current frame's stream as they are read.
- * Compressing a NAR therefore keeps one zstd context and a few 1 MiB chunks in
- * memory. Reading fails with `NarSizeChangedError` when the source has more or
- * fewer bytes than `narSize`.
- *
- * The compressor hashes the NAR bytes as it reads them, and records each
- * frame's compressed offset and the SHA-256 digest of its compressed bytes.
- * `rewind` moves back to a checkpoint: it closes the source, opens it again at
- * the start of the checkpoint's frame, and recompresses from there. The bytes
- * up to the position that the first read reached are checked against the
- * recorded digests, and reading then continues past it. The NAR hash returns
- * to its state at the start of that frame and hashes the bytes that are read
- * again, so the digest always describes the NAR that the returned compressed
- * bytes decode to. The source is never open twice at once.
- */
+Compresses a NAR of `narSize` bytes into one independent zstd frame for
+every 16 MiB of NAR, the layout that Nix 2.35 writes, and returns the
+compressed bytes as the caller reads them. Each frame has its content size
+in its header and, unlike Nix's frames, a content checksum. Decoders that
+follow RFC 8878, including Nix's decoder and the server's verifier, decode
+the concatenated frames as one stream. Node's zstd decompressor stops after
+the first frame.
+
+The frames are compressed one after another, each by its own zstd stream,
+and the NAR's bytes go into the current frame's stream as they are read.
+Compressing a NAR therefore keeps one zstd context and a few 1 MiB chunks in
+memory. Reading fails with `NarSizeChangedError` when the source has more or
+fewer bytes than `narSize`.
+
+The compressor hashes the NAR bytes as it reads them, and records each
+frame's compressed offset and the SHA-256 digest of its compressed bytes.
+`rewind` moves back to a checkpoint: it closes the source, opens it again at
+the start of the checkpoint's frame, and recompresses from there. The bytes
+up to the position that the first read reached are checked against the
+recorded digests, and reading then continues past it. The NAR hash returns
+to its state at the start of that frame and hashes the bytes that are read
+again, so the digest always describes the NAR that the returned compressed
+bytes decode to. The source is never open twice at once.
+*/
 export class FramedNarCompressor {
 	private hasher = new NarHasher();
 
@@ -384,38 +384,38 @@ export class FramedNarCompressor {
 	}
 
 	/**
-	 * The number of compressed bytes read so far.
-	 */
+	The number of compressed bytes read so far.
+	*/
 	get position(): number {
 		return this.consumed;
 	}
 
 	/**
-	 * The furthest compressed position that the first read has reached.
-	 */
+	The furthest compressed position that the first read has reached.
+	*/
 	get reachedPosition(): number {
 		return this.reached;
 	}
 
 	/**
-	 * Whether the compressor is recompressing bytes that the first read has
-	 * already returned.
-	 */
+	Whether the compressor is recompressing bytes that the first read has
+	already returned.
+	*/
 	get isReplaying(): boolean {
 		return this.replay !== undefined;
 	}
 
 	/**
-	 * The number of NAR bytes that the last completed replay recompressed.
-	 */
+	The number of NAR bytes that the last completed replay recompressed.
+	*/
 	get lastReplayNarBytes(): number {
 		return this.replayedNarBytes;
 	}
 
 	/**
-	 * Resolves to whether there are compressed bytes left to read. It rejects
-	 * with the signal's reason when `signal` aborts first.
-	 */
+	Resolves to whether there are compressed bytes left to read. It rejects
+	with the signal's reason when `signal` aborts first.
+	*/
 	async hasMore(signal?: AbortSignal): Promise<boolean> {
 		await this.advance(signal);
 
@@ -423,13 +423,13 @@ export class FramedNarCompressor {
 	}
 
 	/**
-	 * Returns up to `limit` compressed bytes from one chunk, or `undefined`
-	 * once every byte has been read. While it recompresses, it rejects with
-	 * `RecompressedNarMismatchError` at the end of a frame whose bytes differ
-	 * from the first read, or before it returns the last bytes up to the
-	 * position that the first read reached. It rejects with the signal's
-	 * reason when `signal` aborts first.
-	 */
+	Returns up to `limit` compressed bytes from one chunk, or `undefined`
+	once every byte has been read. While it recompresses, it rejects with
+	`RecompressedNarMismatchError` at the end of a frame whose bytes differ
+	from the first read, or before it returns the last bytes up to the
+	position that the first read reached. It rejects with the signal's
+	reason when `signal` aborts first.
+	*/
 	async read(
 		limit: number,
 		signal?: AbortSignal
@@ -471,9 +471,9 @@ export class FramedNarCompressor {
 	}
 
 	/**
-	 * Estimates the remaining compressed bytes, using the ratio of compressed
-	 * bytes returned so far to NAR bytes compressed so far.
-	 */
+	Estimates the remaining compressed bytes, using the ratio of compressed
+	bytes returned so far to NAR bytes compressed so far.
+	*/
 	estimateRemaining(): number {
 		const narRead = Math.max(this.narReached, this.reader.position);
 
@@ -485,9 +485,9 @@ export class FramedNarCompressor {
 	}
 
 	/**
-	 * Returns a checkpoint at the current position. Call it only after
-	 * `hasMore` resolves to true.
-	 */
+	Returns a checkpoint at the current position. Call it only after
+	`hasMore` resolves to true.
+	*/
 	checkpoint(): CompressedCheckpoint {
 		const chunk = this.pending;
 
@@ -506,24 +506,24 @@ export class FramedNarCompressor {
 	}
 
 	/**
-	 * Discards the saved state of the NAR hash for the frames before the
-	 * checkpoint's frame. A later rewind must go to `from` or to a later
-	 * checkpoint.
-	 */
+	Discards the saved state of the NAR hash for the frames before the
+	checkpoint's frame. A later rewind must go to `from` or to a later
+	checkpoint.
+	*/
 	discardBefore(from: CompressedCheckpoint): void {
 		this.hasher.discardBefore(this.frames.narOffset(from.frame));
 	}
 
 	/**
-	 * Moves back to `from`. It closes the source, opens it again at the start
-	 * of the checkpoint's frame and recompresses the frame up to the
-	 * checkpoint. It resolves once those bytes match the first read, and
-	 * rejects with `RecompressedNarMismatchError` when they do not. Later reads
-	 * return the recompressed bytes and then continue past the position that
-	 * the first read reached. The NAR hash returns to its state at the start of
-	 * the checkpoint's frame. It rejects with the signal's reason when `signal`
-	 * aborts first.
-	 */
+	Moves back to `from`. It closes the source, opens it again at the start
+	of the checkpoint's frame and recompresses the frame up to the
+	checkpoint. It resolves once those bytes match the first read, and
+	rejects with `RecompressedNarMismatchError` when they do not. Later reads
+	return the recompressed bytes and then continue past the position that
+	the first read reached. The NAR hash returns to its state at the start of
+	the checkpoint's frame. It rejects with the signal's reason when `signal`
+	aborts first.
+	*/
 	async rewind(
 		from: CompressedCheckpoint,
 		signal?: AbortSignal
@@ -584,9 +584,9 @@ export class FramedNarCompressor {
 	}
 
 	/**
-	 * Returns the NAR's compression facts. They are complete once every
-	 * compressed byte has been read.
-	 */
+	Returns the NAR's compression facts. They are complete once every
+	compressed byte has been read.
+	*/
 	compression(): NarCompressionFacts {
 		return {
 			narBytes: this.hasher.digest().size,
@@ -597,18 +597,18 @@ export class FramedNarCompressor {
 	}
 
 	/**
-	 * Stops compressing and closes the source.
-	 */
+	Stops compressing and closes the source.
+	*/
 	async close(): Promise<void> {
 		await this.events.return?.();
 	}
 }
 
 /**
- * Sends a compressed NAR's body with `send`. When sending fails, it cancels the
- * body and rethrows the error. Cancelling the body stops the compressor and
- * closes the NAR's open files.
- */
+Sends a compressed NAR's body with `send`. When sending fails, it cancels the
+body and rethrows the error. Cancelling the body stops the compressor and
+closes the NAR's open files.
+*/
 export async function sendCompressedNar<T>(
 	body: ReadableStream<Uint8Array>,
 	send: (body: ReadableStream<Uint8Array>) => Promise<T>
@@ -627,9 +627,9 @@ export async function sendCompressedNar<T>(
 }
 
 /**
- * The frames of a NAR: one for every 16 MiB, and one for the remainder. A NAR
- * of zero bytes has one empty frame.
- */
+The frames of a NAR: one for every 16 MiB, and one for the remainder. A NAR
+of zero bytes has one empty frame.
+*/
 export class NarFrames {
 	readonly lengths: readonly number[];
 
@@ -645,15 +645,15 @@ export class NarFrames {
 	}
 
 	/**
-	 * The NAR offset at which the frame numbered `index` starts.
-	 */
+	The NAR offset at which the frame numbered `index` starts.
+	*/
 	narOffset(index: number): number {
 		return index * frameSize;
 	}
 
 	/**
-	 * The largest number of bytes that the frames can compress to.
-	 */
+	The largest number of bytes that the frames can compress to.
+	*/
 	compressedBound(): number {
 		return this.lengths.reduce(
 			(total, length) => total + zstdCompressBound(length),
@@ -663,9 +663,9 @@ export class NarFrames {
 }
 
 /**
- * The largest size of a zstd frame that compresses `length` bytes, from
- * `ZSTD_COMPRESSBOUND` in zstd.h.
- */
+The largest size of a zstd frame that compresses `length` bytes, from
+`ZSTD_COMPRESSBOUND` in zstd.h.
+*/
 export function zstdCompressBound(length: number): number {
 	const smallInputMargin =
 		length < 128 * 1024 ? (128 * 1024 - length) >> 11 : 0;
@@ -774,9 +774,9 @@ function drained(stream: Transform): Promise<void> {
 }
 
 /**
- * Returns the NAR's bytes in slices no longer than the caller's limit, so no
- * slice crosses a frame boundary, and hashes each byte once as it is read.
- */
+Returns the NAR's bytes in slices no longer than the caller's limit, so no
+slice crosses a frame boundary, and hashes each byte once as it is read.
+*/
 class NarReader {
 	private readonly chunks: AsyncIterator<Uint8Array>;
 
@@ -785,9 +785,9 @@ class NarReader {
 	private total: number;
 
 	/**
-	 * Reads `source`, which starts at NAR offset `start`, and hashes every byte
-	 * that it reads with `hasher`.
-	 */
+	Reads `source`, which starts at NAR offset `start`, and hashes every byte
+	that it reads with `hasher`.
+	*/
 	constructor(
 		source: ByteSource,
 		readonly narSize: number,
@@ -813,16 +813,16 @@ class NarReader {
 	}
 
 	/**
-	 * The NAR offset after the bytes read so far.
-	 */
+	The NAR offset after the bytes read so far.
+	*/
 	get position(): number {
 		return this.total;
 	}
 
 	/**
-	 * Returns between one and `limit` bytes, or fails with
-	 * `NarSizeChangedError` when the source has ended.
-	 */
+	Returns between one and `limit` bytes, or fails with
+	`NarSizeChangedError` when the source has ended.
+	*/
 	async read(limit: number): Promise<Uint8Array> {
 		const chunk = this.pending ?? (await this.nextChunk());
 
@@ -839,8 +839,8 @@ class NarReader {
 	}
 
 	/**
-	 * Fails with `NarSizeChangedError` when the source has more bytes.
-	 */
+	Fails with `NarSizeChangedError` when the source has more bytes.
+	*/
 	async expectEnd(): Promise<void> {
 		const chunk = this.pending ?? (await this.nextChunk());
 
@@ -898,9 +898,9 @@ class NarHasher {
 	}
 
 	/**
-	 * Discards the saved states for the frames that start before NAR offset
-	 * `offset`.
-	 */
+	Discards the saved states for the frames that start before NAR offset
+	`offset`.
+	*/
 	discardBefore(offset: number): void {
 		for (const start of this.frameStarts.keys()) {
 			if (start < offset) {
@@ -910,9 +910,9 @@ class NarHasher {
 	}
 
 	/**
-	 * Returns a new hasher in the state that this one had at NAR offset
-	 * `offset`, the start of a frame that this one has reached.
-	 */
+	Returns a new hasher in the state that this one had at NAR offset
+	`offset`, the start of a frame that this one has reached.
+	*/
 	rewoundTo(offset: number): NarHasher {
 		const state = this.frameStarts.get(offset);
 

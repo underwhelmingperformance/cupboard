@@ -14,8 +14,8 @@ import { verifyWorkflowReference } from './workflow-reference.ts';
 
 const workflowPath =
 	'underwhelmingperformance/cupboard/.github/workflows/publish.yml';
-const repoPath = '/repos/underwhelmingperformance/cupboard';
-const contentPath = `${repoPath}/contents/.github%2Fworkflows%2Fpublish.yml`;
+const repositoryPath = '/repos/underwhelmingperformance/cupboard';
+const contentPath = `${repositoryPath}/contents/.github%2Fworkflows%2Fpublish.yml`;
 
 function requestUrl(input: RequestInfo | URL): URL {
 	if (typeof input === 'string') {
@@ -122,7 +122,7 @@ describe('verifyWorkflowReference', () => {
 		);
 
 		expect(requested).toStrictEqual([
-			`${repoPath}/releases/tags/v1.2.3`,
+			`${repositoryPath}/releases/tags/v1.2.3`,
 			`${contentPath}?ref=refs%2Ftags%2Fv1.2.3`
 		]);
 	});

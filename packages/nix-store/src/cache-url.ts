@@ -30,10 +30,10 @@ export function cacheUrl(baseUrl: URL, cache: CacheScope): URL {
 }
 
 /**
- * Separates a tenant cache URL into its tenant URL and cache scope. Only the
- * canonical tenant path and its named-cache child are accepted. Plain HTTP to
- * a host other than a loopback address throws {@link InsecureCacheUrlError}.
- */
+Separates a tenant cache URL into its tenant URL and cache scope. Only the
+canonical tenant path and its named-cache child are accepted. Plain HTTP to
+a host other than a loopback address throws {@link InsecureCacheUrlError}.
+*/
 export function parseTenantCacheUrl(value: URL): TenantCacheUrl {
 	const href = value.href;
 
@@ -87,18 +87,18 @@ export function parseTenantCacheUrl(value: URL): TenantCacheUrl {
 }
 
 /**
- * A read credential for a substituter URL.
- */
+A read credential for a substituter URL.
+*/
 export interface CacheUrlCredential {
 	readonly user: string;
 	readonly password: string;
 }
 
 /**
- * Returns a copy of `url` with the credential in its userinfo. Nix resolves
- * netrc entries by host, so a cache-specific credential must be supplied
- * through URL userinfo.
- */
+Returns a copy of `url` with the credential in its userinfo. Nix resolves
+netrc entries by host, so a cache-specific credential must be supplied
+through URL userinfo.
+*/
 export function urlWithCredential(
 	url: URL,
 	credential: CacheUrlCredential

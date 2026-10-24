@@ -147,10 +147,10 @@ function heldSubject(storePath: StorePathString): unknown {
 	};
 }
 
-function copiedSubject(storePath: StorePathString): unknown {
+function copiedSubject(): unknown {
 	return {
 		origin: 'copied',
-		storePath,
+		storePath: pathA,
 		narHash: narHash.digestHex(),
 		derivation: drvA,
 		signatures: []
@@ -438,13 +438,13 @@ interface FlowConfig {
 	readonly action?: UploadDecisionInput['action'];
 	readonly uploadFailure?: Error;
 	/**
-	 * Compression facts for every compressed NAR.
-	 */
+	Compression facts for every compressed NAR.
+	*/
 	readonly compression?: NarCompressionFacts;
 	/**
-	 * When set, the client compresses each NAR itself, reports padding in its
-	 * second part and returns these transfer facts.
-	 */
+	When set, the client compresses each NAR itself, reports padding in its
+	second part and returns these transfer facts.
+	*/
 	readonly transfer?: NarTransferFacts;
 	readonly negotiateFailure?: Error;
 	readonly unwritableReceipt?: boolean;
@@ -1891,7 +1891,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [copiedSubject(pathA)],
+				subjects: [copiedSubject()],
 				childExitStatus: 0,
 				uploaded: []
 			}
@@ -2019,7 +2019,7 @@ describe('runBuildPush', () => {
 				},
 				declaredOutputs: [pathA]
 			},
-			subject: copiedSubject(pathA)
+			subject: copiedSubject()
 		}
 	])('classifies $name from execution evidence', async (row) => {
 		await expect(reconciledReceipt(row.config)).resolves.toStrictEqual(
@@ -2044,7 +2044,7 @@ describe('runBuildPush', () => {
 				constructed: { succeedOn: 1, installables: [`${drvA}^*`] },
 				declaredOutputs: [pathA]
 			},
-			subject: copiedSubject(pathA)
+			subject: copiedSubject()
 		},
 		{
 			name: 'a path no question before the build covered',
@@ -2213,7 +2213,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [copiedSubject(pathA)],
+				subjects: [copiedSubject()],
 				childExitStatus: 1,
 				terminalFailure: {
 					kind: 'target-build',
@@ -2309,7 +2309,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [copiedSubject(pathA)],
+				subjects: [copiedSubject()],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
 				childExitStatus: 0,
 				uploaded: [],
@@ -2420,7 +2420,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [copiedSubject(pathA)],
+				subjects: [copiedSubject()],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
 				childExitStatus: 0,
 				uploaded: [],
@@ -3979,7 +3979,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [copiedSubject(pathA)],
+				subjects: [copiedSubject()],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
 				childExitStatus: 0,
 				uploaded: [],

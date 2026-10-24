@@ -29,10 +29,10 @@ export function reuseViewSelectorRow(
 }
 
 /**
- * Reads a stored selector back, or returns `undefined` when the two columns do
- * not describe one. The migration that introduced these kinds rewrote every
- * existing row, so a caller treats `undefined` as a stored-data fault.
- */
+Reads a stored selector back, or returns `undefined` when the two columns do
+not describe one. The migration that introduced these kinds rewrote every
+existing row, so a caller treats `undefined` as a stored-data fault.
+*/
 export function reuseViewSelectorFromRow(
 	row: Pick<
 		typeof schema.nativeReuseViewSelectors.$inferSelect,
@@ -63,10 +63,10 @@ export function reuseViewSelectorFromRow(
 }
 
 /**
- * Reads every stored selector of one view. A row the two columns do not
- * describe is a stored-data fault: skipping it would change the set of caches
- * the view reads from, so the read refuses instead.
- */
+Reads every stored selector of one view. A row the two columns do not
+describe is a stored-data fault: skipping it would change the set of caches
+the view reads from, so the read refuses instead.
+*/
 export function reuseViewSelectorsFromRows(
 	view: string,
 	rows: readonly Pick<

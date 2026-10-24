@@ -30,8 +30,8 @@ export interface NarInfoSubstitution {
 }
 
 /**
- * Reads the substitution metadata and the advertised archive location.
- */
+Reads the substitution metadata and the advertised archive location.
+*/
 export function readNarInfoSubstitution(
 	source: string,
 	storePath: StorePathString,
@@ -41,11 +41,11 @@ export function readNarInfoSubstitution(
 }
 
 /**
- * Parses substitution evidence from a narinfo. Deriver and reference basenames
- * are resolved in `storeDirectory`. The parser validates every recognised
- * field against Nix's grammar, including compression values and required
- * fields, and requires `StorePath` to match the requested path.
- */
+Parses substitution evidence from a narinfo. Deriver and reference basenames
+are resolved in `storeDirectory`. The parser validates every recognised
+field against Nix's grammar, including compression values and required
+fields, and requires `StorePath` to match the requested path.
+*/
 export function offerFromNarInfo(
 	source: string,
 	storePath: StorePathString,
@@ -55,13 +55,13 @@ export function offerFromNarInfo(
 }
 
 /**
- * Parses a narinfo using Nix's substituter rules. Every recognised field is
- * decoded so this client does not report a path as available when Nix would
- * reject its narinfo.
- *
- * A field's value starts two characters after its colon, and every line ends
- * with a newline. Nix requires both.
- */
+Parses a narinfo using Nix's substituter rules. Every recognised field is
+decoded so this client does not report a path as available when Nix would
+reject its narinfo.
+
+A field's value starts two characters after its colon, and every line ends
+with a newline. Nix requires both.
+*/
 class NarInfoReader {
 	private references?: readonly StorePathString[];
 

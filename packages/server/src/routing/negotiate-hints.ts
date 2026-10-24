@@ -40,10 +40,10 @@ const lenientNegotiateBodySchema = z.object({
 });
 
 /**
- * Prefetches shared blob and reference facts before dispatching a negotiation.
- * The Durable Object checks the access token and its cache grant before any
- * shared D1 fact read. Invalid input or credentials disable the optimisation.
- */
+Prefetches shared blob and reference facts before dispatching a negotiation.
+The Durable Object checks the access token and its cache grant before any
+shared D1 fact read. Invalid input or credentials disable the optimisation.
+*/
 export async function computeNegotiateHints(
 	request: Request,
 	env: Env,

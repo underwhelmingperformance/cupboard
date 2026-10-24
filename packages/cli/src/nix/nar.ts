@@ -86,10 +86,10 @@ const nodesBetweenTurns = 64;
 const bytesBetweenTurns = pieceSize;
 
 /**
- * The NAR of a path on the local filesystem. Opening it at an offset walks the
- * tree's metadata to find the node that contains the offset, without reading
- * the contents of the files before it.
- */
+The NAR of a path on the local filesystem. Opening it at an offset walks the
+tree's metadata to find the node that contains the offset, without reading
+the contents of the files before it.
+*/
 export class NarArchive implements AsyncIterable<Uint8Array>, NarSource {
 	constructor(public readonly path: string) {}
 
@@ -111,8 +111,8 @@ export class NarArchive implements AsyncIterable<Uint8Array>, NarSource {
 }
 
 /**
- * Serialises the tree at `path` as a NAR and yields its bytes from `offset`.
- */
+Serialises the tree at `path` as a NAR and yields its bytes from `offset`.
+*/
 export async function* narFromPath(
 	path: string,
 	offset = 0
@@ -186,9 +186,9 @@ class EventLoopTurns {
 }
 
 /**
- * A directory whose entries are being written, in the byte order of their
- * names.
- */
+A directory whose entries are being written, in the byte order of their
+names.
+*/
 class OpenDirectory {
 	private index = 0;
 
@@ -198,9 +198,9 @@ class OpenDirectory {
 	) {}
 
 	/**
-	 * Writes the start of the next entry and returns the path of its node, or
-	 * returns `undefined` once every entry has been written.
-	 */
+	Writes the start of the next entry and returns the path of its node, or
+	returns `undefined` once every entry has been written.
+	*/
 	nextEntry(writer: NarWriter): string | undefined {
 		const entry = this.entries[this.index];
 
@@ -377,23 +377,23 @@ class NarWriter {
 	constructor(private readonly start: number) {}
 
 	/**
-	 * The NAR offset after the bytes written so far.
-	 */
+	The NAR offset after the bytes written so far.
+	*/
 	get written(): number {
 		return this.position;
 	}
 
 	/**
-	 * Whether the next `length` bytes are all before the start.
-	 */
+	Whether the next `length` bytes are all before the start.
+	*/
 	skips(length: number): boolean {
 		return this.position + length <= this.start;
 	}
 
 	/**
-	 * Counts up to `length` of the next bytes without writing them, as far as
-	 * the start, and returns how many it counted.
-	 */
+	Counts up to `length` of the next bytes without writing them, as far as
+	the start, and returns how many it counted.
+	*/
 	skip(length: number): number {
 		const skipped = Math.max(0, Math.min(length, this.start - this.position));
 		this.position += skipped;

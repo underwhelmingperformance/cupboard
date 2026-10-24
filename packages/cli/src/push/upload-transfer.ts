@@ -15,24 +15,24 @@ import type { NarTransferFacts, NarUploadObserver } from './nar-upload.ts';
 import type { CompressNar, PushClient } from './push.ts';
 
 /**
- * How often an upload is renewed while its bytes are being sent. Each renewal
- * sets the upload's expiry to 15 minutes after the renewal, so two renewals in
- * a row can be missed before the upload expires.
- */
+How often an upload is renewed while its bytes are being sent. Each renewal
+sets the upload's expiry to 15 minutes after the renewal, so two renewals in
+a row can be missed before the upload expires.
+*/
 export const uploadRenewalIntervalMs = 5 * 60 * 1000;
 
 /**
- * Calls `tick` every `intervalMs` until the returned function cancels it.
- */
+Calls `tick` every `intervalMs` until the returned function cancels it.
+*/
 export type RenewalSchedule = (
 	tick: () => void,
 	intervalMs: number
 ) => () => void;
 
 /**
- * Times uploads and schedules their renewals. Tests replace it to drive both
- * without a real clock.
- */
+Times uploads and schedules their renewals. Tests replace it to drive both
+without a real clock.
+*/
 export interface UploadClock {
 	/**
 	Returns milliseconds from an arbitrary origin.
@@ -54,20 +54,20 @@ export const systemUploadClock: UploadClock = {
 };
 
 /**
- * The result of an upload's transfer, and how long the transfer took in
- * milliseconds.
- */
+The result of an upload's transfer, and how long the transfer took in
+milliseconds.
+*/
 export interface SentUpload<T> {
 	readonly durationMs: number;
 	readonly result: T;
 }
 
 /**
- * Runs `transfer`, which sends the bytes of one upload, and returns its result
- * and how long it took. Until the transfer finishes or fails, the upload is
- * renewed over `session` at every interval. Without a session that supports
- * renewal, the transfer is only timed.
- */
+Runs `transfer`, which sends the bytes of one upload, and returns its result
+and how long it took. Until the transfer finishes or fails, the upload is
+renewed over `session` at every interval. Without a session that supports
+renewal, the transfer is only timed.
+*/
 export async function sendUpload<T>(
 	session: CommitSession | undefined,
 	uploadId: UploadId,
@@ -107,9 +107,9 @@ async function renewQuietly(
 }
 
 /**
- * Reports how long one path's upload took. The message appears with `--debug`
- * and in every JSON event stream, so a slow upload is visible after a run.
- */
+Reports how long one path's upload took. The message appears with `--debug`
+and in every JSON event stream, so a slow upload is visible after a run.
+*/
 export function reportUploadDuration(
 	reporter: Pick<Reporter, 'info'>,
 	storePathName: string,
@@ -121,9 +121,9 @@ export function reportUploadDuration(
 }
 
 /**
- * One NAR's completed upload: how long it took, the uncompressed NAR's digest,
- * and the compression and transfer facts that the client reported.
- */
+One NAR's completed upload: how long it took, the uncompressed NAR's digest,
+and the compression and transfer facts that the client reported.
+*/
 export interface CompletedNarUpload {
 	readonly durationMs: number;
 	readonly digest: NarDigest;
@@ -133,9 +133,9 @@ export interface CompletedNarUpload {
 }
 
 /**
- * Receives the NAR uploads of a run. `observe` returns the observer for one
- * path's upload, and `completed` receives the upload once it has finished.
- */
+Receives the NAR uploads of a run. `observe` returns the observer for one
+path's upload, and `completed` receives the upload once it has finished.
+*/
 export interface UploadReport {
 	resolved?(info: NixValidPathInfo): void;
 	observe(storePath: string): NarUploadObserver;
@@ -147,19 +147,19 @@ export interface NarUploadContext {
 	readonly session: CommitSession | undefined;
 	readonly clock: UploadClock;
 	/**
-	 * Compresses the NAR for a client that has no `uploadCompressedNar`.
-	 */
+	Compresses the NAR for a client that has no `uploadCompressedNar`.
+	*/
 	readonly compressNar: CompressNar;
 	readonly observer: NarUploadObserver;
 }
 
 /**
- * Uploads a NAR to the staging key that negotiation returned, renewing the
- * upload until it finishes. A client with `uploadCompressedNar` compresses
- * and sends the NAR itself, and can read the source again to send a part
- * again. For any other client, the NAR is compressed here and its bytes go to
- * `uploadNar`.
- */
+Uploads a NAR to the staging key that negotiation returned, renewing the
+upload until it finishes. A client with `uploadCompressedNar` compresses
+and sends the NAR itself, and can read the source again to send a part
+again. For any other client, the NAR is compressed here and its bytes go to
+`uploadNar`.
+*/
 export async function uploadNarFromSource(
 	context: NarUploadContext,
 	decision: { readonly uploadId: UploadId; readonly r2Key: string },

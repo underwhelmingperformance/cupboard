@@ -139,13 +139,13 @@ export class GithubRepairUnavailableError extends CliError {
 }
 
 /**
- * How a planned rule could stop an existing rule from authorising another
- * job's runs. `ungranted`: the server would select the planned rule, which
- * does not grant the job's requests. `ambiguous`: the planned rule and an
- * existing rule would both match with as many claims and permit the same
- * request. `unmodelled`: the check cannot model the job, and a planned rule
- * could match its runs with at least as many claims as an existing rule.
- */
+How a planned rule could stop an existing rule from authorising another
+job's runs. `ungranted`: the server would select the planned rule, which
+does not grant the job's requests. `ambiguous`: the planned rule and an
+existing rule would both match with as many claims and permit the same
+request. `unmodelled`: the check cannot model the job, and a planned rule
+could match its runs with at least as many claims as an existing rule.
+*/
 export type GithubRepairShadow = 'ungranted' | 'ambiguous' | 'unmodelled';
 
 function shadowReason(
@@ -170,9 +170,9 @@ function shadowReason(
 }
 
 /**
- * The server selects the matching rule with the most claims. A planned rule
- * can therefore replace the rule that another job currently uses.
- */
+The server selects the matching rule with the most claims. A planned rule
+can therefore replace the rule that another job currently uses.
+*/
 function humanShadowReason(
 	shadow: GithubRepairShadow,
 	job: string,
@@ -267,11 +267,11 @@ export type GithubTrustScope = (typeof githubTrustScopes)[number];
 
 export interface GithubRepairOptions {
 	/**
-	 * With `--yes`, the repair writes without a prompt. Anyone who can push to
-	 * the repository can change the workflow files on a branch other than the
-	 * default branch, so the repair returns an error for rules taken from such
-	 * a branch.
-	 */
+	With `--yes`, the repair writes without a prompt. Anyone who can push to
+	the repository can change the workflow files on a branch other than the
+	default branch, so the repair returns an error for rules taken from such
+	a branch.
+	*/
 	readonly yes?: boolean;
 	readonly allowBranchWorkflow?: boolean;
 	readonly trustScope?: GithubTrustScope;
@@ -409,18 +409,16 @@ function withModelledPrPublicationGrants(
 				return [];
 			}
 
-			return [
-				{
-					...grant,
-					actions,
-					resources: {
-						cache: grant.resources.cache,
-						...(actions.some((action) => isRootOperation(action)) && {
-							root: grant.resources.root
-						})
-					}
+			return {
+				...grant,
+				actions,
+				resources: {
+					cache: grant.resources.cache,
+					...(actions.some((action) => isRootOperation(action)) && {
+						root: grant.resources.root
+					})
 				}
-			];
+			};
 		})
 	};
 }
@@ -718,11 +716,11 @@ function uniqueViews(
 }
 
 /**
- * Finishes a check in discovery mode. With `--fix`, or when an interactive operator
- * accepts the offer, the repair runs and its result determines the exit
- * status. Otherwise the command exits unsuccessfully if the check reported a
- * failed or unverified job.
- */
+Finishes a check in discovery mode. With `--fix`, or when an interactive operator
+accepts the offer, the repair runs and its result determines the exit
+status. Otherwise the command exits unsuccessfully if the check reported a
+failed or unverified job.
+*/
 export async function offerDiscoveredGithubRepair(
 	result: DiscoveredGithubCheckResult,
 	ui: CliUi,
@@ -813,9 +811,9 @@ function canMatchOneRun(left: OidcTrustRule, right: OidcTrustRule): boolean {
 }
 
 /**
- * Whether a planned rule could match a run of an unverified job. Planned rules
- * always specify a Cupboard publishing workflow in `job_workflow_ref`.
- */
+Whether a planned rule could match a run of an unverified job. Planned rules
+always specify a Cupboard publishing workflow in `job_workflow_ref`.
+*/
 function canPlannedRuleMatch(
 	rule: OidcTrustRule,
 	identity: DiscoveredGithubCheckResult['identity'],
@@ -923,7 +921,7 @@ function checkModelledCase(
 		const selection = selectModelledOidcTrust(existing, claims, request);
 
 		return selection.outcome === 'selected' && selection.rule !== undefined
-			? [selection.rule.id]
+			? selection.rule.id
 			: [];
 	});
 
@@ -936,13 +934,13 @@ function checkModelledCase(
 }
 
 /**
- * The server selects the matching rule with the most claims, so a planned rule
- * can replace the rule that another job currently uses. Check the planned
- * rules against every discovered job outside the repair. A job that the check
- * models exactly must keep passing. For any other job, the repair stops when a
- * planned rule could match its runs with at least as many claims as an
- * existing rule that could also match them.
- */
+The server selects the matching rule with the most claims, so a planned rule
+can replace the rule that another job currently uses. Check the planned
+rules against every discovered job outside the repair. A job that the check
+models exactly must keep passing. For any other job, the repair stops when a
+planned rule could match its runs with at least as many claims as an
+existing rule that could also match them.
+*/
 async function checkPlannedRulesKeepOtherJobs(
 	url: URL,
 	result: DiscoveredGithubCheckResult,
@@ -1030,11 +1028,11 @@ async function checkPlannedRulesKeepOtherJobs(
 }
 
 /**
- * The server prefers a planned rule to an existing rule only when the planned
- * rule has more claims. When a matching rule without a required grant has at
- * least as many claims as the planned rule, the repair cannot fix the job by
- * adding a rule.
- */
+The server prefers a planned rule to an existing rule only when the planned
+rule has more claims. When a matching rule without a required grant has at
+least as many claims as the planned rule, the repair cannot fix the job by
+adding a rule.
+*/
 function checkRetainedRules(
 	url: URL,
 	result: DiscoveredGithubCheckResult,
@@ -1458,7 +1456,7 @@ export async function runDiscoveredGithubRepair(
 				modelled.flatMap(({ publication, read }) =>
 					publication.reuseView?.name === view.name &&
 					read.selectedViewAccess !== undefined
-						? [read.selectedViewAccess]
+						? read.selectedViewAccess
 						: []
 				)
 			)

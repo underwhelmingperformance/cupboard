@@ -1,9 +1,9 @@
 /**
- * Process exit codes by failure category, so a caller can tell a misuse from
- * the catch-all. 2 is the usual shell convention for a usage error and 1 is the
- * catch-all. 75 is the BSD sysexits EX_TEMPFAIL code, for a failure that a
- * later attempt may not repeat. Packages layer their own categories on top.
- */
+Process exit codes by failure category, so a caller can tell a misuse from
+the catch-all. 2 is the usual shell convention for a usage error and 1 is the
+catch-all. 75 is the BSD sysexits EX_TEMPFAIL code, for a failure that a
+later attempt may not repeat. Packages layer their own categories on top.
+*/
 export const genericExitCode = 1;
 export const usageExitCode = 2;
 export const transientExitCode = 75;
@@ -23,11 +23,11 @@ export abstract class UsageError extends CodedError {
 const maxRenderedCauses = 5;
 
 /**
- * Returns descriptions of up to five causes, starting with the nearest cause.
- * Errors use `name: message`, objects use JSON, and other values use their
- * string form. The walk stops when it reaches a repeated object, so a cyclic
- * cause chain terminates.
- */
+Returns descriptions of up to five causes, starting with the nearest cause.
+Errors use `name: message`, objects use JSON, and other values use their
+string form. The walk stops when it reaches a repeated object, so a cyclic
+cause chain terminates.
+*/
 export function errorCauses(error: unknown): string[] {
 	const described: string[] = [];
 	const seen = new Set<object>();
@@ -86,10 +86,10 @@ function serialise(value: object): string | undefined {
 }
 
 /**
- * A thrown value's own message with its `cause` chain below it, one indented
- * line per level. Use this in a diagnostic instead of `error.message`: several
- * errors report only that an operation failed and keep the reason in `cause`.
- */
+A thrown value's own message with its `cause` chain below it, one indented
+line per level. Use this in a diagnostic instead of `error.message`: several
+errors report only that an operation failed and keep the reason in `cause`.
+*/
 export function formatErrorWithCauses(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
 

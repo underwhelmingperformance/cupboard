@@ -26,8 +26,8 @@ import {
 import { isR2BadDigest } from './r2-errors.ts';
 
 /**
- * The verified NAR metadata used to promote staged bytes.
- */
+The verified NAR metadata used to promote staged bytes.
+*/
 export interface PromotionTarget {
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
@@ -131,17 +131,17 @@ async function ensureCanonicalObject(
 }
 
 /**
- * Promotes verified staging bytes to a versioned shared R2 object and returns
- * its compressed metadata. A conditional put makes each physical object
- * version write-once, so concurrent uploads adopt one encoding. The staging
- * object remains until the commit is durable so a retry can recover after a
- * crash.
- *
- * R2 completes before the `blob_state` write. A crash between them can leave an
- * unrecorded canonical object; retrying adopts that object and writes the row.
- * Staging remains until the commit is durable so earlier crash points can also
- * be retried.
- */
+Promotes verified staging bytes to a versioned shared R2 object and returns
+its compressed metadata. A conditional put makes each physical object
+version write-once, so concurrent uploads adopt one encoding. The staging
+object remains until the commit is durable so a retry can recover after a
+crash.
+
+R2 completes before the `blob_state` write. A crash between them can leave an
+unrecorded canonical object; retrying adopts that object and writes the row.
+Staging remains until the commit is durable so earlier crash points can also
+be retried.
+*/
 export async function promoteVerifiedBlob(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	blobs: R2Bucket,
@@ -163,10 +163,10 @@ export async function promoteVerifiedBlob(
 }
 
 /**
- * A promotion whose R2 work is complete but whose `blob_state` row is not yet
- * written. A caller can apply the upsert directly or include it in one D1 batch
- * with other promotions.
- */
+A promotion whose R2 work is complete but whose `blob_state` row is not yet
+written. A caller can apply the upsert directly or include it in one D1 batch
+with other promotions.
+*/
 export interface StagedBlobPromotion {
 	readonly canonical: CanonicalBlob;
 	readonly upsert: BlobStateUpsert;
@@ -207,21 +207,21 @@ async function liveBlobIncarnation(
 }
 
 /**
- * Whether verification can write a NAR's canonical object itself. `existing`
- * means that a live object is already recorded for the NAR. `reserved` gives
- * the incarnation to write, reserved for `reservationOwner`. `contended` means
- * that another promoter changed the registry during the reservation.
- */
+Whether verification can write a NAR's canonical object itself. `existing`
+means that a live object is already recorded for the NAR. `reserved` gives
+the incarnation to write, reserved for `reservationOwner`. `contended` means
+that another promoter changed the registry during the reservation.
+*/
 export type CanonicalIncarnation =
 	| { readonly kind: 'existing' }
 	| { readonly kind: 'reserved'; readonly incarnation: number }
 	| { readonly kind: 'contended' };
 
 /**
- * Reserves the incarnation that verification writes while it reads the staged
- * object. {@link commitStagedBlobPromotion} activates it after
- * {@link stageWrittenBlob} prepares it for the same owner.
- */
+Reserves the incarnation that verification writes while it reads the staged
+object. {@link commitStagedBlobPromotion} activates it after
+{@link stageWrittenBlob} prepares it for the same owner.
+*/
 export async function reserveCanonicalIncarnation(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	narHash: NixSha256HashString,
@@ -256,9 +256,9 @@ export async function reserveCanonicalIncarnation(
 }
 
 /**
- * Gives up an incarnation that verification wrote for `reservationOwner` when
- * the upload will not be published from it.
- */
+Gives up an incarnation that verification wrote for `reservationOwner` when
+the upload will not be published from it.
+*/
 export function abandonWrittenBlob(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	narHash: NixSha256HashString,
@@ -275,11 +275,11 @@ export function abandonWrittenBlob(
 }
 
 /**
- * Prepares the promotion of a canonical object that verification has already
- * written at a reserved incarnation. It reads only the object's metadata.
- * Returns `undefined` when the caller no longer owns the upload or when the
- * object is missing, so that a later pass verifies the staged bytes again.
- */
+Prepares the promotion of a canonical object that verification has already
+written at a reserved incarnation. It reads only the object's metadata.
+Returns `undefined` when the caller no longer owns the upload or when the
+object is missing, so that a later pass verifies the staged bytes again.
+*/
 export async function stageWrittenBlob(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	blobs: R2Bucket,
@@ -315,9 +315,9 @@ export async function stageWrittenBlob(
 }
 
 /**
- * Performs the R2 promotion and returns the `blob_state` upsert. The caller must
- * execute the upsert directly or include it in a D1 batch.
- */
+Performs the R2 promotion and returns the `blob_state` upsert. The caller must
+execute the upsert directly or include it in a D1 batch.
+*/
 export function stagePromotedBlob(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	blobs: R2Bucket,
@@ -432,10 +432,10 @@ export async function stagePromotedBlob(
 }
 
 /**
- * Activates a prepared R2 object and writes its `blob_state` row. This function
- * performs no R2 request, so a caller can keep its local ownership check active
- * for the complete operation.
- */
+Activates a prepared R2 object and writes its `blob_state` row. This function
+performs no R2 request, so a caller can keep its local ownership check active
+for the complete operation.
+*/
 export async function commitStagedBlobPromotion(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	staged: StagedBlobPromotion,

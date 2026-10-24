@@ -23,9 +23,9 @@ import {
 	zoneIdSchema
 } from './identifiers.ts';
 
-const accountId = (value: string) => cloudflareAccountIdSchema.parse(value);
+const accountId = () => cloudflareAccountIdSchema.parse('acc-1');
 const scriptName = (value: string) => scriptNameSchema.parse(value);
-const queueId = (value: string) => queueIdSchema.parse(value);
+const queueId = () => queueIdSchema.parse('queue-1');
 
 interface Recorded {
 	readonly method: string;
@@ -115,12 +115,12 @@ async function recordWorkerUpload(
 }
 
 /**
- * A Cloudflare client whose HTTP layer is a fake: responses are looked up by
- * `METHOD path` (paths relative to the v4 API root), and every request is
- * recorded. This exercises the real interface code against the response shapes
- * the live API actually produces, which the SDK's published types do not always
- * match.
- */
+A Cloudflare client whose HTTP layer is a fake: responses are looked up by
+`METHOD path` (paths relative to the v4 API root), and every request is
+recorded. This exercises the real interface code against the response shapes
+the live API actually produces, which the SDK's published types do not always
+match.
+*/
 function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {
 	client: Cloudflare;
 	requests: Recorded[];
@@ -238,7 +238,7 @@ const consumersPath = '/accounts/acc-1/queues/queue-1/consumers';
 describe('uploadScript', () => {
 	it('sends the Worker as Cloudflare multipart upload parts', async () => {
 		const upload = await recordWorkerUpload((client) =>
-			createCloudflareApi(client, accountId('acc-1')).uploadScript(
+			createCloudflareApi(client, accountId()).uploadScript(
 				scriptName('cupboard'),
 				{
 					main_module: 'worker.js',
@@ -316,7 +316,7 @@ describe('listDeployedVersions', () => {
 
 		const versions = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).listDeployedVersions(scriptName('cupboard'));
 
 		expect({ versions, requests }).toStrictEqual({
@@ -329,7 +329,7 @@ describe('listDeployedVersions', () => {
 		const { client } = fakeCloudflare({});
 
 		await expect(
-			createCloudflareApi(client, accountId('acc-1')).listDeployedVersions(
+			createCloudflareApi(client, accountId()).listDeployedVersions(
 				scriptName('cupboard')
 			)
 		).resolves.toStrictEqual([]);
@@ -348,7 +348,7 @@ describe('listDeployedVersions', () => {
 		});
 
 		await expect(
-			createCloudflareApi(client, accountId('acc-1')).listDeployedVersions(
+			createCloudflareApi(client, accountId()).listDeployedVersions(
 				scriptName('cupboard')
 			)
 		).rejects.toBeInstanceOf(ZodError);
@@ -364,7 +364,7 @@ describe('rollApiTokenSecret', () => {
 
 		const value = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).rollApiTokenSecret('token-1');
 
 		expect({ value, requests, bodies }).toStrictEqual({
@@ -400,7 +400,7 @@ describe('d1QueryBatch', () => {
 			params: parameters
 		};
 
-		await createCloudflareApi(client, accountId('acc-1')).d1QueryBatch(
+		await createCloudflareApi(client, accountId()).d1QueryBatch(
 			databaseIdSchema.parse('db-1'),
 			[
 				'CREATE TABLE example (text TEXT, number INTEGER, missing TEXT);',
@@ -429,7 +429,7 @@ describe('d1QueryBatch', () => {
 			[`POST ${path}`]: []
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).d1QueryBatch(
+		await createCloudflareApi(client, accountId()).d1QueryBatch(
 			databaseIdSchema.parse('db-1'),
 			['CREATE TABLE example (id INTEGER);', 'INSERT INTO example VALUES (1);']
 		);
@@ -462,10 +462,7 @@ describe('d1QueryRows', () => {
 			]
 		});
 
-		const rows = await createCloudflareApi(
-			client,
-			accountId('acc-1')
-		).d1QueryRows(
+		const rows = await createCloudflareApi(client, accountId()).d1QueryRows(
 			databaseIdSchema.parse('db-1'),
 			"SELECT name || ':' || sha256 FROM d1_migrations;"
 		);
@@ -478,7 +475,7 @@ describe('d1QueryRows', () => {
 		const { client } = fakeCloudflare({ [`POST ${path}`]: [{}] });
 
 		await expect(
-			createCloudflareApi(client, accountId('acc-1')).d1QueryRows(
+			createCloudflareApi(client, accountId()).d1QueryRows(
 				databaseIdSchema.parse('db-1'),
 				'SELECT 1;'
 			)
@@ -492,8 +489,8 @@ describe('ensureQueueConsumer', () => {
 			[`GET ${consumersPath}`]: [liveWorkerConsumer]
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
-			queueId('queue-1'),
+		await createCloudflareApi(client, accountId()).ensureQueueConsumer(
+			queueId(),
 			scriptName('cupboard'),
 			desiredSettings
 		);
@@ -507,8 +504,8 @@ describe('ensureQueueConsumer', () => {
 			[`POST ${consumersPath}`]: {}
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
-			queueId('queue-1'),
+		await createCloudflareApi(client, accountId()).ensureQueueConsumer(
+			queueId(),
 			scriptName('cupboard'),
 			desiredSettings
 		);
@@ -530,8 +527,8 @@ describe('ensureQueueConsumer', () => {
 			[`PUT ${consumersPath}/consumer-1`]: {}
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
-			queueId('queue-1'),
+		await createCloudflareApi(client, accountId()).ensureQueueConsumer(
+			queueId(),
 			scriptName('cupboard'),
 			desiredSettings
 		);
@@ -548,8 +545,8 @@ describe('ensureQueueConsumer', () => {
 			[`PUT ${consumersPath}/consumer-1`]: {}
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
-			queueId('queue-1'),
+		await createCloudflareApi(client, accountId()).ensureQueueConsumer(
+			queueId(),
 			scriptName('cupboard'),
 			{
 				maxBatchSize: undefined,
@@ -583,19 +580,16 @@ describe('ensureQueueConsumer', () => {
 				}
 			]
 		});
-		const api = createCloudflareApi(client, accountId('acc-1'));
+		const api = createCloudflareApi(client, accountId());
 
 		await expect(
 			api.ensureQueueConsumer(
-				queueId('queue-1'),
+				queueId(),
 				scriptName('cupboard'),
 				desiredSettings
 			)
 		).rejects.toStrictEqual(
-			new QueueConsumerIdMissingError(
-				queueId('queue-1'),
-				scriptName('cupboard')
-			)
+			new QueueConsumerIdMissingError(queueId(), scriptName('cupboard'))
 		);
 		expect(requests).toStrictEqual([{ method: 'GET', path: consumersPath }]);
 	});
@@ -606,8 +600,8 @@ describe('ensureQueueConsumer', () => {
 			[`GET ${consumersPath}`]: [{ ...schemaShaped, script_name: 'cupboard' }]
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
-			queueId('queue-1'),
+		await createCloudflareApi(client, accountId()).ensureQueueConsumer(
+			queueId(),
 			scriptName('cupboard'),
 			desiredSettings
 		);
@@ -624,7 +618,7 @@ describe('ensureSchedules', () => {
 			[`GET ${schedulesPath}`]: { schedules: [{ cron: '0 * * * *' }] }
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).ensureSchedules(
+		await createCloudflareApi(client, accountId()).ensureSchedules(
 			scriptName('cupboard'),
 			['0 * * * *']
 		);
@@ -638,7 +632,7 @@ describe('ensureSchedules', () => {
 			[`PUT ${schedulesPath}`]: { schedules: [{ cron: '0 * * * *' }] }
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).ensureSchedules(
+		await createCloudflareApi(client, accountId()).ensureSchedules(
 			scriptName('cupboard'),
 			['0 * * * *']
 		);
@@ -661,7 +655,7 @@ describe('R2 bucket lookup', () => {
 
 		const isPresent = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).r2BucketExists('cupboard-blobs');
 
 		expect({ isPresent, requests }).toStrictEqual({
@@ -675,7 +669,7 @@ describe('R2 bucket lookup', () => {
 			[`POST ${bucketsPath}`]: { name: 'cupboard-blobs' }
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).ensureR2Bucket(
+		await createCloudflareApi(client, accountId()).ensureR2Bucket(
 			'cupboard-blobs'
 		);
 
@@ -728,10 +722,9 @@ describe('ensureStagingLifecycleRule', () => {
 				}
 			});
 			await expect(
-				createCloudflareApi(
-					client,
-					accountId('acc-1')
-				).ensureStagingLifecycleRule('cupboard-blobs')
+				createCloudflareApi(client, accountId()).ensureStagingLifecycleRule(
+					'cupboard-blobs'
+				)
 			).rejects.toThrow('early');
 			expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
 		}
@@ -743,10 +736,9 @@ describe('ensureStagingLifecycleRule', () => {
 			[`PUT ${lifecyclePath}`]: {}
 		});
 
-		await createCloudflareApi(
-			client,
-			accountId('acc-1')
-		).ensureStagingLifecycleRule('cupboard-blobs');
+		await createCloudflareApi(client, accountId()).ensureStagingLifecycleRule(
+			'cupboard-blobs'
+		);
 
 		expect({ requests, putBody: bodies[1] }).toStrictEqual({
 			requests: [
@@ -762,10 +754,9 @@ describe('ensureStagingLifecycleRule', () => {
 			[`GET ${lifecyclePath}`]: { rules: [stagingRule, publicationRule] }
 		});
 
-		await createCloudflareApi(
-			client,
-			accountId('acc-1')
-		).ensureStagingLifecycleRule('cupboard-blobs');
+		await createCloudflareApi(client, accountId()).ensureStagingLifecycleRule(
+			'cupboard-blobs'
+		);
 
 		expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
 	});
@@ -780,10 +771,9 @@ describe('ensureStagingLifecycleRule', () => {
 			}
 		});
 
-		await createCloudflareApi(
-			client,
-			accountId('acc-1')
-		).ensureStagingLifecycleRule('cupboard-blobs');
+		await createCloudflareApi(client, accountId()).ensureStagingLifecycleRule(
+			'cupboard-blobs'
+		);
 
 		expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
 	});
@@ -810,10 +800,9 @@ describe('ensureStagingLifecycleRule', () => {
 			[`PUT ${lifecyclePath}`]: {}
 		});
 
-		await createCloudflareApi(
-			client,
-			accountId('acc-1')
-		).ensureStagingLifecycleRule('cupboard-blobs');
+		await createCloudflareApi(client, accountId()).ensureStagingLifecycleRule(
+			'cupboard-blobs'
+		);
 
 		expect({ requests, putBody: bodies[1] }).toStrictEqual({
 			requests: [
@@ -835,7 +824,7 @@ describe('bounded Cloudflare pagination', () => {
 
 		const found = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).ensureD1Database('cupboard');
 
 		expect({ found, pages }).toStrictEqual({
@@ -850,9 +839,7 @@ describe('bounded Cloudflare pagination', () => {
 		]);
 
 		await expect(
-			createCloudflareApi(client, accountId('acc-1')).ensureD1Database(
-				'cupboard'
-			)
+			createCloudflareApi(client, accountId()).ensureD1Database('cupboard')
 		).rejects.toBeInstanceOf(ProgressiveCollectionLimitError);
 		expect(pages).toStrictEqual(
 			Array.from(
@@ -876,7 +863,7 @@ describe('findCustomDomain', () => {
 
 		const hostname = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).findCustomDomain(scriptName('cupboard'));
 
 		expect(hostname).toBe('cupboard.supply');
@@ -891,7 +878,7 @@ describe('findCustomDomain', () => {
 
 		const hostname = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).findCustomDomain(scriptName('cupboard'));
 
 		expect(hostname).toBeUndefined();
@@ -910,7 +897,7 @@ describe('listCustomDomains', () => {
 
 		const hostnames = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).listCustomDomains(scriptName('cupboard'));
 
 		expect(hostnames).toStrictEqual(['cache.example.com', 'new.example.com']);
@@ -931,7 +918,7 @@ describe('setCustomDomain', () => {
 			[`DELETE ${domainsPath}/old-b`]: { success: true }
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).setCustomDomain(
+		await createCloudflareApi(client, accountId()).setCustomDomain(
 			scriptName('cupboard'),
 			undefined
 		);
@@ -956,7 +943,7 @@ describe('setCustomDomain', () => {
 			[`DELETE ${domainsPath}/old`]: { success: true }
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).setCustomDomain(
+		await createCloudflareApi(client, accountId()).setCustomDomain(
 			scriptName('cupboard'),
 			{
 				hostname: 'new.example.com',
@@ -994,7 +981,7 @@ describe('getScriptConfiguration', () => {
 
 		const configuration = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).getScriptConfiguration(scriptName('cupboard-tenant'));
 
 		expect(configuration).toStrictEqual({
@@ -1016,7 +1003,7 @@ describe('findD1DatabaseName', () => {
 
 		const name = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).findD1DatabaseName(databaseIdSchema.parse('db-1'));
 
 		expect(name).toBe('my-database');
@@ -1027,7 +1014,7 @@ describe('findD1DatabaseName', () => {
 
 		const name = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).findD1DatabaseName(databaseIdSchema.parse('db-1'));
 
 		expect(name).toBeUndefined();
@@ -1044,10 +1031,9 @@ describe('listSchedules', () => {
 			}
 		});
 
-		const crons = await createCloudflareApi(
-			client,
-			accountId('acc-1')
-		).listSchedules(scriptName('cupboard'));
+		const crons = await createCloudflareApi(client, accountId()).listSchedules(
+			scriptName('cupboard')
+		);
 
 		expect(crons).toStrictEqual(['30 2 * * *', '0 * * * *']);
 	});
@@ -1055,10 +1041,9 @@ describe('listSchedules', () => {
 	it('returns an empty list when Cloudflare reports the script as not found', async () => {
 		const { client } = fakeCloudflare({});
 
-		const crons = await createCloudflareApi(
-			client,
-			accountId('acc-1')
-		).listSchedules(scriptName('cupboard'));
+		const crons = await createCloudflareApi(client, accountId()).listSchedules(
+			scriptName('cupboard')
+		);
 
 		expect(crons).toStrictEqual([]);
 	});
@@ -1078,7 +1063,7 @@ describe('findConsumerDeadLetterQueue', () => {
 
 		const deadLetterQueue = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).findConsumerDeadLetterQueue(
 			'cupboard-maintenance',
 			scriptName('cupboard')
@@ -1127,7 +1112,7 @@ describe('findConsumerDeadLetterQueue', () => {
 
 		const deadLetterQueue = await createCloudflareApi(
 			client,
-			accountId('acc-1')
+			accountId()
 		).findConsumerDeadLetterQueue(
 			'cupboard-maintenance',
 			scriptName('cupboard')
@@ -1138,10 +1123,10 @@ describe('findConsumerDeadLetterQueue', () => {
 });
 
 /**
- * A fake Cloudflare account whose control Worker produces to `producerQueue`.
- * The consumer of that queue reports an empty dead-letter queue name, which is
- * how Cloudflare reports a consumer without a dead-letter queue.
- */
+A fake Cloudflare account whose control Worker produces to `producerQueue`.
+The consumer of that queue reports an empty dead-letter queue name, which is
+how Cloudflare reports a consumer without a dead-letter queue.
+*/
 function existingDeployment(producerQueue: string): Cloudflare {
 	return fakeCloudflare({
 		'GET /accounts/acc-1/workers/scripts/cupboard/settings': {
@@ -1189,7 +1174,7 @@ describe('reading the existing deployment through the API', () => {
 	it('keeps the default dead-letter queue when the consumer reports an empty one', async () => {
 		const api = createCloudflareApi(
 			existingDeployment('cupboard-maintenance'),
-			accountId('acc-1')
+			accountId()
 		);
 
 		await expect(readExistingConfig(api, defaults)).resolves.toStrictEqual(
@@ -1200,7 +1185,7 @@ describe('reading the existing deployment through the API', () => {
 	it('rejects a plan that would make the maintenance queue its own dead-letter queue', async () => {
 		const api = createCloudflareApi(
 			existingDeployment('cupboard-maintenance-dlq'),
-			accountId('acc-1')
+			accountId()
 		);
 
 		await expect(readExistingConfig(api, defaults)).rejects.toStrictEqual(
@@ -1216,7 +1201,7 @@ describe('setWorkersDevRoutes', () => {
 			[`POST ${path}`]: { enabled: false, previews_enabled: false }
 		});
 
-		await createCloudflareApi(client, accountId('acc-1')).setWorkersDevRoutes(
+		await createCloudflareApi(client, accountId()).setWorkersDevRoutes(
 			scriptName('cupboard-tenant'),
 			{
 				workersDev: false,
@@ -1234,7 +1219,7 @@ describe('setWorkersDevRoutes', () => {
 		const { client } = fakeCloudflare({});
 
 		await expect(
-			createCloudflareApi(client, accountId('acc-1')).setWorkersDevRoutes(
+			createCloudflareApi(client, accountId()).setWorkersDevRoutes(
 				scriptName('cupboard-tenant'),
 				{ workersDev: false, previewUrls: false }
 			)
@@ -1249,7 +1234,7 @@ describe('deleteSecret', () => {
 	it('deletes the named secret from the script', async () => {
 		const { client, requests } = fakeCloudflare({ [`DELETE ${path}`]: {} });
 
-		await createCloudflareApi(client, accountId('acc-1')).deleteSecret(
+		await createCloudflareApi(client, accountId()).deleteSecret(
 			scriptName('cupboard'),
 			'CUPBOARD_SIGNUP_SECRET'
 		);
@@ -1260,7 +1245,7 @@ describe('deleteSecret', () => {
 	it('treats a secret that is already gone as deleted', async () => {
 		const { client, requests } = fakeCloudflare({});
 
-		await createCloudflareApi(client, accountId('acc-1')).deleteSecret(
+		await createCloudflareApi(client, accountId()).deleteSecret(
 			scriptName('cupboard'),
 			'CUPBOARD_SIGNUP_SECRET'
 		);
@@ -1270,9 +1255,9 @@ describe('deleteSecret', () => {
 });
 
 /**
- * A Cloudflare client whose account subscriptions endpoint answers with one
- * prepared response, or rejects with `fault`. Every other path answers 404.
- */
+A Cloudflare client whose account subscriptions endpoint answers with one
+prepared response, or rejects with `fault`. Every other path answers 404.
+*/
 function subscriptionsClient(
 	response:
 		| { readonly status: number; readonly body: unknown }
@@ -1330,7 +1315,7 @@ describe('listAccountSubscriptions', () => {
 		);
 
 		await expect(
-			createCloudflareApi(client, accountId('acc-1')).listAccountSubscriptions()
+			createCloudflareApi(client, accountId()).listAccountSubscriptions()
 		).resolves.toStrictEqual({
 			kind: 'listed',
 			subscriptions: [
@@ -1352,7 +1337,7 @@ describe('listAccountSubscriptions', () => {
 		});
 
 		await expect(
-			createCloudflareApi(client, accountId('acc-1')).listAccountSubscriptions()
+			createCloudflareApi(client, accountId()).listAccountSubscriptions()
 		).resolves.toStrictEqual({ kind: 'unreadable' });
 	});
 
@@ -1384,10 +1369,7 @@ describe('listAccountSubscriptions', () => {
 			const client = subscriptionsClient(response);
 
 			await expect(
-				createCloudflareApi(
-					client,
-					accountId('acc-1')
-				).listAccountSubscriptions()
+				createCloudflareApi(client, accountId()).listAccountSubscriptions()
 			).resolves.toStrictEqual({ kind: 'unavailable' });
 		}
 	);
@@ -1400,7 +1382,7 @@ describe('listAccountSubscriptions', () => {
 		cancelled.abort();
 
 		await expect(
-			createCloudflareApi(client, accountId('acc-1')).listAccountSubscriptions(
+			createCloudflareApi(client, accountId()).listAccountSubscriptions(
 				cancelled.signal
 			)
 		).rejects.toBeInstanceOf(Cloudflare.APIUserAbortError);
@@ -1412,7 +1394,7 @@ describe('listAccountSubscriptions', () => {
 		);
 
 		await expect(
-			createCloudflareApi(client, accountId('acc-1')).listAccountSubscriptions()
+			createCloudflareApi(client, accountId()).listAccountSubscriptions()
 		).resolves.toStrictEqual({ kind: 'unparsed' });
 	});
 });

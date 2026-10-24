@@ -43,16 +43,16 @@ export class OracleVersionDriftError extends Error {
 }
 
 /**
- * The Nix binary used as the reference for a conformance case. Every invocation
- * uses an environment supplied by the caller to select the fixture
- * configuration.
- */
+The Nix binary used as the reference for a conformance case. Every invocation
+uses an environment supplied by the caller to select the fixture
+configuration.
+*/
 export class Oracle {
 	constructor(
 		private readonly binary: string,
 		/**
-		 * The root owned by this test run.
-		 */
+		The root owned by this test run.
+		*/
 		public readonly outLink: string,
 		public readonly system: OracleSystem,
 		public readonly version: string
@@ -73,10 +73,10 @@ export class Oracle {
 	}
 
 	/**
-	 * Runs a sibling tool from the resolved Nix installation, such as
-	 * `nix-store`. Resolving the tool beside the `nix` binary avoids using a
-	 * different Nix installation from `PATH`.
-	 */
+	Runs a sibling tool from the resolved Nix installation, such as
+	`nix-store`. Resolving the tool beside the `nix` binary avoids using a
+	different Nix installation from `PATH`.
+	*/
 	runTool(
 		tool: string,
 		arguments_: readonly string[],
@@ -143,17 +143,17 @@ async function resolveOracle(): Promise<OracleResolution> {
 const resolution = await resolveOracle();
 
 /**
- * Declares a suite that uses the pinned oracle and releases its root when the
- * suite ends. Each test file must declare exactly one such suite.
- *
- * Use the test hook for cleanup. Vitest can terminate its forked workers with
- * SIGTERM, which does not run a process exit handler.
- *
- * A machine that cannot build the oracle fails the suite, so a missing oracle
- * cannot produce a false pass. A machine that builds a version not in the record
- * reports a single failure instead: comparing our client against an unrecorded
- * `nix` would invalidate the recorded comparison target.
- */
+Declares a suite that uses the pinned oracle and releases its root when the
+suite ends. Each test file must declare exactly one such suite.
+
+Use the test hook for cleanup. Vitest can terminate its forked workers with
+SIGTERM, which does not run a process exit handler.
+
+A machine that cannot build the oracle fails the suite, so a missing oracle
+cannot produce a false pass. A machine that builds a version not in the record
+reports a single failure instead: comparing our client against an unrecorded
+`nix` would invalidate the recorded comparison target.
+*/
 export function describeConformance(
 	name: string,
 	body: (oracle: Oracle) => void

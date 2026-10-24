@@ -10,9 +10,9 @@ import { type ClaimMatch } from '@cupboard/protocol/oidc';
 const supportedPattern = /^(?:[A-Za-z0-9._/-]|\*)+$/u;
 
 /**
- * A branch or tag pattern from a workflow's `on.<event>` filters. A `*`
- * matches within one path segment, and `**` matches across segments.
- */
+A branch or tag pattern from a workflow's `on.<event>` filters. A `*`
+matches within one path segment, and `**` matches across segments.
+*/
 export class ReferencePattern {
 	static parse(glob: string): ReferencePattern | undefined {
 		return supportedPattern.test(glob) ? new ReferencePattern(glob) : undefined;
@@ -37,16 +37,16 @@ export class ReferencePattern {
 	}
 
 	/**
-	 * A name that the pattern matches, for building modelled claims.
-	 */
+	A name that the pattern matches, for building modelled claims.
+	*/
 	example(): string {
 		return this.glob.replaceAll('*', '0');
 	}
 
 	/**
-	 * A claim matcher for every ref that starts with `prefix` and whose
-	 * remainder matches the pattern.
-	 */
+	A claim matcher for every ref that starts with `prefix` and whose
+	remainder matches the pattern.
+	*/
 	claim(prefix: string): ClaimMatch {
 		if (!this.glob.includes('*')) {
 			return `${prefix}${this.glob}`;

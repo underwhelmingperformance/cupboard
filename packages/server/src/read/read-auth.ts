@@ -38,14 +38,14 @@ export interface ReadVerifier {
 }
 
 /**
- * Creates the verifier stored for a private-read credential. Changing this
- * encoding invalidates existing credentials.
- *
- * The verifier is a salted digest, so the credential is protected by the
- * password's own entropy. `readPasswordSchema` requires 32 random bytes, which
- * leaves an attacker holding a stolen verifier the whole 256-bit space to
- * search.
- */
+Creates the verifier stored for a private-read credential. Changing this
+encoding invalidates existing credentials.
+
+The verifier is a salted digest, so the credential is protected by the
+password's own entropy. `readPasswordSchema` requires 32 random bytes, which
+leaves an attacker holding a stolen verifier the whole 256-bit space to
+search.
+*/
 export async function hashReadPassword(
 	password: string,
 	salt: ReadPasswordSalt
@@ -79,11 +79,11 @@ export function generateReadPasswordSalt(): ReadPasswordSalt {
 }
 
 /**
- * Whether a request contains HTTP Basic credentials matching the tenant's read
- * verifier. The password verifier uses fixed-length cryptographic comparison and
- * is checked even when the user differs, so a user mismatch does not skip the
- * password work.
- */
+Whether a request contains HTTP Basic credentials matching the tenant's read
+verifier. The password verifier uses fixed-length cryptographic comparison and
+is checked even when the user differs, so a user mismatch does not skip the
+password work.
+*/
 export async function isReadAuthorised(
 	request: Request,
 	verifier: ReadVerifier

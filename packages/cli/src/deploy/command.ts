@@ -227,15 +227,15 @@ export interface DeployCliOptions {
 	readonly oidcIssuer: string;
 	readonly clientId: string;
 	/**
-	 * Print the sign-in URL and accept a pasted redirect URL, without opening a
-	 * browser, for the admin login on a first deploy or when an update logs in
-	 * as the admin.
-	 */
+	Print the sign-in URL and accept a pasted redirect URL, without opening a
+	browser, for the admin login on a first deploy or when an update logs in
+	as the admin.
+	*/
 	readonly headless?: boolean;
 	/**
-	 * Authorise an update with the workflow's GitHub Actions OIDC token, through
-	 * a control trust rule, instead of a cached `cupboard login` session.
-	 */
+	Authorise an update with the workflow's GitHub Actions OIDC token, through
+	a control trust rule, instead of a cached `cupboard login` session.
+	*/
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly dryRun?: boolean;
@@ -263,11 +263,11 @@ const serverError: number = StatusCodes.INTERNAL_SERVER_ERROR;
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 /**
- * Shows a server-side fault that a deploy probe hit. It reads the exception
- * that the Worker logged for the failing request, found by its cf-ray, and
- * shows it inline. When the log cannot be fetched yet, it shows the command
- * that reads the log.
- */
+Shows a server-side fault that a deploy probe hit. It reads the exception
+that the Worker logged for the failing request, found by its cf-ray, and
+shows it inline. When the log cannot be fetched yet, it shows the command
+that reads the log.
+*/
 async function showServerFault(dependencies: {
 	readonly ui: DeployUi;
 	readonly api: CloudflareApi;
@@ -340,9 +340,9 @@ async function resolveArtifact(
 }
 
 /**
- * Settle on an account when the credential can see several: prompt when a
- * terminal is available, otherwise instruct the caller to pass `--account`.
- */
+Settle on an account when the credential can see several: prompt when a
+terminal is available, otherwise instruct the caller to pass `--account`.
+*/
 export async function chooseDeployAccount(
 	ui: DeployUi,
 	accounts: readonly AccountSummary[],
@@ -388,11 +388,11 @@ const resourceLabels: Record<EditableResourceKind, string> = {
 };
 
 /**
- * The review menu: Deploy first (so plain Enter accepts the plan as shown),
- * then one entry per editable value with its current setting, then Cancel.
- * The R2 credentials entry appears only when replacing the pair already on the
- * Worker is a choice worth offering.
- */
+The review menu: Deploy first (so plain Enter accepts the plan as shown),
+then one entry per editable value with its current setting, then Cancel.
+The R2 credentials entry appears only when replacing the pair already on the
+Worker is a choice worth offering.
+*/
 export function planMenuEntries(
 	state: PlanState,
 	canReplaceR2Credentials = false
@@ -464,25 +464,25 @@ function cronsListProblem(value: string): string | undefined {
 export interface PlanReviewWorld {
 	readonly ui: DeployUi;
 	/**
-	 * Shows the plan for the state and returns the observation of the
-	 * deployment that the plan was built from.
-	 */
+	Shows the plan for the state and returns the observation of the
+	deployment that the plan was built from.
+	*/
 	readonly render: (state: PlanState) => Promise<DeploymentObservation>;
 	readonly accounts: () => Promise<readonly AccountSummary[]>;
 	readonly skipReview: boolean;
 	readonly canReplaceR2Credentials?: (state: PlanState) => Promise<boolean>;
 	/**
-	 * The configuration that the plan starts from on an account, and the custom
-	 * domain routed to that account's control Worker. Switching account
-	 * restarts the plan from these values for the chosen account.
-	 */
+	The configuration that the plan starts from on an account, and the custom
+	domain routed to that account's control Worker. Switching account
+	restarts the plan from these values for the chosen account.
+	*/
 	readonly startingPlanFor: (
 		accountId: CloudflareAccountId
 	) => Promise<StartingPlan>;
 	/**
-	 * The domain given with `--domain`. It takes precedence over the routed
-	 * custom domain on every account.
-	 */
+	The domain given with `--domain`. It takes precedence over the routed
+	custom domain on every account.
+	*/
 	readonly requestedDomain: string | undefined;
 }
 
@@ -590,11 +590,11 @@ async function applyPlanEdit(
 }
 
 /**
- * Show the plan and let the user adjust the deploy-time choices until they
- * deploy or cancel. Returns the agreed state, or undefined when cancelled.
- * While the plan is blocked, the menu offers only edits and Cancel, and
- * skipping the review or cancelling throws the blocking error.
- */
+Show the plan and let the user adjust the deploy-time choices until they
+deploy or cancel. Returns the agreed state, or undefined when cancelled.
+While the plan is blocked, the menu offers only edits and Cancel, and
+skipping the review or cancelling throws the blocking error.
+*/
 export async function reviewPlan(
 	initial: PlanState,
 	world: PlanReviewWorld
@@ -667,12 +667,12 @@ export function envR2Credentials(
 }
 
 /**
- * What a deploy does about the R2 credentials when the environment does not
- * supply them. It keeps the credentials on the Worker, or it obtains new ones.
- * When the plan changes the bucket that the current credentials were created
- * for, `obtain` includes a `keep` field, and the deploy asks the operator
- * whether to keep those credentials.
- */
+What a deploy does about the R2 credentials when the environment does not
+supply them. It keeps the credentials on the Worker, or it obtains new ones.
+When the plan changes the bucket that the current credentials were created
+for, `obtain` includes a `keep` field, and the deploy asks the operator
+whether to keep those credentials.
+*/
 export type R2KeyAction =
 	| { readonly kind: 'keep' }
 	| {
@@ -681,11 +681,11 @@ export type R2KeyAction =
 	  };
 
 /**
- * Decides what a deploy does about the R2 credentials. `existing` is the
- * existing deployment's configuration. The Worker's current credentials are
- * assumed to be scoped to its bucket, so they are treated as stale only when
- * `agreed` uses another bucket.
- */
+Decides what a deploy does about the R2 credentials. `existing` is the
+existing deployment's configuration. The Worker's current credentials are
+assumed to be scoped to its bucket, so they are treated as stale only when
+`agreed` uses another bucket.
+*/
 export function r2KeyActionFor(options: {
 	readonly isAlreadySet: boolean;
 	readonly isReplaceRequested: boolean;
@@ -719,10 +719,10 @@ export type R2Settlement =
 	| { readonly kind: 'cancelled' };
 
 /**
- * Whether the deploy credential is able to create the scoped key. OAuth
- * grants (the browser login, its cache, and wrangler's token) can never
- * manage API tokens, so for them creation is not offered at all.
- */
+Whether the deploy credential is able to create the scoped key. OAuth
+grants (the browser login, its cache, and wrangler's token) can never
+manage API tokens, so for them creation is not offered at all.
+*/
 export type R2KeyCreation =
 	| {
 			readonly kind: 'available';
@@ -732,12 +732,12 @@ export type R2KeyCreation =
 	| { readonly kind: 'unavailable' };
 
 /**
- * Settle the R2 credential pair interactively: create a bucket-scoped key
- * through the Cloudflare API when the deploy credential allows it (the
- * recommended path), or take an existing pair. When the Worker already holds
- * a pair that may no longer fit (the bucket was renamed), keeping it is
- * offered as an explicit choice.
- */
+Settle the R2 credential pair interactively: create a bucket-scoped key
+through the Cloudflare API when the deploy credential allows it (the
+recommended path), or take an existing pair. When the Worker already holds
+a pair that may no longer fit (the bucket was renamed), keeping it is
+offered as an explicit choice.
+*/
 export async function obtainR2Credentials(options: {
 	readonly ui: DeployUi;
 	readonly accountId: CloudflareAccountId;
@@ -814,14 +814,14 @@ export async function obtainR2Credentials(options: {
 }
 
 /**
- * Whether and how this deploy can create the scoped key. Only an explicit API
- * token can hold token-management rights; OAuth grants (the browser login,
- * its cache, wrangler's token) are never offered creation, since Cloudflare
- * has no token-management scope for them. The bucket existence check runs
- * only when creation is on the table, and the bucket is created first, as its
- * own visible step: a key cannot be scoped to a bucket that does not exist,
- * and the reconcile step later treats an existing bucket as already done.
- */
+Whether and how this deploy can create the scoped key. Only an explicit API
+token can hold token-management rights; OAuth grants (the browser login,
+its cache, wrangler's token) are never offered creation, since Cloudflare
+has no token-management scope for them. The bucket existence check runs
+only when creation is on the table, and the bucket is created first, as its
+own visible step: a key cannot be scoped to a bucket that does not exist,
+and the reconcile step later treats an existing bucket as already done.
+*/
 async function r2KeyCreationFor(options: {
 	readonly ui: DeployUi;
 	readonly api: CloudflareApi;
@@ -866,12 +866,12 @@ const propagationAttempts = 12;
 const propagationDelayMs = 5000;
 
 /**
- * Probe R2 with the pair before deploying anything, by beginning and aborting a
- * multipart upload. A freshly created token is retried while it propagates. The
- * probe writes, so a write-only token passes and a rejection means the pair
- * cannot write; interactively a rejection offers to re-enter the pair, deploy
- * anyway, or cancel, and without a terminal it is fatal.
- */
+Probe R2 with the pair before deploying anything, by beginning and aborting a
+multipart upload. A freshly created token is retried while it propagates. The
+probe writes, so a write-only token passes and a rejection means the pair
+cannot write; interactively a rejection offers to re-enter the pair, deploy
+anyway, or cancel, and without a terminal it is fatal.
+*/
 export async function verifyR2Credentials(options: {
 	readonly ui: DeployUi;
 	readonly interactive: boolean;
@@ -932,11 +932,11 @@ export async function verifyR2Credentials(options: {
 
 			return credentials;
 		} catch (error) {
-			if (isAbortError(error)) {
-				throw error;
-			}
-
-			if (!options.interactive || !(error instanceof CliError)) {
+			if (
+				isAbortError(error) ||
+				!options.interactive ||
+				!(error instanceof CliError)
+			) {
 				throw error;
 			}
 
@@ -973,9 +973,9 @@ export async function verifyR2Credentials(options: {
 }
 
 /**
- * Run `cupboard deploy`. Imported lazily by the command shell so its heavy
- * dependencies stay out of the released single-executable's startup path.
- */
+Run `cupboard deploy`. Imported lazily by the command shell so its heavy
+dependencies stay out of the released single-executable's startup path.
+*/
 export async function executeDeploy(
 	cliOptions: DeployCliOptions,
 	runtimeOptions: DeployRuntimeOptions = {}
@@ -1007,10 +1007,10 @@ export async function executeDeploy(
 }
 
 /**
- * The deploy flow proper. The order is deliberate: build, authenticate, then
- * show a complete plan and let the user adjust it before agreeing. After the
- * agreement the only interaction left is settling the R2 credentials.
- */
+The deploy flow proper. The order is deliberate: build, authenticate, then
+show a complete plan and let the user adjust it before agreeing. After the
+agreement the only interaction left is settling the R2 credentials.
+*/
 async function deployFlow(
 	cliOptions: DeployCliOptions,
 	ui: DeployUi,
@@ -1208,12 +1208,11 @@ async function deployFlow(
 		const pendingR2 = assembled.missing.filter((name) =>
 			r2SecretNames.has(name)
 		);
-		const annotated =
-			pendingR2.length === 0
-				? []
-				: (await isR2AlreadySetFor(state))
-					? pendingR2.map((name) => `${name} (already set)`)
-					: pendingR2.map((name) => `${name} (pending)`);
+		const areR2SecretsSet =
+			pendingR2.length > 0 && (await isR2AlreadySetFor(state));
+		const annotated = pendingR2.map(
+			(name) => `${name} (${areR2SecretsSet ? 'already set' : 'pending'})`
+		);
 		let missing = assembled.missing.filter((name) => !r2SecretNames.has(name));
 
 		// Generate the control key wrapping secret on a first deploy, but never
@@ -1774,10 +1773,10 @@ async function deployFlow(
 
 			// Only a genuinely new custom domain warrants the DNS caveat.
 			const dnsNote =
-				agreed.domain !== undefined &&
-				agreedStartingPlan.routedDomain !== agreed.domain
-					? ' A freshly added custom domain can take a while to resolve in DNS.'
-					: '';
+				agreed.domain === undefined ||
+				agreedStartingPlan.routedDomain === agreed.domain
+					? ''
+					: ' A freshly added custom domain can take a while to resolve in DNS.';
 
 			ui.warn(
 				`Uploaded, but ${outcome.url} did not come online in time ` +
@@ -1820,9 +1819,9 @@ async function deployFlow(
 }
 
 /**
- * Refuses `--cache` or `--access` without the other on a run without a
- * terminal, because nobody can answer the prompt for the missing value.
- */
+Refuses `--cache` or `--access` without the other on a run without a
+terminal, because nobody can answer the prompt for the missing value.
+*/
 export function requireFirstCacheAccess(
 	cliOptions: Pick<DeployCliOptions, 'cache' | 'access'>,
 	isInteractive: boolean
@@ -1841,11 +1840,11 @@ export function requireFirstCacheAccess(
 }
 
 /**
- * True when `version` returns a build, and false when the host cannot be
- * reached or has no `/_version` route. Any other failure, such as a server
- * error, throws, so a deployment that fails for another reason is not treated
- * as a URL that does not serve Cupboard.
- */
+True when `version` returns a build, and false when the host cannot be
+reached or has no `/_version` route. Any other failure, such as a server
+error, throws, so a deployment that fails for another reason is not treated
+as a URL that does not serve Cupboard.
+*/
 export async function isVersionServed(
 	version: () => Promise<unknown>
 ): Promise<boolean> {
@@ -1866,12 +1865,12 @@ export async function isVersionServed(
 }
 
 /**
- * Ends a run whose deployment did not become ready for onboarding. A first
- * deploy that stops before the claim leaves the deployment without an admin,
- * and nobody can use it until someone claims it, so the run fails with
- * `DeploymentUnclaimedError`, as a run without a terminal does. The error
- * reaches the CLI's exit code, which the released binary takes from `runCli`.
- */
+Ends a run whose deployment did not become ready for onboarding. A first
+deploy that stops before the claim leaves the deployment without an admin,
+and nobody can use it until someone claims it, so the run fails with
+`DeploymentUnclaimedError`, as a run without a terminal does. The error
+reaches the CLI's exit code, which the released binary takes from `runCli`.
+*/
 export function endBeforeReady(
 	ui: Pick<DeployUi, 'outro'>,
 	authority: Pick<DeployAuthority, 'kind'>,
@@ -1890,14 +1889,14 @@ type ClaimedOnboardOutcome = Exclude<
 >;
 
 /**
- * Deploys and onboards in the order that keeps the claim secret short-lived.
- * A leftover claim secret is removed before the upload. For a first deploy,
- * `onboard` receives a removal that deletes the claim secret at most once, and
- * the `finally` calls it too, so the secret is removed on every exit once the
- * deploy starts, including a failed upload or a run that stops before the
- * claim. A run that leaves the deployment without an admin throws
- * `DeploymentUnclaimedError` after the upload.
- */
+Deploys and onboards in the order that keeps the claim secret short-lived.
+A leftover claim secret is removed before the upload. For a first deploy,
+`onboard` receives a removal that deletes the claim secret at most once, and
+the `finally` calls it too, so the secret is removed on every exit once the
+deploy starts, including a failed upload or a run that stops before the
+claim. A run that leaves the deployment without an admin throws
+`DeploymentUnclaimedError` after the upload.
+*/
 export async function deployAndOnboard(
 	authority: DeployAuthority,
 	steps: {
@@ -1935,18 +1934,18 @@ export async function deployAndOnboard(
 }
 
 /**
- * Why a first deploy left the deployment without an admin: the run had no
- * terminal to log in from, it stopped before the claim because the deployment
- * did not serve the new build, or `/signup` failed with a server error.
- */
+Why a first deploy left the deployment without an admin: the run had no
+terminal to log in from, it stopped before the claim because the deployment
+did not serve the new build, or `/signup` failed with a server error.
+*/
 export type UnclaimedReason =
 	'no-terminal' | 'stopped-before-claim' | 'claim-server-error';
 
 /**
- * A first deploy left the deployment without an admin. Nobody can create a
- * cache until a run from a terminal claims the deployment, so the run fails
- * although the Workers were deployed.
- */
+A first deploy left the deployment without an admin. Nobody can create a
+cache until a run from a terminal claims the deployment, so the run fails
+although the Workers were deployed.
+*/
 export class DeploymentUnclaimedError extends CliError {
 	override readonly humanMessage: string;
 	constructor(
@@ -1987,9 +1986,9 @@ export class AudienceWithoutGithubOidcError extends CliUsageError {
 }
 
 /**
- * Refuses `--audience` without `--github-oidc`, because only the GitHub
- * Actions token request uses the audience.
- */
+Refuses `--audience` without `--github-oidc`, because only the GitHub
+Actions token request uses the audience.
+*/
 export function requireGithubOidcForAudience(
 	cliOptions: Pick<DeployCliOptions, 'audience' | 'githubOidc'>
 ): void {
@@ -1999,9 +1998,9 @@ export function requireGithubOidcForAudience(
 }
 
 /**
- * The 5xx response from a failed claim, used to look up the Worker's log.
- * Undefined unless `/signup` returned a 5xx status.
- */
+The 5xx response from a failed claim, used to look up the Worker's log.
+Undefined unless `/signup` returned a 5xx status.
+*/
 export function claimServerFault(error: unknown):
 	| {
 			readonly message: string;
@@ -2021,10 +2020,10 @@ export function claimServerFault(error: unknown):
 }
 
 /**
- * The note for `--cache` and `--access` on a run that leaves the deployment
- * without an admin. Undefined when the run has an admin or neither option is
- * passed.
- */
+The note for `--cache` and `--access` on a run that leaves the deployment
+without an admin. Undefined when the run has an admin or neither option is
+passed.
+*/
 export function unclaimedFirstCacheNote(
 	authority: DeployAuthority,
 	cliOptions: Pick<DeployCliOptions, 'cache' | 'access'>

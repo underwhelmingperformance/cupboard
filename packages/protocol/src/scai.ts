@@ -2,16 +2,16 @@ import { sha256HexDigestSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 /**
- * The in-toto predicate type of a SCAI attribute report. The in-toto project
- * owns this predicate and its versioning, so the URI and its version change
- * upstream.
- */
+The in-toto predicate type of a SCAI attribute report. The in-toto project
+owns this predicate and its versioning, so the URI and its version change
+upstream.
+*/
 export const scaiPredicateType = 'https://in-toto.io/attestation/scai/v0.3';
 
 /**
- * SCAI's reproducibility example uses this attribute spelling. Producers and
- * consumers agree on the verification procedure for the asserted property.
- */
+SCAI's reproducibility example uses this attribute spelling. Producers and
+consumers agree on the verification procedure for the asserted property.
+*/
 export const reproducibleAttribute = 'REPRODUCIBLE';
 
 const hexadecimalDigest = z.string().regex(/^(?:[0-9a-f]{2})+$/);

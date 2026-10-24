@@ -23,10 +23,10 @@ export const contractRequestMaxBytes =
 export const uploadRequestMaxBytes = uploadPageSize * 40 * 1024;
 
 /**
- * Returns a function that calls `authenticate` once and returns the same
- * promise on every call, so the body guard and the procedure middleware of
- * one request share one verification.
- */
+Returns a function that calls `authenticate` once and returns the same
+promise on every call, so the body guard and the procedure middleware of
+one request share one verification.
+*/
 export function authenticateOnce(
 	authenticate: () => Promise<AccessClaims>
 ): () => Promise<AccessClaims> {
@@ -36,13 +36,13 @@ export function authenticateOnce(
 }
 
 /**
- * A copy of an admin API request for a contract handler. When the handler
- * reads the copy's body, the copy authenticates the request first, and then
- * reads the original body up to `maximumBytes`. If authentication fails, the
- * copy's body is empty, and the procedure middleware refuses the request
- * without its body being read. A request that the handler does not match
- * leaves the original body unread, so a later route can read it.
- */
+A copy of an admin API request for a contract handler. When the handler
+reads the copy's body, the copy authenticates the request first, and then
+reads the original body up to `maximumBytes`. If authentication fails, the
+copy's body is empty, and the procedure middleware refuses the request
+without its body being read. A request that the handler does not match
+leaves the original body unread, so a later route can read it.
+*/
 export class ContractRequest {
 	#isTooLarge = false;
 	readonly request: Request;
@@ -101,10 +101,10 @@ export class ContractRequest {
 	}
 
 	/**
-	 * Throws {@link RequestBodyTooLargeError} if the handler's read of the body
-	 * crossed the limit. The handler turns a failed read into its own 400
-	 * response, so call this after the handler returns.
-	 */
+	Throws {@link RequestBodyTooLargeError} if the handler's read of the body
+	crossed the limit. The handler turns a failed read into its own 400
+	response, so call this after the handler returns.
+	*/
 	refuseOversizeBody(): void {
 		if (this.#isTooLarge) {
 			throw new RequestBodyTooLargeError(this.maximumBytes);

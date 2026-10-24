@@ -7,9 +7,9 @@ import {
 import { type R2ObjectKey } from '../http/http.ts';
 
 /**
- * The R2 operations that NAR verification uses. A get with options returns
- * only the object's metadata when its `onlyIf` condition fails.
- */
+The R2 operations that NAR verification uses. A get with options returns
+only the object's metadata when its `onlyIf` condition fails.
+*/
 export interface R2ObjectStore {
 	get(key: R2ObjectKey): Promise<R2ObjectBody | null>;
 	get(
@@ -24,19 +24,19 @@ export interface R2ObjectStore {
 }
 
 /**
- * Admits at most `limit` R2 requests at once and queues the rest. A request
- * keeps its connection until R2 sends the response headers. For a `get` that
- * is when the object's body starts to arrive, and for a `put` it is after R2
- * has received the whole body.
- *
- * A put's body can come from gets that start after the put, so puts never take
- * the last connection. Each request counts against the invocation's
- * subrequest slice from the moment it is admitted, so a caller that checks the
- * slice sees requests that are still waiting for a connection.
- *
- * Use one instance for every R2 request that an invocation makes, so that
- * concurrent reads and streamed writes share the same limit.
- */
+Admits at most `limit` R2 requests at once and queues the rest. A request
+keeps its connection until R2 sends the response headers. For a `get` that
+is when the object's body starts to arrive, and for a `put` it is after R2
+has received the whole body.
+
+A put's body can come from gets that start after the put, so puts never take
+the last connection. Each request counts against the invocation's
+subrequest slice from the moment it is admitted, so a caller that checks the
+slice sees requests that are still waiting for a connection.
+
+Use one instance for every R2 request that an invocation makes, so that
+concurrent reads and streamed writes share the same limit.
+*/
 export class ConnectionLimitedBucket implements R2ObjectStore {
 	private readonly connections: CountingSemaphore;
 	private readonly writes: CountingSemaphore;

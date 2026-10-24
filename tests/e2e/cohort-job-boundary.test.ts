@@ -217,9 +217,9 @@ describe.skipIf(!isNixPresent)('cohort job store isolation', () => {
 					attrs: [`packages.${system()}.default`],
 					installables: [installable],
 					queryInstallables: [`${derivation}^out`],
-					// JSON.stringify writes this undefined entry as null, which is
-					// the value the cohort schema expects for an unknown path.
-					expectedPaths: [undefined],
+					// Unknown output paths are null in cohort JSON.
+					// eslint-disable-next-line unicorn/no-null
+					expectedPaths: [null],
 					roots: ['github:owner/repo/main/cohort-job-boundary'],
 					system: system(),
 					os: 'local',

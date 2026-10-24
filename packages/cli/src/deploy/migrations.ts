@@ -6,10 +6,10 @@ import { type D1QueryApi, sqlString } from './d1-query.ts';
 import type { DatabaseId } from './identifiers.ts';
 
 /**
- * A D1 migration ready to apply: its filename (the applied-marker recorded in
- * the tracking table), the digest of the file it was parsed from, and the
- * individual statements to run in order.
- */
+A D1 migration ready to apply: its filename (the applied-marker recorded in
+the tracking table), the digest of the file it was parsed from, and the
+individual statements to run in order.
+*/
 export interface D1Migration {
 	readonly name: string;
 	readonly sha256: string;
@@ -24,10 +24,10 @@ export interface RawMigrationFile {
 const statementBreakpoint = '--> statement-breakpoint';
 
 /**
- * Parse Drizzle's `.sql` migration files into ordered, statement-split
- * migrations. Drizzle separates statements with a `--> statement-breakpoint`
- * marker; the D1 query API accepts the statements as a transactional batch.
- */
+Parse Drizzle's `.sql` migration files into ordered, statement-split
+migrations. Drizzle separates statements with a `--> statement-breakpoint`
+marker; the D1 query API accepts the statements as a transactional batch.
+*/
 export function parseD1Migrations(
 	files: readonly RawMigrationFile[]
 ): D1Migration[] {
@@ -44,10 +44,10 @@ export function parseD1Migrations(
 }
 
 /**
- * A migration file changed after this tool applied it. The database ran the
- * earlier contents, so applying the file again would not produce the schema
- * the new contents describe.
- */
+A migration file changed after this tool applied it. The database ran the
+earlier contents, so applying the file again would not produce the schema
+the new contents describe.
+*/
 export class D1MigrationDigestError extends Error {
 	constructor(
 		readonly migrationName: string,
@@ -60,14 +60,14 @@ export class D1MigrationDigestError extends Error {
 }
 
 /**
- * How much a recorded digest proves. Either way a later change to the file is
- * refused, because the recorded digest no longer matches it.
- *
- * `verified` was recorded when this tool applied the migration, so the digest
- * is what the database ran. `unverified-baseline` was adopted for a name
- * already applied before digests were recorded: it proves the name ran, but
- * the digest was read from the file rather than observed during the apply.
- */
+How much a recorded digest proves. Either way a later change to the file is
+refused, because the recorded digest no longer matches it.
+
+`verified` was recorded when this tool applied the migration, so the digest
+is what the database ran. `unverified-baseline` was adopted for a name
+already applied before digests were recorded: it proves the name ran, but
+the digest was read from the file rather than observed during the apply.
+*/
 type VerificationState = 'verified' | 'unverified-baseline';
 
 export interface RecordedMigration {
@@ -133,10 +133,10 @@ function checkDigest(
 }
 
 /**
- * Reads the migrations that `d1_migrations` records, keyed by name, without
- * writing anything. The map is empty before the tracking table exists, and a
- * table from before this tool recorded digests gives names without digests.
- */
+Reads the migrations that `d1_migrations` records, keyed by name, without
+writing anything. The map is empty before the tracking table exists, and a
+table from before this tool recorded digests gives names without digests.
+*/
 export async function readAppliedD1Migrations(
 	api: D1QueryApi,
 	databaseId: DatabaseId
@@ -161,11 +161,11 @@ export async function readAppliedD1Migrations(
 }
 
 /**
- * Checks the recorded digest of each migration in `migrations`. Throws
- * `D1MigrationDigestError` when a recorded digest no longer matches the file.
- * A migration that has not been applied, or that was applied before this tool
- * recorded digests, passes.
- */
+Checks the recorded digest of each migration in `migrations`. Throws
+`D1MigrationDigestError` when a recorded digest no longer matches the file.
+A migration that has not been applied, or that was applied before this tool
+recorded digests, passes.
+*/
 export function verifyD1MigrationDigests(
 	applied: ReadonlyMap<string, RecordedMigration>,
 	migrations: readonly D1Migration[]
@@ -176,10 +176,10 @@ export function verifyD1MigrationDigests(
 }
 
 /**
- * Add the digest columns to a tracking table created before this tool recorded
- * digests. `ALTER TABLE ... ADD COLUMN` fails when the column already exists,
- * so the current columns decide what to add.
- */
+Add the digest columns to a tracking table created before this tool recorded
+digests. `ALTER TABLE ... ADD COLUMN` fails when the column already exists,
+so the current columns decide what to add.
+*/
 async function ensureDigestColumns(
 	api: D1QueryApi,
 	databaseId: DatabaseId
@@ -202,16 +202,16 @@ async function ensureDigestColumns(
 }
 
 /**
- * Apply the D1 migrations that have not yet run, tracking applied names in a
- * `d1_migrations` table (the same scheme `wrangler d1 migrations apply` uses)
- * alongside the digest of the file each name was applied from. Idempotent: a
- * second run with no new migrations applies nothing and records nothing.
- *
- * Throws `D1MigrationDigestError` when a recorded digest no longer matches the
- * file.
- *
- * Returns the names applied this run.
- */
+Apply the D1 migrations that have not yet run, tracking applied names in a
+`d1_migrations` table (the same scheme `wrangler d1 migrations apply` uses)
+alongside the digest of the file each name was applied from. Idempotent: a
+second run with no new migrations applies nothing and records nothing.
+
+Throws `D1MigrationDigestError` when a recorded digest no longer matches the
+file.
+
+Returns the names applied this run.
+*/
 export async function applyD1Migrations(
 	api: D1QueryApi,
 	databaseId: DatabaseId,

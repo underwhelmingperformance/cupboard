@@ -64,9 +64,9 @@ export class WhoamiProviderWithUrlError extends CliUsageError {
 }
 
 /**
- * What `whoami` reads, injectable so it is testable without real files or a
- * browser.
- */
+What `whoami` reads, injectable so it is testable without real files or a
+browser.
+*/
 export interface WhoamiDependencies {
 	readonly listSessions: typeof listCachedSessions;
 	readonly readSession: (target: URL) => Promise<CachedSession | undefined>;
@@ -80,9 +80,9 @@ export type WhoamiInput =
 	| { readonly kind: 'provider'; readonly options: IdentityLoginOptions };
 
 /**
- * The cached sessions and, when one is cached, the Cloudflare sign-in that
- * `cupboard init` keeps for the Cloudflare API.
- */
+The cached sessions and, when one is cached, the Cloudflare sign-in that
+`cupboard init` keeps for the Cloudflare API.
+*/
 interface WhoamiSessions {
 	readonly sessions?: readonly SessionIdentity[];
 	/**
@@ -275,10 +275,10 @@ async function reportProvider(
 }
 
 /**
- * Resolves the command line: `--provider` (or any sign-in option, which implies
- * it) asks the identity provider and takes no URL; otherwise the cached
- * sessions are shown, all of them or the one for the URL.
- */
+Resolves the command line: `--provider` (or any sign-in option, which implies
+it) asks the identity provider and takes no URL; otherwise the cached
+sessions are shown, all of them or the one for the URL.
+*/
 export function whoamiInput(
 	url: URL | undefined,
 	options: WhoamiOptions
@@ -302,9 +302,9 @@ export function whoamiInput(
 }
 
 /**
- * Shows the claims of the cached sessions' access tokens, or of an ID token
- * from the identity provider, which a person can send with an access request.
- */
+Shows the claims of the cached sessions' access tokens, or of an ID token
+from the identity provider, which a person can send with an access request.
+*/
 export async function runWhoami(
 	input: WhoamiInput,
 	reporter: Reporter,

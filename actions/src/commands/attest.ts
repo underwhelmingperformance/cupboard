@@ -120,9 +120,9 @@ export async function cacheAccess(
 }
 
 /**
- * For a version 2 receipt, treats every accepted subject as built by this run.
- * Version 2 did not distinguish other origins.
- */
+For a version 2 receipt, treats every accepted subject as built by this run.
+Version 2 did not distinguish other origins.
+*/
 export function attestationSubjects(
 	infos: readonly CommittedPathInfo[],
 	receipt: BuildReceiptV2Input
@@ -154,16 +154,16 @@ export function attestationSubjects(
 export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
 
 /**
- * A subject is signed under this repository's identity, so the destination
- * cache must have committed narinfo for every subject with the recorded NAR
- * hash. An absent path or a different hash fails the run. The receipt supplies
- * the build provenance; a cache's deriver can refer to another derivation of
- * the same fixed-output path.
- *
- * The build store may have garbage-collected the path since the build, so
- * the check reads the committed metadata from the destination cache rather
- * than from the build store.
- */
+A subject is signed under this repository's identity, so the destination
+cache must have committed narinfo for every subject with the recorded NAR
+hash. An absent path or a different hash fails the run. The receipt supplies
+the build provenance; a cache's deriver can refer to another derivation of
+the same fixed-output path.
+
+The build store may have garbage-collected the path since the build, so
+the check reads the committed metadata from the destination cache rather
+than from the build store.
+*/
 export function provenancedSubjects(
 	receipt: BuildReceiptV3Input,
 	held: SelectedPathInfos

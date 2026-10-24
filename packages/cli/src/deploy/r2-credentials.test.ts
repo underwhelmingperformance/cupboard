@@ -23,10 +23,7 @@ const initiateBody =
 	'<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult>' +
 	'<UploadId>UP-1</UploadId></InitiateMultipartUploadResult>';
 
-function respondingWith(
-	status: number,
-	body?: string
-): {
+function respondingWith(body?: string): {
 	fetcher: typeof fetch;
 	requests: Request[];
 } {
@@ -35,7 +32,7 @@ function respondingWith(
 	const fetcher: typeof fetch = (input, init) => {
 		requests.push(new Request(input, init));
 
-		return Promise.resolve(new Response(body, { status }));
+		return Promise.resolve(new Response(body, { status: 200 }));
 	};
 
 	return { fetcher, requests };
@@ -43,7 +40,7 @@ function respondingWith(
 
 describe('checkR2Credentials', () => {
 	it('accepts a begun multipart upload as proof of write access', async () => {
-		const { fetcher } = respondingWith(200, initiateBody);
+		const { fetcher } = respondingWith(initiateBody);
 
 		expect(await checkR2Credentials(options, fetcher)).toStrictEqual({
 			kind: 'valid'
@@ -64,7 +61,7 @@ describe('checkR2Credentials', () => {
 			'<InitiateMultipartUploadResult><UploadId>UP-1</UploadId>'
 		]
 	])('rejects %s in a successful response', async (_name, body) => {
-		const { fetcher, requests } = respondingWith(200, body);
+		const { fetcher, requests } = respondingWith(body);
 
 		const result = await checkR2Credentials(options, fetcher);
 
@@ -101,7 +98,7 @@ describe('checkR2Credentials', () => {
 	});
 
 	it('begins then aborts a multipart upload against the bucket', async () => {
-		const { fetcher, requests } = respondingWith(200, initiateBody);
+		const { fetcher, requests } = respondingWith(initiateBody);
 
 		await checkR2Credentials(options, fetcher);
 

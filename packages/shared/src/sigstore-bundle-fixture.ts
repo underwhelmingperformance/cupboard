@@ -137,8 +137,8 @@ function bitString(contents: Uint8Array): Uint8Array {
 	return tagged(0x03, concatenate([Uint8Array.of(0), contents]));
 }
 
-function derBoolean(isTrue: boolean): Uint8Array {
-	return tagged(0x01, Uint8Array.of(isTrue ? 0xff : 0x00));
+function derBoolean(): Uint8Array {
+	return tagged(0x01, Uint8Array.of(0xff));
 }
 
 function twoDigits(value: number): string {
@@ -188,7 +188,7 @@ function extension(
 ): Uint8Array {
 	return sequence(
 		objectIdentifier(oid),
-		...(isCritical ? [derBoolean(true)] : []),
+		...(isCritical ? [derBoolean()] : []),
 		octetString(value)
 	);
 }
@@ -216,10 +216,10 @@ interface CertificateFields {
 }
 
 /**
- * The verifier chains a certificate to its issuer by comparing subject and
- * issuer names, so the fixture carries neither a subject key identifier nor an
- * authority key identifier.
- */
+The verifier chains a certificate to its issuer by comparing subject and
+issuer names, so the fixture carries neither a subject key identifier nor an
+authority key identifier.
+*/
 function certificate(fields: CertificateFields): Uint8Array {
 	const tbs = toBeSigned(fields);
 
@@ -259,11 +259,11 @@ function uint24(value: number): Uint8Array {
 }
 
 /**
- * The certificate extension that lists one RFC 6962 signed certificate
- * timestamp for a precertificate. `precertificate` is the certificate's
- * to-be-signed structure without this extension. The verifier rebuilds this
- * structure and checks the log's signature against it.
- */
+The certificate extension that lists one RFC 6962 signed certificate
+timestamp for a precertificate. `precertificate` is the certificate's
+to-be-signed structure without this extension. The verifier rebuilds this
+structure and checks the log's signature against it.
+*/
 function signedCertificateTimestampExtension(
 	precertificate: Uint8Array,
 	issuerKey: KeyObject,
@@ -303,9 +303,9 @@ function signedCertificateTimestampExtension(
 }
 
 /**
- * A transparency-log or certificate-transparency log instance for a trusted
- * root, in the JSON form of `TransparencyLogInstance`.
- */
+A transparency-log or certificate-transparency log instance for a trusted
+root, in the JSON form of `TransparencyLogInstance`.
+*/
 export function transparencyLogInstance(
 	baseUrl: string,
 	log: KeyPair
@@ -325,7 +325,7 @@ export function transparencyLogInstance(
 }
 
 function certificateAuthorityExtension(): Uint8Array {
-	return extension(basicConstraints, true, sequence(derBoolean(true)));
+	return extension(basicConstraints, true, sequence(derBoolean()));
 }
 
 function certificateAuthority(
@@ -344,10 +344,10 @@ function certificateAuthority(
 }
 
 /**
- * The RFC 3161 response from the timestamp authority for one signature.
- * `imprint` contains the exact signature bytes from the bundle. The verifier
- * hashes these bytes when it checks the timestamp.
- */
+The RFC 3161 response from the timestamp authority for one signature.
+`imprint` contains the exact signature bytes from the bundle. The verifier
+hashes these bytes when it checks the timestamp.
+*/
 function timestampResponse(
 	imprint: Uint8Array,
 	authority: {
@@ -420,13 +420,13 @@ const base64 = (bytes: Uint8Array): string =>
 
 export interface BundleFixture {
 	/**
-	 * The bundle bytes, as `cupboard attest verify` reads them from a file.
-	 */
+	The bundle bytes, as `cupboard attest verify` reads them from a file.
+	*/
 	readonly bundle: Uint8Array;
 	/**
-	 * The trusted root document, in the form `gh attestation trusted-root`
-	 * writes.
-	 */
+	The trusted root document, in the form `gh attestation trusted-root`
+	writes.
+	*/
 	readonly trustedRoot: string;
 	readonly subjectDigest: string;
 	readonly predicateType: string;
@@ -437,25 +437,25 @@ export interface BundleFixtureOptions {
 	readonly predicateType: string;
 	readonly predicate?: unknown;
 	/**
-	 * Adds a signed certificate timestamp to the signing certificate, as the
-	 * public-good Fulcio does. With `listed`, the trusted root lists the
-	 * certificate-transparency log that signed the timestamp. With `unlisted`,
-	 * it does not.
-	 */
+	Adds a signed certificate timestamp to the signing certificate, as the
+	public-good Fulcio does. With `listed`, the trusted root lists the
+	certificate-transparency log that signed the timestamp. With `unlisted`,
+	it does not.
+	*/
 	readonly signedCertificateTimestamp?: 'listed' | 'unlisted';
 }
 
 /**
- * A bundle in the shape GitHub's Sigstore instance produces: a certificate
- * from a private Fulcio, an RFC 3161 timestamp from a private timestamp
- * authority, and no transparency-log entry. The bundle and the trusted root
- * that verifies it are generated together from throwaway keys, so verification
- * runs the real signature, chain and timestamp checks and contacts no service.
- *
- * The certificate validity window and the timestamp both sit at `signingTime`,
- * and the verifier takes its verification time from the timestamp, so the
- * fixture neither expires nor depends on the clock.
- */
+A bundle in the shape GitHub's Sigstore instance produces: a certificate
+from a private Fulcio, an RFC 3161 timestamp from a private timestamp
+authority, and no transparency-log entry. The bundle and the trusted root
+that verifies it are generated together from throwaway keys, so verification
+runs the real signature, chain and timestamp checks and contacts no service.
+
+The certificate validity window and the timestamp both sit at `signingTime`,
+and the verifier takes its verification time from the timestamp, so the
+fixture neither expires nor depends on the clock.
+*/
 export function githubInstanceBundle(
 	options: BundleFixtureOptions
 ): BundleFixture {
@@ -593,12 +593,12 @@ export function githubInstanceBundle(
 }
 
 /**
- * A bundle in the shape of a `tsa-only` bundle from the public-good instance:
- * like {@link githubInstanceBundle}, but the certificate contains a signed
- * certificate timestamp, as the public-good Fulcio issues it. With `listed`,
- * the trusted root lists the certificate-transparency log that signed the
- * timestamp. With `unlisted`, it does not.
- */
+A bundle in the shape of a `tsa-only` bundle from the public-good instance:
+like {@link githubInstanceBundle}, but the certificate contains a signed
+certificate timestamp, as the public-good Fulcio issues it. With `listed`,
+the trusted root lists the certificate-transparency log that signed the
+timestamp. With `unlisted`, it does not.
+*/
 export function publicGoodShapedBundle(
 	options: BundleFixtureOptions,
 	log: 'listed' | 'unlisted'

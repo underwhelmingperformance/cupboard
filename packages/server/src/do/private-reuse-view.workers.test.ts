@@ -87,14 +87,11 @@ function basic(credential: {
 	};
 }
 
-function withCredential(
-	credential: { readonly user: string; readonly password: string },
-	init: RequestInit = {}
-): RequestInit {
+function withCredential(init: RequestInit = {}): RequestInit {
 	const headers = new Headers(init.headers);
 	headers.set(
 		'authorization',
-		`Basic ${btoa(`${credential.user}:${credential.password}`)}`
+		`Basic ${btoa(`${tenantReader.user}:${tenantReader.password}`)}`
 	);
 
 	return { ...init, headers };
@@ -148,10 +145,10 @@ async function forgetViews(): Promise<void> {
 }
 
 /**
- * Commits one store path to a private cache, defines a private view over every
- * private cache, and gives the tenant a read credential. The push authenticates
- * with its bearer token, so it runs before the credential exists.
- */
+Commits one store path to a private cache, defines a private view over every
+private cache, and gives the tenant a read credential. The push authenticates
+with its bearer token, so it runs before the credential exists.
+*/
 async function publishThroughPrivateView(): Promise<string> {
 	const storePathHash = await commitTo(privateBuilds, 'private');
 	await setView([{ kind: 'all' }], privateViewName, 'private');
@@ -261,10 +258,7 @@ describe('private reuse-view access', () => {
 		const observed = await Promise.all(
 			routes.map(async (route) => {
 				const refused = await readFetch(route.path, route.init ?? {});
-				const served = await readFetch(
-					route.path,
-					withCredential(tenantReader, route.init)
-				);
+				const served = await readFetch(route.path, withCredential(route.init));
 
 				return {
 					name: route.name,
@@ -314,10 +308,7 @@ describe('private reuse-view access', () => {
 		const path = `${privateViewPath}/${storePathHash}.narinfo`;
 
 		const refused = await readFetch(path, { method: 'HEAD' });
-		const served = await readFetch(
-			path,
-			withCredential(tenantReader, { method: 'HEAD' })
-		);
+		const served = await readFetch(path, withCredential({ method: 'HEAD' }));
 		const full = await readFetch(path, basic(tenantReader));
 		const fullBody = await full.text();
 

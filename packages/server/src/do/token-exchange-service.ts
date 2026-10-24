@@ -375,11 +375,11 @@ export class TokenExchangeService {
 			throw new ReadResourcesNotPermittedError(selection.uncovered);
 		}
 
-		if (selection.outcome !== 'selected') {
-			throw new TenantSubjectTokenUntrustedError();
-		}
-
-		if (typeof verified.sub !== 'string' || verified.sub === '') {
+		if (
+			selection.outcome !== 'selected' ||
+			typeof verified.sub !== 'string' ||
+			verified.sub === ''
+		) {
 			throw new TenantSubjectTokenUntrustedError();
 		}
 

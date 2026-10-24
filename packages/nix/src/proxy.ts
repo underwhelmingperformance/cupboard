@@ -9,15 +9,15 @@ export interface ProxySettings {
 export type ProxyEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**
- * Reads proxy settings with libcurl's variable names and precedence. For each
- * scheme, it uses the first non-empty scheme-specific variable, then falls back
- * to `all_proxy`.
- *
- * `http_proxy` is read in lower case alone. A CGI script runs with the request
- * headers in its environment as `HTTP_*` variables, so a request carrying a
- * `Proxy:` header would otherwise choose the proxy for every transfer that
- * script made.
- */
+Reads proxy settings with libcurl's variable names and precedence. For each
+scheme, it uses the first non-empty scheme-specific variable, then falls back
+to `all_proxy`.
+
+`http_proxy` is read in lower case alone. A CGI script runs with the request
+headers in its environment as `HTTP_*` variables, so a request carrying a
+`Proxy:` header would otherwise choose the proxy for every transfer that
+script made.
+*/
 export function proxySettingsFrom(env: ProxyEnvironment): ProxySettings {
 	const httpProxy = firstNonEmpty(env, [
 		'http_proxy',
@@ -57,16 +57,16 @@ function firstNonEmpty(
 }
 
 /**
- * Creates a proxy dispatcher from the environment, or returns `undefined` for
- * direct requests.
- *
- * The hosts listed in `no_proxy` go direct. That list is read by the agent,
- * which accepts a leading dot, a bare domain matched on its label boundaries,
- * an optional port, and `*` for every host.
- *
- * The returned fetcher forwards every request option, including abort and
- * timeout signals, and adds only the proxy dispatcher.
- */
+Creates a proxy dispatcher from the environment, or returns `undefined` for
+direct requests.
+
+The hosts listed in `no_proxy` go direct. That list is read by the agent,
+which accepts a leading dot, a bare domain matched on its label boundaries,
+an optional port, and `*` for every host.
+
+The returned fetcher forwards every request option, including abort and
+timeout signals, and adds only the proxy dispatcher.
+*/
 export function proxiedFetch(
 	env: ProxyEnvironment
 ): typeof undiciFetch | undefined {

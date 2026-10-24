@@ -7,9 +7,9 @@ export type RootRetention =
 	| { readonly kind: 'cache' };
 
 /**
- * Reads the retention from the workflow's `ttl` and `permanent` inputs. With
- * neither, the cache's retention settings apply.
- */
+Reads the retention from the workflow's `ttl` and `permanent` inputs. With
+neither, the cache's retention settings apply.
+*/
 export function rootRetention(
 	ttl: string,
 	isPermanent: boolean

@@ -11,9 +11,9 @@ export interface NixSettingTable {
 }
 
 /**
- * Maps a supported Node platform and architecture to a Nix system. Returns
- * `undefined` when the flake does not support the combination.
- */
+Maps a supported Node platform and architecture to a Nix system. Returns
+`undefined` when the flake does not support the combination.
+*/
 export function nixSystemFor(
 	operatingSystem: NodeJS.Platform,
 	architecture: string
@@ -45,17 +45,17 @@ export type NixSettingValueType =
 	'boolean' | 'integer' | 'list' | 'map' | 'string';
 
 /**
- * Returns the value type for a setting, or `undefined` when the pinned Nix does
- * not recognise the setting. Nix warns about unknown settings and ignores them.
- */
+Returns the value type for a setting, or `undefined` when the pinned Nix does
+not recognise the setting. Nix warns about unknown settings and ignores them.
+*/
 export function nixSettingType(name: string): NixSettingValueType | undefined {
 	return currentSettingTable?.types[name];
 }
 
 /**
- * Whether a setting supports an `extra-` assignment. Nix permits these
- * assignments for list and map settings only.
- */
+Whether a setting supports an `extra-` assignment. Nix permits these
+assignments for list and map settings only.
+*/
 export function isAppendableSetting(name: string): boolean {
 	const type = nixSettingType(name);
 
@@ -65,9 +65,9 @@ export function isAppendableSetting(name: string): boolean {
 const booleanValues = new Set(['true', 'yes', '1', 'false', 'no', '0']);
 
 /**
- * The integer width declared for a Nix setting. Values outside this width are
- * rejected before a binary unit is applied.
- */
+The integer width declared for a Nix setting. Values outside this width are
+rejected before a binary unit is applied.
+*/
 export type NixIntegerWidth = 'int32' | 'uint32' | 'int64' | 'uint64';
 
 // Nix reads an integer as a sign, then digits, then an optional binary unit.
@@ -94,17 +94,17 @@ const integerBounds: Readonly<Record<NixIntegerWidth, IntegerBounds>> = {
 };
 
 /**
- * Parses an integer setting, or returns `undefined` when the value is invalid
- * for the setting's width.
- *
- * Nix reads the digits into the width it declared the setting with, so an
- * out-of-range input is rejected. A unit then multiplies the parsed value, and
- * the product wraps within that same width: `cores = 1T` reads as zero, because
- * a tebibyte is an exact multiple of that width's range.
- *
- * A setting absent from the generated width table uses the widest width. The
- * table includes every integer setting known to the pinned Nix.
- */
+Parses an integer setting, or returns `undefined` when the value is invalid
+for the setting's width.
+
+Nix reads the digits into the width it declared the setting with, so an
+out-of-range input is rejected. A unit then multiplies the parsed value, and
+the product wraps within that same width: `cores = 1T` reads as zero, because
+a tebibyte is an exact multiple of that width's range.
+
+A setting absent from the generated width table uses the widest width. The
+table includes every integer setting known to the pinned Nix.
+*/
 export function nixInteger(name: string, value: string): bigint | undefined {
 	return nixIntegerOfWidth(
 		value,
@@ -143,35 +143,35 @@ function wrappedInto(value: bigint, bounds: IntegerBounds): bigint {
 }
 
 /**
- * Values accepted by specific settings in addition to their general type.
- * `max-jobs` accepts either an integer or `auto`, which uses the local
- * machine's parallelism.
- */
+Values accepted by specific settings in addition to their general type.
+`max-jobs` accepts either an integer or `auto`, which uses the local
+machine's parallelism.
+*/
 const wordValues = new Map([['max-jobs', new Set(['auto'])]]);
 
 /**
- * Settings Nix reads as a path from the filesystem root, refusing one written
- * any other way or left empty. The pinned Nix reports only their general
- * string type, so this set records the stricter path requirement.
- */
+Settings Nix reads as a path from the filesystem root, refusing one written
+any other way or left empty. The pinned Nix reports only their general
+string type, so this set records the stricter path requirement.
+*/
 const absolutePathSettings = new Set(['netrc-file', 'ssl-cert-file']);
 
 /**
- * List settings whose entries must parse as store references. The pinned Nix
- * reports only their general list type.
- */
+List settings whose entries must parse as store references. The pinned Nix
+reports only their general list type.
+*/
 const storeReferenceSettings = new Set([
 	'substituters',
 	'trusted-substituters'
 ]);
 
 /**
- * Whether Nix would accept a value for the setting. This client rejects any
- * configuration value that Nix would reject.
- *
- * The general type fully validates booleans and integers. Strings, lists and
- * maps are accepted as written unless a setting has an additional constraint.
- */
+Whether Nix would accept a value for the setting. This client rejects any
+configuration value that Nix would reject.
+
+The general type fully validates booleans and integers. Strings, lists and
+maps are accepted as written unless a setting has an additional constraint.
+*/
 export function isSettingValue(
 	name: string,
 	type: NixSettingValueType,
@@ -207,10 +207,10 @@ export function listOf(value: string): readonly string[] {
 const namedStores = new Set(['', 'auto', 'daemon', 'local']);
 
 /**
- * Whether the value has the syntax of a Nix store reference: a URI, a known
- * store type or a path. Unsupported URI schemes remain syntactically valid and
- * are rejected later when the store is opened.
- */
+Whether the value has the syntax of a Nix store reference: a URI, a known
+store type or a path. Unsupported URI schemes remain syntactically valid and
+are rejected later when the store is opened.
+*/
 function isStoreReference(value: string): boolean {
 	const parameters = value.indexOf('?');
 	const reference = parameters === -1 ? value : value.slice(0, parameters);
@@ -228,14 +228,14 @@ function isStoreReference(value: string): boolean {
 const schemePattern = /^[A-Za-z][\d+.A-Za-z-]*:/u;
 
 /**
- * The store reference in the form Nix uses.
- *
- * A path refers to a local store rooted at that path. Nix resolves the path
- * against the working directory, then writes it as a `local://` URI. A URI is
- * left unchanged, as is each recognised store type.
- *
- * Parameters are kept. An empty query is dropped, which is what Nix does.
- */
+The store reference in the form Nix uses.
+
+A path refers to a local store rooted at that path. Nix resolves the path
+against the working directory, then writes it as a `local://` URI. A URI is
+left unchanged, as is each recognised store type.
+
+Parameters are kept. An empty query is dropped, which is what Nix does.
+*/
 export function canonicalStoreReference(
 	value: string,
 	workingDirectory: string

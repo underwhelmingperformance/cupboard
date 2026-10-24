@@ -1215,18 +1215,20 @@ describe('claiming a verification batch', () => {
 								commitPipeline: CommitPipelineService;
 							}
 						).commitPipeline;
-						const probe = vi
+						const hasProbed = vi
 							.spyOn(pipeline, 'isGenerationCommitted')
 							.mockResolvedValue(false);
 						try {
 							const passes = [];
 							for (let pass = 0; pass < 3; pass++) {
-								probe.mockClear();
+								hasProbed.mockClear();
 								await asOneInvocation(() =>
 									verification.processPendingWithoutDecode(rootLogger(), 1)
 								);
 								passes.push(
-									probe.mock.calls.map(([, metadata]) => metadata.storePathHash)
+									hasProbed.mock.calls.map(
+										([, metadata]) => metadata.storePathHash
+									)
 								);
 							}
 							const failures = instance.context.db
@@ -1239,7 +1241,7 @@ describe('claiming a verification batch', () => {
 								.all();
 							return { passes, failures };
 						} finally {
-							probe.mockRestore();
+							hasProbed.mockRestore();
 						}
 					}
 				);
@@ -1280,7 +1282,7 @@ describe('claiming a verification batch', () => {
 					commitPipeline: CommitPipelineService;
 				}
 			).commitPipeline;
-			const committedProbe = vi
+			const hasCommittedProbe = vi
 				.spyOn(pipeline, 'isGenerationCommitted')
 				.mockResolvedValue(false);
 
@@ -1288,15 +1290,15 @@ describe('claiming a verification batch', () => {
 				await asOneInvocation(() =>
 					verification.processPendingWithoutDecode(rootLogger(), 2)
 				);
-				const first = committedProbe.mock.calls.map(
+				const first = hasCommittedProbe.mock.calls.map(
 					([, metadata]) => metadata.storePathHash
 				);
-				committedProbe.mockClear();
+				hasCommittedProbe.mockClear();
 
 				await asOneInvocation(() =>
 					verification.processPendingWithoutDecode(rootLogger(), 2)
 				);
-				const second = committedProbe.mock.calls.map(
+				const second = hasCommittedProbe.mock.calls.map(
 					([, metadata]) => metadata.storePathHash
 				);
 				const failures = instance.context.db
@@ -1320,7 +1322,7 @@ describe('claiming a verification batch', () => {
 						.toSorted((left, right) => byCodeUnit(left.id, right.id))
 				});
 			} finally {
-				committedProbe.mockRestore();
+				hasCommittedProbe.mockRestore();
 			}
 		});
 	});
@@ -1468,14 +1470,14 @@ describe('claiming a verification batch', () => {
 								narHash: NixSha256HashString
 							) => Promise<boolean>;
 						};
-						const currentProbe =
+						const hasCurrentProbe =
 							probeTarget.isCurrentNarPresent.bind(verification);
-						const probe = vi
+						const hasProbed = vi
 							.spyOn(probeTarget, 'isCurrentNarPresent')
 							.mockImplementation((narHash) =>
 								faultingNarHashes.has(narHash)
 									? Promise.reject(new Error('sensitive reuse provider error'))
-									: currentProbe(narHash)
+									: hasCurrentProbe(narHash)
 							);
 
 						try {
@@ -1487,7 +1489,7 @@ describe('claiming a verification batch', () => {
 								.from(schema.pendingUploads)
 								.orderBy(schema.pendingUploads.id)
 								.all();
-							const probed = probe.mock.calls.map(([narHash]) => narHash);
+							const probed = hasProbed.mock.calls.map(([narHash]) => narHash);
 
 							await asOneInvocation(() =>
 								verification.processPendingWithoutDecode(rootLogger(), 2)
@@ -1507,7 +1509,7 @@ describe('claiming a verification batch', () => {
 								secondPass: secondRows
 							};
 						} finally {
-							probe.mockRestore();
+							hasProbed.mockRestore();
 						}
 					}
 				);
@@ -1591,7 +1593,7 @@ describe('claiming a verification batch', () => {
 						commitPipeline: CommitPipelineService;
 					}
 				).commitPipeline;
-				const committedProbe = vi
+				const hasCommittedProbe = vi
 					.spyOn(pipeline, 'isGenerationCommitted')
 					.mockRejectedValue(
 						new Error(`sensitive-provider-error:${fresh.uploadId}`)
@@ -1602,7 +1604,7 @@ describe('claiming a verification batch', () => {
 						verification.processPendingWithoutDecode(rootLogger(), 1)
 					);
 				} finally {
-					committedProbe.mockRestore();
+					hasCommittedProbe.mockRestore();
 				}
 			});
 		} finally {

@@ -92,14 +92,11 @@ function basic(credential: {
 	};
 }
 
-function withCredential(
-	credential: { readonly user: string; readonly password: string },
-	init: RequestInit = {}
-): RequestInit {
+function withCredential(init: RequestInit = {}): RequestInit {
 	const headers = new Headers(init.headers);
 	headers.set(
 		'authorization',
-		`Basic ${btoa(`${credential.user}:${credential.password}`)}`
+		`Basic ${btoa(`${tenantReader.user}:${tenantReader.password}`)}`
 	);
 
 	return { ...init, headers };
@@ -143,11 +140,10 @@ interface PublishedPath {
 async function putNamedCache(
 	token: string,
 	name: string,
-	access: 'public' | 'private',
-	priority = 40
+	access: 'public' | 'private'
 ): Promise<void> {
 	const response = await authorisedWorkerFetch(`/caches/${name}`, token, {
-		body: JSON.stringify({ access, priority }),
+		body: JSON.stringify({ access, priority: 40 }),
 		headers: { 'content-type': 'application/json' },
 		method: 'PUT'
 	});
@@ -167,7 +163,7 @@ async function putNamedCache(
 		`/caches/${name}`,
 		token,
 		{
-			body: JSON.stringify({ kind: 'priority', priority }),
+			body: JSON.stringify({ kind: 'priority', priority: 40 }),
 			headers: { 'content-type': 'application/json' },
 			method: 'PATCH'
 		}
@@ -180,11 +176,11 @@ async function putNamedCache(
 }
 
 /**
- * Publishes one store path and one attestation bundle to the private cache
- * through the routes a real push uses, then gives the tenant a read credential.
- * The push authenticates with its bearer token, so it runs before the read
- * credential exists.
- */
+Publishes one store path and one attestation bundle to the private cache
+through the routes a real push uses, then gives the tenant a read credential.
+The push authenticates with its bearer token, so it runs before the read
+credential exists.
+*/
 async function publishToPrivateCache(): Promise<PublishedPath> {
 	const token = await initialiseViaWorker();
 	const metadata = uploadMetadata({ fileSize: 1234 });
@@ -284,10 +280,7 @@ describe('private cache access', () => {
 			routes.map(async (route) => {
 				const path = `${cachePrefix}${route.suffix}`;
 				const refused = await readFetch(path, route.init ?? {});
-				const served = await readFetch(
-					path,
-					withCredential(tenantReader, route.init)
-				);
+				const served = await readFetch(path, withCredential(route.init));
 
 				return {
 					name: route.name,
@@ -320,10 +313,7 @@ describe('private cache access', () => {
 		const path = `${cachePrefix}/${published.storePathHash}.narinfo`;
 
 		const refused = await readFetch(path, { method: 'HEAD' });
-		const served = await readFetch(
-			path,
-			withCredential(tenantReader, { method: 'HEAD' })
-		);
+		const served = await readFetch(path, withCredential({ method: 'HEAD' }));
 
 		expect({
 			refused: refused.status,
@@ -357,7 +347,7 @@ describe('private cache access', () => {
 		);
 		const availability = await readFetch(
 			`${cachePrefix}/api/v1/missing-paths`,
-			withCredential(tenantReader, availabilityPost(published.storePathHash))
+			withCredential(availabilityPost(published.storePathHash))
 		);
 
 		expect({
@@ -627,7 +617,7 @@ describe('private cache access', () => {
 		});
 		const reader = await readFetch(
 			`${cachePrefix}/uploads`,
-			withCredential(tenantReader, { method: 'POST' })
+			withCredential({ method: 'POST' })
 		);
 
 		expect({

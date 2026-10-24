@@ -239,10 +239,10 @@ interface FixtureBundles {
 }
 
 /**
- * The control procedures that a test reads after a deploy: the recorded schema
- * transitions, how many tenants have reached the required local step, and a
- * way to wake the tenants below it.
- */
+The control procedures that a test reads after a deploy: the recorded schema
+transitions, how many tenants have reached the required local step, and a
+way to wake the tenants below it.
+*/
 export interface DeploymentClient {
 	transitions(): Promise<ParsedDeploymentTransitionsResponse>;
 	localStepStatus(): Promise<ParsedLocalStepStatus>;
@@ -856,9 +856,9 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * Every D1 migration in the order that an upgrade from the predecessor
-	 * applies them across the intermediate release and the current release.
-	 */
+	Every D1 migration in the order that an upgrade from the predecessor
+	applies them across the intermediate release and the current release.
+	*/
 	get upgradeMigrationOrder(): readonly string[] {
 		if (this.artifact.d1Migrations.length === 0) {
 			throw new ArtifactD1MigrationMissingError();
@@ -882,14 +882,14 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * The schema transition walk that `cupboard deploy` runs, over this
-	 * harness's D1 database and Workers. The serving check covers both Workers,
-	 * as the deploy's does. It reads the control Worker's build version. The
-	 * tenant Worker refuses every request, so for it the check reads which
-	 * Workers the harness configured. `hooks` can replace the clock and add
-	 * `wakeTenants`; without `wakeTenants` the walk only checks that the tenants
-	 * have recorded the contract step.
-	 */
+	The schema transition walk that `cupboard deploy` runs, over this
+	harness's D1 database and Workers. The serving check covers both Workers,
+	as the deploy's does. It reads the control Worker's build version. The
+	tenant Worker refuses every request, so for it the check reads which
+	Workers the harness configured. `hooks` can replace the clock and add
+	`wakeTenants`; without `wakeTenants` the walk only checks that the tenants
+	have recorded the contract step.
+	*/
 	transitionWalk(
 		hooks: Partial<TransitionHooks> = {},
 		stage: 'intermediate' | 'current' = 'current',
@@ -1090,10 +1090,10 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * Replaces the deployed Workers with the ones built from the working
-	 * tree, keeping the persisted D1, R2 and Durable Object storage, and returns
-	 * once both scripts serve this build.
-	 */
+	Replaces the deployed Workers with the ones built from the working
+	tree, keeping the persisted D1, R2 and Durable Object storage, and returns
+	once both scripts serve this build.
+	*/
 	async deployCurrent(): Promise<void> {
 		await this.deployArtifact(this.artifact, 'current');
 	}
@@ -1139,9 +1139,9 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * A control client that exchanges a fresh token for every call. A restart or
-	 * a Worker swap invalidates the previous one.
-	 */
+	A control client that exchanges a fresh token for every call. A restart or
+	a Worker swap invalidates the previous one.
+	*/
 	async deploymentClient(): Promise<DeploymentClient> {
 		await this.connectDeploymentClient();
 
@@ -1165,10 +1165,10 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * Writes a tenant's membership marker, which admission requires before any
-	 * tenant route runs. The fixture seeds its tenants straight into D1, so this
-	 * writes the marker that tenant creation would have written.
-	 */
+	Writes a tenant's membership marker, which admission requires before any
+	tenant route runs. The fixture seeds its tenants straight into D1, so this
+	writes the marker that tenant creation would have written.
+	*/
 	async announceTenant(tenant: FixtureTenant): Promise<void> {
 		const members = await this.miniflare.getKVNamespace(
 			tenantCacheBinding,
@@ -1179,24 +1179,24 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * The stub issuer to put in the `issuer` field of any trust rule seeded
-	 * against this harness.
-	 */
+	The stub issuer to put in the `issuer` field of any trust rule seeded
+	against this harness.
+	*/
 	get issuerUrl(): string {
 		return this.issuer.issuer;
 	}
 
 	/**
-	 * The URL of a tenant's admin API inside the harness.
-	 */
+	The URL of a tenant's admin API inside the harness.
+	*/
 	tenantUrl(tenant: FixtureTenant): URL {
 		return new URL(`https://cupboard.invalid/t/${tenant}`);
 	}
 
 	/**
-	 * A tenant admin client with the operator's authority. Use tenantRpcAs
-	 * with an exchanged token to exercise CI permissions.
-	 */
+	A tenant admin client with the operator's authority. Use tenantRpcAs
+	with an exchanged token to exercise CI permissions.
+	*/
 	async tenantOwnerRpc(
 		tenant: FixtureTenant
 	): Promise<ReturnType<typeof tenantRpc>> {
@@ -1206,8 +1206,8 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * A tenant admin client that presents `credential` on every call.
-	 */
+	A tenant admin client that presents `credential` on every call.
+	*/
 	tenantRpcAs(
 		tenant: FixtureTenant,
 		credential: string
@@ -1219,11 +1219,11 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * Exchanges a signed ID token for one tenant's access token, the way a CI
-	 * job does. The harness signs `claims` with its stub issuer, so a rule
-	 * seeded with {@link issuerUrl} matches it. A claim-bound exchange must
-	 * request the `authorizationDetails` it needs.
-	 */
+	Exchanges a signed ID token for one tenant's access token, the way a CI
+	job does. The harness signs `claims` with its stub issuer, so a rule
+	seeded with {@link issuerUrl} matches it. A claim-bound exchange must
+	request the `authorizationDetails` it needs.
+	*/
 	async tenantCiCredential(
 		tenant: FixtureTenant,
 		claims: Readonly<Record<string, unknown>>,
@@ -1255,9 +1255,9 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * Lists a tenant's caches and retention properties from its Durable Object,
-	 * using the operator's credential.
-	 */
+	Lists a tenant's caches and retention properties from its Durable Object,
+	using the operator's credential.
+	*/
 	async tenantCaches(tenant: FixtureTenant): Promise<CacheListResponse> {
 		const rpc = await this.tenantOwnerRpc(tenant);
 
@@ -1265,10 +1265,10 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * The catalogue version D1 records for a tenant. Its Durable Object writes it
-	 * at the end of a successful start, so a version here means the object
-	 * applied every migration this build carries.
-	 */
+	The catalogue version D1 records for a tenant. Its Durable Object writes it
+	at the end of a successful start, so a version here means the object
+	applied every migration this build carries.
+	*/
 	async catalogueVersion(tenant: FixtureTenant): Promise<number | null> {
 		const database = await this.database();
 		const row = await database

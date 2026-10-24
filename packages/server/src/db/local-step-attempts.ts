@@ -7,16 +7,16 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import * as d1Schema from './d1-schema.ts';
 
 /**
- * The outcome of one attempt at a tenant's local-step work, as its tenant row
- * records it. Only a `failed` attempt records an error.
- *
- * A `finished` attempt is a page that recorded the step that the object was
- * asked for. It clears the attempt time as well, because the object has no
- * work left. When a later required
- * step leaves the tenant pending again, the row therefore reads as unwoken
- * until a wake reaches the object. `progressed` is whether the page projected
- * or moved an item.
- */
+The outcome of one attempt at a tenant's local-step work, as its tenant row
+records it. Only a `failed` attempt records an error.
+
+A `finished` attempt is a page that recorded the step that the object was
+asked for. It clears the attempt time as well, because the object has no
+work left. When a later required
+step leaves the tenant pending again, the row therefore reads as unwoken
+until a wake reaches the object. `progressed` is whether the page projected
+or moved an item.
+*/
 export type LocalStepAttempt =
 	| { readonly kind: 'progressed'; readonly at: IsoTimestamp }
 	| { readonly kind: 'unchanged'; readonly at: IsoTimestamp }
@@ -32,10 +32,10 @@ export type LocalStepAttempt =
 	  };
 
 /**
- * Writes an attempt to the tenant's row. Every write replaces the previous
- * attempt's time and error. An attempt that did not progress leaves the time
- * of the last progress unchanged.
- */
+Writes an attempt to the tenant's row. Every write replaces the previous
+attempt's time and error. An attempt that did not progress leaves the time
+of the last progress unchanged.
+*/
 export function recordLocalStepAttempt(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -56,8 +56,8 @@ export function recordLocalStepAttempt(
 }
 
 /**
- * Summarises an error for a tenant row, within `localStepErrorMaxLength`.
- */
+Summarises an error for a tenant row, within `localStepErrorMaxLength`.
+*/
 export function summariseLocalStepError(error: unknown): string {
 	const summary =
 		error instanceof Error

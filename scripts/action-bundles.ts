@@ -29,8 +29,8 @@ class ActionBundleStaleError extends CodedError {
 }
 
 /**
- * Generates a self-contained Node action from its TypeScript entrypoint.
- */
+Generates a self-contained Node action from its TypeScript entrypoint.
+*/
 export async function renderActionBundle(sourcePath: string): Promise<string> {
 	const result = await build({
 		absWorkingDir: repositoryRoot,

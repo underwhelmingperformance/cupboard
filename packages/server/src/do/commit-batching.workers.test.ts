@@ -575,12 +575,12 @@ describe('commit batching', () => {
 const pagedBurst = 14;
 
 /**
- * Commits one path, then drives a burst of reuse commits for its NAR through
- * one `materialiseBatched` flush under a single invocation allowance.
- *
- * Reports each request outcome, the tracked call count, and the tenant's final
- * reference edges, presence rows, and usage.
- */
+Commits one path, then drives a burst of reuse commits for its NAR through
+one `materialiseBatched` flush under a single invocation allowance.
+
+Reports each request outcome, the tracked call count, and the tenant's final
+reference edges, presence rows, and usage.
+*/
 async function drivePagedBurst(
 	server: string,
 	allowance: number

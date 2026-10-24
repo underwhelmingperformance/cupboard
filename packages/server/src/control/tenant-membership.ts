@@ -47,9 +47,9 @@ const filterCacheTtlSeconds = 10;
 const memberKeyCacheTtlSeconds = 60;
 
 /**
- * A read verifier loaded from D1. It can come from the authoritative tenant row
- * or from one private cache's credential row.
- */
+A read verifier loaded from D1. It can come from the authoritative tenant row
+or from one private cache's credential row.
+*/
 export interface TenantReadVerifier {
 	readonly user: ReadUser;
 	readonly passwordHash: ReadPasswordHash;
@@ -370,13 +370,13 @@ export async function readTenantEntry(
 }
 
 /**
- * Admits a tenant request. The membership filter and marker reject unknown
- * slugs, while a cache fault falls through to the authoritative D1 read.
- *
- * Pass the cache the request addresses. Admission resolves that cache's access,
- * lifecycle version, deletion state and cache-specific verifier before routing
- * can authenticate the request or consult Workers Cache.
- */
+Admits a tenant request. The membership filter and marker reject unknown
+slugs, while a cache fault falls through to the authoritative D1 read.
+
+Pass the cache the request addresses. Admission resolves that cache's access,
+lifecycle version, deletion state and cache-specific verifier before routing
+can authenticate the request or consult Workers Cache.
+*/
 export async function admitTenant(
 	env: Env,
 	ctx: DeferredContext,

@@ -47,21 +47,21 @@ const advancedCache: CacheScope = {
 };
 
 /**
- * The metadata a narinfo object records about the commit that produced it. A
- * narinfo object without all four entries records no version at all, so the
- * read refuses it and so does the move.
- */
-function narInfoMetadata(generation: number): Record<string, string> {
+The metadata a narinfo object records about the commit that produced it. A
+narinfo object without all four entries records no version at all, so the
+read refuses it and so does the move.
+*/
+function narInfoMetadata(): Record<string, string> {
 	return {
-		generation: String(generation),
+		generation: String(3),
 		narHash,
 		narUrl: `nar/${narHash}.nar.zst`,
 		signatureGeneration: '0'
 	};
 }
 
-function listMetadata(generation: number): Record<string, string> {
-	return { [listGenerationMetadataKey]: String(generation) };
+function listMetadata(): Record<string, string> {
+	return { [listGenerationMetadataKey]: String(3) };
 }
 
 async function seed(
@@ -73,13 +73,13 @@ async function seed(
 }
 
 /**
- * Removes the keys a case is about before it seeds them.
- *
- * R2 is one bucket the pool does not roll back between tests, and every server
- * these cases start is configured with the same tenant, so they address the
- * same keys. An object an earlier case left at a destination would make the
- * move keep that object rather than the one under test.
- */
+Removes the keys a case is about before it seeds them.
+
+R2 is one bucket the pool does not roll back between tests, and every server
+these cases start is configured with the same tenant, so they address the
+same keys. An object an earlier case left at a destination would make the
+move keep that object rather than the one under test.
+*/
 async function clear(...keys: readonly string[]): Promise<void> {
 	await Promise.all(keys.map((key) => env.BLOBS.delete(key)));
 }
@@ -100,9 +100,9 @@ async function objectAt(
 }
 
 /**
- * An attestation list records its narinfo generation under its own metadata
- * entry, so a list object is read back differently from a narinfo object.
- */
+An attestation list records its narinfo generation under its own metadata
+entry, so a list object is read back differently from a narinfo object.
+*/
 async function listAt(
 	key: string
 ): Promise<{ body: string; generation: string | undefined } | undefined> {
@@ -128,10 +128,10 @@ function wake() {
 	);
 }
 
-function wakeWithAllowance(subrequests: number) {
+function wakeWithAllowance() {
 	return withoutAlarmArming(() =>
 		runInDurableObject(currentServer(), (instance) =>
-			withDeployedSubrequestAllowance(instance.context, subrequests, () =>
+			withDeployedSubrequestAllowance(instance.context, 10, () =>
 				instance.reportLocalStep(expansionLocalStep)
 			)
 		)
@@ -139,9 +139,9 @@ function wakeWithAllowance(subrequests: number) {
 }
 
 /**
- * The tenant this server was configured with. Object keys are built from that
- * tenant id, which differs from the name the harness addresses the server by.
- */
+The tenant this server was configured with. Object keys are built from that
+tenant id, which differs from the name the harness addresses the server by.
+*/
 async function configuredTenant(): Promise<string> {
 	const tenant = await runInDurableObject(currentServer(), (instance) =>
 		instance.context.tenant()
@@ -155,8 +155,8 @@ async function configuredTenant(): Promise<string> {
 }
 
 /**
- * Brings up a server holding one private cache named `builds`.
- */
+Brings up a server holding one private cache named `builds`.
+*/
 async function useServerWithPrivateCache(name: string): Promise<string> {
 	await useTestServer(name);
 	await bootstrap({ caches: [{ scope: privateCache, access: 'private' }] });
@@ -165,10 +165,10 @@ async function useServerWithPrivateCache(name: string): Promise<string> {
 }
 
 /**
- * Records a committed version of the path in one cache, as a commit would. The
- * dual write keeps the legacy key beside the identity for as long as both
- * spellings are read.
- */
+Records a committed version of the path in one cache, as a commit would. The
+dual write keeps the legacy key beside the identity for as long as both
+spellings are read.
+*/
 async function commitPath(
 	generation: number,
 	scope: CacheScope = privateCache
@@ -202,11 +202,11 @@ describe('legacy private object move', () => {
 		const source = `t/${tenant}/narinfo/private/${cacheName}/${storePathHash}`;
 		const destination = `t/${tenant}/narinfo/${cacheName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, narInfoMetadata(3));
+		await seed(source, legacyBody, narInfoMetadata());
 		await commitPath(3);
 		const outcomes = [
-			await wakeWithAllowance(10),
-			await wakeWithAllowance(10),
+			await wakeWithAllowance(),
+			await wakeWithAllowance(),
 			await wake()
 		];
 
@@ -237,9 +237,9 @@ describe('legacy private object move', () => {
 		await clear(source, destination);
 		try {
 			for (const key of publicKeys) {
-				await seed(key, currentBody, narInfoMetadata(3));
+				await seed(key, currentBody, narInfoMetadata());
 			}
-			await seed(source, legacyBody, narInfoMetadata(3));
+			await seed(source, legacyBody, narInfoMetadata());
 			await commitPath(3);
 			const first = await wake();
 			const second = await wake();
@@ -266,7 +266,7 @@ describe('legacy private object move', () => {
 		const source = `t/${tenant}/narinfo/private/${cacheName}/${storePathHash}`;
 		const destination = `t/${tenant}/narinfo/${cacheName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, narInfoMetadata(3));
+		await seed(source, legacyBody, narInfoMetadata());
 		await commitPath(3);
 
 		await wake();
@@ -289,7 +289,7 @@ describe('legacy private object move', () => {
 		const source = `t/${tenant}/narinfo/private/${cacheName}/${storePathHash}`;
 		const destination = `t/${tenant}/narinfo/${cacheName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, narInfoMetadata(3));
+		await seed(source, legacyBody, narInfoMetadata());
 
 		await wake();
 
@@ -300,22 +300,22 @@ describe('legacy private object move', () => {
 	});
 
 	/**
-	 * The row exists and records a later version than the object does, so the
-	 * object's presence in a live cache is not enough to relocate it.
-	 *
-	 * This is the state a cache torn down and created again under the same name
-	 * leaves behind. The new cache is a different identity, and `generation_seq`
-	 * is never reset, so every version it commits is numbered above the ones its
-	 * predecessor left. Relocating one of those onto the new cache's live key
-	 * would manufacture exactly the object the reference edge exists to refuse.
-	 * A predicate that asked only whether the path has a row would do it.
-	 */
+	The row exists and records a later version than the object does, so the
+	object's presence in a live cache is not enough to relocate it.
+
+	This is the state a cache torn down and created again under the same name
+	leaves behind. The new cache is a different identity, and `generation_seq`
+	is never reset, so every version it commits is numbered above the ones its
+	predecessor left. Relocating one of those onto the new cache's live key
+	would manufacture exactly the object the reference edge exists to refuse.
+	A predicate that asked only whether the path has a row would do it.
+	*/
 	it('deletes an object whose version a later commit superseded', async () => {
 		const tenant = await useServerWithPrivateCache('legacy-move-superseded');
 		const source = `t/${tenant}/narinfo/private/${cacheName}/${storePathHash}`;
 		const destination = `t/${tenant}/narinfo/${cacheName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, narInfoMetadata(3));
+		await seed(source, legacyBody, narInfoMetadata());
 		await commitPath(7);
 
 		await wake();
@@ -335,7 +335,7 @@ describe('legacy private object move', () => {
 		const source = `t/${tenant}/narinfo/private/${cacheName}/${storePathHash}`;
 		const destination = `t/${tenant}/narinfo/${cacheName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, narInfoMetadata(3));
+		await seed(source, legacyBody, narInfoMetadata());
 
 		await wake();
 
@@ -354,8 +354,8 @@ describe('legacy private object move', () => {
 		const source = `t/${tenant}/narinfo/private/${cacheName}/${storePathHash}`;
 		const destination = `t/${tenant}/narinfo/${cacheName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, narInfoMetadata(3));
-		await seed(destination, currentBody, narInfoMetadata(3));
+		await seed(source, legacyBody, narInfoMetadata());
+		await seed(destination, currentBody, narInfoMetadata());
 		await commitPath(3);
 
 		await wake();
@@ -378,7 +378,7 @@ describe('legacy private object move', () => {
 		const tenant = await configuredTenant();
 		const key = `t/${tenant}/narinfo/private/${storePathHash}`;
 		await clear(key);
-		await seed(key, currentBody, narInfoMetadata(3));
+		await seed(key, currentBody, narInfoMetadata());
 
 		await wake();
 
@@ -393,7 +393,7 @@ describe('legacy private object move', () => {
 		const source = `t/${tenant}/attestations/private/${cacheName}/${storePathHash}`;
 		const destination = `t/${tenant}/attestations/${cacheName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, listMetadata(3));
+		await seed(source, legacyBody, listMetadata());
 		await commitPath(3);
 
 		await wake();
@@ -414,7 +414,7 @@ describe('legacy private object move', () => {
 		const source = `t/${tenant}/attestations/private/${cacheName}/${storePathHash}`;
 		const destination = `t/${tenant}/attestations/${cacheName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, listMetadata(3));
+		await seed(source, legacyBody, listMetadata());
 		await commitPath(7);
 
 		await wake();
@@ -432,7 +432,7 @@ describe('legacy private object move', () => {
 		const tenant = await useServerWithPrivateCache('legacy-move-bad-key');
 		const key = `t/${tenant}/narinfo/private/${cacheName}/not-a-store-path`;
 		await clear(key);
-		await seed(key, legacyBody, narInfoMetadata(3));
+		await seed(key, legacyBody, narInfoMetadata());
 
 		const outcome = await wake();
 
@@ -452,8 +452,8 @@ describe('legacy private object move', () => {
 });
 
 /**
- * Keeps the local generation at one while D1 records a re-created cache.
- */
+Keeps the local generation at one while D1 records a re-created cache.
+*/
 async function useServerWithAdvancedCache(name: string): Promise<string> {
 	await useTestServer(name);
 	await bootstrap({ caches: [{ scope: advancedCache }] });
@@ -521,7 +521,7 @@ describe('cache incarnation object move', () => {
 		const name = cacheNameSchema.parse('removed');
 		const source = `t/${tenant}/narinfo/${name}/${storePathHash}`;
 		await clear(source);
-		await seed(source, legacyBody, narInfoMetadata(3));
+		await seed(source, legacyBody, narInfoMetadata());
 		await runInDurableObject(currentServer(), async (instance) => {
 			await instance.context.d1
 				.insert(d1Schema.cacheLifecycle)
@@ -547,7 +547,7 @@ describe('cache incarnation object move', () => {
 		const source = `t/${tenant}/narinfo/${advancedName}/${storePathHash}`;
 		const destination = `t/${tenant}/narinfo/generation/2/${advancedName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, narInfoMetadata(3));
+		await seed(source, legacyBody, narInfoMetadata());
 		await commitPath(3, advancedCache);
 
 		await wake();
@@ -575,7 +575,7 @@ describe('cache incarnation object move', () => {
 		const source = `t/${tenant}/narinfo/${advancedName}/${storePathHash}`;
 		const destination = `t/${tenant}/narinfo/generation/2/${advancedName}/${storePathHash}`;
 		await clear(source, destination);
-		await seed(source, legacyBody, narInfoMetadata(3));
+		await seed(source, legacyBody, narInfoMetadata());
 
 		await wake();
 

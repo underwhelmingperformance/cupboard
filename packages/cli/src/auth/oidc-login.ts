@@ -120,10 +120,10 @@ export class LoginTimeoutError extends OidcLoginError {
 }
 
 /**
- * Why a pasted redirect URL was refused: it is not a URL, its `state` belongs
- * to another sign-in, or it fails a check that also applies to a loopback
- * redirect.
- */
+Why a pasted redirect URL was refused: it is not a URL, its `state` belongs
+to another sign-in, or it fails a check that also applies to a loopback
+redirect.
+*/
 export type PastedRedirectProblem =
 	CallbackProblem | 'not-a-url' | 'other-sign-in';
 
@@ -137,12 +137,12 @@ export class PastedRedirectRefusedError extends OidcLoginError {
 }
 
 /**
- * Reads the redirect URL pasted from the browser's address bar and resolves to
- * the pasted text. It resolves to undefined when the user cancels.
- * The sign-in aborts `signal` once it has a code, and the prompt then closes.
- * After a refused paste, the sign-in asks again with the `refusal`, which the
- * prompt reports.
- */
+Reads the redirect URL pasted from the browser's address bar and resolves to
+the pasted text. It resolves to undefined when the user cancels.
+The sign-in aborts `signal` once it has a code, and the prompt then closes.
+After a refused paste, the sign-in asks again with the `refusal`, which the
+prompt reports.
+*/
 export type PastedRedirectReader = (
 	signal: AbortSignal,
 	refusal?: PastedRedirectRefusedError
@@ -205,11 +205,11 @@ const interactiveOidcDiscoverySchema = z.object({
 });
 
 /**
- * Reads an issuer's `authorization_endpoint` and `token_endpoint` from its OIDC
- * metadata. The issuer must be an HTTPS URL, except on loopback. Cupboard
- * removes one trailing slash before comparing the metadata issuer with the
- * requested issuer, then validates every returned endpoint independently.
- */
+Reads an issuer's `authorization_endpoint` and `token_endpoint` from its OIDC
+metadata. The issuer must be an HTTPS URL, except on loopback. Cupboard
+removes one trailing slash before comparing the metadata issuer with the
+requested issuer, then validates every returned endpoint independently.
+*/
 export async function discoverOidcLogin(
 	issuer: string,
 	fetcher: typeof fetch = resilientFetcher('replay-unsafe'),
@@ -340,12 +340,12 @@ export interface LoopbackLoginOptions {
 }
 
 /**
- * Starts the default owner-login flow with PKCE and a 127.0.0.1 loopback
- * redirect. It opens the browser to the issuer's authorization endpoint,
- * accepts the redirect on loopback or, with `readPastedRedirect`, as a pasted
- * URL, and exchanges the code for an `id_token`. The state, response issuer
- * and PKCE verifier bind the response to this login.
- */
+Starts the default owner-login flow with PKCE and a 127.0.0.1 loopback
+redirect. It opens the browser to the issuer's authorization endpoint,
+accepts the redirect on loopback or, with `readPastedRedirect`, as a pasted
+URL, and exchanges the code for an `id_token`. The state, response issuer
+and PKCE verifier bind the response to this login.
+*/
 export async function loopbackLogin(
 	options: LoopbackLoginOptions
 ): Promise<string> {
@@ -419,10 +419,10 @@ export interface AuthorizationCodeOptions {
 	*/
 	readonly expectedIssuer?: string;
 	/**
-	 * True for an issuer whose metadata does not advertise RFC 9207 support. A
-	 * callback without `iss` is then accepted, and a callback with `iss` must
-	 * still match `expectedIssuer`.
-	 */
+	True for an issuer whose metadata does not advertise RFC 9207 support. A
+	callback without `iss` is then accepted, and a callback with `iss` must
+	still match `expectedIssuer`.
+	*/
 	readonly isIssuerParameterOptional?: boolean;
 	readonly authorizationEndpoint: string;
 	readonly clientId: string;
@@ -433,9 +433,9 @@ export interface AuthorizationCodeOptions {
 	readonly signal?: AbortSignal;
 	readonly loopback?: LoopbackOptions;
 	/**
-	 * Use this reader when the browser cannot reach the loopback server. The first
-	 * redirect wins. A pasted URL receives the same callback-parameter checks.
-	 */
+	Use this reader when the browser cannot reach the loopback server. The first
+	redirect wins. A pasted URL receives the same callback-parameter checks.
+	*/
 	readonly readPastedRedirect?: PastedRedirectReader;
 }
 
@@ -452,11 +452,11 @@ export interface ObtainedAuthorizationCode {
 }
 
 /**
- * Runs the browser half of a PKCE authorization code flow. It binds a loopback
- * redirect server, opens the authorization endpoint, and waits for a matching
- * redirect until the configured timeout. The caller performs the
- * provider-specific token exchange.
- */
+Runs the browser half of a PKCE authorization code flow. It binds a loopback
+redirect server, opens the authorization endpoint, and waits for a matching
+redirect until the configured timeout. The caller performs the
+provider-specific token exchange.
+*/
 export async function obtainAuthorizationCode(
 	options: AuthorizationCodeOptions
 ): Promise<ObtainedAuthorizationCode> {
@@ -863,9 +863,9 @@ export function isRedirectStatus(status: number): boolean {
 }
 
 /**
- * Builds a URL-encoded POST for a token endpoint. Following a 307 or 308 would
- * send the form, with its code or refresh token, to the redirect target.
- */
+Builds a URL-encoded POST for a token endpoint. Following a 307 or 308 would
+send the form, with its code or refresh token, to the redirect target.
+*/
 export function postForm(
 	form: Readonly<Record<string, string>>,
 	signal?: AbortSignal

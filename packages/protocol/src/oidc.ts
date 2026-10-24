@@ -79,8 +79,8 @@ export const subjectTokenProblems = {
 } as const;
 
 /**
- * The Cupboard problem subtype of a subject-token refusal.
- */
+The Cupboard problem subtype of a subject-token refusal.
+*/
 export const subjectTokenProblemSchema = z.enum(subjectTokenProblems);
 export type SubjectTokenProblem = z.infer<typeof subjectTokenProblemSchema>;
 
@@ -116,8 +116,8 @@ export const tokenRequestSchema = z.looseObject({
 export type TokenRequest = z.output<typeof tokenRequestSchema>;
 
 /**
- * The fields to validate after dispatch selects token exchange.
- */
+The fields to validate after dispatch selects token exchange.
+*/
 export const tokenExchangeGrantRequestSchema = z.object({
 	...tokenGrantFields,
 	...subjectBindingFields,
@@ -131,8 +131,8 @@ export type TokenExchangeGrantRequest = z.output<
 >;
 
 /**
- * The fields to validate after dispatch selects refresh-token rotation.
- */
+The fields to validate after dispatch selects refresh-token rotation.
+*/
 export const refreshTokenGrantRequestSchema = z.object({
 	...tokenGrantFields,
 	grant_type: z.literal(refreshTokenGrantType),
@@ -257,8 +257,8 @@ export type OidcTrustSummary = z.output<typeof oidcTrustSummarySchema>;
 export type OidcTrustSummaryInput = z.input<typeof oidcTrustSummarySchema>;
 
 /**
- * Adds grants without changing a rule's selectors or existing authority.
- */
+Adds grants without changing a rule's selectors or existing authority.
+*/
 export const oidcTrustExtendBodySchema = z.strictObject({
 	expected: oidcTrustSummarySchema,
 	permittedGrants: z.array(permittedGrantSchema).min(1)
@@ -269,10 +269,10 @@ export type OidcTrustExtendBodyInput = z.input<
 >;
 
 /**
- * A stored control rule that fails validation when the server reads it. The
- * `disabled` flag identifies rules that have already been disabled and remain
- * only as a record.
- */
+A stored control rule that fails validation when the server reads it. The
+`disabled` flag identifies rules that have already been disabled and remain
+only as a record.
+*/
 export const unreadableOidcTrustRuleSchema = z.strictObject({
 	id: trustRuleIdSchema,
 	disabled: z.boolean()

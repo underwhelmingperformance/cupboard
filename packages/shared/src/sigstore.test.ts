@@ -55,9 +55,9 @@ function logInstance(baseUrl: string): unknown {
 }
 
 /**
- * Adds a transparency log, a certificate-transparency log or both to a trusted
- * root, after any logs that it already lists.
- */
+Adds a transparency log, a certificate-transparency log or both to a trusted
+root, after any logs that it already lists.
+*/
 function withLogs(
 	trustedRoot: string,
 	logs: { readonly tlog: boolean; readonly ctlog: boolean }
@@ -170,11 +170,11 @@ describe('verificationPolicy', () => {
 		'https://github.com/o/r/.github/workflows/release.yml@refs/heads/main';
 
 	it('anchors and escapes an exact identity so a superset SAN is rejected', () => {
-		const { subjectAlternativeName } = verificationPolicy({
+		const { subjectAlternativeName = '' } = verificationPolicy({
 			identity: exactIdentity,
 			issuer: 'https://token.actions.githubusercontent.com'
 		});
-		const san = new RegExp(subjectAlternativeName ?? '');
+		const san = new RegExp(subjectAlternativeName);
 
 		expect({
 			exact: san.test(exactIdentity),
@@ -293,9 +293,9 @@ function withMediaType(trustedRoot: string, mediaType: string): string {
 }
 
 /**
- * Replaces the first certificate authority of a trusted root with one whose
- * certificate is not DER.
- */
+Replaces the first certificate authority of a trusted root with one whose
+certificate is not DER.
+*/
 function withUnloadableCertificate(trustedRoot: string): string {
 	const root = trustedRootDocumentSchema.parse(JSON.parse(trustedRoot));
 
@@ -335,10 +335,10 @@ describe('verifyBundle with a trusted-root file', () => {
 	);
 	const options = { ctlogThreshold: 0, tlogThreshold: 0 };
 	/**
-	 * The verification result for the fixture's signer, without the signer's
-	 * key object and certificate OIDs. The certificate has no signed
-	 * certificate timestamp unless the case gives one.
-	 */
+	The verification result for the fixture's signer, without the signer's
+	key object and certificate OIDs. The certificate has no signed
+	certificate timestamp unless the case gives one.
+	*/
 	function verifiedAgainst(
 		position: number,
 		count: number,

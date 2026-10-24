@@ -9,29 +9,29 @@ import {
 
 export interface SubstitutableClosureOptions {
 	/**
-	 * Limits the number of distinct closure paths when explicitly supplied.
-	 * The default walk has no total path limit.
-	 */
+	Limits the number of distinct closure paths when explicitly supplied.
+	The default walk has no total path limit.
+	*/
 	readonly maxPaths?: number;
 	/**
-	 * Abandons the walk between query pages using the signal's reason. In-flight
-	 * store and substituter queries finish before the current page stops.
-	 */
+	Abandons the walk between query pages using the signal's reason. In-flight
+	store and substituter queries finish before the current page stops.
+	*/
 	readonly signal?: AbortSignal;
 	/**
-	 * Applies the consumer's pre-fetch policy to each offer. The caller supplies
-	 * this policy because store availability alone does not establish that a
-	 * consumer will accept the NAR.
-	 */
+	Applies the consumer's pre-fetch policy to each offer. The caller supplies
+	this policy because store availability alone does not establish that a
+	consumer will accept the NAR.
+	*/
 	readonly accepts?: AcceptsOffer;
 }
 
 /**
- * The result of checking a substitutable closure. `served` means every path in
- * the locally recorded closure has an acceptable offer with the same NAR hash.
- * The path-specific failures identify the first path that prevents that
- * result; `over-cap` reports the traversal limit.
- */
+The result of checking a substitutable closure. `served` means every path in
+the locally recorded closure has an acceptable offer with the same NAR hash.
+The path-specific failures identify the first path that prevents that
+result; `over-cap` reports the traversal limit.
+*/
 export type SubstitutableClosureVerdict =
 	| {
 			readonly kind: 'served';
@@ -41,14 +41,14 @@ export type SubstitutableClosureVerdict =
 	  }
 	| { readonly kind: 'not-served'; readonly storePath: StorePathString }
 	/**
-	 * A reachable path that is absent from the local store. The walk cannot
-	 * continue through its references or compare an offer with local metadata.
-	 */
+	A reachable path that is absent from the local store. The walk cannot
+	continue through its references or compare an offer with local metadata.
+	*/
 	| { readonly kind: 'not-held-locally'; readonly storePath: StorePathString }
 	/**
-	 * A substituter offers the path under a different NAR hash. The offered
-	 * contents therefore differ from the local store's metadata for the path.
-	 */
+	A substituter offers the path under a different NAR hash. The offered
+	contents therefore differ from the local store's metadata for the path.
+	*/
 	| {
 			readonly kind: 'divergent';
 			readonly storePath: StorePathString;
@@ -56,9 +56,9 @@ export type SubstitutableClosureVerdict =
 			readonly offered: string;
 	  }
 	/**
-	 * The consumer's pre-fetch policy rejects the offer. The caller defines the
-	 * policy checked here.
-	 */
+	The consumer's pre-fetch policy rejects the offer. The caller defines the
+	policy checked here.
+	*/
 	| { readonly kind: 'refused'; readonly storePath: StorePathString }
 	| { readonly kind: 'over-cap'; readonly maxPaths: number };
 
@@ -78,22 +78,22 @@ export interface SubstitutableClosureQueries {
 }
 
 /**
- * Checks every path in the closure recorded by the local store. References
- * advertised by substituters are not authoritative and cannot reduce the
- * required closure. Each frontier is queried in pages of at most 32 paths
- * from the local store and the selected substituters.
- *
- * Paths are checked in frontier order. Local absence takes precedence over a
- * missing offer, a NAR hash mismatch, and consumer-policy rejection. The first
- * failure stops the walk. A `served` result counts every accepted offer once
- * and sums its download and NAR sizes.
- *
- * The walk reads local metadata and asks the supplied offer query for each
- * path. That query may also verify access to NAR bytes. The walk observes
- * aborts between pages; in-flight queries finish before the current page
- * stops. The caller selects both the substituters and the offer-acceptance
- * policy.
- */
+Checks every path in the closure recorded by the local store. References
+advertised by substituters are not authoritative and cannot reduce the
+required closure. Each frontier is queried in pages of at most 32 paths
+from the local store and the selected substituters.
+
+Paths are checked in frontier order. Local absence takes precedence over a
+missing offer, a NAR hash mismatch, and consumer-policy rejection. The first
+failure stops the walk. A `served` result counts every accepted offer once
+and sums its download and NAR sizes.
+
+The walk reads local metadata and asks the supplied offer query for each
+path. That query may also verify access to NAR bytes. The walk observes
+aborts between pages; in-flight queries finish before the current page
+stops. The caller selects both the substituters and the offer-acceptance
+policy.
+*/
 export async function resolveSubstitutableClosure(
 	root: StorePathString,
 	queries: SubstitutableClosureQueries,

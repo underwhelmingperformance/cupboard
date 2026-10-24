@@ -921,9 +921,9 @@ jobs:
 
 		await discoverPublishingJobs(repository, 'main', tenant, {
 			...files,
-			read: (repo, path, reference) => {
+			read: (repository_, path, reference) => {
 				reads.push(`${path}@${reference}`);
-				return files.read(repo, path, reference);
+				return files.read(repository_, path, reference);
 			}
 		});
 

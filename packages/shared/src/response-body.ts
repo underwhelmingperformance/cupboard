@@ -319,9 +319,9 @@ function responseWithBoundedBody(
 }
 
 /**
- * Reads a response within a byte limit and returns a response backed by those
- * bytes. Use this for clients that catch errors from `text()` or `json()`.
- */
+Reads a response within a byte limit and returns a response backed by those
+bytes. Use this for clients that catch errors from `text()` or `json()`.
+*/
 export async function responseWithBufferedBoundedBody(
 	response: Response,
 	options: BoundedResponseBodyOptions
@@ -369,9 +369,9 @@ function combinedSignal(
 }
 
 /**
- * Wraps a fetch implementation so every response body is bounded while it is
- * consumed. Request bodies and successful response streams remain streaming.
- */
+Wraps a fetch implementation so every response body is bounded while it is
+consumed. Request bodies and successful response streams remain streaming.
+*/
 export function fetchWithBoundedResponseBodies(
 	fetcher: typeof fetch,
 	options: BoundedFetchResponseOptions
@@ -395,9 +395,9 @@ export function fetchWithBoundedResponseBodies(
 }
 
 /**
- * Wraps a fetch implementation and buffers each response within its byte
- * limit before a downstream client can parse it.
- */
+Wraps a fetch implementation and buffers each response within its byte
+limit before a downstream client can parse it.
+*/
 export function fetchWithBufferedBoundedResponseBodies(
 	fetcher: typeof fetch,
 	options: BoundedFetchResponseOptions

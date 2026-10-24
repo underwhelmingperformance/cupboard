@@ -33,22 +33,18 @@ interface PassOutcome {
 }
 
 /**
- * A pass in the shape the measuring helpers will take: it completes a unit of
- * work, asks whether the budget is spent, and stops before starting another.
- * It reports the units it did not reach so a caller can resume them.
- *
- * The reads go through `context.db`, which is the path the services use, so
- * the budget sees the rows without the pass reporting them.
- */
-function runPass(
-	database: SchemaDatabase,
-	units: number,
-	budgetRows: number
-): PassOutcome {
+A pass in the shape the measuring helpers will take: it completes a unit of
+work, asks whether the budget is spent, and stops before starting another.
+It reports the units it did not reach so a caller can resume them.
+
+The reads go through `context.db`, which is the path the services use, so
+the budget sees the rows without the pass reporting them.
+*/
+function runPass(database: SchemaDatabase, budgetRows: number): PassOutcome {
 	return withRowBudget((): PassOutcome => {
 		let completed = 0;
 
-		for (let unit = 0; unit < units; unit += 1) {
+		for (let unit = 0; unit < 10; unit += 1) {
 			database.select().from(schema.garbageCollectionMarks).all();
 			completed += 1;
 
@@ -57,7 +53,7 @@ function runPass(
 			}
 		}
 
-		return { completed, deferred: units - completed };
+		return { completed, deferred: 10 - completed };
 	}, budgetRows);
 }
 
@@ -83,7 +79,7 @@ describe('Durable Object row budget', () => {
 			seedMarks(instance.context);
 
 			// Room for three of the ten units the pass offers.
-			return runPass(instance.context.db, 10, rowsPerUnit * 3);
+			return runPass(instance.context.db, rowsPerUnit * 3);
 		});
 
 		expect(outcome).toStrictEqual({ completed: 3, deferred: 7 });
@@ -95,7 +91,7 @@ describe('Durable Object row budget', () => {
 		const outcome = await runInDurableObject(currentServer(), (instance) => {
 			seedMarks(instance.context);
 
-			return runPass(instance.context.db, 10, ampleRows);
+			return runPass(instance.context.db, ampleRows);
 		});
 
 		expect(outcome).toStrictEqual({ completed: 10, deferred: 0 });
@@ -114,7 +110,7 @@ describe('Durable Object row budget', () => {
 					// A zero deadline aborts the scope before the body runs. The scope
 					// reports its own expiry by throwing once the body returns.
 					await withDeadlineBudget(0, () => {
-						observed = runPass(instance.context.db, 10, ampleRows);
+						observed = runPass(instance.context.db, ampleRows);
 
 						return Promise.resolve();
 					});

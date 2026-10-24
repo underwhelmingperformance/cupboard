@@ -14,12 +14,12 @@ import { type ControlOrpcContext, controlRouter } from './control-router.ts';
 import { tenantRouter } from './tenant-router.ts';
 
 /**
- * The options for every contract handler. Smart coercion converts query-string
- * values before the contract schemas validate them. Every response to a
- * matched procedure is `no-store`, because the admin APIs return mutable state.
- * The matched procedure's path template becomes the route in the request's
- * cost line.
- */
+The options for every contract handler. Smart coercion converts query-string
+values before the contract schemas validate them. Every response to a
+matched procedure is `no-store`, because the admin APIs return mutable state.
+The matched procedure's path template becomes the route in the request's
+cost line.
+*/
 export function contractHandlerOptions<
 	T extends Context
 >(): OpenAPIHandlerOptions<T> {
@@ -54,9 +54,9 @@ export function contractHandlerOptions<
 }
 
 /**
- * This handler is shared by every Durable Object in the isolate, so
- * request-specific state must arrive through the context.
- */
+This handler is shared by every Durable Object in the isolate, so
+request-specific state must arrive through the context.
+*/
 export const tenantOrpcHandler = new OpenAPIHandler<TenantOrpcContext>(
 	tenantRouter,
 	contractHandlerOptions()

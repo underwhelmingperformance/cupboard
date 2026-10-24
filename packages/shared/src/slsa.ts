@@ -6,8 +6,8 @@ export const githubWorkflowBuildType =
 	'https://actions.github.io/buildtypes/workflow/v1';
 
 /**
- * Whether a predicate type is the SLSA provenance version this package parses.
- */
+Whether a predicate type is the SLSA provenance version this package parses.
+*/
 export function isSlsaProvenanceType(predicateType: string): boolean {
 	return predicateType === slsaProvenanceType;
 }
@@ -59,10 +59,10 @@ const slsaProvenanceSchema = z.object({
 });
 
 /**
- * Returns the Git commit for `sourceRepository` from the resolved dependencies
- * in GitHub's workflow provenance shape. Exactly one dependency must refer to
- * that repository and include a commit.
- */
+Returns the Git commit for `sourceRepository` from the resolved dependencies
+in GitHub's workflow provenance shape. Exactly one dependency must refer to
+that repository and include a commit.
+*/
 function resolvedSourceCommit(
 	dependencies: readonly SlsaDependency[],
 	sourceRepository: string
@@ -80,10 +80,10 @@ function resolvedSourceCommit(
 }
 
 /**
- * Returns the source commit from GitHub's workflow provenance fields. Returns
- * `undefined` when the predicate does not use that shape or does not contain
- * exactly one matching dependency with a Git commit.
- */
+Returns the source commit from GitHub's workflow provenance fields. Returns
+`undefined` when the predicate does not use that shape or does not contain
+exactly one matching dependency with a Git commit.
+*/
 export function slsaSourceCommit(
 	predicate: unknown,
 	sourceRepository: string
@@ -101,9 +101,9 @@ export function slsaSourceCommit(
 }
 
 /**
- * Build identity extracted from GitHub's workflow provenance fields for
- * display alongside a verified attestation. Every field is optional.
- */
+Build identity extracted from GitHub's workflow provenance fields for
+display alongside a verified attestation. Every field is optional.
+*/
 export interface SlsaProvenanceSummary {
 	readonly builder?: string;
 	readonly sourceRepository?: string;
@@ -115,9 +115,9 @@ export interface SlsaProvenanceSummary {
 }
 
 /**
- * Extracts the source, workflow, builder, and invocation from GitHub's workflow
- * provenance fields. Returns `undefined` when none is present.
- */
+Extracts the source, workflow, builder, and invocation from GitHub's workflow
+provenance fields. Returns `undefined` when none is present.
+*/
 export function slsaProvenanceSummary(
 	predicate: unknown
 ): SlsaProvenanceSummary | undefined {

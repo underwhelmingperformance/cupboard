@@ -16,17 +16,17 @@ import { isAudienceBound } from './audience-binding.ts';
 import { type InboundTokenLimits } from './inbound-verifier.ts';
 
 /**
- * The binding parameters of a token request, as the form schemas parse them.
- */
+The binding parameters of a token request, as the form schemas parse them.
+*/
 export interface SubjectBindingParameters {
 	readonly cupboard_binding_seed?: string | undefined;
 	readonly cupboard_binding_targets?: readonly string[] | undefined;
 }
 
 /**
- * A nonce to record as consumed, and the instant at which the server may
- * delete the record.
- */
+A nonce to record as consumed, and the instant at which the server may
+delete the record.
+*/
 export interface SubjectNonce {
 	readonly nonce: string;
 	readonly expiresAt: IsoTimestamp;
@@ -37,10 +37,10 @@ export type SubjectBinding =
 	| { readonly kind: 'audience-bound' };
 
 /**
- * The verification limit for a request. A request with binding parameters is
- * either nonce-bound or refused, so its token must also be at most
- * {@link subjectNonceMaxAgeSeconds} old.
- */
+The verification limit for a request. A request with binding parameters is
+either nonce-bound or refused, so its token must also be at most
+{@link subjectNonceMaxAgeSeconds} old.
+*/
 export function subjectTokenLimits(
 	parameters: SubjectBindingParameters
 ): InboundTokenLimits {
@@ -50,13 +50,13 @@ export function subjectTokenLimits(
 }
 
 /**
- * Classifies a verified subject token for the server whose identity is
- * `target`, and refuses a token that is not bound to `target` with
- * `SubjectTokenUnboundError`. Without binding parameters, the token's audience
- * must be `target`, whether or not the token has a `nonce` claim. With them,
- * every target must be a canonical URL, the targets must include `target`, and
- * the token's `nonce` claim must equal their hash with the seed.
- */
+Classifies a verified subject token for the server whose identity is
+`target`, and refuses a token that is not bound to `target` with
+`SubjectTokenUnboundError`. Without binding parameters, the token's audience
+must be `target`, whether or not the token has a `nonce` claim. With them,
+every target must be a canonical URL, the targets must include `target`, and
+the token's `nonce` claim must equal their hash with the seed.
+*/
 export async function subjectBinding(
 	claims: VerifiedOidcClaims,
 	target: OidcIssuer,

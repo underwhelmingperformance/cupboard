@@ -30,13 +30,11 @@ export function reproducedSubjects(
 			return [];
 		}
 
-		return [
-			{
-				storePath: subject.storePath,
-				sha256: subject.narHash,
-				derivation: subject.derivation
-			}
-		];
+		return {
+			storePath: subject.storePath,
+			sha256: subject.narHash,
+			derivation: subject.derivation
+		};
 	});
 }
 

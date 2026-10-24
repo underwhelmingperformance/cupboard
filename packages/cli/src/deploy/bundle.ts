@@ -1,19 +1,19 @@
 import type { BuildOptions } from 'esbuild';
 
 /**
- * A bundled Worker ready to upload: the single ES module's source and the
- * filename the script metadata references as its `main_module`.
- */
+A bundled Worker ready to upload: the single ES module's source and the
+filename the script metadata references as its `main_module`.
+*/
 export interface WorkerBundle {
 	readonly mainModule: string;
 	readonly code: string;
 }
 
 /**
- * Produces a {@link WorkerBundle} for a Worker entrypoint. Tree mode bundles the
- * live source with esbuild; embedded mode returns the bytes baked into the
- * binary at build time.
- */
+Produces a {@link WorkerBundle} for a Worker entrypoint. Tree mode bundles the
+live source with esbuild; embedded mode returns the bytes baked into the
+binary at build time.
+*/
 export interface Bundler {
 	bundle(entryPath: string, mainModule: string): Promise<WorkerBundle>;
 }
@@ -44,10 +44,10 @@ export class WorkerBundleError extends Error {
 }
 
 /**
- * The esbuild-backed bundler used in tree mode. esbuild is imported lazily so it
- * stays out of the released single-executable, which only ever deploys embedded
- * bundles.
- */
+The esbuild-backed bundler used in tree mode. esbuild is imported lazily so it
+stays out of the released single-executable, which only ever deploys embedded
+bundles.
+*/
 export function createEsbuildBundler(): Bundler {
 	return {
 		async bundle(entryPath, mainModule) {

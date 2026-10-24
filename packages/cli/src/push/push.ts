@@ -151,15 +151,15 @@ export interface PushDependencies {
 	readonly resultArtifact?: string;
 	readonly nix?: PushStore;
 	/**
-	 * Opens the system store when `nix` is absent and the publication has local
-	 * entries. Defaults to `Nix.open`.
-	 */
+	Opens the system store when `nix` is absent and the publication has local
+	entries. Defaults to `Nix.open`.
+	*/
 	readonly openStore?: () => PushStore;
 	readonly client: PushClient;
 	/**
-	 * Include the complete realised closure of each publication entry. By
-	 * default, publication includes only the entries themselves.
-	 */
+	Include the complete realised closure of each publication entry. By
+	default, publication includes only the entries themselves.
+	*/
 	readonly closure?: boolean;
 	readonly referenceSource?: ReferenceSource;
 	readonly fetchReferenceMetadata?: typeof fetchReferenceMetadataFromSource;
@@ -183,9 +183,9 @@ export interface PushDependencies {
 	readonly attestations?: readonly AttestationBundleSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	/**
-	 * An ssh-ng store streams NAR content through the store client instead of
-	 * reading the runner's filesystem.
-	 */
+	An ssh-ng store streams NAR content through the store client instead of
+	reading the runner's filesystem.
+	*/
 	readonly createNarArchive?: (storePath: string) => NarSource;
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
@@ -194,28 +194,28 @@ export interface PushDependencies {
 	*/
 	readonly uploadClock?: UploadClock;
 	/**
-	 * Reads the process's peak RSS for the summary. Defaults to
-	 * `processPeakRss`.
-	 */
+	Reads the process's peak RSS for the summary. Defaults to
+	`processPeakRss`.
+	*/
 	readonly peakRss?: PeakRssSampler;
 	readonly dryRun?: boolean;
 	/**
-	 * The command that `PushIncompleteError` tells the user to run again.
-	 */
+	The command that `PushIncompleteError` tells the user to run again.
+	*/
 	readonly command: PushCommand;
 	readonly credential: PushCredential;
 	readonly buildStore?: string;
 	readonly referenceReceipt?: boolean;
 	/**
-	 * Compatibility inputs for older callers. A push records store metadata;
-	 * these path lists cannot establish that this invocation built an output.
-	 */
+	Compatibility inputs for older callers. A push records store metadata;
+	these path lists cannot establish that this invocation built an output.
+	*/
 	readonly alreadyHeld?: readonly string[];
 	readonly claimable?: readonly string[];
 	/**
-	 * Copy sources observed by a supervised build, keyed by store path. Without an
-	 * activity log, copied subjects contain no source URL.
-	 */
+	Copy sources observed by a supervised build, keyed by store path. Without an
+	activity log, copied subjects contain no source URL.
+	*/
 	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 }
 
@@ -224,15 +224,15 @@ export interface PushDependencies {
 export const defaultUploadConcurrency = 6;
 
 /**
- * Contract procedures cover negotiation, attestations, and roots. Blob upload
- * and WebSocket commit remain raw protocol operations because they stream bytes
- * or use temporary upload credentials.
- */
+Contract procedures cover negotiation, attestations, and roots. Blob upload
+and WebSocket commit remain raw protocol operations because they stream bytes
+or use temporary upload credentials.
+*/
 /**
- * A negotiate or preview response and whether the server acknowledged
- * grace-aware reporting for it. A client without transport metadata leaves
- * `hasUploadGraceFacts` out and is treated as capable.
- */
+A negotiate or preview response and whether the server acknowledged
+grace-aware reporting for it. A client without transport metadata leaves
+`hasUploadGraceFacts` out and is treated as capable.
+*/
 export type Acknowledged<Response> = Response & {
 	readonly hasUploadGraceFacts?: boolean;
 };
@@ -668,9 +668,9 @@ interface ReceiptClaims {
 }
 
 /**
- * Describes published paths from reference narinfos or selected-store metadata.
- * Neither source establishes execution during the current invocation.
- */
+Describes published paths from reference narinfos or selected-store metadata.
+Neither source establishes execution during the current invocation.
+*/
 function reconciledReceipt(
 	claims: ReceiptClaims,
 	resolved: readonly ResolvedPushPath[],

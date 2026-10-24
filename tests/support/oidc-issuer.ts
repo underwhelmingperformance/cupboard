@@ -10,11 +10,11 @@ import type { AddressInfo } from 'node:net';
 const kid = 'stub-issuer-key-1';
 
 /**
- * A minimal OpenID Connect issuer for the e2e suite. It serves real discovery
- * metadata and a JWKS, and signs real RS256 tokens, so cupboard's token
- * exchange runs its genuine discovery and signature verification against it.
- * The worker reaches it over loopback.
- */
+A minimal OpenID Connect issuer for the e2e suite. It serves real discovery
+metadata and a JWKS, and signs real RS256 tokens, so cupboard's token
+exchange runs its genuine discovery and signature verification against it.
+The worker reaches it over loopback.
+*/
 export class StubOidcIssuer {
 	static async start(): Promise<StubOidcIssuer> {
 		const { publicKey, privateKey } = generateKeyPairSync('rsa', {

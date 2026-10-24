@@ -7,9 +7,9 @@ import {
 import { type ServerContext } from './context.ts';
 
 /**
- * Stores trust-rule grants in the selector spelling until the cache-identity
- * transition permits the scope spelling.
- */
+Stores trust-rule grants in the selector spelling until the cache-identity
+transition permits the scope spelling.
+*/
 export class StoredGrantSpelling {
 	constructor(private readonly context: ServerContext) {}
 

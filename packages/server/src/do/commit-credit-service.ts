@@ -120,12 +120,12 @@ function writeCommitSessionAttachment(
 }
 
 /**
- * For a positive balance, the idle interval starts when the balance changes
- * from zero to positive. Partial spending and further requests do not reset that
- * interval. For a zero balance, the latest client frame starts the interval.
- *
- * Declared demand with a zero balance is a server-side wait, not client idleness.
- */
+For a positive balance, the idle interval starts when the balance changes
+from zero to positive. Partial spending and further requests do not reset that
+interval. For a zero balance, the latest client frame starts the interval.
+
+Declared demand with a zero balance is a server-side wait, not client idleness.
+*/
 function isIdle(attachment: CommitSessionAttachment, now: number): boolean {
 	const { credit, lastActivityAt } = attachment;
 
@@ -146,13 +146,13 @@ function isIdle(attachment: CommitSessionAttachment, now: number): boolean {
 }
 
 /**
- * Admission moves each entry from a session's unused balance to the in-flight
- * total. Sending the entry's first frame removes it from the in-flight total and
- * immediately makes that unit available to another waiting session.
- *
- * This bounds parsed commit work across all sessions for a tenant. Subscribe
- * operations resume durable work and therefore consume no entry credit.
- */
+Admission moves each entry from a session's unused balance to the in-flight
+total. Sending the entry's first frame removes it from the in-flight total and
+immediately makes that unit available to another waiting session.
+
+This bounds parsed commit work across all sessions for a tenant. Subscribe
+operations resume durable work and therefore consume no entry credit.
+*/
 export class CommitCreditService {
 	// `undefined` means this instance has not rebuilt the unused balances from
 	// socket attachments since waking.
@@ -341,14 +341,14 @@ export class CommitCreditService {
 	}
 
 	/**
-	 * The server grants half of the currently available budget. The grant is
-	 * speculative because the client has not declared demand yet. Reserving the
-	 * whole budget could block every later session until idle reclamation, while
-	 * half lets an uncontended client start immediately and leaves capacity for a
-	 * concurrent publication. The client can request the remainder.
-	 *
-	 * A legacy session has no credit state and receives no opening grant.
-	 */
+	The server grants half of the currently available budget. The grant is
+	speculative because the client has not declared demand yet. Reserving the
+	whole budget could block every later session until idle reclamation, while
+	half lets an uncontended client start immediately and leaves capacity for a
+	concurrent publication. The client can request the remainder.
+
+	A legacy session has no credit state and receives no opening grant.
+	*/
 	openSession(
 		socket: WebSocket,
 		session: {
@@ -449,9 +449,9 @@ export class CommitCreditService {
 	}
 
 	/**
-	 * Admission charges the whole message before execution, so the caller must also
-	 * release entries left unstarted by the batch runner.
-	 */
+	Admission charges the whole message before execution, so the caller must also
+	release entries left unstarted by the batch runner.
+	*/
 	release(sessionId: SessionId, now: number, entries = 1): void {
 		this.inFlightTotal -= entries;
 		const remaining =
@@ -467,12 +467,12 @@ export class CommitCreditService {
 	}
 
 	/**
-	 * An intermediary can remove the opening grant from the 101 response. The
-	 * first request therefore replaces any unused opening balance with credit sent
-	 * over the established WebSocket. Message ordering ensures that any earlier
-	 * commit is debited before this replacement. Later requests retain the
-	 * session's existing balance.
-	 */
+	An intermediary can remove the opening grant from the 101 response. The
+	first request therefore replaces any unused opening balance with credit sent
+	over the established WebSocket. Message ordering ensures that any earlier
+	commit is debited before this replacement. Later requests retain the
+	session's existing balance.
+	*/
 	declareDemand(
 		socket: WebSocket,
 		attachment: CommitSessionAttachment,
@@ -581,26 +581,26 @@ export class CommitCreditService {
 	}
 
 	/**
-	 * Legacy clients treat any close as the end of publication. Their sessions
-	 * hold no credit, and {@link maxUncreditedCommitSessions} bounds them, so this
-	 * pass leaves them open. Remove this exception with legacy admission.
-	 *
-	 * An outstanding commit or upload verdict also protects a session. Commit
-	 * execution still occupies credit, while verification can legitimately exceed
-	 * the idle interval after the `deferred` frame returned that entry's credit.
-	 *
-	 * Close a session awaiting a verdict only when another session is waiting for
-	 * its unused balance. Opening grants are speculative, so a small publication
-	 * can finish sending and retain a surplus while it waits for verdicts. Without
-	 * competing demand, reclaiming that surplus would force periodic reconnects
-	 * without increasing throughput. With competing demand, the client can recover
-	 * its durable pending entries by subscribing again after reconnecting.
-	 *
-	 * Every pass grants all currently available credit. This lets an alarm resume
-	 * a rotation rebuilt after hibernation even when no session is closed.
-	 *
-	 * The pass reads verdict state lazily and at most once.
-	 */
+	Legacy clients treat any close as the end of publication. Their sessions
+	hold no credit, and {@link maxUncreditedCommitSessions} bounds them, so this
+	pass leaves them open. Remove this exception with legacy admission.
+
+	An outstanding commit or upload verdict also protects a session. Commit
+	execution still occupies credit, while verification can legitimately exceed
+	the idle interval after the `deferred` frame returned that entry's credit.
+
+	Close a session awaiting a verdict only when another session is waiting for
+	its unused balance. Opening grants are speculative, so a small publication
+	can finish sending and retain a surplus while it waits for verdicts. Without
+	competing demand, reclaiming that surplus would force periodic reconnects
+	without increasing throughput. With competing demand, the client can recover
+	its durable pending entries by subscribing again after reconnecting.
+
+	Every pass grants all currently available credit. This lets an alarm resume
+	a rotation rebuilt after hibernation even when no session is closed.
+
+	The pass reads verdict state lazily and at most once.
+	*/
 	closeIdleSessions(
 		now: number,
 		awaitingVerdict: () => ReadonlySet<SessionId>

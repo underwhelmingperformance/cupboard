@@ -1,8 +1,8 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig, type ViteUserConfig } from 'vitest/config';
 
 import RequiredInstallerTestsReporter from './required-tests-reporter.ts';
 
-export default defineConfig({
+export default defineConfig((): ViteUserConfig => ({
 	test: {
 		include: ['tests/installer/remote-builder.test.ts'],
 		fileParallelism: false,
@@ -21,4 +21,4 @@ export default defineConfig({
 			])
 		]
 	}
-});
+}));

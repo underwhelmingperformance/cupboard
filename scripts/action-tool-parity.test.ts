@@ -55,8 +55,8 @@ function actionDocument(action: string) {
 }
 
 /**
- * Each output of a composite action, mapped to the expression it publishes.
- */
+Each output of a composite action, mapped to the expression it publishes.
+*/
 function actionOutputs(action: string): Record<string, string> {
 	return Object.fromEntries(
 		Object.entries(actionDocument(action).outputs).map(([name, output]) => [

@@ -76,9 +76,9 @@ export async function ensureControlKey(
 }
 
 /**
- * Loads the newest live key for token issuance and unwraps its private JWK.
- * Callers must initialise the bootstrap key before calling this function.
- */
+Loads the newest live key for token issuance and unwraps its private JWK.
+Callers must initialise the bootstrap key before calling this function.
+*/
 export async function activeControlKey(
 	database: Database,
 	wrappingSecret: string
@@ -109,9 +109,9 @@ export async function activeControlKey(
 }
 
 /**
- * Loads the public half of every live key for token verification. This path
- * does not unwrap or return private key material.
- */
+Loads the public half of every live key for token verification. This path
+does not unwrap or return private key material.
+*/
 export async function controlVerificationKeys(
 	database: Database
 ): Promise<AuthPublicKey[]> {

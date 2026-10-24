@@ -59,27 +59,27 @@ class InjectedPageFault extends Error {
 }
 
 /**
- * An object's alarm, replaced by a recorder. The platform never delivers it,
- * so the test delivers each alarm itself.
- */
+An object's alarm, replaced by a recorder. The platform never delivers it,
+so the test delivers each alarm itself.
+*/
 interface RecordedAlarm {
 	/**
-	 * Every time that the object armed, in order.
-	 */
+	Every time that the object armed, in order.
+	*/
 	readonly armed: readonly number[];
 	/**
-	 * Clears the armed time and runs the alarm handler, as the platform does.
-	 */
+	Clears the armed time and runs the alarm handler, as the platform does.
+	*/
 	deliver(): Promise<void>;
 	/**
-	 * Delivers the alarm to a new instance over the same storage, as the
-	 * platform does after it evicts or resets the object.
-	 */
+	Delivers the alarm to a new instance over the same storage, as the
+	platform does after it evicts or resets the object.
+	*/
 	deliverAfterRestart(): Promise<void>;
 	/**
-	 * Makes the object's attempts to arm the alarm for `time` throw, as they
-	 * would if the object were reset at that point. `undefined` stops it.
-	 */
+	Makes the object's attempts to arm the alarm for `time` throw, as they
+	would if the object were reset at that point. `undefined` stops it.
+	*/
 	refuseArmingAt(time: number | undefined): void;
 }
 
@@ -163,7 +163,7 @@ function wake(
 	);
 }
 
-function readPending(
+function hasPending(
 	server: DurableObjectStub<CupboardServer> = currentServer()
 ): Promise<boolean> {
 	return runInDurableObject(
@@ -175,13 +175,10 @@ function readPending(
 
 // Delivers alarms until the object has no local-step work pending, at most
 // `limit` times, and returns how many it delivered.
-async function deliverWhilePending(
-	alarm: RecordedAlarm,
-	limit: number
-): Promise<number> {
+async function deliverWhilePending(alarm: RecordedAlarm): Promise<number> {
 	let delivered = 0;
 
-	while (delivered < limit && (await readPending())) {
+	while (delivered < 20 && (await hasPending())) {
 		await alarm.deliver();
 		delivered += 1;
 	}
@@ -345,7 +342,7 @@ describe('local-step work on the alarm', () => {
 				}
 			});
 
-			for (let page = 0; page < 100 && (await readPending(server)); page++) {
+			for (let page = 0; page < 100 && (await hasPending(server)); page++) {
 				await alarm.deliverAfterRestart();
 			}
 
@@ -362,7 +359,7 @@ describe('local-step work on the alarm', () => {
 			expect({
 				finished,
 				row,
-				pending: await readPending(server)
+				pending: await hasPending(server)
 			}).toStrictEqual({
 				finished: {
 					current: currentLocalStep,
@@ -460,13 +457,13 @@ describe('local-step work on the alarm', () => {
 
 		const value = await withRecordedAlarm(async (alarm) => ({
 			wake: await wake(),
-			alarms: await deliverWhilePending(alarm, 20),
+			alarms: await deliverWhilePending(alarm),
 			armed: alarm.armed
 		}));
 
 		expect({
 			...value,
-			pending: await readPending(),
+			pending: await hasPending(),
 			row: await localStepRow()
 		}).toStrictEqual({
 			wake: { kind: 'incomplete', projected: 0, progressed: true },
@@ -529,7 +526,7 @@ describe('local-step work on the alarm', () => {
 			const first = await wake();
 			let alarms = 0;
 
-			while (alarms <= retries && (await readPending())) {
+			while (alarms <= retries && (await hasPending())) {
 				vi.setSystemTime(start + (alarms + 1) * noProgressRetryMs);
 				await alarm.deliver();
 				alarms += 1;
@@ -590,12 +587,12 @@ describe('local-step work on the alarm', () => {
 
 		const value = await withRecordedAlarm(async (alarm) => ({
 			wakes: await Promise.all([wake(), wake()]),
-			alarms: await deliverWhilePending(alarm, 20)
+			alarms: await deliverWhilePending(alarm)
 		}));
 
 		expect({
 			...value,
-			pending: await readPending(),
+			pending: await hasPending(),
 			row: await localStepRow()
 		}).toStrictEqual({
 			wakes: [
@@ -631,13 +628,13 @@ describe('local-step work on the alarm', () => {
 
 			return {
 				duplicate: duplicate.kind,
-				alarms: await deliverWhilePending(alarm, 20)
+				alarms: await deliverWhilePending(alarm)
 			};
 		});
 
 		expect({
 			...value,
-			pending: await readPending(),
+			pending: await hasPending(),
 			row: await localStepRow()
 		}).toStrictEqual({
 			duplicate: 'recorded',
@@ -678,7 +675,7 @@ describe('local-step work on the alarm', () => {
 
 				// Each alarm arrives thirty seconds after the previous one, as it would
 				// if every page stalled.
-				while (alarms < 200 && (await readPending())) {
+				while (alarms < 200 && (await hasPending())) {
 					alarms += 1;
 					vi.setSystemTime(start + alarms * noProgressRetryMs);
 					await alarm.deliver();
@@ -691,7 +688,7 @@ describe('local-step work on the alarm', () => {
 			expect({
 				first: value.first,
 				outlastsStallWindow: finishedAt - start > localStepStallWindowMs,
-				pending: await readPending(),
+				pending: await hasPending(),
 				row: await localStepRow()
 			}).toStrictEqual({
 				first: { kind: 'incomplete', projected: 0, progressed: true },
@@ -760,7 +757,7 @@ describe('local-step work on the alarm', () => {
 			await alarm.deliverAfterRestart();
 			const afterMigrationAlarm = await localStepRow(server);
 
-			while (alarms < 200 && (await readPending(server))) {
+			while (alarms < 200 && (await hasPending(server))) {
 				alarms += 1;
 				await alarm.deliverAfterRestart();
 			}
@@ -772,7 +769,7 @@ describe('local-step work on the alarm', () => {
 
 		expect({
 			...value,
-			pending: await readPending(server),
+			pending: await hasPending(server),
 			localStep: row.localStep
 		}).toStrictEqual({
 			first: { kind: 'incomplete', projected: 0, progressed: true },
@@ -804,7 +801,7 @@ describe('local-step work on the alarm', () => {
 			return {
 				rejection,
 				armedByWake,
-				alarms: await deliverWhilePending(alarm, 20)
+				alarms: await deliverWhilePending(alarm)
 			};
 		});
 
@@ -812,7 +809,7 @@ describe('local-step work on the alarm', () => {
 
 		expect({
 			...value,
-			pending: await readPending(),
+			pending: await hasPending(),
 			localStep: row.localStep
 		}).toStrictEqual({
 			rejection: 'InjectedResetFault',
@@ -834,7 +831,7 @@ describe('local-step work on the alarm', () => {
 			await wake();
 			let alarms = 0;
 
-			while (alarms <= 100 && (await readPending())) {
+			while (alarms <= 100 && (await hasPending())) {
 				alarms += 1;
 				const now = start + alarms * noProgressRetryMs;
 				vi.setSystemTime(now);
@@ -889,7 +886,7 @@ describe('local-step work on the alarm', () => {
 
 		expect({
 			continuation,
-			pending: await readPending(),
+			pending: await hasPending(),
 			row: await localStepRow()
 		}).toStrictEqual({
 			continuation: 'given-up',
@@ -913,7 +910,7 @@ describe('local-step work on the alarm', () => {
 
 		expect({
 			outcome,
-			pending: await readPending(),
+			pending: await hasPending(),
 			row: await localStepRow()
 		}).toStrictEqual({
 			outcome: { kind: 'recorded', step: expansionLocalStep, progressed: true },

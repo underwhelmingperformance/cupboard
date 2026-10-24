@@ -162,9 +162,9 @@ class ControlTestStatement implements D1PreparedStatement {
 const database = new ControlTestDatabase(env.TEST_CONTROL_DATABASE);
 
 /**
- * The separate control database used by the workers tests. Its native binding
- * belongs to an auxiliary Worker, so tenant objects cannot access the binding.
- */
+The separate control database used by the workers tests. Its native binding
+belongs to an auxiliary Worker, so tenant objects cannot access the binding.
+*/
 export function testControlDatabase(): D1Database {
 	return database;
 }

@@ -259,10 +259,10 @@ export type MaintenanceQueueMessage =
 	| { readonly kind: 'local-step-sweep' };
 
 /**
- * Runs every maintenance pass in sequence and reports their failures together.
- * Reaper passes run after tenant fan-out so tenant work cannot consume the
- * subrequest budget reserved for global cleanup.
- */
+Runs every maintenance pass in sequence and reports their failures together.
+Reaper passes run after tenant fan-out so tenant work cannot consume the
+subrequest budget reserved for global cleanup.
+*/
 export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 	const failures: unknown[] = [];
 
@@ -657,9 +657,9 @@ function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
 }
 
 /**
- * Collects unreferenced canonical NAR objects. This runs on the Worker because
- * tenant Durable Objects cannot see reference edges owned by other tenants.
- */
+Collects unreferenced canonical NAR objects. This runs on the Worker because
+tenant Durable Objects cannot see reference edges owned by other tenants.
+*/
 export async function runBlobReaper(
 	logger: Logger,
 	env: Env,
@@ -721,9 +721,9 @@ function runCasReaperPhase(
 }
 
 /**
- * Scans a bounded page of `blob_state` for missing canonical objects. It removes
- * stale rows and asks each tenant Durable Object to retire the affected narinfos.
- */
+Scans a bounded page of `blob_state` for missing canonical objects. It removes
+stale rows and asks each tenant Durable Object to retire the affected narinfos.
+*/
 export function runReaperDemote(
 	logger: Logger,
 	env: Env,
@@ -799,10 +799,10 @@ class TenantCasReferenceDemoter implements CasReferenceDemoter {
 }
 
 /**
- * Drains a bounded batch of offboarding tenants. Each tenant Durable Object
- * removes its reference rows, while the Worker removes namespaced R2 objects.
- * The registry becomes an offboarded tombstone only after both stores are empty.
- */
+Drains a bounded batch of offboarding tenants. Each tenant Durable Object
+removes its reference rows, while the Worker removes namespaced R2 objects.
+The registry becomes an offboarded tombstone only after both stores are empty.
+*/
 export async function runOffboardBatch(
 	logger: Logger,
 	env: Env,
@@ -903,10 +903,10 @@ async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
 }
 
 /**
- * Maintains the oldest active tenant batch. It advances every selected
- * `last_maintained_at` value even when a tenant fails so later tenants are not
- * starved.
- */
+Maintains the oldest active tenant batch. It advances every selected
+`last_maintained_at` value even when a tenant fails so later tenants are not
+starved.
+*/
 export async function runMaintenanceBatch(
 	logger: Logger,
 	env: Env,
@@ -1058,11 +1058,11 @@ async function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Records completed verdicts incrementally through one RPC at a time. Verdicts
- * completed during an RPC form the next batch. A failed RPC keeps its batch at
- * the front of the buffer and makes `finishRecording` reject so the queue can
- * redeliver the idempotent writes.
- */
+Records completed verdicts incrementally through one RPC at a time. Verdicts
+completed during an RPC form the next batch. A failed RPC keeps its batch at
+the front of the buffer and makes `finishRecording` reject so the queue can
+redeliver the idempotent writes.
+*/
 export class VerdictRecorder {
 	private buffer: VerificationResult[] = [];
 	private flushing: Promise<void> | undefined;
@@ -1136,9 +1136,9 @@ export class VerdictRecorder {
 	}
 
 	/**
-	 * Waits until all buffered verdicts are recorded. A persistent RPC failure
-	 * rejects the queue message for redelivery.
-	 */
+	Waits until all buffered verdicts are recorded. A persistent RPC failure
+	rejects the queue message for redelivery.
+	*/
 	async finishRecording(): Promise<number> {
 		// A verdict added during a flush starts another flush. Wait for each
 		// successor until the buffer is quiescent.
@@ -1164,10 +1164,10 @@ type FreshVerificationOutcome =
 	| 'aborted';
 
 /**
- * Asks the tenant's Durable Object to reserve the canonical incarnation for a
- * declared upload. `undefined` means that the consumer verifies the upload
- * without writing the canonical object.
- */
+Asks the tenant's Durable Object to reserve the canonical incarnation for a
+declared upload. `undefined` means that the consumer verifies the upload
+without writing the canonical object.
+*/
 type CanonicalWriteReserver = (
 	claim: PendingVerification
 ) => Promise<CanonicalWriteReservation | undefined>;
@@ -1178,8 +1178,8 @@ interface FreshVerification {
 }
 
 /**
- * What every verification in one pass shares.
- */
+What every verification in one pass shares.
+*/
 interface FreshVerificationPass {
 	readonly logger: Logger;
 	readonly blobs: R2ObjectStore;
@@ -1190,9 +1190,9 @@ interface FreshVerificationPass {
 }
 
 /**
- * One claimed upload and the subrequests that the pass set aside for it: its
- * first get and, for a declared upload, the canonical put.
- */
+One claimed upload and the subrequests that the pass set aside for it: its
+first get and, for a declared upload, the canonical put.
+*/
 interface FreshClaim {
 	readonly claim: PendingVerification;
 	readonly firstGet: SubrequestHold;
@@ -1259,13 +1259,13 @@ async function verifyFreshBytes(
 }
 
 /**
- * Verifies the staged object of one upload that is not a reuse, and adds the
- * verdict to the pass's recorder. A missing object is terminal. When the pass
- * is aborted, the error propagates; any other failure abandons the upload for
- * a later pass, as does a claim that the pass no longer owns. Each call logs
- * one `pending upload verification finished` event with its outcome and the
- * work that it did.
- */
+Verifies the staged object of one upload that is not a reuse, and adds the
+verdict to the pass's recorder. A missing object is terminal. When the pass
+is aborted, the error propagates; any other failure abandons the upload for
+a later pass, as does a claim that the pass no longer owns. Each call logs
+one `pending upload verification finished` event with its outcome and the
+work that it did.
+*/
 async function verifyFreshClaim(
 	pass: FreshVerificationPass,
 	fresh: FreshClaim
@@ -1768,8 +1768,8 @@ function tenantMaintenanceDueCondition() {
 }
 
 /**
- * Builds one update for the selected tenants.
- */
+Builds one update for the selected tenants.
+*/
 export function buildStampMaintainedStatement(
 	database: CronDatabase,
 	tenantIds: JsonValueList<TenantId>,
@@ -1802,9 +1802,9 @@ async function stampMaintained(
 }
 
 /**
- * Runs garbage collection, verification, and optional key retirement
- * independently. If several fail, reports the garbage-collection failure first.
- */
+Runs garbage collection, verification, and optional key retirement
+independently. If several fail, reports the garbage-collection failure first.
+*/
 export async function runScheduledMaintenance(
 	runGarbageCollection: () => Promise<void>,
 	runVerification: () => Promise<void>,

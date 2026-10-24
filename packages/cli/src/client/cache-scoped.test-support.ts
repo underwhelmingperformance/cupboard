@@ -9,10 +9,10 @@ export interface RecordedCall<Input> {
 }
 
 /**
- * A cache-scoped client pair that answers with `respond` and records the cache
- * each call addressed. Which of the two path variants a command used is part of
- * what the recording shows, so a test asserts the cache rather than a path.
- */
+A cache-scoped client pair that answers with `respond` and records the cache
+each call addressed. Which of the two path variants a command used is part of
+what the recording shows, so a test asserts the cache rather than a path.
+*/
 export function recordingCacheScopedClient<Input extends object, Output>(
 	respond: (input: Input, options?: CallOptions) => Promise<Output>
 ): CacheScopedClient<Input, Output> & {

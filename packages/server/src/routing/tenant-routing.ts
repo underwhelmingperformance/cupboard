@@ -8,9 +8,9 @@ import {
 const tenantPrefix = '/t/';
 
 /**
- * Namespace segments followed by a cache or reuse-view name on routes that
- * require literal spelling.
- */
+Namespace segments followed by a cache or reuse-view name on routes that
+require literal spelling.
+*/
 export type RouteNamespace = 'cache' | 'reuse';
 
 const namedCachePrefix = '/cache/';
@@ -51,16 +51,16 @@ export function parseTenantPath(pathname: string): TenantRoute | undefined {
 }
 
 /**
- * Returns whether the raw tenant-relative path contains the literal
- * `/<namespace>/<name>` prefix. `namespace` identifies the route namespace,
- * and `name` is the decoded route parameter.
- *
- * Hono decodes unreserved percent escapes during route matching and parameter
- * extraction. Admission instead parses the raw path to select the cache before
- * authentication, and the Workers Cache key retains the raw path. Namespace
- * and resource names contain only unreserved characters, so the raw and
- * decoded spellings must match.
- */
+Returns whether the raw tenant-relative path contains the literal
+`/<namespace>/<name>` prefix. `namespace` identifies the route namespace,
+and `name` is the decoded route parameter.
+
+Hono decodes unreserved percent escapes during route matching and parameter
+extraction. Admission instead parses the raw path to select the cache before
+authentication, and the Workers Cache key retains the raw path. Namespace
+and resource names contain only unreserved characters, so the raw and
+decoded spellings must match.
+*/
 export function isLiteralNamespacePath(
 	rest: string,
 	namespace: RouteNamespace,
@@ -72,14 +72,14 @@ export function isLiteralNamespacePath(
 }
 
 /**
- * Splits a leading `/cache/<name>` prefix from a tenant-relative path. The
- * remainder is `/` when the path ends at the prefix. A path outside the cache
- * namespace, or one with an empty or malformed name, returns `undefined`.
- *
- * Admission calls this on the raw path before Hono matches a route, so that the
- * tenant row and the addressed cache's identity, credential and lifecycle rows
- * come from one D1 batch.
- */
+Splits a leading `/cache/<name>` prefix from a tenant-relative path. The
+remainder is `/` when the path ends at the prefix. A path outside the cache
+namespace, or one with an empty or malformed name, returns `undefined`.
+
+Admission calls this on the raw path before Hono matches a route, so that the
+tenant row and the addressed cache's identity, credential and lifecycle rows
+come from one D1 batch.
+*/
 export function parseNamedCachePath(
 	pathname: string
 ): NamedCacheRoute | undefined {

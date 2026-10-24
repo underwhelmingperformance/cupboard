@@ -29,10 +29,10 @@ export interface AttestationStatement {
 }
 
 /**
- * Evidence that records when a bundle was signed. A Rekor entry is a permanent
- * public record of the signature. An RFC 3161 timestamp supplies signed time
- * evidence but does not by itself publish the signature to a public log.
- */
+Evidence that records when a bundle was signed. A Rekor entry is a permanent
+public record of the signature. An RFC 3161 timestamp supplies signed time
+evidence but does not by itself publish the signature to a public log.
+*/
 export interface BundleEvidence {
 	readonly tlogEntryCount: number;
 	readonly timestampCount: number;
@@ -70,17 +70,17 @@ export type StatementSigner = (
 ) => Promise<SignedAttestation>;
 
 /**
- * `@sigstore/sign` does not export its stage-code union. Derive it from the
- * exported error class so this type stays aligned with the installed package.
- */
+`@sigstore/sign` does not export its stage-code union. Derive it from the
+exported error class so this type stays aligned with the installed package.
+*/
 export type SigningStageCode = InternalError['code'];
 
 /**
- * Retry only stages that call Fulcio or a witness. The identity codes
- * (`IDENTITY_TOKEN_READ_ERROR`, `IDENTITY_TOKEN_PARSE_ERROR`) are left out,
- * because an OIDC token the job cannot read or decode is no more readable a few
- * seconds later.
- */
+Retry only stages that call Fulcio or a witness. The identity codes
+(`IDENTITY_TOKEN_READ_ERROR`, `IDENTITY_TOKEN_PARSE_ERROR`) are left out,
+because an OIDC token the job cannot read or decode is no more readable a few
+seconds later.
+*/
 const serviceCallCodes = [
 	'CA_CREATE_SIGNING_CERTIFICATE_ERROR',
 	'TLOG_CREATE_ENTRY_ERROR',
@@ -89,11 +89,11 @@ const serviceCallCodes = [
 ] as const satisfies readonly SigningStageCode[];
 
 /**
- * Retry only statuses that can reflect a temporary service failure. Fulcio may
- * use another 4xx status to refuse a certificate, and Rekor may use one to
- * reject an entry. Repeating those requests would get the same refusal, so
- * every status outside this set fails the step at once.
- */
+Retry only statuses that can reflect a temporary service failure. Fulcio may
+use another 4xx status to refuse a certificate, and Rekor may use one to
+reject an entry. Repeating those requests would get the same refusal, so
+every status outside this set fails the step at once.
+*/
 const retryableSigningStatuses = new Set<number>([
 	StatusCodes.REQUEST_TIMEOUT,
 	StatusCodes.TOO_MANY_REQUESTS,
@@ -111,10 +111,10 @@ const signingFailureSchema = z.object({
 const httpFailureSchema = z.object({ statusCode: z.number() });
 
 /**
- * Retries a recognised Fulcio or witness call when it received no response or
- * one of {@link retryableSigningStatuses}. Everything else is final, including
- * a failure with no recognised stage code.
- */
+Retries a recognised Fulcio or witness call when it received no response or
+one of {@link retryableSigningStatuses}. Everything else is final, including
+a failure with no recognised stage code.
+*/
 export function isTransientSigningFailure(error: unknown): boolean {
 	const failure = signingFailureSchema.safeParse(error);
 
@@ -140,13 +140,13 @@ export interface SigningDependencies {
 }
 
 /**
- * Signs one statement, attempting again after a transient Fulcio or witness
- * failure and backing off between attempts. Each attempt signs from the
- * beginning and gets its own key, certificate and log entry. A later attempt
- * therefore does not depend on any log entry created during a failed attempt.
- * When the failure is final, or the attempts run out, the caller gets an
- * {@link AttestationSigningError} and the step fails.
- */
+Signs one statement, attempting again after a transient Fulcio or witness
+failure and backing off between attempts. Each attempt signs from the
+beginning and gets its own key, certificate and log entry. A later attempt
+therefore does not depend on any log entry created during a failed attempt.
+When the failure is final, or the attempts run out, the caller gets an
+{@link AttestationSigningError} and the step fails.
+*/
 export async function signStatement(
 	statement: AttestationStatement,
 	sign: StatementSigner,
@@ -201,11 +201,11 @@ export interface SigningPolicy {
 }
 
 /**
- * How many subjects each statement covers. `individual` signs one statement
- * per subject. Each bundle reveals only that subject and does not attest to the
- * complete run. `run` signs one statement for a batch of subjects, up to the
- * limit accepted by the attestation store.
- */
+How many subjects each statement covers. `individual` signs one statement
+per subject. Each bundle reveals only that subject and does not attest to the
+complete run. `run` signs one statement for a batch of subjects, up to the
+limit accepted by the attestation store.
+*/
 export function subjectsPerStatement(
 	grouping: SubjectGrouping,
 	runBatchSize: number
@@ -214,15 +214,15 @@ export function subjectsPerStatement(
 }
 
 /**
- * Default signing policy for the destination cache's read access.
- * Private defaults avoid sending the statement to Rekor or uploading the
- * bundle to GitHub. An uploaded GitHub bundle reveals its subjects to
- * repository readers, who can retain copies even if the upload is deleted.
- * Rekor's public signature record cannot be deleted.
- *
- * Each private statement covers one subject, so reading one bundle does not
- * reveal other subjects in the run.
- */
+Default signing policy for the destination cache's read access.
+Private defaults avoid sending the statement to Rekor or uploading the
+bundle to GitHub. An uploaded GitHub bundle reveals its subjects to
+repository readers, who can retain copies even if the upload is deleted.
+Rekor's public signature record cannot be deleted.
+
+Each private statement covers one subject, so reading one bundle does not
+reveal other subjects in the run.
+*/
 export function defaultSigningPolicy(access: DestinationAccess): SigningPolicy {
 	if (access === 'private') {
 		return {
@@ -240,12 +240,12 @@ export function defaultSigningPolicy(access: DestinationAccess): SigningPolicy {
 }
 
 /**
- * The Sigstore instance selected by a profile. `tsa-only` and
- * `rekor-and-tsa` both sign in the public-good trust domain. The action
- * constructs their Sigstore clients and uses the public-good timestamp
- * authority. `sigstore-default` returns `undefined` because `@actions/attest`
- * selects an instance from the repository's visibility.
- */
+The Sigstore instance selected by a profile. `tsa-only` and
+`rekor-and-tsa` both sign in the public-good trust domain. The action
+constructs their Sigstore clients and uses the public-good timestamp
+authority. `sigstore-default` returns `undefined` because `@actions/attest`
+selects an instance from the repository's visibility.
+*/
 export function sigstoreInstanceFor(
 	profile: SigningProfile
 ): SigstoreInstance | undefined {
@@ -253,13 +253,13 @@ export function sigstoreInstanceFor(
 }
 
 /**
- * The instance that produced a set of bundles. A directly signed profile
- * selects its trust domain, so the report does not infer the instance from the
- * bundle evidence. Under `sigstore-default`, the repository's visibility
- * selects the instance. The evidence then distinguishes the two instances:
- * the public-good instance records every signature in Rekor, while the GitHub
- * instance adds an RFC 3161 timestamp.
- */
+The instance that produced a set of bundles. A directly signed profile
+selects its trust domain, so the report does not infer the instance from the
+bundle evidence. Under `sigstore-default`, the repository's visibility
+selects the instance. The evidence then distinguishes the two instances:
+the public-good instance records every signature in Rekor, while the GitHub
+instance adds an RFC 3161 timestamp.
+*/
 export function producedInstance(
 	profile: SigningProfile,
 	evidence: BundleEvidence
@@ -289,12 +289,12 @@ export interface GithubSignerDependencies {
 }
 
 /**
- * Signs statements through `@actions/attest`, which selects the Sigstore
- * instance from the repository's visibility. This is the signer for the
- * `sigstore-default` profile. The `tsa-only` and `rekor-and-tsa` profiles use a
- * directly constructed Sigstore client instead. The action writes a signed
- * bundle to GitHub's attestation store only after checking its byte length.
- */
+Signs statements through `@actions/attest`, which selects the Sigstore
+instance from the repository's visibility. This is the signer for the
+`sigstore-default` profile. The `tsa-only` and `rekor-and-tsa` profiles use a
+directly constructed Sigstore client instead. The action writes a signed
+bundle to GitHub's attestation store only after checking its byte length.
+*/
 export function githubStatementSigner(
 	options: GithubSignerOptions,
 	dependencies: GithubSignerDependencies = {}
@@ -341,9 +341,9 @@ export function githubStatementSigner(
 }
 
 /**
- * Uses the same OIDC-derived SLSA predicate as
- * `actions/attest-build-provenance`.
- */
+Uses the same OIDC-derived SLSA predicate as
+`actions/attest-build-provenance`.
+*/
 export async function slsaProvenanceStatement(): Promise<AttestationStatement> {
 	const predicate = await buildSLSAProvenancePredicate();
 

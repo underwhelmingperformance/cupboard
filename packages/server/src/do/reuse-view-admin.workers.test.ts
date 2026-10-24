@@ -46,12 +46,8 @@ function orpcErrorBodyShape(body: unknown): {
 	return { defined: parsed.defined, code: parsed.code, status: parsed.status };
 }
 
-function setViewRaw(
-	token: string,
-	name: string,
-	body: unknown
-): Promise<Response> {
-	return authorisedFetch(`/reuse-views/${encodeURIComponent(name)}`, token, {
+function setViewRaw(token: string, body: unknown): Promise<Response> {
+	return authorisedFetch(`/reuse-views/${encodeURIComponent('reuse')}`, token, {
 		body: JSON.stringify(body),
 		headers: { 'content-type': 'application/json' },
 		method: 'PUT'
@@ -60,10 +56,9 @@ function setViewRaw(
 
 async function setView(
 	token: string,
-	name: string,
 	body: ReuseViewSetBodyInput
 ): Promise<{ readonly status: number; readonly body: ReuseViewSummary }> {
-	const response = await setViewRaw(token, name, body);
+	const response = await setViewRaw(token, body);
 
 	return {
 		status: response.status,
@@ -82,15 +77,12 @@ async function listViews(
 	};
 }
 
-async function removeView(
-	token: string,
-	name: string
-): Promise<{
+async function removeView(token: string): Promise<{
 	readonly status: number;
 	readonly body: ReuseViewRemoveResponse;
 }> {
 	const response = await authorisedFetch(
-		`/reuse-views/${encodeURIComponent(name)}`,
+		`/reuse-views/${encodeURIComponent('reuse')}`,
 		token,
 		{ method: 'DELETE' }
 	);
@@ -129,12 +121,12 @@ describe('reuse views', () => {
 		const token = await initialise();
 		const before = await derivedStateSnapshot();
 
-		const added = await setView(token, 'reuse', {
+		const added = await setView(token, {
 			access: 'public',
 			selectors: [{ kind: 'named', name: 'pr-1' }]
 		});
 		const listed = await listViews(token);
-		const removed = await removeView(token, 'reuse');
+		const removed = await removeView(token);
 		const after = await listViews(token);
 		const afterState = await derivedStateSnapshot();
 
@@ -172,7 +164,7 @@ describe('reuse views', () => {
 	it('accepts an explicit priority', async () => {
 		const token = await initialise();
 
-		const added = await setView(token, 'reuse', {
+		const added = await setView(token, {
 			access: 'public',
 			selectors: [{ kind: 'all' }],
 			priority: 10
@@ -187,7 +179,7 @@ describe('reuse views', () => {
 	it('accepts an all selector', async () => {
 		const token = await initialise();
 
-		const added = await setView(token, 'reuse', {
+		const added = await setView(token, {
 			access: 'public',
 			selectors: [{ kind: 'all' }]
 		});
@@ -204,7 +196,7 @@ describe('reuse views', () => {
 	it('replaces the selector set wholesale on update, preserving createdAt', async () => {
 		const token = await initialise();
 
-		const first = await setView(token, 'reuse', {
+		const first = await setView(token, {
 			access: 'public',
 			selectors: [
 				{ kind: 'named', name: 'pr-1' },
@@ -212,7 +204,7 @@ describe('reuse views', () => {
 			],
 			priority: 10
 		});
-		const second = await setView(token, 'reuse', {
+		const second = await setView(token, {
 			access: 'public',
 			selectors: [{ kind: 'named', name: 'pr-2' }],
 			priority: 20
@@ -258,12 +250,12 @@ describe('reuse views', () => {
 			priority: 10
 		};
 
-		const first = await setView(token, 'reuse', {
+		const first = await setView(token, {
 			access: definition.access,
 			selectors: [...definition.selectors],
 			priority: definition.priority
 		});
-		const reapplied = await setView(token, 'reuse', {
+		const reapplied = await setView(token, {
 			access: definition.access,
 			selectors: definition.selectors.toReversed(),
 			priority: definition.priority
@@ -283,16 +275,16 @@ describe('reuse views', () => {
 	it('never repeats a revision across delete-then-recreate under the same name (ABA)', async () => {
 		const token = await initialise();
 
-		const created = await setView(token, 'reuse', {
+		const created = await setView(token, {
 			access: 'public',
 			selectors: [{ kind: 'named', name: 'pr-1' }]
 		});
-		const updated = await setView(token, 'reuse', {
+		const updated = await setView(token, {
 			access: 'public',
 			selectors: [{ kind: 'named', name: 'pr-2' }]
 		});
-		await removeView(token, 'reuse');
-		const recreated = await setView(token, 'reuse', {
+		await removeView(token);
+		const recreated = await setView(token, {
 			access: 'public',
 			selectors: [{ kind: 'named', name: 'pr-3' }]
 		});
@@ -342,7 +334,7 @@ describe('reuse views', () => {
 	])('rejects $name', async ({ body }) => {
 		const token = await initialise();
 
-		const response = await setViewRaw(token, 'reuse', body);
+		const response = await setViewRaw(token, body);
 		const errorBody = orpcErrorBodyShape(await response.json());
 
 		expect({ status: response.status, errorBody }).toStrictEqual({
@@ -370,15 +362,15 @@ describe('reuse views', () => {
 
 		const before = await derivedStateSnapshot();
 
-		await setView(token, 'reuse', {
+		await setView(token, {
 			access: 'public',
 			selectors: [{ kind: 'named', name: 'pr-1' }]
 		});
-		await setView(token, 'reuse', {
+		await setView(token, {
 			access: 'public',
 			selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 		});
-		await removeView(token, 'reuse');
+		await removeView(token);
 
 		const after = await derivedStateSnapshot();
 
@@ -390,7 +382,7 @@ describe('reuse views', () => {
 		const writeToken = await issueServerSignedToken(cacheWriteGrants());
 
 		const list = await authorisedFetch('/reuse-views', writeToken);
-		const set = await setViewRaw(writeToken, 'reuse', {
+		const set = await setViewRaw(writeToken, {
 			access: 'public',
 			selectors: [{ kind: 'named', name: 'pr-1' }]
 		});

@@ -65,9 +65,9 @@ interface TrackedBody {
 }
 
 /**
- * A readable byte stream that serves `chunks` in order. R2 bodies are byte
- * streams, and the verifier reads them with a BYOB reader.
- */
+A readable byte stream that serves `chunks` in order. R2 bodies are byte
+streams, and the verifier reads them with a BYOB reader.
+*/
 function byteBody(chunks: readonly Uint8Array[]): TrackedBody {
 	let wasCancelled = false;
 	const cancelled = Promise.withResolvers<undefined>();
@@ -100,10 +100,10 @@ function byteBody(chunks: readonly Uint8Array[]): TrackedBody {
 }
 
 /**
- * A byte stream that serves each chunk only after the test releases it.
- * `requested(index)` resolves when the reader asks for that chunk; the index
- * after the last chunk is the request that the stream answers by closing.
- */
+A byte stream that serves each chunk only after the test releases it.
+`requested(index)` resolves when the reader asks for that chunk; the index
+after the last chunk is the request that the stream answers by closing.
+*/
 function gatedBody(chunks: readonly Uint8Array[]): TrackedBody & {
 	readonly requested: (index: number) => Promise<void>;
 	readonly release: (index: number) => void;
@@ -251,9 +251,9 @@ function deferredGetBucket(
 }
 
 /**
- * Stores `stored` at `r2Key` and returns a bucket whose `get` returns that
- * object's metadata with `body` as its body.
- */
+Stores `stored` at `r2Key` and returns a bucket whose `get` returns that
+object's metadata with `body` as its body.
+*/
 async function bucketServing(
 	r2Key: string,
 	body: ReadableStream<Uint8Array>,
@@ -299,12 +299,12 @@ async function compressedStream(
 }
 
 /**
- * Builds a zstd frame that stores `content` in raw blocks, with the content
- * size in the frame header. workerd's zstd compressor fails once its output
- * exceeds about 40 KiB, so multi-MiB fixtures are built by hand. A raw-block
- * frame is as large as its content, so it also gives a large compressed
- * object.
- */
+Builds a zstd frame that stores `content` in raw blocks, with the content
+size in the frame header. workerd's zstd compressor fails once its output
+exceeds about 40 KiB, so multi-MiB fixtures are built by hand. A raw-block
+frame is as large as its content, so it also gives a large compressed
+object.
+*/
 function rawZstdFrame(content: Uint8Array, windowLog = 20): Uint8Array {
 	const maxBlockSize = 128 * 1024;
 	const blockCount = Math.max(1, Math.ceil(content.byteLength / maxBlockSize));
@@ -354,18 +354,18 @@ function concatenated(parts: readonly Uint8Array[]): Uint8Array {
 	return joined;
 }
 
-function slices(bytes: Uint8Array, size: number): Uint8Array[] {
+function slices(bytes: Uint8Array): Uint8Array[] {
 	return Array.from(
-		{ length: Math.ceil(bytes.byteLength / size) },
-		(_, index) => bytes.subarray(index * size, (index + 1) * size)
+		{ length: Math.ceil(bytes.byteLength / mebibyte) },
+		(_, index) => bytes.subarray(index * mebibyte, (index + 1) * mebibyte)
 	);
 }
 
 /**
- * A 4.5 MiB NAR stored as three concatenated raw-block frames. The compressed
- * object is slightly larger than 4.5 MiB, so the verifier reads it in five
- * reads of up to 1 MiB.
- */
+A 4.5 MiB NAR stored as three concatenated raw-block frames. The compressed
+object is slightly larger than 4.5 MiB, so the verifier reads it in five
+reads of up to 1 MiB.
+*/
 function multiFrameNar(): {
 	readonly nar: Uint8Array;
 	readonly compressed: Uint8Array;
@@ -381,11 +381,11 @@ function multiFrameNar(): {
 }
 
 /**
- * Builds a zstd skippable frame of `size` bytes: the magic number, the length
- * of the payload, and a payload of zeros. Decoders that follow RFC 8878 skip
- * it. The CLI pads a streamed part whose compressed bytes end before the part
- * does.
- */
+Builds a zstd skippable frame of `size` bytes: the magic number, the length
+of the payload, and a payload of zeros. Decoders that follow RFC 8878 skip
+it. The CLI pads a streamed part whose compressed bytes end before the part
+does.
+*/
 function skippableFrame(size: number): Uint8Array {
 	const frame = new Uint8Array(size);
 	const view = new DataView(frame.buffer);
@@ -521,7 +521,7 @@ describe('verifyDecompressedNar', () => {
 		const padded = concatenated([compressed, skippableFrame(padding)]);
 
 		const result = await verifyDecompressedNar(
-			byteBody(slices(padded, mebibyte)).stream,
+			byteBody(slices(padded)).stream,
 			{ narHash: await nixNarHash(nar), narSize: nar.byteLength }
 		);
 
@@ -552,7 +552,7 @@ describe('verifyDecompressedNar', () => {
 	it.each([
 		{
 			name: 'the declared size is exceeded',
-			chunks: slices(multiFrameNar().compressed, mebibyte),
+			chunks: slices(multiFrameNar().compressed),
 			narSize: 1000,
 			outcome: 'nar-size-mismatch'
 		},
@@ -688,7 +688,7 @@ describe('verifyStoredNar', () => {
 
 	it('keeps verifying while each read completes within the stall interval', async () => {
 		const { nar, compressed } = multiFrameNar();
-		const chunks = slices(compressed, mebibyte);
+		const chunks = slices(compressed);
 		const r2Key = r2ObjectKeySchema.parse('staging/verify-slow-test');
 		const body = gatedBody(chunks);
 		const bucket = await bucketServing(r2Key, body.stream, compressed);
@@ -733,7 +733,7 @@ describe('verifyStoredNar', () => {
 	it('cancels the body and rejects with the abort reason when the outer signal aborts', async () => {
 		const { nar, compressed } = multiFrameNar();
 		const r2Key = r2ObjectKeySchema.parse('staging/verify-abort-test');
-		const body = gatedBody(slices(compressed, mebibyte));
+		const body = gatedBody(slices(compressed));
 		const bucket = await bucketServing(r2Key, body.stream, compressed);
 		const controller = new AbortController();
 		const reason = new SubrequestTimeoutError('nar.verify.batch');
@@ -792,9 +792,9 @@ interface CompressedNar {
 }
 
 /**
- * The compressed NAR from the vitest config: about 21 MiB of concatenated zstd
- * frames, which the default 8 MiB buffer size divides into three blocks.
- */
+The compressed NAR from the vitest config: about 21 MiB of concatenated zstd
+frames, which the default 8 MiB buffer size divides into three blocks.
+*/
 function compressedNar(): CompressedNar {
 	const { narSha256, narSize } = env.TEST_COMPRESSED_NAR;
 
@@ -810,10 +810,10 @@ function compressedNar(): CompressedNar {
 type GetResult = R2ObjectBody | R2Object | null;
 
 /**
- * Handles one get of the object under test. `offset` is the start of a ranged
- * get, or `undefined` for a get of the whole object. `get` performs the real
- * get.
- */
+Handles one get of the object under test. `offset` is the start of a ranged
+get, or `undefined` for a get of the whole object. `get` performs the real
+get.
+*/
 type PartHandler = (
 	offset: number | undefined,
 	get: () => Promise<GetResult>
@@ -829,12 +829,8 @@ function rangeOffset(options?: R2GetOptions): number | undefined {
 	return range.offset;
 }
 
-function bucketWithParts(
-	r2Key: string,
-	handle: PartHandler,
-	bucket: R2Bucket = env.BLOBS
-): R2Bucket {
-	return new Proxy(bucket, {
+function bucketWithParts(r2Key: string, handle: PartHandler): R2Bucket {
+	return new Proxy(env.BLOBS, {
 		get(target, property) {
 			if (property === 'get') {
 				return (key: string, options?: R2GetOptions) => {
@@ -858,9 +854,9 @@ function bucketWithParts(
 }
 
 /**
- * Performs the real get, keeps the returned object's metadata, and replaces
- * its body with `body`.
- */
+Performs the real get, keeps the returned object's metadata, and replaces
+its body with `body`.
+*/
 async function servedPart(
 	get: () => Promise<GetResult>,
 	body: ReadableStream<Uint8Array>
@@ -877,9 +873,9 @@ async function servedPart(
 }
 
 /**
- * Serves `bytes` in 1 MiB chunks and errors the stream as soon as it has
- * enqueued the last chunk.
- */
+Serves `bytes` in 1 MiB chunks and errors the stream as soon as it has
+enqueued the last chunk.
+*/
 function erroringBody(
 	bytes: Uint8Array,
 	error: Error
@@ -902,8 +898,8 @@ function erroringBody(
 }
 
 /**
- * Deferreds keyed by a number, created on first use.
- */
+Deferreds keyed by a number, created on first use.
+*/
 class Deferreds {
 	private readonly entries = new Map<number, PromiseWithResolvers<undefined>>();
 
@@ -922,9 +918,9 @@ class Deferreds {
 }
 
 /**
- * Leases every free buffer and returns their sizes. A detached buffer has a
- * size of 0.
- */
+Leases every free buffer and returns their sizes. A detached buffer has a
+size of 0.
+*/
 function leasedBufferSizes(buffers: NarReadBufferPool): number[] {
 	const leases = Array.from({ length: buffers.state.free }, () =>
 		buffers.tryAcquire()
@@ -1859,10 +1855,10 @@ function storeWithPut(put: R2ObjectStore['put']): R2ObjectStore {
 }
 
 /**
- * A store over R2 that counts the requests that are waiting for R2's answer:
- * a get until R2 returns the object, and a put until R2 answers the put. Each
- * get waits a moment first, so that concurrent requests overlap.
- */
+A store over R2 that counts the requests that are waiting for R2's answer:
+a get until R2 returns the object, and a put until R2 answers the put. Each
+get waits a moment first, so that concurrent requests overlap.
+*/
 function countingStore(): {
 	readonly store: R2ObjectStore;
 	readonly peaks: () => { readonly requests: number; readonly puts: number };
@@ -1903,8 +1899,8 @@ function countingStore(): {
 }
 
 /**
- * Serves `bytes` in 1 MiB chunks and waits `intervalMs` before each one.
- */
+Serves `bytes` in 1 MiB chunks and waits `intervalMs` before each one.
+*/
 function tricklingBody(
 	bytes: Uint8Array,
 	intervalMs: number

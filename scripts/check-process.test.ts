@@ -250,7 +250,7 @@ it.for([
 	`;
 		const controller = new AbortController();
 		let running: Promise<number> | undefined;
-		const kill = vi.spyOn(process, 'kill');
+		const canKill = vi.spyOn(process, 'kill');
 		await withCleanups(async () => {
 			await new Promise<void>((resolve, reject) => {
 				server.once('error', reject);
@@ -277,14 +277,14 @@ it.for([
 			);
 			observed.socket.write('exit');
 			const code = await operation;
-			expect({ code, signals: kill.mock.calls }).toStrictEqual({
+			expect({ code, signals: canKill.mock.calls }).toStrictEqual({
 				code: status,
 				signals: [[-observed.parentPid, 'SIGKILL']]
 			});
 			await abortable(observed.closed, context.signal);
 		}, [
 			async () => {
-				kill.mockRestore();
+				canKill.mockRestore();
 				vi.unstubAllEnvs();
 				controller.abort(new Error('test cleanup'));
 				if (parentPid !== undefined && descendantSocket?.destroyed !== true) {

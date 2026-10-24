@@ -236,10 +236,10 @@ const tokenResponse: TokenResponse = {
 	issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
 };
 
-function scriptedClient(
-	attempts: (() => Response | Promise<Response>)[],
-	signal?: AbortSignal
-): { readonly client: CupboardClient; readonly attempted: () => number } {
+function scriptedClient(attempts: (() => Response | Promise<Response>)[]): {
+	readonly client: CupboardClient;
+	readonly attempted: () => number;
+} {
 	let attempted = 0;
 
 	const client = new CupboardClient(
@@ -255,7 +255,7 @@ function scriptedClient(
 			return Promise.resolve(next());
 		},
 		{ kind: 'default' },
-		signal
+		undefined
 	);
 
 	return { client, attempted: () => attempted };

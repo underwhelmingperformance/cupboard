@@ -8,9 +8,9 @@ import { type WorkerHonoEnv } from './hono-env.ts';
 import { tenantReadFetch } from './tenant-read-handler.ts';
 
 /**
- * Strips the public tenant prefix and any client-supplied hint token. Upload
- * negotiation adds a server-issued token only after this sanitisation.
- */
+Strips the public tenant prefix and any client-supplied hint token. Upload
+negotiation adds a server-issued token only after this sanitisation.
+*/
 export function innerRequest(context: Context<WorkerHonoEnv>): Request {
 	const inner = new URL(context.req.url);
 	inner.pathname = context.get('tenantRest');
@@ -21,10 +21,10 @@ export function innerRequest(context: Context<WorkerHonoEnv>): Request {
 }
 
 /**
- * Sends a cacheable read to the cache-owning tenant Worker, which serves it
- * through Workers Cache. The tenant Worker is a separate script in production
- * and absent in development and tests, where the same read app runs in process.
- */
+Sends a cacheable read to the cache-owning tenant Worker, which serves it
+through Workers Cache. The tenant Worker is a separate script in production
+and absent in development and tests, where the same read app runs in process.
+*/
 export async function cachedTenantRead(
 	context: Context<WorkerHonoEnv>,
 	readRequest: Request = context.req.raw
@@ -48,8 +48,8 @@ export async function cachedTenantRead(
 }
 
 /**
- * Sends a read straight to the tenant Durable Object, bypassing Workers Cache.
- */
+Sends a read straight to the tenant Durable Object, bypassing Workers Cache.
+*/
 export async function tenantUncachedRead(
 	context: Context<WorkerHonoEnv>,
 	shouldForceNoStore = false
@@ -62,11 +62,11 @@ export async function tenantUncachedRead(
 }
 
 /**
- * Copies a response and sets `Cache-Control: no-store`.
- *
- * Responses returned by `fetch` have immutable headers, so Hono can apply
- * the policy only to a copy.
- */
+Copies a response and sets `Cache-Control: no-store`.
+
+Responses returned by `fetch` have immutable headers, so Hono can apply
+the policy only to a copy.
+*/
 export function withoutStoring(response: Response): Response {
 	const headers = new Headers(response.headers);
 	headers.set('cache-control', 'no-store');

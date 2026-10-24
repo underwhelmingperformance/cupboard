@@ -47,11 +47,11 @@ export const subrequestsPerReconcileRestore = 4;
 export const subrequestsPerReconcileRemoval = 7;
 
 /**
- * The maximum number of queued paths claimed by one alarm.
- *
- * The page reserves three calls per probe, the edge query and one removal.
- * Every pass can therefore repair at least one probed target.
- */
+The maximum number of queued paths claimed by one alarm.
+
+The page reserves three calls per probe, the edge query and one removal.
+Every pass can therefore repair at least one probed target.
+*/
 export function maxPathsReconciledPerRun(subrequestAllowance: number): number {
 	return Math.floor(
 		(maintenancePassSubrequests(subrequestAllowance, 'continuation') -
@@ -65,9 +65,9 @@ export class ReconcileQueueService {
 	constructor(private readonly context: ServerContext) {}
 
 	/**
-	 * The queue key of one target. A pass that finishes only part of its page
-	 * uses this to clear the targets it finished and leave the rest queued.
-	 */
+	The queue key of one target. A pass that finishes only part of its page
+	uses this to clear the targets it finished and leave the rest queued.
+	*/
 	entryKey(target: ReconcileTarget): string {
 		return `${reconcileEntryPrefix}${String(target.cacheId)}:${target.storePathHash}`;
 	}

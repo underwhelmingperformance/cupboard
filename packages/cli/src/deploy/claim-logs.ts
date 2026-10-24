@@ -18,13 +18,13 @@ export interface ClaimLogDependencies {
 }
 
 /**
- * The exception lines the control Worker logged for a refused request, found by
- * its cf-ray. Workers Observability lags the request by a few seconds, so the
- * query is retried before giving up. An empty result means no matching lines were found
- * (observability is off, the credential cannot read it, the query failed, or
- * the log has not been ingested yet), leaving the caller to fall back to
- * pointing at the logs.
- */
+The exception lines the control Worker logged for a refused request, found by
+its cf-ray. Workers Observability lags the request by a few seconds, so the
+query is retried before giving up. An empty result means no matching lines were found
+(observability is off, the credential cannot read it, the query failed, or
+the log has not been ingested yet), leaving the caller to fall back to
+pointing at the logs.
+*/
 export async function fetchClaimFailureLogs(
 	dependencies: ClaimLogDependencies
 ): Promise<readonly string[]> {
@@ -67,9 +67,9 @@ export async function fetchClaimFailureLogs(
 }
 
 /**
- * The most telling text from each event (the error, else the message, else the
- * raw source), de-duplicated and stripped of blanks.
- */
+The most telling text from each event (the error, else the message, else the
+raw source), de-duplicated and stripped of blanks.
+*/
 export function logLines(events: readonly WorkerLogEvent[]): string[] {
 	const lines = new Set<string>();
 

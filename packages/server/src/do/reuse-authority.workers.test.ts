@@ -81,9 +81,9 @@ function writeGrantsWith(extra: readonly object[]): AuthorizationDetails {
 }
 
 /**
- * Publishes a fresh NAR under one store path in `holder` and returns metadata
- * for another store path with the same NAR.
- */
+Publishes a fresh NAR under one store path in `holder` and returns metadata
+for another store path with the same NAR.
+*/
 async function publishedIn(holder: CacheScope): Promise<UploadPathMetadata> {
 	const index = counter.next;
 	counter.next += 2;

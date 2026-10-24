@@ -32,14 +32,14 @@ type AttestationReferenceIdentity = Pick<
 >;
 
 /**
- * A reference key bound in the deletion row list.
- *
- * SQL compares row-list columns individually, and a comparison with NULL
- * cannot match. Absent cache identity columns therefore use empty strings in
- * the list; the queries compare them through `coalesce`. A non-null cache kind
- * is `default` or `named`, and cache names are non-empty, so the empty strings
- * cannot match a stored value by accident.
- */
+A reference key bound in the deletion row list.
+
+SQL compares row-list columns individually, and a comparison with NULL
+cannot match. Absent cache identity columns therefore use empty strings in
+the list; the queries compare them through `coalesce`. A non-null cache kind
+is `default` or `named`, and cache names are non-empty, so the empty strings
+cannot match a stored value by accident.
+*/
 export type BlobReferenceKey = Omit<
 	BlobReferenceIdentity,
 	'cacheKind' | 'cacheName'

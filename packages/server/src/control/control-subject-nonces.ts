@@ -13,11 +13,11 @@ const nonces = d1Schema.controlConsumedSubjectNonce;
 export const controlSubjectNoncePrunePageSize = 1000;
 
 /**
- * Returns the statement that records `nonce` as consumed. It inserts nothing
- * when the nonce is already recorded, and returns the inserted row. `familyId`
- * identifies the refresh family that the same batch creates, so the batch's
- * later statements can check that this statement inserted the row.
- */
+Returns the statement that records `nonce` as consumed. It inserts nothing
+when the nonce is already recorded, and returns the inserted row. `familyId`
+identifies the refresh family that the same batch creates, so the batch's
+later statements can check that this statement inserted the row.
+*/
 export function consumeControlSubjectNonce(
 	database: Database,
 	nonce: SubjectNonce,

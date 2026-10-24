@@ -50,8 +50,8 @@ export const unavailableExitCode = 69;
 export const publicationExitCode = 74;
 
 /**
- * The exit statuses that `classifyFailures` checks for before its fallback.
- */
+The exit statuses that `classifyFailures` checks for before its fallback.
+*/
 export type RankedExitStatus =
 	| typeof authExitCode
 	| typeof transientExitCode
@@ -67,11 +67,11 @@ const internalServerErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
 const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
 
 /**
- * Classifies an HTTP status as transient for the CLI exit code: a request
- * timeout, a rate limit or a server error. The transport retries a narrower
- * set of statuses, so do not use this function to decide whether to retry a
- * request.
- */
+Classifies an HTTP status as transient for the CLI exit code: a request
+timeout, a rate limit or a server error. The transport retries a narrower
+set of statuses, so do not use this function to decide whether to retry a
+request.
+*/
 export function isTransientHttpStatus(status: number): boolean {
 	return (
 		status === requestTimeoutStatusCode ||
@@ -129,11 +129,11 @@ export class SigningKeyNotFoundError extends CliError {
 }
 
 /**
- * The artifact's D1 migrations, in name order, differ from the migrations that
- * the schema transitions list. A migration added without a transition, or
- * listed under the wrong one, is detected here before the deploy changes
- * anything.
- */
+The artifact's D1 migrations, in name order, differ from the migrations that
+the schema transitions list. A migration added without a transition, or
+listed under the wrong one, is detected here before the deploy changes
+anything.
+*/
 export class MisclassifiedD1MigrationsError extends CliError {
 	constructor(
 		public readonly expected: readonly string[],
@@ -154,10 +154,10 @@ export class MisclassifiedD1MigrationsError extends CliError {
 }
 
 /**
- * The releases that can complete `transition` without including `dependent`,
- * as text for the error and the plan row. The range starts at the deployed
- * release, because an older one would be a downgrade.
- */
+The releases that can complete `transition` without including `dependent`,
+as text for the error and the plan row. The range starts at the deployed
+release, because an older one would be a downgrade.
+*/
 export function completingReleases(
 	transition: string,
 	completedBy: string | undefined,
@@ -169,18 +169,18 @@ export function completingReleases(
 }
 
 /**
- * A transition that is not independent (`dependent` below) could expand only
- * after the upload, because an earlier transition is not complete. The new
- * Workers would then run without its expand migrations, so the deploy stops
- * with this error before it changes anything. Once a deploy of a release that
- * does not include the dependent transition has completed the earlier
- * transition, the deploy can apply the dependent transition's expand
- * migrations before the upload.
- *
- * The message gives a range of releases, not `completedBy` alone, and starts
- * it at the deployed release, because `completedBy` can be older than the
- * deployed release, and deploying it would then be a downgrade.
- */
+A transition that is not independent (`dependent` below) could expand only
+after the upload, because an earlier transition is not complete. The new
+Workers would then run without its expand migrations, so the deploy stops
+with this error before it changes anything. Once a deploy of a release that
+does not include the dependent transition has completed the earlier
+transition, the deploy can apply the dependent transition's expand
+migrations before the upload.
+
+The message gives a range of releases, not `completedBy` alone, and starts
+it at the deployed release, because `completedBy` can be older than the
+deployed release, and deploying it would then be a downgrade.
+*/
 export class TransitionIncompleteError extends CliError {
 	constructor(
 		public readonly transition: string,
@@ -195,13 +195,13 @@ export class TransitionIncompleteError extends CliError {
 }
 
 /**
- * The deployment records a transition as complete, or its `deployment_phase`
- * row implies that it is complete, but `d1_migrations` does not record every
- * migration that the transition lists. The deploy never applies the migrations
- * of a complete transition, so it stops with this error before it changes
- * anything. Either a migration was added to a released transition, or the
- * records disagree with the migrations that ran.
- */
+The deployment records a transition as complete, or its `deployment_phase`
+row implies that it is complete, but `d1_migrations` does not record every
+migration that the transition lists. The deploy never applies the migrations
+of a complete transition, so it stops with this error before it changes
+anything. Either a migration was added to a released transition, or the
+records disagree with the migrations that ran.
+*/
 export class TransitionMigrationsMissingError extends CliError {
 	constructor(
 		public readonly transition: string,
@@ -215,11 +215,11 @@ export class TransitionMigrationsMissingError extends CliError {
 }
 
 /**
- * `completeTransitions` found a transition that has not expanded.
- * `prepareTransitions` expands every incomplete transition or stops with an
- * error, so this happens only when `prepareTransitions` did not run. Running
- * the whole deploy again applies the expand migrations before the upload.
- */
+`completeTransitions` found a transition that has not expanded.
+`prepareTransitions` expands every incomplete transition or stops with an
+error, so this happens only when `prepareTransitions` did not run. Running
+the whole deploy again applies the expand migrations before the upload.
+*/
 export class TransitionNotExpandedError extends CliError {
 	constructor(public readonly transition: string) {
 		super(
@@ -230,15 +230,15 @@ export class TransitionNotExpandedError extends CliError {
 }
 
 /**
- * After the upload, every deploy checks that each script serves the build that
- * it has just uploaded. Contract migrations remove what the earlier build
- * reads, so the deploy applies none until the check passes. A script fails
- * this check when it still serves an earlier build, or when a gradual
- * deployment splits its traffic across two versions.
- *
- * The deploy has already uploaded the Workers when it throws this. Running the
- * deploy again once the rollout has finished applies the contract migrations.
- */
+After the upload, every deploy checks that each script serves the build that
+it has just uploaded. Contract migrations remove what the earlier build
+reads, so the deploy applies none until the check passes. A script fails
+this check when it still serves an earlier build, or when a gradual
+deployment splits its traffic across two versions.
+
+The deploy has already uploaded the Workers when it throws this. Running the
+deploy again once the rollout has finished applies the contract migrations.
+*/
 export class WorkersNotServingBuildError extends CliError {
 	constructor(
 		public readonly scripts: readonly string[],
@@ -254,16 +254,16 @@ export class WorkersNotServingBuildError extends CliError {
 }
 
 /**
- * Why tenants below a local step stopped the deploy or
- * `cupboard deployment resume`.
- *
- * - `below-step`: the deploy's own readiness check found tenants below a
- *   transition's contract step. `stragglers` is a sample of them in slug
- *   order.
- * - `stalled`: tenants were still pending a whole stall window after the
- *   settlement's wake, and none was working. `status` is the last status that
- *   the settlement read.
- */
+Why tenants below a local step stopped the deploy or
+`cupboard deployment resume`.
+
+- `below-step`: the deploy's own readiness check found tenants below a
+  transition's contract step. `stragglers` is a sample of them in slug
+  order.
+- `stalled`: tenants were still pending a whole stall window after the
+  settlement's wake, and none was working. `status` is the last status that
+  the settlement read.
+*/
 export type LocalStepShortfall =
 	| {
 			readonly kind: 'below-step';
@@ -274,21 +274,21 @@ export type LocalStepShortfall =
 	| { readonly kind: 'stalled'; readonly status: LocalStepStatus };
 
 /**
- * Active or suspended tenants have not recorded a local step, so the deploy or
- * `cupboard deployment resume` stopped. The Workers are already uploaded when
- * the deploy throws this. When the step is a transition's contract step, that
- * transition's contract migrations stay unapplied. After every transition is
- * complete, only tenant work remains. A woken tenant object continues while
- * it makes progress and stops after `localStepStallWindowMs` without it, and
- * the control Worker's cron trigger enqueues another wake for the stalled and
- * unwoken tenants on every tick.
- */
+Active or suspended tenants have not recorded a local step, so the deploy or
+`cupboard deployment resume` stopped. The Workers are already uploaded when
+the deploy throws this. When the step is a transition's contract step, that
+transition's contract migrations stay unapplied. After every transition is
+complete, only tenant work remains. A woken tenant object continues while
+it makes progress and stops after `localStepStallWindowMs` without it, and
+the control Worker's cron trigger enqueues another wake for the stalled and
+unwoken tenants on every tick.
+*/
 export class LocalStepUnreachedError extends CliError {
 	readonly pending: number;
 	readonly requiredStep: number;
 	/**
-	 * The pending tenants that the error lists.
-	 */
+	The pending tenants that the error lists.
+	*/
 	readonly stragglers: readonly string[];
 
 	constructor(
@@ -638,11 +638,11 @@ export class InvalidWorkerUrlError extends CliUsageError {
 }
 
 /**
- * A Worker URL that includes credentials, a query string or a fragment. Each
- * route is resolved against the base URL's origin and path, so credentials, a
- * query string or a fragment would either be dropped or appear in the wrong
- * place in every request built from that URL.
- */
+A Worker URL that includes credentials, a query string or a fragment. Each
+route is resolved against the base URL's origin and path, so credentials, a
+query string or a fragment would either be dropped or appear in the wrong
+place in every request built from that URL.
+*/
 export class InvalidWorkerUrlBaseError extends CliUsageError {
 	constructor() {
 		super(
@@ -653,10 +653,10 @@ export class InvalidWorkerUrlBaseError extends CliUsageError {
 }
 
 /**
- * A Worker URL that uses plain HTTP to a host other than a loopback address.
- * Requests to a cupboard URL can contain tokens and read credentials, which an
- * on-path observer could read over plain HTTP.
- */
+A Worker URL that uses plain HTTP to a host other than a loopback address.
+Requests to a cupboard URL can contain tokens and read credentials, which an
+on-path observer could read over plain HTTP.
+*/
 export class InsecureWorkerUrlError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(
@@ -729,9 +729,9 @@ export class ScopeForbiddenError extends CliError {
 export type AdminApiTransientStatus = 408 | 429 | 503;
 
 /**
- * The admin API responded with 408, 429 or 503, so the same request may succeed
- * later.
- */
+The admin API responded with 408, 429 or 503, so the same request may succeed
+later.
+*/
 export class AdminApiTransientError extends CliError {
 	constructor(
 		public readonly status: AdminApiTransientStatus,
@@ -780,10 +780,10 @@ function quotaExplanation(detail: string): string {
 }
 
 /**
- * The operator tried to suspend, resume or change the quota of a tenant whose
- * removal has begun. Removal runs to completion, so the tenant's next status
- * can only be `offboarded`.
- */
+The operator tried to suspend, resume or change the quota of a tenant whose
+removal has begun. Removal runs to completion, so the tenant's next status
+can only be `offboarded`.
+*/
 export class TenantOffboardingError extends CliError {
 	constructor(public readonly tenant: TenantId) {
 		super(
@@ -797,8 +797,8 @@ export class TenantOffboardingError extends CliError {
 }
 
 /**
- * The operator asked for a quota below what the tenant already stores.
- */
+The operator asked for a quota below what the tenant already stores.
+*/
 export class QuotaBelowUsageError extends CliError {
 	constructor(
 		public readonly tenant: TenantId,
@@ -1015,40 +1015,40 @@ export class UploadGraceFactsUnsupportedError extends CliError {
 }
 
 /**
- * The exit statuses that a push with failed paths can return.
- */
+The exit statuses that a push with failed paths can return.
+*/
 export type IncompletePushExitStatus =
 	RankedExitStatus | typeof genericExitCode;
 
 /**
- * The command that the user ran. `PushIncompleteError` includes it in its
- * advice.
- */
+The command that the user ran. `PushIncompleteError` includes it in its
+advice.
+*/
 export type PushCommand = 'cupboard push' | 'cupboard build-push';
 
 /**
- * The credential that a push uses: the owner session cached by
- * `cupboard login`, or a token exchanged for the GitHub Actions OIDC token
- * with `--github-oidc`. `PushIncompleteError` gives advice for it when a push
- * is not authorised.
- */
+The credential that a push uses: the owner session cached by
+`cupboard login`, or a token exchanged for the GitHub Actions OIDC token
+with `--github-oidc`. `PushIncompleteError` gives advice for it when a push
+is not authorised.
+*/
 export type PushCredential = 'cupboard-login' | 'github-oidc';
 
 /**
- * The step of a push at which a path failed. A path that fails at `verify` was
- * committed, and then either the server reported that its verification failed
- * or the server had not verified it when the push stopped waiting.
- */
+The step of a push at which a path failed. A path that fails at `verify` was
+committed, and then either the server reported that its verification failed
+or the server had not verified it when the push stopped waiting.
+*/
 export type PushFailureStage = 'resolve' | 'upload' | 'commit' | 'verify';
 
 /**
- * A path that a push did not publish. For a path that failed deferred
- * verification, `verdict` is `failed` when the server reported that
- * verification failed, for example because the upload did not match its hash
- * or the server lost the path. It is `pending` when the server had not
- * verified the path when the push stopped waiting, so the server may still
- * publish it.
- */
+A path that a push did not publish. For a path that failed deferred
+verification, `verdict` is `failed` when the server reported that
+verification failed, for example because the upload did not match its hash
+or the server lost the path. It is `pending` when the server had not
+verified the path when the push stopped waiting, so the server may still
+publish it.
+*/
 export type FailedPushPath =
 	| {
 			readonly path: string;
@@ -1066,16 +1066,16 @@ export interface IncompletePush {
 	readonly command: PushCommand;
 	readonly credential: PushCredential;
 	/**
-	 * Whether the push has retention to record. It has none with `--no-retain`,
-	 * or for a build-push run without `--root`.
-	 */
+	Whether the push has retention to record. It has none with `--no-retain`,
+	or for a build-push run without `--root`.
+	*/
 	readonly recordsRetention: boolean;
 }
 
 /**
- * Some paths of a push failed. The error's exit status comes from
- * `classifyFailures`, applied to the per-path failures.
- */
+Some paths of a push failed. The error's exit status comes from
+`classifyFailures`, applied to the per-path failures.
+*/
 export class PushIncompleteError extends CliError {
 	readonly failedPaths: readonly string[];
 
@@ -1167,11 +1167,11 @@ export class PathsNotConfirmedError extends CliError {
 }
 
 /**
- * A confirm closure larger than one request is split into sequential batches,
- * and a later request failed. Each batch that succeeded has already extended
- * the retention deadlines of its paths on the server. The counts show how many
- * batches completed.
- */
+A confirm closure larger than one request is split into sequential batches,
+and a later request failed. Each batch that succeeded has already extended
+the retention deadlines of its paths on the server. The counts show how many
+batches completed.
+*/
 export class ConfirmIncompleteError extends CliCausedError {
 	constructor(
 		public readonly confirmedBatches: number,
@@ -1565,10 +1565,10 @@ export class CacheInfoUnparsableError extends CliError {
 }
 
 /**
- * github setup found stored state that differs from what it would write. Setup
- * never replaces stored state, so the drifted steps are reported and left in
- * place, and the non-zero exit makes the divergence visible to scripts and CI.
- */
+github setup found stored state that differs from what it would write. Setup
+never replaces stored state, so the drifted steps are reported and left in
+place, and the non-zero exit makes the divergence visible to scripts and CI.
+*/
 export class GithubSetupDriftError extends CliError {
 	constructor(public readonly steps: readonly string[]) {
 		super(
@@ -1582,9 +1582,9 @@ export class GithubSetupDriftError extends CliError {
 }
 
 /**
- * Neither `--reference-paths-file` nor `--reference-source` is meaningful on
- * its own.
- */
+Neither `--reference-paths-file` nor `--reference-source` is meaningful on
+its own.
+*/
 export class ReferenceSourcePairError extends CliUsageError {
 	constructor() {
 		super(
@@ -1595,10 +1595,10 @@ export class ReferenceSourcePairError extends CliUsageError {
 }
 
 /**
- * The destination demanded an upload for a path published by reference.
- * Publication by reference never reads the NAR from a local store, so there are
- * no bytes to send. The tenant was expected to hold the blob already.
- */
+The destination demanded an upload for a path published by reference.
+Publication by reference never reads the NAR from a local store, so there are
+no bytes to send. The tenant was expected to hold the blob already.
+*/
 export class ReferenceUploadRequiredError extends CliError {
 	constructor(public readonly storePath: string) {
 		super(
@@ -1610,10 +1610,10 @@ export class ReferenceUploadRequiredError extends CliError {
 }
 
 /**
- * The token service refused a push token request that included read access to
- * private reference sources. The refusal does not say which grant failed, so
- * the push reports the read grants as the likely cause.
- */
+The token service refused a push token request that included read access to
+private reference sources. The refusal does not say which grant failed, so
+the push reports the read grants as the likely cause.
+*/
 export class ReferenceSourceReadRefusedError extends CliError {
 	constructor(
 		public readonly sources: readonly URL[],
@@ -1680,11 +1680,11 @@ export class NarInfoUnparsableError extends CliError {
 }
 
 /**
- * A `job_workflow_ref` claim without an `@<ref>` becomes a pattern that matches
- * the workflow file at every ref, so an edit to the workflow would gain the
- * publishing authority granted by the rule. The github commands therefore
- * require the exact claim, including its ref.
- */
+A `job_workflow_ref` claim without an `@<ref>` becomes a pattern that matches
+the workflow file at every ref, so an edit to the workflow would gain the
+publishing authority granted by the rule. The github commands therefore
+require the exact claim, including its ref.
+*/
 export class WorkflowReferenceUnpinnedError extends CliUsageError {
 	constructor(public readonly reference: string) {
 		super(
@@ -1704,10 +1704,10 @@ export class WorkflowReferenceMalformedError extends CliUsageError {
 }
 
 /**
- * A mutable ref moves to whichever commit it later points at, so a trust rule
- * that pins a mutable ref also trusts every future edit to the workflow. The
- * GitHub mutations require explicit opt-in for a branch workflow reference.
- */
+A mutable ref moves to whichever commit it later points at, so a trust rule
+that pins a mutable ref also trusts every future edit to the workflow. The
+GitHub mutations require explicit opt-in for a branch workflow reference.
+*/
 export class WorkflowReferenceMutableError extends CliUsageError {
 	constructor(
 		public readonly reference: string,
@@ -1721,11 +1721,11 @@ export class WorkflowReferenceMutableError extends CliUsageError {
 }
 
 /**
- * A `*` wildcard is only meaningful in the tag part of a reference, as
- * `refs/tags/<glob>` with literal tag characters and single `*` wildcards.
- * Anywhere else the wildcard cannot match any ref, so the reference is refused
- * rather than stored as a rule that no token can satisfy.
- */
+A `*` wildcard is only meaningful in the tag part of a reference, as
+`refs/tags/<glob>` with literal tag characters and single `*` wildcards.
+Anywhere else the wildcard cannot match any ref, so the reference is refused
+rather than stored as a rule that no token can satisfy.
+*/
 export class WorkflowReferenceTagPatternError extends CliUsageError {
 	constructor(
 		public readonly reference: string,
@@ -1739,10 +1739,10 @@ export class WorkflowReferenceTagPatternError extends CliUsageError {
 }
 
 /**
- * A configuration check evaluates the workflow release the caller will
- * actually run. Tag patterns describe a wider setup policy and cannot identify
- * that release.
- */
+A configuration check evaluates the workflow release the caller will
+actually run. Tag patterns describe a wider setup policy and cannot identify
+that release.
+*/
 export class WorkflowReferenceExactRequiredError extends CliUsageError {
 	constructor(public readonly reference: string) {
 		super(
@@ -1769,10 +1769,10 @@ export class GithubCheckOptionError extends CliUsageError {
 }
 
 /**
- * Optional trust-rule removals failed after the new configuration was already
- * applied. The result report names each rule that stayed behind; the non-zero
- * exit tells scripts the cleanup is incomplete.
- */
+Optional trust-rule removals failed after the new configuration was already
+applied. The result report names each rule that stayed behind; the non-zero
+exit tells scripts the cleanup is incomplete.
+*/
 export class GithubSetupRemovalError extends CliCausedError {
 	constructor(
 		public readonly ruleIds: readonly string[],
@@ -1800,8 +1800,8 @@ export class GithubSetupOwnerRuleConflictError extends CliUsageError {
 }
 
 /**
- * Basic read credentials come as a pair; half a pair is a mistake.
- */
+Basic read credentials come as a pair; half a pair is a mistake.
+*/
 export class ReadCredentialPairError extends CliUsageError {
 	constructor(target: 'cache' | 'view' = 'cache') {
 		const prefix = target === 'view' ? '--view-read' : '--read';
@@ -1821,8 +1821,8 @@ export class InvalidCacheCredentialsError extends CliUsageError {
 }
 
 /**
- * Each credential must match a cache selected for the Nix configuration.
- */
+Each credential must match a cache selected for the Nix configuration.
+*/
 export class UnknownCacheCredentialError extends CliUsageError {
 	constructor(public readonly cache: string) {
 		super(`Select ${cache} in the command or remove its credential.`);
@@ -1831,9 +1831,9 @@ export class UnknownCacheCredentialError extends CliUsageError {
 }
 
 /**
- * `cupboard check` found committed paths whose stored objects are missing or
- * wrong. The report lists each path.
- */
+`cupboard check` found committed paths whose stored objects are missing or
+wrong. The report lists each path.
+*/
 export class CheckDiscrepanciesError extends CliError {
 	constructor(public readonly count: number) {
 		super(
@@ -1853,10 +1853,10 @@ export class GithubCheckFailedError extends CliError {
 }
 
 /**
- * Some invariants could not be verified in this environment (no `gh`, no
- * evaluated manifest). No check failed, but the configuration was not proven
- * correct either, so the exit code is EX_UNAVAILABLE and not success.
- */
+Some invariants could not be verified in this environment (no `gh`, no
+evaluated manifest). No check failed, but the configuration was not proven
+correct either, so the exit code is EX_UNAVAILABLE and not success.
+*/
 export class GithubCheckIncompleteError extends CliError {
 	constructor(public readonly checks: readonly string[]) {
 		super(`Could not verify: ${checks.join(', ')}`);
@@ -1869,11 +1869,11 @@ export class GithubCheckIncompleteError extends CliError {
 }
 
 /**
- * The token's granted authorization_details do not cover an operation this
- * run needs on a root, so a later step would fail after the expensive build.
- * The run is refused before the build starts, and the error states which
- * operation and root are missing.
- */
+The token's granted authorization_details do not cover an operation this
+run needs on a root, so a later step would fail after the expensive build.
+The run is refused before the build starts, and the error states which
+operation and root are missing.
+*/
 export class MissingGrantError extends CliError {
 	constructor(
 		public readonly operation: string,
@@ -1892,10 +1892,10 @@ export class MissingGrantError extends CliError {
 }
 
 /**
- * The supervised build command itself failed. The run exits with the child's
- * own status, or 128 plus the number of the signal that killed it, so a build
- * failure is never re-labelled as a cache failure.
- */
+The supervised build command itself failed. The run exits with the child's
+own status, or 128 plus the number of the signal that killed it, so a build
+failure is never re-labelled as a cache failure.
+*/
 export class BuildCommandFailedError extends CliError {
 	constructor(
 		public readonly status: number | undefined,
@@ -1988,11 +1988,11 @@ export class BuildRebuildRemoteDispatchError extends CliError {
 }
 
 /**
- * The build succeeded but its publication or retention did not complete. The
- * exit code uses the classified sysexits category so callers can distinguish a
- * publication failure from a build failure. The receipt records each affected
- * path.
- */
+The build succeeded but its publication or retention did not complete. The
+exit code uses the classified sysexits category so callers can distinguish a
+publication failure from a build failure. The receipt records each affected
+path.
+*/
 export class BuildPublicationFailedError extends CliError {
 	constructor(
 		public readonly failedPaths: readonly string[],

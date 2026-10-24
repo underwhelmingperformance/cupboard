@@ -15,11 +15,11 @@ import {
 } from '../errors.ts';
 
 /**
- * Parses a JSON request body and validates it against `schema`. Invalid JSON
- * and schema mismatches become HTTP 400 errors; schema failures retain Zod's
- * diagnostics. A body larger than `maximumBytes` is refused with HTTP 413
- * before it is parsed.
- */
+Parses a JSON request body and validates it against `schema`. Invalid JSON
+and schema mismatches become HTTP 400 errors; schema failures retain Zod's
+diagnostics. A body larger than `maximumBytes` is refused with HTTP 413
+before it is parsed.
+*/
 export async function parseRequestBody<S extends z.ZodType>(
 	schema: S,
 	request: Request,
@@ -62,14 +62,14 @@ async function readJsonText(
 export const formBodyMaxBytes = 128 * 1024;
 
 /**
- * Validates an `application/x-www-form-urlencoded` request body against a
- * schema, returning the parsed (branded) value. The form boundary rejects every
- * repeated parameter before the schema can strip an unknown extension. When the
- * schema rejects the body, the error is an OAuth `invalid_request` with the
- * schema's diagnostics, so the `/token` endpoint reports it in the RFC 6749
- * §5.2 envelope. A body larger than {@link formBodyMaxBytes} is refused with
- * HTTP 413 before it is decoded.
- */
+Validates an `application/x-www-form-urlencoded` request body against a
+schema, returning the parsed (branded) value. The form boundary rejects every
+repeated parameter before the schema can strip an unknown extension. When the
+schema rejects the body, the error is an OAuth `invalid_request` with the
+schema's diagnostics, so the `/token` endpoint reports it in the RFC 6749
+§5.2 envelope. A body larger than {@link formBodyMaxBytes} is refused with
+HTTP 413 before it is decoded.
+*/
 export async function parseFormBody<S extends z.ZodType>(
 	schema: S,
 	request: Request
@@ -166,9 +166,9 @@ export function parseRequestValue<S extends z.ZodType>(
 }
 
 /**
- * Parses and validates JSON owned by the server. Syntax and schema failures are
- * internal faults, so `onInvalid` supplies the contextual typed 500 error.
- */
+Parses and validates JSON owned by the server. Syntax and schema failures are
+internal faults, so `onInvalid` supplies the contextual typed 500 error.
+*/
 export function parseStored<S extends z.ZodType>(
 	schema: S,
 	source: string,

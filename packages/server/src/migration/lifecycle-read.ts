@@ -31,7 +31,7 @@ export async function readCacheLifecycles(
 		}
 	}
 	const names = scopes.flatMap((scope) =>
-		scope.kind === 'named' ? [scope.name] : []
+		scope.kind === 'named' ? scope.name : []
 	);
 	for (const listed of jsonValueLists(names)) {
 		const named = await context.d1

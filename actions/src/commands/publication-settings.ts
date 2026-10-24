@@ -100,10 +100,10 @@ export function registerPublicationSettingsCommand(
 }
 
 /**
- * Prints the publication settings and appends them to the job summary, with
- * the nix.conf lines that read the destination cache. When it cannot download
- * the tenant's public key, it warns and leaves the nix.conf lines out.
- */
+Prints the publication settings and appends them to the job summary, with
+the nix.conf lines that read the destination cache. When it cannot download
+the tenant's public key, it warns and leaves the nix.conf lines out.
+*/
 export async function publicationSettingsAction(
 	options: PublicationSettingsOptions,
 	environment: Environment = env,

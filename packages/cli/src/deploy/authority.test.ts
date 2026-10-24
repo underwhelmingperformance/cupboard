@@ -121,9 +121,9 @@ function boundIdToken(claims: Record<string, unknown>, nonce: string): string {
 }
 
 /**
- * A sign-in whose ID tokens have `claims`, the requested nonce and the current
- * time as `iat`. `issued` receives each ID token.
- */
+A sign-in whose ID tokens have `claims`, the requested nonce and the current
+time as `iat`. `issued` receives each ID token.
+*/
 function signInReturning(
 	claims: Record<string, unknown>,
 	issued?: (idToken: string) => void
@@ -154,9 +154,9 @@ const expiredAdminToken = jwt({
 });
 
 /**
- * A control database as the deploy reads it before any change: whether the
- * database exists, whether it has the `global_admin` table yet, and its row.
- */
+A control database as the deploy reads it before any change: whether the
+database exists, whether it has the `global_admin` table yet, and its row.
+*/
 interface ControlDatabase {
 	readonly exists: boolean;
 	readonly hasAdminTable: boolean;
@@ -1229,9 +1229,9 @@ const migrationsDirectory = new URL(
 );
 
 /**
- * An in-memory SQLite database with the D1 migrations applied up to, but not
- * including, `before`.
- */
+An in-memory SQLite database with the D1 migrations applied up to, but not
+including, `before`.
+*/
 async function migratedDatabase(
 	before: string
 ): Promise<import('node:sqlite').DatabaseSync> {
@@ -1258,9 +1258,9 @@ async function migratedDatabase(
 }
 
 /**
- * Runs each query on `database` and returns the first column of each row as
- * `d1QueryRows` does.
- */
+Runs each query on `database` and returns the first column of each row as
+`d1QueryRows` does.
+*/
 function sqliteRows(database: import('node:sqlite').DatabaseSync): {
 	queryRows(id: DatabaseId, sql: string): Promise<readonly string[]>;
 } {
@@ -1273,7 +1273,7 @@ function sqliteRows(database: import('node:sqlite').DatabaseSync): {
 					.flatMap((row) => {
 						const [value] = Object.values(row);
 
-						return typeof value === 'string' ? [value] : [];
+						return typeof value === 'string' ? value : [];
 					})
 			)
 	};

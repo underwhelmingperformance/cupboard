@@ -181,9 +181,9 @@ function withAttest(
 }
 
 /**
- * The rule options given on the command line, as they are spelt there. A rule
- * file replaces all of them, so none may be combined with `--from-file`.
- */
+The rule options given on the command line, as they are spelt there. A rule
+file replaces all of them, so none may be combined with `--from-file`.
+*/
 export function ruleOptionsGiven(options: OidcTrustAddOptions): string[] {
 	const given: [string, boolean][] = [
 		['--issuer', options.issuer !== undefined],
@@ -291,8 +291,8 @@ export interface OidcTrustAddOptions {
 }
 
 /**
- * The OIDC trust operations required by the command implementations.
- */
+The OIDC trust operations required by the command implementations.
+*/
 export interface OidcTrustClient {
 	list(): Promise<OidcTrustListResponse>;
 	get(input: { id: TrustRuleId }): Promise<OidcTrustSummary>;
@@ -962,9 +962,9 @@ function buildOidcTrustCommands(
 }
 
 /**
- * `oidc-trust add`: a tenant rule built from options or read whole from
- * `--from-file`.
- */
+`oidc-trust add`: a tenant rule built from options or read whole from
+`--from-file`.
+*/
 function registerTenantRuleAdd(
 	oidcTrust: Command,
 	program: Command,
@@ -1059,10 +1059,10 @@ function registerTenantRuleAdd(
 }
 
 /**
- * `control-oidc-trust add`: a control-plane rule read whole from a file. Its
- * grants (control, tenant or wildcard authority) have no options, and the
- * cache and root options of a tenant rule do not apply.
- */
+`control-oidc-trust add`: a control-plane rule read whole from a file. Its
+grants (control, tenant or wildcard authority) have no options, and the
+cache and root options of a tenant rule do not apply.
+*/
 function registerControlRuleAdd(
 	oidcTrust: Command,
 	program: Command,

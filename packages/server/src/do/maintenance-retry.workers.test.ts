@@ -94,22 +94,22 @@ interface StalledPassRun {
 }
 
 /**
- * Gives two maintenance passes work that they cannot finish. The reconcile
- * target fails during its probe, and the upload fails while applying its
- * recorded verdict.
- *
- * Runs four alarms and reports, for each one, the maintenance cursor it left
- * and how long each of the two passes must still wait. The second pass starts
- * waiting one second after the first, so their retry deadlines differ. The
- * third alarm arrives while both passes are waiting; its calls to `setAlarm`
- * show which deadline the scheduler preserves. Before the fourth alarm the
- * fixture puts both deadlines in the past, which is the state the passes reach
- * once their wait is over.
- *
- * The Durable Object alarm scheduler keeps real time while this test freezes
- * `Date`, so reading the stored alarm would race its delivery. The test instead
- * records the deadlines passed to `setAlarm` during the third handler.
- */
+Gives two maintenance passes work that they cannot finish. The reconcile
+target fails during its probe, and the upload fails while applying its
+recorded verdict.
+
+Runs four alarms and reports, for each one, the maintenance cursor it left
+and how long each of the two passes must still wait. The second pass starts
+waiting one second after the first, so their retry deadlines differ. The
+third alarm arrives while both passes are waiting; its calls to `setAlarm`
+show which deadline the scheduler preserves. Before the fourth alarm the
+fixture puts both deadlines in the past, which is the state the passes reach
+once their wait is over.
+
+The Durable Object alarm scheduler keeps real time while this test freezes
+`Date`, so reading the stored alarm would race its delivery. The test instead
+records the deadlines passed to `setAlarm` during the third handler.
+*/
 async function driveStalledPasses(server: string): Promise<StalledPassRun> {
 	await useTestServer(server);
 
@@ -255,14 +255,14 @@ interface ConcurrentDrainRun {
 }
 
 /**
- * Runs one verdict-drain pass that applies every verdict in its page while a
- * commit records another verdict during the pass.
- *
- * The commit lands while the pass holds the page it read, so the number of held
- * verdicts is no lower when the pass ends than when it started. The pass
- * finished its page all the same, and must stay eligible so the next alarm
- * applies the verdict the commit recorded.
- */
+Runs one verdict-drain pass that applies every verdict in its page while a
+commit records another verdict during the pass.
+
+The commit lands while the pass holds the page it read, so the number of held
+verdicts is no lower when the pass ends than when it started. The pass
+finished its page all the same, and must stay eligible so the next alarm
+applies the verdict the commit recorded.
+*/
 async function driveDrainDuringCommit(
 	server: string
 ): Promise<ConcurrentDrainRun> {
@@ -372,16 +372,16 @@ interface ParkedVerdict {
 }
 
 /**
- * Starts applying the recorded verdicts and parks the application of
- * `uploadId` until `release` is called. Applying a verdict first refreshes
- * the upload's NAR markers, so the application parks in that call. The alarm
- * refreshes every upload's markers without an upload ID, and a later
- * application of the same verdict does not park.
- *
- * With `fail`, the parked refresh throws when it is released, which the
- * application records as a failure of that verdict. With `abort`, releasing
- * aborts the application's signal, so the whole application throws.
- */
+Starts applying the recorded verdicts and parks the application of
+`uploadId` until `release` is called. Applying a verdict first refreshes
+the upload's NAR markers, so the application parks in that call. The alarm
+refreshes every upload's markers without an upload ID, and a later
+application of the same verdict does not park.
+
+With `fail`, the parked refresh throws when it is released, which the
+application records as a failure of that verdict. With `abort`, releasing
+aborts the application's signal, so the whole application throws.
+*/
 async function parkVerdict(
 	instance: CupboardServer,
 	uploadId: UploadId,
@@ -568,10 +568,10 @@ async function publicationOutcome(
 }
 
 /**
- * Parks the application of one recorded verdict, records an unrelated ready
- * verdict, and runs alarms as time advances well past the no-progress retry
- * delay. The parked application continues only after the alarms have run.
- */
+Parks the application of one recorded verdict, records an unrelated ready
+verdict, and runs alarms as time advances well past the no-progress retry
+delay. The parked application continues only after the alarms have run.
+*/
 async function driveAlarmsAroundParkedVerdict(server: string) {
 	await useTestServer(server);
 
@@ -642,9 +642,9 @@ async function driveAlarmsAroundParkedVerdict(server: string) {
 }
 
 /**
- * Parks the application of one recorded verdict, ends it with `ending`, and
- * then runs alarms at once and after the no-progress retry delay.
- */
+Parks the application of one recorded verdict, ends it with `ending`, and
+then runs alarms at once and after the no-progress retry delay.
+*/
 async function driveAlarmsAfterParkedFailure(
 	server: string,
 	ending: ParkedEnding
@@ -705,9 +705,9 @@ interface DrainDecision {
 }
 
 /**
- * Runs one verdict-drain alarm while a recorded verdict is due, with the
- * verdict page replaced by `page`.
- */
+Runs one verdict-drain alarm while a recorded verdict is due, with the
+verdict page replaced by `page`.
+*/
 async function driveDrainDecision(
 	server: string,
 	page: RecordedVerdictPage

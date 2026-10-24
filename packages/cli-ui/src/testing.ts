@@ -38,9 +38,9 @@ export interface CliUiCapture {
 }
 
 /**
- * Unspecified prompt answers default to cancellation, so a test only needs to
- * provide answers for the prompts its path reaches.
- */
+Unspecified prompt answers default to cancellation, so a test only needs to
+provide answers for the prompts its path reaches.
+*/
 export interface CliUiScript {
 	readonly interactive?: boolean;
 	readonly presentation?: PresentationLevel;
@@ -72,10 +72,10 @@ const silentStepLog: StepLog = {
 };
 
 /**
- * Use this in command tests that need scripted prompts and captured output
- * without a terminal. Phases run their body directly, and results are captured
- * rather than rendered.
- */
+Use this in command tests that need scripted prompts and captured output
+without a terminal. Phases run their body directly, and results are captured
+rather than rendered.
+*/
 export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 	const captured: CliUiCapture = {
 		intros: [],
@@ -239,11 +239,11 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 }
 
 /**
- * Use this when a test needs result rows, information messages, and top-level
- * warnings without rendered output. It calls each phase, progress, and steps
- * body directly. Warnings raised inside those bodies, `data` payloads, and
- * errors are discarded; a test that needs them must provide its own reporter.
- */
+Use this when a test needs result rows, information messages, and top-level
+warnings without rendered output. It calls each phase, progress, and steps
+body directly. Warnings raised inside those bodies, `data` payloads, and
+errors are discarded; a test that needs them must provide its own reporter.
+*/
 export function capturingReporter(
 	results: ResultRow[][],
 	infos: string[] = [],

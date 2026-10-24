@@ -18,25 +18,25 @@ import { type AccessClaims } from '../auth/auth.ts';
 import { InsufficientScopeError } from '../errors.ts';
 
 /**
- * Returns the cache recorded by a pending upload or attestation, or `undefined`
- * after the pending row has settled or expired.
- */
+Returns the cache recorded by a pending upload or attestation, or `undefined`
+after the pending row has settled or expired.
+*/
 export type PendingCacheResolver = (
 	id: string
 ) => Promise<CacheScope | undefined>;
 
 /**
- * A resolver for authorisations that declare no pending resource, so resource
- * resolution never looks one up. It returns `undefined` for every id.
- */
+A resolver for authorisations that declare no pending resource, so resource
+resolution never looks one up. It returns `undefined` for every id.
+*/
 export const noPendingCache: PendingCacheResolver = () =>
 	Promise.resolve(undefined);
 
 /**
- * Thrown when a procedure declares `resource: { cache: { fromPath: true } }`
- * on a router that supplies no path cache. The control router supplies none,
- * so no control procedure can use that location.
- */
+Thrown when a procedure declares `resource: { cache: { fromPath: true } }`
+on a router that supplies no path cache. The control router supplies none,
+so no control procedure can use that location.
+*/
 export class MissingPathCacheError extends Error {
 	constructor() {
 		super(
@@ -165,9 +165,9 @@ function hasWildcard(grants: AccessClaims['grants']): boolean {
 }
 
 /**
- * Requires the token to authorise the procedure's operation for its resolved
- * resource. A procedure without a `requires` declaration is denied.
- */
+Requires the token to authorise the procedure's operation for its resolved
+resource. A procedure without a `requires` declaration is denied.
+*/
 export async function authoriseRequest(
 	claims: AccessClaims,
 	meta: AuthzMeta,
@@ -213,10 +213,10 @@ export async function authoriseRequest(
 }
 
 /**
- * Requires `root:attach` authority for the cache and run root selected during
- * negotiation. The commit session inherits this binding, so later frames do
- * not repeat the root name.
- */
+Requires `root:attach` authority for the cache and run root selected during
+negotiation. The commit session inherits this binding, so later frames do
+not repeat the root name.
+*/
 export function authoriseAttachRoot(
 	claims: AccessClaims,
 	cache: CacheScope,

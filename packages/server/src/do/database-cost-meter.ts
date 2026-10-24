@@ -3,17 +3,17 @@ import { admitBoundParameters } from './statement-admission.ts';
 type AnyCursor = SqlStorageCursor<Record<string, SqlStorageValue>>;
 
 /**
- * Adds up the rows that Durable Object SQLite reads and writes, which is how
- * Cloudflare bills it.
- *
- * A cursor's totals cover one statement. `sql.exec` accepts a query string
- * holding several statements and returns the cursor of the last one, so the
- * totals for such a string omit every statement before the last. The binding
- * cannot refuse such a string: a semicolon can sit inside one statement, as it
- * does in a `CREATE TRIGGER` body, and `SqlStorage` has no way to report how
- * many statements a string holds. The row budget is debited from these
- * totals, so a multi-statement string is charged only for its last statement.
- */
+Adds up the rows that Durable Object SQLite reads and writes, which is how
+Cloudflare bills it.
+
+A cursor's totals cover one statement. `sql.exec` accepts a query string
+holding several statements and returns the cursor of the last one, so the
+totals for such a string omit every statement before the last. The binding
+cannot refuse such a string: a semicolon can sit inside one statement, as it
+does in a `CREATE TRIGGER` body, and `SqlStorage` has no way to report how
+many statements a string holds. The row budget is debited from these
+totals, so a multi-statement string is charged only for its last statement.
+*/
 export class DatabaseCostMeter {
 	private outstanding: AnyCursor | undefined;
 	rowsRead = 0;
@@ -46,9 +46,9 @@ interface CursorTracker {
 }
 
 /**
- * Returns the tracker for the scope that is open when a statement runs, or
- * undefined when no such scope is open.
- */
+Returns the tracker for the scope that is open when a statement runs, or
+undefined when no such scope is open.
+*/
 type ScopedMeter = () => CursorTracker | undefined;
 
 // Keep the platform cursor unchanged. Drizzle consumes it before the next

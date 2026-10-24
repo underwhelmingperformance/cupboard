@@ -59,9 +59,9 @@ export function serialiseGraceDecision(decision: GraceDecision): string {
 }
 
 /**
- * Parses the grace decision stored on a pending upload. An unset column comes
- * from a negotiation before grace decisions existed and grants no grace.
- */
+Parses the grace decision stored on a pending upload. An unset column comes
+from a negotiation before grace decisions existed and grants no grace.
+*/
 export function parseStoredGraceDecision(
 	source: string | null | undefined
 ): GraceDecision | undefined {
@@ -106,12 +106,12 @@ export type ConfirmedGrace =
 	| { readonly matched: false };
 
 /**
- * Applies a captured grace decision to the exact committed generation and NAR
- * hash. This also applies the decision after conceding to a concurrent winner,
- * before the pending row that stores it is cleared. The identity check always
- * runs, including when the cache had no grace, so callers can distinguish a
- * moved row from a matching row that receives no grace.
- */
+Applies a captured grace decision to the exact committed generation and NAR
+hash. This also applies the decision after conceding to a concurrent winner,
+before the pending row that stores it is cleared. The identity check always
+runs, including when the cache had no grace, so callers can distinguish a
+moved row from a matching row that receives no grace.
+*/
 export function confirmGrace(
 	context: ServerContext,
 	retention: RetentionService,
@@ -134,9 +134,9 @@ export function confirmGrace(
 }
 
 /**
- * Confirms grace for a whole closure. Only rows whose generation and NAR hash
- * still match receive an extension and appear in the result.
- */
+Confirms grace for a whole closure. Only rows whose generation and NAR hash
+still match receive an extension and appear in the result.
+*/
 export function confirmGraceBatch(
 	context: ServerContext,
 	retention: RetentionService,
@@ -240,11 +240,11 @@ export function confirmGraceBatch(
 }
 
 /**
- * Reads the stored grace deadlines after a monotonic extension. An earlier
- * publication or root transition may already have set a later deadline, so
- * replies must report the stored value rather than the latest candidate.
- * Paths without a deadline are absent from the result.
- */
+Reads the stored grace deadlines after a monotonic extension. An earlier
+publication or root transition may already have set a later deadline, so
+replies must report the stored value rather than the latest candidate.
+Paths without a deadline are absent from the result.
+*/
 export function storedGraceDeadlines(
 	database: ServerContext['db'],
 	cache: ResolvedCache,

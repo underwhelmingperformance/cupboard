@@ -100,28 +100,30 @@ describe('cupboard run', () => {
 				},
 				fetcher: (input) =>
 					Promise.resolve(
-						(input instanceof Request ? input.url : String(input)).startsWith(
-							'https://job.example/'
-						)
-							? Response.json({ value: 'signed-identity' })
-							: Response.json({
-									access_token: 'example',
-									token_type: 'Bearer',
-									expires_in: 900,
-									authorization_details: [],
-									read_resources: [
-										{
-											type: 'cupboard_cache',
-											cache: target.cache,
-											mode: 'content',
-											state: {
-												kind: 'existing',
-												access: 'public',
-												priority: 40
+						Response.json(
+							(input instanceof Request ? input.url : String(input)).startsWith(
+								'https://job.example/'
+							)
+								? { value: 'signed-identity' }
+								: {
+										access_token: 'example',
+										token_type: 'Bearer',
+										expires_in: 900,
+										authorization_details: [],
+										read_resources: [
+											{
+												type: 'cupboard_cache',
+												cache: target.cache,
+												mode: 'content',
+												state: {
+													kind: 'existing',
+													access: 'public',
+													priority: 40
+												}
 											}
-										}
-									]
-								})
+										]
+									}
+						)
 					),
 				runChild: () => Promise.resolve({ status: 0, signal: undefined })
 			}
@@ -291,21 +293,23 @@ describe('cupboard run', () => {
 					});
 
 					return Promise.resolve(
-						url.startsWith('https://job.example/')
-							? Response.json({ value: 'signed-identity' })
-							: Response.json({
-									access_token: 'example',
-									token_type: 'Bearer',
-									expires_in: 900,
-									authorization_details: [
-										{
-											type: 'cupboard_cache',
-											cache: target.cache,
-											actions: ['cache:read']
-										}
-									],
-									read_resources: resources
-								})
+						Response.json(
+							url.startsWith('https://job.example/')
+								? { value: 'signed-identity' }
+								: {
+										access_token: 'example',
+										token_type: 'Bearer',
+										expires_in: 900,
+										authorization_details: [
+											{
+												type: 'cupboard_cache',
+												cache: target.cache,
+												actions: ['cache:read']
+											}
+										],
+										read_resources: resources
+									}
+						)
 					);
 				},
 				runChild: async ({ environment }) => {

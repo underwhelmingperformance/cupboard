@@ -155,9 +155,9 @@ export interface SetupOptions {
 }
 
 /**
- * Properties to use when setup creates a missing cache before configuring Nix.
- * An existing cache keeps its properties, but its access must match.
- */
+Properties to use when setup creates a missing cache before configuring Nix.
+An existing cache keeps its properties, but its access must match.
+*/
 export interface ProvisionCache {
 	readonly name: string;
 	readonly rootTtl: string;
@@ -667,9 +667,9 @@ function resolveCacheAccessMode(
 }
 
 /**
- * Resolves the caches to configure and attaches cache-specific credentials.
- * If the cache input is empty, the run configures the default cache.
- */
+Resolves the caches to configure and attaches cache-specific credentials.
+If the cache input is empty, the run configures the default cache.
+*/
 function resolveCaches(
 	options: SetupOptions,
 	destinationCredential: BasicCredential | undefined
@@ -717,15 +717,15 @@ function resolveCaches(
 }
 
 /**
- * Registers every cache-specific password and credential-bearing URL as a run
- * secret. The runner replaces each exact value with `***` in the log.
- *
- * Percent-encoding can change a password when the URL places it in userinfo, so
- * masking the raw password does not necessarily mask the complete URL. Register
- * both forms before setup writes any output.
- *
- * GitHub Actions applies a mask only to log output written after the command.
- */
+Registers every cache-specific password and credential-bearing URL as a run
+secret. The runner replaces each exact value with `***` in the log.
+
+Percent-encoding can change a password when the URL places it in userinfo, so
+masking the raw password does not necessarily mask the complete URL. Register
+both forms before setup writes any output.
+
+GitHub Actions applies a mask only to log output written after the command.
+*/
 function maskCacheCredentials(
 	inputs: SetupInputs,
 	mask: (value: string) => void
@@ -1858,13 +1858,13 @@ export interface ResolveSubstitutersOptions {
 }
 
 /**
- * When a reuse view is configured, checks the priority of every configured
- * cache and the view. An absent named cache uses the default first-write
- * priority. Each cache must have a numerically lower priority than the view.
- * The returned list puts the caches before the view. This ordering
- * prevents a divergent input-addressed path in the view from replacing the path
- * selected from a destination cache.
- */
+When a reuse view is configured, checks the priority of every configured
+cache and the view. An absent named cache uses the default first-write
+priority. Each cache must have a numerically lower priority than the view.
+The returned list puts the caches before the view. This ordering
+prevents a divergent input-addressed path in the view from replacing the path
+selected from a destination cache.
+*/
 export async function resolveSubstituters(
 	options: ResolveSubstitutersOptions,
 	dependencies: CacheInfoFetchDependencies = {}

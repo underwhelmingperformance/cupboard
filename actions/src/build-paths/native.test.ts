@@ -40,7 +40,9 @@ describe('native build inputs', () => {
 describe('native build diagnostic', () => {
 	it('refuses an existing hook and recommends supported publication modes', async () => {
 		vi.stubEnv('GITHUB_ACTIONS', 'true');
-		const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+		const canWriteOutput = vi
+			.spyOn(process.stdout, 'write')
+			.mockReturnValue(true);
 		const protect = vi.fn(() => Promise.resolve());
 		const previousExitCode = process.exitCode;
 		let result: unknown;
@@ -62,7 +64,7 @@ describe('native build diagnostic', () => {
 				});
 			});
 			result = {
-				output: output.mock.calls,
+				output: canWriteOutput.mock.calls,
 				status: process.exitCode,
 				protectedPaths: protect.mock.calls
 			};
@@ -90,7 +92,9 @@ describe('native build logging', () => {
 			stopLogging();
 		});
 		vi.useFakeTimers();
-		const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+		const canWriteOutput = vi
+			.spyOn(process.stdout, 'write')
+			.mockReturnValue(true);
 		try {
 			await runNativeBuild(async () => {
 				await fetchWithProbeRetries(
@@ -104,7 +108,7 @@ describe('native build logging', () => {
 			vi.useRealTimers();
 		}
 
-		expect(output.mock.calls).toStrictEqual([
+		expect(canWriteOutput.mock.calls).toStrictEqual([
 			[
 				'::debug::probe attempt finished url=https://cache.example.test/a.narinfo attempt=1 outcome=succeeded elapsedMs=0\n'
 			]

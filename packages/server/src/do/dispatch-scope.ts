@@ -1,22 +1,22 @@
 /**
- * Wraps every method on `prototype` so each dispatch runs inside `scope`.
- *
- * A Durable Object applies this to its prototype once. The wrapper then covers
- * every method the runtime can dispatch, including requests, alarms, RPCs and
- * methods added later, so no dispatched method has to open the scope itself.
- *
- * A static initialiser wraps the prototype once. A Proxy over each instance
- * would instead intercept every property read, which the commit fan-out
- * performs constantly, so the prototype is the cheaper place for the wrapper.
- *
- * `scope` must reuse an enclosing scope when one is already open. A method that
- * calls another method of the same object enters a nested scope, and the
- * invocation still has exactly one.
- *
- * `scope` also receives the dispatching object, so it can read
- * instance-specific configuration. It also receives the dispatched method's
- * name.
- */
+Wraps every method on `prototype` so each dispatch runs inside `scope`.
+
+A Durable Object applies this to its prototype once. The wrapper then covers
+every method the runtime can dispatch, including requests, alarms, RPCs and
+methods added later, so no dispatched method has to open the scope itself.
+
+A static initialiser wraps the prototype once. A Proxy over each instance
+would instead intercept every property read, which the commit fan-out
+performs constantly, so the prototype is the cheaper place for the wrapper.
+
+`scope` must reuse an enclosing scope when one is already open. A method that
+calls another method of the same object enters a nested scope, and the
+invocation still has exactly one.
+
+`scope` also receives the dispatching object, so it can read
+instance-specific configuration. It also receives the dispatched method's
+name.
+*/
 export function wrapDispatchedMethods<T extends object>(
 	prototype: T,
 	scope: (body: () => unknown, receiver: T, method: string) => unknown

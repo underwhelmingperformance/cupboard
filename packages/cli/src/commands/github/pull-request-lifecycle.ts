@@ -141,11 +141,7 @@ function activityOutcome(
 		return false;
 	}
 
-	if (hasUnknownTypes || outcomes.has(undefined)) {
-		return undefined;
-	}
-
-	if (trigger.hasPathFilter) {
+	if (hasUnknownTypes || outcomes.has(undefined) || trigger.hasPathFilter) {
 		return undefined;
 	}
 
@@ -306,15 +302,13 @@ export function pullRequestLifecycleFindings(
 		if (outcomes.has(true)) {
 			return [];
 		}
-		return [
-			{
-				trigger: lifecycle,
-				finding:
-					outcomes.has(undefined) ||
-					unverified.some((candidate) => candidate.caller === job.caller)
-						? new PullRequestLifecycleUnverifiedFinding(lifecycle)
-						: new PullRequestLifecycleMissingFinding(lifecycle)
-			}
-		];
+		return {
+			trigger: lifecycle,
+			finding:
+				outcomes.has(undefined) ||
+				unverified.some((candidate) => candidate.caller === job.caller)
+					? new PullRequestLifecycleUnverifiedFinding(lifecycle)
+					: new PullRequestLifecycleMissingFinding(lifecycle)
+		};
 	});
 }

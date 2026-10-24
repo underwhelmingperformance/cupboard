@@ -136,13 +136,13 @@ const cohortsFileSchema = z.strictObject({
 });
 
 /**
- * Configures optional garbage collection between cohorts. Collection starts
- * only after the preceding cohort has published and released its temporary GC
- * roots.
- *
- * An ordinary collection failure produces a warning and does not fail the
- * build. A terminating signal still cancels the remaining cohorts.
- */
+Configures optional garbage collection between cohorts. Collection starts
+only after the preceding cohort has published and released its temporary GC
+roots.
+
+An ordinary collection failure produces a warning and does not fail the
+build. A terminating signal still cancels the remaining cohorts.
+*/
 export interface BetweenCohortCollectorOptions {
 	readonly signal?: AbortSignal;
 	readonly runCollector?: RunChild;
@@ -203,10 +203,10 @@ function childCommand(parts: readonly string[]): ChildCommand {
 }
 
 /**
- * Parses the contents of a cohorts file into build invocations, in order.
- * Contents that are not JSON of the cohort shape are refused with
- * {@link CohortsFileInvalidError}.
- */
+Parses the contents of a cohorts file into build invocations, in order.
+Contents that are not JSON of the cohort shape are refused with
+{@link CohortsFileInvalidError}.
+*/
 export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 	let json: unknown;
 	try {
@@ -246,9 +246,9 @@ export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 }
 
 /**
- * Deduplicates successful cohort targets and sorts them so aggregate-root
- * contents do not depend on cohort completion order.
- */
+Deduplicates successful cohort targets and sorts them so aggregate-root
+contents do not depend on cohort completion order.
+*/
 export function aggregateCohortTargets(
 	cohorts: readonly (readonly StorePathString[])[]
 ): readonly StorePathString[] {
@@ -279,10 +279,10 @@ function recordAggregateSubject(
 }
 
 /**
- * Combines version 3 cohort receipts. A `built` subject takes precedence when
- * another cohort later finds the same path in its store, and terminal target
- * failures remain distinct from command failures.
- */
+Combines version 3 cohort receipts. A `built` subject takes precedence when
+another cohort later finds the same path in its store, and terminal target
+failures remain distinct from command failures.
+*/
 export function aggregateBuildReceipts(
 	receipts: readonly BuildReceipt[]
 ): BuildReceiptV3 {
@@ -337,9 +337,9 @@ export function aggregateBuildReceipts(
 }
 
 /**
- * Keeps the public multi-receipt envelope unless the caller explicitly asks
- * for the version 3 aggregate used by the action output.
- */
+Keeps the public multi-receipt envelope unless the caller explicitly asks
+for the version 3 aggregate used by the action output.
+*/
 export function multiCohortReceiptDocument(
 	receipts: readonly BuildReceipt[],
 	shouldAggregateReceiptV3: boolean
@@ -358,9 +358,9 @@ interface AggregateCohortRootOptions {
 }
 
 /**
- * Leaves the aggregate root unchanged after any cohort failure. Once every
- * cohort succeeds, replaces it with the deduplicated targets from all cohorts.
- */
+Leaves the aggregate root unchanged after any cohort failure. Once every
+cohort succeeds, replaces it with the deduplicated targets from all cohorts.
+*/
 export async function updateAggregateCohortRoot(
 	options: AggregateCohortRootOptions,
 	setRoot: (root: RootName, body: RootSetBody) => Promise<void>
@@ -409,11 +409,11 @@ function parseUploadConcurrency(value: string): number {
 }
 
 /**
- * Opens the Nix daemon connection used by build-push preflight and batched
- * publication. The connection is bound to the command's abort signal, so
- * cancelling the command also abandons a connection that is waiting on a daemon
- * protocol operation.
- */
+Opens the Nix daemon connection used by build-push preflight and batched
+publication. The connection is bound to the command's abort signal, so
+cancelling the command also abandons a connection that is waiting on a daemon
+protocol operation.
+*/
 export function createBuildPushDaemon(
 	config: NixStoreConfig,
 	options: Pick<NixDaemonClientOptions, 'connect' | 'signal'>

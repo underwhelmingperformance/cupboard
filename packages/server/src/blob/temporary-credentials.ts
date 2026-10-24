@@ -90,11 +90,11 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 /**
- * Creates an R2 temporary credential locally. The parent secret signs an HS256
- * JWT, the parent access key ID is reused, and the temporary secret is the
- * SHA-256 digest of the JWT. R2 enforces the JWT's bucket, grant and path claims.
- * This operation makes no network request.
- */
+Creates an R2 temporary credential locally. The parent secret signs an HS256
+JWT, the parent access key ID is reused, and the temporary secret is the
+SHA-256 digest of the JWT. R2 enforces the JWT's bucket, grant and path claims.
+This operation makes no network request.
+*/
 export async function createR2TemporaryCredentials(
 	configuration: R2PresignerConfiguration,
 	options: R2TemporaryCredentialOptions,

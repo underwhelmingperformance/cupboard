@@ -111,10 +111,10 @@ export interface CacheTargetAuthorisation<T> extends Omit<
 }
 
 /**
- * Separates an optional cache name before `--` from command arguments after
- * it. Without a separator, `command-payload` takes every positional as command
- * payload and `cache-only` takes one as the cache name, refusing more.
- */
+Separates an optional cache name before `--` from command arguments after
+it. Without a separator, `command-payload` takes every positional as command
+payload and `cache-only` takes one as the cache name, refusing more.
+*/
 export function splitDelimitedCachePositionals(
 	positionals: readonly string[],
 	rawArguments: readonly string[],
@@ -156,8 +156,8 @@ export function splitDelimitedCachePositionals(
 }
 
 /**
- * Resolves a tenant or cache URL to one native cache target.
- */
+Resolves a tenant or cache URL to one native cache target.
+*/
 export function cacheTargetFromUrl(url: URL): CacheTarget {
 	try {
 		return parseTenantCacheUrl(url);
@@ -188,12 +188,12 @@ export function cacheTargetWithName(
 }
 
 /**
- * Resolves the optional cache name after a tenant URL. The first positional
- * is payload when it matches an existing file or directory, so a `result`
- * symlink is never read as a cache. Otherwise a syntactically valid name
- * selects a named cache when that cache exists, and stays payload when none
- * does.
- */
+Resolves the optional cache name after a tenant URL. The first positional
+is payload when it matches an existing file or directory, so a `result`
+symlink is never read as a cache. Otherwise a syntactically valid name
+selects a named cache when that cache exists, and stays payload when none
+does.
+*/
 export async function resolveCachePositionals<T>(
 	url: URL,
 	positionals: readonly string[],
@@ -206,10 +206,10 @@ export async function resolveCachePositionals<T>(
 	}
 
 	const [candidate, ...rest] = positionals;
-	const existsLocally = resolution.existsLocally ?? existsSync;
+	const doesExistLocally = resolution.existsLocally ?? existsSync;
 	const name = cacheNameSchema.safeParse(candidate);
 
-	if (!name.success || existsLocally(name.data)) {
+	if (!name.success || doesExistLocally(name.data)) {
 		return parsedPayload(urlTarget, positionals, resolution);
 	}
 
@@ -239,8 +239,8 @@ export async function resolveCachePositionals<T>(
 }
 
 /**
- * Returns an exact-cache lookup backed by the cache-scoped read procedure.
- */
+Returns an exact-cache lookup backed by the cache-scoped read procedure.
+*/
 export function cacheExistsWith(
 	client: CacheLookupClient
 ): (target: CacheTarget) => Promise<boolean> {
@@ -259,10 +259,10 @@ export function cacheExistsWith(
 }
 
 /**
- * Resolves a positional cache with the command's own cache-scoped authority.
- * The same credential is reused when the resolved target is the candidate
- * that the exact-cache lookup probed.
- */
+Resolves a positional cache with the command's own cache-scoped authority.
+The same credential is reused when the resolved target is the candidate
+that the exact-cache lookup probed.
+*/
 export async function resolveAuthorisedCachePositionals<T>(
 	url: URL,
 	positionals: readonly string[],

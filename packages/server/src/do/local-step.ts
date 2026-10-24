@@ -31,9 +31,9 @@ import {
 } from './object-move.ts';
 
 /**
- * Matches a tenant row whose object has not recorded `step`. A null step means
- * it has not been woken since the column was added.
- */
+Matches a tenant row whose object has not recorded `step`. A null step means
+it has not been woken since the column was added.
+*/
 export function belowLocalStep(step: LocalStep): SQL {
 	const { localStep } = d1Schema.tenant;
 
@@ -41,45 +41,45 @@ export function belowLocalStep(step: LocalStep): SQL {
 }
 
 /**
- * The step that a page recorded when the tenant row already had it. A page that
- * raises the step deletes the key.
- */
+The step that a page recorded when the tenant row already had it. A page that
+raises the step deletes the key.
+*/
 export const repeatedRecordingKey = 'local-step:repeated-recording';
 
 /**
- * The required local step that the last wake asked this object to record. The
- * `local-step` maintenance pass runs pages while the key is present.
- */
+The required local step that the last wake asked this object to record. The
+`local-step` maintenance pass runs pages while the key is present.
+*/
 export const localStepPendingKey = 'local-step:pending';
 
 /**
- * When the current run of pages without progress began. A page that
- * progresses deletes the key.
- */
+When the current run of pages without progress began. A page that
+progresses deletes the key.
+*/
 export const localStepStalledSinceKey = 'local-step:stalled-since';
 
 /**
- * The result of one page of local-step work. `unconfigured` is a tenant whose
- * create failed part way through, so the object has no tenant row to update.
- * `incomplete` is a page that left work to do. `failed` is a page that threw;
- * `error` summarises the error.
- *
- * `projected` counts the caches projected, the objects moved, or the rows
- * rewritten in a full batch of a retention or grant migration. `progressed` is
- * whether the page moved the object's durable state forward. An `incomplete`
- * page progressed when it committed a migration, completed a batch, projected
- * or moved an item, or saved a cursor, so it can progress with `projected` at
- * zero, for example when it only moved a cursor past prefixes that contain no
- * objects to move. A `recorded` page progressed when it raised the recorded
- * step or projected or moved an item.
- *
- * After a step is recorded, the projection and the object moves start again
- * and save their cursors again. Once a page has recorded the same step that
- * the tenant already had, those cursor saves are therefore not progress while
- * the requested step is not higher than that step: only an item projected or
- * moved counts. A request for a higher step counts them again, because the
- * pages then work towards a step that the tenant has not reached.
- */
+The result of one page of local-step work. `unconfigured` is a tenant whose
+create failed part way through, so the object has no tenant row to update.
+`incomplete` is a page that left work to do. `failed` is a page that threw;
+`error` summarises the error.
+
+`projected` counts the caches projected, the objects moved, or the rows
+rewritten in a full batch of a retention or grant migration. `progressed` is
+whether the page moved the object's durable state forward. An `incomplete`
+page progressed when it committed a migration, completed a batch, projected
+or moved an item, or saved a cursor, so it can progress with `projected` at
+zero, for example when it only moved a cursor past prefixes that contain no
+objects to move. A `recorded` page progressed when it raised the recorded
+step or projected or moved an item.
+
+After a step is recorded, the projection and the object moves start again
+and save their cursors again. Once a page has recorded the same step that
+the tenant already had, those cursor saves are therefore not progress while
+the requested step is not higher than that step: only an item projected or
+moved counts. A request for a higher step counts them again, because the
+pages then work towards a step that the tenant has not reached.
+*/
 export type LocalStepOutcome =
 	| {
 			readonly kind: 'recorded';
@@ -95,8 +95,8 @@ export type LocalStepOutcome =
 	| { readonly kind: 'failed'; readonly error: string };
 
 /**
- * The step that the tenant's row records, or undefined when it records none.
- */
+The step that the tenant's row records, or undefined when it records none.
+*/
 export async function readRecordedLocalStep(
 	context: ServerContext
 ): Promise<LocalStep | undefined> {
@@ -116,27 +116,27 @@ export async function readRecordedLocalStep(
 }
 
 /**
- * Runs one page of the work this build's steps require of the object. When no
- * work remains, records the step that the object reached in the tenant's D1
- * row, together with the attempt at `attemptedAt`, in one batch. The attempt
- * clears the attempt time when the step satisfies `requested`.
- *
- * An object that the control plane has not configured yet has no tenant state
- * to advance, and an object whose work does not fit one page has not reached
- * the step. In both cases the recorded step stays where it was.
- *
- * The stored value is a watermark. A build that has fewer steps than the one
- * that ran before it must not lower what that build recorded, so the update
- * applies only where the stored step is absent or lower. Rerunning it when the
- * row already contains the step writes only the attempt.
- *
- * The work runs on every call, without reading the recorded step first. A step
- * added here must reach the same state from any starting point, and must bound
- * its D1 and R2 calls, reporting `incomplete` when work remains, because the
- * object runs further pages until it records the step. `requested` is the step
- * that the pending request asks for, or undefined when the object cannot read
- * the request.
- */
+Runs one page of the work this build's steps require of the object. When no
+work remains, records the step that the object reached in the tenant's D1
+row, together with the attempt at `attemptedAt`, in one batch. The attempt
+clears the attempt time when the step satisfies `requested`.
+
+An object that the control plane has not configured yet has no tenant state
+to advance, and an object whose work does not fit one page has not reached
+the step. In both cases the recorded step stays where it was.
+
+The stored value is a watermark. A build that has fewer steps than the one
+that ran before it must not lower what that build recorded, so the update
+applies only where the stored step is absent or lower. Rerunning it when the
+row already contains the step writes only the attempt.
+
+The work runs on every call, without reading the recorded step first. A step
+added here must reach the same state from any starting point, and must bound
+its D1 and R2 calls, reporting `incomplete` when work remains, because the
+object runs further pages until it records the step. `requested` is the step
+that the pending request asks for, or undefined when the object cannot read
+the request.
+*/
 export async function recordLocalStep(
 	context: ServerContext,
 	families: readonly ObjectFamily[],

@@ -54,10 +54,10 @@ export interface VerifyTlogEntry {
 }
 
 /**
- * The trusted root against which the bundle verified: the public-good Sigstore
- * root, or a root from a trusted-root file, as its 1-based position among the
- * `count` trusted roots in that file.
- */
+The trusted root against which the bundle verified: the public-good Sigstore
+root, or a root from a trusted-root file, as its 1-based position among the
+`count` trusted roots in that file.
+*/
 export type AcceptingRoot =
 	| { readonly kind: 'public-good' }
 	| {
@@ -67,22 +67,22 @@ export type AcceptingRoot =
 	  };
 
 /**
- * The certificate-transparency evidence for a bundle signed with a
- * certificate: the number of signed certificate timestamps that the verifier
- * checked, and the minimum that applied to the accepting root. A bundle signed
- * with a public key has no certificate, and the verifier checks no signed
- * certificate timestamp.
- */
+The certificate-transparency evidence for a bundle signed with a
+certificate: the number of signed certificate timestamps that the verifier
+checked, and the minimum that applied to the accepting root. A bundle signed
+with a public key has no certificate, and the verifier checks no signed
+certificate timestamp.
+*/
 export interface CertificateTransparency {
 	readonly signedCertificateTimestamps: number;
 	readonly threshold: number;
 }
 
 /**
- * Evidence extracted after Sigstore verifies a bundle. `integratedAt` is the
- * earliest Rekor integration time, not the time when the signature was
- * created. `timestampCount` counts verified signed timestamps.
- */
+Evidence extracted after Sigstore verifies a bundle. `integratedAt` is the
+earliest Rekor integration time, not the time when the signature was
+created. `timestampCount` counts verified signed timestamps.
+*/
 export interface VerifyTrust {
 	readonly integratedAt?: string;
 	readonly tlogEntries: readonly VerifyTlogEntry[];
@@ -99,17 +99,17 @@ export interface VerifyResult {
 	readonly signerIssuer?: string;
 	readonly provenance?: SlsaProvenanceSummary;
 	/**
-	 * The Statement predicate, if present. Callers can interpret predicates they
-	 * recognise. This package additionally parses SLSA provenance.
-	 */
+	The Statement predicate, if present. Callers can interpret predicates they
+	recognise. This package additionally parses SLSA provenance.
+	*/
 	readonly predicate?: unknown;
 	readonly trust: VerifyTrust;
 }
 
 /**
- * A resolved signer-identity policy. A string term is matched exactly; a
- * regular expression is matched as a pattern.
- */
+A resolved signer-identity policy. A string term is matched exactly; a
+regular expression is matched as a pattern.
+*/
 export interface VerifiedIdentityPolicy {
 	readonly identity: string | RegExp;
 	readonly issuer: string | RegExp;
@@ -192,11 +192,11 @@ export type TrustedRootFormatReason =
 	| { readonly kind: 'unusable-root-line'; readonly line: number };
 
 /**
- * The trusted-root file is invalid: it is neither one Sigstore trusted root nor
- * JSON Lines of trusted roots (the form that `gh attestation trusted-root`
- * prints). This error is also thrown when a root in the file contains a
- * certificate or key that the verifier cannot load.
- */
+The trusted-root file is invalid: it is neither one Sigstore trusted root nor
+JSON Lines of trusted roots (the form that `gh attestation trusted-root`
+prints). This error is also thrown when a root in the file contains a
+certificate or key that the verifier cannot load.
+*/
 export class TrustedRootFormatError extends UsageError {
 	constructor(
 		public readonly file: string,
@@ -238,11 +238,11 @@ function trustedRootFormatProblem(reason: TrustedRootFormatReason): string {
 }
 
 /**
- * The caller set `--ctlog-threshold 0`, but every trusted root lists a
- * certificate-transparency log. A zero applies only to a root that lists no
- * such log, so it would have no effect. `trustedRoot` is the trusted-root file,
- * or undefined for the public-good Sigstore root.
- */
+The caller set `--ctlog-threshold 0`, but every trusted root lists a
+certificate-transparency log. A zero applies only to a root that lists no
+such log, so it would have no effect. `trustedRoot` is the trusted-root file,
+or undefined for the public-good Sigstore root.
+*/
 export class IneffectiveCtlogThresholdError extends UsageError {
 	constructor(public readonly trustedRoot: string | undefined) {
 		super(
@@ -255,10 +255,10 @@ export class IneffectiveCtlogThresholdError extends UsageError {
 }
 
 /**
- * The bundle did not verify against any of several trusted roots. `failures`
- * lists the failure for each root in file order, and the first failure is the
- * error's `cause`.
- */
+The bundle did not verify against any of several trusted roots. `failures`
+lists the failure for each root in file order, and the first failure is the
+error's `cause`.
+*/
 export class TrustedRootsRejectedError extends Error {
 	constructor(public readonly failures: NonEmptyList<unknown>) {
 		super(
@@ -311,10 +311,10 @@ function resolveCertificateTerm(
 }
 
 /**
- * Resolve identity-policy inputs into a signer-identity policy. Exactly one of
- * the exact or regex form must be given for the identity and for the issuer;
- * the two terms may use different forms.
- */
+Resolve identity-policy inputs into a signer-identity policy. Exactly one of
+the exact or regex form must be given for the identity and for the issuer;
+the two terms may use different forms.
+*/
 export function identityPolicy(
 	options: IdentityPolicyOptions
 ): VerifiedIdentityPolicy {
@@ -339,12 +339,12 @@ export function identityPolicy(
 }
 
 /**
- * Converts an identity policy to Sigstore's verification policy. Exact
- * identities become anchored, escaped regular expressions because Sigstore
- * matches subject alternative names with a regular expression. Regex issuers
- * are omitted here because Sigstore compares certificate issuer extensions by
- * exact value.
- */
+Converts an identity policy to Sigstore's verification policy. Exact
+identities become anchored, escaped regular expressions because Sigstore
+matches subject alternative names with a regular expression. Regex issuers
+are omitted here because Sigstore compares certificate issuer extensions by
+exact value.
+*/
 export function verificationPolicy(
 	policy: VerifiedIdentityPolicy
 ): VerificationPolicy {
@@ -360,12 +360,12 @@ export function verificationPolicy(
 }
 
 /**
- * Verify a Sigstore DSSE bundle against the trusted root and an identity
- * policy, returning the signer, the in-toto predicate type and subject digests,
- * and the raw predicate. When the `trustedRoot` file contains several roots, as
- * JSON Lines, verification succeeds if the bundle verifies against any of
- * them.
- */
+Verify a Sigstore DSSE bundle against the trusted root and an identity
+policy, returning the signer, the in-toto predicate type and subject digests,
+and the raw predicate. When the `trustedRoot` file contains several roots, as
+JSON Lines, verification succeeds if the bundle verifies against any of
+them.
+*/
 export async function verifyBundle(
 	bytes: Uint8Array,
 	policy: VerifiedIdentityPolicy,
@@ -440,9 +440,9 @@ export async function verifyBundle(
 }
 
 /**
- * Requires the expected subject digest and predicate type, then returns the
- * verified identity, predicate, provenance summary, and trust evidence.
- */
+Requires the expected subject digest and predicate type, then returns the
+verified identity, predicate, provenance summary, and trust evidence.
+*/
 export function resultFor(
 	bundle: string,
 	verified: VerifiedBundle,
@@ -537,12 +537,12 @@ function verifierOptions(options: BundleVerifyOptions): VerifierOptions {
 }
 
 /**
- * Sigstore's verifier takes one trusted root, so the bundle is verified against
- * each root in turn until verification succeeds. With one root, this function
- * rethrows the failure against that root unchanged. With several, it throws
- * `TrustedRootsRejectedError`, which lists the failure against each root. A
- * `PolicyError` is rethrown at once, whatever the number of roots.
- */
+Sigstore's verifier takes one trusted root, so the bundle is verified against
+each root in turn until verification succeeds. With one root, this function
+rethrows the failure against that root unchanged. With several, it throws
+`TrustedRootsRejectedError`, which lists the failure against each root. A
+`PolicyError` is rethrown at once, whatever the number of roots.
+*/
 function verifyAgainstAnyRoot(
 	roots: NonEmptyList<LoadedRoot>,
 	signedEntity: SignedEntity,
@@ -576,10 +576,10 @@ function verifyAgainstAnyRoot(
 }
 
 /**
- * The signer from the root against which the bundle verified, the root's
- * 1-based position in the list, and the certificate-transparency threshold
- * that applied to that root.
- */
+The signer from the root against which the bundle verified, the root's
+1-based position in the list, and the certificate-transparency threshold
+that applied to that root.
+*/
 interface AcceptedVerification {
 	readonly signer: Signer;
 	readonly position: number;
@@ -626,26 +626,26 @@ function verifyAgainstRoot(
 }
 
 /**
- * The Sigstore verifier's own default for each threshold, which applies when
- * the caller sets none.
- */
+The Sigstore verifier's own default for each threshold, which applies when
+the caller sets none.
+*/
 export const defaultVerifierThreshold = 1;
 
 /**
- * A zero certificate-transparency threshold applies only to a root that lists
- * no certificate-transparency log. For a root that lists one, the threshold is
- * at least 1, so a bundle that verifies against the public-good root still
- * needs a signed certificate timestamp. `gh attestation trusted-root` prints
- * the public-good root next to GitHub's root, which lists no such log, so a
- * zero that applied to every root would accept a public-good certificate
- * without a signed certificate timestamp.
- *
- * A zero transparency-log threshold applies to every root. A `tsa-only` bundle
- * has no Rekor entry and verifies against the public-good root, which lists
- * transparency logs. If this function raised the transparency-log threshold for
- * such a root, as it does the certificate-transparency threshold, no `tsa-only`
- * bundle would verify.
- */
+A zero certificate-transparency threshold applies only to a root that lists
+no certificate-transparency log. For a root that lists one, the threshold is
+at least 1, so a bundle that verifies against the public-good root still
+needs a signed certificate timestamp. `gh attestation trusted-root` prints
+the public-good root next to GitHub's root, which lists no such log, so a
+zero that applied to every root would accept a public-good certificate
+without a signed certificate timestamp.
+
+A zero transparency-log threshold applies to every root. A `tsa-only` bundle
+has no Rekor entry and verifies against the public-good root, which lists
+transparency logs. If this function raised the transparency-log threshold for
+such a root, as it does the certificate-transparency threshold, no `tsa-only`
+bundle would verify.
+*/
 function rootVerifierOptions(
 	root: TrustedRoot,
 	options: VerifierOptions
@@ -667,9 +667,9 @@ function rootVerifierOptions(
 type NonEmptyList<T> = readonly [T, ...T[]];
 
 /**
- * A trusted root together with the trust material that the verifier builds
- * from it.
- */
+A trusted root together with the trust material that the verifier builds
+from it.
+*/
 interface LoadedRoot {
 	readonly root: TrustedRoot;
 	readonly material: TrustMaterial;
@@ -697,10 +697,10 @@ async function trustedRoots(
 }
 
 /**
- * Builds the trust material for one root of the file. A root that the verifier
- * cannot load is reported here, so a broken root is not hidden by another root
- * that verifies the bundle.
- */
+Builds the trust material for one root of the file. A root that the verifier
+cannot load is reported here, so a broken root is not hidden by another root
+that verifies the bundle.
+*/
 function loadedRoot(file: string, document: ParsedRoot): LoadedRoot {
 	const root = TrustedRoot.fromJSON(document.value);
 
@@ -718,20 +718,20 @@ function loadedRoot(file: string, document: ParsedRoot): LoadedRoot {
 }
 
 /**
- * A trusted root parsed from the file, and its line number when the file is
- * JSON Lines.
- */
+A trusted root parsed from the file, and its line number when the file is
+JSON Lines.
+*/
 interface ParsedRoot {
 	readonly value: object;
 	readonly line?: number;
 }
 
 /**
- * Parses the text of a trusted-root file as one JSON object, which may span
- * lines, or as JSON Lines with one object per non-blank line, the form that
- * `gh attestation trusted-root` prints. The text is JSON Lines when it does not
- * parse as a whole and its first non-blank line is a JSON object on its own.
- */
+Parses the text of a trusted-root file as one JSON object, which may span
+lines, or as JSON Lines with one object per non-blank line, the form that
+`gh attestation trusted-root` prints. The text is JSON Lines when it does not
+parse as a whole and its first non-blank line is a JSON object on its own.
+*/
 function parseTrustedRoots(
 	file: string,
 	text: string

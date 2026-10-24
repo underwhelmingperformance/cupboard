@@ -141,16 +141,13 @@ async function createManagedCache(
 	return token;
 }
 
-async function addManagedCache(
-	token: string,
-	cache: Extract<CacheScope, { kind: 'named' }>
-): Promise<void> {
-	const created = await putManagedCache(token, cache);
+async function addManagedCache(token: string): Promise<void> {
+	const created = await putManagedCache(token, secondManagedCache);
 
 	expect(created.status).toBe(StatusCodes.OK);
 
 	const marked = await authorisedFetch(
-		`/caches/${cache.name}/retirement`,
+		`/caches/${secondManagedCache.name}/retirement`,
 		token,
 		{
 			body: JSON.stringify({ retireWhenEmpty: true }),
@@ -780,7 +777,7 @@ describe('managed cache retirement', () => {
 	it('wakes for a later cache before retrying a blocked retirement', async () => {
 		const token = await createManagedCache('managed-retirement-later-wake');
 		await makeRetirementDue();
-		await addManagedCache(token, secondManagedCache);
+		await addManagedCache(token);
 		const nextDeadline = await runInDurableObject(
 			currentServer(),
 			(instance) => {
@@ -859,7 +856,7 @@ describe('managed cache retirement', () => {
 
 	it('revisits a due cache after a bounded upload expiry spans caches', async () => {
 		const token = await createManagedCache('managed-retirement-expiry-backlog');
-		await addManagedCache(token, secondManagedCache);
+		await addManagedCache(token);
 		await makeRetirementDue();
 		await runInDurableObject(currentServer(), (instance, state) => {
 			const cache = instance.context.cacheRepository.require(managedCache);
@@ -1210,7 +1207,7 @@ describe('managed cache retirement', () => {
 
 	it('retires a later cache when the first claim keeps failing', async () => {
 		const token = await createManagedCache('managed-retirement-fairness');
-		await addManagedCache(token, secondManagedCache);
+		await addManagedCache(token);
 		await makeRetirementDue();
 		await makeRetirementDue(secondManagedCache);
 		await stageRetirementClaim();

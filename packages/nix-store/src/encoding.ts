@@ -1,6 +1,6 @@
 /**
- * Encodes bytes with the standard base64 alphabet and `=` padding.
- */
+Encodes bytes with the standard base64 alphabet and `=` padding.
+*/
 export function bytesToBase64(bytes: Uint8Array): string {
 	let binary = '';
 
@@ -15,9 +15,9 @@ export function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /**
- * Decodes standard base64 into bytes. `atob` rejects malformed input with a
- * `DOMException`.
- */
+Decodes standard base64 into bytes. `atob` rejects malformed input with a
+`DOMException`.
+*/
 export function base64ToBytes(value: string): Uint8Array {
 	return Uint8Array.from(
 		atob(value),
@@ -26,8 +26,8 @@ export function base64ToBytes(value: string): Uint8Array {
 }
 
 /**
- * Encodes bytes with the URL-safe base64 alphabet and no padding.
- */
+Encodes bytes with the URL-safe base64 alphabet and no padding.
+*/
 export function bytesToBase64Url(bytes: Uint8Array): string {
 	return bytesToBase64(bytes)
 		.replaceAll('+', '-')
@@ -36,8 +36,8 @@ export function bytesToBase64Url(bytes: Uint8Array): string {
 }
 
 /**
- * Encodes bytes as lowercase hexadecimal.
- */
+Encodes bytes as lowercase hexadecimal.
+*/
 export function bytesToHex(bytes: Uint8Array): string {
 	let hex = '';
 
@@ -49,10 +49,10 @@ export function bytesToHex(bytes: Uint8Array): string {
 }
 
 /**
- * Decodes uppercase or lowercase hexadecimal into bytes. Throws `RangeError`
- * when the input has an odd length or contains a character outside the
- * hexadecimal alphabet.
- */
+Decodes uppercase or lowercase hexadecimal into bytes. Throws `RangeError`
+when the input has an odd length or contains a character outside the
+hexadecimal alphabet.
+*/
 export function hexToBytes(value: string): Uint8Array {
 	if (value.length % 2 !== 0 || /[^\da-f]/iu.test(value)) {
 		throw new RangeError(`not a valid hex string: ${value}`);

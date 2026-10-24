@@ -177,10 +177,10 @@ const inheritanceDiagnosticTtlMs = 7 * 24 * 60 * 60_000;
 const inheritanceContinuationDelayMs = 1;
 
 /**
- * How an inheritance attempt ended. `budget-exhausted` means more work
- * remains for another pass. `superseded` means the path no longer has
- * the queued generation.
- */
+How an inheritance attempt ended. `budget-exhausted` means more work
+remains for another pass. `superseded` means the path no longer has
+the queued generation.
+*/
 type InheritanceResult =
 	| 'complete'
 	| 'over-quota'
@@ -190,8 +190,8 @@ type InheritanceResult =
 	| 'superseded';
 
 /**
- * A queued path that the drain removed from the queue.
- */
+A queued path that the drain removed from the queue.
+*/
 export interface DequeuedInheritance {
 	readonly cacheId: CacheId;
 	readonly storePathHash: StorePathHash;
@@ -200,8 +200,8 @@ export interface DequeuedInheritance {
 }
 
 /**
- * The result of one drain pass, and the paths that it removed from the queue.
- */
+The result of one drain pass, and the paths that it removed from the queue.
+*/
 export interface InheritanceDrainOutcome {
 	readonly progress: MaintenanceProgress;
 	readonly dequeued: readonly DequeuedInheritance[];
@@ -219,9 +219,9 @@ export interface InheritanceSourceRow {
 }
 
 /**
- * One committed path that inherits attestations. The path and NAR hash come
- * from the committed narinfo row.
- */
+One committed path that inherits attestations. The path and NAR hash come
+from the committed narinfo row.
+*/
 export interface InheritanceRequest {
 	readonly cache: ResolvedCache;
 	readonly storePathHash: StorePathHash;
@@ -443,18 +443,18 @@ export class AttestationsService {
 	}
 
 	/**
-	 * Whether the cache holds a live attestation reference to the bundle.
-	 *
-	 * An `attestation_ref` row records the narinfo generation but not the cache
-	 * generation. Join it to `blob_ref` on the tenant, cache identity, path and
-	 * narinfo generation, then apply the lifecycle-generation predicate. This
-	 * excludes references from an earlier cache incarnation after the cache name
-	 * is reused.
-	 *
-	 * The inner join also excludes a reference after path retirement has removed
-	 * its reference edge, even if attestation cleanup has not yet removed the
-	 * reference.
-	 */
+	Whether the cache holds a live attestation reference to the bundle.
+
+	An `attestation_ref` row records the narinfo generation but not the cache
+	generation. Join it to `blob_ref` on the tenant, cache identity, path and
+	narinfo generation, then apply the lifecycle-generation predicate. This
+	excludes references from an earlier cache incarnation after the cache name
+	is reused.
+
+	The inner join also excludes a reference after path retirement has removed
+	its reference edge, even if attestation cleanup has not yet removed the
+	reference.
+	*/
 	private async hasOwnBundleReferenceInCache(
 		cache: ResolvedCache,
 		digest: Sha256HexDigest
@@ -513,16 +513,16 @@ export class AttestationsService {
 	}
 
 	/**
-	 * Returns the greatest narinfo generation among the reference edges for this
-	 * tenant, cache identity and path that the current cache generation authorises,
-	 * or `undefined` when it authorises none.
-	 *
-	 * A recommit can leave an earlier edge behind until the drain retires it.
-	 * Narinfo generations increase and never repeat for a stored name and path,
-	 * so the greatest authorised generation identifies the current commit.
-	 * Advancing the cache generation excludes every edge from the previous cache
-	 * incarnation.
-	 */
+	Returns the greatest narinfo generation among the reference edges for this
+	tenant, cache identity and path that the current cache generation authorises,
+	or `undefined` when it authorises none.
+
+	A recommit can leave an earlier edge behind until the drain retires it.
+	Narinfo generations increase and never repeat for a stored name and path,
+	so the greatest authorised generation identifies the current commit.
+	Advancing the cache generation excludes every edge from the previous cache
+	incarnation.
+	*/
 	private async authorisedNarInfoGeneration(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash
@@ -1675,9 +1675,9 @@ export class AttestationsService {
 	}
 
 	/**
-	 * Queues a committed path for attestation inheritance and arms the alarm
-	 * that drains the queue. The commit does not wait for inheritance.
-	 */
+	Queues a committed path for attestation inheritance and arms the alarm
+	that drains the queue. The commit does not wait for inheritance.
+	*/
 	async queueInheritance(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash,
@@ -1712,10 +1712,10 @@ export class AttestationsService {
 	}
 
 	/**
-	 * When the queue next has a path that the drain may attempt, or `undefined`
-	 * when the queue is empty. The maintenance scheduler arms the alarm for this
-	 * time, so a scheduled retry is not lost when an earlier alarm runs first.
-	 */
+	When the queue next has a path that the drain may attempt, or `undefined`
+	when the queue is empty. The maintenance scheduler arms the alarm for this
+	time, so a scheduled retry is not lost when an earlier alarm runs first.
+	*/
 	nextInheritanceAt(): number | undefined {
 		const diagnostic = this.context.db
 			.select({ expiresAt: schema.attestationInheritanceFailures.expiresAt })
@@ -1741,11 +1741,11 @@ export class AttestationsService {
 	}
 
 	/**
-	 * Inherits attestations for one page of queued paths. A path leaves the
-	 * queue when inheritance ends, when its narinfo row no longer has the queued
-	 * generation. A path whose
-	 * inheritance runs out of subrequests stays queued for the next pass.
-	 */
+	Inherits attestations for one page of queued paths. A path leaves the
+	queue when inheritance ends, when its narinfo row no longer has the queued
+	generation. A path whose
+	inheritance runs out of subrequests stays queued for the next pass.
+	*/
 	async drainInheritanceQueue(
 		logger: Logger
 	): Promise<InheritanceDrainOutcome> {
@@ -2419,15 +2419,15 @@ export class AttestationsService {
 	}
 
 	/**
-	 * Of these stored list objects, the ones that still describe the generation
-	 * this cache's narinfo row holds for the path.
-	 *
-	 * This is the read path's own test, `isListOfCommittedGeneration`, with the
-	 * local row standing in for the D1 edge the read compares against. A list
-	 * object records a generation and no NAR hash, so the comparison is by
-	 * generation alone, and an object with no recorded generation is treated
-	 * exactly as a read of this cache would treat it.
-	 */
+	Of these stored list objects, the ones that still describe the generation
+	this cache's narinfo row holds for the path.
+
+	This is the read path's own test, `isListOfCommittedGeneration`, with the
+	local row standing in for the D1 edge the read compares against. A list
+	object records a generation and no NAR hash, so the comparison is by
+	generation alone, and an object with no recorded generation is treated
+	exactly as a read of this cache would treat it.
+	*/
 	currentListObjects(
 		cache: ResolvedCache,
 		objects: ReadonlyMap<StorePathHash, R2Object>
@@ -2505,10 +2505,10 @@ export class AttestationsService {
 	}
 
 	/**
-	 * Removes the list objects when the retired narinfo generation was the last
-	 * committed generation for each path. One bulk call can remove all of these
-	 * objects because no later generation uses them.
-	 */
+	Removes the list objects when the retired narinfo generation was the last
+	committed generation for each path. One bulk call can remove all of these
+	objects because no later generation uses them.
+	*/
 	async discardLists(
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
@@ -2527,18 +2527,18 @@ export class AttestationsService {
 	}
 
 	/**
-	 * Removes the list object of a retired narinfo generation, and preserves an
-	 * object that belongs to a later generation of the same path.
-	 *
-	 * An object with no recorded generation was written before this server
-	 * recorded one, so it describes a generation older than the recommit that
-	 * kept the path. Remove it too.
-	 *
-	 * Call head inside the ordered mutation, after any abandoned publication for
-	 * the key has settled. If head runs before that wait, it can observe the old
-	 * object while an abandoned publication is about to replace it. Deleting
-	 * based on that observation would remove the newly published list.
-	 */
+	Removes the list object of a retired narinfo generation, and preserves an
+	object that belongs to a later generation of the same path.
+
+	An object with no recorded generation was written before this server
+	recorded one, so it describes a generation older than the recommit that
+	kept the path. Remove it too.
+
+	Call head inside the ordered mutation, after any abandoned publication for
+	the key has settled. If head runs before that wait, it can observe the old
+	object while an abandoned publication is about to replace it. Deleting
+	based on that observation would remove the newly published list.
+	*/
 	async discardListOfGeneration(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash,

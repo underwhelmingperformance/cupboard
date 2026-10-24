@@ -232,10 +232,10 @@ interface BundleFixture {
 }
 
 /**
- * A bundle from the shared fixture generator and the trusted root that
- * verifies it. Each call generates its own throwaway keys, so a bundle from one
- * call never verifies against the trusted root of another.
- */
+A bundle from the shared fixture generator and the trusted root that
+verifies it. Each call generates its own throwaway keys, so a bundle from one
+call never verifies against the trusted root of another.
+*/
 function bundleFixture(
 	options: {
 		readonly subjectDigest?: string;
@@ -269,11 +269,11 @@ const bundleDocumentSchema = z.looseObject({
 });
 
 /**
- * Creates a fixture with one RFC 3161 timestamp. Options can add transparency
- * log entries or remove the timestamp. These mutations invalidate the bundle,
- * so the tests use them only for evidence checks that run before signature
- * verification.
- */
+Creates a fixture with one RFC 3161 timestamp. Options can add transparency
+log entries or remove the timestamp. These mutations invalidate the bundle,
+so the tests use them only for evidence checks that run before signature
+verification.
+*/
 function shapedBundle(shape: BundleShape = {}): Bundle {
 	const fixture: unknown = JSON.parse(bundleFixture().bundle);
 	const document = bundleDocumentSchema.parse(fixture);
@@ -563,12 +563,12 @@ describe('actionsIdentityPolicy', () => {
 });
 
 /**
- * Verifies against the given trusted root instead of the public-good one, so
- * the self-check runs its real signature, certificate and timestamp checks
- * without contacting a service. The fixture certificate carries no signed
- * certificate timestamp, which the public-good Fulcio embeds, so the fixture
- * verifier asks for none.
- */
+Verifies against the given trusted root instead of the public-good one, so
+the self-check runs its real signature, certificate and timestamp checks
+without contacting a service. The fixture certificate carries no signed
+certificate timestamp, which the public-good Fulcio embeds, so the fixture
+verifier asks for none.
+*/
 async function fixtureVerifier(
 	trustedRoot: string
 ): Promise<typeof verifyBundle> {

@@ -6,9 +6,9 @@ import type { SpanAttributes } from './span.ts';
 const propagator = new W3CTraceContextPropagator();
 
 /**
- * Extracts upstream trace identifiers for correlation with native Worker spans.
- * These attributes do not change the parent of a native Worker span.
- */
+Extracts upstream trace identifiers for correlation with native Worker spans.
+These attributes do not change the parent of a native Worker span.
+*/
 export function upstreamTraceAttributes(headers: Headers): SpanAttributes {
 	const context = propagator.extract(ROOT_CONTEXT, headers, {
 		keys: (carrier: Headers) => {

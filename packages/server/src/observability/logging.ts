@@ -45,9 +45,9 @@ export const loggerMiddleware = createMiddleware<{
 });
 
 /**
- * Logs the billed storage that a pass, RPC or queue message used as
- * `method finished`. The logger supplies the `method` field.
- */
+Logs the billed storage that a pass, RPC or queue message used as
+`method finished`. The logger supplies the `method` field.
+*/
 export function logMethodFinished(
 	logger: Logger,
 	cost: OperationCostRecord
@@ -71,15 +71,15 @@ function handlerRoute(context: Context): string {
 }
 
 /**
- * Measures the billed storage that a request uses and logs it as
- * `request finished` at `debug`. Register it before every other middleware so
- * the scope covers the whole request.
- *
- * The route is the template of the last registered handler, not middleware,
- * that matches the request, so a request that a middleware refuses still
- * reports the handler route that it addressed. A contract procedure records its
- * own template, because Hono matches it through a catch-all middleware.
- */
+Measures the billed storage that a request uses and logs it as
+`request finished` at `debug`. Register it before every other middleware so
+the scope covers the whole request.
+
+The route is the template of the last registered handler, not middleware,
+that matches the request, so a request that a middleware refuses still
+reports the handler route that it addressed. A contract procedure records its
+own template, because Hono matches it through a catch-all middleware.
+*/
 export const requestCostMiddleware = createMiddleware(async (context, next) => {
 	const logger = requestLogger(context.req.raw);
 	let status: number = StatusCodes.INTERNAL_SERVER_ERROR;

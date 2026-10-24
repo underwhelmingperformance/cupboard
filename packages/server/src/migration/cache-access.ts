@@ -108,13 +108,13 @@ export async function clearCacheLifecycleDeletion(
 }
 
 /**
- * The access a cache takes when the local catalogue records none for it: the
- * access of the tenant's default cache, which every tenant has.
- *
- * A cache that records no access was created when one setting on the tenant row
- * decided how all of a tenant's caches read, and the default cache's lifecycle
- * row holds that setting's value.
- */
+The access a cache takes when the local catalogue records none for it: the
+access of the tenant's default cache, which every tenant has.
+
+A cache that records no access was created when one setting on the tenant row
+decided how all of a tenant's caches read, and the default cache's lifecycle
+row holds that setting's value.
+*/
 async function defaultCacheAccess(
 	context: ServerContext,
 	tenant: TenantId
@@ -422,13 +422,13 @@ export async function reconcileCacheCatalogue(
 }
 
 /**
- * Whether every cache and reuse view in this object's catalogue records how it
- * reads, and the tenant's one default cache exists.
- *
- * This runs before the contraction, which is the migration that makes those
- * columns mandatory, so the rows it inspects can still hold nulls even though
- * the declared columns say otherwise.
- */
+Whether every cache and reuse view in this object's catalogue records how it
+reads, and the tenant's one default cache exists.
+
+This runs before the contraction, which is the migration that makes those
+columns mandatory, so the rows it inspects can still hold nulls even though
+the declared columns say otherwise.
+*/
 export function isLocalCacheCatalogueComplete(context: ServerContext): boolean {
 	const incompleteCaches = context.db
 		.select({ count: sql<number>`count(*)`.as('incomplete_cache_count') })

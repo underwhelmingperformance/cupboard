@@ -470,7 +470,6 @@ describe('cache identity contraction', () => {
 	// The insert trigger gives each of these its default cache's lifecycle row,
 	// which is what the contraction requires of a tenant that is not offboarded.
 	function insertTenantWithStatus(
-		id: string,
 		status: 'active' | 'suspended' | 'offboarding' | 'offboarded'
 	): void {
 		database
@@ -485,7 +484,7 @@ describe('cache identity contraction', () => {
 					)
 				`
 			)
-			.run(id, status);
+			.run('bob', status);
 	}
 
 	function contract(): void {
@@ -592,7 +591,7 @@ describe('cache identity contraction', () => {
 	);
 
 	it('contracts a named cache an offboarding tenant still references', () => {
-		insertTenantWithStatus('bob', 'offboarding');
+		insertTenantWithStatus('offboarding');
 		database
 			.prepare(
 				`
@@ -647,7 +646,7 @@ describe('cache identity contraction', () => {
 	// An offboarded tenant's rows are scrubbed and its object is never woken
 	// again, so it neither holds a default cache nor needs one.
 	it('contracts around an offboarded tenant with no cache rows', () => {
-		insertTenantWithStatus('bob', 'offboarded');
+		insertTenantWithStatus('offboarded');
 		database.prepare("DELETE FROM cache_lifecycle WHERE tenant = 'bob'").run();
 
 		contract();
@@ -734,7 +733,7 @@ describe('cache identity contraction', () => {
 	// recorded for its tenant's default cache, so a tenant without that row could
 	// not convert and its object could not migrate.
 	it('refuses to contract while a live tenant has no default cache', () => {
-		insertTenantWithStatus('bob', 'active');
+		insertTenantWithStatus('active');
 		database
 			.prepare(
 				"DELETE FROM cache_lifecycle WHERE tenant = 'bob' AND cache_kind = 'default'"

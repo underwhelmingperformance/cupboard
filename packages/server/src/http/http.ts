@@ -88,19 +88,19 @@ export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 export const blobReaperBatchSize = 500;
 
 /**
- * How many object deletions one invocation flushes. Each successful R2
- * deletion removes one D1 marker. Reserve one statement to discard stray
- * markers and one to read the due markers before processing them.
- */
+How many object deletions one invocation flushes. Each successful R2
+deletion removes one D1 marker. Reserve one statement to discard stray
+markers and one to read the due markers before processing them.
+*/
 export function objectDeletionBatchSize(statementAllowance: number): number {
 	return statementAllowance - 2;
 }
 
 /**
- * How many abandoned promotion reservations one invocation recovers. The pass
- * reads the stale reservations with one statement and spends three more on each
- * reservation it repairs.
- */
+How many abandoned promotion reservations one invocation recovers. The pass
+reads the stale reservations with one statement and spends three more on each
+reservation it repairs.
+*/
 export function objectRecoveryBatchSize(statementAllowance: number): number {
 	return Math.floor((statementAllowance - 1) / 3);
 }
@@ -177,10 +177,10 @@ export function stagingPushPrefix(pushId: PushId): string {
 }
 
 /**
- * The first path segment below `staging/` when another segment follows it. In
- * the current layouts this segment is the push ID. A key in the layout
- * `staging/<name>.nar.zst` has no such segment.
- */
+The first path segment below `staging/` when another segment follows it. In
+the current layouts this segment is the push ID. A key in the layout
+`staging/<name>.nar.zst` has no such segment.
+*/
 export function stagingKeyPushSegment(key: string): string | undefined {
 	if (!key.startsWith(stagingPrefix)) {
 		return undefined;
@@ -223,19 +223,19 @@ export function narInfoObjectKey(
 }
 
 /**
- * Where one cache keeps its path-keyed objects of a family, below that family's
- * own prefix: the cache's generation, then its name.
- *
- * A cache that has never been deleted stays at the keys it has always had, so
- * nothing has to be rewritten for it. From the second generation onwards the
- * key carries `generation/<n>/`, which is what separates one registration of a
- * cache name from the next: the objects of a deleted cache are not where its
- * successor reads.
- *
- * The two shapes cannot collide, even for a cache named `generation`. A
- * first-generation key has at most two segments below the family prefix, and a
- * later one has at least three.
- */
+Where one cache keeps its path-keyed objects of a family, below that family's
+own prefix: the cache's generation, then its name.
+
+A cache that has never been deleted stays at the keys it has always had, so
+nothing has to be rewritten for it. From the second generation onwards the
+key carries `generation/<n>/`, which is what separates one registration of a
+cache name from the next: the objects of a deleted cache are not where its
+successor reads.
+
+The two shapes cannot collide, even for a cache named `generation`. A
+first-generation key has at most two segments below the family prefix, and a
+later one has at least three.
+*/
 export function cacheObjectPrefix(
 	familyPrefix: string,
 	cache: CacheScope,
@@ -338,8 +338,8 @@ export function notFoundResponse(): Response {
 }
 
 /**
- * Returns a 404 that authenticated and mutable reads cannot retain.
- */
+Returns a 404 that authenticated and mutable reads cannot retain.
+*/
 export function uncachedNotFoundResponse(): Response {
 	const response = notFoundResponse();
 	response.headers.set('cache-control', 'no-store');

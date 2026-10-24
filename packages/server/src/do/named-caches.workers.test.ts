@@ -67,11 +67,10 @@ function expectCommitSocketError(
 async function putRoot(
 	token: string,
 	cache: CacheScope,
-	name: string,
 	storePath: string
 ): Promise<void> {
 	const response = await authorisedFetch(
-		cacheScopedPath(cache, `/roots/${name}`),
+		cacheScopedPath(cache, `/roots/channel`),
 		token,
 		{
 			body: JSON.stringify({ targets: [storePath] }),
@@ -232,8 +231,8 @@ describe('named caches', () => {
 
 		// The default cache retains only `kept`, so the other path is unreachable
 		// there; the builds cache retains it, so the shared NAR stays referenced.
-		await putRoot(init.token, defaultCache(), 'channel', kept.storePath);
-		await putRoot(init.token, buildsCache, 'channel', collected.storePath);
+		await putRoot(init.token, defaultCache(), kept.storePath);
+		await putRoot(init.token, buildsCache, collected.storePath);
 
 		const gc = await authorisedFetch('/gc', init.token, { method: 'POST' });
 		expect(gc.status).toBe(StatusCodes.OK);
@@ -290,8 +289,8 @@ describe('named caches', () => {
 		await pushPath(init.token, keptInA, aCache);
 		await pushPath(init.token, keptInB, bCache);
 		await pushPath(init.token, collectableInB, bCache);
-		await putRoot(init.token, aCache, 'channel', keptInA.storePath);
-		await putRoot(init.token, bCache, 'channel', keptInB.storePath);
+		await putRoot(init.token, aCache, keptInA.storePath);
+		await putRoot(init.token, bCache, keptInB.storePath);
 		await seedCollectablePaths(aCache, 2);
 
 		const observed = await runInDurableObject(

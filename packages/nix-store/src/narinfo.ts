@@ -60,11 +60,11 @@ function single<S extends z.ZodType>(value: S) {
 }
 
 /**
- * The size given by a narinfo `FileSize` or `NarSize` field, or `undefined`
- * when the value is not a size. Nix converts the whole value, so any character
- * other than a digit makes it invalid. A value above `Number.MAX_SAFE_INTEGER`
- * is rejected too, since this reader counts sizes in JavaScript numbers.
- */
+The size given by a narinfo `FileSize` or `NarSize` field, or `undefined`
+when the value is not a size. Nix converts the whole value, so any character
+other than a digit makes it invalid. A value above `Number.MAX_SAFE_INTEGER`
+is rejected too, since this reader counts sizes in JavaScript numbers.
+*/
 export function narInfoSize(value: string): number | undefined {
 	if (!/^\d+$/u.test(value)) {
 		return undefined;
@@ -271,11 +271,11 @@ function fingerprintReferenceStorePaths(
 }
 
 /**
- * The Nix narinfo fingerprint a signature is computed over. It commits to the
- * uncompressed NAR (`narHash`/`narSize`) and the references alone, never the
- * compressed encoding, so it can be signed before a blob's file hash and size
- * are known.
- */
+The Nix narinfo fingerprint a signature is computed over. It commits to the
+uncompressed NAR (`narHash`/`narSize`) and the references alone, never the
+compressed encoding, so it can be signed before a blob's file hash and size
+are known.
+*/
 export function narFingerprint(
 	storePath: StorePath,
 	narHash: string,

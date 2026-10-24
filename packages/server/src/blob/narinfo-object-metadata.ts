@@ -5,24 +5,24 @@ import {
 } from '@cupboard/nix-store/scalars';
 
 /**
- * Identifies one commit of a store path in one cache.
- *
- * Narinfo objects are keyed by store path, so publishing a new commit
- * overwrites the previous commit's object. Narinfo generations increase and are
- * never reused for a stored name and path, even after the stored name is
- * deleted and registered again. The generation therefore identifies the commit.
- * The reference edge also records the NAR hash. Readers compare that hash with
- * the object's metadata before serving it.
- */
+Identifies one commit of a store path in one cache.
+
+Narinfo objects are keyed by store path, so publishing a new commit
+overwrites the previous commit's object. Narinfo generations increase and are
+never reused for a stored name and path, even after the stored name is
+deleted and registered again. The generation therefore identifies the commit.
+The reference edge also records the NAR hash. Readers compare that hash with
+the object's metadata before serving it.
+*/
 export interface NarInfoReferenceVersion {
 	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
 }
 
 /**
- * The commit, NAR URL and signing-key generation recorded in a published
- * narinfo object's metadata.
- */
+The commit, NAR URL and signing-key generation recorded in a published
+narinfo object's metadata.
+*/
 export interface NarInfoObjectVersion extends NarInfoReferenceVersion {
 	readonly narUrl: string;
 	readonly signatureGeneration: SigningKeyGeneration;
@@ -68,12 +68,12 @@ export function recordedNarInfoMetadata(
 }
 
 /**
- * Whether recorded metadata describes `commit`.
- *
- * Returns false for absent metadata. This server records the commit in every
- * published narinfo object, so callers require the metadata before serving an
- * object.
- */
+Whether recorded metadata describes `commit`.
+
+Returns false for absent metadata. This server records the commit in every
+published narinfo object, so callers require the metadata before serving an
+object.
+*/
 export function isMetadataOfCommit(
 	metadata: NarInfoObjectMetadata | undefined,
 	commit: NarInfoReferenceVersion
@@ -92,10 +92,10 @@ export function isNarInfoObjectOfCommit(
 }
 
 /**
- * Whether an object's commit, NAR URL and signing-key generation match the
- * supplied version. Republication rewrites the object after a signing-key
- * change or a new NAR incarnation.
- */
+Whether an object's commit, NAR URL and signing-key generation match the
+supplied version. Republication rewrites the object after a signing-key
+change or a new NAR incarnation.
+*/
 export function isNarInfoObjectVersion(
 	object: R2Object | null,
 	version: NarInfoObjectVersion

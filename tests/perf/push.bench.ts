@@ -60,11 +60,11 @@ interface PhaseSample {
 const state: { harness?: Harness } = {};
 const samples: PhaseSample[] = [];
 
-function pseudoRandomBytes(size: number, seed: number): Buffer {
-	const buffer = Buffer.allocUnsafe(size);
+function pseudoRandomBytes(seed: number): Buffer {
+	const buffer = Buffer.allocUnsafe(blockSize);
 	let value = seed >>> 0;
 
-	for (let index = 0; index < size; index += 1) {
+	for (let index = 0; index < blockSize; index += 1) {
 		value = (Math.imul(value, 1_664_525) + 1_013_904_223) >>> 0;
 		buffer[index] = (value >>> 24) & 0xff;
 	}
@@ -75,9 +75,9 @@ function pseudoRandomBytes(size: number, seed: number): Buffer {
 // Semi-compressible content, so zstd does real work on varied bytes; the
 // per-path index keeps every payload distinct.
 function compressibleContent(seed: number): Buffer {
-	const fallbackBlock = pseudoRandomBytes(blockSize, seed);
+	const fallbackBlock = pseudoRandomBytes(seed);
 	const dictionary = Array.from({ length: dictionaryBlocks }, (_, index) =>
-		pseudoRandomBytes(blockSize, seed + index + 1)
+		pseudoRandomBytes(seed + index + 1)
 	);
 	const buffer = Buffer.allocUnsafe(fileSize);
 	let value = (seed * 2_246_822_519) >>> 0;

@@ -63,13 +63,13 @@ async function writeCache(
 }
 
 /**
- * Presents equivalent cache directories to both clients and queries the
- * fixture path.
- *
- * Each client receives a separate copy because Nix writes a default
- * `nix-cache-info` when a cache does not provide one. With a shared directory,
- * our client could read the file written by Nix instead of the fixture state.
- */
+Presents equivalent cache directories to both clients and queries the
+fixture path.
+
+Each client receives a separate copy because Nix writes a default
+`nix-cache-info` when a cache does not provide one. With a shared directory,
+our client could read the file written by Nix instead of the fixture state.
+*/
 export async function openCache(
 	oracle: Oracle,
 	fixture: CacheFixture

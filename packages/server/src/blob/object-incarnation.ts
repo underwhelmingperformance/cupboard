@@ -46,8 +46,8 @@ export const firstVersionedObjectIncarnation = 2;
 export const lateWriteTombstoneHorizonMs = 16 * 60 * 1000 + blobReaperGraceMs;
 
 /**
- * Returns a predicate that matches the live registry row for an incarnation.
- */
+Returns a predicate that matches the live registry row for an incarnation.
+*/
 export function registeredLiveObjectIncarnation(
 	database: DrizzleD1Database<typeof d1Schema>,
 	kind: SharedObjectKind,
@@ -69,9 +69,9 @@ export function registeredLiveObjectIncarnation(
 }
 
 /**
- * Allows an upsert to retain its incarnation or advance an older state row to
- * the reserved incarnation. It never permits a version rollback.
- */
+Allows an upsert to retain its incarnation or advance an older state row to
+the reserved incarnation. It never permits a version rollback.
+*/
 export function promotableStateIncarnation(
 	current: SQLWrapper,
 	target: number
@@ -80,9 +80,9 @@ export function promotableStateIncarnation(
 }
 
 /**
- * Reports whether the registry and object-state tables identify the same live
- * incarnation.
- */
+Reports whether the registry and object-state tables identify the same live
+incarnation.
+*/
 export async function isObjectIncarnationLive(
 	database: DrizzleD1Database<typeof d1Schema>,
 	kind: SharedObjectKind,
@@ -128,11 +128,11 @@ export async function isObjectIncarnationLive(
 }
 
 /**
- * Returns a predicate that is true when the registry row for an object, if one
- * exists, records `incarnation` as live. A missing registry row is accepted,
- * because an older Worker can still write a state row without registering it
- * (see {@link registerLegacyObjectIncarnations}).
- */
+Returns a predicate that is true when the registry row for an object, if one
+exists, records `incarnation` as live. A missing registry row is accepted,
+because an older Worker can still write a state row without registering it
+(see {@link registerLegacyObjectIncarnations}).
+*/
 export function registryAllowsIncarnation(
 	database: DrizzleD1Database<typeof d1Schema>,
 	kind: SharedObjectKind,
@@ -158,8 +158,8 @@ export function registryAllowsIncarnation(
 }
 
 /**
- * The version of a shared object that a caller is about to reference.
- */
+The version of a shared object that a caller is about to reference.
+*/
 export type ReferencedObjectVersion =
 	| {
 			readonly kind: 'nar';
@@ -173,15 +173,15 @@ export type ReferencedObjectVersion =
 	  };
 
 /**
- * Returns a predicate that is true only while a new reference to `version` is
- * safe: the `blob_state` or `cas_object` row records that incarnation, and the
- * registry row, if one exists, records that incarnation as live.
- *
- * Collection and demotion delete the state row. A promotion can also write
- * the state row after collection has set the registry state to `absent`, and
- * collection has then already queued the object for deletion. The state row
- * alone therefore does not show that the object will remain.
- */
+Returns a predicate that is true only while a new reference to `version` is
+safe: the `blob_state` or `cas_object` row records that incarnation, and the
+registry row, if one exists, records that incarnation as live.
+
+Collection and demotion delete the state row. A promotion can also write
+the state row after collection has set the registry state to `absent`, and
+collection has then already queued the object for deletion. The state row
+alone therefore does not show that the object will remain.
+*/
 export function referenceableObjectVersion(
 	database: DrizzleD1Database<typeof d1Schema>,
 	version: ReferencedObjectVersion
@@ -230,9 +230,9 @@ type LegacyObjectIncarnations =
 	  };
 
 /**
- * Registers version-one rows that an older Worker wrote after the registry
- * migration had finished. A current registry row always wins the conflict.
- */
+Registers version-one rows that an older Worker wrote after the registry
+migration had finished. A current registry row always wins the conflict.
+*/
 export async function registerLegacyObjectIncarnations(
 	database: DrizzleD1Database<typeof d1Schema>,
 	objects: LegacyObjectIncarnations,
@@ -298,13 +298,13 @@ function lateWriteRemovalDeadline(now: Date): IsoTimestamp {
 }
 
 /**
- * Gives up a reservation whose object will not be published. If `incarnation`
- * is still pending for `reservationOwner`, it becomes absent, so the next
- * reservation takes a newer one. When the registry then records `incarnation`
- * as absent, its object is queued for deletion after the late-write horizon. A
- * live incarnation stays, and a reservation that superseded `incarnation` has
- * already queued it.
- */
+Gives up a reservation whose object will not be published. If `incarnation`
+is still pending for `reservationOwner`, it becomes absent, so the next
+reservation takes a newer one. When the registry then records `incarnation`
+as absent, its object is queued for deletion after the late-write horizon. A
+live incarnation stays, and a reservation that superseded `incarnation` has
+already queued it.
+*/
 export async function abandonObjectIncarnation(
 	database: DrizzleD1Database<typeof d1Schema>,
 	kind: SharedObjectKind,
@@ -354,8 +354,8 @@ export async function abandonObjectIncarnation(
 }
 
 /**
- * Records the exact physical object version for the deletion retry pass.
- */
+Records the exact physical object version for the deletion retry pass.
+*/
 export async function queueObjectDeletion(
 	database: DrizzleD1Database<typeof d1Schema>,
 	kind: SharedObjectKind,
@@ -375,10 +375,10 @@ export async function queueObjectDeletion(
 }
 
 /**
- * Returns the current object version, reserving a greater one when the previous
- * object is absent. Throws on contention so the caller can retry in a later
- * invocation.
- */
+Returns the current object version, reserving a greater one when the previous
+object is absent. Throws on contention so the caller can retry in a later
+invocation.
+*/
 export async function reserveObjectIncarnation(
 	database: DrizzleD1Database<typeof d1Schema>,
 	kind: SharedObjectKind,

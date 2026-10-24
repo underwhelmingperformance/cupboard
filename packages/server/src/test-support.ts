@@ -286,10 +286,10 @@ export interface GcResult {
 }
 
 /**
- * Points the harness at a fresh, isolated Durable Object so each test starts
- * from empty state, and configures it as the fixture tenant. The origin and the
- * DO name share the same counter so the URL and the stub agree.
- */
+Points the harness at a fresh, isolated Durable Object so each test starts
+from empty state, and configures it as the fixture tenant. The origin and the
+DO name share the same counter so the URL and the stub agree.
+*/
 export async function resetTestServer(): Promise<void> {
 	const serverName = `test-${testRunId}-${String(harness.nextTestServerId)}`;
 	harness.origin = `https://cupboard-${serverName}.test`;
@@ -314,9 +314,9 @@ export async function resetTestServer(): Promise<void> {
 }
 
 /**
- * Resets in-memory Durable Objects and refreshes the harness's stubs while
- * preserving persisted storage.
- */
+Resets in-memory Durable Objects and refreshes the harness's stubs while
+preserving persisted storage.
+*/
 export async function restartTestServers(): Promise<void> {
 	const serverIds = testServersUsed().map((stub) => stub.id);
 	const currentId = harness.server.id;
@@ -331,11 +331,11 @@ export async function restartTestServers(): Promise<void> {
 }
 
 /**
- * Writes the fixture tenant's authoritative D1 row and default cache, then
- * refreshes the negative membership hints. `read` supplies the tenant fallback
- * verifier. Repeated calls can change the default cache without resetting usage
- * counters.
- */
+Writes the fixture tenant's authoritative D1 row and default cache, then
+refreshes the negative membership hints. `read` supplies the tenant fallback
+verifier. Repeated calls can change the default cache without resetting usage
+counters.
+*/
 export async function provisionFixtureTenant(
 	options: {
 		readonly defaultCacheAccess?: 'public' | 'private';
@@ -410,12 +410,12 @@ export async function provisionFixtureTenant(
 }
 
 /**
- * Provisions a named tenant for a route-level test. Writes its D1 row,
- * optionally configures its Durable Object with its path-based issuer, and
- * seeds the membership filter and marker. Returns the tenant's issuer URL.
- * With `configure: false`, the route admits the slug but leaves its Durable
- * Object unconfigured.
- */
+Provisions a named tenant for a route-level test. Writes its D1 row,
+optionally configures its Durable Object with its path-based issuer, and
+seeds the membership filter and marker. Returns the tenant's issuer URL.
+With `configure: false`, the route admits the slug but leaves its Durable
+Object unconfigured.
+*/
 export async function provisionNamedTenant(
 	name: string,
 	options: {
@@ -519,10 +519,10 @@ async function provisionD1Cache(
 }
 
 /**
- * Marks a provisioned tenant suspended, as the control plane does. Every
- * admission reads the updated D1 status. The invalidation call remains as a
- * deployment-compatibility boundary and is a no-op in current code.
- */
+Marks a provisioned tenant suspended, as the control plane does. Every
+admission reads the updated D1 status. The invalidation call remains as a
+deployment-compatibility boundary and is a no-op in current code.
+*/
 export async function suspendTenant(id: string): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
@@ -535,11 +535,11 @@ export async function suspendTenant(id: string): Promise<void> {
 }
 
 /**
- * Begins offboarding a provisioned tenant, as the control plane does. It updates
- * the authoritative D1 status and tells the Durable Object to stop
- * re-materialising its objects, so the cron can drain them. The invalidation
- * call is a no-op retained for deployments with the old row cache.
- */
+Begins offboarding a provisioned tenant, as the control plane does. It updates
+the authoritative D1 status and tells the Durable Object to stop
+re-materialising its objects, so the cron can drain them. The invalidation
+call is a no-op retained for deployments with the old row cache.
+*/
 export async function offboardTenant(id: string): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
@@ -632,9 +632,9 @@ async function configureFixtureTenant(
 }
 
 /**
- * Redirects the harness at a named server, e.g. for a test that needs a
- * distinct DO from the one {@link resetTestServer} assigned, configuring it.
- */
+Redirects the harness at a named server, e.g. for a test that needs a
+distinct DO from the one {@link resetTestServer} assigned, configuring it.
+*/
 export async function useTestServer(name: string): Promise<void> {
 	harness.origin = `https://cupboard-${name}.test`;
 	harness.serverName = name;
@@ -691,8 +691,8 @@ export function uploadStateOf(instance: CupboardServer): UploadStateService {
 const fixtureWaitDeadlineMs = 10_000;
 
 /**
- * Identifies a fixture wait that reached its deadline.
- */
+Identifies a fixture wait that reached its deadline.
+*/
 export class FixtureWaitTimeoutError extends Error {
 	constructor(
 		public readonly awaited: string,
@@ -706,9 +706,9 @@ export class FixtureWaitTimeoutError extends Error {
 }
 
 /**
- * Identifies a fixture wait whose operation finished first, so the awaited
- * point can no longer be reached.
- */
+Identifies a fixture wait whose operation finished first, so the awaited
+point can no longer be reached.
+*/
 export class FixtureOperationSettledError extends Error {
 	constructor(
 		public readonly awaited: string,
@@ -720,10 +720,10 @@ export class FixtureOperationSettledError extends Error {
 }
 
 /**
- * Waits until `reached` resolves while `operation` runs. Rejects with
- * {@link FixtureOperationSettledError} if `operation` finishes or fails first, and with
- * {@link FixtureWaitTimeoutError} after {@link fixtureWaitDeadlineMs}.
- */
+Waits until `reached` resolves while `operation` runs. Rejects with
+{@link FixtureOperationSettledError} if `operation` finishes or fails first, and with
+{@link FixtureWaitTimeoutError} after {@link fixtureWaitDeadlineMs}.
+*/
 export function waitUntilReached(
 	reached: Promise<unknown>,
 	operation: Promise<unknown>,
@@ -749,9 +749,9 @@ export function waitUntilReached(
 }
 
 /**
- * Returns the current test server's subrequest allowance. The pool defaults
- * to Workers Free; `withDeployedSubrequestAllowance` can override that value.
- */
+Returns the current test server's subrequest allowance. The pool defaults
+to Workers Free; `withDeployedSubrequestAllowance` can override that value.
+*/
 export function deployedSubrequestAllowance(): Promise<number> {
 	return runInDurableObject(
 		currentServer(),
@@ -760,13 +760,13 @@ export function deployedSubrequestAllowance(): Promise<number> {
 }
 
 /**
- * Runs `body` with the Durable Object's subrequest allowance replaced, and
- * restores the deployed allowance afterwards.
- *
- * Maintenance page sizes and subsequent dispatches use the replacement. An
- * already open subrequest slice keeps its existing allowance. Tests can use
- * smaller pages to exercise continuation without production-sized fixtures.
- */
+Runs `body` with the Durable Object's subrequest allowance replaced, and
+restores the deployed allowance afterwards.
+
+Maintenance page sizes and subsequent dispatches use the replacement. An
+already open subrequest slice keeps its existing allowance. Tests can use
+smaller pages to exercise continuation without production-sized fixtures.
+*/
 export async function withDeployedSubrequestAllowance<T>(
 	context: ServerContext,
 	subrequests: number,
@@ -789,8 +789,8 @@ export async function withDeployedSubrequestAllowance<T>(
 }
 
 /**
- * Claims an upload and records one owner-fenced verification verdict.
- */
+Claims an upload and records one owner-fenced verification verdict.
+*/
 export async function recordClaimedVerification(
 	uploadId: UploadId,
 	verification: NarVerification
@@ -806,8 +806,8 @@ export async function recordClaimedVerification(
 }
 
 /**
- * Claims an upload and records that its staged object is missing.
- */
+Claims an upload and records that its staged object is missing.
+*/
 export async function recordClaimedMissingObject(
 	uploadId: UploadId
 ): Promise<number> {
@@ -822,15 +822,15 @@ export async function recordClaimedMissingObject(
 }
 
 /**
- * Clears any alarm the test's Durable Objects left armed. A test's objects
- * are abandoned when it ends (the next test points the harness elsewhere),
- * and an armed alarm on an abandoned object fires into a test environment
- * that has moved on: its handler's console output then races the pool's log
- * forwarding and surfaces as teardown errors. The shared `afterEach` calls
- * this. It covers every server selected by the harness during the test and the
- * fixture tenant's object. A test that arms an alarm on another object clears
- * that alarm itself.
- */
+Clears any alarm the test's Durable Objects left armed. A test's objects
+are abandoned when it ends (the next test points the harness elsewhere),
+and an armed alarm on an abandoned object fires into a test environment
+that has moved on: its handler's console output then races the pool's log
+forwarding and surfaces as teardown errors. The shared `afterEach` calls
+this. It covers every server selected by the harness during the test and the
+fixture tenant's object. A test that arms an alarm on another object clears
+that alarm itself.
+*/
 export async function clearAbandonedAlarms(): Promise<void> {
 	for (const stub of testServersUsed()) {
 		await runInDurableObject(stub, (_instance, state) =>
@@ -840,11 +840,11 @@ export async function clearAbandonedAlarms(): Promise<void> {
 }
 
 /**
- * Thrown by the shared `afterEach` for a maintenance pass parked behind a
- * retry deadline the pinned test clock never reaches. A pass that reports a
- * stall is not run again before `now + noProgressRetryMs`; with `Date` pinned
- * that time never comes, so the pass is parked for the rest of the test.
- */
+Thrown by the shared `afterEach` for a maintenance pass parked behind a
+retry deadline the pinned test clock never reaches. A pass that reports a
+stall is not run again before `now + noProgressRetryMs`; with `Date` pinned
+that time never comes, so the pass is parked for the rest of the test.
+*/
 export class StalledMaintenancePassError extends Error {
 	constructor(
 		public readonly pass: string,
@@ -858,15 +858,15 @@ export class StalledMaintenancePassError extends Error {
 }
 
 /**
- * Returns every maintenance pass parked behind a retry deadline the pinned
- * test clock cannot reach, and deletes those deadlines so they do not survive
- * into the next test.
- *
- * The shared `afterEach` calls this and fails the test on the first pass it
- * finds. A test that means to leave a pass stalled calls this function itself
- * and asserts on the result. It covers every server selected by the harness
- * during the test and the fixture tenant's object.
- */
+Returns every maintenance pass parked behind a retry deadline the pinned
+test clock cannot reach, and deletes those deadlines so they do not survive
+into the next test.
+
+The shared `afterEach` calls this and fails the test on the first pass it
+finds. A test that means to leave a pass stalled calls this function itself
+and asserts on the result. It covers every server selected by the harness
+during the test and the fixture tenant's object.
+*/
 export async function takeStalledMaintenancePasses(): Promise<
 	{ readonly pass: string; readonly waitMs: number }[]
 > {
@@ -915,10 +915,10 @@ async function stalledMaintenancePassesFor(
 }
 
 /**
- * Clears alarms and audits stalled maintenance on one snapshot of every
- * Durable Object used by the test. The shared `afterEach` calls this before
- * the next test resets the registry.
- */
+Clears alarms and audits stalled maintenance on one snapshot of every
+Durable Object used by the test. The shared `afterEach` calls this before
+the next test resets the registry.
+*/
 export async function finishTestServerLifecycle(): Promise<
 	{ readonly pass: string; readonly waitMs: number }[]
 > {
@@ -937,21 +937,21 @@ export async function finishTestServerLifecycle(): Promise<
 }
 
 /**
- * Prevents a Durable Object, by default the harness's current server, from
- * arming an alarm while `body` runs. The function restores `setAlarm` before
- * it returns.
- *
- * Workerd schedules alarms with the real clock even when the test pool isolates
- * storage. An immediate alarm can therefore run before a test inspects the state
- * produced by the method that armed it. Deleting an alarm after it becomes due
- * does not cancel delivery. This function disables `setAlarm`, and the test
- * calls `alarm()` explicitly at the required point.
- *
- * The fence also applies to an instance that replaces the object while `body`
- * runs (see `alarm-fence.test-support.ts`). Overlapping fences share a
- * reference count, and the last fence to close restores `setAlarm`. If `body`
- * fails, its error is reported even when restoring `setAlarm` also fails.
- */
+Prevents a Durable Object, by default the harness's current server, from
+arming an alarm while `body` runs. The function restores `setAlarm` before
+it returns.
+
+Workerd schedules alarms with the real clock even when the test pool isolates
+storage. An immediate alarm can therefore run before a test inspects the state
+produced by the method that armed it. Deleting an alarm after it becomes due
+does not cancel delivery. This function disables `setAlarm`, and the test
+calls `alarm()` explicitly at the required point.
+
+The fence also applies to an instance that replaces the object while `body`
+runs (see `alarm-fence.test-support.ts`). Overlapping fences share a
+reference count, and the last fence to close restores `setAlarm`. If `body`
+fails, its error is reported even when restoring `setAlarm` also fails.
+*/
 export async function withoutAlarmArming<T>(
 	body: () => Promise<T>,
 	stub: DurableObjectStub<CupboardServer> = currentServer()
@@ -968,18 +968,18 @@ export async function withoutAlarmArming<T>(
 }
 
 /**
- * Drives a capped maintenance drain to completion: runs `step` until `isDone`
- * returns true, at most `maxSteps` times. A capped pass advances only when an
- * alarm or an explicit resume call runs it again, so a test watching one
- * drain makes those calls itself. Every call makes progress, so the number of
- * steps a drain needs follows from the fixture and the cap, not from how fast
- * the machine is.
- *
- * The caller asserts the terminal state after the loop. If the drain has not
- * finished within `maxSteps`, those assertions fail and their output shows
- * the state the drain reached. If `step` throws, the error propagates
- * immediately.
- */
+Drives a capped maintenance drain to completion: runs `step` until `isDone`
+returns true, at most `maxSteps` times. A capped pass advances only when an
+alarm or an explicit resume call runs it again, so a test watching one
+drain makes those calls itself. Every call makes progress, so the number of
+steps a drain needs follows from the fixture and the cap, not from how fast
+the machine is.
+
+The caller asserts the terminal state after the loop. If the drain has not
+finished within `maxSteps`, those assertions fail and their output shows
+the state the drain reached. If `step` throws, the error propagates
+immediately.
+*/
 export async function driveToCompletion(
 	step: () => Promise<void>,
 	isDone: () => Promise<boolean>,
@@ -995,10 +995,10 @@ export async function driveToCompletion(
 }
 
 /**
- * The slug the current harness server is addressed by, for a worker-side call
- * (a queue consumer) that resolves the same Durable Object through
- * `tenantServer(env, tenant)`.
- */
+The slug the current harness server is addressed by, for a worker-side call
+(a queue consumer) that resolves the same Durable Object through
+`tenantServer(env, tenant)`.
+*/
 export function currentServerTenant(): TenantId {
 	return tenantIdSchema.parse(harness.serverName);
 }
@@ -1032,10 +1032,10 @@ interface BootstrapOptions {
 }
 
 /**
- * Brings a server up the way a deployment is: it issues an owner-equivalent admin
- * token from the active auth key and reads the published signing key, standing
- * in for what the old bootstrap exchange returned.
- */
+Brings a server up the way a deployment is: it issues an owner-equivalent admin
+token from the active auth key and reads the published signing key, standing
+in for what the old bootstrap exchange returned.
+*/
 export async function bootstrap(
 	options: BootstrapOptions = {}
 ): Promise<InitialisedServer> {
@@ -1053,8 +1053,8 @@ export async function bootstrap(
 }
 
 /**
- * Provisions a cache through the same admin routes a client uses.
- */
+Provisions a cache through the same admin routes a client uses.
+*/
 export async function putTestCache(
 	token: string,
 	scope: CacheScope,
@@ -1096,9 +1096,9 @@ export async function putTestCache(
 }
 
 /**
- * Provisions a cache through the fixture Worker's admin API. A cache retained
- * by another test receives the requested properties through the update API.
- */
+Provisions a cache through the fixture Worker's admin API. A cache retained
+by another test receives the requested properties through the update API.
+*/
 export async function putWorkerTestCache(
 	token: string,
 	scope: CacheScope,
@@ -1189,10 +1189,10 @@ export function resolvedCache(
 }
 
 /**
- * A CI-style write grant set: upload and attestation on one cache, plus
- * `root:set` on each named root selector. It authorises exactly the push path,
- * so tests can prove an admin-only route refuses it.
- */
+A CI-style write grant set: upload and attestation on one cache, plus
+`root:set` on each named root selector. It authorises exactly the push path,
+so tests can prove an admin-only route refuses it.
+*/
 export function cacheWriteGrants(
 	roots: readonly string[] = [],
 	cache: CacheScope = defaultCache()
@@ -1209,11 +1209,11 @@ export function cacheWriteGrants(
 }
 
 /**
- * Issues an access token signed by the active server key carrying an explicit
- * grant set, so tests can prove authorisation (e.g. a write grant refused by an
- * admin route). The active key is the newest one still in service, matching what
- * the server issues with, so a token stays valid across a rotation.
- */
+Issues an access token signed by the active server key carrying an explicit
+grant set, so tests can prove authorisation (e.g. a write grant refused by an
+admin route). The active key is the newest one still in service, matching what
+the server issues with, so a token stays valid across a rotation.
+*/
 export function issueServerSignedToken(
 	grants: AuthorizationDetails,
 	subject = 'grant-test',
@@ -1266,10 +1266,10 @@ async function issueServerSignedTokenFor(
 }
 
 /**
- * Issues a token signed by a Durable Object's active auth key but pinned to an
- * explicit issuer and audience, so a route-level test can verify a tenant issues
- * under its own path-based issuer.
- */
+Issues a token signed by a Durable Object's active auth key but pinned to an
+explicit issuer and audience, so a route-level test can verify a tenant issues
+under its own path-based issuer.
+*/
 export async function issueTokenForTenant(
 	stub: DurableObjectStub<CupboardServer>,
 	issuer: OidcIssuer,
@@ -1396,23 +1396,23 @@ export interface FlakyD1Plan {
 	*/
 	readonly message?: string;
 	/**
-	 * The error to throw, so a test can assert which fault reached the caller.
-	 * It takes precedence over `message`.
-	 */
+	The error to throw, so a test can assert which fault reached the caller.
+	It takes precedence over `message`.
+	*/
 	readonly error?: Error;
 	/**
-	 * Runs when a matching query is prepared, before any fault is applied: a
-	 * deterministic point for a test to interleave a concurrent mutation with
-	 * the code under test.
-	 */
+	Runs when a matching query is prepared, before any fault is applied: a
+	deterministic point for a test to interleave a concurrent mutation with
+	the code under test.
+	*/
 	readonly onMatch?: () => void;
 }
 
 /**
- * A D1 binding that throws for the next `failures` matching reads and delegates
- * all later operations. This models a transient control-plane fault during an
- * authoritative D1 read.
- */
+A D1 binding that throws for the next `failures` matching reads and delegates
+all later operations. This models a transient control-plane fault during an
+authoritative D1 read.
+*/
 export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 	return {
 		prepare(query) {
@@ -1437,13 +1437,13 @@ export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 }
 
 /**
- * Wraps a service so direct test calls use one invocation's subrequest
- * slice.
- *
- * Production dispatch opens the slice before it calls a service. Tests that
- * call the service directly bypass that dispatch, so this wrapper adds the same
- * boundary to one instance without changing the shared prototype.
- */
+Wraps a service so direct test calls use one invocation's subrequest
+slice.
+
+Production dispatch opens the slice before it calls a service. Tests that
+call the service directly bypass that dispatch, so this wrapper adds the same
+boundary to one instance without changing the shared prototype.
+*/
 export function drivenDirectly<Service extends object>(
 	service: Service
 ): Service {
@@ -1466,37 +1466,37 @@ export function drivenDirectly<Service extends object>(
 }
 
 /**
- * Runs `body` under one invocation's subrequest slice and row budget.
- *
- * Use this when a test calls code below the Durable Object dispatch boundary.
- * A dispatch opens both scopes, and code that consults either one refuses to
- * run without it.
- */
+Runs `body` under one invocation's subrequest slice and row budget.
+
+Use this when a test calls code below the Durable Object dispatch boundary.
+A dispatch opens both scopes, and code that consults either one refuses to
+run without it.
+*/
 export function asOneInvocation<T>(body: () => T): T {
 	return withSubrequestSlice(() => withRowBudget(body));
 }
 
 /**
- * Runs `body` under a Durable Object row budget that its first statement
- * spends.
- *
- * A pass under this budget advances by one unit of work, because the phase that
- * is due always reads at least one row and the pass stops before starting
- * another unit. A test can therefore drive a pass one unit at a time. Wrap the
- * dispatched method: the dispatch wrapper reuses this budget rather than opening
- * the full one.
- */
+Runs `body` under a Durable Object row budget that its first statement
+spends.
+
+A pass under this budget advances by one unit of work, because the phase that
+is due always reads at least one row and the pass stops before starting
+another unit. A test can therefore drive a pass one unit at a time. Wrap the
+dispatched method: the dispatch wrapper reuses this budget rather than opening
+the full one.
+*/
 export function underOneUnitOfWork<T>(body: () => T): T {
 	return withRowBudget(body, 1);
 }
 
 /**
- * Wraps a D1 binding and counts prepared statements as a query diagnostic.
- *
- * Drizzle prepares each statement before execution, including every batch
- * member. A batch is one subrequest even when this counter reports several
- * statements.
- */
+Wraps a D1 binding and counts prepared statements as a query diagnostic.
+
+Drizzle prepares each statement before execution, including every batch
+member. A batch is one subrequest even when this counter reports several
+statements.
+*/
 export function countingD1(inner: D1Database): {
 	readonly binding: D1Database;
 	readonly statementsSent: () => number;
@@ -1528,18 +1528,18 @@ export interface StatementCounter {
 }
 
 /**
- * The method used to exclude automatic alarm delivery from a measured run.
- *
- * `input-gate` keeps the Durable Object's input gate locked for the complete run.
- * Workerd defers scheduled work until the run finishes, so only the measured
- * calls can change the observed state.
- *
- * `disarmed-alarm` deletes any armed alarm before each measured call and once
- * more after the run. Use it when a measured call opens or waits for its own
- * critical section. The runtime does not enter a nested input gate while
- * The runtime cannot enter a nested input gate while the outer gate is locked,
- * so `input-gate` would time out in this case.
- */
+The method used to exclude automatic alarm delivery from a measured run.
+
+`input-gate` keeps the Durable Object's input gate locked for the complete run.
+Workerd defers scheduled work until the run finishes, so only the measured
+calls can change the observed state.
+
+`disarmed-alarm` deletes any armed alarm before each measured call and once
+more after the run. Use it when a measured call opens or waits for its own
+critical section. The runtime does not enter a nested input gate while
+The runtime cannot enter a nested input gate while the outer gate is locked,
+so `input-gate` would time out in this case.
+*/
 export type InvocationIsolation = 'input-gate' | 'disarmed-alarm';
 
 export type MeasuredInvocation<Observation extends object> = {
@@ -1549,38 +1549,38 @@ export type MeasuredInvocation<Observation extends object> = {
 
 export interface MeasureInvocationsOptions<Observation extends object> {
 	/**
-	 * The maximum number of calls. The run stops early when `isDue` returns false.
-	 */
+	The maximum number of calls. The run stops early when `isDue` returns false.
+	*/
 	readonly attempts: number;
 	readonly isolation?: InvocationIsolation;
 	/**
-	 * Sets up the run's starting state, under the same isolation.
-	 */
+	Sets up the run's starting state, under the same isolation.
+	*/
 	readonly prepare?: () => unknown;
 	/**
-	 * Whether another call has work to do. If absent, every attempt runs.
-	 */
+	Whether another call has work to do. If absent, every attempt runs.
+	*/
 	readonly isDue?: () => Promise<boolean> | boolean;
 	/**
-	 * Makes one complete call and returns its observation.
-	 */
+	Makes one complete call and returns its observation.
+	*/
 	readonly run: () => Promise<Observation>;
 }
 
 /**
- * Makes up to `attempts` complete calls. For each call, it records the number
- * of D1 statements and the observation returned by `run`.
- *
- * Queued maintenance leaves an armed alarm. Fake timers freeze `Date` in the
- * isolate, but the alarm scheduler continues to use real time, so the alarm
- * remains due. Workerd can deliver it at any `await` inside
- * `runInDurableObject`, which would add another pass's statements to the
- * measured call. `isolation` selects how the run prevents that delivery.
- *
- * `run` can read state before and after the call it measures. Those reads occur
- * inside the statement-counting window, so they must use only the Durable
- * Object's local storage.
- */
+Makes up to `attempts` complete calls. For each call, it records the number
+of D1 statements and the observation returned by `run`.
+
+Queued maintenance leaves an armed alarm. Fake timers freeze `Date` in the
+isolate, but the alarm scheduler continues to use real time, so the alarm
+remains due. Workerd can deliver it at any `await` inside
+`runInDurableObject`, which would add another pass's statements to the
+measured call. `isolation` selects how the run prevents that delivery.
+
+`run` can read state before and after the call it measures. Those reads occur
+inside the statement-counting window, so they must use only the Durable
+Object's local storage.
+*/
 export async function measureInvocations<Observation extends object>(
 	state: DurableObjectState,
 	counting: StatementCounter,
@@ -1628,25 +1628,25 @@ export interface FlakyR2Plan {
 	*/
 	readonly message?: string;
 	/**
-	 * Runs when a head probe is issued, before any fault is applied: a
-	 * deterministic point for a test to interleave a concurrent mutation with
-	 * the code under test.
-	 */
+	Runs when a head probe is issued, before any fault is applied: a
+	deterministic point for a test to interleave a concurrent mutation with
+	the code under test.
+	*/
 	readonly onMatch?: () => void;
 	/**
-	 * Limits the fault to the keys this predicate accepts. Probes run
-	 * concurrently, so a test that needs one named object to fail must select it
-	 * by key rather than by the order the probes reach the binding. Every key
-	 * matches when the predicate is absent.
-	 */
+	Limits the fault to the keys this predicate accepts. Probes run
+	concurrently, so a test that needs one named object to fail must select it
+	by key rather than by the order the probes reach the binding. Every key
+	matches when the predicate is absent.
+	*/
 	readonly matches?: (key: string) => boolean;
 }
 
 /**
- * An R2 binding that throws for the next `failures` HEAD requests and delegates
- * all later operations. This models a transient storage fault during a presence
- * check. Every other operation passes straight through.
- */
+An R2 binding that throws for the next `failures` HEAD requests and delegates
+all later operations. This models a transient storage fault during a presence
+check. Every other operation passes straight through.
+*/
 export function flakyR2(inner: R2Bucket, plan: FlakyR2Plan): R2Bucket {
 	return {
 		head(key) {
@@ -1896,9 +1896,9 @@ export function syntheticNarHash(index: number): NixSha256HashString {
 }
 
 /**
- * A deterministic, syntactically valid store-path hash derived from an index.
- * Its lexical order follows the index so a seeded backlog drains predictably.
- */
+A deterministic, syntactically valid store-path hash derived from an index.
+Its lexical order follows the index so a seeded backlog drains predictably.
+*/
 export function syntheticStorePathHash(index: number): StorePathHash {
 	let remaining = index;
 	let suffix = '';
@@ -2032,10 +2032,10 @@ export async function blobStateArmTimes(): Promise<
 }
 
 /**
- * Runs `interleave` once, when the first D1 batch with a statement that starts
- * with `prefix` reaches D1, and then runs that batch. `batches` counts the
- * batches with such a statement. Call `restore` when the test ends.
- */
+Runs `interleave` once, when the first D1 batch with a statement that starts
+with `prefix` reaches D1, and then runs that batch. `batches` counts the
+batches with such a statement. Call `restore` when the test ends.
+*/
 export function interleaveBeforeStatement(
 	prefix: string,
 	interleave: () => Promise<void>
@@ -2075,10 +2075,10 @@ export function interleaveBeforeStatement(
 }
 
 /**
- * Runs `interleave` once, when the first D1 batch that inserts into `table`
- * reaches D1, and then runs that batch. `inserts` counts the batches that
- * insert into `table`. Call `restore` when the test ends.
- */
+Runs `interleave` once, when the first D1 batch that inserts into `table`
+reaches D1, and then runs that batch. `inserts` counts the batches that
+insert into `table`. Call `restore` when the test ends.
+*/
 export function interleaveBeforeInsert(
 	table: string,
 	interleave: () => Promise<void>
@@ -2114,9 +2114,9 @@ async function narStateIncarnation(
 }
 
 /**
- * Each function changes a NAR's current object version in the same way as
- * another writer can between a commit's probe and its charge batch.
- */
+Each function changes a NAR's current object version in the same way as
+another writer can between a commit's probe and its charge batch.
+*/
 export const narObjectVersionChanges = {
 	// The reaper collects the unreferenced object.
 	collected: async (narHash: NixSha256HashString): Promise<void> => {
@@ -2169,9 +2169,9 @@ async function casObjectIncarnation(digest: Sha256HexDigest): Promise<number> {
 }
 
 /**
- * Each function changes a bundle's current object version in the same way as
- * another writer can between an attach's promotion and its reserve batch.
- */
+Each function changes a bundle's current object version in the same way as
+another writer can between an attach's promotion and its reserve batch.
+*/
 export const casObjectVersionChanges = {
 	// The reaper collects the unreferenced object.
 	collected: async (digest: Sha256HexDigest): Promise<void> => {
@@ -2213,10 +2213,10 @@ export const casObjectVersionChanges = {
 };
 
 /**
- * Whether the cron has stamped a tenant as maintained, for asserting which tenants a
- * pass picked up: the maintenance pass orders active tenants by `last_maintained_at`
- * (oldest first, NULL first) and stamps the batch it processes.
- */
+Whether the cron has stamped a tenant as maintained, for asserting which tenants a
+pass picked up: the maintenance pass orders active tenants by `last_maintained_at`
+(oldest first, NULL first) and stamps the batch it processes.
+*/
 export async function wasTenantMaintained(id: string): Promise<boolean> {
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({ lastMaintainedAt: d1Schema.tenant.lastMaintainedAt })
@@ -2429,10 +2429,10 @@ export async function pendingAttestationRows(): Promise<
 }
 
 /**
- * Publishes an attestation list object for a path, as the server does when a
- * bundle is attached to `generation`. Omit `generation` to reproduce a legacy
- * list object without generation metadata.
- */
+Publishes an attestation list object for a path, as the server does when a
+bundle is attached to `generation`. Omit `generation` to reproduce a legacy
+list object without generation metadata.
+*/
 export async function publishAttestationList(fields: {
 	readonly cache?: CacheScope;
 	readonly storePathHash: StorePathHash;
@@ -2561,9 +2561,9 @@ export async function isTenantUsagePresent(id: string): Promise<boolean> {
 }
 
 /**
- * Models a deletion where the row transaction committed before D1 received the
- * queued cleanup. The captured reference edge remains in D1.
- */
+Models a deletion where the row transaction committed before D1 received the
+queued cleanup. The captured reference edge remains in D1.
+*/
 export async function queueUnflushedNarInfoDeletion(fields: {
 	readonly storePathHash: StorePathHash;
 	readonly cache?: CacheScope;
@@ -2948,11 +2948,11 @@ export async function pushPathToTenant(
 }
 
 /**
- * Negotiates, uploads and commits a tenant path through the Worker, returning the
- * HTTP status the commit refusal carried (or OK when it settles), so a test can
- * assert a commit that the Durable Object refuses (for example one settling after
- * offboarding began).
- */
+Negotiates, uploads and commits a tenant path through the Worker, returning the
+HTTP status the commit refusal carried (or OK when it settles), so a test can
+assert a commit that the Durable Object refuses (for example one settling after
+offboarding began).
+*/
 export async function attemptPushToTenant(
 	tenant: TenantId,
 	token: string,
@@ -3093,10 +3093,10 @@ export class CommitSocketProtocolError extends Error {
 }
 
 /**
- * Accepts the client end of a commit upgrade and returns it alongside a frame
- * reader. The listener attaches before `accept()` so no frame the server sent
- * during the commit transition is missed.
- */
+Accepts the client end of a commit upgrade and returns it alongside a frame
+reader. The listener attaches before `accept()` so no frame the server sent
+during the commit transition is missed.
+*/
 export interface CommitConversation {
 	readonly socket: WebSocket;
 	readonly send: (request: CommitSessionRequestInput) => void;
@@ -3244,8 +3244,8 @@ type CommitFixturePhase = 'initial frame' | 'verdict';
 export const commitFixturePhaseDeadlineMs = 20_000;
 
 /**
- * Identifies the commit fixture phase that stopped progressing.
- */
+Identifies the commit fixture phase that stopped progressing.
+*/
 export class CommitFixturePhaseTimeoutError extends Error {
 	constructor(
 		public readonly phase: CommitFixturePhase,
@@ -3315,13 +3315,13 @@ async function verifyUploadPass(
 }
 
 /**
- * Concurrent promotion can leave an upload pending after verification. The
- * test pool does not deliver verification queue messages, and alarm fences
- * disable the backstop. This fixture therefore runs another pass while the
- * stored verdict is pending. The phase deadline applies to each pass and to the
- * wait for the frame after a completed pass, not to the whole loop, because
- * passes that each finish in time can together take longer than one deadline.
- */
+Concurrent promotion can leave an upload pending after verification. The
+test pool does not deliver verification queue messages, and alarm fences
+disable the backstop. This fixture therefore runs another pass while the
+stored verdict is pending. The phase deadline applies to each pass and to the
+wait for the frame after a completed pass, not to the whole loop, because
+passes that each finish in time can together take longer than one deadline.
+*/
 async function verifyUntilFrame(
 	conversation: CommitConversation,
 	uploadId: UploadId,
@@ -3369,9 +3369,9 @@ async function verifyUntilFrame(
 }
 
 /**
- * Resolves once `frame` settles. The caller of {@link verifyUntilFrame}
- * receives a rejected frame, so this promise does not reject.
- */
+Resolves once `frame` settles. The caller of {@link verifyUntilFrame}
+receives a rejected frame, so this promise does not reject.
+*/
 async function frameArrival(frame: Promise<CommitSessionFrame>): Promise<void> {
 	try {
 		await frame;
@@ -3448,14 +3448,14 @@ export async function completeCommitSession(
 }
 
 /**
- * Commits an upload over the session WebSocket the way a client does, against
- * the Durable Object stub. A deferred upload's verification is driven
- * synchronously and the verdict awaited, so callers see the settled
- * `committed` result; `wait: false` returns the deferral as `pending`
- * instead. A refused commit throws {@link CommitSocketError} with the status
- * the error frame carried; a non-servable verdict throws
- * {@link CommitVerdictError}.
- */
+Commits an upload over the session WebSocket the way a client does, against
+the Durable Object stub. A deferred upload's verification is driven
+synchronously and the verdict awaited, so callers see the settled
+`committed` result; `wait: false` returns the deferral as `pending`
+instead. A refused commit throws {@link CommitSocketError} with the status
+the error frame carried; a non-servable verdict throws
+{@link CommitVerdictError}.
+*/
 export async function commitUpload(
 	token: string,
 	uploadId: UploadId,
@@ -3473,11 +3473,11 @@ export async function commitUpload(
 }
 
 /**
- * Runs a commit that the server is expected to refuse. Returns the rejection so
- * the test can compare it structurally. Fails if the commit succeeds, and a
- * deferral counts as success: with `wait: false` it is returned as `pending`
- * without running verification.
- */
+Runs a commit that the server is expected to refuse. Returns the rejection so
+the test can compare it structurally. Fails if the commit succeeds, and a
+deferral counts as success: with `wait: false` it is returned as `pending`
+without running verification.
+*/
 export async function commitUploadRejection(
 	token: string,
 	uploadId: UploadId,
@@ -3736,10 +3736,10 @@ export function runCasReaperToCompletion(
 }
 
 /**
- * Drains the attestation inheritance queue once, as the maintenance alarm
- * does. A test that drives alarms by hand calls this to empty the queue, so the
- * inheritance pass does not take the next alarm.
- */
+Drains the attestation inheritance queue once, as the maintenance alarm
+does. A test that drives alarms by hand calls this to empty the queue, so the
+inheritance pass does not take the next alarm.
+*/
 export async function drainAttestationInheritance(
 	server: DurableObjectStub<CupboardServer> = currentServer()
 ): Promise<void> {
@@ -4005,12 +4005,12 @@ export async function putNarBytes(
 }
 
 /**
- * Seeds an already-available shared blob: writes its canonical object and the
- * `blob_state` row recording its compressed size, so a later upload of a different
- * encoding of the same NAR adopts this canonical size at promote. Lets a test
- * set up a canonical size that differs from the staged size, so it can check
- * that the quota charge uses the canonical size.
- */
+Seeds an already-available shared blob: writes its canonical object and the
+`blob_state` row recording its compressed size, so a later upload of a different
+encoding of the same NAR adopts this canonical size at promote. Lets a test
+set up a canonical size that differs from the staged size, so it can check
+that the quota charge uses the canonical size.
+*/
 export async function seedCanonicalBlob(nar: VerifiableNar): Promise<void> {
 	await putNarBytes(narObjectKey(nar.narHash), nar);
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -4049,11 +4049,11 @@ function singleChunkStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
 }
 
 /**
- * A distinct, self-consistent NAR for a seed: real zstd bytes whose decompressed
- * payload hashes to `narHash`, so the server's verify-before-serve accepts it.
- * Tests that need several distinct blobs (reference graphs, per-blob GC) build one
- * per path with this helper.
- */
+A distinct, self-consistent NAR for a seed: real zstd bytes whose decompressed
+payload hashes to `narHash`, so the server's verify-before-serve accepts it.
+Tests that need several distinct blobs (reference graphs, per-blob GC) build one
+per path with this helper.
+*/
 export async function verifiableNar(seed: string): Promise<VerifiableNar> {
 	const encoder = new TextEncoder();
 	const uncompressed = encoder.encode(`cupboard-nar:${seed}\n`.repeat(64));
@@ -4078,9 +4078,9 @@ export async function verifiableNar(seed: string): Promise<VerifiableNar> {
 }
 
 /**
- * A minimal sigstore DSSE bundle whose in-toto statement attests the given
- * subject digest, byte-encoded the way the attach flow stages it.
- */
+A minimal sigstore DSSE bundle whose in-toto statement attests the given
+subject digest, byte-encoded the way the attach flow stages it.
+*/
 export function sigstoreBundleBytes(
 	subjectDigest: string,
 	predicateType = 'https://slsa.dev/provenance/v1'
@@ -4155,11 +4155,11 @@ function storedZstdFrame(payload: Uint8Array): Uint8Array {
 }
 
 /**
- * The same NAR payload as {@link verifiableNar} for a seed, but encoded as an
- * uncompressed "stored" zstd frame. It decompresses to the same bytes (sharing
- * the seed's `narHash`), yet its compressed bytes and thus `fileHash` differ,
- * modelling a client that compressed the same NAR with other zstd settings.
- */
+The same NAR payload as {@link verifiableNar} for a seed, but encoded as an
+uncompressed "stored" zstd frame. It decompresses to the same bytes (sharing
+the seed's `narHash`), yet its compressed bytes and thus `fileHash` differ,
+modelling a client that compressed the same NAR with other zstd settings.
+*/
 export async function verifiableNarStored(
 	seed: string
 ): Promise<VerifiableNar> {
@@ -4181,10 +4181,10 @@ export async function verifiableNarStored(
 }
 
 /**
- * Reads a pending upload's verification verdict: `undefined` if the row is gone,
- * otherwise the stored verdict (`null`, `'committing'`, `'pending'`, `'servable'`,
- * `'mismatch'`, or `'over-quota'`).
- */
+Reads a pending upload's verification verdict: `undefined` if the row is gone,
+otherwise the stored verdict (`null`, `'committing'`, `'pending'`, `'servable'`,
+`'mismatch'`, or `'over-quota'`).
+*/
 export async function pendingUploadVerdict(
 	uploadId: UploadId
 ): Promise<string | null | undefined> {
@@ -4207,10 +4207,10 @@ async function pendingUploadVerdictAt(
 }
 
 /**
- * Snapshots a pending upload's verdict and observation window, `undefined` if
- * the row is gone. A terminal row must survive a straggling verdict unchanged,
- * so tests compare whole snapshots taken either side of the straggler.
- */
+Snapshots a pending upload's verdict and observation window, `undefined` if
+the row is gone. A terminal row must survive a straggling verdict unchanged,
+so tests compare whole snapshots taken either side of the straggler.
+*/
 export async function pendingUploadSnapshot(
 	uploadId: UploadId
 ): Promise<{ verdict: string | null; expiresAt: string } | undefined> {
@@ -4290,10 +4290,10 @@ export async function verifiablePath(
 }
 
 /**
- * Negotiates, uploads and commits a path backed by a distinct verifiable NAR for
- * the seed, returning its metadata. Use for the second and later paths in a test:
- * each needs its own NAR hash so negotiate returns a fresh `upload` for each.
- */
+Negotiates, uploads and commits a path backed by a distinct verifiable NAR for
+the seed, returning its metadata. Use for the second and later paths in a test:
+each needs its own NAR hash so negotiate returns a fresh `upload` for each.
+*/
 export async function commitVerifiablePath(
 	token: string,
 	seed: string,
@@ -4310,11 +4310,11 @@ export async function commitVerifiablePath(
 }
 
 /**
- * Collects every message the current server sends through its own queue
- * binding (the path `requestVerification` and its continuations take), by
- * swapping a recording stub onto the live instance before the code under test
- * runs.
- */
+Collects every message the current server sends through its own queue
+binding (the path `requestVerification` and its continuations take), by
+swapping a recording stub onto the live instance before the code under test
+runs.
+*/
 export async function collectVerificationPasses(): Promise<unknown[]> {
 	const sent: unknown[] = [];
 	const metrics = { backlogCount: 0, backlogBytes: 0 };
@@ -4339,9 +4339,9 @@ export async function collectVerificationPasses(): Promise<unknown[]> {
 }
 
 /**
- * Negotiates one fresh path, stages its bytes, and defers it as `pending`
- * background verification, returning the facts a verify claim carries for it.
- */
+Negotiates one fresh path, stages its bytes, and defers it as `pending`
+background verification, returning the facts a verify claim carries for it.
+*/
 export async function deferFreshUpload(
 	token: string,
 	seed: string,
@@ -4368,9 +4368,9 @@ export async function deferFreshUpload(
 }
 
 /**
- * Marks a staged upload as pending so a test can run background verification
- * without opening a commit session.
- */
+Marks a staged upload as pending so a test can run background verification
+without opening a commit session.
+*/
 export async function markUploadPendingVerification(
 	uploadId: UploadId,
 	stub: DurableObjectStub<CupboardServer> = currentServer()
@@ -4447,11 +4447,11 @@ export async function seedReservedNarInfo(
 }
 
 /**
- * Rewrites fields on a committed narinfo row directly, to plant a stored blob
- * that disagrees with the hash or size its narinfo signed. This is a state a
- * normal verified commit cannot produce, so the deep storage check's NAR
- * re-derivation can be exercised.
- */
+Rewrites fields on a committed narinfo row directly, to plant a stored blob
+that disagrees with the hash or size its narinfo signed. This is a state a
+normal verified commit cannot produce, so the deep storage check's NAR
+re-derivation can be exercised.
+*/
 export async function corruptCommittedNarInfo(
 	storePathHash: StorePathHash,
 	fields: Partial<{
@@ -4624,9 +4624,9 @@ export function uploadExpiryFromNow(): IsoTimestamp {
 }
 
 /**
- * Records a schema transition's state as `cupboard deploy` does, in the row
- * that the tenant objects' transition gate reads.
- */
+Records a schema transition's state as `cupboard deploy` does, in the row
+that the tenant objects' transition gate reads.
+*/
 export async function recordTransition(
 	id: TransitionId,
 	state: TransitionState
@@ -4649,10 +4649,10 @@ export const latestMigrationIndex = Math.max(
 );
 
 /**
- * The index of the migration with this tag, so a test can migrate to a point in
- * the history by name rather than by a number that shifts as migrations are
- * added.
- */
+The index of the migration with this tag, so a test can migrate to a point in
+the history by name rather than by a number that shifts as migrations are
+added.
+*/
 export function migrationIndexNamed(tag: string): number {
 	const entry = migrations.journal.entries.find((item) => item.tag === tag);
 
@@ -4664,18 +4664,18 @@ export function migrationIndexNamed(tag: string): number {
 }
 
 /**
- * The last migration before the one that makes every cache's access mandatory.
- * Rows in the legacy shape can be planted up to here.
- */
+The last migration before the one that makes every cache's access mandatory.
+Rows in the legacy shape can be planted up to here.
+*/
 export const beforeCacheIdentityContract =
 	migrationIndexNamed('0051_cache_identity_contract_assertions') - 1;
 
 /**
- * Applies the registered migrations up to and including `throughIndex` against
- * a Durable Object's raw storage. Calling it twice with seeding in between lets
- * a test plant rows in an older table shape and then assert how a later
- * migration backfills them; the migrator skips migrations already applied.
- */
+Applies the registered migrations up to and including `throughIndex` against
+a Durable Object's raw storage. Calling it twice with seeding in between lets
+a test plant rows in an older table shape and then assert how a later
+migration backfills them; the migrator skips migrations already applied.
+*/
 export async function migrateThrough(
 	state: DurableObjectState,
 	throughIndex: number
@@ -4693,14 +4693,14 @@ export async function migrateThrough(
 }
 
 /**
- * Applies every migration to a store seeded in a shape older than the cache
- * catalogue, giving each of its caches a public access on the way.
- *
- * The contraction refuses an object whose caches record no access. A deployment
- * converts every tenant's catalogue before that release reaches its object, and
- * this stands in for that conversion so a test can seed an old row shape and
- * still migrate to the end of the history.
- */
+Applies every migration to a store seeded in a shape older than the cache
+catalogue, giving each of its caches a public access on the way.
+
+The contraction refuses an object whose caches record no access. A deployment
+converts every tenant's catalogue before that release reaches its object, and
+this stands in for that conversion so a test can seed an old row shape and
+still migrate to the end of the history.
+*/
 export async function migrateThroughConvertedCatalogue(
 	state: DurableObjectState
 ): Promise<void> {
@@ -4747,11 +4747,11 @@ export interface SeededSigningKey {
 }
 
 /**
- * Plants signing keys directly in the current Durable Object's storage so a
- * test can exercise multi-key signing without going through key rotation. Run
- * it before the DO first loads its keys (the load is cached for the DO's
- * lifetime), before the first bootstrap or read.
- */
+Plants signing keys directly in the current Durable Object's storage so a
+test can exercise multi-key signing without going through key rotation. Run
+it before the DO first loads its keys (the load is cached for the DO's
+lifetime), before the first bootstrap or read.
+*/
 export async function seedSigningKeys(
 	seeds: readonly SigningKeySeed[]
 ): Promise<SeededSigningKey[]> {

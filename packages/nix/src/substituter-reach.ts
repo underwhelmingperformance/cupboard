@@ -1,11 +1,11 @@
 export type SubstituterReach = (substituter: string) => boolean;
 
 /**
- * This check uses URL syntax only. It rejects local store transports,
- * literal private or link-local addresses, and the `localhost` names reserved
- * by RFC 6761. It accepts all other hostnames without resolving them, so the
- * result does not depend on the machine or DNS response.
- */
+This check uses URL syntax only. It rejects local store transports,
+literal private or link-local addresses, and the `localhost` names reserved
+by RFC 6761. It accepts all other hostnames without resolving them, so the
+result does not depend on the machine or DNS response.
+*/
 export function isReachableElsewhere(substituter: string): boolean {
 	const parsed = URL.parse(substituter);
 
@@ -41,11 +41,7 @@ function isReachableHost(hostname: string): boolean {
 function ipv4Octets(hostname: string): readonly number[] | undefined {
 	const parts = hostname.split('.');
 
-	if (parts.length !== 4) {
-		return undefined;
-	}
-
-	if (parts.some((part) => !/^\d{1,3}$/.test(part))) {
+	if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) {
 		return undefined;
 	}
 

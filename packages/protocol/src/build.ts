@@ -27,10 +27,10 @@ export const buildEventSchema = z.strictObject({
 	derivation: derivationPathSchema,
 	outputPaths: z.array(storePathSchema).min(1),
 	/**
-	 * The hook could not protect these outputs from garbage collection. The
-	 * supervisor records them for publication after the build but does not stream
-	 * them.
-	 */
+	The hook could not protect these outputs from garbage collection. The
+	supervisor records them for publication after the build but does not stream
+	them.
+	*/
 	outputProtection: z.literal('failed').optional()
 });
 export type BuildEvent = z.output<typeof buildEventSchema>;

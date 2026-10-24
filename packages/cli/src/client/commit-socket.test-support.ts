@@ -79,12 +79,12 @@ export class FakeCommitSocket
 	}
 
 	/**
-	 * Match the close events and ordering from `ws`. Closing during the handshake
-	 * emits an error followed by an abnormal close with status 1006. Closing an
-	 * open socket emits only status 1005, which `ws` uses when no close frame
-	 * supplies a status. Queue the events so tests can deliver a late event from
-	 * a superseded connection after the session has changed state.
-	 */
+	Match the close events and ordering from `ws`. Closing during the handshake
+	emits an error followed by an abnormal close with status 1006. Closing an
+	open socket emits only status 1005, which `ws` uses when no close frame
+	supplies a status. Queue the events so tests can deliver a late event from
+	a superseded connection after the session has changed state.
+	*/
 	close(): void {
 		if (this.closed) {
 			return;

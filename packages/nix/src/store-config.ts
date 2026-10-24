@@ -30,16 +30,16 @@ import {
 
 export interface NixStoreConfig {
 	/**
-	 * Backend selection uses this canonical store reference. Relative and absolute
-	 * paths become `local://` URIs; store keywords and other URIs retain their
-	 * original form.
-	 */
+	Backend selection uses this canonical store reference. Relative and absolute
+	paths become `local://` URIs; store keywords and other URIs retain their
+	original form.
+	*/
 	readonly storeUri: string;
 	/**
-	 * `NIX_STORE_DIR` sets the prefix for every store path, while `NIX_STORE` is a
-	 * deprecated alias. Stores serving a different directory specify it in their
-	 * URI.
-	 */
+	`NIX_STORE_DIR` sets the prefix for every store path, while `NIX_STORE` is a
+	deprecated alias. Stores serving a different directory specify it in their
+	URI.
+	*/
 	readonly storeDirectory: StoreDirectory;
 	readonly stateDirectory: string;
 	readonly daemonSocketPath: string;
@@ -50,15 +50,15 @@ export interface NixStoreConfig {
 	readonly fileTransfer: NixFileTransferSettings;
 	readonly signatures: NixSignatureSettings;
 	/**
-	 * Configuration setting names unknown to this client. Nix warns about
-	 * unknown settings and ignores their values; callers can report them here.
-	 */
+	Configuration setting names unknown to this client. Nix warns about
+	unknown settings and ignores their values; callers can report them here.
+	*/
 	readonly unknownSettings: readonly string[];
 	/**
-	 * Nix supports exactly one post-build hook. This is the effective setting from
-	 * the merged configuration, so callers that need to install another hook must
-	 * reject a non-empty value.
-	 */
+	Nix supports exactly one post-build hook. This is the effective setting from
+	the merged configuration, so callers that need to install another hook must
+	reject a non-empty value.
+	*/
 	readonly postBuildHook?: string;
 }
 
@@ -75,11 +75,11 @@ export interface NixDaemonSetOptions {
 export type NixDaemonOverrides = Readonly<Record<string, string>>;
 
 /**
- * Controls substitution eligibility and substituter order. No paths are
- * substituted when `substitute` is off. A derivation's own
- * `allowSubstitutes = false` is honoured unless `alwaysAllowSubstitutes`
- * overrules it.
- */
+Controls substitution eligibility and substituter order. No paths are
+substituted when `substitute` is off. A derivation's own
+`allowSubstitutes = false` is honoured unless `alwaysAllowSubstitutes`
+overrules it.
+*/
 export interface NixSubstitutionSettings {
 	readonly substitute: boolean;
 	readonly alwaysAllowSubstitutes: boolean;
@@ -88,34 +88,34 @@ export interface NixSubstitutionSettings {
 	*/
 	readonly fallback: boolean;
 	/**
-	 * Nix queries the configured base list first, followed by
-	 * `extra-substituters` entries in source order.
-	 */
+	Nix queries the configured base list first, followed by
+	`extra-substituters` entries in source order.
+	*/
 	readonly substituters: readonly string[];
 }
 
 /**
- * Determines where Nix would build a derivation. Nix builds on this machine
- * when `systems` contains the derivation's system and `features` contains all
- * its required features. Nix sends anything else to a remote builder. If no
- * suitable builder is configured, the derivation cannot build.
- */
+Determines where Nix would build a derivation. Nix builds on this machine
+when `systems` contains the derivation's system and `features` contains all
+its required features. Nix sends anything else to a remote builder. If no
+suitable builder is configured, the derivation cannot build.
+*/
 export interface NixBuildSettings {
 	/**
-	 * Nix considers the effective `system` first, followed by compatible
-	 * `extra-platforms`. Empty when the host system cannot be determined.
-	 */
+	Nix considers the effective `system` first, followed by compatible
+	`extra-platforms`. Empty when the host system cannot be determined.
+	*/
 	readonly systems: readonly string[];
 	readonly features: readonly string[];
 	readonly builders?: string;
 }
 
 /**
- * Controls HTTP transfers. Nix doubles the retry delay after each transient
- * failure, up to the configured maximum. `Retry-After` can extend the delay.
- * Jitter prevents clients that receive the same response from retrying
- * simultaneously.
- */
+Controls HTTP transfers. Nix doubles the retry delay after each transient
+failure, up to the configured maximum. `Retry-After` can extend the delay.
+Jitter prevents clients that receive the same response from retrying
+simultaneously.
+*/
 export interface NixFileTransferSettings {
 	/**
 	Total request attempts, including the initial request.
@@ -138,23 +138,23 @@ export interface NixFileTransferSettings {
 	*/
 	readonly retryJitter: boolean;
 	/**
-	 * A whole-request deadline in milliseconds, derived from
-	 * `stalled-download-timeout`. Nix instead aborts after libcurl measures less
-	 * than one byte per second for that interval. At the default five minutes, a
-	 * narinfo or `nix-cache-info` document of a few hundred bytes that is still
-	 * incomplete has moved at roughly that low speed. A response approaching the
-	 * one-megabyte limit can remain above one byte per second yet outlast this
-	 * client's deadline, so the two mechanisms can diverge at that scale.
-	 */
+	A whole-request deadline in milliseconds, derived from
+	`stalled-download-timeout`. Nix instead aborts after libcurl measures less
+	than one byte per second for that interval. At the default five minutes, a
+	narinfo or `nix-cache-info` document of a few hundred bytes that is still
+	incomplete has moved at roughly that low speed. A response approaching the
+	one-megabyte limit can remain above one byte per second yet outlast this
+	client's deadline, so the two mechanisms can diverge at that scale.
+	*/
 	readonly stalledTransferTimeoutMs: number;
 	/**
 	Maximum concurrent HTTP requests. Zero means no configured limit.
 	*/
 	readonly httpConnections: number;
 	/**
-	 * An absolute netrc path. The default follows the system configuration
-	 * directory whether or not the file exists.
-	 */
+	An absolute netrc path. The default follows the system configuration
+	directory whether or not the file exists.
+	*/
 	readonly netrcFile: string;
 }
 
@@ -163,11 +163,11 @@ export interface NixFileTransferSettings {
 const defaultSubstituters = ['https://cache.nixos.org/'];
 
 /**
- * Controls the signature policy for paths offered by another store. With
- * `require-sigs` enabled, Nix accepts a path only when a trusted key verifies at
- * least one signature. With `require-sigs` disabled, Nix accepts the path
- * without a valid signature.
- */
+Controls the signature policy for paths offered by another store. With
+`require-sigs` enabled, Nix accepts a path only when a trusted key verifies at
+least one signature. With `require-sigs` disabled, Nix accepts the path
+without a valid signature.
+*/
 export interface NixSignatureSettings {
 	readonly requireSignatures: boolean;
 	/**
@@ -175,9 +175,9 @@ export interface NixSignatureSettings {
 	*/
 	readonly trustedPublicKeys: readonly string[];
 	/**
-	 * Secret key files also contribute their public halves to the trusted key
-	 * set.
-	 */
+	Secret key files also contribute their public halves to the trusted key
+	set.
+	*/
 	readonly secretKeyFiles: readonly string[];
 }
 
@@ -211,26 +211,26 @@ function netrcFileIn(configDirectory: string): string {
 }
 
 /**
- * Host capabilities detected by Nix startup probes. Each default below uses
- * the corresponding Nix probe, so unsupported capabilities are omitted.
- */
+Host capabilities detected by Nix startup probes. Each default below uses
+the corresponding Nix probe, so unsupported capabilities are omitted.
+*/
 export interface NixMachineProbes {
 	canReadWrite(path: string): boolean;
 	isFilePresent(path: string): boolean;
 	/**
-	 * Whether this machine offers hardware virtualisation to a guest: the
-	 * kernel supports it and this is not itself a guest.
-	 */
+	Whether this machine offers hardware virtualisation to a guest: the
+	kernel supports it and this is not itself a guest.
+	*/
 	hasHardwareVirtualisation(): boolean;
 	/**
 	Whether this is WSL 1, whose kernel does not run i686 binaries.
 	*/
 	isWsl1(): boolean;
 	/**
-	 * Returns the x86-64 psABI microarchitecture levels this CPU supports, lowest
-	 * first, as `x86_64-v1` through `x86_64-v4`. Empty on a machine whose CPU is
-	 * not x86-64.
-	 */
+	Returns the x86-64 psABI microarchitecture levels this CPU supports, lowest
+	first, as `x86_64-v1` through `x86_64-v4`. Empty on a machine whose CPU is
+	not x86-64.
+	*/
 	microarchitectureLevels(): readonly string[];
 }
 
@@ -243,12 +243,12 @@ const kvmDevice = '/dev/kvm';
 const rosettaRuntime = '/Library/Apple/usr/libexec/oah/libRosettaRuntime';
 
 /**
- * Computes the default `extra-platforms` from the host system and runtime
- * probes. The configured `system` does not affect these defaults. An
- * x86_64-linux host adds i686-linux unless it runs WSL 1, Linux adds the psABI
- * levels reported by the CPU probe, and Apple silicon adds x86_64-darwin only
- * when Rosetta is installed.
- */
+Computes the default `extra-platforms` from the host system and runtime
+probes. The configured `system` does not affect these defaults. An
+x86_64-linux host adds i686-linux unless it runs WSL 1, Linux adds the psABI
+levels reported by the CPU probe, and Apple silicon adds x86_64-darwin only
+when Rosetta is installed.
+*/
 function defaultExtraPlatforms(
 	machineSystem: string | undefined,
 	probes: NixMachineProbes
@@ -337,20 +337,20 @@ function nixSystemOf(architecture: string, kernel: string): string | undefined {
 export interface NixConfigEnvironment {
 	readonly env: Readonly<Record<string, string | undefined>>;
 	/**
-	 * Returns the file's contents, or `undefined` when it does not exist. Other
-	 * read failures are raised so callers can distinguish an inaccessible file
-	 * from a missing file.
-	 */
+	Returns the file's contents, or `undefined` when it does not exist. Other
+	read failures are raised so callers can distinguish an inaccessible file
+	from a missing file.
+	*/
 	readonly readFile: (filePath: string) => string | undefined;
 	readonly homeDirectory: () => string | undefined;
 	/**
-	 * Supplies the directory against which relative store references resolve.
-	 */
+	Supplies the directory against which relative store references resolve.
+	*/
 	readonly workingDirectory: () => string;
 	/**
-	 * Supplies the default for the `system` setting, or `undefined` when this
-	 * machine's Nix system cannot be determined.
-	 */
+	Supplies the default for the `system` setting, or `undefined` when this
+	machine's Nix system cannot be determined.
+	*/
 	readonly currentSystem: () => string | undefined;
 	readonly probes: NixMachineProbes;
 }
@@ -362,9 +362,9 @@ const maxIncludeDepth = 16;
 const inlineConfigSource = 'NIX_CONFIG';
 
 /**
- * Relative includes resolve from the including file's directory. `NIX_CONFIG`
- * is a value rather than a file, so it cannot contain a relative include.
- */
+Relative includes resolve from the including file's directory. `NIX_CONFIG`
+is a value rather than a file, so it cannot contain a relative include.
+*/
 type ConfigSource =
 	| { readonly kind: 'file'; readonly filePath: string }
 	| { readonly kind: 'inline' };
@@ -374,10 +374,10 @@ function sourceName(source: ConfigSource): string {
 }
 
 /**
- * Tokenises a configuration line before its fields are parsed. `name = value`
- * needs its spaces, and each run of whitespace inside a multi-word value
- * collapses to a single space.
- */
+Tokenises a configuration line before its fields are parsed. `name = value`
+needs its spaces, and each run of whitespace inside a multi-word value
+collapses to a single space.
+*/
 function settingTokens(line: string): readonly string[] {
 	return line.split(/[\t\r ]+/u).filter(Boolean);
 }
@@ -409,13 +409,13 @@ export const defaultMachineProbes: NixMachineProbes = {
 };
 
 /**
- * Returns the x86-64 psABI levels satisfied by a set of CPU feature flags. Each
- * level subsumes the one below it, so the first unsupported level ends the
- * list. A CPU below `v1` satisfies no level.
- *
- * Nix reports these levels only when built against libcpuid. A build without
- * libcpuid reports none regardless of the host CPU.
- */
+Returns the x86-64 psABI levels satisfied by a set of CPU feature flags. Each
+level subsumes the one below it, so the first unsupported level ends the
+list. A CPU below `v1` satisfies no level.
+
+Nix reports these levels only when built against libcpuid. A build without
+libcpuid reports none regardless of the host CPU.
+*/
 export function microarchitectureLevelsOf(
 	flags: ReadonlySet<string>
 ): readonly string[] {
@@ -433,20 +433,20 @@ export function microarchitectureLevelsOf(
 }
 
 /**
- * CPU features required for each psABI level. These arrays reproduce
- * libcpuid's `architecture_x86_64_v1` to `_v4` feature sets using the
- * identifiers from Linux's `/proc/cpuinfo`. Nix reads its levels from
- * libcpuid, so the arrays match its result rather than the psABI document's
- * wording.
- *
- * Three libcpuid flags use different identifiers here. `PNI` is SSE3, which
- * Linux reports as `pni`; `FMA3` is the three-operand FMA reported as `fma`;
- * and `ABM` includes LZCNT support, which Linux reports as `abm` for both Intel
- * and AMD. Libcpuid separately requires `OSXSAVE`, but Linux publishes `avx`
- * only after the operating system enables the required XSAVE state. Requiring
- * another `/proc/cpuinfo` flag would therefore reject an otherwise complete
- * third-level feature set.
- */
+CPU features required for each psABI level. These arrays reproduce
+libcpuid's `architecture_x86_64_v1` to `_v4` feature sets using the
+identifiers from Linux's `/proc/cpuinfo`. Nix reads its levels from
+libcpuid, so the arrays match its result rather than the psABI document's
+wording.
+
+Three libcpuid flags use different identifiers here. `PNI` is SSE3, which
+Linux reports as `pni`; `FMA3` is the three-operand FMA reported as `fma`;
+and `ABM` includes LZCNT support, which Linux reports as `abm` for both Intel
+and AMD. Libcpuid separately requires `OSXSAVE`, but Linux publishes `avx`
+only after the operating system enables the required XSAVE state. Requiring
+another `/proc/cpuinfo` flag would therefore reject an otherwise complete
+third-level feature set.
+*/
 const microarchitectureLevelFlags: readonly [string, readonly string[]][] = [
 	['x86_64-v1', ['cmov', 'cx8', 'fpu', 'fxsr', 'mmx', 'sse', 'sse2']],
 	[
@@ -542,10 +542,10 @@ export const defaultNixConfigEnvironment: NixConfigEnvironment = {
 };
 
 /**
- * Resolves the store configuration with Nix's source precedence. The system
- * file is the base, user files override it, and `NIX_CONFIG` applies last.
- * Store and state environment variables retain their separate precedence.
- */
+Resolves the store configuration with Nix's source precedence. The system
+file is the base, user files override it, and `NIX_CONFIG` applies last.
+Store and state environment variables retain their separate precedence.
+*/
 export function discoverNixStoreConfig(
 	dependencies: NixConfigEnvironment = defaultNixConfigEnvironment
 ): NixStoreConfig {
@@ -879,10 +879,10 @@ function applyInclude(
 }
 
 /**
- * Resolves an include target. Relative targets use the including file's
- * directory. `NIX_CONFIG` has no containing directory, so it cannot contain a
- * relative include.
- */
+Resolves an include target. Relative targets use the including file's
+directory. `NIX_CONFIG` has no containing directory, so it cannot contain a
+relative include.
+*/
 function includePath(target: string, source: ConfigSource): string {
 	if (path.isAbsolute(target)) {
 		return target;
@@ -970,9 +970,9 @@ class EffectiveSettings {
 	}
 
 	/**
-	 * Validates known settings with Nix's value rules. Unknown names return false
-	 * so discovery can report them without rejecting the configuration.
-	 */
+	Validates known settings with Nix's value rules. Unknown names return false
+	so discovery can report them without rejecting the configuration.
+	*/
 	private readable(name: string, value: string): boolean {
 		const named = namedSetting(name);
 
@@ -1132,10 +1132,10 @@ export class EffectiveList {
 	}
 
 	/**
-	 * The explicitly assigned value followed by later appends, or `undefined`
-	 * when the configuration only appends. This class has no base
-	 * default, so there is no complete value to report in that case.
-	 */
+	The explicitly assigned value followed by later appends, or `undefined`
+	when the configuration only appends. This class has no base
+	default, so there is no complete value to report in that case.
+	*/
 	assignedValue(): readonly string[] | undefined {
 		return this.assigned === undefined
 			? undefined
@@ -1273,10 +1273,10 @@ function resolvedBuilders(
 const maxMachineFileDepth = 16;
 
 /**
- * Expands a `builders` value using Nix's rules: `#` starts a comment,
- * semicolons separate entries, and `@file` recursively inserts entries from
- * the referenced file.
- */
+Expands a `builders` value using Nix's rules: `#` starts a comment,
+semicolons separate entries, and `@file` recursively inserts entries from
+the referenced file.
+*/
 function expandBuilderLines(
 	builders: string,
 	dependencies: NixConfigEnvironment,
@@ -1298,16 +1298,16 @@ function expandBuilderLines(
 							dependencies,
 							depth + 1
 						)
-					: [entry]
+					: entry
 			)
 	);
 }
 
 /**
- * Reads a machines file referenced by `@file`. Nix treats a missing file as
- * empty but propagates other filesystem errors. An unreadable file therefore
- * makes the configuration unresolved.
- */
+Reads a machines file referenced by `@file`. Nix treats a missing file as
+empty but propagates other filesystem errors. An unreadable file therefore
+makes the configuration unresolved.
+*/
 function machineFileText(
 	filePath: string,
 	dependencies: NixConfigEnvironment
@@ -1443,10 +1443,10 @@ class EffectiveSubstitutionSettings {
 }
 
 /**
- * Builds the SetOptions override map. Scalar assignments use their pinned
- * names. Appendable settings with a locally known base use the fully resolved
- * list, which prevents the daemon from appending the same base again.
- */
+Builds the SetOptions override map. Scalar assignments use their pinned
+names. Appendable settings with a locally known base use the fully resolved
+list, which prevents the daemon from appending the same base again.
+*/
 class EffectiveDaemonOverrides {
 	private readonly appendable = new Map<string, EffectiveList>();
 
@@ -1475,10 +1475,10 @@ class EffectiveDaemonOverrides {
 	}
 
 	/**
-	 * Uses a resolved list when available. Otherwise a plain assignment can be
-	 * forwarded as a complete value, while an append remains under `extra-` so
-	 * the daemon applies it to its own base value.
-	 */
+	Uses a resolved list when available. Otherwise a plain assignment can be
+	forwarded as a complete value, while an append remains under `extra-` so
+	the daemon applies it to its own base value.
+	*/
 	values(
 		resolvedLists: ReadonlyMap<string, readonly string[]>
 	): NixDaemonOverrides {
@@ -1535,19 +1535,19 @@ const settingAliases = new Map([
 ]);
 
 /**
- * Maps a parser name to the spelling sent to the daemon when they differ. Nix
- * renamed the transfer-retry attempts setting but retained the released
- * spelling as an alias, so daemons from either naming era accept that spelling.
- */
+Maps a parser name to the spelling sent to the daemon when they differ. Nix
+renamed the transfer-retry attempts setting but retained the released
+spelling as an alias, so daemons from either naming era accept that spelling.
+*/
 const forwardedSettingNames = new Map([
 	['filetransfer-retry-attempts', 'download-attempts']
 ]);
 
 /**
- * Settings added on Nix master after the pinned release. The generated table
- * does not contain them, so this client recognises their current names
- * separately.
- */
+Settings added on Nix master after the pinned release. The generated table
+does not contain them, so this client recognises their current names
+separately.
+*/
 const masterOnlySettings = new Set([
 	'filetransfer-retry-delay',
 	'filetransfer-retry-delay-rate-limited',
@@ -1570,12 +1570,12 @@ interface NamedSetting {
 }
 
 /**
- * Resolves an assignment name to a setting. Nix first looks up the complete
- * name and then interprets an `extra-` prefix as an append, so a real setting
- * whose name starts with `extra-` wins that lookup.
- * An `extra-` prefix on a scalar setting matches no setting, and the assignment
- * is reported as unknown.
- */
+Resolves an assignment name to a setting. Nix first looks up the complete
+name and then interprets an `extra-` prefix as an append, so a real setting
+whose name starts with `extra-` wins that lookup.
+An `extra-` prefix on a scalar setting matches no setting, and the assignment
+is reported as unknown.
+*/
 function namedSetting(name: string): NamedSetting | undefined {
 	const pinnedName = pinnedSettingName(name);
 	const type = nixSettingType(pinnedName);
@@ -1609,10 +1609,10 @@ function byName(left: string, right: string): number {
 }
 
 /**
- * Whether Nix parses a setting value as enabled. Nix accepts three spellings
- * for each boolean and rejects every other value. Callers use this function so
- * that every boolean setting follows the same parser.
- */
+Whether Nix parses a setting value as enabled. Nix accepts three spellings
+for each boolean and rejects every other value. Callers use this function so
+that every boolean setting follows the same parser.
+*/
 export function isEnabledSettingValue(name: string, value: string): boolean {
 	if (['true', 'yes', '1'].includes(value)) {
 		return true;
@@ -1630,15 +1630,15 @@ export function isEnabledSettingValue(name: string, value: string): boolean {
 }
 
 /**
- * Parses an integer setting using Nix's grammar: an optional sign, digits, and
- * an optional binary unit. The value must fit the width declared for the
- * setting.
- *
- * Two of Nix's setting widths are 64 bits, which covers values beyond the range
- * a JavaScript number represents exactly. A value beyond that range is rounded
- * to the nearest representable number. Such values are far above anything this
- * client acts on; the largest relevant setting is a byte count.
- */
+Parses an integer setting using Nix's grammar: an optional sign, digits, and
+an optional binary unit. The value must fit the width declared for the
+setting.
+
+Two of Nix's setting widths are 64 bits, which covers values beyond the range
+a JavaScript number represents exactly. A value beyond that range is rounded
+to the nearest representable number. Such values are far above anything this
+client acts on; the largest relevant setting is a byte count.
+*/
 function parseSettingInteger(name: string, value: string): number {
 	const parsed = nixInteger(name, value);
 

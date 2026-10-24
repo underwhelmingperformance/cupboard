@@ -195,9 +195,10 @@ async function attachmentFilePaths(
 			return [];
 		}
 
-		return [
-			parseAttachPath(entry, `--paths-file ${file}, line ${String(index + 1)}`)
-		];
+		return parseAttachPath(
+			entry,
+			`--paths-file ${file}, line ${String(index + 1)}`
+		);
 	});
 }
 

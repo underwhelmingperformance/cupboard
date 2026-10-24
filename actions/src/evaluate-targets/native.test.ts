@@ -94,8 +94,12 @@ it.each(['', '0', '1'])(
 		onTestFinished(() => {
 			now.mockRestore();
 		});
-		const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
-		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+		const canWriteStdout = vi
+			.spyOn(process.stdout, 'write')
+			.mockReturnValue(true);
+		const canWriteStderr = vi
+			.spyOn(process.stderr, 'write')
+			.mockReturnValue(true);
 		try {
 			await nativeEvaluationWorker(
 				{
@@ -108,8 +112,8 @@ it.each(['', '0', '1'])(
 				}
 			);
 			expect({
-				stdout: stdout.mock.calls,
-				stderr: stderr.mock.calls.map(([value]): unknown =>
+				stdout: canWriteStdout.mock.calls,
+				stderr: canWriteStderr.mock.calls.map(([value]): unknown =>
 					JSON.parse(String(value))
 				)
 			}).toStrictEqual({
@@ -128,8 +132,8 @@ it.each(['', '0', '1'])(
 						: []
 			});
 		} finally {
-			stdout.mockRestore();
-			stderr.mockRestore();
+			canWriteStdout.mockRestore();
+			canWriteStderr.mockRestore();
 		}
 	}
 );
@@ -727,8 +731,12 @@ it('writes a probe record from the worker to stderr, which keeps stdout for the 
 		vi.restoreAllMocks();
 	});
 	vi.useFakeTimers();
-	const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
-	const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+	const canWriteStdout = vi
+		.spyOn(process.stdout, 'write')
+		.mockReturnValue(true);
+	const canWriteStderr = vi
+		.spyOn(process.stderr, 'write')
+		.mockReturnValue(true);
 	try {
 		await runNativeEvaluation(async () => {
 			await fetchWithProbeRetries(
@@ -743,8 +751,8 @@ it('writes a probe record from the worker to stderr, which keeps stdout for the 
 	}
 
 	expect({
-		stdout: stdout.mock.calls,
-		stderr: stderr.mock.calls
+		stdout: canWriteStdout.mock.calls,
+		stderr: canWriteStderr.mock.calls
 	}).toStrictEqual({
 		stdout: [],
 		stderr: [

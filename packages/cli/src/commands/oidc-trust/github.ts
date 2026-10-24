@@ -289,14 +289,14 @@ export function parseRepository(value: string): string {
 }
 
 /**
- * Reads a repository's numeric ids and current full name from GitHub. The
- * lookup uses `GH_TOKEN`, then `GITHUB_TOKEN`, when either is set. Without a
- * token, GitHub only returns public repositories. Conditional requests reuse a
- * local HTTP cache. A 404 throws {@link RepositoryNotFoundError}; rate limits
- * throw {@link GithubRateLimitError}; and authentication or permission failures
- * throw {@link GithubPermissionError}. Temporary request failures throw
- * {@link GithubTemporaryError}.
- */
+Reads a repository's numeric ids and current full name from GitHub. The
+lookup uses `GH_TOKEN`, then `GITHUB_TOKEN`, when either is set. Without a
+token, GitHub only returns public repositories. Conditional requests reuse a
+local HTTP cache. A 404 throws {@link RepositoryNotFoundError}; rate limits
+throw {@link GithubRateLimitError}; and authentication or permission failures
+throw {@link GithubPermissionError}. Temporary request failures throw
+{@link GithubTemporaryError}.
+*/
 export async function lookupRepository(
 	repository: string,
 	options: LookupRepositoryOptions = {}
@@ -305,12 +305,12 @@ export async function lookupRepository(
 	const slash = repository.indexOf('/');
 
 	const owner = repository.slice(0, slash);
-	const repo = repository.slice(slash + 1);
+	const repository_ = repository.slice(slash + 1);
 
 	const octokit = githubApi(options);
 
 	try {
-		const { data } = await octokit.rest.repos.get({ owner, repo });
+		const { data } = await octokit.rest.repos.get({ owner, repo: repository_ });
 
 		return {
 			repositoryId: data.id,
@@ -415,10 +415,10 @@ function githubRequestSignal(
 }
 
 /**
- * Tests the HTTP status of a GitHub request failure by reading its `status`
- * field. More than one installed copy of `@octokit/request-error` can define
- * `RequestError`, so an `instanceof` check can miss an error from another copy.
- */
+Tests the HTTP status of a GitHub request failure by reading its `status`
+field. More than one installed copy of `@octokit/request-error` can define
+`RequestError`, so an `instanceof` check can miss an error from another copy.
+*/
 export function isGithubResponseStatus(
 	error: unknown,
 	status: number

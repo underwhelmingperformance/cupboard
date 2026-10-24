@@ -62,8 +62,8 @@ function abortOnSecondCheck(reason: Error): AbortSignal {
 
 async function cachedFileMode(configHome: string): Promise<number> {
 	const directory = tokensDirectory(configHome);
-	const [file] = await readdir(directory);
-	const stats = await stat(path.join(directory, file ?? ''));
+	const [file = ''] = await readdir(directory);
+	const stats = await stat(path.join(directory, file));
 
 	return stats.mode & 0o777;
 }

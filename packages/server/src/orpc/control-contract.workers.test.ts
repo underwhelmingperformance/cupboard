@@ -92,9 +92,9 @@ const controlRuleGrants = [
 ];
 
 /**
- * Stores a control rule with a subject pattern, which an earlier build
- * accepted and the add procedure now refuses, and returns its ID.
- */
+Stores a control rule with a subject pattern, which an earlier build
+accepted and the add procedure now refuses, and returns its ID.
+*/
 async function insertPatternRule(
 	createdAt: string,
 	disabledAt?: string

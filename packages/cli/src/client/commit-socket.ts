@@ -64,10 +64,10 @@ export interface UpgradeBodyChunk extends Uint8Array {
 }
 
 /**
- * The HTTP response returned when the server refuses an upgrade (a `ws`
- * `IncomingMessage`). `ws` hands a refused connection to the listener but does
- * not consume the response, so the session calls `destroy` after reading it.
- */
+The HTTP response returned when the server refuses an upgrade (a `ws`
+`IncomingMessage`). `ws` hands a refused connection to the listener but does
+not consume the response, so the session calls `destroy` after reading it.
+*/
 export interface UpgradeFailure {
 	readonly statusCode?: number;
 	readonly headers: Readonly<Record<string, string | string[] | undefined>>;
@@ -103,21 +103,21 @@ export type CommitSocketConnect = (
 ) => CommitSocket;
 
 /**
- * Supplies authentication for the first commit connection and every reconnect.
- * The session requests a new attempt after an expiry close. If an upgrade
- * returns 401, it refreshes the current attempt once.
- */
+Supplies authentication for the first commit connection and every reconnect.
+The session requests a new attempt after an expiry close. If an upgrade
+returns 401, it refreshes the current attempt once.
+*/
 export interface CommitSocketCredentials {
 	readonly initial: BearerAttempt;
 	authorise(): Promise<BearerAttempt>;
 }
 
 /**
- * The path identity supports recovery when a reconnect finds that the pending
- * row was already cleared. `retention` is set when the original negotiation
- * response acknowledged `upload-grace-facts`. On an identity-based reconnect,
- * it asks a capable server to return the stored grace fact.
- */
+The path identity supports recovery when a reconnect finds that the pending
+row was already cleared. `retention` is set when the original negotiation
+response acknowledged `upload-grace-facts`. On an identity-based reconnect,
+it asks a capable server to return the stored grace fact.
+*/
 export interface CommitSessionTarget {
 	readonly publication?: {
 		readonly pushId: PushId;
@@ -153,26 +153,26 @@ export interface CommitSessionOptions {
 	*/
 	readonly onFailure?: (error: Error) => void;
 	/**
-	 * Called when the session starts waiting for the server to grant commit
-	 * capacity, and again when it stops. It reports only the state transition:
-	 * queue position can change whenever another tenant entry settles, so the
-	 * client has no stable position or completion estimate.
-	 */
+	Called when the session starts waiting for the server to grant commit
+	capacity, and again when it stops. It reports only the state transition:
+	queue position can change whenever another tenant entry settles, so the
+	client has no stable position or completion estimate.
+	*/
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 	/**
-	 * Returns the push ID to send with each `renew-uploads` request. Without it,
-	 * the session sends no renewals.
-	 */
+	Returns the push ID to send with each `renew-uploads` request. Without it,
+	the session sends no renewals.
+	*/
 	readonly pushId?: () => Promise<PushId>;
 }
 
 /**
- * Separates the server's durable acknowledgement from the final verification
- * result. `commit` returns after the pending row exists, which allows retention
- * to be recorded immediately. `settled` completes when the path is servable or
- * verification fails. Reuse and inline verification complete both stages in
- * the same frame.
- */
+Separates the server's durable acknowledgement from the final verification
+result. `commit` returns after the pending row exists, which allows retention
+to be recorded immediately. `settled` completes when the path is servable or
+verification fails. Reuse and inline verification complete both stages in
+the same frame.
+*/
 export interface CommitOutcome {
 	readonly storePathHash: StorePathHash;
 	readonly narHash: NixSha256HashString;
@@ -189,12 +189,12 @@ export interface CommitOutcome {
 export interface CommitSession {
 	commit(target: CommitSessionTarget): Promise<CommitOutcome>;
 	/**
-	 * Asks the server to extend uploads whose bytes are still being sent. The
-	 * session sends nothing unless the current connection advertises
-	 * `renew-uploads` and the session knows its push. The server reports
-	 * refusals in a `renewed` frame without ending the session, so the returned
-	 * promise resolves once the request is sent, without waiting for that frame.
-	 */
+	Asks the server to extend uploads whose bytes are still being sent. The
+	session sends nothing unless the current connection advertises
+	`renew-uploads` and the session knows its push. The server reports
+	refusals in a `renewed` frame without ending the session, so the returned
+	promise resolves once the request is sent, without waiting for that frame.
+	*/
 	renewUploads?(uploadIds: readonly UploadId[]): Promise<void>;
 	/**
 	Closes the socket; safe once every commit has settled.
@@ -340,11 +340,11 @@ function parseTokenAttributes(parts: readonly string[]): CapabilityAttributes {
 }
 
 /**
- * Parses the value of the `x-cupboard-commit-capabilities` header into a map
- * from token name to its attributes. Tokens are separated by commas or
- * whitespace; each token is `name` or `name;key=value;...`. A bare token maps
- * to an empty attributes record.
- */
+Parses the value of the `x-cupboard-commit-capabilities` header into a map
+from token name to its attributes. Tokens are separated by commas or
+whitespace; each token is `name` or `name;key=value;...`. A bare token maps
+to an empty attributes record.
+*/
 export function parseCapabilities(header: string): AdvertisedCapabilities {
 	const result = new Map<string, CapabilityAttributes>();
 
@@ -2069,23 +2069,23 @@ function asError(value: unknown): Error {
 }
 
 /**
- * Returns whether a later upgrade attempt can reasonably succeed. Gateways and
- * the Worker can return transient 5xx responses during deployment, overload, or
- * origin failure. Rate limiting is also transient. Other 4xx responses describe
- * the request and remain terminal across retries.
- *
- * This set is wider than {@link retryableErrorStatuses}, which covers frames
- * written by the Worker after a successful upgrade.
- */
+Returns whether a later upgrade attempt can reasonably succeed. Gateways and
+the Worker can return transient 5xx responses during deployment, overload, or
+origin failure. Rate limiting is also transient. Other 4xx responses describe
+the request and remain terminal across retries.
+
+This set is wider than {@link retryableErrorStatuses}, which covers frames
+written by the Worker after a successful upgrade.
+*/
 function isRetryableRefusal(status: number): boolean {
 	return status === 429 || status >= 500;
 }
 
 /**
- * The wait a refused upgrade asked for in `Retry-After`, in milliseconds and
- * capped at {@link maxRetryAfterMs}. Invalid values return `undefined` and the
- * back-off decides the delay on its own.
- */
+The wait a refused upgrade asked for in `Retry-After`, in milliseconds and
+capped at {@link maxRetryAfterMs}. Invalid values return `undefined` and the
+back-off decides the delay on its own.
+*/
 function requestedRetryDelayMs(failure: UpgradeFailure): number | undefined {
 	const stated = failure.headers['retry-after'];
 	const delay = retryAfterDelayMs(Array.isArray(stated) ? stated[0] : stated);

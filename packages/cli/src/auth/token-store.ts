@@ -16,11 +16,11 @@ import {
 import { withSecretFileLock } from './secret-lock.ts';
 
 /**
- * Where cached sessions live, within the CLI's configuration directory.
- * Sessions are keyed per target, so logging in to one tenant does not make
- * its tokens usable against another tenant on the same host. Exposed so the
- * login command can disclose where it cached the session.
- */
+Where cached sessions live, within the CLI's configuration directory.
+Sessions are keyed per target, so logging in to one tenant does not make
+its tokens usable against another tenant on the same host. Exposed so the
+login command can disclose where it cached the session.
+*/
 export function tokensDirectory(): string {
 	return path.join(configDirectory(), 'tokens');
 }
@@ -49,10 +49,10 @@ function tokenFilePath(normalisedTarget: string): string {
 }
 
 /**
- * Serialises the session read, refresh-token rotation, and replacement for one
- * target across CLI processes. The lock directory is kept alive while the
- * operation runs, so a slow token endpoint does not make a live lock stale.
- */
+Serialises the session read, refresh-token rotation, and replacement for one
+target across CLI processes. The lock directory is kept alive while the
+operation runs, so a slow token endpoint does not make a live lock stale.
+*/
 export async function withCachedSessionLock<T>(
 	target: URL,
 	action: (signal?: AbortSignal) => Promise<T>,
@@ -89,10 +89,10 @@ export async function readCachedSession(
 }
 
 /**
- * Persists the session for a target in the CLI's owner-only configuration
- * directory. The file is replaced atomically so readers see the previous
- * session or the complete replacement.
- */
+Persists the session for a target in the CLI's owner-only configuration
+directory. The file is replaced atomically so readers see the previous
+session or the complete replacement.
+*/
 export async function writeCachedSession(
 	session: CachedSession,
 	target: URL,
@@ -106,9 +106,9 @@ export async function writeCachedSession(
 }
 
 /**
- * What a removal found. A removed file whose contents could not be read or
- * parsed has no session.
- */
+What a removal found. A removed file whose contents could not be read or
+parsed has no session.
+*/
 export type RemovedSession =
 	| { readonly removal: 'absent' }
 	| {
@@ -117,11 +117,11 @@ export type RemovedSession =
 	  };
 
 /**
- * Deletes the cached session for a target under the lock that guards its
- * renewal, so a renewal in progress finishes before the deletion, and returns
- * the session that it deleted. A renewal that starts later can still create a
- * session from the Cloudflare sign-in while that sign-in is cached.
- */
+Deletes the cached session for a target under the lock that guards its
+renewal, so a renewal in progress finishes before the deletion, and returns
+the session that it deleted. A renewal that starts later can still create a
+session from the Cloudflare sign-in while that sign-in is cached.
+*/
 export async function removeCachedSession(
 	target: URL,
 	signal?: AbortSignal
@@ -169,11 +169,11 @@ export interface SessionReadFailure {
 }
 
 /**
- * Every cached session that parses, whatever its target. The target is not
- * recoverable from the file name, so callers read it from the access token.
- * With `onReadFailure`, enumeration continues after reporting each unreadable
- * file to the caller. Without it, read failures propagate.
- */
+Every cached session that parses, whatever its target. The target is not
+recoverable from the file name, so callers read it from the access token.
+With `onReadFailure`, enumeration continues after reporting each unreadable
+file to the caller. Without it, read failures propagate.
+*/
 export async function listCachedSessions(
 	onReadFailure?: (failure: SessionReadFailure) => void
 ): Promise<readonly CachedSession[]> {
@@ -205,9 +205,9 @@ export async function listCachedSessions(
 }
 
 /**
- * Deletes every cached session, each under its own lock. Returns the contents
- * of each removed file, or undefined for a file that could not be read.
- */
+Deletes every cached session, each under its own lock. Returns the contents
+of each removed file, or undefined for a file that could not be read.
+*/
 export async function removeAllCachedSessions(
 	signal?: AbortSignal
 ): Promise<readonly (CachedSession | undefined)[]> {

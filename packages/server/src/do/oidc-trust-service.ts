@@ -67,9 +67,9 @@ interface UnreadableOidcTrustRow {
 }
 
 /**
- * The enabled trust rules that the server can read, together with the stored
- * issuer and audience of each enabled row that it cannot read.
- */
+The enabled trust rules that the server can read, together with the stored
+issuer and audience of each enabled row that it cannot read.
+*/
 export class EnabledOidcTrustRules {
 	constructor(
 		readonly snapshots: readonly OidcTrustRuleSnapshot[],
@@ -81,11 +81,11 @@ export class EnabledOidcTrustRules {
 	}
 
 	/**
-	 * Throws the `StoredOidcTrustInvalidError` of an unreadable row whose issuer
-	 * and audience match `claims`. Rule selection uses only the most specific
-	 * matching rules. Without the unreadable row, a broader readable rule could
-	 * therefore give the token more authority than the row would have allowed.
-	 */
+	Throws the `StoredOidcTrustInvalidError` of an unreadable row whose issuer
+	and audience match `claims`. Rule selection uses only the most specific
+	matching rules. Without the unreadable row, a broader readable rule could
+	therefore give the token more authority than the row would have allowed.
+	*/
 	requireReadableFor(claims: OidcClaims): void {
 		const match = this.unreadable.find((row) =>
 			hasMatchingIssuerAndAudience(row, claims)
@@ -323,11 +323,11 @@ export class OidcTrustService {
 	}
 
 	/**
-	 * The enabled rules to evaluate for `claims`, which are a verified token's
-	 * claims or a refresh family's stored identity. Throws
-	 * `StoredOidcTrustInvalidError` when an enabled row that the server cannot
-	 * read has the same issuer and audience.
-	 */
+	The enabled rules to evaluate for `claims`, which are a verified token's
+	claims or a refresh family's stored identity. Throws
+	`StoredOidcTrustInvalidError` when an enabled row that the server cannot
+	read has the same issuer and audience.
+	*/
 	enabledOidcTrustRulesFor(
 		logger: Logger,
 		claims: OidcClaims
@@ -339,9 +339,9 @@ export class OidcTrustService {
 	}
 
 	/**
-	 * Returns readable enabled rules and the stored issuer and audience of
-	 * unreadable enabled rows. Logs each unreadable row.
-	 */
+	Returns readable enabled rules and the stored issuer and audience of
+	unreadable enabled rows. Logs each unreadable row.
+	*/
 	enabledOidcTrustRuleSnapshots(logger: Logger): EnabledOidcTrustRules {
 		const snapshots: OidcTrustRuleSnapshot[] = [];
 		const unreadable: UnreadableOidcTrustRow[] = [];

@@ -143,13 +143,13 @@ export interface LocalStepReadiness {
 }
 
 /**
- * Counts active and suspended tenants below the required step and returns up
- * to {@link localStepSampleSize} of their ids in slug order.
- *
- * This function does not write to D1. The control Worker's cron trigger wakes
- * tenants below the required local step, and each woken object records its
- * step. The count therefore falls even when the deploy does nothing.
- */
+Counts active and suspended tenants below the required step and returns up
+to {@link localStepSampleSize} of their ids in slug order.
+
+This function does not write to D1. The control Worker's cron trigger wakes
+tenants below the required local step, and each woken object records its
+step. The count therefore falls even when the deploy does nothing.
+*/
 export async function readLocalStepReadiness(
 	api: D1QueryApi,
 	databaseId: DatabaseId,
@@ -178,12 +178,12 @@ export async function readLocalStepReadiness(
 }
 
 /**
- * The deployment records a row that this build does not define: a known
- * transition in a state that this build does not define, or a transition that
- * this build does not define in a state other than `expanded` or `complete`.
- * The deploy has no steps to run for such a row, so it stops and reports the
- * stored id and state.
- */
+The deployment records a row that this build does not define: a known
+transition in a state that this build does not define, or a transition that
+this build does not define in a state other than `expanded` or `complete`.
+The deploy has no steps to run for such a row, so it stops and reports the
+stored id and state.
+*/
 export class UnknownDeploymentTransitionError extends CliError {
 	override readonly humanMessage: string;
 	constructor(
@@ -203,11 +203,11 @@ export class UnknownDeploymentTransitionError extends CliError {
 }
 
 /**
- * The deployment records that the contract migrations of a transition have
- * started, and this build does not define the transition. A later release
- * added it, and its contract migrations may have removed schema that this
- * build reads, so this build's deploy stops before it changes anything.
- */
+The deployment records that the contract migrations of a transition have
+started, and this build does not define the transition. A later release
+added it, and its contract migrations may have removed schema that this
+build reads, so this build's deploy stops before it changes anything.
+*/
 export class UnrecognisedTransitionContractedError extends CliError {
 	override readonly humanMessage: string;
 	constructor(
@@ -224,9 +224,9 @@ export class UnrecognisedTransitionContractedError extends CliError {
 }
 
 /**
- * A `deployment_transition` row did not split into its four fields, so a
- * field contains the separator that the query puts between them.
- */
+A `deployment_transition` row did not split into its four fields, so a
+field contains the separator that the query puts between them.
+*/
 export class InvalidTransitionRowError extends CliError {
 	override readonly humanMessage: string;
 	constructor(public readonly row: string) {
@@ -240,15 +240,15 @@ export class InvalidTransitionRowError extends CliError {
 }
 
 /**
- * Whether the deploy may treat the deployment as fresh and apply every
- * migration before the upload. That is safe when no Worker of an earlier build
- * serves the database and it has no tenants to wake. A database without a
- * `tenant` table is fresh. So is one whose `tenant` table has no rows while
- * neither Worker script exists: a first deploy that stops after the migration
- * that creates the table, and before the upload, leaves that state.
- *
- * `columns` are the `tenant` columns when the caller has already read them.
- */
+Whether the deploy may treat the deployment as fresh and apply every
+migration before the upload. That is safe when no Worker of an earlier build
+serves the database and it has no tenants to wake. A database without a
+`tenant` table is fresh. So is one whose `tenant` table has no rows while
+neither Worker script exists: a first deploy that stops after the migration
+that creates the table, and before the upload, leaves that state.
+
+`columns` are the `tenant` columns when the caller has already read them.
+*/
 export async function isFreshDeployment(
 	api: D1QueryApi,
 	databaseId: DatabaseId,
@@ -292,26 +292,26 @@ export interface RecordedTransition<Id extends string = TransitionId> {
 }
 
 /**
- * Why the deploy refuses a stored row.
- *
- * - `contracted`: this build does not define the transition, and its contract
- *   migrations have started.
- * - `unknown-state`: this build defines the transition but not the state.
- * - `unknown-transition-and-state`: this build defines neither.
- */
+Why the deploy refuses a stored row.
+
+- `contracted`: this build does not define the transition, and its contract
+  migrations have started.
+- `unknown-state`: this build defines the transition but not the state.
+- `unknown-transition-and-state`: this build defines neither.
+*/
 export type TransitionRefusal =
 	'contracted' | 'unknown-state' | 'unknown-transition-and-state';
 
 /**
- * How this build's deploy treats one stored row.
- *
- * - `defined`: this build defines the transition and the state.
- * - `unrecognised`: this build does not define the transition, the state is
- *   `expanded` or `complete`, and no contract migration of the transition has
- *   started. Only its expand migrations have run, so the deploy leaves the row
- *   unchanged and applies only this build's transitions.
- * - `refused`: the deploy stops with an error before it changes anything.
- */
+How this build's deploy treats one stored row.
+
+- `defined`: this build defines the transition and the state.
+- `unrecognised`: this build does not define the transition, the state is
+  `expanded` or `complete`, and no contract migration of the transition has
+  started. Only its expand migrations have run, so the deploy leaves the row
+  unchanged and applies only this build's transitions.
+- `refused`: the deploy stops with an error before it changes anything.
+*/
 export type StoredTransitionReading<Id extends string = TransitionId> =
 	| { readonly kind: 'defined'; readonly transition: RecordedTransition<Id> }
 	| { readonly kind: 'unrecognised'; readonly row: StoredTransitionRow }
@@ -419,10 +419,10 @@ function parseStoredTransitionRow(row: string): StoredTransitionRow {
 }
 
 /**
- * The transitions recorded in `deployment_transition`, or none when no deploy
- * has created the table yet. Throws the error for the first row that the
- * deploy refuses.
- */
+The transitions recorded in `deployment_transition`, or none when no deploy
+has created the table yet. Throws the error for the first row that the
+deploy refuses.
+*/
 export async function readTransitionsForDeploy<Id extends string>(
 	api: D1QueryApi,
 	database: DeploymentDatabase,
@@ -472,11 +472,11 @@ export interface CompatibilityPhaseRecord {
 }
 
 /**
- * The phase that an earlier build recorded, or undefined when none is recorded
- * or the table does not exist yet. The name is returned unchanged, and
- * `reconcileTransitionStates` treats any name other than `native-reads` or
- * `contracted` as no phase.
- */
+The phase that an earlier build recorded, or undefined when none is recorded
+or the table does not exist yet. The name is returned unchanged, and
+`reconcileTransitionStates` treats any name other than `native-reads` or
+`contracted` as no phase.
+*/
 export async function readCompatibilityPhase(
 	api: D1QueryApi,
 	databaseId: DatabaseId
@@ -512,12 +512,12 @@ const impliedByReleasedPhase = new Map<string, TransitionState>([
 ]);
 
 /**
- * Returns the stored states, with each transition that sets
- * `compatibilityPhase` raised to the state that the phase implies. Only the
- * phase names that a released build recorded imply a state; any other name
- * counts as no phase. The implied state replaces a recorded one only when it
- * is higher, so a rerun never lowers a state.
- */
+Returns the stored states, with each transition that sets
+`compatibilityPhase` raised to the state that the phase implies. Only the
+phase names that a released build recorded imply a state; any other name
+counts as no phase. The implied state replaces a recorded one only when it
+is higher, so a rerun never lowers a state.
+*/
 export function reconcileTransitionStates<Id extends string>(
 	stored: TransitionStates<Id>,
 	phase: string | undefined,
@@ -566,11 +566,11 @@ export interface ReconciledTransitions<Id extends string = TransitionId> {
 }
 
 /**
- * Reads the recorded states of the transitions and reconciles them with the
- * compatibility phase, without writing either. The plan uses the reconciled
- * states. The deploy also writes the difference from the stored states and
- * repairs the phase.
- */
+Reads the recorded states of the transitions and reconciles them with the
+compatibility phase, without writing either. The plan uses the reconciled
+states. The deploy also writes the difference from the stored states and
+repairs the phase.
+*/
 export async function readReconciledTransitions<Id extends string>(
 	api: D1QueryApi,
 	database: DeploymentDatabase,
@@ -593,15 +593,15 @@ export async function readReconciledTransitions<Id extends string>(
 }
 
 /**
- * Records the state that a transition has reached. With `contractStarted`, it
- * also records when the deploy started the transition's contract migrations.
- * The deploy of a build that does not define the transition reads this value.
- *
- * The timestamps record when the transition entered the state and when its
- * contract migrations started, so rerunning the deploy leaves them unchanged.
- * A rerun cannot lower a state that an earlier run already recorded, and a
- * state that this build does not define is never overwritten.
- */
+Records the state that a transition has reached. With `contractStarted`, it
+also records when the deploy started the transition's contract migrations.
+The deploy of a build that does not define the transition reads this value.
+
+The timestamps record when the transition entered the state and when its
+contract migrations started, so rerunning the deploy leaves them unchanged.
+A rerun cannot lower a state that an earlier run already recorded, and a
+state that this build does not define is never overwritten.
+*/
 export async function recordTransition(
 	api: D1QueryApi,
 	databaseId: DatabaseId,
@@ -626,14 +626,14 @@ export async function recordTransition(
 }
 
 /**
- * Records the phase that v0.0.34 and v0.0.35 read, for the transition that
- * sets `compatibilityPhase`: `native-reads` once every active or suspended
- * tenant has recorded local step 4, and `contracted` once its contract
- * migrations have run. The write never lowers a known phase and keeps the
- * timestamp of a phase already recorded, as those releases' deploys did. A
- * name that this build does not list is replaced, because no release writes
- * other names that it must keep.
- */
+Records the phase that v0.0.34 and v0.0.35 read, for the transition that
+sets `compatibilityPhase`: `native-reads` once every active or suspended
+tenant has recorded local step 4, and `contracted` once its contract
+migrations have run. The write never lowers a known phase and keeps the
+timestamp of a phase already recorded, as those releases' deploys did. A
+name that this build does not list is replaced, because no release writes
+other names that it must keep.
+*/
 export async function recordCompatibilityPhase(
 	api: D1QueryApi,
 	databaseId: DatabaseId,

@@ -43,9 +43,9 @@ export interface BuildObservationPreflight {
 }
 
 /**
- * Checks the store, hook helper and socket layout before observing a build.
- * The daemon must trust the current user to apply the hook override.
- */
+Checks the store, hook helper and socket layout before observing a build.
+The daemon must trust the current user to apply the hook override.
+*/
 export async function preflightBuildObservation(
 	options: BuildObservationPreflightOptions
 ): Promise<BuildObservationPreflight> {

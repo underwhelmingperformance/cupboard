@@ -522,13 +522,11 @@ it('verifies split preset publication and close jobs with only their required au
 				claims: { ...pr.claims, job_workflow_ref: closeReference },
 				permittedGrants: pr.permittedGrants.flatMap((grant) =>
 					grant.type === 'cupboard_cache'
-						? [
-								{
-									...grant,
-									actions: ['cache:close'],
-									resources: { cache: grant.resources.cache }
-								}
-							]
+						? {
+								...grant,
+								actions: ['cache:close'],
+								resources: { cache: grant.resources.cache }
+							}
 						: []
 				)
 			},

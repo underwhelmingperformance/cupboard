@@ -49,32 +49,32 @@ export function cacheLifecycleFilter(
 }
 
 /**
- * Registers a cache's local identity and the D1 lifecycle row that admission
- * reads.
- *
- * The write paths create a named cache on its first write through this
- * service, so it depends on nothing but the context.
- */
+Registers a cache's local identity and the D1 lifecycle row that admission
+reads.
+
+The write paths create a named cache on its first write through this
+service, so it depends on nothing but the context.
+*/
 export class CacheRegistrationService {
 	constructor(private readonly context: ServerContext) {}
 
 	/**
-	 * Writes this cache's lifecycle row when the tenant registers the cache,
-	 * clears the deletion timestamp when a deleted name is registered again,
-	 * and returns the generation and read revision the row then holds.
-	 *
-	 * The row says the cache exists and how it reads, which is what a request
-	 * naming the cache consults. Writing it here rather than leaving it to the
-	 * projection means a cache is known from its first write.
-	 *
-	 * The generation stays where a deletion left it, so the edges of the deleted
-	 * cache remain revoked while the new cache commits its own. An insert starts
-	 * at the first generation.
-	 *
-	 * The read revision advances only when the access recorded for the name
-	 * differs from the access being registered. Advancing it on every
-	 * registration would evict the cache's public responses on each commit.
-	 */
+	Writes this cache's lifecycle row when the tenant registers the cache,
+	clears the deletion timestamp when a deleted name is registered again,
+	and returns the generation and read revision the row then holds.
+
+	The row says the cache exists and how it reads, which is what a request
+	naming the cache consults. Writing it here rather than leaving it to the
+	projection means a cache is known from its first write.
+
+	The generation stays where a deletion left it, so the edges of the deleted
+	cache remain revoked while the new cache commits its own. An insert starts
+	at the first generation.
+
+	The read revision advances only when the access recorded for the name
+	differs from the access being registered. Advancing it on every
+	registration would evict the cache's public responses on each commit.
+	*/
 	async recordLifecycle(
 		cache: Pick<ResolvedCache, 'scope' | 'access'>
 	): Promise<CacheLifecycleVersion> {
@@ -139,9 +139,9 @@ export class CacheRegistrationService {
 	}
 
 	/**
-	 * Creates the cache. The caller holds the critical section, so the
-	 * existence check and the writes see no other request between them.
-	 */
+	Creates the cache. The caller holds the critical section, so the
+	existence check and the writes see no other request between them.
+	*/
 	async createInSection(
 		scope: CacheScope,
 		configuration: CacheCreation
@@ -171,12 +171,12 @@ export class CacheRegistrationService {
 	}
 
 	/**
-	 * The cache a write addresses. A named cache the tenant does not hold is
-	 * created first, so a push, a root write or an attestation negotiation
-	 * needs no registration step before it. The new cache takes the access of
-	 * the tenant's default cache: a tenant whose reads are private gets private
-	 * caches from its writes, and a public one public caches.
-	 */
+	The cache a write addresses. A named cache the tenant does not hold is
+	created first, so a push, a root write or an attestation negotiation
+	needs no registration step before it. The new cache takes the access of
+	the tenant's default cache: a tenant whose reads are private gets private
+	caches from its writes, and a public one public caches.
+	*/
 	async forWrite(
 		scope: CacheScope,
 		expectedGeneration?: CacheGeneration

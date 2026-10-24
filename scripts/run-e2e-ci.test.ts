@@ -409,7 +409,7 @@ describe('owned daemon process groups', () => {
 					const permissionError = Object.assign(new Error('kill EPERM'), {
 						code: 'EPERM'
 					});
-					const kill = vi
+					const canKill = vi
 						.spyOn(process, 'kill')
 						.mockImplementation((_pid, signal) => {
 							if (signal === failedSignal) {
@@ -454,7 +454,7 @@ describe('owned daemon process groups', () => {
 					} finally {
 						child.emit('close');
 						await startup;
-						kill.mockRestore();
+						canKill.mockRestore();
 						vi.useRealTimers();
 					}
 				}
@@ -473,7 +473,7 @@ describe('owned daemon process groups', () => {
 				const permissionError = Object.assign(new Error('kill EPERM'), {
 					code: 'EPERM'
 				});
-				const kill = vi
+				const canKill = vi
 					.spyOn(process, 'kill')
 					.mockImplementation((_pid, signal) => {
 						if (signal === 'SIGKILL') {
@@ -492,7 +492,7 @@ describe('owned daemon process groups', () => {
 					await vi.advanceTimersByTimeAsync(5000);
 					await rejected;
 					expect({
-						signals: kill.mock.calls,
+						signals: canKill.mock.calls,
 						timers: vi.getTimerCount(),
 						socketExists: existsSync(socketPath),
 						isRunning: child.exitCode === null && child.signalCode === null
@@ -512,7 +512,7 @@ describe('owned daemon process groups', () => {
 					} catch (error) {
 						expect(error).toBe(permissionError);
 					}
-					kill.mockRestore();
+					canKill.mockRestore();
 					vi.useRealTimers();
 					await close(server);
 				}
@@ -552,15 +552,15 @@ describe('owned daemon process groups', () => {
 			async (directory) => {
 				const { child, closed, completionState, daemon } =
 					await inheritedDaemonProcess(directory, true);
-				const kill = vi.spyOn(process, 'kill');
+				const canKill = vi.spyOn(process, 'kill');
 				const stopping = daemon.stop();
 
 				try {
 					expect(daemon.stop()).toBe(stopping);
-					expect(kill).toHaveBeenCalledWith(-(child.pid ?? 0), 'SIGKILL');
+					expect(canKill).toHaveBeenCalledWith(-(child.pid ?? 0), 'SIGKILL');
 					await stopping;
 				} finally {
-					kill.mockRestore();
+					canKill.mockRestore();
 					if (!completionState.isClosed) {
 						killTestProcessGroup(child);
 					}
@@ -579,11 +579,11 @@ describe('owned daemon process groups', () => {
 				async (directory) => {
 					const { child, closed, completionState, daemon } =
 						await inheritedDaemonProcess(directory, false);
-					const realKill = process.kill.bind(process);
+					const canKillProcess = process.kill.bind(process);
 					const closedGroupError = Object.assign(new Error('kill EPERM'), {
 						code: 'EPERM'
 					});
-					const kill = vi
+					const canKill = vi
 						.spyOn(process, 'kill')
 						.mockImplementation((pid, signal) => {
 							if (
@@ -594,7 +594,7 @@ describe('owned daemon process groups', () => {
 								throw closedGroupError;
 							}
 
-							return realKill(pid, signal);
+							return canKillProcess(pid, signal);
 						});
 					vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 					const controller = new AbortController();
@@ -605,15 +605,15 @@ describe('owned daemon process groups', () => {
 					try {
 						expect(vi.getTimerCount()).toBe(1);
 						await vi.advanceTimersByTimeAsync(5000);
-						expect(kill).toHaveBeenCalledWith(-(child.pid ?? 0), 'SIGKILL');
+						expect(canKill).toHaveBeenCalledWith(-(child.pid ?? 0), 'SIGKILL');
 						await rejected;
 						expect(vi.getTimerCount()).toBe(0);
-						expect(kill.mock.calls).toStrictEqual([
+						expect(canKill.mock.calls).toStrictEqual([
 							[-(child.pid ?? 0), 'SIGTERM'],
 							[-(child.pid ?? 0), 'SIGKILL']
 						]);
 					} finally {
-						kill.mockRestore();
+						canKill.mockRestore();
 						if (!completionState.isClosed) {
 							killTestProcessGroup(child);
 						}

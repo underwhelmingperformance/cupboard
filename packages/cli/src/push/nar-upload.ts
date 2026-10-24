@@ -22,19 +22,19 @@ import { CompressedBlobHasher } from './blob-hash.ts';
 const mebibyte = 1024 * 1024;
 
 /**
- * The part size for a NAR that fits in 9,999 parts. R2 accepts parts of 5 MiB
- * or more.
- */
+The part size for a NAR that fits in 9,999 parts. R2 accepts parts of 5 MiB
+or more.
+*/
 export const minimumPartBytes = 8 * mebibyte;
 
 /**
- * The largest number of parts in one multipart upload, which R2 sets.
- */
+The largest number of parts in one multipart upload, which R2 sets.
+*/
 export const maxPartsPerUpload = 10_000;
 
 /**
- * The largest number of attempts at one request.
- */
+The largest number of attempts at one request.
+*/
 export const maxRequestAttempts = 5;
 
 // R2 resets a request whose body sends no bytes for about 15 seconds. A failed
@@ -49,11 +49,11 @@ const skippableFrameHeaderBytes = 8;
 const zeros = new Uint8Array(mebibyte);
 
 /**
- * Returns the part size for a NAR: 8 MiB, or more when the largest possible
- * compressed NAR would need more than 9,999 parts. One of R2's 10,000 parts is
- * kept in reserve for the last few bytes of a skippable frame that runs past
- * the end of a part.
- */
+Returns the part size for a NAR: 8 MiB, or more when the largest possible
+compressed NAR would need more than 9,999 parts. One of R2's 10,000 parts is
+kept in reserve for the last few bytes of a skippable frame that runs past
+the end of a part.
+*/
 export function partSizeFor(frames: NarFrames): number {
 	const needed =
 		Math.ceil(frames.compressedBound() / (maxPartsPerUpload - 1) / mebibyte) *
@@ -63,8 +63,8 @@ export function partSizeFor(frames: NarFrames): number {
 }
 
 /**
- * The object-store requests that an upload makes.
- */
+The object-store requests that an upload makes.
+*/
 export type ObjectStoreOperation =
 	| 'PutObject'
 	| 'CreateMultipartUpload'
@@ -74,13 +74,13 @@ export type ObjectStoreOperation =
 	| 'HeadObject';
 
 /**
- * A request to the object store that failed. `isRetryable` is true when the
- * same request can succeed if it is sent again: the connection failed, or the
- * store returned a server error, timed out or asked the client to slow down.
- * `reason` is the store's error code, or the network error's code. `status` is
- * the HTTP status of the store's response, and is `undefined` when the
- * connection failed before a response arrived.
- */
+A request to the object store that failed. `isRetryable` is true when the
+same request can succeed if it is sent again: the connection failed, or the
+store returned a server error, timed out or asked the client to slow down.
+`reason` is the store's error code, or the network error's code. `status` is
+the HTTP status of the store's response, and is `undefined` when the
+connection failed before a response arrived.
+*/
 export class ObjectStoreRequestError extends Error {
 	constructor(
 		public readonly operation: ObjectStoreOperation,
@@ -95,19 +95,19 @@ export class ObjectStoreRequestError extends Error {
 }
 
 /**
- * The size and ETag of a stored object.
- */
+The size and ETag of a stored object.
+*/
 export interface StoredObject {
 	readonly length: number;
 	readonly etag: string;
 }
 
 /**
- * Raised when a failed completion request left the upload's outcome unknown
- * and the object at `key` does not have the size and multipart ETag of the
- * parts that were sent. `found` is the object at `key`, or `undefined` when
- * there is none.
- */
+Raised when a failed completion request left the upload's outcome unknown
+and the object at `key` does not have the size and multipart ETag of the
+parts that were sent. `found` is the object at `key`, or `undefined` when
+there is none.
+*/
 export class UnverifiedMultipartUploadError extends Error {
 	constructor(
 		public readonly key: string,
@@ -122,9 +122,9 @@ export class UnverifiedMultipartUploadError extends Error {
 }
 
 /**
- * Returns the ETag, without quotes, of a completed multipart upload whose
- * parts have the given ETags, in part order.
- */
+Returns the ETag, without quotes, of a completed multipart upload whose
+parts have the given ETags, in part order.
+*/
 export function multipartEtag(partEtags: readonly string[]): string {
 	const digests = partEtags.map((etag) =>
 		Buffer.from(unquotedEtag(etag), 'hex')
@@ -135,8 +135,8 @@ export function multipartEtag(partEtags: readonly string[]): string {
 }
 
 /**
- * Returns an ETag without the quotes that HTTP puts around it.
- */
+Returns an ETag without the quotes that HTTP puts around it.
+*/
 export function unquotedEtag(etag: string): string {
 	return etag.replaceAll('"', '');
 }
@@ -147,9 +147,9 @@ export interface UploadedPart {
 }
 
 /**
- * A request body of exactly `length` bytes. `signal` stops the request while
- * it is in progress.
- */
+A request body of exactly `length` bytes. `signal` stops the request while
+it is in progress.
+*/
 export interface ObjectStoreBody {
 	readonly body: AsyncIterable<Uint8Array>;
 	readonly length: number;
@@ -157,9 +157,9 @@ export interface ObjectStoreBody {
 }
 
 /**
- * The object-store requests that an upload makes. Each request fails with
- * `ObjectStoreRequestError` when the store refuses it or the connection fails.
- */
+The object-store requests that an upload makes. Each request fails with
+`ObjectStoreRequestError` when the store refuses it or the connection fails.
+*/
 export interface ObjectStore {
 	putObject(key: string, body: ObjectStoreBody): Promise<void>;
 	createMultipartUpload(key: string, signal: AbortSignal): Promise<string>;
@@ -177,9 +177,9 @@ export interface ObjectStore {
 	): Promise<void>;
 	abortMultipartUpload(key: string, uploadId: string): Promise<void>;
 	/**
-	 * Returns the size and unquoted ETag of the object at `key`, or `undefined`
-	 * when there is none.
-	 */
+	Returns the size and unquoted ETag of the object at `key`, or `undefined`
+	when there is none.
+	*/
 	headObject(
 		key: string,
 		signal: AbortSignal
@@ -187,10 +187,10 @@ export interface ObjectStore {
 }
 
 /**
- * How a part's bytes were sent. A `single-request` upload sends the whole
- * object with one `PutObject`. A `buffered` part is compressed into memory
- * before its request starts. A `streamed` part is sent as it is compressed.
- */
+How a part's bytes were sent. A `single-request` upload sends the whole
+object with one `PutObject`. A `buffered` part is compressed into memory
+before its request starts. A `streamed` part is sent as it is compressed.
+*/
 export type NarPartMode = 'single-request' | 'buffered' | 'streamed';
 
 export interface NarPartReport {
@@ -203,9 +203,9 @@ export interface NarPartReport {
 }
 
 /**
- * The request that a retry report is about: one part of the upload, or a
- * request that sends no part.
- */
+The request that a retry report is about: one part of the upload, or a
+request that sends no part.
+*/
 export type NarRequestTarget =
 	| { readonly kind: 'part'; readonly partNumber: number }
 	| {
@@ -214,11 +214,11 @@ export type NarRequestTarget =
 	  };
 
 /**
- * A failed attempt that the uploader is about to make again. `reason` is the
- * store's error code, the network error's code, or `idle-timeout` when the
- * body had produced nothing for 10 seconds or more, which is less than R2's
- * limit.
- */
+A failed attempt that the uploader is about to make again. `reason` is the
+store's error code, the network error's code, or `idle-timeout` when the
+body had produced nothing for 10 seconds or more, which is less than R2's
+limit.
+*/
 export interface NarRetryReport {
 	readonly target: NarRequestTarget;
 	readonly attempt: number;
@@ -226,10 +226,10 @@ export interface NarRetryReport {
 }
 
 /**
- * A streamed part that was recompressed from the NAR source for another
- * attempt. `narBytes` counts the NAR bytes recompressed, and `compressedBytes`
- * the part's compressed bytes that were recompressed.
- */
+A streamed part that was recompressed from the NAR source for another
+attempt. `narBytes` counts the NAR bytes recompressed, and `compressedBytes`
+the part's compressed bytes that were recompressed.
+*/
 export interface NarRecompressionReport {
 	readonly partNumber: number;
 	readonly reason: string;
@@ -239,11 +239,11 @@ export interface NarRecompressionReport {
 }
 
 /**
- * A streamed part whose compressed bytes ended before the part did. The
- * uploader filled the rest with a zstd skippable frame of `bytes` bytes.
- * `continuesIntoNextPart` is true when the frame did not fit in the gap and
- * its last bytes formed one more part.
- */
+A streamed part whose compressed bytes ended before the part did. The
+uploader filled the rest with a zstd skippable frame of `bytes` bytes.
+`continuesIntoNextPart` is true when the frame did not fit in the gap and
+its last bytes formed one more part.
+*/
 export interface NarPaddingReport {
 	readonly partNumber: number;
 	readonly bytes: number;
@@ -251,13 +251,13 @@ export interface NarPaddingReport {
 }
 
 /**
- * Receives the events of one NAR's upload as they happen.
- */
+Receives the events of one NAR's upload as they happen.
+*/
 export interface NarUploadObserver {
 	/**
-	 * Receives the number of bytes added to the stored object, including
-	 * padding. Each byte is counted once.
-	 */
+	Receives the number of bytes added to the stored object, including
+	padding. Each byte is counted once.
+	*/
 	readonly onBytes?: (count: number) => void;
 	readonly onPart?: (report: NarPartReport) => void;
 	readonly onRetry?: (report: NarRetryReport) => void;
@@ -266,9 +266,9 @@ export interface NarUploadObserver {
 }
 
 /**
- * How one NAR was sent. `resentBytes` counts the bytes sent beyond the size
- * of the stored object: the bytes that failed attempts had already sent.
- */
+How one NAR was sent. `resentBytes` counts the bytes sent beyond the size
+of the stored object: the bytes that failed attempts had already sent.
+*/
 export interface NarTransferFacts {
 	readonly isSingleRequest: boolean;
 	readonly bufferedParts: number;
@@ -287,23 +287,23 @@ export interface CompressedNarUpload {
 }
 
 /**
- * Waits after the failed attempt numbered `attempt`.
- */
+Waits after the failed attempt numbered `attempt`.
+*/
 export type Backoff = (attempt: number, signal: AbortSignal) => Promise<void>;
 
 export interface RequestOptions {
 	readonly observer?: NarUploadObserver;
 	readonly signal?: AbortSignal;
 	/**
-	 * The default backoff waits about 0.5 s after the first failed attempt,
-	 * then about 1 s, 2 s and 4 s. Each wait is shortened by up to half at
-	 * random so that uploads that fail together are unlikely to retry
-	 * together.
-	 */
+	The default backoff waits about 0.5 s after the first failed attempt,
+	then about 1 s, 2 s and 4 s. Each wait is shortened by up to half at
+	random so that uploads that fail together are unlikely to retry
+	together.
+	*/
 	readonly backoff?: Backoff;
 	/**
-	 * Returns the current time in milliseconds.
-	 */
+	Returns the current time in milliseconds.
+	*/
 	readonly now?: () => number;
 }
 
@@ -312,25 +312,25 @@ export interface NarUploadOptions extends RequestOptions {
 }
 
 /**
- * Compresses a NAR and uploads it to `key`: with one `PutObject` when it
- * compresses to one part or less, and as a multipart upload otherwise.
- *
- * Every part except the last has the same length, which R2 requires. The first
- * part is compressed into memory, and a NAR that ends inside it is sent with
- * one `PutObject` of its exact length. Before each later part, the uploader
- * estimates the compressed bytes that remain from the compression ratio so
- * far. While the estimate is at least two parts, the part is streamed: its
- * request starts with its length fixed, and its body sends the compressed
- * bytes as they are produced. Otherwise the part is compressed into memory
- * first, so a last part has its exact length. If a streamed part's bytes end
- * before the part does, a zstd skippable frame fills the rest of the part.
- *
- * A failed buffered part is sent again from memory. A failed streamed part is
- * recompressed from the NAR source. The bytes that were already sent are
- * checked against the digests that the first read recorded, and the NAR hash
- * describes the NAR that the stored object decodes to. A multipart upload that
- * fails is aborted.
- */
+Compresses a NAR and uploads it to `key`: with one `PutObject` when it
+compresses to one part or less, and as a multipart upload otherwise.
+
+Every part except the last has the same length, which R2 requires. The first
+part is compressed into memory, and a NAR that ends inside it is sent with
+one `PutObject` of its exact length. Before each later part, the uploader
+estimates the compressed bytes that remain from the compression ratio so
+far. While the estimate is at least two parts, the part is streamed: its
+request starts with its length fixed, and its body sends the compressed
+bytes as they are produced. Otherwise the part is compressed into memory
+first, so a last part has its exact length. If a streamed part's bytes end
+before the part does, a zstd skippable frame fills the rest of the part.
+
+A failed buffered part is sent again from memory. A failed streamed part is
+recompressed from the NAR source. The bytes that were already sent are
+checked against the digests that the first read recorded, and the NAR hash
+describes the NAR that the stored object decodes to. A multipart upload that
+fails is aborted.
+*/
 export async function uploadCompressedNar(
 	store: ObjectStore,
 	key: string,
@@ -354,9 +354,9 @@ export async function uploadCompressedNar(
 }
 
 /**
- * Uploads `bytes` to `key` with one `PutObject`, sending it again after a
- * failure that another attempt can fix.
- */
+Uploads `bytes` to `key` with one `PutObject`, sending it again after a
+failure that another attempt can fix.
+*/
 export async function uploadBytes(
 	store: ObjectStore,
 	key: string,
@@ -378,11 +378,11 @@ interface BufferedBytes {
 }
 
 /**
- * The body of one attempt at a request. It counts the bytes that it hands to
- * the request and notes when it last produced a chunk. When producing a chunk
- * fails, it aborts the attempt's signal, so the request stops without waiting
- * for the store to reset the connection.
- */
+The body of one attempt at a request. It counts the bytes that it hands to
+the request and notes when it last produced a chunk. When producing a chunk
+fails, it aborts the attempt's signal, so the request stops without waiting
+for the store to reset the connection.
+*/
 class AttemptBody implements AsyncIterable<Uint8Array> {
 	private readonly controller = new AbortController();
 
@@ -425,15 +425,15 @@ class AttemptBody implements AsyncIterable<Uint8Array> {
 	}
 
 	/**
-	 * The error that producing the body raised, if any.
-	 */
+	The error that producing the body raised, if any.
+	*/
 	get error(): unknown {
 		return this.failure;
 	}
 
 	/**
-	 * How long the body has gone without producing a chunk.
-	 */
+	How long the body has gone without producing a chunk.
+	*/
 	idleMs(): number {
 		return this.now() - this.lastProducedAt;
 	}
@@ -455,12 +455,12 @@ class AttemptBody implements AsyncIterable<Uint8Array> {
 	}
 
 	/**
-	 * Waits for a chunk that is being produced and then stops the body. After
-	 * a failed attempt, the request may still be producing a chunk that it will
-	 * never send. Waiting for it means that the next attempt starts from where
-	 * this one stopped reading. When the upload is cancelled first, it stops
-	 * the body without waiting and rejects with the cancellation's reason.
-	 */
+	Waits for a chunk that is being produced and then stops the body. After
+	a failed attempt, the request may still be producing a chunk that it will
+	never send. Waiting for it means that the next attempt starts from where
+	this one stopped reading. When the upload is cancelled first, it stops
+	the body without waiting and rejects with the cancellation's reason.
+	*/
 	async stop(): Promise<void> {
 		try {
 			await abortable(this.pulling, this.outer);
@@ -473,18 +473,18 @@ class AttemptBody implements AsyncIterable<Uint8Array> {
 	}
 
 	/**
-	 * Stops the body without waiting for a chunk that is being produced. The
-	 * body closes once that chunk arrives, if it ever does. Use it when no
-	 * attempt follows, so a stalled source cannot delay the upload's failure.
-	 */
+	Stops the body without waiting for a chunk that is being produced. The
+	body closes once that chunk arrives, if it ever does. Use it when no
+	attempt follows, so a stalled source cannot delay the upload's failure.
+	*/
 	abandon(): void {
 		void closeInBackground(this.iterator.return?.());
 	}
 }
 
 /**
- * Counts how the parts of one upload were sent.
- */
+Counts how the parts of one upload were sent.
+*/
 class TransferCounts {
 	private bufferedParts = 0;
 
@@ -537,9 +537,9 @@ class TransferCounts {
 }
 
 /**
- * Sends requests to the object store, and sends a request again after a
- * failure that another attempt can fix.
- */
+Sends requests to the object store, and sends a request again after a
+failure that another attempt can fix.
+*/
 class RequestSender {
 	private readonly backoff: Backoff;
 
@@ -618,9 +618,9 @@ class RequestSender {
 	}
 
 	/**
-	 * Waits before the next attempt. When the upload is cancelled during the
-	 * wait, it rejects with the cancellation's reason.
-	 */
+	Waits before the next attempt. When the upload is cancelled during the
+	wait, it rejects with the cancellation's reason.
+	*/
 	async wait(attempt: number): Promise<void> {
 		try {
 			await this.backoff(attempt, this.signal);
@@ -631,11 +631,11 @@ class RequestSender {
 	}
 
 	/**
-	 * Sends one part, or the single request, until it succeeds, it fails with
-	 * an error that another attempt cannot fix, or the attempts run out. `body`
-	 * returns the bytes of an attempt, given the reason that the previous
-	 * attempt failed.
-	 */
+	Sends one part, or the single request, until it succeeds, it fails with
+	an error that another attempt cannot fix, or the attempts run out. `body`
+	returns the bytes of an attempt, given the reason that the previous
+	attempt failed.
+	*/
 	async sendPart<T>(
 		partNumber: number,
 		mode: NarPartMode,
@@ -678,9 +678,9 @@ class RequestSender {
 	}
 
 	/**
-	 * Sends a request that has no body of NAR bytes, such as creating the
-	 * multipart upload or reading the object, and sends it again like a part.
-	 */
+	Sends a request that has no body of NAR bytes, such as creating the
+	multipart upload or reading the object, and sends it again like a part.
+	*/
 	async request<T>(
 		operation: Exclude<ObjectStoreOperation, 'UploadPart'>,
 		send: (signal: AbortSignal) => Promise<T>
@@ -712,9 +712,9 @@ class RequestSender {
 }
 
 /**
- * The skippable frame that fills the end of a part. `gap` of its bytes are in
- * that part, and the rest of the frame is the last part.
- */
+The skippable frame that fills the end of a part. `gap` of its bytes are in
+that part, and the rest of the frame is the last part.
+*/
 interface Padding {
 	readonly partNumber: number;
 	readonly gap: number;
@@ -722,9 +722,9 @@ interface Padding {
 }
 
 /**
- * A recompression that has started and not yet reached the position that the
- * first read reached.
- */
+A recompression that has started and not yet reached the position that the
+first read reached.
+*/
 interface Recompression {
 	readonly reason: string;
 	readonly startedAt: number;
@@ -1123,9 +1123,9 @@ class NarUpload {
 	}
 
 	/**
-	 * Closes the compressor and its source without waiting for them. A source
-	 * that has stalled closes once its read returns, if it ever does.
-	 */
+	Closes the compressor and its source without waiting for them. A source
+	that has stalled closes once its read returns, if it ever does.
+	*/
 	closeInBackground(): void {
 		void closeInBackground(this.compressor.close());
 	}

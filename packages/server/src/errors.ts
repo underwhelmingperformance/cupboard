@@ -250,9 +250,9 @@ export class LocalSchemaMigrationPendingError extends ServerHttpError {
 	readonly stage: string;
 
 	/**
-	 * @param pending The migration that stopped, and whether the initialisation
-	 * committed any migration work before it stopped.
-	 */
+	@param pending The migration that stopped, and whether the initialisation
+	committed any migration work before it stopped.
+	*/
 	constructor(readonly pending: LocalMigrationPending) {
 		super(
 			`Durable Object migration ${pending.migration} is still running stage ${pending.stage}; retry shortly`
@@ -442,14 +442,14 @@ export class CacheIdentityMissingError extends ServerHttpError {
 }
 
 /**
- * An object move found a stored key that does not name a cache and a store
- * path.
- *
- * Only this server writes those keys, so a key it cannot read back is a defect
- * in this build rather than an object left by something else. The move refuses
- * the key instead of treating it as an object no cache claims, because that
- * branch deletes.
- */
+An object move found a stored key that does not name a cache and a store
+path.
+
+Only this server writes those keys, so a key it cannot read back is a defect
+in this build rather than an object left by something else. The move refuses
+the key instead of treating it as an object no cache claims, because that
+branch deletes.
+*/
 export class StoredObjectKeyInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -933,11 +933,11 @@ export type OAuthErrorCode =
 	| 'temporarily_unavailable';
 
 /**
- * An OAuth 2.0 error (RFC 6749 §5.2). The JSON response uses the error code and
- * message as `error` and `error_description`, and is sent with `no-store`. A
- * concrete error can also include `problem`, which refines the RFC code, and a
- * structured `detail` describing that problem.
- */
+An OAuth 2.0 error (RFC 6749 §5.2). The JSON response uses the error code and
+message as `error` and `error_description`, and is sent with `no-store`. A
+concrete error can also include `problem`, which refines the RFC code, and a
+structured `detail` describing that problem.
+*/
 export abstract class OAuthError extends ServerHttpError {
 	abstract readonly error: OAuthErrorCode;
 	readonly problem?: string;
@@ -1019,11 +1019,11 @@ export class TokenRequestBodyTooLargeError extends OAuthError {
 }
 
 /**
- * RFC 6749 defines `temporarily_unavailable` for an overloaded authorization
- * endpoint. Here it reports a temporary rate-limit refusal at the token, signup
- * and revocation endpoints. RFC 8628 restricts `slow_down` to device-flow
- * polling; a client that receives it adds five seconds to its polling interval.
- */
+RFC 6749 defines `temporarily_unavailable` for an overloaded authorization
+endpoint. Here it reports a temporary rate-limit refusal at the token, signup
+and revocation endpoints. RFC 8628 restricts `slow_down` to device-flow
+polling; a client that receives it adds five seconds to its polling interval.
+*/
 export class TokenRateLimitedError extends OAuthError {
 	readonly status = StatusCodes.TOO_MANY_REQUESTS;
 	readonly error = 'temporarily_unavailable';
@@ -1039,10 +1039,10 @@ export class TokenRateLimitedError extends OAuthError {
 }
 
 /**
- * A rule without wildcard authority must receive explicit
- * `authorization_details`. Wildcard-permitting interactive rules may omit the
- * field and receive their full permitted authority.
- */
+A rule without wildcard authority must receive explicit
+`authorization_details`. Wildcard-permitting interactive rules may omit the
+field and receive their full permitted authority.
+*/
 export class AuthorizationDetailsRequiredError extends InvalidRequestError {
 	readonly problem = 'authorization-details-required';
 
@@ -1053,10 +1053,10 @@ export class AuthorizationDetailsRequiredError extends InvalidRequestError {
 }
 
 /**
- * `invalid_authorization_details` (RFC 9396 §5): a requested grant was empty,
- * malformed, or not permitted by the matching trust rule. The request is refused
- * in full, so a client never silently receives less than it asked for.
- */
+`invalid_authorization_details` (RFC 9396 §5): a requested grant was empty,
+malformed, or not permitted by the matching trust rule. The request is refused
+in full, so a client never silently receives less than it asked for.
+*/
 export class InvalidAuthorizationDetailsError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_authorization_details';
@@ -1093,12 +1093,10 @@ export class ReadResourcesNotPermittedError extends OAuthError {
 					resource.cache.kind === 'default'
 						? 'the default cache'
 						: `cache '${resource.cache.name}'`;
-				return [`Add ${resource.actions.join(', ')} for ${cache}.`];
+				return `Add ${resource.actions.join(', ')} for ${cache}.`;
 			}
 			if (resource.type === 'cupboard_view') {
-				return [
-					`Add ${resource.actions.join(', ')} for reuse view '${resource.view}'.`
-				];
+				return `Add ${resource.actions.join(', ')} for reuse view '${resource.view}'.`;
 			}
 			return [];
 		});
@@ -1119,10 +1117,10 @@ export abstract class InvalidGrantError extends OAuthError {
 }
 
 /**
- * A presented refresh token was unknown, mismatched, expired, or tied to a
- * retired rule. Every refresh failure raises this single error with one
- * message, so a probe cannot tell which part was wrong.
- */
+A presented refresh token was unknown, mismatched, expired, or tied to a
+retired rule. Every refresh failure raises this single error with one
+message, so a probe cannot tell which part was wrong.
+*/
 export class StaleRefreshTokenError extends InvalidGrantError {
 	readonly problem = 'stale-refresh-token';
 
@@ -1133,9 +1131,9 @@ export class StaleRefreshTokenError extends InvalidGrantError {
 }
 
 /**
- * The token request includes binding parameters, but they do not bind the
- * subject token to this server.
- */
+The token request includes binding parameters, but they do not bind the
+subject token to this server.
+*/
 export class SubjectTokenUnboundError extends InvalidGrantError {
 	readonly problem = subjectBindingProblems.unbound;
 
@@ -1146,8 +1144,8 @@ export class SubjectTokenUnboundError extends InvalidGrantError {
 }
 
 /**
- * The server has already accepted this nonce-bound subject token.
- */
+The server has already accepted this nonce-bound subject token.
+*/
 export class SubjectTokenReplayedError extends InvalidGrantError {
 	readonly problem = subjectBindingProblems.replayed;
 
@@ -1158,9 +1156,9 @@ export class SubjectTokenReplayedError extends InvalidGrantError {
 }
 
 /**
- * The token request includes binding parameters, and the subject token was
- * issued longer ago than a nonce-bound token may be.
- */
+The token request includes binding parameters, and the subject token was
+issued longer ago than a nonce-bound token may be.
+*/
 export class SubjectTokenTooOldError extends InvalidGrantError {
 	readonly problem = subjectBindingProblems.tooOld;
 
@@ -1224,12 +1222,12 @@ export class TenantSubjectTokenUntrustedError extends SubjectTokenUntrustedError
 }
 
 /**
- * The token matched a rule's repository pins but failed another configured
- * claim. This error is used only after the token's signature has been verified
- * against that rule's issuer. The detailed diagnostic is therefore disclosed
- * only to a repository that the rule already pins; every other caller receives
- * {@link TenantSubjectTokenUntrustedError}.
- */
+The token matched a rule's repository pins but failed another configured
+claim. This error is used only after the token's signature has been verified
+against that rule's issuer. The detailed diagnostic is therefore disclosed
+only to a repository that the rule already pins; every other caller receives
+{@link TenantSubjectTokenUntrustedError}.
+*/
 export class TenantSubjectTokenClaimMismatchError extends SubjectTokenUntrustedError {
 	override readonly problem = subjectTokenProblems.claimMismatch;
 	override readonly detail: Readonly<Record<string, string>>;
@@ -1328,8 +1326,8 @@ export class StoredReuseViewSelectorInvalidError extends ServerHttpError {
 }
 
 /**
- * A collection scan cannot run because a write-barrier trigger is missing.
- */
+A collection scan cannot run because a write-barrier trigger is missing.
+*/
 export class GarbageCollectionBarrierMissingError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -1500,10 +1498,10 @@ export class UploadedObjectNotFoundError extends ServerHttpError {
 }
 
 /**
- * R2 refused to copy a staging object to its canonical key because the bytes
- * did not match the file hash that verification computed. The staging object
- * changed after verification read it, so the verified bytes no longer exist.
- */
+R2 refused to copy a staging object to its canonical key because the bytes
+did not match the file hash that verification computed. The staging object
+changed after verification read it, so the verified bytes no longer exist.
+*/
 export class StagedObjectDigestMismatchError extends Error {
 	constructor(
 		public readonly stagingKey: R2ObjectKey,
@@ -1515,12 +1513,12 @@ export class StagedObjectDigestMismatchError extends Error {
 }
 
 /**
- * Verification reads a stored object in several R2 gets, and a later read did
- * not match the first get. A later get found a different object under the key
- * (`etag-changed`) or no object (`deleted`), or a body ended before it reached
- * the object's size (`truncated`). The next verification pass reads the object
- * again.
- */
+Verification reads a stored object in several R2 gets, and a later read did
+not match the first get. A later get found a different object under the key
+(`etag-changed`) or no object (`deleted`), or a body ended before it reached
+the object's size (`truncated`). The next verification pass reads the object
+again.
+*/
 export class StoredObjectInconsistentError extends Error {
 	constructor(
 		public readonly r2Key: R2ObjectKey,
@@ -1782,12 +1780,12 @@ export class UnboundableIoError extends Error {
 }
 
 /**
- * Returns the first instance of `errorType` in `error` or its `cause` chain.
- *
- * Drizzle wraps whatever its driver callback throws in an error of its own, so
- * a refusal from the D1 binding reaches the caller as the cause of a query
- * error rather than on its own.
- */
+Returns the first instance of `errorType` in `error` or its `cause` chain.
+
+Drizzle wraps whatever its driver callback throws in an error of its own, so
+a refusal from the D1 binding reaches the caller as the cause of a query
+error rather than on its own.
+*/
 export function causedBy<T>(
 	error: unknown,
 	errorType: abstract new (...parameters: never[]) => T
@@ -1806,13 +1804,13 @@ export function causedBy<T>(
 }
 
 /**
- * Work that asks how much of the invocation's Durable Object row budget is
- * left but runs outside a budget scope.
- *
- * Every dispatched method opens a budget. This error exposes a pass that runs
- * outside one, where it would otherwise size itself against a budget nothing
- * is debiting.
- */
+Work that asks how much of the invocation's Durable Object row budget is
+left but runs outside a budget scope.
+
+Every dispatched method opens a budget. This error exposes a pass that runs
+outside one, where it would otherwise size itself against a budget nothing
+is debiting.
+*/
 export class MissingRowBudgetError extends Error {
 	constructor() {
 		super('This work requires an invocation row budget and none is in force');
@@ -1836,10 +1834,10 @@ export class SubrequestSliceExceededError extends Error {
 }
 
 /**
- * A statement with more bound parameters than Cloudflare's SQLite accepts.
- * Both the D1 binding and the Durable Object's storage binding refuse such a
- * statement before the runtime receives it.
- */
+A statement with more bound parameters than Cloudflare's SQLite accepts.
+Both the D1 binding and the Durable Object's storage binding refuse such a
+statement before the runtime receives it.
+*/
 export class StatementParameterLimitError extends Error {
 	constructor(
 		public readonly parameters: number,
@@ -1853,10 +1851,10 @@ export class StatementParameterLimitError extends Error {
 }
 
 /**
- * A single value whose serialised form is longer than the string Cloudflare's
- * SQLite accepts as a bound parameter. A list is split until each part fits;
- * one value that does not fit cannot be split any further.
- */
+A single value whose serialised form is longer than the string Cloudflare's
+SQLite accepts as a bound parameter. A list is split until each part fits;
+one value that does not fit cannot be split any further.
+*/
 export class BoundValueLengthError extends Error {
 	constructor(
 		public readonly bytes: number,
@@ -1870,9 +1868,9 @@ export class BoundValueLengthError extends Error {
 }
 
 /**
- * A batch builder that produced an empty batch for a non-empty chunk. Reporting
- * the chunk as processed would acknowledge work that was not executed.
- */
+A batch builder that produced an empty batch for a non-empty chunk. Reporting
+the chunk as processed would acknowledge work that was not executed.
+*/
 export class EmptyStatementBatchError extends Error {
 	constructor(public readonly items: number) {
 		super(

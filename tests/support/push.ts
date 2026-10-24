@@ -33,12 +33,12 @@ interface UploadIdentity {
 }
 
 /**
- * Pushes the given store paths to a cupboard through the full client flow:
- * negotiate, then for each path either stream its compressed NAR to the staging
- * key the server names and commit, or commit a reused blob. The server derives
- * the file hash and size from the streamed bytes, so the push carries only the
- * path metadata it can read from the store.
- */
+Pushes the given store paths to a cupboard through the full client flow:
+negotiate, then for each path either stream its compressed NAR to the staging
+key the server names and commit, or commit a reused blob. The server derives
+the file hash and size from the streamed bytes, so the push carries only the
+path metadata it can read from the store.
+*/
 export async function pushStorePaths(
 	context: PushContext,
 	storePaths: readonly string[]
@@ -99,10 +99,10 @@ export interface NegotiatedUpload {
 }
 
 /**
- * Negotiates a single store path and returns the upload it yields together with
- * the path's compressed NAR bytes. Lets a test drive the staging write itself,
- * e.g. to stage tampered bytes and assert verification rejects the commit.
- */
+Negotiates a single store path and returns the upload it yields together with
+the path's compressed NAR bytes. Lets a test drive the staging write itself,
+e.g. to stage tampered bytes and assert verification rejects the commit.
+*/
 export async function negotiateUpload(
 	context: PushContext,
 	storePath: string

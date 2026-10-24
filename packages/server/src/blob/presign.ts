@@ -29,11 +29,11 @@ export class R2Presigner {
 	}
 
 	/**
-	 * Sends a header-signed GET with the same derived, action-only and
-	 * prefix-scoped credential used by pushes. A 400 response means R2 rejected
-	 * the credential; 2xx, 403 and 404 responses show that the request reached R2.
-	 * The probe does not write an object.
-	 */
+	Sends a header-signed GET with the same derived, action-only and
+	prefix-scoped credential used by pushes. A 400 response means R2 rejected
+	the credential; 2xx, 403 and 404 responses show that the request reached R2.
+	The probe does not write an object.
+	*/
 	async probeTemporaryCredential(now: Date): Promise<Response> {
 		const credential = await createR2TemporaryCredentials(
 			this.configuration,

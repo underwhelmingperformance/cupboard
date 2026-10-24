@@ -52,8 +52,8 @@ interface DatePartIndexes {
 }
 
 /**
- * Parses an HTTP date without accepting JavaScript's additional date formats.
- */
+Parses an HTTP date without accepting JavaScript's additional date formats.
+*/
 export function parseHttpDate(
 	value: string,
 	nowMilliseconds: number = Date.now()
@@ -207,8 +207,8 @@ function dateParts(
 }
 
 /**
- * Applies HTTP's weak entity-tag comparison to an If-None-Match field.
- */
+Applies HTTP's weak entity-tag comparison to an If-None-Match field.
+*/
 export function isWeakEtagMatch(
 	ifNoneMatch: string,
 	etag: string | null

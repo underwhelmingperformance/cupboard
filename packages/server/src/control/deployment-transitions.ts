@@ -11,14 +11,14 @@ import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import * as d1Schema from '../db/d1-schema.ts';
 
 /**
- * Returns how far each schema transition has got, in the order that the deploy
- * applies them. The list is empty until a deploy of this release has run.
- *
- * A row whose transition id or state this server version does not define goes
- * in `unrecognised`. A rollback past the release that added the transition
- * leaves such a row. `cupboard deployment status` lists it with what the
- * CLI's own `cupboard deploy` does with it.
- */
+Returns how far each schema transition has got, in the order that the deploy
+applies them. The list is empty until a deploy of this release has run.
+
+A row whose transition id or state this server version does not define goes
+in `unrecognised`. A rollback past the release that added the transition
+leaves such a row. `cupboard deployment status` lists it with what the
+CLI's own `cupboard deploy` does with it.
+*/
 export async function controlDeploymentTransitions(
 	env: Env
 ): Promise<DeploymentTransitionsResponse> {

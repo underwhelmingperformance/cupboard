@@ -2,31 +2,31 @@ import type { NarSource } from '../../packages/cli/src/nix/nar-source.ts';
 
 export interface MemoryNarSourceOptions {
 	/**
-	 * Returns the NAR contents for the open at index `open`, counting from 0. A
-	 * test returns different bytes to simulate a NAR that changes between
-	 * reads.
-	 */
+	Returns the NAR contents for the open at index `open`, counting from 0. A
+	test returns different bytes to simulate a NAR that changes between
+	reads.
+	*/
 	readonly contents: (open: number) => Uint8Array;
 	/**
-	 * Returns the length of the pieces that the open at index `open` yields.
-	 */
+	Returns the length of the pieces that the open at index `open` yields.
+	*/
 	readonly pieceSize?: (open: number) => number;
 	/**
-	 * Runs before the open at index `open` yields the piece that starts at
-	 * `offset`. The piece waits for a returned promise.
-	 */
+	Runs before the open at index `open` yields the piece that starts at
+	`offset`. The piece waits for a returned promise.
+	*/
 	readonly beforePiece?: (open: number, offset: number) => Promise<void> | void;
 	/**
-	 * Refuses to start reading an open while an earlier open is still being
-	 * read, as a store with one connection would.
-	 */
+	Refuses to start reading an open while an earlier open is still being
+	read, as a store with one connection would.
+	*/
 	readonly isExclusive?: boolean;
 }
 
 /**
- * Fails an open of an exclusive `MemoryNarSource` that starts while another
- * open is still being read.
- */
+Fails an open of an exclusive `MemoryNarSource` that starts while another
+open is still being read.
+*/
 export class ConcurrentNarOpenError extends Error {
 	constructor(public readonly offset: number) {
 		super(`The NAR was opened at ${String(offset)} while it was still open`);
@@ -35,10 +35,10 @@ export class ConcurrentNarOpenError extends Error {
 }
 
 /**
- * A NAR held in memory that can be opened at any offset. It records the
- * offset of every open, the number of bytes that each open yields, and how
- * many opens have finished.
- */
+A NAR held in memory that can be opened at any offset. It records the
+offset of every open, the number of bytes that each open yields, and how
+many opens have finished.
+*/
 export class MemoryNarSource implements NarSource {
 	static of(contents: Uint8Array): MemoryNarSource {
 		return new MemoryNarSource({ contents: () => contents });
@@ -55,8 +55,8 @@ export class MemoryNarSource implements NarSource {
 	constructor(private readonly options: MemoryNarSourceOptions) {}
 
 	/**
-	 * The number of opens whose reading has finished or been stopped.
-	 */
+	The number of opens whose reading has finished or been stopped.
+	*/
 	get closed(): number {
 		return this.closedOpens;
 	}

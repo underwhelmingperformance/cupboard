@@ -29,10 +29,10 @@ export type OidcTrustSelection =
 	  };
 
 /**
- * Composes exact requested authority within the preferred verified identity
- * tier. An omitted request retains single-rule selection for implicit authority.
- * The issuer must re-evaluate current policy after asynchronous work.
- */
+Composes exact requested authority within the preferred verified identity
+tier. An omitted request retains single-rule selection for implicit authority.
+The issuer must re-evaluate current policy after asynchronous work.
+*/
 export function selectOidcTrust(
 	rules: readonly OidcTrustRule[],
 	claims: VerifiedOidcClaims,

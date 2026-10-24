@@ -31,9 +31,9 @@ export class DuplicateTargetAttributeError extends ManifestError {
 }
 
 /**
- * Accepts the publish workflow's target array directly or under a `targets`
- * property. Both forms produce the same target list.
- */
+Accepts the publish workflow's target array directly or under a `targets`
+property. Both forms produce the same target list.
+*/
 export const measurementManifestSchema = z.union([
 	publishTargetsSchema,
 	z
@@ -42,9 +42,9 @@ export const measurementManifestSchema = z.union([
 ]);
 
 /**
- * Parses the manifest targets and expands component-publication targets into
- * the components the workflow would realise.
- */
+Parses the manifest targets and expands component-publication targets into
+the components the workflow would realise.
+*/
 export function parseManifest(source: string): readonly PublishTarget[] {
 	let value: unknown;
 
@@ -89,11 +89,11 @@ export interface TargetGroup {
 }
 
 /**
- * Returns the manifest cohorts with at least two members, sorted by cohort
- * key. Unlabelled targets form one-member cohorts, which cost the same measured
- * separately or together and do not need a group comparison. The manifest
- * label remains the stable baseline key when targets are added.
- */
+Returns the manifest cohorts with at least two members, sorted by cohort
+key. Unlabelled targets form one-member cohorts, which cost the same measured
+separately or together and do not need a group comparison. The manifest
+label remains the stable baseline key when targets are added.
+*/
 export function declaredGroups(
 	targets: readonly PublishTarget[]
 ): readonly TargetGroup[] {

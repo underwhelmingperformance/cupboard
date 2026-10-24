@@ -52,14 +52,14 @@ function executionContextKey(cohort: Cohort): string {
 }
 
 /**
- * Pack measured single-target cohorts within each execution context using
- * first-fit decreasing. Sort by measured substitutable NAR size and preserve
- * manifest order when sizes match.
- *
- * Never split or merge an explicit multi-target cohort. Leave a target in its
- * original cohort when it has no measurement. Return `undefined` only when
- * packing is disabled; an enabled run returns a result even if nothing moves.
- */
+Pack measured single-target cohorts within each execution context using
+first-fit decreasing. Sort by measured substitutable NAR size and preserve
+manifest order when sizes match.
+
+Never split or merge an explicit multi-target cohort. Leave a target in its
+original cohort when it has no measurement. Return `undefined` only when
+packing is disabled; an enabled run returns a result even if nothing moves.
+*/
 export function packCohorts(
 	options: PackCohortsOptions
 ): PackingResult | undefined {

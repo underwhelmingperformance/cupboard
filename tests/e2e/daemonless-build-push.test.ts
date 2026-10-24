@@ -32,16 +32,16 @@ import { temporaryRoot, waitForFile } from '../support/filesystem.ts';
 import { runCommand } from '../support/process.ts';
 
 /**
- * A store of this test's own: its own store directory, its own database, and no
- * daemon socket anywhere near it. This is what a tarball install of Nix gives
- * you, and what a GitHub-hosted runner using `nix-quick-install-action` gets.
- *
- * A cupboard cache serves exactly one store directory, `/nix/store`, so a store
- * of another directory publishes to a cache of this suite's own rather than to
- * the tenant. What that cache is asked for is the whole of what the run
- * publishes, so it stands in for the tenant here; the run against the host
- * store below publishes to the tenant itself.
- */
+A store of this test's own: its own store directory, its own database, and no
+daemon socket anywhere near it. This is what a tarball install of Nix gives
+you, and what a GitHub-hosted runner using `nix-quick-install-action` gets.
+
+A cupboard cache serves exactly one store directory, `/nix/store`, so a store
+of another directory publishes to a cache of this suite's own rather than to
+the tenant. What that cache is asked for is the whole of what the run
+publishes, so it stands in for the tenant here; the run against the host
+store below publishes to the tenant itself.
+*/
 interface DaemonlessStore {
 	readonly workspace: string;
 	readonly storeDirectory: string;

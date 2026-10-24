@@ -28,8 +28,8 @@ async function monitorResources(
 }
 
 /**
- * Collects debug resource samples until evaluation completes, then joins monitoring.
- */
+Collects debug resource samples until evaluation completes, then joins monitoring.
+*/
 export async function withEvaluationMonitor<T>(
 	environment: Environment,
 	operation: () => Promise<T>,

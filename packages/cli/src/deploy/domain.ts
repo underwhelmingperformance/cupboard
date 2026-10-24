@@ -84,10 +84,10 @@ export function checkDomainOption(value: string): string {
 }
 
 /**
- * Candidate Cloudflare zones for a hostname, from the most specific delegated
- * zone down to its registrable domain. The Public Suffix List supplies the
- * lower bound, so a lookup never asks Cloudflare for a suffix such as `co.uk`.
- */
+Candidate Cloudflare zones for a hostname, from the most specific delegated
+zone down to its registrable domain. The Public Suffix List supplies the
+lower bound, so a lookup never asks Cloudflare for a suffix such as `co.uk`.
+*/
 export function cloudflareZoneCandidates(hostname: string): string[] {
 	const normalised = hostname.toLowerCase();
 	const registrable = getDomain(normalised, {

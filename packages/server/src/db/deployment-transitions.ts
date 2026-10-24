@@ -15,15 +15,15 @@ export interface DeploymentTransitionRow {
 }
 
 /**
- * The transition states that this build defines, read from the rows that the
- * deploy recorded. A later release's deploy can write two kinds of row that
- * this build does not define. A row with an unknown id is left out, because
- * this build does not handle that transition. A row with a known id and an
- * unknown state counts as `complete`: a later release may only append states
- * after `complete`, so the transition has at least completed. Treating it as
- * incomplete would make the Workers write the grant format from before the
- * contract migrations, which those migrations reject.
- */
+The transition states that this build defines, read from the rows that the
+deploy recorded. A later release's deploy can write two kinds of row that
+this build does not define. A row with an unknown id is left out, because
+this build does not handle that transition. A row with a known id and an
+unknown state counts as `complete`: a later release may only append states
+after `complete`, so the transition has at least completed. Treating it as
+incomplete would make the Workers write the grant format from before the
+contract migrations, which those migrations reject.
+*/
 export function recordedTransitions(
 	rows: readonly DeploymentTransitionRow[]
 ): TransitionStates {

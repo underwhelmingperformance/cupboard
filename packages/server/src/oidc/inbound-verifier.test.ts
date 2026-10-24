@@ -128,13 +128,15 @@ describe('InboundTokenVerifier', () => {
 			requested.push(url);
 
 			return Promise.resolve(
-				url.endsWith('/.well-known/openid-configuration')
-					? Response.json({
-							issuer,
-							jwks_uri: `${issuer}/jwks`,
-							id_token_signing_alg_values_supported: ['RS256']
-						})
-					: Response.json({ keys: [jwk] })
+				Response.json(
+					url.endsWith('/.well-known/openid-configuration')
+						? {
+								issuer,
+								jwks_uri: `${issuer}/jwks`,
+								id_token_signing_alg_values_supported: ['RS256']
+							}
+						: { keys: [jwk] }
+				)
 			);
 		};
 		const verifier = new InboundTokenVerifier(

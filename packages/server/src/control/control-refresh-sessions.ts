@@ -89,10 +89,10 @@ interface PreparedControlRefresh {
 type ControlRotationOutcome = 'rotated' | 'stale-member';
 
 /**
- * What the control plane supplies to its refresh sessions: the D1 database,
- * the keys for its refresh credentials, the current control trust policy, and
- * the signing of access tokens.
- */
+What the control plane supplies to its refresh sessions: the D1 database,
+the keys for its refresh credentials, the current control trust policy, and
+the signing of access tokens.
+*/
 export interface ControlRefreshDependencies {
 	readonly database: Database;
 	readonly keys: RefreshKeyContext;
@@ -108,13 +108,13 @@ export interface ControlRefreshDependencies {
 }
 
 /**
- * The control plane's refresh-token families in D1. They follow the tenant
- * object's families: rotation on every refresh, a one-minute retry grace for
- * the spent credential, revocation on replay, a member limit and a 30-day
- * expiry. D1 has no interactive transactions, so rotation advances the active
- * member with a conditional update in one batch and checks whether the update
- * changed a row.
- */
+The control plane's refresh-token families in D1. They follow the tenant
+object's families: rotation on every refresh, a one-minute retry grace for
+the spent credential, revocation on replay, a member limit and a 30-day
+expiry. D1 has no interactive transactions, so rotation advances the active
+member with a conditional update in one batch and checks whether the update
+changed a row.
+*/
 export class ControlRefreshSessions {
 	constructor(private readonly dependencies: ControlRefreshDependencies) {}
 
@@ -298,12 +298,12 @@ export class ControlRefreshSessions {
 	}
 
 	/**
-	 * Advances the family from the presented member to the successor. The
-	 * update matches only while the presented member is still active, and the
-	 * later statements in the batch apply only once the successor is active.
-	 * A concurrent rotation that won therefore leaves this batch with no
-	 * effect.
-	 */
+	Advances the family from the presented member to the successor. The
+	update matches only while the presented member is still active, and the
+	later statements in the batch apply only once the successor is active.
+	A concurrent rotation that won therefore leaves this batch with no
+	effect.
+	*/
 	private async rotate(
 		family: ControlRefreshFamily,
 		member: ControlRefreshMember,
@@ -419,11 +419,11 @@ export class ControlRefreshSessions {
 	}
 
 	/**
-	 * Creates a family for a verified external identity and returns its first
-	 * refresh credential. With `nonce`, one batch records the nonce as consumed
-	 * and creates the family. When the nonce is already recorded, the batch
-	 * changes nothing and the method throws `SubjectTokenReplayedError`.
-	 */
+	Creates a family for a verified external identity and returns its first
+	refresh credential. With `nonce`, one batch records the nonce as consumed
+	and creates the family. When the nonce is already recorded, the batch
+	changes nothing and the method throws `SubjectTokenReplayedError`.
+	*/
 	async create(
 		identity: VerifiedOidcClaims,
 		subject: OidcSubject,
@@ -609,10 +609,10 @@ export class ControlRefreshSessions {
 	}
 
 	/**
-	 * Revokes the family of a presented credential. An unknown or forged
-	 * credential changes nothing, and it is hashed like a known one so the
-	 * response time does not show whether its member exists.
-	 */
+	Revokes the family of a presented credential. An unknown or forged
+	credential changes nothing, and it is hashed like a known one so the
+	response time does not show whether its member exists.
+	*/
 	async revokePresented(
 		logger: Logger,
 		presented: RefreshCredential
@@ -669,11 +669,11 @@ function logFamilyRevocation(
 }
 
 /**
- * Deletes expired control refresh families, and clears successor envelopes
- * whose retry grace has passed, up to one page of each kind per call. A family
- * can have more members than a page, so a family row is deleted only once it
- * has no members left, and the next call continues with the rest.
- */
+Deletes expired control refresh families, and clears successor envelopes
+whose retry grace has passed, up to one page of each kind per call. A family
+can have more members than a page, so a family row is deleted only once it
+has no members left, and the next call continues with the rest.
+*/
 export async function pruneControlRefreshSessions(
 	database: Database,
 	now: IsoTimestamp

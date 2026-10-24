@@ -33,10 +33,10 @@ export interface Capture {
 }
 
 /**
- * Resets LogTape and captures Cupboard records until `stop()` resets it again.
- * Tests must call `stop()` during teardown because LogTape configuration is
- * global to the process.
- */
+Resets LogTape and captures Cupboard records until `stop()` resets it again.
+Tests must call `stop()` during teardown because LogTape configuration is
+global to the process.
+*/
 export function startCapture(): Capture {
 	const logs: CapturedLog[] = [];
 
@@ -68,9 +68,9 @@ export function startCapture(): Capture {
 }
 
 /**
- * Removes the LogTape configuration. Records are dropped until something
- * configures logging again.
- */
+Removes the LogTape configuration. Records are dropped until something
+configures logging again.
+*/
 export function stopLogging(): void {
 	resetSync();
 }

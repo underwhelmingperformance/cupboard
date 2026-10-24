@@ -39,11 +39,11 @@ interface FakeServerSession {
 }
 
 /**
- * Models the tenant-wide credit invariant. Admission consumes credit, the first
- * response returns it, and waiting sessions receive returned credit in
- * rotation. Every admitted entry settles, which isolates capacity as the only
- * possible source of delay.
- */
+Models the tenant-wide credit invariant. Admission consumes credit, the first
+response returns it, and waiting sessions receive returned credit in
+rotation. Every admitted entry settles, which isolates capacity as the only
+possible source of delay.
+*/
 class CreditServerFake {
 	private available: number;
 	private readonly rotation: FakeServerSession[] = [];

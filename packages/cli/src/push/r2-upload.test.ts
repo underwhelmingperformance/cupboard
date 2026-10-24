@@ -1770,9 +1770,9 @@ class RecordingObserver implements NarUploadObserver {
 }
 
 /**
- * A pause in a NAR source. `reached` resolves when the source arrives at it,
- * and the source waits there until `open` is called.
- */
+A pause in a NAR source. `reached` resolves when the source arrives at it,
+and the source waits there until `open` is called.
+*/
 class Gate {
 	private readonly arrived = Promise.withResolvers<undefined>();
 

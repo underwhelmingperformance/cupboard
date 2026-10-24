@@ -18,15 +18,15 @@ import {
 } from './substituter-reach.ts';
 
 /**
- * A confirmation store configured with only the substituters available to an
- * external consumer. It excludes Cupboard's destination cache and the tenant's
- * reuse views because they contain tenant-owned content that the workflow
- * should publish or retain. It also excludes runner-local and private-network
- * substituters.
- *
- * The store also reports whether the daemon trusts the connection, because a
- * daemon applies a client's settings only for a client it trusts.
- */
+A confirmation store configured with only the substituters available to an
+external consumer. It excludes Cupboard's destination cache and the tenant's
+reuse views because they contain tenant-owned content that the workflow
+should publish or retain. It also excludes runner-local and private-network
+substituters.
+
+The store also reports whether the daemon trusts the connection, because a
+daemon applies a client's settings only for a client it trusts.
+*/
 export type PermittedSubstituterStore = Pick<
 	Nix,
 	| 'resolveSubstitutableClosure'
@@ -38,21 +38,21 @@ export interface UpstreamConfirmationOptions {
 	readonly substitution: NixSubstitutionSettings;
 	readonly store: PermittedSubstituterStore;
 	/**
-	 * Whether the consumer's signature policy accepts a substituter's offer. A
-	 * rejected offer does not establish availability.
-	 */
+	Whether the consumer's signature policy accepts a substituter's offer. A
+	rejected offer does not establish availability.
+	*/
 	readonly accepts: AcceptsOffer;
 	readonly closure?: SubstitutableClosureOptions;
 }
 
 /**
- * Creates the confirmation required before excluding a target from publication
- * because an upstream substituter serves it. Confirmation requires a trusted
- * connection, substitution eligibility, and a complete matching closure from
- * permitted substituters. It reads each narinfo, verifies that its NAR hash
- * matches the local store, and checks that the signature policy accepts it.
- * The confirmation store also verifies anonymous access to the advertised NAR.
- */
+Creates the confirmation required before excluding a target from publication
+because an upstream substituter serves it. Confirmation requires a trusted
+connection, substitution eligibility, and a complete matching closure from
+permitted substituters. It reads each narinfo, verifies that its NAR hash
+matches the local store, and checks that the signature policy accepts it.
+The confirmation store also verifies anonymous access to the advertised NAR.
+*/
 export function confirmUpstreamAvailabilityWith(
 	options: UpstreamConfirmationOptions
 ): (
@@ -120,14 +120,14 @@ export interface UpstreamConfirmationOverrideOptions {
 }
 
 /**
- * The override replaces the substituter list with externally usable configured
- * caches, excluding this tenant's endpoints. A zero positive narinfo TTL makes
- * each confirmation request current metadata from those caches.
- *
- * A daemon honours these for a trusted client only, so
- * {@link confirmUpstreamAvailabilityWith} checks the connection's trust before
- * using any result to decide a verdict.
- */
+The override replaces the substituter list with externally usable configured
+caches, excluding this tenant's endpoints. A zero positive narinfo TTL makes
+each confirmation request current metadata from those caches.
+
+A daemon honours these for a trusted client only, so
+{@link confirmUpstreamAvailabilityWith} checks the connection's trust before
+using any result to decide a verdict.
+*/
 export function upstreamConfirmationOverrides(
 	substitution: NixSubstitutionSettings,
 	tenantUrl: URL,

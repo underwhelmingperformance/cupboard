@@ -1,9 +1,9 @@
 import { CliError, unavailableExitCode } from '../errors.ts';
 
 /**
- * Reports the available and total bytes for the filesystem that contains the
- * selected store.
- */
+Reports the available and total bytes for the filesystem that contains the
+selected store.
+*/
 export type StoreCapacityProbe = (storePath: string) => Promise<{
 	readonly available: number;
 	readonly capacity: number;
@@ -25,10 +25,10 @@ function effectiveHeadroom(config: HeadroomConfig, capacity: number): number {
 }
 
 /**
- * Remedies the caller found while inspecting the build configuration. An
- * aggregate target cannot be split into smaller cohorts, so the caller must
- * report that distinction rather than deriving it from the byte counts.
- */
+Remedies the caller found while inspecting the build configuration. An
+aggregate target cannot be split into smaller cohorts, so the caller must
+report that distinction rather than deriving it from the byte counts.
+*/
 export interface DetectedCapacityOptions {
 	readonly cohortSplitPossible: boolean;
 	readonly remoteStoreConfigured: boolean;
@@ -42,11 +42,11 @@ export interface CapacityMeasurement {
 }
 
 /**
- * The measured substitutable NAR bytes exceed the store's available space after
- * headroom. The measurement excludes build outputs, scratch space, and the
- * difference between NAR and on-disk sizes, so passing this check does not
- * guarantee that the build will fit.
- */
+The measured substitutable NAR bytes exceed the store's available space after
+headroom. The measurement excludes build outputs, scratch space, and the
+difference between NAR and on-disk sizes, so passing this check does not
+guarantee that the build will fit.
+*/
 export class StoreCapacityError extends CliError {
 	constructor(
 		public readonly measured: CapacityMeasurement,
@@ -86,10 +86,10 @@ export interface CapacityCheckResult {
 }
 
 /**
- * Refuses the build before fetching when the measured substitutable NAR bytes
- * exceed the selected store's capacity after headroom. The caller remains
- * responsible for splitting cohorts or choosing another store.
- */
+Refuses the build before fetching when the measured substitutable NAR bytes
+exceed the selected store's capacity after headroom. The caller remains
+responsible for splitting cohorts or choosing another store.
+*/
 export async function checkStoreCapacity(
 	options: CapacityPreflightOptions
 ): Promise<CapacityCheckResult> {

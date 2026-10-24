@@ -5,54 +5,54 @@ import { z } from 'zod';
 import type { WorkerSecret } from './cloudflare-api.ts';
 
 /**
- * Generate a fresh `CONTROL_KEY_WRAP_SECRET`: a base64 AES-256 key. Used on a
- * first deploy when the operator has not supplied one. It must stay stable
- * afterwards, as a different value cannot unwrap the existing control key.
- */
+Generate a fresh `CONTROL_KEY_WRAP_SECRET`: a base64 AES-256 key. Used on a
+first deploy when the operator has not supplied one. It must stay stable
+afterwards, as a different value cannot unwrap the existing control key.
+*/
 export function generateWrapSecret(): string {
 	return randomBytes(32).toString('base64');
 }
 
 /**
- * Generate a fresh `PUSH_ID_SIGNING_KEY`: a high-entropy base64 secret. Used on
- * a first deploy when the operator has not supplied one. It must stay stable
- * afterwards, as a different value invalidates in-flight push ids and recovery
- * of recently consumed refresh tokens.
- */
+Generate a fresh `PUSH_ID_SIGNING_KEY`: a high-entropy base64 secret. Used on
+a first deploy when the operator has not supplied one. It must stay stable
+afterwards, as a different value invalidates in-flight push ids and recovery
+of recently consumed refresh tokens.
+*/
 export function generatePushIdSigningKey(): string {
 	return randomBytes(32).toString('base64');
 }
 
 /**
- * The control Worker secret that `/signup` requires for the first-admin claim.
- */
+The control Worker secret that `/signup` requires for the first-admin claim.
+*/
 export const claimSecretName = 'CUPBOARD_SIGNUP_SECRET';
 
 /**
- * A generated claim secret, which `/signup` requires for the first-admin
- * claim.
- */
+A generated claim secret, which `/signup` requires for the first-admin
+claim.
+*/
 export const claimSecretSchema = z.string().min(1).brand('ClaimSecret');
 export type ClaimSecret = z.infer<typeof claimSecretSchema>;
 
 /**
- * Generate a claim secret for one first deploy. The deploy sets it on the
- * control Worker, presents it with the operator's id_token, and deletes it
- * after the claim attempt or when the run stops before the claim. The CLI never
- * prints the value or writes it to disk.
- */
+Generate a claim secret for one first deploy. The deploy sets it on the
+control Worker, presents it with the operator's id_token, and deletes it
+after the claim attempt or when the run stops before the claim. The CLI never
+prints the value or writes it to disk.
+*/
 export function generateClaimSecret(): ClaimSecret {
 	return claimSecretSchema.parse(randomBytes(32).toString('base64url'));
 }
 
 /**
- * The secrets each Worker needs, ready to apply. The control plane holds the
- * signing-key wrapping secret; the tenant Durable Object holds the R2
- * credentials its presigner uses (see `packages/server/src/do/context.ts`).
- * The push id signing key goes to both Workers: the tenant object issues and
- * verifies push ids with it, and the front Worker verifies them to gate its
- * pre-auth negotiate hint reads.
- */
+The secrets each Worker needs, ready to apply. The control plane holds the
+signing-key wrapping secret; the tenant Durable Object holds the R2
+credentials its presigner uses (see `packages/server/src/do/context.ts`).
+The push id signing key goes to both Workers: the tenant object issues and
+verifies push ids with it, and the front Worker verifies them to gate its
+pre-auth negotiate hint reads.
+*/
 export interface DeploySecrets {
 	readonly control: readonly WorkerSecret[];
 	readonly tenant: readonly WorkerSecret[];
@@ -74,12 +74,12 @@ const requiredTenantR2 = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
 const requiredShared = ['PUSH_ID_SIGNING_KEY'];
 
 /**
- * Both Workers must use the same push-ID signing key, but a deployed secret
- * cannot be read back. Keep the existing key when both Workers have one,
- * generate the first key when neither does, and rotate both Workers when only
- * one has a key. Rotation invalidates in-flight push IDs, so those pushes must
- * be run again.
- */
+Both Workers must use the same push-ID signing key, but a deployed secret
+cannot be read back. Keep the existing key when both Workers have one,
+generate the first key when neither does, and rotate both Workers when only
+one has a key. Rotation invalidates in-flight push IDs, so those pushes must
+be run again.
+*/
 export type PushIdKeySettlement = 'keep' | 'generate' | 'rotate';
 
 export function settlePushIdSigningKey(existing: {
@@ -97,12 +97,12 @@ export function settlePushIdSigningKey(existing: {
 }
 
 /**
- * Assemble the per-Worker secrets from the environment and the resolved
- * deployment facts. `R2_ACCOUNT_ID` and `R2_BUCKET_NAME` are derived; the
- * sensitive values come from the environment. Names whose required value is
- * absent are returned in `missing` so the caller can warn before deploying a
- * cache that would fail to start.
- */
+Assemble the per-Worker secrets from the environment and the resolved
+deployment facts. `R2_ACCOUNT_ID` and `R2_BUCKET_NAME` are derived; the
+sensitive values come from the environment. Names whose required value is
+absent are returned in `missing` so the caller can warn before deploying a
+cache that would fail to start.
+*/
 export function assembleSecrets(inputs: SecretInputs): AssembledSecrets {
 	const missing: string[] = [];
 

@@ -7,37 +7,37 @@ import { currentDeadlineSignal } from './deadline.ts';
 import { wrapDispatchedMethods } from './dispatch-scope.ts';
 
 /**
- * How many Durable Object SQLite rows one invocation reads and writes before a
- * pass defers the rest of its work.
- *
- * This is a work-unit size, chosen rather than derived. Durable Object SQLite
- * caps neither statements nor rows per invocation, so no platform limit fixes
- * it. It decides how much a pass does before it stops and leaves the rest for
- * the next invocation: too small spends extra invocations on the same work,
- * too large makes one pass take longer to finish.
- *
- * Rows are the unit for the work a pass does in the object's own SQLite, which
- * the storage binding already counts for billing: every Durable Object request
- * logs its `rowsRead` and `rowsWritten`, so production traces are the evidence
- * for changing this number.
- *
- * They are not the only quantity a pass can watch itself spend. A pass that
- * reaches R2 or D1 also spends subrequests, which `subrequest-slice.ts` tracks
- * separately. The two do not overlap: the runtime counts no storage operation
- * as a subrequest, and no R2 or D1 call reads a row of this object.
- *
- * A row is not a fixed amount of work: a list bound as one JSON parameter
- * costs a row read per element (see `json-list.ts`), so a row count measured
- * against differently bound statements does not transfer to this number.
- */
+How many Durable Object SQLite rows one invocation reads and writes before a
+pass defers the rest of its work.
+
+This is a work-unit size, chosen rather than derived. Durable Object SQLite
+caps neither statements nor rows per invocation, so no platform limit fixes
+it. It decides how much a pass does before it stops and leaves the rest for
+the next invocation: too small spends extra invocations on the same work,
+too large makes one pass take longer to finish.
+
+Rows are the unit for the work a pass does in the object's own SQLite, which
+the storage binding already counts for billing: every Durable Object request
+logs its `rowsRead` and `rowsWritten`, so production traces are the evidence
+for changing this number.
+
+They are not the only quantity a pass can watch itself spend. A pass that
+reaches R2 or D1 also spends subrequests, which `subrequest-slice.ts` tracks
+separately. The two do not overlap: the runtime counts no storage operation
+as a subrequest, and no R2 or D1 call reads a row of this object.
+
+A row is not a fixed amount of work: a list bound as one JSON parameter
+costs a row read per element (see `json-list.ts`), so a row count measured
+against differently bound statements does not transfer to this number.
+*/
 const rowsPerInvocation = 25_000;
 
 /**
- * One invocation's remaining Durable Object row budget.
- *
- * The storage binding debits the budget as statements run, so a pass cannot
- * spend rows the budget does not see.
- */
+One invocation's remaining Durable Object row budget.
+
+The storage binding debits the budget as statements run, so a pass cannot
+spend rows the budget does not see.
+*/
 class RowBudget {
 	readonly meter = new DatabaseCostMeter();
 
@@ -65,14 +65,14 @@ class RowBudget {
 const budgetScope = new AsyncLocalStorage<RowBudget>();
 
 /**
- * Runs `body` under one invocation's row budget.
- *
- * A nested call reuses the enclosing budget, so a method that calls another
- * method of the same object shares the one budget for the invocation.
- *
- * The body may be synchronous or asynchronous. `sql.exec` is synchronous, so a
- * pass that never awaits still spends and observes the budget.
- */
+Runs `body` under one invocation's row budget.
+
+A nested call reuses the enclosing budget, so a method that calls another
+method of the same object shares the one budget for the invocation.
+
+The body may be synchronous or asynchronous. `sql.exec` is synchronous, so a
+pass that never awaits still spends and observes the budget.
+*/
 export function withRowBudget<T>(
 	body: () => T,
 	rows: number = rowsPerInvocation
@@ -85,23 +85,23 @@ export function withRowBudget<T>(
 }
 
 /**
- * The meter the storage binding debits for the current budget. Outside a
- * budget this is undefined and the binding tracks nothing extra.
- */
+The meter the storage binding debits for the current budget. Outside a
+budget this is undefined and the binding tracks nothing extra.
+*/
 export function currentRowBudgetMeter(): DatabaseCostMeter | undefined {
 	return budgetScope.getStore()?.meter;
 }
 
 /**
- * How many rows the current invocation may still read and write.
- *
- * This reaches zero once the rows are spent, and also once an enclosing
- * deadline scope has been aborted, because a pass must not begin another step
- * there.
- *
- * Callers must run under a dispatched Durable Object method. This throws
- * outside a budget rather than reporting an allowance nothing is debiting.
- */
+How many rows the current invocation may still read and write.
+
+This reaches zero once the rows are spent, and also once an enclosing
+deadline scope has been aborted, because a pass must not begin another step
+there.
+
+Callers must run under a dispatched Durable Object method. This throws
+outside a budget rather than reporting an allowance nothing is debiting.
+*/
 export function rowsRemaining(): number {
 	const budget = budgetScope.getStore();
 
@@ -113,25 +113,25 @@ export function rowsRemaining(): number {
 }
 
 /**
- * Whether the current invocation has spent its row budget.
- *
- * Ask this *after* completing a step, never before starting one. Unlike the
- * subrequest slice, a row budget cannot refuse work in advance, because
- * a statement's row count is known only once it has run. So a pass runs a
- * step, asks this, and stops before starting another.
- *
- * Asking afterwards is also what guarantees forward progress: the first step
- * always runs, so a pass makes progress however little budget it inherits and
- * can never spin without doing work.
- */
+Whether the current invocation has spent its row budget.
+
+Ask this *after* completing a step, never before starting one. Unlike the
+subrequest slice, a row budget cannot refuse work in advance, because
+a statement's row count is known only once it has run. So a pass runs a
+step, asks this, and stops before starting another.
+
+Asking afterwards is also what guarantees forward progress: the first step
+always runs, so a pass makes progress however little budget it inherits and
+can never spin without doing work.
+*/
 export function isRowBudgetExhausted(): boolean {
 	return rowsRemaining() === 0;
 }
 
 /**
- * Wraps every method on `prototype` so each dispatch enters the invocation's
- * row budget, and so each dispatch shares one budget.
- */
+Wraps every method on `prototype` so each dispatch enters the invocation's
+row budget, and so each dispatch shares one budget.
+*/
 export function enterRowBudgetOnDispatch(prototype: object): void {
 	wrapDispatchedMethods(prototype, (body) => withRowBudget(body));
 }

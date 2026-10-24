@@ -37,12 +37,11 @@ interface Offer {
 
 function held(
 	storePath: StorePathString,
-	references: readonly StorePathString[] = [],
-	narHash: NixSha256Hash = sameBytes
+	references: readonly StorePathString[] = []
 ): NixValidPathInfo {
 	return {
 		storePath,
-		narHash,
+		narHash: sameBytes,
 		narSize: 1,
 		references,
 		signatures: [],
@@ -175,7 +174,7 @@ describe('resolveSubstitutableClosure', () => {
 
 	it('returns divergent when the offered NAR hash differs from local metadata', async () => {
 		const store = new FakeStore(
-			new Map([[appPath, held(appPath, [], sameBytes)]]),
+			new Map([[appPath, held(appPath, [])]]),
 			new Map([[appPath, offer(0, 0, otherBytes)]])
 		);
 

@@ -60,7 +60,7 @@ function buildMetadata(character: string): UploadPathMetadata {
 	});
 }
 
-async function teardownPending(cache: CacheScope): Promise<unknown> {
+async function teardownPending(): Promise<unknown> {
 	return runInDurableObject(currentServer(), (instance, state) => {
 		const row = instance.context.db
 			.select({ id: schema.cacheIdentities.id })
@@ -69,7 +69,7 @@ async function teardownPending(cache: CacheScope): Promise<unknown> {
 				cacheIdentityCondition(
 					schema.cacheIdentities.kind,
 					schema.cacheIdentities.name,
-					cache
+					buildsCache
 				)
 			)
 			.get();
@@ -148,7 +148,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
-			async () => (await teardownPending(buildsCache)) === undefined,
+			async () => (await teardownPending()) === undefined,
 			paths.length + 1
 		);
 
@@ -156,7 +156,7 @@ describe('cache teardown', () => {
 			onReturn,
 			rowsOnReturn,
 			object: await isNarInfoObjectPresent(first.storePathHash, buildsCache),
-			pending: await teardownPending(buildsCache)
+			pending: await teardownPending()
 		}).toStrictEqual({
 			onReturn: { object: true, pending: origin },
 			rowsOnReturn: 0,
@@ -182,7 +182,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
-			async () => (await teardownPending(buildsCache)) === undefined,
+			async () => (await teardownPending()) === undefined,
 			paths.length + 1
 		);
 
@@ -194,7 +194,7 @@ describe('cache teardown', () => {
 
 		expect({
 			objectsLeft: present.filter(Boolean).length,
-			pending: await teardownPending(buildsCache)
+			pending: await teardownPending()
 		}).toStrictEqual({ objectsLeft: 0, pending: undefined });
 	});
 
@@ -232,7 +232,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
-			async () => (await teardownPending(buildsCache)) === undefined,
+			async () => (await teardownPending()) === undefined,
 			paths.length + 1
 		);
 
@@ -344,7 +344,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
-			async () => (await teardownPending(buildsCache)) === undefined,
+			async () => (await teardownPending()) === undefined,
 			4
 		);
 
@@ -400,7 +400,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
-			async () => (await teardownPending(buildsCache)) === undefined,
+			async () => (await teardownPending()) === undefined,
 			3
 		);
 
@@ -410,7 +410,7 @@ describe('cache teardown', () => {
 			queued: await narInfoDeletionRows(),
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
-			pending: await teardownPending(buildsCache),
+			pending: await teardownPending(),
 			object: await isNarInfoObjectPresent(path.storePathHash, buildsCache),
 			usage: {
 				bytes: usage?.bytes,
@@ -445,7 +445,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
-			async () => (await teardownPending(buildsCache)) === undefined,
+			async () => (await teardownPending()) === undefined,
 			3
 		);
 
@@ -502,7 +502,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
-			async () => (await teardownPending(buildsCache)) === undefined,
+			async () => (await teardownPending()) === undefined,
 			3
 		);
 

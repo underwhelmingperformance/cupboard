@@ -17,9 +17,9 @@ import {
 import { describeConformance } from './oracle.ts';
 
 /**
- * The file shares one built and signed cache fixture. Cases that realise paths
- * use separate target stores so earlier fetches cannot affect later results.
- */
+The file shares one built and signed cache fixture. Cases that realise paths
+use separate target stores so earlier fetches cannot affect later results.
+*/
 const prepared: { fixture?: AvailabilityFixture } = {};
 
 class AvailabilityFixtureNotPreparedError extends Error {

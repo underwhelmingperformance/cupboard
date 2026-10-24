@@ -25,17 +25,17 @@ export interface InboundTokenLimits {
 }
 
 /**
- * Verifies an inbound ID token against the keys that its issuer publishes. The
- * tenant token exchange, the control token exchange and the first-admin claim
- * all use it.
- *
- * A failure to fetch the issuer's metadata or keys is an
- * `IssuerUnavailableError`, which the client can retry. The verifier retries it
- * once itself after a short delay. A token older than the maximum token age is
- * a `SubjectTokenTooOldError`. A token that fails verification in any other way
- * is a `SubjectTokenVerificationFailedError`. Any other error propagates unchanged
- * and becomes a 500.
- */
+Verifies an inbound ID token against the keys that its issuer publishes. The
+tenant token exchange, the control token exchange and the first-admin claim
+all use it.
+
+A failure to fetch the issuer's metadata or keys is an
+`IssuerUnavailableError`, which the client can retry. The verifier retries it
+once itself after a short delay. A token older than the maximum token age is
+a `SubjectTokenTooOldError`. A token that fails verification in any other way
+is a `SubjectTokenVerificationFailedError`. Any other error propagates unchanged
+and becomes a 500.
+*/
 export class InboundTokenVerifier {
 	constructor(
 		private readonly discovery: Pick<OidcDiscoveryStore, 'resolve'>

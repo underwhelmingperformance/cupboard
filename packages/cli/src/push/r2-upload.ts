@@ -36,18 +36,18 @@ import {
 export type CredentialProvider = () => Promise<PushCredential>;
 
 /**
- * Uploads the objects of one push to its R2 bucket.
- */
+Uploads the objects of one push to its R2 bucket.
+*/
 export interface BlobUploader {
 	/**
-	 * Uploads a small object, such as an attestation bundle, with one
-	 * `PutObject`, sending it again after a failure that another attempt can
-	 * fix.
-	 */
+	Uploads a small object, such as an attestation bundle, with one
+	`PutObject`, sending it again after a failure that another attempt can
+	fix.
+	*/
 	uploadBytes(r2Key: string, body: ReadableStream<Uint8Array>): Promise<void>;
 	/**
-	 * Compresses a NAR and uploads it. See `uploadCompressedNar`.
-	 */
+	Compresses a NAR and uploads it. See `uploadCompressedNar`.
+	*/
 	uploadNar(
 		r2Key: string,
 		source: NarSource,
@@ -75,16 +75,16 @@ export interface R2BlobUploaderOptions {
 	readonly bucket: string;
 	readonly provider: CredentialProvider;
 	/**
-	 * Cancels uploads in progress. A cancelled multipart upload is aborted.
-	 */
+	Cancels uploads in progress. A cancelled multipart upload is aborted.
+	*/
 	readonly signal?: AbortSignal;
 	readonly compression?: NarCompressionOptions;
 	readonly backoff?: Backoff;
 	readonly now?: () => number;
 	/**
-	 * Fails a request whose connection sends and receives nothing for this
-	 * long. The default is five minutes.
-	 */
+	Fails a request whose connection sends and receives nothing for this
+	long. The default is five minutes.
+	*/
 	readonly socketTimeoutMs?: number;
 }
 
@@ -99,11 +99,11 @@ const defaultSocketTimeoutMs = 5 * 60 * 1000;
 const connectionTimeoutMs = 30_000;
 
 /**
- * Builds a blob uploader bound to one push's R2 bucket. The S3 client signs with
- * the push credential and renews it through the provider as it expires, so a
- * push longer than a single credential's life recovers without re-driving the
- * upload from the caller.
- */
+Builds a blob uploader bound to one push's R2 bucket. The S3 client signs with
+the push credential and renews it through the provider as it expires, so a
+push longer than a single credential's life recovers without re-driving the
+upload from the caller.
+*/
 export function r2BlobUploader(options: R2BlobUploaderOptions): BlobUploader {
 	const store = new R2ObjectStore(options);
 	const signal = options.signal ?? new AbortController().signal;
@@ -138,12 +138,12 @@ function logSdkMessage(...content: unknown[]): void {
 }
 
 /**
- * The S3 requests of an upload, sent to R2. The client never retries a
- * request itself: a streamed body cannot be sent twice, so the uploader
- * decides what to send again. It sends every body with its length and no
- * checksum, which makes the SDK sign the request with `UNSIGNED-PAYLOAD` and
- * stream the body as it is produced.
- */
+The S3 requests of an upload, sent to R2. The client never retries a
+request itself: a streamed body cannot be sent twice, so the uploader
+decides what to send again. It sends every body with its length and no
+checksum, which makes the SDK sign the request with `UNSIGNED-PAYLOAD` and
+stream the body as it is produced.
+*/
 class R2ObjectStore implements ObjectStore {
 	private readonly client: S3Client;
 

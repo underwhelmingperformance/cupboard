@@ -332,7 +332,7 @@ async function runQueuedMaintenanceTick(): Promise<void> {
 
 	await verifyTenants(
 		messages.flatMap((message) =>
-			message.kind === 'tenant-maintenance' ? [message.tenant] : []
+			message.kind === 'tenant-maintenance' ? message.tenant : []
 		)
 	);
 }

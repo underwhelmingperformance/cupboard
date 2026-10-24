@@ -58,7 +58,7 @@ function narInfoDocument(fixture: NarInfoFixture): string {
 			? changed[name]
 			: wellFormedValues.get(name);
 
-		return value === undefined ? [] : [`${name}: ${value}`];
+		return value === undefined ? [] : `${name}: ${value}`;
 	});
 	const document = [...lines, ...(fixture.extraLines ?? [])].join('\n');
 

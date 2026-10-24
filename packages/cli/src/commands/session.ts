@@ -24,9 +24,9 @@ interface RevokeOptions {
 }
 
 /**
- * The owner of the sign-in sessions that a command lists or revokes: one
- * tenant, or the operators at the control plane.
- */
+The owner of the sign-in sessions that a command lists or revokes: one
+tenant, or the operators at the control plane.
+*/
 export type SessionScope = 'tenant' | 'operator';
 
 const sessionNouns: Readonly<Record<SessionScope, string>> = {
@@ -92,9 +92,9 @@ export function registerSessionCommands(
 }
 
 /**
- * Registers `session list` and `session revoke` under `deployment`, for the
- * operators' sessions at the control plane.
- */
+Registers `session list` and `session revoke` under `deployment`, for the
+operators' sessions at the control plane.
+*/
 export function registerOperatorSessionCommands(
 	deployment: Command,
 	program: Command,

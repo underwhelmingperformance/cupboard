@@ -78,10 +78,10 @@ const migrationSource = (bundle: MigrationBundle, index: number): string => {
 };
 
 /**
- * Writes a tracking row directly, so a test can put the store in a state no
- * current build produces: a Drizzle-era empty hash, a tag this build does not
- * carry, or a digest that no longer matches.
- */
+Writes a tracking row directly, so a test can put the store in a state no
+current build produces: a Drizzle-era empty hash, a tag this build does not
+carry, or a digest that no longer matches.
+*/
 function recordTrackingRow(
 	storage: Storage,
 	row: {

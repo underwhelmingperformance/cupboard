@@ -142,12 +142,8 @@ export function readReferenceSources(): ReferenceSources {
 
 // Collapse a YAML description to one line. Escape `<` so that a placeholder
 // such as `<number>` isn't read as an HTML tag.
-function prose(text: string | undefined): string {
-	return (text ?? '')
-		.split(/\s+/u)
-		.filter(Boolean)
-		.join(' ')
-		.replaceAll('<', '&lt;');
+function prose(text: string | undefined = ''): string {
+	return text.split(/\s+/u).filter(Boolean).join(' ').replaceAll('<', '&lt;');
 }
 
 function cell(text: string): string {

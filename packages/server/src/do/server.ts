@@ -294,8 +294,8 @@ const verificationBudgetSchema = z
 const verificationRpcControlMarginMs = 10;
 
 /**
- * The internal result of a budgeted verification claim RPC.
- */
+The internal result of a budgeted verification claim RPC.
+*/
 export type VerificationClaimRpcResult =
 	| {
 			readonly kind: 'claimed';
@@ -304,8 +304,8 @@ export type VerificationClaimRpcResult =
 	| { readonly kind: 'timed-out' };
 
 /**
- * The internal result of a budgeted verification record RPC.
- */
+The internal result of a budgeted verification record RPC.
+*/
 export type VerificationRecordRpcResult =
 	| { readonly kind: 'recorded'; readonly applied: number }
 	| { readonly kind: 'timed-out' };
@@ -351,16 +351,16 @@ type MaintenancePassKey =
 	| 'verify-backstop';
 
 /**
- * One bounded background task an alarm can run.
- *
- * `workAt` reads durable storage or local SQLite. The alarm therefore leaves
- * the complete subrequest allowance for the selected pass. `workAt` returns the
- * time from which the pass has work: now or earlier for work that is ready, a later
- * time for scheduled work, or `undefined` for none. A pass is due once that
- * time and its retry deadline have passed.
- *
- * The result from `run` determines the next retry deadline.
- */
+One bounded background task an alarm can run.
+
+`workAt` reads durable storage or local SQLite. The alarm therefore leaves
+the complete subrequest allowance for the selected pass. `workAt` returns the
+time from which the pass has work: now or earlier for work that is ready, a later
+time for scheduled work, or `undefined` for none. A pass is due once that
+time and its retry deadline have passed.
+
+The result from `run` determines the next retry deadline.
+*/
 interface MaintenancePass {
 	readonly key: MaintenancePassKey;
 	readonly workAt: (now: number) => Promise<number | undefined>;
@@ -445,13 +445,13 @@ function mergeGarbageCollectionContinuation(
 }
 
 /**
- * How many deferred rows one backstop pass reads.
- *
- * The page reserves the same maximum cost for every row after subtracting the
- * page prefetch from the invocation's subrequest allowance. This value is a page
- * limit; the bounded bindings enforce the allowance during settlement. Unprocessed rows
- * remain pending, and the pass requests another verification run.
- */
+How many deferred rows one backstop pass reads.
+
+The page reserves the same maximum cost for every row after subtracting the
+page prefetch from the invocation's subrequest allowance. This value is a page
+limit; the bounded bindings enforce the allowance during settlement. Unprocessed rows
+remain pending, and the pass requests another verification run.
+*/
 export function verifyBackstopReuseSettleLimit(
 	subrequestAllowance: number
 ): number {
@@ -1202,6 +1202,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// Advertise optional operations on the upgrade response. The credit token
 		// includes the opening grant so a negotiated client can commit immediately.
 		return new Response(undefined, {
+			// Workers permits 101 for WebSocket upgrades; Fetch still excludes it.
+			// https://developers.cloudflare.com/workers/runtime-apis/websockets/
+			// https://github.com/whatwg/fetch/issues/1759
+			// eslint-disable-next-line unicorn/no-invalid-response-options
 			status: 101,
 			webSocket: client,
 			headers: {
@@ -2531,11 +2535,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * The object families a move relocates, each with the service that owns the
-	 * objects it holds. A family builds its own keys and answers what its own
-	 * objects record about the commit that produced them, so a move never reads
-	 * either layout itself.
-	 */
+	The object families a move relocates, each with the service that owns the
+	objects it holds. A family builds its own keys and answers what its own
+	objects record about the commit that produced them, so a move never reads
+	either layout itself.
+	*/
 	private objectFamilies(): readonly ObjectFamily[] {
 		return [
 			{
@@ -2556,12 +2560,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * The maintenance passes an alarm chooses between, in the order they take
-	 * turns.
-	 *
-	 * Every `workAt` callback reads durable storage or the local SQLite database.
-	 * The selected pass receives the complete subrequest allowance.
-	 */
+	The maintenance passes an alarm chooses between, in the order they take
+	turns.
+
+	Every `workAt` callback reads durable storage or the local SQLite database.
+	The selected pass receives the complete subrequest allowance.
+	*/
 	private maintenancePasses(logger: Logger): readonly MaintenancePass[] {
 		return [
 			{
@@ -2668,13 +2672,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Runs the first due pass, starting after the pass in the alarm cursor,
-	 * then arms the alarm for the next pass that will be due.
-	 *
-	 * Record the turn before running the pass. If the pass throws, the next alarm
-	 * continues with another pass instead of leaving the cursor on the failure.
-	 * Cloudflare retries a failed alarm handler.
-	 */
+	Runs the first due pass, starting after the pass in the alarm cursor,
+	then arms the alarm for the next pass that will be due.
+
+	Record the turn before running the pass. If the pass throws, the next alarm
+	continues with another pass instead of leaving the cursor on the failure.
+	Cloudflare retries a failed alarm handler.
+	*/
 	private async runOneMaintenancePass(logger: Logger): Promise<void> {
 		const passes = this.maintenancePasses(logger);
 		const start = await this.maintenancePassStart(passes);
@@ -2745,13 +2749,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Arms the shared alarm for the earliest maintenance pass that has work.
-	 *
-	 * Durable Object storage holds one alarm. Delivery clears that deadline, so
-	 * a later deadline is not retained when an earlier alarm fires. Recompute the
-	 * next wake from the durable retry records after every handler. A pass that
-	 * is ready now takes precedence over every future deadline.
-	 */
+	Arms the shared alarm for the earliest maintenance pass that has work.
+
+	Durable Object storage holds one alarm. Delivery clears that deadline, so
+	a later deadline is not retained when an earlier alarm fires. Recompute the
+	next wake from the durable retry records after every handler. A pass that
+	is ready now takes precedence over every future deadline.
+	*/
 	private async armForMaintenancePasses(
 		passes: readonly MaintenancePass[]
 	): Promise<void> {
@@ -2800,14 +2804,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Runs the next page of local-step work from the alarm, in the same
-	 * exclusive section as a wake. The pass reports a stall for a page that made
-	 * no progress or failed, so the next page waits for the retry delay. An
-	 * error thrown by the page becomes a failed page and never leaves the pass.
-	 * Once the object has recorded the step or given up, the pass has no work,
-	 * and it reports progress so that it leaves no retry deadline behind, even
-	 * when the attempt cannot be written.
-	 */
+	Runs the next page of local-step work from the alarm, in the same
+	exclusive section as a wake. The pass reports a stall for a page that made
+	no progress or failed, so the next page waits for the retry delay. An
+	error thrown by the page becomes a failed page and never leaves the pass.
+	Once the object has recorded the step or given up, the pass has no work,
+	and it reports progress so that it leaves no retry deadline behind, even
+	when the attempt cannot be written.
+	*/
 	private continueLocalStep(logger: Logger): Promise<MaintenanceProgress> {
 		return this.runExclusiveMaintenance('local-step', async () => {
 			// A wake that finished the work while this pass waited for the section
@@ -3018,16 +3022,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * One alarm drives every bounded background task.
-	 *
-	 * Close commit sessions first so their credit is returned, then arm owned
-	 * deadlines and run queued cache purges. These operations use local or
-	 * durable storage.
-	 *
-	 * Maintenance passes issue D1 and R2 calls under one Free-plan subrequest
-	 * slice. The alarm runs one pass and arms another alarm for whichever pass
-	 * is due next.
-	 */
+	One alarm drives every bounded background task.
+
+	Close commit sessions first so their credit is returned, then arm owned
+	deadlines and run queued cache purges. These operations use local or
+	durable storage.
+
+	Maintenance passes issue D1 and R2 calls under one Free-plan subrequest
+	slice. The alarm runs one pass and arms another alarm for whichever pass
+	is due next.
+	*/
 	override async alarm(): Promise<void> {
 		try {
 			await this.initialise();
@@ -3158,8 +3162,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Claims a verification batch within the supplied consumer budget.
-	 */
+	Claims a verification batch within the supplied consumer budget.
+	*/
 	async claimVerificationBatchWithinBudget(
 		limit: number,
 		maxNarBytes: number,
@@ -3227,8 +3231,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Checks the token and cache grant before the Worker reads shared hints.
-	 */
+	Checks the token and cache grant before the Worker reads shared hints.
+	*/
 	async authoriseNegotiateHints(
 		authorization: string,
 		cache: CacheScope
@@ -3332,8 +3336,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Records verification results within the supplied consumer budget.
-	 */
+	Records verification results within the supplied consumer budget.
+	*/
 	async recordVerificationsWithinBudget(
 		owner: string,
 		results: readonly VerificationResult[],
@@ -3364,10 +3368,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Reserves the canonical object incarnation that the queue consumer writes
-	 * while it verifies a declared upload. See
-	 * {@link VerificationService.reserveCanonicalWrite}.
-	 */
+	Reserves the canonical object incarnation that the queue consumer writes
+	while it verifies a declared upload. See
+	{@link VerificationService.reserveCanonicalWrite}.
+	*/
 	async reserveCanonicalWrite(
 		owner: string,
 		uploadId: UploadId
@@ -3392,28 +3396,28 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Starts this object's local-step work towards `required` and runs its
-	 * first page. Applies any pending migrations first. This is the only path
-	 * that starts the work; serving traffic does not. The whole call runs in
-	 * the `local-step` exclusive section, so it cannot interleave with a page
-	 * that the alarm runs or with another wake. When the tenant row already
-	 * records `required`, the call reports `recorded` without running a page.
-	 *
-	 * While pages make progress, the `local-step` maintenance pass runs the
-	 * next page on the alarm at once. After a page without progress it retries
-	 * after the maintenance retry delay, and it stops once no page has made
-	 * progress for `localStepStallWindowMs` or once the object has recorded
-	 * `required`. A failed page, a page without progress and a page that
-	 * records a step each write an attempt to the tenant row; the write of a
-	 * page that made progress can be skipped by the progress-write throttle.
-	 *
-	 * Reports `unconfigured` when the control plane has not configured this
-	 * object, which then has no tenant row to update, `incomplete` when the
-	 * page left work to do, and `failed` with a summary of the error when the
-	 * page threw. The call rejects when initialisation throws anything other
-	 * than a pending migration or an unconfigured tenant, and when the attempt
-	 * cannot be written.
-	 */
+	Starts this object's local-step work towards `required` and runs its
+	first page. Applies any pending migrations first. This is the only path
+	that starts the work; serving traffic does not. The whole call runs in
+	the `local-step` exclusive section, so it cannot interleave with a page
+	that the alarm runs or with another wake. When the tenant row already
+	records `required`, the call reports `recorded` without running a page.
+
+	While pages make progress, the `local-step` maintenance pass runs the
+	next page on the alarm at once. After a page without progress it retries
+	after the maintenance retry delay, and it stops once no page has made
+	progress for `localStepStallWindowMs` or once the object has recorded
+	`required`. A failed page, a page without progress and a page that
+	records a step each write an attempt to the tenant row; the write of a
+	page that made progress can be skipped by the progress-write throttle.
+
+	Reports `unconfigured` when the control plane has not configured this
+	object, which then has no tenant row to update, `incomplete` when the
+	page left work to do, and `failed` with a summary of the error when the
+	page threw. The call rejects when initialisation throws anything other
+	than a pending migration or an unconfigured tenant, and when the attempt
+	cannot be written.
+	*/
 	async reportLocalStep(required: LocalStep): Promise<LocalStepOutcome> {
 		return this.runExclusiveMaintenance('local-step', async () => {
 			const now = Date.now();

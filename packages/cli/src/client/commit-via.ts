@@ -13,10 +13,10 @@ export interface CommitSource {
 }
 
 /**
- * When a publication has a shared commit session, use it for commits from every
- * phase. All paths then draw from one server credit grant and declared demand
- * budget. Without a session, use a one-off client commit.
- */
+When a publication has a shared commit session, use it for commits from every
+phase. All paths then draw from one server credit grant and declared demand
+budget. Without a session, use a one-off client commit.
+*/
 export function commitOverSession(
 	source: CommitSource,
 	target: CommitTarget

@@ -9,10 +9,10 @@ interface ConfigHomeFixture {
 }
 
 /**
- * Runs a test with `$XDG_CONFIG_HOME` pointed at a fresh temporary directory,
- * then removes the directory and restores the environment afterwards. Lets the
- * token-cache tests exercise the real on-disk store without leaking directories.
- */
+Runs a test with `$XDG_CONFIG_HOME` pointed at a fresh temporary directory,
+then removes the directory and restores the environment afterwards. Lets the
+token-cache tests exercise the real on-disk store without leaking directories.
+*/
 export const testWithConfigHome = test.extend<ConfigHomeFixture>({
 	// `auto` so the temporary config home is set up and torn down for every test,
 	// including those that depend on the stubbed environment without reading the

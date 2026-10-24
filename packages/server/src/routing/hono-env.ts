@@ -9,12 +9,12 @@ import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
 import { type ReadScope } from '../read/read.ts';
 
 /**
- * The Hono environment for the worker app: the admission middleware resolves
- * a tenant request's slug, tenant entry and tenant-relative path before any
- * route runs. Admission resolves the cache identity and access before any
- * content route can authenticate or use Workers Cache. `logger` is the
- * request-scoped logger, seeded before admission and narrowed with the tenant.
- */
+The Hono environment for the worker app: the admission middleware resolves
+a tenant request's slug, tenant entry and tenant-relative path before any
+route runs. Admission resolves the cache identity and access before any
+content route can authenticate or use Workers Cache. `logger` is the
+request-scoped logger, seeded before admission and narrowed with the tenant.
+*/
 export interface WorkerHonoEnv {
 	Bindings: Env;
 	Variables: {

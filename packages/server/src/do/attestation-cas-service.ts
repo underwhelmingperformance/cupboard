@@ -311,8 +311,8 @@ export class AttestationCasService {
 	}
 
 	/**
-	 * Claims a previously validated bundle before attaching new references.
-	 */
+	Claims a previously validated bundle before attaching new references.
+	*/
 	async reuseBundleIncarnation(
 		digest: Sha256HexDigest,
 		incarnation: number
@@ -327,9 +327,9 @@ export class AttestationCasService {
 	}
 
 	/**
-	 * Stores the bundle as a live CAS object and returns its incarnation.
-	 * Callers pass this incarnation to `reserveReferenceAndCharge`.
-	 */
+	Stores the bundle as a live CAS object and returns its incarnation.
+	Callers pass this incarnation to `reserveReferenceAndCharge`.
+	*/
 	async promoteMeasuredBundle(
 		_stagingKey: R2ObjectKey,
 		bundle: MeasuredAttestationBundle,

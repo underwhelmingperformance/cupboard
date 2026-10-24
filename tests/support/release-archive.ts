@@ -10,9 +10,9 @@ import { runCommand } from './process.ts';
 const repositoryRoot = path.resolve(import.meta.dirname, '../..');
 
 /**
- * Builds this checkout's executable and hook helper as a release archive for
- * the current platform, using the release build script.
- */
+Builds this checkout's executable and hook helper as a release archive for
+the current platform, using the release build script.
+*/
 export async function buildReleaseArchive(options: {
 	readonly directory: string;
 	readonly env?: NodeJS.ProcessEnv;
@@ -52,11 +52,11 @@ export interface ReleaseInstallation {
 }
 
 /**
- * Unpacks a release archive the way `actions/setup` unpacks one on a runner:
- * the `cupboard` executable and its hook helper side by side in one
- * directory. The caller passes the archive `pnpm build:binary` wrote for this
- * platform.
- */
+Unpacks a release archive the way `actions/setup` unpacks one on a runner:
+the `cupboard` executable and its hook helper side by side in one
+directory. The caller passes the archive `pnpm build:binary` wrote for this
+platform.
+*/
 export async function unpackReleaseArchive(options: {
 	readonly archivePath: string;
 	readonly directory: string;

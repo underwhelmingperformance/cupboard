@@ -11,10 +11,10 @@ import {
 import { controlWorker, tenantWorker } from './source.ts';
 
 /**
- * A Durable Object binding. `scriptName` is set only for the cross-script
- * binding on the control Worker, which reaches the `CupboardServer` class
- * defined in the tenant script.
- */
+A Durable Object binding. `scriptName` is set only for the cross-script
+binding on the control Worker, which reaches the `CupboardServer` class
+defined in the tenant script.
+*/
 export interface DurableObjectBinding {
 	readonly binding: string;
 	readonly className: string;
@@ -27,10 +27,10 @@ export interface R2Binding {
 }
 
 /**
- * A KV namespace binding. `title` is the account-level name this command
- * reconciles by, derived from the binding (the wrangler config only contains a
- * placeholder id).
- */
+A KV namespace binding. `title` is the account-level name this command
+reconciles by, derived from the binding (the wrangler config only contains a
+placeholder id).
+*/
 export interface KvBinding {
 	readonly binding: string;
 	readonly title: string;
@@ -43,9 +43,9 @@ export interface D1Binding {
 }
 
 /**
- * A Workers rate-limit binding with a `simple` limit: `limit` requests for
- * each key in each `period` seconds.
- */
+A Workers rate-limit binding with a `simple` limit: `limit` requests for
+each key in each `period` seconds.
+*/
 export interface RateLimitBinding {
 	readonly binding: string;
 	readonly namespaceId: RateLimitNamespaceId;
@@ -130,31 +130,28 @@ export interface DeploymentConfig {
 
 // Account-level resource names (Workers, buckets, queues, databases) share
 // Cloudflare's shape: lowercase letters, digits and inner hyphens.
-function resourceName(what: string, maximumLength: number): z.ZodString {
+function resourceName(what: string): z.ZodString {
 	return z
 		.string()
 		.regex(
 			/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/,
 			`${what} must be lowercase letters, digits and hyphens (not at the ends)`
 		)
-		.max(
-			maximumLength,
-			`${what} must be at most ${String(maximumLength)} characters`
-		);
+		.max(63, `${what} must be at most 63 characters`);
 }
 
-const workerName = resourceName('worker name', 63);
-const bucketName = resourceName('R2 bucket name', 63).min(
+const workerName = resourceName('worker name');
+const bucketName = resourceName('R2 bucket name').min(
 	3,
 	'R2 bucket name must be at least 3 characters'
 );
-const databaseName = resourceName('D1 database name', 63);
-const queueName = resourceName('queue name', 63);
+const databaseName = resourceName('D1 database name');
+const queueName = resourceName('queue name');
 
 /**
- * KV namespace titles come from their bindings, so the interactive editor
- * accepts changes only for these account-level resources.
- */
+KV namespace titles come from their bindings, so the interactive editor
+accepts changes only for these account-level resources.
+*/
 export type EditableResourceKind = 'bucket' | 'database' | 'queue';
 
 export const editableResourceKinds: readonly EditableResourceKind[] = [
@@ -170,9 +167,9 @@ const editableSchemas: Record<EditableResourceKind, () => z.ZodString> = {
 };
 
 /**
- * Uses the same schemas as the checked-in Wrangler configuration so an
- * interactive edit cannot create a value that the configuration parser rejects.
- */
+Uses the same schemas as the checked-in Wrangler configuration so an
+interactive edit cannot create a value that the configuration parser rejects.
+*/
 export function resourceNameProblem(
 	kind: EditableResourceKind,
 	value: string
@@ -506,10 +503,10 @@ function parseWorker(
 }
 
 /**
- * Parse the control and tenant `wrangler.jsonc` contents into the typed
- * configuration the deploy pipeline reconciles against. Takes the file contents
- * (not paths) so it is testable and usable from the build-time embed step.
- */
+Parse the control and tenant `wrangler.jsonc` contents into the typed
+configuration the deploy pipeline reconciles against. Takes the file contents
+(not paths) so it is testable and usable from the build-time embed step.
+*/
 export function parseDeploymentConfig(
 	controlSource: string,
 	tenantSource: string

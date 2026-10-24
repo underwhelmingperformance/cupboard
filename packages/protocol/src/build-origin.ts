@@ -8,10 +8,10 @@ import {
 } from './build.ts';
 
 /**
- * The in-toto predicate type of a cupboard build-origin statement. The project
- * owns no domain, so the repository URL is the namespace, and the trailing
- * version changes when the predicate's shape does.
- */
+The in-toto predicate type of a cupboard build-origin statement. The project
+owns no domain, so the repository URL is the namespace, and the trailing
+version changes when the predicate's shape does.
+*/
 export const buildOriginPredicateType =
 	'https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2';
 

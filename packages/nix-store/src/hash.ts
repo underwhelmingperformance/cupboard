@@ -87,10 +87,10 @@ function decodeBase64(
 }
 
 /**
- * Decodes a digest by inferring its encoding from its length. Nix uses the
- * same rule to distinguish base16, Nix base32 and base64 when the value does
- * not specify an encoding.
- */
+Decodes a digest by inferring its encoding from its length. Nix uses the
+same rule to distinguish base16, Nix base32 and base64 when the value does
+not specify an encoding.
+*/
 function decodeDigest(
 	digest: string,
 	digestBytes: number
@@ -111,10 +111,10 @@ function decodeDigest(
 }
 
 /**
- * Decodes an `<algorithm>:<digest>` value, or returns `undefined` if Nix would
- * not recognise it. The algorithm precedes the colon, and the digest encoding
- * is inferred from its length.
- */
+Decodes an `<algorithm>:<digest>` value, or returns `undefined` if Nix would
+not recognise it. The algorithm precedes the colon, and the digest encoding
+is inferred from its length.
+*/
 export function decodeNixHash(value: string): NixHash | undefined {
 	const separator = value.indexOf(':');
 
@@ -129,10 +129,10 @@ export function decodeNixHash(value: string): NixHash | undefined {
 }
 
 /**
- * Decodes a narinfo hash field in either format written by Nix:
- * `<algorithm>:<digest>`, or the subresource integrity `<algorithm>-<base64>`.
- * An integrity value is always base64 and is read by the bytes it decodes to.
- */
+Decodes a narinfo hash field in either format written by Nix:
+`<algorithm>:<digest>`, or the subresource integrity `<algorithm>-<base64>`.
+An integrity value is always base64 and is read by the bytes it decodes to.
+*/
 export function decodeNixHashField(value: string): NixHash | undefined {
 	if (value.includes(':')) {
 		return decodeNixHash(value);
@@ -186,11 +186,11 @@ export class NixSha256Hash {
 	}
 
 	/**
-	 * Parse a `sha256:`-prefixed digest in any of the encodings Nix writes, the
-	 * way `Hash::parseAnyPrefixed` does: the digest is base16 when it is 64
-	 * characters, Nix base32 when it is 52, and otherwise base64. The Nix store
-	 * database records NAR hashes in this `sha256:<base16>` form.
-	 */
+	Parse a `sha256:`-prefixed digest in any of the encodings Nix writes, the
+	way `Hash::parseAnyPrefixed` does: the digest is base16 when it is 64
+	characters, Nix base32 when it is 52, and otherwise base64. The Nix store
+	database records NAR hashes in this `sha256:<base16>` form.
+	*/
 	static parsePrefixed(value: string): NixSha256Hash {
 		const hash = decodeNixHash(value);
 
@@ -239,9 +239,9 @@ export class NixSha256Hash {
 	}
 
 	/**
-	 * The hash as a single URL path segment, with the `sha256:` prefix's colon
-	 * percent-encoded. A Nix client requests a NAR over HTTP at this spelling.
-	 */
+	The hash as a single URL path segment, with the `sha256:` prefix's colon
+	percent-encoded. A Nix client requests a NAR over HTTP at this spelling.
+	*/
 	toUrlSegment(): string {
 		return encodeURIComponent(this.value);
 	}
@@ -284,9 +284,9 @@ export function fromNixBase32(value: string): Uint8Array {
 }
 
 /**
- * Decodes a Nix base32 digest of the specified size. Returns `undefined` if the
- * input has the wrong length or contains bits outside that digest size.
- */
+Decodes a Nix base32 digest of the specified size. Returns `undefined` if the
+input has the wrong length or contains bits outside that digest size.
+*/
 function decodeNixBase32(
 	value: string,
 	digestBytes: number

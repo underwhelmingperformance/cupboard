@@ -323,10 +323,10 @@ export class ProtectedInheritanceService {
 	}
 
 	/**
-	 * The source caches of paths that an explicit deletion removed after the
-	 * pending upload of the same path and NAR was accepted. Deletion keeps such
-	 * an upload's right to reuse the NAR.
-	 */
+	The source caches of paths that an explicit deletion removed after the
+	pending upload of the same path and NAR was accepted. Deletion keeps such
+	an upload's right to reuse the NAR.
+	*/
 	deletedSourcesAfterAcceptance(
 		uploadId: UploadId,
 		storePathHash: StorePathHash
@@ -405,8 +405,8 @@ export class ProtectedInheritanceService {
 	}
 
 	/**
-	 * Removes one destination's durable eligibility for every protected source.
-	 */
+	Removes one destination's durable eligibility for every protected source.
+	*/
 	releaseDestination(
 		cacheId: ResolvedCache['id'],
 		storePathHash: StorePathHash,

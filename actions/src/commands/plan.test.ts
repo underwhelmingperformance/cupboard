@@ -790,14 +790,14 @@ describe('ensureAvailableTargets', () => {
 		});
 		const stdout: unknown[] = [];
 		const stderr: unknown[] = [];
-		const stdoutWrite = vi
+		const canWriteStdout = vi
 			.spyOn(process.stdout, 'write')
 			.mockImplementation((chunk: unknown) => {
 				stdout.push(chunk);
 
 				return true;
 			});
-		const stderrWrite = vi
+		const canWriteStderr = vi
 			.spyOn(process.stderr, 'write')
 			.mockImplementation((chunk: unknown) => {
 				stderr.push(chunk);
@@ -816,8 +816,8 @@ describe('ensureAvailableTargets', () => {
 		} catch (error) {
 			thrown = error;
 		} finally {
-			stdoutWrite.mockRestore();
-			stderrWrite.mockRestore();
+			canWriteStdout.mockRestore();
+			canWriteStderr.mockRestore();
 		}
 
 		const commandError =
@@ -1157,9 +1157,9 @@ function recordingFetcher(): {
 }
 
 function rootCommandTarget(arguments_: readonly string[]): string {
-	const index = arguments_.includes('targets')
-		? arguments_.indexOf('targets')
-		: arguments_.indexOf('ensure');
+	const index = arguments_.indexOf(
+		arguments_.includes('targets') ? 'targets' : 'ensure'
+	);
 	const root = arguments_.at(index + 2);
 
 	if (root === undefined) {
@@ -2275,7 +2275,7 @@ describe('plan-job reference publication', () => {
 		}
 	])(
 		'keeps an advisory receipt for $name',
-		async ({ available, fails, status, fetchStatus }) => {
+		async ({ available, fails, status, fetchStatus = 200 }) => {
 			const directory = await mkdtemp(
 				path.join(tmpdir(), 'cupboard-plan-reference-')
 			);
@@ -2339,7 +2339,7 @@ describe('plan-job reference publication', () => {
 						Promise.resolve(
 							Response.json(
 								{ missingStorePathHashes: available ? [] : ['1'.repeat(32)] },
-								{ status: fetchStatus ?? 200 }
+								{ status: fetchStatus }
 							)
 						)
 				}

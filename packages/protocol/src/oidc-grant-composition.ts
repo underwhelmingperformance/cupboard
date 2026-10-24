@@ -53,9 +53,9 @@ function selectAlternative(
 }
 
 /**
- * Resolves ordered grant alternatives within the preferred identity tier.
- * Every action must be permitted; a refused request returns no partial grants.
- */
+Resolves ordered grant alternatives within the preferred identity tier.
+Every action must be permitted; a refused request returns no partial grants.
+*/
 export function composeOidcGrants(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims,

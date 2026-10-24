@@ -262,9 +262,9 @@ export class ServerContext {
 	}
 
 	/**
-	 * Purges every supplied cache tag, in as many requests as the platform limit
-	 * requires. A caller passes the tags it has and does not size its list.
-	 */
+	Purges every supplied cache tag, in as many requests as the platform limit
+	requires. A caller passes the tags it has and does not size its list.
+	*/
 	async purgeCacheTags(tags: readonly string[]): Promise<void> {
 		interface CachePurgeEntrypoint {
 			purgeTags(tags: string[]): Promise<void>;

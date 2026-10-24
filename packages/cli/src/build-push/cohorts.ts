@@ -9,16 +9,16 @@ export interface CohortSequenceOptions {
 	readonly cohorts: readonly BuildInvocation[];
 	readonly signal?: AbortSignal;
 	/**
-	 * Collect the local store at cohort boundaries, so the next cohort
-	 * substitutes the earlier shared work from the cache; off unless set, so a
-	 * run never deletes the user's paths by default.
-	 */
+	Collect the local store at cohort boundaries, so the next cohort
+	substitutes the earlier shared work from the cache; off unless set, so a
+	run never deletes the user's paths by default.
+	*/
 	readonly collectBetweenCohorts?: boolean;
 	readonly collectAfterLast?: boolean;
 	/**
-	 * Continue after an ordinary cohort failure; aborts and signalled children
-	 * always stop the sequence. Off unless set.
-	 */
+	Continue after an ordinary cohort failure; aborts and signalled children
+	always stop the sequence. Off unless set.
+	*/
 	readonly keepGoingCohorts?: boolean;
 }
 
@@ -31,16 +31,16 @@ export interface CohortFailure {
 export interface CohortSequenceResult {
 	readonly receipts: readonly BuildReceipt[];
 	/**
-	 * Failed cohorts remain in run order. A fatal failure takes precedence over
-	 * target build failures when the caller chooses the run status.
-	 */
+	Failed cohorts remain in run order. A fatal failure takes precedence over
+	target build failures when the caller chooses the run status.
+	*/
 	readonly failures: readonly CohortFailure[];
 }
 
 /**
- * Returns the first fatal failure, or the first target failure if all failures
- * are target builds.
- */
+Returns the first fatal failure, or the first target failure if all failures
+are target builds.
+*/
 export function cohortSequenceFailure(
 	failures: readonly CohortFailure[]
 ): CohortFailure | undefined {
@@ -86,16 +86,16 @@ function shouldStopSequence(error: unknown): boolean {
 }
 
 /**
- * Runs the cohorts sequentially, each one finishing and draining before the
- * next starts, so an earlier cohort's shared paths are already published by the
- * time a later cohort needs them. Collection only runs at a boundary the run
- * opted into: between cohorts when the setting is on, after the last only when
- * additionally configured, and never when the setting is off. An ordinary
- * cohort failure stops the sequence unless the keep-going option is set;
- * cancellation stops it either way. The result reports the failures alongside
- * the receipts produced during the run. Failures without validated target build
- * evidence also contribute a command failure to receipt aggregation.
- */
+Runs the cohorts sequentially, each one finishing and draining before the
+next starts, so an earlier cohort's shared paths are already published by the
+time a later cohort needs them. Collection only runs at a boundary the run
+opted into: between cohorts when the setting is on, after the last only when
+additionally configured, and never when the setting is off. An ordinary
+cohort failure stops the sequence unless the keep-going option is set;
+cancellation stops it either way. The result reports the failures alongside
+the receipts produced during the run. Failures without validated target build
+evidence also contribute a command failure to receipt aggregation.
+*/
 export async function runCohortSequence(
 	options: CohortSequenceOptions,
 	dependencies: CohortSequenceDependencies

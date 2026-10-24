@@ -117,13 +117,13 @@ export class ReferenceReceiptOptionError extends CliUsageError {
 }
 
 /**
- * Checks the retention options before a push authenticates. `--no-retain`
- * conflicts with `--root` and with `--ttl`. A mutating GitHub OIDC push must
- * choose either a named root or explicit unretained publication before it
- * requests a token, so a CI run never obtains a token for a retention plan it
- * cannot execute. A dry run publishes nothing, so it does not need that
- * choice.
- */
+Checks the retention options before a push authenticates. `--no-retain`
+conflicts with `--root` and with `--ttl`. A mutating GitHub OIDC push must
+choose either a named root or explicit unretained publication before it
+requests a token, so a CI run never obtains a token for a retention plan it
+cannot execute. A dry run publishes nothing, so it does not need that
+choice.
+*/
 export function validateRetentionChoice(
 	options: Pick<
 		PushOptions,
@@ -184,9 +184,9 @@ export function validateRetentionChoice(
 }
 
 /**
- * Returns the explicitly selected store for a publication receipt. The receipt
- * describes store metadata and does not establish current-run build execution.
- */
+Returns the explicitly selected store for a publication receipt. The receipt
+describes store metadata and does not establish current-run build execution.
+*/
 export function receiptBuildStore(
 	options: Pick<
 		PushOptions,
@@ -205,10 +205,10 @@ export function receiptBuildStore(
 }
 
 /**
- * Reads the copy observations written by a supervising build. The push runs in
- * a separate process after the build and cannot observe those copies itself.
- * Without this file, the receipt records no source for any published path.
- */
+Reads the copy observations written by a supervising build. The push runs in
+a separate process after the build and cannot observe those copies itself.
+Without this file, the receipt records no source for any published path.
+*/
 export async function observedCopiesFrom(
 	copiedFromFile: string | undefined
 ): Promise<ReadonlyMap<StorePathString, readonly NixStoreUri[]> | undefined> {
@@ -229,11 +229,11 @@ export async function observedCopiesFrom(
 }
 
 /**
- * The authority requested by a push's token exchange. A CI exchange must
- * request its authorization_details explicitly. A dry run publishes nothing, so
- * it requests only the read-only preview operation and never a push's full
- * upload grant.
- */
+The authority requested by a push's token exchange. A CI exchange must
+request its authorization_details explicitly. A dry run publishes nothing, so
+it requests only the read-only preview operation and never a push's full
+upload grant.
+*/
 export function pushCommandAuthorizationDetails(
 	options: Pick<PushOptions, 'dryRun' | 'attest' | 'root' | 'runRoot'>,
 	cache: CacheScope,
@@ -310,13 +310,13 @@ export function parsePathFile(contents: string): string[] {
 }
 
 /**
- * Resolves one path given on the command line to a store path, the way
- * `nix path-info` does. A store path is returned unchanged. Anything else is
- * resolved through the filesystem, so both a `result` symlink and a file inside
- * a store path resolve to the store path that contains them. A location that
- * still does not parse as a store path is returned as resolved. Each caller
- * rejects it with its own error.
- */
+Resolves one path given on the command line to a store path, the way
+`nix path-info` does. A store path is returned unchanged. Anything else is
+resolved through the filesystem, so both a `result` symlink and a file inside
+a store path resolve to the store path that contains them. A location that
+still does not parse as a store path is returned as resolved. Each caller
+rejects it with its own error.
+*/
 export function resolvePushPath(
 	path: string,
 	realpath: (path: string) => string = realpathSync
@@ -376,21 +376,21 @@ function parseUploadConcurrency(value: string): number {
 
 interface PushCommandDependencies {
 	/**
-	 * Returns the token provider for the push. Defaults to `authenticateForPush`,
-	 * which uses GitHub Actions OIDC with `--github-oidc` and otherwise the owner
-	 * session cached by `cupboard login`.
-	 */
+	Returns the token provider for the push. Defaults to `authenticateForPush`,
+	which uses GitHub Actions OIDC with `--github-oidc` and otherwise the owner
+	session cached by `cupboard login`.
+	*/
 	readonly authenticate?: typeof authenticateForPush;
 	/**
-	 * Opens the system store when `--store` is omitted and the publication has
-	 * local entries. When this dependency is not supplied, `runPush` opens the
-	 * system store with `Nix.open`.
-	 */
+	Opens the system store when `--store` is omitted and the publication has
+	local entries. When this dependency is not supplied, `runPush` opens the
+	system store with `Nix.open`.
+	*/
 	readonly openStore?: () => PushStore;
 	/**
-	 * Reports whether a cache or reuse view URL is public or private. Defaults
-	 * to an unauthenticated `nix-cache-info` request.
-	 */
+	Reports whether a cache or reuse view URL is public or private. Defaults
+	to an unauthenticated `nix-cache-info` request.
+	*/
 	readonly fetchCacheAccess?: (url: URL) => Promise<CacheAccessMode>;
 }
 

@@ -18,10 +18,10 @@ import {
 } from './errors.ts';
 
 /**
- * Returns the failure's exit status. Typed substituter failures use the CLI's
- * authority and service-failure categories; other errors use a `CodedError`'s
- * status or 1. `cliExitCode` handles cancellation and Commander errors.
- */
+Returns the failure's exit status. Typed substituter failures use the CLI's
+authority and service-failure categories; other errors use a `CodedError`'s
+status or 1. `cliExitCode` handles cancellation and Commander errors.
+*/
 export function errorExitCode(error: unknown): number {
 	if (error instanceof CodedError) {
 		return error.exitCode;
@@ -49,9 +49,9 @@ export function errorExitCode(error: unknown): number {
 }
 
 /**
- * The exit statuses that {@link classifyFailures} checks for, in the order in
- * which it checks them.
- */
+The exit statuses that {@link classifyFailures} checks for, in the order in
+which it checks them.
+*/
 const rankedExitStatuses: readonly RankedExitStatus[] = [
 	authExitCode,
 	transientExitCode,
@@ -60,28 +60,28 @@ const rankedExitStatuses: readonly RankedExitStatus[] = [
 ];
 
 /**
- * The exit status to report when several independent operations fail, and the
- * failure that has that exit status.
- */
+The exit status to report when several independent operations fail, and the
+failure that has that exit status.
+*/
 export interface FailureClassification<Fallback extends number> {
 	readonly exitCode: RankedExitStatus | Fallback;
 	readonly cause: unknown;
 }
 
 /**
- * Returns 77 and the first authentication or authorisation failure if there is
- * one, otherwise 75 and the first transient failure, otherwise 69 and the first
- * failure caused by an unavailable dependency. Otherwise it returns
- * 2 if a typed usage error remains, otherwise `fallbackExitCode` and the
- * first defined cause. Authentication and
- * authorisation rank first because a re-run cannot succeed until the user signs
- * in again or uses a credential with the required access.
- *
- * Each cause is converted with `translateRpcError` first, so the returned cause
- * is the converted CLI error. A converted session or scope error keeps the oRPC
- * error as its cause, so a report of the returned cause includes the server's
- * message.
- */
+Returns 77 and the first authentication or authorisation failure if there is
+one, otherwise 75 and the first transient failure, otherwise 69 and the first
+failure caused by an unavailable dependency. Otherwise it returns
+2 if a typed usage error remains, otherwise `fallbackExitCode` and the
+first defined cause. Authentication and
+authorisation rank first because a re-run cannot succeed until the user signs
+in again or uses a credential with the required access.
+
+Each cause is converted with `translateRpcError` first, so the returned cause
+is the converted CLI error. A converted session or scope error keeps the oRPC
+error as its cause, so a report of the returned cause includes the server's
+message.
+*/
 export function classifyFailures<Fallback extends number>(
 	causes: readonly unknown[],
 	fallbackExitCode: Fallback
@@ -108,10 +108,10 @@ export function classifyFailures<Fallback extends number>(
 }
 
 /**
- * Classifies build-push publication failures with {@link classifyFailures}. The
- * fallback exit status, 74, means that publication or retention failed without
- * a more specific exit status.
- */
+Classifies build-push publication failures with {@link classifyFailures}. The
+fallback exit status, 74, means that publication or retention failed without
+a more specific exit status.
+*/
 export function classifyPublicationFailures(
 	causes: readonly unknown[]
 ): FailureClassification<typeof publicationExitCode> {

@@ -101,10 +101,10 @@ export function waitForChildProcess(
 }
 
 /**
- * Wait for complete process closure, terminating an aborted child gracefully
- * before escalating to SIGKILL. Node's spawn-level AbortSignal handling must
- * not also be enabled: this helper is the single owner of child termination.
- */
+Wait for complete process closure, terminating an aborted child gracefully
+before escalating to SIGKILL. Node's spawn-level AbortSignal handling must
+not also be enabled: this helper is the single owner of child termination.
+*/
 export async function waitForAbortableChildProcess(
 	child: AbortableChildProcessLifecycle,
 	signal: AbortSignal | undefined,

@@ -9,10 +9,10 @@ export interface CapturedRecord {
 }
 
 /**
- * Captures Cupboard log records at every level until the current test
- * finishes. `@cupboard/logger/testing` provides the same capture, but
- * `@cupboard/logger` depends on this package.
- */
+Captures Cupboard log records at every level until the current test
+finishes. `@cupboard/logger/testing` provides the same capture, but
+`@cupboard/logger` depends on this package.
+*/
 export function captureLogs(): CapturedRecord[] {
 	const records: CapturedRecord[] = [];
 

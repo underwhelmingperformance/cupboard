@@ -216,18 +216,18 @@ export interface NixDaemonTransport {
 }
 
 /**
- * Operations bound to one open daemon connection. A temporary root added
- * through the session lives exactly as long as that connection: the daemon
- * releases it when the connection closes, so the connection is the unit of
- * pinning and the session's queries see the store while those roots remain
- * registered.
- */
+Operations bound to one open daemon connection. A temporary root added
+through the session lives exactly as long as that connection: the daemon
+releases it when the connection closes, so the connection is the unit of
+pinning and the session's queries see the store while those roots remain
+registered.
+*/
 export interface NixDaemonSession {
 	/**
-	 * Protect a path from garbage collection for the life of this session's
-	 * connection. There is no matching release; closing the connection is the
-	 * release.
-	 */
+	Protect a path from garbage collection for the life of this session's
+	connection. There is no matching release; closing the connection is the
+	release.
+	*/
 	addTempRoot(storePath: StorePathString): Promise<void>;
 	buildPathsWithResults(
 		targets: readonly NixDerivedPathString[],
@@ -251,10 +251,10 @@ export interface NixDaemonSession {
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
 	/**
-	 * Streams the NAR serialisation over this session's connection. The stream
-	 * must be drained before the session issues its next operation: the connection
-	 * is a serial request/response channel.
-	 */
+	Streams the NAR serialisation over this session's connection. The stream
+	must be drained before the session issues its next operation: the connection
+	is a serial request/response channel.
+	*/
 	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array>;
 }
 
@@ -639,10 +639,10 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * Extracts derivation text from the single regular file in its NAR. The worker
-	 * protocol reaches store contents only as NARs, so the derivation arrives
-	 * wrapped in one.
-	 */
+	Extracts derivation text from the single regular file in its NAR. The worker
+	protocol reaches store contents only as NARs, so the derivation arrives
+	wrapped in one.
+	*/
 	async readDerivation(drvPath: StorePathString): Promise<string> {
 		return new TextDecoder().decode(
 			await narRegularFileContents(this.narFromPath(drvPath))
@@ -650,9 +650,9 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * Streams the path's NAR over a dedicated connection. The connection closes
-	 * after a full drain, an error, or early termination by the consumer.
-	 */
+	Streams the path's NAR over a dedicated connection. The connection closes
+	after a full drain, an error, or early termination by the consumer.
+	*/
 	async *narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array> {
 		const connection = await this.openConnection();
 
@@ -664,10 +664,10 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * Copy activity forwarded over this client's daemon connections. Existing
-	 * paths produce no `actCopyPath` event, and requests on other connections are
-	 * outside this map. Source stores are deduplicated in event order.
-	 */
+	Copy activity forwarded over this client's daemon connections. Existing
+	paths produce no `actCopyPath` event, and requests on other connections are
+	outside this map. Source stores are deduplicated in event order.
+	*/
 	observedCopies(): ReadonlyMap<StorePathString, readonly string[]> {
 		return this.copies;
 	}
@@ -753,11 +753,11 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * Run `use` against a session bound to one daemon connection, then close the
-	 * connection when `use` completes. A temporary root added through the
-	 * session belongs to that connection alone, so the callback's extent
-	 * decides exactly how long the roots protect their paths.
-	 */
+	Run `use` against a session bound to one daemon connection, then close the
+	connection when `use` completes. A temporary root added through the
+	session belongs to that connection alone, so the callback's extent
+	decides exactly how long the roots protect their paths.
+	*/
 	async withConnection<T>(
 		use: (session: NixDaemonSession) => Promise<T>
 	): Promise<T> {
@@ -801,10 +801,10 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * Whether the daemon trusts this client. The daemon silently drops an
-	 * untrusted client's setting overrides, so a caller that depends on a
-	 * forwarded setting checks the trust level first.
-	 */
+	Whether the daemon trusts this client. The daemon silently drops an
+	untrusted client's setting overrides, so a caller that depends on a
+	forwarded setting checks the trust level first.
+	*/
 	async daemonTrust(): Promise<NixDaemonTrust> {
 		const connection = await this.openConnection();
 
@@ -2064,15 +2064,15 @@ class NixDaemonConnection {
 	}
 
 	/**
-	 * Queries external availability through the daemon. Local validity does not
-	 * satisfy this query; a result exists only when a configured substituter offers
-	 * the path. The worker response contains the deriver, references, download
-	 * size and NAR size, but no NAR hash or signatures.
-	 *
-	 * The daemon applies `trusted-public-keys` when it later decides whether to
-	 * substitute. An offer from this operation does not prove that the daemon will
-	 * accept the path.
-	 */
+	Queries external availability through the daemon. Local validity does not
+	satisfy this query; a result exists only when a configured substituter offers
+	the path. The worker response contains the deriver, references, download
+	size and NAR size, but no NAR hash or signatures.
+
+	The daemon applies `trusted-public-keys` when it later decides whether to
+	substitute. An offer from this operation does not prove that the daemon will
+	accept the path.
+	*/
 	async querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixDaemonOffer[]> {
@@ -2404,11 +2404,11 @@ export interface ByteStreamSource {
 }
 
 /**
- * Buffers a byte stream (a socket, a child process pipe) and serves
- * exact-length reads, which is how the daemon protocol consumes bytes. When the
- * stream ends or fails, pending reads fail if the buffered data cannot satisfy
- * them.
- */
+Buffers a byte stream (a socket, a child process pipe) and serves
+exact-length reads, which is how the daemon protocol consumes bytes. When the
+stream ends or fails, pending reads fail if the buffered data cannot satisfy
+them.
+*/
 export class ByteStreamReader {
 	private readonly chunks: Buffer[] = [];
 

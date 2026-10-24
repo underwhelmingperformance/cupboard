@@ -146,9 +146,9 @@ export const hookScriptFileName = 'post-build-hook.sh';
 export const defaultBuildAttempts = 5;
 
 /**
- * A bounded attempt loop retries transient build failures. Per-attempt activity
- * logs associate each built path with the attempt that produced it.
- */
+A bounded attempt loop retries transient build failures. Per-attempt activity
+logs associate each built path with the attempt that produced it.
+*/
 export interface ConstructedBuild {
 	/**
 	Realise each required path from its candidate producers before targets.
@@ -175,9 +175,9 @@ export interface ConstructedBuild {
 }
 
 /**
- * A user command must inherit the configured Nix store. Cupboard cannot protect
- * or publish outputs from a store selected inside the command.
- */
+A user command must inherit the configured Nix store. Cupboard cannot protect
+or publish outputs from a store selected inside the command.
+*/
 export type BuildInvocation =
 	| { readonly kind: 'command'; readonly command: ChildCommand }
 	| { readonly kind: 'constructed'; readonly build: ConstructedBuild };
@@ -224,9 +224,9 @@ export interface BuildPushDependencies {
 	readonly createNarArchive?: (storePath: string) => NarSource;
 	readonly compressNar?: CompressNar;
 	/**
-	 * Reads the process's peak RSS for the summary. Defaults to
-	 * `processPeakRss`.
-	 */
+	Reads the process's peak RSS for the summary. Defaults to
+	`processPeakRss`.
+	*/
 	readonly peakRss?: PeakRssSampler;
 	readonly now?: () => number;
 	readonly nextAttemptId?: () => string;
@@ -238,9 +238,9 @@ export interface BuildPushDependencies {
 }
 
 /**
- * Converts a child exit to the shell status used by retry systems: the child's
- * status, or 128 plus its terminating signal number.
- */
+Converts a child exit to the shell status used by retry systems: the child's
+status, or 128 plus its terminating signal number.
+*/
 export function childExitCode(exit: ChildExit): number {
 	if (exit.status !== undefined) {
 		return exit.status;
@@ -281,12 +281,12 @@ class PublicationScopeInvalidError extends CliUsageError {
 }
 
 /**
- * Runs one cohort using the publication mode supported by the selected Nix
- * store. A daemonless store streams after the hook registers GC roots. A trusted
- * daemon streams by using temporary roots on one connection. An untrusted daemon
- * publishes from the store after the build. The reporter records the mode
- * before the build starts.
- */
+Runs one cohort using the publication mode supported by the selected Nix
+store. A daemonless store streams after the hook registers GC roots. A trusted
+daemon streams by using temporary roots on one connection. An untrusted daemon
+publishes from the store after the build. The reporter records the mode
+before the build starts.
+*/
 export async function runBuildPush(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
@@ -940,9 +940,7 @@ async function runRebuild(
 		const requestedDerivation = derivationPathOf(installable);
 		const targetDerivations = new Set([
 			...(requestedDerivation === undefined ? [] : [requestedDerivation]),
-			...infos.flatMap((info) =>
-				info.deriver === undefined ? [] : [info.deriver]
-			)
+			...infos.flatMap((info) => info.deriver ?? [])
 		]);
 		if (
 			attempts.some(
@@ -1036,13 +1034,11 @@ async function runRebuild(
 						(activity) =>
 							activity.derivation === info.deriver && activity.machine === ''
 					)
-						? [
-								{
-									storePath: info.storePath,
-									narHash: info.narHash.digestHex(),
-									derivation: info.deriver
-								}
-							]
+						? {
+								storePath: info.storePath,
+								narHash: info.narHash.digestHex(),
+								derivation: info.deriver
+							}
 						: []
 				);
 
@@ -1450,7 +1446,7 @@ async function outLinkTargets(
 		targets.flat().flatMap((target) => {
 			const parsed = storePathSchema.safeParse(target);
 
-			return parsed.success ? [parsed.data] : [];
+			return parsed.success ? parsed.data : [];
 		})
 	);
 }

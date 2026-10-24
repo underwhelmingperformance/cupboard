@@ -34,12 +34,12 @@ function scopedMeta(route: CacheScopedRoute): AuthzMeta {
 }
 
 /**
- * Declares a cache-scoped procedure under `/cache/{cacheName}` only, as a single
- * procedure whose input gains `cacheName`. Use it when the bare path already
- * belongs to a tenant-wide operation and therefore cannot also mean the default
- * cache. That operation then has no route for the default cache, so record in
- * the declaration what reaches it instead.
- */
+Declares a cache-scoped procedure under `/cache/{cacheName}` only, as a single
+procedure whose input gains `cacheName`. Use it when the bare path already
+belongs to a tenant-wide operation and therefore cannot also mean the default
+cache. That operation then has no route for the default cache, so record in
+the declaration what reaches it instead.
+*/
 export function namedCacheProcedure<
 	Shape extends z.core.$ZodLooseShape,
 	Output extends z.ZodType
@@ -52,15 +52,15 @@ export function namedCacheProcedure<
 }
 
 /**
- * Declares one cache-scoped operation as a pair of procedures: `inDefaultCache`
- * on the bare path and `inNamedCache` under `/cache/{cacheName}`. The tenant
- * router implements both, and the CLI calls them through `callInCache`.
- *
- * `shape` supplies every input field except the cache selection, which only
- * `inNamedCache` carries. The fields arrive as one flat object: oRPC takes the
- * path parameters from the path and sends the rest in the body, or in the query
- * string for a GET.
- */
+Declares one cache-scoped operation as a pair of procedures: `inDefaultCache`
+on the bare path and `inNamedCache` under `/cache/{cacheName}`. The tenant
+router implements both, and the CLI calls them through `callInCache`.
+
+`shape` supplies every input field except the cache selection, which only
+`inNamedCache` carries. The fields arrive as one flat object: oRPC takes the
+path parameters from the path and sends the rest in the body, or in the query
+string for a GET.
+*/
 export function cacheScopedProcedure<
 	Shape extends z.core.$ZodLooseShape,
 	Output extends z.ZodType
@@ -83,8 +83,8 @@ export const cacheClosedError = {
 };
 
 /**
- * Declares a cache mutation that can reject an explicitly closed cache.
- */
+Declares a cache mutation that can reject an explicitly closed cache.
+*/
 export function writableCacheScopedProcedure<
 	Shape extends z.core.$ZodLooseShape,
 	Output extends z.ZodType

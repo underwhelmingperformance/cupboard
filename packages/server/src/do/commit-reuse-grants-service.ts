@@ -25,12 +25,12 @@ function sessionKey(sessionId: SessionId, expiresAt: number): string {
 }
 
 /**
- * Persists a commit session's authority across hibernation without adding it
- * to the size-limited WebSocket attachment. A session that negotiates
- * publication retains all upgrade grants because it may publish after legacy
- * operations, and root and write checks still need those grants after
- * hibernation. Expiry-sorted keys permit bounded cleanup of expired records.
- */
+Persists a commit session's authority across hibernation without adding it
+to the size-limited WebSocket attachment. A session that negotiates
+publication retains all upgrade grants because it may publish after legacy
+operations, and root and write checks still need those grants after
+hibernation. Expiry-sorted keys permit bounded cleanup of expired records.
+*/
 export class CommitReuseGrantsService {
 	constructor(private readonly storage: DurableObjectStorage) {}
 

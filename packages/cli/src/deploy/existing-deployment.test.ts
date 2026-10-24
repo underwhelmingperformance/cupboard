@@ -84,10 +84,10 @@ interface FakeAccount {
 }
 
 /**
- * Reports `account` for the control Worker and reports every other script as
- * undeployed. Code that reads the tenant Worker therefore gets the defaults,
- * and the assertions on renamed values fail.
- */
+Reports `account` for the control Worker and reports every other script as
+undeployed. Code that reads the tenant Worker therefore gets the defaults,
+and the assertions on renamed values fail.
+*/
 function fakeApi(account: FakeAccount): ExistingDeploymentApi {
 	const control: ScriptConfiguration | undefined =
 		account.bindings === undefined

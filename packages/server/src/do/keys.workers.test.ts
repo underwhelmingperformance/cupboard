@@ -79,10 +79,9 @@ async function rotate(
 }
 
 async function retire(
-	token: string,
-	id: string
+	token: string
 ): Promise<{ readonly status: number; readonly body: KeyRetireResponseInput }> {
-	const response = await authorisedFetch(`/keys/retire/${id}`, token, {
+	const response = await authorisedFetch(`/keys/retire/active`, token, {
 		method: 'POST'
 	});
 
@@ -212,9 +211,9 @@ describe('signing key rotation', () => {
 		const { rotated } = rotation.body;
 		await drainKeyBackfill();
 
-		const first = await retire(init.token, 'active');
-		const second = await retire(init.token, 'active');
-		const third = await retire(init.token, 'active');
+		const first = await retire(init.token);
+		const second = await retire(init.token);
+		const third = await retire(init.token);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -261,7 +260,7 @@ describe('signing key rotation', () => {
 		const oldNarInfo = await fetchNarInfo(before.storePathHash);
 		const rotation = await rotate(init.token);
 		await drainKeyBackfill();
-		await retire(init.token, 'active');
+		await retire(init.token);
 
 		await runInDurableObject(currentServer(), async (instance) => {
 			const row = instance.context.db

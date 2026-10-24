@@ -43,21 +43,21 @@ export interface BatchSession {
 }
 
 /**
- * Provides store access while paths are protected from garbage collection. The
- * implementation can open a connection for one batch or retain a connection
- * for the full streamed run. For a daemonless build, the hook has already
- * registered GC roots.
- */
+Provides store access while paths are protected from garbage collection. The
+implementation can open a connection for one batch or retain a connection
+for the full streamed run. For a daemonless build, the hook has already
+registered GC roots.
+*/
 export interface BatchStore {
 	withProtectedPaths<T>(use: (session: BatchSession) => Promise<T>): Promise<T>;
 }
 
 /**
- * A path's state in the streaming session: published by this run,
- * already served by the destination, or collected locally before its NAR
- * could be read. The command layer decides which paths are targets and what a
- * collected target means for the run; this module only reports the outcome.
- */
+A path's state in the streaming session: published by this run,
+already served by the destination, or collected locally before its NAR
+could be read. The command layer decides which paths are targets and what a
+collected target means for the run; this module only reports the outcome.
+*/
 export type BatchPathOutcome =
 	| {
 			readonly outcome: 'published';
@@ -80,9 +80,9 @@ export interface BuildOutputBatcherOptions {
 	readonly runRoot?: UploadAttachRootInput;
 	readonly commitOptions?: CommitOptions;
 	/**
-	 * The run's shared commit session. When it is present, every flush commits
-	 * over it. The server then applies one credit budget to the whole run.
-	 */
+	The run's shared commit session. When it is present, every flush commits
+	over it. The server then applies one credit budget to the whole run.
+	*/
 	readonly session?: CommitSession;
 	readonly createNarArchive?: (storePath: string) => NarSource;
 	readonly compressNar?: CompressNar;
@@ -125,19 +125,19 @@ function assertNarMetadata(info: NixValidPathInfo, digest: NarDigest): void {
 }
 
 /**
- * Debounces accepted build outputs into streamed publication. Accepted paths
- * accumulate in an unbounded candidate set and flush in bounded batches. Each
- * flush protects its paths before checking their validity, resolves metadata,
- * then negotiates, uploads and commits through the ordinary push client. Paths
- * are negotiated in small groups as upload workers become free, and each upload
- * worker waits for its commit acknowledgement before taking another path. The
- * store implementation controls how long protection remains in place.
- *
- * Deferred commit verdicts are retained until final reconciliation. If
- * publication fails, the path returns to the candidate set for reconciliation. A
- * path that vanished from the local store produces a typed `collected` outcome
- * instead of failing the batch.
- */
+Debounces accepted build outputs into streamed publication. Accepted paths
+accumulate in an unbounded candidate set and flush in bounded batches. Each
+flush protects its paths before checking their validity, resolves metadata,
+then negotiates, uploads and commits through the ordinary push client. Paths
+are negotiated in small groups as upload workers become free, and each upload
+worker waits for its commit acknowledgement before taking another path. The
+store implementation controls how long protection remains in place.
+
+Deferred commit verdicts are retained until final reconciliation. If
+publication fails, the path returns to the candidate set for reconciliation. A
+path that vanished from the local store produces a typed `collected` outcome
+instead of failing the batch.
+*/
 export class BuildOutputBatcher {
 	private readonly waiting = new Set<StorePathString>();
 	private readonly inFlight = new Set<StorePathString>();
@@ -400,9 +400,9 @@ export class BuildOutputBatcher {
 	}
 
 	/**
-	 * Waits for the original streamed verdicts before fresh reconciliation.
-	 * Failed verdicts return their paths and typed reasons to the candidate set.
-	 */
+	Waits for the original streamed verdicts before fresh reconciliation.
+	Failed verdicts return their paths and typed reasons to the candidate set.
+	*/
 	async settleCommits(
 		signal?: AbortSignal,
 		onSettled?: () => void
@@ -431,10 +431,10 @@ export class BuildOutputBatcher {
 	}
 
 	/**
-	 * Accepts one path into the candidate set. It ignores a path that already has
-	 * an outcome or is waiting or being published. The set flushes when it reaches
-	 * the batch bound or when the debounce window lapses.
-	 */
+	Accepts one path into the candidate set. It ignores a path that already has
+	an outcome or is waiting or being published. The set flushes when it reaches
+	the batch bound or when the debounce window lapses.
+	*/
 	enqueue(storePath: StorePathString): void {
 		if (
 			this.recorded.has(storePath) ||
@@ -475,11 +475,11 @@ export class BuildOutputBatcher {
 	}
 
 	/**
-	 * Flushes what remains and waits for every started flush to finish. Each
-	 * remaining candidate is attempted once; a path that fails here stays in
-	 * the candidate set for final reconciliation to publish through the
-	 * ordinary push path.
-	 */
+	Flushes what remains and waits for every started flush to finish. Each
+	remaining candidate is attempted once; a path that fails here stays in
+	the candidate set for final reconciliation to publish through the
+	ordinary push path.
+	*/
 	async drain(): Promise<void> {
 		this.clearTimer();
 		await this.chain;

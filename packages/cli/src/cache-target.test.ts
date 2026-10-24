@@ -195,7 +195,7 @@ describe('resolveCachePositionals', () => {
 	});
 
 	it('uses the cache selected by the URL without probing a payload', async () => {
-		const cacheExists = vi.fn<() => Promise<boolean>>();
+		const doesCacheExist = vi.fn<() => Promise<boolean>>();
 
 		await expect(
 			resolveCachePositionals(
@@ -204,7 +204,7 @@ describe('resolveCachePositionals', () => {
 				{
 					minimumPayload: 1,
 					payloadDescription: 'a path',
-					cacheExists,
+					cacheExists: doesCacheExist,
 					parsePayloadEntry: keepEntry
 				}
 			)
@@ -215,18 +215,18 @@ describe('resolveCachePositionals', () => {
 			},
 			payload: ['result']
 		});
-		expect(cacheExists).not.toHaveBeenCalled();
+		expect(doesCacheExist).not.toHaveBeenCalled();
 	});
 
 	it('consumes an existing cache name after a tenant URL', async () => {
-		const cacheExists = vi.fn(() => Promise.resolve(true));
+		const doesCacheExist = vi.fn(() => Promise.resolve(true));
 
 		await expect(
 			resolveCachePositionals(tenantUrl, ['builds', 'result'], {
 				minimumPayload: 1,
 				payloadDescription: 'a path',
 				parsePayloadEntry: keepEntry,
-				cacheExists,
+				cacheExists: doesCacheExist,
 				existsLocally: () => false
 			})
 		).resolves.toStrictEqual({
@@ -236,7 +236,7 @@ describe('resolveCachePositionals', () => {
 			},
 			payload: ['result']
 		});
-		expect(cacheExists).toHaveBeenCalledWith({
+		expect(doesCacheExist).toHaveBeenCalledWith({
 			tenantUrl,
 			cache: { kind: 'named', name: builds }
 		});
@@ -259,49 +259,49 @@ describe('resolveCachePositionals', () => {
 	// A `result` symlink or a directory named like a cache is payload, whether
 	// or not a cache of that name exists.
 	it('keeps a candidate that names an existing local path as payload without probing', async () => {
-		const cacheExists = vi.fn(() => Promise.resolve(true));
+		const doesCacheExist = vi.fn(() => Promise.resolve(true));
 
 		await expect(
 			resolveCachePositionals(tenantUrl, ['builds', 'result'], {
 				minimumPayload: 1,
 				payloadDescription: 'a path',
 				parsePayloadEntry: keepEntry,
-				cacheExists,
+				cacheExists: doesCacheExist,
 				existsLocally: (candidate) => candidate === 'builds'
 			})
 		).resolves.toStrictEqual({
 			target: { tenantUrl, cache: { kind: 'default' } },
 			payload: ['builds', 'result']
 		});
-		expect(cacheExists).not.toHaveBeenCalled();
+		expect(doesCacheExist).not.toHaveBeenCalled();
 	});
 
 	it('does not probe an explicit local path', async () => {
-		const cacheExists = vi.fn<() => Promise<boolean>>();
+		const doesCacheExist = vi.fn<() => Promise<boolean>>();
 
 		await expect(
 			resolveCachePositionals(tenantUrl, ['./result'], {
 				minimumPayload: 1,
 				payloadDescription: 'a path',
 				parsePayloadEntry: keepEntry,
-				cacheExists
+				cacheExists: doesCacheExist
 			})
 		).resolves.toStrictEqual({
 			target: { tenantUrl, cache: { kind: 'default' } },
 			payload: ['./result']
 		});
-		expect(cacheExists).not.toHaveBeenCalled();
+		expect(doesCacheExist).not.toHaveBeenCalled();
 	});
 
 	it('parses the entries that follow a possible cache name before looking up the cache', async () => {
-		const cacheExists = vi.fn<() => Promise<boolean>>();
+		const doesCacheExist = vi.fn<() => Promise<boolean>>();
 		const invalid = new Error('invalid payload entry');
 
 		await expect(
 			resolveCachePositionals(tenantUrl, ['builds', 'bad'], {
 				minimumPayload: 1,
 				payloadDescription: 'a path',
-				cacheExists,
+				cacheExists: doesCacheExist,
 				existsLocally: () => false,
 				parsePayloadEntry: (entry) => {
 					if (entry === 'bad') {
@@ -312,7 +312,7 @@ describe('resolveCachePositionals', () => {
 				}
 			})
 		).rejects.toBe(invalid);
-		expect(cacheExists).not.toHaveBeenCalled();
+		expect(doesCacheExist).not.toHaveBeenCalled();
 	});
 
 	it('parses the entries that follow an existing cache name once, before the lookup', async () => {
@@ -395,16 +395,16 @@ describe('cacheExistsWith', () => {
 			inDefaultCache: vi.fn(() => Promise.resolve({ exists: true })),
 			inNamedCache: vi.fn(() => Promise.resolve({ exists: true }))
 		};
-		const exists = cacheExistsWith({ get });
+		const doesExist = cacheExistsWith({ get });
 
 		await expect(
-			exists({ tenantUrl, cache: { kind: 'named', name: builds } })
+			doesExist({ tenantUrl, cache: { kind: 'named', name: builds } })
 		).resolves.toBe(true);
 		expect(get.inNamedCache).toHaveBeenCalledWith({ cacheName: builds });
 	});
 
 	it('returns false only for the typed not-found response', async () => {
-		const exists = cacheExistsWith({
+		const doesExist = cacheExistsWith({
 			get: {
 				inDefaultCache: vi.fn(),
 				inNamedCache: vi.fn(() =>
@@ -414,13 +414,13 @@ describe('cacheExistsWith', () => {
 		});
 
 		await expect(
-			exists({ tenantUrl, cache: { kind: 'named', name: builds } })
+			doesExist({ tenantUrl, cache: { kind: 'named', name: builds } })
 		).resolves.toBe(false);
 	});
 
 	it('preserves every other failure', async () => {
 		const failure = new ORPCError('FORBIDDEN', { status: 403 });
-		const exists = cacheExistsWith({
+		const doesExist = cacheExistsWith({
 			get: {
 				inDefaultCache: vi.fn(),
 				inNamedCache: vi.fn(() => Promise.reject(failure))
@@ -428,7 +428,7 @@ describe('cacheExistsWith', () => {
 		});
 
 		await expect(
-			exists({ tenantUrl, cache: { kind: 'named', name: builds } })
+			doesExist({ tenantUrl, cache: { kind: 'named', name: builds } })
 		).rejects.toBe(failure);
 	});
 });

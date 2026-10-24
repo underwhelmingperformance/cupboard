@@ -92,9 +92,9 @@ export type CommandRunner = (
 ) => void;
 
 /**
- * The CLI resolves the post-build hook helper beside its own binary. Compile
- * the helper there with the Nix-provided compiler or the host `cc`.
- */
+The CLI resolves the post-build hook helper beside its own binary. Compile
+the helper there with the Nix-provided compiler or the host `cc`.
+*/
 export function compileHookHelper(options: {
 	readonly binaryDirectory: string;
 	readonly runCommand: CommandRunner;

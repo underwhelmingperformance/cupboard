@@ -91,12 +91,12 @@ export async function readAttestationInfo(
 	const fetchRead = cacheReadFetcher(options.url, fetcher, options.netrcFile);
 	const base = cacheUrl(options.url, options.cache);
 	const headers =
-		options.readUser !== undefined && options.readPassword !== undefined
-			? basicAuthHeader({
+		options.readUser === undefined || options.readPassword === undefined
+			? {}
+			: basicAuthHeader({
 					user: options.readUser,
 					password: options.readPassword
-				})
-			: {};
+				});
 	const target = (path: string): string =>
 		`${base.href.replace(/\/$/u, '')}/${path}`;
 	const refuseUnexpected = async (

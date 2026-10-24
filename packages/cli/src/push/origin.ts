@@ -10,13 +10,13 @@ import type {
 import type { ReferenceMetadata } from './reference.ts';
 
 /**
- * `ultimate` distinguishes work produced by the selected store from a path that
- * arrived through substitution or `nix copy`. For copied paths, retain the
- * signatures and content address from the store metadata.
- *
- * Store metadata contains neither the copy time nor its source. A supervised
- * build can supplement it with copy sources observed in the activity log.
- */
+`ultimate` distinguishes work produced by the selected store from a path that
+arrived through substitution or `nix copy`. For copied paths, retain the
+signatures and content address from the store metadata.
+
+Store metadata contains neither the copy time nor its source. A supervised
+build can supplement it with copy sources observed in the activity log.
+*/
 function unbuiltSubject(
 	pathInfo: NixValidPathInfo,
 	buildStore: string,
@@ -43,12 +43,12 @@ function unbuiltSubject(
 }
 
 /**
- * A reference publication does not query a Nix store for the path, so the
- * source narinfo is its only provenance evidence.
- *
- * The run transfers no NAR bytes. Record the source URL and the narinfo's
- * provenance fields, but do not infer where the destination obtained its copy.
- */
+A reference publication does not query a Nix store for the path, so the
+source narinfo is its only provenance evidence.
+
+The run transfers no NAR bytes. Record the source URL and the narinfo's
+provenance fields, but do not infer where the destination obtained its copy.
+*/
 export function republishedSubject(
 	metadata: ReferenceMetadata,
 	metadataSource: string
@@ -77,10 +77,10 @@ export interface PublishedSubjectsOptions {
 }
 
 /**
- * A subject already established by the caller takes precedence. Remaining
- * servable paths use selected-store metadata, so later store state cannot
- * replace current-run attribution.
- */
+A subject already established by the caller takes precedence. Remaining
+servable paths use selected-store metadata, so later store state cannot
+replace current-run attribution.
+*/
 export function publishedSubjects(
 	options: PublishedSubjectsOptions
 ): readonly BuildSubjectV3Input[] {

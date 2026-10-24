@@ -100,13 +100,13 @@ const defaultUnknownCeilingUntrustedFallback = 5;
 const negativeNarinfoCacheBypass = { 'narinfo-cache-negative-ttl': '0' };
 
 /**
- * Re-queries paths whose availability remained unknown, bypassing the negative
- * narinfo cache when the selected store accepts the override.
- *
- * A store that does not cache substituter responses needs no second query. For
- * a caching store, a separate client sets the negative narinfo TTL to zero.
- * The daemon applies that setting only when it honours client overrides.
- */
+Re-queries paths whose availability remained unknown, bypassing the negative
+narinfo cache when the selected store accepts the override.
+
+A store that does not cache substituter responses needs no second query. For
+a caching store, a separate client sets the negative narinfo TTL to zero.
+The daemon applies that setting only when it honours client overrides.
+*/
 export async function requeryUnknownWith(
 	store: Pick<Nix, 'cachesSubstituterQueries' | 'honoursSubstituterSettings'>,
 	openBypass: () => Pick<Nix, 'queryMissing' | 'querySubstitutablePathInfos'>,
@@ -151,10 +151,10 @@ export async function requeryUnknownWith(
 }
 
 /**
- * Resolves the substitution policy used to estimate work after the action
- * copies a planned derivation. The policy is unknown when the selected store
- * preserves settings that belong to another Nix daemon.
- */
+Resolves the substitution policy used to estimate work after the action
+copies a planned derivation. The policy is unknown when the selected store
+preserves settings that belong to another Nix daemon.
+*/
 export async function resolvePlannedSubstitutionPolicy(
 	store: Pick<Nix, 'honoursSubstituterSettings'>,
 	settings: NixSubstitutionSettings
@@ -200,9 +200,9 @@ export interface PlanCohortOptions {
 }
 
 /**
- * SSH does not expose the remote filesystem to `statfs`, and local runner
- * capacity does not constrain a build performed in the remote store.
- */
+SSH does not expose the remote filesystem to `statfs`, and local runner
+capacity does not constrain a build performed in the remote store.
+*/
 export interface RemoteStoreCapacitySkip {
 	readonly skipped: 'remote-store';
 }

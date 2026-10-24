@@ -51,13 +51,13 @@ const accessTokenFreshnessMarginMs = 30 * 1000;
 const badRequestStatusCode: number = StatusCodes.BAD_REQUEST;
 
 /**
- * Supplies the owner's admin token to the admin commands from the session
- * cached for `target`, and never opens a browser. A fresh cached access token
- * is used as is; an expired or refused one is renewed by rotating the cupboard
- * refresh token. When the session has no refresh token, or the server refuses
- * it, the provider throws `OwnerLoginRequiredError`, whose message tells the
- * user to run `cupboard login` again.
- */
+Supplies the owner's admin token to the admin commands from the session
+cached for `target`, and never opens a browser. A fresh cached access token
+is used as is; an expired or refused one is renewed by rotating the cupboard
+refresh token. When the session has no refresh token, or the server refuses
+it, the provider throws `OwnerLoginRequiredError`, whose message tells the
+user to run `cupboard login` again.
+*/
 export function cachedOwnerProvider(
 	target: URL,
 	dependencies: OwnerSessionDependencies = {}
@@ -164,9 +164,9 @@ function isSameSession(
 }
 
 /**
- * Whether a cached access token is expired or expires within 30 seconds, and
- * so needs renewing before use.
- */
+Whether a cached access token is expired or expires within 30 seconds, and
+so needs renewing before use.
+*/
 export function isAccessTokenExpired(
 	accessToken: string,
 	nowMs: number
@@ -205,11 +205,11 @@ function isBadRequest(error: unknown): error is CupboardHttpError {
 }
 
 /**
- * Federates a GitHub Actions OIDC token into a cupboard write token through the
- * token-exchange endpoint, returning a provider that caches it and re-exchanges
- * on demand. The first exchange happens eagerly so a workflow missing the
- * `id-token: write` permission, or a token no rule trusts, fails up front.
- */
+Federates a GitHub Actions OIDC token into a cupboard write token through the
+token-exchange endpoint, returning a provider that caches it and re-exchanges
+on demand. The first exchange happens eagerly so a workflow missing the
+`id-token: write` permission, or a token no rule trusts, fails up front.
+*/
 export async function authenticateGithubOidc(
 	client: CupboardClient,
 	audience: Audience,
@@ -232,12 +232,12 @@ export async function authenticateGithubOidc(
 }
 
 /**
- * A provider that exchanges a GitHub Actions OIDC token for a Cupboard token
- * on first use and, as the Cupboard token nears expiry, requests a new GitHub
- * token and exchanges that. Unlike {@link authenticateGithubOidc}, it does not
- * exchange up front. The first exchange happens at the first `get()`, and
- * `get()` throws any failure.
- */
+A provider that exchanges a GitHub Actions OIDC token for a Cupboard token
+on first use and, as the Cupboard token nears expiry, requests a new GitHub
+token and exchanges that. Unlike {@link authenticateGithubOidc}, it does not
+exchange up front. The first exchange happens at the first `get()`, and
+`get()` throws any failure.
+*/
 export function githubOidcTokenProvider(
 	client: CupboardClient,
 	audience: Audience,
@@ -255,9 +255,9 @@ export interface PushAuthOptions {
 }
 
 /**
- * Picks the push credential: GitHub Actions OIDC federation with
- * `--github-oidc`, otherwise the cached owner token from `cupboard login`.
- */
+Picks the push credential: GitHub Actions OIDC federation with
+`--github-oidc`, otherwise the cached owner token from `cupboard login`.
+*/
 export function authenticateForPush(
 	client: CupboardClient,
 	options: PushAuthOptions

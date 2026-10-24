@@ -1,6 +1,6 @@
 /**
- * Compares JSON-shaped values without depending on object property order.
- */
+Compares JSON-shaped values without depending on object property order.
+*/
 export function isDeepEqual(left: unknown, right: unknown): boolean {
 	if (Object.is(left, right)) {
 		return true;

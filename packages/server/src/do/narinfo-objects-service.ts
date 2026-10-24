@@ -681,14 +681,14 @@ export class NarInfoObjectsService {
 	}
 
 	/**
-	 * Of these stored objects, the ones that still describe the version this
-	 * cache's row holds for the path.
-	 *
-	 * This is the read path's own test, `isMetadataOfCommit`, with the local row
-	 * standing in for the D1 edge the read compares against. An object the
-	 * result leaves out is one the read would refuse: the path has no row in
-	 * this cache, or a later commit superseded the version the object records.
-	 */
+	Of these stored objects, the ones that still describe the version this
+	cache's row holds for the path.
+
+	This is the read path's own test, `isMetadataOfCommit`, with the local row
+	standing in for the D1 edge the read compares against. An object the
+	result leaves out is one the read would refuse: the path has no row in
+	this cache, or a later commit superseded the version the object records.
+	*/
 	currentObjects(
 		cache: ResolvedCache,
 		objects: ReadonlyMap<StorePathHash, R2Object>
@@ -852,11 +852,11 @@ export class NarInfoObjectsService {
 	}
 
 	/**
-	 * Queues the invalidation of public narinfo responses whose objects this
-	 * service rewrote. Workers Cache serves a response until it expires, so
-	 * without the purge a reader would receive the old object for up to an hour
-	 * after the repair.
-	 */
+	Queues the invalidation of public narinfo responses whose objects this
+	service rewrote. Workers Cache serves a response until it expires, so
+	without the purge a reader would receive the old object for up to an hour
+	after the repair.
+	*/
 	async purgeReplacedNarUrls(
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
@@ -892,11 +892,7 @@ export class NarInfoObjectsService {
 			)
 			.get();
 
-		if (row === undefined) {
-			return undefined;
-		}
-
-		if (!(await this.hasCommittedReference(cache, row))) {
+		if (row === undefined || !(await this.hasCommittedReference(cache, row))) {
 			return undefined;
 		}
 

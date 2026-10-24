@@ -332,12 +332,12 @@ interface ControlSessionRequest {
 }
 
 /**
- * Issues a control access token to a verified external identity that the
- * control trust rules select, with a refresh token unless the verified
- * audience is the deployment URL. The nonce of a nonce-bound token is recorded
- * as consumed in the batch that creates the refresh family, or on its own when
- * there is no family. A later use of the same nonce-bound token is refused.
- */
+Issues a control access token to a verified external identity that the
+control trust rules select, with a refresh token unless the verified
+audience is the deployment URL. The nonce of a nonce-bound token is recorded
+as consumed in the batch that creates the refresh family, or on its own when
+there is no family. A later use of the same nonce-bound token is refused.
+*/
 export async function issueControlSession(
 	request: Request,
 	env: Env,

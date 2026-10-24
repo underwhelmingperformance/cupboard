@@ -62,10 +62,10 @@ function isCpuLimitsUnsupported(error: unknown): boolean {
 }
 
 /**
- * Upload a script, dropping the CPU limit if the plan does not support one
- * (the Free plan rejects the `limits` field outright). The Worker still
- * deploys and runs within the plan's own CPU budget.
- */
+Upload a script, dropping the CPU limit if the plan does not support one
+(the Free plan rejects the `limits` field outright). The Worker still
+deploys and runs within the plan's own CPU budget.
+*/
 async function uploadScriptForPlan(
 	dependencies: DeployDependencies,
 	context: PhaseContext,
@@ -120,9 +120,9 @@ function uniqueSorted(values: Iterable<string>): string[] {
 }
 
 /**
- * The full set of named resources both Workers depend on, deduped. Drives both
- * the dry-run plan and the reconcile step.
- */
+The full set of named resources both Workers depend on, deduped. Drives both
+the dry-run plan and the reconcile step.
+*/
 export function collectResources(config: DeploymentConfig): ResourcePlan {
 	const workers = [config.control, config.tenant];
 
@@ -157,10 +157,10 @@ export function collectResources(config: DeploymentConfig): ResourcePlan {
 }
 
 /**
- * The plan facts that are derived from the built artifact and cannot be
- * changed at deploy time: bundle sizes, derived KV titles, migration count,
- * and which secrets will be set.
- */
+The plan facts that are derived from the built artifact and cannot be
+changed at deploy time: bundle sizes, derived KV titles, migration count,
+and which secrets will be set.
+*/
 export function derivedPlanRows(
 	artifact: DeploymentArtifact,
 	secrets: DeploySecrets,
@@ -203,12 +203,12 @@ export function derivedPlanRows(
 }
 
 /**
- * The plan facts the user may change while reviewing: resource names, cron
- * triggers and the custom domain.
- */
+The plan facts the user may change while reviewing: resource names, cron
+triggers and the custom domain.
+*/
 export function choicePlanRows(
 	config: DeploymentConfig,
-	domain: string | undefined
+	domain: string | undefined = '(none)'
 ): ResultRow[] {
 	const resources = collectResources(config);
 
@@ -220,7 +220,7 @@ export function choicePlanRows(
 			label: 'Cron triggers',
 			value: config.control.crons.join(', ') || '(none)'
 		},
-		{ label: 'Custom domain', value: domain ?? '(none)' }
+		{ label: 'Custom domain', value: domain }
 	];
 }
 
@@ -473,15 +473,15 @@ async function findZoneId(
 }
 
 /**
- * Whether the bindings that a deployed script reports match the bindings that
- * this deploy would upload. The live bindings include the script's secrets,
- * which persist across uploads, so `secret_text` entries are left out of the
- * comparison. A live D1 binding can have its database id in `id`, so D1
- * bindings are compared by their normalised `database_id`. Any other difference
- * counts as a mismatch, including a field that the API adds. Treating such a
- * difference as a mismatch costs one redundant upload on each deploy while the
- * difference persists.
- */
+Whether the bindings that a deployed script reports match the bindings that
+this deploy would upload. The live bindings include the script's secrets,
+which persist across uploads, so `secret_text` entries are left out of the
+comparison. A live D1 binding can have its database id in `id`, so D1
+bindings are compared by their normalised `database_id`. Any other difference
+counts as a mismatch, including a field that the API adds. Treating such a
+difference as a mismatch costs one redundant upload on each deploy while the
+difference persists.
+*/
 export function hasMatchingBindings(
 	planned: readonly unknown[] | undefined,
 	live: readonly unknown[] | undefined
@@ -543,10 +543,10 @@ function canonicalJson(value: unknown): string {
 }
 
 /**
- * Provisions, migrates, uploads, and configures a Cupboard deployment after the
- * caller has accepted the plan. The command handles `--dry-run` before it calls
- * this mutating operation.
- */
+Provisions, migrates, uploads, and configures a Cupboard deployment after the
+caller has accepted the plan. The command handles `--dry-run` before it calls
+this mutating operation.
+*/
 export async function runDeploy(
 	dependencies: DeployDependencies
 ): Promise<ResultRow[]> {
@@ -580,7 +580,7 @@ async function performDeploy(
 			const id = resources.d1.get(binding.databaseName);
 			return id === undefined
 				? []
-				: [{ binding: binding.binding, name: binding.databaseName, id }];
+				: { binding: binding.binding, name: binding.databaseName, id };
 		})
 		.toSorted(
 			(left, right) =>
@@ -919,15 +919,15 @@ function isMissingWorkerScriptError(error: unknown): boolean {
 }
 
 /**
- * Returns the build a script is serving, or undefined when its deployment does
- * not send every request to one version. A gradual deployment splits traffic
- * between two versions, and there is then no single build to report.
- *
- * This reads the deployment's intended allocation. Cloudflare has accepted a
- * deployment that sends every request to this build; whether every colo is
- * already serving it is not reported, and nothing here measures that
- * propagation or the completion of requests already in flight.
- */
+Returns the build a script is serving, or undefined when its deployment does
+not send every request to one version. A gradual deployment splits traffic
+between two versions, and there is then no single build to report.
+
+This reads the deployment's intended allocation. Cloudflare has accepted a
+deployment that sends every request to this build; whether every colo is
+already serving it is not reported, and nothing here measures that
+propagation or the completion of requests already in flight.
+*/
 async function servingBuildVersion(
 	api: CloudflareApi,
 	scriptName: ScriptName
@@ -945,17 +945,17 @@ async function servingBuildVersion(
 }
 
 /**
- * Confirms that both Workers serve this build from a single version. Every
- * deploy runs this check after the upload, before it applies any contract
- * migrations, because those remove what the earlier build reads.
- *
- * The deployments API reports the configured allocation, not whether old
- * requests have finished. Old requests can therefore reach a contracted
- * schema, which must reject their incompatible writes. If a script is still
- * split across versions, or still serves an earlier build, this throws
- * {@link WorkersNotServingBuildError} and the recorded transition states do
- * not change.
- */
+Confirms that both Workers serve this build from a single version. Every
+deploy runs this check after the upload, before it applies any contract
+migrations, because those remove what the earlier build reads.
+
+The deployments API reports the configured allocation, not whether old
+requests have finished. Old requests can therefore reach a contracted
+schema, which must reject their incompatible writes. If a script is still
+split across versions, or still serves an earlier build, this throws
+{@link WorkersNotServingBuildError} and the recorded transition states do
+not change.
+*/
 async function checkServing(
 	api: CloudflareApi,
 	artifact: DeploymentArtifact

@@ -29,10 +29,10 @@ export interface TargetMeasurement {
 }
 
 /**
- * The per-target measurements {@link runPlanMeasure} reports and writes,
- * keyed by each target's attr. A target the store could not price has no
- * entry at all, so a consumer can tell "measured at zero" from "unmeasured".
- */
+The per-target measurements {@link runPlanMeasure} reports and writes,
+keyed by each target's attr. A target the store could not price has no
+entry at all, so a consumer can tell "measured at zero" from "unmeasured".
+*/
 export interface PlanMeasureResult {
 	readonly measurements: Readonly<Record<string, TargetMeasurement>>;
 }
@@ -94,12 +94,12 @@ export function registerPlanMeasureCommand(
 }
 
 /**
- * Calls `queryMissing` separately for each target. The sizes include every
- * missing substitutable path needed to realise that target, and do not merge
- * shared paths across targets. A failed target is omitted with a warning so a
- * caller can distinguish it from a target measured at zero. The result is
- * reported and written to `options.measureFile`.
- */
+Calls `queryMissing` separately for each target. The sizes include every
+missing substitutable path needed to realise that target, and do not merge
+shared paths across targets. A failed target is omitted with a warning so a
+caller can distinguish it from a target measured at zero. The result is
+reported and written to `options.measureFile`.
+*/
 export async function runPlanMeasure(
 	options: PlanMeasureRunOptions,
 	reporter: Reporter,

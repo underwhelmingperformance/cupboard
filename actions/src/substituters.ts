@@ -14,8 +14,8 @@ const cacheHeaders: Readonly<Record<string, string>> = {
 };
 
 /**
- * A configured cache and its optional cache-specific read credential.
- */
+A configured cache and its optional cache-specific read credential.
+*/
 export interface CacheSelection {
 	readonly cache: CacheScope;
 	readonly credential?: BasicCredential;
@@ -26,11 +26,11 @@ export function cacheUrlFor(baseUrl: URL, cache: CacheScope): URL {
 }
 
 /**
- * Returns the substituter URL for one cache. A cache-specific read credential
- * is placed in the URL because netrc is keyed by host and cannot select a cache.
- * A `nix-cache-info` probe uses `cacheUrlFor` instead and sends the credential
- * in an `authorization` header because fetch ignores URL credentials.
- */
+Returns the substituter URL for one cache. A cache-specific read credential
+is placed in the URL because netrc is keyed by host and cannot select a cache.
+A `nix-cache-info` probe uses `cacheUrlFor` instead and sends the credential
+in an `authorization` header because fetch ignores URL credentials.
+*/
 export function substituterUrlFor(
 	baseUrl: URL,
 	selection: CacheSelection
@@ -43,9 +43,9 @@ export function substituterUrlFor(
 }
 
 /**
- * A reuse view spans every cache in a tenant. Build its URL from the tenant
- * base rather than nesting it under a cache-specific prefix.
- */
+A reuse view spans every cache in a tenant. Build its URL from the tenant
+base rather than nesting it under a cache-specific prefix.
+*/
 export function reuseViewUrlFor(baseUrl: URL, view: string): URL {
 	let tenantUrl = baseUrl;
 	try {

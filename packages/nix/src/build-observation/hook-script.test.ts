@@ -70,7 +70,7 @@ describe('renderHookScript', () => {
 		{ timeout: 30_000 },
 		async ({
 			rootDirectoryExists,
-			failedPath,
+			failedPath = '',
 			protection,
 			rootEntries: expectedRootEntries,
 			rootTargets: expectedRootTargets
@@ -117,7 +117,7 @@ describe('renderHookScript', () => {
 				env: {
 					...process.env,
 					PATH: `${binDirectory}:${process.env.PATH ?? ''}`,
-					FAILED_PATH: failedPath ?? '',
+					FAILED_PATH: failedPath,
 					EVENT_FILE: eventFile,
 					SOCKET_FILE: socketFile,
 					DRV_PATH: derivation,

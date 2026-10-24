@@ -162,12 +162,8 @@ export async function claimGlobalAdmin(
 		.where(eq(d1Schema.globalAdmin.id, singletonId))
 		.get();
 
-	if (admin === undefined) {
-		throw new GlobalAdminAlreadyClaimedError();
-	}
-
 	if (
-		admin.issuer !== principal.issuer ||
+		admin?.issuer !== principal.issuer ||
 		admin.subject !== principal.subject ||
 		admin.audience !== principal.audience
 	) {

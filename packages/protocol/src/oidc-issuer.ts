@@ -1,8 +1,8 @@
 import { isHttpsOrLoopbackHttp } from '@cupboard/nix-store/url';
 
 /**
- * Whether a URL uses HTTPS.
- */
+Whether a URL uses HTTPS.
+*/
 export function isHttpsIssuerUrl(value: string): boolean {
 	try {
 		return new URL(value).protocol === 'https:';
@@ -12,11 +12,11 @@ export function isHttpsIssuerUrl(value: string): boolean {
 }
 
 /**
- * Whether a URL may be used as an OIDC issuer or JWKS endpoint. HTTPS is
- * required so tokens and keys cannot be fetched over an interceptable channel;
- * plain HTTP is permitted only for loopback hosts, so local development and the
- * e2e stub issuer work without a certificate.
- */
+Whether a URL may be used as an OIDC issuer or JWKS endpoint. HTTPS is
+required so tokens and keys cannot be fetched over an interceptable channel;
+plain HTTP is permitted only for loopback hosts, so local development and the
+e2e stub issuer work without a certificate.
+*/
 export function isAllowedIssuerUrl(value: string): boolean {
 	let url: URL;
 
@@ -30,10 +30,10 @@ export function isAllowedIssuerUrl(value: string): boolean {
 }
 
 /**
- * A validated OpenID Connect issuer identifier. Construction enforces the
- * transport rule while preserving the exact identifier because discovery
- * metadata and token issuer comparisons are case-sensitive string comparisons.
- */
+A validated OpenID Connect issuer identifier. Construction enforces the
+transport rule while preserving the exact identifier because discovery
+metadata and token issuer comparisons are case-sensitive string comparisons.
+*/
 export class IssuerUrl {
 	static parse(raw: string): IssuerUrl | undefined {
 		if (!isAllowedIssuerUrl(raw) || hasForbiddenRawIssuerComponent(raw)) {
@@ -81,9 +81,9 @@ function hasForbiddenRawIssuerComponent(raw: string): boolean {
 }
 
 /**
- * The stored issuer value to replace during an explicit trailing-slash
- * compatibility repair, or `undefined` when no repair applies.
- */
+The stored issuer value to replace during an explicit trailing-slash
+compatibility repair, or `undefined` when no repair applies.
+*/
 export function legacyNormalisedIssuer(
 	exactIssuer: string
 ): string | undefined {

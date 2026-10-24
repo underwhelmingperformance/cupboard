@@ -55,8 +55,8 @@ const defaultCacheScope: CacheScope = { kind: 'default' };
 export type ConfigEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**
- * Returns the substituter URL for one cache and optional credential.
- */
+Returns the substituter URL for one cache and optional credential.
+*/
 export function cacheSubstituterUrl(
 	url: URL,
 	cache: CacheScope,
@@ -156,10 +156,10 @@ export function resolveConfigSubstituters(
 }
 
 /**
- * Selects named caches from the positional arguments, or the URL's cache when
- * no names are given. With `hasDefaultCache`, the default cache comes first
- * and appears once, separately from any named cache called `default`.
- */
+Selects named caches from the positional arguments, or the URL's cache when
+no names are given. With `hasDefaultCache`, the default cache comes first
+and appears once, separately from any named cache called `default`.
+*/
 export function selectConfigCaches(
 	target: CacheTarget,
 	names: readonly string[],
@@ -255,9 +255,9 @@ function sharedCredential(
 		options.readUser ?? parseReadUser(environment.CUPBOARD_READ_USER);
 	const password = options.readPassword ?? environment.CUPBOARD_READ_PASSWORD;
 
-	return user !== undefined && password !== undefined
-		? { user, password }
-		: undefined;
+	return user === undefined || password === undefined
+		? undefined
+		: { user, password };
 }
 
 function cacheDescription(cache: CacheScope): string {

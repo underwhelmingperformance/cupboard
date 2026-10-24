@@ -139,11 +139,11 @@ export interface ConsoleLike {
 }
 
 /**
- * Writes each record to the console as a plain object, which lets Cloudflare
- * Workers Logs index every field. The constant message uses the `msg` field,
- * and the remaining fields contain variable data. Tests can inject a console
- * implementation.
- */
+Writes each record to the console as a plain object, which lets Cloudflare
+Workers Logs index every field. The constant message uses the `msg` field,
+and the remaining fields contain variable data. Tests can inject a console
+implementation.
+*/
 export function cloudflareSink(target: ConsoleLike = console): Sink {
 	return (record) => {
 		target[consoleMethodFor(record.level)](logObject(record));
@@ -151,9 +151,9 @@ export function cloudflareSink(target: ConsoleLike = console): Sink {
 }
 
 /**
- * Writes one JSON object per line through the supplied callback. The caller
- * chooses the destination; the default logger and CLI normally supply stderr.
- */
+Writes one JSON object per line through the supplied callback. The caller
+chooses the destination; the default logger and CLI normally supply stderr.
+*/
 export function jsonLinesSink(write: (line: string) => void): Sink {
 	return (record) => {
 		write(
@@ -207,10 +207,10 @@ function emitToActions(
 }
 
 /**
- * When `GITHUB_ACTIONS=true`, warnings and errors become annotations and trace
- * and debug records use `::debug::`. Informational records remain plain lines.
- * Outside GitHub Actions, the shared command emitter falls back to plain lines.
- */
+When `GITHUB_ACTIONS=true`, warnings and errors become annotations and trace
+and debug records use `::debug::`. Informational records remain plain lines.
+Outside GitHub Actions, the shared command emitter falls back to plain lines.
+*/
 export function githubActionsSink(streams: WorkflowCommandStreams = {}): Sink {
 	const commands = workflowCommands(streams);
 	const out = streams.stdout ?? process.stdout;

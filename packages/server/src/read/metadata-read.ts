@@ -26,9 +26,9 @@ import { authorisedNarInfoVersions, type ReadScope } from './read.ts';
 const utf8 = new TextEncoder();
 
 /**
- * Serialises a complete narinfo only when its full store path matches the
- * requested path. The per-narinfo bound applies before JSON encoding.
- */
+Serialises a complete narinfo only when its full store path matches the
+requested path. The per-narinfo bound applies before JSON encoding.
+*/
 export function renderCacheMetadataEntry(
 	storePath: StorePathString,
 	metadata: NarInfo | string | undefined
@@ -134,10 +134,10 @@ async function boundedNarInfoText(
 }
 
 /**
- * Reads the current committed narinfos in request order. Each group reads at
- * most six bounded R2 bodies before yielding its entries, so a caller can stop
- * after a response prefix without retaining every requested narinfo.
- */
+Reads the current committed narinfos in request order. Each group reads at
+most six bounded R2 bodies before yielding its entries, so a caller can stop
+after a response prefix without retaining every requested narinfo.
+*/
 export async function* readCacheMetadata(
 	blobs: R2Bucket,
 	database: DrizzleD1Database<typeof d1Schema>,

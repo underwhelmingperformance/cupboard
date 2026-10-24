@@ -13,12 +13,12 @@ export interface PushGrantIntent {
 	readonly attest: boolean;
 	readonly root?: RootName;
 	/**
-	 * The run root the push binds at negotiate. Attaching a path to a run root
-	 * retains it, so the run root needs its own grant with its own root
-	 * selector. The request therefore includes a second cache grant on the same
-	 * cache, scoped to the run root: a run root and a target root are different
-	 * roots with different lifetimes.
-	 */
+	The run root the push binds at negotiate. Attaching a path to a run root
+	retains it, so the run root needs its own grant with its own root
+	selector. The request therefore includes a second cache grant on the same
+	cache, scoped to the run root: a run root and a target root are different
+	roots with different lifetimes.
+	*/
 	readonly runRoot?: RootName;
 }
 
@@ -30,11 +30,11 @@ export interface RootEnsureGrantIntent {
 export interface RootListGrantIntent {
 	readonly cache: CacheScope;
 	/**
-	 * Present for a single root's target listing (`root targets`), absent for a
-	 * cache-wide listing (`root list`). The resource a listing route declares
-	 * includes a root only when the route names one, and a grant with no root
-	 * covers only a resource with no root.
-	 */
+	Present for a single root's target listing (`root targets`), absent for a
+	cache-wide listing (`root list`). The resource a listing route declares
+	includes a root only when the route names one, and a grant with no root
+	covers only a resource with no root.
+	*/
 	readonly root?: RootName;
 }
 
@@ -64,9 +64,9 @@ export interface ContentReadGrantIntent {
 }
 
 /**
- * Requests only binary-cache read authority for the resources used by a CI
- * operation. An empty request needs no token exchange.
- */
+Requests only binary-cache read authority for the resources used by a CI
+operation. An empty request needs no token exchange.
+*/
 export function contentReadAuthorizationDetails(
 	intent: ContentReadGrantIntent
 ): AuthorizationDetails {
@@ -97,11 +97,11 @@ const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
 
 /**
- * The concrete `authorization_details` a push requests: a single cache grant on
- * the target cache, with upload (and, when used, attestation and `root:set`)
- * operations. Built and validated client-side so a CI run requests only the
- * authority it needs.
- */
+The concrete `authorization_details` a push requests: a single cache grant on
+the target cache, with upload (and, when used, attestation and `root:set`)
+operations. Built and validated client-side so a CI run requests only the
+authority it needs.
+*/
 export function pushAuthorizationDetails(
 	intent: PushGrantIntent
 ): AuthorizationDetails {
@@ -132,13 +132,13 @@ export function pushAuthorizationDetails(
 }
 
 /**
- * The authority `attest attach` requests: `attestation:negotiate` and
- * `attestation:attach` on the target cache, plus `upload:negotiate`, which
- * issues the credential the bundle bytes are staged under and the signed push
- * id the attestation negotiate names. The grant includes no commit, status or
- * root operation, so the exchanged token can attach bundles to paths the cache
- * already serves but can never publish a path or change retention.
- */
+The authority `attest attach` requests: `attestation:negotiate` and
+`attestation:attach` on the target cache, plus `upload:negotiate`, which
+issues the credential the bundle bytes are staged under and the signed push
+id the attestation negotiate names. The grant includes no commit, status or
+root operation, so the exchanged token can attach bundles to paths the cache
+already serves but can never publish a path or change retention.
+*/
 export function attestAttachAuthorizationDetails(
 	intent: AttestAttachGrantIntent
 ): AuthorizationDetails {
@@ -152,9 +152,9 @@ export function attestAttachAuthorizationDetails(
 }
 
 /**
- * Requests only `root:ensure` for the selected cache and root. This lets a CI
- * preflight verify retention without granting permission to change the root.
- */
+Requests only `root:ensure` for the selected cache and root. This lets a CI
+preflight verify retention without granting permission to change the root.
+*/
 export function rootEnsureAuthorizationDetails(
 	intent: RootEnsureGrantIntent
 ): AuthorizationDetails {
@@ -169,11 +169,11 @@ export function rootEnsureAuthorizationDetails(
 }
 
 /**
- * The read-only authority needed by a CI read of a cache's roots, or of one
- * root's targets: exactly `root:list`, never `root:set`, so a plan job's
- * exchanged token can read a root's reconciled list but cannot refresh
- * retention unless it also has `root:set`.
- */
+The read-only authority needed by a CI read of a cache's roots, or of one
+root's targets: exactly `root:list`, never `root:set`, so a plan job's
+exchanged token can read a root's reconciled list but cannot refresh
+retention unless it also has `root:set`.
+*/
 export function rootListAuthorizationDetails(
 	intent: RootListGrantIntent
 ): AuthorizationDetails {
@@ -188,12 +188,12 @@ export function rootListAuthorizationDetails(
 }
 
 /**
- * The confirm-scoped authority `cupboard confirm` needs: exactly
- * `upload:confirm` on the target cache, never `upload:negotiate` or
- * `upload:commit`, so the exchanged token can extend retention on an
- * already-published path without uploading bytes or using any broader upload
- * operation.
- */
+The confirm-scoped authority `cupboard confirm` needs: exactly
+`upload:confirm` on the target cache, never `upload:negotiate` or
+`upload:commit`, so the exchanged token can extend retention on an
+already-published path without uploading bytes or using any broader upload
+operation.
+*/
 export function confirmAuthorizationDetails(
 	intent: ConfirmGrantIntent
 ): AuthorizationDetails {
@@ -207,11 +207,11 @@ export function confirmAuthorizationDetails(
 }
 
 /**
- * The preview-scoped authority a `--dry-run` push needs: exactly
- * `upload:preview` on the target cache, never `upload:negotiate` or
- * `upload:commit`, so a dry run's exchanged token cannot stage or commit an
- * upload even if the client asked it to.
- */
+The preview-scoped authority a `--dry-run` push needs: exactly
+`upload:preview` on the target cache, never `upload:negotiate` or
+`upload:commit`, so a dry run's exchanged token cannot stage or commit an
+upload even if the client asked it to.
+*/
 export function previewAuthorizationDetails(
 	intent: PreviewGrantIntent
 ): AuthorizationDetails {
@@ -225,9 +225,9 @@ export function previewAuthorizationDetails(
 }
 
 /**
- * The authority `cupboard cache create` needs in CI: exactly `cache:create` on
- * the cache being created, and no upload or root operation.
- */
+The authority `cupboard cache create` needs in CI: exactly `cache:create` on
+the cache being created, and no upload or root operation.
+*/
 export function cacheCreateAuthorizationDetails(
 	intent: CacheCreateGrantIntent
 ): AuthorizationDetails {
@@ -241,9 +241,9 @@ export function cacheCreateAuthorizationDetails(
 }
 
 /**
- * Requests `cache:delete` on the cache being removed, without upload or root
- * operations.
- */
+Requests `cache:delete` on the cache being removed, without upload or root
+operations.
+*/
 export function cacheRemoveAuthorizationDetails(
 	intent: CacheRemoveGrantIntent
 ): AuthorizationDetails {

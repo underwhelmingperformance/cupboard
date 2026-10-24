@@ -22,9 +22,9 @@ export const loggerCategory = ['cupboard'] as const;
 
 export interface LoggingOptions {
 	/**
-	 * The sink that receives log records. If this is omitted, {@link resolveSink}
-	 * selects a sink from the environment.
-	 */
+	The sink that receives log records. If this is omitted, {@link resolveSink}
+	selects a sink from the environment.
+	*/
 	readonly sink?: Sink;
 	/**
 	Defaults to `debug`.
@@ -33,11 +33,11 @@ export interface LoggingOptions {
 }
 
 /**
- * When `GITHUB_ACTIONS=true`, the default sink writes workflow-command syntax
- * to stdout. Other environments receive line-delimited JSON on stderr.
- * Entrypoints that select their own output format pass an explicit sink to
- * {@link configureLogging}.
- */
+When `GITHUB_ACTIONS=true`, the default sink writes workflow-command syntax
+to stdout. Other environments receive line-delimited JSON on stderr.
+Entrypoints that select their own output format pass an explicit sink to
+{@link configureLogging}.
+*/
 export function resolveSink(streams: WorkflowCommandStreams = {}): Sink {
 	if (isGithubActions(streams.environment)) {
 		return githubActionsSink(streams);
@@ -49,11 +49,11 @@ export function resolveSink(streams: WorkflowCommandStreams = {}): Sink {
 }
 
 /**
- * Configures LogTape once for the current isolate or process. Later calls leave
- * the global configuration unchanged, which lets several entrypoints share an
- * isolate. Callers add request context through `.with(...)` child loggers. Every
- * Cupboard sink is synchronous, so configuration is synchronous too.
- */
+Configures LogTape once for the current isolate or process. Later calls leave
+the global configuration unchanged, which lets several entrypoints share an
+isolate. Callers add request context through `.with(...)` child loggers. Every
+Cupboard sink is synchronous, so configuration is synchronous too.
+*/
 export function configureLogging(options: LoggingOptions = {}): void {
 	if (getConfig() !== null) {
 		return;
@@ -77,9 +77,9 @@ export function configureLogging(options: LoggingOptions = {}): void {
 }
 
 /**
- * Callers derive request or operation loggers with `.with(fields)` and pass the
- * resulting logger to downstream functions.
- */
+Callers derive request or operation loggers with `.with(fields)` and pass the
+resulting logger to downstream functions.
+*/
 export function rootLogger(): Logger {
 	return getLogger(loggerCategory);
 }

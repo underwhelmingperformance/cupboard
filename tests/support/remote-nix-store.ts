@@ -69,9 +69,9 @@ interface StoppableContainer {
 }
 
 /**
- * Stops the fixture's container, when one was started, and removes the
- * fixture's workspace.
- */
+Stops the fixture's container, when one was started, and removes the
+fixture's workspace.
+*/
 export async function stopNixSshStore(
 	container: StoppableContainer | undefined,
 	workspace: string
@@ -85,10 +85,10 @@ export async function stopNixSshStore(
 }
 
 /**
- * Starts an isolated Nix store whose daemon is reachable only through a real
- * OpenSSH server. Testcontainers owns the image and container lifecycle; the
- * matching private key remains in the fixture workspace on the host.
- */
+Starts an isolated Nix store whose daemon is reachable only through a real
+OpenSSH server. Testcontainers owns the image and container lifecycle; the
+matching private key remains in the fixture workspace on the host.
+*/
 export async function startNixSshStore(): Promise<NixSshStoreFixture> {
 	const workspace = await mkdtemp(path.join(tmpdir(), 'cupboard-nix-ssh-'));
 	const identityFile = path.join(workspace, 'id_ed25519');

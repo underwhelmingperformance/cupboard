@@ -36,9 +36,9 @@ import {
 	TargetRootUnresolvedError
 } from './errors.ts';
 
-const namedCache = (name: string): CacheScope => ({
+const namedCache = (): CacheScope => ({
 	kind: 'named',
-	name: cacheNameSchema.parse(name)
+	name: cacheNameSchema.parse('pr-1')
 });
 import {
 	assertDistinctGroupKeys,
@@ -1254,7 +1254,7 @@ describe('availableCachePaths', () => {
 
 		const available = await availableCachePaths({
 			baseUrl: new URL('https://cupboard.example/t/acme'),
-			cache: namedCache('pr-1'),
+			cache: namedCache(),
 			paths,
 			fetcher
 		});
@@ -1278,7 +1278,7 @@ describe('availableCachePaths', () => {
 		try {
 			const pending = availableCachePaths({
 				baseUrl: new URL('https://cupboard.example/t/acme'),
-				cache: namedCache('pr-1'),
+				cache: namedCache(),
 				paths: [firstPath, secondPath],
 				fetcher
 			});
@@ -1303,7 +1303,7 @@ describe('availableCachePaths', () => {
 		const headers: (HeadersInit | undefined)[] = [];
 		const available = await availableCachePaths({
 			baseUrl: new URL('https://cupboard.example/t/acme'),
-			cache: namedCache('pr-1'),
+			cache: namedCache(),
 			paths: [firstPath, secondPath],
 			fetcher: (input, init) => {
 				const url =
@@ -1368,7 +1368,7 @@ describe('availableCachePaths', () => {
 			try {
 				await availableCachePaths({
 					baseUrl: new URL('https://cupboard.example/t/acme'),
-					cache: namedCache('pr-1'),
+					cache: namedCache(),
 					paths: [firstPath],
 					fetcher: () => {
 						observedAttempts += 1;
@@ -1398,7 +1398,7 @@ describe('availableCachePaths', () => {
 
 		const available = await availableCachePaths({
 			baseUrl: new URL('https://cupboard.example/t/acme'),
-			cache: namedCache('pr-1'),
+			cache: namedCache(),
 			paths: [firstPath],
 			fetcher: () => {
 				attempts += 1;
@@ -1423,7 +1423,7 @@ describe('availableCachePaths', () => {
 		const malformed = await rejectedBy(() =>
 			availableCachePaths({
 				baseUrl: new URL('https://cupboard.example/t/acme'),
-				cache: namedCache('pr-1'),
+				cache: namedCache(),
 				paths: [firstPath],
 				fetcher: () =>
 					Promise.resolve(new Response('{', { status: StatusCodes.OK }))
@@ -1432,7 +1432,7 @@ describe('availableCachePaths', () => {
 		const invalid = await rejectedBy(() =>
 			availableCachePaths({
 				baseUrl: new URL('https://cupboard.example/t/acme'),
-				cache: namedCache('pr-1'),
+				cache: namedCache(),
 				paths: [firstPath],
 				fetcher: () =>
 					Promise.resolve(
@@ -1466,7 +1466,7 @@ describe('availableCachePaths', () => {
 		const error = await rejectedBy(() =>
 			availableCachePaths({
 				baseUrl: new URL('https://cupboard.example/t/acme'),
-				cache: namedCache('pr-1'),
+				cache: namedCache(),
 				paths: [firstPath],
 				fetcher: () =>
 					Promise.resolve(
@@ -1498,7 +1498,7 @@ describe('availableCachePaths', () => {
 
 		await availableCachePaths({
 			baseUrl: new URL('https://cupboard.example/t/acme'),
-			cache: namedCache('pr-1'),
+			cache: namedCache(),
 			paths: [firstPath, secondPath],
 			credentials: {
 				user: readUserInputSchema.parse('reader'),
@@ -1543,7 +1543,7 @@ describe('availableCachePaths', () => {
 
 			await availableCachePaths({
 				baseUrl: new URL('https://cupboard.example/t/acme'),
-				cache: namedCache('pr-1'),
+				cache: namedCache(),
 				paths: [firstPath],
 				fetcher: (_input, init) => {
 					headers.push(new Headers(init?.headers).get('authorization') ?? '');

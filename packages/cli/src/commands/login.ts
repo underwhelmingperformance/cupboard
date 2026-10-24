@@ -55,9 +55,9 @@ export class LoginIdTokenMissingError extends CliError {
 }
 
 /**
- * Options for the OIDC login that identifies the operator. `cupboard login`
- * and `cupboard init` both use it.
- */
+Options for the OIDC login that identifies the operator. `cupboard login`
+and `cupboard init` both use it.
+*/
 export interface IdentityLoginOptions {
 	readonly oidcIssuer: string;
 	readonly clientId: string;
@@ -68,9 +68,9 @@ export interface IdentityLoginDependencies {
 	readonly openBrowser: (url: string) => void;
 	readonly info: (message: string) => void;
 	/**
-	 * The prompt for the redirect URL of a headless sign-in. Without it, a
-	 * headless sign-in completes only from the loopback redirect.
-	 */
+	The prompt for the redirect URL of a headless sign-in. Without it, a
+	headless sign-in completes only from the loopback redirect.
+	*/
 	readonly readPastedRedirect?: PastedRedirectReader;
 	readonly signal?: AbortSignal;
 	/**
@@ -86,9 +86,9 @@ export interface IdentityLoginDependencies {
 const waitingMessage = 'Waiting for you to authorise in your browser…';
 
 /**
- * Returns a redirect-URL reader for an interactive run, or `undefined` when
- * prompting is unavailable.
- */
+Returns a redirect-URL reader for an interactive run, or `undefined` when
+prompting is unavailable.
+*/
 export function pastedRedirectReader(
 	ui: Pick<CliUi, 'interactive' | 'editText'>
 ): PastedRedirectReader | undefined {
@@ -149,9 +149,9 @@ function authorizationPrompt(
 }
 
 /**
- * Whether `options` select the Cloudflare issuer with cupboard's own client,
- * the identity of the Cloudflare login for the account.
- */
+Whether `options` select the Cloudflare issuer with cupboard's own client,
+the identity of the Cloudflare login for the account.
+*/
 export function isCloudflareSignIn(options: IdentityLoginOptions): boolean {
 	return (
 		options.clientId === cloudflareOauthClientId &&
@@ -160,15 +160,15 @@ export function isCloudflareSignIn(options: IdentityLoginOptions): boolean {
 }
 
 /**
- * Returns the sign-in method for the issuer and client in `options`. With the
- * built-in client and the Cloudflare issuer, it uses Cloudflare's fixed
- * endpoints, and otherwise it discovers the issuer's endpoints. By default, a
- * sign-in opens a browser at the authorisation URL. With `headless`, the CLI
- * prints that URL instead, and the sign-in completes from the loopback redirect
- * or from the redirect URL that the user pastes, whichever arrives first. A Cloudflare sign-in does not
- * request `offline_access`, so it receives no refresh token, and nothing keeps
- * its grant.
- */
+Returns the sign-in method for the issuer and client in `options`. With the
+built-in client and the Cloudflare issuer, it uses Cloudflare's fixed
+endpoints, and otherwise it discovers the issuer's endpoints. By default, a
+sign-in opens a browser at the authorisation URL. With `headless`, the CLI
+prints that URL instead, and the sign-in completes from the loopback redirect
+or from the redirect URL that the user pastes, whichever arrives first. A Cloudflare sign-in does not
+request `offline_access`, so it receives no refresh token, and nothing keeps
+its grant.
+*/
 export function identitySignIn(
 	options: IdentityLoginOptions,
 	dependencies: IdentityLoginDependencies
@@ -250,9 +250,9 @@ export interface SignInToDependencies {
 }
 
 /**
- * Signs in for `url`, exchanges an ID token bound to `url` at its token
- * endpoint, and caches the session for `url`.
- */
+Signs in for `url`, exchanges an ID token bound to `url` at its token
+endpoint, and caches the session for `url`.
+*/
 export async function signInTo(
 	url: URL,
 	dependencies: SignInToDependencies
@@ -299,10 +299,10 @@ export async function cacheLoginSession(
 }
 
 /**
- * The identity-provider options of `login` and `whoami`, so both commands
- * accept the same options with the same defaults. Each option in `implies`
- * is set when any of these options is given.
- */
+The identity-provider options of `login` and `whoami`, so both commands
+accept the same options with the same defaults. Each option in `implies`
+is set when any of these options is given.
+*/
 export function identityLoginOptions(
 	implies?: Readonly<Record<string, boolean>>
 ): readonly Option[] {

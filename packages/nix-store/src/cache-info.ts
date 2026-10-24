@@ -16,11 +16,11 @@ export class CacheInfo {
 	);
 
 	/**
-	 * Parses a `nix-cache-info` document. `StoreDir` and `Priority` are required;
-	 * a missing or malformed value throws {@link CacheInfoParseError} for that
-	 * field. `WantMassQuery` defaults to false when omitted and otherwise accepts
-	 * only `0` or `1`. Unknown fields are ignored.
-	 */
+	Parses a `nix-cache-info` document. `StoreDir` and `Priority` are required;
+	a missing or malformed value throws {@link CacheInfoParseError} for that
+	field. `WantMassQuery` defaults to false when omitted and otherwise accepts
+	only `0` or `1`. Unknown fields are ignored.
+	*/
 	static parse(source: string): CacheInfo {
 		const fields = new Map<string, string>();
 

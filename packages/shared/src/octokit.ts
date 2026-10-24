@@ -65,12 +65,12 @@ export interface OctokitClientOptions {
 }
 
 /**
- * Build an Octokit client with the project's shared resilience policy: the
- * throttling plugin fails fast on rate limits and the retry plugin handles
- * transient failures. Pass `auth` to authenticate, `baseUrl` to target a
- * GitHub Enterprise host, and `request` to supply transport options such as a
- * caching or stubbed `fetch`.
- */
+Build an Octokit client with the project's shared resilience policy: the
+throttling plugin fails fast on rate limits and the retry plugin handles
+transient failures. Pass `auth` to authenticate, `baseUrl` to target a
+GitHub Enterprise host, and `request` to supply transport options such as a
+caching or stubbed `fetch`.
+*/
 export function createOctokitClient(
 	options: OctokitClientOptions = {}
 ): InstanceType<typeof OctokitClient> {
@@ -109,8 +109,8 @@ export function createOctokitClient(
 	return octokit;
 }
 
-function hasNextPage(link: string | undefined): boolean {
-	return /(?:^|,)\s*<[^>]+>;[^,]*\brel="next"/u.test(link ?? '');
+function hasNextPage(link: string | undefined = ''): boolean {
+	return /(?:^|,)\s*<[^>]+>;[^,]*\brel="next"/u.test(link);
 }
 
 async function githubReleasePage(

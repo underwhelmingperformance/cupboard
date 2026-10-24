@@ -1742,9 +1742,9 @@ async function installTrustedIdp(
 		claims?: Readonly<Record<string, unknown>>;
 		issuedAt?: number;
 		/**
-		 * False for a token without the default nonce for the tenant's issuer. A
-		 * token whose audience is the tenant's issuer never has it.
-		 */
+		False for a token without the default nonce for the tenant's issuer. A
+		token whose audience is the tenant's issuer never has it.
+		*/
 		isNonceBound?: boolean;
 	} = {}
 ): Promise<string> {
@@ -2009,10 +2009,10 @@ function refreshTokenMemberRows(): Promise<
 }
 
 /**
- * Presents a refresh token to a token service in the tenant object. `fault`
- * runs first and can make the rotation fail. Returns the response, or the
- * error that the refresh throws.
- */
+Presents a refresh token to a token service in the tenant object. `fault`
+runs first and can make the rotation fail. Returns the response, or the
+error that the refresh throws.
+*/
 function refreshWithFault(
 	refreshToken: string,
 	fault: (authKeys: AuthKeysService, state: DurableObjectState) => void

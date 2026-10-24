@@ -29,11 +29,11 @@ import {
 } from '../errors.ts';
 
 /**
- * Parses a non-empty `authorization_details` form value. The request schema
- * leaves it JSON-encoded so invalid JSON or an invalid grant array is reported
- * as `invalid_authorization_details`. An omitted value remains undefined; an
- * empty form value is rejected earlier as `invalid_request`.
- */
+Parses a non-empty `authorization_details` form value. The request schema
+leaves it JSON-encoded so invalid JSON or an invalid grant array is reported
+as `invalid_authorization_details`. An omitted value remains undefined; an
+empty form value is rejected earlier as `invalid_request`.
+*/
 export function parseRequestedGrants(
 	raw: string | undefined
 ): AuthorizationDetails | undefined {
@@ -63,12 +63,12 @@ export function parseRequestedGrants(
 }
 
 /**
- * Resolves grants against the matched rule and verified claims. A rule that
- * permits wildcard authority may omit `authorization_details` and receive that
- * wildcard. Every other rule must request explicit grants; omission is
- * `invalid_request`. An empty request or any unpermitted grant rejects the whole
- * request as `invalid_authorization_details`; no partial subset is returned.
- */
+Resolves grants against the matched rule and verified claims. A rule that
+permits wildcard authority may omit `authorization_details` and receive that
+wildcard. Every other rule must request explicit grants; omission is
+`invalid_request`. An empty request or any unpermitted grant rejects the whole
+request as `invalid_authorization_details`; no partial subset is returned.
+*/
 export function resolveRequestedGrants(
 	rule: OidcTrustRule,
 	claims: VerifiedOidcClaims,
@@ -96,11 +96,11 @@ export function resolveRequestedGrants(
 }
 
 /**
- * Omitting `authorization_details` preserves the presented grants. An empty
- * request or any grant outside the presented authority rejects the whole
- * exchange. A successful result cannot authorise an operation or resource that
- * the presented token did not authorise.
- */
+Omitting `authorization_details` preserves the presented grants. An empty
+request or any grant outside the presented authority rejects the whole
+exchange. A successful result cannot authorise an operation or resource that
+the presented token did not authorise.
+*/
 export function attenuatedGrants(
 	presented: AuthorizationDetails,
 	requested: AuthorizationDetails | undefined
@@ -132,10 +132,10 @@ interface AttenuatedAccessTokenOptions {
 }
 
 /**
- * Issues a self-attenuated access token without extending the lifetime of the
- * presented token. The issuer refuses a token whose remaining lifetime is not
- * positive, including one accepted only because of verification tolerance.
- */
+Issues a self-attenuated access token without extending the lifetime of the
+presented token. The issuer refuses a token whose remaining lifetime is not
+positive, including one accepted only because of verification tolerance.
+*/
 export async function issueAttenuatedAccessToken(
 	options: AttenuatedAccessTokenOptions,
 	now: Date

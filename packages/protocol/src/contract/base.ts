@@ -4,13 +4,13 @@ import { oc } from '@orpc/contract';
 import { type Operation } from '../grants.ts';
 
 /**
- * Specifies how the authoriser obtains a resource: from the request path, from
- * an input field, or from the pending upload or attestation in the request.
- *
- * A missing pending row denies access by default. A procedure can set
- * `missingDenies: false` so a caller with the required operation can receive
- * the normal missing result after the pending row is removed.
- */
+Specifies how the authoriser obtains a resource: from the request path, from
+an input field, or from the pending upload or attestation in the request.
+
+A missing pending row denies access by default. A procedure can set
+`missingDenies: false` so a caller with the required operation can receive
+the normal missing result after the pending row is removed.
+*/
 export type ResourceLocation =
 	| { readonly fromPath: true }
 	| { readonly field: string }
@@ -23,11 +23,11 @@ export interface ResourceSpec {
 }
 
 /**
- * Declares the required operation, resource locations, and maintenance effect
- * for a procedure. The server authoriser reads this metadata directly from the
- * contract. Although `requires` is optional in the type, every procedure must
- * set it. The authoriser denies a procedure that omits the declaration.
- */
+Declares the required operation, resource locations, and maintenance effect
+for a procedure. The server authoriser reads this metadata directly from the
+contract. Although `requires` is optional in the type, every procedure must
+set it. The authoriser denies a procedure that omits the declaration.
+*/
 export interface AuthzMeta {
 	readonly acceptsControlDatabaseValidationSecret?: true;
 	readonly requires?: Operation;
@@ -37,9 +37,9 @@ export interface AuthzMeta {
 }
 
 /**
- * The base contract for authenticated procedures. It declares the shared
- * authorisation errors, and each procedure adds its required operation.
- */
+The base contract for authenticated procedures. It declares the shared
+authorisation errors, and each procedure adds its required operation.
+*/
 export const baseProcedure = oc
 	.$meta<AuthzMeta>({ replaySafety: 'replay-unsafe' })
 	.errors({

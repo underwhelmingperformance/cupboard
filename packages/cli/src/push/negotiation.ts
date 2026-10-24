@@ -17,9 +17,9 @@ function identityKey(identity: UploadNegotiationIdentity): string {
 }
 
 /**
- * Requires a negotiate or preview response to return exactly one decision for
- * every requested path and no decision for another path.
- */
+Requires a negotiate or preview response to return exactly one decision for
+every requested path and no decision for another path.
+*/
 export function exactUploadDecisions<
 	Decision extends UploadNegotiationDecisionIdentity
 >(
@@ -81,19 +81,19 @@ export function exactUploadDecisions<
 }
 
 /**
- * One negotiate response and whether the server acknowledged grace-aware
- * reporting for it.
- */
+One negotiate response and whether the server acknowledged grace-aware
+reporting for it.
+*/
 export interface NegotiatedGroup<Decision> {
 	readonly uploads: readonly Decision[];
 	readonly hasUploadGraceFacts: boolean;
 }
 
 /**
- * A path handed to an upload worker: either the server's decision for it,
- * with its group's grace-facts acknowledgement, or the error that refused its
- * group.
- */
+A path handed to an upload worker: either the server's decision for it,
+with its group's grace-facts acknowledgement, or the error that refused its
+group.
+*/
 export type NegotiatedPath<Path, Decision> =
 	| {
 			readonly kind: 'decided';
@@ -218,15 +218,15 @@ async function* negotiateJustInTime<
 }
 
 /**
- * Negotiates paths in small groups as upload workers become free, and runs
- * `run` for each path with no more than `concurrency` runs in progress.
- *
- * Negotiation starts each upload's expiry. Negotiating a group only when an
- * upload worker asks for work keeps at most one negotiate request in flight and
- * at most one negotiated group waiting for upload workers, so no upload waits
- * behind a long queue of earlier uploads. A failed negotiation refuses the
- * paths of its group and later groups continue.
- */
+Negotiates paths in small groups as upload workers become free, and runs
+`run` for each path with no more than `concurrency` runs in progress.
+
+Negotiation starts each upload's expiry. Negotiating a group only when an
+upload worker asks for work keeps at most one negotiate request in flight and
+at most one negotiated group waiting for upload workers, so no upload waits
+behind a long queue of earlier uploads. A failed negotiation refuses the
+paths of its group and later groups continue.
+*/
 export async function publishJustInTime<
 	Path,
 	Fields extends UploadNegotiationIdentity,

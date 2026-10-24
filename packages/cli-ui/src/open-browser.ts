@@ -15,10 +15,10 @@ export interface BrowserMessages {
 }
 
 /**
- * Prints the URL and starts the platform opener. The function returns without
- * waiting, then reports a warning if the process cannot start or exits
- * unsuccessfully.
- */
+Prints the URL and starts the platform opener. The function returns without
+waiting, then reports a warning if the process cannot start or exits
+unsuccessfully.
+*/
 export function openBrowser(target: string, messages: BrowserMessages): void {
 	messages.info(`Opening your browser to:\n${target}`);
 

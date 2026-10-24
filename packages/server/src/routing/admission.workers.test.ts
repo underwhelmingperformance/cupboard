@@ -66,7 +66,6 @@ const cacheCredential: TenantReadCredential = tenantReadCredentialSchema.parse({
 });
 
 async function admitWithFaults(
-	slug: string,
 	failures: number
 ): Promise<TenantEntry | undefined> {
 	const ctx = createExecutionContext();
@@ -74,7 +73,7 @@ async function admitWithFaults(
 		...env,
 		CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, { failures })
 	};
-	const entry = await admitTenant(faultyEnv, ctx, tenantIdSchema.parse(slug));
+	const entry = await admitTenant(faultyEnv, ctx, tenantIdSchema.parse('acme'));
 	await waitOnExecutionContext(ctx);
 
 	return entry?.entry;
@@ -304,7 +303,7 @@ describe('layered admission gate', () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 
-		expect(await admitWithFaults('acme', 1)).toStrictEqual({
+		expect(await admitWithFaults(1)).toStrictEqual({
 			status: 'active'
 		});
 	});
@@ -316,7 +315,7 @@ describe('layered admission gate', () => {
 		let caught: unknown;
 
 		try {
-			await admitWithFaults('acme', Number.MAX_SAFE_INTEGER);
+			await admitWithFaults(Number.MAX_SAFE_INTEGER);
 		} catch (error) {
 			caught = error;
 		}
@@ -647,7 +646,6 @@ interface CacheAdmission {
 }
 
 async function admitCache(
-	slug: string,
 	cache: CacheScope = defaultCache()
 ): Promise<CacheAdmission> {
 	const batches: number[] = [];
@@ -659,7 +657,7 @@ async function admitCache(
 	const admission = await admitTenant(
 		countedEnv,
 		ctx,
-		tenantIdSchema.parse(slug),
+		tenantIdSchema.parse('acme'),
 		cache
 	);
 	await waitOnExecutionContext(ctx);
@@ -701,7 +699,7 @@ describe('cache admission', () => {
 		);
 		await refreshTenantMembership(env);
 
-		expect(await admitCache('acme', builds)).toStrictEqual({
+		expect(await admitCache(builds)).toStrictEqual({
 			entry: { status: 'active' },
 			cacheUser: 'reader',
 			cacheAcceptsPassword: true,
@@ -714,7 +712,7 @@ describe('cache admission', () => {
 		await ensureTenant(database(), createBody('acme', 'public'), now);
 		await refreshTenantMembership(env);
 
-		expect(await admitCache('acme', builds)).toStrictEqual({
+		expect(await admitCache(builds)).toStrictEqual({
 			entry: { status: 'active' },
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
@@ -734,7 +732,7 @@ describe('cache admission', () => {
 		);
 		await refreshTenantMembership(env);
 
-		expect(await admitCache('acme', builds)).toStrictEqual({
+		expect(await admitCache(builds)).toStrictEqual({
 			entry: { status: 'active' },
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
@@ -754,7 +752,7 @@ describe('cache admission', () => {
 		);
 		await refreshTenantMembership(env);
 
-		expect(await admitCache('acme')).toStrictEqual({
+		expect(await admitCache()).toStrictEqual({
 			entry: { status: 'active' },
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
@@ -787,7 +785,7 @@ describe('cache admission', () => {
 
 		// A deletion keeps the cache credential, so the reader still authenticates.
 		// The deleted cache state causes the content request to fail.
-		expect(await admitCache('acme', builds)).toStrictEqual({
+		expect(await admitCache(builds)).toStrictEqual({
 			entry: { status: 'active' },
 			cacheUser: 'reader',
 			cacheAcceptsPassword: true,
@@ -812,7 +810,7 @@ describe('cache admission', () => {
 			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('acme')))
 			.run();
 
-		expect(await admitCache('acme', builds)).toStrictEqual({
+		expect(await admitCache(builds)).toStrictEqual({
 			entry: undefined,
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,

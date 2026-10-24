@@ -82,15 +82,15 @@ const backfillBatchSize = 32;
 const subrequestsPerBackfillEntry = 5;
 
 /**
- * How many entries of a continuation one backfill pass publishes.
- *
- * The alarm runs one D1-issuing maintenance pass per invocation, so the pass may
- * spend the whole per-invocation allowance on publication. A pass that reaches
- * this many entries settles them, keeps the rest in the continuation, and wakes
- * the alarm for another pass.
- *
- * This value is a page limit. Each entry uses the five D1 and R2 calls in the calculation above.
- */
+How many entries of a continuation one backfill pass publishes.
+
+The alarm runs one D1-issuing maintenance pass per invocation, so the pass may
+spend the whole per-invocation allowance on publication. A pass that reaches
+this many entries settles them, keeps the rest in the continuation, and wakes
+the alarm for another pass.
+
+This value is a page limit. Each entry uses the five D1 and R2 calls in the calculation above.
+*/
 export function backfillEntriesPerPass(subrequestAllowance: number): number {
 	return Math.floor(
 		maintenancePassSubrequests(subrequestAllowance, 'continuation') /
@@ -633,10 +633,10 @@ export class SigningKeysService {
 	}
 
 	/**
-	 * Records the entries this pass published and removes them from the
-	 * continuation. The continuation row survives while `remaining` holds the
-	 * entries a later pass still has to publish.
-	 */
+	Records the entries this pass published and removes them from the
+	continuation. The continuation row survives while `remaining` holds the
+	entries a later pass still has to publish.
+	*/
 	private settleContinuation(
 		continuation: typeof schema.cachePurgeContinuations.$inferSelect,
 		entries: readonly PurgeEntry[],
@@ -717,16 +717,16 @@ export class SigningKeysService {
 	}
 
 	/**
-	 * Publishes as many entries of the oldest backfill continuation as one
-	 * invocation's subrequest allowance covers, purges their cache tags, and records them.
-	 *
-	 * Reports `partial` when entries remain, so the caller wakes the alarm for
-	 * another pass rather than staging more work on top of them.
-	 *
-	 * If publication or cache-tag purging fails, the pass removes none of the
-	 * selected entries from the continuation. A later pass retries the same
-	 * leading page and may publish the same objects again.
-	 */
+	Publishes as many entries of the oldest backfill continuation as one
+	invocation's subrequest allowance covers, purges their cache tags, and records them.
+
+	Reports `partial` when entries remain, so the caller wakes the alarm for
+	another pass rather than staging more work on top of them.
+
+	If publication or cache-tag purging fails, the pass removes none of the
+	selected entries from the continuation. A later pass retries the same
+	leading page and may publish the same objects again.
+	*/
 	private async processContinuation(): Promise<
 		'none' | 'settled' | 'partial' | 'retrying'
 	> {
@@ -1095,12 +1095,12 @@ export class SigningKeysService {
 	}
 
 	/**
-	 * Whether a re-signing backfill or one of its queued cache-tag purges
-	 * remains outstanding.
-	 *
-	 * The alarm calls this before running the backfill. Both queries use the
-	 * Durable Object's local SQLite database.
-	 */
+	Whether a re-signing backfill or one of its queued cache-tag purges
+	remains outstanding.
+
+	The alarm calls this before running the backfill. Both queries use the
+	Durable Object's local SQLite database.
+	*/
 	hasBackfillWork(): boolean {
 		const continuation = this.context.db
 			.select({ id: schema.cachePurgeContinuations.id })

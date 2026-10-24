@@ -107,11 +107,11 @@ const commandLoggerState: { logger?: Logger } = {};
 const errorContexts = new WeakMap<Command, HumanErrorOptions>();
 
 /**
- * The logger for the running command: the application root logger tagged with
- * the invoked subcommand's name, so every record it emits carries `command`.
- * Handlers call this to obtain a logger without threading one through their
- * signatures. Before the first command begins, it returns {@link rootLogger}.
- */
+The logger for the running command: the application root logger tagged with
+the invoked subcommand's name, so every record it emits carries `command`.
+Handlers call this to obtain a logger without threading one through their
+signatures. Before the first command begins, it returns {@link rootLogger}.
+*/
 export function commandLogger(): Logger {
 	return commandLoggerState.logger ?? rootLogger();
 }
@@ -250,12 +250,12 @@ function resultFileFromGlobals(program: Command): string | undefined {
 }
 
 /**
- * The {@link CliUi} for a command: the output mode comes from `--output-mode`
- * and the environment, the colour from `--colour`/`--no-colour`, connected to
- * the program's abort signal so an interrupted command renders its active spinner,
- * bar or task as cancelled. `assumeYes` passes a command's `--yes` flag to
- * confirmations.
- */
+The {@link CliUi} for a command: the output mode comes from `--output-mode`
+and the environment, the colour from `--colour`/`--no-colour`, connected to
+the program's abort signal so an interrupted command renders its active spinner,
+bar or task as cancelled. `assumeYes` passes a command's `--yes` flag to
+confirmations.
+*/
 export function commandUi(
 	program: Command,
 	options: ProgramOptions,
@@ -273,9 +273,9 @@ export function commandUi(
 }
 
 /**
- * The reporter mode for a top-level failure. The `--output-mode` flag wins when
- * it parsed; a failure before parsing finished falls back to the environment.
- */
+The reporter mode for a top-level failure. The `--output-mode` flag wins when
+it parsed; a failure before parsing finished falls back to the environment.
+*/
 export function failureReporterMode(program: Command): ReporterMode {
 	try {
 		return reporterModeFromGlobals(program);
@@ -285,9 +285,9 @@ export function failureReporterMode(program: Command): ReporterMode {
 }
 
 /**
- * The colour preference for a top-level failure, or undefined when the flag did
- * not parse, so the reporter falls back to picocolors' own detection.
- */
+The colour preference for a top-level failure, or undefined when the flag did
+not parse, so the reporter falls back to picocolors' own detection.
+*/
 export function failureColour(program: Command): boolean | undefined {
 	try {
 		return colourFromGlobals(program);
@@ -297,11 +297,11 @@ export function failureColour(program: Command): boolean | undefined {
 }
 
 /**
- * Returns the process exit status for a thrown value: `abortExitCode` for a
- * cancellation, 0 for `--help` and `--version`, 2 for any other Commander error
- * or a `ConfirmationRequiredError`, and otherwise the exit status from
- * {@link errorExitCode}.
- */
+Returns the process exit status for a thrown value: `abortExitCode` for a
+cancellation, 0 for `--help` and `--version`, 2 for any other Commander error
+or a `ConfirmationRequiredError`, and otherwise the exit status from
+{@link errorExitCode}.
+*/
 export function cliExitCode(error: unknown, abortExitCode: number): number {
 	if (isAbortError(error)) {
 		return abortExitCode;
@@ -323,11 +323,11 @@ export function cliExitCode(error: unknown, abortExitCode: number): number {
 }
 
 /**
- * Reports a top-level failure through the reporter: one `{event:'error'}` in JSON
- * mode, one red marker line in terminal mode. An abort (Ctrl-C) is a
- * cancellation, not a failure, so no error event is emitted and only the exit
- * code reports it.
- */
+Reports a top-level failure through the reporter: one `{event:'error'}` in JSON
+mode, one red marker line in terminal mode. An abort (Ctrl-C) is a
+cancellation, not a failure, so no error event is emitted and only the exit
+code reports it.
+*/
 export function reportCliFailure(reporter: Reporter, error: unknown): void {
 	// Commander has already rendered successful informational output or help.
 	// A bare invocation reports help with exit 1, so its code must be recognised

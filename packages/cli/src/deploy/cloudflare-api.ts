@@ -41,18 +41,18 @@ export interface AccountSummary {
 }
 
 /**
- * An account product subscription. Read `rate_plan.id` as a string because
- * the SDK's zone-plan union does not cover account product subscriptions.
- */
+An account product subscription. Read `rate_plan.id` as a string because
+the SDK's zone-plan union does not cover account product subscriptions.
+*/
 export interface AccountSubscription {
 	readonly state: string | undefined;
 	readonly ratePlanId: string | undefined;
 }
 
 /**
- * The result of subscription lookup. An empty list and a failed lookup must
- * remain distinct so deployment can explain why it selected an allowance.
- */
+The result of subscription lookup. An empty list and a failed lookup must
+remain distinct so deployment can explain why it selected an allowance.
+*/
 export type AccountSubscriptions =
 	| {
 			readonly kind: 'listed';
@@ -92,11 +92,11 @@ export interface WorkerSecret {
 }
 
 /**
- * A D1 binding in a script's live settings. The database id can be in
- * `database_id`, in `id`, or in both. When both fields are present, the schema
- * uses `database_id`. The parsed binding has the id in `database_id` only, so
- * it compares equal to the binding that an upload sends.
- */
+A D1 binding in a script's live settings. The database id can be in
+`database_id`, in `id`, or in both. When both fields are present, the schema
+uses `database_id`. The parsed binding has the id in `database_id` only, so
+it compares equal to the binding that an upload sends.
+*/
 export const liveD1BindingSchema = z.union([
 	z
 		.looseObject({
@@ -171,42 +171,42 @@ export interface WorkerLogEvent {
 }
 
 /**
- * The Cloudflare operations the deploy pipeline performs, as a narrow interface
- * over the official SDK. Resource-creation methods return the live id and are
- * safe to call when the resource already exists.
- */
+The Cloudflare operations the deploy pipeline performs, as a narrow interface
+over the official SDK. Resource-creation methods return the live id and are
+safe to call when the resource already exists.
+*/
 export interface CloudflareApi {
 	listAccounts(): Promise<AccountSummary[]>;
 
 	/**
-	 * Lists account subscriptions for plan detection. Lookup failures produce a
-	 * typed result; request cancellation propagates. Pass the run's signal so
-	 * the SDK can distinguish cancellation from other request failures.
-	 */
+	Lists account subscriptions for plan detection. Lookup failures produce a
+	typed result; request cancellation propagates. Pass the run's signal so
+	the SDK can distinguish cancellation from other request failures.
+	*/
 	listAccountSubscriptions(signal?: AbortSignal): Promise<AccountSubscriptions>;
 
 	r2BucketExists(name: string): Promise<boolean>;
 	ensureR2Bucket(name: string): Promise<void>;
 	/**
-	 * Configures the one-day legacy staging rule and publication staging's
-	 * seven-day expiry and 48-hour multipart abort. Refuses overlapping rules
-	 * that reclaim publication staging earlier. The bucket must already exist.
-	 */
+	Configures the one-day legacy staging rule and publication staging's
+	seven-day expiry and 48-hour multipart abort. Refuses overlapping rules
+	that reclaim publication staging earlier. The bucket must already exist.
+	*/
 	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
 	findD1Database(name: string): Promise<DatabaseId | undefined>;
 	/**
-	 * `undefined` when Cloudflare reports no database with this id.
-	 */
+	`undefined` when Cloudflare reports no database with this id.
+	*/
 	findD1DatabaseName(databaseId: DatabaseId): Promise<string | undefined>;
 	ensureD1Database(name: string): Promise<DatabaseId>;
 	ensureKvNamespace(title: string): Promise<KvNamespaceId>;
 	ensureQueue(name: string): Promise<QueueId>;
 	/**
-	 * The dead-letter queue of the script's consumer on the queue `queueName`,
-	 * or `undefined` when the queue does not exist, the script has no consumer
-	 * on it, or the consumer has no dead-letter queue. Cloudflare reports a
-	 * missing dead-letter queue as an empty name.
-	 */
+	The dead-letter queue of the script's consumer on the queue `queueName`,
+	or `undefined` when the queue does not exist, the script has no consumer
+	on it, or the consumer has no dead-letter queue. Cloudflare reports a
+	missing dead-letter queue as an empty name.
+	*/
 	findConsumerDeadLetterQueue(
 		queueName: string,
 		scriptName: ScriptName
@@ -217,15 +217,15 @@ export interface CloudflareApi {
 		statements: readonly D1Statement[]
 	): Promise<void>;
 	/**
-	 * Runs one read query and returns the first column of each row. A row whose
-	 * first column is not a string is left out.
-	 */
+	Runs one read query and returns the first column of each row. A row whose
+	first column is not a string is left out.
+	*/
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
 
 	/**
-	 * The live bindings and cache settings needed for deployment convergence.
-	 * Returns `undefined` when the script is not deployed.
-	 */
+	The live bindings and cache settings needed for deployment convergence.
+	Returns `undefined` when the script is not deployed.
+	*/
 	getScriptConfiguration(
 		scriptName: ScriptName
 	): Promise<ScriptConfiguration | undefined>;
@@ -236,9 +236,9 @@ export interface CloudflareApi {
 	): Promise<void>;
 
 	/**
-	 * The traffic split of the script's newest deployment. Empty when the script
-	 * has never been deployed.
-	 */
+	The traffic split of the script's newest deployment. Empty when the script
+	has never been deployed.
+	*/
 	listDeployedVersions(scriptName: ScriptName): Promise<DeployedVersion[]>;
 
 	ensureQueueConsumer(
@@ -247,9 +247,9 @@ export interface CloudflareApi {
 		settings: QueueConsumerSettings
 	): Promise<void>;
 	/**
-	 * The script's cron triggers, in the order that Cloudflare reports them.
-	 * Empty when the script is not deployed.
-	 */
+	The script's cron triggers, in the order that Cloudflare reports them.
+	Empty when the script is not deployed.
+	*/
 	listSchedules(scriptName: ScriptName): Promise<string[]>;
 	ensureSchedules(
 		scriptName: ScriptName,
@@ -265,8 +265,8 @@ export interface CloudflareApi {
 	findZoneId(name: string): Promise<ZoneId | undefined>;
 	findCustomDomain(scriptName: ScriptName): Promise<string | undefined>;
 	/**
-	 * The hostnames of every custom domain routed to the script.
-	 */
+	The hostnames of every custom domain routed to the script.
+	*/
 	listCustomDomains(scriptName: ScriptName): Promise<string[]>;
 	setCustomDomain(
 		scriptName: ScriptName,
@@ -288,10 +288,10 @@ export interface CloudflareApi {
 	): Promise<void>;
 
 	/**
-	 * Recent Workers Observability log events matching a full-text needle in a
-	 * time window. Returns an empty array when observability is off or no event
-	 * matches yet, since ingestion lags the request by a few seconds.
-	 */
+	Recent Workers Observability log events matching a full-text needle in a
+	time window. Returns an empty array when observability is off or no event
+	matches yet, since ingestion lags the request by a few seconds.
+	*/
 	queryWorkerLogs(query: WorkerLogQuery): Promise<readonly WorkerLogEvent[]>;
 }
 
@@ -350,12 +350,12 @@ async function filterCloudflareItems<T>(
 const lifecyclePrefixSchema = z.string().default('');
 
 /**
- * A queue consumer as the live API returns it. The published schema (and the
- * SDK's types) say the Worker is identified by `script_name`. The live
- * endpoint returns `script`, or `service` for service bindings. Wrangler also
- * matches these live fields. The schema accepts all three field names and does
- * not depend on the SDK's response types.
- */
+A queue consumer as the live API returns it. The published schema (and the
+SDK's types) say the Worker is identified by `script_name`. The live
+endpoint returns `script`, or `service` for service bindings. Wrangler also
+matches these live fields. The schema accepts all three field names and does
+not depend on the SDK's response types.
+*/
 const liveConsumerSchema = z.object({
 	type: z.string().optional(),
 	consumer_id: z.string().optional(),
@@ -390,9 +390,9 @@ const liveDeploymentSchema = z.object({
 });
 
 /**
- * Whether Cloudflare rejected the request with an authentication or
- * authorisation error.
- */
+Whether Cloudflare rejected the request with an authentication or
+authorisation error.
+*/
 function isTokenRefusal(error: unknown): boolean {
 	return (
 		error instanceof Cloudflare.APIError &&
@@ -406,9 +406,9 @@ const defaultQueueBatchWaitMilliseconds = 5000;
 const defaultQueueRetries = 3;
 
 /**
- * Whether a live queue consumer uses the configured values, or Cloudflare's
- * documented defaults for settings the deployment omits.
- */
+Whether a live queue consumer uses the configured values, or Cloudflare's
+documented defaults for settings the deployment omits.
+*/
 function isConsumerSettled(
 	existing: {
 		readonly settings?: {
@@ -445,12 +445,12 @@ const stagingReclaimRuleId = 'cupboard-staging-reclaim';
 const oneDayInSeconds = 24 * 60 * 60;
 
 /**
- * The lifecycle rule reclaiming a push's transient staging objects: it expires
- * anything under `staging/` a day after it is written, and aborts incomplete
- * multipart uploads there a day after they begin. An abandoned incomplete
- * multipart upload is not a listable object, so this rule is the only thing
- * that can recover its storage.
- */
+The lifecycle rule reclaiming a push's transient staging objects: it expires
+anything under `staging/` a day after it is written, and aborts incomplete
+multipart uploads there a day after they begin. An abandoned incomplete
+multipart upload is not a listable object, so this rule is the only thing
+that can recover its storage.
+*/
 function stagingReclaimRule(): LifecycleUpdateParams.Rule {
 	return {
 		id: stagingReclaimRuleId,
@@ -493,9 +493,9 @@ function managedLifecycleFields(rule: ManagedLifecycleFields): {
 }
 
 /**
- * A D1 query response has no `results`. The caller cannot tell it from a query
- * that found no rows, so the read fails.
- */
+A D1 query response has no `results`. The caller cannot tell it from a query
+that found no rows, so the read fails.
+*/
 export class D1QueryResultsMissingError extends CliError {
 	constructor() {
 		super('The D1 query response did not include its results.');
@@ -504,10 +504,10 @@ export class D1QueryResultsMissingError extends CliError {
 }
 
 /**
- * The real {@link CloudflareApi}, backed by the official SDK. Resource creators
- * look the resource up by name first and create it only when absent, so a
- * re-run converges; existing resources are updated in place.
- */
+The real {@link CloudflareApi}, backed by the official SDK. Resource creators
+look the resource up by name first and create it only when absent, so a
+re-run converges; existing resources are updated in place.
+*/
 export function createCloudflareApi(
 	client: Cloudflare,
 	accountId: CloudflareAccountId

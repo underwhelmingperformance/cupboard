@@ -56,12 +56,12 @@ function renderFields(
 }
 
 /**
- * Renders LogTape records through Clack to `output`, stderr by default, so they
- * stay apart from the command's data on stdout. Record properties form a dimmed,
- * single-line suffix; an Error property uses its name and message. Warning and
- * error levels retain their distinct Clack channels, while trace and debug use
- * the neutral message channel.
- */
+Renders LogTape records through Clack to `output`, stderr by default, so they
+stay apart from the command's data on stdout. Record properties form a dimmed,
+single-line suffix; an Error property uses its name and message. Warning and
+error levels retain their distinct Clack channels, while trace and debug use
+the neutral message channel.
+*/
 export function clackSink(colours: Colours, output: Writable = stderr): Sink {
 	return (record) => {
 		const line = `${messageOf(record)}${renderFields(record.properties, colours)}`;

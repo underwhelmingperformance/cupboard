@@ -65,8 +65,8 @@ export function shellQuote(value: string): string {
 }
 
 /**
- * Resolves the configured hook in the process that will execute remote builds.
- */
+Resolves the configured hook in the process that will execute remote builds.
+*/
 export async function probeBuildHook(options: {
 	readonly directory: string;
 	readonly command: string;

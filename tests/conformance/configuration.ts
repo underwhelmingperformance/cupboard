@@ -18,13 +18,13 @@ import { isolatedEnvironment } from '../support/nix.ts';
 import type { Oracle } from './oracle.ts';
 
 /**
- * `nix config show` reports each effective setting, which allows comparison
- * with `discoverNixStoreConfig`.
- * Reading the settings requires the `nix-command` feature. The isolated
- * configuration does not enable that feature, so the invocation enables it
- * explicitly. This changes `experimental-features` only for the oracle, and no
- * adapter below reads that setting.
- */
+`nix config show` reports each effective setting, which allows comparison
+with `discoverNixStoreConfig`.
+Reading the settings requires the `nix-command` feature. The isolated
+configuration does not enable that feature, so the invocation enables it
+explicitly. This changes `experimental-features` only for the oracle, and no
+adapter below reads that setting.
+*/
 const configShowArguments = [
 	'--extra-experimental-features',
 	'nix-command',
@@ -152,10 +152,10 @@ type FieldValue = string | number | boolean | readonly string[] | undefined;
 export type FieldValues = Readonly<Record<string, FieldValue>>;
 
 /**
- * One resolved field and its corresponding Nix settings. The oracle uses Nix's
- * native data shapes and units. When a direct mapping is not possible,
- * `fromOracle` converts those values to the domain field.
- */
+One resolved field and its corresponding Nix settings. The oracle uses Nix's
+native data shapes and units. When a direct mapping is not possible,
+`fromOracle` converts those values to the domain field.
+*/
 interface FieldAdapter {
 	readonly field: string;
 	readonly settings: readonly string[];
@@ -284,15 +284,15 @@ export const mappedSettings: readonly string[] = sorted([
 ]);
 
 /**
- * Settings relevant to the four configuration groups: substitution, builds,
- * file transfers, and signatures. The list also includes `store`, which
- * selects the backend. The suite reports each listed setting that has no field
- * adapter.
- *
- * The list is written out rather than derived, because `nix config show`
- * does not classify settings by purpose. When Nix adds a relevant setting, the
- * oracle update must add it to this list.
- */
+Settings relevant to the four configuration groups: substitution, builds,
+file transfers, and signatures. The list also includes `store`, which
+selects the backend. The suite reports each listed setting that has no field
+adapter.
+
+The list is written out rather than derived, because `nix config show`
+does not classify settings by purpose. When Nix adds a relevant setting, the
+oracle update must add it to this list.
+*/
 export const settingsInScope: readonly string[] = sorted([
 	// Whether and from where Nix substitutes.
 	'always-allow-substitutes',
@@ -340,13 +340,13 @@ export const settingsInScope: readonly string[] = sorted([
 ]);
 
 /**
- * Settings represented by `NixFileTransferSettings` but absent from the pinned
- * oracle. Nix renamed its retry settings after this oracle version, while the
- * domain fields use the newer names. The pinned Nix can therefore confirm
- * neither their defaults nor their parsing rules. The suite verifies that the
- * settings remain absent. A later oracle that includes them will fail until
- * the adapter is updated.
- */
+Settings represented by `NixFileTransferSettings` but absent from the pinned
+oracle. Nix renamed its retry settings after this oracle version, while the
+domain fields use the newer names. The pinned Nix can therefore confirm
+neither their defaults nor their parsing rules. The suite verifies that the
+settings remain absent. A later oracle that includes them will fail until
+the adapter is updated.
+*/
 export const settingsAbsentFromTheOracle: readonly string[] = [
 	'filetransfer-retry-delay',
 	'filetransfer-retry-delay-rate-limited',
@@ -380,14 +380,14 @@ export class BuildersTooDeeplyNestedError extends Error {
 }
 
 /**
- * Expands a `builders` setting by replacing every `@file` entry with that
- * file's builders.
- *
- * `nix config show` reports the setting as written, but Nix follows each file
- * reference when it dispatches a build. The comparison therefore expands the
- * same references. A `#` starts a comment, semicolons separate entries, and an
- * empty file produces an empty builder list.
- */
+Expands a `builders` setting by replacing every `@file` entry with that
+file's builders.
+
+`nix config show` reports the setting as written, but Nix follows each file
+reference when it dispatches a build. The comparison therefore expands the
+same references. A `#` starts a comment, semicolons separate entries, and an
+empty file produces an empty builder list.
+*/
 function expandedBuilders(setting: string): string | undefined {
 	const entries = builderEntries(setting, 0);
 
@@ -434,10 +434,10 @@ export interface ConfigurationFixture {
 	readonly machines?: string;
 	readonly inlineConfig?: string;
 	/**
-	 * A configuration directory below the fixture home, selected through
-	 * `NIX_CONF_DIR`. The isolated environment's default directory keeps
-	 * its empty `nix.conf`, so a side reading the wrong one resolves differently.
-	 */
+	A configuration directory below the fixture home, selected through
+	`NIX_CONF_DIR`. The isolated environment's default directory keeps
+	its empty `nix.conf`, so a side reading the wrong one resolves differently.
+	*/
 	readonly configDirectory?: string;
 }
 
@@ -453,10 +453,10 @@ export interface ResolvedFixture {
 	readonly clientAccepted: boolean;
 	readonly clientError: unknown;
 	/**
-	 * Both sides' fields, absent when either rejected the configuration. They
-	 * are read while the fixture is still on disk, since a `builders` setting
-	 * referencing a machines file can be resolved only while that file exists.
-	 */
+	Both sides' fields, absent when either rejected the configuration. They
+	are read while the fixture is still on disk, since a `builders` setting
+	referencing a machines file can be resolved only while that file exists.
+	*/
 	readonly fields: FieldComparison | undefined;
 }
 

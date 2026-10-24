@@ -87,13 +87,13 @@ const revokedEdgeSweepSubrequestsPerPass = 1;
 const stagingCleanupSubrequestsPerPass = 1;
 
 /**
- * The most paths one pass reads from the teardown queue.
- *
- * This caps the rows read. The drain can retire the entire page when its paths
- * have no attestation references. Otherwise the remaining subrequests can
- * stop it earlier. The calculation reserves calls for the revoked-edge
- * sweep and, when staging work exists, at least one staging deletion.
- */
+The most paths one pass reads from the teardown queue.
+
+This caps the rows read. The drain can retire the entire page when its paths
+have no attestation references. Otherwise the remaining subrequests can
+stop it earlier. The calculation reserves calls for the revoked-edge
+sweep and, when staging work exists, at least one staging deletion.
+*/
 export function maxPathsTornDownPerRun(
 	subrequestAllowance: number,
 	hasStagingCleanup = false
@@ -1347,23 +1347,23 @@ export class CacheAdminService {
 	}
 
 	/**
-	 * Revokes a cache's read authority, then removes its local state. Bounded
-	 * alarm passes run by {@link resumeTeardownPass} remove staging objects and
-	 * retire published state.
-	 *
-	 * Revocation advances the generation, records deletion and clears the cache
-	 * credential in one D1 transaction. Reads then exclude earlier generations
-	 * while cleanup continues.
-	 *
-	 * The normal path runs two D1 statements in one batch, independently of the
-	 * number of committed paths. A missing lifecycle row needs an additional
-	 * lookup and insert batch. The teardown marker also starts the sweep for
-	 * edges left by an interrupted earlier deletion.
-	 *
-	 * The deletion queue is durable, so garbage collection can resume it after a
-	 * crash before the alarm marker is written. The blob reaper later collects
-	 * unreferenced canonical objects.
-	 */
+	Revokes a cache's read authority, then removes its local state. Bounded
+	alarm passes run by {@link resumeTeardownPass} remove staging objects and
+	retire published state.
+
+	Revocation advances the generation, records deletion and clears the cache
+	credential in one D1 transaction. Reads then exclude earlier generations
+	while cleanup continues.
+
+	The normal path runs two D1 statements in one batch, independently of the
+	number of committed paths. A missing lifecycle row needs an additional
+	lookup and insert batch. The teardown marker also starts the sweep for
+	edges left by an interrupted earlier deletion.
+
+	The deletion queue is durable, so garbage collection can resume it after a
+	crash before the alarm marker is written. The blob reaper later collects
+	unreferenced canonical objects.
+	*/
 	tearDownCache(cache: ResolvedCache, origin: RequestOrigin): Promise<void> {
 		return this.context.criticalSection(() =>
 			this.tearDownCacheInSection(cache, origin)

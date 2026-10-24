@@ -10,19 +10,15 @@ const libraryPath = storePathSchema.parse(
 	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
 );
 
-function copyLine(
-	storePath: string,
-	source: string,
-	destination = 'local'
-): string {
+function copyLine(storePath: string, source: string): string {
 	return JSON.stringify({
 		action: 'start',
 		id: 2,
 		level: 3,
 		parent: 0,
-		text: `copying path '${storePath}' from '${source}' to '${destination}'`,
+		text: `copying path '${storePath}' from '${source}' to 'local'`,
 		type: 100,
-		fields: [storePath, source, destination]
+		fields: [storePath, source, 'local']
 	});
 }
 

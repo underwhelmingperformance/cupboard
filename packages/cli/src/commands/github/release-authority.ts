@@ -185,12 +185,10 @@ function releaseAuthority(
 				return [grant];
 			}
 			uncertainRuleIds.push(rule.id);
-			return [
-				{
-					...grant,
-					actions: grant.actions.filter((action) => !isRootOperation(action))
-				}
-			];
+			return {
+				...grant,
+				actions: grant.actions.filter((action) => !isRootOperation(action))
+			};
 		})
 	}));
 	return { rules: proven, uncertainRuleIds };
@@ -215,7 +213,7 @@ export function checkPublicationTrust(options: {
 		options.resources
 	);
 	const uncertain = authority.uncertainRuleIds?.[0];
-	return uncertain !== undefined && trust.status !== 'ok'
-		? new ReleaseTagCoverageFinding(uncertain)
-		: trust;
+	return uncertain === undefined || trust.status === 'ok'
+		? trust
+		: new ReleaseTagCoverageFinding(uncertain);
 }

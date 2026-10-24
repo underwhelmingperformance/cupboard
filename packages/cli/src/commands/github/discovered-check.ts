@@ -88,15 +88,15 @@ import { verifyWorkflowReference } from './workflow-reference.ts';
 export interface DiscoveredGithubCheckOptions {
 	readonly repo: string;
 	/**
-	 * Defaults to the repository's default branch.
-	 */
+	Defaults to the repository's default branch.
+	*/
 	readonly branch?: string;
 	readonly readUser?: string;
 	readonly isFixRequested?: boolean;
 	/**
-	 * Reports the result as `github-check-verified`, without the repair
-	 * suggestion or candidate rules, for the check that follows a repair.
-	 */
+	Reports the result as `github-check-verified`, without the repair
+	suggestion or candidate rules, for the check that follows a repair.
+	*/
 	readonly isVerification?: boolean;
 }
 
@@ -125,10 +125,10 @@ export interface DiscoveredGithubCheckResult {
 	readonly branch: string;
 	readonly jobs: readonly PublishingJobResult[];
 	/**
-	 * The discovered jobs in which a repair can fix every failure: a missing
-	 * trust rule, a matching rule without a required grant, or a missing
-	 * preset reuse view.
-	 */
+	The discovered jobs in which a repair can fix every failure: a missing
+	trust rule, a matching rule without a required grant, or a missing
+	preset reuse view.
+	*/
 	readonly repairableJobs: readonly DiscoveredPublishingJob[];
 	readonly verifiedWorkflowReferences: ReadonlySet<string>;
 	readonly scheduleNote?: string;
@@ -163,10 +163,10 @@ export class PublishingJobMissingFinding extends CheckFinding {
 }
 
 /**
- * A job without a preset or claim-bound PR templates publishes its pull-request
- * runs to the cache and root of its branch runs. The check reports this case for manual review
- * whether or not a trust rule for those runs exists.
- */
+A job without a preset or claim-bound PR templates publishes its pull-request
+runs to the cache and root of its branch runs. The check reports this case for manual review
+whether or not a trust rule for those runs exists.
+*/
 export class SharedPullRequestCacheFinding extends CheckFinding {
 	readonly status = 'unverified' as const;
 
@@ -275,7 +275,7 @@ function findingDetails(findings: readonly PublishingJobFinding[]): string[] {
 			return [];
 		}
 
-		return [trigger === undefined ? detail : `${trigger}: ${detail}`];
+		return trigger === undefined ? detail : `${trigger}: ${detail}`;
 	});
 }
 
@@ -290,10 +290,10 @@ function isPlaceholder(job: PublishingJobResult): boolean {
 }
 
 /**
- * Whether a GitHub trust rule can match a run of this repository whose token
- * has `workflowReference` as its `job_workflow_ref` claim. When it is
- * `undefined`, the rule's `job_workflow_ref` claim is not compared.
- */
+Whether a GitHub trust rule can match a run of this repository whose token
+has `workflowReference` as its `job_workflow_ref` claim. When it is
+`undefined`, the rule's `job_workflow_ref` claim is not compared.
+*/
 export function canMatchRepositoryRun(
 	rule: Pick<OidcTrustRule, 'issuer' | 'claims'>,
 	identity: RepositoryIdentity,

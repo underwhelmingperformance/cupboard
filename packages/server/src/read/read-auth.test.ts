@@ -21,12 +21,12 @@ function request(authorization?: string): Request {
 	);
 }
 
-async function verifierFor(password: string): Promise<ReadVerifier> {
+async function verifierFor(): Promise<ReadVerifier> {
 	const passwordSalt = readPasswordSaltSchema.parse('test-salt');
 
 	return {
 		user: readUserSchema.parse('alice'),
-		passwordHash: await hashReadPassword(password, passwordSalt),
+		passwordHash: await hashReadPassword('p:a:ss', passwordSalt),
 		passwordSalt
 	};
 }
@@ -92,7 +92,7 @@ describe('isReadAuthorised', () => {
 			expected: false
 		}
 	])('returns $expected for $name', async ({ authorization, expected }) => {
-		const verifier = await verifierFor('p:a:ss');
+		const verifier = await verifierFor();
 
 		expect(await isReadAuthorised(request(authorization), verifier)).toBe(
 			expected
@@ -100,7 +100,7 @@ describe('isReadAuthorised', () => {
 	});
 
 	it('rejects a request with no Authorization header', async () => {
-		const verifier = await verifierFor('p:a:ss');
+		const verifier = await verifierFor();
 
 		expect(await isReadAuthorised(request(), verifier)).toBe(false);
 	});

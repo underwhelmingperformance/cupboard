@@ -65,8 +65,8 @@ interface RecordedRequest {
 }
 
 /**
- * A fetcher that records each revocation request and responds with `respond`.
- */
+A fetcher that records each revocation request and responds with `respond`.
+*/
 function recordingFetcher(
 	respond: () => Promise<Response> = () =>
 		Promise.resolve(new Response(undefined, { status: StatusCodes.OK }))

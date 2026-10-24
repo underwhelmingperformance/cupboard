@@ -23,9 +23,9 @@ export interface RecordingGithubReporter {
 }
 
 /**
- * A GitHub reporter for tests. It records the job log and the job summary in
- * memory, so a test never writes to the runner's real `GITHUB_STEP_SUMMARY`.
- */
+A GitHub reporter for tests. It records the job log and the job summary in
+memory, so a test never writes to the runner's real `GITHUB_STEP_SUMMARY`.
+*/
 export function recordingGithubReporter(): RecordingGithubReporter {
 	const chunks: string[] = [];
 	const summary: JobSummaryAppend[] = [];

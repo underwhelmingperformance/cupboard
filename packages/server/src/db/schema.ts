@@ -651,11 +651,11 @@ export const narInfoDeletions = sqliteTable(
 );
 
 /**
- * Committed paths that have yet to inherit attestations from other caches. The
- * maintenance alarm drains the rows. A row leaves the queue when inheritance
- * ends or its narinfo row no longer has the queued generation. Failed attempts
- * remain queued for a retry.
- */
+Committed paths that have yet to inherit attestations from other caches. The
+maintenance alarm drains the rows. A row leaves the queue when inheritance
+ends or its narinfo row no longer has the queued generation. Failed attempts
+remain queued for a retry.
+*/
 export const attestationInheritances = sqliteTable(
 	'attestation_inheritance',
 	{

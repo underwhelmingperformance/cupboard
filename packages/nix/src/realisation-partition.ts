@@ -18,21 +18,21 @@ import {
 } from './nix-store.ts';
 
 /**
- * Caps concurrent derivation reads so a wide traversal level does not open all
- * derivation NARs at once.
- */
+Caps concurrent derivation reads so a wide traversal level does not open all
+derivation NARs at once.
+*/
 export const defaultDerivationReadConcurrency = 16;
 
 /**
- * Maximum number of derived paths visited by a walk. This bounds traversal of
- * untrusted reference graphs supplied by substituters.
- */
+Maximum number of derived paths visited by a walk. This bounds traversal of
+untrusted reference graphs supplied by substituters.
+*/
 export const defaultRealisationWalkCap = 50_000;
 
 /**
- * The walk reached its path limit before it could claim the next derived path.
- * A partial partition cannot describe all work required by the targets.
- */
+The walk reached its path limit before it could claim the next derived path.
+A partial partition cannot describe all work required by the targets.
+*/
 export class RealisationWalkOverCapError extends NixStoreError {
 	constructor(public readonly maxPaths: number) {
 		super(
@@ -62,10 +62,10 @@ export class UndeclaredOutputError extends NixStoreError {
 }
 
 /**
- * A floating output has no store path before its build. This dry-run walk
- * cannot query its validity or substitution availability, so it rejects the
- * target.
- */
+A floating output has no store path before its build. This dry-run walk
+cannot query its validity or substitution availability, so it rejects the
+target.
+*/
 export class FloatingOutputUnsupportedError extends NixStoreError {
 	constructor(
 		public readonly drvPath: StorePathString,
@@ -87,36 +87,36 @@ export interface RealisationPartitionSource {
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixSubstitutablePathInfo[]>;
 	/**
-	 * When false, missing outputs build without a substituter query.
-	 */
+	When false, missing outputs build without a substituter query.
+	*/
 	readonly substitute: boolean;
 	/**
-	 * Limits the number of derived paths visited by the walk. Defaults to
-	 * {@link defaultRealisationWalkCap}.
-	 */
+	Limits the number of derived paths visited by the walk. Defaults to
+	{@link defaultRealisationWalkCap}.
+	*/
 	readonly maxPaths?: number;
 	/**
-	 * Abandons the walk between levels and rejects with the signal's reason.
-	 */
+	Abandons the walk between levels and rejects with the signal's reason.
+	*/
 	readonly signal?: AbortSignal;
 	/**
-	 * The `always-allow-substitutes` setting, which overrules a derivation's
-	 * own `allowSubstitutes = false`.
-	 */
+	The `always-allow-substitutes` setting, which overrules a derivation's
+	own `allowSubstitutes = false`.
+	*/
 	readonly alwaysAllowSubstitutes: boolean;
 }
 
 /**
- * Computes the work required to realise the targets, following Nix's
- * `queryMissing` rules. Valid paths need no work. Offered paths and their
- * references become substitution work. A derivation builds when any requested
- * missing output cannot be substituted, and the walk then follows its input
- * derivations and sources. Missing derivation files and unoffered opaque paths
- * are unknown.
- *
- * Shared store paths are claimed once, so download and NAR sizes count the work
- * once across all targets. Result paths are sorted by code unit.
- */
+Computes the work required to realise the targets, following Nix's
+`queryMissing` rules. Valid paths need no work. Offered paths and their
+references become substitution work. A derivation builds when any requested
+missing output cannot be substituted, and the walk then follows its input
+derivations and sources. Missing derivation files and unoffered opaque paths
+are unknown.
+
+Shared store paths are claimed once, so download and NAR sizes count the work
+once across all targets. Result paths are sorted by code unit.
+*/
 export async function queryMissingOver(
 	targets: readonly NixDerivedPathString[],
 	source: RealisationPartitionSource
@@ -131,8 +131,8 @@ export async function queryMissingOver(
 interface BuiltTarget {
 	readonly drvPath: StorePathString;
 	/**
-	 * When absent, the walk includes every output declared by the derivation.
-	 */
+	When absent, the walk includes every output declared by the derivation.
+	*/
 	readonly outputNames?: ReadonlySet<string>;
 }
 
@@ -357,10 +357,10 @@ class RealisationWalk {
 	}
 
 	/**
-	 * Walks out from the targets one level at a time. Each level uses batched
-	 * validity and substituter queries, so a wide closure does not issue one
-	 * request per path.
-	 */
+	Walks out from the targets one level at a time. Each level uses batched
+	validity and substituter queries, so a wide closure does not issue one
+	request per path.
+	*/
 	async from(targets: readonly NixDerivedPathString[]): Promise<void> {
 		let frontier = this.claimed(
 			targets.map((target) => parseDerivedPath(target))

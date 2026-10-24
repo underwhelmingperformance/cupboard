@@ -14,9 +14,9 @@ const maximumListingItems = 10_000_000;
 const maximumListingPages = 1_000_000;
 
 /**
- * The item and page limits for collecting an admin API listing. The error for
- * a listing that exceeds a limit starts with `description`.
- */
+The item and page limits for collecting an admin API listing. The error for
+a listing that exceeds a limit starts with `description`.
+*/
 export function listingLimits(
 	description: string
 ): ProgressiveCollectionLimits {
@@ -28,9 +28,9 @@ export function listingLimits(
 }
 
 /**
- * The `caches.list` procedure, with the result narrowed to the fields that the
- * caller reads.
- */
+The `caches.list` procedure, with the result narrowed to the fields that the
+caller reads.
+*/
 export interface CacheLister<Entry> {
 	list(
 		input?: { readonly namePrefix?: string; readonly cursor?: string },
@@ -39,10 +39,10 @@ export interface CacheLister<Entry> {
 }
 
 /**
- * Requests the first page of the tenant's caches, or of the caches whose names
- * start with `namePrefix`. Each page request has the probe deadline and is
- * sent again when the deadline expires.
- */
+Requests the first page of the tenant's caches, or of the caches whose names
+start with `namePrefix`. Each page request has the probe deadline and is
+sent again when the deadline expires.
+*/
 export function cachePages<Entry>(
 	client: CacheLister<Entry>,
 	namePrefix?: string

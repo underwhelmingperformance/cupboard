@@ -49,9 +49,9 @@ const identityColumns = {
 };
 
 /**
- * Reads and writes the `cache_identity` rows that hold each cache's scope,
- * access and surrogate key.
- */
+Reads and writes the `cache_identity` rows that hold each cache's scope,
+access and surrogate key.
+*/
 export class CacheRepository {
 	constructor(private readonly database: SchemaDatabase) {}
 
@@ -65,12 +65,12 @@ export class CacheRepository {
 	}
 
 	/**
-	 * The live cache for this scope, or undefined when the tenant has none.
-	 *
-	 * Deleting a cache leaves its row in place so the rows referring to it still
-	 * resolve. Lookups here skip a deleted row, so a cache name registered again
-	 * gets an identity of its own.
-	 */
+	The live cache for this scope, or undefined when the tenant has none.
+
+	Deleting a cache leaves its row in place so the rows referring to it still
+	resolve. Lookups here skip a deleted row, so a cache name registered again
+	gets an identity of its own.
+	*/
 	resolve(scope: CacheScope): ResolvedCache | undefined {
 		const row = this.database
 			.select(identityColumns)
@@ -101,10 +101,10 @@ export class CacheRepository {
 	}
 
 	/**
-	 * The most recently deleted cache of this scope, or undefined when no cache
-	 * of the scope has been deleted. A teardown that began under the previous
-	 * build is keyed by name and is resumed through this lookup.
-	 */
+	The most recently deleted cache of this scope, or undefined when no cache
+	of the scope has been deleted. A teardown that began under the previous
+	build is keyed by name and is resumed through this lookup.
+	*/
 	lastDeleted(scope: CacheScope): ResolvedCache | undefined {
 		const row = this.database
 			.select(identityColumns)
@@ -212,12 +212,12 @@ export class CacheRepository {
 	}
 
 	/**
-	 * Records on the identity the generation `cache_lifecycle` holds for the
-	 * cache. The row is created at the first generation, so a name registered
-	 * again after a deletion has to take the generation the deletion advanced.
-	 * Continue with the returned cache: the input still carries its earlier
-	 * generation and would address the previous cache's objects.
-	 */
+	Records on the identity the generation `cache_lifecycle` holds for the
+	cache. The row is created at the first generation, so a name registered
+	again after a deletion has to take the generation the deletion advanced.
+	Continue with the returned cache: the input still carries its earlier
+	generation and would address the previous cache's objects.
+	*/
 	stampGeneration(
 		cache: ResolvedCache,
 		generation: CacheGeneration

@@ -44,12 +44,12 @@ export class MigrationApplyError extends CodedError {
 }
 
 /**
- * The deploy sorts the migration files by name. drizzle-kit records its own
- * order in the journal and uses that order when it generates the next
- * migration, so a journal in another order describes a history that differs
- * from the name order. This check fails when the two orders differ, before a
- * deploy runs.
- */
+The deploy sorts the migration files by name. drizzle-kit records its own
+order in the journal and uses that order when it generates the next
+migration, so a journal in another order describes a history that differs
+from the name order. This check fails when the two orders differ, before a
+deploy runs.
+*/
 export class MigrationJournalOrderError extends CodedError {
 	constructor(
 		public readonly files: readonly string[],
@@ -63,11 +63,11 @@ export class MigrationJournalOrderError extends CodedError {
 }
 
 /**
- * The deploy assigns the migration files to the schema transitions in name
- * order, so the transitions must list the files in that order. The deploy
- * refuses an artifact whose files do not match; this check fails before a
- * deploy runs.
- */
+The deploy assigns the migration files to the schema transitions in name
+order, so the transitions must list the files in that order. The deploy
+refuses an artifact whose files do not match; this check fails before a
+deploy runs.
+*/
 export class TransitionSequenceError extends CodedError {
 	constructor(
 		public readonly files: readonly string[],
@@ -81,10 +81,10 @@ export class TransitionSequenceError extends CodedError {
 }
 
 /**
- * A transition's contract migrations run after its expand migrations, so its
- * contract files must sort after every expand file. Otherwise the deploy would
- * apply them out of name order.
- */
+A transition's contract migrations run after its expand migrations, so its
+contract files must sort after every expand file. Otherwise the deploy would
+apply them out of name order.
+*/
 export class ContractOrderError extends CodedError {
 	constructor(
 		public readonly transition: string,
@@ -163,12 +163,12 @@ function statementsOf(set: MigrationSet, file: string): string[] {
 }
 
 /**
- * Replaying the migrations in a deploy order succeeded but produced a different
- * schema from name order. When an independent transition's expand
- * migration runs before an earlier contract migration, it can succeed and
- * still produce a different schema, for example by creating a table or index
- * with `IF NOT EXISTS` or by adding a column.
- */
+Replaying the migrations in a deploy order succeeded but produced a different
+schema from name order. When an independent transition's expand
+migration runs before an earlier contract migration, it can succeed and
+still produce a different schema, for example by creating a table or index
+with `IF NOT EXISTS` or by adding a column.
+*/
 export class MigrationSchemaMismatchError extends CodedError {
 	constructor(
 		public readonly context: string,
@@ -285,7 +285,7 @@ function schemaOf(database: DatabaseSync): string[] {
 		const line = `${object.type} ${object.name}: ${object.sql ?? ''}`;
 
 		if (object.type !== 'table') {
-			return [line];
+			return line;
 		}
 
 		return [line, ...tableSchemaOf(database, object.name)];
@@ -336,31 +336,31 @@ The migration files in the order that one deploy run applies them.
 export interface DeployOrder {
 	readonly files: readonly string[];
 	/**
-	 * The independent transitions that the run expands before the contract of
-	 * an earlier transition.
-	 */
+	The independent transitions that the run expands before the contract of
+	an earlier transition.
+	*/
 	readonly ahead: readonly string[];
 }
 
 /**
- * The order in which one deploy run applies the migrations to a deployment
- * whose first N transitions are complete, where N is `completeCount`, and
- * whose later transitions are pending. The files of the complete transitions
- * come first, in name order. Undefined when the deploy would stop with an
- * error because `deferredTransition` finds a transition that could expand
- * only after the upload.
- *
- * Otherwise the run expands every pending transition before the upload, in
- * list order, and applies the contract migrations after it, as the deploy's
- * transition walk does.
- *
- * These are not the only states that a deployment can reach. Suppose an
- * independent transition has contract migrations, and a deploy expands it
- * before an earlier transition's contract migrations run and then stops. If a
- * later release adds another transition before that transition completes, the
- * later deploy applies the files in an order that this function does not
- * return.
- */
+The order in which one deploy run applies the migrations to a deployment
+whose first N transitions are complete, where N is `completeCount`, and
+whose later transitions are pending. The files of the complete transitions
+come first, in name order. Undefined when the deploy would stop with an
+error because `deferredTransition` finds a transition that could expand
+only after the upload.
+
+Otherwise the run expands every pending transition before the upload, in
+list order, and applies the contract migrations after it, as the deploy's
+transition walk does.
+
+These are not the only states that a deployment can reach. Suppose an
+independent transition has contract migrations, and a deploy expands it
+before an earlier transition's contract migrations run and then stops. If a
+later release adds another transition before that transition completes, the
+later deploy applies the files in an order that this function does not
+return.
+*/
 export function deployOrder(
 	transitions: readonly SchemaTransition<string>[],
 	completeCount: number
@@ -415,24 +415,24 @@ export function deployOrder(
 export interface MigrationCheckResult {
 	readonly applied: number;
 	/**
-	 * The independent transitions that a deploy expands ahead of an earlier
-	 * contract.
-	 */
+	The independent transitions that a deploy expands ahead of an earlier
+	contract.
+	*/
 	readonly replayed: readonly string[];
 }
 
 /**
- * Fails unless the files, the journal and the transitions list the same
- * sequence, each transition's contract migrations sort after its expand
- * migrations, and every file applies in order from an empty database.
- *
- * It then replays each order from {@link deployOrder} that differs from name
- * order: for each N from none to all but the last, the order for a deployment
- * whose first N transitions are complete and whose later ones are pending.
- * The check fails if an independent transition's expand migrations do not
- * apply before the earlier contract migrations, or if the order produces a
- * different schema from name order.
- */
+Fails unless the files, the journal and the transitions list the same
+sequence, each transition's contract migrations sort after its expand
+migrations, and every file applies in order from an empty database.
+
+It then replays each order from {@link deployOrder} that differs from name
+order: for each N from none to all but the last, the order for a deployment
+whose first N transitions are complete and whose later ones are pending.
+The check fails if an independent transition's expand migrations do not
+apply before the earlier contract migrations, or if the order produces a
+different schema from name order.
+*/
 export function checkD1Migrations(
 	set: MigrationSet,
 	transitions: readonly SchemaTransition<string>[] = schemaTransitions.filter(

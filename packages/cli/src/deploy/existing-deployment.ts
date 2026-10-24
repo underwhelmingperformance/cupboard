@@ -74,8 +74,8 @@ function throwIfDefaultNamesRepeat(control: WorkerConfig): void {
 		database: control.d1Databases.map((database) => database.databaseName),
 		queue: [
 			...control.queueProducers.map((producer) => producer.queue),
-			...control.queueConsumers.flatMap((consumer) =>
-				consumer.deadLetterQueue === undefined ? [] : [consumer.deadLetterQueue]
+			...control.queueConsumers.flatMap(
+				(consumer) => consumer.deadLetterQueue ?? []
 			)
 		]
 	};
@@ -110,17 +110,17 @@ function throwIfDeadLetterLoop(config: DeploymentConfig): void {
 }
 
 /**
- * The release defaults, with the resource names and cron triggers replaced by
- * the values from the account's control Worker: the bucket, the database and
- * the maintenance queue from its bindings, the dead-letter queue from its queue
- * consumer, and the cron triggers from its schedules. When the control Worker
- * does not report a resource, the result has the release's default name for
- * it. `undefined` when the control Worker has not been deployed.
- *
- * An empty schedule list is replaced by the default cron triggers, because the
- * control Worker runs maintenance only when a cron trigger fires. A first
- * deploy that failed after uploading the Workers also leaves the list empty.
- */
+The release defaults, with the resource names and cron triggers replaced by
+the values from the account's control Worker: the bucket, the database and
+the maintenance queue from its bindings, the dead-letter queue from its queue
+consumer, and the cron triggers from its schedules. When the control Worker
+does not report a resource, the result has the release's default name for
+it. `undefined` when the control Worker has not been deployed.
+
+An empty schedule list is replaced by the default cron triggers, because the
+control Worker runs maintenance only when a cron trigger fires. A first
+deploy that failed after uploading the Workers also leaves the list empty.
+*/
 export async function readExistingConfig(
 	api: ExistingDeploymentApi,
 	defaults: DeploymentConfig
@@ -209,22 +209,22 @@ export async function readExistingConfig(
 }
 
 /**
- * The configuration that a plan starts from on an account, and the custom
- * domain that is routed to the account's control Worker.
- */
+The configuration that a plan starts from on an account, and the custom
+domain that is routed to the account's control Worker.
+*/
 export interface StartingPlan {
 	readonly config: DeploymentConfig;
 	readonly routedDomain: string | undefined;
 }
 
 /**
- * Returns a lookup for the plan that a deploy starts from on each account. The
- * configuration is the existing deployment's configuration, or `defaults` on
- * an account without a control Worker. The lookup reads each account's
- * existing deployment once and returns the same result on later calls, so the
- * decision about R2 credentials and the DNS note after the review use the same
- * reading of the existing deployment as the plan.
- */
+Returns a lookup for the plan that a deploy starts from on each account. The
+configuration is the existing deployment's configuration, or `defaults` on
+an account without a control Worker. The lookup reads each account's
+existing deployment once and returns the same result on later calls, so the
+decision about R2 credentials and the DNS note after the review use the same
+reading of the existing deployment as the plan.
+*/
 export function startingPlanLookup(options: {
 	readonly apiFor: (account: CloudflareAccountId) => ExistingDeploymentApi;
 	readonly defaults: DeploymentConfig;

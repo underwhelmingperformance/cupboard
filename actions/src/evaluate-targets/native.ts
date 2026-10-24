@@ -33,8 +33,8 @@ class EvaluationSignalError extends CodedError {
 }
 
 /**
- * Reads the target expression and publication scope from action inputs.
- */
+Reads the target expression and publication scope from action inputs.
+*/
 export function evaluationInputs(
 	environment: Environment
 ): ManifestEvaluationOptions {
@@ -47,8 +47,8 @@ export function evaluationInputs(
 }
 
 /**
- * Publishes the complete worker result after the optional read wrapper closes.
- */
+Publishes the complete worker result after the optional read wrapper closes.
+*/
 export async function nativeEvaluationMain(
 	environment: Environment,
 	signal?: AbortSignal,
@@ -102,8 +102,8 @@ export async function nativeEvaluationMain(
 }
 
 /**
- * Evaluates every target within the worker's inherited read credential session.
- */
+Evaluates every target within the worker's inherited read credential session.
+*/
 export async function nativeEvaluationWorker(
 	environment: Environment,
 	signal: AbortSignal,
@@ -136,8 +136,8 @@ export async function nativeEvaluationWorker(
 }
 
 /**
- * Joins the operation before reporting a failure or external interruption.
- */
+Joins the operation before reporting a failure or external interruption.
+*/
 export async function runNativeEvaluation(
 	operation: (environment: Environment, signal: AbortSignal) => Promise<void>
 ): Promise<void> {

@@ -40,16 +40,16 @@ const codeByStatus: Record<number, string> = {
 };
 
 /**
- * Converts cache, signing-key, tenant-removal and tenant-quota conflicts to
- * the contract's typed errors.
- * Other `ServerHttpError` statuses in `codeByStatus` use the corresponding
- * generic oRPC code. An unlisted status uses `INTERNAL_SERVER_ERROR`, while the
- * original HTTP status and message remain unchanged.
- *
- * Existing `ORPCError` values pass through. Unexpected errors are logged with
- * the request logger and returned unchanged so oRPC can mask them with its own
- * 500 response.
- */
+Converts cache, signing-key, tenant-removal and tenant-quota conflicts to
+the contract's typed errors.
+Other `ServerHttpError` statuses in `codeByStatus` use the corresponding
+generic oRPC code. An unlisted status uses `INTERNAL_SERVER_ERROR`, while the
+original HTTP status and message remain unchanged.
+
+Existing `ORPCError` values pass through. Unexpected errors are logged with
+the request logger and returned unchanged so oRPC can mask them with its own
+500 response.
+*/
 export function bridgedError(
 	logger: Logger,
 	caught: unknown,

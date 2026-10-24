@@ -100,14 +100,10 @@ function environmentWith(
 	};
 }
 
-function resolve(
-	storeUri: string,
-	probes: Probes = {},
-	env: Record<string, string> = {}
-): StoreBackend {
+function resolve(storeUri: string, probes: Probes = {}): StoreBackend {
 	return resolveStoreBackend(
 		{ ...baseConfig, storeUri },
-		environmentWith(env, probes)
+		environmentWith({}, probes)
 	);
 }
 

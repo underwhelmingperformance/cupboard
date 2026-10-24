@@ -33,19 +33,19 @@ function repositoryFrom(environment: Environment): readonly [string, string] {
 
 	const match = repositoryPattern.exec(value);
 	const owner = match?.[1];
-	const repo = match?.[2];
+	const repository = match?.[2];
 
-	if (owner === undefined || repo === undefined) {
+	if (owner === undefined || repository === undefined) {
 		throw new AttestationStoreWriteError(value);
 	}
 
-	return [owner, repo];
+	return [owner, repository];
 }
 
 export async function writeToAttestationStore(
 	write: AttestationStoreWrite
 ): Promise<string> {
-	const [owner, repo] = repositoryFrom(write.environment);
+	const [owner, repository] = repositoryFrom(write.environment);
 	const octokit = createOctokitClient({
 		replaySafety: 'replay-safe',
 		auth: write.githubToken,
@@ -59,11 +59,13 @@ export async function writeToAttestationStore(
 	try {
 		const response = await octokit.request(
 			'POST /repos/{owner}/{repo}/attestations',
-			{ owner, repo, bundle: document }
+			{ owner, repo: repository, bundle: document }
 		);
 
 		return String(attestationStoreResponseSchema.parse(response.data).id);
 	} catch (error) {
-		throw new AttestationStoreWriteError(`${owner}/${repo}`, { cause: error });
+		throw new AttestationStoreWriteError(`${owner}/${repository}`, {
+			cause: error
+		});
 	}
 }

@@ -30,9 +30,9 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { type JsonValueList } from './json-list.ts';
 
 /**
- * A readable reference from one cache in the tenant to a stored NAR, with the
- * cache's current access.
- */
+A readable reference from one cache in the tenant to a stored NAR, with the
+cache's current access.
+*/
 export const reusableReferenceSchema = z.object({
 	narHash: nixSha256HashSchema,
 	cache: cacheScopeSchema,
@@ -41,9 +41,9 @@ export const reusableReferenceSchema = z.object({
 export type ReusableReference = z.infer<typeof reusableReferenceSchema>;
 
 /**
- * The caches that one reuse view includes. A view includes only caches with
- * the same access as the view.
- */
+The caches that one reuse view includes. A view includes only caches with
+the same access as the view.
+*/
 export interface ReuseViewMembership {
 	readonly view: ReuseViewName;
 	readonly access: CacheAccessMode;
@@ -53,29 +53,29 @@ export interface ReuseViewMembership {
 export interface ReuseAuthorityInput {
 	readonly destination: CacheScope;
 	/**
-	 * The grants of the token that negotiates or commits the push.
-	 */
+	The grants of the token that negotiates or commits the push.
+	*/
 	readonly grants: AuthorizationDetails;
 	/**
-	 * Reuse views and the caches that each one includes. A view permits reuse
-	 * only when the grants also cover it for `view:content-read`.
-	 */
+	Reuse views and the caches that each one includes. A view permits reuse
+	only when the grants also cover it for `view:content-read`.
+	*/
 	readonly views: readonly ReuseViewMembership[];
 }
 
 /**
- * A cache with a reference to a stored NAR, and the cache's access.
- */
+A cache with a reference to a stored NAR, and the cache's access.
+*/
 export type ReferencingCache = Pick<ReusableReference, 'cache' | 'access'>;
 
 /**
- * Decides whether a push may reuse a NAR that the tenant already stores
- * instead of uploading it. A reference permits the reuse only when the pusher
- * can already read the NAR through the referencing cache. That cache must be
- * the destination, a public cache, a cache that the grants cover for
- * `cache:content-read`, or a cache in a reuse view that the grants cover for
- * `view:content-read`.
- */
+Decides whether a push may reuse a NAR that the tenant already stores
+instead of uploading it. A reference permits the reuse only when the pusher
+can already read the NAR through the referencing cache. That cache must be
+the destination, a public cache, a cache that the grants cover for
+`cache:content-read`, or a cache in a reuse view that the grants cover for
+`view:content-read`.
+*/
 export class ReuseAuthority {
 	constructor(private readonly input: ReuseAuthorityInput) {}
 
@@ -116,8 +116,8 @@ export class ReuseAuthority {
 	}
 
 	/**
-	 * The NAR hashes that have at least one permitting reference.
-	 */
+	The NAR hashes that have at least one permitting reference.
+	*/
 	permittedNarHashes(
 		references: readonly ReusableReference[]
 	): ReadonlySet<NixSha256HashString> {
@@ -149,9 +149,9 @@ function isReuseGrant(grant: AuthorizationDetail): boolean {
 }
 
 /**
- * The grants that {@link ReuseAuthority} consults. A commit session persists only
- * these in durable storage for reuse checks after hibernation.
- */
+The grants that {@link ReuseAuthority} consults. A commit session persists only
+these in durable storage for reuse checks after hibernation.
+*/
 export function reuseGrants(
 	grants: AuthorizationDetails
 ): AuthorizationDetails {
@@ -159,11 +159,11 @@ export function reuseGrants(
 }
 
 /**
- * Selects, for each listed NAR, every cache that has a readable reference to
- * it in the cache's current generation, with the cache's access. One row
- * covers all of a cache's references to the NAR. A reference counts only when
- * the tenant also owns the blob.
- */
+Selects, for each listed NAR, every cache that has a readable reference to
+it in the cache's current generation, with the cache's access. One row
+covers all of a cache's references to the NAR. A reference counts only when
+the tenant also owns the blob.
+*/
 export function readableReferenceSelect(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,

@@ -3,10 +3,10 @@ import { withCleanup } from '@cupboard/shared/cleanup';
 import { NixStoreError } from './nix-store.ts';
 
 /**
- * The largest regular-file payload accepted by default. The reader checks the
- * declared length before allocating the destination buffer, so daemon
- * derivation reads reject unexpectedly large files.
- */
+The largest regular-file payload accepted by default. The reader checks the
+declared length before allocating the destination buffer, so daemon
+derivation reads reject unexpectedly large files.
+*/
 export const maxNarFileByteLength = 32 * 1024 * 1024;
 
 export class UnexpectedNarShapeError extends NixStoreError {
@@ -29,11 +29,11 @@ export class NarFileTooLargeError extends NixStoreError {
 }
 
 /**
- * Reads the contents when a NAR's root node is a regular file, including one
- * with the optional executable marker. The payload is buffered in memory up to
- * `maxByteLength`; any other root shape is rejected. The input iterator is
- * released after success or failure.
- */
+Reads the contents when a NAR's root node is a regular file, including one
+with the optional executable marker. The payload is buffered in memory up to
+`maxByteLength`; any other root shape is rejected. The input iterator is
+released after success or failure.
+*/
 export async function narRegularFileContents(
 	chunks: AsyncIterable<Uint8Array>,
 	maxByteLength: number = maxNarFileByteLength

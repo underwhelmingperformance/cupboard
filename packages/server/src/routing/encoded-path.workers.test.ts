@@ -116,12 +116,12 @@ async function attachBundle(
 }
 
 /**
- * Publishes the same store path to the default cache, a named public cache and
- * a private cache, and attaches one attestation bundle to the private cache.
- * The public and private views select caches with the same access as the view.
- * The tenant and private cache use separate read credentials. All three cache
- * entries refer to the same NAR hash.
- */
+Publishes the same store path to the default cache, a named public cache and
+a private cache, and attaches one attestation bundle to the private cache.
+The public and private views select caches with the same access as the view.
+The tenant and private cache use separate read credentials. All three cache
+entries refer to the same NAR hash.
+*/
 async function publish(): Promise<Published> {
 	const token = await initialiseViaWorker();
 	const metadata = uploadMetadata({ fileSize: 1234 });

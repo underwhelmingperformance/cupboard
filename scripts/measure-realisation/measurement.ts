@@ -14,10 +14,10 @@ import type {
 import { declaredGroups, type TargetGroup } from './manifest.ts';
 
 /**
- * The estimated cost of realising installables from an empty store: partition
- * counts plus the download and uncompressed NAR byte totals for substitutable
- * paths. Build receipts record the counts and sizes separately.
- */
+The estimated cost of realising installables from an empty store: partition
+counts plus the download and uncompressed NAR byte totals for substitutable
+paths. Build receipts record the counts and sizes separately.
+*/
 export const realisationMeasurementSchema = plannerPartitionSchema
 	.pick({ willBuild: true, willSubstitute: true, unknown: true })
 	.extend(substitutableSizesSchema.shape);
@@ -26,10 +26,10 @@ export type RealisationMeasurement = z.output<
 >;
 
 /**
- * The metrics a budget covers. `unknown` counts paths for which no substituter
- * returned an offer. This depends on network state rather than the flake, so
- * `budgetedMetrics` excludes it.
- */
+The metrics a budget covers. `unknown` counts paths for which no substituter
+returned an offer. This depends on network state rather than the flake, so
+`budgetedMetrics` excludes it.
+*/
 export const budgetedMetrics = [
 	'willBuild',
 	'willSubstitute',
@@ -54,9 +54,9 @@ export interface ResolvedDerivation {
 export interface RealisationPlanner {
 	resolve(target: PublishTarget): Promise<ResolvedDerivation>;
 	/**
-	 * Adds the derivations to the store so it can plan against them. A store
-	 * without the derivations cannot plan the installables.
-	 */
+	Adds the derivations to the store so it can plan against them. A store
+	without the derivations cannot plan the installables.
+	*/
 	seed(drvPaths: readonly StorePathString[]): Promise<void>;
 	plan(
 		installables: readonly NixDerivedPathString[]
@@ -78,10 +78,10 @@ export interface TargetMeasurement {
 }
 
 /**
- * Compares the cost of measuring group members together with the sum of
- * measuring each member separately. Shared closure paths count once in the
- * group measurement but once per member in the separate measurements.
- */
+Compares the cost of measuring group members together with the sum of
+measuring each member separately. Shared closure paths count once in the
+group measurement but once per member in the separate measurements.
+*/
 export interface GroupComparison {
 	readonly apart: MeasurementDelta;
 	readonly together: MeasurementDelta;
@@ -97,10 +97,10 @@ export interface GroupMeasurement {
 }
 
 /**
- * Measurements from one run. `combined` is present when the manifest contains
- * more than one target. `groups` contains the declared cohorts with more than
- * one member.
- */
+Measurements from one run. `combined` is present when the manifest contains
+more than one target. `groups` contains the declared cohorts with more than
+one member.
+*/
 export interface RealisationReport {
 	readonly flake: string;
 	readonly substituters: readonly string[];
@@ -122,11 +122,11 @@ const defaultClock: Clock = () => performance.now();
 export const combinedGroupKey = 'all-targets';
 
 /**
- * Measures each target separately and each multi-target group together against
- * the selected store. Every target is resolved before any derivation is seeded,
- * and all derivations are seeded before planning begins. Plans run sequentially
- * so the report retains each target's planning time.
- */
+Measures each target separately and each multi-target group together against
+the selected store. Every target is resolved before any derivation is seeded,
+and all derivations are seeded before planning begins. Plans run sequentially
+so the report retains each target's planning time.
+*/
 export async function measureRealisation(
 	options: MeasureOptions
 ): Promise<RealisationReport> {

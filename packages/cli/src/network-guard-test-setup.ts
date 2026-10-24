@@ -42,19 +42,19 @@ loopbackAddresses.addAddress('::1', 'ipv6');
 loopbackAddresses.addSubnet('::ffff:127.0.0.0', 104, 'ipv6');
 
 /**
- * Where a connection attempt is going, as far as the guard can read it. A unix
- * socket is the only destination that is always allowed, so the other kinds are
- * the ones an error can report.
- */
+Where a connection attempt is going, as far as the guard can read it. A unix
+socket is the only destination that is always allowed, so the other kinds are
+the ones an error can report.
+*/
 type Destination =
 	RefusedDestination | { readonly kind: 'socket-path'; readonly path: string };
 
 /**
- * `connect` takes a port, a socket path, or an options object, in each case
- * with further optional arguments after it. `net.connect` and
- * `net.createConnection` pass a fourth form that the type declarations do not
- * describe, so the guard reads every argument as `unknown`.
- */
+`connect` takes a port, a socket path, or an options object, in each case
+with further optional arguments after it. `net.connect` and
+`net.createConnection` pass a fourth form that the type declarations do not
+describe, so the guard reads every argument as `unknown`.
+*/
 type ConnectArguments = [target: unknown, ...rest: unknown[]];
 
 type SocketConnect = (
@@ -109,10 +109,10 @@ class GuardedSocket extends net.Socket {
 installGuardedConnect();
 
 /**
- * Reads the `connect` implementation the guard delegates to. The property
- * descriptor carries the same function as `net.Socket.prototype.connect`, which
- * the linter rejects as an unbound method reference.
- */
+Reads the `connect` implementation the guard delegates to. The property
+descriptor carries the same function as `net.Socket.prototype.connect`, which
+the linter rejects as an unbound method reference.
+*/
 function readSocketConnect(): SocketConnect {
 	const value: unknown = Object.getOwnPropertyDescriptor(
 		net.Socket.prototype,
@@ -162,9 +162,9 @@ function readDestination(parameters: ConnectArguments): Destination {
 }
 
 /**
- * Node reads a string target as a port number when the string parses as a
- * number that is not negative, and as a socket path otherwise.
- */
+Node reads a string target as a port number when the string parses as a
+number that is not negative, and as a socket path otherwise.
+*/
 function readStringTarget(target: string, second: unknown): Destination {
 	const port = Number(target);
 
@@ -180,10 +180,10 @@ function readHost(second: unknown): string {
 }
 
 /**
- * `net.connect` and `net.createConnection` normalise their own arguments and
- * then pass `connect` the resulting `[options, listener]` array as a single
- * argument.
- */
+`net.connect` and `net.createConnection` normalise their own arguments and
+then pass `connect` the resulting `[options, listener]` array as a single
+argument.
+*/
 function unwrapNormalisedArguments(target: unknown): unknown {
 	const parsed = z.array(z.unknown()).safeParse(target);
 
@@ -211,11 +211,11 @@ function readOptions(options: unknown): Destination {
 }
 
 /**
- * The destination to report in the error, or `undefined` when the connection
- * may go ahead. A unix socket cannot leave the machine, so it is always
- * allowed. A destination the guard cannot read is refused as well, because the
- * guard cannot tell whether that connection would stay on loopback.
- */
+The destination to report in the error, or `undefined` when the connection
+may go ahead. A unix socket cannot leave the machine, so it is always
+allowed. A destination the guard cannot read is refused as well, because the
+guard cannot tell whether that connection would stay on loopback.
+*/
 function refusedDestination(
 	destination: Destination
 ): RefusedDestination | undefined {

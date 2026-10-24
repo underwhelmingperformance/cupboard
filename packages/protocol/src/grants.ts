@@ -323,10 +323,10 @@ function isOperationImplied(
 }
 
 /**
- * Checks whether a stored trust-rule grant permits `operation` when the server
- * issues or refreshes a token. The operation can be listed directly or implied
- * by {@link impliedAtIssuance}.
- */
+Checks whether a stored trust-rule grant permits `operation` when the server
+issues or refreshes a token. The operation can be listed directly or implied
+by {@link impliedAtIssuance}.
+*/
 export function isOperationPermittedAtIssuance(
 	actions: readonly Operation[],
 	operation: Operation
@@ -335,10 +335,10 @@ export function isOperationPermittedAtIssuance(
 }
 
 /**
- * Checks whether a presented token authorises `operation`. Route checks and
- * attenuation accept either a listed operation or one implied by
- * {@link impliedByPresentedAuthority}.
- */
+Checks whether a presented token authorises `operation`. Route checks and
+attenuation accept either a listed operation or one implied by
+{@link impliedByPresentedAuthority}.
+*/
 export function isOperationSatisfiedByPresentedActions(
 	actions: readonly Operation[],
 	operation: Operation
@@ -413,10 +413,10 @@ function isCoveredByGrant(
 }
 
 /**
- * Checks whether any presented grant authorises `operation` on `resource`.
- * The server uses this after token verification, and the CLI uses the same
- * decision for its preflight check.
- */
+Checks whether any presented grant authorises `operation` on `resource`.
+The server uses this after token verification, and the CLI uses the same
+decision for its preflight check.
+*/
 export function isCoveredByToken(
 	grants: readonly AuthorizationDetail[],
 	operation: Operation,
@@ -443,10 +443,10 @@ function detailResource(detail: AuthorizationDetail): ResourceRequest {
 }
 
 /**
- * Checks whether `grants` authorises every operation in `detail` for its
- * selected resource. Attenuation uses this to prevent a new token from exceeding
- * the presenter's authority. Only a wildcard grant covers a requested wildcard.
- */
+Checks whether `grants` authorises every operation in `detail` for its
+selected resource. Attenuation uses this to prevent a new token from exceeding
+the presenter's authority. Only a wildcard grant covers a requested wildcard.
+*/
 export function isAuthorizationDetailCovered(
 	grants: readonly AuthorizationDetail[],
 	detail: AuthorizationDetail
@@ -777,12 +777,12 @@ function upgradedCacheBinding(binding: {
 }
 
 /**
- * Validates stored trust-rule grants from both current and earlier releases.
- * Before strict validation, the preprocessor upgrades a cache binding written
- * in the selector spelling, then removes retired operations and any
- * non-wildcard grant with no recognised operation. An upgrade that narrows the
- * operation set therefore does not invalidate the stored rule.
- */
+Validates stored trust-rule grants from both current and earlier releases.
+Before strict validation, the preprocessor upgrades a cache binding written
+in the selector spelling, then removes retired operations and any
+non-wildcard grant with no recognised operation. An upgrade that narrows the
+operation set therefore does not invalidate the stored rule.
+*/
 export const storedPermittedGrantsSchema = z.preprocess(
 	(grants) => withoutRetiredActions(withUpgradedCacheBindings(grants)),
 	z
@@ -800,10 +800,10 @@ const legacyIssuedCacheGrantSchema = z.looseObject({
 });
 
 /**
- * Validates grants recorded by a refresh-token family. Until a deploy records
- * `contracted`, the family stores cache selectors for rollback compatibility.
- * The preprocessor converts those selectors to scopes before validation.
- */
+Validates grants recorded by a refresh-token family. Until a deploy records
+`contracted`, the family stores cache selectors for rollback compatibility.
+The preprocessor converts those selectors to scopes before validation.
+*/
 export const storedAuthorizationDetailsSchema = z.preprocess(
 	(grants) => {
 		if (!Array.isArray(grants)) {
@@ -841,18 +841,18 @@ function scopeFromSelectorText(selector: string): unknown {
 }
 
 /**
- * The access to spell a named cache with, or undefined when the tenant holds
- * no cache of that name.
- */
+The access to spell a named cache with, or undefined when the tenant holds
+no cache of that name.
+*/
 export type CacheAccessLookup = (
 	name: CacheName
 ) => CacheAccessMode | undefined;
 
 /**
- * A cache binding as a build before the scope spelling stores it. The bound
- * value is a selector: `_default` for the default cache, the name of a public
- * cache or `_private-<name>` for a private one.
- */
+A cache binding as a build before the scope spelling stores it. The bound
+value is a selector: `_default` for the default cache, the name of a public
+cache or `_private-<name>` for a private one.
+*/
 export interface SelectorSpelledCacheBinding {
 	readonly equalsTemplate?: string;
 	readonly exact?: string;
@@ -882,11 +882,11 @@ export type SelectorSpelledAuthorizationDetail =
 	  });
 
 /**
- * The selector that spells a scope together with the cache's access:
- * `_default` for the default cache, `_private-<name>` for a private named
- * cache and the name alone for a public one. `scopeFromSelectorText` reads
- * it back.
- */
+The selector that spells a scope together with the cache's access:
+`_default` for the default cache, `_private-<name>` for a private named
+cache and the name alone for a public one. `scopeFromSelectorText` reads
+it back.
+*/
 function selectorForScope(scope: CacheScope, access: CacheAccessMode): string {
 	if (scope.kind === 'default') {
 		return legacyDefaultCacheSelector;
@@ -942,18 +942,18 @@ export class SelectorTemplateUnrepresentableError extends Error {
 }
 
 /**
- * Spells trust-rule grants the way a build before the scope spelling stores
- * them, so that such a build parses the row after a rollback.
- * `storedPermittedGrantsSchema` reads the result back into `grants`.
- *
- * A named cache is spelled with its current access, so the previous build
- * matches the same cache. If the caller cannot determine a named cache's
- * access, store both selector forms. This covers unregistered caches and
- * control-plane rules, which do not inspect tenant cache state.
- * A template is stored in both public and private selector forms so either
- * access mode retains its authority after rollback. The current reader
- * coalesces those equivalent grants.
- */
+Spells trust-rule grants the way a build before the scope spelling stores
+them, so that such a build parses the row after a rollback.
+`storedPermittedGrantsSchema` reads the result back into `grants`.
+
+A named cache is spelled with its current access, so the previous build
+matches the same cache. If the caller cannot determine a named cache's
+access, store both selector forms. This covers unregistered caches and
+control-plane rules, which do not inspect tenant cache state.
+A template is stored in both public and private selector forms so either
+access mode retains its authority after rollback. The current reader
+coalesces those equivalent grants.
+*/
 
 export function permittedGrantsInSelectorSpelling(
 	grants: readonly PermittedGrant[],
@@ -1002,11 +1002,11 @@ export function permittedGrantsInSelectorSpelling(
 }
 
 /**
- * Spells the issued grants a refresh-token family records the way a build
- * before the scope spelling stores them, with the same rules as
- * `permittedGrantsInSelectorSpelling`. `storedAuthorizationDetailsSchema`
- * reads the result back into `grants`.
- */
+Spells the issued grants a refresh-token family records the way a build
+before the scope spelling stores them, with the same rules as
+`permittedGrantsInSelectorSpelling`. `storedAuthorizationDetailsSchema`
+reads the result back into `grants`.
+*/
 export function authorizationDetailsInSelectorSpelling(
 	grants: readonly AuthorizationDetail[],
 	accessOf: CacheAccessLookup

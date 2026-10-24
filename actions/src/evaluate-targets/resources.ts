@@ -65,8 +65,8 @@ async function optionalResource<T>(
 }
 
 /**
- * Collects best-effort resource diagnostics during debug evaluation.
- */
+Collects best-effort resource diagnostics during debug evaluation.
+*/
 export class EvaluationResourceMonitor {
 	constructor(
 		private readonly environment: Environment,

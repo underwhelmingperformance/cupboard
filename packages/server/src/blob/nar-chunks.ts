@@ -16,45 +16,45 @@ import {
 } from './nar-read-buffers.ts';
 
 /**
- * The largest chunk that a source returns. The verifier decodes one chunk at a
- * time.
- */
+The largest chunk that a source returns. The verifier decodes one chunk at a
+time.
+*/
 export const narChunkSize = 1024 * 1024;
 
 // A source never keeps more buffers than this, however large the pool is.
 const maxRangeBuffersPerSource = 4;
 
 /**
- * Bytes of a stored object, in object order. `bytes` stays valid until
- * `release` is called. Call `release` once every consumer has finished with
- * the bytes; a second call has no effect.
- */
+Bytes of a stored object, in object order. `bytes` stays valid until
+`release` is called. Call `release` once every consumer has finished with
+the bytes; a second call has no effect.
+*/
 export interface NarChunk {
 	readonly bytes: Uint8Array;
 	release(): void;
 }
 
 /**
- * Returns the bytes of one object as chunks of at most {@link narChunkSize}.
- */
+Returns the bytes of one object as chunks of at most {@link narChunkSize}.
+*/
 export interface NarChunkSource {
 	/**
-	 * Resolves with the next chunk, or with `undefined` after the last one. Call
-	 * it again only after the previous call has settled.
-	 */
+	Resolves with the next chunk, or with `undefined` after the last one. Call
+	it again only after the previous call has settled.
+	*/
 	read(): Promise<NarChunk | undefined>;
 	/**
-	 * Stops every read and returns the source's buffers to their pool. Call it
-	 * on every exit, once no consumer uses the chunks any more.
-	 */
+	Stops every read and returns the source's buffers to their pool. Call it
+	on every exit, once no consumer uses the chunks any more.
+	*/
 	close(reason?: unknown): Promise<void>;
 }
 
 /**
- * Tracks progress for a stall timeout. `restart` is called whenever a read
- * completes and `stop` once the object has been read. When `signal` aborts,
- * every R2 get and every read of the source stops at once.
- */
+Tracks progress for a stall timeout. `restart` is called whenever a read
+completes and `stop` once the object has been read. When `signal` aborts,
+every R2 get and every read of the source stops at once.
+*/
 export interface ReadWatch {
 	readonly signal: AbortSignal;
 	restart(): void;
@@ -62,31 +62,31 @@ export interface ReadWatch {
 }
 
 /**
- * Counts for one stored object's ranged reads.
- */
+Counts for one stored object's ranged reads.
+*/
 export interface RangeReadProgress {
 	/**
-	 * The ranged reads started into a pooled buffer.
-	 */
+	The ranged reads started into a pooled buffer.
+	*/
 	ranges: number;
 	/**
-	 * The blocks that found every pooled buffer in use at least once. A block
-	 * can still get a range later, when a buffer becomes free first.
-	 */
+	The blocks that found every pooled buffer in use at least once. A block
+	can still get a range later, when a buffer becomes free first.
+	*/
 	rangeBufferMisses: number;
 	/**
-	 * The blocks that found, at least once, that the invocation's subrequest
-	 * slice could not cover a ranged get and a later get for the head.
-	 */
+	The blocks that found, at least once, that the invocation's subrequest
+	slice could not cover a ranged get and a later get for the head.
+	*/
 	rangeBudgetSkips: number;
 	/**
-	 * The pooled buffers that a cancelled read kept. The pool allocates a new
-	 * buffer in place of each one.
-	 */
+	The pooled buffers that a cancelled read kept. The pool allocates a new
+	buffer in place of each one.
+	*/
 	lostRangeBuffers: number;
 	/**
-	 * The largest number of pooled buffers that the source kept at once.
-	 */
+	The largest number of pooled buffers that the source kept at once.
+	*/
 	peakRangeBuffers: number;
 }
 
@@ -95,9 +95,9 @@ export interface StoredNarChunksOptions {
 	readonly watch: ReadWatch;
 	readonly progress: RangeReadProgress;
 	/**
-	 * The subrequest that the pass set aside for the first get. The source
-	 * releases it just before it makes the get.
-	 */
+	The subrequest that the pass set aside for the first get. The source
+	releases it just before it makes the get.
+	*/
 	readonly firstGet?: SubrequestHold;
 }
 
@@ -106,10 +106,10 @@ const releaseNothing = (): void => {
 };
 
 /**
- * Cancels a body or reader and waits for it, ignoring a rejection. The caller
- * no longer reads the stream, so a stream that has already failed cannot
- * change the outcome.
- */
+Cancels a body or reader and waits for it, ignoring a rejection. The caller
+no longer reads the stream, so a stream that has already failed cannot
+change the outcome.
+*/
 async function cancelQuietly(cancel: Promise<void>): Promise<void> {
 	await Promise.allSettled([cancel]);
 }
@@ -133,9 +133,9 @@ async function cancelObjectBody(
 }
 
 /**
- * Waits for an R2 get until `signal` aborts. If the get finishes after the
- * abort, the returned body is cancelled without being read.
- */
+Waits for an R2 get until `signal` aborts. If the get finishes after the
+abort, the returned body is cancelled without being read.
+*/
 async function abortableGet<T extends R2ObjectBody | R2Object | null>(
 	get: () => Promise<T>,
 	signal: AbortSignal
@@ -174,9 +174,9 @@ async function abortableGet<T extends R2ObjectBody | R2Object | null>(
 }
 
 /**
- * The object that the first get returned. Every later get asks for this ETag,
- * so all parts come from the same object.
- */
+The object that the first get returned. Every later get asks for this ETag,
+so all parts come from the same object.
+*/
 interface StoredObject {
 	readonly blobs: R2ObjectStore;
 	readonly r2Key: R2ObjectKey;
@@ -185,9 +185,9 @@ interface StoredObject {
 }
 
 /**
- * The bytes of a later get: `length` bytes from `offset`, or the rest of the
- * object when `length` is absent.
- */
+The bytes of a later get: `length` bytes from `offset`, or the rest of the
+object when `length` is absent.
+*/
 interface PartRange {
 	readonly offset: number;
 	readonly length?: number;
@@ -229,10 +229,10 @@ async function getStoredPart(
 }
 
 /**
- * A sequential read of a body from a given offset. Each read allocates a new
- * buffer, because the decoder can still be using the previous chunk while the
- * next read runs.
- */
+A sequential read of a body from a given offset. Each read allocates a new
+buffer, because the decoder can still be using the previous chunk while the
+next read runs.
+*/
 class SequentialBody {
 	private readonly reader: ReadableStreamBYOBReader;
 	private position: number;
@@ -267,9 +267,9 @@ class SequentialBody {
 }
 
 /**
- * Returns a body's bytes in chunks of up to {@link narChunkSize}, without a
- * buffer pool.
- */
+Returns a body's bytes in chunks of up to {@link narChunkSize}, without a
+buffer pool.
+*/
 export class BodyChunks implements NarChunkSource {
 	private readonly body: SequentialBody;
 	private hasEnded = false;
@@ -299,10 +299,10 @@ export class BodyChunks implements NarChunkSource {
 }
 
 /**
- * One ranged get into a pooled buffer. The range is delivered only once all of
- * its bytes are in the buffer: every BYOB read detaches the buffer that it
- * fills, which would also detach chunks already given to the decoder.
- */
+One ranged get into a pooled buffer. The range is delivered only once all of
+its bytes are in the buffer: every BYOB read detaches the buffer that it
+fills, which would also detach chunks already given to the decoder.
+*/
 class RangeRead {
 	private releasedBytes = 0;
 	private isReleased = false;
@@ -388,9 +388,9 @@ class RangeRead {
 	}
 
 	/**
-	 * Returns `bytes`, a view of this range's buffer, as a chunk. The buffer goes
-	 * back to the pool once every byte of the range has been released.
-	 */
+	Returns `bytes`, a view of this range's buffer, as a chunk. The buffer goes
+	back to the pool once every byte of the range has been released.
+	*/
 	chunk(bytes: Uint8Array): NarChunk {
 		let isReleased = false;
 
@@ -423,9 +423,9 @@ class RangeRead {
 	}
 
 	/**
-	 * Waits for the fill to end, then returns the buffer. The caller has already
-	 * aborted the signal that the fill checks between reads.
-	 */
+	Waits for the fill to end, then returns the buffer. The caller has already
+	aborted the signal that the fill checks between reads.
+	*/
 	async stop(): Promise<void> {
 		await Promise.allSettled([this.filled]);
 		this.release();
@@ -433,26 +433,26 @@ class RangeRead {
 }
 
 /**
- * A source for one stored object, which also gives the object's size.
- */
+A source for one stored object, which also gives the object's size.
+*/
 export interface StoredNarChunkSource extends NarChunkSource {
 	readonly size: number;
 }
 
 /**
- * Reads a stored object in order. A sequential stream, the head, reads the
- * bytes that are needed next. Before each read, the source starts ranged gets
- * for the following parts of the object into pooled buffers, if the pool has a
- * free buffer and the invocation's subrequest slice can cover the gets. The
- * source never waits for a buffer or for subrequests, so the head always makes
- * progress.
- *
- * Ranges are aligned to the pool's buffer size. When the next byte is in a
- * prefetched range, the source cancels the head and returns that range's
- * buffer in chunks. When the next byte is not prefetched, the head reads it. If
- * the source cancelled the head for an earlier range, it first opens a new head
- * at that byte.
- */
+Reads a stored object in order. A sequential stream, the head, reads the
+bytes that are needed next. Before each read, the source starts ranged gets
+for the following parts of the object into pooled buffers, if the pool has a
+free buffer and the invocation's subrequest slice can cover the gets. The
+source never waits for a buffer or for subrequests, so the head always makes
+progress.
+
+Ranges are aligned to the pool's buffer size. When the next byte is in a
+prefetched range, the source cancels the head and returns that range's
+buffer in chunks. When the next byte is not prefetched, the head reads it. If
+the source cancelled the head for an earlier range, it first opens a new head
+at that byte.
+*/
 class StoredNarChunks implements StoredNarChunkSource {
 	private position = 0;
 	private head: SequentialBody | undefined;
@@ -650,12 +650,12 @@ class StoredNarChunks implements StoredNarChunkSource {
 }
 
 /**
- * Fetches a stored object and returns its bytes in order, reading ahead into
- * pooled buffers when they are free. It fails with
- * `UploadedObjectNotFoundError` when the first get finds no object. A later
- * read fails with `StoredObjectInconsistentError` when a later get finds a
- * different object or none, or when a body ends early.
- */
+Fetches a stored object and returns its bytes in order, reading ahead into
+pooled buffers when they are free. It fails with
+`UploadedObjectNotFoundError` when the first get finds no object. A later
+read fails with `StoredObjectInconsistentError` when a later get finds a
+different object or none, or when a body ends early.
+*/
 export async function openStoredNarChunks(
 	blobs: R2ObjectStore,
 	r2Key: R2ObjectKey,

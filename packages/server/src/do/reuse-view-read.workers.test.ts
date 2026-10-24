@@ -30,14 +30,13 @@ async function provisionReader(): Promise<void> {
 }
 
 async function setView(
-	name: string,
 	priority: number,
 	access: 'public' | 'private' = 'public'
 ): Promise<Response> {
 	const token = await initialiseViaWorker();
 
 	return authorisedWorkerFetch(
-		`/reuse-views/${encodeURIComponent(name)}`,
+		`/reuse-views/${encodeURIComponent('reuse')}`,
 		token,
 		{
 			body: JSON.stringify({
@@ -55,7 +54,7 @@ describe('reuse-view nix-cache-info', () => {
 	beforeEach(resetTestServer);
 
 	it('renders the view nix-cache-info from its stored priority, always no-store', async () => {
-		const set = await setView('reuse', 55);
+		const set = await setView(55);
 		expect(set.status).toBe(StatusCodes.OK);
 
 		const response = await readFetch('/reuse/reuse/nix-cache-info');
@@ -79,7 +78,7 @@ describe('reuse-view nix-cache-info', () => {
 	});
 
 	it('returns HEAD with an empty body and the same headers as GET', async () => {
-		await setView('reuse', 55);
+		await setView(55);
 
 		const fullResponse = await readFetch('/reuse/reuse/nix-cache-info');
 		const fullBody = await fullResponse.text();
@@ -123,7 +122,7 @@ describe('reuse-view nix-cache-info', () => {
 	});
 
 	it('gates a private view, serving no-store once authorised', async () => {
-		await setView('reuse', 50, 'private');
+		await setView(50, 'private');
 		await provisionReader();
 
 		const unauthorised = await readFetch('/reuse/reuse/nix-cache-info', {});
@@ -144,7 +143,7 @@ describe('reuse-view nix-cache-info', () => {
 	});
 
 	it('returns 404 for an unimplemented path under a private view', async () => {
-		await setView('reuse', 50, 'private');
+		await setView(50, 'private');
 		await provisionReader();
 
 		const anonymous = await readFetch('/reuse/reuse/anything');
@@ -163,7 +162,7 @@ describe('reuse-view nix-cache-info', () => {
 	});
 
 	it('404s every unimplemented path under a public tenant reuse subtree, no-store', async () => {
-		await setView('reuse', 50);
+		await setView(50);
 
 		const narPath = await readFetch('/reuse/reuse/nar/whatever.nar.zst');
 		const arbitrary = await readFetch('/reuse/reuse/some/other/path');
