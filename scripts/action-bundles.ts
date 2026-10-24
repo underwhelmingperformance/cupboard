@@ -7,8 +7,9 @@ import { build } from 'esbuild';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '..');
 const actions = [
+	{ name: 'diagnostics', entrypoints: ['main', 'post'] },
 	{ name: 'build-paths', entrypoints: ['main', 'post', 'worker'] },
-	{ name: 'evaluate-targets', entrypoints: ['main', 'worker'] },
+	{ name: 'evaluate-targets', entrypoints: ['main', 'worker', 'post'] },
 	{ name: 'prepare-builders', entrypoints: ['main', 'post', 'probe-worker'] }
 ] as const;
 

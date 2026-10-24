@@ -90,6 +90,8 @@ inputs:
 runs:
   using: composite
   steps:
+    - uses: $/actions/diagnostics
+
     - name: Verify the SSH mode configuration
       shell: bash
       env:

@@ -1,0 +1,7 @@
+name: Collect Cupboard diagnostics
+description: Collects correlated diagnostic logs for the job.
+runs:
+  using: node24
+  main: dist/main.cjs
+  post: dist/post.cjs
+  post-if: always()

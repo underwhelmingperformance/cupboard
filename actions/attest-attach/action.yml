@@ -58,6 +58,8 @@ inputs:
 runs:
   using: composite
   steps:
+    - uses: $/actions/diagnostics
+
     - name: Resolve the pinned toolchain
       id: toolchain
       shell: bash

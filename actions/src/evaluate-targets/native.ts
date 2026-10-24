@@ -1,11 +1,13 @@
 import path from 'node:path';
 import process from 'node:process';
 
-import { configureLogging, resolveSink } from '@cupboard/logger';
+import { resolveSink } from '@cupboard/logger';
 import { CodedError, formatErrorWithCauses } from '@cupboard/shared/errors';
+import { subprocessTraceEnvironment } from '@cupboard/shared/node-tracing';
 import { z } from 'zod';
 
 import { cupboardDebugArguments } from '../cupboard-run.ts';
+import { withActionLogging } from '../diagnostics/logging.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { publishTargetsSchema } from '../publish-plan.ts';
 
@@ -91,7 +93,7 @@ export async function nativeEvaluationMain(
 		(dependencies.capture ?? captureEvaluationProcess)({
 			executable,
 			arguments: arguments_,
-			environment,
+			environment: { ...environment, ...subprocessTraceEnvironment() },
 			...(signal !== undefined && { signal })
 		})
 	);
@@ -141,9 +143,19 @@ Joins the operation before reporting a failure or external interruption.
 export async function runNativeEvaluation(
 	operation: (environment: Environment, signal: AbortSignal) => Promise<void>
 ): Promise<void> {
+	return withActionLogging(
+		'cupboard.action.evaluation',
+		process.env,
+		() => executeNativeEvaluation(operation),
+		resolveSink({ stdout: process.stderr })
+	);
+}
+
+async function executeNativeEvaluation(
+	operation: (environment: Environment, signal: AbortSignal) => Promise<void>
+): Promise<void> {
 	// The worker writes the manifest to stdout, and the main process parses
 	// all of stdout as JSON.
-	configureLogging({ sink: resolveSink({ stdout: process.stderr }) });
 	const controller = new AbortController();
 	const interrupt = (): void => {
 		controller.abort(new EvaluationSignalError('SIGINT'));

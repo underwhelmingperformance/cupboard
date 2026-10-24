@@ -1,6 +1,12 @@
 {
 	"$schema": "https://unpkg.com/knip@5/schema.json",
 	"workspaces": {
+		"actions": {
+			"entry": [
+				"src/cupboard-debug-arguments.ts",
+				"src/{build-paths,diagnostics,evaluate-targets,prepare-builders}/{main,post,worker,probe-worker}.ts"
+			]
+		},
 		"packages/cli": {},
 		"packages/cli-ui": {},
 		"packages/logger": {},

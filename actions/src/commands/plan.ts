@@ -36,6 +36,7 @@ import {
 } from '@cupboard/shared/child-process';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { type ReadUser } from '@cupboard/shared/http';
+import { subprocessTraceEnvironment } from '@cupboard/shared/node-tracing';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -140,7 +141,8 @@ const defaultEnsureRunner: EnsureRunner = async (
 	signal?.throwIfAborted();
 
 	const child = spawn(command, [...debugArguments, ...arguments_], {
-		stdio: ['ignore', 'pipe', 'pipe']
+		stdio: ['ignore', 'pipe', 'pipe'],
+		env: { ...env, ...subprocessTraceEnvironment() }
 	});
 	const outputLimit = new AbortController();
 	const lifecycleSignal =
