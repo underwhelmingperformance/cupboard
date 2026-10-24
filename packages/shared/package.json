@@ -41,7 +41,8 @@
 		"./sigstore": "./src/sigstore.ts",
 		"./sigstore-bundle-fixture": "./src/sigstore-bundle-fixture.ts",
 		"./slsa": "./src/slsa.ts",
-		"./timeout": "./src/timeout.ts"
+		"./timeout": "./src/timeout.ts",
+		"./log-context": "./src/log-context.ts"
 	},
 	"license": "AGPL-3.0-or-later",
 	"private": true,
