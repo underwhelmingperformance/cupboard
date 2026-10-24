@@ -32,6 +32,7 @@ interface FakeCupboardOptions {
 	readonly pushHelp?: string;
 	readonly attachHelp?: string;
 	readonly rootHelp?: string;
+	readonly logFileProbe?: { readonly status: number; readonly output: string };
 }
 
 async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
@@ -52,6 +53,10 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 		'#!/usr/bin/env node',
 		"const fs = require('node:fs');",
 		'const argv = process.argv.slice(2);',
+		"if (argv.at(-1) === '--log-file') {",
+		`  process.stderr.write(${JSON.stringify(options.logFileProbe?.output ?? JSON.stringify({ event: 'error', name: 'CommanderError', message: "error: unknown option '--log-file'" }))});`,
+		`  process.exit(${String(options.logFileProbe?.status ?? 2)});`,
+		'}',
 		`if (${JSON.stringify(options.captureEnvironmentFile ?? '')}) { fs.writeFileSync(${JSON.stringify(options.captureEnvironmentFile ?? '')}, JSON.stringify({deferred: process.env.CUPBOARD_DEFER_ERROR_ANNOTATIONS ?? ''})); }`,
 		"if (argv.includes('--help')) {",
 		`  if (argv[0] === '--help' && ${JSON.stringify(options.rootHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.rootHelp ?? '')}); process.exit(0); }`,
@@ -194,6 +199,85 @@ const releasedRootHelp = rootHelp([
 ]);
 
 describe('cupboardDebugArguments', () => {
+	it.each([
+		{
+			supported: true,
+			message: "error: option '--log-file <path>' argument missing"
+		},
+		{ supported: false, message: "error: unknown option '--log-file'" }
+	])(
+		'probes the parser for log file support ($supported)',
+		async ({ supported, message }) => {
+			const temporary = await runnerTemporary();
+			const captureArgvFile = path.join(temporary, 'executed.json');
+			const binary = await fakeCupboard({
+				results: [],
+				exitCode: 0,
+				captureArgvFile,
+				logFileProbe: {
+					status: 2,
+					output: JSON.stringify({
+						event: 'error',
+						name: 'CommanderError',
+						message
+					})
+				}
+			});
+			const arguments_ = await cupboardDebugArguments(binary, {
+				CUPBOARD_LOG_DIRECTORY: temporary
+			});
+
+			expect({
+				option: arguments_[0],
+				directory:
+					arguments_[1] === undefined ? undefined : path.dirname(arguments_[1])
+			}).toStrictEqual({
+				option: supported ? '--log-file' : undefined,
+				directory: supported ? temporary : undefined
+			});
+			await expect(readFile(captureArgvFile, 'utf8')).rejects.toMatchObject({
+				code: 'ENOENT'
+			});
+		}
+	);
+
+	it.each([
+		{ status: 0, output: '' },
+		{ status: 1, output: 'failed to start' },
+		{ status: 2, output: 'invalid JSON' },
+		{
+			status: 2,
+			output: JSON.stringify({
+				event: 'error',
+				name: 'Error',
+				message: "error: unknown option '--log-file'"
+			})
+		},
+		{
+			status: 2,
+			output: JSON.stringify({
+				event: 'error',
+				name: 'CommanderError',
+				message: 'unrelated usage error'
+			})
+		}
+	])(
+		'rejects an unexpected parser probe response: $status $output',
+		async (logFileProbe) => {
+			const binary = await fakeCupboard({
+				results: [],
+				exitCode: 0,
+				logFileProbe
+			});
+
+			await expect(
+				cupboardDebugArguments(binary, {
+					CUPBOARD_LOG_DIRECTORY: await runnerTemporary()
+				})
+			).rejects.toBeInstanceOf(CommandFailedError);
+		}
+	);
+
 	it.each([
 		{
 			cli: 'a CLI that lists --debug',

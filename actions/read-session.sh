@@ -18,7 +18,7 @@ run_with_read_session() {
   fi
 
   local -a wrapper=("$cupboard_path")
-  if [[ "${RUNNER_DEBUG:-}" == 1 ]]; then
+  if [[ "${RUNNER_DEBUG:-}" == 1 || -n "${CUPBOARD_LOG_DIRECTORY:-}" ]]; then
     local debug_lines debug_argument
     debug_lines=$(node --experimental-transform-types \
       --disable-warning=ExperimentalWarning \

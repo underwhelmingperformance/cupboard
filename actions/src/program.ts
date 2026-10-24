@@ -1,6 +1,6 @@
 import process, { env } from 'node:process';
 
-import { configureLogging, rootLogger } from '@cupboard/logger';
+import { rootLogger } from '@cupboard/logger';
 import { wasErrorReported } from '@cupboard/reporter';
 import {
 	CodedError,
@@ -25,6 +25,7 @@ import { registerPublicationSettingsCommand } from './commands/publication-setti
 import { registerPushCommand } from './commands/push.ts';
 import { registerResolveCupboardCommand } from './commands/resolve-cupboard.ts';
 import { registerSetupCommand } from './commands/setup.ts';
+import { withActionLogging } from './diagnostics/logging.ts';
 import { wasAlreadyReported } from './errors.ts';
 import type { Environment } from './inputs.ts';
 
@@ -105,6 +106,17 @@ export async function runAction(
 	signalSource: ActionSignalSource = process,
 	dependencies: ActionProgramDependencies = {}
 ): Promise<number> {
+	return withActionLogging('cupboard.action', environment, () =>
+		executeAction(argument, environment, signalSource, dependencies)
+	);
+}
+
+async function executeAction(
+	argument: readonly string[],
+	environment: Environment,
+	signalSource: ActionSignalSource,
+	dependencies: ActionProgramDependencies
+): Promise<number> {
 	const githubActions = workflowCommands();
 	const isSignalAwareCommand = [
 		'setup',
@@ -123,8 +135,6 @@ export async function runAction(
 	const abortSigterm = (): void => {
 		controller?.abort(new ActionSignalError('SIGTERM'));
 	};
-
-	configureLogging();
 
 	if (controller !== undefined) {
 		signalSource.once('SIGINT', abortSigint);

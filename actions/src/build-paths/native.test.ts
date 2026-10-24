@@ -1,12 +1,29 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import process from 'node:process';
 
 import { stopLogging } from '@cupboard/logger/testing';
 import { discoverNixStoreConfig } from '@cupboard/nix';
 import { fetchWithProbeRetries } from '@cupboard/shared/paging';
-import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	onTestFinished,
+	vi
+} from 'vitest';
 
 import { buildPathInputs, runNativeBuild } from './native.ts';
 import { observeBuild } from './observation.ts';
+
+beforeEach(async () => {
+	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-native-logs-'));
+	vi.stubEnv('CUPBOARD_LOG_DIRECTORY', directory);
+	onTestFinished(() => rm(directory, { recursive: true, force: true }));
+});
 
 afterEach(() => {
 	vi.restoreAllMocks();
