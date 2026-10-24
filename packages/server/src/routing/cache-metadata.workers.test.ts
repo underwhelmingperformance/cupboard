@@ -57,47 +57,59 @@ const probeSpans = vi.hoisted(() => {
 	}[];
 });
 
-vi.mock('../observability/span.ts', () => ({
-	withSpan: async (
-		name: string,
-		attributes: SpanAttributes,
-		body: (span: Span) => Promise<unknown>
-	) => {
-		const values = Object.fromEntries(
-			Object.entries(attributes).filter(
-				(entry): entry is [string, boolean | number | string] =>
-					entry[1] !== undefined
-			)
-		);
-		if (name === 'cache-metadata-probe' || name === 'narinfo-read') {
-			probeSpans.push({ name, attributes: values });
-		}
-		const span: Span = {
-			isTraced: false,
-			setAttribute(key, value) {
-				values[key] = value;
-				return span;
-			},
-			setAttributes(attributes) {
-				for (const [key, value] of Object.entries(attributes)) {
-					if (value !== undefined) {
-						values[key] = value;
+vi.mock('../observability/span.ts', async (importOriginal) => {
+	const { withSpan } =
+		await importOriginal<typeof import('../observability/span.ts')>();
+
+	return {
+		withSpan: (
+			name: string,
+			attributes: SpanAttributes,
+			body: (span: Span) => Promise<unknown>
+		) => {
+			const values = Object.fromEntries(
+				Object.entries(attributes).filter(
+					(entry): entry is [string, boolean | number | string] =>
+						entry[1] !== undefined
+				)
+			);
+			if (name === 'cache-metadata-probe' || name === 'narinfo-read') {
+				probeSpans.push({ name, attributes: values });
+			}
+
+			return withSpan(name, attributes, (span) => {
+				const observed = new Proxy(span, {
+					get(target, property): unknown {
+						if (property === 'setAttribute') {
+							return (key: string, value: boolean | number | string) => {
+								values[key] = value;
+								target.setAttribute(key, value);
+								return observed;
+							};
+						}
+
+						if (property === 'setAttributes') {
+							return (attributes: SpanAttributes) => {
+								for (const [key, value] of Object.entries(attributes)) {
+									if (value !== undefined) {
+										values[key] = value;
+									}
+								}
+								target.setAttributes(attributes);
+								return observed;
+							};
+						}
+
+						const value: unknown = Reflect.get(target, property, target);
+						return typeof value === 'function' ? value.bind(target) : value;
 					}
-				}
-				return span;
-			},
-			recordException: vi.fn(),
-			updateName() {
-				return span;
-			},
-			setStatus() {
-				return span;
-			},
-			end: vi.fn()
-		};
-		return body(span);
-	}
-}));
+				});
+
+				return body(observed);
+			});
+		}
+	};
+});
 
 const stringMatcher: unknown = expect.any(String);
 
