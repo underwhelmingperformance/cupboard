@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import {
 	configureSync,
 	type LogLevel,
@@ -42,6 +44,7 @@ export function startCapture(): Capture {
 
 	configureSync({
 		reset: true,
+		contextLocalStorage: new AsyncLocalStorage<Record<string, unknown>>(),
 		sinks: { capture: capturingSink(logs) },
 		loggers: [
 			{

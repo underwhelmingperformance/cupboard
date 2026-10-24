@@ -1,9 +1,11 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import process from 'node:process';
 
 import {
 	isGithubActions,
 	type WorkflowCommandStreams
 } from '@cupboard/shared/github-actions';
+import { traceLogFields } from '@cupboard/shared/log-context';
 import {
 	configureSync,
 	getConfig,
@@ -13,10 +15,12 @@ import {
 	type Sink
 } from '@logtape/logtape';
 
+import { redactingSink } from './redaction.ts';
+import { serialiseLogProperties } from './serialisation.ts';
 import { githubActionsSink, jsonLinesSink } from './sinks.ts';
 
 export type { Logger, LogLevel, LogRecord, Sink } from '@logtape/logtape';
-export { getLogger } from '@logtape/logtape';
+export { getLogger, withContext } from '@logtape/logtape';
 
 export const loggerCategory = ['cupboard'] as const;
 
@@ -30,6 +34,20 @@ export interface LoggingOptions {
 	Defaults to `debug`.
 	*/
 	readonly lowestLevel?: LogLevel;
+}
+
+function observedSink(sink: Sink): Sink {
+	const redacted = redactingSink(sink);
+
+	return (record) => {
+		redacted({
+			...record,
+			properties: {
+				...serialiseLogProperties(record.properties),
+				...traceLogFields()
+			}
+		});
+	};
 }
 
 /**
@@ -60,7 +78,8 @@ export function configureLogging(options: LoggingOptions = {}): void {
 	}
 
 	configureSync({
-		sinks: { cupboard: options.sink ?? resolveSink() },
+		contextLocalStorage: new AsyncLocalStorage<Record<string, unknown>>(),
+		sinks: { cupboard: observedSink(options.sink ?? resolveSink()) },
 		loggers: [
 			{
 				category: [...loggerCategory],
