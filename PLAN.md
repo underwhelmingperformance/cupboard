@@ -34,14 +34,17 @@ cannot unwrap the control signing key it can read from shared D1.
 
 ## Compatibility
 
-- Develop and test against Nix 2.34.7, which the end-to-end suite installs with
-  Determinate Nix. That is the only version cupboard is verified against, and
-  there is no compatibility guarantee for older releases. Supporting older
-  clients is an explicit non-goal. zstd-compressed NARs are the obvious hard
-  limit because Nix gained zstd substitution in 2.4 (November 2021), so anything
-  older could not substitute at all. More broadly, we do not certify a minimum
-  version, and adding fallback NAR compression for old clients is not worth it
-  for a personal cache.
+- CI installs the Nix version pinned in the [installer
+  configuration][ci-nix-versions]. The conformance suite uses `conformanceNix`
+  from [the flake][conformance-flake], with the tested versions recorded in the
+  [conformance oracle][conformance-versions]. The [remote-store
+  fixture][remote-store-image] pins its own Nix image. There is no compatibility
+  guarantee for older releases. Supporting older clients is an explicit
+  non-goal. zstd-compressed NARs are the obvious hard limit because Nix gained
+  zstd substitution in 2.4 (November 2021), so anything older could not
+  substitute at all. More broadly, we do not certify a minimum version, and
+  adding fallback NAR compression for old clients is not worth it for a personal
+  cache.
 - The CLI drives the write path. Pure TypeScript code serialises NARs, computes
   hashes, compresses blobs, and speaks the cupboard upload protocol. The CLI
   negotiates, prepares an upload, uploads the blob to a presigned R2 PUT, and
@@ -59,6 +62,11 @@ cannot unwrap the control signing key it can read from shared D1.
   optional in the schema, a newer CLI accepts an older server's response without
   it, and an older CLI against a newer server rejects the unknown field, which
   is the supporting-older-clients non-goal above applied to our own CLI.
+
+[ci-nix-versions]: ./actions/install-nix/versions.env
+[conformance-flake]: ./flake.nix
+[conformance-versions]: ./tests/conformance/oracle.json
+[remote-store-image]: ./tests/fixtures/nix-ssh-store/Dockerfile
 
 ## Current state
 
@@ -6485,11 +6493,7 @@ published intermediates and their storage cost.
       `attestation-path-index` landed before this extension with an empty
       expand, so expanding it early applies no migration.
 
-## Remaining release repairs
-
-Complete these repairs on the current release branch before release preparation.
-All authored implementation and test code must be TypeScript. Generated action
-bundles remain build outputs.
+## Release repairs
 
 - [x] Detect build-hook failure markers incrementally with bounded stderr
       retention. Forward the complete log and preserve child-exit and receipt
@@ -6529,15 +6533,6 @@ bundles remain build outputs.
       Repair every failure found during verification, including pre-existing
       failures and flakes. Keep security assertions and maintenance work limits
       intact.
-- [x] Review and integrate Sol high subagent patches, autosquash branch fixups,
-      and complete a context-blind Sol high review of main plus the branch,
-      including compatibility, operations and UX. Use separate commits for
-      pre-existing follow-ups and preserve main's history.
-
-The initial consolidated `pnpm check` passed with 10,576 tests and nine existing
-skips. The context-blind release review found the local bootstrap defect above.
-Its correction and the Docker fixture repair passed separate independent
-reviews.
 
 ### Release UX follow-up
 
@@ -6556,64 +6551,24 @@ reviews.
       release report. Keep deletion output and built publication unchanged.
       Queue private Nix configuration diagnostics for the following release
       alongside managed read sessions.
-- [x] Verify the follow-up with focused regression tests and `pnpm check`,
-      review the consolidated patch and autosquash its branch fixups.
-
-The follow-up `pnpm check` passed with 10,637 tests and nine existing skips.
-Independent review passed 691 focused tests and CLI type checking; the final
-import-order correction passed all 42 affected tests. The source autosquash
-preserved an identical Git tree and both main references. No actionable review
-finding remains within this follow-up.
-
-An additional dependency regression reproduced false coverage for missing jobs
-whose identifiers matched inherited object properties. The checker now requires
-a declared job and preserves explicitly declared jobs with those identifiers.
-The final `pnpm check` passed with 10,641 tests and nine existing skips.
-Supplementary independent review passed all 516 GitHub tests, the 134 affected
-inspection tests and CLI type checking. The reviewed source fingerprint remained
-unchanged through the full gate.
-
-The first merge-queue run exposed two generation-gate fixture races. Initial
-publication could schedule an alarm before deletion opened the test fence, and a
-due delivery could remove the old objects before their assertions. All 12 parked
-fixtures now fence configuration and publication. The existing assertions on old
-objects and refused reads remain intact. The affected file passed ten
-consecutive runs and a final run (22 tests each). Independent review passed 23
-tests, including the replacement-instance fence regression. The corrected full
-`pnpm check` passed 10,641 tests with nine existing skips and unchanged reviewed
-source hashes. Delivery requires fresh CI and merge-queue validation.
-
-The second merge-queue run exposed a recorded-verdict fixture collision. The
-absent and legacy cursor cases used identical NAR bytes, so a late alarm could
-make the next case reuse a canonical object instead of starting a fresh upload.
-Manual claims also armed immediate alarms that could race the controlled verdict
-passes. The cases now use distinct bytes and store paths, with the selected
-object fenced before configuration through the cursor assertions. The
-readiness-order and retry-count assertions remain unchanged. Controlled red
-checks reproduced both causes. Ten consecutive affected-file runs passed nine
-tests each, and independent review passed ten tests, including alarm-fence
-replacement coverage. The repeated `pnpm check` passed 10,641 tests with nine
-existing skips and unchanged reviewed source hashes. Delivery requires history
-consolidation and fresh CI and merge-queue validation.
+- [x] Require workflow job identifiers to be declared. Inherited object
+      properties do not define jobs, but explicitly declared jobs with those
+      identifiers remain valid.
+- [x] Fence generation-gate fixtures before configuration and publication. Use
+      distinct NAR bytes and store paths in recorded-verdict cursor cases so
+      delayed alarms cannot change the objects used by later cases.
 
 Existing cache grace policies remain unchanged because persisted values do not
-distinguish a default from an explicit selection. Managed read sessions remain
-queued for the following release. After source sign-off and history
-consolidation, push this branch, wait for CI, repair any failures and merge
-through the merge queue. Release publication and deployment remain separate.
+distinguish a default from an explicit selection. Managed read sessions are
+planned separately below.
 
 ## Guided GitHub trust upgrades
 
-Implement this follow-up on `codex/guided-trust-repairs`, based on the merged
-release repairs at `2330adfd`. Open a separate PR. All authored implementation
-and test code must be TypeScript.
-
-The post-merge dogfood runs exposed command gaps. The existing server needs an
-upgrade, and its trust rules lack run-root attachment and PR lifecycle grants.
-Before these repairs, the guided commands refused the deliberately selected
-`@main` workflow reference. They could not extend an existing matched rule's
-grants or model the dogfood workflow's dynamic PR cache and root inputs.
-Operators can now review and apply these upgrades through supported commands.
+Guided trust repairs support run-root attachment and PR lifecycle grants. Before
+these repairs, the guided commands refused the deliberately selected `@main`
+workflow reference. They could not extend an existing matched rule's grants or
+model the dogfood workflow's dynamic PR cache and root inputs. Operators can now
+review and apply these upgrades through supported commands.
 
 - [x] Model canonical branch workflow references and verify that the referenced
       workflow exists. Keep immutable references as the default for guided
@@ -6642,17 +6597,6 @@ Operators can now review and apply these upgrades through supported commands.
       red/green tests for each behaviour, focused checks during development, and
       `pnpm check` on the consolidated tree. Obtain an independent review,
       address its findings.
-
-The focused integration suite passed all 585 tests. A context-blind Sol high
-review found no remaining issues after its findings were addressed. The final
-`pnpm check` passed, including the Docker and Nix integration suites, with
-10,735 passing tests and nine configured skips. Commit the reviewed changes and
-open the follow-up PR.
-
-Sol high subagents implement branch-reference handling, atomic rule extension
-and publication modelling. The parent integrates the patches, checks user-facing
-output and documentation, and runs the final gate. Production deployment, live
-trust changes and workflow retries remain pending separate approval.
 
 ## Managed read sessions (following release)
 
