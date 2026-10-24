@@ -1,4 +1,5 @@
 import Cloudflare from 'cloudflare';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -65,7 +66,7 @@ const httpEvent = {
 				method: 'POST',
 				url: 'https://user:password@cupboard.example.workers.dev/t/acme/token?secret=redacted#fragment'
 			},
-			response: { status: 500 }
+			response: { status: StatusCodes.INTERNAL_SERVER_ERROR }
 		}
 	}
 };
@@ -97,7 +98,7 @@ describe('HTTP status queries', () => {
 			mode: 'json',
 			forceLogin: false,
 			githubJob: undefined,
-			status: 500,
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
 			hostname: 'cupboard.example.workers.dev'
 		});
 	});
@@ -125,7 +126,7 @@ describe('HTTP status queries', () => {
 			'account',
 			{
 				worker: 'cupboard',
-				status: 500,
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
 				hostname: 'cupboard.example.workers.dev'
 			},
 			{ from: 0, to: 2000 },
@@ -151,7 +152,7 @@ describe('HTTP status queries', () => {
 					key: '$workers.event.response.status',
 					operation: 'eq',
 					type: 'number',
-					value: 500
+					value: StatusCodes.INTERNAL_SERVER_ERROR
 				},
 				{
 					key: '$workers.event.request.headers.host',
@@ -192,7 +193,7 @@ describe('HTTP status queries', () => {
 			traceId: 'trace-1',
 			method: 'POST',
 			url: 'https://cupboard.example.workers.dev/t/acme/token',
-			status: 500,
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
 			outcome: 'ok'
 		});
 	});
@@ -216,7 +217,7 @@ describe('HTTP status queries', () => {
 			const analysis = {
 				worker: 'cupboard',
 				window: { from: 0, to: 1000 },
-				status: 500,
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
 				hostname: undefined,
 				requests: []
 			};
