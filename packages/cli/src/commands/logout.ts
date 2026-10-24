@@ -103,7 +103,7 @@ export interface LogoutDependencies {
 		revoke: (grant: CloudflareGrant) => Promise<RevocationOutcome>,
 		signal?: AbortSignal
 	) => Promise<GrantRemoval>;
-	readonly fetcher: typeof fetch;
+	readonly fetcher?: typeof fetch;
 	readonly signal?: AbortSignal;
 }
 
@@ -211,7 +211,8 @@ async function revokeSession(
 		revocation: await revokeRefreshToken(
 			removed.target,
 			removed.session.refreshToken,
-			dependencies.fetcher,
+			dependencies.fetcher ??
+				resilientFetcher('replay-safe', fetch, removed.target.origin),
 			dependencies.signal
 		)
 	};
@@ -281,7 +282,11 @@ async function resolveCloudflareSignIn(
 	if (intent === 'remove') {
 		const removed = await dependencies.removeGrant(
 			(grant) =>
-				revokeCloudflareGrant(grant, dependencies.fetcher, dependencies.signal),
+				revokeCloudflareGrant(
+					grant,
+					dependencies.fetcher ?? resilientFetcher('replay-safe'),
+					dependencies.signal
+				),
 			dependencies.signal
 		);
 
@@ -511,7 +516,6 @@ export function registerLogoutCommand(
 				removeAllSessions: removeAllCachedSessions,
 				readGrant: readCachedGrant,
 				removeGrant: removeCachedGrant,
-				fetcher: resilientFetcher('replay-safe'),
 				signal: programOptions.signal
 			});
 		});

@@ -25,10 +25,16 @@ import {
 	readResponseText
 } from '@cupboard/shared/response-body';
 import { loggedUrl } from '@cupboard/shared/retry';
+import { StatusCodes } from 'http-status-codes';
 
 import { throwIfAborted } from '../abort.ts';
 import { cacheReadFetcher } from '../client/transport.ts';
 import { CliError, CliUsageError, CupboardHttpError } from '../errors.ts';
+
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
+const conflictStatus: number = StatusCodes.CONFLICT;
+const requestTooLongStatus: number = StatusCodes.REQUEST_TOO_LONG;
+const badGatewayStatus: number = StatusCodes.BAD_GATEWAY;
 
 export interface AttestationDiscoveryOptions {
 	readonly url: URL;
@@ -88,7 +94,10 @@ export async function readAttestationInfo(
 		options.onProgress?.(completed);
 		return entry;
 	};
-	const fetchRead = cacheReadFetcher(options.url, fetcher, options.netrcFile);
+	const fetchRead = cacheReadFetcher(options.url, fetcher, {
+		netrcFile: options.netrcFile,
+		trustedOrigin: options.url.origin
+	});
 	const base = cacheUrl(options.url, options.cache);
 	const headers =
 		options.readUser === undefined || options.readPassword === undefined
@@ -104,22 +113,27 @@ export async function readAttestationInfo(
 		method: string,
 		response: Response
 	): Promise<void> => {
-		if (response.ok || response.status === 404) {
+		if (response.ok || response.status === notFoundStatus) {
 			return;
 		}
-		if (response.status === 409) {
+		if (response.status === conflictStatus) {
 			await discardResponseBody(response);
 			throw new AttestationDiscoveryScopeChangedError();
 		}
 		const body = await discoveryRefusalText(response, options.signal);
 		if (path === 'api/v1/attestation-info') {
 			const failure = parseDiscoveryFailure(body);
-			if (response.status === 413 && failure?.code === 'request-too-large') {
+			if (
+				response.status === requestTooLongStatus &&
+				failure?.code === 'request-too-large'
+			) {
 				throw new AttestationDiscoveryRequestLimitError();
 			}
 			if (
-				(response.status === 413 && failure?.code === 'list-too-large') ||
-				(response.status === 502 && failure?.code === 'list-invalid')
+				(response.status === requestTooLongStatus &&
+					failure?.code === 'list-too-large') ||
+				(response.status === badGatewayStatus &&
+					failure?.code === 'list-invalid')
 			) {
 				throw new InvalidAttestationDiscoveryError();
 			}
@@ -167,7 +181,7 @@ export async function readAttestationInfo(
 			6,
 			async (hash): Promise<AttestationInfoEntry> => {
 				const narinfo = await read(`${hash}.narinfo`, async (response) => {
-					if (response.status === 404) {
+					if (response.status === notFoundStatus) {
 						await discardResponseBody(response);
 						return;
 					}
@@ -193,7 +207,7 @@ export async function readAttestationInfo(
 				const attestations = await read(
 					`attestations/${hash}`,
 					async (response) => {
-						if (response.status === 404) {
+						if (response.status === notFoundStatus) {
 							await discardResponseBody(response);
 							return [];
 						}

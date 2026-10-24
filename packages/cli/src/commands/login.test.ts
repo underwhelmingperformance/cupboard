@@ -1,8 +1,10 @@
 import type { TextEditOptions } from '@cupboard/cli-ui';
+import { startCapture } from '@cupboard/logger/testing';
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
+import { StatusCodes } from 'http-status-codes';
 import lockfile from 'proper-lockfile';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { BoundSignIn } from '../auth/bound-sign-in.ts';
 import { PastedRedirectRefusedError } from '../auth/oidc-login.ts';
@@ -216,6 +218,47 @@ describe('signInTo', () => {
 });
 
 describe('identitySignIn', () => {
+	it('observes issuer discovery without propagating trace context or retrying refusals', async () => {
+		const capture = startCapture();
+		onTestFinished(() => {
+			capture.stop();
+		});
+		const requests: { readonly traceparent: string | undefined }[] = [];
+		const method = identitySignIn(
+			{ oidcIssuer: 'https://issuer.example.test', clientId: 'test-client' },
+			{
+				openBrowser: () => {
+					throw new Error('Discovery must fail before opening a browser');
+				},
+				info: vi.fn(),
+				fetcher: (_input, init) => {
+					requests.push({
+						traceparent:
+							new Headers(init?.headers).get('traceparent') ?? undefined
+					});
+					return Promise.resolve(
+						new Response(undefined, { status: StatusCodes.SERVICE_UNAVAILABLE })
+					);
+				}
+			}
+		);
+
+		await expect(method.signIn('nonce')).rejects.toThrow(
+			'Could not read OIDC metadata'
+		);
+		expect({
+			requests,
+			messages: capture.logs.map((record) => record.message)
+		}).toStrictEqual({
+			requests: [{ traceparent: undefined }],
+			messages: [
+				'HTTP attempt started',
+				'HTTP response headers received',
+				'HTTP operation completed'
+			]
+		});
+	});
+
 	testWithConfigHome(
 		'rejects a Cloudflare sign-in without an ID token and keeps no grant',
 		async () => {

@@ -95,8 +95,16 @@ export class CupboardClient {
 		public readonly signal?: AbortSignal,
 		private readonly connectSocket: CommitSocketConnect = connectCommitSocket
 	) {
-		this.replaySafeFetcher = resilientFetcher('replay-safe', fetcher);
-		this.replayUnsafeFetcher = resilientFetcher('replay-unsafe', fetcher);
+		this.replaySafeFetcher = resilientFetcher(
+			'replay-safe',
+			fetcher,
+			baseUrl.origin
+		);
+		this.replayUnsafeFetcher = resilientFetcher(
+			'replay-unsafe',
+			fetcher,
+			baseUrl.origin
+		);
 	}
 
 	private async fetchText(path: string): Promise<string> {
