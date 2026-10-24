@@ -6,6 +6,7 @@ export default defineConfig({
 		// fixtures. Give process startup and I/O the same 30-second budget as the
 		// server suites.
 		include: ['actions/src/**/*.test.ts'],
+		setupFiles: ['tests/support/action-test-environment.ts'],
 		testTimeout: 30_000
 	}
 });

@@ -84,7 +84,7 @@
 		"fixtures:generate": "node tests/fixtures/generate.ts",
 		"measure:realisation": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/measure-realisation/main.ts",
 		"test:actions": "vitest run --config actions/vitest.config.ts",
-		"test:scripts": "vitest run scripts --exclude '**/.claude/**'",
+		"test:scripts": "vitest run scripts --config scripts/vitest.config.ts --exclude '**/.claude/**'",
 		"update:action-bundles": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/action-bundles.ts",
 		"update:actions-reference": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/actions-reference.ts",
 		"update:cli-reference": "pnpm --filter @cupboard/cli update:cli-reference",
