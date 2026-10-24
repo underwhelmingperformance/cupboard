@@ -4,7 +4,10 @@ import { channel } from 'node:diagnostics_channel';
 import { getConfig, getLogger } from '@logtape/logtape';
 import { context, ROOT_CONTEXT } from '@opentelemetry/api';
 
-import { currentHttpAttemptFields } from './fetch-observation.ts';
+import {
+	currentHttpAttemptFields,
+	currentHttpAttemptTraceHeaders
+} from './fetch-observation.ts';
 
 const logger = getLogger(['cupboard', 'http', 'undici']);
 const requests = new WeakMap<object, RequestObservation>();
@@ -177,10 +180,22 @@ export function initialiseHttpDiagnostics(): void {
 		const origin = objectField(request, 'origin');
 		const path = objectField(request, 'path');
 		const method = objectField(request, 'method');
+		const requestOrigin =
+			typeof origin === 'string' ? URL.parse(origin) : origin;
 		const url =
-			typeof origin === 'string' && typeof path === 'string'
-				? URL.parse(path, origin)
+			typeof path === 'string' && requestOrigin instanceof URL
+				? URL.parse(path, requestOrigin)
 				: undefined;
+		const addHeader = objectField(request, 'addHeader');
+
+		if (typeof addHeader === 'function' && requestOrigin instanceof URL) {
+			const headers =
+				currentHttpAttemptTraceHeaders(requestOrigin.origin) ?? {};
+
+			for (const [key, value] of Object.entries(headers)) {
+				Reflect.apply(addHeader, request, [key, value]);
+			}
+		}
 
 		requests.set(request, {
 			run: AsyncLocalStorage.snapshot(),

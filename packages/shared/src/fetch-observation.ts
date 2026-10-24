@@ -38,7 +38,19 @@ export function recordFetchOutcome(disposition: FetchDisposition): void {
 }
 
 class HttpAttemptContext {
+	followPropagation: FollowTracePropagation | undefined;
+
 	constructor(readonly fields: Record<string, unknown>) {}
+}
+
+interface FollowTracePropagation {
+	readonly trustedOrigin: string;
+	readonly headers: Readonly<Record<string, string>>;
+}
+
+interface TracedFetchRequest {
+	readonly init: Parameters<typeof fetch>[1];
+	readonly followPropagation?: FollowTracePropagation;
 }
 
 export function currentHttpAttemptFields():
@@ -48,6 +60,21 @@ export function currentHttpAttemptFields():
 	return observation instanceof HttpAttemptContext
 		? observation.fields
 		: undefined;
+}
+
+export function currentHttpAttemptTraceHeaders(
+	origin: string
+): Readonly<Record<string, string>> | undefined {
+	const observation = context.active().getValue(attemptContextKey);
+
+	if (
+		!(observation instanceof HttpAttemptContext) ||
+		observation.followPropagation?.trustedOrigin !== origin
+	) {
+		return undefined;
+	}
+
+	return observation.followPropagation.headers;
 }
 
 export interface FetchObservationOptions {
@@ -64,12 +91,12 @@ function requestUrl(input: Parameters<typeof fetch>[0]): URL | null {
 	return URL.parse(input instanceof Request ? input.url : input.toString());
 }
 
-function tracedInit(
+function tracedRequest(
 	url: URL | null,
 	input: Parameters<typeof fetch>[0],
 	init: Parameters<typeof fetch>[1],
 	options: FetchObservationOptions
-): Parameters<typeof fetch>[1] {
+): TracedFetchRequest {
 	const spanContext = trace.getSpanContext(context.active());
 
 	if (
@@ -78,7 +105,7 @@ function tracedInit(
 		url.origin !== options.trustedOrigin ||
 		!isSpanContextValid(spanContext)
 	) {
-		return init;
+		return { init };
 	}
 
 	const headers = new Headers(
@@ -87,12 +114,24 @@ function tracedInit(
 	const carrier: Record<string, string> = {};
 
 	propagation.inject(context.active(), carrier);
+	const redirect =
+		init?.redirect ?? (input instanceof Request ? input.redirect : 'follow');
+
+	if (redirect === 'follow') {
+		// Fetch reuses its headers on redirects. Inject only into each dispatch.
+		headers.delete('traceparent');
+		headers.delete('tracestate');
+		return {
+			init: { ...init, headers },
+			followPropagation: { trustedOrigin: url.origin, headers: carrier }
+		};
+	}
 
 	for (const [key, value] of Object.entries(carrier)) {
 		headers.set(key, value);
 	}
 
-	return { ...init, headers, redirect: 'manual' };
+	return { init: { ...init, headers } };
 }
 
 export async function observeFetchOperation(
@@ -202,11 +241,11 @@ export async function observeFetchAttempt(
 				'cupboard.replay_safety': details.replaySafety
 			}
 		},
-		async (span) =>
-			context.with(
-				context
-					.active()
-					.setValue(attemptContextKey, new HttpAttemptContext(fields)),
+		async (span) => {
+			const observation = new HttpAttemptContext(fields);
+
+			return context.with(
+				context.active().setValue(attemptContextKey, observation),
 				async () => {
 					activeAttempts.add(attempt);
 					logger.trace('HTTP attempt started', {
@@ -215,10 +254,9 @@ export async function observeFetchAttempt(
 					});
 
 					try {
-						const response = await fetcher(
-							input,
-							tracedInit(url, input, init, details)
-						);
+						const request = tracedRequest(url, input, init, details);
+						observation.followPropagation = request.followPropagation;
+						const response = await fetcher(input, request.init);
 						const requestId = response.headers
 							.get('x-request-id')
 							?.slice(0, 128);
@@ -265,7 +303,8 @@ export async function observeFetchAttempt(
 						span.end();
 					}
 				}
-			)
+			);
+		}
 	);
 }
 

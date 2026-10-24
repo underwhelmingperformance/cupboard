@@ -1,5 +1,10 @@
+import { once } from 'node:events';
+import { createServer } from 'node:http';
+
+import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { NoopSpanProcessor } from '@opentelemetry/sdk-trace';
 import { StatusCodes } from 'http-status-codes';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { captureLogs } from './log-capture.test-support.ts';
 import { initialiseTracing, stopTracing } from './node-tracing.ts';
@@ -11,6 +16,49 @@ initialiseTracing();
 afterAll(stopTracing);
 
 describe('HTTP attempt observation', () => {
+	it('ends the attempt span when request preparation fails', async () => {
+		const records = captureLogs();
+		const completed = vi.spyOn(NoopSpanProcessor.prototype, 'onEnd');
+		onTestFinished(() => {
+			completed.mockRestore();
+		});
+		const transport = vi.fn<typeof fetch>(() =>
+			Promise.resolve(new Response('unexpected request'))
+		);
+		const fetcher = retryingFetcher(transport, 'replay-unsafe', {
+			trustedOrigin: 'https://cupboard.example.test'
+		});
+		let failure: unknown;
+
+		try {
+			await fetcher('https://cupboard.example.test/api', {
+				headers: [['bad header', 'value']]
+			});
+		} catch (error) {
+			failure = error;
+		}
+
+		expect({
+			invalidHeaders: failure instanceof TypeError,
+			requests: transport.mock.calls.length,
+			completed: completed.mock.calls.map(([span]) => ({
+				kind: span.kind,
+				status: span.status.code
+			})),
+			failedAttempts: records
+				.filter((record) => record.properties.error instanceof TypeError)
+				.map(({ properties }) => properties.attempt)
+		}).toStrictEqual({
+			invalidHeaders: true,
+			requests: 0,
+			completed: [
+				{ kind: SpanKind.CLIENT, status: SpanStatusCode.ERROR },
+				{ kind: SpanKind.INTERNAL, status: SpanStatusCode.ERROR }
+			],
+			failedAttempts: [1, undefined]
+		});
+	});
+
 	it.each(['pre-aborted', 'replay-unsafe', 'backoff'] as const)(
 		'records cancellation during %s',
 		async (phase) => {
@@ -178,7 +226,7 @@ describe('HTTP attempt observation', () => {
 				'replay-unsafe',
 				{ trustedOrigin }
 			);
-			await fetcher(url);
+			await fetcher(url, { redirect: 'manual' });
 
 			expect({
 				propagated: /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/u.test(
@@ -187,8 +235,140 @@ describe('HTTP attempt observation', () => {
 				redirect
 			}).toStrictEqual({
 				propagated: shouldPropagate,
-				redirect: shouldPropagate ? 'manual' : undefined
+				redirect: 'manual'
 			});
+		}
+	);
+
+	it.each([
+		{ requestRedirect: undefined, redirect: undefined, propagated: false },
+		{ requestRedirect: undefined, redirect: 'follow', propagated: false },
+		{ requestRedirect: undefined, redirect: 'manual', propagated: true },
+		{ requestRedirect: undefined, redirect: 'error', propagated: true },
+		{ requestRedirect: 'follow', redirect: undefined, propagated: false },
+		{ requestRedirect: 'manual', redirect: undefined, propagated: true },
+		{ requestRedirect: 'error', redirect: undefined, propagated: true },
+		{ requestRedirect: 'manual', redirect: 'follow', propagated: false },
+		{ requestRedirect: 'follow', redirect: 'error', propagated: true }
+	] satisfies readonly {
+		readonly requestRedirect: RequestRedirect | undefined;
+		readonly redirect: RequestRedirect | undefined;
+		readonly propagated: boolean;
+	}[])(
+		'preserves redirect mode for request $requestRedirect and init $redirect',
+		async ({ requestRedirect, redirect, propagated }) => {
+			const request = new Request('https://cupboard.example.test/api', {
+				redirect: requestRedirect
+			});
+			let observed:
+				{ redirect: RequestRedirect; propagated: boolean } | undefined;
+			const fetcher = retryingFetcher(
+				(input, init) => {
+					const current = new Request(input, init);
+					observed = {
+						redirect: current.redirect,
+						propagated: /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/u.test(
+							current.headers.get('traceparent') ?? ''
+						)
+					};
+					return Promise.resolve(new Response('ok'));
+				},
+				'replay-unsafe',
+				{ trustedOrigin: 'https://cupboard.example.test' }
+			);
+			await fetcher(request, { redirect });
+
+			expect(observed).toStrictEqual({
+				redirect: redirect ?? requestRedirect ?? 'follow',
+				propagated
+			});
+		}
+	);
+
+	it.each([false, true])(
+		'follows redirects without propagating context across origins: %s',
+		async (crossOrigin) => {
+			const requests: {
+				path: string;
+				traceparent: string | string[] | undefined;
+				tracestate: string | string[] | undefined;
+			}[] = [];
+			let location = '';
+			const server = createServer((request, response) => {
+				requests.push({
+					path: request.url ?? '',
+					traceparent: request.headers.traceparent,
+					tracestate: request.headers.tracestate
+				});
+				request.resume();
+
+				if (request.url === '/redirect') {
+					response.writeHead(StatusCodes.TEMPORARY_REDIRECT, { location });
+					response.end();
+					return;
+				}
+
+				response.end('redirected body');
+			});
+			server.listen(0, '127.0.0.1');
+			await once(server, 'listening');
+
+			try {
+				const address = server.address();
+
+				if (address === null || typeof address === 'string') {
+					throw new TypeError('Expected a TCP address');
+				}
+
+				const origin = `http://127.0.0.1:${String(address.port)}`;
+				location = crossOrigin
+					? `http://localhost:${String(address.port)}/destination`
+					: '/destination';
+				const fetcher = retryingFetcher(fetch, 'replay-unsafe', {
+					trustedOrigin: origin
+				});
+				const response = await fetcher(`${origin}/redirect`, {
+					headers: { traceparent: 'stale-parent', tracestate: 'client=stale' }
+				});
+
+				expect({
+					status: response.status,
+					redirected: response.redirected,
+					body: await response.text(),
+					requests: requests.map(({ path, traceparent, tracestate }) => ({
+						path,
+						tracestate,
+						propagated:
+							typeof traceparent === 'string' &&
+							/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/u.test(traceparent),
+						sameParent:
+							typeof traceparent === 'string' &&
+							traceparent === requests[0]?.traceparent
+					}))
+				}).toStrictEqual({
+					status: StatusCodes.OK,
+					redirected: true,
+					body: 'redirected body',
+					requests: [
+						{
+							path: '/redirect',
+							tracestate: undefined,
+							propagated: true,
+							sameParent: true
+						},
+						{
+							path: '/destination',
+							tracestate: undefined,
+							propagated: !crossOrigin,
+							sameParent: !crossOrigin
+						}
+					]
+				});
+			} finally {
+				server.closeAllConnections();
+				server.close();
+				await once(server, 'close');
+			}
 		}
 	);
 

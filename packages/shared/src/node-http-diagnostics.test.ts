@@ -79,7 +79,7 @@ describe('Node HTTP diagnostics', () => {
 				},
 				'replay-unsafe',
 				{ operation, trustedOrigin: 'https://cupboard.example.test' }
-			)('https://cupboard.example.test/api');
+			)('https://cupboard.example.test/api', { redirect: 'manual' });
 		const pending = [
 			start(0, 'first', first.promise),
 			start(1, 'second', second.promise)
