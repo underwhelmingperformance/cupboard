@@ -794,8 +794,7 @@ The requests are under the tenant URL.
    - P, a 1 MiB piece of NAR (two at a time);
    - O, a 1 MiB chunk of compressed output (up to three).
 
-   This is about 17 MiB of buffers. In one measurement, with six NARs uploaded
-   at once, each upload worker added 22 to 27 MiB to the peak RSS.
+   This is about 17 MiB of buffers.
 
    While the bytes are being sent, the CLI sends a `renew-uploads` message over
    the commit WebSocket every five minutes, if the server advertises that
