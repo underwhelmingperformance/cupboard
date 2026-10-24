@@ -78,6 +78,46 @@ describe('HTTP status queries', () => {
 		);
 	});
 
+	it.each(['99', '600', 'abc', '500.5'])('rejects HTTP status %s', (status) => {
+		const exitError = new Error('Unexpected process.exit');
+		const exit = vi.spyOn(process, 'exit').mockImplementation((): never => {
+			throw exitError;
+		});
+		const stderr = vi
+			.spyOn(process.stderr, 'write')
+			.mockImplementation(() => true);
+
+		try {
+			expect(() =>
+				parseOptions(['--since', '2880', '--status', status])
+			).toThrow(exitError);
+			expect(exit.mock.calls).toStrictEqual([[1]]);
+		} finally {
+			exit.mockRestore();
+			stderr.mockRestore();
+		}
+	});
+
+	it.each([
+		['100', StatusCodes.CONTINUE],
+		['599', 599]
+	] as const)('accepts HTTP status %s', (status, expected) => {
+		expect(parseOptions(['--since', '2880', '--status', status])).toStrictEqual(
+			{
+				worker: 'cupboard-tenant',
+				searchMinutes: 120,
+				sinceMinutes: 2880,
+				gapMs: 60_000,
+				account: undefined,
+				mode: 'json',
+				forceLogin: false,
+				githubJob: undefined,
+				status: expected,
+				hostname: undefined
+			}
+		);
+	});
+
 	it('accepts a fixed status query and hostname', () => {
 		expect(
 			parseOptions([
