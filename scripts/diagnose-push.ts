@@ -8,6 +8,7 @@ import { type CliUi, createCliUi, resolveReporterMode } from '@cupboard/cli-ui';
 import type { Reporter, ReporterMode, ResultRow } from '@cupboard/reporter';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import Cloudflare from 'cloudflare';
+import type { TelemetryQueryParams } from 'cloudflare/resources/workers/observability/telemetry';
 import { Command, InvalidArgumentError } from 'commander';
 import { z } from 'zod';
 
@@ -294,6 +295,72 @@ export interface TimeWindow {
 	readonly to: number;
 }
 
+export interface HttpRequest {
+	readonly timestamp: number;
+	readonly requestId: string;
+	readonly traceId: string | undefined;
+	readonly method: string;
+	readonly url: string;
+	readonly status: number;
+	readonly outcome: string | undefined;
+}
+
+export interface HttpStatusAnalysis {
+	readonly worker: string;
+	readonly window: TimeWindow;
+	readonly status: number;
+	readonly hostname: string | undefined;
+	readonly requests: readonly HttpRequest[];
+}
+
+const httpStatusSchema = z.number().int().min(100).max(599);
+const httpRequestEventSchema = z.object({
+	request: z.object({ method: z.string(), url: z.url() }),
+	response: z.object({ status: httpStatusSchema })
+});
+const httpRequestSchema = z.object({
+	timestamp: z.number(),
+	$metadata: z.object({
+		type: z.literal('cf-worker-event'),
+		requestId: z.string(),
+		traceId: z.string().optional()
+	}),
+	$workers: z.object({
+		outcome: z.string().optional(),
+		event: httpRequestEventSchema
+	})
+});
+
+export class InvalidHttpResponseEventError extends DiagnoseError {
+	constructor(public readonly issues: readonly z.core.$ZodIssue[]) {
+		super(
+			'Cloudflare returned an invalid HTTP response event; the status query is incomplete'
+		);
+		this.name = 'InvalidHttpResponseEventError';
+	}
+}
+
+export function parseHttpRequest(event: unknown): HttpRequest {
+	const parsed = httpRequestSchema.safeParse(event);
+
+	if (!parsed.success) {
+		throw new InvalidHttpResponseEventError(parsed.error.issues);
+	}
+
+	const { timestamp, $metadata: metadata, $workers: workers } = parsed.data;
+	const url = new URL(workers.event.request.url);
+
+	return {
+		timestamp,
+		requestId: metadata.requestId,
+		traceId: metadata.traceId,
+		method: workers.event.request.method,
+		url: `${url.origin}${url.pathname}`,
+		status: workers.event.response.status,
+		outcome: workers.outcome
+	};
+}
+
 export function lookbackWindow(now: number, minutes: number): TimeWindow {
 	return { from: now - minutes * 60 * 1000, to: now };
 }
@@ -488,6 +555,7 @@ export function triggerGroup(bucket: string): string {
 
 const logSourceSchema = z.object({
 	message: z.string().optional(),
+	msg: z.string().optional(),
 	method: z.string().optional(),
 	path: z.string().optional(),
 	status: z.number().optional(),
@@ -553,14 +621,15 @@ export function parseWorkerLog(event: unknown): WorkerLog | undefined {
 	}
 
 	const data = fields.data;
+	const message = data.message ?? data.msg;
 
-	if (data.message === undefined || data.message.trim() === '') {
+	if (message === undefined || message.trim() === '') {
 		return undefined;
 	}
 
 	// The traces view already supplies each root request. Omit its duplicate event
 	// from the operation totals.
-	if (data.path === undefined && traceArtifactMessage.test(data.message)) {
+	if (data.path === undefined && traceArtifactMessage.test(message)) {
 		return undefined;
 	}
 
@@ -571,14 +640,14 @@ export function parseWorkerLog(event: unknown): WorkerLog | undefined {
 	return {
 		requestId: parsed.data.$metadata?.requestId,
 		timestamp: parsed.data.timestamp,
-		message: data.message,
+		message,
 		httpMethod,
 		rpcMethod,
 		path: requestPath,
 		status: data.status,
 		rowsRead: data.rowsRead ?? 0,
 		rowsWritten: data.rowsWritten ?? 0,
-		bucket: bucketForLog(httpMethod, rpcMethod, requestPath, data.message)
+		bucket: bucketForLog(httpMethod, rpcMethod, requestPath, message)
 	};
 }
 
@@ -1412,6 +1481,8 @@ interface Options {
 	readonly mode: ReporterMode;
 	readonly forceLogin: boolean;
 	readonly githubJob: GitHubJobReference | undefined;
+	readonly status: number | undefined;
+	readonly hostname: string | undefined;
 }
 
 function resolveMode(
@@ -1443,6 +1514,25 @@ function positiveNumber(value: string): number {
 	return parsed;
 }
 
+function httpStatus(value: string): number {
+	const parsed = httpStatusSchema.safeParse(Number(value));
+
+	if (!parsed.success) {
+		throw new InvalidArgumentError(
+			'Expected an HTTP status code from 100 to 599.'
+		);
+	}
+
+	return parsed.data;
+}
+
+export class InvalidStatusQueryError extends DiagnoseError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'InvalidStatusQueryError';
+	}
+}
+
 interface ProgramFlags {
 	readonly worker: string;
 	readonly search: number;
@@ -1452,13 +1542,15 @@ interface ProgramFlags {
 	readonly outputMode?: string;
 	readonly json?: boolean;
 	readonly login?: boolean;
+	readonly status?: number;
+	readonly hostname?: string;
 }
 
-function parseOptions(arguments_: readonly string[]): Options {
+export function parseOptions(arguments_: readonly string[]): Options {
 	const program = new Command()
 		.name('diagnose-push')
 		.description(
-			'Explain where a slow cupboard push spent its time, from Cloudflare Workers telemetry.'
+			'Analyse cupboard pushes or find HTTP responses by status, from Cloudflare Workers telemetry.'
 		)
 		.argument(
 			'[github-job-url]',
@@ -1483,6 +1575,15 @@ function parseOptions(arguments_: readonly string[]): Options {
 			defaultSessionGapMs / 1000
 		)
 		.option('--account <id>', 'Cloudflare account id (otherwise resolved)')
+		.option(
+			'--status <code>',
+			'list HTTP responses with this status (requires an explicit window)',
+			httpStatus
+		)
+		.option(
+			'--hostname <host>',
+			'restrict --status to this request Host header'
+		)
 		.option('--output-mode <mode>', 'force the output mode: terminal or json')
 		.option('--json', 'shorthand for --output-mode json')
 		.option('--login', 'force a fresh browser login, ignoring the cached grant')
@@ -1493,6 +1594,20 @@ function parseOptions(arguments_: readonly string[]): Options {
 	const flags = program.opts<ProgramFlags>();
 	const githubJobUrl = program.args[0];
 
+	if (
+		githubJobUrl === undefined &&
+		flags.status !== undefined &&
+		flags.since === undefined
+	) {
+		throw new InvalidStatusQueryError(
+			'--status requires --since <minutes> or a GitHub Actions job URL'
+		);
+	}
+
+	if (flags.status === undefined && flags.hostname !== undefined) {
+		throw new InvalidStatusQueryError('--hostname requires --status');
+	}
+
 	return {
 		worker: flags.worker,
 		searchMinutes: flags.search,
@@ -1501,6 +1616,8 @@ function parseOptions(arguments_: readonly string[]): Options {
 		account: flags.account,
 		mode: resolveMode(flags.json ?? false, flags.outputMode),
 		forceLogin: flags.login ?? false,
+		status: flags.status,
+		hostname: flags.hostname,
 		githubJob:
 			githubJobUrl === undefined ? undefined : parseGitHubJobUrl(githubJobUrl)
 	};
@@ -1820,6 +1937,48 @@ function serviceFilter(worker: string): {
 		type: 'string',
 		value: worker
 	};
+}
+
+interface TelemetrySelection {
+	readonly worker: string;
+	readonly status?: number | undefined;
+	readonly hostname?: string | undefined;
+}
+
+function telemetryParameters(
+	selection: TelemetrySelection
+): TelemetryQueryParams.Parameters {
+	const filters: NonNullable<TelemetryQueryParams.Parameters['filters']> = [
+		serviceFilter(selection.worker)
+	];
+
+	if (selection.status !== undefined) {
+		filters.push(
+			{
+				key: '$metadata.type',
+				operation: 'eq',
+				type: 'string',
+				value: 'cf-worker-event'
+			},
+			{
+				key: '$workers.event.response.status',
+				operation: 'eq',
+				type: 'number',
+				value: selection.status
+			}
+		);
+	}
+
+	if (selection.hostname !== undefined) {
+		filters.push({
+			key: '$workers.event.request.headers.host',
+			operation: 'eq',
+			type: 'string',
+			value: selection.hostname
+		});
+	}
+
+	return { filterCombination: 'and', filters };
 }
 
 type PageProgress = (pageRows: number) => void;
@@ -2372,10 +2531,10 @@ const cursorOf: Record<
 // This relies on a request emitting its log and its trace together, so a quiet
 // gap in one view is a quiet gap in the other. A fixed `--since` window is
 // sliced and fetched in full.
-async function fetchTelemetry(
+export async function fetchTelemetry(
 	client: Cloudflare,
 	accountId: string,
-	worker: string,
+	selection: TelemetrySelection,
 	window: TimeWindow,
 	stopAtGapMs: number | undefined,
 	onProgress: (
@@ -2385,7 +2544,8 @@ async function fetchTelemetry(
 	) => void
 ): Promise<Record<TelemetryView, unknown[]>> {
 	const slices = stopAtGapMs === undefined ? sliceWindow(window) : [window];
-	const views: readonly TelemetryView[] = ['events', 'traces'];
+	const views: readonly TelemetryView[] =
+		selection.status === undefined ? ['events', 'traces'] : ['events'];
 	const progress: Record<TelemetryView, ViewProgress> = {
 		events: { rows: 0, pages: 0, slicesDone: 0 },
 		traces: { rows: 0, pages: 0, slicesDone: 0 }
@@ -2400,7 +2560,7 @@ async function fetchTelemetry(
 		client.workers.observability.telemetry.query({
 			account_id: accountId,
 			queryId: 'cupboard-diagnose-push',
-			parameters: { filters: [serviceFilter(worker)] },
+			parameters: telemetryParameters(selection),
 			...parameters
 		});
 
@@ -2480,6 +2640,45 @@ export function renderAnalysis(
 	}
 }
 
+export function renderHttpStatusAnalysis(
+	ui: CliUi,
+	reporter: Reporter,
+	mode: ReporterMode,
+	analysis: HttpStatusAnalysis
+): void {
+	if (mode === 'json') {
+		reporter.data(JSON.stringify(analysis));
+
+		return;
+	}
+
+	const rows: ResultRow[] = [
+		{ label: 'Worker', value: analysis.worker },
+		{
+			label: 'Window',
+			value: `${new Date(analysis.window.from).toISOString()} to ${new Date(analysis.window.to).toISOString()}`
+		},
+		{ label: 'HTTP status', value: String(analysis.status) },
+		{ label: 'Matching requests', value: formatCount(analysis.requests.length) }
+	];
+
+	if (analysis.hostname !== undefined) {
+		rows.push({ label: 'Hostname', value: analysis.hostname });
+	}
+
+	reporter.result({ kind: 'http-status-diagnostic', data: analysis, rows });
+
+	if (analysis.requests.length > 0) {
+		ui.note(
+			'Matching requests',
+			analysis.requests.map((request) => ({
+				label: `${new Date(request.timestamp).toISOString()} ${request.method} ${request.url}`,
+				value: `request ${request.requestId} · trace ${request.traceId ?? 'unavailable'} · outcome ${request.outcome ?? 'unknown'}`
+			}))
+		);
+	}
+}
+
 async function resolveTelemetryWindow(
 	options: Options,
 	now: number,
@@ -2503,7 +2702,9 @@ async function main(): Promise<void> {
 	const ui = createCliUi({ mode: options.mode });
 	const reporter = ui.reporter();
 
-	ui.intro(`Push diagnostic: ${options.worker}`);
+	ui.intro(
+		`${options.status === undefined ? 'Push' : 'HTTP status'} diagnostic: ${options.worker}`
+	);
 	const searchWindow = await resolveTelemetryWindow(options, now, reporter);
 	const shouldDetectLatestSession =
 		options.githubJob === undefined && options.sinceMinutes === undefined;
@@ -2526,12 +2727,12 @@ async function main(): Promise<void> {
 	const stopAtGapMs = shouldDetectLatestSession ? options.gapMs : undefined;
 
 	const { rawEvents, rawTraces } = await reporter.phase(
-		`Fetching ${lookbackLabel} of logs and traces (account ${accountId})`,
+		`Fetching ${lookbackLabel} of ${options.status === undefined ? 'logs and traces' : 'HTTP responses'} (account ${accountId})`,
 		async (context) => {
 			const fetched = await fetchTelemetry(
 				client,
 				accountId,
-				options.worker,
+				options,
 				searchWindow,
 				stopAtGapMs,
 				(view, progress, sliceCount) => {
@@ -2550,6 +2751,27 @@ async function main(): Promise<void> {
 			return { rawEvents: fetched.events, rawTraces: fetched.traces };
 		}
 	);
+
+	if (options.status !== undefined) {
+		const requests = rawEvents
+			.map((event) => parseHttpRequest(event))
+			.toSorted(
+				(left, right) =>
+					right.timestamp - left.timestamp ||
+					left.requestId.localeCompare(right.requestId)
+			);
+
+		renderHttpStatusAnalysis(ui, reporter, options.mode, {
+			worker: options.worker,
+			window: searchWindow,
+			status: options.status,
+			hostname: options.hostname,
+			requests
+		});
+		ui.outro('Done');
+
+		return;
+	}
 
 	// The events view includes the Worker's logs and trace spans; each
 	// raw event is one or the other, so both are read from the one fetch.

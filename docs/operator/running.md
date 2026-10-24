@@ -92,6 +92,26 @@ trace IDs. The upstream attributes connect the client check to the native Worker
 spans; they do not change Cloudflare's native span parentage. A job's time
 window alone cannot distinguish its requests from other concurrent jobs.
 
+To find recorded HTTP 500 responses during the last 48 hours, query both
+Workers:
+
+```sh
+pnpm diagnose:push --worker cupboard --since 2880 --status 500 \
+  --hostname cupboard.example.workers.dev
+pnpm diagnose:push --worker cupboard-tenant --since 2880 --status 500 \
+  --hostname cupboard.example.workers.dev
+```
+
+`--since` is in minutes. A status query requires either `--since` or a GitHub
+Actions job URL. `--hostname` restricts the query to an exact request Host
+header; omit it to query every hostname for the selected Worker. Add `--json` to
+get the matching requests with their timestamps, request IDs and trace IDs. URLs
+in the report exclude credentials, query parameters and fragments.
+
+This mode queries invocation response records. Errors inside an open commit
+WebSocket or an RPC invocation do not necessarily produce an HTTP 500 response.
+Cloudflare's log retention and sampling limit which responses can be found.
+
 ### Maintenance failures
 
 When a tenant's maintenance or removal fails, the failure is recorded in the D1

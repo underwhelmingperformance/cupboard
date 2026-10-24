@@ -14,10 +14,13 @@ import {
 	canonicalPath,
 	detectSession,
 	fetchPaged,
+	fetchTelemetry,
 	GitHubJobRequestError,
 	hasSessionBoundary,
 	InvalidGitHubJobMetadataError,
 	InvalidGitHubJobUrlError,
+	InvalidHttpResponseEventError,
+	InvalidStatusQueryError,
 	lookbackWindow,
 	mergeBusy,
 	minPageLimit,
@@ -26,11 +29,14 @@ import {
 	operationRows,
 	type OperationStat,
 	parseGitHubJobUrl,
+	parseHttpRequest,
+	parseOptions,
 	parseSpanEvent,
 	parseTraceSummary,
 	parseWorkerLog,
 	percentile,
 	renderAnalysis,
+	renderHttpStatusAnalysis,
 	sliceWindow,
 	slowestRows,
 	type SpanEvent,
@@ -43,6 +49,211 @@ import {
 	windowForGitHubJob,
 	type WorkerLog
 } from './diagnose-push.ts';
+
+const httpEvent = {
+	timestamp: 1000,
+	$metadata: {
+		id: 'event-1',
+		type: 'cf-worker-event',
+		requestId: 'request-1',
+		traceId: 'trace-1'
+	},
+	$workers: {
+		outcome: 'ok',
+		event: {
+			request: {
+				method: 'POST',
+				url: 'https://user:password@cupboard.example.workers.dev/t/acme/token?secret=redacted#fragment'
+			},
+			response: { status: 500 }
+		}
+	}
+};
+
+describe('HTTP status queries', () => {
+	it('requires an explicit window for a status query', () => {
+		expect(() => parseOptions(['--status', '500'])).toThrow(
+			InvalidStatusQueryError
+		);
+	});
+
+	it('accepts a fixed status query and hostname', () => {
+		expect(
+			parseOptions([
+				'--since',
+				'2880',
+				'--status',
+				'500',
+				'--hostname',
+				'cupboard.example.workers.dev',
+				'--json'
+			])
+		).toStrictEqual({
+			worker: 'cupboard-tenant',
+			searchMinutes: 120,
+			sinceMinutes: 2880,
+			gapMs: 60_000,
+			account: undefined,
+			mode: 'json',
+			forceLogin: false,
+			githubJob: undefined,
+			status: 500,
+			hostname: 'cupboard.example.workers.dev'
+		});
+	});
+
+	it('fetches every page of matching invocation events without fetching traces', async () => {
+		const bodies: unknown[] = [];
+		const client = new Cloudflare({
+			apiToken: 'test-token',
+			fetch: (_url, init) => {
+				const body: unknown = JSON.parse(z.string().parse(init?.body));
+				bodies.push(body);
+
+				return Promise.resolve(
+					Response.json({
+						success: true,
+						result: {
+							events: { events: bodies.length === 1 ? [httpEvent] : [] }
+						}
+					})
+				);
+			}
+		});
+		const result = await fetchTelemetry(
+			client,
+			'account',
+			{
+				worker: 'cupboard',
+				status: 500,
+				hostname: 'cupboard.example.workers.dev'
+			},
+			{ from: 0, to: 2000 },
+			undefined,
+			vi.fn()
+		);
+		const parameters = {
+			filterCombination: 'and',
+			filters: [
+				{
+					key: '$metadata.service',
+					operation: 'eq',
+					type: 'string',
+					value: 'cupboard'
+				},
+				{
+					key: '$metadata.type',
+					operation: 'eq',
+					type: 'string',
+					value: 'cf-worker-event'
+				},
+				{
+					key: '$workers.event.response.status',
+					operation: 'eq',
+					type: 'number',
+					value: 500
+				},
+				{
+					key: '$workers.event.request.headers.host',
+					operation: 'eq',
+					type: 'string',
+					value: 'cupboard.example.workers.dev'
+				}
+			]
+		};
+
+		expect({ result, bodies }).toStrictEqual({
+			result: { events: [httpEvent], traces: [] },
+			bodies: [
+				{
+					queryId: 'cupboard-diagnose-push',
+					parameters,
+					view: 'events',
+					timeframe: { from: -1, to: 2001 },
+					limit: 1000
+				},
+				{
+					queryId: 'cupboard-diagnose-push',
+					parameters,
+					view: 'events',
+					timeframe: { from: -1, to: 2001 },
+					limit: 1000,
+					offset: 'event-1',
+					offsetDirection: 'next'
+				}
+			]
+		});
+	});
+
+	it('parses an invocation response without including URL credentials or query parameters', () => {
+		expect(parseHttpRequest(httpEvent)).toStrictEqual({
+			timestamp: 1000,
+			requestId: 'request-1',
+			traceId: 'trace-1',
+			method: 'POST',
+			url: 'https://cupboard.example.workers.dev/t/acme/token',
+			status: 500,
+			outcome: 'ok'
+		});
+	});
+
+	it.each(['cf-worker', 'span'])(
+		'rejects a %s event as an HTTP response',
+		(type) => {
+			expect(() =>
+				parseHttpRequest({
+					...httpEvent,
+					$metadata: { ...httpEvent.$metadata, type }
+				})
+			).toThrow(InvalidHttpResponseEventError);
+		}
+	);
+
+	it.each(['terminal', 'json'] as const)(
+		'renders a zero-match result in %s mode',
+		(mode) => {
+			const { ui, captured } = fakeCliUi();
+			const analysis = {
+				worker: 'cupboard',
+				window: { from: 0, to: 1000 },
+				status: 500,
+				hostname: undefined,
+				requests: []
+			};
+
+			renderHttpStatusAnalysis(ui, ui.reporter(), mode, analysis);
+
+			expect({
+				data: captured.data,
+				results: captured.results,
+				notes: captured.notes
+			}).toStrictEqual(
+				mode === 'json'
+					? { data: [JSON.stringify(analysis)], results: [], notes: [] }
+					: {
+							data: [],
+							notes: [],
+							results: [
+								{
+									kind: 'http-status-diagnostic',
+									data: analysis,
+									rows: [
+										{ label: 'Worker', value: 'cupboard' },
+										{
+											label: 'Window',
+											value:
+												'1970-01-01T00:00:00.000Z to 1970-01-01T00:00:01.000Z'
+										},
+										{ label: 'HTTP status', value: '500' },
+										{ label: 'Matching requests', value: '0' }
+									]
+								}
+							]
+						}
+			);
+		}
+	);
+});
 
 const completedGitHubJob: typeof fetch = () =>
 	Promise.resolve(
@@ -236,33 +447,36 @@ describe('bucketForTrace', () => {
 });
 
 describe('parseWorkerLog', () => {
-	it('parses an HTTP request-finished event', () => {
-		const event = {
-			timestamp: 1000,
-			source: {
+	it.each(['message', 'msg'])(
+		'parses an HTTP request-finished event with %s',
+		(messageField) => {
+			const event = {
+				timestamp: 1000,
+				source: {
+					[messageField]: 'request finished',
+					method: 'PUT',
+					path: '/cache/pr-1/uploads/abc123def456ghij',
+					status: 200,
+					rowsRead: 22,
+					rowsWritten: 19
+				},
+				$metadata: { requestId: 'r1' }
+			};
+
+			expect(parseWorkerLog(event)).toStrictEqual({
+				requestId: 'r1',
+				timestamp: 1000,
 				message: 'request finished',
-				method: 'PUT',
+				httpMethod: 'PUT',
+				rpcMethod: undefined,
 				path: '/cache/pr-1/uploads/abc123def456ghij',
 				status: 200,
 				rowsRead: 22,
-				rowsWritten: 19
-			},
-			$metadata: { requestId: 'r1' }
-		};
-
-		expect(parseWorkerLog(event)).toStrictEqual({
-			requestId: 'r1',
-			timestamp: 1000,
-			message: 'request finished',
-			httpMethod: 'PUT',
-			rpcMethod: undefined,
-			path: '/cache/pr-1/uploads/abc123def456ghij',
-			status: 200,
-			rowsRead: 22,
-			rowsWritten: 19,
-			bucket: 'PUT /cache/:cache/uploads/:id'
-		});
-	});
+				rowsWritten: 19,
+				bucket: 'PUT /cache/:cache/uploads/:id'
+			});
+		}
+	);
 
 	it('parses an RPC method-finished event', () => {
 		const event = {
