@@ -42,6 +42,26 @@ describe('canonicalCacheRequest', () => {
 		});
 	});
 
+	it('uses the same content key for different request and trace identifiers', () => {
+		const requests = ['first', 'second'].map((value) =>
+			canonicalCacheRequest(
+				new Request('https://cache.example/t/acme/abc.narinfo', {
+					headers: {
+						'x-request-id': value,
+						'x-cupboard-client-trace-id': value,
+						traceparent: value
+					}
+				}),
+				firstVersion
+			)
+		);
+
+		expect(requests.map((request) => request.url)).toStrictEqual([
+			'https://cache.example/t/acme/abc.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1',
+			'https://cache.example/t/acme/abc.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1'
+		]);
+	});
+
 	it('keys a deleted and recreated cache apart from its previous incarnation', () => {
 		const request = new Request('https://cache.example/t/acme/abc.narinfo');
 

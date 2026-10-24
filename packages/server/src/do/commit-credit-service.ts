@@ -12,6 +12,10 @@ import {
 } from '@cupboard/protocol/upload';
 import { z } from 'zod';
 
+import {
+	type RequestCorrelation,
+	requestCorrelationSchema
+} from '../observability/correlation.ts';
 import { commitEntryCreditBudget } from '../policy/commit-credit.ts';
 import { maxUncreditedCommitSessions } from '../policy/commit-sockets.ts';
 
@@ -56,7 +60,8 @@ export const commitSessionAttachmentSchema = z.object({
 	publication: z.literal(true).optional(),
 	isClosing: z.boolean().optional(),
 	credit: commitCreditStateSchema.optional(),
-	lastActivityAt: epochMillisSchema.optional()
+	lastActivityAt: epochMillisSchema.optional(),
+	correlation: requestCorrelationSchema.optional()
 });
 export type CommitSessionAttachment = z.infer<
 	typeof commitSessionAttachmentSchema
@@ -357,6 +362,7 @@ export class CommitCreditService {
 			readonly authenticatedUntil: number;
 			readonly reuseGrants?: AuthorizationDetails;
 			readonly reuseGrantsStored?: true;
+			readonly correlation?: RequestCorrelation;
 		},
 		hasNegotiated: boolean,
 		now: number

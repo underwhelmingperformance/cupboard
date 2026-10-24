@@ -137,8 +137,11 @@ describe('public narinfo read cost', () => {
 
 		const capture = startCapture();
 
+		let requestId: string | undefined;
+
 		try {
-			await readFetch(`/${metadata.storePathHash}.narinfo`);
+			const response = await readFetch(`/${metadata.storePathHash}.narinfo`);
+			requestId = response.headers.get('x-request-id') ?? undefined;
 		} finally {
 			capture.stop();
 		}
@@ -149,6 +152,7 @@ describe('public narinfo read cost', () => {
 				.map((entry) => entry.properties)
 		).toStrictEqual([
 			{
+				requestId,
 				method: 'GET',
 				path,
 				route: String.raw`/t/:tenant/:name{[0-9a-z]+\.narinfo}`,

@@ -13,6 +13,7 @@ import {
 	withOperationCost
 } from '../do/operation-cost.ts';
 
+import { requestCorrelation } from './correlation.ts';
 import { stampTraceContext } from './trace.ts';
 
 function configuredRootLogger(): Logger {
@@ -31,6 +32,7 @@ export function requestLogger(request: Request): Logger {
 
 	return root.with({
 		...stampTraceContext(),
+		...requestCorrelation(request),
 		...(ray !== undefined && { ray }),
 		method: request.method,
 		path: new URL(request.url).pathname
