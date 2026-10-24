@@ -7,12 +7,12 @@
 		"@cupboard/shared": "workspace:*",
 		"@opentelemetry/api": "^1.10.0",
 		"@opentelemetry/core": "^3.0.0",
+		"http-status-codes": "catalog:",
 		"undici": "^8.11.2",
 		"zod": "catalog:"
 	},
 	"devDependencies": {
 		"@types/node": "catalog:",
-		"http-status-codes": "catalog:",
 		"typescript": "catalog:",
 		"vitest": "catalog:"
 	},

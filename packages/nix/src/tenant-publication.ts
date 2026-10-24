@@ -2,14 +2,15 @@ import type { StorePathString } from '@cupboard/nix-store/scalars';
 import { canonicalHref, parseBaseUrl } from '@cupboard/nix-store/url';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import {
+	context,
 	defaultTextMapSetter,
-	ROOT_CONTEXT,
 	type Span,
 	SpanKind,
 	SpanStatusCode,
 	trace
 } from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
+import { StatusCodes } from 'http-status-codes';
 
 import {
 	CachedClosureReader,
@@ -18,6 +19,8 @@ import {
 } from './cache-metadata.ts';
 import { withReadAuthentication } from './read-authentication.ts';
 import { discoverNixStoreConfig } from './store-config.ts';
+
+const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
 export interface TenantDependencyReference {
 	readonly storePath: StorePathString;
@@ -117,10 +120,12 @@ export async function tenantDependencyReferences(
 		.startSpan(
 			'tenant-dependency-references',
 			{ attributes: { 'cupboard.paths.requested': new Set(paths).size } },
-			ROOT_CONTEXT
+			context.active()
 		);
 	try {
-		return await discoverDependencyReferences(paths, options, span);
+		return await context.with(trace.setSpan(context.active(), span), () =>
+			discoverDependencyReferences(paths, options, span)
+		);
 	} catch (error) {
 		if (error instanceof Error) {
 			span.recordException(error);
@@ -139,7 +144,6 @@ async function discoverDependencyReferences(
 ): Promise<TenantDependencyReference[]> {
 	const references: TenantDependencyReference[] = [];
 	const traceId = span.spanContext().traceId;
-	const parent = trace.setSpan(ROOT_CONTEXT, span);
 	const propagator = new W3CTraceContextPropagator();
 	let pending = [...new Set(paths)];
 	for (const source of options.sources) {
@@ -185,12 +189,12 @@ async function discoverDependencyReferences(
 						'http.request.method': init?.method ?? 'GET'
 					}
 				},
-				parent
+				context.active()
 			);
 			if (shouldPropagate) {
 				const carrier: Record<string, string> = {};
 				propagator.inject(
-					trace.setSpan(parent, requestSpan),
+					trace.setSpan(context.active(), requestSpan),
 					carrier,
 					defaultTextMapSetter
 				);
@@ -218,13 +222,17 @@ async function discoverDependencyReferences(
 			};
 			try {
 				report();
-				const response = await fetcher(input, {
-					...init,
-					headers,
-					...(shouldPropagate && { redirect: 'error' })
-				});
+				const response = await context.with(
+					trace.setSpan(context.active(), requestSpan),
+					() =>
+						fetcher(input, {
+							...init,
+							headers,
+							...(shouldPropagate && { redirect: 'error' })
+						})
+				);
 				requestSpan.setAttribute('http.response.status_code', response.status);
-				if (response.status >= 500) {
+				if (response.status >= serverErrorStatus) {
 					requestSpan.setStatus({ code: SpanStatusCode.ERROR });
 				}
 				return observeResponseBody(response, finish);
