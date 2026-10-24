@@ -228,9 +228,21 @@ failures do not prevent the remaining checks from running. The scripts suite
 uses one worker because its tests create additional build and database
 subprocesses. You need Nix and Docker to run the full gate.
 
+When adding a `check:*` script, register it in
+[`scripts/check-runner.ts`][check-runner] too. The scheduler rejects scripts
+that its plan does not recognise.
+
+Interrupting `pnpm check` cancels active checks. On Unix, cleanup terminates
+their process groups, including descendants whose parents have already exited.
+
 CI runs the source checks in separate jobs. The required `check` context
 succeeds only when all source jobs and every conformance platform succeed. A
-failed, cancelled or skipped prerequisite prevents success.
+failed, cancelled or skipped prerequisite prevents success. The aggregator in
+[`ci.yml`][ci-workflow] uses `always()` to evaluate those results after a
+failure or cancellation.
+
+[ci-workflow]: ../../.github/workflows/ci.yml
+[check-runner]: ../../scripts/check-runner.ts
 
 | Script                            | What it does                                                                                                                                                                                       | What it needs                                                        |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |

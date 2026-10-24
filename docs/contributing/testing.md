@@ -19,6 +19,23 @@ This page explains what each kind covers, how to run it, and what it needs.
 
 `pnpm check:test` runs the first four rows together.
 
+## Time and synchronisation
+
+Use an injected clock or scoped fake timers to test retry delays without waiting
+through them. Keep the operations under test real. For example, the failed-build
+cases in [`build-paths.test.ts`][build-paths-tests] run real Nix builds through
+a test Worker that injects `ManualClock`. They assert the retry delays and the
+resulting receipts and GC roots. Successful builds use the shipped Worker.
+
+Synchronise concurrent operations with explicit acknowledgements or control
+sockets. File and socket readiness checks still need real I/O and deadlines. The
+[cross-DO quota tests][quota-tests] use R2 markers to pause and release
+verification. Their polling loops also need `scheduler.wait(0)` to let the other
+Worker progress; awaiting R2 operations alone can starve that Worker.
+
+[build-paths-tests]: ../../tests/e2e/build-paths.test.ts
+[quota-tests]: ../../packages/server/src/do/quota.workers.test.ts
+
 ## Package unit tests
 
 Every package uses Vitest. The tests live next to the code that they test, in
@@ -160,17 +177,18 @@ locally when those prerequisites are unavailable. Linux CI starts a trusted
 daemon and fails on any skipped general end-to-end case. The GC fixture uses its
 own diverted daemon, and private daemonless fixtures remain daemonless.
 
+Use [`addKnownStorePath`][known-store-path] when a fixture needs a real Nix
+store path and a dependency. Host executables can be installed outside
+`/nix/store`. Tests must not collect the host store.
+
+[known-store-path]: ../../tests/support/known-store-path.ts
+
 Each end-to-end Vitest invocation builds the production and test Worker bundles,
 plus the predecessor fixture, once from the working tree. Watch reruns rebuild
 those artifacts. The fixtures continue to create fresh Miniflare instances,
 issuers and storage; stopping a fixture does not remove shared artifacts. When
 called outside these test suites, the support helpers build from the working
 tree on each invocation.
-
-The [check runtime report][check-runtime] records timings, coverage and
-remaining bootstrap costs.
-
-[check-runtime]: ./check-runtime.md
 
 ### The staged upgrade test
 
