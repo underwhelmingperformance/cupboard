@@ -300,7 +300,9 @@ describe('GitHub job window', () => {
 			'https://github.com/iainlane/dotfiles/actions/runs/20/job/30'
 		);
 		const request = windowForGitHubJob(reference, 0, () =>
-			Promise.resolve(new Response(undefined, { status: 403 }))
+			Promise.resolve(
+				new Response(undefined, { status: StatusCodes.FORBIDDEN })
+			)
 		);
 
 		await expect(request).rejects.toBeInstanceOf(GitHubJobRequestError);
@@ -457,7 +459,7 @@ describe('parseWorkerLog', () => {
 					[messageField]: 'request finished',
 					method: 'PUT',
 					path: '/cache/pr-1/uploads/abc123def456ghij',
-					status: 200,
+					status: StatusCodes.OK,
 					rowsRead: 22,
 					rowsWritten: 19
 				},
@@ -471,7 +473,7 @@ describe('parseWorkerLog', () => {
 				httpMethod: 'PUT',
 				rpcMethod: undefined,
 				path: '/cache/pr-1/uploads/abc123def456ghij',
-				status: 200,
+				status: StatusCodes.OK,
 				rowsRead: 22,
 				rowsWritten: 19,
 				bucket: 'PUT /cache/:cache/uploads/:id'
@@ -1062,7 +1064,12 @@ describe('fetchPaged', () => {
 				failures -= 1;
 
 				return Promise.reject(
-					new Cloudflare.APIError(401, undefined, 'unauthorized', undefined)
+					new Cloudflare.APIError(
+						StatusCodes.UNAUTHORIZED,
+						undefined,
+						'unauthorized',
+						undefined
+					)
 				);
 			}
 
@@ -1095,7 +1102,12 @@ describe('fetchPaged', () => {
 			attempts += 1;
 
 			return Promise.reject(
-				new Cloudflare.APIError(429, undefined, 'rate limited', undefined)
+				new Cloudflare.APIError(
+					StatusCodes.TOO_MANY_REQUESTS,
+					undefined,
+					'rate limited',
+					undefined
+				)
 			);
 		};
 
@@ -1119,7 +1131,12 @@ describe('fetchPaged', () => {
 			attempts += 1;
 
 			return Promise.reject(
-				new Cloudflare.APIError(400, undefined, 'bad query', undefined)
+				new Cloudflare.APIError(
+					StatusCodes.BAD_REQUEST,
+					undefined,
+					'bad query',
+					undefined
+				)
 			);
 		};
 
@@ -1509,7 +1526,7 @@ describe('analyse', () => {
 			httpMethod: 'PUT',
 			rpcMethod: undefined,
 			path: '/cache/c/uploads/aaa111bbb222ccc3',
-			status: 200,
+			status: StatusCodes.OK,
 			rowsRead: 20,
 			rowsWritten: 10,
 			bucket: 'PUT /cache/:cache/uploads/:id'
@@ -1521,7 +1538,7 @@ describe('analyse', () => {
 			httpMethod: 'PUT',
 			rpcMethod: undefined,
 			path: '/cache/c/uploads/ddd444eee555fff6',
-			status: 500,
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
 			rowsRead: 30,
 			rowsWritten: 15,
 			bucket: 'PUT /cache/:cache/uploads/:id'
@@ -1533,7 +1550,7 @@ describe('analyse', () => {
 			httpMethod: 'POST',
 			rpcMethod: undefined,
 			path: '/cache/c/uploads',
-			status: 200,
+			status: StatusCodes.OK,
 			rowsRead: 5,
 			rowsWritten: 0,
 			bucket: 'POST /cache/:cache/uploads'
