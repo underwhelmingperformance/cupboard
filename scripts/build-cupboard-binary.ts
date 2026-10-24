@@ -235,6 +235,7 @@ async function main(): Promise<void> {
 			format: 'cjs',
 			outfile: bundlePath,
 			platform: 'node',
+			conditions: ['require'],
 			sourcemap: true,
 			target: 'node24'
 		});

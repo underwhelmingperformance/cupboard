@@ -38,6 +38,7 @@ export async function renderActionBundle(sourcePath: string): Promise<string> {
 		bundle: true,
 		format: 'cjs',
 		platform: 'node',
+		conditions: ['require'],
 		target: 'node24',
 		minify: true,
 		legalComments: 'eof',
