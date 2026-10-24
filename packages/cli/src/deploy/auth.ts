@@ -105,7 +105,7 @@ export function defaultCredentialChain(
 		writeGrant: writeCachedGrant,
 		withGrantLock: withCachedGrantLock,
 		refreshGrant: (previous, signal = options.signal) =>
-			refreshCloudflareGrant(previous, fetch, Date.now, signal),
+			refreshCloudflareGrant(previous, undefined, Date.now, signal),
 		...(options.wrangler && { readWranglerToken }),
 		login: (signal = options.signal) =>
 			cloudflareLogin({

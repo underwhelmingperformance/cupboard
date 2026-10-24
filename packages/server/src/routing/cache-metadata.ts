@@ -13,6 +13,7 @@ import {
 } from '@cupboard/shared/response-body';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context } from 'hono';
+import { StatusCodes } from 'http-status-codes';
 
 import { sha256Hex } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -23,6 +24,7 @@ import {
 	MetadataScopeChangedError,
 	SharedFactsUnavailableError
 } from '../errors.ts';
+import { internalCorrelationHeaders } from '../observability/request-context.ts';
 import { withSpan } from '../observability/span.ts';
 import { upstreamTraceAttributes } from '../observability/trace-context.ts';
 import {
@@ -43,6 +45,9 @@ import {
 } from './read-scope.ts';
 import { cachedTenantRead, withoutStoring } from './tenant-forward.ts';
 
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
+const firstErrorStatus: number = StatusCodes.BAD_REQUEST;
+
 class ForwardedMetadataRefusal extends Error {
 	constructor(readonly response: Response) {
 		super(
@@ -61,21 +66,24 @@ async function publicEntry(
 		/\/api\/v1\/path-info$/u,
 		() => `/${StorePath.hash(storePath)}.narinfo`
 	);
+	const headers = internalCorrelationHeaders(context.req.raw.headers);
+	headers.set('accept', 'text/x-nix-narinfo');
+
 	let response: Response;
 	try {
 		response = await cachedTenantRead(
 			context,
-			new Request(target, { headers: { accept: 'text/x-nix-narinfo' } })
+			new Request(target, { headers })
 		);
 	} catch (error) {
 		throw new SharedFactsUnavailableError(error);
 	}
-	if (response.status === 404) {
+	if (response.status === notFoundStatus) {
 		await discardResponseBody(response);
 		return { storePath, status: 'missing' };
 	}
 	if (!response.ok) {
-		if (response.status < 400) {
+		if (response.status < firstErrorStatus) {
 			await discardResponseBody(response);
 			throw new MetadataNarInfoInvalidError(
 				storePath,

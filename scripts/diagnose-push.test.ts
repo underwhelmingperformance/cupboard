@@ -13,11 +13,9 @@ import {
 	bucketForTrace,
 	buildVerdict,
 	canonicalPath,
-	detectSession,
 	fetchPaged,
 	fetchTelemetry,
 	GitHubJobRequestError,
-	hasSessionBoundary,
 	InvalidGitHubJobMetadataError,
 	InvalidGitHubJobUrlError,
 	InvalidHttpResponseEventError,
@@ -108,7 +106,6 @@ describe('HTTP status queries', () => {
 			worker: 'cupboard-tenant',
 			searchMinutes: 120,
 			sinceMinutes: 2880,
-			gapMs: 60_000,
 			account: undefined,
 			mode: 'json',
 			forceLogin: false,
@@ -133,7 +130,6 @@ describe('HTTP status queries', () => {
 			worker: 'cupboard-tenant',
 			searchMinutes: 120,
 			sinceMinutes: 2880,
-			gapMs: 60_000,
 			account: undefined,
 			mode: 'json',
 			forceLogin: false,
@@ -170,7 +166,6 @@ describe('HTTP status queries', () => {
 				hostname: 'cupboard.example.workers.dev'
 			},
 			{ from: 0, to: 2000 },
-			undefined,
 			vi.fn()
 		);
 		const parameters = {
@@ -345,6 +340,31 @@ describe('HTTP status queries', () => {
 			);
 		}
 	);
+});
+
+describe('client diagnostic options', () => {
+	it('accepts a client log directory without changing the query window', () => {
+		expect(
+			parseOptions([
+				'--client-logs',
+				'/tmp/diagnostics',
+				'--since',
+				'10',
+				'--json'
+			])
+		).toStrictEqual({
+			clientLogs: '/tmp/diagnostics',
+			worker: 'cupboard-tenant',
+			searchMinutes: 120,
+			sinceMinutes: 10,
+			account: undefined,
+			mode: 'json',
+			forceLogin: false,
+			githubJob: undefined,
+			status: undefined,
+			hostname: undefined
+		});
+	});
 });
 
 const completedGitHubJob: typeof fetch = () =>
@@ -541,13 +561,14 @@ describe('bucketForTrace', () => {
 });
 
 describe('parseWorkerLog', () => {
-	it.each(['message', 'msg'])(
-		'parses an HTTP request-finished event with %s',
-		(messageField) => {
+	it.each(['message', 'msg'] as const)(
+		'parses an HTTP event with %s',
+		(key) => {
+			const message = 'request finished';
 			const event = {
 				timestamp: 1000,
 				source: {
-					[messageField]: 'request finished',
+					[key]: message,
 					method: 'PUT',
 					path: '/cache/pr-1/uploads/abc123def456ghij',
 					status: StatusCodes.OK,
@@ -560,7 +581,7 @@ describe('parseWorkerLog', () => {
 			expect(parseWorkerLog(event)).toStrictEqual({
 				requestId: 'r1',
 				timestamp: 1000,
-				message: 'request finished',
+				message,
 				httpMethod: 'PUT',
 				rpcMethod: undefined,
 				path: '/cache/pr-1/uploads/abc123def456ghij',
@@ -1393,7 +1414,7 @@ describe('fetchPaged', () => {
 		]);
 	});
 
-	it('stops the timeframe walk once the collected rows bracket a gap', async () => {
+	it('continues the timeframe walk across quiet gaps', async () => {
 		let requests = 0;
 		const pages = [
 			[{ timestamp: 1000 }, { timestamp: 950 }],
@@ -1413,17 +1434,16 @@ describe('fetchPaged', () => {
 			timestampOf,
 			undefined,
 			noProgress,
-			noSleep,
-			1000
+			noSleep
 		);
 
 		expect({ rows, requests }).toStrictEqual({
 			rows: [{ timestamp: 1000 }, { timestamp: 950 }, { timestamp: -2000 }],
-			requests: 2
+			requests: 3
 		});
 	});
 
-	it('stops the cursor walk once the collected rows bracket a gap', async () => {
+	it('continues the cursor walk across quiet gaps', async () => {
 		let requests = 0;
 		const pages = [
 			[
@@ -1446,8 +1466,7 @@ describe('fetchPaged', () => {
 			timestampOf,
 			cursorOf,
 			noProgress,
-			noSleep,
-			1000
+			noSleep
 		);
 
 		expect({ rows, requests }).toStrictEqual({
@@ -1456,7 +1475,7 @@ describe('fetchPaged', () => {
 				{ timestamp: 950, id: 'c' },
 				{ timestamp: -2000, id: 'a' }
 			],
-			requests: 2
+			requests: 3
 		});
 	});
 
@@ -1556,39 +1575,6 @@ describe('mergeBusy', () => {
 		['is zero for no intervals', [], 0]
 	])('%s', (_label, intervals, expected) => {
 		expect(mergeBusy(intervals as [number, number][])).toBe(expected);
-	});
-});
-
-describe('detectSession', () => {
-	it('returns undefined with no activity', () => {
-		expect(detectSession([], 1000)).toBeUndefined();
-	});
-
-	it('keeps only the trailing cluster after a long gap', () => {
-		expect(detectSession([0, 500, 11_000, 11_400, 11_900], 1000)).toStrictEqual(
-			{
-				from: 11_000,
-				to: 11_900
-			}
-		);
-	});
-
-	it('spans the whole range when gaps stay small', () => {
-		expect(detectSession([0, 500, 900, 1300], 1000)).toStrictEqual({
-			from: 0,
-			to: 1300
-		});
-	});
-});
-
-describe('hasSessionBoundary', () => {
-	it.each([
-		['is false with fewer than two points', [5], false],
-		['is false when every gap is within the limit', [0, 500, 900, 1300], false],
-		['is true when a gap exceeds the limit', [0, 500, 2000], true],
-		['ignores the order of the points', [11_000, 0, 500], true]
-	])('%s', (_label, timestamps, expected) => {
-		expect(hasSessionBoundary(timestamps, 1000)).toBe(expected);
 	});
 });
 
@@ -1796,18 +1782,27 @@ describe('analyse', () => {
 	it('reports a no-trace fallback in the verdict', () => {
 		const analysis = analyse('cupboard-tenant', window, logs, [], []);
 
-		expect(analysis.tracingAvailable).toBe(false);
-		expect(analysis.verdict).toContain('No traces in the window');
+		expect({
+			tracingAvailable: analysis.tracingAvailable,
+			verdict: analysis.verdict
+		}).toStrictEqual({
+			tracingAvailable: false,
+			verdict: {
+				kind: 'traces-unavailable',
+				scope: 'time-window',
+				busiest: {
+					bucket: 'PUT /cache/:cache/uploads/:id',
+					logCount: 2,
+					rowsRead: 50
+				}
+			}
+		});
 	});
 
 	it('leads the summary rows with the verdict', () => {
 		const analysis = analyse('cupboard-tenant', window, logs, traces, spans);
 		const rows = summaryRows(analysis);
 
-		expect(rows[0]).toStrictEqual({
-			label: 'Verdict',
-			value: analysis.verdict
-		});
 		expect(rows.map((row) => row.label)).toStrictEqual([
 			'Verdict',
 			'Window',
@@ -1883,6 +1878,20 @@ const fetchGroupOf = (operations: OperationStat[]): OperationGroup => ({
 });
 
 describe('buildVerdict', () => {
+	it('describes unavailable matching telemetry without claiming no execution', () => {
+		expect(
+			buildVerdict([], false, {
+				kind: 'client-identifiers',
+				matchedBy: { requestId: 0, ray: 0, untrustedClientParent: 0 },
+				excludedEvents: 10,
+				excludedTraces: 2
+			})
+		).toStrictEqual({
+			kind: 'telemetry-unavailable',
+			scope: 'client-identifiers'
+		});
+	});
+
 	it('reports time outside traced leaf spans when it dominates', () => {
 		const roots = operationStat({
 			bucket: 'PUT /cache/:cache/roots/:name',
@@ -1893,9 +1902,15 @@ describe('buildVerdict', () => {
 			spans: [{ name: 'r2_head', count: 50, busyMs: 419 }]
 		});
 
-		expect(buildVerdict([fetchGroupOf([roots])], true)).toBe(
-			'Push path: most time (412.0s over 10 calls, 100% of fetch) is PUT /cache/:cache/roots/:name, 411.0s outside traced leaf spans.'
-		);
+		expect(buildVerdict([fetchGroupOf([roots])], true)).toStrictEqual({
+			kind: 'dominant-operation',
+			group: 'fetch',
+			bucket: 'PUT /cache/:cache/roots/:name',
+			totalMs: 412_000,
+			traceCount: 10,
+			sharePercent: 100,
+			cost: { kind: 'outside-spans', durationMs: 411_000 }
+		});
 	});
 
 	it('reports the busiest traced leaf-span kind when it dominates', () => {
@@ -1906,13 +1921,21 @@ describe('buildVerdict', () => {
 			spans: [{ name: 'r2_head', count: 634, busyMs: 4800 }]
 		});
 
-		expect(buildVerdict([fetchGroupOf([uploads])], true)).toBe(
-			'Push path: most time (5.0s over 1 calls, 100% of fetch) is POST /cache/:cache/uploads, 4.8s in r2_head (634 calls).'
-		);
+		expect(buildVerdict([fetchGroupOf([uploads])], true)).toStrictEqual({
+			kind: 'dominant-operation',
+			group: 'fetch',
+			bucket: 'POST /cache/:cache/uploads',
+			totalMs: 5000,
+			traceCount: 1,
+			sharePercent: 100,
+			cost: { kind: 'span', durationMs: 4800, name: 'r2_head', count: 634 }
+		});
 	});
 
 	it('explains an empty window', () => {
-		expect(buildVerdict([], true)).toBe('No trace has a positive duration.');
+		expect(buildVerdict([], true)).toStrictEqual({
+			kind: 'no-positive-duration'
+		});
 	});
 });
 
@@ -1937,7 +1960,7 @@ describe('renderAnalysis', () => {
 		tracedServerMs: 400,
 		wallSpanMs: 10_000,
 		tracingAvailable: true,
-		verdict: 'fine',
+		verdict: buildVerdict([fetchGroupOf(operations)], true),
 		groups: [fetchGroupOf(operations)],
 		slowest: [
 			{

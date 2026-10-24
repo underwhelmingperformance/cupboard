@@ -2,7 +2,15 @@ import { getLogger } from '@logtape/logtape';
 import { StatusCodes } from 'http-status-codes';
 
 import { discardResponseBody } from './cleanup.ts';
+import {
+	type FetchObservationOptions,
+	observeFetchAttempt,
+	observeFetchOperation,
+	recordFetchOutcome
+} from './fetch-observation.ts';
 import { parseHttpDate } from './http-fields.ts';
+
+const firstErrorStatus: number = StatusCodes.BAD_REQUEST;
 
 const logger = getLogger(['cupboard', 'fetch']);
 
@@ -44,9 +52,10 @@ must therefore supply reusable bytes rather than a one-shot stream.
 */
 export function retryingFetcher(
 	fetcher: typeof fetch,
-	replaySafety: ReplaySafety
+	replaySafety: ReplaySafety,
+	observation: FetchObservationOptions = {}
 ): typeof fetch {
-	return async (input, init) => {
+	const retrying: typeof fetch = async (input, init) => {
 		const signal =
 			init?.signal === null
 				? undefined
@@ -56,7 +65,11 @@ export function retryingFetcher(
 		if (replaySafety === 'replay-unsafe') {
 			signal?.throwIfAborted();
 
-			return fetcher(input, init);
+			return observeFetchAttempt(fetcher, input, init, {
+				...observation,
+				attempt: 1,
+				replaySafety
+			});
 		}
 
 		const request = {
@@ -72,13 +85,24 @@ export function retryingFetcher(
 
 			let response: Response;
 			try {
-				response = await fetcher(attempt, init);
+				response = await observeFetchAttempt(fetcher, attempt, init, {
+					...observation,
+					attempt: retries + 1,
+					replaySafety
+				});
 			} catch (error) {
 				if (
 					signal?.aborted === true ||
 					!isFetchNetworkError(error) ||
 					retries >= maxTransientRetries
 				) {
+					recordFetchOutcome(
+						signal?.aborted === true
+							? 'cancelled'
+							: isFetchNetworkError(error) && retries >= maxTransientRetries
+								? 'exhausted'
+								: 'failed'
+					);
 					throw error;
 				}
 
@@ -110,9 +134,28 @@ export function retryingFetcher(
 				continue;
 			}
 
+			recordFetchOutcome(
+				isTransientResponse(response) && retries >= maxTransientRetries
+					? 'exhausted'
+					: retries > 0 && response.status < firstErrorStatus
+						? 'recovered'
+						: 'returned'
+			);
+
 			return response;
 		}
 	};
+
+	return (input, init) =>
+		observeFetchOperation(() => retrying(input, init), {
+			...observation,
+			replaySafety,
+			signal:
+				init?.signal === null
+					? undefined
+					: (init?.signal ??
+						(input instanceof Request ? input.signal : undefined))
+		});
 }
 
 /**

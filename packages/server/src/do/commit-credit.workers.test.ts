@@ -348,6 +348,49 @@ async function openHoldingPool(
 
 describe('commit session credit', () => {
 	beforeEach(resetTestServer);
+
+	it('preserves trusted request correlation in the hibernation attachment', async () => {
+		const token = await initialise();
+		const correlation = {
+			requestId: 'request-before-hibernation',
+			clientTraceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+			clientSpanId: '00f067aa0ba902b7'
+		};
+		const response = await fetchPath('/commit', {
+			headers: {
+				authorization: `Bearer ${token}`,
+				upgrade: 'websocket',
+				'x-request-id': correlation.requestId,
+				'x-cupboard-client-trace-id': correlation.clientTraceId,
+				'x-cupboard-client-span-id': correlation.clientSpanId
+			}
+		});
+		const socket = response.webSocket;
+
+		if (socket === null) {
+			throw new Error('Expected a commit WebSocket');
+		}
+
+		socket.accept();
+
+		try {
+			const restored = await runInDurableObject(
+				currentServer(),
+				(_instance, state) =>
+					state
+						.getWebSockets()
+						.map(
+							(serverSocket) =>
+								readCommitSessionAttachment(serverSocket)?.correlation
+						)
+			);
+
+			expect(restored).toStrictEqual([correlation]);
+		} finally {
+			socket.close();
+		}
+	});
+
 	it.each([false, true])(
 		'applies the publication message bound only with negotiated publication=%s',
 		async (publication) => {

@@ -7,6 +7,20 @@ const spanId = '00f067aa0ba902b7';
 const parent = `00-${traceId}-${spanId}-01`;
 
 describe('upstream W3C trace context', () => {
+	it('reads validated identifiers forwarded after public trace headers are removed', () => {
+		expect(
+			upstreamTraceAttributes(
+				new Headers({
+					'x-cupboard-client-trace-id': traceId,
+					'x-cupboard-client-span-id': spanId
+				})
+			)
+		).toStrictEqual({
+			'cupboard.upstream.trace_id': traceId,
+			'cupboard.upstream.span_id': spanId
+		});
+	});
+
 	it.each(['00', '01'])(
 		'extracts valid trace identifiers with flags %s',
 		(flags) => {

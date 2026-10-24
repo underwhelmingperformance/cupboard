@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
+import { rootLogger } from '@cupboard/logger';
 import {
 	parseReporterResults,
 	type ReporterResultEvent,
@@ -13,12 +14,15 @@ import {
 	observeChildProcess,
 	waitForAbortableChildProcess
 } from '@cupboard/shared/child-process';
+import { usageExitCode } from '@cupboard/shared/errors';
 import {
 	type WorkflowCommands,
 	workflowCommands
 } from '@cupboard/shared/github-actions';
+import { subprocessTraceEnvironment } from '@cupboard/shared/node-tracing';
 import { z } from 'zod';
 
+import { subprocessLogFile } from './diagnostics/logging.ts';
 import { CommandFailedError, CupboardReportedError } from './errors.ts';
 import { type Environment, requireEnvironment } from './inputs.ts';
 
@@ -29,9 +33,9 @@ export type CacheCommand =
 	readonly ['push'] | readonly ['attest', 'attach'] | readonly ['run'];
 
 /**
-The long options that a command's `--help` output lists. Released CLIs
-predate some of the options the actions pass, so each invocation is shaped
-to the installed command rather than to the current contract.
+The long options listed by a command's `--help` output. Released CLIs support
+different option sets, so actions inspect the installed command before
+constructing arguments.
 */
 export type CommandOptions = ReadonlySet<string>;
 
@@ -133,7 +137,7 @@ export async function detectCupboardResultProtocol(
 	binaryPath: string,
 	signal?: AbortSignal
 ): Promise<CupboardResultProtocol> {
-	const help = await readHelp(binaryPath, ['--help'], signal);
+	const help = await readCommandOutput(binaryPath, ['--help'], signal);
 
 	if (help.status !== 0) {
 		throw new CommandFailedError(binaryPath, help.status);
@@ -155,20 +159,90 @@ export async function cupboardDebugArguments(
 	environment: Environment,
 	signal?: AbortSignal
 ): Promise<readonly string[]> {
-	if (environment.RUNNER_DEBUG !== '1') {
+	const logFile = subprocessLogFile(environment);
+
+	if (logFile === undefined && environment.RUNNER_DEBUG !== '1') {
 		return [];
 	}
 
-	const options = await inspectGlobalOptions(binaryPath, signal);
+	const canUseLogFile =
+		logFile !== undefined && (await canLogToFile(binaryPath, signal));
+	const options =
+		environment.RUNNER_DEBUG === '1'
+			? await inspectGlobalOptions(binaryPath, signal)
+			: new Set<string>();
+	const canDebug = options.has('--debug');
 
-	return options.has('--debug') ? ['--debug'] : [];
+	return [
+		...(canDebug ? ['--debug'] : []),
+		...(logFile !== undefined && canUseLogFile ? ['--log-file', logFile] : [])
+	];
+}
+
+const parserErrorSchema = z.object({
+	event: z.literal('error'),
+	name: z.literal('CommanderError'),
+	message: z.string()
+});
+
+async function canLogToFile(
+	binaryPath: string,
+	signal?: AbortSignal
+): Promise<boolean> {
+	// Omitting the value stops parsing before any command handler or file sink.
+	const probe = await readCommandOutput(
+		binaryPath,
+		['--output-mode', 'json', '--log-file'],
+		signal,
+		'stderr'
+	);
+	let failure: unknown;
+
+	try {
+		failure = JSON.parse(probe.output);
+	} catch {
+		throw new CommandFailedError(
+			binaryPath,
+			probe.status,
+			'invalid CLI parser response'
+		);
+	}
+
+	const parsed = parserErrorSchema.safeParse(failure);
+
+	if (probe.status !== usageExitCode || !parsed.success) {
+		throw new CommandFailedError(
+			binaryPath,
+			probe.status,
+			'unexpected CLI parser response'
+		);
+	}
+
+	if (
+		parsed.data.message === "error: option '--log-file <path>' argument missing"
+	) {
+		return true;
+	}
+
+	if (parsed.data.message === "error: unknown option '--log-file'") {
+		rootLogger().debug('installed CLI does not support diagnostic log files', {
+			supported: false
+		});
+		return false;
+	}
+
+	throw new CommandFailedError(
+		binaryPath,
+		probe.status,
+		'unexpected CLI parser error'
+	);
 }
 
 async function inspectGlobalOptions(
 	binaryPath: string,
 	signal?: AbortSignal
 ): Promise<CommandOptions> {
-	const help = await readHelp(binaryPath, ['--help'], signal);
+	const help = await readCommandOutput(binaryPath, ['--help'], signal);
 
 	if (help.status !== 0 || !help.output.startsWith('Usage: cupboard ')) {
 		throw new CommandFailedError(
@@ -227,7 +301,11 @@ export async function inspectCommandOptions(
 	command: CacheCommand,
 	signal?: AbortSignal
 ): Promise<CommandOptions> {
-	const help = await readHelp(binaryPath, [...command, '--help'], signal);
+	const help = await readCommandOutput(
+		binaryPath,
+		[...command, '--help'],
+		signal
+	);
 
 	if (
 		help.status !== 0 ||
@@ -243,20 +321,24 @@ export async function inspectCommandOptions(
 	return commandOptionsFromHelp(help.output);
 }
 
-async function readHelp(
+async function readCommandOutput(
 	binaryPath: string,
 	arguments_: readonly string[],
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	outputStream: 'stdout' | 'stderr' = 'stdout'
 ): Promise<{ readonly status: number | null; readonly output: string }> {
 	signal?.throwIfAborted();
 
 	const child = spawn(binaryPath, [...arguments_], {
-		stdio: ['ignore', 'pipe', 'ignore']
+		stdio: ['ignore', 'pipe', 'pipe'],
+		env: { ...process.env, ...subprocessTraceEnvironment() }
 	});
 	let output = '';
 
-	child.stdout.setEncoding('utf8');
-	child.stdout.on('data', (chunk: string) => {
+	const stream = child[outputStream];
+	child[outputStream === 'stdout' ? 'stderr' : 'stdout'].resume();
+	stream.setEncoding('utf8');
+	stream.on('data', (chunk: string) => {
 		output += chunk;
 	});
 
@@ -284,7 +366,8 @@ async function runLegacyCupboard(
 		commands.warning(message);
 	});
 	const child = spawn(binaryPath, ['--output-mode', 'json', ...arguments_], {
-		stdio: ['inherit', 'inherit', 'pipe']
+		stdio: ['inherit', 'inherit', 'pipe'],
+		env: { ...process.env, ...subprocessTraceEnvironment() }
 	});
 
 	child.stderr.setEncoding('utf8');
@@ -427,6 +510,7 @@ async function spawnCupboard(
 		env: {
 			...process.env,
 			...environment,
+			...subprocessTraceEnvironment(),
 			CUPBOARD_DEFER_ERROR_ANNOTATIONS: shouldDeferErrorAnnotations
 				? '1'
 				: undefined

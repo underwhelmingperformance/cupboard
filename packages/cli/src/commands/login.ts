@@ -26,7 +26,7 @@ import {
 } from '../auth/token-store.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
-import { parseWorkerUrl } from '../client/transport.ts';
+import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
 import {
 	cloudflareDashIssuer,
 	cloudflareLogin,
@@ -174,7 +174,10 @@ export function identitySignIn(
 	dependencies: IdentityLoginDependencies
 ): SignInMethod {
 	const { signal } = dependencies;
-	const fetcher = dependencies.fetcher ?? fetch;
+	const fetcher = resilientFetcher(
+		'replay-unsafe',
+		dependencies.fetcher ?? fetch
+	);
 	const scope = loginScopeForClient(options.clientId);
 	const prompt = authorizationPrompt(options, dependencies);
 	const isCupboardClient = options.clientId === cloudflareOauthClientId;

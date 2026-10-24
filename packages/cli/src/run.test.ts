@@ -5,7 +5,9 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { readLogFile } from '@cupboard/logger/file';
 import { maxTransientRetries } from '@cupboard/shared/retry';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { overQuotaAdvice } from './errors.ts';
@@ -52,7 +54,7 @@ describe('runCli', () => {
 	it.each([
 		{
 			code: 'FORBIDDEN',
-			status: 403,
+			status: StatusCodes.FORBIDDEN,
 			exitCode: 77,
 			requests: 1,
 			annotation:
@@ -60,7 +62,7 @@ describe('runCli', () => {
 		},
 		{
 			code: 'SERVICE_UNAVAILABLE',
-			status: 503,
+			status: StatusCodes.SERVICE_UNAVAILABLE,
 			exitCode: 75,
 			requests: maxTransientRetries + 1,
 			annotation:
@@ -68,14 +70,14 @@ describe('runCli', () => {
 		},
 		{
 			code: 'INSUFFICIENT_STORAGE',
-			status: 507,
+			status: StatusCodes.INSUFFICIENT_STORAGE,
 			exitCode: 1,
 			requests: 1,
 			annotation: `The tenant has insufficient storage for this request. ${overQuotaAdvice}`
 		},
 		{
 			code: 'BAD_REQUEST',
-			status: 400,
+			status: StatusCodes.BAD_REQUEST,
 			exitCode: 1,
 			requests: 1,
 			annotation:
@@ -137,6 +139,8 @@ describe('runCli', () => {
 						path.resolve(import.meta.dirname, 'main.ts'),
 						'--output-mode',
 						'github',
+						'--log-file',
+						path.join(directory, 'command.jsonl.zst'),
 						'key',
 						'list',
 						target
@@ -177,6 +181,43 @@ describe('runCli', () => {
 						child.once('close', resolve);
 					}
 				);
+				const logs = await readLogFile(
+					path.join(directory, 'command.jsonl.zst')
+				);
+				const lifecycle = logs.records.filter(
+					(record) =>
+						record.category === 'cupboard' &&
+						typeof record.processId === 'number'
+				);
+
+				expect({
+					incomplete: logs.incomplete,
+					lifecycle: lifecycle.map((record) => ({
+						exitCode: record.exitCode,
+						hasElapsedTime: typeof record.elapsedMs === 'number',
+						hasCounters: record.http !== undefined,
+						correlated:
+							typeof record.trace_id === 'string' &&
+							typeof record.span_id === 'string'
+					}))
+				}).toStrictEqual({
+					incomplete: false,
+					lifecycle: [
+						{
+							exitCode: undefined,
+							hasElapsedTime: false,
+							hasCounters: false,
+							correlated: true
+						},
+						{
+							exitCode,
+							hasElapsedTime: true,
+							hasCounters: true,
+							correlated: true
+						}
+					]
+				});
+
 				expect({ status: actualStatus, stdout, stderr, calls }).toStrictEqual({
 					status: exitCode,
 					stdout: '',

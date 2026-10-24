@@ -14,13 +14,22 @@ export function withSpan<T>(
 	attributes: SpanAttributes,
 	body: (span: Span) => Promise<T>
 ): Promise<T> {
-	return tracing.enterSpan(name, (span) => {
+	return tracing.enterSpan(name, async (span) => {
 		for (const [key, value] of Object.entries(attributes)) {
 			if (value !== undefined) {
 				span.setAttribute(key, value);
 			}
 		}
 
-		return body(span);
+		try {
+			return await body(span);
+		} catch (error) {
+			span.setAttribute(
+				'error.type',
+				error instanceof Error ? error.name : 'Error'
+			);
+
+			throw error;
+		}
 	});
 }

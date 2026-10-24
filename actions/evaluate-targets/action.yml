@@ -29,3 +29,5 @@ outputs:
 runs:
   using: node24
   main: dist/main.cjs
+  post: dist/post.cjs
+  post-if: always()

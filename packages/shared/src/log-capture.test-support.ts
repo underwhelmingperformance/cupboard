@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { configureSync, type LogLevel, resetSync } from '@logtape/logtape';
 import { onTestFinished } from 'vitest';
 
@@ -18,6 +20,7 @@ export function captureLogs(): CapturedRecord[] {
 
 	configureSync({
 		reset: true,
+		contextLocalStorage: new AsyncLocalStorage<Record<string, unknown>>(),
 		sinks: {
 			capture: (record) => {
 				records.push({

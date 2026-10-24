@@ -565,6 +565,10 @@ export async function executeMaintenanceQueueMessage(
 			}
 		}
 	} catch (error) {
+		logger.error('maintenance queue operation failed', {
+			kind: message.kind,
+			error
+		});
 		return {
 			action: 'retry',
 			delaySeconds: queueRetryDelaySeconds,

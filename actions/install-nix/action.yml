@@ -5,6 +5,8 @@ description:
 runs:
   using: composite
   steps:
+    - uses: $/actions/diagnostics
+
     - name: Install Nix in single-user mode
       shell: bash
       env:

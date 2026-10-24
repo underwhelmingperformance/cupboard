@@ -1,6 +1,12 @@
+import { StatusCodes } from 'http-status-codes';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { type LogRecord, resolveSink, rootLogger } from './config.ts';
+import {
+	type LogRecord,
+	resolveSink,
+	rootLogger,
+	withContext
+} from './config.ts';
 import { type Capture, startCapture } from './testing.ts';
 
 function record(overrides: Partial<LogRecord> = {}): LogRecord {
@@ -16,6 +22,27 @@ function record(overrides: Partial<LogRecord> = {}): LogRecord {
 }
 
 describe('rootLogger with capture', () => {
+	it('captures asynchronous request context independently', async () => {
+		const scoped = startCapture();
+
+		try {
+			await Promise.all(
+				['first', 'second'].map((requestId) =>
+					withContext({ requestId }, async () => {
+						await Promise.resolve();
+						rootLogger().info('scoped record');
+					})
+				)
+			);
+			expect(scoped.logs.map((record) => record.properties)).toStrictEqual([
+				{ requestId: 'first' },
+				{ requestId: 'second' }
+			]);
+		} finally {
+			scoped.stop();
+		}
+	});
+
 	let capture: Capture | undefined;
 
 	afterEach(() => {
@@ -54,10 +81,13 @@ describe('rootLogger with capture', () => {
 
 		const parent = rootLogger().with({ tenant: 't1' });
 		const child = parent.with({ uploadId: 'abc' });
-		parent.info('request finished', { status: 200 });
+		parent.info('request finished', { status: StatusCodes.OK });
 
 		expect(child).not.toBe(parent);
-		expect(capture.logs[0]?.properties).toEqual({ tenant: 't1', status: 200 });
+		expect(capture.logs[0]?.properties).toEqual({
+			tenant: 't1',
+			status: StatusCodes.OK
+		});
 	});
 
 	it('records each level and message independently', () => {

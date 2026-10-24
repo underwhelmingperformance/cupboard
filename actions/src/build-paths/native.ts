@@ -2,7 +2,6 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 
-import { configureLogging } from '@cupboard/logger';
 import { PostBuildHookConflictError } from '@cupboard/nix/build-observation';
 import {
 	observeChildProcess,
@@ -10,10 +9,12 @@ import {
 } from '@cupboard/shared/child-process';
 import { CodedError, formatErrorWithCauses } from '@cupboard/shared/errors';
 import { workflowCommands } from '@cupboard/shared/github-actions';
+import { subprocessTraceEnvironment } from '@cupboard/shared/node-tracing';
 import { z } from 'zod';
 
 import type { BuildOptions } from '../commands/build.ts';
 import { cupboardDebugArguments } from '../cupboard-run.ts';
+import { withActionLogging } from '../diagnostics/logging.ts';
 import { CommandFailedError } from '../errors.ts';
 import { type Environment, parseLines, requireEnvironment } from '../inputs.ts';
 import { provided } from '../options.ts';
@@ -92,7 +93,7 @@ export async function nativeBuildMain(
 	}
 	const child = spawn(executable, arguments_, {
 		stdio: 'inherit',
-		env: childEnvironment
+		env: { ...childEnvironment, ...subprocessTraceEnvironment() }
 	});
 	const result = await waitForAbortableChildProcess(
 		observeChildProcess(child),
@@ -135,7 +136,14 @@ class NativePostBuildHookConflictError extends CodedError {
 export async function runNativeBuild(
 	run: (environment: Environment, signal: AbortSignal) => Promise<void>
 ): Promise<void> {
-	configureLogging();
+	return withActionLogging('cupboard.action.build', process.env, () =>
+		executeNativeBuild(run)
+	);
+}
+
+async function executeNativeBuild(
+	run: (environment: Environment, signal: AbortSignal) => Promise<void>
+): Promise<void> {
 	const controller = new AbortController();
 	const interrupt = (): void => {
 		controller.abort(new NativeActionSignalError('SIGINT'));

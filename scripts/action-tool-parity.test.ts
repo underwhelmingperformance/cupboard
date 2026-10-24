@@ -238,7 +238,7 @@ describe('native build action runtime', () => {
 });
 
 describe('native evaluation action runtime', () => {
-	it('uses the pinned Node major and its standalone main bundle without post cleanup', () => {
+	it('uses the pinned Node major and its standalone bundles for execution and diagnostic upload', () => {
 		const document: unknown = parse(
 			readFileSync(
 				path.join(actionsDirectory, 'evaluate-targets', 'action.yml'),
@@ -259,7 +259,9 @@ describe('native evaluation action runtime', () => {
 		}
 		expect(runs).toStrictEqual({
 			using: `node${major}`,
-			main: 'dist/main.cjs'
+			main: 'dist/main.cjs',
+			post: 'dist/post.cjs',
+			'post-if': 'always()'
 		});
 	});
 });

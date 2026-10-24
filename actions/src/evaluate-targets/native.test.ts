@@ -723,6 +723,11 @@ it('terminates an overflowing evaluation and waits for process closure', async (
 });
 
 it('writes a probe record from the worker to stderr, which keeps stdout for the manifest', async () => {
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-evaluation-logs-')
+	);
+	vi.stubEnv('CUPBOARD_LOG_DIRECTORY', directory);
+	onTestFinished(() => rm(directory, { recursive: true, force: true }));
 	vi.stubEnv('GITHUB_ACTIONS', 'true');
 	stopLogging();
 	onTestFinished(() => {

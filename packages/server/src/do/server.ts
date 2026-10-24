@@ -1,4 +1,4 @@
-import { type Logger } from '@cupboard/logger';
+import { type Logger, withContext } from '@cupboard/logger';
 import {
 	cacheNameSchema,
 	type CacheScope,
@@ -112,12 +112,14 @@ import {
 	markCacheCatalogueComplete,
 	reconcileCacheCatalogue as reconcileStoredCacheCatalogue
 } from '../migration/cache-access.ts';
+import { requestCorrelation } from '../observability/correlation.ts';
 import {
 	loggerMiddleware,
 	logMethodFinished,
 	requestCostMiddleware,
 	rootLogger
 } from '../observability/logging.ts';
+import { withInternalRequest } from '../observability/request-context.ts';
 import { withSpan } from '../observability/span.ts';
 import { authoriseRequest, noPendingCache } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
@@ -272,6 +274,10 @@ import {
 	type VerificationResult,
 	VerificationService
 } from './verification-service.ts';
+
+const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
+const forbiddenStatus: number = StatusCodes.FORBIDDEN;
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 const verificationClaimBoundSchema = z
 	.number()
@@ -835,9 +841,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// Both key documents are served uncached so a rotation is visible across
 		// colos at once.
 		this.app.get('/.well-known/jwks.json', async (context) =>
-			context.json({ keys: await this.authKeys.authPublicJwks() }, 200, {
-				'cache-control': 'no-cache'
-			})
+			context.json(
+				{ keys: await this.authKeys.authPublicJwks() },
+				StatusCodes.OK,
+				{
+					'cache-control': 'no-cache'
+				}
+			)
 		);
 		this.app.get('/.well-known/oauth-authorization-server', (context) => {
 			return context.json(
@@ -1191,6 +1201,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				cache,
 				sessionId,
 				authenticatedUntil: claims.expiresAt.getTime(),
+				correlation: requestCorrelation(request),
 				reuseGrantsStored: true,
 				...(hasPublication && { publication: true as const })
 			},
@@ -1202,11 +1213,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// Advertise optional operations on the upgrade response. The credit token
 		// includes the opening grant so a negotiated client can commit immediately.
 		return new Response(undefined, {
-			// Workers permits 101 for WebSocket upgrades; Fetch still excludes it.
-			// https://developers.cloudflare.com/workers/runtime-apis/websockets/
-			// https://github.com/whatwg/fetch/issues/1759
-			// eslint-disable-next-line unicorn/no-invalid-response-options
-			status: 101,
+			status: StatusCodes.SWITCHING_PROTOCOLS,
 			webSocket: client,
 			headers: {
 				[commitCapabilitiesHeader]: hasNegotiatedCredit
@@ -1378,10 +1385,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 								? error.reason
 								: error instanceof InsufficientScopeError
 									? 'forbidden'
-									: isKnown && error.status < 500
+									: isKnown && error.status < serverErrorStatus
 										? 'invalid-publication'
 										: 'temporary-failure',
-				status: isKnown ? error.status : 500,
+				status: isKnown ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
 				message: isKnown ? error.message : 'internal error'
 			});
 		}
@@ -2269,7 +2276,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// The alarm drains negotiated paths in bounded passes. That keeps the R2
 	// probes off the push path and releases the input gate between passes. Clear
-	// the keys of the targets the pass reconciled, leave the deferred ones
+	// the keys for reconciled targets, leave the deferred targets
 	// queued, and clear the origin only after the queue drains.
 	//
 	// Report a stall when every attempted target remains queued. The retry delay
@@ -2985,7 +2992,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	async fetch(request: Request): Promise<Response> {
+	private async fetchInitialised(request: Request): Promise<Response> {
 		try {
 			await this.initialise();
 		} catch (error) {
@@ -3008,6 +3015,340 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// cannot accidentally bypass the input-gate deadline.
 			async () => this.app.fetch(request, this.context.env)
 		);
+	}
+
+	private async handleCommitSocketMessage(
+		socket: WebSocket,
+		message: string | ArrayBuffer
+	): Promise<void> {
+		const attachment = readCommitSessionAttachment(socket);
+
+		if (attachment === undefined) {
+			socket.close(1011, 'missing session');
+			return;
+		}
+
+		if (
+			this.commitCredit.closeIfAuthenticationExpired(
+				socket,
+				attachment,
+				Date.now()
+			)
+		) {
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+			return;
+		}
+
+		if (isSessionClosing(attachment)) {
+			// A peer can send a late frame before acknowledging the server's close.
+			// Do not run it or grant credit again: this session has already returned
+			// its credit and may never produce another close event. Use 1001 so the
+			// client can reconnect.
+			socket.close(1001, 'commit session closed');
+			return;
+		}
+
+		const text =
+			typeof message === 'string' ? message : new TextDecoder().decode(message);
+		if (
+			attachment.publication === true &&
+			new TextEncoder().encode(text).byteLength > publicationMaxFrameBytes
+		) {
+			socket.close(1009, 'commit message too large');
+			return;
+		}
+		const parsed = commitSessionRequestSchema.safeParse(safeJsonParse(text));
+
+		if (!parsed.success) {
+			// Reply `unsupported` for a well-formed future operation. Malformed JSON
+			// or an invalid shape for a known operation closes the socket.
+			const unknown = unknownSessionOp(text);
+
+			if (unknown !== undefined) {
+				sendCommitSessionFrame(socket, { ev: 'unsupported', op: unknown });
+				return;
+			}
+
+			socket.close(1002, 'invalid commit request');
+			return;
+		}
+
+		const request = parsed.data;
+		rootLogger().trace('commit message decoded', {
+			operation: request.op,
+			messageBytes: new TextEncoder().encode(text).byteLength
+		});
+		const { cache: cacheScope, sessionId } = attachment;
+
+		if (request.op === 'request-credit') {
+			const hasNegotiated = this.commitCredit.declareDemand(
+				socket,
+				attachment,
+				request.entries,
+				Date.now()
+			);
+
+			if (!hasNegotiated) {
+				// This session did not negotiate credit. Reply `unsupported` so the
+				// client falls back to the fixed window used by legacy sessions.
+				sendCommitSessionFrame(socket, {
+					ev: 'unsupported',
+					op: request.op
+				});
+			}
+
+			return;
+		}
+
+		const decision = this.commitCredit.admitMessage(
+			socket,
+			attachment,
+			commitEntryCount(request),
+			Date.now()
+		);
+
+		// Reclaim before initiating either close. The socket remains listed until
+		// the peer acknowledges it, and another grant could otherwise reach a
+		// closing session.
+		if (decision === 'overdrawn') {
+			// A negotiated client knows its exact grant. Exceeding it is a terminal
+			// protocol error, so close with 1002.
+			this.commitCredit.closeSession(sessionId, Date.now());
+			socket.close(1002, 'commit credit exceeded');
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+			return;
+		}
+
+		if (decision === 'refused') {
+			// The tenant has no capacity for another unpaced session. Use retryable
+			// close code 1013 so the client reconnects and negotiates again.
+			this.commitCredit.closeSession(sessionId, Date.now());
+			socket.close(1013, 'too many unpaced commit sessions');
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+			return;
+		}
+
+		// Release an accounted entry after its processing and result-send attempt
+		// finish. The `finally` also returns credit when sending the frame fails.
+		const isAccounted = decision === 'accounted';
+
+		if (
+			request.op === 'publish-batch' ||
+			request.op === 'subscribe-publication'
+		) {
+			if (attachment.publication !== true) {
+				if (isAccounted) {
+					this.commitCredit.release(
+						sessionId,
+						Date.now(),
+						request.entries.length
+					);
+				}
+				sendCommitSessionFrame(socket, { ev: 'unsupported', op: request.op });
+				return;
+			}
+			const grants = await new CommitReuseGrantsService(this.ctx.storage).read(
+				attachment,
+				Date.now()
+			);
+			await Promise.all(
+				request.entries.map(async (entry) => {
+					await this.commitEntrySemaphore.acquire();
+					try {
+						await this.runPublication({
+							socket,
+							attachment,
+							pushId: request.pushId,
+							entry,
+							grants,
+							subscribe: request.op === 'subscribe-publication'
+						});
+					} finally {
+						this.commitEntrySemaphore.release();
+						if (isAccounted) {
+							this.commitCredit.release(sessionId, Date.now());
+						}
+					}
+				})
+			);
+			return;
+		}
+		const cache = this.context.cacheRepository.require(cacheScope);
+		if (request.op === 'commit') {
+			// Apply the same tenant-wide semaphore to individual commit messages and
+			// batch entries so neither form can bypass the concurrency limit.
+			const logger = rootLogger().with({ sessionId, cache, op: request.op });
+			await this.commitEntrySemaphore.acquire();
+
+			try {
+				await this.runSessionCommit(
+					logger,
+					socket,
+					cache,
+					sessionId,
+					request.uploadId,
+					await this.sessionReuseAuthority(cache, attachment)
+				);
+			} finally {
+				this.commitEntrySemaphore.release();
+
+				if (isAccounted) {
+					this.commitCredit.release(sessionId, Date.now());
+				}
+			}
+
+			return;
+		}
+
+		if (request.op === 'commit-batch') {
+			// Each entry reports its own result, so one failure does not stop its
+			// batch peers. Bounded concurrency also prevents one materialisation wait
+			// from blocking the rest of the batch.
+			const logger = rootLogger().with({ sessionId, cache, op: request.op });
+
+			// Prefetch D1 facts once for the batch. They remain advisory; the charge
+			// batch decides status and quota. On failure, each entry reads fresh facts.
+			const narHashes = request.commits.map((entry) => entry.narHash);
+			const authority = await this.sessionReuseAuthority(cache, attachment);
+			let batchPrefetched: Map<string, PrefetchedCommitFacts> | undefined;
+			let batchAccount: TenantAccount | undefined;
+
+			try {
+				const [prefetched, account] = await Promise.all([
+					this.commitPipeline.prefetchCommitFacts(narHashes),
+					this.commitPipeline.readTenantAccount()
+				]);
+				batchPrefetched = prefetched;
+				batchAccount = account;
+			} catch {
+				// Each entry falls back to fresh reads.
+			}
+
+			// `mapWithConcurrency` may leave later entries unstarted after a rejection.
+			// Return their reserved credit here; entries that ran return their own.
+			let released = 0;
+			const answered = new Set<UploadId>();
+
+			try {
+				await mapWithConcurrency(
+					request.commits,
+					maxOutgoingConnections,
+					async (entry) => {
+						await this.commitEntrySemaphore.acquire();
+
+						try {
+							await this.runSessionCommit(
+								logger,
+								socket,
+								cache,
+								sessionId,
+								entry.uploadId,
+								authority,
+								{
+									storePathHash: entry.storePathHash,
+									narHash: entry.narHash,
+									retention: entry.retention
+								},
+								{
+									prefetched: batchPrefetched?.get(entry.narHash)
+										?.materialisation,
+									account: batchAccount,
+									reuseReferences: batchPrefetched?.get(entry.narHash)
+										?.reuseReferences
+								},
+								entry.blob
+							);
+							answered.add(entry.uploadId);
+						} finally {
+							this.commitEntrySemaphore.release();
+
+							if (isAccounted) {
+								released += 1;
+								this.commitCredit.release(sessionId, Date.now());
+							}
+						}
+					}
+				);
+			} catch (error) {
+				// An escaped entry failure can prevent later entries from starting.
+				// Return a retryable result for every entry without a frame and keep the
+				// internal exception in server logs.
+				logger.error(
+					'commit batch stopped after an error escaped per-entry handling',
+					{ error }
+				);
+
+				for (const entry of request.commits) {
+					if (answered.has(entry.uploadId)) {
+						continue;
+					}
+
+					sendCommitSessionFrame(socket, {
+						ev: 'error',
+						uploadId: entry.uploadId,
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						message:
+							'The server stopped processing the commit batch before it produced a result for this entry.'
+					});
+				}
+			} finally {
+				const abandoned = request.commits.length - released;
+
+				if (isAccounted && abandoned > 0) {
+					this.commitCredit.release(sessionId, Date.now(), abandoned);
+				}
+			}
+
+			return;
+		}
+
+		if (request.op === 'renew-uploads') {
+			const renewal = await this.uploads.renewUploads(
+				cache,
+				request.pushId,
+				request.uploadIds,
+				new Date()
+			);
+
+			sendCommitSessionFrame(socket, { ev: 'renewed', ...renewal });
+			return;
+		}
+
+		if (request.op === 'subscribe-identity') {
+			await this.replaySubscribeIdentity(
+				socket,
+				cache,
+				sessionId,
+				request.entries
+			);
+			return;
+		}
+
+		this.replaySubscribe(socket, cache, sessionId, request.uploadIds);
+	}
+
+	private async closeCommitSocket(socket: WebSocket): Promise<void> {
+		const attachment = readCommitSessionAttachment(socket);
+		reclaimCommitCredit(this.commitCredit, socket);
+		socket.close();
+
+		if (attachment !== undefined) {
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+		}
+	}
+
+	private async failCommitSocket(socket: WebSocket): Promise<void> {
+		const attachment = readCommitSessionAttachment(socket);
+		reclaimCommitCredit(this.commitCredit, socket);
+		socket.close(1011, 'socket error');
+
+		if (attachment !== undefined) {
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+		}
+	}
+
+	async fetch(request: Request): Promise<Response> {
+		return withInternalRequest(request, () => this.fetchInitialised(request));
 	}
 
 	// Cron invokes these Durable Object RPC methods directly. The `/gc` and
@@ -3594,7 +3935,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// A 2xx response, 403, or 404 proves that R2 accepted the derived
 		// credential far enough to evaluate the probe. Other statuses reject it;
 		// 400 is R2's `InvalidArgument` response for an invalid credential.
-		if (response.ok || response.status === 403 || response.status === 404) {
+		if (
+			response.ok ||
+			response.status === forbiddenStatus ||
+			response.status === notFoundStatus
+		) {
 			return { result: 'ok' };
 		}
 
@@ -3631,328 +3976,77 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		socket: WebSocket,
 		message: string | ArrayBuffer
 	): Promise<void> {
-		const attachment = readCommitSessionAttachment(socket);
-
-		if (attachment === undefined) {
-			socket.close(1011, 'missing session');
-			return;
-		}
-
-		if (
-			this.commitCredit.closeIfAuthenticationExpired(
-				socket,
-				attachment,
-				Date.now()
-			)
-		) {
-			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
-			return;
-		}
-
-		if (isSessionClosing(attachment)) {
-			// A peer can send a late frame before acknowledging the server's close.
-			// Do not run it or grant credit again: this session has already returned
-			// its credit and may never produce another close event. Use 1001 so the
-			// client can reconnect.
-			socket.close(1001, 'commit session closed');
-			return;
-		}
-
-		const text =
-			typeof message === 'string' ? message : new TextDecoder().decode(message);
-		if (
-			attachment.publication === true &&
-			new TextEncoder().encode(text).byteLength > publicationMaxFrameBytes
-		) {
-			socket.close(1009, 'commit message too large');
-			return;
-		}
-		const parsed = commitSessionRequestSchema.safeParse(safeJsonParse(text));
-
-		if (!parsed.success) {
-			// Reply `unsupported` for a well-formed future operation. Malformed JSON
-			// or an invalid shape for a known operation closes the socket.
-			const unknown = unknownSessionOp(text);
-
-			if (unknown !== undefined) {
-				sendCommitSessionFrame(socket, { ev: 'unsupported', op: unknown });
-				return;
-			}
-
-			socket.close(1002, 'invalid commit request');
-			return;
-		}
-
-		const request = parsed.data;
-		const { cache: cacheScope, sessionId } = attachment;
-
-		if (request.op === 'request-credit') {
-			const hasNegotiated = this.commitCredit.declareDemand(
-				socket,
-				attachment,
-				request.entries,
-				Date.now()
-			);
-
-			if (!hasNegotiated) {
-				// This session did not negotiate credit. Reply `unsupported` so the
-				// client falls back to the fixed window used by legacy sessions.
-				sendCommitSessionFrame(socket, {
-					ev: 'unsupported',
-					op: request.op
-				});
-			}
-
-			return;
-		}
-
-		const decision = this.commitCredit.admitMessage(
-			socket,
-			attachment,
-			commitEntryCount(request),
-			Date.now()
+		return withCommitSocketEvent(socket, 'message', () =>
+			this.handleCommitSocketMessage(socket, message)
 		);
-
-		// Reclaim before initiating either close. The socket remains listed until
-		// the peer acknowledges it, and another grant could otherwise reach a
-		// closing session.
-		if (decision === 'overdrawn') {
-			// A negotiated client knows its exact grant. Exceeding it is a terminal
-			// protocol error, so close with 1002.
-			this.commitCredit.closeSession(sessionId, Date.now());
-			socket.close(1002, 'commit credit exceeded');
-			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
-			return;
-		}
-
-		if (decision === 'refused') {
-			// The tenant has no capacity for another unpaced session. Use retryable
-			// close code 1013 so the client reconnects and negotiates again.
-			this.commitCredit.closeSession(sessionId, Date.now());
-			socket.close(1013, 'too many unpaced commit sessions');
-			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
-			return;
-		}
-
-		// Release an accounted entry after its processing and result-send attempt
-		// finish. The `finally` also returns credit when sending the frame fails.
-		const isAccounted = decision === 'accounted';
-
-		if (
-			request.op === 'publish-batch' ||
-			request.op === 'subscribe-publication'
-		) {
-			if (attachment.publication !== true) {
-				if (isAccounted) {
-					this.commitCredit.release(
-						sessionId,
-						Date.now(),
-						request.entries.length
-					);
-				}
-				sendCommitSessionFrame(socket, { ev: 'unsupported', op: request.op });
-				return;
-			}
-			const grants = await new CommitReuseGrantsService(this.ctx.storage).read(
-				attachment,
-				Date.now()
-			);
-			await Promise.all(
-				request.entries.map(async (entry) => {
-					await this.commitEntrySemaphore.acquire();
-					try {
-						await this.runPublication({
-							socket,
-							attachment,
-							pushId: request.pushId,
-							entry,
-							grants,
-							subscribe: request.op === 'subscribe-publication'
-						});
-					} finally {
-						this.commitEntrySemaphore.release();
-						if (isAccounted) {
-							this.commitCredit.release(sessionId, Date.now());
-						}
-					}
-				})
-			);
-			return;
-		}
-		const cache = this.context.cacheRepository.require(cacheScope);
-		if (request.op === 'commit') {
-			// Apply the same tenant-wide semaphore to individual commit messages and
-			// batch entries so neither form can bypass the concurrency limit.
-			const logger = rootLogger().with({ sessionId, cache, op: request.op });
-			await this.commitEntrySemaphore.acquire();
-
-			try {
-				await this.runSessionCommit(
-					logger,
-					socket,
-					cache,
-					sessionId,
-					request.uploadId,
-					await this.sessionReuseAuthority(cache, attachment)
-				);
-			} finally {
-				this.commitEntrySemaphore.release();
-
-				if (isAccounted) {
-					this.commitCredit.release(sessionId, Date.now());
-				}
-			}
-
-			return;
-		}
-
-		if (request.op === 'commit-batch') {
-			// Each entry reports its own result, so one failure does not stop its
-			// batch peers. Bounded concurrency also prevents one materialisation wait
-			// from blocking the rest of the batch.
-			const logger = rootLogger().with({ sessionId, cache, op: request.op });
-
-			// Prefetch D1 facts once for the batch. They remain advisory; the charge
-			// batch decides status and quota. On failure, each entry reads fresh facts.
-			const narHashes = request.commits.map((entry) => entry.narHash);
-			const authority = await this.sessionReuseAuthority(cache, attachment);
-			let batchPrefetched: Map<string, PrefetchedCommitFacts> | undefined;
-			let batchAccount: TenantAccount | undefined;
-
-			try {
-				const [prefetched, account] = await Promise.all([
-					this.commitPipeline.prefetchCommitFacts(narHashes),
-					this.commitPipeline.readTenantAccount()
-				]);
-				batchPrefetched = prefetched;
-				batchAccount = account;
-			} catch {
-				// Each entry falls back to fresh reads.
-			}
-
-			// `mapWithConcurrency` may leave later entries unstarted after a rejection.
-			// Return their reserved credit here; entries that ran return their own.
-			let released = 0;
-			const answered = new Set<UploadId>();
-
-			try {
-				await mapWithConcurrency(
-					request.commits,
-					maxOutgoingConnections,
-					async (entry) => {
-						await this.commitEntrySemaphore.acquire();
-
-						try {
-							await this.runSessionCommit(
-								logger,
-								socket,
-								cache,
-								sessionId,
-								entry.uploadId,
-								authority,
-								{
-									storePathHash: entry.storePathHash,
-									narHash: entry.narHash,
-									retention: entry.retention
-								},
-								{
-									prefetched: batchPrefetched?.get(entry.narHash)
-										?.materialisation,
-									account: batchAccount,
-									reuseReferences: batchPrefetched?.get(entry.narHash)
-										?.reuseReferences
-								},
-								entry.blob
-							);
-							answered.add(entry.uploadId);
-						} finally {
-							this.commitEntrySemaphore.release();
-
-							if (isAccounted) {
-								released += 1;
-								this.commitCredit.release(sessionId, Date.now());
-							}
-						}
-					}
-				);
-			} catch (error) {
-				// An escaped entry failure can prevent later entries from starting.
-				// Return a retryable result for every entry without a frame and keep the
-				// internal exception in server logs.
-				logger.error(
-					'commit batch stopped after an error escaped per-entry handling',
-					{ error }
-				);
-
-				for (const entry of request.commits) {
-					if (answered.has(entry.uploadId)) {
-						continue;
-					}
-
-					sendCommitSessionFrame(socket, {
-						ev: 'error',
-						uploadId: entry.uploadId,
-						status: StatusCodes.SERVICE_UNAVAILABLE,
-						message:
-							'The server stopped processing the commit batch before it produced a result for this entry.'
-					});
-				}
-			} finally {
-				const abandoned = request.commits.length - released;
-
-				if (isAccounted && abandoned > 0) {
-					this.commitCredit.release(sessionId, Date.now(), abandoned);
-				}
-			}
-
-			return;
-		}
-
-		if (request.op === 'renew-uploads') {
-			const renewal = await this.uploads.renewUploads(
-				cache,
-				request.pushId,
-				request.uploadIds,
-				new Date()
-			);
-
-			sendCommitSessionFrame(socket, { ev: 'renewed', ...renewal });
-			return;
-		}
-
-		if (request.op === 'subscribe-identity') {
-			await this.replaySubscribeIdentity(
-				socket,
-				cache,
-				sessionId,
-				request.entries
-			);
-			return;
-		}
-
-		this.replaySubscribe(socket, cache, sessionId, request.uploadIds);
 	}
 
 	// Return the session's remaining credit when the peer closes the socket.
-	async webSocketClose(socket: WebSocket): Promise<void> {
-		const attachment = readCommitSessionAttachment(socket);
-		reclaimCommitCredit(this.commitCredit, socket);
-		socket.close();
-
-		if (attachment !== undefined) {
-			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
-		}
+	async webSocketClose(
+		socket: WebSocket,
+		code?: number,
+		_reason?: string,
+		wasClean?: boolean
+	): Promise<void> {
+		return withCommitSocketEvent(socket, 'close', async () => {
+			rootLogger().debug('commit socket closed', { code, wasClean });
+			await this.closeCommitSocket(socket);
+		});
 	}
 
-	async webSocketError(socket: WebSocket): Promise<void> {
-		const attachment = readCommitSessionAttachment(socket);
-		reclaimCommitCredit(this.commitCredit, socket);
-		socket.close(1011, 'socket error');
-
-		if (attachment !== undefined) {
-			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
-		}
+	async webSocketError(socket: WebSocket, error?: unknown): Promise<void> {
+		return withCommitSocketEvent(socket, 'error', async () => {
+			rootLogger().debug('commit socket failed', { error });
+			await this.failCommitSocket(socket);
+		});
 	}
+}
+
+function withCommitSocketEvent(
+	socket: WebSocket,
+	event: string,
+	run: () => Promise<void>
+): Promise<void> {
+	const attachment = readCommitSessionAttachment(socket);
+	const fields = attachment?.correlation ?? {};
+
+	return withContext({ ...fields, sessionId: attachment?.sessionId }, () =>
+		withSpan(
+			`commit.socket.${event}`,
+			{
+				'cupboard.request_id': fields.requestId,
+				'cloudflare.ray_id': fields.cfRay,
+				'cupboard.session_id': attachment?.sessionId,
+				'cupboard.upstream.trace_id': fields.clientTraceId,
+				'cupboard.upstream.span_id': fields.clientSpanId,
+				'cupboard.upstream.untrusted':
+					fields.clientTraceId !== undefined || undefined
+			},
+			async (span) => {
+				const started = performance.now();
+
+				if (event === 'error') {
+					span.setAttribute('error.type', 'Error');
+				}
+
+				try {
+					await run();
+				} catch (error) {
+					span.setAttribute(
+						'error.type',
+						error instanceof Error ? error.name : 'Error'
+					);
+					rootLogger().error('commit socket event failed', { event, error });
+					throw error;
+				} finally {
+					rootLogger().trace('commit socket event completed', {
+						event,
+						elapsedMs: performance.now() - started
+					});
+				}
+			}
+		)
+	);
 }
 
 function reclaimCommitCredit(

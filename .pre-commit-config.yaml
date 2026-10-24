@@ -4,13 +4,13 @@ default_install_hook_types:
   - commit-msg
 default_stages:
   - pre-commit
+exclude: (^|/)dist/
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: check-added-large-files
-        exclude: ^actions/(build-paths/dist/(main|post|worker)|evaluate-targets/dist/(main|worker)|prepare-builders/dist/(main|post))\.cjs$
       - id: check-case-conflict
       - id: check-json
       - id: check-merge-conflict

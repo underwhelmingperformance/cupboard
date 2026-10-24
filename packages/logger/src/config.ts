@@ -1,26 +1,32 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import process from 'node:process';
 
 import {
 	isGithubActions,
 	type WorkflowCommandStreams
 } from '@cupboard/shared/github-actions';
+import { traceLogFields } from '@cupboard/shared/log-context';
 import {
 	configureSync,
 	getConfig,
 	getLogger,
 	type Logger,
 	type LogLevel,
-	type Sink
+	type Sink,
+	withFilter
 } from '@logtape/logtape';
 
+import { redactingSink } from './redaction.ts';
+import { serialiseLogProperties } from './serialisation.ts';
 import { githubActionsSink, jsonLinesSink } from './sinks.ts';
 
 export type { Logger, LogLevel, LogRecord, Sink } from '@logtape/logtape';
-export { getLogger } from '@logtape/logtape';
+export { getLogger, withContext } from '@logtape/logtape';
 
 export const loggerCategory = ['cupboard'] as const;
 
 export interface LoggingOptions {
+	readonly fileSink?: Sink;
 	/**
 	The sink that receives log records. If this is omitted, {@link resolveSink}
 	selects a sink from the environment.
@@ -30,6 +36,20 @@ export interface LoggingOptions {
 	Defaults to `debug`.
 	*/
 	readonly lowestLevel?: LogLevel;
+}
+
+function observedSink(sink: Sink): Sink {
+	const redacted = redactingSink(sink);
+
+	return (record) => {
+		redacted({
+			...record,
+			properties: {
+				...serialiseLogProperties(record.properties),
+				...traceLogFields()
+			}
+		});
+	};
 }
 
 /**
@@ -59,18 +79,41 @@ export function configureLogging(options: LoggingOptions = {}): void {
 		return;
 	}
 
+	const destination = options.sink ?? resolveSink();
+	const consoleSink = withFilter(
+		observedSink(destination),
+		options.lowestLevel ?? 'debug'
+	);
+	const metaConsoleSink = withFilter(observedSink(destination), 'warning');
+	const sinks: Record<string, Sink> = {
+		cupboard: consoleSink,
+		meta: metaConsoleSink
+	};
+	const sinkIds = ['cupboard'];
+	const metaSinkIds = ['meta'];
+
+	if (options.fileSink !== undefined) {
+		sinks.file = observedSink(options.fileSink);
+		sinkIds.push('file');
+		metaSinkIds.push('file');
+	}
+
 	configureSync({
-		sinks: { cupboard: options.sink ?? resolveSink() },
+		contextLocalStorage: new AsyncLocalStorage<Record<string, unknown>>(),
+		sinks,
 		loggers: [
 			{
 				category: [...loggerCategory],
-				sinks: ['cupboard'],
-				lowestLevel: options.lowestLevel ?? 'debug'
+				sinks: sinkIds,
+				lowestLevel:
+					options.fileSink === undefined
+						? (options.lowestLevel ?? 'debug')
+						: 'trace'
 			},
 			{
 				category: ['logtape', 'meta'],
-				sinks: ['cupboard'],
-				lowestLevel: 'warning'
+				sinks: metaSinkIds,
+				lowestLevel: options.fileSink === undefined ? 'warning' : 'trace'
 			}
 		]
 	});

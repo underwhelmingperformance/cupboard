@@ -13,6 +13,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { rootLogger } from '@cupboard/logger';
 import { type PushCredential } from '@cupboard/protocol/upload';
+import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { StatusCodes } from 'http-status-codes';
 
 import type { NarCompressionOptions } from '../nix/blob.ts';
@@ -133,6 +134,15 @@ export function r2BlobUploader(options: R2BlobUploaderOptions): BlobUploader {
 
 const sdkLogger = rootLogger().getChild('s3');
 
+interface R2Response {
+	readonly $metadata: {
+		readonly httpStatusCode?: number;
+		readonly requestId?: string;
+		readonly attempts?: number;
+		readonly totalRetryDelay?: number;
+	};
+}
+
 function logSdkMessage(...content: unknown[]): void {
 	sdkLogger.debug('{content}', { content });
 }
@@ -174,12 +184,60 @@ class R2ObjectStore implements ObjectStore {
 		});
 	}
 
-	private async send<T>(
+	private async observeRequest<T extends R2Response>(
+		operation: ObjectStoreOperation,
+		request: () => Promise<T>
+	): Promise<T> {
+		return trace.getTracer('cupboard.r2').startActiveSpan(
+			`r2.${operation}`,
+			{
+				kind: SpanKind.CLIENT,
+				attributes: { 'rpc.system.name': 'aws-api', 'rpc.method': operation }
+			},
+			async (span) => {
+				const started = performance.now();
+
+				try {
+					const output = await request();
+					const metadata = output.$metadata;
+					if (metadata.httpStatusCode !== undefined) {
+						span.setAttribute(
+							'http.response.status_code',
+							metadata.httpStatusCode
+						);
+					}
+					sdkLogger.trace('R2 request completed', {
+						operation,
+						status: metadata.httpStatusCode,
+						r2RequestId: metadata.requestId,
+						attempts: metadata.attempts,
+						retryDelayMs: metadata.totalRetryDelay,
+						elapsedMs: performance.now() - started
+					});
+
+					return output;
+				} catch (error) {
+					span.setStatus({ code: SpanStatusCode.ERROR });
+					sdkLogger.debug('R2 request failed', {
+						operation,
+						elapsedMs: performance.now() - started,
+						error
+					});
+
+					throw error;
+				} finally {
+					span.end();
+				}
+			}
+		);
+	}
+
+	private async send<T extends R2Response>(
 		operation: ObjectStoreOperation,
 		request: () => Promise<T>
 	): Promise<T> {
 		try {
-			return await request();
+			return await this.observeRequest(operation, request);
 		} catch (error) {
 			throw requestError(operation, error);
 		}
@@ -265,9 +323,11 @@ class R2ObjectStore implements ObjectStore {
 		signal: AbortSignal
 	): Promise<StoredObject | undefined> {
 		try {
-			const output = await this.client.send(
-				new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
-				{ abortSignal: signal }
+			const output = await this.observeRequest('HeadObject', () =>
+				this.client.send(
+					new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+					{ abortSignal: signal }
+				)
 			);
 
 			return {

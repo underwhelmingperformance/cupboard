@@ -540,15 +540,17 @@ describe('POST /token', () => {
 			capture.stop();
 		}
 
-		const lines = capture.logs.map((entry) => ({
-			message: entry.message,
-			method: entry.properties.method,
-			path: entry.properties.path,
-			ray: entry.properties.ray,
-			status: entry.properties.status,
-			rowsRead: entry.properties.rowsRead,
-			rowsWritten: entry.properties.rowsWritten
-		}));
+		const lines = capture.logs
+			.filter((entry) => entry.message === 'request finished')
+			.map((entry) => ({
+				message: entry.message,
+				method: entry.properties.method,
+				path: entry.properties.path,
+				ray: entry.properties.ray,
+				status: entry.properties.status,
+				rowsRead: entry.properties.rowsRead,
+				rowsWritten: entry.properties.rowsWritten
+			}));
 		const serialised = JSON.stringify(capture.logs);
 
 		expect({ status: response.status, lines }).toStrictEqual({
@@ -728,7 +730,7 @@ async function installComposedReadRules(isOverlapping = false): Promise<{
 			selectors: [{ kind: 'all' }]
 		})
 	});
-	expect(view.status).toBe(200);
+	expect(view.status).toBe(StatusCodes.OK);
 	await view.text();
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		const database = drizzle(state.storage, { schema: { oidcTrust } });
@@ -825,7 +827,7 @@ describe('server-resolved read acquisition', () => {
 			status: response.status,
 			body: await response.json()
 		}).toStrictEqual({
-			status: 400,
+			status: StatusCodes.BAD_REQUEST,
 			body: {
 				error: 'invalid_request',
 				error_description:
@@ -862,7 +864,7 @@ describe('server-resolved read acquisition', () => {
 				status: response.status,
 				body: await response.json()
 			}).toStrictEqual({
-				status: 400,
+				status: StatusCodes.BAD_REQUEST,
 				body: {
 					error: 'invalid_authorization_details',
 					error_description:
@@ -966,7 +968,7 @@ describe('server-resolved read acquisition', () => {
 			status: response.status,
 			body: await response.json()
 		}).toStrictEqual({
-			status: 400,
+			status: StatusCodes.BAD_REQUEST,
 			body: {
 				error: 'invalid_authorization_details',
 				error_description:
@@ -998,7 +1000,7 @@ describe('server-resolved read acquisition', () => {
 				subject_token_type: subjectTokenTypeIdToken,
 				read_resources: JSON.stringify(requested)
 			});
-			expect(response.status).toBe(200);
+			expect(response.status).toBe(StatusCodes.OK);
 			const result = readAccessResponseSchema.parse(await response.json());
 			const decoded = decodeJwt(result.access_token);
 			const grants = requested.map((resource) =>
@@ -1123,7 +1125,7 @@ describe('server-resolved read acquisition', () => {
 			subject_token_type: subjectTokenTypeIdToken,
 			read_resources: JSON.stringify(resources)
 		});
-		expect(response.status).toBe(200);
+		expect(response.status).toBe(StatusCodes.OK);
 		const result = readAccessResponseSchema.parse(await response.json());
 		const decoded = decodeJwt(result.access_token);
 		expect({
@@ -1422,7 +1424,7 @@ describe('server-resolved read acquisition', () => {
 				}
 			);
 			expect(result).toStrictEqual({
-				status: 400,
+				status: StatusCodes.BAD_REQUEST,
 				body: {
 					error: 'invalid_authorization_details',
 					error_description:
@@ -1496,7 +1498,7 @@ describe('server-resolved read acquisition', () => {
 			status: response.status,
 			body: await response.json()
 		}).toStrictEqual({
-			status: 400,
+			status: StatusCodes.BAD_REQUEST,
 			body: {
 				error: 'invalid_authorization_details',
 				error_description:
@@ -1554,7 +1556,7 @@ describe('server-resolved read acquisition', () => {
 			facts: result.read_resources,
 			jwtGrants: decodeJwt(result.access_token).authorization_details
 		}).toStrictEqual({
-			status: 200,
+			status: StatusCodes.OK,
 			expires: 900,
 			refresh: undefined,
 			grants,
@@ -2199,7 +2201,7 @@ describe('refresh grant', () => {
 			const original = await exchange(await installTrustedIdp('admin'));
 			if (mode === 'retry') {
 				const first = await refresh(original.refresh_token ?? '');
-				expect(first.status).toBe(200);
+				expect(first.status).toBe(StatusCodes.OK);
 				await first.text();
 			}
 			await runInDurableObject(currentServer(), async (instance) => {
@@ -2222,7 +2224,7 @@ describe('refresh grant', () => {
 				grants: tokenResponseSchema.safeParse(await renewed.json()).data
 					?.authorization_details
 			}).toStrictEqual({
-				status: 200,
+				status: StatusCodes.OK,
 				grants: [{ type: 'cupboard_wildcard' }]
 			});
 		}
@@ -2291,7 +2293,7 @@ describe('refresh grant', () => {
 				});
 			}
 			const expected = {
-				status: permitted ? 200 : 400,
+				status: permitted ? StatusCodes.OK : StatusCodes.BAD_REQUEST,
 				grants: permitted ? requested : undefined
 			};
 			expect(outcomes).toStrictEqual([expected, expected, expected]);
@@ -2358,11 +2360,11 @@ describe('refresh grant', () => {
 			grants: body.authorization_details,
 			revoked: await staleRefreshOutcome(body.refresh_token ?? '')
 		}).toStrictEqual({
-			originalStatus: 200,
-			renewedStatus: 200,
+			originalStatus: StatusCodes.OK,
+			renewedStatus: StatusCodes.OK,
 			grants: requested,
 			revoked: {
-				status: 400,
+				status: StatusCodes.BAD_REQUEST,
 				error: 'invalid_grant',
 				problem: 'stale-refresh-token'
 			}
@@ -2472,7 +2474,7 @@ describe('refresh grant', () => {
 			successorSegments: result.refresh_token?.split('.').length,
 			grants: result.authorization_details
 		}).toStrictEqual({
-			status: 200,
+			status: StatusCodes.OK,
 			nearLimit: true,
 			withinLimit: true,
 			successorSegments: 4,

@@ -1,4 +1,7 @@
 import { bestEffort } from './cleanup.ts';
+import { observeResponseBody } from './fetch-observation.ts';
+
+export { observeResponseBody } from './fetch-observation.ts';
 
 interface ResponseBodyReader {
 	cancel(reason?: unknown): Promise<void>;
@@ -152,6 +155,15 @@ export async function readResponseBytes(
 	response: ReadableResponseBody,
 	options: BoundedResponseBodyOptions
 ): Promise<Uint8Array> {
+	return observeResponseBody(response, () =>
+		collectResponseBytes(response, options)
+	);
+}
+
+async function collectResponseBytes(
+	response: ReadableResponseBody,
+	options: BoundedResponseBodyOptions
+): Promise<Uint8Array> {
 	options.signal?.throwIfAborted();
 	const declaredBytes = declaredBodyBytes(response);
 
@@ -212,7 +224,9 @@ export async function readResponseText(
 	response: ReadableResponseBody,
 	options: BoundedResponseBodyOptions
 ): Promise<string> {
-	return new TextDecoder().decode(await readResponseBytes(response, options));
+	return observeResponseBody(response, async () =>
+		new TextDecoder().decode(await collectResponseBytes(response, options))
+	);
 }
 
 /**
@@ -222,7 +236,12 @@ export async function readResponseJson(
 	response: ReadableResponseBody,
 	options: BoundedResponseBodyOptions
 ): Promise<unknown> {
-	return JSON.parse(await readResponseText(response, options));
+	return observeResponseBody(response, async () => {
+		const bytes = await collectResponseBytes(response, options);
+		const payload: unknown = JSON.parse(new TextDecoder().decode(bytes));
+
+		return payload;
+	});
 }
 
 function responseWithBoundedBody(

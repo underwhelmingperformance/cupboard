@@ -53,6 +53,7 @@ import {
 	requestCostMiddleware,
 	rootLogger
 } from '../observability/logging.ts';
+import { withPublicRequest } from '../observability/request-context.ts';
 import { canUseLoopbackHttp } from '../oidc/issuer-policy.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import { uploadRequestSubrequestsFor } from '../policy/upload-pages.ts';
@@ -552,9 +553,14 @@ function uploadPageRequest(inner: Request, body: unknown): Request {
 
 export default {
 	fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
-		withSubrequestSlice(() => app.fetch(request, boundedWorkerEnv(env), ctx), {
-			subrequests: subrequestsPerInvocation(env)
-		}),
+		withPublicRequest(request, (internal) =>
+			withSubrequestSlice(
+				() => app.fetch(internal, boundedWorkerEnv(env), ctx),
+				{
+					subrequests: subrequestsPerInvocation(env)
+				}
+			)
+		),
 
 	async scheduled(_controller, env) {
 		// Enqueue bounded jobs so execution failures retry per message rather than

@@ -125,6 +125,7 @@ Options:
   --output-mode <mode>                            choose the output format: terminal (interactive, with progress), json (one JSON object per line) or github (GitHub Actions workflow commands)
   --details                                       show additional configuration and domain information
   --debug                                         include details and internal diagnostics
+  --log-file <path>                               replace this file with trace-level JSONL logs (.zst or .gz for compression)
   --colour                                        force ANSI colour output
   --no-colour                                     disable ANSI colour output
   --result-file <path>                            append the command's results to this file, one JSON object per line

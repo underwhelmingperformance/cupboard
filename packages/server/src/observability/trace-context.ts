@@ -1,4 +1,4 @@
-import { ROOT_CONTEXT, trace } from '@opentelemetry/api';
+import { defaultTextMapGetter, ROOT_CONTEXT, trace } from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 
 import type { SpanAttributes } from './span.ts';
@@ -10,16 +10,19 @@ Extracts upstream trace identifiers for correlation with native Worker spans.
 These attributes do not change the parent of a native Worker span.
 */
 export function upstreamTraceAttributes(headers: Headers): SpanAttributes {
-	const context = propagator.extract(ROOT_CONTEXT, headers, {
-		keys: (carrier: Headers) => {
-			const keys: string[] = [];
-			for (const key of carrier.keys()) {
-				keys.push(key);
-			}
-			return keys;
+	const clientTraceId = headers.get('x-cupboard-client-trace-id');
+	const clientSpanId = headers.get('x-cupboard-client-span-id');
+	const forwarded =
+		clientTraceId === null || clientSpanId === null
+			? undefined
+			: `00-${clientTraceId}-${clientSpanId}-00`;
+	const context = propagator.extract(
+		ROOT_CONTEXT,
+		{
+			traceparent: headers.get('traceparent') ?? forwarded
 		},
-		get: (carrier: Headers, key) => carrier.get(key) ?? undefined
-	});
+		defaultTextMapGetter
+	);
 	const upstream = trace.getSpanContext(context);
 	if (upstream === undefined) {
 		return {};
