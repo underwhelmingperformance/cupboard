@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
+import { getLogger } from '@cupboard/logger';
 import { withDeadline } from '@cupboard/shared/timeout';
 
 import { SubrequestTimeoutError } from '../errors.ts';
@@ -21,6 +22,7 @@ interface DeadlineScope {
 
 const deadlineScope = new AsyncLocalStorage<DeadlineScope>();
 const deadlineExpired = Symbol('deadline-expired');
+const logger = getLogger(['cupboard', 'storage']);
 
 /**
 Runs `body` within a deadline that cannot extend an enclosing deadline.
@@ -113,7 +115,7 @@ transfers pass an infinite cap, so this layer limits them only inside a
 deadline scope. A timed-out operation can still finish and must be safe to
 retry.
 */
-export function boundedSubrequest<T>(
+export async function boundedSubrequest<T>(
 	operation: () => Promise<T>,
 	subrequest: string,
 	capMs: number = perCallCapMs
@@ -122,20 +124,77 @@ export function boundedSubrequest<T>(
 	const remaining =
 		deadline === undefined ? Infinity : deadline.deadline - Date.now();
 	const ms = Math.min(remaining, capMs);
-
-	if (!Number.isFinite(ms)) {
-		return operation();
-	}
+	const started = performance.now();
+	const fields = {
+		operation: subrequest,
+		capMs: Number.isFinite(capMs) ? capMs : undefined,
+		remainingBudgetMs: Number.isFinite(remaining)
+			? Math.max(0, remaining)
+			: undefined,
+		deadlineMs: Number.isFinite(ms) ? ms : undefined
+	};
 
 	if (ms <= 0) {
-		return Promise.reject(new SubrequestTimeoutError(subrequest));
+		logger.debug('storage request refused', {
+			...fields,
+			disposition: 'budget-exhausted'
+		});
+		throw new SubrequestTimeoutError(subrequest);
 	}
 
-	return withDeadline(
-		operation,
-		ms,
-		(abandoned) => new SubrequestTimeoutError(subrequest, abandoned)
-	);
+	const completion = { hasTimedOut: false };
+
+	const recordLateCompletion = async (pending: Promise<T>): Promise<void> => {
+		try {
+			await pending;
+
+			if (completion.hasTimedOut) {
+				logger.debug('storage request completed after timeout', {
+					...fields,
+					elapsedMs: performance.now() - started
+				});
+			}
+		} catch (error) {
+			if (completion.hasTimedOut) {
+				logger.debug('storage request failed after timeout', {
+					...fields,
+					elapsedMs: performance.now() - started,
+					error
+				});
+			}
+		}
+	};
+	const execute = (): Promise<T> => {
+		logger.trace('storage request started', fields);
+		const pending = operation();
+		void recordLateCompletion(pending);
+
+		return pending;
+	};
+
+	try {
+		const result = await (Number.isFinite(ms)
+			? withDeadline(execute, ms, (abandoned) => {
+					completion.hasTimedOut = true;
+					return new SubrequestTimeoutError(subrequest, abandoned);
+				})
+			: execute());
+		logger.trace('storage request completed', {
+			...fields,
+			elapsedMs: performance.now() - started
+		});
+
+		return result;
+	} catch (error) {
+		logger.debug('storage request failed', {
+			...fields,
+			elapsedMs: performance.now() - started,
+			disposition: completion.hasTimedOut ? 'timeout' : 'failed',
+			error
+		});
+
+		throw error;
+	}
 }
 
 export const unboundedCapMs = Infinity;

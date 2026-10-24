@@ -819,6 +819,17 @@ describe('scheduled tenant pass failure records', () => {
 			],
 			errors: [
 				[
+					'maintenance queue operation failed',
+					{
+						worker: 'scheduled',
+						queue: 'cupboard-maintenance',
+						messageId: 'retry',
+						attempts: 1,
+						kind: 'blob-demote',
+						error: new Error('kv unavailable')
+					}
+				],
+				[
 					'maintenance queue message retrying',
 					{
 						worker: 'scheduled',
@@ -963,6 +974,17 @@ describe('scheduled tenant pass failure records', () => {
 				}
 			],
 			errors: [
+				[
+					'maintenance queue operation failed',
+					{
+						worker: 'scheduled',
+						queue: 'cupboard-maintenance',
+						messageId: 'retry',
+						attempts: 1,
+						kind: 'blob-reaper',
+						error: new QueueBatchSendError([new Error('queue unavailable')])
+					}
+				],
 				[
 					'maintenance queue message retrying',
 					{

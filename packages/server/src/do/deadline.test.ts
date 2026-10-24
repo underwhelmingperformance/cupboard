@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SubrequestTimeoutError } from '../errors.ts';
@@ -14,6 +15,75 @@ function never(): Promise<never> {
 }
 
 describe('boundedSubrequest', () => {
+	it.each([false, true])(
+		'records a late storage result after timeout (failed=%s)',
+		async (hasFailed) => {
+			const capture = startCapture();
+			vi.useFakeTimers();
+			const operation = Promise.withResolvers<string>();
+
+			try {
+				const pending = boundedSubrequest(
+					() => operation.promise,
+					'r2.get',
+					10
+				);
+				const rejected = expect(pending).rejects.toBeInstanceOf(
+					SubrequestTimeoutError
+				);
+				await vi.advanceTimersByTimeAsync(10);
+				await rejected;
+
+				if (hasFailed) {
+					operation.reject(new Error('late R2 failure'));
+				} else {
+					operation.resolve('late');
+				}
+
+				await Promise.resolve();
+
+				expect(
+					capture.logs
+						.filter((log) => log.category.join('.') === 'cupboard.storage')
+						.map(({ message, properties }) => ({
+							message,
+							operation: properties.operation,
+							capMs: properties.capMs,
+							deadlineMs: properties.deadlineMs,
+							disposition: properties.disposition
+						}))
+				).toStrictEqual([
+					{
+						message: 'storage request started',
+						operation: 'r2.get',
+						capMs: 10,
+						deadlineMs: 10,
+						disposition: undefined
+					},
+					{
+						message: 'storage request failed',
+						operation: 'r2.get',
+						capMs: 10,
+						deadlineMs: 10,
+						disposition: 'timeout'
+					},
+					{
+						message: hasFailed
+							? 'storage request failed after timeout'
+							: 'storage request completed after timeout',
+						operation: 'r2.get',
+						capMs: 10,
+						deadlineMs: 10,
+						disposition: undefined
+					}
+				]);
+			} finally {
+				capture.stop();
+				vi.useRealTimers();
+			}
+		}
+	);
+
 	it('resolves when the operation settles within the budget', async () => {
 		const result = await withDeadlineBudget(criticalSectionBudgetMs, () =>
 			boundedSubrequest(() => Promise.resolve('ok'), 'r2.get')
