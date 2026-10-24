@@ -152,8 +152,12 @@ export async function verifyRemoteAttestations(
 ): Promise<readonly VerifyResult[]> {
 	const policy = identityPolicy(options);
 	validateRemoteTrustOptions(options);
-	const fetcher = dependencies.fetch ?? resilientFetcher('replay-safe');
-	const readFetcher = cacheReadFetcher(options.url, dependencies.fetch);
+	const fetcher =
+		dependencies.fetch ??
+		resilientFetcher('replay-safe', fetch, options.url.origin);
+	const readFetcher = cacheReadFetcher(options.url, dependencies.fetch, {
+		trustedOrigin: options.url.origin
+	});
 	const base = canonicalHref(cacheUrl(options.url, options.cache));
 	const readHeaders = readAuthHeaders(options);
 	const narInfo = await fetchNarInfo(

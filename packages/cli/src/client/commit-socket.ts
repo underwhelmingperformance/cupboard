@@ -30,6 +30,7 @@ import {
 import { chunk } from '@cupboard/shared/collections';
 import { BoundedBodyCollector } from '@cupboard/shared/response-body';
 import { fullJitterDelayMs, retryAfterDelayMs } from '@cupboard/shared/retry';
+import { context } from '@opentelemetry/api';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -48,6 +49,14 @@ import {
 } from '../errors.ts';
 
 import type { BearerAttempt } from './credentials.ts';
+import {
+	observeCommitConnection,
+	sendObservedCommitMessage
+} from './socket-observation.ts';
+
+const unauthorizedStatusCode: number = StatusCodes.UNAUTHORIZED;
+const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
+const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
 /**
 A received WebSocket frame; `ws` hands it over as a `Buffer`.
@@ -257,7 +266,10 @@ const maxTimerDelayMs = 2 ** 31 - 1;
 // backoff and re-send may succeed where an immediate retry would not. An error
 // frame is written by the tenant's own object, which reports every transient
 // condition of its own as one of these two.
-const retryableErrorStatuses = new Set([429, 503]);
+const retryableErrorStatuses = new Set([
+	StatusCodes.TOO_MANY_REQUESTS,
+	StatusCodes.SERVICE_UNAVAILABLE
+]);
 const insufficientStorageStatus: number = StatusCodes.INSUFFICIENT_STORAGE;
 
 // Cap `Retry-After` above the reconnect back-off ceiling so valid server delays
@@ -463,6 +475,7 @@ export function runCommitSession(
 	credentials: CommitSocketCredentials,
 	options: CommitSessionOptions
 ): CommitSession {
+	const sessionContext = context.active();
 	const outstanding = new Map<UploadId, SessionEntry>();
 	const maxReconnects = options.maxReconnects ?? defaultMaxReconnects;
 	const backoffBase = options.reconnectBackoffMs ?? defaultReconnectBackoffMs;
@@ -541,7 +554,9 @@ export function runCommitSession(
 	let lastRefusal: CupboardHttpError | undefined;
 
 	const sendNow = (request: CommitSessionRequestInput): void => {
-		socket?.send(JSON.stringify(request));
+		if (socket !== undefined) {
+			sendObservedCommitMessage(socket, JSON.stringify(request));
+		}
 	};
 
 	// Window state for the batch path. Each in-flight chunk is tracked by a set
@@ -1740,10 +1755,8 @@ export function runCommitSession(
 		connectionAttempt = attempt;
 		connectionGeneration += 1;
 		const generation = connectionGeneration;
-		// A superseded socket keeps its listeners and can still deliver events:
-		// `ws` emits `error` and `close` for the same fault, and a socket the
-		// session has moved on from goes on running its own handshake. Session
-		// state belongs to the current connection alone.
+		// A previous socket can still emit error and close events after a
+		// reconnect. Only the current connection may change session state.
 		const isCurrent = (): boolean => generation === connectionGeneration;
 		let hasDropped = false;
 		const dropOnce = (
@@ -1787,7 +1800,12 @@ export function runCommitSession(
 		let openingGrant = 0;
 		// Capture the connection for its handlers so stale events cannot act on the
 		// session's current socket.
-		const connection = connect(url, connectionAttempt.headers);
+		const connection = observeCommitConnection(
+			connect,
+			url,
+			connectionAttempt.headers,
+			sessionContext
+		);
 		socket = connection;
 
 		// The upgrade response precedes the open, so the capability is known
@@ -1850,7 +1868,7 @@ export function runCommitSession(
 			replayOutstanding();
 
 			keepalive = setInterval(() => {
-				connection.send(keepaliveRequest);
+				sendObservedCommitMessage(connection, keepaliveRequest);
 			}, options.keepaliveMs ?? defaultKeepaliveMs);
 			keepalive.unref();
 		});
@@ -1926,7 +1944,10 @@ export function runCommitSession(
 					'GET',
 					options.path,
 					status,
-					body.text()
+					body.text(),
+					Array.isArray(response.headers['cf-ray'])
+						? response.headers['cf-ray'][0]
+						: response.headers['cf-ray']
 				);
 
 				if (isRetryableRefusal(status)) {
@@ -1938,7 +1959,7 @@ export function runCommitSession(
 					return;
 				}
 
-				if (status === 401) {
+				if (status === unauthorizedStatusCode) {
 					hasDropped = true;
 					refreshAndOpenConnection(refusal);
 
@@ -2078,7 +2099,7 @@ This set is wider than {@link retryableErrorStatuses}, which covers frames
 written by the Worker after a successful upgrade.
 */
 function isRetryableRefusal(status: number): boolean {
-	return status === 429 || status >= 500;
+	return status === tooManyRequestsStatus || status >= serverErrorStatus;
 }
 
 /**

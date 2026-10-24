@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import {
 	cacheNameSchema,
 	cachePrioritySchema,
@@ -17,7 +18,7 @@ import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { ORPCError } from '@orpc/client';
 import { ValidationError } from '@orpc/contract';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { z } from 'zod';
 
 import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
@@ -249,18 +250,49 @@ const nonIdempotentNegotiations = [
 ] as const;
 
 describe('tenantRpc', () => {
+	it.each([
+		{ name: 'invalid JSON', body: '{' },
+		{ name: 'invalid output', body: '{"caches":false}' }
+	])('correlates $name after successful response headers', async ({ body }) => {
+		const capture = startCapture();
+		onTestFinished(() => {
+			capture.stop();
+		});
+		const rpc = tenantRpc(new URL('https://cupboard.test/t/acme'), {
+			fetcher: () =>
+				Promise.resolve(
+					new Response(body, {
+						headers: {
+							'content-type': 'application/json',
+							'x-request-id': 'invalid-rpc-response'
+						}
+					})
+				)
+		});
+
+		await expect(rpc.caches.list()).rejects.toThrow();
+		expect(
+			capture.logs
+				.filter((record) => record.properties.error instanceof Error)
+				.map((record) => ({
+					requestId: record.properties.requestId,
+					hasError: record.properties.error instanceof Error
+				}))
+		).toStrictEqual([{ requestId: 'invalid-rpc-response', hasError: true }]);
+	});
+
 	it('decodes an upload request limit once and keeps its nonretryable CLI classification', async () => {
 		const envelope = {
 			defined: true,
 			code: 'UPLOAD_REQUEST_LIMIT_EXCEEDED',
-			status: 413,
+			status: StatusCodes.REQUEST_TOO_LONG,
 			message: 'Split the upload request.',
 			data: { maxPaths: 100 }
 		};
 		const { fetcher, captured } = capturingFetcher([
 			() =>
 				Response.json(envelope, {
-					status: 413,
+					status: StatusCodes.REQUEST_TOO_LONG,
 					headers: { 'x-cupboard-upload-max-paths': '100' }
 				})
 		]);
@@ -481,7 +513,7 @@ describe('tenantRpc', () => {
 
 	it('does not retry a fixed string token on 401', async () => {
 		const { fetcher, captured } = capturingFetcher([
-			() => new Response('Unauthorised\n', { status: 401 })
+			() => new Response('Unauthorised\n', { status: StatusCodes.UNAUTHORIZED })
 		]);
 		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
 			credential: 'static-token',
@@ -496,11 +528,11 @@ describe('tenantRpc', () => {
 			expect(rejected).toMatchObject({
 				defined: true,
 				code: 'UNAUTHORIZED',
-				status: 401,
+				status: StatusCodes.UNAUTHORIZED,
 				data: {
 					body: 'Unauthorised\n',
 					headers: { 'content-type': 'text/plain;charset=UTF-8' },
-					status: 401
+					status: StatusCodes.UNAUTHORIZED
 				}
 			});
 		}
@@ -1313,7 +1345,7 @@ describe('controlRpc', () => {
 		]);
 	});
 
-	// A rotation stores the password the request carries, so the server accepts the
+	// A rotation stores the password from the request, so the server accepts the
 	// same body twice. A clear deletes by name and must not be sent again.
 	const credentialCalls = [
 		{

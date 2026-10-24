@@ -22,23 +22,31 @@ unchanged.
 */
 export function resilientFetcher(
 	replaySafety: ReplaySafety,
-	fetcher: typeof fetch = fetch
+	fetcher: typeof fetch = fetch,
+	trustedOrigin?: string
 ): typeof fetch {
-	return reachableFetcher(retryingFetcher(fetcher, replaySafety));
+	return reachableFetcher(
+		retryingFetcher(fetcher, replaySafety, { trustedOrigin })
+	);
+}
+
+interface CacheReadOptions {
+	readonly netrcFile?: string;
+	readonly trustedOrigin?: string;
 }
 
 export function cacheReadFetcher(
 	tenantUrl: URL,
 	fetcher?: typeof fetch,
-	netrcFile?: string
+	options: CacheReadOptions = {}
 ): typeof fetch {
 	const authenticated = withReadAuthentication(fetcher ?? fetch, {
 		tenantUrl,
-		netrcFile
+		netrcFile: options.netrcFile
 	});
 
 	return fetcher === undefined
-		? resilientFetcher('replay-safe', authenticated)
+		? resilientFetcher('replay-safe', authenticated, options.trustedOrigin)
 		: authenticated;
 }
 

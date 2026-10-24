@@ -4,6 +4,7 @@ import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
 import { type DeadlineOptions } from '@cupboard/shared/paging';
 import {
 	BoundedBodyCollector,
+	observeResponseBody,
 	RemoteBodyTooLargeError,
 	responseWithBufferedBoundedBody
 } from '@cupboard/shared/response-body';
@@ -43,9 +44,19 @@ export interface TenantRpcOptions {
 	readonly fetcher?: typeof fetch;
 }
 
-const unauthorizedStatusCode = 401;
+const unauthorizedStatusCode: number = StatusCodes.UNAUTHORIZED;
 const maximumErrorBodyBytes = 64 * 1024;
 const errorBodyPreviewBytes = 4 * 1024;
+
+const rpcObservationKey = Symbol('cupboard.rpc.response');
+
+class RpcObservation {
+	response: Response | undefined;
+}
+
+interface RpcContext {
+	readonly [rpcObservationKey]?: RpcObservation;
+}
 
 export type ControlRpc = JsonifiedClient<
 	ContractRouterClient<typeof controlContract>
@@ -86,8 +97,28 @@ function derivedClient<C extends AnyContractRouter>(
 	options: TenantRpcOptions
 ): JsonifiedClient<ContractRouterClient<C>> {
 	const { credential, signal, fetcher = fetch } = options;
-	const link = new OpenAPILink(contract, {
+	const link = new OpenAPILink<RpcContext>(contract, {
 		url,
+		interceptors: [
+			async (call) => {
+				const observation = new RpcObservation();
+
+				try {
+					return await call.next({
+						...call,
+						context: { ...call.context, [rpcObservationKey]: observation }
+					});
+				} catch (error) {
+					if (observation.response === undefined) {
+						throw error;
+					}
+
+					return observeResponseBody(observation.response, () => {
+						throw error;
+					});
+				}
+			}
+		],
 		headers: () => {
 			// The credential fetch is the first thing every admin command does;
 			// honour an abort here so Ctrl-C is prompt.
@@ -103,7 +134,10 @@ function derivedClient<C extends AnyContractRouter>(
 			let current = new Request(request, { headers: attempt.headers });
 			const replaySafety = replaySafetyFor(contract, path);
 			const transport = reachableFetcher(
-				retryingFetcher(fetcher, replaySafety)
+				retryingFetcher(fetcher, replaySafety, {
+					operation: path.join('.'),
+					trustedOrigin: url.origin
+				})
 			);
 
 			for (;;) {
@@ -131,7 +165,14 @@ function derivedClient<C extends AnyContractRouter>(
 					}
 				}
 
-				return await checkResponse(current, response);
+				const checked = await checkResponse(current, response);
+				const observation = callOptions.context[rpcObservationKey];
+
+				if (observation !== undefined && response.ok) {
+					observation.response = response;
+				}
+
+				return checked;
 			}
 		},
 		plugins: [new ResponseValidationPlugin(contract)]
