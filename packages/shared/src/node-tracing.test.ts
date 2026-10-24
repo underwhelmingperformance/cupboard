@@ -1,17 +1,12 @@
 import process from 'node:process';
 
-import {
-	context,
-	logs,
-	propagation,
-	ROOT_CONTEXT,
-	trace
-} from '@opentelemetry/api';
+import { context, propagation, ROOT_CONTEXT, trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { traceLogFields } from './log-context.ts';
 import {
 	initialiseTracing,
+	stopTracing,
 	subprocessTraceEnvironment,
 	traceOperation
 } from './node-tracing.ts';
@@ -26,11 +21,9 @@ beforeEach(() => {
 	delete process.env.OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT;
 });
 
-afterEach(() => {
-	trace.disable();
-	context.disable();
-	propagation.disable();
-	logs.disable();
+afterEach(async () => {
+	await stopTracing();
+	vi.unstubAllEnvs();
 	process.env = originalEnvironment;
 });
 
