@@ -201,41 +201,24 @@ async function canLogToFile(
 	try {
 		failure = JSON.parse(probe.output);
 	} catch {
-		throw new CommandFailedError(
-			binaryPath,
-			probe.status,
-			'invalid CLI parser response'
-		);
+		failure = undefined;
 	}
 
 	const parsed = parserErrorSchema.safeParse(failure);
 
-	if (probe.status !== usageExitCode || !parsed.success) {
-		throw new CommandFailedError(
-			binaryPath,
-			probe.status,
-			'unexpected CLI parser response'
-		);
-	}
-
 	if (
+		probe.status === usageExitCode &&
+		parsed.success &&
 		parsed.data.message === "error: option '--log-file <path>' argument missing"
 	) {
 		return true;
 	}
 
-	if (parsed.data.message === "error: unknown option '--log-file'") {
-		rootLogger().debug('installed CLI does not support diagnostic log files', {
-			supported: false
-		});
-		return false;
-	}
-
-	throw new CommandFailedError(
-		binaryPath,
-		probe.status,
-		'unexpected CLI parser error'
-	);
+	rootLogger().debug('installed CLI does not support diagnostic log files', {
+		supported: false,
+		status: probe.status
+	});
+	return false;
 }
 
 async function inspectGlobalOptions(
