@@ -10,6 +10,7 @@ import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import Cloudflare from 'cloudflare';
 import type { TelemetryQueryParams } from 'cloudflare/resources/workers/observability/telemetry';
 import { Command, InvalidArgumentError } from 'commander';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import {
@@ -313,7 +314,7 @@ export interface HttpStatusAnalysis {
 	readonly requests: readonly HttpRequest[];
 }
 
-const httpStatusSchema = z.number().int().min(100).max(599);
+const httpStatusSchema = z.number().int().min(StatusCodes.CONTINUE).max(599);
 const httpRequestEventSchema = z.object({
 	request: z.object({ method: z.string(), url: z.url() }),
 	response: z.object({ status: httpStatusSchema })
