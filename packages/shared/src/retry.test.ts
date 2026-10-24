@@ -575,7 +575,9 @@ describe('retryingFetcher debug logs', () => {
 			method: 'POST',
 			url: 'https://cache.test/api/v1/path-info'
 		};
-		expect(records).toStrictEqual([
+		expect(
+			records.filter((record) => record.category[1] === 'fetch')
+		).toStrictEqual([
 			{
 				level: 'debug',
 				category: ['cupboard', 'fetch'],

@@ -1,17 +1,20 @@
 import { traceLogFields } from '@cupboard/shared/log-context';
 import {
 	initialiseTracing,
+	stopTracing,
 	traceOperation
 } from '@cupboard/shared/node-tracing';
 import { resetSync } from '@logtape/logtape';
 import { StatusCodes } from 'http-status-codes';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { configureLogging, getLogger, type LogRecord } from './config.ts';
 import { serialiseLogProperties } from './serialisation.ts';
 import { githubActionsSink, jsonLinesSink } from './sinks.ts';
 
 const token = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJl';
+
+afterAll(stopTracing);
 
 function render(properties: Record<string, unknown>): unknown {
 	let result: unknown;
