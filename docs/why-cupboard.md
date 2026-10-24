@@ -24,11 +24,14 @@ cupboard probably isn't right for you if:
 
 - You can't use Cloudflare, or you need to run everything on premises.
 - Your clients use a version of Nix too old to decompress zstd. cupboard
-  requires zstd, and is tested with Nix 2.34.
+  requires zstd. The [Nix client guide][nix-client-versions] describes the
+  tested versions.
 - You need to mirror or federate between several caches, import the contents of
   an existing cache, or manage the cache from a web interface. cupboard can't do
   any of these yet.
 - You need a stable 1.0 release. See [Maturity](#maturity) below.
+
+[nix-client-versions]: ./use/nix-clients.md#which-versions-of-nix-work
 
 ## Maturity
 

@@ -13,20 +13,18 @@ together.
 
 You need these to install dependencies and run the unit tests:
 
-- Node.js 24. The file `.node-version` pins 24.21.0, and `package.json` requires
-  at least version 24. `.npmrc` sets `engine-strict=true`, so pnpm won't install
-  anything on an older Node. There's no build step for the CLI. Node runs its
-  TypeScript directly, using `--experimental-transform-types`.
-- pnpm 12.8.0. The `packageManager` field in `package.json` pins this version.
-  If you run `corepack enable`, Corepack installs the pinned version the first
-  time you use pnpm.
+- Node.js, using the version pinned in [`.node-version`][node-version]. The
+  `engines.node` field in [`package.json`][package-manifest] specifies the
+  minimum supported version. `.npmrc` sets `engine-strict=true`, so pnpm won't
+  install anything on an older Node. There's no build step for the CLI. Node
+  runs its TypeScript directly, using `--experimental-transform-types`.
+- pnpm, using the version pinned in the `packageManager` field in
+  [`package.json`][package-manifest]. If you run `corepack enable`, Corepack
+  installs the pinned version on first use.
 
-  The flake's package and overlay build with pnpm 10 from nixpkgs. nixpkgs
-  doesn't package pnpm 12, and pnpm 10 can read the lockfile that pnpm 12
-  writes. nixpkgs does package pnpm 11, but pnpm 11 keeps its store index in a
-  SQLite database, and on macOS the install fails with an `EXC_GUARD` file
-  descriptor violation. The build only uses pnpm to fetch packages and install
-  them from the lockfile.
+  Nix builds use the pnpm package selected in [`flake.nix`][flake]. That version
+  can differ from the workspace pin. The build only uses pnpm to fetch packages
+  and install them from the lockfile.
 
 - pre-commit, to install the Git hooks. The hook that checks commit messages,
   `wrapscallion-system`, also needs Deno on your `PATH`.
@@ -34,12 +32,19 @@ You need these to install dependencies and run the unit tests:
 You also need these for some of the slower checks:
 
 - Nix. The conformance suite and the end-to-end suites need it, and so do the
-  `update:conformance-oracle` and `update:flake-deps` scripts. CI installs Nix
-  2.34.7.
+  `update:conformance-oracle` and `update:flake-deps` scripts. CI installs the
+  version pinned in
+  [`actions/install-nix/versions.env`][nix-installer-versions]. The conformance
+  suite uses the separate `conformanceNix` output from [`flake.nix`][flake].
 - Docker, or another container engine that Testcontainers can drive. The
   remote-store end-to-end suite needs it, and so does the remote-store part of
   the publish pipeline suite, `pnpm e2e:pipeline`, which skips that part when no
   container engine is running.
+
+[node-version]: ../../.node-version
+[package-manifest]: ../../package.json
+[flake]: ../../flake.nix
+[nix-installer-versions]: ../../actions/install-nix/versions.env
 
 ## Setting up
 

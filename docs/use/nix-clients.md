@@ -240,5 +240,8 @@ it. If Nix builds it, see [Troubleshooting](../troubleshooting.md#nix-clients).
 ## Which versions of Nix work
 
 cupboard compresses the files that it serves with zstd, so you need a version of
-Nix that can decompress zstd. cupboard is tested with Nix 2.34. Older versions
-of Nix, and other Nix implementations, aren't tested.
+Nix that can decompress zstd. The [conformance oracle][conformance-oracle]
+records the tested Nix version for each supported platform. Other versions of
+Nix and other Nix implementations aren't tested.
+
+[conformance-oracle]: ../../tests/conformance/oracle.json
