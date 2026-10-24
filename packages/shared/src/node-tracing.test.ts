@@ -7,9 +7,14 @@ import {
 	ROOT_CONTEXT,
 	trace
 } from '@opentelemetry/api';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { initialiseTracing } from './node-tracing.ts';
+import { traceLogFields } from './log-context.ts';
+import {
+	initialiseTracing,
+	subprocessTraceEnvironment,
+	traceOperation
+} from './node-tracing.ts';
 
 const originalEnvironment = process.env;
 
@@ -89,3 +94,74 @@ it.each(['OTEL_ATTRIBUTE_COUNT_LIMIT', 'OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT'])(
 		span.end();
 	}
 );
+
+describe('Node tracing', () => {
+	beforeEach(() => {
+		initialiseTracing();
+	});
+
+	it('continues an owning subprocess context without retaining it outside the operation', async () => {
+		const parentTrace = '4bf92f3577b34da6a3ce929d0e0e4736';
+		const parentSpan = '00f067aa0ba902b7';
+		vi.stubEnv('CUPBOARD_TRACEPARENT', `00-${parentTrace}-${parentSpan}-01`);
+
+		const result = await traceOperation('command', () =>
+			Promise.resolve({
+				fields: traceLogFields(),
+				environment: subprocessTraceEnvironment()
+			})
+		);
+
+		expect(result).toStrictEqual({
+			fields: {
+				trace_id: parentTrace,
+				span_id: result.fields.span_id,
+				trace_flags: '01'
+			},
+			environment: {
+				CUPBOARD_TRACEPARENT: `00-${parentTrace}-${result.fields.span_id ?? ''}-01`
+			}
+		});
+		expect({
+			validSpan: /^[0-9a-f]{16}$/u.test(result.fields.span_id ?? ''),
+			freshSpan: result.fields.span_id !== parentSpan,
+			fields: traceLogFields(),
+			environment: subprocessTraceEnvironment()
+		}).toStrictEqual({
+			validSpan: true,
+			freshSpan: true,
+			fields: {},
+			environment: {}
+		});
+	});
+
+	it('keeps independent trace context across concurrent asynchronous operations', async () => {
+		const tracer = trace.getTracer('test');
+		const first = tracer.startSpan('first');
+		const second = tracer.startSpan('second');
+
+		const observe = async (): Promise<Record<string, string>> => {
+			await Promise.resolve();
+
+			return traceLogFields();
+		};
+		const firstContext = trace.setSpan(context.active(), first);
+		const secondContext = trace.setSpan(context.active(), second);
+		const result = await Promise.all([
+			context.with(firstContext, observe),
+			context.with(secondContext, observe)
+		]);
+
+		expect(result).toStrictEqual(
+			[first, second].map((span) => ({
+				trace_id: span.spanContext().traceId,
+				span_id: span.spanContext().spanId,
+				trace_flags: span.spanContext().traceFlags.toString(16).padStart(2, '0')
+			}))
+		);
+		expect(traceLogFields()).toStrictEqual({});
+
+		first.end();
+		second.end();
+	});
+});
