@@ -68,6 +68,79 @@ wrangler tail cupboard
 wrangler tail cupboard-tenant
 ```
 
+The CLI writes diagnostic files only when `--log-file <path>` is supplied. Files
+contain the existing structured logs at trace level, independently of the
+console's verbosity. They include the active OpenTelemetry `trace_id` and
+`span_id`, structured error causes, HTTP attempts, response and body failures,
+retry outcomes, WebSocket events and subprocess completion counters.
+
+```sh
+cupboard --log-file /tmp/cupboard-push.jsonl.zst push \
+  https://cupboard.example.workers.dev/t/acme /nix/store/...
+```
+
+The suffix selects streaming compression: `.zst` uses Zstandard level 3 with
+frame checksums, `.gz` uses gzip, and other suffixes write plain JSONL. Each
+invocation replaces its selected file. Use a distinct path for each concurrent
+process. Files rotate after 10 MiB of uncompressed records, with two backups,
+and use mode `0600`. The in-memory queue is bounded; overload produces a
+dropped-record count. Normal shutdown flushes and closes the compressor. An
+abruptly terminated process can leave an incomplete final frame or record.
+
+Cupboard's GitHub Actions enable the same file logger automatically. Each
+process writes a separate file in the job's shared diagnostic directory. The
+first action uploads the directory from its post step after the other post steps
+finish. Artifacts use the `cupboard-diagnostics-` prefix and the repository's
+retention setting. Older CLIs that reject `--log-file` run without CLI file
+logging; the action's own logs remain available. An upload failure produces a
+warning and does not replace the command's result.
+
+Public requests receive a fresh `x-request-id` before authentication and
+routing. Client HTTP and WebSocket logs record this response header and
+Cloudflare's `CF-Ray` header. The server forwards its request ID through trusted
+bindings and includes it in logs and native trace attributes. Incoming client
+trace IDs are untrusted attributes; they do not determine server trace IDs,
+parentage or sampling. The [native Workers tracing API][custom-spans] does not
+currently support explicit span links, so client parent identifiers are recorded
+as attributes. Cloudflare's account-level incoming trace-context acceptance must
+remain disabled. Forward to origin is not needed for Worker bindings.
+
+Responses receive their request ID after cache lookup. Cached responses exclude
+request IDs, trace context, client correlation headers and their `Vary` tokens.
+A cache hit therefore receives a new request ID.
+
+Extract a diagnostic artifact and pass its directory to the tracing script:
+
+```sh
+pnpm diagnose:push --client-logs /tmp/cupboard-diagnostics \
+  https://github.com/acme/app/actions/runs/123/job/456
+```
+
+The report lists diagnostic artifacts for the workflow run and reads plain,
+compressed and rotated files from the supplied directory. It reports attempt and
+response counts, failures, recovery, cancellation, dropped records and
+incomplete files. The GitHub job's recorded times bound the query. Without a job
+URL or `--since`, client timestamps bound the query with an allowance of one
+minute on either side for clock differences.
+
+When client logs are supplied, the report selects server activity by returned
+request IDs, Ray IDs and exact client trace/span pairs in untrusted server
+attributes. It follows the matching server request and native trace identifiers
+to include related logs and spans. Concurrent jobs are excluded unless their
+records share a matching identifier. Path/time candidates are reported
+separately and do not select server activity. Client trace IDs never identify
+native server traces.
+
+Without client logs, the report covers the whole query window, which can include
+concurrent jobs. A quiet interval does not identify a job boundary. Server
+telemetry can be sampled, delayed or unavailable, and clocks can differ. An
+unmatched client record does not prove that the server did not execute the
+request. These diagnostics do not change retry limits or make replay-unsafe
+operations safe to repeat.
+
+[custom-spans]:
+  https://developers.cloudflare.com/workers/observability/traces/custom-spans/
+
 Dependency metadata probes run in the control Worker. Their
 `cache-metadata-probe` spans record the upstream OpenTelemetry trace and span
 IDs, requested path count, found and missing counts, continuation status and
