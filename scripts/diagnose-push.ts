@@ -23,6 +23,30 @@ import {
 	writeSecretFile
 } from '../packages/cli/src/auth/secret-file.ts';
 
+import {
+	analyseClientLogs,
+	type ClientCoverageCaveat,
+	type ClientDiagnostics,
+	type ClientLogCollection,
+	clientLogWindow,
+	discoverLogArtifacts,
+	type LogArtifactDiscovery,
+	readClientLogs,
+	selectClientTelemetry,
+	type TelemetrySelection as ClientTelemetrySelection
+} from './diagnostic-client-logs.ts';
+
+type WindowSource = 'github-job' | 'client-log-timestamps' | 'lookback';
+
+interface DiagnosticAttachments {
+	readonly scope?: {
+		readonly windowSource: WindowSource;
+		readonly selection: ClientTelemetrySelection;
+	};
+	readonly clientDiagnostics?: ClientDiagnostics;
+	readonly logArtifacts?: LogArtifactDiscovery;
+}
+
 // The diagnostic talks to Cloudflare as a dedicated public OAuth client (the id
 // lives in `cf_analytics_client_id` at the repo root), separate from the deploy
 // client: it needs only Workers Observability, which the deploy grant does not
@@ -58,9 +82,6 @@ const fetchConcurrency = 8;
 
 const slowestCount = 12;
 
-// Activity separated by a gap this long is treated as a different job, so the
-// auto-detected window covers the most recent push rather than older traffic.
-const defaultSessionGapMs = 60 * 1000;
 const defaultSearchMinutes = 120;
 
 export abstract class DiagnoseError extends CodedError {}
@@ -307,7 +328,7 @@ export interface HttpRequest {
 	readonly outcome: string | undefined;
 }
 
-export interface HttpStatusAnalysis {
+export interface HttpStatusAnalysis extends DiagnosticAttachments {
 	readonly worker: string;
 	readonly window: TimeWindow;
 	readonly status: number;
@@ -374,7 +395,37 @@ export interface GitHubJobReference {
 	readonly jobId: string;
 }
 
-export interface Analysis {
+type DominantCost =
+	| { readonly kind: 'outside-spans'; readonly durationMs: number }
+	| {
+			readonly kind: 'span';
+			readonly durationMs: number;
+			readonly name: string;
+			readonly count: number;
+	  };
+
+export type Verdict =
+	| {
+			readonly kind: 'telemetry-unavailable';
+			readonly scope: ClientTelemetrySelection['kind'];
+	  }
+	| {
+			readonly kind: 'traces-unavailable';
+			readonly scope: ClientTelemetrySelection['kind'];
+			readonly busiest: Pick<OperationStat, 'bucket' | 'logCount' | 'rowsRead'>;
+	  }
+	| { readonly kind: 'no-positive-duration' }
+	| {
+			readonly kind: 'dominant-operation';
+			readonly group: string;
+			readonly bucket: string;
+			readonly totalMs: number;
+			readonly traceCount: number;
+			readonly sharePercent: number;
+			readonly cost: DominantCost;
+	  };
+
+export interface Analysis extends DiagnosticAttachments {
 	readonly metadataProbes?: readonly MetadataProbeStat[];
 	readonly worker: string;
 	readonly window: TimeWindow;
@@ -382,7 +433,7 @@ export interface Analysis {
 	readonly tracedServerMs: number;
 	readonly wallSpanMs: number;
 	readonly tracingAvailable: boolean;
-	readonly verdict: string;
+	readonly verdict: Verdict;
 	readonly groups: readonly OperationGroup[];
 	readonly slowest: readonly TraceSummary[];
 	readonly traceErrors: readonly TraceErrorStat[];
@@ -755,68 +806,6 @@ export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 	};
 }
 
-/**
-The most recent run of activity: the window from the start of the trailing
-cluster (everything not separated from the newest point by a gap longer than
-`gapMs`) to the newest point. Returns undefined when there is no activity.
-*/
-export function detectSession(
-	timestamps: readonly number[],
-	gapMs: number
-): TimeWindow | undefined {
-	if (timestamps.length === 0) {
-		return undefined;
-	}
-
-	const sorted = timestamps.toSorted((a, b) => a - b);
-	const to = sorted.at(-1) ?? 0;
-	let from = to;
-
-	for (let index = sorted.length - 1; index > 0; index -= 1) {
-		const current = sorted[index];
-		const earlier = sorted[index - 1];
-
-		if (
-			current === undefined ||
-			earlier === undefined ||
-			current - earlier > gapMs
-		) {
-			break;
-		}
-
-		from = earlier;
-	}
-
-	return { from, to };
-}
-
-/**
-Whether the timestamps collected so far already contain a gap wider than
-`gapMs`. A view is walked newest-first, so once such a gap opens every row
-still to come is older than it: the trailing session is fully bracketed and
-the walk can stop without paging the rest of the search window.
-*/
-export function hasSessionBoundary(
-	timestamps: readonly number[],
-	gapMs: number
-): boolean {
-	if (timestamps.length < 2) {
-		return false;
-	}
-
-	const sorted = timestamps.toSorted((a, b) => a - b);
-
-	for (let index = 1; index < sorted.length; index += 1) {
-		const gap = (sorted[index] ?? 0) - (sorted[index - 1] ?? 0);
-
-		if (gap > gapMs) {
-			return true;
-		}
-	}
-
-	return false;
-}
-
 export function percentile(
 	sortedAscending: readonly number[],
 	p: number
@@ -922,7 +911,8 @@ export function analyse(
 	window: TimeWindow,
 	logs: readonly WorkerLog[],
 	traces: readonly TraceSummary[],
-	spans: readonly SpanEvent[]
+	spans: readonly SpanEvent[],
+	selection?: ClientTelemetrySelection
 ): Analysis {
 	const buckets = new Map<string, Bucket>();
 
@@ -1094,7 +1084,7 @@ export function analyse(
 		tracedServerMs,
 		wallSpanMs: window.to - window.from,
 		tracingAvailable: traces.length > 0,
-		verdict: buildVerdict(groups, traces.length > 0),
+		verdict: buildVerdict(groups, traces.length > 0, selection),
 		groups,
 		slowest,
 		traceErrors: traceErrors
@@ -1293,35 +1283,50 @@ function formatCount(count: number): string {
 	return String(count);
 }
 
-function dominantCost(op: OperationStat): string {
+function dominantCost(op: OperationStat): DominantCost {
 	const topSpan = op.spans[0];
 
 	if (topSpan === undefined || op.unaccountedMs >= topSpan.busyMs) {
-		return `${formatMs(op.unaccountedMs)} outside traced leaf spans`;
+		return { kind: 'outside-spans', durationMs: op.unaccountedMs };
 	}
 
-	return `${formatMs(topSpan.busyMs)} in ${topSpan.name} (${formatCount(topSpan.count)} calls)`;
+	return {
+		kind: 'span',
+		durationMs: topSpan.busyMs,
+		name: topSpan.name,
+		count: topSpan.count
+	};
 }
 
 /**
-The one-line headline, focused on the push request path (the `fetch` group)
-when there is one: its costliest operation, how much of the group's time it
-takes, and whether that time is inside or outside traced leaf spans.
+Identifies the dominant operation and cost, or the available telemetry's limits.
 */
 export function buildVerdict(
 	groups: readonly OperationGroup[],
-	isTracingAvailable: boolean
-): string {
+	isTracingAvailable: boolean,
+	selection?: ClientTelemetrySelection
+): Verdict {
 	if (!isTracingAvailable) {
 		const busiest = groups
 			.flatMap((group) => group.operations)
 			.toSorted((a, b) => b.logCount - a.logCount)[0];
 
 		if (busiest === undefined) {
-			return 'No Worker activity in the window.';
+			return {
+				kind: 'telemetry-unavailable',
+				scope: selection?.kind ?? 'time-window'
+			};
 		}
 
-		return `No traces in the window (tracing may not have reached this deploy); busiest by request count is ${busiest.bucket} (${formatCount(busiest.logCount)} calls, ${formatCount(busiest.rowsRead)} rows read).`;
+		return {
+			kind: 'traces-unavailable',
+			scope: selection?.kind ?? 'time-window',
+			busiest: {
+				bucket: busiest.bucket,
+				logCount: busiest.logCount,
+				rowsRead: busiest.rowsRead
+			}
+		};
 	}
 
 	const group =
@@ -1330,13 +1335,51 @@ export function buildVerdict(
 	const top = group?.operations.find((op) => op.totalMs > 0);
 
 	if (group === undefined || top === undefined) {
-		return 'No trace has a positive duration.';
+		return { kind: 'no-positive-duration' };
 	}
 
-	const share = Math.round((top.totalMs / group.tracedServerMs) * 100);
-	const lead = group.group === 'fetch' ? 'Push path' : `${group.group} work`;
+	return {
+		kind: 'dominant-operation',
+		group: group.group,
+		bucket: top.bucket,
+		totalMs: top.totalMs,
+		traceCount: top.traceCount,
+		sharePercent: Math.round((top.totalMs / group.tracedServerMs) * 100),
+		cost: dominantCost(top)
+	};
+}
 
-	return `${lead}: most time (${formatMs(top.totalMs)} over ${formatCount(top.traceCount)} calls, ${String(share)}% of ${group.group}) is ${top.bucket}, ${dominantCost(top)}.`;
+function formatVerdict(verdict: Verdict): string {
+	switch (verdict.kind) {
+		case 'telemetry-unavailable': {
+			return verdict.scope === 'client-identifiers'
+				? 'No matching request logs or native traces are available. Server telemetry may be sampled, delayed or unavailable; this does not show whether the request executed.'
+				: 'No server telemetry is available in the query window. Telemetry may be sampled, delayed or unavailable.';
+		}
+		case 'traces-unavailable': {
+			const coverage =
+				verdict.scope === 'client-identifiers'
+					? 'No matching native traces are available'
+					: 'No native traces are available in the query window';
+			const busiest = verdict.busiest;
+
+			return `${coverage} (telemetry may be sampled, delayed or unavailable); busiest by request count is ${busiest.bucket} (${formatCount(busiest.logCount)} calls, ${formatCount(busiest.rowsRead)} rows read).`;
+		}
+		case 'no-positive-duration': {
+			return 'No trace has a positive duration.';
+		}
+		case 'dominant-operation': {
+			const lead =
+				verdict.group === 'fetch' ? 'Push path' : `${verdict.group} work`;
+			const cost = verdict.cost;
+			const costSummary =
+				cost.kind === 'outside-spans'
+					? `${formatMs(cost.durationMs)} outside traced leaf spans`
+					: `${formatMs(cost.durationMs)} in ${cost.name} (${formatCount(cost.count)} calls)`;
+
+			return `${lead}: most time (${formatMs(verdict.totalMs)} over ${formatCount(verdict.traceCount)} calls, ${String(verdict.sharePercent)}% of ${verdict.group}) is ${verdict.bucket}, ${costSummary}.`;
+		}
+	}
 }
 
 export function summaryRows(analysis: Analysis): ResultRow[] {
@@ -1348,7 +1391,7 @@ export function summaryRows(analysis: Analysis): ResultRow[] {
 			: '0';
 
 	return [
-		{ label: 'Verdict', value: analysis.verdict },
+		{ label: 'Verdict', value: formatVerdict(analysis.verdict) },
 		{
 			label: 'Window',
 			value: `${from} -> ${to} (${formatMs(analysis.wallSpanMs)})`
@@ -1471,10 +1514,10 @@ export function traceErrorRows(analysis: Analysis): ResultRow[] {
 }
 
 interface Options {
+	readonly clientLogs?: string;
 	readonly worker: string;
 	readonly searchMinutes: number;
 	readonly sinceMinutes: number | undefined;
-	readonly gapMs: number;
 	readonly account: string | undefined;
 	readonly mode: ReporterMode;
 	readonly forceLogin: boolean;
@@ -1532,10 +1575,10 @@ export class InvalidStatusQueryError extends DiagnoseError {
 }
 
 interface ProgramFlags {
+	readonly clientLogs?: string;
 	readonly worker: string;
 	readonly search: number;
 	readonly since?: number;
-	readonly gap: number;
 	readonly account?: string;
 	readonly outputMode?: string;
 	readonly json?: boolean;
@@ -1556,6 +1599,10 @@ export function parseOptions(arguments_: readonly string[]): Options {
 		)
 		.option('--worker <name>', 'Worker script to query', 'cupboard-tenant')
 		.option(
+			'--client-logs <directory>',
+			'read client diagnostic logs from an extracted artifact directory'
+		)
+		.option(
 			'--search <minutes>',
 			'how far back to look for activity',
 			positiveNumber,
@@ -1563,14 +1610,8 @@ export function parseOptions(arguments_: readonly string[]): Options {
 		)
 		.option(
 			'--since <minutes>',
-			'use a fixed window instead of auto-detecting the most recent session',
+			'query this many minutes of activity',
 			positiveNumber
-		)
-		.option(
-			'--gap <seconds>',
-			'activity gap that separates one session from the next',
-			positiveNumber,
-			defaultSessionGapMs / 1000
 		)
 		.option('--account <id>', 'Cloudflare account id (otherwise resolved)')
 		.option(
@@ -1607,10 +1648,10 @@ export function parseOptions(arguments_: readonly string[]): Options {
 	}
 
 	return {
+		...(flags.clientLogs !== undefined && { clientLogs: flags.clientLogs }),
 		worker: flags.worker,
 		searchMinutes: flags.search,
 		sinceMinutes: flags.since,
-		gapMs: flags.gap * 1000,
 		account: flags.account,
 		mode: resolveMode(flags.json ?? false, flags.outputMode),
 		forceLogin: flags.login ?? false,
@@ -2205,12 +2246,10 @@ async function fetchByCursor(
 	cursorOf: (row: unknown) => string | undefined,
 	timestampOf: (row: unknown) => number | undefined,
 	onPage: PageProgress,
-	sleep: Sleep,
-	stopAtGapMs: number | undefined
+	sleep: Sleep
 ): Promise<unknown[]> {
 	const rows: unknown[] = [];
 	const seen = new Set<string>();
-	const timestamps: number[] = [];
 	const pageSize = new AdaptivePageLimit();
 	let upper = window.to;
 	let offset: string | undefined;
@@ -2253,20 +2292,6 @@ async function fetchByCursor(
 		rows.push(...fresh);
 		onPage(fresh.length);
 
-		if (stopAtGapMs !== undefined) {
-			for (const row of fresh) {
-				const at = timestampOf(row);
-
-				if (at !== undefined) {
-					timestamps.push(at);
-				}
-			}
-
-			if (hasSessionBoundary(timestamps, stopAtGapMs)) {
-				break;
-			}
-		}
-
 		const next = smallestCursor(page, cursorOf);
 
 		if (next !== undefined && (offset === undefined || next < offset)) {
@@ -2298,21 +2323,18 @@ async function fetchByCursor(
 // lower. If that page is full, the millisecond had more rows than one page,
 // and the walk warns that some were lost.
 //
-// The walk ends on an empty page, when the bound passes `window.from`, or in
-// session mode at the first gap of `stopAtGapMs`. The 500-row cap is
-// observed, not documented, so the walk does not treat a short page as the
-// end of the window.
+// The walk ends on an empty page or when the bound passes `window.from`.
+// The 500-row cap is observed, not documented, so a short page does not end
+// the window.
 async function fetchByTimeframe(
 	query: TelemetryQuery,
 	view: 'events' | 'traces',
 	window: TimeWindow,
 	timestampOf: (row: unknown) => number | undefined,
 	onPage: PageProgress,
-	sleep: Sleep,
-	stopAtGapMs: number | undefined
+	sleep: Sleep
 ): Promise<unknown[]> {
 	const rows: unknown[] = [];
-	const timestamps: number[] = [];
 	const pageSize = new AdaptivePageLimit(timeframePageLimit);
 	let upper = window.to;
 	let boundary = new Set<string>();
@@ -2361,20 +2383,6 @@ async function fetchByTimeframe(
 		rows.push(...fresh);
 		onPage(fresh.length);
 
-		if (stopAtGapMs !== undefined) {
-			for (const row of fresh) {
-				const at = timestampOf(row);
-
-				if (at !== undefined) {
-					timestamps.push(at);
-				}
-			}
-
-			if (hasSessionBoundary(timestamps, stopAtGapMs)) {
-				break;
-			}
-		}
-
 		for (const row of fresh) {
 			if (timestampOf(row) === undefined) {
 				unreadable.add(JSON.stringify(row));
@@ -2408,12 +2416,7 @@ export async function fetchPaged(
 	timestampOf: (row: unknown) => number | undefined,
 	cursorOf: ((row: unknown) => string | undefined) | undefined,
 	onPage: PageProgress,
-	sleep: Sleep = defaultSleep,
-	// In session mode the walk stops once the collected rows bracket a gap this
-	// wide: the trailing session is then complete and the older rows behind it
-	// would only be filtered back out. Left undefined for a fixed `--since`
-	// window, which is fetched to its end.
-	stopAtGapMs?: number
+	sleep: Sleep = defaultSleep
 ): Promise<unknown[]> {
 	if (cursorOf !== undefined) {
 		return fetchByCursor(
@@ -2423,20 +2426,11 @@ export async function fetchPaged(
 			cursorOf,
 			timestampOf,
 			onPage,
-			sleep,
-			stopAtGapMs
+			sleep
 		);
 	}
 
-	return fetchByTimeframe(
-		query,
-		view,
-		window,
-		timestampOf,
-		onPage,
-		sleep,
-		stopAtGapMs
-	);
+	return fetchByTimeframe(query, view, window, timestampOf, onPage, sleep);
 }
 
 export function sliceWindow(window: TimeWindow): TimeWindow[] {
@@ -2531,26 +2525,18 @@ const cursorOf: Record<
 
 // Both views and every slice share one bounded pool of in-flight queries.
 // Disjoint slices need no dedup; their rows are concatenated per view.
-//
-// In session mode (`stopAtGapMs` set) the window is left whole rather than
-// sliced: each view is walked newest-first and stops at the first gap this wide,
-// so only the trailing session is fetched instead of the entire search window.
-// This relies on a request emitting its log and its trace together, so a quiet
-// gap in one view is a quiet gap in the other. A fixed `--since` window is
-// sliced and fetched in full.
 export async function fetchTelemetry(
 	client: Cloudflare,
 	accountId: string,
 	selection: TelemetrySelection,
 	window: TimeWindow,
-	stopAtGapMs: number | undefined,
 	onProgress: (
 		view: TelemetryView,
 		progress: ViewProgress,
 		sliceCount: number
 	) => void
 ): Promise<Record<TelemetryView, unknown[]>> {
-	const slices = stopAtGapMs === undefined ? sliceWindow(window) : [window];
+	const slices = sliceWindow(window);
 	const views: readonly TelemetryView[] =
 		selection.status === undefined ? ['events', 'traces'] : ['events'];
 	const progress: Record<TelemetryView, ViewProgress> = {
@@ -2583,13 +2569,12 @@ export async function fetchTelemetry(
 				progress[view].pages += 1;
 				onProgress(view, progress[view], slices.length);
 			},
-			defaultSleep,
-			stopAtGapMs
+			defaultSleep
 		);
 		progress[view].slicesDone += 1;
 		onProgress(view, progress[view], slices.length);
 
-		// A slice can hold tens of thousands of rows; spreading them into push
+		// A slice can contain tens of thousands of rows; spreading them into push
 		// would overflow the argument stack, so append element by element.
 		for (const row of rows) {
 			out[view].push(row);
@@ -2621,6 +2606,8 @@ export function renderAnalysis(
 		data: analysis,
 		rows: summaryRows(analysis)
 	});
+
+	renderDiagnosticAttachments(ui, analysis);
 
 	for (const group of analysis.groups) {
 		ui.note(
@@ -2659,6 +2646,8 @@ export function renderHttpStatusAnalysis(
 		return;
 	}
 
+	renderDiagnosticAttachments(ui, analysis);
+
 	const rows: ResultRow[] = [
 		{ label: 'Worker', value: analysis.worker },
 		{
@@ -2686,20 +2675,137 @@ export function renderHttpStatusAnalysis(
 	}
 }
 
+const clientCoverageMessages: Readonly<Record<ClientCoverageCaveat, string>> = {
+	'server-telemetry':
+		'Server telemetry may be sampled, delayed or unavailable. An unmatched record does not prove that the request was not executed.',
+	'untrusted-client-parent':
+		'Client parent identifiers are untrusted attributes. They do not identify a server trace.',
+	'path-and-time':
+		'Path and time matches are candidates and depend on clock alignment.',
+	'client-log-coverage':
+		'Rotation, queue drops and abrupt termination can remove client records.'
+};
+
+function formatArtifactCoverage(discovery: LogArtifactDiscovery): string {
+	const unavailable = discovery.unavailable;
+
+	if (unavailable === undefined) {
+		return discovery.incomplete ? 'partial' : 'complete';
+	}
+
+	if (unavailable.kind === 'http') {
+		return `HTTP ${String(unavailable.status)}`;
+	}
+
+	return unavailable.kind === 'invalid-response'
+		? 'Invalid artifact response'
+		: 'Artifact request failed';
+}
+
+function renderDiagnosticAttachments(
+	ui: CliUi,
+	analysis: DiagnosticAttachments
+): void {
+	const scope = analysis.scope;
+
+	if (scope !== undefined) {
+		const selection = scope.selection;
+		ui.note('Telemetry selection', [
+			{ label: 'Query window', value: scope.windowSource },
+			{ label: 'Selection', value: selection.kind },
+			...(selection.kind === 'client-identifiers'
+				? [
+						{
+							label: 'Matching records',
+							value: JSON.stringify(selection.matchedBy)
+						},
+						{
+							label: 'Excluded',
+							value: `${String(selection.excludedEvents)} events, ${String(selection.excludedTraces)} native traces`
+						}
+					]
+				: [
+						{
+							label: 'Coverage',
+							value:
+								'This window can contain concurrent jobs. Supply --client-logs to select requests by identifier.'
+						}
+					])
+		]);
+	}
+
+	const client = analysis.clientDiagnostics;
+
+	if (client !== undefined) {
+		ui.note('Client diagnostic logs', [
+			{
+				label: 'Coverage',
+				value: `${String(client.files)} files, ${String(client.records)} records, ${String(client.incompleteFiles.length)} incomplete, ${String(client.unreadableFiles.length)} unreadable; truncated: ${String(client.truncated)}`
+			},
+			{
+				label: 'HTTP',
+				value: `${String(client.attempts)} attempts, ${String(client.responses)} responses, ${String(client.transportFailures)} transport failures, ${String(client.bodyFailures)} body failures`
+			},
+			{
+				label: 'Operations',
+				value: `${String(client.recoveredOperations)} recovered, ${String(client.exhaustedOperations)} exhausted, ${String(client.cancelledOperations)} cancelled`
+			},
+			{
+				label: 'Correlation (records)',
+				value: JSON.stringify(client.correlation)
+			},
+			{ label: 'Dropped records', value: String(client.droppedRecords) },
+			...client.caveats.map((caveat) => ({
+				label: 'Coverage limit',
+				value: clientCoverageMessages[caveat]
+			}))
+		]);
+	}
+
+	const discovery = analysis.logArtifacts;
+
+	if (discovery !== undefined) {
+		ui.note('Workflow diagnostic artifacts', [
+			{
+				label: 'Coverage',
+				value: formatArtifactCoverage(discovery)
+			},
+			...discovery.artifacts.map((artifact) => ({
+				label: artifact.name,
+				value: `${String(artifact.id)}${artifact.expired ? ' (expired)' : ''}`
+			}))
+		]);
+	}
+}
+
 async function resolveTelemetryWindow(
 	options: Options,
 	now: number,
-	reporter: Reporter
-): Promise<TimeWindow> {
+	reporter: Reporter,
+	clientLogs: ClientLogCollection | undefined
+): Promise<{ readonly window: TimeWindow; readonly source: WindowSource }> {
 	const githubJob = options.githubJob;
 
 	if (githubJob !== undefined) {
-		return reporter.phase('Reading GitHub job timing', () =>
-			windowForGitHubJob(githubJob, now)
-		);
+		return {
+			window: await reporter.phase('Reading GitHub job timing', () =>
+				windowForGitHubJob(githubJob, now)
+			),
+			source: 'github-job'
+		};
 	}
 
-	return lookbackWindow(now, options.sinceMinutes ?? options.searchMinutes);
+	const clientWindow =
+		clientLogs === undefined ? undefined : clientLogWindow(clientLogs);
+
+	if (clientWindow !== undefined && options.sinceMinutes === undefined) {
+		return { window: clientWindow, source: 'client-log-timestamps' };
+	}
+
+	return {
+		window: lookbackWindow(now, options.sinceMinutes ?? options.searchMinutes),
+		source: 'lookback'
+	};
 }
 
 async function main(): Promise<void> {
@@ -2712,9 +2818,15 @@ async function main(): Promise<void> {
 	ui.intro(
 		`${options.status === undefined ? 'Push' : 'HTTP status'} diagnostic: ${options.worker}`
 	);
-	const searchWindow = await resolveTelemetryWindow(options, now, reporter);
-	const shouldDetectLatestSession =
-		options.githubJob === undefined && options.sinceMinutes === undefined;
+	const directory = options.clientLogs;
+	const clientLogs =
+		directory === undefined
+			? undefined
+			: await reporter.phase('Reading client logs', () =>
+					readClientLogs(directory)
+				);
+	const { window: searchWindow, source: windowSource } =
+		await resolveTelemetryWindow(options, now, reporter, clientLogs);
 
 	const accessToken = await authenticate(ui, options, now);
 	const client = new Cloudflare({ apiToken: accessToken });
@@ -2729,11 +2841,7 @@ async function main(): Promise<void> {
 				: `${String(lookbackMinutes)}m`
 			: 'the GitHub job window';
 
-	// Session detection walks backwards only until it finds the previous quiet
-	// gap. A fixed manual or GitHub window must be fetched in full.
-	const stopAtGapMs = shouldDetectLatestSession ? options.gapMs : undefined;
-
-	const { rawEvents, rawTraces } = await reporter.phase(
+	const fetchedTelemetry = await reporter.phase(
 		`Fetching ${lookbackLabel} of ${options.status === undefined ? 'logs and traces' : 'HTTP responses'} (account ${accountId})`,
 		async (context) => {
 			const fetched = await fetchTelemetry(
@@ -2741,7 +2849,6 @@ async function main(): Promise<void> {
 				accountId,
 				options,
 				searchWindow,
-				stopAtGapMs,
 				(view, progress, sliceCount) => {
 					const slices =
 						sliceCount > 1
@@ -2759,6 +2866,37 @@ async function main(): Promise<void> {
 		}
 	);
 
+	const unfiltered: ClientTelemetrySelection = { kind: 'time-window' };
+	const selected =
+		clientLogs === undefined
+			? {
+					events: fetchedTelemetry.rawEvents,
+					traces: fetchedTelemetry.rawTraces,
+					selection: unfiltered
+				}
+			: selectClientTelemetry(
+					clientLogs,
+					fetchedTelemetry.rawEvents,
+					fetchedTelemetry.rawTraces
+				);
+	const rawEvents = selected.events;
+	const rawTraces = selected.traces;
+
+	const diagnosticAttachments: DiagnosticAttachments = {
+		scope: { windowSource, selection: selected.selection },
+		...(clientLogs !== undefined && {
+			clientDiagnostics: analyseClientLogs(clientLogs, [
+				...fetchedTelemetry.rawEvents,
+				...fetchedTelemetry.rawTraces
+			])
+		}),
+		...(options.githubJob !== undefined && {
+			logArtifacts: await discoverLogArtifacts(options.githubJob, {
+				token: env.GH_TOKEN ?? env.GITHUB_TOKEN
+			})
+		})
+	};
+
 	if (options.status !== undefined) {
 		const requests = rawEvents
 			.map((event) => parseHttpRequest(event))
@@ -2769,6 +2907,7 @@ async function main(): Promise<void> {
 			);
 
 		renderHttpStatusAnalysis(ui, reporter, options.mode, {
+			...diagnosticAttachments,
 			worker: options.worker,
 			window: searchWindow,
 			status: options.status,
@@ -2804,12 +2943,7 @@ async function main(): Promise<void> {
 	);
 
 	const analysis = await reporter.phase('Analysing', (context) => {
-		const window = shouldDetectLatestSession
-			? (detectSession(
-					[...logs.map((l) => l.timestamp), ...traces.map((t) => t.startMs)],
-					options.gapMs
-				) ?? searchWindow)
-			: searchWindow;
+		const window = searchWindow;
 
 		const isInWindow = (stamp: number): boolean =>
 			stamp >= window.from && stamp <= window.to;
@@ -2822,11 +2956,15 @@ async function main(): Promise<void> {
 			window,
 			logs.filter((log) => isInWindow(log.timestamp)),
 			traces.filter((trace) => isInWindow(trace.startMs)),
-			windowedSpans
+			windowedSpans,
+			selected.selection
 		);
 	});
 
-	renderAnalysis(ui, reporter, options.mode, analysis);
+	renderAnalysis(ui, reporter, options.mode, {
+		...analysis,
+		...diagnosticAttachments
+	});
 
 	ui.outro('Done');
 }
