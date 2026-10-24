@@ -12,7 +12,8 @@ import {
 	getLogger,
 	type Logger,
 	type LogLevel,
-	type Sink
+	type Sink,
+	withFilter
 } from '@logtape/logtape';
 
 import { redactingSink } from './redaction.ts';
@@ -25,6 +26,7 @@ export { getLogger, withContext } from '@logtape/logtape';
 export const loggerCategory = ['cupboard'] as const;
 
 export interface LoggingOptions {
+	readonly fileSink?: Sink;
 	/**
 	The sink that receives log records. If this is omitted, {@link resolveSink}
 	selects a sink from the environment.
@@ -77,19 +79,41 @@ export function configureLogging(options: LoggingOptions = {}): void {
 		return;
 	}
 
+	const destination = options.sink ?? resolveSink();
+	const consoleSink = withFilter(
+		observedSink(destination),
+		options.lowestLevel ?? 'debug'
+	);
+	const metaConsoleSink = withFilter(observedSink(destination), 'warning');
+	const sinks: Record<string, Sink> = {
+		cupboard: consoleSink,
+		meta: metaConsoleSink
+	};
+	const sinkIds = ['cupboard'];
+	const metaSinkIds = ['meta'];
+
+	if (options.fileSink !== undefined) {
+		sinks.file = observedSink(options.fileSink);
+		sinkIds.push('file');
+		metaSinkIds.push('file');
+	}
+
 	configureSync({
 		contextLocalStorage: new AsyncLocalStorage<Record<string, unknown>>(),
-		sinks: { cupboard: observedSink(options.sink ?? resolveSink()) },
+		sinks,
 		loggers: [
 			{
 				category: [...loggerCategory],
-				sinks: ['cupboard'],
-				lowestLevel: options.lowestLevel ?? 'debug'
+				sinks: sinkIds,
+				lowestLevel:
+					options.fileSink === undefined
+						? (options.lowestLevel ?? 'debug')
+						: 'trace'
 			},
 			{
 				category: ['logtape', 'meta'],
-				sinks: ['cupboard'],
-				lowestLevel: 'warning'
+				sinks: metaSinkIds,
+				lowestLevel: options.fileSink === undefined ? 'warning' : 'trace'
 			}
 		]
 	});
