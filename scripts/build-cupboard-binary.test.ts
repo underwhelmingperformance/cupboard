@@ -28,6 +28,7 @@ describe('binaryCliEntrySource', () => {
 			bundle: true,
 			format: 'cjs',
 			platform: 'node',
+			conditions: ['require'],
 			write: false,
 			plugins: [
 				{
