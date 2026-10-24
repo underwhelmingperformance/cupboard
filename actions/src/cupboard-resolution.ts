@@ -204,18 +204,18 @@ function githubApiEndpoints(
 }
 
 /**
- * Validate again before serialisation. This prevents unresolved or
- * noncanonical coordinates from crossing the job-output boundary if a caller
- * bypasses `resolveCupboard`.
- */
+Validate again before serialisation. This prevents unresolved or
+noncanonical coordinates from crossing the job-output boundary if a caller
+bypasses `resolveCupboard`.
+*/
 export function serialiseResolvedCupboard(resolved: ResolvedCupboard): string {
 	return JSON.stringify(resolvedCupboardSchema.parse(resolved));
 }
 
 /**
- * Reject unknown fields and noncanonical coordinates from the job output, and
- * report JSON and schema failures through `CupboardResolutionJsonError`.
- */
+Reject unknown fields and noncanonical coordinates from the job output, and
+report JSON and schema failures through `CupboardResolutionJsonError`.
+*/
 export function parseResolvedCupboard(value: string): ResolvedCupboard {
 	try {
 		return resolvedCupboardSchema.parse(JSON.parse(value) as unknown);
@@ -225,9 +225,9 @@ export function parseResolvedCupboard(value: string): ResolvedCupboard {
 }
 
 /**
- * Describes the resolved cupboard for a reader: `release <tag>` or
- * `built from source`.
- */
+Describes the resolved cupboard for a reader: `release <tag>` or
+`built from source`.
+*/
 export function describeResolvedCupboard(resolved: ResolvedCupboard): string {
 	return resolved.kind === 'release'
 		? `release ${resolved.tag}`
@@ -235,9 +235,9 @@ export function describeResolvedCupboard(resolved: ResolvedCupboard): string {
 }
 
 /**
- * The GitHub page of the resolved cupboard: the release page for a release,
- * and the commit page for a source build.
- */
+The GitHub page of the resolved cupboard: the release page for a release,
+and the commit page for a source build.
+*/
 export function resolvedCupboardPage(
 	resolved: ResolvedCupboard,
 	serverUrl: URL
@@ -251,10 +251,10 @@ export function resolvedCupboardPage(
 }
 
 /**
- * The GitHub page of a file in the resolved cupboard's source: at the release
- * tag for a release, and at the commit for a source build. `file` is relative
- * to the repository root and may end with a fragment.
- */
+The GitHub page of a file in the resolved cupboard's source: at the release
+tag for a release, and at the commit for a source build. `file` is relative
+to the repository root and may end with a fragment.
+*/
 export function resolvedCupboardFile(
 	resolved: ResolvedCupboard,
 	serverUrl: URL,
@@ -269,10 +269,10 @@ export function resolvedCupboardFile(
 }
 
 /**
- * Select an exact release tag and source commit, or the exact source commit
- * from the reusable workflow. The result must not contain `latest` or defer
- * any choice to acquisition.
- */
+Select an exact release tag and source commit, or the exact source commit
+from the reusable workflow. The result must not contain `latest` or defer
+any choice to acquisition.
+*/
 export async function resolveCupboard(
 	options: ResolveCupboardOptions,
 	dependencies: ResolveCupboardDependencies = {}

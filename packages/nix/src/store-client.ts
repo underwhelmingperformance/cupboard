@@ -43,20 +43,20 @@ import {
 import { openSubstituters, SubstituterClient } from './substituter.ts';
 
 /**
- * Supplies the runtime probes used to resolve an `auto` store.
- */
+Supplies the runtime probes used to resolve an `auto` store.
+*/
 export interface StoreClientEnvironment extends NixConfigEnvironment {
 	/**
-	 * Checks whether this process can both read and write the state directory.
-	 */
+	Checks whether this process can both read and write the state directory.
+	*/
 	canWriteStateDirectory(stateDirectory: string): boolean;
 	socketExists(socketPath: string): boolean;
 	directoryExists(directoryPath: string): boolean;
 	isSuperuser(): boolean;
 	/**
-	 * Creates the directory and any missing parents. Returns false if recursive
-	 * creation fails.
-	 */
+	Creates the directory and any missing parents. Returns false if recursive
+	creation fails.
+	*/
 	createDirectory(directoryPath: string): boolean;
 }
 
@@ -91,10 +91,10 @@ export type StoreBackend =
 	| { readonly backend: 'ssh-ng'; readonly remote: NixSshStoreSpec };
 
 /**
- * Identifies where store contents live. Callers use this discriminant to choose
- * the source of NAR bytes. A `local-filesystem` store and a `daemon` store use
- * this machine's filesystem; an `ssh-ng` store uses the remote machine.
- */
+Identifies where store contents live. Callers use this discriminant to choose
+the source of NAR bytes. A `local-filesystem` store and a `daemon` store use
+this machine's filesystem; an `ssh-ng` store uses the remote machine.
+*/
 export type NixStoreKind = 'local-filesystem' | 'daemon' | 'ssh-ng';
 
 export function storeKindOf(backend: StoreBackend): NixStoreKind {
@@ -104,13 +104,13 @@ export function storeKindOf(backend: StoreBackend): NixStoreKind {
 const unixScheme = 'unix://';
 
 /**
- * Creates a client for the store selected by the running configuration. A
- * `daemon` or `unix://` reference uses the local daemon, `local` uses the local
- * store, and `ssh-ng` uses the remote daemon. For `auto`, Nix first uses the
- * local store when its state directory is readable and writable, then a present
- * daemon socket, then an eligible per-user store on Linux, and otherwise the
- * configured local store.
- */
+Creates a client for the store selected by the running configuration. A
+`daemon` or `unix://` reference uses the local daemon, `local` uses the local
+store, and `ssh-ng` uses the remote daemon. For `auto`, Nix first uses the
+local store when its state directory is readable and writable, then a present
+daemon socket, then an eligible per-user store on Linux, and otherwise the
+configured local store.
+*/
 export function createNixStoreClient(
 	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
 	config: NixStoreConfig = discoverNixStoreConfig(dependencies)
@@ -131,10 +131,10 @@ export function createNixStoreClient(
 }
 
 /**
- * Resolves the directories used by a backend. A local backend provides its own
- * directories. An `ssh-ng` `remote-store` reference can override the configured
- * directories; other daemon backends use the configured values.
- */
+Resolves the directories used by a backend. A local backend provides its own
+directories. An `ssh-ng` `remote-store` reference can override the configured
+directories; other daemon backends use the configured values.
+*/
 export function storeDirectoriesOf(
 	backend: StoreBackend,
 	configured: ConfiguredStoreDirectories
@@ -183,17 +183,17 @@ export function storeClientForBackend(
 }
 
 /**
- * Creates lazy queries that read narinfos directly from the configured
- * substituters. Each offer includes the NAR hash and signatures needed for
- * consumer policy checks.
- *
- * Private-cache requests use credentials from the configured netrc entry for
- * each host. Every request uses the proxy selected by the environment's
- * `http_proxy` and `https_proxy` variables.
- *
- * Every request receives the caller's signal, so aborting it cancels all
- * outstanding substituter work.
- */
+Creates lazy queries that read narinfos directly from the configured
+substituters. Each offer includes the NAR hash and signatures needed for
+consumer policy checks.
+
+Private-cache requests use credentials from the configured netrc entry for
+each host. Every request uses the proxy selected by the environment's
+`http_proxy` and `https_proxy` variables.
+
+Every request receives the caller's signal, so aborting it cancels all
+outstanding substituter work.
+*/
 export function substituterClientOver(
 	directories: ConfiguredStoreDirectories,
 	substitution: NixSubstitutionSettings,
@@ -227,10 +227,10 @@ export function substituterClientOver(
 }
 
 /**
- * Reads the configured netrc, or returns `undefined` when the file is absent or
- * unreadable. libcurl treats either case as disabled netrc support, so requests
- * proceed without credentials.
- */
+Reads the configured netrc, or returns `undefined` when the file is absent or
+unreadable. libcurl treats either case as disabled netrc support, so requests
+proceed without credentials.
+*/
 function netrcContents(
 	netrcFile: string,
 	dependencies: NixConfigEnvironment
@@ -266,56 +266,56 @@ function localStoreOver(
 }
 
 /**
- * Controls a daemon-backed store opened for one operation.
- */
+Controls a daemon-backed store opened for one operation.
+*/
 export interface NixDaemonClientOptions {
 	/**
-	 * Require anonymous narinfo and NAR access for direct substitution evidence.
-	 */
+	Require anonymous narinfo and NAR access for direct substitution evidence.
+	*/
 	readonly requirePublicNar?: boolean;
 	/**
-	 * Execute builds in this store without using configured remote builders.
-	 */
+	Execute builds in this store without using configured remote builders.
+	*/
 	readonly disableRemoteBuilders?: boolean;
 	/**
-	 * Selects the store. Defaults to the discovered `store` setting.
-	 */
+	Selects the store. Defaults to the discovered `store` setting.
+	*/
 	readonly storeUri?: string;
 	/**
-	 * Overrides discovered SetOptions fields for a local daemon. The caller wins
-	 * per key. An ssh-ng store preserves its remote daemon's policy.
-	 */
+	Overrides discovered SetOptions fields for a local daemon. The caller wins
+	per key. An ssh-ng store preserves its remote daemon's policy.
+	*/
 	readonly setOptions?: NixDaemonSetOptions;
 	/**
-	 * Overrides discovered daemon settings for a local daemon. The caller wins per
-	 * key. An ssh-ng store preserves its remote daemon's policy.
-	 */
+	Overrides discovered daemon settings for a local daemon. The caller wins per
+	key. An ssh-ng store preserves its remote daemon's policy.
+	*/
 	readonly overrides?: NixDaemonOverrides;
 	readonly connect?: NixDaemonConnector;
 	/**
-	 * Aborts the client's work with the signal's reason.
-	 */
+	Aborts the client's work with the signal's reason.
+	*/
 	readonly signal?: AbortSignal;
 	/**
-	 * Selects how an availability store queries substituters when availability
-	 * selection uses a local store. Defaults to `direct`.
-	 */
+	Selects how an availability store queries substituters when availability
+	selection uses a local store. Defaults to `direct`.
+	*/
 	readonly localStoreQueries?: LocalStoreQueries;
 }
 
 /**
- * How an availability store queries substituters when availability selection
- * uses a local store. `direct` sends narinfo requests from this process.
- * `scoped-daemon` starts `nix daemon --stdio` as the current user for each
- * connection, so Nix records the answers in its narinfo disk cache for later
- * Nix commands.
- */
+How an availability store queries substituters when availability selection
+uses a local store. `direct` sends narinfo requests from this process.
+`scoped-daemon` starts `nix daemon --stdio` as the current user for each
+connection, so Nix records the answers in its narinfo disk cache for later
+Nix commands.
+*/
 export type LocalStoreQueries = 'direct' | 'scoped-daemon';
 
 /**
- * The command that starts a scoped daemon, and the settings that its client
- * sends after the handshake.
- */
+The command that starts a scoped daemon, and the settings that its client
+sends after the handshake.
+*/
 export interface ScopedDaemonCommand {
 	readonly command: string;
 	readonly commandArguments: readonly string[];
@@ -323,8 +323,8 @@ export interface ScopedDaemonCommand {
 }
 
 /**
- * Where an availability store sends its queries.
- */
+Where an availability store sends its queries.
+*/
 export type AvailabilityRoute =
 	| { readonly kind: 'ssh-ng'; readonly storeUri: string }
 	| { readonly kind: 'daemon'; readonly socketPath: string }
@@ -343,10 +343,10 @@ const freshNarinfoSettings: NixDaemonOverrides = {
 };
 
 /**
- * For an automatic store, selects an existing daemon socket before local
- * queries. An explicitly selected local store can use a scoped daemon even when
- * the socket exists.
- */
+For an automatic store, selects an existing daemon socket before local
+queries. An explicitly selected local store can use a scoped daemon even when
+the socket exists.
+*/
 export function availabilityRoute(
 	backend: StoreBackend,
 	config: NixStoreConfig,
@@ -399,13 +399,13 @@ export function availabilityRoute(
 }
 
 /**
- * Creates a daemon-backed client instead of applying automatic local-store
- * selection. A local daemon must have the configured or `unix://` socket, and
- * per-call settings override discovered daemon settings by key. An `ssh-ng`
- * store opens its remote daemon over SSH and preserves that daemon's policy.
- * A missing local socket throws {@link NixDaemonUnavailableError} with the path
- * that was probed.
- */
+Creates a daemon-backed client instead of applying automatic local-store
+selection. A local daemon must have the configured or `unix://` socket, and
+per-call settings override discovered daemon settings by key. An `ssh-ng`
+store opens its remote daemon over SSH and preserves that daemon's policy.
+A missing local socket throws {@link NixDaemonUnavailableError} with the path
+that was probed.
+*/
 export function createNixDaemonStoreClient(
 	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
 	config: NixStoreConfig = discoverNixStoreConfig(dependencies),
@@ -465,34 +465,34 @@ export interface AvailabilityStore {
 	readonly stateDirectory: LocalStoreDirectories['stateDirectory'];
 	readonly realStoreDirectory?: string;
 	/**
-	 * Queries the configured substituters directly, independently of the selected
-	 * backend, and returns complete narinfo evidence.
-	 */
+	Queries the configured substituters directly, independently of the selected
+	backend, and returns complete narinfo evidence.
+	*/
 	readonly substituters: SubstituterClient;
 }
 
 /**
- * Creates a store for external-availability queries. A path-shaped per-call
- * store reference is resolved against the process working directory before
- * backend selection.
- *
- * For `auto`, a present daemon socket wins even when ordinary selection could
- * read the local store. This lets substitutability and missing-path queries use
- * the daemon's own substituter configuration. An explicit local store remains
- * local, and an `ssh-ng` store uses its remote daemon.
- *
- * The result also provides direct substituter queries with effective overrides
- * for callers that need NAR hashes and signatures. A local backend reads path
- * metadata from the store database. By default it also queries substituters
- * from this process. With `localStoreQueries: 'scoped-daemon'`, it sends its
- * store operations to a `nix daemon --stdio` child instead, which reads no
- * cached narinfo but records its answers in Nix's narinfo disk cache. The
- * child exits when its connection closes.
- *
- * A selected local daemon without a socket throws
- * {@link NixDaemonUnavailableError}. An unsupported store throws
- * {@link UnsupportedNixStoreError}.
- */
+Creates a store for external-availability queries. A path-shaped per-call
+store reference is resolved against the process working directory before
+backend selection.
+
+For `auto`, a present daemon socket wins even when ordinary selection could
+read the local store. This lets substitutability and missing-path queries use
+the daemon's own substituter configuration. An explicit local store remains
+local, and an `ssh-ng` store uses its remote daemon.
+
+The result also provides direct substituter queries with effective overrides
+for callers that need NAR hashes and signatures. A local backend reads path
+metadata from the store database. By default it also queries substituters
+from this process. With `localStoreQueries: 'scoped-daemon'`, it sends its
+store operations to a `nix daemon --stdio` child instead, which reads no
+cached narinfo but records its answers in Nix's narinfo disk cache. The
+child exits when its connection closes.
+
+A selected local daemon without a socket throws
+{@link NixDaemonUnavailableError}. An unsupported store throws
+{@link UnsupportedNixStoreError}.
+*/
 export function createAvailabilityStoreClient(
 	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
 	config: NixStoreConfig = discoverNixStoreConfig(dependencies),
@@ -582,11 +582,11 @@ export function createAvailabilityStoreClient(
 }
 
 /**
- * Applies substitution overrides to the discovered settings. A daemon reads
- * these values from its client's SetOptions frame. A plain `substituters`
- * assignment replaces the discovered list; an `extra-substituters` assignment
- * appends to it. The configuration layer parses each boolean consistently.
- */
+Applies substitution overrides to the discovered settings. A daemon reads
+these values from its client's SetOptions frame. A plain `substituters`
+assignment replaces the discovered list; an `extra-substituters` assignment
+appends to it. The configuration layer parses each boolean consistently.
+*/
 export function overriddenSubstitution(
 	discovered: NixSubstitutionSettings,
 	overrides: NixDaemonOverrides
@@ -707,13 +707,13 @@ function resolveAuto(
 }
 
 /**
- * Creates Nix's per-user fallback below the data directory on Linux. It applies
- * only when no existing installation or explicit store configuration does.
- *
- * Other platforms, an existing state directory, the superuser, and explicit
- * store or state directories all keep the configured local store. Failure to
- * create the fallback root does the same.
- */
+Creates Nix's per-user fallback below the data directory on Linux. It applies
+only when no existing installation or explicit store configuration does.
+
+Other platforms, an existing state directory, the superuser, and explicit
+store or state directories all keep the configured local store. Failure to
+create the fallback root does the same.
+*/
 function chrootStore(
 	config: NixStoreConfig,
 	environment: StoreClientEnvironment

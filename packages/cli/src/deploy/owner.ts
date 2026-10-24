@@ -19,27 +19,27 @@ import {
 } from './cloudflare-oauth.ts';
 
 /**
- * An OIDC principal: the issuer and subject that identify it.
- */
+An OIDC principal: the issuer and subject that identify it.
+*/
 export interface Principal {
 	readonly issuer: OidcIssuer;
 	readonly subject: OidcSubject;
 }
 
 /**
- * An OIDC principal as the control plane pins it: the global admin, or the
- * owner of a tenant that the deploy creates. The audience is absent for an
- * admin claimed before migration 0016 whose bootstrap trust rule was removed.
- */
+An OIDC principal as the control plane pins it: the global admin, or the
+owner of a tenant that the deploy creates. The audience is absent for an
+admin claimed before migration 0016 whose bootstrap trust rule was removed.
+*/
 export interface OwnerBinding extends Principal {
 	readonly audience?: OidcAudience;
 }
 
 /**
- * The identity in the operator's id_token, which a first deploy makes the
- * admin. `displayName` is the token's `name`, `email`, `preferred_username` or
- * `sub` claim.
- */
+The identity in the operator's id_token, which a first deploy makes the
+admin. `displayName` is the token's `name`, `email`, `preferred_username` or
+`sub` claim.
+*/
 export interface Claimant extends Principal {
 	readonly audience: OidcAudience;
 	readonly displayName: string | undefined;
@@ -53,9 +53,9 @@ const principalClaimsSchema = z.looseObject({
 });
 
 /**
- * The principal in an id_token, or undefined when the token has no string
- * `iss` and `sub`.
- */
+The principal in an id_token, or undefined when the token has no string
+`iss` and `sub`.
+*/
 export function principalOf(idToken: string): Principal | undefined {
 	const parsed = principalClaimsSchema.safeParse(decodeJwtPayload(idToken));
 
@@ -67,10 +67,10 @@ export function principalOf(idToken: string): Principal | undefined {
 }
 
 /**
- * Why `/signup` on a deployed Worker would refuse an id_token: its issuer is
- * not an HTTPS URL without a query or fragment, it has no subject, or its
- * `aud` does not contain exactly one audience.
- */
+Why `/signup` on a deployed Worker would refuse an id_token: its issuer is
+not an HTTPS URL without a query or fragment, it has no subject, or its
+`aud` does not contain exactly one audience.
+*/
 export type ClaimTokenProblem = 'issuer' | 'subject' | 'audience';
 
 function claimTokenProblemText(problem: ClaimTokenProblem): string {
@@ -94,9 +94,9 @@ function claimTokenProblemText(problem: ClaimTokenProblem): string {
 }
 
 /**
- * The id_token from the login cannot claim the deployment, because `/signup`
- * would refuse it.
- */
+The id_token from the login cannot claim the deployment, because `/signup`
+would refuse it.
+*/
 export class ClaimTokenUnusableError extends CliError {
 	constructor(public readonly problem: ClaimTokenProblem) {
 		super(
@@ -122,12 +122,12 @@ const singleAudienceSchema = z.union([
 ]);
 
 /**
- * The claimant in an id_token. It applies the checks that `/signup` on a
- * deployed Worker applies before it verifies the token, so a token that
- * `/signup` would refuse stops the deploy before any change. A deployed Worker
- * accepts loopback HTTP issuers only in local development, which `cupboard
- * init` never deploys, so the check requires HTTPS.
- */
+The claimant in an id_token. It applies the checks that `/signup` on a
+deployed Worker applies before it verifies the token, so a token that
+`/signup` would refuse stops the deploy before any change. A deployed Worker
+accepts loopback HTTP issuers only in local development, which `cupboard
+init` never deploys, so the check requires HTTPS.
+*/
 export function claimantOf(idToken: string): Claimant {
 	const claims = claimTokenSchema.safeParse(decodeJwtPayload(idToken)).data;
 	const issuer =
@@ -158,8 +158,8 @@ export function claimantOf(idToken: string): Claimant {
 }
 
 /**
- * Whether two principals have the same issuer and subject.
- */
+Whether two principals have the same issuer and subject.
+*/
 export function isSamePrincipal(
 	left: Principal | undefined,
 	right: Principal
@@ -176,10 +176,10 @@ function shellWord(value: string): string {
 }
 
 /**
- * The `cupboard login` command that obtains a session for `admin` at `url`.
- * It adds `--oidc-issuer` and `--client-id` when the admin's issuer or client
- * differs from the defaults of `cupboard login`.
- */
+The `cupboard login` command that obtains a session for `admin` at `url`.
+It adds `--oidc-issuer` and `--client-id` when the admin's issuer or client
+differs from the defaults of `cupboard login`.
+*/
 export function adminLoginCommand(url: URL, admin: OwnerBinding): string {
 	const isDefaultLogin =
 		admin.issuer === cloudflareDashIssuer &&
@@ -197,9 +197,9 @@ export function adminLoginCommand(url: URL, admin: OwnerBinding): string {
 }
 
 /**
- * How a first deploy shows the identity that its claim makes the admin: the
- * display name, then the issuer, subject and audience.
- */
+How a first deploy shows the identity that its claim makes the admin: the
+display name, then the issuer, subject and audience.
+*/
 export function claimantLabel(claimant: Claimant): string {
 	return (
 		`${claimant.displayName ?? claimant.subject} (issuer ` +

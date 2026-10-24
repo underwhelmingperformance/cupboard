@@ -792,13 +792,12 @@ describe('commit session credit', () => {
 	// the circulating budget and leaves the client waiting for abandoned work.
 	it('sends errors for unstarted entries after a batch failure and returns their credit', async () => {
 		const token = await initialise();
-		const commits: CommitBatchEntry[] = [];
-
 		// Exceed the concurrency limit so a rejection leaves entries unstarted.
 		// Nix base32 omits `e`.
-		for (const character of ['a', 'b', 'c', 'd', 'f', 'g', 'h', 'i']) {
-			commits.push(await settledEntry(token, character));
-		}
+		const commits = await Array.fromAsync(
+			['a', 'b', 'c', 'd', 'f', 'g', 'h', 'i'],
+			(character) => settledEntry(token, character)
+		);
 
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);

@@ -129,11 +129,11 @@ function passThrough(target: object, property: PropertyKey): unknown {
 }
 
 /**
- * Wraps a Worker's D1 and R2 bindings with the deadlines and subrequest
- * accounting used by Durable Objects. R2 `get` and `put` can transfer NAR
- * bytes, so they have no per-call deadline; an enclosing deadline still
- * applies. Other bindings receive no deadline or accounting wrapper.
- */
+Wraps a Worker's D1 and R2 bindings with the deadlines and subrequest
+accounting used by Durable Objects. R2 `get` and `put` can transfer NAR
+bytes, so they have no per-call deadline; an enclosing deadline still
+applies. Other bindings receive no deadline or accounting wrapper.
+*/
 export function boundedWorkerEnv<
 	T extends {
 		readonly BLOBS: R2Bucket;
@@ -166,10 +166,10 @@ export function boundedWorkerEnv<
 }
 
 /**
- * Wraps an {@link R2Bucket} with deadlines. `head`, `delete` and `list` use the
- * per-call limit. `get` and `put` transfer blob bytes, so they use the enclosing
- * critical-section deadline and can continue without the input gate.
- */
+Wraps an {@link R2Bucket} with deadlines. `head`, `delete` and `list` use the
+per-call limit. `get` and `put` transfer blob bytes, so they use the enclosing
+critical-section deadline and can continue without the input gate.
+*/
 export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 	return new Proxy(bucket, {
 		get(target, property) {
@@ -289,11 +289,11 @@ function boundedD1Client<T extends D1Database | D1DatabaseSession>(
 }
 
 /**
- * Wraps a {@link D1Database} and its sessions with deadlines and subrequest
- * accounting. Each terminal statement method, batch, or exec call consumes
- * one subrequest. A batch remains atomic and consumes one call regardless
- * of its member count.
- */
+Wraps a {@link D1Database} and its sessions with deadlines and subrequest
+accounting. Each terminal statement method, batch, or exec call consumes
+one subrequest. A batch remains atomic and consumes one call regardless
+of its member count.
+*/
 export function boundedD1(database: D1Database): D1Database {
 	const client = boundedD1Client(database);
 

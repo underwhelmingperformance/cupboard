@@ -173,12 +173,12 @@ const settleOverQuotaSubrequests =
 	settleReclaimSubrequests;
 
 /**
- * The maximum number of D1 and R2 calls needed to process one pending row without
- * decoding its NAR.
- *
- * Every row uses the same maximum because the result is unknown before the
- * first charge completes.
- */
+The maximum number of D1 and R2 calls needed to process one pending row without
+decoding its NAR.
+
+Every row uses the same maximum because the result is unknown before the
+first charge completes.
+*/
 export const subrequestsPerPendingSettleRow =
 	settleClassifySubrequests +
 	settlePrepareSubrequests +
@@ -191,17 +191,17 @@ export const subrequestsPerPendingSettleRow =
 const settlePromoteSubrequests = 17;
 
 /**
- * The maximum number of D1 and R2 calls needed to apply one recorded verdict.
- *
- * Applying a verdict runs the same reservation, charge and publication as
- * settling a row without a decode, and promotes the upload's bytes as well. It
- * skips the classification read, because the queue consumer has already
- * classified the row. A page of verdicts also requires the same prefetch as a
- * page of pending rows.
- *
- * The maximum includes the case in which charging reports that the tenant
- * is over quota.
- */
+The maximum number of D1 and R2 calls needed to apply one recorded verdict.
+
+Applying a verdict runs the same reservation, charge and publication as
+settling a row without a decode, and promotes the upload's bytes as well. It
+skips the classification read, because the queue consumer has already
+classified the row. A page of verdicts also requires the same prefetch as a
+page of pending rows.
+
+The maximum includes the case in which charging reports that the tenant
+is over quota.
+*/
 export const subrequestsPerRecordedVerdict =
 	subrequestsPerPendingSettleRow -
 	settleClassifySubrequests +
@@ -215,25 +215,25 @@ const pendingDecodeFreeCursorKey =
 export const recordedVerdictCursorKey = 'maintenance:verdict-drain-cursor';
 
 /**
- * What one page of the verdict drain did. `applied` counts the verdicts that
- * completed their upload. `resolved` also counts verdicts that the page
- * discarded because they no longer applied. A page that resolved none is the
- * stall signal, since the number of recorded verdicts can rise while a page
- * runs. The page skips a verdict that another pass in this object is
- * applying, and `beingApplied` counts those verdicts. A page that skipped
- * every verdict that it read is not a stall.
- */
+What one page of the verdict drain did. `applied` counts the verdicts that
+completed their upload. `resolved` also counts verdicts that the page
+discarded because they no longer applied. A page that resolved none is the
+stall signal, since the number of recorded verdicts can rise while a page
+runs. The page skips a verdict that another pass in this object is
+applying, and `beingApplied` counts those verdicts. A page that skipped
+every verdict that it read is not a stall.
+*/
 export interface RecordedVerdictPage {
 	readonly applied: number;
 	readonly resolved: number;
 	/**
-	 * The verdicts in the page that the page tried and left in place.
-	 */
+	The verdicts in the page that the page tried and left in place.
+	*/
 	readonly unresolved: number;
 	/**
-	 * The verdicts in the page that another pass in this object was applying.
-	 * The page neither resolved them nor failed on them.
-	 */
+	The verdicts in the page that another pass in this object was applying.
+	The page neither resolved them nor failed on them.
+	*/
 	readonly beingApplied: number;
 }
 
@@ -324,12 +324,12 @@ function reconcileCandidates(
 }
 
 /**
- * The state of a row's narinfo object. An `obsolete` object records the URL of
- * an earlier incarnation of the NAR, which recovery has replaced. An
- * `unrecorded` object was written before narinfo metadata existed.
- * Authenticated reads and the availability probe refuse such an object, but a
- * public read serves it.
- */
+The state of a row's narinfo object. An `obsolete` object records the URL of
+an earlier incarnation of the NAR, which recovery has replaced. An
+`unrecorded` object was written before narinfo metadata existed.
+Authenticated reads and the availability probe refuse such an object, but a
+public read serves it.
+*/
 type NarInfoObjectState = 'current' | 'missing' | 'obsolete' | 'unrecorded';
 
 interface RowObservation {
@@ -356,8 +356,8 @@ function narInfoObjectState(
 }
 
 /**
- * Runs probes with the same outgoing-connection bound as reconciliation.
- */
+Runs probes with the same outgoing-connection bound as reconciliation.
+*/
 export function mapVerificationProbes<T, U>(
 	items: readonly T[],
 	probe: (item: T, index: number) => Promise<U>
@@ -366,9 +366,9 @@ export function mapVerificationProbes<T, U>(
 }
 
 /**
- * The result of reconciling one row. `failed` means that a D1, R2 or narinfo
- * publication error interrupted the repair and the row still needs attention.
- */
+The result of reconciling one row. `failed` means that a D1, R2 or narinfo
+publication error interrupted the repair and the row still needs attention.
+*/
 type ReconcileOutcome = 'removed' | 'restored' | 'unchanged' | 'failed';
 
 interface ReconcileCounts {
@@ -389,12 +389,12 @@ function reconcileCounts(outcome: ReconcileOutcome): ReconcileCounts {
 }
 
 /**
- * The consumer must fetch and verify `r2Key` unless `reuse` is true. A reuse
- * claim refers to canonical bytes that were verified when they were promoted,
- * so the consumer must not decode them again. `blob` is the client's
- * declaration of the staged object's file hash and size, present only for a
- * fresh upload committed with one.
- */
+The consumer must fetch and verify `r2Key` unless `reuse` is true. A reuse
+claim refers to canonical bytes that were verified when they were promoted,
+so the consumer must not decode them again. `blob` is the client's
+declaration of the staged object's file hash and size, present only for a
+fresh upload committed with one.
+*/
 export interface PendingVerification {
 	readonly uploadId: UploadId;
 	readonly storePathHash: StorePathHash;
@@ -523,9 +523,9 @@ function promotedPath(
 }
 
 /**
- * An object that the queue consumer wrote at a reserved incarnation for an
- * upload that will not be published from it.
- */
+An object that the queue consumer wrote at a reserved incarnation for an
+upload that will not be published from it.
+*/
 interface UnpublishedWrite {
 	readonly narHash: NixSha256HashString;
 	readonly incarnation: number;
@@ -537,11 +537,11 @@ interface HeldVerdicts {
 }
 
 /**
- * The answer to a queue consumer that asks to write a declared upload's
- * canonical object itself. `revoked` means that the consumer's pass no longer
- * owns the claim. `declined` means that an earlier attempt for the upload
- * failed, so the consumer verifies it and the Durable Object copies it.
- */
+The answer to a queue consumer that asks to write a declared upload's
+canonical object itself. `revoked` means that the consumer's pass no longer
+owns the claim. `declined` means that an earlier attempt for the upload
+failed, so the consumer verifies it and the Durable Object copies it.
+*/
 export type CanonicalWriteReservation =
 	| CanonicalIncarnation
 	| { readonly kind: 'revoked' }
@@ -558,12 +558,12 @@ export interface PendingVerificationBatch {
 type PendingVerificationChunk = Omit<PendingVerificationBatch, 'owner'>;
 
 /**
- * The consumer's write of a declared upload's canonical object, made while it
- * verified the upload. The Durable Object reserved `incarnation` for the claim
- * owner before the consumer started writing. `bytes` counts the compressed
- * bytes that the consumer read, and `durationMs` is the time from the start of
- * the read until the write ended.
- */
+The consumer's write of a declared upload's canonical object, made while it
+verified the upload. The Durable Object reserved `incarnation` for the claim
+owner before the consumer started writing. `bytes` counts the compressed
+bytes that the consumer read, and `durationMs` is the time from the start of
+the read until the write ended.
+*/
 export interface CanonicalWrite {
 	readonly incarnation: number;
 	readonly bytes: number;
@@ -592,10 +592,10 @@ export type VerificationVerdict =
 	  };
 
 /**
- * How a verified upload's canonical object comes to exist: the Durable Object
- * copies the staged object, the consumer has written it at a reserved
- * incarnation, or it already exists.
- */
+How a verified upload's canonical object comes to exist: the Durable Object
+copies the staged object, the consumer has written it at a reserved
+incarnation, or it already exists.
+*/
 export type PromotionState =
 	| { readonly kind: 'copy' }
 	| { readonly kind: 'written'; readonly incarnation: number }
@@ -664,13 +664,13 @@ const recordedVerdictSchema = z.strictObject({
 type RecordedVerdict = z.output<typeof recordedVerdictSchema>;
 
 /**
- * Parses a recorded verdict, or returns `undefined` if this build cannot read
- * it.
- *
- * The column contains text. JSON written by an older build can fail the current
- * schema, and malformed JSON fails during parsing. The caller clears either
- * value so the drain can continue with later verdicts.
- */
+Parses a recorded verdict, or returns `undefined` if this build cannot read
+it.
+
+The column contains text. JSON written by an older build can fail the current
+schema, and malformed JSON fails during parsing. The caller clears either
+value so the drain can continue with later verdicts.
+*/
 function parseRecordedVerdict(
 	recordedVerdictJson: string | null
 ): RecordedVerdict | undefined {
@@ -696,10 +696,10 @@ interface HeldVerdictRow extends RecordedVerdict {
 }
 
 /**
- * One page of held verdicts, with the number of verdicts the read discarded
- * because the row's claim moved on. A discarded verdict leaves the page but is
- * still work the pass completed.
- */
+One page of held verdicts, with the number of verdicts the read discarded
+because the row's claim moved on. A discarded verdict leaves the page but is
+still work the pass completed.
+*/
 interface HeldVerdictPage {
 	readonly held: readonly HeldVerdictRow[];
 	readonly discarded: number;
@@ -713,18 +713,18 @@ interface PreparedSettle {
 }
 
 /**
- * The committed reference edges returned by a read and the store path hashes
- * included in that read. The edge is unknown for every excluded hash.
- */
+The committed reference edges returned by a read and the store path hashes
+included in that read. The edge is unknown for every excluded hash.
+*/
 interface CommittedEdges {
 	readonly keys: ReadonlySet<string>;
 	readonly covered: ReadonlySet<StorePathHash>;
 }
 
 /**
- * A verdict that is ready to materialise and the upload row from the start of
- * the pass. The row provides the values needed to fence the later clear.
- */
+A verdict that is ready to materialise and the upload row from the start of
+the pass. The row provides the values needed to fence the later clear.
+*/
 interface ReadyRecordedVerdict {
 	readonly held: PendingUploadRow;
 	readonly settle: PreparedSettle;
@@ -777,12 +777,12 @@ function claimableFilter(now: Date) {
 }
 
 /**
- * Builds the update that leases one page of pending uploads to a verification
- * pass.
- *
- * The parameter test imports this builder and inspects the generated SQL
- * without executing it.
- */
+Builds the update that leases one page of pending uploads to a verification
+pass.
+
+The parameter test imports this builder and inspects the generated SQL
+without executing it.
+*/
 export function buildLeaseUpdate(
 	database: SchemaDatabase,
 	uploadIds: JsonValueList<UploadId>,
@@ -2295,18 +2295,18 @@ export class VerificationService {
 	}
 
 	/**
-	 * Reads the committed reference edges for `rows` and reports which store path
-	 * hashes were included in the completed queries.
-	 *
-	 * A deferred commit reserves its narinfo row before creating a reference
-	 * edge. Requiring the edge stops reconciliation serving a reserved,
-	 * unverified row. The read runs outside the gate; if a commit creates the
-	 * edge afterwards, this pass leaves the row for the next scan.
-	 *
-	 * The read stops before a query that would exceed the subrequest allowance. `covered`
-	 * contains only the hashes from completed queries. Callers must defer every
-	 * other row because its reference edge is unknown.
-	 */
+	Reads the committed reference edges for `rows` and reports which store path
+	hashes were included in the completed queries.
+
+	A deferred commit reserves its narinfo row before creating a reference
+	edge. Requiring the edge stops reconciliation serving a reserved,
+	unverified row. The read runs outside the gate; if a commit creates the
+	edge afterwards, this pass leaves the row for the next scan.
+
+	The read stops before a query that would exceed the subrequest allowance. `covered`
+	contains only the hashes from completed queries. Callers must defer every
+	other row because its reference edge is unknown.
+	*/
 	private async committedEdgeKeys(
 		rows: readonly NarInfoRow[]
 	): Promise<CommittedEdges> {
@@ -2889,9 +2889,9 @@ export class VerificationService {
 	}
 
 	/**
-	 * Stores each accepted verdict and captures abandoned rows before any await.
-	 * The synchronous database writes preserve the batch's decoded results.
-	 */
+	Stores each accepted verdict and captures abandoned rows before any await.
+	The synchronous database writes preserve the batch's decoded results.
+	*/
 	private holdVerdicts(
 		owner: string,
 		results: readonly VerificationResult[]
@@ -3071,18 +3071,18 @@ export class VerificationService {
 	}
 
 	/**
-	 * Reads the upload rows for the verdicts that this pass will apply. The page
-	 * starts after the cursor saved by the previous pass. The page must include
-	 * ready verdicts before the cursor when capacity remains. Otherwise those
-	 * verdicts wait for another drain although they fit in this pass.
-	 *
-	 * A pass reads far fewer rows than a batch can contain. The rotating cursor
-	 * prevents a repeatedly failing verdict from blocking every later verdict.
-	 *
-	 * The method clears a verdict if its owner no longer owns the row or if this
-	 * build cannot parse it. Clearing either value makes the row available for a
-	 * new claim. The caller applies the remaining verdicts.
-	 */
+	Reads the upload rows for the verdicts that this pass will apply. The page
+	starts after the cursor saved by the previous pass. The page must include
+	ready verdicts before the cursor when capacity remains. Otherwise those
+	verdicts wait for another drain although they fit in this pass.
+
+	A pass reads far fewer rows than a batch can contain. The rotating cursor
+	prevents a repeatedly failing verdict from blocking every later verdict.
+
+	The method clears a verdict if its owner no longer owns the row or if this
+	build cannot parse it. Clearing either value makes the row available for a
+	new claim. The caller applies the remaining verdicts.
+	*/
 	private heldVerdicts(
 		after: ReadinessCursor | undefined,
 		limit: number
@@ -3114,15 +3114,15 @@ export class VerificationService {
 	}
 
 	/**
-	 * Clears a recorded verdict only if the upload ID, claim owner and exact
-	 * verdict text still match the values read at the start of the pass.
-	 *
-	 * Verdict application can await before it clears the value. During that time,
-	 * a client re-drive can revoke the claim and another consumer can record a
-	 * replacement. The comparison prevents this pass from deleting the
-	 * replacement and leaving its row leased without a verdict. `heldVerdicts`
-	 * uses the same comparison when it clears an unreadable or stale verdict.
-	 */
+	Clears a recorded verdict only if the upload ID, claim owner and exact
+	verdict text still match the values read at the start of the pass.
+
+	Verdict application can await before it clears the value. During that time,
+	a client re-drive can revoke the claim and another consumer can record a
+	replacement. The comparison prevents this pass from deleting the
+	replacement and leaving its row leased without a verdict. `heldVerdicts`
+	uses the same comparison when it clears an unreadable or stale verdict.
+	*/
 	private clearRecordedVerdict(pending: PendingUploadRow): boolean {
 		const { claimOwner, recordedVerdictJson } = pending;
 
@@ -3149,8 +3149,8 @@ export class VerificationService {
 	}
 
 	/**
-	 * Releases the specified leases only while `owner` still owns them.
-	 */
+	Releases the specified leases only while `owner` still owns them.
+	*/
 	releaseClaimLeases(owner: string, uploadIds: readonly UploadId[]): void {
 		const distinctIds = [...new Set(uploadIds)];
 
@@ -3194,19 +3194,19 @@ export class VerificationService {
 	}
 
 	/**
-	 * Reconciles the committed paths from one push. {@link verifyBatch} performs
-	 * the corresponding periodic scan. The probes run outside the gate, then one
-	 * short critical section applies the generation-checked repairs.
-	 *
-	 * The Durable Object alarm calls this method after negotiating a closure.
-	 * This keeps the R2 HEAD requests used for reconciliation out of the
-	 * negotiation request. Reconciliation restores a missing narinfo object or
-	 * removes a path after its NAR disappears.
-	 *
-	 * Returns every target that still needs reconciliation. This includes targets
-	 * outside the current subrequest allowance and targets for which a probe or repair
-	 * failed. The caller keeps them in the queue for the next pass.
-	 */
+	Reconciles the committed paths from one push. {@link verifyBatch} performs
+	the corresponding periodic scan. The probes run outside the gate, then one
+	short critical section applies the generation-checked repairs.
+
+	The Durable Object alarm calls this method after negotiating a closure.
+	This keeps the R2 HEAD requests used for reconciliation out of the
+	negotiation request. Reconciliation restores a missing narinfo object or
+	removes a path after its NAR disappears.
+
+	Returns every target that still needs reconciliation. This includes targets
+	outside the current subrequest allowance and targets for which a probe or repair
+	failed. The caller keeps them in the queue for the next pass.
+	*/
 	async reconcileTargets(
 		logger: Logger,
 		targets: readonly ReconcileTarget[],
@@ -3279,15 +3279,15 @@ export class VerificationService {
 	}
 
 	/**
-	 * Scans one page of committed narinfos from the durable cursor, restoring a
-	 * missing narinfo object and removing a path after its NAR disappears.
-	 *
-	 * The preceding settle pass and this scan share one subrequest slice.
-	 * The available calls determine the page size. The scan advances its
-	 * cursor through every row it examines, and the next pass starts at the first
-	 * unexamined row. After a failed probe, the scan revisits the row when the
-	 * cursor wraps.
-	 */
+	Scans one page of committed narinfos from the durable cursor, restoring a
+	missing narinfo object and removing a path after its NAR disappears.
+
+	The preceding settle pass and this scan share one subrequest slice.
+	The available calls determine the page size. The scan advances its
+	cursor through every row it examines, and the next pass starts at the first
+	unexamined row. After a failed probe, the scan revisits the row when the
+	cursor wraps.
+	*/
 	async verifyBatch(
 		logger: Logger,
 		origin: RequestOrigin | undefined,
@@ -3709,14 +3709,14 @@ export class VerificationService {
 	}
 
 	/**
-	 * Resolves up to `limit` rows that need no NAR decode. A committed fresh row
-	 * can finish crash recovery from its durable reference, and a reuse row can
-	 * adopt its canonical object. Other fresh rows remain for the queue consumer.
-	 *
-	 * The remaining subrequest allowance determines the page size. Claiming removes a row
-	 * from the pending set, so unclaimed rows remain available to a later pass.
-	 * The durable claim cursor records where that pass should resume.
-	 */
+	Resolves up to `limit` rows that need no NAR decode. A committed fresh row
+	can finish crash recovery from its durable reference, and a reuse row can
+	adopt its canonical object. Other fresh rows remain for the queue consumer.
+
+	The remaining subrequest allowance determines the page size. Claiming removes a row
+	from the pending set, so unclaimed rows remain available to a later pass.
+	The durable claim cursor records where that pass should resume.
+	*/
 	async processPendingWithoutDecode(
 		logger: Logger,
 		limit: number,
@@ -3872,10 +3872,10 @@ export class VerificationService {
 	}
 
 	/**
-	 * Reserves the canonical incarnation that the queue consumer writes while it
-	 * verifies a declared upload. The reservation belongs to the claim owner, so
-	 * a pass that later takes over the claim reserves a newer incarnation.
-	 */
+	Reserves the canonical incarnation that the queue consumer writes while it
+	verifies a declared upload. The reservation belongs to the claim owner, so
+	a pass that later takes over the claim reserves a newer incarnation.
+	*/
 	async reserveCanonicalWrite(
 		owner: string,
 		uploadId: UploadId
@@ -3931,18 +3931,18 @@ export class VerificationService {
 	}
 
 	/**
-	 * Accepts one queue batch. It first stores every verdict in the Durable
-	 * Object's SQLite database. The synchronous local writes preserve the
-	 * consumer's decode results if the remaining subrequest allowance covers only part of
-	 * the batch.
-	 *
-	 * A stored verdict prevents another consumer from claiming the row and
-	 * decoding the same NAR again. A later pass applies the verdict.
-	 *
-	 * The method applies as many verdicts as the subrequest allowance permits and returns
-	 * the number of settled rows. The consumer uses this count to decide whether
-	 * to continue a truncated batch.
-	 */
+	Accepts one queue batch. It first stores every verdict in the Durable
+	Object's SQLite database. The synchronous local writes preserve the
+	consumer's decode results if the remaining subrequest allowance covers only part of
+	the batch.
+
+	A stored verdict prevents another consumer from claiming the row and
+	decoding the same NAR again. A later pass applies the verdict.
+
+	The method applies as many verdicts as the subrequest allowance permits and returns
+	the number of settled rows. The consumer uses this count to decide whether
+	to continue a truncated batch.
+	*/
 	async recordVerifications(
 		logger: Logger,
 		owner: string,
@@ -4071,11 +4071,11 @@ export class VerificationService {
 	}
 
 	/**
-	 * Whether any upload row has a recorded verdict awaiting application.
-	 *
-	 * The alarm calls this before running the verdict drain. The query uses the
-	 * Durable Object's local SQLite database.
-	 */
+	Whether any upload row has a recorded verdict awaiting application.
+
+	The alarm calls this before running the verdict drain. The query uses the
+	Durable Object's local SQLite database.
+	*/
 	hasRecordedVerdicts(): boolean {
 		return (
 			this.context.db
@@ -4088,9 +4088,9 @@ export class VerificationService {
 	}
 
 	/**
-	 * When the verdict drain is next due. It ignores every verdict that another
-	 * pass in this object is applying, for as long as that pass runs.
-	 */
+	When the verdict drain is next due. It ignores every verdict that another
+	pass in this object is applying, for as long as that pass runs.
+	*/
 	recordedVerdictDueAt(): number | undefined {
 		return new UploadRetrySchedule(this.context).recordedAt(
 			this.applyingRecordedVerdicts.values().toArray()
@@ -4098,14 +4098,14 @@ export class VerificationService {
 	}
 
 	/**
-	 * Applies recorded verdicts within the invocation's subrequest slice. It prepares
-	 * the verdicts concurrently and flushes their materialisations together.
-	 *
-	 * Keep a deferred verdict and its lease so a later page can apply it without
-	 * another decode. Release an ignored upload's lease only after clearing the
-	 * same recorded verdict; a concurrent replacement must remain untouched.
-	 * An error also leaves the verdict in place for a later application attempt.
-	 */
+	Applies recorded verdicts within the invocation's subrequest slice. It prepares
+	the verdicts concurrently and flushes their materialisations together.
+
+	Keep a deferred verdict and its lease so a later page can apply it without
+	another decode. Release an ignored upload's lease only after clearing the
+	same recorded verdict; a concurrent replacement must remain untouched.
+	An error also leaves the verdict in place for a later application attempt.
+	*/
 	async applyRecordedVerdicts(
 		logger: Logger,
 		signal?: AbortSignal,

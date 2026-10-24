@@ -2,7 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 import StrictEndToEndReporter from '../support/strict-e2e-reporter.ts';
 
-export default defineConfig({
+export default defineConfig(() => ({
 	test: {
 		globalSetup: ['tests/support/e2e-artifacts.global-setup.ts'],
 		setupFiles: ['tests/support/e2e-artifacts.setup.ts'],
@@ -18,4 +18,4 @@ export default defineConfig({
 		include: ['tests/e2e/**/*.test.ts', 'tests/support/**/*.test.ts'],
 		testTimeout: 120_000
 	}
-});
+}));

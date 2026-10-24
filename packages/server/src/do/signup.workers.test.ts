@@ -162,9 +162,9 @@ interface StubIssuer {
 		readonly claims?: Readonly<Record<string, unknown>>;
 		readonly issuedAt?: number;
 		/**
-		 * False for a token without the default nonce for the deployment URL. A
-		 * token whose audience is the deployment URL never has it.
-		 */
+		False for a token without the default nonce for the deployment URL. A
+		token whose audience is the deployment URL never has it.
+		*/
 		readonly isNonceBound?: boolean;
 	}): Promise<string>;
 }

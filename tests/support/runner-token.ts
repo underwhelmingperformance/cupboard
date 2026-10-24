@@ -19,15 +19,15 @@ export interface RunnerTokenEnvironment {
 }
 
 /**
- * The token endpoint GitHub Actions exposes to a job that was granted
- * `id-token: write`. The runner sets its address and a request token in
- * `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`; a client
- * requests a token for an audience and receives `{"value": "<id_token>"}`.
- *
- * This stub speaks that protocol over loopback and answers with a token signed
- * by {@link StubOidcIssuer}, so `--github-oidc` performs its real request and
- * the tenant verifies the token it presents against the issuer's JWKS.
- */
+The token endpoint GitHub Actions exposes to a job that was granted
+`id-token: write`. The runner sets its address and a request token in
+`ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`; a client
+requests a token for an audience and receives `{"value": "<id_token>"}`.
+
+This stub speaks that protocol over loopback and answers with a token signed
+by {@link StubOidcIssuer}, so `--github-oidc` performs its real request and
+the tenant verifies the token it presents against the issuer's JWKS.
+*/
 export class StubRunnerTokenEndpoint {
 	static async start(options: {
 		readonly issuer: StubOidcIssuer;

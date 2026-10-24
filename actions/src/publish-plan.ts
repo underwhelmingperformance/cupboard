@@ -64,18 +64,18 @@ export function canonicalRootSuffix(suffix: string): string {
 }
 
 /**
- * Retained-target checks and build jobs must construct byte-identical root
- * names. Canonicalise the prefix and suffix here for every consumer.
- */
+Retained-target checks and build jobs must construct byte-identical root
+names. Canonicalise the prefix and suffix here for every consumer.
+*/
 export function joinRoot(prefix: string, suffix: string): string {
 	return `${prefix.replace(/\/+$/u, '')}/${canonicalRootSuffix(suffix)}`;
 }
 
 /**
- * GitHub compares runner labels case-insensitively with .NET's ordinal rules.
- * JavaScript's full case conversion differs outside ASCII, so manifest parsing
- * permits only printable ASCII labels without spaces.
- */
+GitHub compares runner labels case-insensitively with .NET's ordinal rules.
+JavaScript's full case conversion differs outside ASCII, so manifest parsing
+permits only printable ASCII labels without spaces.
+*/
 export function isValidRunnerLabel(label: string): boolean {
 	return /^[!-~]+$/u.test(label);
 }
@@ -100,9 +100,9 @@ const publishOutputsSchema = z
 	.transform((outputs) => [...new Set(outputs)]);
 
 /**
- * Component entries inherit the aggregate target's execution context,
- * retention root, failure policy and cohort; see {@link expandComponents}.
- */
+Component entries inherit the aggregate target's execution context,
+retention root, failure policy and cohort; see {@link expandComponents}.
+*/
 export const publishComponentSchema = z.strictObject({
 	attr: z.string().min(1).refine(isNixPositionalArgument, {
 		message: 'attr must not start with a hyphen or contain control characters'
@@ -187,8 +187,8 @@ export const publishTargetsSchema = z
 export type PublishTarget = z.output<typeof publishTargetSchema>;
 
 /**
- * A stable key for joining a target with its evaluated paths and coverage.
- */
+A stable key for joining a target with its evaluated paths and coverage.
+*/
 export function targetIdentityKey(target: PublishTarget): string {
 	return JSON.stringify([
 		canonicalRootSuffix(target.rootSuffix),
@@ -198,14 +198,14 @@ export function targetIdentityKey(target: PublishTarget): string {
 }
 
 /**
- * Replaces each aggregate target with one synthetic target per component.
- * Components inherit the aggregate's execution context, failure policy, cohort
- * and root suffix, so they publish under one retention root. Targets without
- * components pass through unchanged. The aggregate itself is not evaluated or
- * built; the activating machine assembles it from the published components.
- * Input validation limits the component list to the number of targets a root
- * can accept in one update.
- */
+Replaces each aggregate target with one synthetic target per component.
+Components inherit the aggregate's execution context, failure policy, cohort
+and root suffix, so they publish under one retention root. Targets without
+components pass through unchanged. The aggregate itself is not evaluated or
+built; the activating machine assembles it from the published components.
+Input validation limits the component list to the number of targets a root
+can accept in one update.
+*/
 export function expandComponents(
 	targets: readonly PublishTarget[]
 ): readonly PublishTarget[] {
@@ -249,10 +249,10 @@ export interface TargetEvaluation {
 }
 
 /**
- * Targets in one cohort run in one job. A target without an explicit `cohort`
- * label forms its own cohort. Cohorts partition the complete manifest before
- * destination availability is checked, so retained targets remain members.
- */
+Targets in one cohort run in one job. A target without an explicit `cohort`
+label forms its own cohort. Cohorts partition the complete manifest before
+destination availability is checked, so retained targets remain members.
+*/
 export interface Cohort {
 	readonly key: string;
 	readonly system: string;
@@ -407,7 +407,6 @@ async function evaluateResolvedTargets(
 		const label = attributes.join(', ');
 		const value = await evaluateDerivationsAsync(
 			rootDrvPaths,
-			true,
 			evaluator,
 			label
 		);
@@ -439,7 +438,6 @@ async function evaluateResolvedTarget(
 	try {
 		const value = await evaluateDerivationsAsync(
 			[rootDrvPath],
-			true,
 			evaluator,
 			target.attr
 		);
@@ -531,17 +529,10 @@ function evaluationForRoot(
 
 async function evaluateDerivationsAsync(
 	installables: readonly string[],
-	isRecursive: boolean,
 	evaluator: NixEvaluator,
 	label = installables.join(', ')
 ): Promise<unknown> {
-	const arguments_ = [
-		'derivation',
-		'show',
-		...(isRecursive ? ['-r'] : []),
-		'--',
-		...installables
-	];
+	const arguments_ = ['derivation', 'show', '-r', '--', ...installables];
 
 	try {
 		const result = await evaluator(arguments_);
@@ -817,9 +808,9 @@ async function queryMissingStorePathHashes(
 }
 
 /**
- * Fails the plan when two cohorts would emit the same key. The workflow selects
- * a job by its key alone, so two cohorts sharing one could not be told apart.
- */
+Fails the plan when two cohorts would emit the same key. The workflow selects
+a job by its key alone, so two cohorts sharing one could not be told apart.
+*/
 export function assertDistinctGroupKeys(
 	groups: readonly { readonly key: string }[]
 ): void {
@@ -853,10 +844,10 @@ export function isBestEffortCohort(members: readonly PublishTarget[]): boolean {
 }
 
 /**
- * Destination availability does not change cohort membership. Partition the
- * complete manifest by explicit `cohort` label, with an individual cohort for
- * each target that has no label.
- */
+Destination availability does not change cohort membership. Partition the
+complete manifest by explicit `cohort` label, with an individual cohort for
+each target that has no label.
+*/
 export function cohortsFor(targets: readonly PublishTarget[]): Cohort[] {
 	const byLabel = Map.groupBy(
 		targets,
@@ -924,10 +915,10 @@ function cohortKey(label: string, target: PublishTarget): string {
 }
 
 /**
- * Record which target graphs contain each derivation. This map is attribution
- * evidence only; it does not instruct a build to realise every derivation in
- * those graphs.
- */
+Record which target graphs contain each derivation. This map is attribution
+evidence only; it does not instruct a build to realise every derivation in
+those graphs.
+*/
 export function derivationToTargetsFor(
 	evaluations: readonly TargetEvaluation[]
 ): DerivationToTargetsEntry[] {
@@ -958,10 +949,10 @@ export type TargetCoverageStatus =
 	'covered' | 'not-covered' | 'unknown-output' | 'failed';
 
 /**
- * `covered` requires the root's last reconciled list to contain every current
- * output. Keep unknown output paths and failed reads distinct so callers do not
- * treat them as cache misses.
- */
+`covered` requires the root's last reconciled list to contain every current
+output. Keep unknown output paths and failed reads distinct so callers do not
+treat them as cache misses.
+*/
 export interface TargetCoverage {
 	readonly attr: string;
 	readonly status: TargetCoverageStatus;
@@ -969,10 +960,10 @@ export interface TargetCoverage {
 }
 
 /**
- * A retained root covers a known-output target only when its last reconciled
- * path list contains every current output. Callers handle unknown outputs and
- * failed reads before this check.
- */
+A retained root covers a known-output target only when its last reconciled
+path list contains every current output. Callers handle unknown outputs and
+failed reads before this check.
+*/
 export function evaluateTargetCoverage(
 	target: PublishTarget,
 	targetPaths: readonly StorePathString[],
@@ -999,11 +990,11 @@ export interface CohortPreFilterDecision {
 }
 
 /**
- * The advisory pre-filter may prune a cohort only when every member is covered.
- * An uncovered, unknown or failed member keeps the job in the plan. Failures
- * record their reasons but do not fail planning because this check exists only
- * to avoid unnecessary runner work.
- */
+The advisory pre-filter may prune a cohort only when every member is covered.
+An uncovered, unknown or failed member keeps the job in the plan. Failures
+record their reasons but do not fail planning because this check exists only
+to avoid unnecessary runner work.
+*/
 export function cohortPreFilterDecision(
 	cohort: Cohort,
 	coverageByTarget: ReadonlyMap<string, TargetCoverage>

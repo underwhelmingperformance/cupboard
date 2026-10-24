@@ -244,19 +244,19 @@ interface RecordingApiOptions {
 }
 
 /**
- * A Cloudflare API that records every call and tracks each script's deployed
- * build. A script has no configuration until it is uploaded, and afterwards
- * reports the build of that upload. `alreadyDeployed` sets the build each script
- * is running when the deploy starts.
- *
- * The deploy checks the deployed build twice: before the uploads, to decide
- * which scripts to upload, and after them, to confirm the new build is serving.
- * Tracking the state lets both checks see what they would see in production.
- *
- * D1 is an in-memory SQLite database, so the walk reads back the rows that its
- * own writes and migrations produced. It starts empty; a test seeds it
- * through `database` for a deployment in an earlier state.
- */
+A Cloudflare API that records every call and tracks each script's deployed
+build. A script has no configuration until it is uploaded, and afterwards
+reports the build of that upload. `alreadyDeployed` sets the build each script
+is running when the deploy starts.
+
+The deploy checks the deployed build twice: before the uploads, to decide
+which scripts to upload, and after them, to confirm the new build is serving.
+Tracking the state lets both checks see what they would see in production.
+
+D1 is an in-memory SQLite database, so the walk reads back the rows that its
+own writes and migrations produced. It starts empty; a test seeds it
+through `database` for a deployment in an earlier state.
+*/
 function recordingApi(
 	alreadyDeployed: Readonly<Record<string, DeployedBuild>> = {},
 	options: RecordingApiOptions = {}
@@ -364,7 +364,7 @@ function recordingApi(
 					rows.flatMap((row) => {
 						const [value] = Object.values(row);
 
-						return typeof value === 'string' ? [value] : [];
+						return typeof value === 'string' ? value : [];
 					})
 				);
 			},
@@ -439,9 +439,9 @@ function recordingApi(
 }
 
 /**
- * Applies `migrations` as an earlier release's deploy did, then clears the
- * recorded calls, so a test starts from that deployment's state.
- */
+Applies `migrations` as an earlier release's deploy did, then clears the
+recorded calls, so a test starts from that deployment's state.
+*/
 async function seedApplied(
 	recording: ReturnType<typeof recordingApi>,
 	migrations: readonly D1Migration[]
@@ -483,7 +483,7 @@ function appliedMigrations(database: DatabaseSync): string[] {
 	return database
 		.prepare('SELECT name FROM d1_migrations ORDER BY name')
 		.all()
-		.flatMap((row) => (typeof row.name === 'string' ? [row.name] : []));
+		.flatMap((row) => (typeof row.name === 'string' ? row.name : []));
 }
 
 function recordedTransitions(database: DatabaseSync): Record<string, string> {
@@ -1266,8 +1266,8 @@ describe('runDeploy', () => {
 					Promise.resolve(
 						body({
 							fact: vi.fn(),
-							warn: (label, value) => {
-								warnings.push(`${label}: ${value ?? ''}`);
+							warn: (label, value = '') => {
+								warnings.push(`${label}: ${value}`);
 							},
 							result: vi.fn()
 						})

@@ -58,7 +58,7 @@ function stubFetch(url: string, response: Response): typeof fetch {
 	};
 }
 
-const repoUrl = 'https://api.github.com/repos/iainlane/cupboard';
+const repositoryUrl = 'https://api.github.com/repos/iainlane/cupboard';
 
 describe('lookupRepository', () => {
 	afterEach(() => {
@@ -163,7 +163,7 @@ describe('lookupRepository', () => {
 
 	it('returns the repository ids and current full name from GitHub', async () => {
 		const fetch = stubFetch(
-			repoUrl,
+			repositoryUrl,
 			Response.json({
 				id: 123,
 				owner: { id: 456 },
@@ -187,7 +187,7 @@ describe('lookupRepository', () => {
 
 		const authorizations: (string | undefined)[] = [];
 		const fetch: typeof globalThis.fetch = (input, init) => {
-			if (requestUrl(input) !== repoUrl) {
+			if (requestUrl(input) !== repositoryUrl) {
 				return Promise.reject(
 					new Error(`unexpected request: ${requestUrl(input)}`)
 				);
@@ -217,7 +217,7 @@ describe('lookupRepository', () => {
 
 		const authorizations: (string | undefined)[] = [];
 		const fetch: typeof globalThis.fetch = (input, init) => {
-			if (requestUrl(input) !== repoUrl) {
+			if (requestUrl(input) !== repositoryUrl) {
 				return Promise.reject(
 					new Error(`unexpected request: ${requestUrl(input)}`)
 				);
@@ -284,7 +284,10 @@ describe('lookupRepository', () => {
 	);
 
 	it('throws RepositoryNotFoundError for a 404 response', async () => {
-		const fetch = stubFetch(repoUrl, new Response(undefined, { status: 404 }));
+		const fetch = stubFetch(
+			repositoryUrl,
+			new Response(undefined, { status: 404 })
+		);
 
 		await expect(
 			lookupRepository('iainlane/cupboard', { fetch })
@@ -293,7 +296,7 @@ describe('lookupRepository', () => {
 
 	it('throws GithubRateLimitError when the rate limit is exhausted', async () => {
 		const fetch = stubFetch(
-			repoUrl,
+			repositoryUrl,
 			new Response(undefined, {
 				status: 403,
 				headers: { 'x-ratelimit-remaining': '0' }
@@ -307,7 +310,7 @@ describe('lookupRepository', () => {
 
 	it('throws GithubRateLimitError for a secondary rate limit', async () => {
 		const fetch = stubFetch(
-			repoUrl,
+			repositoryUrl,
 			new Response(undefined, {
 				status: 403,
 				headers: {
@@ -324,7 +327,7 @@ describe('lookupRepository', () => {
 
 	it('throws GithubPermissionError for a forbidden response outside a rate limit', async () => {
 		const fetch = stubFetch(
-			repoUrl,
+			repositoryUrl,
 			new Response(undefined, {
 				status: 403,
 				headers: { 'x-ratelimit-remaining': '1' }

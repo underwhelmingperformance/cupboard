@@ -256,9 +256,9 @@ export interface CohortMember {
 	*/
 	readonly installable: string;
 	/**
-	 * The derivation-store-path form the daemon's availability queries
-	 * understand, absent when the member's evaluation is unknown.
-	 */
+	The derivation-store-path form the daemon's availability queries
+	understand, absent when the member's evaluation is unknown.
+	*/
 	readonly queryInstallable?: string;
 	readonly expectedPath?: string;
 	readonly root: string;
@@ -1155,7 +1155,7 @@ export async function buildCohortAction(
 
 					return retainedOwners.length === 0
 						? []
-						: [{ path, installables, requiredBy: retainedOwners }];
+						: { path, installables, requiredBy: retainedOwners };
 				}
 			);
 			const dependencyCopies = (partition?.dependencyCopies ?? [])
@@ -1915,11 +1915,9 @@ async function settleCohortBuild(
 						)
 				);
 				return isRetained || isCompleted
-					? [
-							derivationPathOf(
-								nixDerivedPathSchema.parse(member.queryInstallable)
-							)
-						]
+					? derivationPathOf(
+							nixDerivedPathSchema.parse(member.queryInstallable)
+						)
 					: [];
 			})
 		);
@@ -2288,11 +2286,11 @@ function cohortRootSummaries(
 }
 
 /**
- * The cohorts file one supervised `cupboard build-push` run consumes. A strict
- * build keeps every target in one cohort so they share work; a best-effort
- * build puts one target in each cohort so every failure can be attributed to
- * its target.
- */
+The cohorts file one supervised `cupboard build-push` run consumes. A strict
+build keeps every target in one cohort so they share work; a best-effort
+build puts one target in each cohort so every failure can be attributed to
+its target.
+*/
 export function buildPushCohortsFile(
 	installables: readonly string[],
 	maxJobs: string,
@@ -2322,11 +2320,11 @@ export function buildPushCohortsFile(
 }
 
 /**
- * The `cupboard build-push` argv for one streamed cohort build. The run
- * publishes without a target root: a root's declared list must also name its
- * attach-only and reference targets, so the roots are set by the per-group
- * pushes once every target path is known.
- */
+The `cupboard build-push` argv for one streamed cohort build. The run
+publishes without a target root: a root's declared list must also name its
+attach-only and reference targets, so the roots are set by the per-group
+pushes once every target path is known.
+*/
 export function cohortBuildPushArguments(
 	inputs: Pick<
 		BuildCohortInputs,
@@ -2454,12 +2452,12 @@ async function runBuildPushCohort(
 }
 
 /**
- * Arguments for the unretained push that publishes remote-store results and
- * writes their receipt. Later pushes apply each root to its complete target
- * list. Keyed daemon results identify which outputs were built by this run;
- * substituted and already-valid outputs are published without provenance
- * claims.
- */
+Arguments for the unretained push that publishes remote-store results and
+writes their receipt. Later pushes apply each root to its complete target
+list. Keyed daemon results identify which outputs were built by this run;
+substituted and already-valid outputs are published without provenance
+claims.
+*/
 export function cohortReceiptPushArguments(
 	inputs: Pick<
 		BuildCohortInputs,
@@ -2520,11 +2518,11 @@ interface CohortRootGrouping {
 }
 
 /**
- * Groups target paths by retention root. For a floating or multi-output target,
- * the remote keyed results say which member produced each output, so they decide
- * the root; otherwise the predictable output paths decide it. A local path with
- * no known owner uses the first root.
- */
+Groups target paths by retention root. For a floating or multi-output target,
+the remote keyed results say which member produced each output, so they decide
+the root; otherwise the predictable output paths decide it. A local path with
+no known owner uses the first root.
+*/
 export function rootGroups(
 	members: readonly CohortMember[],
 	roots: readonly string[],
@@ -2650,12 +2648,12 @@ interface CohortPushExtras {
 }
 
 /**
- * The `cupboard push` arguments for one root group, including built and
- * attach-only targets so the atomic root replacement contains the complete
- * declared list. A streamed cohort's built paths negotiate as
- * already-present skips, so this invocation is the root setting, not a second
- * upload.
- */
+The `cupboard push` arguments for one root group, including built and
+attach-only targets so the atomic root replacement contains the complete
+declared list. A streamed cohort's built paths negotiate as
+already-present skips, so this invocation is the root setting, not a second
+upload.
+*/
 export function cohortPushArguments(
 	inputs: Pick<
 		BuildCohortInputs,
@@ -2798,9 +2796,9 @@ async function writeReferenceManifest(
 }
 
 /**
- * A reference path has no local bytes, so an upload-stage failure means that
- * the destination requested them.
- */
+A reference path has no local bytes, so an upload-stage failure means that
+the destination requested them.
+*/
 function reportReferenceUploads(
 	reporter: Reporter,
 	error: unknown,
@@ -2820,7 +2818,7 @@ function reportReferenceUploads(
 		const source = sources.get(failure.storePath);
 
 		return source !== undefined && failure.stage === 'upload'
-			? [{ storePath: failure.storePath, source }]
+			? { storePath: failure.storePath, source }
 			: [];
 	});
 
@@ -3019,7 +3017,7 @@ async function publishCohort(
 			const reference = prepared.get(storePath);
 			return reference === undefined
 				? []
-				: [{ storePath, kind: 'target' as const, ...reference }];
+				: { storePath, kind: 'target' as const, ...reference };
 		});
 		if (cachedTargets.length > 0) {
 			const cached = new Set(cachedTargets.map((entry) => entry.storePath));
@@ -3203,13 +3201,13 @@ function linesOf(paths: readonly string[]): string {
 }
 
 /**
- * The partition as the re-probe leaves it: every withdrawn target moves out of
- * the build set and into the list the re-probe classified it under, so the
- * target paths, the reference paths and the pushes that set the target roots
- * all read one partition rather than two. The `leftUpstream` list keeps the
- * plan's own entries, because the re-probe classifies a withdrawn target only
- * as `attachOnly` or `publishByReference`.
- */
+The partition as the re-probe leaves it: every withdrawn target moves out of
+the build set and into the list the re-probe classified it under, so the
+target paths, the reference paths and the pushes that set the target roots
+all read one partition rather than two. The `leftUpstream` list keeps the
+plan's own entries, because the re-probe classifies a withdrawn target only
+as `attachOnly` or `publishByReference`.
+*/
 export function withdrawFromPartition(
 	partition: PartitionData,
 	withdrawn: readonly WithdrawnTargetData[],
@@ -3344,10 +3342,10 @@ function reprobeTargets(
 }
 
 /**
- * The `cupboard plan reprobe` arguments for one cohort. The command reads cache
- * endpoints without exchanging a token or opening a Nix store. It uses the
- * run's read credentials for a cache.
- */
+The `cupboard plan reprobe` arguments for one cohort. The command reads cache
+endpoints without exchanging a token or opening a Nix store. It uses the
+run's read credentials for a cache.
+*/
 export function planReprobeArguments(
 	inputs: Pick<
 		BuildCohortInputs,
@@ -3499,14 +3497,14 @@ async function planCohort(
 		inputs.publish,
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...referenceProbeArguments(inputs),
-		...(cohortReferenceSource(inputs) !== '' && inputs.fallbackReadUser !== ''
-			? [
+		...(cohortReferenceSource(inputs) === '' || inputs.fallbackReadUser === ''
+			? []
+			: [
 					'--view-read-user',
 					inputs.fallbackReadUser,
 					'--view-read-password',
 					inputs.fallbackReadPassword
-				]
-			: []),
+				]),
 		...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
 		...(inputs.permanent ? ['--permanent'] : []),
 		...(inputs.readUser === ''
@@ -3595,17 +3593,17 @@ function planCohortResult(
 }
 
 /**
- * Runs `nix build --keep-going` over the given installables. A local build's
- * out-links are kept under a directory this invocation owns, which protects its
- * closure until publication finishes. A remote non-publishing build also
- * receives the argument, but its out-link exists only in the local filesystem
- * and is not a GC root on the remote store. Because of `--keep-going`, a cohort
- * with one failing derivation still reports whatever `--print-out-paths` prints
- * for the survivors; a failure that reports no target results at all is treated
- * as a command failure. A configured remote store owns the build: `--store`
- * sends the results there while `--eval-store auto` keeps evaluation on the
- * runner, so the built closure never enters the runner's local store.
- */
+Runs `nix build --keep-going` over the given installables. A local build's
+out-links are kept under a directory this invocation owns, which protects its
+closure until publication finishes. A remote non-publishing build also
+receives the argument, but its out-link exists only in the local filesystem
+and is not a GC root on the remote store. Because of `--keep-going`, a cohort
+with one failing derivation still reports whatever `--print-out-paths` prints
+for the survivors; a failure that reports no target results at all is treated
+as a command failure. A configured remote store owns the build: `--store`
+sends the results there while `--eval-store auto` keeps evaluation on the
+runner, so the built closure never enters the runner's local store.
+*/
 export function nixBuildArguments(
 	installables: readonly string[],
 	maxJobs: string,
@@ -3678,7 +3676,7 @@ function retainedDependencyBuilds(
 			retainedTargets.has(canonicalNixDerivedPath(target))
 		);
 
-		return requiredBy.length === 0 ? [] : [{ ...dependency, requiredBy }];
+		return requiredBy.length === 0 ? [] : { ...dependency, requiredBy };
 	});
 }
 
@@ -3816,13 +3814,11 @@ async function materialisePlannedDerivations(
 				return [];
 			}
 
-			return [
-				{
-					installable,
-					planned: binding.derivation,
-					evaluated
-				}
-			];
+			return {
+				installable,
+				planned: binding.derivation,
+				evaluated
+			};
 		}
 	);
 
@@ -4092,9 +4088,9 @@ export async function runNixDerivationShow(
 }
 
 /**
- * The evaluation store and process launcher for
- * {@link materialiseDerivationGraph}.
- */
+The evaluation store and process launcher for
+{@link materialiseDerivationGraph}.
+*/
 export interface MaterialiseDerivationGraphDependencies {
 	readonly evalStore?: string;
 	readonly start?: (
@@ -4115,10 +4111,10 @@ function startDiscardedNixProcess(
 }
 
 /**
- * Evaluates a cohort's complete derivation graph and materialises every
- * derivation in the evaluation store. The JSON can exceed a pipe's buffer for
- * a large closure, so discard it at the child process rather than capturing it.
- */
+Evaluates a cohort's complete derivation graph and materialises every
+derivation in the evaluation store. The JSON can exceed a pipe's buffer for
+a large closure, so discard it at the child process rather than capturing it.
+*/
 export async function materialiseDerivationGraph(
 	installables: readonly string[],
 	signal?: AbortSignal,
@@ -4372,12 +4368,12 @@ function openLocalDerivationRootStore(
 }
 
 /**
- * Keeps planned derivations and their materialised closure live during use.
- * A multi-user installation roots them through its system daemon. A
- * single-user installation has no daemon socket, so it falls back to a scoped
- * stdio daemon serving the explicit local store where evaluation materialised
- * them.
- */
+Keeps planned derivations and their materialised closure live during use.
+A multi-user installation roots them through its system daemon. A
+single-user installation has no daemon socket, so it falls back to a scoped
+stdio daemon serving the explicit local store where evaluation materialised
+them.
+*/
 export async function runWithLocalDerivationRoots<T>(
 	derivations: readonly StorePathString[],
 	use: () => Promise<T>,
@@ -4399,8 +4395,8 @@ export async function runWithLocalDerivationRoots<T>(
 }
 
 /**
- * Copies the required local store paths to the remote build store.
- */
+Copies the required local store paths to the remote build store.
+*/
 export async function runNixCopy(
 	paths: readonly StorePathString[],
 	store: string,
@@ -4429,12 +4425,12 @@ type RemoteBuildPublisher = (
 ) => Promise<void>;
 
 /**
- * Copies selected local paths and realises dependencies and cohort targets
- * through one connection to the remote store. The connection protects the
- * copied paths and every realised output until publication finishes. Keyed
- * results distinguish current builds from substitutions and paths that became
- * valid before Nix started them.
- */
+Copies selected local paths and realises dependencies and cohort targets
+through one connection to the remote store. The connection protects the
+copied paths and every realised output until publication finishes. Keyed
+results distinguish current builds from substitutions and paths that became
+valid before Nix started them.
+*/
 export async function runNixBuildWithResults(
 	installables: readonly NixDerivedPathString[],
 	maxJobs: string,
@@ -4480,9 +4476,9 @@ export async function runNixBuildWithResults(
 }
 
 /**
- * Options for work that shares the remote daemon session. The connection
- * protects copied paths and realised outputs until publication finishes.
- */
+Options for work that shares the remote daemon session. The connection
+protects copied paths and realised outputs until publication finishes.
+*/
 export interface RemoteBuildSessionOptions {
 	/**
 	Local store paths whose copied closures the session must protect.
@@ -4842,7 +4838,7 @@ async function realiseRemoteDependencies(
 				);
 
 				return failure.kind === 'protocol' && !selectedTargets.has(target)
-					? [{ ...failure, kind: 'dependency-protocol' as const }]
+					? { ...failure, kind: 'dependency-protocol' as const }
 					: [];
 			})
 		);
@@ -5134,7 +5130,7 @@ function incompleteRootsFor(
 			return failedTargets.has(
 				nixDerivedPathSchema.parse(member.queryInstallable)
 			)
-				? [member.root]
+				? member.root
 				: [];
 		})
 	);

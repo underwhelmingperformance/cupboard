@@ -31,10 +31,10 @@ import {
 } from './reuse-view-selectors.ts';
 
 /**
- * A selector row bound through the insert's JSON list. List values must be
- * text or numbers, so unset fields use empty strings. The statement converts
- * them back to NULL with `nullif`. Valid cache names and prefixes are non-empty.
- */
+A selector row bound through the insert's JSON list. List values must be
+text or numbers, so unset fields use empty strings. The statement converts
+them back to NULL with `nullif`. Valid cache names and prefixes are non-empty.
+*/
 export interface StoredReuseViewSelector {
 	readonly kind: ReuseViewSelector['kind'];
 	readonly cacheName: string;
@@ -58,12 +58,12 @@ export function storedReuseViewSelector(
 }
 
 /**
- * Builds the insert that records one list of a view's selectors. The parameter
- * test imports this builder.
- *
- * `reuse_view_selector_native` numbers its rows itself, so the source supplies
- * a null id for SQLite to replace.
- */
+Builds the insert that records one list of a view's selectors. The parameter
+test imports this builder.
+
+`reuse_view_selector_native` numbers its rows itself, so the source supplies
+a null id for SQLite to replace.
+*/
 export function reuseViewSelectorInsert(
 	handle: SchemaWriter,
 	view: ReuseViewName,

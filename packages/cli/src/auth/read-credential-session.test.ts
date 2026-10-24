@@ -50,10 +50,10 @@ function requestHref(input: string | URL | Request): string {
 }
 
 /**
- * A GitHub Actions token endpoint and a tenant token endpoint. The tenant
- * endpoint returns the bodies of `responses` in order: a body with an
- * `access_token` succeeds, and any other body is a 400 refusal.
- */
+A GitHub Actions token endpoint and a tenant token endpoint. The tenant
+endpoint returns the bodies of `responses` in order: a body with an
+`access_token` succeeds, and any other body is a 400 refusal.
+*/
 function readAccessServer(responses: readonly Record<string, unknown>[]): {
 	readonly fetcher: typeof fetch;
 	readonly exchanges: () => number;

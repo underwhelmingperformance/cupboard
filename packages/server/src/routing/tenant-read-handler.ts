@@ -66,13 +66,13 @@ function innerRequest(context: Context<TenantReadHonoEnv>): Request {
 }
 
 /**
- * The reads this Worker serves through Workers Cache, relative to the cache
- * each one addresses. The control Worker forwards a read here only after it has
- * admitted the tenant and resolved the selected cache as public.
- *
- * Hono answers HEAD by re-dispatching the request to the GET handler with the
- * body stripped, so a separate HEAD registration would never match.
- */
+The reads this Worker serves through Workers Cache, relative to the cache
+each one addresses. The control Worker forwards a read here only after it has
+admitted the tenant and resolved the selected cache as public.
+
+Hono answers HEAD by re-dispatching the request to the GET handler with the
+body stripped, so a separate HEAD registration would never match.
+*/
 function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 	const app = new Hono<TenantReadHonoEnv>();
 

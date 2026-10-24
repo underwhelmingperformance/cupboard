@@ -47,9 +47,9 @@ function parseDurationSeconds(input: string): number {
 }
 
 /**
- * Parses a retention-root TTL, rejecting anything outside the root TTL bounds so
- * the CLI fails with the same limits the server enforces.
- */
+Parses a retention-root TTL, rejecting anything outside the root TTL bounds so
+the CLI fails with the same limits the server enforces.
+*/
 export function parseTtl(input: string): TtlSeconds {
 	const seconds = parseDurationSeconds(input);
 
@@ -61,10 +61,10 @@ export function parseTtl(input: string): TtlSeconds {
 }
 
 /**
- * Parses a retention-grace duration, sharing the root TTL's upper bound but
- * allowing zero: a cache may configure a zero grace, unlike a root TTL,
- * which cannot be zero.
- */
+Parses a retention-grace duration, sharing the root TTL's upper bound but
+allowing zero: a cache may configure a zero grace, unlike a root TTL,
+which cannot be zero.
+*/
 export function parseGrace(input: string): GraceSeconds {
 	const seconds = parseDurationSeconds(input);
 
@@ -76,11 +76,11 @@ export function parseGrace(input: string): GraceSeconds {
 }
 
 /**
- * Parses the `--wait-timeout` duration: how long a push waits for deferred blobs
- * to become servable. It shares the duration syntax but has no retention
- * bounds, and rejects a zero wait, which would otherwise time the commit out on
- * the next tick; use `--no-wait` to skip waiting entirely.
- */
+Parses the `--wait-timeout` duration: how long a push waits for deferred blobs
+to become servable. It shares the duration syntax but has no retention
+bounds, and rejects a zero wait, which would otherwise time the commit out on
+the next tick; use `--no-wait` to skip waiting entirely.
+*/
 export function parseWaitTimeout(input: string): WaitTimeoutSeconds {
 	const seconds = parseDurationSeconds(input);
 

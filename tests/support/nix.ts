@@ -29,14 +29,14 @@ export interface RealiseOptions {
 }
 
 /**
- * A Nix store rooted at a known filesystem location, paired with an isolated
- * configuration so tests never touch the user's real Nix settings.
- *
- * The host store (`/nix/store`) is the only one that can build derivations on
- * every platform: macOS cannot build into a diverted (`local?root=`) store.
- * Diverted stores still support `add` and substitution, which is all a clean
- * target store needs.
- */
+A Nix store rooted at a known filesystem location, paired with an isolated
+configuration so tests never touch the user's real Nix settings.
+
+The host store (`/nix/store`) is the only one that can build derivations on
+every platform: macOS cannot build into a diverted (`local?root=`) store.
+Diverted stores still support `add` and substitution, which is all a clean
+target store needs.
+*/
 export class NixStore {
 	static async host(home: string): Promise<NixStore> {
 		return new NixStore('/', [], await isolatedEnvironment(home));
@@ -118,10 +118,10 @@ export class NixStore {
 	}
 
 	/**
-	 * Collects everything no root protects. On the host store this would
-	 * discard real data, so it is only meaningful for a chroot store the test
-	 * owns.
-	 */
+	Collects everything no root protects. On the host store this would
+	discard real data, so it is only meaningful for a chroot store the test
+	owns.
+	*/
 	async collectGarbage(): Promise<void> {
 		await this.run('nix-store', ['--gc']);
 	}
@@ -157,12 +157,12 @@ export interface DivertedNixDaemonOptions {
 }
 
 /**
- * A dedicated `nix-daemon` serving a diverted (`local?root=`) store over its
- * own socket. Temporary roots exist only behind a daemon connection, so a
- * test that exercises them against a store it owns starts one of these and
- * points a daemon client at {@link socketPath}. The daemon runs as the test
- * user with the same isolated configuration the stores use.
- */
+A dedicated `nix-daemon` serving a diverted (`local?root=`) store over its
+own socket. Temporary roots exist only behind a daemon connection, so a
+test that exercises them against a store it owns starts one of these and
+points a daemon client at {@link socketPath}. The daemon runs as the test
+user with the same isolated configuration the stores use.
+*/
 export class DivertedNixDaemon {
 	static async start(
 		options: DivertedNixDaemonOptions
@@ -277,10 +277,10 @@ export class NixDaemonStartError extends Error {
 }
 
 /**
- * Generates an Ed25519 binary cache key pair and returns the public key in
- * Nix's `name:base64` form. Useful for proving that an untrusted signer is
- * rejected.
- */
+Generates an Ed25519 binary cache key pair and returns the public key in
+Nix's `name:base64` form. Useful for proving that an untrusted signer is
+rejected.
+*/
 export async function generatePublicKey(name: string): Promise<string> {
 	return withTemporaryDirectory('cupboard-nix-key-', async (directory) => {
 		const publicKeyPath = path.join(directory, 'public.key');
@@ -298,11 +298,11 @@ export async function generatePublicKey(name: string): Promise<string> {
 }
 
 /**
- * An environment in which Nix reads no configuration but what the harness puts
- * under `home`: the command features its own invocations require, and no user
- * files at all. Every Nix invocation a test makes runs in one of these, so the
- * machine's own settings never decide what the test observes.
- */
+An environment in which Nix reads no configuration but what the harness puts
+under `home`: the command features its own invocations require, and no user
+files at all. Every Nix invocation a test makes runs in one of these, so the
+machine's own settings never decide what the test observes.
+*/
 export async function isolatedEnvironment(
 	home: string
 ): Promise<NodeJS.ProcessEnv> {

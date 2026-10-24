@@ -54,13 +54,13 @@ import {
 import { type VerificationService } from './verification-service.ts';
 
 /**
- * Takes the retry deadline of a parked verdict drain, if there is one.
- *
- * The tests below make every verdict in a page fail, so a drain pass that
- * runs during one of them parks. Whether one runs before the test ends
- * depends on when the alarm fires. Taking the deadline keeps the shared
- * teardown from reporting it; any other parked pass fails the test.
- */
+Takes the retry deadline of a parked verdict drain, if there is one.
+
+The tests below make every verdict in a page fail, so a drain pass that
+runs during one of them parks. Whether one runs before the test ends
+depends on when the alarm fires. Taking the deadline keeps the shared
+teardown from reporting it; any other parked pass fails the test.
+*/
 async function takeParkedVerdictDrain(): Promise<void> {
 	const parked = await takeStalledMaintenancePasses();
 
@@ -147,10 +147,10 @@ async function deferUpload(
 }
 
 /**
- * Gives the verdict drain `attempts` turns. Each alarm applies as many held
- * verdicts as one invocation's subrequest allowance covers, so a batch needs one turn
- * per verdict the recording invocation could not afford.
- */
+Gives the verdict drain `attempts` turns. Each alarm applies as many held
+verdicts as one invocation's subrequest allowance covers, so a batch needs one turn
+per verdict the recording invocation could not afford.
+*/
 async function drainRecordedVerdicts(attempts: number): Promise<void> {
 	for (let attempt = 0; attempt < attempts; attempt += 1) {
 		await runInDurableObject(currentServer(), async (instance, state) => {
@@ -630,7 +630,7 @@ describe('batched verify fault isolation', () => {
 						narHash: NixSha256HashString
 					) => Promise<boolean>;
 				};
-				const probe = vi
+				const hasProbed = vi
 					.spyOn(probeTarget, 'isCurrentNarPresent')
 					.mockRejectedValue(new Error('persistent canonical probe failure'));
 
@@ -662,7 +662,7 @@ describe('batched verify fault isolation', () => {
 						await asOneInvocation(() =>
 							verification.processPendingWithoutDecode(rootLogger(), 1)
 						);
-						expect(probe).toHaveBeenCalledTimes(attempt);
+						expect(hasProbed).toHaveBeenCalledTimes(attempt);
 						instance.context.db
 							.update(schema.pendingUploads)
 							.set({ settleRetryAfter: isoTimestamp(new Date(0)) })
@@ -670,7 +670,7 @@ describe('batched verify fault isolation', () => {
 							.run();
 					}
 				} finally {
-					probe.mockRestore();
+					hasProbed.mockRestore();
 				}
 				await asOneInvocation(() =>
 					verification.processPendingWithoutDecode(rootLogger(), 1)
@@ -729,7 +729,7 @@ describe('batched verify fault isolation', () => {
 			const objects = (
 				verification as unknown as { narInfoObjects: NarInfoObjectsService }
 			).narInfoObjects;
-			const publish = vi
+			const hasPublished = vi
 				.spyOn(objects, 'publishNarInfoObjectWhile')
 				.mockRejectedValue(new Error('publication unavailable'));
 
@@ -738,7 +738,7 @@ describe('batched verify fault isolation', () => {
 					verification.processPendingWithoutDecode(rootLogger(), 1)
 				);
 			} finally {
-				publish.mockRestore();
+				hasPublished.mockRestore();
 			}
 
 			const pending = instance.context.db
@@ -815,7 +815,7 @@ describe('batched verify fault isolation', () => {
 					Promise.withResolvers<boolean>();
 				const { promise: reached, resolve: didReach } =
 					Promise.withResolvers<undefined>();
-				const committedProbe = vi
+				const hasCommittedProbe = vi
 					.spyOn(pipeline, 'isGenerationCommitted')
 					.mockImplementation(async () => {
 						didReach(undefined);
@@ -869,7 +869,7 @@ describe('batched verify fault isolation', () => {
 				} finally {
 					vi.useRealTimers();
 					release(false);
-					committedProbe.mockRestore();
+					hasCommittedProbe.mockRestore();
 				}
 			}
 		);

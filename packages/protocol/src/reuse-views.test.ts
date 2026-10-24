@@ -15,7 +15,7 @@ import {
 	viewPriorityMargin
 } from './reuse-views.ts';
 
-const destinationPriority = (value: number) => cachePrioritySchema.parse(value);
+const destinationPriority = () => cachePrioritySchema.parse(40);
 const viewPriority = (value: number) => reuseViewPrioritySchema.parse(value);
 
 describe('reuseViewNameSchema', () => {
@@ -207,14 +207,14 @@ describe('isDestinationPreferred', () => {
 		}
 	])('$name', ({ view, expected }) => {
 		expect(
-			isDestinationPreferred(destinationPriority(40), viewPriority(view))
+			isDestinationPreferred(destinationPriority(), viewPriority(view))
 		).toBe(expected);
 	});
 
 	it("keeps the destination preferred when the view's numeric priority is 10 greater than the destination's", () => {
 		expect(
 			isDestinationPreferred(
-				destinationPriority(40),
+				destinationPriority(),
 				viewPriority(40 + viewPriorityMargin)
 			)
 		).toBe(true);

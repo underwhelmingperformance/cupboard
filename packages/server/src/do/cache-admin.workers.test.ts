@@ -81,9 +81,9 @@ import { type LocalStepOutcome, recordLocalStep } from './local-step.ts';
 const repeated = (character: string): string => character.repeat(32);
 
 /**
- * Every cache identity in creation order, with the scope read back out of the
- * stored columns.
- */
+Every cache identity in creation order, with the scope read back out of the
+stored columns.
+*/
 async function cacheIdentities(): Promise<
 	{
 		id: CacheId;
@@ -124,9 +124,9 @@ const defaultIdentity = {
 };
 
 /**
- * Tears the cache down and reads the deletion queue in the same object visit.
- * The teardown's alarm passes would otherwise retire the rows first.
- */
+Tears the cache down and reads the deletion queue in the same object visit.
+The teardown's alarm passes would otherwise retire the rows first.
+*/
 async function tearDownAndReadQueue(
 	cache: CacheScope
 ): Promise<{ cacheId: CacheId }[]> {
@@ -189,8 +189,8 @@ async function projectedCaches(): Promise<number> {
 }
 
 /**
- * The lifecycle rows a tenant has, by the identity they record.
- */
+The lifecycle rows a tenant has, by the identity they record.
+*/
 async function lifecycleIdentities(): Promise<
 	{
 		kind: string | undefined;
@@ -317,10 +317,9 @@ async function putReuseView(
 
 async function updateCacheAccess(
 	token: string,
-	name: string,
 	access: CacheAccessMode
 ): Promise<CacheSummaryInput> {
-	const response = await authorisedFetch(`/caches/${name}`, token, {
+	const response = await authorisedFetch(`/caches/builds`, token, {
 		body: JSON.stringify({ kind: 'access', access }),
 		headers: { 'content-type': 'application/json' },
 		method: 'PATCH'
@@ -1718,7 +1717,7 @@ describe('cache registry admin', () => {
 		// Set the access the cache already has. The read revision must stay where
 		// it is, or every such call would evict the cache's public responses from
 		// Workers Cache.
-		await updateCacheAccess(init.token, 'builds', 'public');
+		await updateCacheAccess(init.token, 'public');
 
 		const reregistered = await cacheVersions();
 
@@ -1756,7 +1755,7 @@ describe('cache registry admin', () => {
 
 		const before = await cacheVersions();
 
-		await updateCacheAccess(init.token, 'builds', 'private');
+		await updateCacheAccess(init.token, 'private');
 
 		const after = await cacheVersions();
 		const narInfo = new Request('https://cache.example/t/acme/abc.narinfo');

@@ -8,10 +8,10 @@ const featureListSchema = z.array(z.string());
 
 export class Derivation {
 	/**
-	 * Parses a serialised `Derive(...)` term. This reader supports the unversioned
-	 * seven-element grammar and rejects `DrvWithVersion(...)`, which Nix uses for
-	 * derivations with dynamic inputs, with {@link MalformedDerivationError}.
-	 */
+	Parses a serialised `Derive(...)` term. This reader supports the unversioned
+	seven-element grammar and rejects `DrvWithVersion(...)`, which Nix uses for
+	derivations with dynamic inputs, with {@link MalformedDerivationError}.
+	*/
 	static parse(aterm: string): Derivation {
 		return new Derivation(derivationTerm(aterm));
 	}
@@ -21,15 +21,15 @@ export class Derivation {
 	private readonly structured: Readonly<Record<string, unknown>> | undefined;
 
 	/**
-	 * A floating content-addressed output maps to `undefined` because its store
-	 * path depends on the result of the build.
-	 */
+	A floating content-addressed output maps to `undefined` because its store
+	path depends on the result of the build.
+	*/
 	readonly outputs: ReadonlyMap<string, StorePathString | undefined>;
 
 	/**
-	 * The output names required from each input derivation. Nix must make the
-	 * selected outputs available before it can build this derivation.
-	 */
+	The output names required from each input derivation. Nix must make the
+	selected outputs available before it can build this derivation.
+	*/
 	readonly inputDerivations: ReadonlyMap<StorePathString, readonly string[]>;
 
 	readonly inputSources: readonly StorePathString[];
@@ -44,10 +44,10 @@ export class Derivation {
 	}
 
 	/**
-	 * The platform and system features that a machine must provide to build this
-	 * derivation. Nix matches the platform against `system` and `extra-platforms`,
-	 * and every required feature must appear in `system-features`.
-	 */
+	The platform and system features that a machine must provide to build this
+	derivation. Nix matches the platform against `system` and `extra-platforms`,
+	and every required feature must appear in `system-features`.
+	*/
 	get buildRequirements(): DerivationBuildRequirements {
 		return {
 			system: this.system,
@@ -59,14 +59,14 @@ export class Derivation {
 	}
 
 	/**
-	 * Whether this derivation's own `allowSubstitutes` option lets Nix fetch
-	 * its outputs rather than build them. A derivation that never sets the
-	 * option allows substitution, which is Nix's default.
-	 *
-	 * The derivation option is only one part of the substitution policy. Nix
-	 * does not substitute anything when the `substitute` setting is off. It
-	 * ignores a `false` value here when `always-allow-substitutes` is on.
-	 */
+	Whether this derivation's own `allowSubstitutes` option lets Nix fetch
+	its outputs rather than build them. A derivation that never sets the
+	option allows substitution, which is Nix's default.
+
+	The derivation option is only one part of the substitution policy. Nix
+	does not substitute anything when the `substitute` setting is off. It
+	ignores a `false` value here when `always-allow-substitutes` is on.
+	*/
 	get allowsSubstitutes(): boolean {
 		return canSubstitute(this.environment, this.structured);
 	}
@@ -108,8 +108,8 @@ function canSubstituteStructured(
 export interface DerivationBuildRequirements {
 	readonly system: string;
 	/**
-	 * The required system features in derivation order, without duplicates.
-	 */
+	The required system features in derivation order, without duplicates.
+	*/
 	readonly requiredSystemFeatures: readonly string[];
 }
 
@@ -254,10 +254,10 @@ function orderedUnique(values: readonly string[]): readonly string[] {
 const derivationSuffix = '.drv';
 
 /**
- * Extracts the `.drv` store path from a derivation installable. This includes
- * derived-path forms that append `^` and an output selection. Returns
- * `undefined` for other installables.
- */
+Extracts the `.drv` store path from a derivation installable. This includes
+derived-path forms that append `^` and an output selection. Returns
+`undefined` for other installables.
+*/
 export function derivationPathOf(
 	installable: string
 ): StorePathString | undefined {

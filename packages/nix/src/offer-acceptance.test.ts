@@ -114,24 +114,24 @@ describe('offerAcceptance', () => {
 	it('accepts an offer signed with a configured trusted key', async () => {
 		const key = await signingKey('cache-1');
 		const signed = offer({ signatures: [await key.sign(offer())] });
-		const accepts = offerAcceptance(
+		const doesAccept = offerAcceptance(
 			settings({ trustedPublicKeys: [key.published] }),
 			noKeyFiles
 		);
 
-		await expect(accepts(signed)).resolves.toBe(true);
+		await expect(doesAccept(signed)).resolves.toBe(true);
 	});
 
 	it('rejects an offer signed only with an untrusted key', async () => {
 		const signing = await signingKey('cache-1');
 		const other = await signingKey('cache-2');
 		const signed = offer({ signatures: [await signing.sign(offer())] });
-		const accepts = offerAcceptance(
+		const doesAccept = offerAcceptance(
 			settings({ trustedPublicKeys: [other.published] }),
 			noKeyFiles
 		);
 
-		await expect(accepts(signed)).resolves.toBe(false);
+		await expect(doesAccept(signed)).resolves.toBe(false);
 	});
 
 	it.each<{
@@ -149,42 +149,42 @@ describe('offerAcceptance', () => {
 	])('rejects an offer with $name after signing', async ({ moved }) => {
 		const key = await signingKey('cache-1');
 		const signature = await key.sign(offer());
-		const accepts = offerAcceptance(
+		const doesAccept = offerAcceptance(
 			settings({ trustedPublicKeys: [key.published] }),
 			noKeyFiles
 		);
 
 		await expect(
-			accepts(offer({ ...moved, signatures: [signature] }))
+			doesAccept(offer({ ...moved, signatures: [signature] }))
 		).resolves.toBe(false);
 	});
 
 	it('rejects an unsigned offer', async () => {
 		const key = await signingKey('cache-1');
-		const accepts = offerAcceptance(
+		const doesAccept = offerAcceptance(
 			settings({ trustedPublicKeys: [key.published] }),
 			noKeyFiles
 		);
 
-		await expect(accepts(offer())).resolves.toBe(false);
+		await expect(doesAccept(offer())).resolves.toBe(false);
 	});
 
 	it('accepts an offer signed with a configured secret key', async () => {
 		const key = await signingKey('cache-1');
 		const secret = await key.secretFile();
 		const signed = offer({ signatures: [await key.sign(offer())] });
-		const accepts = offerAcceptance(
+		const doesAccept = offerAcceptance(
 			settings({ secretKeyFiles: ['/etc/nix/key'] }),
 			(filePath) => (filePath === '/etc/nix/key' ? secret : undefined)
 		);
 
-		await expect(accepts(signed)).resolves.toBe(true);
+		await expect(doesAccept(signed)).resolves.toBe(true);
 	});
 
 	it('ignores an unreadable secret key file', async () => {
 		const key = await signingKey('cache-1');
 		const signed = offer({ signatures: [await key.sign(offer())] });
-		const accepts = offerAcceptance(
+		const doesAccept = offerAcceptance(
 			settings({
 				trustedPublicKeys: [key.published],
 				secretKeyFiles: ['/etc/nix/missing']
@@ -192,23 +192,23 @@ describe('offerAcceptance', () => {
 			noKeyFiles
 		);
 
-		await expect(accepts(signed)).resolves.toBe(true);
+		await expect(doesAccept(signed)).resolves.toBe(true);
 	});
 
 	it('accepts an unsigned offer from a trusted substituter', async () => {
-		const accepts = offerAcceptance(settings(), noKeyFiles);
+		const doesAccept = offerAcceptance(settings(), noKeyFiles);
 
 		await expect(
-			accepts(offer({ fromTrustedSubstituter: true }))
+			doesAccept(offer({ fromTrustedSubstituter: true }))
 		).resolves.toBe(true);
 	});
 
 	it('accepts every offer when signature checks are disabled', async () => {
-		const accepts = offerAcceptance(
+		const doesAccept = offerAcceptance(
 			settings({ requireSignatures: false }),
 			noKeyFiles
 		);
 
-		await expect(accepts(offer())).resolves.toBe(true);
+		await expect(doesAccept(offer())).resolves.toBe(true);
 	});
 });

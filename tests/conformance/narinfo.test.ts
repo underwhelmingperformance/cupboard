@@ -14,8 +14,8 @@ interface NarinfoCase {
 }
 
 /**
- * Documents accepted by Nix, allowing exact field comparison between clients.
- */
+Documents accepted by Nix, allowing exact field comparison between clients.
+*/
 const agreedCases: readonly NarinfoCase[] = [
 	{ name: 'a well-formed narinfo', fixture: {} },
 	{
@@ -107,8 +107,8 @@ const refusedCases: readonly NarinfoCase[] = [
 ];
 
 /**
- * Documents accepted by the pinned Nix but rejected by our stricter client.
- */
+Documents accepted by the pinned Nix but rejected by our stricter client.
+*/
 const stricterCases: readonly NarinfoCase[] = [
 	{
 		name: 'a compression algorithm Nix has no decompressor for',

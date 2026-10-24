@@ -60,10 +60,10 @@ export const unknownPathCauseSchema = z.discriminatedUnion('kind', [
 export type UnknownPathCause = z.output<typeof unknownPathCauseSchema>;
 
 /**
- * `targets` contains cohort targets that refer to the path directly through an
- * installable, expected output path, or planned derivation. Dependencies
- * reached only through closure traversal have no target entry.
- */
+`targets` contains cohort targets that refer to the path directly through an
+installable, expected output path, or planned derivation. Dependencies
+reached only through closure traversal have no target entry.
+*/
 export const unknownPathDetailSchema = z.object({
 	path: storePathSchema,
 	cause: unknownPathCauseSchema,
@@ -72,9 +72,9 @@ export const unknownPathDetailSchema = z.object({
 export type UnknownPathDetail = z.output<typeof unknownPathDetailSchema>;
 
 /**
- * `source` identifies either the configured limit or the fallback used when
- * Cupboard could not trust that limit.
- */
+`source` identifies either the configured limit or the fallback used when
+Cupboard could not trust that limit.
+*/
 export const availabilityCeilingSchema = z.object({
 	value: z.number(),
 	source: z.enum(['configured', 'untrusted-fallback']),
@@ -83,9 +83,9 @@ export const availabilityCeilingSchema = z.object({
 export type AvailabilityCeiling = z.output<typeof availabilityCeilingSchema>;
 
 /**
- * An older cupboard reports only the count, the ceiling and the byte totals.
- * The newer fields therefore default to empty so that payload still parses.
- */
+An older cupboard reports only the count, the ceiling and the byte totals.
+The newer fields therefore default to empty so that payload still parses.
+*/
 export const unknownPathsCeilingRefusalSchema = z.object({
 	reason: z.literal('unknown-paths-ceiling'),
 	unknownCount: z.number(),

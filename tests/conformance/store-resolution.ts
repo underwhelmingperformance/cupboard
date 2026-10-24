@@ -18,15 +18,15 @@ import type { Oracle } from './oracle.ts';
 import type { NixSystem } from '#nix-systems';
 
 /**
- * `nix store info` reports the store selected by a configuration, while
- * `nix config show` reports the `store` setting as written. That resolution is
- * the result of `resolveStoreBackend`, so it provides the oracle value.
- *
- * Nix prints the resolved URL before it connects to the store, so a
- * configuration that refers to a missing daemon socket still reports the
- * selected store. Ignore the status because selection does not require a
- * successful connection.
- */
+`nix store info` reports the store selected by a configuration, while
+`nix config show` reports the `store` setting as written. That resolution is
+the result of `resolveStoreBackend`, so it provides the oracle value.
+
+Nix prints the resolved URL before it connects to the store, so a
+configuration that refers to a missing daemon socket still reports the
+selected store. Ignore the status because selection does not require a
+successful connection.
+*/
 const storeInfoArguments = [
 	'--extra-experimental-features',
 	'nix-command',
@@ -52,12 +52,12 @@ export interface ResolvedStore {
 }
 
 /**
- * Parses the store type from a `nix store info` URL.
- *
- * Nix includes store directories in the URL only when they came from URI
- * parameters. Environment-configured directories leave a plain `local` URL.
- * The comparison therefore uses only the selected backend.
- */
+Parses the store type from a `nix store info` URL.
+
+Nix includes store directories in the URL only when they came from URI
+parameters. Environment-configured directories leave a plain `local` URL.
+The comparison therefore uses only the selected backend.
+*/
 function resolvedStoreOfUrl(url: string): ResolvedStore {
 	// Nix reports its usual daemon socket as `daemon` and any other socket as a
 	// `unix://` URL. Both values select the daemon store.
@@ -154,14 +154,14 @@ function storeInfoUrl(stdout: string): string | undefined {
 }
 
 /**
- * Returns why the per-user fallback store cannot be exercised, or `undefined`
- * when it can.
- *
- * Nix compiles this fallback for Linux only and selects it only when no state
- * directory or explicit store configuration exists. Test machines have Nix
- * installed and therefore normally have a state directory, so the case reports
- * why it was skipped.
- */
+Returns why the per-user fallback store cannot be exercised, or `undefined`
+when it can.
+
+Nix compiles this fallback for Linux only and selects it only when no state
+directory or explicit store configuration exists. Test machines have Nix
+installed and therefore normally have a state directory, so the case reports
+why it was skipped.
+*/
 export function chrootFallbackUnavailable(
 	system: NixSystem
 ): string | undefined {

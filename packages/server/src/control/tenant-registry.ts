@@ -210,15 +210,12 @@ export async function ensureTenant(
 
 	// Never reuse a slug after offboarding has begun; doing so could restore the
 	// removed tenant's identity.
-	if (existing?.status === 'offboarding' || existing?.status === 'offboarded') {
-		throw new TenantAlreadyExistsError(body.id);
-	}
-
-	if (existing === undefined) {
-		throw new TenantAlreadyExistsError(body.id);
-	}
-
-	if (!(await hasSameConfig(database, existing, body))) {
+	if (
+		existing === undefined ||
+		existing.status === 'offboarding' ||
+		existing.status === 'offboarded' ||
+		!(await hasSameConfig(database, existing, body))
+	) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
@@ -252,13 +249,13 @@ export async function ensureTenant(
 }
 
 /**
- * The three rows a tenant is provisioned with: the tenant itself, its default
- * cache, and its usage counter. The cache and the usage row select from the
- * tenant row, so a batch that writes all three must run them in this order.
- *
- * Every statement leaves a stored row alone, so a repair can run the cache and
- * usage statements again for a tenant that already has its row.
- */
+The three rows a tenant is provisioned with: the tenant itself, its default
+cache, and its usage counter. The cache and the usage row select from the
+tenant row, so a batch that writes all three must run them in this order.
+
+Every statement leaves a stored row alone, so a repair can run the cache and
+usage statements again for a tenant that already has its row.
+*/
 function provisioningStatements(
 	database: Database,
 	body: TenantCreateBody,
@@ -473,12 +470,12 @@ export async function resumeTenant(
 }
 
 /**
- * Sets or removes a live tenant's storage quota and returns it with the
- * tenant's charged bytes. The quota is a column of the usage row, and every
- * charge's D1 batch checks that column, so the next charge uses the new value.
- * A limit below the charged bytes is refused, because the row's CHECK
- * constraint forbids usage above the quota.
- */
+Sets or removes a live tenant's storage quota and returns it with the
+tenant's charged bytes. The quota is a column of the usage row, and every
+charge's D1 batch checks that column, so the next charge uses the new value.
+A limit below the charged bytes is refused, because the row's CHECK
+constraint forbids usage above the quota.
+*/
 export async function setTenantQuota(
 	database: Database,
 	id: TenantId,
@@ -601,10 +598,10 @@ export async function setTenantReadCredential(
 }
 
 /**
- * Replaces one cache's read credential while the tenant is active or
- * suspended. While the row exists, it takes precedence over the tenant
- * fallback credential.
- */
+Replaces one cache's read credential while the tenant is active or
+suspended. While the row exists, it takes precedence over the tenant
+fallback credential.
+*/
 export async function setCacheReadCredential(
 	database: Database,
 	id: TenantId,
@@ -653,22 +650,24 @@ export async function setCacheReadCredential(
 	};
 	// Each cache kind has its own partial unique index, so name the matching
 	// conflict target.
-	const written = await (
-		cache.kind === 'default'
-			? insert.onConflictDoUpdate({
-					target: d1Schema.tenantCacheReadCredential.tenant,
-					targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'default'`,
-					set
-				})
-			: insert.onConflictDoUpdate({
-					target: [
-						d1Schema.tenantCacheReadCredential.tenant,
-						d1Schema.tenantCacheReadCredential.cacheName
-					],
-					targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'named'`,
-					set
-				})
-	).run();
+	const written = await insert
+		.onConflictDoUpdate(
+			cache.kind === 'default'
+				? {
+						target: d1Schema.tenantCacheReadCredential.tenant,
+						targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'default'`,
+						set
+					}
+				: {
+						target: [
+							d1Schema.tenantCacheReadCredential.tenant,
+							d1Schema.tenantCacheReadCredential.cacheName
+						],
+						targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'named'`,
+						set
+					}
+		)
+		.run();
 
 	if (written.meta.changes === 0) {
 		await refuseRetiredTenant(database, id);
@@ -676,10 +675,10 @@ export async function setCacheReadCredential(
 }
 
 /**
- * Removes one cache's read credential while the tenant is active or suspended.
- * Readers of a private cache then authenticate with the tenant credential. The
- * operation is idempotent.
- */
+Removes one cache's read credential while the tenant is active or suspended.
+Readers of a private cache then authenticate with the tenant credential. The
+operation is idempotent.
+*/
 export async function clearCacheReadCredential(
 	database: Database,
 	id: TenantId,

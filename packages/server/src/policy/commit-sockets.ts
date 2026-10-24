@@ -15,9 +15,9 @@ export const defaultCommitSocketCeiling = 256;
 export const maxUncreditedCommitSessions = 8;
 
 /**
- * Parses `CUPBOARD_COMMIT_SOCKET_CEILING`. An empty setting selects the built-in
- * tenant ceiling; a non-empty setting must be a positive integer.
- */
+Parses `CUPBOARD_COMMIT_SOCKET_CEILING`. An empty setting selects the built-in
+tenant ceiling; a non-empty setting must be a positive integer.
+*/
 export function commitSocketCeiling(env: CommitSocketEnv): number {
 	const raw = env.CUPBOARD_COMMIT_SOCKET_CEILING;
 

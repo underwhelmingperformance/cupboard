@@ -61,10 +61,10 @@ function close(server: Server): Promise<void> {
 }
 
 /**
- * Creates a stale Unix socket that refuses connections. Node unlinks the
- * listening path when the server closes, so keep a hard link to the socket
- * inode first. A missing path would exercise a different cleanup case.
- */
+Creates a stale Unix socket that refuses connections. Node unlinks the
+listening path when the server closes, so keep a hard link to the socket
+inode first. A missing path would exercise a different cleanup case.
+*/
 async function deadOwnerSocket(
 	directory: string,
 	socketPath: string

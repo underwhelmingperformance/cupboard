@@ -12,9 +12,9 @@ export function parseLines(value: string): string[] {
 }
 
 /**
- * The entries of a list input. A workflow may write one entry per line or
- * separate them with commas; blank entries are dropped.
- */
+The entries of a list input. A workflow may write one entry per line or
+separate them with commas; blank entries are dropped.
+*/
 export function parseListInput(value: string): string[] {
 	return value
 		.split(/[\n,]/u)

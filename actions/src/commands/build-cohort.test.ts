@@ -4783,7 +4783,7 @@ describe('buildCohortAction availability confirmation', () => {
 				paths: installables.flatMap((installable) => {
 					const built = builtPathOf.get(installable);
 
-					return built === undefined ? [] : [built];
+					return built ?? [];
 				}),
 				status: 0,
 				copiedFrom: new Map()

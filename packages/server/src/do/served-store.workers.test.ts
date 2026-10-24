@@ -84,9 +84,9 @@ interface RetentionState {
 }
 
 /**
- * Reads the rows that a negotiate or a root write can change: the retention
- * roots and their targets, the grace deadlines, and the pending uploads.
- */
+Reads the rows that a negotiate or a root write can change: the retention
+roots and their targets, the grace deadlines, and the pending uploads.
+*/
 function retentionState(): Promise<RetentionState> {
 	return runInDurableObject(currentServer(), (instance) => {
 		const { db } = instance.context;

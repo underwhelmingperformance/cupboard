@@ -61,7 +61,9 @@ describe('Nix stderr forwarding', () => {
 		async ({ status, marker, failed }) => {
 			const processFixture = fixture();
 			const { child, stdout, stderr } = processFixture;
-			const forwarded = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+			const hasForwarded = vi
+				.spyOn(process.stderr, 'write')
+				.mockReturnValue(true);
 			const invocation = {
 				arguments: ['build', '--stdin'],
 				stdin: '.#app\n',
@@ -84,7 +86,7 @@ describe('Nix stderr forwarding', () => {
 
 			expect({
 				completed,
-				forwarded: forwarded.mock.calls,
+				forwarded: hasForwarded.mock.calls,
 				input: processFixture.input,
 				invocations: vi.mocked(spawn).mock.calls
 			}).toStrictEqual({

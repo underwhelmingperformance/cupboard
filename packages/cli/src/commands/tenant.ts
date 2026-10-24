@@ -490,12 +490,12 @@ export async function runTenantCreate(
 					}
 				]
 			: []),
-		...(generatedReadPassword !== undefined && body.read !== undefined
-			? [
+		...(generatedReadPassword === undefined || body.read === undefined
+			? []
+			: [
 					{ label: 'Read user', raw: true, value: body.read.user },
 					{ label: 'Read password', raw: true, value: generatedReadPassword }
-				]
-			: [])
+				])
 	];
 
 	reporter.result({
@@ -569,9 +569,9 @@ export async function runTenantResume(
 }
 
 /**
- * Sets or removes a tenant's quota, then prints it alongside how much the
- * tenant is charged for now. The new quota applies from the next upload.
- */
+Sets or removes a tenant's quota, then prints it alongside how much the
+tenant is charged for now. The new quota applies from the next upload.
+*/
 export async function runTenantSetQuota(
 	id: TenantId,
 	quota: TenantQuota,
@@ -664,10 +664,10 @@ export async function runTenantClearCredential(
 }
 
 /**
- * Generates a read password for one cache, sets it as that cache's own read
- * credential, and prints it once. The deployment stores only a verifier, so
- * the password cannot be recovered later.
- */
+Generates a read password for one cache, sets it as that cache's own read
+credential, and prints it once. The deployment stores only a verifier, so
+the password cannot be recovered later.
+*/
 export async function runTenantRotateCacheCredential(
 	id: TenantId,
 	cache: CacheScope,

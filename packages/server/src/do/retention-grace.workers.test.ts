@@ -515,8 +515,8 @@ async function hasGraceManagedMarker(cache: CacheScope): Promise<boolean> {
 }
 
 /**
- * The `grace_managed` flag of every cache identity, keyed by legacy name.
- */
+The `grace_managed` flag of every cache identity, keyed by legacy name.
+*/
 describe('retention grace transitions', () => {
 	beforeEach(resetTestServer);
 

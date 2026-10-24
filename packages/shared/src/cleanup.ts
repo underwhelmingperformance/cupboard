@@ -21,9 +21,9 @@ export function discardResponseBody(response: {
 }
 
 /**
- * Runs an operation and its cleanup. A cleanup failure is reported after a
- * successful operation, but cannot replace the operation's own failure.
- */
+Runs an operation and its cleanup. A cleanup failure is reported after a
+successful operation, but cannot replace the operation's own failure.
+*/
 export async function withCleanup<T>(
 	operation: () => Promise<T>,
 	cleanup: () => Promise<unknown>
@@ -32,10 +32,10 @@ export async function withCleanup<T>(
 }
 
 /**
- * Runs a synchronous operation and its synchronous cleanup. As with
- * {@link withCleanup}, a cleanup failure is reported after a successful
- * operation, but cannot replace the operation's own failure.
- */
+Runs a synchronous operation and its synchronous cleanup. As with
+{@link withCleanup}, a cleanup failure is reported after a successful
+operation, but cannot replace the operation's own failure.
+*/
 export function withCleanupSync<T>(operation: () => T, cleanup: () => void): T {
 	let result: T;
 
@@ -57,9 +57,9 @@ export function withCleanupSync<T>(operation: () => T, cleanup: () => void): T {
 }
 
 /**
- * Runs an operation and every cleanup in order. The first failure is reported,
- * while later cleanup failures cannot replace it or prevent remaining cleanup.
- */
+Runs an operation and every cleanup in order. The first failure is reported,
+while later cleanup failures cannot replace it or prevent remaining cleanup.
+*/
 export async function withCleanups<T>(
 	operation: () => Promise<T>,
 	cleanups: readonly (() => Promise<unknown>)[]
@@ -92,9 +92,9 @@ export async function withCleanups<T>(
 }
 
 /**
- * Runs cleanup after iteration. A cleanup failure is reported only when the
- * source itself completed successfully.
- */
+Runs cleanup after iteration. A cleanup failure is reported only when the
+source itself completed successfully.
+*/
 export async function* withIterableCleanup<T>(
 	source: AsyncIterable<T>,
 	cleanup: () => Promise<unknown>

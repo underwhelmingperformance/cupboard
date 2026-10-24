@@ -50,16 +50,16 @@ function environmentBases(
 	const environment = options.environment ?? process.env;
 
 	return [environment.XDG_RUNTIME_DIR, environment.RUNNER_TEMP].flatMap(
-		(base) => (base === undefined || base === '' ? [] : [base])
+		(base) => (base === undefined || base === '' ? [] : base)
 	);
 }
 
 /**
- * Where one invocation's own directory lives when it hosts no hook endpoint:
- * the first preferred base's `cupboard/<invocation id>`, or the operating
- * system's temporary directory. A run with no socket to listen on is not bound
- * by the `sun_path` limit, so the first base is always used.
- */
+Where one invocation's own directory lives when it hosts no hook endpoint:
+the first preferred base's `cupboard/<invocation id>`, or the operating
+system's temporary directory. A run with no socket to listen on is not bound
+by the `sun_path` limit, so the first base is always used.
+*/
 export function planInvocationDirectory(
 	options: InvocationRuntimeOptions
 ): string {
@@ -70,12 +70,12 @@ export function planInvocationDirectory(
 }
 
 /**
- * Where one invocation's hook endpoint lives: an owner-only directory holding
- * the listening socket, chosen so the socket path fits `sun_path`. Candidate
- * bases are tried in order (`$XDG_RUNTIME_DIR`, `$RUNNER_TEMP`, the operating
- * system's temporary directory), each with a `cupboard/<invocation id>`
- * suffix, and the first whose socket path fits wins.
- */
+Where one invocation's hook endpoint lives: an owner-only directory holding
+the listening socket, chosen so the socket path fits `sun_path`. Candidate
+bases are tried in order (`$XDG_RUNTIME_DIR`, `$RUNNER_TEMP`, the operating
+system's temporary directory), each with a `cupboard/<invocation id>`
+suffix, and the first whose socket path fits wins.
+*/
 export function planInvocationRuntime(
 	options: InvocationRuntimeOptions
 ): InvocationRuntimePlan {
@@ -105,9 +105,9 @@ export function planInvocationRuntime(
 }
 
 /**
- * Creates the planned invocation directory, owner-only. The daemon connects
- * through it as root; the mode excludes every other user.
- */
+Creates the planned invocation directory, owner-only. The daemon connects
+through it as root; the mode excludes every other user.
+*/
 export async function createInvocationRuntimeDirectory(
 	options: InvocationRuntimeOptions
 ): Promise<InvocationRuntimePlan> {
@@ -155,7 +155,7 @@ async function rootOwnerSocket(directory: string): Promise<string | undefined> {
 	}
 }
 
-function socketAcceptsConnection(socketPath: string): Promise<boolean> {
+function canConnectToSocket(socketPath: string): Promise<boolean> {
 	return new Promise((resolve) => {
 		const socket = createConnection(socketPath);
 		let isFinished = false;
@@ -205,13 +205,13 @@ function closeServer(server: Server): Promise<void> {
 }
 
 /**
- * Creates a daemonless run's GC-root directory and records the private socket
- * that identifies its owner. A later invocation removes a directory that has no
- * owner record or whose recorded socket no longer accepts connections. This
- * releases roots left by a process that could not clean up. The socket itself
- * stays in the short invocation runtime directory so a long Nix state directory
- * cannot exceed `sun_path`.
- */
+Creates a daemonless run's GC-root directory and records the private socket
+that identifies its owner. A later invocation removes a directory that has no
+owner record or whose recorded socket no longer accepts connections. This
+releases roots left by a process that could not clean up. The socket itself
+stays in the short invocation runtime directory so a long Nix state directory
+cannot exceed `sun_path`.
+*/
 export async function createRootLinkDirectory(
 	directory: string,
 	ownerSocket: string,
@@ -241,7 +241,7 @@ export async function createRootLinkDirectory(
 
 		if (
 			candidateOwner !== undefined &&
-			(await socketAcceptsConnection(candidateOwner))
+			(await canConnectToSocket(candidateOwner))
 		) {
 			continue;
 		}
@@ -278,7 +278,7 @@ export async function createRootLinkDirectory(
 
 		if (
 			recordedSocket !== undefined &&
-			(await socketAcceptsConnection(recordedSocket))
+			(await canConnectToSocket(recordedSocket))
 		) {
 			continue;
 		}

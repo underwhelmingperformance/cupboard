@@ -103,10 +103,10 @@ export interface ConfirmClient {
 
 interface ConfirmCommandDependencies {
 	/**
-	 * Returns the token provider for the confirmation. Defaults to
-	 * `authenticateForPush`, which uses GitHub Actions OIDC with `--github-oidc`
-	 * and otherwise the owner session cached by `cupboard login`.
-	 */
+	Returns the token provider for the confirmation. Defaults to
+	`authenticateForPush`, which uses GitHub Actions OIDC with `--github-oidc`
+	and otherwise the owner session cached by `cupboard login`.
+	*/
 	readonly authenticate?: typeof authenticateForPush;
 }
 

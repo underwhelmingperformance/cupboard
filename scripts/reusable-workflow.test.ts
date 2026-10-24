@@ -59,8 +59,8 @@ const cupboardAction = (name: string) => `${cupboardActionPrefix}${name}`;
 const nixInstaller = cupboardAction('install-nix');
 
 /**
- * The scalar forms GitHub accepts for a step input or an environment value.
- */
+The scalar forms GitHub accepts for a step input or an environment value.
+*/
 const scalarSchema = z.union([z.string(), z.boolean(), z.number()]);
 const scalarMapSchema = z.record(z.string(), scalarSchema);
 
@@ -163,8 +163,8 @@ async function loadWorkflow(file: URL): Promise<Workflow> {
 }
 
 /**
- * Every step of every job, in document order, tagged with its job name.
- */
+Every step of every job, in document order, tagged with its job name.
+*/
 function allSteps(
 	workflow: Workflow
 ): { job: string; index: number; step: Step }[] {
@@ -184,8 +184,8 @@ function inputsOf(workflow: Workflow, uses: string) {
 }
 
 /**
- * The `run` body of one named step, which the tests read as shell source.
- */
+The `run` body of one named step, which the tests read as shell source.
+*/
 function shellOf(workflow: Workflow, job: string, name: string): string {
 	const step = workflow.jobs[job]?.steps.find(
 		(candidate) => candidate.name === name
@@ -243,9 +243,7 @@ describe('workflow action references', () => {
 		'resolves its own actions from the called revision in $name',
 		async ({ file }) => {
 			const workflow = await loadWorkflow(file);
-			const uses = allSteps(workflow).flatMap(({ step }) =>
-				step.uses === undefined ? [] : [step.uses]
-			);
+			const uses = allSteps(workflow).flatMap(({ step }) => step.uses ?? []);
 
 			expect({
 				referencesItsOwnActions: uses.some((spec) =>
@@ -2706,7 +2704,7 @@ it.each([
 	{ audience: '', expected: '' },
 	{ audience: ' '.repeat(3), expected: '' },
 	{ audience: '  custom-audience  ', expected: 'custom-audience' },
-	{ audience: ' custom-audience ', expected: 'custom-audience' }
+	{ audience: '\u{A0}custom-audience\u{A0}', expected: 'custom-audience' }
 ])(
 	'uses the normalised audience in native evaluation and lifecycle scripts: $audience',
 	async ({ audience, expected }) => {
@@ -2928,7 +2926,7 @@ it.each<{
 	{ kind: 'ambiguous merged PRs', patches: [{}, { number: 8 }], expected: '' }
 ])(
 	'uses only the merged PR cache for $kind',
-	async ({ patches, expected, isApiFailure, hasInvalidResponse }) => {
+	async ({ patches, expected, isApiFailure = false, hasInvalidResponse }) => {
 		const workflow = await loadWorkflow(
 			new URL(
 				'../.github/workflows/cupboard-flake-publish-trusted.yml',
@@ -2960,7 +2958,7 @@ it.each<{
 					REPOSITORY_ID: '1234',
 					SHA: 'matching',
 					GITHUB_OUTPUT: output,
-					API_FAILURE: String(isApiFailure ?? false),
+					API_FAILURE: String(isApiFailure),
 					PULLS:
 						hasInvalidResponse === true
 							? 'invalid'

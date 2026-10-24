@@ -63,6 +63,12 @@ const nodeBuiltInImports = [
 	'zlib'
 ];
 
+// Building this configuration reads .gitignore and maps static lists.
+// Unicorn treats those calls as side effects in the default export.
+// https://github.com/sindresorhus/eslint-plugin-unicorn/issues/3895
+// https://eslint.org/docs/latest/use/configure/ignore#including-gitignore-files
+// https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array.prototype.map
+// eslint-disable-next-line unicorn/no-top-level-side-effects
 export default defineConfig(
 	includeIgnoreFile(gitignorePath),
 	eslint.configs.recommended,
@@ -77,6 +83,17 @@ export default defineConfig(
 			// This rule replaces early-return guards with ternaries, nesting
 			// exceptional cases in the normal path and making it harder to read.
 			'unicorn/prefer-ternary': 'off',
+			// Drizzle's defineConfig returns its argument without changing it.
+			// https://github.com/drizzle-team/drizzle-orm/blob/drizzle-kit%400.31.10/drizzle-kit/src/index.ts
+			// https://github.com/sindresorhus/eslint-plugin-unicorn/issues/3907
+			'unicorn/no-top-level-side-effects': [
+				'error',
+				{
+					allow: {
+						'drizzle-kit': ['defineConfig']
+					}
+				}
+			],
 			'unicorn/name-replacements': [
 				'error',
 				{

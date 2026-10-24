@@ -7,15 +7,15 @@ import {
 import { type PreparedReference } from './reference-manifest.ts';
 
 /**
- * Targets participate in target retention. Intermediates are published without
- * being added to a target root or pin.
- */
+Targets participate in target retention. Intermediates are published without
+being added to a target root or pin.
+*/
 export type PublicationKind = 'target' | 'intermediate';
 
 /**
- * Reference entries use a served narinfo and never read local store metadata or
- * NAR content.
- */
+Reference entries use a served narinfo and never read local store metadata or
+NAR content.
+*/
 export type PublicationMetadataSource = 'local' | 'reference';
 
 export interface PublicationEntry {
@@ -39,12 +39,12 @@ interface PublicationDeclaration {
 }
 
 /**
- * Normalises publication declarations by store path. A target declaration takes
- * precedence over an intermediate declaration, and a reference declaration
- * takes precedence over local metadata for the same target. Every input crosses
- * the branded store-path boundary here and invalid values throw
- * {@link InvalidStorePathError}.
- */
+Normalises publication declarations by store path. A target declaration takes
+precedence over an intermediate declaration, and a reference declaration
+takes precedence over local metadata for the same target. Every input crosses
+the branded store-path boundary here and invalid values throw
+{@link InvalidStorePathError}.
+*/
 export class PublicationCollection {
 	static of(input: PublicationInput): PublicationCollection {
 		const byPath = new Map<StorePathString, PublicationDeclaration>();

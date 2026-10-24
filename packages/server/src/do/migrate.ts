@@ -24,9 +24,9 @@ export interface MigrationBundle {
 }
 
 /**
- * The prefix of a bundle up to and including one journal index. Test support
- * uses it to leave a store as an earlier build left it.
- */
+The prefix of a bundle up to and including one journal index. Test support
+uses it to leave a store as an earlier build left it.
+*/
 export function migrationsThrough(
 	bundle: MigrationBundle,
 	throughIndex: number
@@ -57,11 +57,11 @@ const lastLegacyDrizzleMigrationIndex = 24;
 const statementBreakpoint = '--> statement-breakpoint';
 
 /**
- * Thrown when a migration statement fails for a reason other than the change
- * already being present. It names the migration and the offending statement and
- * keeps the underlying database error as its cause, so the real fault reaches
- * the logs.
- */
+Thrown when a migration statement fails for a reason other than the change
+already being present. It names the migration and the offending statement and
+keeps the underlying database error as its cause, so the real fault reaches
+the logs.
+*/
 export class DurableObjectMigrationError extends Error {
 	constructor(
 		readonly tag: string,
@@ -74,8 +74,8 @@ export class DurableObjectMigrationError extends Error {
 }
 
 /**
- * A recorded migration's SQL no longer matches what this build carries.
- */
+A recorded migration's SQL no longer matches what this build carries.
+*/
 export class DurableObjectMigrationDigestError extends Error {
 	constructor(
 		readonly tag: string,
@@ -90,8 +90,8 @@ export class DurableObjectMigrationDigestError extends Error {
 }
 
 /**
- * The store's recorded history is not a history this build can continue.
- */
+The store's recorded history is not a history this build can continue.
+*/
 export class DurableObjectMigrationJournalError extends Error {
 	constructor(
 		readonly tag: string,
@@ -103,8 +103,8 @@ export class DurableObjectMigrationJournalError extends Error {
 }
 
 /**
- * A tracking row carries a verification state this build does not know.
- */
+A tracking row carries a verification state this build does not know.
+*/
 export class DurableObjectMigrationVerificationStateError extends Error {
 	constructor(
 		readonly tag: string,
@@ -162,8 +162,8 @@ function statementsOf(bundle: MigrationBundle, entry: JournalEntry): string[] {
 }
 
 /**
- * The SHA-256 of each migration's SQL as the bundle ships it, keyed by tag.
- */
+The SHA-256 of each migration's SQL as the bundle ships it, keyed by tag.
+*/
 type MigrationDigests = ReadonlyMap<string, string>;
 
 const bundleDigests = new WeakMap<MigrationBundle, MigrationDigests>();
@@ -216,12 +216,12 @@ type MigrationDatabase<TSchema extends Record<string, unknown>> =
 	DrizzleSqliteDODatabase<TSchema>;
 
 /**
- * How much a recorded digest proves. `verified` and `verified-contraction`
- * rows were written with the digest of the SQL the store ran. The contraction
- * state makes older builds refuse a schema that removed their columns.
- * `unverified-baseline` rows were written before digests were recorded; their
- * digest was adopted from the bundle afterwards.
- */
+How much a recorded digest proves. `verified` and `verified-contraction`
+rows were written with the digest of the SQL the store ran. The contraction
+state makes older builds refuse a schema that removed their columns.
+`unverified-baseline` rows were written before digests were recorded; their
+digest was adopted from the bundle afterwards.
+*/
 type VerificationState =
 	'verified' | 'verified-contraction' | 'unverified-baseline';
 
@@ -365,23 +365,23 @@ function assertRowMatchesEntry(
 }
 
 /**
- * Refuses a store whose recorded history this build cannot continue, and
- * returns the recorded rows once they are accepted.
- *
- * The recorded rows must be a prefix of the bundled journal: same order, same
- * timestamps, and either the stable tag or the legacy empty hash that Drizzle
- * wrote at index 0024 and earlier. A row this migrator verified must carry its
- * tag, and a recorded digest must match the SQL this build ships.
- *
- * Rows beyond the bundle are migrations a newer build applied before this one
- * ran, which a rollback leaves behind. They are admitted only when that build
- * recorded them as verified, with the digest it applied; without that there is
- * no evidence of what the schema now contains.
- *
- * An empty journal over existing application tables is refused on every
- * admission: the store was migrated by something that kept no record, so no
- * journal position describes its schema.
- */
+Refuses a store whose recorded history this build cannot continue, and
+returns the recorded rows once they are accepted.
+
+The recorded rows must be a prefix of the bundled journal: same order, same
+timestamps, and either the stable tag or the legacy empty hash that Drizzle
+wrote at index 0024 and earlier. A row this migrator verified must carry its
+tag, and a recorded digest must match the SQL this build ships.
+
+Rows beyond the bundle are migrations a newer build applied before this one
+ran, which a rollback leaves behind. They are admitted only when that build
+recorded them as verified, with the digest it applied; without that there is
+no evidence of what the schema now contains.
+
+An empty journal over existing application tables is refused on every
+admission: the store was migrated by something that kept no record, so no
+journal position describes its schema.
+*/
 export async function admitMigrationSource<
 	TSchema extends Record<string, unknown>
 >(
@@ -499,20 +499,20 @@ function migrationIndexOf(bundle: MigrationBundle, tag: string): number {
 }
 
 /**
- * Brings a Durable Object's SQLite schema up to the bundled migrations, after
- * {@link admitMigrationSource} has accepted the store's recorded history.
- *
- * A migration whose tag is already recorded is skipped. A recorded row with no
- * digest adopts the bundled SQL's digest as an unverified baseline, so a later
- * edit to that migration is refused. Each migration still to run executes in
- * its own transaction and records the digest it was applied from, so a later
- * build can tell what this store actually ran.
- *
- * `stopBefore` names a migration to leave unapplied, along with everything
- * after it, for a caller with work to do before that migration can run.
- * Admission still sees the whole bundle, so a store already past that migration
- * is admitted rather than refused for holding rows this run would not reach.
- */
+Brings a Durable Object's SQLite schema up to the bundled migrations, after
+{@link admitMigrationSource} has accepted the store's recorded history.
+
+A migration whose tag is already recorded is skipped. A recorded row with no
+digest adopts the bundled SQL's digest as an unverified baseline, so a later
+edit to that migration is refused. Each migration still to run executes in
+its own transaction and records the digest it was applied from, so a later
+build can tell what this store actually ran.
+
+`stopBefore` names a migration to leave unapplied, along with everything
+after it, for a caller with work to do before that migration can run.
+Admission still sees the whole bundle, so a store already past that migration
+is admitted rather than refused for holding rows this run would not reach.
+*/
 export async function applyMigrations<TSchema extends Record<string, unknown>>(
 	database: MigrationDatabase<TSchema>,
 	bundle: MigrationBundle,

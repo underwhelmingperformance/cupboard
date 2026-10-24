@@ -255,16 +255,15 @@ async function cacheCredentialCaches(): Promise<
 }
 
 /**
- * Writes one reference edge at the cache's first generation, with no lifecycle
- * row for the cache. This is what a cache that has never been deleted holds.
- * The NAR it points at is stored too, so only the reference check can decide
- * whether a read of it succeeds.
- *
- * The presence row and the usage charge come with it, because retiring the
- * edge credits both and the tenant's counters may not go negative.
- */
+Writes one reference edge at the cache's first generation, with no lifecycle
+row for the cache. This is what a cache that has never been deleted holds.
+The NAR it points at is stored too, so only the reference check can decide
+whether a read of it succeeds.
+
+The presence row and the usage charge come with it, because retiring the
+edge credits both and the tenant's counters may not go negative.
+*/
 async function seedFirstGenerationEdge(
-	cache: CacheScope,
 	storePathHash: StorePathHash,
 	nar: VerifiableNar
 ): Promise<void> {
@@ -284,7 +283,7 @@ async function seedFirstGenerationEdge(
 		.insert(d1Schema.blobReference)
 		.values({
 			tenant: fixtureTenant,
-			...cacheIdentityColumns(cache),
+			...cacheIdentityColumns(buildsCache),
 			storePathHash,
 			generation: narInfoGenerationSchema.parse(0),
 			narHash: nar.narHash,
@@ -372,15 +371,14 @@ async function deleteAndParkTeardown(cache: CacheScope): Promise<void> {
 }
 
 /**
- * Removes one narinfo object before a case relies on nothing being at its key.
- *
- * R2 is one bucket the pool does not roll back between tests, and every server
- * these cases start is configured with the same tenant, so they address the
- * same keys. A public read is answered from the object at the key it addresses,
- * so an object an earlier case left there would be served.
- */
+Removes one narinfo object before a case relies on nothing being at its key.
+
+R2 is one bucket the pool does not roll back between tests, and every server
+these cases start is configured with the same tenant, so they address the
+same keys. A public read is answered from the object at the key it addresses,
+so an object an earlier case left there would be served.
+*/
 async function clearNarInfoObject(
-	cache: CacheScope,
 	storePathHash: string,
 	generation?: CacheGeneration
 ): Promise<void> {
@@ -388,21 +386,21 @@ async function clearNarInfoObject(
 		narInfoObjectKey(
 			fixtureTenant,
 			storePathHashSchema.parse(storePathHash),
-			cache,
+			buildsCache,
 			generation
 		)
 	);
 }
 
 /**
- * Counts the D1 statements used by a deletion with production chunk sizes. The
- * deletion revokes the generation and schedules the drain. Its statement count
- * must therefore remain independent of the number of paths in the cache.
- *
- * The count is taken inside one Durable Object invocation. A deletion arms the
- * alarm that drains the cache before it returns, and the statements of that
- * drain would otherwise land in the count of a separate invocation.
- */
+Counts the D1 statements used by a deletion with production chunk sizes. The
+deletion revokes the generation and schedules the drain. Its statement count
+must therefore remain independent of the number of paths in the cache.
+
+The count is taken inside one Durable Object invocation. A deletion arms the
+alarm that drains the cache before it returns, and the statements of that
+drain would otherwise land in the count of a separate invocation.
+*/
 async function deletionStatements(
 	server: string,
 	storePaths: number
@@ -504,13 +502,13 @@ async function deletionStatements(
 }
 
 /**
- * Counts the D1 statements one alarm pass runs at the deployed chunk size,
- * after a deletion has filled the queue. The count separates fixed query work
- * from the work for each retirement chunk.
- *
- * The deletion and the pass share one Durable Object invocation, so a delivered
- * alarm cannot drain the queue before the pass this counts.
- */
+Counts the D1 statements one alarm pass runs at the deployed chunk size,
+after a deletion has filled the queue. The count separates fixed query work
+from the work for each retirement chunk.
+
+The deletion and the pass share one Durable Object invocation, so a delivered
+alarm cannot drain the queue before the pass this counts.
+*/
 async function teardownPassStatements(
 	server: string,
 	storePaths: number
@@ -555,11 +553,11 @@ function attestationUploadId(index: number): string {
 }
 
 /**
- * Publishes `paths` store paths in `builds`, each carrying `references`
- * attestation references. Every bundle belongs to one path alone, so retiring
- * a reference removes the tenant's last one to that bundle and credits its
- * quota, which is the costliest retirement the drain meets.
- */
+Publishes `paths` store paths in `builds`, each carrying `references`
+attestation references. Every bundle belongs to one path alone, so retiring
+a reference removes the tenant's last one to that bundle and credits its
+quota, which is the costliest retirement the drain meets.
+*/
 async function publishAttestedPaths(
 	paths: number,
 	references: number
@@ -588,12 +586,12 @@ async function publishAttestedPaths(
 }
 
 /**
- * Counts the tracked D1 and R2 calls each teardown pass makes until the drain
- * has emptied the queue, at the selected invocation allowance.
- *
- * The deletion and every pass share one Durable Object invocation, so a
- * delivered alarm cannot drain the queue between the counts.
- */
+Counts the tracked D1 and R2 calls each teardown pass makes until the drain
+has emptied the queue, at the selected invocation allowance.
+
+The deletion and every pass share one Durable Object invocation, so a
+delivered alarm cannot drain the queue between the counts.
+*/
 async function attestedTeardownPassSubrequests(
 	server: string,
 	paths: number,
@@ -647,10 +645,10 @@ async function attestedTeardownPassSubrequests(
 }
 
 /**
- * Publishes a private cache holding one path, its own read credential, and the
- * two objects a deletion leaves for its drain: the path's narinfo and its
- * attestation list.
- */
+Publishes a private cache holding one path, its own read credential, and the
+two objects a deletion leaves for its drain: the path's narinfo and its
+attestation list.
+*/
 async function publishPrivatePath(
 	server: string,
 	pathIndex = 0
@@ -733,23 +731,23 @@ async function readPrivateSurfaces(
 
 // Reads one path's narinfo by GET and by HEAD, and asks availability about it,
 // all with the given credential.
-async function readPrivateNarInfo(
-	storePathHash: StorePathHash,
-	credential: ReadCredential
-): Promise<{
+async function readPrivateNarInfo(storePathHash: StorePathHash): Promise<{
 	narinfo: number;
 	head: number;
 	missing: readonly string[];
 }> {
 	const path = `/cache/${privateBuildsName}/${storePathHash}.narinfo`;
-	const narinfo = await readFetch(path, basic(credential));
-	const head = await readFetch(path, { method: 'HEAD', ...basic(credential) });
+	const narinfo = await readFetch(path, basic(tenantReader));
+	const head = await readFetch(path, {
+		method: 'HEAD',
+		...basic(tenantReader)
+	});
 	const availability = await readFetch(
 		`/cache/${privateBuildsName}/api/v1/missing-paths`,
 		{
 			method: 'POST',
 			headers: {
-				...credentialHeaders(credential),
+				...credentialHeaders(tenantReader),
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ storePathHashes: [storePathHash] })
@@ -807,17 +805,17 @@ describe('deleted private cache', () => {
 	});
 
 	/**
-	 * Deleting a private cache and registering the name again as public is the
-	 * crossing that discloses: the reader who arrives next presents no
-	 * credential, and the paths behind the old one were never meant for them.
-	 *
-	 * Access is not part of an object key. Both incarnations of the name resolve
-	 * to one identity with an access field, so what separates the public cache's
-	 * reads from the private cache's objects is the generation alone. The public
-	 * read consults nothing else. A path index no other case in this file uses
-	 * keeps the assertion about this cache's own objects, because the pool does
-	 * not roll R2 back between tests.
-	 */
+	Deleting a private cache and registering the name again as public is the
+	crossing that discloses: the reader who arrives next presents no
+	credential, and the paths behind the old one were never meant for them.
+
+	Access is not part of an object key. Both incarnations of the name resolve
+	to one identity with an access field, so what separates the public cache's
+	reads from the private cache's objects is the generation alone. The public
+	read consults nothing else. A path index no other case in this file uses
+	keeps the assertion about this cache's own objects, because the pool does
+	not roll R2 back between tests.
+	*/
 	it('refuses the deleted private cache narinfo to the public cache that takes its name', async () => {
 		const { token, metadata } = await publishPrivatePath(
 			'gen-private-to-public',
@@ -953,10 +951,7 @@ describe('deleted private cache', () => {
 			recommittedNar
 		);
 
-		const afterRecommit = await readPrivateNarInfo(
-			metadata.storePathHash,
-			tenantReader
-		);
+		const afterRecommit = await readPrivateNarInfo(metadata.storePathHash);
 
 		// Put the previous object at the recommitted cache's own key, modelling the
 		// interval after the new reference edge is written but before the
@@ -978,10 +973,7 @@ describe('deleted private cache', () => {
 
 		expect({
 			afterRecommit,
-			withPreviousObject: await readPrivateNarInfo(
-				metadata.storePathHash,
-				tenantReader
-			)
+			withPreviousObject: await readPrivateNarInfo(metadata.storePathHash)
 		}).toStrictEqual({
 			afterRecommit: {
 				narinfo: StatusCodes.OK,
@@ -1409,11 +1401,7 @@ describe('cache generation gate', () => {
 		const oldPath = indexedMetadata(0, oldNar);
 		const newPath = indexedMetadata(1, newNar);
 
-		await clearNarInfoObject(
-			buildsCache,
-			oldPath.storePathHash,
-			secondCacheGeneration
-		);
+		await clearNarInfoObject(oldPath.storePathHash, secondCacheGeneration);
 		await pushPath(token, oldPath, buildsCache, oldNar);
 		// Park the drain so the deleted cache's narinfo object survives into the
 		// lifetime of the next cache of the same name.
@@ -1467,12 +1455,8 @@ describe('cache generation gate', () => {
 		const oldPath = indexedMetadata(0, oldNar);
 		const newPath = indexedMetadata(1, newNar);
 
-		await clearNarInfoObject(buildsCache, newPath.storePathHash);
-		await clearNarInfoObject(
-			buildsCache,
-			newPath.storePathHash,
-			secondCacheGeneration
-		);
+		await clearNarInfoObject(newPath.storePathHash);
+		await clearNarInfoObject(newPath.storePathHash, secondCacheGeneration);
 		await pushPath(token, oldPath, buildsCache, oldNar);
 		await deleteAndParkTeardown(buildsCache);
 		await putTestCache(token, buildsCache);
@@ -1518,11 +1502,7 @@ describe('cache generation gate', () => {
 		const legacyPath = indexedMetadata(0, legacyNar);
 		const freshPath = indexedMetadata(1, freshNar);
 
-		await seedFirstGenerationEdge(
-			buildsCache,
-			legacyPath.storePathHash,
-			legacyNar
-		);
+		await seedFirstGenerationEdge(legacyPath.storePathHash, legacyNar);
 
 		const legacyPathUrl = seededNarPath(legacyNar);
 		const beforeDeletion = await readFetch(legacyPathUrl);
@@ -1574,11 +1554,7 @@ describe('cache generation gate', () => {
 		// Seed the state left when the row transaction commits but the drain does
 		// not run: a reference edge without a narinfo row. A later deletion must
 		// still retire this edge.
-		await seedFirstGenerationEdge(
-			buildsCache,
-			stranded.storePathHash,
-			strandedNar
-		);
+		await seedFirstGenerationEdge(stranded.storePathHash, strandedNar);
 
 		// A due alarm can run while a Durable Object callback awaits. Keep alarm
 		// arming disabled so only the explicit drain passes can clear the marker.
@@ -1629,11 +1605,7 @@ describe('cache generation gate', () => {
 		// Seed a reference edge without a narinfo row. An interrupted earlier
 		// deletion can leave this state. The transaction that queues the teardown reads
 		// the narinfo rows, so it cannot find this one.
-		await seedFirstGenerationEdge(
-			buildsCache,
-			stranded.storePathHash,
-			strandedNar
-		);
+		await seedFirstGenerationEdge(stranded.storePathHash, strandedNar);
 
 		// An alarm pass uses the deployed cap and would drain the queue before
 		// this test can inspect the state left by its cap-one pass.

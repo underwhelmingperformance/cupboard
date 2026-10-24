@@ -67,10 +67,10 @@ export interface ReadEnv {
 }
 
 /**
- * The cache selected by a read request: which cache, which incarnation of its
- * name, and who may read it. Admission resolves all three from the cache's
- * lifecycle row.
- */
+The cache selected by a read request: which cache, which incarnation of its
+name, and who may read it. Admission resolves all three from the cache's
+lifecycle row.
+*/
 export interface ReadScope {
 	readonly scope: CacheScope;
 	readonly access: CacheAccessMode;
@@ -91,16 +91,16 @@ export interface ViewReadAuthentication {
 }
 
 /**
- * Authenticates a read, or returns the refusal to send instead.
- *
- * Admission reads every verifier from the authoritative D1 rows on each
- * request, so a rotated or deleted verifier takes effect immediately.
- *
- * A private cache must authenticate. A content-read token can authorise the
- * cache directly. For a static credential, the cache-specific verifier takes
- * precedence over the tenant verifier. The control Worker streams private
- * content; token verification calls the tenant Worker once per request.
- */
+Authenticates a read, or returns the refusal to send instead.
+
+Admission reads every verifier from the authoritative D1 rows on each
+request, so a rotated or deleted verifier takes effect immediately.
+
+A private cache must authenticate. A content-read token can authorise the
+cache directly. For a static credential, the cache-specific verifier takes
+precedence over the tenant verifier. The control Worker streams private
+content; token verification calls the tenant Worker once per request.
+*/
 export async function guardScopedRead(
 	request: Request,
 	entry: TenantEntry,
@@ -119,13 +119,13 @@ export async function guardScopedRead(
 }
 
 /**
- * Authenticates a read of a private reuse view, or returns the refusal to send
- * instead.
- *
- * A view can select several caches. An exact view content-read token or the
- * tenant's static credential can authorise it; a cache-specific credential
- * grants access only to that cache.
- */
+Authenticates a read of a private reuse view, or returns the refusal to send
+instead.
+
+A view can select several caches. An exact view content-read token or the
+tenant's static credential can authorise it; a cache-specific credential
+grants access only to that cache.
+*/
 export function guardPrivateViewRead(
 	request: Request,
 	authentication: ViewReadAuthentication
@@ -158,16 +158,16 @@ async function authenticateRead(
 }
 
 /**
- * Which reference rows may authorise a NAR read.
- *
- * R2 stores one NAR object for each hash. Every cache that has committed a
- * narinfo for that hash has a corresponding `blob_ref` row. The read surface
- * determines which reference rows can authorise the request.
- *
- * A direct cache read counts only reference rows for that cache. A reuse-view
- * NAR read counts rows from caches selected by that exact view. Both forms also
- * require the cache's current access to match the route that admitted the read.
- */
+Which reference rows may authorise a NAR read.
+
+R2 stores one NAR object for each hash. Every cache that has committed a
+narinfo for that hash has a corresponding `blob_ref` row. The read surface
+determines which reference rows can authorise the request.
+
+A direct cache read counts only reference rows for that cache. A reuse-view
+NAR read counts rows from caches selected by that exact view. Both forms also
+require the cache's current access to match the route that admitted the read.
+*/
 export type NarAuthority =
 	| {
 			readonly kind: 'cache';
@@ -229,12 +229,12 @@ export async function serveNar(
 }
 
 /**
- * Selects at most 65 readable references for one NAR. Cache selectors, access
- * policy and cache lifecycle generation filter the candidates before the
- * limit. Each candidate reports whether its path revocation fence permits
- * the read. A full page without authority requires a retry while maintenance
- * demotes revoked references.
- */
+Selects at most 65 readable references for one NAR. Cache selectors, access
+policy and cache lifecycle generation filter the candidates before the
+limit. Each candidate reports whether its path revocation fence permits
+the read. A full page without authority requires a retry while maintenance
+demotes revoked references.
+*/
 export function narReferenceQuery(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -316,11 +316,11 @@ function referencingCaches(authority: NarAuthority): SQL | undefined {
 }
 
 /**
- * Finds the newest readable reference above each requested path's revocation
- * fence in the current cache lifecycle generation. The query returns the
- * narinfo generation and NAR hash so the read can reject an object from
- * another publication.
- */
+Finds the newest readable reference above each requested path's revocation
+fence in the current cache lifecycle generation. The query returns the
+narinfo generation and NAR hash so the read can reject an object from
+another publication.
+*/
 export function narInfoReferenceQuery(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -394,18 +394,18 @@ export const cacheProbeD1CallsPerChunk = 2;
 export const cacheProbeHeadsPerHash = 2;
 
 /**
- * Returns the current commit of each requested path in this cache, taken from
- * the reference edges the cache generation authorises.
- *
- * A recommit can leave an earlier edge in place until the teardown drain
- * removes it, so D1 can contain several authorised edges for one path. Narinfo
- * generations increase and are never reused for one cache and path.
- * The greatest generation therefore belongs to the current commit. A path with
- * no authorised edge is absent from the result.
- *
- * Retry the D1 query once, as the NAR read does: a persistent failure becomes a
- * retryable refusal instead of a 404 reporting the path as absent.
- */
+Returns the current commit of each requested path in this cache, taken from
+the reference edges the cache generation authorises.
+
+A recommit can leave an earlier edge in place until the teardown drain
+removes it, so D1 can contain several authorised edges for one path. Narinfo
+generations increase and are never reused for one cache and path.
+The greatest generation therefore belongs to the current commit. A path with
+no authorised edge is absent from the result.
+
+Retry the D1 query once, as the NAR read does: a persistent failure becomes a
+retryable refusal instead of a 404 reporting the path as absent.
+*/
 export async function authorisedNarInfoVersions(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -498,13 +498,13 @@ async function isPublishedNarAvailable(
 }
 
 /**
- * Which of the requested paths the cache cannot serve. Runs in the tenant
- * Durable Object, one chunk of a page per request: each hash costs a narinfo
- * head and a head of the NAR at the URL that the narinfo records. The Worker
- * sizes a chunk so the heads fit one invocation's subrequest slice
- * (`chunked-availability.ts`). A chunk that does not fit is refused, because
- * the sizing is derived from the same limits.
- */
+Which of the requested paths the cache cannot serve. Runs in the tenant
+Durable Object, one chunk of a page per request: each hash costs a narinfo
+head and a head of the NAR at the URL that the narinfo records. The Worker
+sizes a chunk so the heads fit one invocation's subrequest slice
+(`chunked-availability.ts`). A chunk that does not fit is refused, because
+the sizing is derived from the same limits.
+*/
 export async function missingStorePathHashes(
 	blobs: R2Bucket,
 	database: DrizzleD1Database<typeof d1Schema>,
@@ -540,11 +540,11 @@ export async function missingStorePathHashes(
 				narInfoObjectKey(tenant, storePathHash, cache, current.cacheGeneration)
 			);
 
-			if (object === null || !isNarInfoObjectOfCommit(object, current)) {
-				return storePathHash;
-			}
-
-			if (!(await isPublishedNarAvailable(blobs, object))) {
+			if (
+				object === null ||
+				!isNarInfoObjectOfCommit(object, current) ||
+				!(await isPublishedNarAvailable(blobs, object))
+			) {
 				return storePathHash;
 			}
 

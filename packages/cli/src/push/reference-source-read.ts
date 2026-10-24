@@ -62,10 +62,10 @@ function sourceResource(source: URL): SourceResource | undefined {
 }
 
 /**
- * Returns the content-read grant to request for a recognised private cache or
- * reuse view in the destination's tenant. The destination, a public, unrecognised or
- * other-tenant source returns an empty intent.
- */
+Returns the content-read grant to request for a recognised private cache or
+reuse view in the destination's tenant. The destination, a public, unrecognised or
+other-tenant source returns an empty intent.
+*/
 async function referenceSourceReadIntent(
 	source: URL,
 	destination: ReferenceDestination,
@@ -91,18 +91,18 @@ async function referenceSourceReadIntent(
 }
 
 /**
- * The read grants that a push requests for its private reference sources, and
- * those sources.
- */
+The read grants that a push requests for its private reference sources, and
+those sources.
+*/
 export interface ReferenceSourceReads {
 	readonly intents: readonly ContentReadGrantIntent[];
 	readonly sources: readonly URL[];
 }
 
 /**
- * Returns the read grants for a set of reference sources. Each distinct source
- * is probed once, and sources that need no grant are left out.
- */
+Returns the read grants for a set of reference sources. Each distinct source
+is probed once, and sources that need no grant are left out.
+*/
 export async function referenceSourceReadIntents(
 	sources: readonly URL[],
 	destination: ReferenceDestination,

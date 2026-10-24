@@ -138,19 +138,19 @@ export interface TornDownNarInfo {
 }
 
 /**
- * What one queued narinfo deletion retired: the queue entry, and whether a
- * later commit of the same path owned the published object and so kept it.
- */
+What one queued narinfo deletion retired: the queue entry, and whether a
+later commit of the same path owned the published object and so kept it.
+*/
 export interface RetiredNarInfo {
 	readonly queued: typeof schema.narInfoDeletions.$inferSelect;
 	readonly wasNewerCommitted: boolean;
 }
 
 /**
- * The result of {@link DeletionQueueService.retireQueuedNarInfoEdge}: the queue
- * has no such entry, the entry is deferred for inheritance, or its edge was
- * retired.
- */
+The result of {@link DeletionQueueService.retireQueuedNarInfoEdge}: the queue
+has no such entry, the entry is deferred for inheritance, or its edge was
+retired.
+*/
 export type QueuedNarInfoRetirement =
 	| { readonly kind: 'absent' }
 	| { readonly kind: 'deferred'; readonly wasObjectDeleted: boolean }
@@ -200,10 +200,10 @@ function maxSinglePathAttestationRetirements(
 }
 
 /**
- * Builds the query for the attestation references filed against the exact
- * narinfo generations of one retirement chunk. The parameter test imports this
- * builder.
- */
+Builds the query for the attestation references filed against the exact
+narinfo generations of one retirement chunk. The parameter test imports this
+builder.
+*/
 export function capturedReferenceSelect(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -237,12 +237,12 @@ export function capturedReferenceSelect(
 }
 
 /**
- * Builds the query for the edges of one cache that still reference a retired
- * chunk's NAR hashes. The hashes travel as a list, so the query binds the same
- * parameters however many the chunk retired.
- *
- * The parameter test imports this builder and inspects the statement it makes.
- */
+Builds the query for the edges of one cache that still reference a retired
+chunk's NAR hashes. The hashes travel as a list, so the query binds the same
+parameters however many the chunk retired.
+
+The parameter test imports this builder and inspects the statement it makes.
+*/
 export function cacheReferenceSelect(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -268,13 +268,13 @@ export function cacheReferenceSelect(
 }
 
 /**
- * Builds statements to retire one chunk of narinfo references and their
- * publication records. The quota update counts only references matched by
- * the reference deletion.
- *
- * The parameter test imports this builder so it inspects the production
- * statements instead of maintaining a separate filter.
- */
+Builds statements to retire one chunk of narinfo references and their
+publication records. The quota update counts only references matched by
+the reference deletion.
+
+The parameter test imports this builder so it inspects the production
+statements instead of maintaining a separate filter.
+*/
 export function fencedEdgeRetirement(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -753,16 +753,16 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Retires as many of one narinfo generation's attestation references as the
-	 * available subrequests permit, and reports whether it retired them all.
-	 *
-	 * A path may have any number of references, so one invocation might not
-	 * retire them all. When this returns false the caller keeps the queue entry,
-	 * and garbage collection retires the remainder.
-	 *
-	 * The remaining subrequest slice and `maxSinglePathAttestationRetirements`
-	 * jointly limit the page.
-	 */
+	Retires as many of one narinfo generation's attestation references as the
+	available subrequests permit, and reports whether it retired them all.
+
+	A path may have any number of references, so one invocation might not
+	retire them all. When this returns false the caller keeps the queue entry,
+	and garbage collection retires the remainder.
+
+	The remaining subrequest slice and `maxSinglePathAttestationRetirements`
+	jointly limit the page.
+	*/
 	private async retireAttestationRefs(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash,
@@ -812,21 +812,21 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Retires one chunk of queued narinfo deletions. Returns the number of
-	 * published narinfo objects removed, or `undefined` when the remaining D1
-	 * allowance is too small for the complete chunk.
-	 *
-	 * Attestation references go first because their unbounded count determines
-	 * whether the chunk can finish. The drain keeps back the fixed
-	 * narinfo-retirement cost and retires only the references the rest of the
-	 * allowance covers. A surplus reference stops the chunk before it retires the
-	 * reference edges or clears the queue entries.
-	 *
-	 * The bundle route requires both an attestation reference and its matching
-	 * generation-authorised reference edge. Removing references before the rest
-	 * of the chunk therefore stops the bundle route serving the path
-	 * immediately, even if the pass is interrupted.
-	 */
+	Retires one chunk of queued narinfo deletions. Returns the number of
+	published narinfo objects removed, or `undefined` when the remaining D1
+	allowance is too small for the complete chunk.
+
+	Attestation references go first because their unbounded count determines
+	whether the chunk can finish. The drain keeps back the fixed
+	narinfo-retirement cost and retires only the references the rest of the
+	allowance covers. A surplus reference stops the chunk before it retires the
+	reference edges or clears the queue entries.
+
+	The bundle route requires both an attestation reference and its matching
+	generation-authorised reference edge. Removing references before the rest
+	of the chunk therefore stops the bundle route serving the path
+	immediately, even if the pass is interrupted.
+	*/
 	private async retireTornDownChunk(
 		cache: ResolvedCache,
 		tenant: TenantId,
@@ -862,11 +862,10 @@ export class DeletionQueueService {
 			await this.attestationCas.removeCapturedReference(reference);
 		}
 
-		if (references.length > affordable) {
-			return undefined;
-		}
-
-		if (subrequestsAvailable() < finishingSubrequests) {
+		if (
+			references.length > affordable ||
+			subrequestsAvailable() < finishingSubrequests
+		) {
 			return undefined;
 		}
 
@@ -1002,16 +1001,16 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Removes the attestation list objects left by a retired chunk.
-	 *
-	 * `removable` contains paths for which the retired generation was the latest
-	 * commit. One bulk call removes their lists. `superseded` contains paths with
-	 * a later committed generation. For those paths, the method removes a list
-	 * only if it still records the retired generation.
-	 *
-	 * Neither step reads the reference rows, so a replay after a crash between
-	 * reference removal and list removal still discards the stale object.
-	 */
+	Removes the attestation list objects left by a retired chunk.
+
+	`removable` contains paths for which the retired generation was the latest
+	commit. One bulk call removes their lists. `superseded` contains paths with
+	a later committed generation. For those paths, the method removes a list
+	only if it still records the retired generation.
+
+	Neither step reads the reference rows, so a replay after a crash between
+	reference removal and list removal still discards the stale object.
+	*/
 	private async discardRetiredLists(
 		cache: ResolvedCache,
 		removable: readonly TornDownNarInfo[],
@@ -1048,10 +1047,10 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Queues narinfo versions for deletion, one statement per bound list. A
-	 * version already queued keeps its `created_at` and takes the incoming NAR
-	 * hash.
-	 */
+	Queues narinfo versions for deletion, one statement per bound list. A
+	version already queued keeps its `created_at` and takes the incoming NAR
+	hash.
+	*/
 	enqueueNarInfoDeletions(
 		handle: SchemaWriter,
 		cache: ResolvedCache,
@@ -1152,10 +1151,10 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Whether the next flush can do work: retire an entry, or withdraw the
-	 * narinfo of a deferred entry that it has not withdrawn yet. A withdrawn
-	 * entry becomes work again when its deferral ends.
-	 */
+	Whether the next flush can do work: retire an entry, or withdraw the
+	narinfo of a deferred entry that it has not withdrawn yet. A withdrawn
+	entry becomes work again when its deferral ends.
+	*/
 	hasNarInfoDeletionWork(now: Date = new Date()): boolean {
 		const table = schema.narInfoDeletions;
 		const deferred = deferredDeletionCondition(isoTimestamp(now));
@@ -1170,12 +1169,12 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * The earliest time at which a pending upload that defers a withdrawn
-	 * deletion expires, or `undefined` when no pending upload defers one.
-	 * This includes another cache's upload when the source cache is public.
-	 * The inheritance drain reports when it removes a queue row that deferred
-	 * a deletion.
-	 */
+	The earliest time at which a pending upload that defers a withdrawn
+	deletion expires, or `undefined` when no pending upload defers one.
+	This includes another cache's upload when the source cache is public.
+	The inheritance drain reports when it removes a queue row that deferred
+	a deletion.
+	*/
 	earliestPendingDeferralEnd(now: Date = new Date()): number | undefined {
 		const deletion = schema.narInfoDeletions;
 		const pending = schema.pendingUploads;
@@ -1200,11 +1199,11 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Stores the time at which the first pending upload that defers a withdrawn
-	 * deletion expires, and arms the alarm for that time. An earlier stored time
-	 * remains, because garbage collection has not yet retired the deletions whose
-	 * deferral ended then.
-	 */
+	Stores the time at which the first pending upload that defers a withdrawn
+	deletion expires, and arms the alarm for that time. An earlier stored time
+	remains, because garbage collection has not yet retired the deletions whose
+	deferral ended then.
+	*/
 	async armDeferralWake(now: Date = new Date()): Promise<void> {
 		const wakeAt = this.earliestPendingDeferralEnd(now);
 
@@ -1220,9 +1219,9 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * The time at which garbage collection runs again for a withdrawn deletion,
-	 * or `undefined` when no time is stored.
-	 */
+	The time at which garbage collection runs again for a withdrawn deletion,
+	or `undefined` when no time is stored.
+	*/
 	async deferralWakeAt(): Promise<number | undefined> {
 		const stored = z
 			.number()
@@ -1236,9 +1235,9 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Whether removing this inheritance released a deletion for the same path
-	 * and NAR in an earlier generation or a public source cache.
-	 */
+	Whether removing this inheritance released a deletion for the same path
+	and NAR in an earlier generation or a public source cache.
+	*/
 	hasDeletionReleasedByInheritance(
 		cacheId: CacheId,
 		storePathHash: StorePathHash,
@@ -1290,16 +1289,16 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Removes one queued narinfo's published object, then retires its reference
-	 * edge. Returns undefined when the queue has no such entry.
-	 *
-	 * Retire the edge before calling {@link blobHashUnreferenced}; otherwise
-	 * this edge would still authorise the NAR. An object owned by a later
-	 * publication is preserved. Callers reporting a deletion must propagate a
-	 * failure here because the old edge may still authorise reads.
-	 *
-	 * The caller must hold the critical section.
-	 */
+	Removes one queued narinfo's published object, then retires its reference
+	edge. Returns undefined when the queue has no such entry.
+
+	Retire the edge before calling {@link blobHashUnreferenced}; otherwise
+	this edge would still authorise the NAR. An object owned by a later
+	publication is preserved. Callers reporting a deletion must propagate a
+	failure here because the old edge may still authorise reads.
+
+	The caller must hold the critical section.
+	*/
 	async retireQueuedNarInfoEdge(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash,
@@ -1408,14 +1407,14 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Removes the cached copies, attestations and queue entry for a retired
-	 * narinfo. The caller must have run {@link retireQueuedNarInfoEdge}, which
-	 * removes the published object and the reference edge, and must hold the
-	 * critical section.
-	 *
-	 * A path carrying more attestation references than one invocation may retire
-	 * keeps its queue entry, so garbage collection retires the rest.
-	 */
+	Removes the cached copies, attestations and queue entry for a retired
+	narinfo. The caller must have run {@link retireQueuedNarInfoEdge}, which
+	removes the published object and the reference edge, and must hold the
+	critical section.
+
+	A path carrying more attestation references than one invocation may retire
+	keeps its queue entry, so garbage collection retires the rest.
+	*/
 	async cleanUpQueuedNarInfo(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash,
@@ -1484,24 +1483,24 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Advances the lifecycle generation and records the cache as deleted in the
-	 * same statement. This revokes a cache of any size before physical cleanup
-	 * drains its edges. A cache with no lifecycle row yet takes one insert
-	 * instead.
-	 *
-	 * A later cache with the same name uses the advanced generation. Its reads
-	 * therefore exclude every edge left by the deleted cache.
-	 *
-	 * For a private cache, the deletion timestamp makes content reads return
-	 * absent-object results and makes availability report every requested path as
-	 * missing while path-keyed objects await teardown.
-	 * `CacheRegistrationService.recordLifecycle` removes the timestamp when the
-	 * cache name is registered again.
-	 *
-	 * The read revision advances with the generation. Both are in the Workers
-	 * Cache key, so a response the deleted cache produced is not served to a
-	 * reader of the next cache of this name.
-	 */
+	Advances the lifecycle generation and records the cache as deleted in the
+	same statement. This revokes a cache of any size before physical cleanup
+	drains its edges. A cache with no lifecycle row yet takes one insert
+	instead.
+
+	A later cache with the same name uses the advanced generation. Its reads
+	therefore exclude every edge left by the deleted cache.
+
+	For a private cache, the deletion timestamp makes content reads return
+	absent-object results and makes availability report every requested path as
+	missing while path-keyed objects await teardown.
+	`CacheRegistrationService.recordLifecycle` removes the timestamp when the
+	cache name is registered again.
+
+	The read revision advances with the generation. Both are in the Workers
+	Cache key, so a response the deleted cache produced is not served to a
+	reader of the next cache of this name.
+	*/
 	async revokeCacheGenerationAndClearCredential(
 		cache: ResolvedCache
 	): Promise<void> {
@@ -1581,24 +1580,24 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Queues one bounded page of reference edges from an earlier cache generation.
-	 * The ordinary retirement drain removes the edges and credits their usage.
-	 *
-	 * A commit inserts its edge inside the same critical section that a cache
-	 * deletion runs in, and it records its local narinfo before that insert, so
-	 * the local transaction that queues every narinfo normally covers every
-	 * committed edge. This sweep finds the revoked edges an interrupted earlier
-	 * deletion left, which would otherwise keep counting towards the tenant's
-	 * usage indefinitely.
-	 *
-	 * The cache-generation predicate excludes the edges of the current cache of
-	 * this name. Retirement then matches the exact narinfo generation, which is a
-	 * separate number, so a queued deletion cannot remove a newer recommitted
-	 * edge.
-	 *
-	 * Returns the number of edges queued. The caller must hold the critical
-	 * section.
-	 */
+	Queues one bounded page of reference edges from an earlier cache generation.
+	The ordinary retirement drain removes the edges and credits their usage.
+
+	A commit inserts its edge inside the same critical section that a cache
+	deletion runs in, and it records its local narinfo before that insert, so
+	the local transaction that queues every narinfo normally covers every
+	committed edge. This sweep finds the revoked edges an interrupted earlier
+	deletion left, which would otherwise keep counting towards the tenant's
+	usage indefinitely.
+
+	The cache-generation predicate excludes the edges of the current cache of
+	this name. Retirement then matches the exact narinfo generation, which is a
+	separate number, so a queued deletion cannot remove a newer recommitted
+	edge.
+
+	Returns the number of edges queued. The caller must hold the critical
+	section.
+	*/
 	async queueRevokedCacheEdges(
 		cache: ResolvedCache,
 		limit: number
@@ -1649,17 +1648,17 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Retires queued narinfo deletions for one cache within the invocation's D1
-	 * allowance. Returns the number of published narinfo objects removed.
-	 *
-	 * The caller must hold the critical section. Each chunk completes its
-	 * attestation retirement, generation checks, object deletions, edge
-	 * retirement, accounting, and queue clears before the next chunk starts, so
-	 * a timeout can repeat at most one chunk. Exact generation filters make
-	 * replays idempotent and preserve objects from later recommits.
-	 *
-	 * The durable queue retains every unprocessed entry for the next pass.
-	 */
+	Retires queued narinfo deletions for one cache within the invocation's D1
+	allowance. Returns the number of published narinfo objects removed.
+
+	The caller must hold the critical section. Each chunk completes its
+	attestation retirement, generation checks, object deletions, edge
+	retirement, accounting, and queue clears before the next chunk starts, so
+	a timeout can repeat at most one chunk. Exact generation filters make
+	replays idempotent and preserve objects from later recommits.
+
+	The durable queue retains every unprocessed entry for the next pass.
+	*/
 	async retireTornDownNarInfos(
 		cache: ResolvedCache,
 		entries: readonly TornDownNarInfo[],
@@ -1888,13 +1887,13 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Runs the queued cleanup of rows that {@link reconcileMissingNar} removed
-	 * with deferred cleanup. Each row has its own critical section, so the input
-	 * gate does not stay closed across every R2 delete. A failed row stays
-	 * queued for garbage collection.
-	 *
-	 * Opens critical sections; do not call this from inside one.
-	 */
+	Runs the queued cleanup of rows that {@link reconcileMissingNar} removed
+	with deferred cleanup. Each row has its own critical section, so the input
+	gate does not stay closed across every R2 delete. A failed row stays
+	queued for garbage collection.
+
+	Opens critical sections; do not call this from inside one.
+	*/
 	async cleanUpRemovedNarInfos(
 		rows: readonly (typeof schema.narInfos.$inferSelect)[],
 		origin?: RequestOrigin

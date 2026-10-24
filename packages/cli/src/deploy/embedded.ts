@@ -49,9 +49,9 @@ export function parseEmbeddedPayload(json: string): EmbeddedPayload {
 }
 
 /**
- * Load the deployment artifact baked into the released single-executable. Only
- * valid when running as a SEA whose build embedded the payload.
- */
+Load the deployment artifact baked into the released single-executable. Only
+valid when running as a SEA whose build embedded the payload.
+*/
 export function loadEmbeddedArtifact(): DeploymentArtifact {
 	if (!isSea()) {
 		throw new EmbeddedArtifactError('not running as a single executable');

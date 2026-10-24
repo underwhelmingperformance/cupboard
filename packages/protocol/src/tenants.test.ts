@@ -7,12 +7,12 @@ import {
 } from './tenants.ts';
 
 /**
- * The fields a rejection is about. Asserting only that a parse failed lets a
- * fixture that is wrong in some other way satisfy the case, so each rejection
- * names the path it expects to fail on. An unrecognised key reports an empty
- * path, which is how a fixture that has drifted from the schema shows up here
- * rather than passing.
- */
+The fields a rejection is about. Asserting only that a parse failed lets a
+fixture that is wrong in some other way satisfy the case, so each rejection
+names the path it expects to fail on. An unrecognised key reports an empty
+path, which is how a fixture that has drifted from the schema shows up here
+rather than passing.
+*/
 function rejectedPaths(schema: ZodType, value: unknown): string[] {
 	const result = schema.safeParse(value);
 

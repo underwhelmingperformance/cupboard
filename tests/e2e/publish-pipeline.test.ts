@@ -147,10 +147,10 @@ function system(): string {
 }
 
 /**
- * Whether local builds use streaming publication on this machine. A daemonless
- * store registers GC roots. A daemon-backed store streams when the daemon trusts
- * the current user to configure a build hook for this command.
- */
+Whether local builds use streaming publication on this machine. A daemonless
+store registers GC roots. A daemon-backed store streams when the daemon trusts
+the current user to configure a build hook for this command.
+*/
 async function canStreamLocalBuild(): Promise<boolean> {
 	const config = discoverNixStoreConfig();
 	const storeKind = Nix.open().storeKind;
@@ -172,10 +172,10 @@ function consumerFlake(options: {
 	readonly seed: string;
 	readonly runtimeDependency?: boolean;
 	/**
-	 * Distinguishes this flake's derivation names from those of another flake
-	 * built with the same seed. The builder writes the same bytes either way,
-	 * so the two flakes produce different store paths whose NARs are identical.
-	 */
+	Distinguishes this flake's derivation names from those of another flake
+	built with the same seed. The builder writes the same bytes either way,
+	so the two flakes produce different store paths whose NARs are identical.
+	*/
 	readonly variant?: string;
 }): string {
 	const derivationName = (name: string): string =>
@@ -392,10 +392,10 @@ exec ${JSON.stringify(commandPath)} "$@"
 }
 
 /**
- * The argv `actions/plan` builds. Every input the composite declares is
- * passed, so an input the workflow left unset arrives as the empty string
- * rather than as an absent flag.
- */
+The argv `actions/plan` builds. Every input the composite declares is
+passed, so an input the workflow left unset arrives as the empty string
+rather than as an absent flag.
+*/
 function planArguments(options: {
 	readonly targets: string;
 	readonly url: string;
@@ -496,10 +496,10 @@ function buildCohortArguments(options: {
 }
 
 /**
- * Signing is the next step in `actions/attest`, but it requires a GitHub
- * identity. The test stops after the subject step and inspects the subjects
- * from the receipt.
- */
+Signing is the next step in `actions/attest`, but it requires a GitHub
+identity. The test stops after the subject step and inspects the subjects
+from the receipt.
+*/
 function attestArguments(options: {
 	readonly receiptFile: string;
 	readonly url: string;
@@ -555,14 +555,14 @@ interface PublishOptions {
 	readonly store: string;
 	readonly rootPrefix?: string;
 	/**
-	 * The `cupboard` executable every step of the run invokes. Defaults to the
-	 * installation the fixture assembles from this checkout's sources.
-	 */
+	The `cupboard` executable every step of the run invokes. Defaults to the
+	installation the fixture assembles from this checkout's sources.
+	*/
 	readonly cupboardPath?: string;
 	/**
-	 * The endpoint that issues the run's OIDC tokens. Defaults to the endpoint
-	 * for the consumer's default branch.
-	 */
+	The endpoint that issues the run's OIDC tokens. Defaults to the endpoint
+	for the consumer's default branch.
+	*/
 	readonly runner?: StubRunnerTokenEndpoint;
 }
 
@@ -684,10 +684,10 @@ async function readPaths(file: string): Promise<readonly string[]> {
 }
 
 /**
- * The receipt a cohort wrote, with path lists in a stable order. Build retries
- * vary under load, so the comparison checks the presence of attempt metadata
- * without requiring a particular attempt number or identifier.
- */
+The receipt a cohort wrote, with path lists in a stable order. Build retries
+vary under load, so the comparison checks the presence of attempt metadata
+without requiring a particular attempt number or identifier.
+*/
 async function recordedReceipt(receiptFile: string): Promise<RecordedReceipt> {
 	const receipt = buildReceiptV3Schema.parse(
 		JSON.parse(await readFile(receiptFile, 'utf8'))
@@ -756,10 +756,10 @@ const builtPathsSchema = z.array(
 );
 
 /**
- * Every path a run of this flake builds, with the NAR hash reported by the
- * store that holds it. A remote-store run leaves its results in that store and
- * never copies them to the runner, so the caller passes the store to query.
- */
+Every path a run of this flake builds, with the NAR hash reported by the
+store that holds it. A remote-store run leaves its results in that store and
+never copies them to the runner, so the caller passes the store to query.
+*/
 async function builtPaths(
 	flakeDirectory: string,
 	store: Nix = Nix.open()
@@ -801,11 +801,11 @@ interface PublicationPaths {
 }
 
 /**
- * The paths a cohort publishes. A streaming run watches the build and
- * publishes each output it sees, so the intermediates travel with the targets;
- * a run that reconciles afterwards publishes what the build reported, which is
- * the targets alone.
- */
+The paths a cohort publishes. A streaming run watches the build and
+publishes each output it sees, so the intermediates travel with the targets;
+a run that reconciles afterwards publishes what the build reported, which is
+the targets alone.
+*/
 function claimedPaths(options: PublicationPaths): readonly PublishedPath[] {
 	return options.attribution === 'supervised-attempt' && fixture().streams
 		? options.built
@@ -815,10 +815,10 @@ function claimedPaths(options: PublicationPaths): readonly PublishedPath[] {
 function expectedReceipt(
 	options: PublicationPaths & {
 		/**
-		 * The cohort's `store` input, empty for the runner's own store. It
-		 * decides both how the run publishes and what its receipt can record;
-		 * see {@link isBuildPushCohort}.
-		 */
+		The cohort's `store` input, empty for the runner's own store. It
+		decides both how the run publishes and what its receipt can record;
+		see {@link isBuildPushCohort}.
+		*/
 		readonly store: string;
 		readonly alreadyServed?: boolean;
 		readonly reproduced?: true;
@@ -944,9 +944,9 @@ function targetRoots(): Promise<readonly RetentionRoot[]> {
 }
 
 /**
- * The run roots beneath a prefix, with the run identifier in each name replaced
- * by `<run>` so a test can assert on the names deterministically.
- */
+The run roots beneath a prefix, with the run identifier in each name replaced
+by `<run>` so a test can assert on the names deterministically.
+*/
 async function runRoots(prefix: string): Promise<readonly RetentionRoot[]> {
 	const marker = `${prefix}${runRootMarker}`;
 	const roots = await retentionRoots((name) => name.startsWith(marker));

@@ -25,11 +25,11 @@ import { transientExitCode } from '@cupboard/shared/errors';
 import { CliError, CliUsageError } from '../errors.ts';
 
 /**
- * A target with no `expectedPath` is content-addressed or otherwise floating.
- * Its path does not exist yet, so the module cannot query it in the
- * destination, a reuse view or an upstream substituter. It therefore always
- * joins the build set.
- */
+A target with no `expectedPath` is content-addressed or otherwise floating.
+Its path does not exist yet, so the module cannot query it in the
+destination, a reuse view or an upstream substituter. It therefore always
+joins the build set.
+*/
 export interface AvailabilityTarget {
 	readonly attr: string;
 	readonly installable: NixDerivedPathString;
@@ -52,42 +52,42 @@ export interface DestinationProbes {
 }
 
 /**
- * The maximum number of paths whose availability may remain unknown. The
- * configured value applies after a successful re-query and may be zero. If the
- * store refuses the re-query, the fallback applies because cached misses cannot
- * be distinguished from current upstream misses.
- */
+The maximum number of paths whose availability may remain unknown. The
+configured value applies after a successful re-query and may be zero. If the
+store refuses the re-query, the fallback applies because cached misses cannot
+be distinguished from current upstream misses.
+*/
 export interface AvailabilityCeilingConfig {
 	readonly value: number;
 	readonly untrustedFallback: number;
 }
 
 /**
- * The candidate includes the installable because a
- * derivation can disable substitutes for its own outputs, and that setting
- * cannot be read from the store path alone.
- */
+The candidate includes the installable because a
+derivation can disable substitutes for its own outputs, and that setting
+cannot be read from the store path alone.
+*/
 export interface UpstreamAvailabilityCandidate {
 	readonly installable: NixDerivedPathString;
 	readonly storePath: StorePathString;
 }
 
 /**
- * Only `confirmed` excludes the target from publication. Every other result
- * records why the target must be built or published.
- */
+Only `confirmed` excludes the target from publication. Every other result
+records why the target must be built or published.
+*/
 export type UpstreamAvailabilityVerdict =
 	| { readonly kind: 'confirmed' }
 	| { readonly kind: 'substitution-disabled' }
 	| { readonly kind: 'substitutes-not-allowed' }
 	| { readonly kind: 'derivation-unreadable'; readonly errorName: string }
 	/**
-	 * The daemon does not trust the confirmation's connection. It drops such a
-	 * client's settings, so the runner's substituters answer instead. Their
-	 * responses may also come from a narinfo cache despite the confirmation's
-	 * bypass setting. Neither fact shows that an external consumer could fetch
-	 * the path.
-	 */
+	The daemon does not trust the confirmation's connection. It drops such a
+	client's settings, so the runner's substituters answer instead. Their
+	responses may also come from a narinfo cache despite the confirmation's
+	bypass setting. Neither fact shows that an external consumer could fetch
+	the path.
+	*/
 	| {
 			readonly kind: 'connection-not-trusted';
 			readonly trust: NixDaemonTrust;
@@ -97,19 +97,19 @@ export type UpstreamAvailabilityVerdict =
 			readonly missing: StorePathString;
 	  }
 	/**
-	 * The selected store has no local NAR hash for a path in the candidate's
-	 * closure. Confirmation cannot compare the upstream offer with this run's
-	 * content.
-	 */
+	The selected store has no local NAR hash for a path in the candidate's
+	closure. Confirmation cannot compare the upstream offer with this run's
+	content.
+	*/
 	| {
 			readonly kind: 'closure-not-held-locally';
 			readonly missing: StorePathString;
 	  }
 	/**
-	 * A substituter offers a path in the closure under a NAR hash other than
-	 * the one this store holds, so what a consumer would fetch is not what
-	 * this run has.
-	 */
+	A substituter offers a path in the closure under a NAR hash other than
+	the one this store holds, so what a consumer would fetch is not what
+	this run has.
+	*/
 	| {
 			readonly kind: 'closure-divergent';
 			readonly storePath: StorePathString;
@@ -117,9 +117,9 @@ export type UpstreamAvailabilityVerdict =
 			readonly offered: string;
 	  }
 	/**
-	 * The consumer's policy accepts none of the signatures on a narinfo in the
-	 * candidate's closure, so the consumer would refuse that path.
-	 */
+	The consumer's policy accepts none of the signatures on a narinfo in the
+	candidate's closure, so the consumer would refuse that path.
+	*/
 	| { readonly kind: 'closure-unsigned'; readonly storePath: StorePathString }
 	| { readonly kind: 'closure-over-cap'; readonly maxPaths: number };
 
@@ -136,18 +136,18 @@ export interface SubstitutablePathSize {
 }
 
 /**
- * The result of re-querying paths whose availability was unknown. `answered`
- * contains a fresh partition. `already-fresh` means the first query bypassed
- * caches. `refused` explains why the fallback ceiling applies.
- */
+The result of re-querying paths whose availability was unknown. `answered`
+contains a fresh partition. `already-fresh` means the first query bypassed
+caches. `refused` explains why the fallback ceiling applies.
+*/
 export type UnknownRequeryOutcome =
 	| {
 			readonly kind: 'answered';
 			readonly partition: NixMissingPartition;
 			/**
-			 * Per-path costs for substitutable paths in the fresh partition. They
-			 * prevent paths included in both partitions from being counted twice.
-			 */
+			Per-path costs for substitutable paths in the fresh partition. They
+			prevent paths included in both partitions from being counted twice.
+			*/
 			readonly sizes: ReadonlyMap<StorePathString, SubstitutablePathSize>;
 	  }
 	| { readonly kind: 'already-fresh' }
@@ -160,10 +160,10 @@ export interface AvailabilityCeiling {
 }
 
 /**
- * An SSH store preserves the remote daemon's settings, so its policy
- * is unknown until the derivation has been copied. For an unknown policy, the
- * plan accounts for both the build and substitution branches.
- */
+An SSH store preserves the remote daemon's settings, so its policy
+is unknown until the derivation has been copied. For an unknown policy, the
+plan accounts for both the build and substitution branches.
+*/
 export type PlannedSubstitutionPolicy =
 	| {
 			readonly kind: 'known';
@@ -200,17 +200,17 @@ export interface AvailabilityPartitionOptions {
 	>;
 	readonly destinationProbes: DestinationProbes;
 	/**
-	 * Re-queries paths whose availability remained unknown, bypassing any cache
-	 * used by the first query. Called only when at least one path is unknown.
-	 */
+	Re-queries paths whose availability remained unknown, bypassing any cache
+	used by the first query. Called only when at least one path is unknown.
+	*/
 	readonly requeryUnknown: (
 		storePaths: readonly StorePathString[]
 	) => Promise<UnknownRequeryOutcome>;
 	/**
-	 * Confirms that permitted upstream substituters offer the same closure held
-	 * locally and that the consumer's policy accepts every offer. Called only
-	 * for a candidate that the raw substitutability result would leave upstream.
-	 */
+	Confirms that permitted upstream substituters offer the same closure held
+	locally and that the consumer's policy accepts every offer. Called only
+	for a candidate that the raw substitutability result would leave upstream.
+	*/
 	readonly confirmUpstreamAvailability: (
 		candidate: UpstreamAvailabilityCandidate
 	) => Promise<UpstreamAvailabilityVerdict>;
@@ -222,31 +222,31 @@ export interface AvailabilityPartition {
 	readonly publishByReference: readonly StorePathString[];
 	readonly leftUpstream: readonly StorePathString[];
 	/**
-	 * The candidates the confirmation refused, with the reason each was
-	 * refused. Every one of them joins `buildSet` instead.
-	 */
+	The candidates the confirmation refused, with the reason each was
+	refused. Every one of them joins `buildSet` instead.
+	*/
 	readonly leftUpstreamRejections: readonly LeftUpstreamRejection[];
 	readonly buildSet: readonly NixDerivedPathString[];
 	/**
-	 * Selected target installables that require a forced rebuild. Each also
-	 * appears in `buildSet`.
-	 */
+	Selected target installables that require a forced rebuild. Each also
+	appears in `buildSet`.
+	*/
 	readonly rebuildSet: readonly NixDerivedPathString[];
 	/**
-	 * Target paths served by the destination or reuse view whose runtime closures
-	 * need publication. The action processes these paths without building them.
-	 */
+	Target paths served by the destination or reuse view whose runtime closures
+	need publication. The action processes these paths without building them.
+	*/
 	readonly closureTargets: readonly StorePathString[];
 	/**
-	 * Outputs to realise before the targets in `buildSet` that require them. The
-	 * `requiredBy` lets the action remove dependencies used only by targets that
-	 * the final probe withdraws.
-	 */
+	Outputs to realise before the targets in `buildSet` that require them. The
+	`requiredBy` lets the action remove dependencies used only by targets that
+	the final probe withdraws.
+	*/
 	readonly dependencyBuilds: readonly AvailabilityDependencyBuild[];
 	/**
-	 * Local closure paths to copy before realising the targets that require them.
-	 * `requiredBy` lets the action omit paths used only by withdrawn targets.
-	 */
+	Local closure paths to copy before realising the targets that require them.
+	`requiredBy` lets the action omit paths used only by withdrawn targets.
+	*/
 	readonly dependencyCopies: readonly AvailabilityDependencyCopy[];
 	readonly counts: {
 		readonly willBuild: number;
@@ -254,26 +254,26 @@ export interface AvailabilityPartition {
 		readonly unknown: number;
 	};
 	/**
-	 * The estimated substitution capacity, including complete substitute
-	 * closures that become usable after their derivations are copied. When the
-	 * remote daemon's substitution policy is unknown, this is the conservative
-	 * substitution branch of the estimate.
-	 */
+	The estimated substitution capacity, including complete substitute
+	closures that become usable after their derivations are copied. When the
+	remote daemon's substitution policy is unknown, this is the conservative
+	substitution branch of the estimate.
+	*/
 	readonly downloadSize: number;
 	readonly narSize: number;
 	/**
-	 * The targets already present in this store when the plan ran. A later build
-	 * realises every other target that it publishes, so its build receipt must
-	 * exclude these paths.
-	 */
+	The targets already present in this store when the plan ran. A later build
+	realises every other target that it publishes, so its build receipt must
+	exclude these paths.
+	*/
 	readonly alreadyValid: readonly StorePathString[];
 	readonly unknownCount: number;
 	readonly ceiling: AvailabilityCeiling;
 	/**
-	 * Configured substituters that could not be queried. Availability results
-	 * exclude these substituters, so a reported miss is incomplete when this
-	 * list is non-empty.
-	 */
+	Configured substituters that could not be queried. Availability results
+	exclude these substituters, so a reported miss is incomplete when this
+	list is non-empty.
+	*/
 	readonly unreachableSubstituters: readonly UnreachableSubstituter[];
 }
 
@@ -369,13 +369,13 @@ function shouldQueryAvailabilityForTarget(
 }
 
 /**
- * Partitions a manifest's targets by what realising and publishing each one
- * actually requires. Machine-independent facts (destination- and
- * view-serving) come from the caller's HTTP probes. The selected store reports
- * local validity, build work, and raw substitutability through batched daemon
- * queries. Upstream confirmation then checks the exact offered closure and the
- * consumer's signature policy.
- */
+Partitions a manifest's targets by what realising and publishing each one
+actually requires. Machine-independent facts (destination- and
+view-serving) come from the caller's HTTP probes. The selected store reports
+local validity, build work, and raw substitutability through batched daemon
+queries. Upstream confirmation then checks the exact offered closure and the
+consumer's signature policy.
+*/
 export async function partitionAvailability(
 	options: AvailabilityPartitionOptions
 ): Promise<AvailabilityPartition> {
@@ -387,13 +387,11 @@ export async function partitionAvailability(
 
 		return floatingOutputs.length === 0
 			? []
-			: [
-					{
-						attr: target.attr,
-						installable: target.installable,
-						floatingOutputs
-					}
-				];
+			: {
+					attr: target.attr,
+					installable: target.installable,
+					floatingOutputs
+				};
 	});
 
 	if (floatingTargets.length > 0) {
@@ -577,23 +575,21 @@ async function includeMissingSubstituteReferences(
 			return [];
 		}
 
-		return [
-			{
-				expectedPaths: expected.paths,
-				installable: target.installable,
-				outputsDeclared: expected.outputsDeclared,
-				plannedLocalDerivation: target.plannedLocalDerivation,
-				substitution: expected.outputsDeclared
-					? plannedSubstitutionVerdict(
-							options.plannedSubstitutionPolicy,
-							options.plannedSubstitutableDerivations?.has(
-								target.plannedLocalDerivation
-							) === true
-						)
-					: 'refused',
-				stoppedAtDerivation: unknown.has(target.plannedLocalDerivation)
-			}
-		];
+		return {
+			expectedPaths: expected.paths,
+			installable: target.installable,
+			outputsDeclared: expected.outputsDeclared,
+			plannedLocalDerivation: target.plannedLocalDerivation,
+			substitution: expected.outputsDeclared
+				? plannedSubstitutionVerdict(
+						options.plannedSubstitutionPolicy,
+						options.plannedSubstitutableDerivations?.has(
+							target.plannedLocalDerivation
+						) === true
+					)
+				: 'refused',
+			stoppedAtDerivation: unknown.has(target.plannedLocalDerivation)
+		};
 	});
 	if (candidates.length === 0) {
 		return {
@@ -909,7 +905,7 @@ function unknownPathDetails(
 		cause: unknownPathCause(unknownPath, ceiling),
 		targets: targets.flatMap((target) =>
 			isTargetPath(target, unknownPath)
-				? [{ attr: target.attr, installable: target.installable }]
+				? { attr: target.attr, installable: target.installable }
 				: []
 		)
 	}));
@@ -973,8 +969,8 @@ function accountForLocalDerivations(
 	readonly dependencyCopies: readonly AvailabilityDependencyCopy[];
 } {
 	const localDerivations = new Set(
-		targets.flatMap(({ plannedLocalDerivation }) =>
-			plannedLocalDerivation === undefined ? [] : [plannedLocalDerivation]
+		targets.flatMap(
+			({ plannedLocalDerivation }) => plannedLocalDerivation ?? []
 		)
 	);
 	const copiedMissing = missing.unknown.filter((storePath) => {
@@ -1035,16 +1031,11 @@ function accountForLocalDerivations(
 
 			return firstInstallable === undefined || firstOwner === undefined
 				? []
-				: [
-						{
-							path,
-							installables: [
-								firstInstallable,
-								...remainingInstallables
-							] as const,
-							requiredBy: [firstOwner, ...remainingOwners] as const
-						}
-					];
+				: {
+						path,
+						installables: [firstInstallable, ...remainingInstallables] as const,
+						requiredBy: [firstOwner, ...remainingOwners] as const
+					};
 		}
 	);
 	const dependencyCopies = copiedMissing.flatMap((path) => {
@@ -1057,7 +1048,7 @@ function accountForLocalDerivations(
 
 		return firstOwner === undefined
 			? []
-			: [{ path, requiredBy: [firstOwner, ...remainingOwners] as const }];
+			: { path, requiredBy: [firstOwner, ...remainingOwners] as const };
 	});
 	const buildableDerivations = dependencyBuilds.map(({ installables }) => {
 		const installable = installables[0];
@@ -1150,7 +1141,7 @@ async function confirmCandidates(
 	);
 
 	return verdicts.flatMap(({ storePath, verdict }) =>
-		verdict.kind === 'confirmed' ? [] : [{ ...verdict, storePath }]
+		verdict.kind === 'confirmed' ? [] : { ...verdict, storePath }
 	);
 }
 
@@ -1169,10 +1160,10 @@ function confirmed(
 }
 
 /**
- * Classifies one target from the destination, view and substitutability
- * answers under the selected build and substituter policies. Exported for a
- * later re-probe over a subset of the same targets.
- */
+Classifies one target from the destination, view and substitutability
+answers under the selected build and substituter policies. Exported for a
+later re-probe over a subset of the same targets.
+*/
 export function classify(
 	target: AvailabilityTarget,
 	destinationServedPaths: ReadonlySet<StorePathString>,
@@ -1358,16 +1349,16 @@ function mergeRequeryAnswer(
 }
 
 /**
- * The download and NAR bytes included in both answers. Each answer reports one
- * total for its substitutable paths, so adding the totals counts their
- * intersection twice. The caller subtracts what this function returns.
- *
- * The per-path figures come from the re-query, which is enough on its own: a
- * path in both totals is one the re-query classified as substitutable, so the
- * re-query asked for its size. A path whose size did not come back stays
- * counted twice, because the merged total is read as the bytes substitution
- * would fetch and subtracting a guess could put it below the true figure.
- */
+The download and NAR bytes included in both answers. Each answer reports one
+total for its substitutable paths, so adding the totals counts their
+intersection twice. The caller subtracts what this function returns.
+
+The per-path figures come from the re-query, which is enough on its own: a
+path in both totals is one the re-query classified as substitutable, so the
+re-query asked for its size. A path whose size did not come back stays
+counted twice, because the merged total is read as the bytes substitution
+would fetch and subtracting a guess could put it below the true figure.
+*/
 function bytesCountedTwice(
 	missing: NixMissingPartition,
 	requery: NixMissingPartition,

@@ -47,7 +47,7 @@ import { type RepositoryIdentity } from './oidc-trust/github.ts';
 
 const mocks = vi.hoisted(() => ({
 	add: vi.fn<OidcTrustClient['add']>(),
-	lookup: vi.fn<(repo: string) => Promise<RepositoryIdentity>>(),
+	lookup: vi.fn<(repository: string) => Promise<RepositoryIdentity>>(),
 	verify:
 		vi.fn<
 			typeof import('./github/workflow-reference.ts').verifyWorkflowReference
@@ -393,9 +393,9 @@ const tenantRule: OidcTrustAddBodyInput = {
 };
 
 /**
- * Runs `add --from-file` through the command line with the rule written to a
- * temporary file. Returns 'added', or the error that the command threw.
- */
+Runs `add --from-file` through the command line with the rule written to a
+temporary file. Returns 'added', or the error that the command threw.
+*/
 async function addFromFile(
 	command: 'oidc-trust' | 'control-oidc-trust',
 	url: string,

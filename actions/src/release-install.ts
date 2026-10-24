@@ -479,10 +479,10 @@ const defaultReleaseCommandRunner: ReleaseCommandRunner = async (
 };
 
 /**
- * Release builds run on the default branch before the tag exists. Match any ref
- * for the exact release workflow path; `verifyReleaseAttestation` separately
- * requires the SLSA source commit to equal the tag commit.
- */
+Release builds run on the default branch before the tag exists. Match any ref
+for the exact release workflow path; `verifyReleaseAttestation` separately
+requires the SLSA source commit to equal the tag commit.
+*/
 export function releaseWorkflowIdentityRegex(
 	releaseRepository: string
 ): string {
@@ -1767,23 +1767,23 @@ export async function fetchRelease(
 		| 'expectedSourceCommit'
 	>
 ): Promise<Release> {
-	const [owner, repo] = splitRepository(options.releaseRepository);
+	const [owner, repository] = splitRepository(options.releaseRepository);
 	const version =
 		options.expectedSourceCommit === undefined
 			? normaliseVersion(options.version)
 			: exactResolvedReleaseTag(options.version);
 
 	if (version === 'latest' && options.includePrereleases) {
-		return fetchNewestRelease(octokit, owner, repo);
+		return fetchNewestRelease(octokit, owner, repository);
 	}
 
 	const { data } =
 		version === 'latest'
-			? await octokit.rest.repos.getLatestRelease({ owner, repo })
+			? await octokit.rest.repos.getLatestRelease({ owner, repo: repository })
 			: await fetchReleaseByExplicitTag(
 					octokit,
 					owner,
-					repo,
+					repository,
 					version,
 					options.expectedSourceCommit === undefined
 				);
@@ -1799,12 +1799,16 @@ export async function fetchRelease(
 async function fetchReleaseByExplicitTag(
 	octokit: Octokit,
 	owner: string,
-	repo: string,
+	repository: string,
 	tag: string,
 	canUseLegacyPrefix: boolean
 ): ReturnType<Octokit['rest']['repos']['getReleaseByTag']> {
 	try {
-		return await octokit.rest.repos.getReleaseByTag({ owner, repo, tag });
+		return await octokit.rest.repos.getReleaseByTag({
+			owner,
+			repo: repository,
+			tag
+		});
 	} catch (error) {
 		const prefixedTag = legacyPrefixedTag(tag);
 
@@ -1818,7 +1822,7 @@ async function fetchReleaseByExplicitTag(
 
 		return octokit.rest.repos.getReleaseByTag({
 			owner,
-			repo,
+			repo: repository,
 			tag: prefixedTag
 		});
 	}
@@ -1838,11 +1842,11 @@ function legacyPrefixedTag(tag: string): string | undefined {
 async function fetchNewestRelease(
 	octokit: Octokit,
 	owner: string,
-	repo: string
+	repository: string
 ): Promise<Release> {
 	const item = await findGithubRelease(
 		octokit,
-		{ owner, repo },
+		{ owner, repo: repository },
 		(candidate) =>
 			!candidate.draft && releaseResponseSchema.safeParse(candidate).success
 	);
@@ -1851,7 +1855,7 @@ async function fetchNewestRelease(
 		return releaseFromResponse(releaseResponseSchema.parse(item));
 	}
 
-	throw new NoReleaseFoundError(`${owner}/${repo}`);
+	throw new NoReleaseFoundError(`${owner}/${repository}`);
 }
 
 function releaseFromResponse(
@@ -2074,10 +2078,10 @@ function verifyChecksum(
 }
 
 /**
- * Verify that the archive has exactly one subject and was built by the release
- * workflow. Its SLSA source commit must equal the commit for the release tag.
- * Returns that commit, or throws if no published attestation verifies.
- */
+Verify that the archive has exactly one subject and was built by the release
+workflow. Its SLSA source commit must equal the commit for the release tag.
+Returns that commit, or throws if no published attestation verifies.
+*/
 export async function verifyReleaseAttestation(
 	options: Omit<InstallCupboardOptions, 'installDirectory'>,
 	archivePath: string,
@@ -2090,13 +2094,13 @@ export async function verifyReleaseAttestation(
 	const verify = dependencies.verify ?? verifyBundle;
 	const maximumBundleBytes =
 		dependencies.maximumBundleBytes ?? maximumAttestationBundleBytes;
-	const [owner, repo] = splitRepository(options.releaseRepository);
+	const [owner, repository] = splitRepository(options.releaseRepository);
 	const archiveName = path.basename(archivePath);
 	const subjectDigest =
 		dependencies.subjectDigest ??
 		(await (dependencies.hashFile ?? sha256File)(archivePath, options.signal));
 	const attestations = await githubRequest(options.signal, () =>
-		listAttestations(octokit, owner, repo, subjectDigest)
+		listAttestations(octokit, owner, repository, subjectDigest)
 	);
 
 	if (attestations.length === 0) {
@@ -2104,7 +2108,7 @@ export async function verifyReleaseAttestation(
 	}
 
 	const tagCommit = await githubRequest(options.signal, () =>
-		fetchTagCommit(octokit, owner, repo, tagName)
+		fetchTagCommit(octokit, owner, repository, tagName)
 	);
 	const policy = identityPolicy({
 		certificateIdentityRegex: releaseWorkflowIdentityRegex(
@@ -2348,7 +2352,7 @@ async function readBoundedAttestationBundle(
 async function listAttestations(
 	octokit: Octokit,
 	owner: string,
-	repo: string,
+	repository: string,
 	subjectDigest: string
 ): Promise<readonly Attestation[]> {
 	let observedCandidates = 0;
@@ -2359,7 +2363,7 @@ async function listAttestations(
 			octokit.rest.repos.listAttestations,
 			{
 				owner,
-				repo,
+				repo: repository,
 				subject_digest: `sha256:${subjectDigest}`,
 				predicate_type: provenancePredicateType,
 				per_page: releaseAttestationsPerPage
@@ -2481,13 +2485,13 @@ function githubApiOrigin(environment: Environment): string {
 export async function fetchTagCommit(
 	octokit: Octokit,
 	owner: string,
-	repo: string,
+	repository: string,
 	tagName: string
 ): Promise<string> {
 	try {
 		const { data } = await octokit.rest.repos.getCommit({
 			owner,
-			repo,
+			repo: repository,
 			ref: `tags/${tagName}`
 		});
 

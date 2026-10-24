@@ -14,19 +14,19 @@ async function settleBoth(
 }
 
 /**
- * Orders mutations of path-keyed R2 objects by issue time.
- *
- * A timed-out R2 call is abandoned, not cancelled (see
- * {@link boundedSubrequest}), so it can reach R2 after a later call to the
- * same key. Content-addressed keys tolerate that ordering. Path-keyed objects,
- * such as tenant narinfos and attestation lists, do not: a late delete could
- * remove an object that a newer put restored.
- *
- * {@link write} waits for abandoned mutations of the same keys to settle. The
- * registry can remain in memory because the tenant Durable Object is the only
- * writer of its path-keyed objects. Verification and reconciliation repair
- * state after an instance dies with a mutation still in flight.
- */
+Orders mutations of path-keyed R2 objects by issue time.
+
+A timed-out R2 call is abandoned, not cancelled (see
+{@link boundedSubrequest}), so it can reach R2 after a later call to the
+same key. Content-addressed keys tolerate that ordering. Path-keyed objects,
+such as tenant narinfos and attestation lists, do not: a late delete could
+remove an object that a newer put restored.
+
+{@link write} waits for abandoned mutations of the same keys to settle. The
+registry can remain in memory because the tenant Durable Object is the only
+writer of its path-keyed objects. Verification and reconciliation repair
+state after an instance dies with a mutation still in flight.
+*/
 export class ObjectWriteOrder {
 	private readonly outstanding = new Map<string, Promise<void>>();
 
@@ -72,14 +72,14 @@ export class ObjectWriteOrder {
 	}
 
 	/**
-	 * Runs one R2 mutation of `keys`, first waiting for any abandoned earlier
-	 * mutation of those keys to settle. The wait is itself a bounded
-	 * subrequest: inside a critical section it consumes the section's deadline
-	 * budget and rejects retryably if the abandoned mutation outlasts it,
-	 * leaving the signal registered for the retry. When the mutation times out,
-	 * its settled-signal is registered against every key so later mutations
-	 * order behind it.
-	 */
+	Runs one R2 mutation of `keys`, first waiting for any abandoned earlier
+	mutation of those keys to settle. The wait is itself a bounded
+	subrequest: inside a critical section it consumes the section's deadline
+	budget and rejects retryably if the abandoned mutation outlasts it,
+	leaving the signal registered for the retry. When the mutation times out,
+	its settled-signal is registered against every key so later mutations
+	order behind it.
+	*/
 	async write<T>(
 		keys: readonly R2ObjectKey[],
 		mutate: () => Promise<T>

@@ -31,12 +31,12 @@ export interface AvailabilityReprobe {
 const noSubstitutableExternal: ReadonlySet<StorePathString> = new Set();
 
 /**
- * Immediately before dispatch, queries the predictable output paths in the
- * destination and reuse view. It removes a target when the destination now
- * serves its path or the reuse view can now supply it for publication by
- * reference. All other targets remain. If availability changes again after
- * this query, Nix reports any resulting build failure normally.
- */
+Immediately before dispatch, queries the predictable output paths in the
+destination and reuse view. It removes a target when the destination now
+serves its path or the reuse view can now supply it for publication by
+reference. All other targets remain. If availability changes again after
+this query, Nix reports any resulting build failure normally.
+*/
 export async function reprobeAvailability(
 	options: AvailabilityReprobeOptions
 ): Promise<AvailabilityReprobe> {

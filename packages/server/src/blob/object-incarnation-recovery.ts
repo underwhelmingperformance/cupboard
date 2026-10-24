@@ -55,12 +55,12 @@ function objectKey(row: ObjectIncarnationIdentity): R2ObjectKey {
 }
 
 /**
- * Retries deletion of R2 objects after their `blob_state` or `cas_object` rows
- * have been deleted. Each marker identifies one immutable R2 key, so deleting
- * that key cannot remove an object created by a later promotion. A future
- * removal deadline keeps the old object available while a preceding Worker or
- * cached narinfo can still refer to it.
- */
+Retries deletion of R2 objects after their `blob_state` or `cas_object` rows
+have been deleted. Each marker identifies one immutable R2 key, so deleting
+that key cannot remove an object created by a later promotion. A future
+removal deadline keeps the old object available while a preceding Worker or
+cached narinfo can still refer to it.
+*/
 export async function drainObjectDeletions(
 	database: DrizzleD1Database<typeof d1Schema>,
 	blobs: R2Bucket,
@@ -384,11 +384,11 @@ async function didRecoverCas(
 }
 
 /**
- * Recovers or retires old promotion reservations whose state-table row is
- * missing or older. Version and age predicates stop a repair if a promoter or
- * collector changes the object while the R2 probe is in flight. A failed probe
- * moves behind the current stale page so later reservations can make progress.
- */
+Recovers or retires old promotion reservations whose state-table row is
+missing or older. Version and age predicates stop a repair if a promoter or
+collector changes the object while the R2 probe is in flight. A failed probe
+moves behind the current stale page so later reservations can make progress.
+*/
 export async function recoverAbandonedIncarnations(
 	database: DrizzleD1Database<typeof d1Schema>,
 	blobs: R2Bucket,

@@ -83,12 +83,12 @@ export function registerCheckCommand(
 }
 
 /**
- * Checks every committed path, one page per request. The server checks one page
- * and returns a cursor, in two parts, that points after the last row that it
- * checked. The command sends the cursor back until the server returns an empty
- * cursor: an empty string and 0. If the server reports any discrepancies, the
- * command warns about each one and then throws {@link CheckDiscrepanciesError}.
- */
+Checks every committed path, one page per request. The server checks one page
+and returns a cursor, in two parts, that points after the last row that it
+checked. The command sends the cursor back until the server returns an empty
+cursor: an empty string and 0. If the server reports any discrepancies, the
+command warns about each one and then throws {@link CheckDiscrepanciesError}.
+*/
 export async function runCheck(
 	isDeep: boolean,
 	reporter: Reporter,

@@ -10,9 +10,9 @@ interface CommitCreditEnv {
 export const defaultCommitEntryCreditBudget = 2 * commitBatchMaxEntries;
 
 /**
- * Parses `CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET`. An empty setting selects the
- * built-in tenant budget; a non-empty setting must be a positive integer.
- */
+Parses `CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET`. An empty setting selects the
+built-in tenant budget; a non-empty setting must be a positive integer.
+*/
 export function commitEntryCreditBudget(env: CommitCreditEnv): number {
 	const raw = env.CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET;
 

@@ -35,12 +35,12 @@ import { type WorkerHonoEnv } from './hono-env.ts';
 import { cachedTenantRead, tenantUncachedRead } from './tenant-forward.ts';
 
 /**
- * The Nix binary-cache routes relative to a selected cache. The worker mounts
- * this sub-app at each cache prefix, and mount middleware sets the read scope.
- *
- * Hono answers HEAD by re-dispatching the request to the GET handler with the
- * body stripped, so a separate HEAD registration would never match.
- */
+The Nix binary-cache routes relative to a selected cache. The worker mounts
+this sub-app at each cache prefix, and mount middleware sets the read scope.
+
+Hono answers HEAD by re-dispatching the request to the GET handler with the
+body stripped, so a separate HEAD registration would never match.
+*/
 export const readApp = buildReadApp();
 
 function buildReadApp(): Hono<WorkerHonoEnv> {
@@ -235,10 +235,10 @@ function guardRead(
 }
 
 /**
- * Deletion retains credentials and removes content asynchronously.
- * Authentication can therefore succeed while objects remain. Return 404
- * before object-serving code can expose those residual objects.
- */
+Deletion retains credentials and removes content asynchronously.
+Authentication can therefore succeed while objects remain. Return 404
+before object-serving code can expose those residual objects.
+*/
 async function guardContentRead(
 	context: Context<WorkerHonoEnv>
 ): Promise<Response | undefined> {

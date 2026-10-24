@@ -344,11 +344,11 @@ export class MaintenanceEligibilityService {
 	}
 
 	/**
-	 * Starts a fresh pass. The first of several concurrent fresh passes marks
-	 * the row with {@link passInProgress} unless the row is already due or
-	 * absent, and every pass waits for that mark. The mark waits for any
-	 * reconciliation in flight. If the mark fails, the pass does not start.
-	 */
+	Starts a fresh pass. The first of several concurrent fresh passes marks
+	the row with {@link passInProgress} unless the row is already due or
+	absent, and every pass waits for that mark. The mark waits for any
+	reconciliation in flight. If the mark fails, the pass does not start.
+	*/
 	async beginFreshPass(): Promise<void> {
 		this.freshPasses += 1;
 
@@ -366,9 +366,9 @@ export class MaintenanceEligibilityService {
 	}
 
 	/**
-	 * Ends a fresh pass and returns whether it was the last one running. The
-	 * caller reconciles with `pass` only when it was the last.
-	 */
+	Ends a fresh pass and returns whether it was the last one running. The
+	caller reconciles with `pass` only when it was the last.
+	*/
 	endFreshPass(): boolean {
 		this.freshPasses -= 1;
 
@@ -376,14 +376,14 @@ export class MaintenanceEligibilityService {
 	}
 
 	/**
-	 * Publishes the tenant's next wake with a conditional upsert, so a stale
-	 * reconciliation cannot replace a newer wake and an unchanged wake writes
-	 * nothing.
-	 *
-	 * While a fresh pass runs, only that pass's final reconciliation publishes.
-	 * Every other reconciliation returns without writing, because the row stays
-	 * due until the pass ends and the pass then reads the final state.
-	 */
+	Publishes the tenant's next wake with a conditional upsert, so a stale
+	reconciliation cannot replace a newer wake and an unchanged wake writes
+	nothing.
+
+	While a fresh pass runs, only that pass's final reconciliation publishes.
+	Every other reconciliation returns without writing, because the row stays
+	due until the pass ends and the pass then reads the final state.
+	*/
 	async reconcile(
 		now: Date = new Date(),
 		change: WakeChange = 'any'
@@ -443,18 +443,18 @@ async function completion(publication: Promise<unknown>): Promise<void> {
 }
 
 /**
- * How a reconciliation may change the stored wake.
- *
- * - `pass`: the final reconciliation of a fresh pass. It may replace any
- *   stored wake, including {@link passInProgress}.
- * - `any`: a reconciliation outside a pass, such as after an admin mutation,
- *   a token exchange or a configuration change. It may move the wake earlier
- *   or later, but leaves {@link passInProgress} in place, so a pass that
- *   stopped early keeps the tenant due until the next fresh pass ends.
- * - `sooner`: a reconciliation after a commit or a continuation. It only
- *   moves the wake earlier, and also leaves {@link passInProgress} in place.
- *   A later wake waits for the next fresh pass.
- */
+How a reconciliation may change the stored wake.
+
+- `pass`: the final reconciliation of a fresh pass. It may replace any
+  stored wake, including {@link passInProgress}.
+- `any`: a reconciliation outside a pass, such as after an admin mutation,
+  a token exchange or a configuration change. It may move the wake earlier
+  or later, but leaves {@link passInProgress} in place, so a pass that
+  stopped early keeps the tenant due until the next fresh pass ends.
+- `sooner`: a reconciliation after a commit or a continuation. It only
+  moves the wake earlier, and also leaves {@link passInProgress} in place.
+  A later wake waits for the next fresh pass.
+*/
 export type WakeChange = 'pass' | 'any' | 'sooner';
 
 // Prefer an earlier wake even when reconciliation timestamps tie. Waking too
@@ -496,14 +496,14 @@ const trailingEligibilitySubrequests = 2;
 const leadingEligibilitySubrequests = 1;
 
 /**
- * The tracked binding calls that a maintenance pass has for its own work.
- *
- * A fresh pass spends one D1 call marking the eligibility row before its body,
- * and every pass keeps two calls for reconciliation after it.
- *
- * Pages use the remaining allowance and call-cost constants to choose an
- * initial size. Callers retain unprocessed work for a later invocation.
- */
+The tracked binding calls that a maintenance pass has for its own work.
+
+A fresh pass spends one D1 call marking the eligibility row before its body,
+and every pass keeps two calls for reconciliation after it.
+
+Pages use the remaining allowance and call-cost constants to choose an
+initial size. Callers retain unprocessed work for a later invocation.
+*/
 export function maintenancePassSubrequests(
 	subrequestAllowance: number,
 	trigger: PassTrigger
@@ -519,31 +519,31 @@ export function maintenancePassSubrequests(
 }
 
 /**
- * What started a maintenance pass.
- *
- * - `fresh`: a cron maintenance pass or an admin cache teardown. The cron
- *   reruns a pass that stopped early only while the tenant is due, so the
- *   pass marks the eligibility row first. Its final reconciliation may move
- *   the wake later.
- * - `continuation`: the object's alarm or the verification queue. Cloudflare
- *   retries an alarm handler that fails. The queue retries its message, and
- *   the verify backstop alarm requests another pass when a claim's lease
- *   ends. The durable state that made the pass due therefore keeps it due,
- *   so the pass does not mark the row, and its reconciliation only moves the
- *   wake earlier.
- */
+What started a maintenance pass.
+
+- `fresh`: a cron maintenance pass or an admin cache teardown. The cron
+  reruns a pass that stopped early only while the tenant is due, so the
+  pass marks the eligibility row first. Its final reconciliation may move
+  the wake later.
+- `continuation`: the object's alarm or the verification queue. Cloudflare
+  retries an alarm handler that fails. The queue retries its message, and
+  the verify backstop alarm requests another pass when a claim's lease
+  ends. The durable state that made the pass due therefore keeps it due,
+  so the pass does not mark the row, and its reconciliation only moves the
+  wake earlier.
+*/
 export type PassTrigger = 'fresh' | 'continuation';
 
 /**
- * Runs `body` as a maintenance pass and reconciles the tenant's eligibility
- * row afterwards, including after an error from `body`.
- *
- * A fresh pass first marks the row so that the tenant stays due if the pass
- * stops before it reconciles. When several fresh passes run at once, only
- * the last one to end reconciles. Before calling `body`, the function
- * reserves the reconciliation's D1 calls from the invocation's subrequest
- * slice.
- */
+Runs `body` as a maintenance pass and reconciles the tenant's eligibility
+row afterwards, including after an error from `body`.
+
+A fresh pass first marks the row so that the tenant stays due if the pass
+stops before it reconciles. When several fresh passes run at once, only
+the last one to end reconciles. Before calling `body`, the function
+reserves the reconciliation's D1 calls from the invocation's subrequest
+slice.
+*/
 export async function withMaintenanceEligibility<T>(
 	maintenanceEligibility: MaintenanceEligibilityService,
 	reconcileMaintenanceEligibility: (change: WakeChange) => Promise<void>,

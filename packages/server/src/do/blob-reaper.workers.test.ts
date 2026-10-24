@@ -88,9 +88,9 @@ function failD1Batch(database: D1Database, failureNumber: number): D1Database {
 const boundStatementSchema = z.object({ statement: z.string() });
 
 /**
- * Runs `reference` once, after the reaper has read its candidates and before
- * the batch that arms deadlines on `table` reaches D1.
- */
+Runs `reference` once, after the reaper has read its candidates and before
+the batch that arms deadlines on `table` reaches D1.
+*/
 function referenceBeforeArm(
 	database: D1Database,
 	table: string,

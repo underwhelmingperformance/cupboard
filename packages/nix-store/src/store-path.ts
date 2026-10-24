@@ -63,11 +63,11 @@ export interface ResolvedRootTarget {
 }
 
 /**
- * A retention root is a set of targets. Targets that share a store-path hash
- * collapse to the first occurrence, so repeating a path in one request does not
- * create a duplicate row downstream. Targets are expected to be validated store
- * paths; any whose hash cannot be derived are dropped.
- */
+A retention root is a set of targets. Targets that share a store-path hash
+collapse to the first occurrence, so repeating a path in one request does not
+create a duplicate row downstream. Targets are expected to be validated store
+paths; any whose hash cannot be derived are dropped.
+*/
 export function resolveRootTargets(
 	targets: readonly StorePathString[]
 ): readonly ResolvedRootTarget[] {

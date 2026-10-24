@@ -31,17 +31,17 @@ export function isTransientResponse(response: Response): boolean {
 export type ReplaySafety = 'replay-safe' | 'replay-unsafe';
 
 /**
- * For a `replay-safe` request, retries a fetch that rejects with a network
- * error ({@link isFetchNetworkError}) and each {@link isTransientResponse}
- * status, with at most {@link maxTransientRetries} additional attempts. Other
- * rejections and other responses return immediately. A `Retry-After` value in
- * seconds or as an HTTP date supplies the delay, up to the maximum backoff. A
- * missing or invalid value uses the normal backoff. An abort signal ends the
- * wait immediately. A `replay-unsafe` request makes a single attempt.
- *
- * The function clones a `Request` before each attempt. Callers that send a body
- * must therefore supply reusable bytes rather than a one-shot stream.
- */
+For a `replay-safe` request, retries a fetch that rejects with a network
+error ({@link isFetchNetworkError}) and each {@link isTransientResponse}
+status, with at most {@link maxTransientRetries} additional attempts. Other
+rejections and other responses return immediately. A `Retry-After` value in
+seconds or as an HTTP date supplies the delay, up to the maximum backoff. A
+missing or invalid value uses the normal backoff. An abort signal ends the
+wait immediately. A `replay-unsafe` request makes a single attempt.
+
+The function clones a `Request` before each attempt. Callers that send a body
+must therefore supply reusable bytes rather than a one-shot stream.
+*/
 export function retryingFetcher(
 	fetcher: typeof fetch,
 	replaySafety: ReplaySafety
@@ -116,9 +116,9 @@ export function retryingFetcher(
 }
 
 /**
- * Returns the origin and path of a request URL. Debug logs use this form
- * because the user information and the query can contain credentials.
- */
+Returns the origin and path of a request URL. Debug logs use this form
+because the user information and the query can contain credentials.
+*/
 export function loggedUrl(input: Parameters<typeof fetch>[0]): string {
 	const url = URL.parse(
 		input instanceof Request ? input.url : input.toString()
@@ -128,11 +128,11 @@ export function loggedUrl(input: Parameters<typeof fetch>[0]): string {
 }
 
 /**
- * Returns the delay before the next attempt after a transient response. A
- * `Retry-After` value in seconds or as an HTTP date supplies the delay,
- * limited to the maximum backoff. A missing or invalid value uses
- * {@link backoffDelayMs}.
- */
+Returns the delay before the next attempt after a transient response. A
+`Retry-After` value in seconds or as an HTTP date supplies the delay,
+limited to the maximum backoff. A missing or invalid value uses
+{@link backoffDelayMs}.
+*/
 function transientResponseDelayMs(response: Response, attempt: number): number {
 	const retryAfter = retryAfterDelayMs(response.headers.get('retry-after'));
 
@@ -142,9 +142,9 @@ function transientResponseDelayMs(response: Response, attempt: number): number {
 }
 
 /**
- * Waits for the jittered backoff delay for this attempt. An abort signal ends
- * the wait immediately.
- */
+Waits for the jittered backoff delay for this attempt. An abort signal ends
+the wait immediately.
+*/
 export async function backoffDelay(
 	attempt: number,
 	signal?: AbortSignal
@@ -153,19 +153,19 @@ export async function backoffDelay(
 }
 
 /**
- * Returns an exponentially increasing delay with full jitter for the given
- * attempt, counted from 1: a random value from zero to the current ceiling.
- * The delay does not exceed `maxRetryDelayMs`.
- */
+Returns an exponentially increasing delay with full jitter for the given
+attempt, counted from 1: a random value from zero to the current ceiling.
+The delay does not exceed `maxRetryDelayMs`.
+*/
 export function backoffDelayMs(attempt: number): number {
 	return fullJitterDelayMs(attempt, baseRetryDelayMs, maxRetryDelayMs);
 }
 
 /**
- * Returns a delay with full jitter for the given attempt, counted from 1: a
- * random value from zero to a ceiling. The ceiling starts at `baseMs` and
- * doubles with each attempt, up to `maximumMs`.
- */
+Returns a delay with full jitter for the given attempt, counted from 1: a
+random value from zero to a ceiling. The ceiling starts at `baseMs` and
+doubles with each attempt, up to `maximumMs`.
+*/
 export function fullJitterDelayMs(
 	attempt: number,
 	baseMs: number,
@@ -201,9 +201,9 @@ export function retryAfterDelayMs(
 }
 
 /**
- * Waits for `delay` milliseconds. An abort signal ends the wait immediately
- * and without an error.
- */
+Waits for `delay` milliseconds. An abort signal ends the wait immediately
+and without an error.
+*/
 export async function abortableSleep(
 	delay: number,
 	signal?: AbortSignal
@@ -227,10 +227,10 @@ export async function abortableSleep(
 }
 
 /**
- * Replaces a rejected `TypeError` when its cause chain contains a non-empty
- * network error code. The caller supplies the typed error for the requested
- * host. Other rejected values propagate unchanged, including abort reasons.
- */
+Replaces a rejected `TypeError` when its cause chain contains a non-empty
+network error code. The caller supplies the typed error for the requested
+host. Other rejected values propagate unchanged, including abort reasons.
+*/
 export function reachableFetcher(
 	fetcher: typeof fetch,
 	makeError: (host: string, cause: TypeError) => Error

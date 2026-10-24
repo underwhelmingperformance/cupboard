@@ -6,19 +6,19 @@ import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
 import { type StubOidcIssuer } from './oidc-issuer.ts';
 
 /**
- * An ID token whose `nonce` claim binds it to one server, and the binding
- * parameters that the token request sends, as the CLI sends them.
- */
+An ID token whose `nonce` claim binds it to one server, and the binding
+parameters that the token request sends, as the CLI sends them.
+*/
 export interface BoundSubjectToken {
 	readonly token: string;
 	readonly form: Readonly<Record<string, string>>;
 }
 
 /**
- * Signs `claims` with `issuer`, adding a nonce that binds the token to the
- * server at `target`: the deployment URL for the control plane, or a tenant
- * URL. Each call uses a new random seed, so each token has its own nonce.
- */
+Signs `claims` with `issuer`, adding a nonce that binds the token to the
+server at `target`: the deployment URL for the control plane, or a tenant
+URL. Each call uses a new random seed, so each token has its own nonce.
+*/
 export async function signBound(
 	issuer: StubOidcIssuer,
 	claims: Readonly<Record<string, unknown>>,

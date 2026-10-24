@@ -96,10 +96,10 @@ export class GithubOidcResponseError extends CliError {
 }
 
 /**
- * The server at `target` refused a GitHub Actions token with
- * `subject-token-unbound`. The server accepts a token without a nonce binding
- * only when the token's audience is the server's own URL.
- */
+The server at `target` refused a GitHub Actions token with
+`subject-token-unbound`. The server accepts a token without a nonce binding
+only when the token's audience is the server's own URL.
+*/
 export class GithubOidcAudienceRefusedError extends CliError {
 	override readonly humanMessage: string;
 
@@ -126,11 +126,11 @@ export class GithubOidcAudienceRefusedError extends CliError {
 }
 
 /**
- * Returns the error to throw when the server at `target` refuses a GitHub
- * Actions token with the audience `audience`. A `subject-token-unbound`
- * refusal becomes `GithubOidcAudienceRefusedError`, and any other error is
- * returned unchanged.
- */
+Returns the error to throw when the server at `target` refuses a GitHub
+Actions token with the audience `audience`. A `subject-token-unbound`
+refusal becomes `GithubOidcAudienceRefusedError`, and any other error is
+returned unchanged.
+*/
 export function githubOidcExchangeFailure(
 	error: unknown,
 	target: URL,
@@ -161,10 +161,10 @@ class GithubOidcTransportError extends CliError {
 const githubOidcResponseSchema = z.object({ value: z.string().min(1) });
 
 /**
- * Requests a GitHub Actions OIDC token bound to `audience`, the value the
- * cupboard CI trust rule pins. Throws when the workflow lacks the
- * `id-token: write` permission that exposes the request endpoint.
- */
+Requests a GitHub Actions OIDC token bound to `audience`, the value the
+cupboard CI trust rule pins. Throws when the workflow lacks the
+`id-token: write` permission that exposes the request endpoint.
+*/
 export async function fetchGithubOidcToken(options: {
 	readonly audience: string;
 	readonly environment?: GithubOidcEnvironment;

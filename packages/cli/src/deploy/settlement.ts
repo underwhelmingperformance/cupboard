@@ -23,26 +23,26 @@ export interface SettlementOptions {
 }
 
 /**
- * How long the settlement waits between two reads of `localStep.status`.
- */
+How long the settlement waits between two reads of `localStep.status`.
+*/
 export const localStepPollIntervalMs = 5000;
 
 /**
- * Waits until every active or suspended tenant has completed the server's
- * required schema and data work. When tenants are pending, the settlement calls
- * `localStep.wake` once, which enqueues a wake for every pending tenant that
- * is not working. Each woken tenant object then continues its own work on its
- * alarm. The settlement reads `localStep.status` every
- * `localStepPollIntervalMs` until no tenant is pending. It writes the counts to
- * the step log whenever they change, and a warning the first time that a
- * tenant appears in the stalled sample.
- *
- * It fails with `LocalStepUnreachedError` when tenants are pending, none of
- * them is currently classified as working, and the wake is at least
- * `localStepStallWindowMs` old. The tenant objects do not depend on the
- * settlement: an object that is working continues when the settlement fails
- * or is interrupted, and one that has stopped waits for the next wake.
- */
+Waits until every active or suspended tenant has completed the server's
+required schema and data work. When tenants are pending, the settlement calls
+`localStep.wake` once, which enqueues a wake for every pending tenant that
+is not working. Each woken tenant object then continues its own work on its
+alarm. The settlement reads `localStep.status` every
+`localStepPollIntervalMs` until no tenant is pending. It writes the counts to
+the step log whenever they change, and a warning the first time that a
+tenant appears in the stalled sample.
+
+It fails with `LocalStepUnreachedError` when tenants are pending, none of
+them is currently classified as working, and the wake is at least
+`localStepStallWindowMs` old. The tenant objects do not depend on the
+settlement: an object that is working continues when the settlement fails
+or is interrupted, and one that has stopped waits for the next wake.
+*/
 export async function settleTenants(
 	client: SettlementClient,
 	reporter: Reporter,

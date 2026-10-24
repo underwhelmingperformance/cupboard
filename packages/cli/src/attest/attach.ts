@@ -116,10 +116,10 @@ export function requireAttestationAttachClient(
 }
 
 /**
- * A skip decision can reveal that the local path and the committed path have
- * different NAR hashes. An attestation for the local bytes cannot be attached
- * to the cache's copy of that store path.
- */
+A skip decision can reveal that the local path and the committed path have
+different NAR hashes. An attestation for the local bytes cannot be attached
+to the cache's copy of that store path.
+*/
 export interface DivergentSkip {
 	readonly storePath: StorePathString;
 	readonly localNarHash: string;
@@ -162,11 +162,11 @@ export interface CommittedAttestationReadDependencies extends ReferenceFetchDepe
 }
 
 /**
- * Reads the path identities from the destination's live narinfos. A path that
- * is absent during this initial read fails the command. The standalone attach
- * command reports an unservable outcome only for a later `NOT_FOUND` response
- * from the attachment request.
- */
+Reads the path identities from the destination's live narinfos. A path that
+is absent during this initial read fails the command. The standalone attach
+command reports an unservable outcome only for a later `NOT_FOUND` response
+from the attachment request.
+*/
 export async function readCommittedAttestationPathInfos(
 	paths: readonly StorePathString[],
 	source: CommittedAttestationSource,
@@ -206,12 +206,12 @@ export async function readCommittedAttestationPathInfos(
 }
 
 /**
- * Matches every in-toto subject in each bundle against the selected store
- * paths and NAR hashes. If any subject is outside that set, the whole bundle is
- * rejected before upload. A bundle is also rejected when the destination has
- * different bytes for one of its subjects. Duplicate path and bundle pairs
- * collapse to one entry.
- */
+Matches every in-toto subject in each bundle against the selected store
+paths and NAR hashes. If any subject is outside that set, the whole bundle is
+rejected before upload. A bundle is also rejected when the destination has
+different bytes for one of its subjects. Duplicate path and bundle pairs
+collapse to one entry.
+*/
 export async function prepareAttestationBundles(
 	pathInfos: readonly AttestationPathInfo[],
 	options: PrepareAttestationBundlesOptions
@@ -284,11 +284,11 @@ export interface AttestationAttachmentOptions {
 		outcome: AttestationAttachPartialOutcome
 	) => void | Promise<void>;
 	/**
-	 * Treats `NOT_FOUND` during attachment as an `unservable` outcome and
-	 * continues with the other bundles. The server uses this response when the
-	 * committed path disappears or the pending attachment is missing or expired.
-	 * A push leaves this unset because it has just committed every path it attests.
-	 */
+	Treats `NOT_FOUND` during attachment as an `unservable` outcome and
+	continues with the other bundles. The server uses this response when the
+	committed path disappears or the pending attachment is missing or expired.
+	A push leaves this unset because it has just committed every path it attests.
+	*/
 	readonly skipUnservable?: boolean;
 }
 
@@ -522,13 +522,11 @@ async function attachWithProgress(
 
 			return match === undefined
 				? []
-				: [
-						{
-							storePathHash: match.storePathHash,
-							digest: match.digest,
-							outcome: 'reused' as const
-						}
-					];
+				: {
+						storePathHash: match.storePathHash,
+						digest: match.digest,
+						outcome: 'reused' as const
+					};
 		});
 
 	await mapWithConcurrency(toUpload, bundleConcurrency, async (decision) => {
@@ -611,11 +609,11 @@ export interface AttestAttachDependencies {
 }
 
 /**
- * Attaches bundles after their subjects have been matched against live
- * destination narinfos. If the server returns `NOT_FOUND` during attachment,
- * the summary reports the path as unservable and continues with the other
- * bundles.
- */
+Attaches bundles after their subjects have been matched against live
+destination narinfos. If the server returns `NOT_FOUND` during attachment,
+the summary reports the path as unservable and continues with the other
+bundles.
+*/
 export async function runAttestAttach(
 	paths: readonly string[],
 	reporter: Reporter,

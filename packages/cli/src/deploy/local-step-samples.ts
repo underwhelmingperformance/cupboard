@@ -5,10 +5,10 @@ type StalledTenant = LocalStepStatus['stalledSample'][number];
 type UnwokenTenant = LocalStepStatus['unwokenSample'][number];
 
 /**
- * Describes a stalled tenant: when its object last attempted the work, when
- * it last made progress, and the error of the last attempt or the reason that
- * the object gave up.
- */
+Describes a stalled tenant: when its object last attempted the work, when
+it last made progress, and the error of the last attempt or the reason that
+the object gave up.
+*/
 export function stalledTenantText(tenant: StalledTenant): string {
 	const attempted =
 		tenant.attemptedAt === undefined
@@ -24,9 +24,9 @@ export function stalledTenantText(tenant: StalledTenant): string {
 }
 
 /**
- * Describes an unwoken tenant: when its object last attempted the outstanding
- * work, if it has since the tenant last recorded a step.
- */
+Describes an unwoken tenant: when its object last attempted the outstanding
+work, if it has since the tenant last recorded a step.
+*/
 export function unwokenTenantText(tenant: UnwokenTenant): string {
 	return tenant.attemptedAt === undefined
 		? `${tenant.tenant}: no attempt at the outstanding work`
@@ -34,8 +34,8 @@ export function unwokenTenantText(tenant: UnwokenTenant): string {
 }
 
 /**
- * The pending count and how it divides into the three classes.
- */
+The pending count and how it divides into the three classes.
+*/
 export function pendingText(status: LocalStepStatus): string {
 	return `${String(status.pending)} (working ${String(status.working)}, stalled ${String(status.stalled)}, unwoken ${String(status.unwoken)})`;
 }

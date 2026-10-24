@@ -46,16 +46,16 @@ export interface CloudflareCredential {
 	*/
 	readonly subject: string | undefined;
 	/**
-	 * The ID token from the browser login that produced this credential.
-	 * Absent for every other source.
-	 */
+	The ID token from the browser login that produced this credential.
+	Absent for every other source.
+	*/
 	readonly loginIdToken?: string;
 }
 
 /**
- * How the credential chain talks to the world; injectable so resolution order
- * is testable without real files, endpoints, or a browser.
- */
+How the credential chain talks to the world; injectable so resolution order
+is testable without real files, endpoints, or a browser.
+*/
 export interface CredentialChain {
 	readonly signal?: AbortSignal;
 	readonly env: Readonly<Record<string, string | undefined>>;
@@ -78,12 +78,12 @@ export interface CredentialChain {
 	readonly readWranglerToken?: () => Promise<string | undefined>;
 	readonly login: (signal?: AbortSignal) => Promise<CloudflareGrant>;
 	/**
-	 * Whether an incomplete cached grant may be replaced by a fresh browser
-	 * login. A grant issued before the `openid` scope was requested has no
-	 * subject, and refreshing it cannot add one, so only a new login can
-	 * establish who the operator is; with no terminal to log in on, the old
-	 * grant is used as it stands.
-	 */
+	Whether an incomplete cached grant may be replaced by a fresh browser
+	login. A grant issued before the `openid` scope was requested has no
+	subject, and refreshing it cannot add one, so only a new login can
+	establish who the operator is; with no terminal to log in on, the old
+	grant is used as it stands.
+	*/
 	readonly upgradeLogin: boolean;
 	readonly now: () => number;
 }
@@ -169,11 +169,11 @@ function isUsable(grant: CloudflareGrant, now: number): boolean {
 }
 
 /**
- * Resolve a Cloudflare credential, in order: the environment
- * (`CLOUDFLARE_API_TOKEN`/`CF_API_TOKEN`), the cached cupboard login (renewed
- * from its refresh token when expired), a logged-in wrangler's stored token,
- * and finally an interactive browser login, which is cached for next time.
- */
+Resolve a Cloudflare credential, in order: the environment
+(`CLOUDFLARE_API_TOKEN`/`CF_API_TOKEN`), the cached cupboard login (renewed
+from its refresh token when expired), a logged-in wrangler's stored token,
+and finally an interactive browser login, which is cached for next time.
+*/
 export async function resolveCredential(
 	chain: CredentialChain
 ): Promise<CloudflareCredential> {
@@ -286,9 +286,9 @@ export function createCloudflareClient(
 export interface ResolvedAccount {
 	readonly client: Cloudflare;
 	/**
-	 * Creates a client with the same credential and its own signal, for work
-	 * that must finish after the run's signal aborts.
-	 */
+	Creates a client with the same credential and its own signal, for work
+	that must finish after the run's signal aborts.
+	*/
 	readonly clientWithSignal: (signal: AbortSignal) => Cloudflare;
 	readonly api: CloudflareApi;
 	readonly accountId: CloudflareAccountId;
@@ -298,17 +298,17 @@ export interface ResolvedAccount {
 	*/
 	readonly subject: string | undefined;
 	/**
-	 * The ID token from the browser login that produced the credential. Absent
-	 * for every other source.
-	 */
+	The ID token from the browser login that produced the credential. Absent
+	for every other source.
+	*/
 	readonly loginIdToken?: string;
 }
 
 /**
- * Build an authenticated client and settle on an account: explicit option, then
- * `CLOUDFLARE_ACCOUNT_ID`, then the sole account on the credential, otherwise
- * prompt.
- */
+Build an authenticated client and settle on an account: explicit option, then
+`CLOUDFLARE_ACCOUNT_ID`, then the sole account on the credential, otherwise
+prompt.
+*/
 export async function resolveCloudflare(
 	accountOption: string | undefined,
 	chooseAccount: (

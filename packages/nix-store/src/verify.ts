@@ -4,14 +4,14 @@ import { type NixFingerprint, type NixKeyName } from './scalars.ts';
 import { NixSignature } from './signature.ts';
 
 /**
- * Trusted keys indexed by signing key name. Nix keeps the first key for each
- * name, so duplicate entries do not replace it.
- */
+Trusted keys indexed by signing key name. Nix keeps the first key for each
+name, so duplicate entries do not replace it.
+*/
 export class NixTrustedKeys {
 	/**
-	 * Parses the valid `<name>:<base64>` keys and ignores malformed values. Only
-	 * the parsed keys can verify path signatures.
-	 */
+	Parses the valid `<name>:<base64>` keys and ignores malformed values. Only
+	the parsed keys can verify path signatures.
+	*/
 	static of(values: readonly string[]): NixTrustedKeys {
 		const keys = new Map<NixKeyName, NixPublicKey>();
 
@@ -35,10 +35,10 @@ export class NixTrustedKeys {
 	}
 
 	/**
-	 * Whether any signature verifies the fingerprint under a trusted key.
-	 * Malformed signatures and signatures from unknown keys do not affect the
-	 * result.
-	 */
+	Whether any signature verifies the fingerprint under a trusted key.
+	Malformed signatures and signatures from unknown keys do not affect the
+	result.
+	*/
 	async hasValidSignature(
 		fingerprint: NixFingerprint,
 		signatures: readonly string[]
@@ -61,10 +61,10 @@ export class NixTrustedKeys {
 }
 
 /**
- * Reads the public half of a Nix secret key file. The file contains a name and a
- * 64-byte Ed25519 secret whose last 32 bytes are the public key. Returns
- * `undefined` for any other format.
- */
+Reads the public half of a Nix secret key file. The file contains a name and a
+64-byte Ed25519 secret whose last 32 bytes are the public key. Returns
+`undefined` for any other format.
+*/
 export function publicKeyOfSecret(contents: string): NixPublicKey | undefined {
 	const parsed = parseNamedMaterial(contents.trim());
 

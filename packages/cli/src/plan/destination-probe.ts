@@ -65,9 +65,9 @@ export function destinationServedPaths(
 }
 
 /**
- * Reuse-view results permit publication by reference; they do not show that the
- * destination cache serves or retains a path.
- */
+Reuse-view results permit publication by reference; they do not show that the
+destination cache serves or retains a path.
+*/
 export async function viewServedPaths(
 	options: DestinationProbeOptions & {
 		readonly baseUrl: URL;

@@ -44,9 +44,9 @@ const requiredStep = localStep(1);
 const ids = schemaTransitions.map((transition) => transition.id);
 
 /**
- * A `D1QueryApi` whose `queryRows` returns each of `answers` in turn, one per
- * call, and records the SQL so a test can assert which queries ran.
- */
+A `D1QueryApi` whose `queryRows` returns each of `answers` in turn, one per
+call, and records the SQL so a test can assert which queries ran.
+*/
 function stubApi(...answers: readonly (readonly string[])[]): D1QueryApi & {
 	readonly queries: string[];
 } {
@@ -68,11 +68,11 @@ function stubApi(...answers: readonly (readonly string[])[]): D1QueryApi & {
 }
 
 /**
- * The real `d1QueryRows` over an in-memory SQLite `tenant` table. The
- * Cloudflare client's `fetch` runs each posted query on the database and
- * answers with the D1 response envelope, so the wrapper receives the same
- * column types as from D1.
- */
+The real `d1QueryRows` over an in-memory SQLite `tenant` table. The
+Cloudflare client's `fetch` runs each posted query on the database and
+answers with the D1 response envelope, so the wrapper receives the same
+column types as from D1.
+*/
 function sqliteBackedApi(
 	rows: readonly {
 		id: string;
@@ -136,9 +136,9 @@ function sqliteBackedApi(
 }
 
 /**
- * A `D1QueryApi` over an empty in-memory SQLite database, so the statements
- * that the deploy sends run as D1 would run them.
- */
+A `D1QueryApi` over an empty in-memory SQLite database, so the statements
+that the deploy sends run as D1 would run them.
+*/
 function sqliteApi(): D1QueryApi & { readonly database: DatabaseSync } {
 	const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
 	const database = new DatabaseSync(':memory:');

@@ -58,7 +58,7 @@ function expectMaintenanceProjectionTestError(
 	expect(error).toBeInstanceOf(MaintenanceProjectionTestError);
 }
 
-async function eligibilityRow(tenant: string = fixtureTenant) {
+async function eligibilityRow() {
 	const row = await drizzleD1(env.CUPBOARD_DB, {
 		schema: {
 			tenantMaintenanceEligibility: d1Schema.tenantMaintenanceEligibility
@@ -69,7 +69,7 @@ async function eligibilityRow(tenant: string = fixtureTenant) {
 		.where(
 			eq(
 				d1Schema.tenantMaintenanceEligibility.tenant,
-				tenantIdSchema.parse(tenant)
+				tenantIdSchema.parse(fixtureTenant)
 			)
 		)
 		.get();

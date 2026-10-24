@@ -66,7 +66,7 @@ describe('bounded response bodies', () => {
 
 describe('bounded fetch responses', () => {
 	it('counts streamed bytes without retaining them in a collector', async () => {
-		const append = vi.spyOn(BoundedBodyCollector.prototype, 'append');
+		const canAppend = vi.spyOn(BoundedBodyCollector.prototype, 'append');
 		const fetcher = fetchWithBoundedResponseBodies(
 			() => Promise.resolve(new Response('accepted')),
 			{
@@ -79,7 +79,7 @@ describe('bounded fetch responses', () => {
 		const response = await fetcher('https://example.test');
 
 		await expect(response.text()).resolves.toBe('accepted');
-		expect(append).not.toHaveBeenCalled();
+		expect(canAppend).not.toHaveBeenCalled();
 	});
 
 	it('combines a caller signal with the request signal', async () => {

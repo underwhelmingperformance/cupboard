@@ -545,10 +545,10 @@ function scriptedSignIn(
 
 // The admin credential for an update, which the deploy checked before it
 // changed anything.
-function adminProvider(token = 'admin-jwt'): TokenProvider {
+function adminProvider(): TokenProvider {
 	return {
-		get: () => Promise.resolve(token),
-		refresh: () => Promise.resolve(token)
+		get: () => Promise.resolve('admin-jwt'),
+		refresh: () => Promise.resolve('admin-jwt')
 	};
 }
 
@@ -591,10 +591,10 @@ function tenantSummary(id: string): TenantSummary {
 }
 
 /**
- * One scripted answer: a value, an HTTP status to fail with, a `fetch` that
- * fails before any response, a network failure as `CupboardClient` reports
- * it, or an error to fail with.
- */
+One scripted answer: a value, an HTTP status to fail with, a `fetch` that
+fails before any response, a network failure as `CupboardClient` reports
+it, or an error to fail with.
+*/
 type Scripted<T> = T | number | 'offline' | 'unreachable' | Error;
 
 function answer<T>(
@@ -872,8 +872,8 @@ function unreachableShape(outcome: OnboardOutcome): {
 }
 
 /**
- * A loopback port with nothing listening on it, so a connection is refused.
- */
+A loopback port with nothing listening on it, so a connection is refused.
+*/
 async function closedLoopbackPort(): Promise<number> {
 	const server = createServer();
 

@@ -121,8 +121,8 @@ interface HarnessOptions {
 	readonly failCommitsOnce?: ReadonlySet<StorePathString>;
 	readonly failNegotiate?: boolean;
 	/**
-	 * Rejects every upload with this error.
-	 */
+	Rejects every upload with this error.
+	*/
 	readonly uploadFailure?: Error;
 	readonly decisions?: (
 		paths: NegotiateBody['paths']
@@ -130,10 +130,10 @@ interface HarnessOptions {
 	readonly maxEntries?: number;
 	readonly uploadConcurrency?: number;
 	/**
-	 * Advances a fake clock by this many minutes for each upload. Negotiation
-	 * gives each upload 15 minutes, and the harness refuses a commit that
-	 * arrives after that.
-	 */
+	Advances a fake clock by this many minutes for each upload. Negotiation
+	gives each upload 15 minutes, and the harness refuses a commit that
+	arrives after that.
+	*/
 	readonly uploadMinutes?: number;
 	/**
 	Use this shared session for every flush instead of opening another socket.

@@ -68,11 +68,11 @@ interface RootListingOptions extends RootOptions {
 }
 
 /**
- * The authority requested by a listing command's token exchange: cache-wide for
- * `root list`, and narrowed to the single root that `root targets` reads.
- * Exported so a test can check the grant a CI read requests without running the
- * command.
- */
+The authority requested by a listing command's token exchange: cache-wide for
+`root list`, and narrowed to the single root that `root targets` reads.
+Exported so a test can check the grant a CI read requests without running the
+command.
+*/
 export function rootListingAuthorizationDetails(
 	cache: CacheScope,
 	root?: RootName
@@ -84,10 +84,10 @@ export function rootListingAuthorizationDetails(
 }
 
 /**
- * The part of the derived client that the root commands use, in the contract's
- * input and output shapes. The real `tenantRpc(...).roots` satisfies this
- * interface by construction.
- */
+The part of the derived client that the root commands use, in the contract's
+input and output shapes. The real `tenantRpc(...).roots` satisfies this
+interface by construction.
+*/
 export interface RootClient {
 	set: CacheScopedClient<
 		RootSetBodyInput & { readonly name: string },

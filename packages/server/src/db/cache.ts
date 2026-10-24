@@ -13,9 +13,9 @@ import { z } from 'zod';
 import { jsonRowList } from '../do/json-list.ts';
 
 /**
- * The surrogate key of a `cache_identity` row, stored in the `cache_id` columns
- * of the cache-scoped tables.
- */
+The surrogate key of a `cache_identity` row, stored in the `cache_id` columns
+of the cache-scoped tables.
+*/
 export const cacheIdSchema = z
 	.number()
 	.int()
@@ -33,13 +33,13 @@ const cacheIdentityRowSchema = z.discriminatedUnion('kind', [
 ]);
 
 /**
- * One cache: its surrogate key, the scope that identifies it, whether a reader
- * must present a credential for it, and which incarnation of the name it is.
- *
- * The generation is part of the key of every path-keyed object this cache
- * writes, so a cache created after a deletion of the same name does not address
- * the objects its predecessor left.
- */
+One cache: its surrogate key, the scope that identifies it, whether a reader
+must present a credential for it, and which incarnation of the name it is.
+
+The generation is part of the key of every path-keyed object this cache
+writes, so a cache created after a deletion of the same name does not address
+the objects its predecessor left.
+*/
 export interface ResolvedCache {
 	readonly id: CacheId;
 	readonly scope: CacheScope;
@@ -52,10 +52,10 @@ type CacheIdentityColumns =
 	| { readonly cacheKind: 'named'; readonly cacheName: CacheName };
 
 /**
- * The `cache_kind` and `cache_name` values for a scope. A default cache
- * stores a SQL null for the name.
- *
- */
+The `cache_kind` and `cache_name` values for a scope. A default cache
+stores a SQL null for the name.
+
+*/
 export function cacheIdentityColumns(scope: CacheScope): CacheIdentityColumns {
 	if (scope.kind === 'default') {
 		return { cacheKind: 'default', cacheName: sql<null>`null` };
@@ -65,9 +65,9 @@ export function cacheIdentityColumns(scope: CacheScope): CacheIdentityColumns {
 }
 
 /**
- * Matches the rows for one scope: the default cache by its kind and its null
- * name, a named cache by its kind and its name.
- */
+Matches the rows for one scope: the default cache by its kind and its null
+name, a named cache by its kind and its name.
+*/
 export function cacheIdentityCondition(
 	kind: AnySQLiteColumn,
 	name: AnySQLiteColumn,
@@ -93,12 +93,12 @@ function prefixUpperBound(prefix: string): string {
 }
 
 /**
- * A selector bound through a JSON list.
- *
- * List values must be text or numbers. Selectors use empty strings for fields
- * they do not use. The predicate compares names or prefix bounds only for the
- * corresponding selector kind. Valid cache names and prefixes are never empty.
- */
+A selector bound through a JSON list.
+
+List values must be text or numbers. Selectors use empty strings for fields
+they do not use. The predicate compares names or prefix bounds only for the
+corresponding selector kind. Valid cache names and prefixes are never empty.
+*/
 interface ListedCacheSelector {
 	readonly kind: ReuseViewSelector['kind'];
 	readonly name: string;
@@ -124,9 +124,9 @@ function listedCacheSelector(selector: ReuseViewSelector): ListedCacheSelector {
 }
 
 /**
- * Matches the caches a complete selector set selects. `all` matches every
- * cache and returns no condition; an empty set matches none.
- */
+Matches the caches a complete selector set selects. `all` matches every
+cache and returns no condition; an empty set matches none.
+*/
 export function cacheSelectorsCondition(
 	kind: AnySQLiteColumn,
 	name: AnySQLiteColumn,
@@ -150,11 +150,11 @@ export function cacheSelectorsCondition(
 }
 
 /**
- * The scope stored in a row's identity columns.
- *
- * A row refuses to parse unless its name matches its kind: a default cache has
- * no name and a named cache has one.
- */
+The scope stored in a row's identity columns.
+
+A row refuses to parse unless its name matches its kind: a default cache has
+no name and a named cache has one.
+*/
 export function cacheScopeFromRow(row: {
 	readonly kind: 'default' | 'named';
 	readonly name?: string | null;

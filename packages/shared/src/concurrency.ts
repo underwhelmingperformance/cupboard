@@ -1,14 +1,14 @@
 import { positiveSafeInteger } from './limits.ts';
 
 /**
- * Calls `map` for each value with no more than `concurrency` calls in progress.
- * The returned results preserve input order.
- *
- * Workers share one iterator and claim another value when their previous call
- * finishes. This limits simultaneous I/O without making the calls serial. After
- * one call rejects, no new calls start. Calls already in progress finish, and
- * the returned promise rejects with the first error.
- */
+Calls `map` for each value with no more than `concurrency` calls in progress.
+The returned results preserve input order.
+
+Workers share one iterator and claim another value when their previous call
+finishes. This limits simultaneous I/O without making the calls serial. After
+one call rejects, no new calls start. Calls already in progress finish, and
+the returned promise rejects with the first error.
+*/
 export async function mapWithConcurrency<T, Result>(
 	values: readonly T[],
 	concurrency: number,
@@ -55,17 +55,17 @@ export async function mapWithConcurrency<T, Result>(
 }
 
 /**
- * Pulls values from `source` and calls `run` for each, with no more than
- * `concurrency` calls in progress.
- *
- * A worker asks the source for its next value only after its previous call
- * finishes, so a lazy source such as an async generator produces each value
- * when a worker is ready for it. An async generator handles concurrent `next`
- * calls one at a time. After a call or the source rejects, workers stop asking
- * for values. `run` is still called for a value that a worker has already
- * received. Calls in progress finish, an unfinished source is closed with
- * `return`, and the returned promise rejects with the first error.
- */
+Pulls values from `source` and calls `run` for each, with no more than
+`concurrency` calls in progress.
+
+A worker asks the source for its next value only after its previous call
+finishes, so a lazy source such as an async generator produces each value
+when a worker is ready for it. An async generator handles concurrent `next`
+calls one at a time. After a call or the source rejects, workers stop asking
+for values. `run` is still called for a value that a worker has already
+received. Calls in progress finish, an unfinished source is closed with
+`return`, and the returned promise rejects with the first error.
+*/
 export async function drainWithConcurrency<T>(
 	source: AsyncIterator<T>,
 	concurrency: number,
@@ -115,10 +115,10 @@ export async function drainWithConcurrency<T>(
 }
 
 /**
- * Admits at most `limit` holders at once. `acquire` resolves when a slot is
- * free, and each holder must call `release` once. Waiters are admitted in the
- * order in which they called `acquire`.
- */
+Admits at most `limit` holders at once. `acquire` resolves when a slot is
+free, and each holder must call `release` once. Waiters are admitted in the
+order in which they called `acquire`.
+*/
 export class CountingSemaphore {
 	private slots: number;
 	private readonly waiters: ((value: undefined) => void)[] = [];
@@ -164,10 +164,10 @@ export class CountingSemaphore {
 	}
 
 	/**
-	 * Runs `task` in a slot and releases the slot when the task's promise
-	 * resolves or rejects. When a slot is free, `task` starts before `run` returns;
-	 * otherwise it starts once a slot is released to it.
-	 */
+	Runs `task` in a slot and releases the slot when the task's promise
+	resolves or rejects. When a slot is free, `task` starts before `run` returns;
+	otherwise it starts once a slot is released to it.
+	*/
 	run<T>(task: () => Promise<T>): Promise<T> {
 		if (this.slots > 0) {
 			this.slots -= 1;

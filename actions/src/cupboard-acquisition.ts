@@ -30,9 +30,9 @@ const defaultDependencies: AcquireCupboardDependencies = {
 };
 
 /**
- * Acquire only the resolved coordinate. A release installation failure must
- * fail the action; it must not trigger a source build.
- */
+Acquire only the resolved coordinate. A release installation failure must
+fail the action; it must not trigger a source build.
+*/
 export async function acquireCupboard(
 	options: AcquireCupboardOptions,
 	reporter: Reporter,

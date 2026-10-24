@@ -63,16 +63,16 @@ function statementDetail(statement: D1PreparedStatement): StatementDetail {
 
 interface BatchFaultPlan {
 	/**
-	 * The NAR hashes selected for fault injection.
-	 */
+	The NAR hashes selected for fault injection.
+	*/
 	readonly narHashes: ReadonlySet<string>;
 	/**
-	 * Whether the batch contains the SQL operation this plan rejects.
-	 */
+	Whether the batch contains the SQL operation this plan rejects.
+	*/
 	readonly matches: (sql: string) => boolean;
 	/**
-	 * How many matching batches to reject. The rest run normally.
-	 */
+	How many matching batches to reject. The rest run normally.
+	*/
 	readonly limit?: number;
 }
 
@@ -82,15 +82,15 @@ interface BatchFault {
 }
 
 /**
- * Rejects the D1 batches a plan selects, and reports how many it rejected.
- *
- * The isolate shares one binding across its tests, so call order is not stable.
- * This helper rejects a batch only when it binds one of the selected NAR hashes
- * and contains the selected SQL operation.
- *
- * Each test asserts the rejection count, so a query change that prevents fault
- * injection also fails the test.
- */
+Rejects the D1 batches a plan selects, and reports how many it rejected.
+
+The isolate shares one binding across its tests, so call order is not stable.
+This helper rejects a batch only when it binds one of the selected NAR hashes
+and contains the selected SQL operation.
+
+Each test asserts the rejection count, so a query change that prevents fault
+injection also fails the test.
+*/
 function failBatchesFor(plan: BatchFaultPlan): BatchFault {
 	const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 	const limit = plan.limit ?? Infinity;

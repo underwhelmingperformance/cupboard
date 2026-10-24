@@ -6,12 +6,12 @@ import type { AccessClaims } from '../auth/auth.ts';
 import type { RuntimeEnv } from './context.ts';
 
 /**
- * Middleware installs `logger` before any route runs and installs `claims` on
- * authenticated routes.
- *
- * The path names the cache but not its access. A route that needs the access
- * resolves the cache through the catalogue.
- */
+Middleware installs `logger` before any route runs and installs `claims` on
+authenticated routes.
+
+The path names the cache but not its access. A route that needs the access
+resolves the cache through the catalogue.
+*/
 export interface TenantHonoEnv {
 	Bindings: RuntimeEnv;
 	Variables: {

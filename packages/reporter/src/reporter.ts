@@ -19,11 +19,11 @@ function reportableError(error: unknown): Error {
 }
 
 /**
- * Records an error object's identity globally so another reporter can suppress
- * a duplicate diagnostic. A primitive value is not recorded. The GitHub
- * reporter's phases wrap a thrown primitive in an `Error` before they record
- * and rethrow it, so the Actions handler receives the recorded object.
- */
+Records an error object's identity globally so another reporter can suppress
+a duplicate diagnostic. A primitive value is not recorded. The GitHub
+reporter's phases wrap a thrown primitive in an `Error` before they record
+and rethrow it, so the Actions handler receives the recorded object.
+*/
 export function markErrorReported(error: unknown): void {
 	if (typeof error === 'object' && error !== null) {
 		reportedErrors.add(error);
@@ -44,8 +44,8 @@ export interface LabelPresentation {
 
 export interface StepsPresentation extends LabelPresentation {
 	/**
-	 * Prints the group's messages after successful completion in terminal mode.
-	 */
+	Prints the group's messages after successful completion in terminal mode.
+	*/
 	readonly showMessages?: boolean;
 }
 
@@ -93,17 +93,17 @@ export interface PhaseContext {
 		presentation?: FactPresentation
 	): void;
 	/**
-	 * Reports a warning for this unit. JSON and GitHub modes emit it immediately.
-	 * Terminal spinners and progress bars defer it until the animation ends; a
-	 * task log shows it live and repeats it after the task closes.
-	 */
+	Reports a warning for this unit. JSON and GitHub modes emit it immediately.
+	Terminal spinners and progress bars defer it until the animation ends; a
+	task log shows it live and repeats it after the task closes.
+	*/
 	warn(label: string, value?: string, presentation?: MessagePresentation): void;
 	/**
-	 * Reports a result of this phase. Each mode outputs it when the phase ends,
-	 * whether the phase succeeds or fails. GitHub mode writes it inside the
-	 * phase's group after the facts. Terminal mode renders it after the spinner
-	 * stops, and JSON mode emits it after the phase event.
-	 */
+	Reports a result of this phase. Each mode outputs it when the phase ends,
+	whether the phase succeeds or fails. GitHub mode writes it inside the
+	phase's group after the facts. Terminal mode renders it after the spinner
+	stops, and JSON mode emits it after the phase event.
+	*/
 	result(payload: ResultPayload): void;
 }
 
@@ -157,9 +157,9 @@ export interface ResultColumn<K extends string> {
 }
 
 /**
- * A table cell that links to a page. The job summary renders it as a markdown
- * link. Terminal and GitHub modes print {@link ResultLink.plainText}.
- */
+A table cell that links to a page. The job summary renders it as a markdown
+link. Terminal and GitHub modes print {@link ResultLink.plainText}.
+*/
 export class ResultLink {
 	constructor(
 		readonly text: string,
@@ -181,15 +181,15 @@ function plainCellText(cell: ResultCell): string {
 }
 
 /**
- * A display-only table with one cell in each row for every column, in column
- * order. Build one with {@link ResultTable.of}.
- */
+A display-only table with one cell in each row for every column, in column
+order. Build one with {@link ResultTable.of}.
+*/
 export class ResultTable {
 	/**
-	 * Builds a table from rows keyed by the columns' keys. The columns specify
-	 * the keys read from each row. Every row must provide those keys, and other
-	 * properties are ignored.
-	 */
+	Builds a table from rows keyed by the columns' keys. The columns specify
+	the keys read from each row. Every row must provide those keys, and other
+	properties are ignored.
+	*/
 	static of<const K extends string>(
 		columns: readonly ResultColumn<K>[],
 		rows: readonly Readonly<Record<NoInfer<K>, ResultCell>>[]
@@ -206,9 +206,9 @@ export class ResultTable {
 	) {}
 
 	/**
-	 * Returns the column labels and then each row as plain text, with the cells
-	 * padded to align the columns. `measure` gives a cell's display width.
-	 */
+	Returns the column labels and then each row as plain text, with the cells
+	padded to align the columns. `measure` gives a cell's display width.
+	*/
 	lines(measure: (text: string) => number = (text) => text.length): string[] {
 		const textRows = [
 			this.columns,
@@ -231,16 +231,16 @@ export class ResultTable {
 }
 
 /**
- * `kind` and `data` are the stable machine result. JSON mode emits them as a
- * result event, and every mode appends them to `resultFile` when configured.
- * The other fields are display-only.
- *
- * Terminal mode renders `rows`, `table` and `code` as a card. GitHub mode
- * writes the title, then `rows` as `label: value` lines, then `table` as
- * aligned columns, then the lines of `code`. When a phase reports the result
- * through {@link PhaseContext.result}, GitHub mode writes it inside the phase's
- * group.
- */
+`kind` and `data` are the stable machine result. JSON mode emits them as a
+result event, and every mode appends them to `resultFile` when configured.
+The other fields are display-only.
+
+Terminal mode renders `rows`, `table` and `code` as a card. GitHub mode
+writes the title, then `rows` as `label: value` lines, then `table` as
+aligned columns, then the lines of `code`. When a phase reports the result
+through {@link PhaseContext.result}, GitHub mode writes it inside the phase's
+group.
+*/
 export interface ResultPayload<T = unknown> {
 	readonly kind: string;
 	readonly title?: string;
@@ -248,33 +248,33 @@ export interface ResultPayload<T = unknown> {
 	readonly rows: readonly ResultRow[];
 	readonly table?: ResultTable;
 	/**
-	 * Text to print verbatim after the rows and the table, such as
-	 * configuration lines for the reader to copy.
-	 */
+	Text to print verbatim after the rows and the table, such as
+	configuration lines for the reader to copy.
+	*/
 	readonly code?: string;
 	/**
-	 * A sentence after `code`, made of text and links. The job summary writes it
-	 * as a paragraph with markdown links, and the other modes print each link as
-	 * {@link ResultLink.plainText}.
-	 */
+	A sentence after `code`, made of text and links. The job summary writes it
+	as a paragraph with markdown links, and the other modes print each link as
+	{@link ResultLink.plainText}.
+	*/
 	readonly note?: readonly ResultCell[];
 	/**
-	 * Terminal and GitHub modes render this text when `rows`, `table`, `code`
-	 * and `note` are all empty. JSON mode still emits the empty `data` value.
-	 */
+	Terminal and GitHub modes render this text when `rows`, `table`, `code`
+	and `note` are all empty. JSON mode still emits the empty `data` value.
+	*/
 	readonly empty?: string;
 	/**
-	 * When this is true and `GITHUB_STEP_SUMMARY` is set, GitHub mode also
-	 * appends the result to that file as markdown: a heading from the title, a
-	 * two-column table for `rows`, a table for `table` and a fenced code block
-	 * for `code`. The other modes ignore it.
-	 */
+	When this is true and `GITHUB_STEP_SUMMARY` is set, GitHub mode also
+	appends the result to that file as markdown: a heading from the title, a
+	two-column table for `rows`, a table for `table` and a fenced code block
+	for `code`. The other modes ignore it.
+	*/
 	readonly jobSummary?: boolean;
 }
 
 /**
- * Returns a result's `note` as plain text, or `undefined` when it has none.
- */
+Returns a result's `note` as plain text, or `undefined` when it has none.
+*/
 export function resultNoteText(
 	payload: Pick<ResultPayload, 'note'>
 ): string | undefined {
@@ -286,9 +286,9 @@ export function resultNoteText(
 }
 
 /**
- * Splits a result's `code` into lines and removes one trailing line break.
- * Returns an empty list when `code` is missing or empty.
- */
+Splits a result's `code` into lines and removes one trailing line break.
+Returns an empty list when `code` is missing or empty.
+*/
 export function resultCodeLines(
 	payload: Pick<ResultPayload, 'code'>
 ): string[] {
@@ -318,36 +318,36 @@ export interface Reporter {
 	): Promise<T>;
 	result(payload: ResultPayload): void;
 	/**
-	 * Writes a raw payload followed by a newline to `out`. Every mode keeps `out`
-	 * separate from its progress rendering, so a caller can capture the payload.
-	 */
+	Writes a raw payload followed by a newline to `out`. Every mode keeps `out`
+	separate from its progress rendering, so a caller can capture the payload.
+	*/
 	data(text: string): void;
 	warn(label: string, value?: string, presentation?: MessagePresentation): void;
 	info(message: string, presentation?: MessagePresentation): void;
 	/**
-	 * Reports completed work as a terminal success marker, a JSON `success` event,
-	 * or a GitHub notice when workflow commands are active.
-	 */
+	Reports completed work as a terminal success marker, a JSON `success` event,
+	or a GitHub notice when workflow commands are active.
+	*/
 	success(message: string, presentation?: MessagePresentation): void;
 	/**
-	 * Reports skipped work as a terminal step marker, a JSON `step` event, or a
-	 * plain GitHub log line.
-	 */
+	Reports skipped work as a terminal step marker, a JSON `step` event, or a
+	plain GitHub log line.
+	*/
 	step(message: string, presentation?: MessagePresentation): void;
 	/**
-	 * Reports a failure with its cause chain. Terminal mode renders an indented
-	 * error, JSON mode emits an `error` event, and GitHub mode uses an annotation
-	 * when workflow commands are active.
-	 */
+	Reports a failure with its cause chain. Terminal mode renders an indented
+	error, JSON mode emits an `error` event, and GitHub mode uses an annotation
+	when workflow commands are active.
+	*/
 	error(error: unknown): void;
 }
 
 export type ReporterMode = 'terminal' | 'json' | 'github';
 
 /**
- * Build-push emits these phase labels in run order. The labels remain stable
- * because JSON consumers use them to identify phase events.
- */
+Build-push emits these phase labels in run order. The labels remain stable
+because JSON consumers use them to identify phase events.
+*/
 export const buildPushPhases = {
 	build: 'Building',
 	queue: 'Queueing completed paths',
@@ -361,36 +361,36 @@ export type BuildPushPhase = keyof typeof buildPushPhases;
 export interface ReporterOptions {
 	readonly presentation?: PresentationLevel;
 	/**
-	 * Destination for JSON events and GitHub rendering. Defaults to stderr.
-	 */
+	Destination for JSON events and GitHub rendering. Defaults to stderr.
+	*/
 	readonly stream?: NodeJS.WritableStream;
 	/**
-	 * Destination for `data` payloads. Defaults to stdout.
-	 */
+	Destination for `data` payloads. Defaults to stdout.
+	*/
 	readonly out?: NodeJS.WritableStream;
 	/**
 	The clock used for durations and progress throttling; defaults to `Date.now`.
 	*/
 	readonly now?: () => number;
 	/**
-	 * A path to which every mode appends one JSONL event for each
-	 * {@link Reporter.result}. Read it with {@link parseReporterResults}.
-	 */
+	A path to which every mode appends one JSONL event for each
+	{@link Reporter.result}. Read it with {@link parseReporterResults}.
+	*/
 	readonly resultFile?: string;
 	/**
-	 * Formats GitHub error annotations without changing the thrown error.
-	 * Defaults to the error message and its causes.
-	 */
+	Formats GitHub error annotations without changing the thrown error.
+	Defaults to the error message and its causes.
+	*/
 	readonly formatError?: (error: unknown) => string;
 	/**
-	 * The environment from which GitHub mode reads `GITHUB_STEP_SUMMARY`.
-	 * Defaults to `process.env`.
-	 */
+	The environment from which GitHub mode reads `GITHUB_STEP_SUMMARY`.
+	Defaults to `process.env`.
+	*/
 	readonly environment?: Readonly<Record<string, string | undefined>>;
 	/**
-	 * Appends text to a file. Every mode uses it for `resultFile`, and GitHub
-	 * mode also uses it for the job summary. Defaults to `appendFileSync`.
-	 */
+	Appends text to a file. Every mode uses it for `resultFile`, and GitHub
+	mode also uses it for the job summary. Defaults to `appendFileSync`.
+	*/
 	readonly appendFile?: (path: string, text: string) => void;
 }
 
@@ -409,10 +409,10 @@ export class MalformedResultLineError extends Error {
 }
 
 /**
- * Parses a `--result-file`'s contents into its result events, skipping blank
- * lines. Throws a {@link MalformedResultLineError} on the first line that is not
- * a JSON result event, so a corrupt file fails loudly rather than dropping data.
- */
+Parses a `--result-file`'s contents into its result events, skipping blank
+lines. Throws a {@link MalformedResultLineError} on the first line that is not
+a JSON result event, so a corrupt file fails loudly rather than dropping data.
+*/
 export function parseReporterResults(
 	fileContents: string
 ): ReporterResultEvent[] {
@@ -452,10 +452,10 @@ function parseResultLine(line: string): ReporterResultEvent | undefined {
 }
 
 /**
- * Appends one result event to the JSONL result file. A reporter in any mode
- * calls this for every {@link Reporter.result} when a `resultFile` is set, so a
- * caller can read a run's results back with {@link parseReporterResults}.
- */
+Appends one result event to the JSONL result file. A reporter in any mode
+calls this for every {@link Reporter.result} when a `resultFile` is set, so a
+caller can read a run's results back with {@link parseReporterResults}.
+*/
 export function appendResultEvent(
 	resultFile: string,
 	payload: ResultPayload,
@@ -492,9 +492,9 @@ function warnText(label: string, value?: string): string {
 const progressIntervalMs = 2000;
 
 /**
- * Emits the machine-readable contract as line-delimited JSON to `stream` and
- * writes raw data to `out`. The defaults are stderr and stdout respectively.
- */
+Emits the machine-readable contract as line-delimited JSON to `stream` and
+writes raw data to `out`. The defaults are stderr and stdout respectively.
+*/
 export function createReporter(options: ReporterOptions = {}): Reporter {
 	return createJsonReporter(
 		options.stream ?? stderr,
@@ -506,14 +506,14 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
 }
 
 /**
- * Renders to `stream`, which defaults to stderr, and writes `data` payloads to
- * `out`, which defaults to stdout. The runner reads workflow commands from
- * both streams. When `GITHUB_ACTIONS=true`, phases and tasks use workflow
- * groups and warnings, successes and failures use command annotations.
- * Otherwise the shared command emitter degrades them to plain lines. Results
- * use `label: value` lines and aligned table columns in either environment,
- * and a result marked with `jobSummary` is also appended to the job summary.
- */
+Renders to `stream`, which defaults to stderr, and writes `data` payloads to
+`out`, which defaults to stdout. The runner reads workflow commands from
+both streams. When `GITHUB_ACTIONS=true`, phases and tasks use workflow
+groups and warnings, successes and failures use command annotations.
+Otherwise the shared command emitter degrades them to plain lines. Results
+use `label: value` lines and aligned table columns in either environment,
+and a result marked with `jobSummary` is also appended to the job summary.
+*/
 export function createGithubReporter(options: ReporterOptions = {}): Reporter {
 	return buildGithubReporter(options);
 }
@@ -1213,11 +1213,11 @@ export function formatCount(count: number): string {
 }
 
 /**
- * Renders an ISO 8601 timestamp as a compact `YYYY-MM-DD HH:mm UTC` for terminal
- * display, dropping the seconds and milliseconds. The result is in UTC so it does
- * not depend on the machine's timezone. A value that does not parse is returned
- * unchanged.
- */
+Renders an ISO 8601 timestamp as a compact `YYYY-MM-DD HH:mm UTC` for terminal
+display, dropping the seconds and milliseconds. The result is in UTC so it does
+not depend on the machine's timezone. A value that does not parse is returned
+unchanged.
+*/
 export function formatTimestamp(value: string): string {
 	const date = new Date(value);
 

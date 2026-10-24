@@ -70,10 +70,10 @@ export interface ReconcileTarget {
 }
 
 /**
- * Preserves the planner's pre-build classifications. `leftUpstream` remains
- * authoritative even if another target realises the same path during this
- * build, keeping root contents independent of which targets share a cohort.
- */
+Preserves the planner's pre-build classifications. `leftUpstream` remains
+authoritative even if another target realises the same path during this
+build, keeping root contents independent of which targets share a cohort.
+*/
 export interface ReconcilePartition {
 	readonly attachOnly: readonly StorePathString[];
 	readonly publishByReference: readonly StorePathString[];
@@ -90,9 +90,9 @@ export interface ReconcilePartition {
 export interface DerivationSnapshot {
 	readonly derivations: ReadonlyMap<NixDerivedPathString, DerivationPath>;
 	/**
-	 * Recorded in the receipt because a cold evaluation of a large flake can take
-	 * minutes and form a material part of the run's cost.
-	 */
+	Recorded in the receipt because a cold evaluation of a large flake can take
+	minutes and form a material part of the run's cost.
+	*/
 	readonly evaluationTimeMs?: number;
 }
 
@@ -114,9 +114,9 @@ export interface ReconcileOptions {
 	readonly wait?: boolean;
 	readonly commitOptions?: CommitOptions;
 	/**
-	 * Reuse the streaming phase's commit session so the server applies one credit
-	 * budget across all phases.
-	 */
+	Reuse the streaming phase's commit session so the server applies one credit
+	budget across all phases.
+	*/
 	readonly session?: CommitSession;
 	readonly createNarArchive?: (storePath: string) => NarSource;
 	readonly compressNar?: CompressNar;
@@ -129,9 +129,9 @@ export interface ReconcileOptions {
 	readonly childExitStatus?: number;
 	readonly terminalFailure?: TerminalBuildFailureInput;
 	/**
-	 * Subjects established before reconciliation take precedence over store
-	 * metadata read afterward.
-	 */
+	Subjects established before reconciliation take precedence over store
+	metadata read afterward.
+	*/
 	readonly subjects?: readonly BuildSubjectV3Input[];
 	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 }

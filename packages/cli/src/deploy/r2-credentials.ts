@@ -129,12 +129,12 @@ function secretAccessKeyProblemText(value: string): string | undefined {
 const credentialProbeKey = '.cupboard-credential-probe';
 
 /**
- * Begins a multipart upload to test the same write access that a push needs.
- * R2 creates no object until an upload completes. If the response contains an
- * upload id, the probe attempts to abort it. A successful begin is accepted
- * even if that cleanup request fails. This permits write-only credentials;
- * 401 or 403 rejects them.
- */
+Begins a multipart upload to test the same write access that a push needs.
+R2 creates no object until an upload completes. If the response contains an
+upload id, the probe attempts to abort it. A successful begin is accepted
+even if that cleanup request fails. This permits write-only credentials;
+401 or 403 rejects them.
+*/
 export async function checkR2Credentials(
 	options: {
 		readonly accountId: CloudflareAccountId;

@@ -4,10 +4,10 @@ import path from 'node:path';
 import { type ScriptName, scriptNameSchema } from './identifiers.ts';
 
 /**
- * A Worker this command deploys: the script name Cloudflare knows it by, the
- * entry source (relative to the checkout root) used in tree mode, and the
- * filename its bundle is referenced by in the upload metadata.
- */
+A Worker this command deploys: the script name Cloudflare knows it by, the
+entry source (relative to the checkout root) used in tree mode, and the
+filename its bundle is referenced by in the upload metadata.
+*/
 export interface WorkerEntry {
 	readonly scriptName: ScriptName;
 	readonly entryFile: string;
@@ -29,10 +29,10 @@ export const tenantWorker: WorkerEntry = {
 export type RunMode = 'tree' | 'embedded';
 
 /**
- * Where this invocation gets its Worker bytes. `tree` rebuilds from a checkout's
- * source; `embedded` uploads the bundles baked into the binary at release time.
- * `notice` explains the choice when a released binary runs inside a checkout.
- */
+Where this invocation gets its Worker bytes. `tree` rebuilds from a checkout's
+source; `embedded` uploads the bundles baked into the binary at release time.
+`notice` explains the choice when a released binary runs inside a checkout.
+*/
 export interface WorkerSourcePlan {
 	readonly mode: RunMode;
 	readonly checkoutRoot: string | undefined;
@@ -56,10 +56,10 @@ export class NoCheckoutError extends Error {
 }
 
 /**
- * Walk upwards from `start` for the workspace root: the first directory holding
- * both `pnpm-workspace.yaml` and the server Worker source. Returns undefined
- * when run outside a checkout (the released binary's normal case).
- */
+Walk upwards from `start` for the workspace root: the first directory holding
+both `pnpm-workspace.yaml` and the server Worker source. Returns undefined
+when run outside a checkout (the released binary's normal case).
+*/
 export function findCheckoutRoot(
 	start: string,
 	hasPath: (filePath: string) => boolean = existsSync
@@ -85,13 +85,13 @@ export function findCheckoutRoot(
 }
 
 /**
- * Decide whether to deploy from a checkout's source or the embedded bundles.
- *
- * Running unbuilt from source always deploys the working tree. The released
- * single-executable deploys its embedded bundles, except when invoked inside a
- * checkout: there it defaults to embedded with a pointer to `pnpm cli deploy`,
- * and only rebuilds from the tree when `--from-tree` is given.
- */
+Decide whether to deploy from a checkout's source or the embedded bundles.
+
+Running unbuilt from source always deploys the working tree. The released
+single-executable deploys its embedded bundles, except when invoked inside a
+checkout: there it defaults to embedded with a pointer to `pnpm cli deploy`,
+and only rebuilds from the tree when `--from-tree` is given.
+*/
 export function planWorkerSource(
 	environment: RunEnvironment
 ): WorkerSourcePlan {

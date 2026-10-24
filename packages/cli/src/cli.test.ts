@@ -51,14 +51,14 @@ describe('cliExitCode', () => {
 	])(
 		'rejects a named cache URL for creation defaults: $arguments_',
 		async ({ arguments_ }) => {
-			const [command, ...options] = arguments_;
+			const [command = '', ...options] = arguments_;
 			let failure: unknown;
 			try {
 				await buildProgram().parseAsync([
 					'node',
 					'cupboard',
 					'cache',
-					command ?? '',
+					command,
 					'https://cupboard.test/t/acme/cache/builds',
 					...options
 				]);

@@ -209,9 +209,9 @@ export class UploadStateService {
 	}
 
 	/**
-	 * Records that the canonical object of a live blob is missing, so that
-	 * negotiation plans an upload for the NAR instead of a reuse commit.
-	 */
+	Records that the canonical object of a live blob is missing, so that
+	negotiation plans an upload for the NAR instead of a reuse commit.
+	*/
 	async markCanonicalNarMissing(narHash: NixSha256HashString): Promise<void> {
 		const now = Date.now();
 
@@ -223,9 +223,9 @@ export class UploadStateService {
 	}
 
 	/**
-	 * Removes the record for a NAR hash once an upload has promoted its bytes to
-	 * a live object.
-	 */
+	Removes the record for a NAR hash once an upload has promoted its bytes to
+	a live object.
+	*/
 	async clearCanonicalNarMissing(narHash: NixSha256HashString): Promise<void> {
 		await this.context.ctx.storage.delete(missingCanonicalNarKey(narHash));
 	}
@@ -315,9 +315,9 @@ export class UploadStateService {
 	}
 
 	/**
-	 * The reusable blobs, without those whose canonical object a reuse commit
-	 * recently found missing. Expired records are deleted.
-	 */
+	The reusable blobs, without those whose canonical object a reuse commit
+	recently found missing. Expired records are deleted.
+	*/
 	async withoutMissingCanonicalNars<T>(
 		reusable: ReadonlyMap<NixSha256HashString, T>,
 		shouldCleanup = true
@@ -403,10 +403,10 @@ export class UploadStateService {
 	}
 
 	/**
-	 * Removes the upload row while `owner` owns its claim, or while nobody does
-	 * when `owner` is absent. When the row was still in verification, this
-	 * concludes the upload's promotion with `conclusion`.
-	 */
+	Removes the upload row while `owner` owns its claim, or while nobody does
+	when `owner` is absent. When the row was still in verification, this
+	concludes the upload's promotion with `conclusion`.
+	*/
 	async clearPendingUpload(
 		uploadId: UploadId,
 		conclusion: UploadConclusion,
@@ -455,9 +455,9 @@ export class UploadStateService {
 	}
 
 	/**
-	 * Replaces the upload's promotion record while `owner` owns its claim.
-	 * Returns whether the record was replaced.
-	 */
+	Replaces the upload's promotion record while `owner` owns its claim.
+	Returns whether the record was replaced.
+	*/
 	recordPromotion(
 		uploadId: UploadId,
 		owner: string,
@@ -553,9 +553,7 @@ export class UploadStateService {
 			.where(and(isNotNull(schema.pendingUploads.sessionId), liveVerdict))
 			.all();
 
-		return new Set(
-			rows.flatMap((row) => (row.sessionId === null ? [] : [row.sessionId]))
-		);
+		return new Set(rows.flatMap((row) => row.sessionId ?? []));
 	}
 
 	// Set this marker before reservation or promotion. After a crash, verification
@@ -640,9 +638,9 @@ export class UploadStateService {
 	}
 
 	/**
-	 * The readable references to the listed NARs, from every cache in the
-	 * tenant.
-	 */
+	The readable references to the listed NARs, from every cache in the
+	tenant.
+	*/
 	async readableReferences(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<ReusableReference[]> {

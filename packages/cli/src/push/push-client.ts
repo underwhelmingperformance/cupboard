@@ -64,10 +64,10 @@ export interface PushClientOptions {
 }
 
 /**
- * Creates a push client for one tenant and cache. Administrative calls use the
- * contract client, blob uploads use renewable R2 credentials, and commits use
- * the WebSocket client.
- */
+Creates a push client for one tenant and cache. Administrative calls use the
+contract client, blob uploads use renewable R2 credentials, and commits use
+the WebSocket client.
+*/
 export function pushClientFor(
 	url: URL,
 	credential: AccessCredential,

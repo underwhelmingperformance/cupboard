@@ -54,13 +54,13 @@ export interface BuildEventListenerOptions {
 }
 
 /**
- * The invocation's hook endpoint: a Unix-socket listener accepting the
- * post-build hook's events. Each connection sends one newline-terminated
- * message, so concurrent hook firings cannot interleave. Every valid event is
- * recorded immediately, and the accepted set is deliberately unbounded: even an
- * enormous build is only tens of thousands of paths, and the back-pressure comes
- * from the bounded upload pool that consumes the set, never from the hook.
- */
+The invocation's hook endpoint: a Unix-socket listener accepting the
+post-build hook's events. Each connection sends one newline-terminated
+message, so concurrent hook firings cannot interleave. Every valid event is
+recorded immediately, and the accepted set is deliberately unbounded: even an
+enormous build is only tens of thousands of paths, and the back-pressure comes
+from the bounded upload pool that consumes the set, never from the hook.
+*/
 export class BuildEventListener {
 	static async listen(
 		options: BuildEventListenerOptions
@@ -273,14 +273,14 @@ export class BuildEventListener {
 	}
 
 	/**
-	 * Quiesces the endpoint: refuses connections arriving from here on and
-	 * resolves once every accepted connection has reached its terminal state,
-	 * with its message recorded, its rejection reported, or the connection
-	 * closed. A connection that never settles is destroyed once the drain
-	 * timeout elapses. Closing a connection also cancels any output protection
-	 * that was waiting to acknowledge its event. After drain resolves the accepted
-	 * set is complete.
-	 */
+	Quiesces the endpoint: refuses connections arriving from here on and
+	resolves once every accepted connection has reached its terminal state,
+	with its message recorded, its rejection reported, or the connection
+	closed. A connection that never settles is destroyed once the drain
+	timeout elapses. Closing a connection also cancels any output protection
+	that was waiting to acknowledge its event. After drain resolves the accepted
+	set is complete.
+	*/
 	async drain(): Promise<void> {
 		// A helper that connected before this call may still be waiting for its
 		// connection to be dispatched, so the queued arrivals are accepted

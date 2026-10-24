@@ -21,8 +21,8 @@ import type {
 } from './nar-upload.ts';
 
 /**
- * Returns the process's peak resident set size in bytes.
- */
+Returns the process's peak resident set size in bytes.
+*/
 export type PeakRssSampler = () => number;
 
 export const processPeakRss: PeakRssSampler = () =>
@@ -40,8 +40,8 @@ export function reportNarCompression(
 }
 
 /**
- * Adds up what a run compressed, for its summary.
- */
+Adds up what a run compressed, for its summary.
+*/
 export class CompressionTotals {
 	private narBytes = 0;
 
@@ -62,9 +62,9 @@ export class CompressionTotals {
 	}
 
 	/**
-	 * Returns the totals with the given peak RSS, or `undefined` when the run
-	 * compressed no NAR.
-	 */
+	Returns the totals with the given peak RSS, or `undefined` when the run
+	compressed no NAR.
+	*/
 	summary(peakRssBytes: number): CompressionSummary | undefined {
 		if (this.nars === 0) {
 			return undefined;
@@ -81,12 +81,12 @@ export class CompressionTotals {
 }
 
 /**
- * The summary rows for a run's compression. The rate is the NAR bytes divided
- * by the time that uploads waited for their NARs to be read and compressed.
- * The waits of concurrent uploads are added together, so this is the average
- * rate of one upload worker, not of the whole run. The rate is omitted when the
- * summed wait rounds to zero.
- */
+The summary rows for a run's compression. The rate is the NAR bytes divided
+by the time that uploads waited for their NARs to be read and compressed.
+The waits of concurrent uploads are added together, so this is the average
+rate of one upload worker, not of the whole run. The rate is omitted when the
+summed wait rounds to zero.
+*/
 export function compressionRows(summary: CompressionSummary): ResultRow[] {
 	return [
 		{ label: 'NAR bytes compressed', value: formatBytes(summary.narBytes) },
@@ -104,11 +104,11 @@ export function compressionRows(summary: CompressionSummary): ResultRow[] {
 }
 
 /**
- * Reports one NAR's upload as it happens: each part at debug level, each
- * request that will be sent again at debug level, and each part that was
- * recompressed from the store or padded as a warning. `onBytes` receives the
- * number of bytes added to the stored object.
- */
+Reports one NAR's upload as it happens: each part at debug level, each
+request that will be sent again at debug level, and each part that was
+recompressed from the store or padded as a warning. `onBytes` receives the
+number of bytes added to the stored object.
+*/
 export function uploadObserver(
 	reporter: Pick<Reporter, 'info' | 'warn'>,
 	storePathName: string,
@@ -169,8 +169,8 @@ function partMessage(report: NarPartReport): string {
 }
 
 /**
- * Adds up how a run sent its NARs, for its summary.
- */
+Adds up how a run sent its NARs, for its summary.
+*/
 export class TransferTotals {
 	private nars = 0;
 
@@ -200,8 +200,8 @@ export class TransferTotals {
 	}
 
 	/**
-	 * Returns the totals, or `undefined` when the run uploaded no NAR.
-	 */
+	Returns the totals, or `undefined` when the run uploaded no NAR.
+	*/
 	summary(): TransferSummary | undefined {
 		if (this.nars === 0) {
 			return undefined;
@@ -221,10 +221,10 @@ export class TransferTotals {
 }
 
 /**
- * The summary rows for how a run sent its NARs. The rows for requests sent
- * again, parts recompressed, bytes sent again and padding appear only when
- * their totals are not zero.
- */
+The summary rows for how a run sent its NARs. The rows for requests sent
+again, parts recompressed, bytes sent again and padding appear only when
+their totals are not zero.
+*/
 export function transferRows(summary: TransferSummary): ResultRow[] {
 	const optional: readonly [string, number, string][] = [
 		['Requests sent again', summary.retries, formatCount(summary.retries)],

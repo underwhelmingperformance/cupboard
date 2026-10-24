@@ -1,14 +1,14 @@
 /**
- * `true` or `false` when the result of a job condition follows from the event
- * name. For `pull_request`, the result can also use the source and activity of
- * the modelled pull request. Otherwise `undefined`.
- */
+`true` or `false` when the result of a job condition follows from the event
+name. For `pull_request`, the result can also use the source and activity of
+the modelled pull request. Otherwise `undefined`.
+*/
 export type ConditionOutcome = boolean | undefined;
 
 /**
- * Where a modelled pull request comes from: a branch of the repository itself
- * or a fork.
- */
+Where a modelled pull request comes from: a branch of the repository itself
+or a fork.
+*/
 export type PullRequestSource = 'repository' | 'fork';
 
 export interface JobConditionContext {
@@ -270,12 +270,12 @@ class Parser {
 			const hasArguments = this.functionArguments();
 			const status = statusFunctions.get(token.value.toLowerCase());
 
-			return !hasArguments && status !== undefined
-				? {
+			return hasArguments || status === undefined
+				? { kind: 'unknown' }
+				: {
 						kind: 'status',
 						value: status
-					}
-				: { kind: 'unknown' };
+					};
 		}
 
 		let isIndexed = false;
@@ -599,20 +599,20 @@ function parseCondition(condition: string): Expression | undefined {
 }
 
 /**
- * Evaluates whether a job's `if` value allows the job to run for one event.
- * The evaluator handles comparisons of `github.event_name` with a string
- * literal, the guard that compares a pull request's head repository with the
- * repository, and the status functions `success()` and `always()`, combined
- * with `&&`, `||`, `!` and parentheses. It treats every other term as unknown.
- * An `if` value may be written with or without the `${{ }}` wrapper, because
- * GitHub accepts both. For `pull_request`, the guard is true when `source` is
- * `repository` and false when it is `fork`.
- * The supplied context can specify `github.ref` for a verified push branch.
- * For pull requests, it can also specify `github.event.action` and
- * `github.event.pull_request.merged`.
- * `cancelled()` uses `activity.isCancelled`, and remains unknown when the
- * caller does not supply a cancellation state.
- */
+Evaluates whether a job's `if` value allows the job to run for one event.
+The evaluator handles comparisons of `github.event_name` with a string
+literal, the guard that compares a pull request's head repository with the
+repository, and the status functions `success()` and `always()`, combined
+with `&&`, `||`, `!` and parentheses. It treats every other term as unknown.
+An `if` value may be written with or without the `${{ }}` wrapper, because
+GitHub accepts both. For `pull_request`, the guard is true when `source` is
+`repository` and false when it is `fork`.
+The supplied context can specify `github.ref` for a verified push branch.
+For pull requests, it can also specify `github.event.action` and
+`github.event.pull_request.merged`.
+`cancelled()` uses `activity.isCancelled`, and remains unknown when the
+caller does not supply a cancellation state.
+*/
 export function jobConditionOutcome(
 	condition: string | boolean,
 	event: string,

@@ -6,17 +6,17 @@ import { throwIfAborted } from '../abort.ts';
 import { postForm } from './oidc-login.ts';
 
 /**
- * The result of a revocation request for a refresh token. `no-refresh-token`
- * means that the saved sign-in had no refresh token to revoke.
- */
+The result of a revocation request for a refresh token. `no-refresh-token`
+means that the saved sign-in had no refresh token to revoke.
+*/
 export type RevocationOutcome = 'revoked' | 'failed' | 'no-refresh-token';
 
 /**
- * Sends an RFC 7009 revocation request. A successful response counts as
- * revoked. A network failure, a redirect or an error status reads as
- * `failed`, because the caller deletes its local copy in every case. An
- * aborted signal still throws.
- */
+Sends an RFC 7009 revocation request. A successful response counts as
+revoked. A network failure, a redirect or an error status reads as
+`failed`, because the caller deletes its local copy in every case. An
+aborted signal still throws.
+*/
 export async function postRevocation(
 	endpoint: string,
 	form: Readonly<Record<string, string>>,
@@ -39,9 +39,9 @@ export async function postRevocation(
 }
 
 /**
- * Revokes a cupboard refresh token at the revocation endpoint of the tenant
- * or deployment URL that issued it.
- */
+Revokes a cupboard refresh token at the revocation endpoint of the tenant
+or deployment URL that issued it.
+*/
 export function revokeRefreshToken(
 	target: URL,
 	refreshToken: string,

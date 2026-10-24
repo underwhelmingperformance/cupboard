@@ -17,16 +17,16 @@ import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
 import { BoundValueLengthError } from '../errors.ts';
 
 /**
- * A value that SQLite reads back from JSON as it was written: a string becomes
- * text and a number becomes an integer or a real.
- */
+A value that SQLite reads back from JSON as it was written: a string becomes
+text and a number becomes an integer or a real.
+*/
 export type JsonListValue = string | number;
 
 /**
- * A row of a list that SQL compares or inserts column by column. The constraint
- * is written over the row's own keys so that an interface satisfies it, which a
- * `Record<string, ...>` constraint does not.
- */
+A row of a list that SQL compares or inserts column by column. The constraint
+is written over the row's own keys so that an interface satisfies it, which a
+`Record<string, ...>` constraint does not.
+*/
 export type JsonListRow<T> = { readonly [K in keyof T]: JsonListValue };
 
 // Cloudflare documents a maximum string of 2,000,000 bytes for D1 and for
@@ -61,10 +61,10 @@ function singleList<T>(values: readonly T[]): SerialisedList<T> {
 }
 
 /**
- * Splits `values` into groups whose serialised JSON each fit within a bound
- * string. The whole list is one group unless it is very long. A value that
- * exceeds the limit on its own is refused, because no split can make it fit.
- */
+Splits `values` into groups whose serialised JSON each fit within a bound
+string. The whole list is one group unless it is very long. A value that
+exceeds the limit on its own is refused, because no split can make it fit.
+*/
 function serialiseLists<T>(values: readonly T[]): readonly SerialisedList<T>[] {
 	if (values.length === 0) {
 		return [];
@@ -95,24 +95,24 @@ function rowValue(key: string): SQL {
 }
 
 /**
- * The source of an `INSERT ... SELECT` over a list. `columns` must name every
- * column of the target table, in the order `schema.ts` declares them: Drizzle
- * emits every insertable column in that order and does not check a raw SQL
- * source against it, so a reordered source writes values into the wrong
- * columns and SQLite does not object when the types agree.
- *
- * SQLite reads an `INSERT ... SELECT` that carries an `ON CONFLICT` clause as
- * ambiguous unless the select has a `WHERE`, so every source carries one.
- */
+The source of an `INSERT ... SELECT` over a list. `columns` must name every
+column of the target table, in the order `schema.ts` declares them: Drizzle
+emits every insertable column in that order and does not check a raw SQL
+source against it, so a reordered source writes values into the wrong
+columns and SQLite does not object when the types agree.
+
+SQLite reads an `INSERT ... SELECT` that carries an `ON CONFLICT` clause as
+ambiguous unless the select has a `WHERE`, so every source carries one.
+*/
 function insertSource(json: string, columns: readonly SQL[]): SQL {
 	return sql`select ${sql.join([...columns], sql`, `)} from json_each(${json}) where true`;
 }
 
 /**
- * A list of values bound as one JSON parameter. `inArray(column, list)` expands
- * it with `json_each`, so a statement binds one parameter for the list however
- * many values it holds.
- */
+A list of values bound as one JSON parameter. `inArray(column, list)` expands
+it with `json_each`, so a statement binds one parameter for the list however
+many values it holds.
+*/
 class JsonValueList<T extends JsonListValue> implements SQLWrapper {
 	constructor(
 		readonly values: readonly T[],
@@ -124,26 +124,26 @@ class JsonValueList<T extends JsonListValue> implements SQLWrapper {
 	}
 
 	/**
-	 * The value of the row `json_each` is on, for {@link insertSource}.
-	 */
+	The value of the row `json_each` is on, for {@link insertSource}.
+	*/
 	element(): SQL {
 		return sql`value`;
 	}
 
 	/**
-	 * The source of an `INSERT ... SELECT` over the list. Each column is an
-	 * expression: a fixed value the statement binds, or {@link element}. See the
-	 * module-level `insertSource` for the column order the source must follow.
-	 */
+	The source of an `INSERT ... SELECT` over the list. Each column is an
+	expression: a fixed value the statement binds, or {@link element}. See the
+	module-level `insertSource` for the column order the source must follow.
+	*/
 	insertSource(columns: readonly SQL[]): SQL {
 		return insertSource(this.json, columns);
 	}
 }
 
 /**
- * A list of rows bound as one JSON parameter, for a comparison or an insert
- * over several columns at once.
- */
+A list of rows bound as one JSON parameter, for a comparison or an insert
+over several columns at once.
+*/
 class JsonRowList<T extends JsonListRow<T>> {
 	constructor(
 		readonly rows: readonly T[],
@@ -151,16 +151,16 @@ class JsonRowList<T extends JsonListRow<T>> {
 	) {}
 
 	/**
-	 * The row's value for one key.
-	 */
+	The row's value for one key.
+	*/
 	column(key: keyof T & string): SQL {
 		return rowValue(key);
 	}
 
 	/**
-	 * A predicate that holds for a row of the table whose `columns` equal the
-	 * values a row of the list holds under the same keys.
-	 */
+	A predicate that holds for a row of the table whose `columns` equal the
+	values a row of the list holds under the same keys.
+	*/
 	matches(
 		columns: Readonly<Partial<Record<keyof T & string, SQLWrapper>>>
 	): SQL {
@@ -182,19 +182,19 @@ class JsonRowList<T extends JsonListRow<T>> {
 	}
 
 	/**
-	 * A predicate that holds when `predicate` holds for a row of the list. The
-	 * predicate reads the row's values through {@link column}, so this states a
-	 * comparison that {@link matches} cannot, such as a range.
-	 */
+	A predicate that holds when `predicate` holds for a row of the list. The
+	predicate reads the row's values through {@link column}, so this states a
+	comparison that {@link matches} cannot, such as a range.
+	*/
 	anyRow(predicate: SQL): SQL {
 		return sql`exists (select 1 from json_each(${this.json}) where ${predicate})`;
 	}
 
 	/**
-	 * The source of an `INSERT ... SELECT` over the list. Each column is an
-	 * expression: a fixed value the statement binds, or {@link column}. See the
-	 * module-level `insertSource` for the column order the source must follow.
-	 */
+	The source of an `INSERT ... SELECT` over the list. Each column is an
+	expression: a fixed value the statement binds, or {@link column}. See the
+	module-level `insertSource` for the column order the source must follow.
+	*/
 	insertSource(columns: readonly SQL[]): SQL {
 		return insertSource(this.json, columns);
 	}
@@ -203,9 +203,9 @@ class JsonRowList<T extends JsonListRow<T>> {
 export type { JsonRowList, JsonValueList };
 
 /**
- * Binds one list as one JSON parameter. Refuses a list above SQLite's bound
- * string limit; callers that need larger lists can use {@link jsonValueLists}.
- */
+Binds one list as one JSON parameter. Refuses a list above SQLite's bound
+string limit; callers that need larger lists can use {@link jsonValueLists}.
+*/
 export function jsonValueList<T extends JsonListValue>(
 	values: readonly T[]
 ): JsonValueList<T> {
@@ -214,10 +214,10 @@ export function jsonValueList<T extends JsonListValue>(
 }
 
 /**
- * Binds one row list as one JSON parameter. Refuses a list above SQLite's
- * bound string limit; callers that need larger lists can use
- * {@link jsonRowLists}.
- */
+Binds one row list as one JSON parameter. Refuses a list above SQLite's
+bound string limit; callers that need larger lists can use
+{@link jsonRowLists}.
+*/
 export function jsonRowList<T extends JsonListRow<T>>(
 	rows: readonly T[]
 ): JsonRowList<T> {
@@ -226,10 +226,10 @@ export function jsonRowList<T extends JsonListRow<T>>(
 }
 
 /**
- * Prepares `values` for statements that bind the list as one JSON parameter.
- * The result holds one list unless the values serialise to more than a bound
- * string can carry.
- */
+Prepares `values` for statements that bind the list as one JSON parameter.
+The result holds one list unless the values serialise to more than a bound
+string can carry.
+*/
 export function jsonValueLists<T extends JsonListValue>(
 	values: readonly T[]
 ): readonly JsonValueList<T>[] {
@@ -239,10 +239,10 @@ export function jsonValueLists<T extends JsonListValue>(
 }
 
 /**
- * Prepares `rows` for statements that compare or insert several columns from
- * one JSON parameter. The result holds one list unless the rows serialise to
- * more than a bound string can carry.
- */
+Prepares `rows` for statements that compare or insert several columns from
+one JSON parameter. The result holds one list unless the rows serialise to
+more than a bound string can carry.
+*/
 export function jsonRowLists<T extends JsonListRow<T>>(
 	rows: readonly T[]
 ): readonly JsonRowList<T>[] {

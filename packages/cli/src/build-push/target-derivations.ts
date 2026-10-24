@@ -53,7 +53,7 @@ export async function targetDerivations(
 			evaluated.flatMap((target) =>
 				typeof target === 'string' || target.drvPath === undefined
 					? []
-					: [target.drvPath]
+					: target.drvPath
 			)
 		);
 	}

@@ -90,12 +90,12 @@ const requiredFeatures = [
 ];
 
 /**
- * A diverted store whose logical store directory matches the host but whose
- * files live in a separate directory. The logical directory participates in
- * store-path hashes and must remain unchanged. Using the temporary directory
- * as `--store` would change every derivation and prevent substitution, so the
- * measurements would not represent a runner.
- */
+A diverted store whose logical store directory matches the host but whose
+files live in a separate directory. The logical directory participates in
+store-path hashes and must remain unchanged. Using the temporary directory
+as `--store` would change every derivation and prevent substitution, so the
+measurements would not represent a runner.
+*/
 export function divertedStoreUri(options: {
 	readonly storeDirectory: StoreDirectory;
 	readonly directory: string;
@@ -187,15 +187,15 @@ const noDivertedStoreDirectoryHook: DivertedStoreDirectoryHook = () =>
 const ownershipFile = '.cupboard-diverted-store';
 
 /**
- * Creates a fresh work directory and puts the diverted store in an
- * unpredictable child. Cleanup recursively removes only that private child.
- * It removes the work directory with `rmdir` after the child is gone. Another
- * process running as the same user must not change the private child while
- * cleanup traverses it.
- *
- * Resolve the path because Nix rejects a store below a symlink. On macOS, the
- * normal temporary directory is reached through `/var`, which is a symlink.
- */
+Creates a fresh work directory and puts the diverted store in an
+unpredictable child. Cleanup recursively removes only that private child.
+It removes the work directory with `rmdir` after the child is gone. Another
+process running as the same user must not change the private child while
+cleanup traverses it.
+
+Resolve the path because Nix rejects a store below a symlink. On macOS, the
+normal temporary directory is reached through `/var`, which is a symlink.
+*/
 export async function createDivertedStoreDirectory(
 	directory?: string,
 	initialise: DivertedStoreDirectoryInitialiser = initialiseDivertedStoreDirectory,
@@ -347,10 +347,10 @@ async function createExplicitDirectory(directory: string): Promise<string> {
 }
 
 /**
- * Removes a diverted store. Nix makes everything it writes read-only, and a
- * read-only directory cannot have its entries unlinked, so every entry is
- * made writable on the way out.
- */
+Removes a diverted store. Nix makes everything it writes read-only, and a
+read-only directory cannot have its entries unlinked, so every entry is
+made writable on the way out.
+*/
 export async function removeDivertedStore(
 	owned: DivertedStoreDirectory,
 	beforeRemoval: DivertedStoreDirectoryHook = noDivertedStoreDirectoryHook,
@@ -466,10 +466,10 @@ async function makeWritable(directory: string): Promise<void> {
 }
 
 /**
- * Evaluates targets and copies their derivations with the Nix CLI, then plans
- * through a daemon that serves the diverted store. Every Nix process receives
- * the selected substituters so host configuration does not change the result.
- */
+Evaluates targets and copies their derivations with the Nix CLI, then plans
+through a daemon that serves the diverted store. Every Nix process receives
+the selected substituters so host configuration does not change the result.
+*/
 export function createDivertedStorePlanner(
 	options: DivertedStoreOptions
 ): RealisationPlanner {
@@ -547,10 +547,10 @@ async function runNix(
 }
 
 /**
- * Returns the first non-empty derivation path printed by
- * `nix path-info --derivation`. Rejects output whose first path is missing,
- * malformed, or not a `.drv` path.
- */
+Returns the first non-empty derivation path printed by
+`nix path-info --derivation`. Rejects output whose first path is missing,
+malformed, or not a `.drv` path.
+*/
 export function parseDerivationPath(
 	attribute: string,
 	stdout: string

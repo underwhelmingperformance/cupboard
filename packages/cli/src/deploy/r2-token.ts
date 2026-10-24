@@ -50,11 +50,11 @@ export function scopedR2TokenName(bucketName: string): string {
 }
 
 /**
- * Creates (or, on a re-deploy, rolls) the account-owned API token that backs
- * the cache's R2 credentials: write-only on exactly one bucket. The bucket must
- * already exist; the caller creates it first. The S3 pair is derived from the
- * token and stored only as Worker secrets. Re-running rotates the token secret.
- */
+Creates (or, on a re-deploy, rolls) the account-owned API token that backs
+the cache's R2 credentials: write-only on exactly one bucket. The bucket must
+already exist; the caller creates it first. The S3 pair is derived from the
+token and stored only as Worker secrets. Re-running rotates the token secret.
+*/
 export async function createScopedR2Key(
 	api: CloudflareApi,
 	options: {
@@ -107,9 +107,9 @@ export async function createScopedR2Key(
 }
 
 /**
- * An R2 S3 credential pair from an API token: the access key id is the token
- * id, and the secret is the hex SHA-256 of the token's value.
- */
+An R2 S3 credential pair from an API token: the access key id is the token
+id, and the secret is the hex SHA-256 of the token's value.
+*/
 function pairFrom(id: string, value: string): R2Credentials {
 	if (id === '' || value === '') {
 		throw new ApiTokenResponseError(id !== '', value !== '');

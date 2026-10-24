@@ -46,7 +46,7 @@ describe('maintenance reconcile', () => {
 
 	it('publishes the wake time synchronously on a mutation', async () => {
 		const token = await initialise();
-		await insertPendingUpload('pending');
+		await insertPendingUpload();
 
 		await runInDurableObject(currentServer(), (instance) =>
 			negotiateViaInstance(instance, token, 'a'.repeat(32))
@@ -57,7 +57,7 @@ describe('maintenance reconcile', () => {
 
 	it('writes D1 once across a push whose wake time does not change', async () => {
 		const token = await initialise();
-		await insertPendingUpload('pending');
+		await insertPendingUpload();
 
 		await runInDurableObject(currentServer(), (instance) =>
 			negotiateViaInstance(instance, token, 'a'.repeat(32))
@@ -77,7 +77,7 @@ describe('maintenance reconcile', () => {
 
 	it('publishes the wake time even when the mutating body throws', async () => {
 		const token = await initialise();
-		await insertPendingUpload('pending');
+		await insertPendingUpload();
 
 		const status = await runInDurableObject(
 			currentServer(),
@@ -107,7 +107,7 @@ describe('maintenance reconcile', () => {
 
 	it('drops the projection when the reconcile write fails (fail-open)', async () => {
 		const token = await initialise();
-		await insertPendingUpload('pending');
+		await insertPendingUpload();
 
 		const before = await eligibilityRow();
 
@@ -354,9 +354,7 @@ describe('coalesced maintenance reconcile', () => {
 	});
 });
 
-async function insertPendingUpload(
-	verdict?: typeof schema.pendingUploads.$inferSelect.verdict
-): Promise<void> {
+async function insertPendingUpload(): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
 		const cacheId = resolvedCache(instance.context).id;
 
@@ -370,7 +368,7 @@ async function insertPendingUpload(
 				metadataJson: '{}',
 				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 				expiresAt: isoTimestampSchema.parse('2026-06-01T00:00:00.000Z'),
-				verdict
+				verdict: 'pending'
 			})
 			.run();
 	});

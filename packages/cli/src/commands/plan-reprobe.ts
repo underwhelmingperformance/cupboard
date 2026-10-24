@@ -120,11 +120,11 @@ export function registerPlanReprobeCommand(
 }
 
 /**
- * Queries the destination and reuse view again, then reports paths that became
- * available after the initial partition. It does not update retention, repeat
- * upstream confirmation, apply the unknown-path ceiling, or repartition the
- * plan. If no target became available, it reports the original build set.
- */
+Queries the destination and reuse view again, then reports paths that became
+available after the initial partition. It does not update retention, repeat
+upstream confirmation, apply the unknown-path ceiling, or repartition the
+plan. If no target became available, it reports the original build set.
+*/
 export async function runPlanReprobe(
 	options: PlanReprobeRunOptions,
 	reporter: Reporter,

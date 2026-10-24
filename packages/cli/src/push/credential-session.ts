@@ -22,10 +22,10 @@ export interface CredentialSession {
 const defaultRefreshMarginMs = 5 * 60 * 1000;
 
 /**
- * Supplies renewable R2 credentials for one push. Every renewal reuses the
- * signed push ID, so all uploads remain within the original staging prefix.
- * The provider refreshes the underlying access token when required.
- */
+Supplies renewable R2 credentials for one push. Every renewal reuses the
+signed push ID, so all uploads remain within the original staging prefix.
+The provider refreshes the underlying access token when required.
+*/
 export function credentialSession(
 	issue: IssuePushCredential,
 	options: CredentialSessionOptions = {}

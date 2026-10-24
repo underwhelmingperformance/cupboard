@@ -9,10 +9,10 @@ export interface NamedMaterialParts {
 }
 
 /**
- * Parses a Nix `<name>:<base64>` value, or returns `undefined` when the value is
- * malformed. Callers that require a value construct the relevant domain type,
- * which reports a typed error instead.
- */
+Parses a Nix `<name>:<base64>` value, or returns `undefined` when the value is
+malformed. Callers that require a value construct the relevant domain type,
+which reports a typed error instead.
+*/
 export function parseNamedMaterial(
 	value: string
 ): NamedMaterialParts | undefined {
@@ -39,10 +39,10 @@ export function parseNamedMaterial(
 }
 
 /**
- * A Nix `<name>:<base64>` value containing a signing key name and binary
- * material. Public keys and narinfo signatures use this format so a verifier
- * can select the key identified by a signature.
- */
+A Nix `<name>:<base64>` value containing a signing key name and binary
+material. Public keys and narinfo signatures use this format so a verifier
+can select the key identified by a signature.
+*/
 export abstract class NamedMaterial {
 	readonly value: string;
 	readonly name: NixKeyName;

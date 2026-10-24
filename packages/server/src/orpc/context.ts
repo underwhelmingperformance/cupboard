@@ -25,10 +25,10 @@ import type { RequestOrigin } from '../http/http.ts';
 import type { PendingCacheResolver } from './authorise.ts';
 
 /**
- * The capabilities the contract's procedures need from the Durable Object:
- * the post-mutation maintenance hook and the domain services.
- * The object supplies an instance per request through the handler context.
- */
+The capabilities the contract's procedures need from the Durable Object:
+the post-mutation maintenance hook and the domain services.
+The object supplies an instance per request through the handler context.
+*/
 export interface TenantRpcServices {
 	pendingCache: PendingCacheResolver;
 	// Reconcile maintenance eligibility before a mutation returns. Concurrent

@@ -21,12 +21,12 @@ async function isFile(candidate: string): Promise<boolean> {
 }
 
 /**
- * Finds the compiled hook helper in either supported installation layout. A
- * release archive places it beside `cupboard`; the Nix package places it under
- * the sibling `libexec/cupboard` directory. Resolution performs no evaluation
- * or substitution, so preflight can reject an incomplete installation before
- * starting the build.
- */
+Finds the compiled hook helper in either supported installation layout. A
+release archive places it beside `cupboard`; the Nix package places it under
+the sibling `libexec/cupboard` directory. Resolution performs no evaluation
+or substitution, so preflight can reject an incomplete installation before
+starting the build.
+*/
 export async function resolveHookHelper(
 	options: HelperResolutionOptions = {}
 ): Promise<string> {

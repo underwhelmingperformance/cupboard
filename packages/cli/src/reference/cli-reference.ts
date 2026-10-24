@@ -77,10 +77,10 @@ function renderEntry({ path, command }: ReferenceEntry): string {
 }
 
 /**
- * Renders the Markdown CLI reference for a newly built program. Rendering
- * changes where each command writes its help, so pass a program built just for
- * this, not one that will go on to parse arguments.
- */
+Renders the Markdown CLI reference for a newly built program. Rendering
+changes where each command writes its help, so pass a program built just for
+this, not one that will go on to parse arguments.
+*/
 export function renderCliReference(program: Command): string {
 	const entries = [...walk(program, [program.name()])];
 

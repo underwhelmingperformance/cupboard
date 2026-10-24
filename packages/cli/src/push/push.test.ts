@@ -4234,7 +4234,7 @@ describe('runPush', () => {
 				narFromPath: (storePath) => {
 					narReads.push(storePath);
 
-					return narBytes(appDigest);
+					return narBytes();
 				}
 			}),
 			createNarArchive: (storePath) => {
@@ -4301,7 +4301,7 @@ describe('runPush', () => {
 					narFromPath: (storePath) => {
 						narReads.push(storePath);
 
-						return narBytes(appDigest);
+						return narBytes();
 					}
 				}),
 				createNarArchive: (storePath) => {
@@ -4357,7 +4357,7 @@ describe('runPush', () => {
 				root: rootName('main'),
 				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }, [], {
 					storeKind: 'ssh-ng',
-					narFromPath: () => narBytes(appDigest)
+					narFromPath: () => narBytes()
 				}),
 				// The streamed bytes digest to the runtime NAR, so verification
 				// must refuse the upload.
@@ -6576,10 +6576,10 @@ function deferredDependencies() {
 	} satisfies Partial<PushDependencies>;
 }
 
-async function* narBytes(digestValue: NarDigest): AsyncIterable<Uint8Array> {
+async function* narBytes(): AsyncIterable<Uint8Array> {
 	await Promise.resolve();
 
-	yield digestValue.narHash.digestBytes();
+	yield appDigest.narHash.digestBytes();
 }
 
 class FakeNarArchive implements NarSource {
@@ -6679,11 +6679,11 @@ function pathKey(value: string): PushedPath {
 }
 
 /**
- * Pushes `appPath` and `runtimePath`, failing each path at the stage given in
- * `failures`, and returns the value that the push throws. A path that fails at
- * `resolve` is missing from the local store. The push's warnings are appended
- * to `warnings`.
- */
+Pushes `appPath` and `runtimePath`, failing each path at the stage given in
+`failures`, and returns the value that the push throws. A path that fails at
+`resolve` is missing from the local store. The push's warnings are appended
+to `warnings`.
+*/
 async function incompletePush(
 	failures: PathFailures,
 	warnings: { label: string; value?: string }[] = [],

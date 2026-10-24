@@ -36,19 +36,19 @@ export interface OidcClaims {
 declare const verifiedOidcClaimsBrand: unique symbol;
 
 /**
- * Claims returned after an OIDC verifier has accepted the token.
- */
+Claims returned after an OIDC verifier has accepted the token.
+*/
 export type VerifiedOidcClaims = OidcClaims & {
 	readonly [verifiedOidcClaimsBrand]: true;
 };
 
 /**
- * Whether the claims match the expected issuer and include the expected
- * audience.
- *
- * Issuer identifiers use the exact, case-sensitive value configured at
- * ingress. A malformed `iss` fails validation and never matches.
- */
+Whether the claims match the expected issuer and include the expected
+audience.
+
+Issuer identifiers use the exact, case-sensitive value configured at
+ingress. A malformed `iss` fails validation and never matches.
+*/
 export function hasMatchingIssuerAndAudience(
 	expected: { readonly issuer: string; readonly audience: string },
 	claims: OidcClaims
@@ -102,17 +102,17 @@ export interface OidcTrustVerificationTarget {
 }
 
 /**
- * Returns a configured issuer and audience to use for verification, or
- * `undefined` when no pair matches the decoded token. A token has one `iss`
- * value, so all matching rules use the same issuer. If the token's `aud`
- * array matches several configured audiences and its `azp` claim names one of
- * them, that audience is used, because verification requires `azp` to equal
- * the verified audience. Otherwise the first audience in sorted order is
- * chosen so rule order cannot affect the target.
- *
- * Decoded claims only route verification to a configured trust domain. They
- * do not select a rule or grant authority.
- */
+Returns a configured issuer and audience to use for verification, or
+`undefined` when no pair matches the decoded token. A token has one `iss`
+value, so all matching rules use the same issuer. If the token's `aud`
+array matches several configured audiences and its `azp` claim names one of
+them, that audience is used, because verification requires `azp` to equal
+the verified audience. Otherwise the first audience in sorted order is
+chosen so rule order cannot affect the target.
+
+Decoded claims only route verification to a configured trust domain. They
+do not select a rule or grant authority.
+*/
 export function oidcTrustVerificationTarget(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims
@@ -129,12 +129,12 @@ export function oidcTrustVerificationTarget(
 }
 
 /**
- * The audiences of rules for `issuer` that the verifier permits as additional
- * entries in a token's `aud` array. An audience identifies this deployment
- * only to the issuer in its rule. The token's issuer might give the same value
- * to another relying party, so audiences from rules for other issuers are left
- * out.
- */
+The audiences of rules for `issuer` that the verifier permits as additional
+entries in a token's `aud` array. An audience identifies this deployment
+only to the issuer in its rule. The token's issuer might give the same value
+to another relying party, so audiences from rules for other issuers are left
+out.
+*/
 export function trustedAudiences(
 	rules: readonly OidcTrustRule[],
 	issuer: OidcIssuer
@@ -145,12 +145,12 @@ export function trustedAudiences(
 }
 
 /**
- * Whether the supplied claims satisfy the issuer, audience and
- * configured-claim constraints of any rule. Verification does not change the
- * token payload, so the caller can refuse a token whose decoded claims
- * satisfy no rule. Satisfying these identity constraints does not grant
- * authority; policy selection still requires verified claims.
- */
+Whether the supplied claims satisfy the issuer, audience and
+configured-claim constraints of any rule. Verification does not change the
+token payload, so the caller can refuse a token whose decoded claims
+satisfy no rule. Satisfying these identity constraints does not grant
+authority; policy selection still requires verified claims.
+*/
 export function hasMatchingOidcTrustIdentity(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims
@@ -163,14 +163,14 @@ export function hasMatchingOidcTrustIdentity(
 }
 
 /**
- * Returns the highest-precedence tier of rules whose issuer, audience and
- * configured claims match the supplied claim set. Interactive rules take
- * precedence so an owner is never downgraded. Among rules of the same kind,
- * the tier with the most claim bindings takes precedence.
- *
- * Rule IDs make the returned order deterministic but do not decide which rule
- * grants authority.
- */
+Returns the highest-precedence tier of rules whose issuer, audience and
+configured claims match the supplied claim set. Interactive rules take
+precedence so an owner is never downgraded. Among rules of the same kind,
+the tier with the most claim bindings takes precedence.
+
+Rule IDs make the returned order deterministic but do not decide which rule
+grants authority.
+*/
 export function preferredModelledOidcTrustRules(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims
@@ -201,9 +201,9 @@ export function preferredModelledOidcTrustRules(
 }
 
 /**
- * Returns the sole rule in the preferred identity tier. A tie is ambiguous
- * because a generated rule ID cannot decide which authority the token receives.
- */
+Returns the sole rule in the preferred identity tier. A tie is ambiguous
+because a generated rule ID cannot decide which authority the token receives.
+*/
 export function matchModelledOidcTrust(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims
@@ -220,11 +220,11 @@ export interface ClaimMismatch {
 }
 
 /**
- * Every configured claim of `rule` that `claims` does not satisfy, in
- * claim-name order so the report is deterministic; empty when every
- * configured claim matches. Issuer and audience are compared during matching
- * and verification, not here, so a mismatch always names a configured claim.
- */
+Every configured claim of `rule` that `claims` does not satisfy, in
+claim-name order so the report is deterministic; empty when every
+configured claim matches. Issuer and audience are compared during matching
+and verification, not here, so a mismatch always names a configured claim.
+*/
 export function claimMismatches(
 	rule: OidcTrustRule,
 	claims: OidcClaims

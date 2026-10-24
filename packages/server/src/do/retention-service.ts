@@ -114,15 +114,13 @@ export class RetentionService {
 			return override.retention;
 		}
 
-		if (configured === undefined) {
+		const ttlSeconds = configured?.ttlSeconds;
+
+		if (ttlSeconds === undefined || ttlSeconds === null) {
 			return { kind: 'permanent' };
 		}
 
-		if (configured.ttlSeconds === null) {
-			return { kind: 'permanent' };
-		}
-
-		return { kind: 'duration', seconds: configured.ttlSeconds };
+		return { kind: 'duration', seconds: ttlSeconds };
 	}
 
 	resolveGraceSeconds(cache: ResolvedCache): GraceSeconds | undefined {
@@ -253,14 +251,12 @@ export class RetentionService {
 
 				return anchorIso === undefined
 					? []
-					: [
-							{
-								storePathHash,
-								retainUntil: isoTimestamp(
-									new Date(new Date(anchorIso).getTime() + graceSeconds * 1000)
-								)
-							}
-						];
+					: {
+							storePathHash,
+							retainUntil: isoTimestamp(
+								new Date(new Date(anchorIso).getTime() + graceSeconds * 1000)
+							)
+						};
 			}),
 			writer
 		);

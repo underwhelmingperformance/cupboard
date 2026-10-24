@@ -46,9 +46,9 @@ function status(counts: Counts): LocalStepStatus {
 }
 
 /**
- * A client that answers each status read with the next status in `statuses`,
- * repeating the last one, and records every call.
- */
+A client that answers each status read with the next status in `statuses`,
+repeating the last one, and records every call.
+*/
 function scriptedClient(
 	statuses: readonly LocalStepStatus[],
 	calls: string[]
@@ -111,8 +111,8 @@ function recordingReporter(lines: string[]): Reporter {
 						lines.push(message);
 					},
 					group: () => ({ message: ignore, success: ignore, error: ignore }),
-					warn: (label, value) => {
-						lines.push(`${label}: ${value ?? ''}`);
+					warn: (label, value = '') => {
+						lines.push(`${label}: ${value}`);
 					}
 				})
 			)

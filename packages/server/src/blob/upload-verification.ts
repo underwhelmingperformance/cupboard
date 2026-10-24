@@ -21,10 +21,10 @@ export interface ExpectedNarBlob {
 }
 
 /**
- * Checks that an R2 object exists and has the expected compressed size and
- * stored SHA-256 checksum. This check does not decompress or verify the NAR
- * contents.
- */
+Checks that an R2 object exists and has the expected compressed size and
+stored SHA-256 checksum. This check does not decompress or verify the NAR
+contents.
+*/
 export function verifyStoredBlob(
 	object: UploadedObject | undefined,
 	expected: ExpectedNarBlob,

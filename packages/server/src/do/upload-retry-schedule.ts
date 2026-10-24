@@ -48,9 +48,9 @@ export class UploadRetrySchedule {
 	}
 
 	/**
-	 * When the earliest recorded verdict or exhausted upload becomes ready,
-	 * ignoring the uploads in `excluded`.
-	 */
+	When the earliest recorded verdict or exhausted upload becomes ready,
+	ignoring the uploads in `excluded`.
+	*/
 	recordedAt(excluded: readonly UploadId[] = []): number | undefined {
 		return new RetryClockService(this.context).isBlocked()
 			? undefined

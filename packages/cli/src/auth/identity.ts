@@ -6,10 +6,10 @@ import { decodeJwtPayload } from './jwt.ts';
 import type { CachedSession } from './token-store.ts';
 
 /**
- * The identity of a cached session, read from its access token. A tenant
- * session's audience is its tenant URL. A deployment (control-plane)
- * session's audience is a client id.
- */
+The identity of a cached session, read from its access token. A tenant
+session's audience is its tenant URL. A deployment (control-plane)
+session's audience is a client id.
+*/
 export interface SessionIdentity {
 	/**
 	The issuer URL in the access token: the tenant or deployment URL.
@@ -45,11 +45,11 @@ const sessionClaimsSchema = z.object({
 });
 
 /**
- * Describes a cached session from its access token's claims, or returns
- * undefined when the token has no issuer. The claims are decoded without
- * verifying the signature: they only describe the session to its owner, and
- * the server verifies the token whenever it is used.
- */
+Describes a cached session from its access token's claims, or returns
+undefined when the token has no issuer. The claims are decoded without
+verifying the signature: they only describe the session to its owner, and
+the server verifies the token whenever it is used.
+*/
 export function sessionIdentity(
 	session: CachedSession
 ): SessionIdentity | undefined {
@@ -77,9 +77,9 @@ export function sessionIdentity(
 }
 
 /**
- * The identity a trust rule has to match to admit a person: the claims of the
- * ID token their identity provider issued, as a tenant administrator needs them.
- */
+The identity a trust rule has to match to admit a person: the claims of the
+ID token their identity provider issued, as a tenant administrator needs them.
+*/
 export interface ProviderIdentity {
 	readonly issuer: string;
 	readonly audience: string | readonly string[];
@@ -89,10 +89,10 @@ export interface ProviderIdentity {
 	*/
 	readonly expiresAt?: string;
 	/**
-	 * The token's string-valued claims, without the claims in
-	 * {@link perTokenClaims}. A trust rule's claims match only string values,
-	 * so a rule can match only claims of this kind.
-	 */
+	The token's string-valued claims, without the claims in
+	{@link perTokenClaims}. A trust rule's claims match only string values,
+	so a rule can match only claims of this kind.
+	*/
 	readonly claims: Readonly<Record<string, string>>;
 	/**
 	The identity half of a trust rule that matches exactly this person.
@@ -150,14 +150,14 @@ export class UnreadableIdTokenError extends CliError {
 }
 
 /**
- * Describes the identity in an OIDC ID token, for a person to send to an
- * administrator with an access request. The claims are decoded without
- * verifying the signature, because they are only displayed.
- *
- * The rule's audience is the sign-in client when the token lists it, because
- * `cupboard login` presents a token for that client. Otherwise it is the
- * token's first audience.
- */
+Describes the identity in an OIDC ID token, for a person to send to an
+administrator with an access request. The claims are decoded without
+verifying the signature, because they are only displayed.
+
+The rule's audience is the sign-in client when the token lists it, because
+`cupboard login` presents a token for that client. Otherwise it is the
+token's first audience.
+*/
 export function providerIdentity(
 	idToken: string,
 	clientId: string

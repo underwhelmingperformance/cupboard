@@ -6,10 +6,10 @@ import { decodeNixHash } from './hash.ts';
 const nixArchivePrefix = 'r:';
 
 /**
- * Returns whether the value uses a default Nix content-address form supported
- * by this parser: `text:<algorithm>:<digest>` or
- * `fixed:[r:]<algorithm>:<digest>`.
- */
+Returns whether the value uses a default Nix content-address form supported
+by this parser: `text:<algorithm>:<digest>` or
+`fixed:[r:]<algorithm>:<digest>`.
+*/
 export function isContentAddress(value: string): boolean {
 	const separator = value.indexOf(':');
 

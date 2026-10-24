@@ -8,9 +8,9 @@ import {
 const binaryUnits = ['B', 'KiB', 'MiB', 'GiB', 'TiB'] as const;
 
 /**
- * A byte count in the units a person reads it in. The JSON carries the exact
- * number; this is for the summary alone.
- */
+A byte count in the units a person reads it in. The JSON carries the exact
+number; this is for the summary alone.
+*/
 export function formatBytes(bytes: number): string {
 	const sign = bytes < 0 ? '-' : '';
 	let remaining = Math.abs(bytes);

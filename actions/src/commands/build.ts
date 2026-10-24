@@ -414,15 +414,13 @@ export function receiptSubjects(
 		subject.attempt === undefined ||
 		subject.attemptId === undefined
 			? []
-			: [
-					{
-						storePath: subject.storePath,
-						narHash: subject.narHash,
-						derivation: subject.derivation,
-						attempt: subject.attempt,
-						attemptId: subject.attemptId
-					}
-				]
+			: {
+					storePath: subject.storePath,
+					narHash: subject.narHash,
+					derivation: subject.derivation,
+					attempt: subject.attempt,
+					attemptId: subject.attemptId
+				}
 	);
 }
 
@@ -920,7 +918,7 @@ export async function buildAction(
 										buildAttempt.activities.every(
 											(activity) => activity.derivation !== info.deriver
 										)
-											? [info.deriver]
+											? info.deriver
 											: []
 									)
 								])
@@ -1005,9 +1003,7 @@ export async function buildAction(
 					failedCommand = 'nix build --rebuild';
 					if (status === 0) {
 						const selectedDerivations = new Set(
-							attemptInfos.flatMap((info) =>
-								info.deriver === undefined ? [] : [info.deriver]
-							)
+							attemptInfos.flatMap((info) => info.deriver ?? [])
 						);
 						const selectedActivities = checkActivities.filter((activity) =>
 							selectedDerivations.has(activity.derivation)
@@ -1186,7 +1182,7 @@ export async function buildAction(
 							);
 							return derivation === undefined
 								? []
-								: [storePathSchema.parse(derivation)];
+								: storePathSchema.parse(derivation);
 						})
 				)
 			];

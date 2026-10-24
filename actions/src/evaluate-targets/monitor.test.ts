@@ -90,9 +90,11 @@ it.each([false, true])(
 );
 
 it('leaves evaluation usable when a resource sample fails', async () => {
-	const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+	const canWriteStderr = vi
+		.spyOn(process.stderr, 'write')
+		.mockReturnValue(true);
 	onTestFinished(() => {
-		stderr.mockRestore();
+		canWriteStderr.mockRestore();
 	});
 	const sampled = Promise.withResolvers<undefined>();
 	const failure = new Error('monitor unavailable');
@@ -110,7 +112,7 @@ it('leaves evaluation usable when a resource sample fails', async () => {
 			}
 		}
 	);
-	expect({ result, reports: stderr.mock.calls }).toStrictEqual({
+	expect({ result, reports: canWriteStderr.mock.calls }).toStrictEqual({
 		result: 'manifest',
 		reports: [['Evaluation monitor unavailable: Error: monitor unavailable\n']]
 	});

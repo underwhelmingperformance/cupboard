@@ -111,9 +111,9 @@ export type OnboardOutcome =
 			readonly created?: CreatedCache;
 	  }
 	/**
-	 * No admin exists, and the run had no terminal to log in from. `url` is
-	 * absent when the deployment has no URL yet.
-	 */
+	No admin exists, and the run had no terminal to log in from. `url` is
+	absent when the deployment has no URL yet.
+	*/
 	| { readonly kind: 'unclaimed'; readonly url: string | undefined }
 	| { readonly kind: 'cancelled'; readonly url: string }
 	| {
@@ -138,21 +138,21 @@ export type OnboardOutcome =
 	| { readonly kind: 'no-subdomain' };
 
 /**
- * What the onboarding drives: the raw endpoints {@link CupboardClient}
- * serves, plus the control procedures in the contract's shapes. Each control
- * call takes the admin credential as an argument, because a first deploy
- * obtains the credential after it builds the client. The default factory
- * creates a derived client for each control call and binds that call's
- * credential.
- */
+What the onboarding drives: the raw endpoints {@link CupboardClient}
+serves, plus the control procedures in the contract's shapes. Each control
+call takes the admin credential as an argument, because a first deploy
+obtains the credential after it builds the client. The default factory
+creates a derived client for each control call and binds that call's
+credential.
+*/
 export interface OnboardClient extends Pick<
 	CupboardClient,
 	'version' | 'signup' | 'publicKey' | 'tokenExchange'
 > {
 	/**
-	 * The access of the default cache, read with a tenant credential.
-	 * Undefined when the credential is missing or refused.
-	 */
+	The access of the default cache, read with a tenant credential.
+	Undefined when the credential is missing or refused.
+	*/
 	cacheAccess(
 		credential: AccessCredential
 	): Promise<CacheAccessMode | undefined>;
@@ -182,10 +182,10 @@ function defaultInstanceName(publicUrl: string): InstanceName {
 }
 
 /**
- * How this deploy settled the Worker's R2 pair: freshly set after a
- * client-side probe, or kept in place. A kept pair's values cannot be read
- * back, so the Worker proves it after a cache exists.
- */
+How this deploy settled the Worker's R2 pair: freshly set after a
+client-side probe, or kept in place. A kept pair's values cannot be read
+back, so the Worker proves it after a cache exists.
+*/
 export type OnboardR2 =
 	| {
 			readonly kind: 'kept';
@@ -206,14 +206,14 @@ export interface OnboardOptions {
 	*/
 	readonly authority: DeployAuthority;
 	/**
-	 * The slug of the first tenant. When this is absent, the operator is asked,
-	 * or, without a terminal, the first tenant is skipped.
-	 */
+	The slug of the first tenant. When this is absent, the operator is asked,
+	or, without a terminal, the first tenant is skipped.
+	*/
 	readonly cacheSlug?: string;
 	/**
-	 * Read access for the first tenant's default cache. Prompt for access when
-	 * this is absent.
-	 */
+	Read access for the first tenant's default cache. Prompt for access when
+	this is absent.
+	*/
 	readonly cacheAccess: CacheAccessMode | undefined;
 	readonly buildVersion: string;
 	readonly r2: OnboardR2;
@@ -224,27 +224,27 @@ export interface OnboardOptions {
 	*/
 	readonly fetcher?: typeof fetch;
 	/**
-	 * Saves a session for `target`: the admin session from the claim, or the
-	 * first tenant's session. By default it saves the session as
-	 * `cupboard login` does.
-	 */
+	Saves a session for `target`: the admin session from the claim, or the
+	first tenant's session. By default it saves the session as
+	`cupboard login` does.
+	*/
 	readonly cacheSession?: (
 		session: TokenResponse,
 		target: URL
 	) => Promise<void>;
 	/**
-	 * A credential from the session cached for `target`, without a new sign-in:
-	 * the admin credential once a first deploy has claimed the deployment, and
-	 * a tenant credential to read the access of an existing cache. By default
-	 * the cached session, renewed as it nears expiry.
-	 */
+	A credential from the session cached for `target`, without a new sign-in:
+	the admin credential once a first deploy has claimed the deployment, and
+	a tenant credential to read the access of an existing cache. By default
+	the cached session, renewed as it nears expiry.
+	*/
 	readonly sessionCredential?: (target: URL) => AccessCredential;
 	/**
-	 * Removes the claim secret after the claim attempt. By default it deletes
-	 * the secret from the control Worker; the deploy passes a function that
-	 * deletes it at most once, so that it can also remove the secret when the
-	 * run stops before the claim.
-	 */
+	Removes the claim secret after the claim attempt. By default it deletes
+	the secret from the control Worker; the deploy passes a function that
+	deletes it at most once, so that it can also remove the secret when the
+	run stops before the claim.
+	*/
 	readonly removeClaimSecret?: () => Promise<void>;
 	readonly checkCredentials?: typeof checkR2Credentials;
 	readonly readPassword?: () => string;
@@ -291,27 +291,27 @@ export function slugProblemText(value: string): string | undefined {
 }
 
 /**
- * Turns a deployed Worker into a usable cache, in two steps.
- *
- * First the deployment must be up: its URL is resolved (the custom domain, or
- * the account's workers.dev subdomain with the script's route enabled) and the
- * unauthenticated `/_version` route is polled until it returns the version
- * just uploaded, since routing, DNS and the new Worker version all take time to
- * settle and an older version may respond in the meantime with the old
- * configuration.
- *
- * Then it is initialised with an admin credential. A first deploy claims the
- * deployment for the operator with the claim secret and an id_token bound to
- * the deployment and the first tenant. The operator chose the tenant's slug
- * before the upload. The deploy caches the admin token for the other commands and deletes the
- * secret. An
- * update uses the admin token that the deploy checked before it changed
- * anything, and asks for the slug when there is no tenant. The create call
- * fails with a conflict when the slug is taken, and the deploy then asks for
- * another slug. The new tenant's `/pubkey` is polled, since the first
- * successful request creates the signing key. After a claim, the deploy
- * exchanges the id_token at the new tenant and caches that session too.
- */
+Turns a deployed Worker into a usable cache, in two steps.
+
+First the deployment must be up: its URL is resolved (the custom domain, or
+the account's workers.dev subdomain with the script's route enabled) and the
+unauthenticated `/_version` route is polled until it returns the version
+just uploaded, since routing, DNS and the new Worker version all take time to
+settle and an older version may respond in the meantime with the old
+configuration.
+
+Then it is initialised with an admin credential. A first deploy claims the
+deployment for the operator with the claim secret and an id_token bound to
+the deployment and the first tenant. The operator chose the tenant's slug
+before the upload. The deploy caches the admin token for the other commands and deletes the
+secret. An
+update uses the admin token that the deploy checked before it changed
+anything, and asks for the slug when there is no tenant. The create call
+fails with a conflict when the slug is taken, and the deploy then asks for
+another slug. The new tenant's `/pubkey` is polled, since the first
+successful request creates the signing key. After a claim, the deploy
+exchanges the id_token at the new tenant and caches that session too.
+*/
 export async function onboardDeployment(
 	options: OnboardOptions
 ): Promise<OnboardOutcome> {
@@ -660,12 +660,12 @@ function describeR2Check(check: R2CredentialCheck): string {
 }
 
 /**
- * Verifies the R2 credentials stored as Worker secrets, which cannot be read
- * back. A failed check prompts for a replacement, verifies it directly against
- * R2, stores it, and repeats the Worker check. Only a missing check procedure
- * identifies an older deployment; authentication and server failures propagate.
- * Bad credentials remain warnings because the cache can still serve reads.
- */
+Verifies the R2 credentials stored as Worker secrets, which cannot be read
+back. A failed check prompts for a replacement, verifies it directly against
+R2, stores it, and repeats the Worker check. Only a missing check procedure
+identifies an older deployment; authentication and server failures propagate.
+Bad credentials remain warnings because the cache can still serve reads.
+*/
 async function ensureWorkerR2(dependencies: {
 	readonly ui: DeployUi;
 	readonly api: CloudflareApi;
@@ -824,9 +824,9 @@ const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
 const serverErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
 /**
- * The advice for a failed claim, chosen by the status of the last response
- * from `/signup`.
- */
+The advice for a failed claim, chosen by the status of the last response
+from `/signup`.
+*/
 export type ClaimFailureAdvice =
 	| 'fresh-secret'
 	| 'already-claimed'
@@ -909,9 +909,9 @@ function claimFailureAdviceText(url: URL, advice: ClaimFailureAdvice): string {
 }
 
 /**
- * The admin claim at `/signup` failed. `status` and `ray` come from the last
- * response from `/signup`, when there was one, and `status` selects `advice`.
- */
+The admin claim at `/signup` failed. `status` and `ray` come from the last
+response from `/signup`, when there was one, and `status` selects `advice`.
+*/
 export class DeploymentClaimFailedError extends CliError {
 	override readonly humanMessage: string;
 	readonly advice: ClaimFailureAdvice;
@@ -936,9 +936,9 @@ export class DeploymentClaimFailedError extends CliError {
 }
 
 /**
- * The claim succeeded, but the admin session could not be cached on this
- * machine, so the steps that need an admin token cannot run.
- */
+The claim succeeded, but the admin session could not be cached on this
+machine, so the steps that need an admin token cannot run.
+*/
 export class AdminSessionNotCachedError extends CliError {
 	override readonly humanMessage: string;
 	constructor(
@@ -962,9 +962,9 @@ export class AdminSessionNotCachedError extends CliError {
 }
 
 /**
- * The id_token presented at the claim belongs to a different identity from the
- * one that the operator confirmed before the upload.
- */
+The id_token presented at the claim belongs to a different identity from the
+one that the operator confirmed before the upload.
+*/
 export class ClaimantChangedError extends CliError {
 	override readonly humanMessage = this.message;
 	constructor(
@@ -990,28 +990,28 @@ export class ClaimantChangedError extends CliError {
 const claimSecretPropagationAttempts = 8;
 
 /**
- * Claims the deployment for the operator by presenting the claim secret and the
- * operator's id_token at `/signup`, and caches the admin session that `/signup`
- * returns. The id_token is bound to `targets`, which include the deployment.
- * `/signup` consumes a nonce-bound id_token; `/token` refuses a later exchange
- * with that id_token. The id_token must belong to the claimant that the
- * operator confirmed before the upload. The secret is deleted whether or
- * not the claim succeeds, because `/signup` accepts the secret from anyone for
- * as long as it is set. A failed delete produces a warning and leaves the
- * claim's outcome unchanged. A failure to cache the session after a successful
- * claim is reported with `AdminSessionNotCachedError`, not as a failed claim.
- *
- * Setting the secret after the upload creates a new Worker version of the same
- * release. Until that version serves, the version without the secret responds
- * with 403 and reports the same release at `/_version`. After each 403 the
- * deploy reads `/_version`. A 403 from a Worker that reports an earlier release
- * is retried for all of the claim's attempts. The version without the secret
- * and the version with it both report this release, so a 403 that reports this
- * release may still come from the version without the secret. The deploy
- * therefore allows eight such 403s before the claim counts as failed. The
- * attempts are four seconds apart, so the eighth arrives about 30 seconds
- * after the first.
- */
+Claims the deployment for the operator by presenting the claim secret and the
+operator's id_token at `/signup`, and caches the admin session that `/signup`
+returns. The id_token is bound to `targets`, which include the deployment.
+`/signup` consumes a nonce-bound id_token; `/token` refuses a later exchange
+with that id_token. The id_token must belong to the claimant that the
+operator confirmed before the upload. The secret is deleted whether or
+not the claim succeeds, because `/signup` accepts the secret from anyone for
+as long as it is set. A failed delete produces a warning and leaves the
+claim's outcome unchanged. A failure to cache the session after a successful
+claim is reported with `AdminSessionNotCachedError`, not as a failed claim.
+
+Setting the secret after the upload creates a new Worker version of the same
+release. Until that version serves, the version without the secret responds
+with 403 and reports the same release at `/_version`. After each 403 the
+deploy reads `/_version`. A 403 from a Worker that reports an earlier release
+is retried for all of the claim's attempts. The version without the secret
+and the version with it both report this release, so a 403 that reports this
+release may still come from the version without the secret. The deploy
+therefore allows eight such 403s before the claim counts as failed. The
+attempts are four seconds apart, so the eighth arrives about 30 seconds
+after the first.
+*/
 async function claimDeployment(dependencies: {
 	readonly ui: DeployUi;
 	readonly client: OnboardClient;
@@ -1212,10 +1212,10 @@ async function presentClaim(
 }
 
 /**
- * The admin was claimed before migration 0016, and its bootstrap trust rule was
- * removed, so the control database has no audience for the admin. A new cache
- * needs the audience for its owner trust rule.
- */
+The admin was claimed before migration 0016, and its bootstrap trust rule was
+removed, so the control database has no audience for the admin. A new cache
+needs the audience for its owner trust rule.
+*/
 export class OwnerAudienceUnknownError extends CliError {
 	override readonly humanMessage: string;
 	constructor(public readonly owner: OwnerBinding) {
@@ -1232,9 +1232,9 @@ export class OwnerAudienceUnknownError extends CliError {
 }
 
 /**
- * The slug from `--cache` is taken, and without a terminal nobody can choose
- * another.
- */
+The slug from `--cache` is taken, and without a terminal nobody can choose
+another.
+*/
 export class FirstCacheSlugTakenError extends CliError {
 	override readonly humanMessage = this.message;
 	constructor(
@@ -1268,12 +1268,12 @@ interface FirstTenantRequest {
 }
 
 /**
- * Create the first tenant under the requested slug, or ask for one, and ask
- * for its default cache's access if none was supplied. If another caller takes
- * the slug first, ask for another slug and reuse the chosen access and read
- * credential. Without a terminal, the prompts return `undefined`, so no tenant
- * is created.
- */
+Create the first tenant under the requested slug, or ask for one, and ask
+for its default cache's access if none was supplied. If another caller takes
+the slug first, ask for another slug and reuse the chosen access and read
+credential. Without a terminal, the prompts return `undefined`, so no tenant
+is created.
+*/
 async function createFirstTenant(
 	ui: DeployUi,
 	client: OnboardClient,
@@ -1344,9 +1344,9 @@ async function createFirstTenant(
 }
 
 /**
- * Asks for the first tenant's slug, shown after the deployment URL `url`.
- * Returns undefined when the operator cancels the prompt.
- */
+Asks for the first tenant's slug, shown after the deployment URL `url`.
+Returns undefined when the operator cancels the prompt.
+*/
 export function askFirstTenantSlug(
 	ui: DeployUi,
 	url: string
@@ -1359,10 +1359,10 @@ export function askFirstTenantSlug(
 }
 
 /**
- * Exchanges an id_token bound to the new tenant at its token endpoint and
- * caches the session, so that later commands for the tenant need no browser.
- * A failure produces a warning, because the cache is already usable.
- */
+Exchanges an id_token bound to the new tenant at its token endpoint and
+caches the session, so that later commands for the tenant need no browser.
+A failure produces a warning, because the cache is already usable.
+*/
 async function cacheTenantSession(dependencies: {
 	readonly ui: DeployUi;
 	readonly signIn: BoundSignIn;

@@ -19,9 +19,9 @@ function slugs(count: number, prefix = 'tenant'): string[] {
 	);
 }
 
-function probes(values: readonly string[], count: number): string[] {
+function probes(values: readonly string[]): string[] {
 	return Array.from(
-		{ length: count },
+		{ length: 1024 },
 		(_, index) => values[index % values.length] ?? ''
 	);
 }
@@ -61,14 +61,14 @@ const unicodeMembers = [
 	'tenant-💾',
 	'tenant-مرحبا'
 ];
-const presentBatch = probes(largeMembers, 1024);
-const absentBatch = probes(slugs(1024, 'absent'), 1024);
+const presentBatch = probes(largeMembers);
+const absentBatch = probes(slugs(1024, 'absent'));
 const mixedBatch = Array.from({ length: 1024 }, (_, index) =>
 	index % 2 === 0
 		? (largeMembers[index % largeMembers.length] ?? '')
 		: `absent-${String(index)}`
 );
-const unicodeBatch = probes(unicodeMembers, 1024);
+const unicodeBatch = probes(unicodeMembers);
 
 const largeFilter = BinaryFuse8.build(largeMembers);
 const unicodeFilter = BinaryFuse8.build(unicodeMembers);

@@ -66,10 +66,10 @@ export class FakeByteSource implements ByteStreamSource {
 }
 
 /**
- * A scripted daemon child: bytes written to its stdin drive the shared fake
- * daemon, whose buffered responses come back as stdout data events, so the
- * bridged pipes carry the same protocol as the socket transport.
- */
+A scripted daemon child: bytes written to its stdin drive the shared fake
+daemon, whose buffered responses come back as stdout data events, so the
+bridged pipes carry the same protocol as the socket transport.
+*/
 export class FakeDaemonChild implements DaemonChildProcess {
 	private exitListener: ((error: Error) => void) | undefined;
 
@@ -118,9 +118,9 @@ export class FakeDaemonChild implements DaemonChildProcess {
 }
 
 /**
- * A daemon that dies as soon as it is spoken to: stdout closes before the
- * handshake's first reply arrives.
- */
+A daemon that dies as soon as it is spoken to: stdout closes before the
+handshake's first reply arrives.
+*/
 export class DyingDaemonChild implements DaemonChildProcess {
 	private exitListener: ((error: Error) => void) | undefined;
 
@@ -148,9 +148,9 @@ export class DyingDaemonChild implements DaemonChildProcess {
 }
 
 /**
- * A command that cannot start: the child reports the spawn failure through
- * its error event and, having never run, emits no exit.
- */
+A command that cannot start: the child reports the spawn failure through
+its error event and, having never run, emits no exit.
+*/
 export class UnspawnableDaemonChild implements DaemonChildProcess {
 	private errorListener: ((error: Error) => void) | undefined;
 

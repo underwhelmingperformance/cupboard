@@ -23,22 +23,22 @@ const hostStoreDirectory: StoreDirectory =
 	storeDirectorySchema.parse('/nix/store');
 
 /**
- * A closure queried through both clients and a signed cache that offers it.
- *
- * The paths are built in the host store, which is the only store that can build
- * them on every platform. `builtPath` is input-addressed, so Nix requires a
- * trusted signature. `dependencyPath` is content-addressed, so Nix accepts it
- * regardless of its signature.
- */
+A closure queried through both clients and a signed cache that offers it.
+
+The paths are built in the host store, which is the only store that can build
+them on every platform. `builtPath` is input-addressed, so Nix requires a
+trusted signature. `dependencyPath` is content-addressed, so Nix accepts it
+regardless of its signature.
+*/
 export interface AvailabilityFixture {
 	readonly root: string;
 	readonly environment: NodeJS.ProcessEnv;
 	readonly cacheUri: string;
 	/**
-	 * A local store containing the same closure, referenced by path. For this
-	 * form of substituter, Nix reads path metadata from the store database rather
-	 * than from narinfo documents.
-	 */
+	A local store containing the same closure, referenced by path. For this
+	form of substituter, Nix reads path metadata from the store database rather
+	than from narinfo documents.
+	*/
 	readonly storeSubstituter: string;
 	readonly builtPath: StorePathString;
 	readonly dependencyPath: StorePathString;
@@ -93,9 +93,9 @@ const unbuiltExpression = [
 ].join('\n');
 
 /**
- * A syntactically valid path that has never existed in the host store. Its
- * digest is a fixture constant because no build produces it.
- */
+A syntactically valid path that has never existed in the host store. Its
+digest is a fixture constant because no build produces it.
+*/
 const absentPath: StorePathString = storePathSchema.parse(
 	'/nix/store/00000000000000000000000000000000-cupboard-conformance-absent'
 );
@@ -259,10 +259,10 @@ async function prepareFixture(
 }
 
 /**
- * Enables mass queries for the fixture cache. `nix copy` writes only the store
- * directory, and clients do not send batch queries unless the cache advertises
- * support. Setting the flag keeps this test focused on cache contents.
- */
+Enables mass queries for the fixture cache. `nix copy` writes only the store
+directory, and clients do not send batch queries unless the cache advertises
+support. Setting the flag keeps this test focused on cache contents.
+*/
 async function inviteMassQuery(cacheInfoFile: string): Promise<void> {
 	const published = await readFile(cacheInfoFile, 'utf8');
 
@@ -320,9 +320,9 @@ async function generateUntrustedPublicKey(
 }
 
 /**
- * A fresh store used as the realisation target. Its database is created before
- * the test so our client can read it before Nix opens the store.
- */
+A fresh store used as the realisation target. Its database is created before
+the test so our client can read it before Nix opens the store.
+*/
 export async function createTargetStore(
 	oracle: Oracle,
 	fixture: AvailabilityFixture,
@@ -366,9 +366,9 @@ function signingOptions(policy: SigningPolicy): readonly string[] {
 }
 
 /**
- * Reads offers from a substituter that references a local store. The store
- * database has no narinfo transfer size, so neither client reports one.
- */
+Reads offers from a substituter that references a local store. The store
+database has no narinfo transfer size, so neither client reports one.
+*/
 export async function offeredThroughStore(
 	oracle: Oracle,
 	fixture: AvailabilityFixture,
@@ -473,9 +473,9 @@ export class UnreadablePathInfoError extends Error {
 }
 
 /**
- * The subset of paths offered by the cache according to each client. Nix
- * returns a null entry for an absent path.
- */
+The subset of paths offered by the cache according to each client. Nix
+returns a null entry for an absent path.
+*/
 export async function offeredPaths(
 	oracle: Oracle,
 	fixture: AvailabilityFixture,
@@ -525,11 +525,11 @@ export interface RealisationPlan {
 }
 
 /**
- * The headings `nix-store --realise --dry-run` prints, recognised by the words
- * that distinguish them. Nix writes each in a singular and a plural form and
- * includes download and unpacked figures in the fetch heading. The patterns
- * accept either number without parsing those figures.
- */
+The headings `nix-store --realise --dry-run` prints, recognised by the words
+that distinguish them. Nix writes each in a singular and a plural form and
+includes download and unpacked figures in the fetch heading. The patterns
+accept either number without parsing those figures.
+*/
 const planHeadings: readonly {
 	section: keyof RealisationPlan;
 	pattern: RegExp;
@@ -540,14 +540,14 @@ const planHeadings: readonly {
 ];
 
 /**
- * Parses the plan that a dry run wrote to stderr.
- *
- * This is the suite's one dependency on the text of a Nix message. The dry run
- * has no structured output or equivalent API, so
- * the parser accepts minor wording changes. It identifies each heading by its
- * distinguishing words and reads the indented paths below it. Figures in the
- * heading and unrelated Nix messages do not affect the result.
- */
+Parses the plan that a dry run wrote to stderr.
+
+This is the suite's one dependency on the text of a Nix message. The dry run
+has no structured output or equivalent API, so
+the parser accepts minor wording changes. It identifies each heading by its
+distinguishing words and reads the indented paths below it. Figures in the
+heading and unrelated Nix messages do not affect the result.
+*/
 export function parseRealisationPlan(stderr: string): RealisationPlan {
 	const sections: Record<keyof RealisationPlan, string[]> = {
 		willBuild: [],
@@ -621,9 +621,9 @@ export async function realisationPlans(
 }
 
 /**
- * Whether a consumer under this policy obtains the closure, as measured by a
- * real Nix realisation and by our closure walk.
- */
+Whether a consumer under this policy obtains the closure, as measured by a
+real Nix realisation and by our closure walk.
+*/
 export async function closureOutcome(
 	oracle: Oracle,
 	fixture: AvailabilityFixture,

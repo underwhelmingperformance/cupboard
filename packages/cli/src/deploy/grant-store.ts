@@ -19,8 +19,8 @@ function grantFilePath(): string {
 }
 
 /**
- * Serialises Cloudflare grant renewal and replacement across CLI processes.
- */
+Serialises Cloudflare grant renewal and replacement across CLI processes.
+*/
 export function withCachedGrantLock<T>(
 	action: (signal?: AbortSignal) => Promise<T>,
 	signal?: AbortSignal
@@ -36,11 +36,11 @@ const storedGrantSchema = z.object({
 });
 
 /**
- * Reads the cached Cloudflare grant, or undefined when none is stored or the
- * file does not parse (a corrupt cache reads as absent, so the caller logs in
- * again on parse failure). The grant has no ID token: the store never keeps
- * one, and it drops the `id_token` of a file written by an earlier release.
- */
+Reads the cached Cloudflare grant, or undefined when none is stored or the
+file does not parse (a corrupt cache reads as absent, so the caller logs in
+again on parse failure). The grant has no ID token: the store never keeps
+one, and it drops the `id_token` of a file written by an earlier release.
+*/
 export async function readCachedGrant(): Promise<CloudflareGrant | undefined> {
 	const contents = await readSecretFile(grantFilePath());
 
@@ -72,8 +72,8 @@ export async function readCachedGrant(): Promise<CloudflareGrant | undefined> {
 }
 
 /**
- * Writes the cached grant to an owner-only `0600` file.
- */
+Writes the cached grant to an owner-only `0600` file.
+*/
 export async function writeCachedGrant(
 	grant: CloudflareGrant,
 	signal?: AbortSignal
@@ -91,19 +91,19 @@ export async function writeCachedGrant(
 }
 
 /**
- * The result of deleting the cached grant. `revocation` is present when the
- * file contained a grant, and is `failed` when the file could not be read.
- */
+The result of deleting the cached grant. `revocation` is present when the
+file contained a grant, and is `failed` when the file could not be read.
+*/
 export interface GrantRemoval {
 	readonly removal: Removal;
 	readonly revocation?: RevocationOutcome;
 }
 
 /**
- * Revokes and deletes the cached Cloudflare grant under its renewal lock, so a
- * concurrent refresh cannot write it back or rotate the token that `revoke`
- * receives. The file is deleted whatever the revocation's outcome.
- */
+Revokes and deletes the cached Cloudflare grant under its renewal lock, so a
+concurrent refresh cannot write it back or rotate the token that `revoke`
+receives. The file is deleted whatever the revocation's outcome.
+*/
 export async function removeCachedGrant(
 	revoke: (grant: CloudflareGrant) => Promise<RevocationOutcome>,
 	signal?: AbortSignal

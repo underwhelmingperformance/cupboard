@@ -78,10 +78,10 @@ async function runUntilSettled<T>(
 }
 
 /**
- * Serialises a read-modify-write operation on one secret file across CLI
- * processes. A compromised lock aborts the operation, but the lock is not
- * released until the operation has stopped.
- */
+Serialises a read-modify-write operation on one secret file across CLI
+processes. A compromised lock aborts the operation, but the lock is not
+released until the operation has stopped.
+*/
 export async function withSecretFileLock<T>(
 	file: string,
 	action: (signal?: AbortSignal) => Promise<T>,

@@ -31,10 +31,10 @@ export interface NixSshStoreSpec {
 }
 
 /**
- * Parses an `ssh-ng` store URI into the settings needed to start its daemon.
- * Returns `undefined` when the scheme, authority or path does not identify a
- * usable `ssh-ng` store. Invalid query-setting values throw instead.
- */
+Parses an `ssh-ng` store URI into the settings needed to start its daemon.
+Returns `undefined` when the scheme, authority or path does not identify a
+usable `ssh-ng` store. Invalid query-setting values throw instead.
+*/
 export function parseSshNgStoreUri(uri: string): NixSshStoreSpec | undefined {
 	if (!uri.startsWith(sshNgScheme)) {
 		return undefined;
@@ -211,12 +211,12 @@ export interface NixSshConnectorDependencies {
 }
 
 /**
- * Creates one child for each SSH daemon connection. Closing a connection
- * terminates only its child and removes that child's temporary known-hosts
- * file. `NixDaemonStoreClient` closes this transport when an operation is
- * aborted. A native `localhost` authority with no user or explicit port runs
- * the remote program locally, matching Nix's `ssh-ng` behaviour.
- */
+Creates one child for each SSH daemon connection. Closing a connection
+terminates only its child and removes that child's temporary known-hosts
+file. `NixDaemonStoreClient` closes this transport when an operation is
+aborted. A native `localhost` authority with no user or explicit port runs
+the remote program locally, matching Nix's `ssh-ng` behaviour.
+*/
 export function createSshNixDaemonConnector(
 	spec: NixSshStoreSpec,
 	run: DaemonCommandRunner = spawnDaemonProcess,

@@ -283,16 +283,14 @@ export async function runWithReadAccess(
 			) {
 				return [];
 			}
-			return [
-				{
-					type: 'cupboard_cache' as const,
-					cache: additional.cache,
-					mode,
-					...('isOptional' in additionalCache && {
-						optional: true as const
-					})
-				}
-			];
+			return {
+				type: 'cupboard_cache' as const,
+				cache: additional.cache,
+				mode,
+				...('isOptional' in additionalCache && {
+					optional: true as const
+				})
+			};
 		}),
 		...(requiresViewOidc && viewName !== undefined
 			? [{ type: 'cupboard_view' as const, view: viewName }]

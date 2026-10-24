@@ -86,10 +86,10 @@ function isReadSessionFailure(error: unknown): error is ReadSessionFailure {
 }
 
 /**
- * Installs a temporary netrc for one owned Nix operation and renews its read
- * credential while the operation runs. The callback must stop when its signal
- * aborts, so cleanup can wait for it before removing the file.
- */
+Installs a temporary netrc for one owned Nix operation and renews its read
+credential while the operation runs. The callback must stop when its signal
+aborts, so cleanup can wait for it before removing the file.
+*/
 export async function withRenewingReadCredential<T>(
 	options: ReadCredentialSessionOptions,
 	operation: (context: {
@@ -279,7 +279,7 @@ async function renewBeforeExpiry(
 
 async function createTemporaryReadCredentialFile(
 	url: URL,
-	existingNetrc: string | undefined
+	existingNetrc: string | undefined = ''
 ): Promise<ReadCredentialFile> {
 	const directory = await mkdtemp(
 		path.join(process.env.RUNNER_TEMP ?? tmpdir(), 'cupboard-read-')
@@ -293,7 +293,7 @@ async function createTemporaryReadCredentialFile(
 		replace: async (credential, signal) => {
 			await writeSecretFile(
 				file,
-				`${renderNetrc(url, credential.user, credential.password)}${existingNetrc ?? ''}`,
+				`${renderNetrc(url, credential.user, credential.password)}${existingNetrc}`,
 				signal
 			);
 

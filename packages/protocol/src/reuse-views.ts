@@ -135,9 +135,9 @@ export type ReuseViewRemoveResponseInput = z.input<
 export const viewPriorityMargin = 10;
 
 /**
- * Returns true when Nix will prefer the destination cache to the reuse view.
- * Nix prefers lower priorities, so the view's value must be strictly greater.
- */
+Returns true when Nix will prefer the destination cache to the reuse view.
+Nix prefers lower priorities, so the view's value must be strictly greater.
+*/
 export function isDestinationPreferred(
 	destinationPriority: CachePriority,
 	viewPriority: ReuseViewPriority

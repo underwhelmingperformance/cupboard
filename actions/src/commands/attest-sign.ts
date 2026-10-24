@@ -101,8 +101,8 @@ export interface AttestSignInputs {
 }
 
 /**
- * File operations used while signing and saving attestation bundles.
- */
+File operations used while signing and saving attestation bundles.
+*/
 export interface AttestSignIo {
 	readonly readText: (filePath: string) => Promise<string>;
 	readonly writeText: (filePath: string, contents: string) => Promise<void>;
@@ -114,16 +114,16 @@ export interface AttestSignIo {
 
 export interface AttestSignDependencies extends SigningDependencies {
 	/**
-	 * Defaults to {@link statementSignerFor}.
-	 */
+	Defaults to {@link statementSignerFor}.
+	*/
 	readonly signerFor?: (
 		options: GithubSignerOptions,
 		signing?: SigstoreSignerDependencies
 	) => StatementSigner;
 	readonly provenanceStatement?: () => Promise<AttestationStatement>;
 	/**
-	 * Defaults to {@link setGithubOutput}.
-	 */
+	Defaults to {@link setGithubOutput}.
+	*/
 	readonly setOutput?: (name: string, value: string) => Promise<void> | void;
 	readonly io?: AttestSignIo;
 	readonly environment?: Environment;
@@ -352,10 +352,10 @@ const nodeAttestSignIo: AttestSignIo = {
 };
 
 /**
- * Build provenance covers paths built by this run. An explicit custom predicate
- * applies to the explicitly selected subjects. Generated reproduction reports
- * cover only the subjects with locally observed successful verification checks.
- */
+Build provenance covers paths built by this run. An explicit custom predicate
+applies to the explicitly selected subjects. Generated reproduction reports
+cover only the subjects with locally observed successful verification checks.
+*/
 export async function attestSignAction(
 	options: AttestSignOptions,
 	reporter: Reporter = createGithubReporter(),

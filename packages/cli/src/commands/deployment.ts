@@ -221,9 +221,9 @@ function tenantCountRows(status: LocalStepStatus): ResultRow[] {
 }
 
 /**
- * Shows deployment readiness, tenant migration progress and the next operator
- * action. Debug output includes schema transitions and migration diagnostics.
- */
+Shows deployment readiness, tenant migration progress and the next operator
+action. Debug output includes schema transitions and migration diagnostics.
+*/
 export async function runDeploymentStatus(
 	reporter: Reporter,
 	client: DeploymentClient,
@@ -261,9 +261,9 @@ export async function runDeploymentStatus(
 }
 
 /**
- * Wakes the pending tenants and waits until each has recorded the required
- * schema and data updates, then reports any remaining deployment work.
- */
+Wakes the pending tenants and waits until each has recorded the required
+schema and data updates, then reports any remaining deployment work.
+*/
 export async function runDeploymentResume(
 	reporter: Reporter,
 	client: DeploymentClient,

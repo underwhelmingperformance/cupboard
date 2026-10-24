@@ -157,8 +157,8 @@ async function seedQueuedDeletions(
 }
 
 // Runs maintenance alarms, each starting its rotation at the first pass.
-async function runMaintenanceAlarms(count: number): Promise<void> {
-	for (let alarm = 0; alarm < count; alarm += 1) {
+async function runMaintenanceAlarms(): Promise<void> {
+	for (let alarm = 0; alarm < 6; alarm += 1) {
 		await runInDurableObject(currentServer(), async (instance, state) => {
 			await state.storage.delete(maintenancePassCursorKey);
 			await instance.alarm();
@@ -707,7 +707,7 @@ describe('narinfo deletion queue', () => {
 					.run();
 			});
 
-			await runMaintenanceAlarms(6);
+			await runMaintenanceAlarms();
 
 			expect({
 				queued: await narInfoDeletionRows(),
@@ -896,7 +896,7 @@ describe('narinfo deletion queue', () => {
 					references: expectedReferences
 				});
 
-				await runMaintenanceAlarms(6);
+				await runMaintenanceAlarms();
 				const retiredEdges = await blobReferenceRows();
 
 				expect({
@@ -1055,7 +1055,7 @@ describe('narinfo deletion queue', () => {
 				});
 
 				if (withdrawnBy === 'collection') {
-					await runMaintenanceAlarms(6);
+					await runMaintenanceAlarms();
 				}
 
 				const beforeExpiry = await narInfoDeletionRows();
@@ -1074,7 +1074,7 @@ describe('narinfo deletion queue', () => {
 				}
 
 				vi.setSystemTime(Date.parse(expiresAt) + 1);
-				await runMaintenanceAlarms(6);
+				await runMaintenanceAlarms();
 
 				expect({
 					beforeExpiry,
@@ -1168,7 +1168,7 @@ describe('narinfo deletion queue', () => {
 			);
 			const hasExpiredDuringSettlement = await (async () => {
 				try {
-					await runMaintenanceAlarms(6);
+					await runMaintenanceAlarms();
 
 					return clearWake.mock.calls.length > 0;
 				} finally {

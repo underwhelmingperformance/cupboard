@@ -83,7 +83,7 @@ describe('HTTP status queries', () => {
 		const exit = vi.spyOn(process, 'exit').mockImplementation((): never => {
 			throw exitError;
 		});
-		const stderr = vi
+		const canWriteStderr = vi
 			.spyOn(process.stderr, 'write')
 			.mockImplementation(() => true);
 
@@ -94,7 +94,7 @@ describe('HTTP status queries', () => {
 			expect(exit.mock.calls).toStrictEqual([[1]]);
 		} finally {
 			exit.mockRestore();
-			stderr.mockRestore();
+			canWriteStderr.mockRestore();
 		}
 	});
 
@@ -884,10 +884,10 @@ const traceRowSchema = z.object({
 type TraceRow = z.infer<typeof traceRowSchema>;
 
 /**
- * Builds a row from the JSON that the traces view sends, so the row contains
- * `null` exactly as the wire does. For a trace with no root span name, the
- * view sends `null` as both the root transaction name and the root span name.
- */
+Builds a row from the JSON that the traces view sends, so the row contains
+`null` exactly as the wire does. For a trace with no root span name, the
+view sends `null` as both the root transaction name and the root span name.
+*/
 function traceRow(
 	index: number,
 	traceStartMs: number,
@@ -905,16 +905,16 @@ function traceRow(
 const tracesViewPageCap = 500;
 
 /**
- * A traces view that behaves like Cloudflare's. It returns the rows that start
- * strictly between `from` and `to`, newest first, and at most 500 of them
- * whatever the requested limit. It rejects every query after the first
- * `maxQueries`, so a walk that stops making progress fails instead of running
- * forever.
- */
-function fakeTracesView(
-	rows: readonly TraceRow[],
-	maxQueries: number
-): { readonly query: TelemetryQuery; readonly queryCount: () => number } {
+A traces view that behaves like Cloudflare's. It returns the rows that start
+strictly between `from` and `to`, newest first, and at most 500 of them
+whatever the requested limit. It rejects every query after the first
+`maxQueries`, so a walk that stops making progress fails instead of running
+forever.
+*/
+function fakeTracesView(rows: readonly TraceRow[]): {
+	readonly query: TelemetryQuery;
+	readonly queryCount: () => number;
+} {
 	const newestFirst = rows.toSorted(
 		(left, right) => right.traceStartMs - left.traceStartMs
 	);
@@ -923,7 +923,7 @@ function fakeTracesView(
 	const query: TelemetryQuery = ({ limit, timeframe }) => {
 		queries += 1;
 
-		if (queries > maxQueries) {
+		if (queries > 20) {
 			return Promise.reject(new RangeError('query budget exhausted'));
 		}
 
@@ -1062,7 +1062,7 @@ describe('fetchPaged', () => {
 	])(
 		'collects every trace once when $label',
 		async ({ window, rows, queries }) => {
-			const view = fakeTracesView(rows, 20);
+			const view = fakeTracesView(rows);
 
 			const collected = await fetchPaged(
 				view.query,
@@ -1092,7 +1092,7 @@ describe('fetchPaged', () => {
 	it('collects a trace without a readable start time once', async () => {
 		const unreadable = traceRow(2, 85);
 		const rows = [traceRow(0, 100), traceRow(1, 90), unreadable];
-		const view = fakeTracesView(rows, 20);
+		const view = fakeTracesView(rows);
 		const startOf = (row: unknown): number | undefined =>
 			traceRowSchema.safeParse(row).data?.traceId === unreadable.traceId
 				? undefined
@@ -1119,7 +1119,7 @@ describe('fetchPaged', () => {
 			traceRow(index, 700)
 		);
 		const older = traceRow(600, 650);
-		const view = fakeTracesView([...burst, older], 20);
+		const view = fakeTracesView([...burst, older]);
 		const warn = vi.spyOn(console, 'warn').mockImplementation(ignoreWarning);
 
 		try {

@@ -64,14 +64,14 @@ export interface WorkflowTrigger {
 	>;
 	readonly hasPathFilter: boolean;
 	/**
-	 * The job's `if` conditions. They are set only when the check cannot
-	 * evaluate whether they allow the job to run for this event.
-	 */
+	The job's `if` conditions. They are set only when the check cannot
+	evaluate whether they allow the job to run for this event.
+	*/
 	readonly undecidedConditions?: readonly string[];
 	/**
-	 * Set for a `pull_request` trigger when the job's conditions exclude pull
-	 * requests from forks.
-	 */
+	Set for a `pull_request` trigger when the job's conditions exclude pull
+	requests from forks.
+	*/
 	readonly isSameRepositoryOnly?: boolean;
 }
 
@@ -82,8 +82,8 @@ export interface DiscoveredPublishingJob {
 	readonly trustedContributorReuse?: true;
 	readonly pullRequestsReadPermission?: 'granted' | 'missing' | 'unknown';
 	/**
-	 * Set only when the referenced push step specifies a nonempty run-root input.
-	 */
+	Set only when the referenced push step specifies a nonempty run-root input.
+	*/
 	readonly installableRunRoot?: true;
 	readonly workflowRef: string;
 	readonly workflowRefInput?: string;
@@ -98,11 +98,11 @@ export interface DiscoveredPublishingJob {
 }
 
 /**
- * The workflow that the `job_workflow_ref` claim of an unverified job's OIDC
- * token refers to: a Cupboard publishing workflow, a workflow file in the
- * checked repository, a reusable workflow in another repository, or a workflow
- * that the check could not read.
- */
+The workflow that the `job_workflow_ref` claim of an unverified job's OIDC
+token refers to: a Cupboard publishing workflow, a workflow file in the
+checked repository, a reusable workflow in another repository, or a workflow
+that the check could not read.
+*/
 export type UnverifiedJobWorkflow =
 	'cupboard' | 'repository' | 'external' | 'unknown';
 
@@ -509,10 +509,10 @@ function publicationKind(
 }
 
 /**
- * The directory of a local action, such as `.github/actions/publish` for
- * `uses: ./.github/actions/publish`. GitHub resolves the path from the root of
- * the repository.
- */
+The directory of a local action, such as `.github/actions/publish` for
+`uses: ./.github/actions/publish`. GitHub resolves the path from the root of
+the repository.
+*/
 function localActionDirectory(uses: string | undefined): string | undefined {
 	if (uses?.startsWith('./') !== true) {
 		return undefined;
@@ -564,10 +564,10 @@ function isDirectPublicationStep(step: WorkflowStep, tenant: URL): boolean {
 }
 
 /**
- * The reference to verify for a Cupboard workflow pin. A caller can write a
- * tag with or without `refs/tags/`. GitHub resolves bare refs with tag
- * precedence. Branch refs remain exact for an opted-in repair.
- */
+The reference to verify for a Cupboard workflow pin. A caller can write a
+tag with or without `refs/tags/`. GitHub resolves bare refs with tag
+precedence. Branch refs remain exact for an opted-in repair.
+*/
 async function pinnedReference(
 	uses: string,
 	source: WorkflowSource
@@ -617,11 +617,11 @@ function isExternalPublication(inputs: WorkflowInputs, tenant: URL): boolean {
 }
 
 /**
- * The triggers for which the job's `if` conditions may allow it to run. A
- * trigger that a condition excludes is dropped. When the check cannot evaluate
- * the conditions for a trigger, it keeps the trigger and records the
- * conditions so that the check can report them.
- */
+The triggers for which the job's `if` conditions may allow it to run. A
+trigger that a condition excludes is dropped. When the check cannot evaluate
+the conditions for a trigger, it keeps the trigger and records the
+conditions so that the check can report them.
+*/
 function conditionedTriggers(
 	triggers: readonly WorkflowTrigger[],
 	conditions: readonly (string | boolean)[],
@@ -664,15 +664,13 @@ function conditionedTriggers(
 		};
 
 		if (outcomes.every((outcome) => outcome === true)) {
-			return [conditioned];
+			return conditioned;
 		}
 
-		return [
-			{
-				...conditioned,
-				undecidedConditions: conditions.map(String)
-			}
-		];
+		return {
+			...conditioned,
+			undecidedConditions: conditions.map(String)
+		};
 	});
 }
 
@@ -844,10 +842,10 @@ export async function discoverPublishingJobs(
 	}
 
 	/**
-	 * Why a job's steps publish directly, or `undefined` when they do not. The
-	 * check also reads the steps of each local composite action that a step
-	 * uses.
-	 */
+	Why a job's steps publish directly, or `undefined` when they do not. The
+	check also reads the steps of each local composite action that a step
+	uses.
+	*/
 	async function directPublication(
 		steps: readonly WorkflowStep[],
 		reference: string,
@@ -1302,13 +1300,13 @@ export async function discoverPublishingJobs(
 }
 
 function repositoryParts(repository: string): { owner: string; repo: string } {
-	const [owner, repo] = repository.split('/', 2);
+	const [owner, repository_] = repository.split('/', 2);
 
-	if (owner === undefined || repo === undefined) {
+	if (owner === undefined || repository_ === undefined) {
 		throw new WorkflowDiscoveryError(`Invalid GitHub repository ${repository}`);
 	}
 
-	return { owner, repo };
+	return { owner, repo: repository_ };
 }
 
 export function githubWorkflowSource(

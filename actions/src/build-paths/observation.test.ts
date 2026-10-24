@@ -56,7 +56,7 @@ async function fixture(
 	};
 }
 
-function send(socket: string, event: unknown): Promise<Buffer> {
+function send(socket: string): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
 		const connection = createConnection(socket);
 		const chunks: Buffer[] = [];
@@ -90,7 +90,7 @@ describe('simple build observation', () => {
 			protecting.resolve(undefined);
 			return protection.promise;
 		});
-		const acknowledgement = send(socketPath, event);
+		const acknowledgement = send(socketPath);
 		await protecting.promise;
 		expect(protectedPaths).toStrictEqual(event.outputPaths);
 		protection.resolve(undefined);
@@ -103,7 +103,7 @@ describe('simple build observation', () => {
 		const { observation, socketPath } = await fixture(() =>
 			Promise.reject(new Error('GC root failed'))
 		);
-		await send(socketPath, event);
+		await send(socketPath);
 		await expect(observation.flush()).rejects.toThrow(
 			'report and protect every completed output'
 		);

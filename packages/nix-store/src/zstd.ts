@@ -122,17 +122,17 @@ function zstdTransformStream(
 
 export interface ZstdDecoderOptions {
 	/**
-	 * The largest size of a chunk of decompressed output.
-	 */
+	The largest size of a chunk of decompressed output.
+	*/
 	readonly chunkSize: number;
 	/**
-	 * The base-2 logarithm of the largest window that a frame may require.
-	 */
+	The base-2 logarithm of the largest window that a frame may require.
+	*/
 	readonly windowLogMax: number;
 	/**
-	 * Receives each chunk of decompressed output. When it returns a promise, the
-	 * decoder produces no more output until the promise settles.
-	 */
+	Receives each chunk of decompressed output. When it returns a promise, the
+	decoder produces no more output until the promise settles.
+	*/
 	readonly onOutput: (chunk: Uint8Array) => Promise<void> | undefined;
 }
 
@@ -146,11 +146,11 @@ interface ZstdFailure {
 }
 
 /**
- * Decompresses concatenated zstd frames that the caller writes one chunk at a
- * time. `write` and `end` reject with `ZstdDecodeError` when the bytes do not
- * decode, and with `onOutput`'s rejection reason when the promise from
- * `onOutput` rejects.
- */
+Decompresses concatenated zstd frames that the caller writes one chunk at a
+time. `write` and `end` reject with `ZstdDecodeError` when the bytes do not
+decode, and with `onOutput`'s rejection reason when the promise from
+`onOutput` rejects.
+*/
 export class ZstdDecoder {
 	private readonly failure = Promise.withResolvers<ZstdFailure>();
 	private run: ZstdRun;
@@ -212,8 +212,8 @@ export class ZstdDecoder {
 	}
 
 	/**
-	 * Resolves once the decoder has consumed the whole chunk.
-	 */
+	Resolves once the decoder has consumed the whole chunk.
+	*/
 	async write(chunk: Uint8Array): Promise<void> {
 		let input = chunk;
 
@@ -247,8 +247,8 @@ export class ZstdDecoder {
 	}
 
 	/**
-	 * Resolves once the decoder has delivered all of its output.
-	 */
+	Resolves once the decoder has delivered all of its output.
+	*/
 	async end(): Promise<void> {
 		this.run.zstd.end();
 		await this.unlessFailed(this.run.ended);

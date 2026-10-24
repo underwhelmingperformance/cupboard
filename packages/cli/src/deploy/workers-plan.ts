@@ -6,8 +6,8 @@ import {
 import type { AccountSubscriptions, CloudflareApi } from './cloudflare-api.ts';
 
 /**
- * Why subscription lookup could not determine the Workers plan.
- */
+Why subscription lookup could not determine the Workers plan.
+*/
 export type WorkersPlanUnknownCause =
 	| { readonly cause: 'subscriptions-unreadable' }
 	| { readonly cause: 'subscriptions-unavailable' }
@@ -48,10 +48,10 @@ function isActive(state: string | undefined): boolean {
 }
 
 /**
- * Interprets active Workers subscriptions using the recognised rate-plan IDs.
- * An unrecognised Workers ID produces an unknown result. If there is no active
- * Workers subscription, the result is Free.
- */
+Interprets active Workers subscriptions using the recognised rate-plan IDs.
+An unrecognised Workers ID produces an unknown result. If there is no active
+Workers subscription, the result is Free.
+*/
 export function workersPlanFrom(listed: AccountSubscriptions): WorkersPlan {
 	if (listed.kind !== 'listed') {
 		return { kind: 'unknown', cause: unreadSubscriptionCauses[listed.kind] };
@@ -62,7 +62,7 @@ export function workersPlanFrom(listed: AccountSubscriptions): WorkersPlan {
 
 		return ratePlanId?.includes('workers') === true &&
 			isActive(subscription.state)
-			? [ratePlanId]
+			? ratePlanId
 			: [];
 	});
 
@@ -88,9 +88,9 @@ export function workersPlanFrom(listed: AccountSubscriptions): WorkersPlan {
 }
 
 /**
- * Returns the configured subrequest allowance for the detected plan. An unknown plan
- * uses the Free limit so a failed lookup does not require a Paid subscription.
- */
+Returns the configured subrequest allowance for the detected plan. An unknown plan
+uses the Free limit so a failed lookup does not require a Paid subscription.
+*/
 export function invocationAllowanceFor(
 	plan: WorkersPlan
 ): WorkersInvocationAllowance {
@@ -100,8 +100,8 @@ export function invocationAllowanceFor(
 }
 
 /**
- * An explicit plan selection that bypasses subscription lookup.
- */
+An explicit plan selection that bypasses subscription lookup.
+*/
 export type WorkersPlanOverride = 'free' | 'paid';
 
 interface WorkersPlanUi {
@@ -165,10 +165,10 @@ const unknownPlanExplanations: Readonly<
 };
 
 /**
- * Chooses a subrequest allowance and reports whether it came from subscription lookup
- * or an explicit override. Lookup failures use the Free allowance and report
- * the cause. Request cancellation propagates to stop deployment.
- */
+Chooses a subrequest allowance and reports whether it came from subscription lookup
+or an explicit override. Lookup failures use the Free allowance and report
+the cause. Request cancellation propagates to stop deployment.
+*/
 export async function establishWorkersPlan({
 	api,
 	ui,

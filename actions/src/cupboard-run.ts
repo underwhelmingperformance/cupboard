@@ -29,10 +29,10 @@ export type CacheCommand =
 	readonly ['push'] | readonly ['attest', 'attach'] | readonly ['run'];
 
 /**
- * The long options that a command's `--help` output lists. Released CLIs
- * predate some of the options the actions pass, so each invocation is shaped
- * to the installed command rather than to the current contract.
- */
+The long options that a command's `--help` output lists. Released CLIs
+predate some of the options the actions pass, so each invocation is shaped
+to the installed command rather than to the current contract.
+*/
 export type CommandOptions = ReadonlySet<string>;
 
 export interface CupboardRunResult {
@@ -47,11 +47,11 @@ export interface CupboardRunDependencies {
 }
 
 /**
- * Run the cupboard binary and stream its output to the runner log. Current
- * releases write machine-readable results to a file under `RUNNER_TEMP`. Older
- * releases emit JSON events on stderr. A non-zero exit throws
- * {@link CupboardReportedError} with any results that the process recorded.
- */
+Run the cupboard binary and stream its output to the runner log. Current
+releases write machine-readable results to a file under `RUNNER_TEMP`. Older
+releases emit JSON events on stderr. A non-zero exit throws
+{@link CupboardReportedError} with any results that the process recorded.
+*/
 export async function runCupboard(
 	binaryPath: string,
 	arguments_: readonly string[],
@@ -145,11 +145,11 @@ export async function detectCupboardResultProtocol(
 }
 
 /**
- * Returns the global options that turn on the CLI's debug logging in a debug
- * re-run. GitHub sets `RUNNER_DEBUG=1` when it re-runs a job with debug
- * logging, and shows `::debug::` lines only then. Releases before v0.0.36 do
- * not accept `--debug`, so the option goes only to a CLI whose help lists it.
- */
+Returns the global options that turn on the CLI's debug logging in a debug
+re-run. GitHub sets `RUNNER_DEBUG=1` when it re-runs a job with debug
+logging, and shows `::debug::` lines only then. Releases before v0.0.36 do
+not accept `--debug`, so the option goes only to a CLI whose help lists it.
+*/
 export async function cupboardDebugArguments(
 	binaryPath: string,
 	environment: Environment,
@@ -192,9 +192,9 @@ export async function detectCacheSelectionSyntax(
 }
 
 /**
- * Published CLIs through v0.0.33 select a named cache with `--cache` on the
- * tenant URL; later CLIs take the cache URL itself.
- */
+Published CLIs through v0.0.33 select a named cache with `--cache` on the
+tenant URL; later CLIs take the cache URL itself.
+*/
 export function cacheSelectionSyntax(
 	options: CommandOptions
 ): CacheSelectionSyntax {
@@ -218,10 +218,10 @@ export function commandOptionsFromHelp(output: string): CommandOptions {
 }
 
 /**
- * Read the options that the installed command accepts from its help output.
- * Rejects output that does not describe the requested command rather than
- * guessing the interface.
- */
+Read the options that the installed command accepts from its help output.
+Rejects output that does not describe the requested command rather than
+guessing the interface.
+*/
 export async function inspectCommandOptions(
 	binaryPath: string,
 	command: CacheCommand,

@@ -6,8 +6,8 @@ import { verifyClaimLeaseMs } from '../http/http.ts';
 export const verificationClaimRenewalMs = Math.floor(verifyClaimLeaseMs / 2);
 
 /**
- * Tracks the uploads whose claim leases an active verification pass must renew.
- */
+Tracks the uploads whose claim leases an active verification pass must renew.
+*/
 export class ActiveVerificationClaims {
 	private readonly uploadIds: Set<UploadId>;
 
@@ -16,8 +16,8 @@ export class ActiveVerificationClaims {
 	}
 
 	/**
-	 * Stops renewing uploads after the Durable Object accepts their verdicts.
-	 */
+	Stops renewing uploads after the Durable Object accepts their verdicts.
+	*/
 	recorded(uploadIds: readonly UploadId[]): void {
 		for (const uploadId of uploadIds) {
 			this.uploadIds.delete(uploadId);
@@ -25,8 +25,8 @@ export class ActiveVerificationClaims {
 	}
 
 	/**
-	 * Returns the upload IDs that still require lease renewal.
-	 */
+	Returns the upload IDs that still require lease renewal.
+	*/
 	remaining(): UploadId[] {
 		return [...this.uploadIds];
 	}
@@ -54,10 +54,10 @@ function abortReason(signal: AbortSignal): unknown {
 }
 
 /**
- * Stops waiting for an operation when verification is aborted. The race keeps
- * observing the operation, so a rejection after the caller has stopped waiting
- * cannot become unhandled.
- */
+Stops waiting for an operation when verification is aborted. The race keeps
+observing the operation, so a rejection after the caller has stopped waiting
+cannot become unhandled.
+*/
 export async function raceVerificationOperation<T>(
 	operation: Promise<T>,
 	signal?: AbortSignal
@@ -93,12 +93,12 @@ export async function raceVerificationOperation<T>(
 }
 
 /**
- * Runs one claimed verification operation and renews its lease while the
- * operation remains in progress. A failed renewal rejects a successful
- * operation so the caller leaves the upload pending. The upload's existing
- * status and generation checks make the next attempt safe. If both the
- * operation and a renewal fail, the operation's error remains authoritative.
- */
+Runs one claimed verification operation and renews its lease while the
+operation remains in progress. A failed renewal rejects a successful
+operation so the caller leaves the upload pending. The upload's existing
+status and generation checks make the next attempt safe. If both the
+operation and a renewal fail, the operation's error remains authoritative.
+*/
 export async function withRenewedVerificationClaim<T>(
 	renew: () => Promise<void>,
 	work: (signal: AbortSignal) => Promise<T>,

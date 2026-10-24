@@ -14,10 +14,10 @@ import { uploadsContract } from './uploads.ts';
 import { verifyContract } from './verify.ts';
 
 /**
- * The tenant administrative API. Paths are relative to the tenant base:
- * `/t/<slug>` at the Worker and `/` inside the Durable Object. The server and
- * CLI both derive their implementations from this contract.
- */
+The tenant administrative API. Paths are relative to the tenant base:
+`/t/<slug>` at the Worker and `/` inside the Durable Object. The server and
+CLI both derive their implementations from this contract.
+*/
 export const tenantContract = {
 	policies: policiesContract,
 	caches: cachesContract,

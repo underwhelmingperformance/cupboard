@@ -353,13 +353,13 @@ function hasValue(
 }
 
 /**
- * Static approximate-membership filter with no false negatives for successfully
- * built keys and an expected false-positive rate of about 1/256.
- */
+Static approximate-membership filter with no false negatives for successfully
+built keys and an expected false-positive rate of about 1/256.
+*/
 export class BinaryFuse8 {
 	/**
-	 * Restores a filter produced by {@link BinaryFuse8.serialise}.
-	 */
+	Restores a filter produced by {@link BinaryFuse8.serialise}.
+	*/
 	static deserialise(bytes: Uint8Array): BinaryFuse8 {
 		if (bytes.byteLength < headerBytes) {
 			throw new BinaryFuseFilterInvalidError();
@@ -401,8 +401,8 @@ export class BinaryFuse8 {
 	}
 
 	/**
-	 * Builds a filter over the given values.
-	 */
+	Builds a filter over the given values.
+	*/
 	static build(values: readonly string[]): BinaryFuse8 {
 		const keys = hashedKeys(values);
 		const geometry = geometryFor(keys.length);
@@ -442,8 +442,8 @@ export class BinaryFuse8 {
 	) {}
 
 	/**
-	 * Returns whether a value is probably in the built set.
-	 */
+	Returns whether a value is probably in the built set.
+	*/
 	has(value: string): boolean {
 		if (this.keyCount === 0) {
 			return false;
@@ -462,8 +462,8 @@ export class BinaryFuse8 {
 	}
 
 	/**
-	 * Encodes the filter into the local checked binary format.
-	 */
+	Encodes the filter into the local checked binary format.
+	*/
 	serialise(): Uint8Array {
 		const buffer = new Uint8Array(headerBytes + this.fingerprints.length);
 		const view = new DataView(buffer.buffer);

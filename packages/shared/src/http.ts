@@ -33,9 +33,9 @@ export type BasicCredentialResult =
 	| { readonly ok: false; readonly reason: BasicCredentialRejection };
 
 /**
- * Encodes the credential as an HTTP Basic `authorization` header. The returned
- * record can be spread into `HeadersInit` or a plain header object.
- */
+Encodes the credential as an HTTP Basic `authorization` header. The returned
+record can be spread into `HeadersInit` or a plain header object.
+*/
 export function basicAuthHeader(credential: BasicCredential): {
 	readonly authorization: string;
 } {
@@ -45,11 +45,11 @@ export function basicAuthHeader(credential: BasicCredential): {
 }
 
 /**
- * Reads token68 credentials from a case-insensitive HTTP authentication
- * scheme. Basic uses token68 directly, and Bearer uses the same character and
- * padding grammar for its b64token. Both schemes require one or more spaces
- * before the credentials.
- */
+Reads token68 credentials from a case-insensitive HTTP authentication
+scheme. Basic uses token68 directly, and Bearer uses the same character and
+padding grammar for its b64token. Both schemes require one or more spaces
+before the credentials.
+*/
 export function parseAuthenticationHeader(
 	header: string | undefined,
 	scheme: string
@@ -73,10 +73,10 @@ export function parseAuthenticationHeader(
 }
 
 /**
- * Parses an HTTP Basic credential or returns the reason it was rejected. The
- * decoded value is split at its first colon, so a password may contain colons
- * but a user-id may not.
- */
+Parses an HTTP Basic credential or returns the reason it was rejected. The
+decoded value is split at its first colon, so a password may contain colons
+but a user-id may not.
+*/
 export function parseBasicAuthHeader(
 	header: string | undefined
 ): BasicCredentialResult {

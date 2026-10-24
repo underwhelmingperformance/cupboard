@@ -4,8 +4,8 @@ import { type OidcTrustSelection } from './oidc-trust-selection.ts';
 import { evaluateOidcTrust } from './oidc-trust-selection-internal.ts';
 
 /**
- * Models trust selection without issuing authority.
- */
+Models trust selection without issuing authority.
+*/
 export function selectModelledOidcTrust(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims,

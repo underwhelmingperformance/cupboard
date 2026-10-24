@@ -28,21 +28,21 @@ export interface ReferenceFetchDependencies {
 const maximumNarInfoBytes = 1024 * 1024;
 
 /**
- * The destination signs the narinfo it serves, so upload metadata excludes the
- * source signatures. The receipt retains them because they cover the unchanged
- * path fingerprint and remain independently verifiable.
- */
+The destination signs the narinfo it serves, so upload metadata excludes the
+source signatures. The receipt retains them because they cover the unchanged
+path fingerprint and remain independently verifiable.
+*/
 export interface ReferenceMetadata {
 	readonly upload: UploadPathMetadataFields;
 	readonly signatures: readonly string[];
 }
 
 /**
- * Fetches and parses `<store-path-hash>.narinfo` from a reference source. The
- * result retains source signatures separately from upload metadata. A
- * non-success response throws {@link NarInfoUnavailableError}; invalid narinfo
- * text throws {@link NarInfoUnparsableError}.
- */
+Fetches and parses `<store-path-hash>.narinfo` from a reference source. The
+result retains source signatures separately from upload metadata. A
+non-success response throws {@link NarInfoUnavailableError}; invalid narinfo
+text throws {@link NarInfoUnparsableError}.
+*/
 export async function fetchReferenceMetadata(
 	source: ReferenceSource,
 	storePathHash: StorePathHash,

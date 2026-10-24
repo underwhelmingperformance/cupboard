@@ -19,9 +19,9 @@ import type { RootRetention } from './root-retention.ts';
 const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 
 /**
- * Upload totals from one or more cupboard runs. Older build summaries omit
- * the byte count.
- */
+Upload totals from one or more cupboard runs. Older build summaries omit
+the byte count.
+*/
 export interface UploadTally {
 	readonly paths: number;
 	readonly bytes?: number;
@@ -36,10 +36,10 @@ export interface UploadTally {
 }
 
 /**
- * Reads the upload counts from the results of one `cupboard push` or
- * `cupboard build-push` run. Returns `undefined` when the run recorded no
- * summary that matches the protocol.
- */
+Reads the upload counts from the results of one `cupboard push` or
+`cupboard build-push` run. Returns `undefined` when the run recorded no
+summary that matches the protocol.
+*/
 export function uploadTally(
 	results: readonly ReporterResultEvent[]
 ): UploadTally | undefined {
@@ -86,9 +86,9 @@ function eventUploads(event: ReporterResultEvent): UploadTally | undefined {
 }
 
 /**
- * Attributes an upload to a root only when its recorded closure has one owner.
- * Shared uploads remain in the cohort total.
- */
+Attributes an upload to a root only when its recorded closure has one owner.
+Shared uploads remain in the cohort total.
+*/
 export function attributedUploads(
 	uploads: UploadTally | undefined,
 	owners: ReadonlyMap<string, ReadonlySet<string>>
@@ -182,9 +182,9 @@ export function addUploads(
 }
 
 /**
- * What the cohort job did with a target. A root can list more than one
- * outcome.
- */
+What the cohort job did with a target. A root can list more than one
+outcome.
+*/
 export type TargetOutcome =
 	| 'built'
 	| 'already-served'
@@ -239,10 +239,10 @@ export interface CohortSummary {
 }
 
 /**
- * The cohort job's summary: its duration, the uploads that happened while it
- * built, and one row for each root with the root's targets, outcome, uploads
- * and expiry.
- */
+The cohort job's summary: its duration, the uploads that happened while it
+built, and one row for each root with the root's targets, outcome, uploads
+and expiry.
+*/
 export function cohortSummaryResult(
 	summary: CohortSummary
 ): ResultPayload<CohortSummary> {
@@ -303,8 +303,8 @@ interface CohortFailureSummary {
 }
 
 /**
- * Records the completed transfers when publication stops before roots are set.
- */
+Records the completed transfers when publication stops before roots are set.
+*/
 export function cohortFailureResult(
 	summary: CohortFailureSummary
 ): ResultPayload<CohortFailureSummary> {

@@ -61,12 +61,12 @@ type ResourceRenames = Partial<
 >;
 
 /**
- * Renames resources in every binding, producer, consumer and dead-letter queue
- * of both Workers. For each kind,
- * `renames` maps an old name to its new name. Each reference is looked up once
- * against the old names, so a new name that equals another old name is not
- * renamed again. Names without an entry are untouched.
- */
+Renames resources in every binding, producer, consumer and dead-letter queue
+of both Workers. For each kind,
+`renames` maps an old name to its new name. Each reference is looked up once
+against the old names, so a new name that equals another old name is not
+renamed again. Names without an entry are untouched.
+*/
 export function renameResources(
 	config: DeploymentConfig,
 	renames: ResourceRenames
@@ -93,9 +93,9 @@ export function renameResources(
 }
 
 /**
- * Renames one resource everywhere both Workers reference it. Names not
- * matching `from` are untouched.
- */
+Renames one resource everywhere both Workers reference it. Names not
+matching `from` are untouched.
+*/
 export function renameResource(
 	config: DeploymentConfig,
 	kind: EditableResourceKind,
@@ -116,8 +116,8 @@ export function withCrons(
 }
 
 /**
- * Sets the shared D1 and R2 subrequest allowance for both Workers.
- */
+Sets the shared D1 and R2 subrequest allowance for both Workers.
+*/
 export function withWorkersInvocationAllowance(
 	config: DeploymentConfig,
 	allowance: WorkersInvocationAllowance

@@ -71,10 +71,10 @@ interface FirstBuild {
 }
 
 /**
- * Attributes known outputs to successful local attempts. Callers exclude paths
- * that were valid before the invocation unless a successful rebuild checked
- * them, and supply only attempts that completed successfully.
- */
+Attributes known outputs to successful local attempts. Callers exclude paths
+that were valid before the invocation unless a successful rebuild checked
+them, and supply only attempts that completed successfully.
+*/
 export function receiptSubjects(
 	attempts: readonly BuildAttempt[],
 	finalInfos: readonly NixValidPathInfo[],

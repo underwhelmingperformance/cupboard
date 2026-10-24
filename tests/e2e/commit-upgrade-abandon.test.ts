@@ -12,11 +12,11 @@ import { withTemporaryDirectory } from '../support/filesystem.ts';
 const creditBudget = 2;
 
 /**
- * Opens a commit upgrade and drops the connection at once, without waiting for
- * the answer. This is what a publication that opens a session and finishes with
- * it immediately looks like from the outside, and it races the dispatch to the
- * worker.
- */
+Opens a commit upgrade and drops the connection at once, without waiting for
+the answer. This is what a publication that opens a session and finishes with
+it immediately looks like from the outside, and it races the dispatch to the
+worker.
+*/
 async function abandonCommitUpgrade(
 	server: CupboardTestServer,
 	bearer: string

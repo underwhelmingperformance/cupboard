@@ -21,21 +21,21 @@ import { type NarReadBufferPool } from './nar-read-buffers.ts';
 import { isR2BadDigest } from './r2-errors.ts';
 
 /**
- * How long verification may go without completing a read of the stored NAR,
- * from any of its R2 gets, before it fails with
- * `SubrequestTimeoutError('nar.verify')`.
- */
+How long verification may go without completing a read of the stored NAR,
+from any of its R2 gets, before it fails with
+`SubrequestTimeoutError('nar.verify')`.
+*/
 const narVerifyStallMs = 60 * 1000;
 
 /**
- * The stall interval while verification also writes the canonical object. R2
- * fails a streamed put whose body receives no bytes for 75 seconds, and keeps
- * one open across a 60-second gap. A chunk from a ranged read reaches the put
- * only after the whole range has arrived, so reads can complete while the put
- * receives nothing. Verification therefore fails when the put receives no
- * bytes for this interval, as well as when no read completes for it. The
- * interval also bounds the work after the last read and R2's answer to the put.
- */
+The stall interval while verification also writes the canonical object. R2
+fails a streamed put whose body receives no bytes for 75 seconds, and keeps
+one open across a 60-second gap. A chunk from a ranged read reaches the put
+only after the whole range has arrived, so reads can complete while the put
+receives nothing. Verification therefore fails when the put receives no
+bytes for this interval, as well as when no read completes for it. The
+interval also bounds the work after the last read and R2's answer to the put.
+*/
 const canonicalWriteStallMs = 30 * 1000;
 
 // libzstd allocates the decoding window outside the isolate's memory limit.
@@ -45,9 +45,9 @@ const canonicalWriteStallMs = 30 * 1000;
 const maxWindowLog = 23;
 
 /**
- * Verification accepts decompressed bytes only when both values match the
- * corresponding narinfo fields.
- */
+Verification accepts decompressed bytes only when both values match the
+corresponding narinfo fields.
+*/
 export interface ExpectedNar {
 	readonly narHash: string;
 	readonly narSize: number;
@@ -74,9 +74,9 @@ export type NarVerification =
 	| { readonly ok: false; readonly reason: 'undecodable' };
 
 /**
- * The staged object differs from the client's declaration of the compressed
- * file.
- */
+The staged object differs from the client's declaration of the compressed
+file.
+*/
 export type DeclarationMismatch =
 	| {
 			readonly ok: false;
@@ -86,9 +86,9 @@ export type DeclarationMismatch =
 	| { readonly ok: false; readonly reason: 'file-hash-mismatch' };
 
 /**
- * The result of verification that also writes a declared upload's canonical
- * object.
- */
+The result of verification that also writes a declared upload's canonical
+object.
+*/
 export type DeclaredNarVerification = NarVerification | DeclarationMismatch;
 
 type NarMismatch = Extract<NarVerification, { readonly ok: false }>;
@@ -101,16 +101,16 @@ type DecodeHalt = Extract<
 const undecodable: DecodeHalt = { ok: false, reason: 'undecodable' };
 
 /**
- * The step that a verification is performing: fetching the object from R2,
- * waiting for a read of its body, or decoding the bytes read so far.
- */
+The step that a verification is performing: fetching the object from R2,
+waiting for a read of its body, or decoding the bytes read so far.
+*/
 export type NarVerifyStage = 'fetch' | 'read' | 'decode';
 
 /**
- * The work that one verification has done so far. The verifier updates this
- * object during verification, so the caller can still read the counts and the
- * last stage after verification throws.
- */
+The work that one verification has done so far. The verifier updates this
+object during verification, so the caller can still read the counts and the
+last stage after verification throws.
+*/
 export interface NarVerifyProgress extends RangeReadProgress {
 	stage: NarVerifyStage;
 	reads: number;
@@ -138,17 +138,17 @@ export interface NarVerifyOptions {
 
 export interface StoredNarVerifyOptions extends NarVerifyOptions {
 	/**
-	 * The buffers for reading parts of the object ahead of the decoder.
-	 */
+	The buffers for reading parts of the object ahead of the decoder.
+	*/
 	readonly buffers: NarReadBufferPool;
 	/**
-	 * The subrequest that the pass set aside for the first get. The verifier
-	 * releases it just before it makes the get.
-	 */
+	The subrequest that the pass set aside for the first get. The verifier
+	releases it just before it makes the get.
+	*/
 	readonly firstGet?: SubrequestHold;
 	/**
-	 * Stops verification, for example when the verification pass ends.
-	 */
+	Stops verification, for example when the verification pass ends.
+	*/
 	readonly signal?: AbortSignal;
 	readonly stallMs?: number;
 }
@@ -157,12 +157,12 @@ const verificationRejected = (): DOMException =>
 	new DOMException('The staged NAR failed verification.', 'AbortError');
 
 /**
- * Receives each compressed chunk that verification reads, in order, and
- * produces the result once the NAR has passed verification. `write` calls
- * `release` once the sink no longer reads `bytes`, which can be after `write`
- * resolves. `finish` is called only after every chunk has been decoded and the
- * NAR matched; `abort` is called on every other exit.
- */
+Receives each compressed chunk that verification reads, in order, and
+produces the result once the NAR has passed verification. `write` calls
+`release` once the sink no longer reads `bytes`, which can be after `write`
+resolves. `finish` is called only after every chunk has been decoded and the
+NAR matched; `abort` is called on every other exit.
+*/
 interface CompressedSink<Result> {
 	write(bytes: Uint8Array, release: () => void): Promise<void>;
 	finish(): Promise<Result>;
@@ -170,8 +170,8 @@ interface CompressedSink<Result> {
 }
 
 /**
- * A running SHA-256 of the bytes written to it.
- */
+A running SHA-256 of the bytes written to it.
+*/
 class Sha256Stream {
 	private readonly stream = new crypto.DigestStream('SHA-256');
 	private readonly writer = this.stream.getWriter();
@@ -231,9 +231,9 @@ async function decoded(
 }
 
 /**
- * Decompresses zstd frames and hashes the output, stopping as soon as the
- * output exceeds `limit` bytes.
- */
+Decompresses zstd frames and hashes the output, stopping as soon as the
+output exceeds `limit` bytes.
+*/
 class NarDecoder {
 	private readonly hash = new Sha256Stream();
 	private readonly halted = Promise.withResolvers<DecodeHalt>();
@@ -267,17 +267,17 @@ class NarDecoder {
 	}
 
 	/**
-	 * Resolves when the decoder has consumed the whole chunk, or with the
-	 * verdict that stopped decoding.
-	 */
+	Resolves when the decoder has consumed the whole chunk, or with the
+	verdict that stopped decoding.
+	*/
 	write(chunk: Uint8Array): Promise<DecodeHalt | undefined> {
 		return Promise.race([this.halted.promise, decoded(this.zstd.write(chunk))]);
 	}
 
 	/**
-	 * Resolves when the decoder has hashed all of its output, or with the
-	 * verdict that stopped decoding.
-	 */
+	Resolves when the decoder has hashed all of its output, or with the
+	verdict that stopped decoding.
+	*/
 	end(): Promise<DecodeHalt | undefined> {
 		return Promise.race([this.halted.promise, decoded(this.zstd.end())]);
 	}
@@ -295,10 +295,10 @@ class NarDecoder {
 }
 
 /**
- * Provides a signal that aborts with the outer signal's reason, or with
- * `SubrequestTimeoutError('nar.verify')` when nothing restarts the watchdog for
- * `stallMs`.
- */
+Provides a signal that aborts with the outer signal's reason, or with
+`SubrequestTimeoutError('nar.verify')` when nothing restarts the watchdog for
+`stallMs`.
+*/
 class StallWatchdog {
 	private readonly controller = new AbortController();
 	private timer: ReturnType<typeof setTimeout> | undefined;
@@ -324,8 +324,8 @@ class StallWatchdog {
 	}
 
 	/**
-	 * Starts a new stall interval after the source makes progress.
-	 */
+	Starts a new stall interval after the source makes progress.
+	*/
 	restart(): void {
 		clearTimeout(this.timer);
 
@@ -349,9 +349,9 @@ class StallWatchdog {
 }
 
 /**
- * Starts reading the next chunk. The verifier awaits the read only after it has
- * decoded the previous chunk, so a rejection is marked as handled until then.
- */
+Starts reading the next chunk. The verifier awaits the read only after it has
+decoded the previous chunk, so a rejection is marked as handled until then.
+*/
 function readAhead(source: NarChunkSource): Promise<NarChunk | undefined> {
 	const read = source.read();
 	void read.catch(() => {
@@ -465,18 +465,18 @@ async function verifyNarChunks<Result>(
 }
 
 /**
- * Reads a stored `.nar.zst` body in 1 MiB pieces, decompresses it with native
- * zstd and hashes the output, then compares the NAR hash and size with what the
- * narinfo declares. The same pass hashes and counts the compressed input, so
- * successful verification also yields the object's file hash and size without
- * fetching the object again. Verification stops reading once the decompressed
- * data exceeds the declared size or the server limit, and on every early exit
- * it cancels the body.
- *
- * When the bytes do not decode, it returns
- * `{ ok: false, reason: 'undecodable' }`. An error from reading the body
- * propagates for the caller to treat as transient.
- */
+Reads a stored `.nar.zst` body in 1 MiB pieces, decompresses it with native
+zstd and hashes the output, then compares the NAR hash and size with what the
+narinfo declares. The same pass hashes and counts the compressed input, so
+successful verification also yields the object's file hash and size without
+fetching the object again. Verification stops reading once the decompressed
+data exceeds the declared size or the server limit, and on every early exit
+it cancels the body.
+
+When the bytes do not decode, it returns
+`{ ok: false, reason: 'undecodable' }`. An error from reading the body
+propagates for the caller to treat as transient.
+*/
 export async function verifyDecompressedNar(
 	body: ReadableStream,
 	expected: ExpectedNar,
@@ -491,14 +491,14 @@ export async function verifyDecompressedNar(
 }
 
 /**
- * Fetches and verifies one staged NAR. While the decoder works through one part
- * of the object, ranged gets read later parts into buffers from `buffers`; see
- * `openStoredNarChunks`. It fails with `SubrequestTimeoutError('nar.verify')`
- * when no read of the object completes for `stallMs`, from the head or from any
- * ranged get. When the outer signal aborts, it cancels every body and rejects
- * with the signal's reason. If an R2 get finishes after a timeout or an abort,
- * the verifier cancels the returned body without decoding it.
- */
+Fetches and verifies one staged NAR. While the decoder works through one part
+of the object, ranged gets read later parts into buffers from `buffers`; see
+`openStoredNarChunks`. It fails with `SubrequestTimeoutError('nar.verify')`
+when no read of the object completes for `stallMs`, from the head or from any
+ranged get. When the outer signal aborts, it cancels every body and rejects
+with the signal's reason. If an R2 get finishes after a timeout or an abort,
+the verifier cancels the returned body without decoding it.
+*/
 export async function verifyStoredNar(
 	blobs: R2ObjectStore,
 	r2Key: R2ObjectKey,
@@ -537,9 +537,9 @@ export async function verifyStoredNar(
 }
 
 /**
- * Where to write a declared upload's canonical object, and the client's
- * declaration of the compressed file.
- */
+Where to write a declared upload's canonical object, and the client's
+declaration of the compressed file.
+*/
 export interface CanonicalWriteTarget {
 	readonly key: R2ObjectKey;
 	readonly fileHash: NixSha256HashString;
@@ -548,9 +548,9 @@ export interface CanonicalWriteTarget {
 
 export interface CanonicalWriteOptions extends StoredNarVerifyOptions {
 	/**
-	 * The subrequest that the pass set aside for the canonical put. The writer
-	 * releases it just before it makes the put.
-	 */
+	The subrequest that the pass set aside for the canonical put. The writer
+	releases it just before it makes the put.
+	*/
 	readonly canonicalPut?: SubrequestHold;
 }
 
@@ -589,13 +589,13 @@ interface HeldChunk {
 }
 
 /**
- * Streams the staged bytes into a conditional put of the canonical object. R2
- * checks the body against the declared SHA-256. The writer keeps back the
- * final chunk until verification accepts the NAR. Until then the body is
- * incomplete, so R2 cannot store a new object. An abort prevents an unfinished
- * put from completing; an existing or completed object can remain at the key.
- * A chunk is released only once the put no longer reads it.
- */
+Streams the staged bytes into a conditional put of the canonical object. R2
+checks the body against the declared SHA-256. The writer keeps back the
+final chunk until verification accepts the NAR. Until then the body is
+incomplete, so R2 cannot store a new object. An abort prevents an unfinished
+put from completing; an existing or completed object can remain at the key.
+A chunk is released only once the put no longer reads it.
+*/
 class CanonicalWriter implements CompressedSink<DeclaredNarVerification> {
 	private readonly writer: WritableStreamDefaultWriter<Uint8Array>;
 	private readonly put: Promise<PutResult>;
@@ -661,8 +661,8 @@ class CanonicalWriter implements CompressedSink<DeclaredNarVerification> {
 	}
 
 	/**
-	 * Sends the final chunk, closes the body and reports what R2 did with it.
-	 */
+	Sends the final chunk, closes the body and reports what R2 did with it.
+	*/
 	async finish(): Promise<DeclaredNarVerification> {
 		if (this.finalChunk !== undefined) {
 			await this.send(this.finalChunk.bytes);
@@ -697,22 +697,22 @@ class CanonicalWriter implements CompressedSink<DeclaredNarVerification> {
 }
 
 /**
- * Verifies one staged NAR and writes its canonical object to `target.key`
- * from the same read, which uses ranged gets as {@link verifyStoredNar} does.
- * The client declared the compressed object's SHA-256 and length, and R2
- * checks the written bytes against the declared hash, so this verifier does
- * not hash the compressed bytes itself.
- *
- * Returns `{ ok: true }` once R2 has stored the object, or when an object
- * already exists at the key. A mismatch of the NAR or of the declaration
- * prevents a new object from being stored; an existing object remains.
- * Read failures, stalls and aborts behave as in {@link verifyStoredNar}, with
- * a shorter stall interval, and abort any unfinished put. A verified write that
- * completed before a later abort can remain at the key. The write also fails with
- * `SubrequestTimeoutError('nar.verify')` when an unfinished put receives no
- * bytes for the stall interval, which covers the work after the last read and
- * R2's answer to the put.
- */
+Verifies one staged NAR and writes its canonical object to `target.key`
+from the same read, which uses ranged gets as {@link verifyStoredNar} does.
+The client declared the compressed object's SHA-256 and length, and R2
+checks the written bytes against the declared hash, so this verifier does
+not hash the compressed bytes itself.
+
+Returns `{ ok: true }` once R2 has stored the object, or when an object
+already exists at the key. A mismatch of the NAR or of the declaration
+prevents a new object from being stored; an existing object remains.
+Read failures, stalls and aborts behave as in {@link verifyStoredNar}, with
+a shorter stall interval, and abort any unfinished put. A verified write that
+completed before a later abort can remain at the key. The write also fails with
+`SubrequestTimeoutError('nar.verify')` when an unfinished put receives no
+bytes for the stall interval, which covers the work after the last read and
+R2's answer to the put.
+*/
 export async function verifyAndWriteStoredNar(
 	blobs: R2ObjectStore,
 	stagingKey: R2ObjectKey,

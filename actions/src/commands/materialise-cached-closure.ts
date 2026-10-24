@@ -327,8 +327,8 @@ async function resolveReferenceClosure(
 }
 
 /**
- * The caller keeps the session and temporary roots live through publication.
- */
+The caller keeps the session and temporary roots live through publication.
+*/
 export async function materialiseCachedClosure(
 	options: MaterialiseCachedClosureOptions
 ): Promise<readonly StorePathString[]> {

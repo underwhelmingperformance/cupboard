@@ -673,8 +673,8 @@ export interface CacheCreateRequest {
 	readonly rootTtl?: TtlSeconds;
 	readonly grace?: GraceSeconds;
 	/**
-	 * Report an existing cache without changing its properties.
-	 */
+	Report an existing cache without changing its properties.
+	*/
 	readonly ifAbsent?: boolean;
 }
 

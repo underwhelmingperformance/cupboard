@@ -668,11 +668,11 @@ export async function pushAction(
 }
 
 /**
- * Released CLIs before explicit retention have no `--permanent` or
- * `--run-root-permanent`, and refuse an unknown option. Those releases retain
- * a root under the cache's own retention whenever `--ttl` is absent, so drop
- * the explicit request and report which options were dropped.
- */
+Released CLIs before explicit retention have no `--permanent` or
+`--run-root-permanent`, and refuse an unknown option. Those releases retain
+a root under the cache's own retention whenever `--ttl` is absent, so drop
+the explicit request and report which options were dropped.
+*/
 export function permanenceForCommand(
 	requested: PushPermanence,
 	options: CommandOptions
@@ -823,10 +823,10 @@ export async function inspectCupboardVersion(
 }
 
 /**
- * A grouped action run is one publication even though it invokes
- * `cupboard push` once per root. Combine the summaries before publishing action
- * outputs and checking grace deadlines.
- */
+A grouped action run is one publication even though it invokes
+`cupboard push` once per root. Combine the summaries before publishing action
+outputs and checking grace deadlines.
+*/
 export function aggregatePushSummaries(
 	summaries: readonly PushSummary[]
 ): PushSummary {
@@ -888,10 +888,10 @@ export function requireGraceResultProtocol(
 }
 
 /**
- * A path with neither `retainUntil` nor `graceSeconds` matched no cache grace
- * configuration. {@link CacheGraceMissingError} reports this cache-level
- * condition.
- */
+A path with neither `retainUntil` nor `graceSeconds` matched no cache grace
+configuration. {@link CacheGraceMissingError} reports this cache-level
+condition.
+*/
 export function hasUngracedPath(summary: PushSummary): boolean {
 	return summary.paths.some(
 		(path) =>
@@ -901,12 +901,12 @@ export function hasUngracedPath(summary: PushSummary): boolean {
 }
 
 /**
- * Grace mode fails closed unless every reported path has a materialised
- * `retainUntil` value (see PLAN.md, "Planning and destination adoption"). An
- * empty grace fact means that the cache has no configured grace. A
- * `graceSeconds` value without `retainUntil` means that verification is still
- * pending.
- */
+Grace mode fails closed unless every reported path has a materialised
+`retainUntil` value (see PLAN.md, "Planning and destination adoption"). An
+empty grace fact means that the cache has no configured grace. A
+`graceSeconds` value without `retainUntil` means that verification is still
+pending.
+*/
 export function pathsMissingGraceDeadline(
 	summary: PushSummary
 ): readonly MissingGracePath[] {
@@ -1109,10 +1109,10 @@ export function buildPushArguments(
 }
 
 /**
- * Keep root groups and paths in input order. Intermediate and reference paths
- * apply to the cohort rather than to one target root, so pass their files only
- * to the first invocation and avoid publishing them again for later roots.
- */
+Keep root groups and paths in input order. Intermediate and reference paths
+apply to the cohort rather than to one target root, so pass their files only
+to the first invocation and avoid publishing them again for later roots.
+*/
 export function pushArgumentsForInvocations(
 	inputs: Pick<
 		PushInputs,

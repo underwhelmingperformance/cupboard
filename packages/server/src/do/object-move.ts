@@ -28,38 +28,38 @@ import { hasSubrequestsFor } from './subrequest-slice.ts';
 const privateSegment = 'private/';
 
 /**
- * Moving one object costs a head of the destination and, when nothing is there,
- * a get, a put and a delete. This many objects per run leaves the listing and
- * the rest of the pass well inside the Durable Object's subrequest allowance,
- * and a tenant with more objects finishes over the wakes that follow.
- */
+Moving one object costs a head of the destination and, when nothing is there,
+a get, a put and a delete. This many objects per run leaves the listing and
+the rest of the pass well inside the Durable Object's subrequest allowance,
+and a tenant with more objects finishes over the wakes that follow.
+*/
 export const maxObjectsMovedPerRun = 100;
 
 export interface ObjectMoveOutcome {
 	readonly moved: number;
 	readonly hasMore: boolean;
 	/**
-	 * Whether this call saved the move's cursor. A call that moves no objects
-	 * can still advance the cursor past prefixes with nothing to move.
-	 */
+	Whether this call saved the move's cursor. A call that moves no objects
+	can still advance the cursor past prefixes with nothing to move.
+	*/
 	readonly progressed: boolean;
 }
 
 /**
- * Returns the path hashes whose stored objects match the cache's current local
- * rows. Narinfo objects and attestation lists record different metadata
- * about a commit, so each family checks its own fields.
- */
+Returns the path hashes whose stored objects match the cache's current local
+rows. Narinfo objects and attestation lists record different metadata
+about a commit, so each family checks its own fields.
+*/
 type CurrentObjects = (
 	cache: ResolvedCache,
 	objects: ReadonlyMap<StorePathHash, R2Object>
 ) => ReadonlySet<StorePathHash>;
 
 /**
- * One family of path-keyed objects: where the family keeps everything it
- * writes, where within that one cache's object for a path belongs, and which
- * of its stored objects a cache can still serve.
- */
+One family of path-keyed objects: where the family keeps everything it
+writes, where within that one cache's object for a path belongs, and which
+of its stored objects a cache can still serve.
+*/
 export interface ObjectFamily {
 	readonly prefix: (tenant: TenantId) => string;
 	readonly key: (
@@ -70,8 +70,8 @@ export interface ObjectFamily {
 }
 
 /**
- * One stored object under a prefix a move is emptying.
- */
+One stored object under a prefix a move is emptying.
+*/
 interface SourceObject {
 	readonly key: R2ObjectKey;
 	readonly storePathHash: StorePathHash;
@@ -84,20 +84,20 @@ interface MovedObject {
 }
 
 /**
- * The old storage prefix for one family's private-cache objects.
- *
- * A private cache used the stored name `private/<name>`, so its objects are
- * under `<family>/private/<name>/`. A public cache called `private` writes
- * directly under `<family>/private/`, one directory higher. The prefix alone
- * therefore does not identify the cache that owns an object.
- */
+The old storage prefix for one family's private-cache objects.
+
+A private cache used the stored name `private/<name>`, so its objects are
+under `<family>/private/<name>/`. A public cache called `private` writes
+directly under `<family>/private/`, one directory higher. The prefix alone
+therefore does not identify the cache that owns an object.
+*/
 function legacyPrefix(tenant: TenantId, family: ObjectFamily): string {
 	return `${family.prefix(tenant)}${privateSegment}`;
 }
 
 /**
- * The cache name encoded in a directory below the legacy `private/` prefix.
- */
+The cache name encoded in a directory below the legacy `private/` prefix.
+*/
 function cacheNameOf(legacyFamilyPrefix: string, directory: string): CacheName {
 	const parsed = cacheNameSchema.safeParse(
 		directory.slice(legacyFamilyPrefix.length, -1)
@@ -111,12 +111,12 @@ function cacheNameOf(legacyFamilyPrefix: string, directory: string): CacheName {
 }
 
 /**
- * Reads each listed key back as the store path it was written for.
- *
- * Only this server writes these keys. A key it cannot read back is a defect in
- * this build rather than an object another writer left, so it stops the pass
- * instead of reaching the branch that deletes an object no cache claims.
- */
+Reads each listed key back as the store path it was written for.
+
+Only this server writes these keys. A key it cannot read back is a defect in
+this build rather than an object another writer left, so it stops the pass
+instead of reaching the branch that deletes an object no cache claims.
+*/
 function sourceObjectsIn(
 	prefix: string,
 	listed: readonly R2Object[]
@@ -146,18 +146,18 @@ async function deleteObject(
 }
 
 /**
- * Moves one object to the key its cache now reads, and reports whether it
- * wrote the destination.
- *
- * The destination is authoritative once it exists: a commit made after the key
- * changed wrote it under the current key, and copying the older object over it
- * would put back what that commit replaced. So an existing destination is left
- * alone and only the older object is removed.
- *
- * The copy preserves the object's metadata because the read checks a
- * narinfo's recorded generation and NAR hash against the reference edge and
- * would refuse an object that arrived without them.
- */
+Moves one object to the key its cache now reads, and reports whether it
+wrote the destination.
+
+The destination is authoritative once it exists: a commit made after the key
+changed wrote it under the current key, and copying the older object over it
+would put back what that commit replaced. So an existing destination is left
+alone and only the older object is removed.
+
+The copy preserves the object's metadata because the read checks a
+narinfo's recorded generation and NAR hash against the reference edge and
+would refuse an object that arrived without them.
+*/
 async function moveObject(
 	context: ServerContext,
 	source: R2ObjectKey,
@@ -186,17 +186,17 @@ async function moveObject(
 }
 
 /**
- * Takes back a relocated object whose path stopped being current while the
- * copy was in flight.
- *
- * Deletion removes the path's narinfo row before its queued object deletion.
- * If deletion happens after this run checks the row but before it copies the
- * object, the queue can miss the new copy. Re-read the row under the critical
- * section and remove this run's copy when the row has gone.
- *
- * Only the objects this run wrote are considered. A destination that was
- * already there belongs to a later commit and is not this run's to remove.
- */
+Takes back a relocated object whose path stopped being current while the
+copy was in flight.
+
+Deletion removes the path's narinfo row before its queued object deletion.
+If deletion happens after this run checks the row but before it copies the
+object, the queue can miss the new copy. Re-read the row under the critical
+section and remove this run's copy when the row has gone.
+
+Only the objects this run wrote are considered. A destination that was
+already there belongs to a later commit and is not this run's to remove.
+*/
 async function discardSupersededCopies(
 	context: ServerContext,
 	family: ObjectFamily,
@@ -225,15 +225,15 @@ async function discardSupersededCopies(
 }
 
 /**
- * Relocates current objects from a legacy prefix and deletes the rest.
- *
- * Writers no longer use this prefix. Local rows identify objects that the
- * cache can still serve. An object without a path row, or one whose recorded
- * version a later commit replaced, would not be readable at its new key.
- * Delete these objects so they do not remain outside collection. If no cache
- * claims the prefix, all of its objects belong to a deleted cache and are
- * deleted.
- */
+Relocates current objects from a legacy prefix and deletes the rest.
+
+Writers no longer use this prefix. Local rows identify objects that the
+cache can still serve. An object without a path row, or one whose recorded
+version a later commit replaced, would not be readable at its new key.
+Delete these objects so they do not remain outside collection. If no cache
+claims the prefix, all of its objects belong to a deleted cache and are
+deleted.
+*/
 async function disposeOfObjects(
 	context: ServerContext,
 	family: ObjectFamily,
@@ -292,10 +292,10 @@ const legacyProgressSchema = z.object({
 });
 
 /**
- * Moves private-cache objects off their legacy keys. The outer cursor also
- * advances past objects owned by a public cache named `private`, which stay
- * at those keys. Each wake bounds both directory inspection and object moves.
- */
+Moves private-cache objects off their legacy keys. The outer cursor also
+advances past objects owned by a public cache named `private`, which stay
+at those keys. Each wake bounds both directory inspection and object moves.
+*/
 export async function moveLegacyPrivateObjects(
 	context: ServerContext,
 	tenant: TenantId,
@@ -399,13 +399,13 @@ const incarnationProgressSchema = z.object({
 });
 
 /**
- * Moves first-generation objects to the current cache incarnation, or deletes
- * them when no live cache claims them. Scope and listing cursors survive each
- * wake, including pages which contain no objects to move.
- *
- * A first-generation cache still reads its original keys and must not be moved.
- * Delimited listings exclude the generation directories beneath those keys.
- */
+Moves first-generation objects to the current cache incarnation, or deletes
+them when no live cache claims them. Scope and listing cursors survive each
+wake, including pages which contain no objects to move.
+
+A first-generation cache still reads its original keys and must not be moved.
+Delimited listings exclude the generation directories beneath those keys.
+*/
 export async function moveObjectsToCacheIncarnation(
 	context: ServerContext,
 	tenant: TenantId,

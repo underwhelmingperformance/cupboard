@@ -11,9 +11,9 @@ export interface LocalStoreDirectories {
 	readonly stateDirectory: string;
 	readonly storeDirectory: StoreDirectory;
 	/**
-	 * The physical directory containing the store paths. A rooted store retains
-	 * logical `/nix/store/...` paths while storing their contents below the root.
-	 */
+	The physical directory containing the store paths. A rooted store retains
+	logical `/nix/store/...` paths while storing their contents below the root.
+	*/
 	readonly realStoreDirectory?: string;
 }
 
@@ -26,12 +26,12 @@ const localScheme = 'local';
 const localSchemePrefix = `${localScheme}://`;
 
 /**
- * Parses a local-store URI, or returns `undefined` for another store type. Nix
- * applies URI parameters over the configured directories: `root` places the
- * store and state below one directory, while `store`, `state` and `real`
- * specify them individually. Invalid paths reject the URI; unknown parameters
- * are ignored, matching Nix.
- */
+Parses a local-store URI, or returns `undefined` for another store type. Nix
+applies URI parameters over the configured directories: `root` places the
+store and state below one directory, while `store`, `state` and `real`
+specify them individually. Invalid paths reject the URI; unknown parameters
+are ignored, matching Nix.
+*/
 export function localStoreOfUri(
 	uri: string,
 	configured: ConfiguredStoreDirectories
@@ -60,14 +60,14 @@ export function localStoreOfUri(
 }
 
 /**
- * Parses parameters from a `local` store URI, or returns `undefined` for
- * another store type. Nix accepts `local` and `local://` alike, and takes the
- * first assignment of a parameter named more than once.
- *
- * A `local://` URI can name a path. That path is the store's root. Nix opens
- * the same store for a reference written as a path. It takes the root from the
- * URI only when no parameter names one, so a `root` parameter wins.
- */
+Parses parameters from a `local` store URI, or returns `undefined` for
+another store type. Nix accepts `local` and `local://` alike, and takes the
+first assignment of a parameter named more than once.
+
+A `local://` URI can name a path. That path is the store's root. Nix opens
+the same store for a reference written as a path. It takes the root from the
+URI only when no parameter names one, so a `root` parameter wins.
+*/
 function localStoreParameters(
 	uri: string
 ): ReadonlyMap<string, string> | undefined {
@@ -91,12 +91,12 @@ function localStoreParameters(
 }
 
 /**
- * Parses a store URI query using Nix's rules. Percent escapes are decoded, but
- * `+` remains a literal plus. Segments without values are ignored, and the
- * first assignment wins when a parameter is repeated.
- *
- * The query is taken without its leading `?`.
- */
+Parses a store URI query using Nix's rules. Percent escapes are decoded, but
+`+` remains a literal plus. Segments without values are ignored, and the
+first assignment wins when a parameter is repeated.
+
+The query is taken without its leading `?`.
+*/
 export function storeUriParameters(query: string): ReadonlyMap<string, string> {
 	const parameters = new Map<string, string>();
 

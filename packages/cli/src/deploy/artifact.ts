@@ -14,10 +14,10 @@ import { type D1Migration, parseD1Migrations } from './migrations.ts';
 import { controlWorker, tenantWorker } from './source.ts';
 
 /**
- * Everything needed to deploy, independent of where it came from. Tree mode
- * assembles it from a checkout; embedded mode imports it from the bundle baked
- * into the binary at release time.
- */
+Everything needed to deploy, independent of where it came from. Tree mode
+assembles it from a checkout; embedded mode imports it from the bundle baked
+into the binary at release time.
+*/
 export interface DeploymentArtifact {
 	readonly config: DeploymentConfig;
 	readonly controlBundle: WorkerBundle;
@@ -31,11 +31,11 @@ export interface DeploymentArtifact {
 }
 
 /**
- * The serializable form embedded in the released binary: the raw wrangler
- * sources (re-parsed on load, reusing the same validation as a tree build)
- * alongside the bundles and migrations. {@link payloadToArtifact} turns it back
- * into a {@link DeploymentArtifact}.
- */
+The serializable form embedded in the released binary: the raw wrangler
+sources (re-parsed on load, reusing the same validation as a tree build)
+alongside the bundles and migrations. {@link payloadToArtifact} turns it back
+into a {@link DeploymentArtifact}.
+*/
 export interface EmbeddedPayload {
 	readonly controlSource: string;
 	readonly tenantSource: string;
@@ -99,10 +99,10 @@ async function readMigrations(
 }
 
 /**
- * Read both wrangler sources, bundle each Worker from live source, and read the
- * D1 migrations from a checkout. This is the serializable payload the release
- * build embeds; a tree deploy turns it straight into an artifact.
- */
+Read both wrangler sources, bundle each Worker from live source, and read the
+D1 migrations from a checkout. This is the serializable payload the release
+build embeds; a tree deploy turns it straight into an artifact.
+*/
 export async function buildEmbeddedPayload(
 	checkoutRoot: string,
 	bundler: Bundler

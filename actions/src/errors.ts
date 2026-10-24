@@ -451,9 +451,9 @@ export class ReadPasswordRequiredError extends UsageError {
 }
 
 /**
- * The `cache-credentials` input is a JSON array of explicit cache scopes and
- * their read credentials.
- */
+The `cache-credentials` input is a JSON array of explicit cache scopes and
+their read credentials.
+*/
 export class CacheCredentialsInvalidError extends UsageError {
 	constructor(options?: { readonly cause: unknown }) {
 		super(
@@ -465,8 +465,8 @@ export class CacheCredentialsInvalidError extends UsageError {
 }
 
 /**
- * Each entry in `cache-credentials` must match a cache in `cache`.
- */
+Each entry in `cache-credentials` must match a cache in `cache`.
+*/
 export class UnknownCacheCredentialError extends UsageError {
 	constructor(public readonly cache: string) {
 		super(`add '${cache}' to cache or remove its cache-credentials entry`);
@@ -893,9 +893,9 @@ export class AttestationNotFoundError extends CodedError {
 }
 
 /**
- * `cause` contains the last candidate's failure; earlier attempts may have
- * failed for other reasons.
- */
+`cause` contains the last candidate's failure; earlier attempts may have
+failed for other reasons.
+*/
 export class AttestationVerificationFailedError extends CodedError {
 	constructor(
 		public readonly archiveName: string,
@@ -1003,10 +1003,10 @@ export class AttestationChecksumsMismatchError extends CodedError {
 }
 
 /**
- * Signing a statement failed on every attempt, or failed once with a failure
- * the action treats as final. `attempts` is the number of attempts made, so one
- * means the first failure was final.
- */
+Signing a statement failed on every attempt, or failed once with a failure
+the action treats as final. `attempts` is the number of attempts made, so one
+means the first failure was final.
+*/
 export class AttestationSigningError extends CodedError {
 	constructor(
 		public readonly predicateType: string,
@@ -1035,10 +1035,10 @@ export class AttestationBundleTooLargeForSubjectError extends CodedError {
 }
 
 /**
- * A produced bundle failed its generation self-check. The action runs this
- * check before it writes the bundle to a file or the repository's attestation
- * store. Rekor may already have recorded an entry during signing.
- */
+A produced bundle failed its generation self-check. The action runs this
+check before it writes the bundle to a file or the repository's attestation
+store. Rekor may already have recorded an entry during signing.
+*/
 export abstract class AttestationSelfCheckError extends CodedError {}
 
 export class AttestationEvidenceShapeError extends AttestationSelfCheckError {
@@ -1066,9 +1066,9 @@ export class AttestationBundleUnverifiedError extends AttestationSelfCheckError 
 }
 
 /**
- * The attestation store refused a bundle, or `GITHUB_REPOSITORY` is not an
- * `owner/name` pair.
- */
+The attestation store refused a bundle, or `GITHUB_REPOSITORY` is not an
+`owner/name` pair.
+*/
 export class AttestationStoreWriteError extends CodedError {
 	constructor(
 		public readonly repository: string,
@@ -1173,9 +1173,9 @@ export class StaticReadCredentialRejectedError extends CodedError {
 }
 
 /**
- * Nix defaults a missing cache priority to 30. The reuse-view check must compare
- * the configured values, so it rejects a document without a parseable priority.
- */
+Nix defaults a missing cache priority to 30. The reuse-view check must compare
+the configured values, so it rejects a document without a parseable priority.
+*/
 export class CacheInfoInvalidError extends CodedError {
 	constructor(
 		public readonly side: 'destination' | 'view',
@@ -1190,9 +1190,9 @@ export class CacheInfoInvalidError extends CodedError {
 }
 
 /**
- * Nix tries lower priorities first. A reuse view must have a numerically higher
- * priority so the destination wins when both caches provide a path.
- */
+Nix tries lower priorities first. A reuse view must have a numerically higher
+priority so the destination wins when both caches provide a path.
+*/
 export class ReuseViewPriorityError extends UsageError {
 	constructor(
 		public readonly destinationPriority: number,
@@ -1453,10 +1453,10 @@ export class PublishRootTargetLimitError extends UsageError {
 }
 
 /**
- * A component target exceeds the atomic `root:set` limit. Do not page this
- * update: retention requires one all-or-nothing target list. Supporting larger
- * lists requires generation-aware attachment.
- */
+A component target exceeds the atomic `root:set` limit. Do not page this
+update: retention requires one all-or-nothing target list. Supporting larger
+lists requires generation-aware attachment.
+*/
 export class ComponentRootTargetLimitError extends UsageError {
 	constructor(
 		public readonly attribute: string,
@@ -1726,10 +1726,10 @@ export class CohortEvaluationDriftError extends CodedError {
 }
 
 /**
- * The cupboard binary exited non-zero after reporting the cause. This error
- * stores the exit status adopted by the action and any result events recorded
- * before failure. It adds no diagnostic.
- */
+The cupboard binary exited non-zero after reporting the cause. This error
+stores the exit status adopted by the action and any result events recorded
+before failure. It adds no diagnostic.
+*/
 export class CupboardReportedError extends CodedError {
 	constructor(
 		public readonly status: number | null,
@@ -1786,12 +1786,12 @@ export class CohortPlanResultInvalidError extends CodedError {
 }
 
 /**
- * The cohort's availability check failed because the unknown-path count
- * exceeded its ceiling or the measured data would not fit in this store.
- * `cupboard plan cohort` reports a transient exit code for the first case and
- * an unavailable-resource exit code for the second. This error preserves that
- * distinction.
- */
+The cohort's availability check failed because the unknown-path count
+exceeded its ceiling or the measured data would not fit in this store.
+`cupboard plan cohort` reports a transient exit code for the first case and
+an unavailable-resource exit code for the second. This error preserves that
+distinction.
+*/
 export class CohortPlanRefusedError extends CodedError {
 	constructor(
 		public readonly cohortKey: string,
@@ -1835,11 +1835,11 @@ export class LegacyPushSummaryError extends CodedError {
 }
 
 /**
- * A path without a positive grace deadline. `not-present` means the confirm no
- * longer found the path at the destination. `pending` means the upload has not
- * yet produced a deadline. If the cache has no configured grace, the
- * cache-level {@link CacheGraceMissingError} is used instead.
- */
+A path without a positive grace deadline. `not-present` means the confirm no
+longer found the path at the destination. `pending` means the upload has not
+yet produced a deadline. If the cache has no configured grace, the
+cache-level {@link CacheGraceMissingError} is used instead.
+*/
 export interface MissingGracePath {
 	readonly storePathHash: string;
 	readonly storePath?: string;

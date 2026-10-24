@@ -99,19 +99,19 @@ interface ManualAlarmBindings {
 }
 
 /**
- * What the commit sessions of a run did, as counted at the socket the worker
- * answered on. A test that needs to prove a publication waited on the socket it
- * already held, rather than re-dialling, reads the upgrade count; one that needs
- * to prove the credit budget was genuinely exhausted reads the queued count.
- */
+What the commit sessions of a run did, as counted at the socket the worker
+answered on. A test that needs to prove a publication waited on the socket it
+already held, rather than re-dialling, reads the upgrade count; one that needs
+to prove the credit budget was genuinely exhausted reads the queued count.
+*/
 export interface CommitSessionObservations {
 	readonly upgrades: number;
 	readonly creditFrames: number;
 	readonly queuedFrames: number;
 	/**
-	 * Upgrades the worker accepted that never reached a client, because the
-	 * client had gone by the time the handshake completed.
-	 */
+	Upgrades the worker accepted that never reached a client, because the
+	client had gone by the time the handshake completed.
+	*/
 	readonly abandonedUpgrades: number;
 }
 
@@ -162,12 +162,12 @@ function countWorkerFrame(counters: CommitSessionCounters, data: string): void {
 }
 
 /**
- * A running cupboard worker backed by Miniflare, fronted by a local HTTP server
- * so that Nix can reach it over a real socket. A push's NAR bytes are written
- * straight into the bound R2 bucket because the real upload signs with a
- * temporary credential against Cloudflare's S3 endpoint, which Miniflare does
- * not serve.
- */
+A running cupboard worker backed by Miniflare, fronted by a local HTTP server
+so that Nix can reach it over a real socket. A push's NAR bytes are written
+straight into the bound R2 bucket because the real upload signs with a
+temporary credential against Cloudflare's S3 endpoint, which Miniflare does
+not serve.
+*/
 export class CupboardTestServer {
 	static async start(
 		directory: string,
@@ -452,10 +452,10 @@ export class CupboardTestServer {
 	}
 
 	/**
-	 * What the commit sessions have done so far. A test that spans one run reads
-	 * this before and after it and compares, since the counts are the server's
-	 * and outlive any one run.
-	 */
+	What the commit sessions have done so far. A test that spans one run reads
+	this before and after it and compares, since the counts are the server's
+	and outlive any one run.
+	*/
 	get commitSessions(): CommitSessionObservations {
 		return {
 			upgrades: this.commitCounters.upgrades,
@@ -466,10 +466,10 @@ export class CupboardTestServer {
 	}
 
 	/**
-	 * The fixture tenant's base URL: the `/t/<tenant>/` prefix every tenant route
-	 * (token exchange, uploads, narinfo and NAR reads) lives under. The bare
-	 * {@link URL} is the deployment/control surface.
-	 */
+	The fixture tenant's base URL: the `/t/<tenant>/` prefix every tenant route
+	(token exchange, uploads, narinfo and NAR reads) lives under. The bare
+	{@link URL} is the deployment/control surface.
+	*/
 	get tenantUrl(): URL {
 		return new URL(`/t/${fixtureTenant}`, this.url);
 	}
@@ -502,11 +502,11 @@ export class CupboardTestServer {
 	}
 
 	/**
-	 * Provisions the fixture tenant the way an operator would: it seeds the control
-	 * trust policy, mints a control admin token, and creates the tenant through the
-	 * control API, which configures its Durable Object and publishes the admission
-	 * manifest. After this the fixture tenant serves and accepts writes.
-	 */
+	Provisions the fixture tenant the way an operator would: it seeds the control
+	trust policy, mints a control admin token, and creates the tenant through the
+	control API, which configures its Durable Object and publishes the admission
+	manifest. After this the fixture tenant serves and accepts writes.
+	*/
 	async provisionFixtureTenant(spec: TenantProvisionSpec): Promise<void> {
 		await this.seedControlTrust({
 			issuer: this.issuer.issuer,
@@ -560,13 +560,13 @@ export class CupboardTestServer {
 	}
 
 	/**
-	 * Builds the push client an e2e test drives. Negotiation, commit and
-	 * retention speak to the running worker. Miniflare does not serve
-	 * Cloudflare's S3 endpoint, so the CLI's uploader sends each NAR to a
-	 * loopback S3 endpoint, which writes the completed object into the bound R2
-	 * bucket that the worker verifies against. Other objects, such as
-	 * attestation bundles, are written into the bucket directly.
-	 */
+	Builds the push client an e2e test drives. Negotiation, commit and
+	retention speak to the running worker. Miniflare does not serve
+	Cloudflare's S3 endpoint, so the CLI's uploader sends each NAR to a
+	loopback S3 endpoint, which writes the completed object into the bound R2
+	bucket that the worker verifies against. Other objects, such as
+	attestation bundles, are written into the bucket directly.
+	*/
 	pushClient(
 		credential: AccessCredential,
 		options: { readonly cache?: CacheScope } = {}
@@ -608,12 +608,12 @@ export class CupboardTestServer {
 	}
 
 	/**
-	 * Exchanges an issuer-signed id_token for a cupboard access token via
-	 * `/token`. A claim-bound (CI) rule must name the `authorizationDetails` it
-	 * wants; the interactive owner may omit them and receive its wildcard.
-	 * `binding` is the binding parameters of a nonce-bound token, from
-	 * `signBound`. A token whose audience is the tenant URL needs none.
-	 */
+	Exchanges an issuer-signed id_token for a cupboard access token via
+	`/token`. A claim-bound (CI) rule must name the `authorizationDetails` it
+	wants; the interactive owner may omit them and receive its wildcard.
+	`binding` is the binding parameters of a nonce-bound token, from
+	`signBound`. A token whose audience is the tenant URL needs none.
+	*/
 	async exchangeIdToken(
 		idToken: string,
 		authorizationDetails?: unknown,
@@ -650,9 +650,9 @@ export class CupboardTestServer {
 	}
 
 	/**
-	 * Seeds a control trust rule directly in D1, standing in for the gated
-	 * first-signup claim that will seed it. A pinned `sub` goes in `claims`.
-	 */
+	Seeds a control trust rule directly in D1, standing in for the gated
+	first-signup claim that will seed it. A pinned `sub` goes in `claims`.
+	*/
 	async seedControlTrust(rule: {
 		readonly issuer: string;
 		readonly audience: string;

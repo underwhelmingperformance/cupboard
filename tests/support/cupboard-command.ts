@@ -21,20 +21,20 @@ const hookHelperSource = path.join(
 export type StageObject = (key: string, bytes: Uint8Array) => Promise<void>;
 
 /**
- * The `cupboard` command an action runs, backed by this checkout's CLI sources.
- * It is a real executable: the action spawns it, detects its result protocol,
- * and reads its exit status, exactly as it would the binary that
- * `actions/setup` installs on a runner.
- *
- * One part of it is not the production path. A push signs its blob uploads with
- * a temporary R2 credential and sends them to Cloudflare's S3 endpoint, which
- * Miniflare does not serve. A module hook therefore wraps the CLI's uploader so
- * that it sends the same requests to a loopback S3 endpoint, which writes each
- * completed object into the bucket that the worker verifies against.
- * `CupboardTestServer.pushClient` does the same for the suites that drive a
- * push directly. Everything else the command does, including issuing the upload
- * credential that it signs with, runs unchanged.
- */
+The `cupboard` command an action runs, backed by this checkout's CLI sources.
+It is a real executable: the action spawns it, detects its result protocol,
+and reads its exit status, exactly as it would the binary that
+`actions/setup` installs on a runner.
+
+One part of it is not the production path. A push signs its blob uploads with
+a temporary R2 credential and sends them to Cloudflare's S3 endpoint, which
+Miniflare does not serve. A module hook therefore wraps the CLI's uploader so
+that it sends the same requests to a loopback S3 endpoint, which writes each
+completed object into the bucket that the worker verifies against.
+`CupboardTestServer.pushClient` does the same for the suites that drive a
+push directly. Everything else the command does, including issuing the upload
+credential that it signs with, runs unchanged.
+*/
 export class CupboardCommand {
 	static async start(options: {
 		readonly directory: string;

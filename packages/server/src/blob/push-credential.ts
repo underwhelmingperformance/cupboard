@@ -33,9 +33,9 @@ export const pushCredentialMaxTtlSeconds = 6 * 60 * 60;
 const pushIdTtlSeconds = 24 * 60 * 60;
 
 /**
- * Returns the access token's remaining whole seconds, capped at six hours.
- * Rejects a token that has no remaining lifetime.
- */
+Returns the access token's remaining whole seconds, capped at six hours.
+Rejects a token that has no remaining lifetime.
+*/
 export function pushCredentialTtlSeconds(
 	tokenExpiresAt: Date,
 	now: Date
@@ -68,10 +68,10 @@ export function pushIdSigningKey(env: PushIdSigningEnv): PushIdSigningKey {
 }
 
 /**
- * Issues R2 credentials that can write only to one push's staging prefix. The
- * signed push ID lets negotiation verify the tenant, expiry, and prefix without
- * storing per-push state.
- */
+Issues R2 credentials that can write only to one push's staging prefix. The
+signed push ID lets negotiation verify the tenant, expiry, and prefix without
+storing per-push state.
+*/
 export class PushCredentialIssuer {
 	private hmacKey: Promise<CryptoKey> | undefined;
 

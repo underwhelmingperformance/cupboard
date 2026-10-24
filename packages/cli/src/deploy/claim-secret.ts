@@ -8,10 +8,10 @@ import { claimSecretName } from './secrets.ts';
 import type { DeployUi } from './ui.ts';
 
 /**
- * Deletes the claim secret from the control Worker. A failure other than an
- * abort produces a warning that the secret stays set. Its value was never
- * printed or written to disk, and the next `cupboard init` removes it.
- */
+Deletes the claim secret from the control Worker. A failure other than an
+abort produces a warning that the secret stays set. Its value was never
+printed or written to disk, and the next `cupboard init` removes it.
+*/
 export async function removeClaimSecret(
 	ui: Pick<DeployUi, 'reporter' | 'warn'>,
 	api: Pick<CloudflareApi, 'deleteSecret'>,
@@ -39,11 +39,11 @@ export async function removeClaimSecret(
 const cleanupTimeoutMs = 15_000;
 
 /**
- * The Cloudflare API that removes the claim secret. Each removal creates a
- * client with its own time limit, because an interrupted run removes the
- * secret after the run's signal has aborted, and a request with that signal
- * fails at once.
- */
+The Cloudflare API that removes the claim secret. Each removal creates a
+client with its own time limit, because an interrupted run removes the
+secret after the run's signal has aborted, and a request with that signal
+fails at once.
+*/
 export function claimSecretCleanupApi(
 	clientWithSignal: (signal: AbortSignal) => Cloudflare,
 	accountId: CloudflareAccountId

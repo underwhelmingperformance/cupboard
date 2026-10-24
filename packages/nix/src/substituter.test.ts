@@ -179,17 +179,17 @@ const endless: typeof undiciFetch = () =>
 const flooding: typeof undiciFetch = (input) => {
 	const url = requestUrl(input);
 
-	return url.origin === 'https://flood.example'
-		? Promise.resolve(
-				new Response(
-					new ReadableStream({
+	return Promise.resolve(
+		new Response(
+			url.origin === 'https://flood.example'
+				? new ReadableStream({
 						pull(controller) {
 							controller.enqueue(new Uint8Array(64 * 1024));
 						}
 					})
-				)
-			)
-		: Promise.resolve(new Response('StoreDir: /nix/store\n'));
+				: 'StoreDir: /nix/store\n'
+		)
+	);
 };
 
 function askingToWait(seconds: string): typeof undiciFetch {

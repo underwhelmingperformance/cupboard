@@ -69,10 +69,10 @@ const tenantOffboardingError = {
 };
 
 /**
- * The administrative API served under `/control` on the bare host. Paths in
- * this contract are relative to `/control`. The server implements this contract,
- * and the CLI derives its client from the same definition.
- */
+The administrative API served under `/control` on the bare host. Paths in
+this contract are relative to `/control`. The server implements this contract,
+and the CLI derives its client from the same definition.
+*/
 export const controlContract = {
 	check: controlProcedure
 		.meta({ requires: 'control:check', replaySafety: 'replay-safe' })

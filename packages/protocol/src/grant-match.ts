@@ -262,10 +262,10 @@ function isGrantPermitted(
 }
 
 /**
- * A rule permits a concrete grant only when it includes every requested
- * operation and each resource binding resolves to the requested resource. A
- * wildcard permitted grant permits every request.
- */
+A rule permits a concrete grant only when it includes every requested
+operation and each resource binding resolves to the requested resource. A
+wildcard permitted grant permits every request.
+*/
 export function isGrantPermittedByRule(
 	permittedGrants: readonly PermittedGrant[],
 	requested: AuthorizationDetail,

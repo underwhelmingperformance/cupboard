@@ -4,21 +4,21 @@ import { currentOperationCost } from './do/operation-cost.ts';
 
 export interface D1StatementLog {
 	/**
-	 * Returns the SQL of a statement, or `undefined` for a statement prepared
-	 * before the log started recording.
-	 */
+	Returns the SQL of a statement, or `undefined` for a statement prepared
+	before the log started recording.
+	*/
 	sql(statement: D1PreparedStatement): string | undefined;
 	/**
-	 * Returns the values bound to a statement, or `[]` for an unbound one.
-	 */
+	Returns the values bound to a statement, or `[]` for an unbound one.
+	*/
 	values(statement: D1PreparedStatement): readonly unknown[];
 	restore(): void;
 }
 
 /**
- * Labels a statement by its verb and table, such as `update tenant_usage`. A
- * statement that does not write a table is labelled by its first word.
- */
+Labels a statement by its verb and table, such as `update tenant_usage`. A
+statement that does not write a table is labelled by its first word.
+*/
 export function describeStatement(query: string): string {
 	const [, verb, table] =
 		/^(insert into|update|delete from) "(\w+)"/.exec(query) ?? [];
@@ -31,10 +31,10 @@ export function describeStatement(query: string): string {
 }
 
 /**
- * Records the SQL of every statement prepared on `database` until `restore`
- * is called. A batch receives the statements that `bind` returns, so the log
- * records each bound statement and its values as well as the prepared one.
- */
+Records the SQL of every statement prepared on `database` until `restore`
+is called. A batch receives the statements that `bind` returns, so the log
+records each bound statement and its values as well as the prepared one.
+*/
 export function recordD1Statements(database: D1Database): D1StatementLog {
 	const prepare = database.prepare.bind(database);
 	const queries = new WeakMap<D1PreparedStatement, string>();
@@ -66,8 +66,8 @@ export function recordD1Statements(database: D1Database): D1StatementLog {
 }
 
 /**
- * One statement of a D1 batch, as `batchCosts` passes it to `beforeBatch`.
- */
+One statement of a D1 batch, as `batchCosts` passes it to `beforeBatch`.
+*/
 export interface BatchStatement {
 	readonly label: string;
 	readonly sql: string;
@@ -75,10 +75,10 @@ export interface BatchStatement {
 }
 
 /**
- * The rows that one statement of a batch wrote, and with `reads` the rows that
- * it read. D1 bills each table row and each index entry that a statement
- * writes, and reports the total as `meta.rows_written`.
- */
+The rows that one statement of a batch wrote, and with `reads` the rows that
+it read. D1 bills each table row and each index entry that a statement
+writes, and reports the total as `meta.rows_written`.
+*/
 export interface StatementCost {
 	readonly statement: string;
 	readonly written: number;
@@ -86,9 +86,9 @@ export interface StatementCost {
 }
 
 /**
- * Runs `body` and returns the cost of each statement in every D1 batch that
- * it sends to `database`. `beforeBatch` runs before each batch reaches D1.
- */
+Runs `body` and returns the cost of each statement in every D1 batch that
+it sends to `database`. `beforeBatch` runs before each batch reaches D1.
+*/
 export async function batchCosts(
 	database: D1Database,
 	body: () => Promise<unknown>,
@@ -144,22 +144,22 @@ export async function batchCosts(
 
 export interface TableWrite {
 	/**
-	 * The label of the cost scope that ran the statement.
-	 */
+	The label of the cost scope that ran the statement.
+	*/
 	readonly scope: string | undefined;
 	readonly statement: string;
 	readonly written: number;
 }
 
 /**
- * Runs `body` and returns, in order, every statement on `table` that ran
- * through `run`, with the number of rows that D1 reports it wrote.
- *
- * The test pool freezes `Date`, so every statement would otherwise see the
- * same instant. In production the clock moves on across each D1 call, so
- * here it advances by one millisecond for every statement prepared on
- * `database`.
- */
+Runs `body` and returns, in order, every statement on `table` that ran
+through `run`, with the number of rows that D1 reports it wrote.
+
+The test pool freezes `Date`, so every statement would otherwise see the
+same instant. In production the clock moves on across each D1 call, so
+here it advances by one millisecond for every statement prepared on
+`database`.
+*/
 export async function recordTableWrites(
 	database: D1Database,
 	table: string,

@@ -18,9 +18,9 @@ export interface CacheCredential {
 export type CacheCredentials = readonly CacheCredential[];
 
 /**
- * Cache-specific read credentials. Each entry uses an explicit cache scope, so
- * the default cache never needs a sentinel name.
- */
+Cache-specific read credentials. Each entry uses an explicit cache scope, so
+the default cache never needs a sentinel name.
+*/
 export const cacheCredentialsSchema = z
 	.array(
 		z.strictObject({

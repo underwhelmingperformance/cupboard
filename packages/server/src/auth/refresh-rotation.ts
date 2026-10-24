@@ -8,10 +8,10 @@ import { refreshTokenRetryGraceMs } from './auth.ts';
 import { type AuthenticatedRefreshAuthority } from './refresh-credential.ts';
 
 /**
- * Authenticating against this hash always fails. A presented credential with
- * an unknown member ID is hashed like one with a known ID, so the response time
- * does not show whether the member exists.
- */
+Authenticating against this hash always fails. A presented credential with
+an unknown member ID is hashed like one with a known ID, so the response time
+does not show whether the member exists.
+*/
 export const unknownMemberCredentialHash = '0'.repeat(64);
 
 /**
@@ -32,9 +32,9 @@ export interface RefreshMemberState {
 }
 
 /**
- * Whether two sets of grants cover each other. A retry must request grants
- * equivalent to those in the successor credential.
- */
+Whether two sets of grants cover each other. A retry must request grants
+equivalent to those in the successor credential.
+*/
 export function hasSameAuthority(
 	left: AuthorizationDetails,
 	right: AuthorizationDetails
@@ -46,9 +46,9 @@ export function hasSameAuthority(
 }
 
 /**
- * Whether a successor member created at `createdAt` can still be returned to a
- * retry of the credential that it replaced.
- */
+Whether a successor member created at `createdAt` can still be returned to a
+retry of the credential that it replaced.
+*/
 export function isWithinRefreshRetryGrace(
 	createdAt: IsoTimestamp,
 	now: IsoTimestamp

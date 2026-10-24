@@ -41,10 +41,10 @@ export type { AttestationStoreWriter } from './attestation-store.ts';
 export { writeToAttestationStore } from './attestation-store.ts';
 
 /**
- * A profile for which the action signs with a Sigstore client directly instead
- * of delegating to `@actions/attest`. Both client-signed profiles use the
- * public-good trust domain and differ only in the witnesses they use.
- */
+A profile for which the action signs with a Sigstore client directly instead
+of delegating to `@actions/attest`. Both client-signed profiles use the
+public-good trust domain and differ only in the witnesses they use.
+*/
 export type ClientSignedProfile = Exclude<SigningProfile, 'sigstore-default'>;
 
 export function isClientSignedProfile(
@@ -54,21 +54,21 @@ export function isClientSignedProfile(
 }
 
 /**
- * The public-good service endpoints. `@actions/attest` uses these Fulcio and
- * Rekor endpoints when it selects the public-good instance. The public-good
- * trusted root lists this timestamp authority, so a verifier can use the
- * certificate chain from that trusted root to verify its timestamps.
- */
+The public-good service endpoints. `@actions/attest` uses these Fulcio and
+Rekor endpoints when it selects the public-good instance. The public-good
+trusted root lists this timestamp authority, so a verifier can use the
+certificate chain from that trusted root to verify its timestamps.
+*/
 export const publicGoodFulcioUrl = 'https://fulcio.sigstore.dev';
 export const publicGoodRekorUrl = 'https://rekor.sigstore.dev';
 export const publicGoodTimestampUrl =
 	'https://timestamp.sigstore.dev/api/v1/timestamp';
 
 /**
- * The services used by each signing profile. `tsa-only` omits the Rekor URL and
- * uses an RFC 3161 timestamp as its only signed time evidence. The signature is
- * therefore not submitted to a public transparency log.
- */
+The services used by each signing profile. `tsa-only` omits the Rekor URL and
+uses an RFC 3161 timestamp as its only signed time evidence. The signature is
+therefore not submitted to a public transparency log.
+*/
 export interface SigstoreComposition {
 	readonly fulcioUrl: string;
 	readonly rekorUrl?: string;
@@ -102,10 +102,10 @@ export type BundleBuilderFor = (
 ) => BundleBuilder;
 
 /**
- * Assembles the Sigstore client for one composition: a Fulcio signer that
- * exchanges the job's OIDC token for a signing certificate, and one witness for
- * each configured service. The builder produces version 0.3 DSSE bundles.
- */
+Assembles the Sigstore client for one composition: a Fulcio signer that
+exchanges the job's OIDC token for a signing certificate, and one witness for
+each configured service. The builder produces version 0.3 DSSE bundles.
+*/
 export function bundleBuilderFor(
 	composition: SigstoreComposition
 ): BundleBuilder {
@@ -155,10 +155,10 @@ export function inTotoStatement(
 }
 
 /**
- * The evidence required by each profile. `tsa-only` promises signed time
- * without a public record of the signature. A transparency-log entry in one of
- * its bundles would violate that promise.
- */
+The evidence required by each profile. `tsa-only` promises signed time
+without a public record of the signature. A transparency-log entry in one of
+its bundles would violate that promise.
+*/
 export interface ExpectedEvidence {
 	readonly tlogEntries: 'none' | 'at-least-one';
 	readonly timestamps: 'at-least-one';
@@ -190,11 +190,11 @@ function describeExpectation(expected: ExpectedEvidence): string {
 }
 
 /**
- * Fails when a produced bundle carries evidence the profile did not promise.
- * For rekor-and-tsa, Rekor records its entry while the bundle is assembled, so
- * this check cannot withdraw that entry; it stops the run before the bundle is
- * written to files or recorded in the repository's attestation store.
- */
+Fails when a produced bundle carries evidence the profile did not promise.
+For rekor-and-tsa, Rekor records its entry while the bundle is assembled, so
+this check cannot withdraw that entry; it stops the run before the bundle is
+written to files or recorded in the repository's attestation store.
+*/
 export function checkEvidenceShape(
 	profile: ClientSignedProfile,
 	evidence: BundleEvidence
@@ -219,13 +219,13 @@ export function checkEvidenceShape(
 const githubServerUrl = 'https://github.com';
 
 /**
- * The identity policy that the signing certificate must satisfy. GitHub's OIDC
- * issuer depends on the GitHub server's host. Fulcio records the job's workflow
- * reference as a URI under the same server. This policy confirms that the
- * public-good Fulcio certified a workload from the configured GitHub server.
- * It does not restrict the workflow identity; consumers decide which workflows
- * to trust.
- */
+The identity policy that the signing certificate must satisfy. GitHub's OIDC
+issuer depends on the GitHub server's host. Fulcio records the job's workflow
+reference as a URI under the same server. This policy confirms that the
+public-good Fulcio certified a workload from the configured GitHub server.
+It does not restrict the workflow identity; consumers decide which workflows
+to trust.
+*/
 export function actionsIdentityPolicy(
 	environment: Environment
 ): VerifiedIdentityPolicy {
@@ -242,10 +242,10 @@ export function actionsIdentityPolicy(
 }
 
 /**
- * The number of transparency-log entries the verifier must find. A `tsa-only`
- * bundle carries none by design, so its verification rests on the timestamp
- * alone.
- */
+The number of transparency-log entries the verifier must find. A `tsa-only`
+bundle carries none by design, so its verification rests on the timestamp
+alone.
+*/
 function tlogThresholdFor(profile: ClientSignedProfile): number {
 	return profile === 'tsa-only' ? 0 : 1;
 }
@@ -263,8 +263,8 @@ export type BundleSelfCheck = (checked: CheckedBundle) => Promise<void>;
 export interface SelfCheckDependencies {
 	readonly environment?: Environment;
 	/**
-	 * Defaults to the shared verifier, which reads the public-good trusted root.
-	 */
+	Defaults to the shared verifier, which reads the public-good trusted root.
+	*/
 	readonly verify?: typeof verifyBundle;
 }
 
@@ -298,16 +298,16 @@ function sortedDigests(digests: readonly string[]): string {
 }
 
 /**
- * Checks a bundle before the action attaches or uploads it. Under the
- * `rekor-and-tsa` profile, Rekor has already recorded its entry while the
- * signer built the bundle.
- *
- * The check confirms that the bundle contains the evidence required by the
- * profile. It verifies the signature, signing certificate, timestamp and any
- * log entry against the public-good trusted root. It also compares the signed
- * predicate type and subject digests with the requested statement. The check
- * does not compare subject names or predicate contents.
- */
+Checks a bundle before the action attaches or uploads it. Under the
+`rekor-and-tsa` profile, Rekor has already recorded its entry while the
+signer built the bundle.
+
+The check confirms that the bundle contains the evidence required by the
+profile. It verifies the signature, signing certificate, timestamp and any
+log entry against the public-good trusted root. It also compares the signed
+predicate type and subject digests with the requested statement. The check
+does not compare subject names or predicate contents.
+*/
 export async function selfCheckBundle(
 	checked: CheckedBundle,
 	dependencies: SelfCheckDependencies = {}
@@ -349,11 +349,11 @@ export interface SigstoreSignerDependencies {
 }
 
 /**
- * Signs statements with the Fulcio and witness configuration for the selected
- * profile. The selected witnesses determine which evidence the bundle
- * contains. The action checks every bundle before writing it to a file or the
- * repository's attestation store.
- */
+Signs statements with the Fulcio and witness configuration for the selected
+profile. The selected witnesses determine which evidence the bundle
+contains. The action checks every bundle before writing it to a file or the
+repository's attestation store.
+*/
 export function sigstoreStatementSigner(
 	options: SigstoreSignerOptions,
 	dependencies: SigstoreSignerDependencies = {}
@@ -410,11 +410,11 @@ export function sigstoreStatementSigner(
 }
 
 /**
- * The signer for a policy. `sigstore-default` delegates to `@actions/attest`,
- * which selects an instance from the repository's visibility. The other
- * profiles select an explicit set of witnesses, so the action constructs the
- * Sigstore client itself.
- */
+The signer for a policy. `sigstore-default` delegates to `@actions/attest`,
+which selects an instance from the repository's visibility. The other
+profiles select an explicit set of witnesses, so the action constructs the
+Sigstore client itself.
+*/
 export function statementSignerFor(
 	options: GithubSignerOptions,
 	dependencies: SigstoreSignerDependencies = {}

@@ -218,13 +218,13 @@ async function hasContracted(database: Database): Promise<boolean> {
 const noTenantCaches = (): ReturnType<CacheAccessLookup> => undefined;
 
 /**
- * The stored form of a control rule's grants. Until a deploy records the
- * `cache-identity` transition complete, the previous build's control Worker
- * can still serve after a rollback, and it parses a rule strictly in the
- * selector spelling. A rule is therefore stored in that spelling, so the
- * previous build can read every rule. Once the transition is complete, the
- * scope spelling is stored.
- */
+The stored form of a control rule's grants. Until a deploy records the
+`cache-identity` transition complete, the previous build's control Worker
+can still serve after a rollback, and it parses a rule strictly in the
+selector spelling. A rule is therefore stored in that spelling, so the
+previous build can read every rule. Once the transition is complete, the
+scope spelling is stored.
+*/
 async function storedGrantsJson(
 	body: OidcTrustAddBody,
 	transitionDatabase: Database

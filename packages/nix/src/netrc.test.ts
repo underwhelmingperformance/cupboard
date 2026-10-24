@@ -150,10 +150,8 @@ const cases: readonly NetrcCase[] = [
 ];
 
 describe('netrcCredentialFor', () => {
-	it.each(cases)('$name', ({ source, host, expected }) => {
-		expect(netrcCredentialFor(source, host ?? 'cache.example')).toStrictEqual(
-			expected
-		);
+	it.each(cases)('$name', ({ source, host = 'cache.example', expected }) => {
+		expect(netrcCredentialFor(source, host)).toStrictEqual(expected);
 	});
 
 	it.each([

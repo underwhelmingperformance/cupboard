@@ -104,14 +104,14 @@ function migrationNames(migrations: readonly D1Migration[]): string {
 }
 
 /**
- * What one run does for a transition, from the observed states. On a fresh
- * database the deploy applies every migration before the upload. Otherwise
- * the deploy expands a pending transition before the upload and applies its
- * contract migrations after it; for an expanded one it applies only the
- * contract migrations, and it leaves a complete one alone. When a transition
- * could expand only after the upload, the deploy stops with an error, and the
- * plan row for that transition shows what to deploy first.
- */
+What one run does for a transition, from the observed states. On a fresh
+database the deploy applies every migration before the upload. Otherwise
+the deploy expands a pending transition before the upload and applies its
+contract migrations after it; for an expanded one it applies only the
+contract migrations, and it leaves a complete one alone. When a transition
+could expand only after the upload, the deploy stops with an error, and the
+plan row for that transition shows what to deploy first.
+*/
 function transitionStageText(
 	planned: PlannedTransition,
 	observation: DeploymentObservation
@@ -163,12 +163,12 @@ function transitionStageText(
 }
 
 /**
- * The error that the deploy would throw for the observed states, or undefined
- * when the deploy can proceed. While there is one, the deploy command's review
- * offers no Deploy choice, so a blocked deploy creates no credentials or
- * resources. The deploy checks again, because the states can change between
- * the plan and the run.
- */
+The error that the deploy would throw for the observed states, or undefined
+when the deploy can proceed. While there is one, the deploy command's review
+offers no Deploy choice, so a blocked deploy creates no credentials or
+resources. The deploy checks again, because the states can change between
+the plan and the run.
+*/
 export function planBlockedError(
 	observation: DeploymentObservation
 ): TransitionIncompleteError | undefined {

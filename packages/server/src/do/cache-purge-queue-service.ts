@@ -85,11 +85,11 @@ export class CachePurgeQueueService {
 	}
 
 	/**
-	 * Queues the invalidation of this cache's responses for the NAR hashes and
-	 * schedules the first attempt. Call this once the cache stops referencing a
-	 * hash, so Workers Cache cannot serve a response after the exact reference
-	 * check would refuse the read.
-	 */
+	Queues the invalidation of this cache's responses for the NAR hashes and
+	schedules the first attempt. Call this once the cache stops referencing a
+	hash, so Workers Cache cannot serve a response after the exact reference
+	check would refuse the read.
+	*/
 	async enqueueNars(
 		cache: ResolvedCache,
 		narHashes: readonly NixSha256HashString[]
@@ -110,9 +110,9 @@ export class CachePurgeQueueService {
 	}
 
 	/**
-	 * Runs one queued invalidation. A failed purge remains queued until its TTL
-	 * expires.
-	 */
+	Runs one queued invalidation. A failed purge remains queued until its TTL
+	expires.
+	*/
 	async runOnce(): Promise<void> {
 		const continuation = this.context.db
 			.select()

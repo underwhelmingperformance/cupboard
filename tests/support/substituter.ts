@@ -25,15 +25,15 @@ const priority = cachePrioritySchema.parse(41);
 export const servedNarSize = 4096;
 
 /**
- * A loopback binary cache for tests that exercise a real Nix daemon. It serves
- * `nix-cache-info` and a narinfo for each path registered with
- * {@link FakeSubstituter.serve}, records every narinfo request, and returns 404
- * for all other paths. Tests can therefore distinguish a request that reached
- * this cache from a response Nix had already cached.
- *
- * The store paths exist only as metadata. Tests never request their NAR
- * contents.
- */
+A loopback binary cache for tests that exercise a real Nix daemon. It serves
+`nix-cache-info` and a narinfo for each path registered with
+{@link FakeSubstituter.serve}, records every narinfo request, and returns 404
+for all other paths. Tests can therefore distinguish a request that reached
+this cache from a response Nix had already cached.
+
+The store paths exist only as metadata. Tests never request their NAR
+contents.
+*/
 export class FakeSubstituter {
 	static async start(storeDirectory: StoreDirectory): Promise<FakeSubstituter> {
 		const substituter = new FakeSubstituter(storeDirectory);
@@ -119,10 +119,10 @@ export class FakeSubstituter {
 	}
 
 	/**
-	 * Creates a fresh store path, registers it with this cache, and returns the
-	 * path. Nothing else on the machine has that path, so an availability result
-	 * can come only from this cache or from a client's cached result.
-	 */
+	Creates a fresh store path, registers it with this cache, and returns the
+	path. Nothing else on the machine has that path, so an availability result
+	can come only from this cache or from a client's cached result.
+	*/
 	serve(name: string): StorePathString {
 		const hash = storePathHashSchema.parse(
 			toNixBase32(randomBytes(32)).slice(0, 32)
@@ -137,10 +137,10 @@ export class FakeSubstituter {
 	}
 
 	/**
-	 * Serves a path that already exists elsewhere, such as an output path from a
-	 * real derivation. Unless the caller provides a NAR hash, the cache advertises
-	 * a hash of its own fixture bytes.
-	 */
+	Serves a path that already exists elsewhere, such as an output path from a
+	real derivation. Unless the caller provides a NAR hash, the cache advertises
+	a hash of its own fixture bytes.
+	*/
 	servePath(
 		storePath: StorePathString,
 		narHash?: NixSha256Hash

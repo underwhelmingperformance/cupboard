@@ -46,8 +46,8 @@ const defaultChildTerminationScheduler: ChildTerminationScheduler = {
 };
 
 /**
- * A running child that can receive signals and report its exit.
- */
+A running child that can receive signals and report its exit.
+*/
 export interface SupervisedChild {
 	kill(signal: NodeJS.Signals): void;
 	readonly exited: Promise<ChildExit>;
@@ -77,10 +77,10 @@ export interface SuperviseOptions {
 	readonly environment: ChildEnvironment;
 	readonly runtimeDirectory: string;
 	/**
-	 * Runs after the child exits and before the runtime directory is removed:
-	 * the command layer drains uploads and reconciles here, while the hook
-	 * endpoint still exists.
-	 */
+	Runs after the child exits and before the runtime directory is removed:
+	the command layer drains uploads and reconciles here, while the hook
+	endpoint still exists.
+	*/
 	readonly onExit?: (exit: ChildExit) => Promise<void>;
 	readonly signalSource?: SignalSource;
 	readonly terminationScheduler?: ChildTerminationScheduler;
@@ -124,13 +124,13 @@ export const spawnChildProcess: SpawnChild = (command, environment) => {
 };
 
 /**
- * Runs one child to completion with the given environment and inherited
- * stdio. SIGINT and SIGTERM
- * arriving at the supervisor are forwarded to the child while it runs, as is
- * an explicit AbortSignal cancellation. A child that does not exit within the
- * graceful shutdown window is killed. The first forwarded signal remains the
- * run's result even when the child traps it.
- */
+Runs one child to completion with the given environment and inherited
+stdio. SIGINT and SIGTERM
+arriving at the supervisor are forwarded to the child while it runs, as is
+an explicit AbortSignal cancellation. A child that does not exit within the
+graceful shutdown window is killed. The first forwarded signal remains the
+run's result even when the child traps it.
+*/
 export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 	options.signal?.throwIfAborted();
 
@@ -208,16 +208,16 @@ export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 }
 
 /**
- * Runs the user-supplied build command to completion with the composed
- * environment and inherited stdio, so the child's output and semantics are
- * untouched: a failed build is still a failed build, and the caller reads the
- * child's own exit status or signal from the result unless the supervisor was
- * interrupted. SIGINT and SIGTERM arriving at the supervisor are forwarded to
- * the child and escalate to SIGKILL after the graceful shutdown window. The
- * first signal remains the run's result, and the invocation runtime directory
- * is removed once the run is over, whether the child succeeded, failed, or
- * could not start.
- */
+Runs the user-supplied build command to completion with the composed
+environment and inherited stdio, so the child's output and semantics are
+untouched: a failed build is still a failed build, and the caller reads the
+child's own exit status or signal from the result unless the supervisor was
+interrupted. SIGINT and SIGTERM arriving at the supervisor are forwarded to
+the child and escalate to SIGKILL after the graceful shutdown window. The
+first signal remains the run's result, and the invocation runtime directory
+is removed once the run is over, whether the child succeeded, failed, or
+could not start.
+*/
 export async function superviseBuild(
 	options: SuperviseOptions
 ): Promise<ChildExit> {
@@ -325,12 +325,12 @@ async function readAttemptLog(logFile: string): Promise<string> {
 }
 
 /**
- * Runs a constructed build invocation under the bounded attempt loop: each
- * attempt gets its own identifier and JSON activity log, a failed attempt
- * waits a growing delay before the next, and the loop stops at the first
- * success or once the attempts are spent. The invocation runtime directory is
- * removed once the run is over, the way {@link superviseBuild} removes it.
- */
+Runs a constructed build invocation under the bounded attempt loop: each
+attempt gets its own identifier and JSON activity log, a failed attempt
+waits a growing delay before the next, and the loop stops at the first
+success or once the attempts are spent. The invocation runtime directory is
+removed once the run is over, the way {@link superviseBuild} removes it.
+*/
 export async function superviseAttemptedBuild(
 	options: AttemptedBuildOptions
 ): Promise<AttemptedBuildResult> {

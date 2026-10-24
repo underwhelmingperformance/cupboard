@@ -48,9 +48,9 @@ export class LogoutTargetError extends CliUsageError {
 }
 
 /**
- * Which sessions to delete: one target's, every one, or none (when only the
- * Cloudflare sign-in is to go).
- */
+Which sessions to delete: one target's, every one, or none (when only the
+Cloudflare sign-in is to go).
+*/
 type LogoutSessions =
 	| { readonly kind: 'url'; readonly url: URL }
 	| { readonly kind: 'all' }
@@ -62,9 +62,9 @@ export interface LogoutInput {
 }
 
 /**
- * Resolves the command line into what to delete. A URL and `--all` are
- * exclusive, and at least one of them or `--cloudflare` is required.
- */
+Resolves the command line into what to delete. A URL and `--all` are
+exclusive, and at least one of them or `--cloudflare` is required.
+*/
 export function logoutInput(
 	url: URL | undefined,
 	options: LogoutOptions
@@ -110,9 +110,9 @@ export interface LogoutDependencies {
 type CloudflareSignInOutcome = Removal | 'kept' | 'unreadable';
 
 /**
- * The revocation of one deleted session. `target` is the tenant or deployment
- * URL of the session, when the command line or the saved session shows it.
- */
+The revocation of one deleted session. `target` is the tenant or deployment
+URL of the session, when the command line or the saved session shows it.
+*/
 export interface SessionRevocation {
 	readonly target?: string;
 	readonly revocation: RevocationOutcome;
@@ -261,9 +261,7 @@ function failedRevocationHints(
 	const kinds = new Set(
 		revoked
 			.filter((entry) => entry.revocation.revocation === 'failed')
-			.flatMap((entry) =>
-				entry.kind === undefined ? sessionKinds : [entry.kind]
-			)
+			.flatMap((entry) => entry.kind ?? sessionKinds)
 	);
 
 	return sessionKinds
@@ -364,14 +362,14 @@ function cloudflareSignInLabel(resolution: CloudflareSignInResolution): string {
 }
 
 /**
- * Deletes cached sessions, and the Cloudflare sign-in when asked, and sends
- * revocation requests for their refresh tokens to the servers. The local files
- * are deleted whether or not a revocation succeeds.
- *
- * The Cloudflare sign-in goes first. A renewal that falls back to it keeps the
- * grant lock until it has written its session, so once the grant is removed no
- * renewal can create a session that the removal below would miss.
- */
+Deletes cached sessions, and the Cloudflare sign-in when asked, and sends
+revocation requests for their refresh tokens to the servers. The local files
+are deleted whether or not a revocation succeeds.
+
+The Cloudflare sign-in goes first. A renewal that falls back to it keeps the
+grant lock until it has written its session, so once the grant is removed no
+renewal can create a session that the removal below would miss.
+*/
 export async function runLogout(
 	input: LogoutInput,
 	reporter: Reporter,

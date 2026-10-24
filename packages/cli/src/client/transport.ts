@@ -15,11 +15,11 @@ import {
 } from '../errors.ts';
 
 /**
- * Retries rejected fetches and transient status responses with backoff. After
- * the retry budget is exhausted, a rejected `TypeError` becomes an
- * {@link UnreachableHostError} for the requested host. Other errors pass through
- * unchanged.
- */
+Retries rejected fetches and transient status responses with backoff. After
+the retry budget is exhausted, a rejected `TypeError` becomes an
+{@link UnreachableHostError} for the requested host. Other errors pass through
+unchanged.
+*/
 export function resilientFetcher(
 	replaySafety: ReplaySafety,
 	fetcher: typeof fetch = fetch
@@ -43,14 +43,14 @@ export function cacheReadFetcher(
 }
 
 /**
- * Parses and canonicalises a Worker URL. It accepts only HTTPS, or HTTP to a
- * loopback host, without credentials, a query or a fragment, and removes
- * trailing path slashes except for the root slash. A malformed URL throws
- * {@link InvalidWorkerUrlError}; an invalid base throws
- * {@link InvalidWorkerUrlBaseError}; plain HTTP to another host throws
- * {@link InsecureWorkerUrlError}. The returned URL is a copy, so a URL
- * supplied by the caller remains unchanged.
- */
+Parses and canonicalises a Worker URL. It accepts only HTTPS, or HTTP to a
+loopback host, without credentials, a query or a fragment, and removes
+trailing path slashes except for the root slash. A malformed URL throws
+{@link InvalidWorkerUrlError}; an invalid base throws
+{@link InvalidWorkerUrlBaseError}; plain HTTP to another host throws
+{@link InsecureWorkerUrlError}. The returned URL is a copy, so a URL
+supplied by the caller remains unchanged.
+*/
 export function parseWorkerUrl(value: string | URL): URL {
 	let url: URL;
 	try {
@@ -78,10 +78,10 @@ export function parseWorkerUrl(value: string | URL): URL {
 }
 
 /**
- * Converts a network failure identified by the shared fetch classifier into an
- * {@link UnreachableHostError} for the requested host. Every other rejection
- * passes through unchanged.
- */
+Converts a network failure identified by the shared fetch classifier into an
+{@link UnreachableHostError} for the requested host. Every other rejection
+passes through unchanged.
+*/
 export function reachableFetcher(fetcher: typeof fetch): typeof fetch {
 	return sharedReachableFetcher(
 		fetcher,

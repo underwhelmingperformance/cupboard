@@ -69,19 +69,19 @@ import {
 import type { DeployUi } from './ui.ts';
 
 /**
- * Who may change the deployment in this run, determined before any change:
- *
- * - `bootstrap`: the control database has no admin and this run has a
- *   terminal, so this run claims the deployment for the operator with a
- *   claim secret and the operator's id_token. `claimant` is the identity
- *   that the operator confirmed, which becomes the admin. `firstTenantSlug`
- *   is the first tenant's slug, chosen before any change. Absent when the
- *   deployment had no URL at that point. The claim signs in with `signIn`,
- *   which reuses an earlier sign-in only while {@link BoundSignIn} allows it;
- * - `unclaimed`: no admin and no terminal to log in from, so this run
- *   provisions and uploads but leaves the claim to a run with a terminal;
- * - `admin`: an admin exists, and this run has an admin token for it.
- */
+Who may change the deployment in this run, determined before any change:
+
+- `bootstrap`: the control database has no admin and this run has a
+  terminal, so this run claims the deployment for the operator with a
+  claim secret and the operator's id_token. `claimant` is the identity
+  that the operator confirmed, which becomes the admin. `firstTenantSlug`
+  is the first tenant's slug, chosen before any change. Absent when the
+  deployment had no URL at that point. The claim signs in with `signIn`,
+  which reuses an earlier sign-in only while {@link BoundSignIn} allows it;
+- `unclaimed`: no admin and no terminal to log in from, so this run
+  provisions and uploads but leaves the claim to a run with a terminal;
+- `admin`: an admin exists, and this run has an admin token for it.
+*/
 export type DeployAuthority =
 	| {
 			readonly kind: 'bootstrap';
@@ -98,34 +98,34 @@ export type DeployAuthority =
 	  };
 
 /**
- * The authority for this run, or `declined` when the operator cancelled the
- * first tenant's slug prompt or declined the claim at the confirmation prompt.
- */
+The authority for this run, or `declined` when the operator cancelled the
+first tenant's slug prompt or declined the claim at the confirmation prompt.
+*/
 export type EstablishedAuthority =
 	DeployAuthority | { readonly kind: 'declined' };
 
 /**
- * The admin credential for a deployment URL: the session cached by
- * `cupboard login`, or a CI token exchanged through a control trust rule.
- * Each provider renews its token as it nears expiry, so the token stays valid
- * while the deploy migrates tenants.
- */
+The admin credential for a deployment URL: the session cached by
+`cupboard login`, or a CI token exchanged through a control trust rule.
+Each provider renews its token as it nears expiry, so the token stays valid
+while the deploy migrates tenants.
+*/
 export interface AdminAccess {
 	credentialFor(url: URL): TokenProvider;
 	/**
-	 * The admin session that this machine has stored for `url`, read without
-	 * contacting `url`. Undefined when there is none. Absent for a CI token,
-	 * which never uses a stored session.
-	 */
+	The admin session that this machine has stored for `url`, read without
+	contacting `url`. Undefined when there is none. Absent for a CI token,
+	which never uses a stored session.
+	*/
 	storedSessionFor?(url: URL): Promise<CachedSession | undefined>;
 }
 
 /**
- * Creates the admin access for a deployment whose URL before this run is
- * `deploymentUrl`. The deploy requests a CI token whose audience is that URL
- * at every URL that the deploy contacts, because the workflow's control trust
- * rule pins one audience.
- */
+Creates the admin access for a deployment whose URL before this run is
+`deploymentUrl`. The deploy requests a CI token whose audience is that URL
+at every URL that the deploy contacts, because the workflow's control trust
+rule pins one audience.
+*/
 export type AdminAccessFactory = (deploymentUrl: URL) => AdminAccess;
 
 const unauthorisedStatus: number = StatusCodes.UNAUTHORIZED;
@@ -168,9 +168,9 @@ const ciUpdateAdvice =
 export class AdminTokenRequiredError extends CliError {
 	override readonly humanMessage: string;
 	/**
-	 * True when the run logged in as the admin at a terminal before this
-	 * refusal.
-	 */
+	True when the run logged in as the admin at a terminal before this
+	refusal.
+	*/
 	readonly isAfterLogin: boolean;
 
 	constructor(
@@ -216,9 +216,9 @@ export class AdminTokenRequiredError extends CliError {
 }
 
 /**
- * The plan leaves the deployment without a URL, for example by removing its
- * custom domain on an account without a workers.dev subdomain.
- */
+The plan leaves the deployment without a URL, for example by removing its
+custom domain on an account without a workers.dev subdomain.
+*/
 export class AdminNewUrlMissingError extends CliError {
 	override readonly humanMessage = this.message;
 	constructor(public readonly admin: OwnerBinding) {
@@ -235,8 +235,8 @@ export class AdminNewUrlMissingError extends CliError {
 }
 
 /**
- * A session stored for a URL was issued by a different deployment.
- */
+A session stored for a URL was issued by a different deployment.
+*/
 export class StoredSessionMismatchError extends CliError {
 	override readonly humanMessage: string;
 	constructor() {
@@ -264,17 +264,17 @@ export class AdminDeploymentUrlMissingError extends CliError {
 }
 
 /**
- * Which of the two databases records the admin when the plan selects a
- * database other than the deployed Workers' database.
- */
+Which of the two databases records the admin when the plan selects a
+database other than the deployed Workers' database.
+*/
 export type AdminRecordedIn = 'bound' | 'planned' | 'both';
 
 /**
- * The plan selects a D1 database other than the database of the deployed
- * Workers, and one of the two databases records an admin. Deploying would
- * either run as a first deploy while a database records an admin, or leave
- * the admin in a database that the Workers are no longer bound to.
- */
+The plan selects a D1 database other than the database of the deployed
+Workers, and one of the two databases records an admin. Deploying would
+either run as a first deploy while a database records an admin, or leave
+the admin in a database that the Workers are no longer bound to.
+*/
 export class AdminDatabaseMismatchError extends CliError {
 	override readonly humanMessage: string;
 	constructor(
@@ -305,10 +305,10 @@ export class AdminDatabaseMismatchError extends CliError {
 }
 
 /**
- * The control Worker no longer exists, but a control database records an
- * admin. No Worker can check an admin token, so the deploy cannot update the
- * deployment until the control Worker is redeployed.
- */
+The control Worker no longer exists, but a control database records an
+admin. No Worker can check an admin token, so the deploy cannot update the
+deployment until the control Worker is redeployed.
+*/
 export class AdminControlWorkerMissingError extends CliError {
 	override readonly humanMessage: string;
 	constructor(
@@ -335,16 +335,16 @@ export class AdminControlWorkerMissingError extends CliError {
 }
 
 /**
- * The plan moves the deployment to another URL, and this machine has no
- * usable admin token for that URL. The new URL does not serve the deployment
- * until this run moves the deployment there, so the deploy cannot obtain a
- * token from the new URL beforehand.
- */
+The plan moves the deployment to another URL, and this machine has no
+usable admin token for that URL. The new URL does not serve the deployment
+until this run moves the deployment there, so the deploy cannot obtain a
+token from the new URL beforehand.
+*/
 export class AdminTokenForNewUrlRequiredError extends CliError {
 	override readonly humanMessage = this.message;
 	/**
-	 * False for a run with `--github-oidc`, which never reads a stored session.
-	 */
+	False for a run with `--github-oidc`, which never reads a stored session.
+	*/
 	readonly readsStoredSessions: boolean;
 
 	constructor(
@@ -382,11 +382,11 @@ export class AdminTokenForNewUrlRequiredError extends CliError {
 }
 
 /**
- * Why the deploy could not check an admin token against the deployment: it
- * could not reach the deployment, the deployment answered with an error
- * status, the URL does not serve a Cupboard build, or the deployment's build
- * has no `instance.get` procedure.
- */
+Why the deploy could not check an admin token against the deployment: it
+could not reach the deployment, the deployment answered with an error
+status, the URL does not serve a Cupboard build, or the deployment's build
+has no `instance.get` procedure.
+*/
 export type AdminCheckFailure =
 	| { readonly kind: 'unreachable' }
 	| {
@@ -394,19 +394,19 @@ export type AdminCheckFailure =
 			readonly status: number;
 			readonly ray?: string;
 			/**
-			 * The OAuth error description when the token exchange failed, for
-			 * example because the admin's issuer could not be reached.
-			 */
+			The OAuth error description when the token exchange failed, for
+			example because the admin's issuer could not be reached.
+			*/
 			readonly oauthDescription?: string;
 	  }
 	| { readonly kind: 'not-served' }
 	| { readonly kind: 'unsupported' };
 
 /**
- * What an error from the admin check means: the token is unusable, the check
- * could not run against the deployment, or the error has another cause and is
- * rethrown unchanged.
- */
+What an error from the admin check means: the token is unusable, the check
+could not run against the deployment, or the error has another cause and is
+rethrown unchanged.
+*/
 type AdminCheckError =
 	| { readonly kind: 'token' }
 	| { readonly kind: 'check'; readonly failure: AdminCheckFailure }
@@ -519,10 +519,10 @@ function adminCheckFailureText(
 }
 
 /**
- * The deploy could not check the admin token because the deployment was
- * unreachable, answered with an error status, does not serve at its URL, or
- * has no `instance.get` procedure.
- */
+The deploy could not check the admin token because the deployment was
+unreachable, answered with an error status, does not serve at its URL, or
+has no `instance.get` procedure.
+*/
 export class AdminCheckFailedError extends CliError {
 	override readonly humanMessage: string;
 	constructor(
@@ -551,8 +551,8 @@ export class AdminCheckFailedError extends CliError {
 }
 
 /**
- * The login as the admin returned an identity other than the admin.
- */
+The login as the admin returned an identity other than the admin.
+*/
 export class AdminLoginMismatchError extends CliError {
 	override readonly humanMessage = this.message;
 	constructor(
@@ -576,13 +576,13 @@ export class AdminLoginMismatchError extends CliError {
 }
 
 /**
- * Returns the login that an update at a terminal uses when no usable admin
- * session is cached. It always starts a new login through the admin's issuer,
- * so the operator can complete it as a different identity from the cached
- * Cloudflare login. It refuses an id_token for any identity other than the
- * admin, then exchanges an id_token bound to `url` and caches the session, as
- * `cupboard login` does. The admin's audience is the client id of the login.
- */
+Returns the login that an update at a terminal uses when no usable admin
+session is cached. It always starts a new login through the admin's issuer,
+so the operator can complete it as a different identity from the cached
+Cloudflare login. It refuses an id_token for any identity other than the
+admin, then exchanges an id_token bound to `url` and caches the session, as
+`cupboard login` does. The admin's audience is the client id of the login.
+*/
 export function adminLogin(dependencies: {
 	readonly info: (message: string) => void;
 	readonly signInFor: (issuer: string, clientId: string) => BoundSignIn;
@@ -649,94 +649,94 @@ export class AdminGrantMissingError extends CliError {
 }
 
 /**
- * The control database that the deployed Workers are bound to, identified by
- * the binding's database id.
- */
+The control database that the deployed Workers are bound to, identified by
+the binding's database id.
+*/
 export interface BoundDatabase {
 	readonly id: DatabaseId;
 	readonly name: string;
 }
 
 /**
- * The facts about the deployment and the plan that decide who may change it.
- */
+The facts about the deployment and the plan that decide who may change it.
+*/
 export interface AuthorityDeployment {
 	/**
-	 * The database that the deployed Workers are bound to: the control Worker's
-	 * binding, or the tenant Worker's binding when the control Worker was
-	 * deleted. Undefined when neither Worker has the binding, or when the bound
-	 * database no longer exists.
-	 */
+	The database that the deployed Workers are bound to: the control Worker's
+	binding, or the tenant Worker's binding when the control Worker was
+	deleted. Undefined when neither Worker has the binding, or when the bound
+	database no longer exists.
+	*/
 	readonly boundDatabase: BoundDatabase | undefined;
 	/**
-	 * The name of the control database selected in the plan.
-	 */
+	The name of the control database selected in the plan.
+	*/
 	readonly plannedDatabaseName: string | undefined;
 	readonly legacyTransfer?: true;
 	readonly controlTransferRecovery?: true;
 	readonly controlScriptName: string;
 	/**
-	 * Whether the control Worker exists on the account.
-	 */
+	Whether the control Worker exists on the account.
+	*/
 	readonly isControlDeployed: boolean;
 	/**
-	 * Whether this run has a terminal, so the operator can log in.
-	 */
+	Whether this run has a terminal, so the operator can log in.
+	*/
 	readonly interactive: boolean;
 }
 
 /**
- * The reads, requests and logins that deciding the authority performs.
- */
+The reads, requests and logins that deciding the authority performs.
+*/
 export interface AuthorityEffects {
 	readonly api: Pick<CloudflareApi, 'findD1Database' | 'd1QueryRows'>;
 	/**
-	 * True when a `/_version` request to `url` succeeds, and false when the host
-	 * cannot be reached or does not serve Cupboard. Any other failure throws.
-	 */
+	True when a `/_version` request to `url` succeeds, and false when the host
+	cannot be reached or does not serve Cupboard. Any other failure throws.
+	*/
 	readonly servesCupboard: (url: URL) => Promise<boolean>;
 	/**
-	 * Logs the operator in as `admin` and caches the session for `url`, as
-	 * `cupboard login` does. Absent when the run cannot log in, for example
-	 * with `--github-oidc`.
-	 */
+	Logs the operator in as `admin` and caches the session for `url`, as
+	`cupboard login` does. Absent when the run cannot log in, for example
+	with `--github-oidc`.
+	*/
 	readonly logInAsAdmin?: (url: URL, admin: OwnerBinding) => Promise<void>;
 	/**
-	 * The URL that the deployment serves on before this run changes anything.
-	 */
+	The URL that the deployment serves on before this run changes anything.
+	*/
 	readonly currentUrl: () => Promise<URL | undefined>;
 	/**
-	 * The URL that the deploy uses after the upload to migrate tenants and to
-	 * initialise the instance.
-	 */
+	The URL that the deploy uses after the upload to migrate tenants and to
+	initialise the instance.
+	*/
 	readonly newUrl: () => Promise<URL | undefined>;
 	readonly adminAccess: AdminAccessFactory;
 	/**
-	 * Checks that the deployment accepts the credential.
-	 */
+	Checks that the deployment accepts the credential.
+	*/
 	readonly checkAdmin: (url: URL, credential: TokenProvider) => Promise<void>;
 	/**
-	 * Signs the operator in for a first deploy. Without
-	 * `cloudflareLoginIdToken`, its first sign-in also shows who the claim makes
-	 * the admin.
-	 */
+	Signs the operator in for a first deploy. Without
+	`cloudflareLoginIdToken`, its first sign-in also shows who the claim makes
+	the admin.
+	*/
 	readonly signIn: BoundSignIn;
 	/**
-	 * The ID token from the Cloudflare browser login that this run opened for
-	 * the Cloudflare API, when the claim signs in with the same issuer and
-	 * client. A first deploy reads the claimant from it and never sends it.
-	 * That login ran before the deployment URL was known, so its nonce does not
-	 * commit to the deployment.
-	 */
+	The ID token from the Cloudflare browser login that this run opened for
+	the Cloudflare API, when the claim signs in with the same issuer and
+	client. A first deploy reads the claimant from it and never sends it.
+	That login ran before the deployment URL was known, so its nonce does not
+	commit to the deployment.
+	*/
 	readonly cloudflareLoginIdToken?: string;
 	/**
 	The first tenant's slug from `--cache`.
 	*/
 	readonly firstTenantSlug?: string;
 	/**
-	 * Asks for the first tenant's slug at the deployment URL. Returns undefined
-	 * when the operator cancels the prompt.
-	 */
+	Asks for the first tenant's slug at the deployment URL. Returns undefined
+	when the operator cancels the prompt.
+	*/
 	readonly chooseFirstTenantSlug: (
 		deploymentUrl: URL
 	) => Promise<string | undefined>;
@@ -746,27 +746,27 @@ export interface AuthorityEffects {
 }
 
 /**
- * Decides who may change the deployment and, for an update, obtains and
- * checks the admin token. Nothing here changes the account, so a refusal
- * leaves the deployment as it was.
- *
- * The admin is read from the database that the deployed Workers are bound to
- * and from the database selected in the plan. When the two differ and either
- * records an admin, the deploy refuses: without the refusal, it could run as a
- * first deploy while a database records an admin, or leave the admin in a
- * database that the Workers are no longer bound to.
- *
- * Whether the deploy claims or updates the deployment depends on the
- * `global_admin` row, not on whether Workers are deployed. A deployment
- * uploaded without a claim, or one whose deploy stopped between setting the
- * claim secret and claiming, has Workers but no admin, and the next run from a
- * terminal claims it with a fresh secret.
- *
- * A first deploy from a terminal asks for the first tenant's slug before it
- * reads the claimant, so that a sign-in for the check can cover the deployment
- * and the tenant. When the operator cancels that prompt, the result is
- * `declined`.
- */
+Decides who may change the deployment and, for an update, obtains and
+checks the admin token. Nothing here changes the account, so a refusal
+leaves the deployment as it was.
+
+The admin is read from the database that the deployed Workers are bound to
+and from the database selected in the plan. When the two differ and either
+records an admin, the deploy refuses: without the refusal, it could run as a
+first deploy while a database records an admin, or leave the admin in a
+database that the Workers are no longer bound to.
+
+Whether the deploy claims or updates the deployment depends on the
+`global_admin` row, not on whether Workers are deployed. A deployment
+uploaded without a claim, or one whose deploy stopped between setting the
+claim secret and claiming, has Workers but no admin, and the next run from a
+terminal claims it with a fresh secret.
+
+A first deploy from a terminal asks for the first tenant's slug before it
+reads the claimant, so that a sign-in for the check can cover the deployment
+and the tenant. When the operator cancels that prompt, the result is
+`declined`.
+*/
 export async function decideAuthority(
 	deployment: AuthorityDeployment,
 	effects: AuthorityEffects
@@ -948,10 +948,10 @@ async function claimantIdToken(
 }
 
 /**
- * The targets of the sign-in for a claim: the deployment and, once its slug is
- * known, the first tenant. The control plane and the tenant keep separate
- * records of consumed nonces, so each accepts the same ID token once.
- */
+The targets of the sign-in for a claim: the deployment and, once its slug is
+known, the first tenant. The control plane and the tenant keep separate
+records of consumed nonces, so each accepts the same ID token once.
+*/
 export function claimTargets(
 	deploymentUrl: URL,
 	firstTenantSlug: string | undefined
@@ -1118,12 +1118,12 @@ export class GlobalAdminRowInvalidError extends CliError {
 }
 
 /**
- * The deployment's global admin, read from the control database before any
- * migration runs. Undefined when nobody has claimed the deployment, or when
- * the database predates the `global_admin` table. The audience of an admin
- * claimed before migration 0016 comes from the bootstrap trust rule, and is
- * absent when that rule is missing.
- */
+The deployment's global admin, read from the control database before any
+migration runs. Undefined when nobody has claimed the deployment, or when
+the database predates the `global_admin` table. The audience of an admin
+claimed before migration 0016 comes from the bootstrap trust rule, and is
+absent when that rule is missing.
+*/
 export async function readGlobalAdmin(
 	api: {
 		queryRows(databaseId: DatabaseId, sql: string): Promise<readonly string[]>;
@@ -1191,10 +1191,10 @@ function requireWildcardGrant(token: string): void {
 }
 
 /**
- * Adds the claim secret to the control Worker's secrets on a first
- * deploy, so the claim can present it once the new build serves. For an
- * update or an unclaimed deploy, it returns the options unchanged.
- */
+Adds the claim secret to the control Worker's secrets on a first
+deploy, so the claim can present it once the new build serves. For an
+update or an unclaimed deploy, it returns the options unchanged.
+*/
 export function withClaimSecret(
 	options: DeployOptions,
 	authority: DeployAuthority
@@ -1216,11 +1216,11 @@ export function withClaimSecret(
 }
 
 /**
- * The function that migrates tenants during an update, with the admin access
- * that the update checked before any change. Only an admin creates tenants, so
- * a deployment without an admin has none, and the result is undefined for a
- * first deploy or an unclaimed deploy.
- */
+The function that migrates tenants during an update, with the admin access
+that the update checked before any change. Only an admin creates tenants, so
+a deployment without an admin has none, and the result is undefined for a
+first deploy or an unclaimed deploy.
+*/
 export function tenantMigratorFor(
 	authority: DeployAuthority,
 	migrate: (access: AdminAccess, requiredStep: LocalStep) => Promise<void>
@@ -1233,12 +1233,12 @@ export function tenantMigratorFor(
 }
 
 /**
- * Removes a claim secret that an earlier first deploy left on the control
- * Worker, which happens when that deploy was interrupted or could not delete
- * the secret. An update and a deploy without a terminal remove it; a first
- * deploy from a terminal sets and deletes its own secret. A failed removal
- * produces a warning, and the deploy continues.
- */
+Removes a claim secret that an earlier first deploy left on the control
+Worker, which happens when that deploy was interrupted or could not delete
+the secret. An update and a deploy without a terminal remove it; a first
+deploy from a terminal sets and deletes its own secret. A failed removal
+produces a warning, and the deploy continues.
+*/
 export async function removeLeftoverClaimSecret(
 	authority: DeployAuthority,
 	dependencies: {
@@ -1267,10 +1267,10 @@ export async function removeLeftoverClaimSecret(
 }
 
 /**
- * Where an update's admin credential comes from: the session that
- * `cupboard login` cached for a URL, or a CI token exchanged through a control
- * trust rule.
- */
+Where an update's admin credential comes from: the session that
+`cupboard login` cached for a URL, or a CI token exchanged through a control
+trust rule.
+*/
 export interface AdminCredentialSources {
 	readonly session: (url: URL) => TokenProvider;
 	readonly storedSession: (url: URL) => Promise<CachedSession | undefined>;
@@ -1293,14 +1293,14 @@ export function adminCredentialSources(
 }
 
 /**
- * The admin credential for an update: a CI token exchanged through a control
- * trust rule with `--github-oidc`, otherwise the session cached by
- * `cupboard login`. Each origin has one provider, so every request to that
- * origin uses the token that the provider renews. With `--github-oidc`, the
- * deploy requests a GitHub token whose audience is `--audience`, or otherwise
- * the deployment URL from before this run, and `storedSessionFor` does not
- * read stored sessions.
- */
+The admin credential for an update: a CI token exchanged through a control
+trust rule with `--github-oidc`, otherwise the session cached by
+`cupboard login`. Each origin has one provider, so every request to that
+origin uses the token that the provider renews. With `--github-oidc`, the
+deploy requests a GitHub token whose audience is `--audience`, or otherwise
+the deployment URL from before this run, and `storedSessionFor` does not
+read stored sessions.
+*/
 export function adminAccessFor(
 	options: { readonly githubOidc?: boolean; readonly audience?: Audience },
 	sources: AdminCredentialSources
@@ -1356,14 +1356,14 @@ function boundDatabaseId(
 		const parsed = liveD1BindingSchema.safeParse(binding);
 
 		return parsed.success && parsed.data.name === bindingName
-			? [parsed.data.database_id]
+			? parsed.data.database_id
 			: [];
 	})[0];
 }
 
 /**
- * The Cloudflare reads that determine who may change the deployment.
- */
+The Cloudflare reads that determine who may change the deployment.
+*/
 export type AuthorityApi = Pick<
 	CloudflareApi,
 	| 'findD1Database'
@@ -1389,31 +1389,31 @@ export interface AuthorityWorld {
 		deploymentUrl: URL
 	) => Promise<string | undefined>;
 	/**
-	 * Asks whether the claim may make `claimant` the admin.
-	 */
+	Asks whether the claim may make `claimant` the admin.
+	*/
 	readonly confirmClaim: (claimant: Claimant) => Promise<boolean>;
 	readonly interactive: boolean;
 	readonly signal?: AbortSignal | undefined;
 }
 
 /**
- * Determines who may change the deployment before anything changes, with the
- * rules of {@link decideAuthority}, and reports the result. The deployment's
- * current URL is the URL that the last deploy recorded on the control Worker.
- * A deployment from an earlier release has no record, and its current URL is
- * the custom domain routed to the control Worker, or the workers.dev URL. A
- * record whose URL is no longer routed to the control Worker, which a failed
- * move leaves, is ignored with a warning, and the routed URL is used. An
- * update checks its admin token against the current URL. When the plan moves
- * the deployment, the update also needs a token for the new URL: the deploy
- * checks it live if the new URL already serves the deployment, and otherwise
- * reads it from a session stored on this machine. A first deploy asks for the
- * first tenant's slug and reads the claimant from the Cloudflare login for the
- * account. When this run opened no such login, or the claim uses another
- * issuer or client, it signs the operator in with the issuer and client from
- * `--oidc-issuer` and `--client-id`. It then prints who the claim will make
- * the admin and asks for confirmation.
- */
+Determines who may change the deployment before anything changes, with the
+rules of {@link decideAuthority}, and reports the result. The deployment's
+current URL is the URL that the last deploy recorded on the control Worker.
+A deployment from an earlier release has no record, and its current URL is
+the custom domain routed to the control Worker, or the workers.dev URL. A
+record whose URL is no longer routed to the control Worker, which a failed
+move leaves, is ignored with a warning, and the routed URL is used. An
+update checks its admin token against the current URL. When the plan moves
+the deployment, the update also needs a token for the new URL: the deploy
+checks it live if the new URL already serves the deployment, and otherwise
+reads it from a session stored on this machine. A first deploy asks for the
+first tenant's slug and reads the claimant from the Cloudflare login for the
+account. When this run opened no such login, or the claim uses another
+issuer or client, it signs the operator in with the issuer and client from
+`--oidc-issuer` and `--client-id`. It then prints who the claim will make
+the admin and asks for confirmation.
+*/
 export async function establishAuthority(
 	plans: {
 		readonly agreed: {

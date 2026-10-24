@@ -231,10 +231,10 @@ interface CacheInfoFetcherDependencies {
 const cacheInfoTimeoutMs = 30_000;
 
 /**
- * Reads `nix-cache-info` with the supplied Basic credential. A private cache
- * returns 401 without one. Supplying only one part of the credential pair fails
- * before the request starts.
- */
+Reads `nix-cache-info` with the supplied Basic credential. A private cache
+returns 401 without one. Supplying only one part of the credential pair fails
+before the request starts.
+*/
 export function cacheInfoFetcher(
 	options: ReadCredentialOptions,
 	dependencies: CacheInfoFetcherDependencies = {}
@@ -667,7 +667,7 @@ async function planPullRequestCacheAccess(
 	);
 	const mismatched = differentAccess.flatMap((cache) =>
 		cache.scope.kind === 'named' && cache.scope.name.startsWith(prefix)
-			? [cache.scope.name]
+			? cache.scope.name
 			: []
 	);
 

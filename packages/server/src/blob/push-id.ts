@@ -28,9 +28,9 @@ function hasPushIdLayout(value: string): boolean {
 }
 
 /**
- * The value as a push ID when it has the length and lowercase hexadecimal
- * layout that `issuePushId` produces.
- */
+The value as a push ID when it has the length and lowercase hexadecimal
+layout that `issuePushId` produces.
+*/
 export function wellFormedPushId(value: string): PushId | undefined {
 	if (!hasPushIdLayout(value)) {
 		return undefined;
@@ -91,9 +91,9 @@ export const pushIdNonceSchema = z
 export type PushIdNonce = z.infer<typeof pushIdNonceSchema>;
 
 /**
- * Signs a caller-supplied 16-byte nonce. Callers must provide exactly 16 bytes
- * because verification rejects every other push ID length.
- */
+Signs a caller-supplied 16-byte nonce. Callers must provide exactly 16 bytes
+because verification rejects every other push ID length.
+*/
 export async function issuePushId(
 	secret: PushIdSigningKey,
 	tenant: TenantId,
@@ -124,8 +124,8 @@ export async function issuePushId(
 }
 
 /**
- * Signs a push ID with a fresh random nonce.
- */
+Signs a push ID with a fresh random nonce.
+*/
 export async function createPushId(
 	secret: PushIdSigningKey,
 	tenant: TenantId,
@@ -138,8 +138,8 @@ export async function createPushId(
 }
 
 /**
- * Whether the push ID is authentic, belongs to the tenant, and is unexpired.
- */
+Whether the push ID is authentic, belongs to the tenant, and is unexpired.
+*/
 export async function isPushIdValid(
 	secret: PushIdSigningKey,
 	pushId: string,
@@ -159,9 +159,9 @@ export async function isPushIdValid(
 }
 
 /**
- * Whether the push ID is authentic and belongs to the tenant, whether or not it
- * has expired. `key` comes from `importPushIdKey`.
- */
+Whether the push ID is authentic and belongs to the tenant, whether or not it
+has expired. `key` comes from `importPushIdKey`.
+*/
 export async function isPushIdIssuedTo(
 	key: CryptoKey,
 	pushId: PushId,

@@ -6,20 +6,20 @@ export interface NetrcCredential {
 }
 
 /**
- * Selects HTTP Basic credentials for a host using libcurl-compatible netrc
- * parsing. Returns `undefined` when no usable entry matches.
- *
- * Nix hands the file to libcurl rather than reading it itself, so what a netrc
- * means is what libcurl makes of it: tokens separated by spaces, tabs and line
- * breaks; a line whose first non-blank character is `#` dropped whole; and
- * `machine`, `default`, `login`, `password` and `macdef` recognised whatever
- * their case. Entries can continue across lines.
- *
- * A complete early `default` entry shadows later machine entries. When another
- * machine begins, a matching entry with only a login is skipped. At the end of
- * the file, either credential field is accepted and the missing field becomes
- * an empty string.
- */
+Selects HTTP Basic credentials for a host using libcurl-compatible netrc
+parsing. Returns `undefined` when no usable entry matches.
+
+Nix hands the file to libcurl rather than reading it itself, so what a netrc
+means is what libcurl makes of it: tokens separated by spaces, tabs and line
+breaks; a line whose first non-blank character is `#` dropped whole; and
+`machine`, `default`, `login`, `password` and `macdef` recognised whatever
+their case. Entries can continue across lines.
+
+A complete early `default` entry shadows later machine entries. When another
+machine begins, a matching entry with only a login is skipped. At the end of
+the file, either credential field is accepted and the missing field becomes
+an empty string.
+*/
 export function netrcCredentialFor(
 	source: string,
 	host: string
@@ -122,17 +122,17 @@ function isKeyword(token: string, keyword: string): boolean {
 }
 
 /**
- * Removes the brackets that URLs place around IPv6 hosts before matching a
- * netrc machine, where IPv6 addresses are unbracketed.
- */
+Removes the brackets that URLs place around IPv6 hosts before matching a
+netrc machine, where IPv6 addresses are unbracketed.
+*/
 function withoutBrackets(host: string): string {
 	return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
 }
 
 /**
- * A `#` starts a comment only when it is the first non-blank character on a
- * line. Anywhere else, it is an ordinary character in a token.
- */
+A `#` starts a comment only when it is the first non-blank character on a
+line. Anywhere else, it is an ordinary character in a token.
+*/
 function withoutCommentLines(source: string): string {
 	return source
 		.split('\n')
@@ -161,10 +161,10 @@ class NetrcReader {
 	}
 
 	/**
-	 * libcurl accepts every character above ASCII space in an unquoted token.
-	 * Other control characters are syntax errors rather than separators. A
-	 * carriage return therefore ends the token and makes the next read fail.
-	 */
+	libcurl accepts every character above ASCII space in an unquoted token.
+	Other control characters are syntax errors rather than separators. A
+	carriage return therefore ends the token and makes the next read fail.
+	*/
 	private plainToken(): string {
 		const start = this.at;
 
@@ -182,11 +182,11 @@ class NetrcReader {
 	}
 
 	/**
-	 * A token wrapped in double quotes, which is how a value containing a space
-	 * or a tab is written. A backslash escapes the character after it, and
-	 * `\n`, `\r` and `\t` stand for the three characters a token cannot contain
-	 * literally.
-	 */
+	A token wrapped in double quotes, which is how a value containing a space
+	or a tab is written. A backslash escapes the character after it, and
+	`\n`, `\r` and `\t` stand for the three characters a token cannot contain
+	literally.
+	*/
 	private quotedToken(): string {
 		this.at += 1;
 

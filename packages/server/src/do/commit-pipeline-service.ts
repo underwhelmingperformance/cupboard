@@ -123,9 +123,9 @@ export const verifyBackstopKey = 'maintenance:verify-pending';
 export const verifyBackstopDelayMs = 60_000;
 
 /**
- * Reports a final commit response immediately, or tells the caller to wait for
- * the verification pass.
- */
+Reports a final commit response immediately, or tells the caller to wait for
+the verification pass.
+*/
 // Include `grace` only when the client negotiated grace facts. Older clients
 // must receive the original frame shape.
 export type CommitOutcome =
@@ -192,21 +192,21 @@ export interface MaterialiseRequest {
 	readonly probe: MaterialisationProbe;
 	readonly mustOwnBlob: boolean;
 	/**
-	 * Apply this negotiated decision in the same gate as materialisation.
-	 * `undefined` identifies a legacy row and grants no grace.
-	 */
+	Apply this negotiated decision in the same gate as materialisation.
+	`undefined` identifies a legacy row and grants no grace.
+	*/
 	readonly graceDecision: GraceDecision | undefined;
 	/**
-	 * Attach the path to the run root selected at negotiation while the
-	 * materialised generation is still protected by the gate. `undefined` means
-	 * that the push selected no run root.
-	 */
+	Attach the path to the run root selected at negotiation while the
+	materialised generation is still protected by the gate. `undefined` means
+	that the push selected no run root.
+	*/
 	readonly attachRootName: RootName | undefined;
 	/**
-	 * Return false to report `gone` without charging. This runs inside the flush
-	 * gate and must stay synchronous so no event can change the row between this
-	 * check and the generation fence.
-	 */
+	Return false to report `gone` without charging. This runs inside the flush
+	gate and must stay synchronous so no event can change the row between this
+	check and the generation fence.
+	*/
 	readonly isStillSettleable?: () => boolean;
 }
 
@@ -259,11 +259,11 @@ class MaterialiseFlushOutcomeMissingError extends Error {
 }
 
 /**
- * Facts read before materialisation enters the input gate. The gate rechecks
- * the generation and offboarding state, and the charge batch makes the final
- * tenant-status and quota decisions. Callers recover from stale ownership in
- * the same way as a concurrent deletion.
- */
+Facts read before materialisation enters the input gate. The gate rechecks
+the generation and offboarding state, and the charge batch makes the final
+tenant-status and quota decisions. Callers recover from stale ownership in
+the same way as a concurrent deletion.
+*/
 export interface MaterialisationProbe {
 	readonly blob: CanonicalBlobFacts | undefined;
 	readonly isCanonicalPresent: boolean;
@@ -1408,14 +1408,12 @@ export class CommitPipelineService {
 				request.cache,
 				request.graceDecision?.retentionEpoch ?? 0
 			) === undefined
-				? [
-						{
-							cacheId: request.cache.id,
-							rootName: request.attachRootName,
-							storePathHash: request.metadata.storePathHash,
-							storePath: request.metadata.storePath
-						}
-					]
+				? {
+						cacheId: request.cache.id,
+						rootName: request.attachRootName,
+						storePathHash: request.metadata.storePathHash,
+						storePath: request.metadata.storePath
+					}
 				: []
 		);
 
@@ -1541,18 +1539,18 @@ export class CommitPipelineService {
 	}
 
 	/**
-	 * Reads tenant-wide account facts once for a commit batch. The charge batch
-	 * still makes the authoritative status and quota decision for each entry.
-	 */
+	Reads tenant-wide account facts once for a commit batch. The charge batch
+	still makes the authoritative status and quota decision for each entry.
+	*/
 	async readTenantAccount(): Promise<TenantAccount | undefined> {
 		return this.tenantAccount(this.context.requireTenant());
 	}
 
 	/**
-	 * Attaches a committed path to the run root selected at negotiation. Call
-	 * this only while the winning row's identity is proven; retries are
-	 * idempotent by cache, root, and store-path hash.
-	 */
+	Attaches a committed path to the run root selected at negotiation. Call
+	this only while the winning row's identity is proven; retries are
+	idempotent by cache, root, and store-path hash.
+	*/
 	attachRootTarget(
 		cache: ResolvedCache,
 		rootName: RootName | null | undefined,
@@ -2307,10 +2305,10 @@ export class CommitPipelineService {
 	}
 
 	/**
-	 * Prefetches the facts of {@link prefetchMaterialisationFacts} for a commit
-	 * batch, and the readable references that decide whether each reuse commit
-	 * is still permitted. The ownership and reference reads share one D1 batch.
-	 */
+	Prefetches the facts of {@link prefetchMaterialisationFacts} for a commit
+	batch, and the readable references that decide whether each reuse commit
+	is still permitted. The ownership and reference reads share one D1 batch.
+	*/
 	async prefetchCommitFacts(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<NixSha256HashString, PrefetchedCommitFacts>> {

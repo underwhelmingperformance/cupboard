@@ -18,36 +18,36 @@ import { throwIfAborted } from '../abort.ts';
 import { CliError } from '../errors.ts';
 
 /**
- * The CLI's configuration directory: under `$XDG_CONFIG_HOME` when set,
- * otherwise `~/.config`, always within a `cupboard` subdirectory.
- */
+The CLI's configuration directory: under `$XDG_CONFIG_HOME` when set,
+otherwise `~/.config`, always within a `cupboard` subdirectory.
+*/
 export function configDirectory(): string {
 	const base =
-		env.XDG_CONFIG_HOME !== undefined && env.XDG_CONFIG_HOME !== ''
-			? env.XDG_CONFIG_HOME
-			: path.join(homedir(), '.config');
+		env.XDG_CONFIG_HOME === undefined || env.XDG_CONFIG_HOME === ''
+			? path.join(homedir(), '.config')
+			: env.XDG_CONFIG_HOME;
 
 	return path.join(base, 'cupboard');
 }
 
 /**
- * The CLI's cache directory: under `$XDG_CACHE_HOME` when set, otherwise
- * `~/.cache`, always within a `cupboard` subdirectory. Used for content that can
- * be re-fetched, such as conditional GitHub API responses.
- */
+The CLI's cache directory: under `$XDG_CACHE_HOME` when set, otherwise
+`~/.cache`, always within a `cupboard` subdirectory. Used for content that can
+be re-fetched, such as conditional GitHub API responses.
+*/
 export function cacheDirectory(): string {
 	const base =
-		env.XDG_CACHE_HOME !== undefined && env.XDG_CACHE_HOME !== ''
-			? env.XDG_CACHE_HOME
-			: path.join(homedir(), '.cache');
+		env.XDG_CACHE_HOME === undefined || env.XDG_CACHE_HOME === ''
+			? path.join(homedir(), '.cache')
+			: env.XDG_CACHE_HOME;
 
 	return path.join(base, 'cupboard');
 }
 
 /**
- * Reads a secret file's contents, or undefined when the file does not exist.
- * Other failures (permissions, I/O) propagate.
- */
+Reads a secret file's contents, or undefined when the file does not exist.
+Other failures (permissions, I/O) propagate.
+*/
 export async function readSecretFile(
 	file: string
 ): Promise<string | undefined> {
@@ -63,14 +63,14 @@ export async function readSecretFile(
 }
 
 /**
- * Whether a removal deleted something or found nothing to delete.
- */
+Whether a removal deleted something or found nothing to delete.
+*/
 export type Removal = 'removed' | 'absent';
 
 /**
- * Deletes a secret file. A missing file is not an error, so removal is
- * idempotent; other failures propagate.
- */
+Deletes a secret file. A missing file is not an error, so removal is
+idempotent; other failures propagate.
+*/
 export async function removeSecretFile(file: string): Promise<Removal> {
 	try {
 		await unlink(file);
@@ -86,8 +86,8 @@ export async function removeSecretFile(file: string): Promise<Removal> {
 }
 
 /**
- * The names of the entries in a directory, or none when it does not exist.
- */
+The names of the entries in a directory, or none when it does not exist.
+*/
 export async function listSecretDirectory(
 	directory: string
 ): Promise<readonly string[]> {
@@ -116,11 +116,11 @@ interface SecretFileOperations {
 }
 
 /**
- * Persists a secret in a `0600` file inside a `0700` directory owned by the
- * current user. It creates the temporary file exclusively with its final mode,
- * so an existing path or symlink cannot redirect the write. It then renames the
- * temporary file over the target atomically.
- */
+Persists a secret in a `0600` file inside a `0700` directory owned by the
+current user. It creates the temporary file exclusively with its final mode,
+so an existing path or symlink cannot redirect the write. It then renames the
+temporary file over the target atomically.
+*/
 export async function writeSecretFile(
 	file: string,
 	contents: string,
@@ -199,11 +199,11 @@ export class SecretDirectorySymlinkError extends CliError {
 }
 
 /**
- * Creates the final directory for credential files with mode `0700`, or
- * reasserts that mode when the directory already exists. The final directory
- * must be owned by the current user. A path component may be a symlink only
- * when root owns the symlink.
- */
+Creates the final directory for credential files with mode `0700`, or
+reasserts that mode when the directory already exists. The final directory
+must be owned by the current user. A path component may be a symlink only
+when root owns the symlink.
+*/
 export async function ensureSecretDirectory(directory: string): Promise<void> {
 	await ensureSecretDirectoryWith(directory, lstat);
 }

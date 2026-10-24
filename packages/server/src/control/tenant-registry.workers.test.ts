@@ -221,13 +221,13 @@ function database(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
 
-async function usageRow(
-	id: TenantId
-): Promise<undefined | { quotaBytes: number | undefined }> {
+async function usageRow(): Promise<
+	undefined | { quotaBytes: number | undefined }
+> {
 	const row = await database()
 		.select({ quotaBytes: d1Schema.tenantUsage.quotaBytes })
 		.from(d1Schema.tenantUsage)
-		.where(eq(d1Schema.tenantUsage.tenant, id))
+		.where(eq(d1Schema.tenantUsage.tenant, acme))
 		.get();
 
 	return row === undefined
@@ -248,9 +248,9 @@ function createBody(
 	});
 }
 
-function privateBodyWithRead(id: string): TenantCreateBody {
+function privateBodyWithRead(): TenantCreateBody {
 	return tenantCreateBodySchema.parse({
-		id,
+		id: acme,
 		defaultCacheAccess: 'private',
 		read: {
 			user: 'cupboard',
@@ -272,9 +272,9 @@ function readCredential(
 	return tenantReadCredentialSchema.parse({ user, password });
 }
 
-function quotaBody(id: string, quotaBytes: number): TenantCreateBody {
+function quotaBody(quotaBytes: number): TenantCreateBody {
 	return tenantCreateBodySchema.parse({
-		id,
+		id: acme,
 		defaultCacheAccess: 'private',
 		ownerIssuer: 'https://idp.test',
 		ownerSubject: 'owner',
@@ -344,7 +344,7 @@ function errorFields(error: unknown): {
 		.parse(error);
 }
 
-async function storedReadVerifier(id: TenantId): Promise<{
+async function storedReadVerifier(): Promise<{
 	readonly readUser: ReadUser;
 	readonly readPasswordHash: ReadPasswordHash;
 	readonly readPasswordSalt: ReadPasswordSalt;
@@ -363,7 +363,7 @@ async function storedReadVerifier(id: TenantId): Promise<{
 					readPasswordSalt: d1Schema.tenant.readPasswordSalt
 				})
 				.from(d1Schema.tenant)
-				.where(eq(d1Schema.tenant.id, id))
+				.where(eq(d1Schema.tenant.id, acme))
 				.get()
 		);
 }
@@ -379,13 +379,12 @@ interface StoredCacheCredential {
 // Every cache-specific credential row the tenant holds, in cache-name order,
 // with the verifier checked against the password it was set from.
 async function storedCacheCredentials(
-	id: TenantId,
 	password: string = readPassword
 ): Promise<StoredCacheCredential[]> {
 	const rows = await database()
 		.select()
 		.from(d1Schema.tenantCacheReadCredential)
-		.where(eq(d1Schema.tenantCacheReadCredential.tenant, id))
+		.where(eq(d1Schema.tenantCacheReadCredential.tenant, acme))
 		.orderBy(asc(d1Schema.tenantCacheReadCredential.cacheName))
 		.all();
 
@@ -533,9 +532,9 @@ describe('tenant registry', () => {
 	);
 
 	it('preserves the owner issuer when a conflicting retry also changes the quota', async () => {
-		await ensureTenant(database(), quotaBody(acme, 1000), now);
+		await ensureTenant(database(), quotaBody(1000), now);
 		const conflicting = tenantCreateBodySchema.parse({
-			...quotaBody(acme, 2000),
+			...quotaBody(2000),
 			ownerIssuer: 'https://idp.test/'
 		});
 
@@ -576,9 +575,9 @@ describe('tenant registry', () => {
 	});
 
 	it('stores only the hashed private-read verifier', async () => {
-		await provision(privateBodyWithRead(acme));
+		await provision(privateBodyWithRead());
 
-		const row = await storedReadVerifier(acme);
+		const row = await storedReadVerifier();
 
 		expect({
 			user: row.readUser,
@@ -596,17 +595,17 @@ describe('tenant registry', () => {
 	});
 
 	it('is idempotent for a re-create with the same quota', async () => {
-		await ensureTenant(database(), quotaBody(acme, 1000), now);
-		const again = await ensureTenant(database(), quotaBody(acme, 1000), now);
+		await ensureTenant(database(), quotaBody(1000), now);
+		const again = await ensureTenant(database(), quotaBody(1000), now);
 
 		expect(again.id).toBe(acme);
 	});
 
 	it('refuses a re-create that changes the quota', async () => {
-		await ensureTenant(database(), quotaBody(acme, 1000), now);
+		await ensureTenant(database(), quotaBody(1000), now);
 
 		const rejected = await rejectedBy(() =>
-			ensureTenant(database(), quotaBody(acme, 2000), now)
+			ensureTenant(database(), quotaBody(2000), now)
 		);
 
 		expect(errorFields(rejected)).toStrictEqual({
@@ -620,7 +619,7 @@ describe('tenant registry', () => {
 		// The create schema rejects a negative quota, so the value bypasses it.
 		// The usage insert then violates the quota CHECK, which fails a statement
 		// of the batch after the tenant insert.
-		const body = { ...quotaBody(acme, 0), quotaBytes: -1 };
+		const body = { ...quotaBody(0), quotaBytes: -1 };
 
 		const rejected = await rejectedBy(() =>
 			ensureTenant(database(), body, now)
@@ -634,7 +633,7 @@ describe('tenant registry', () => {
 		expect({
 			failed: rejected !== undefined,
 			tenantStored: tenant !== undefined,
-			usageStored: (await usageRow(acme)) !== undefined
+			usageStored: (await usageRow()) !== undefined
 		}).toStrictEqual({
 			failed: true,
 			tenantStored: false,
@@ -670,7 +669,7 @@ describe('tenant registry', () => {
 	])(
 		'refuses zero accounting repair when $table already has tenant data',
 		async ({ table, insert, digest }) => {
-			const body = quotaBody(acme, 1000);
+			const body = quotaBody(1000);
 			await ensureTenant(database(), body, now);
 			await env.CUPBOARD_DB.prepare(insert).bind(acme, digest).run();
 			await database()
@@ -691,7 +690,7 @@ describe('tenant registry', () => {
 				.all();
 			expect({
 				error: rejected === undefined ? undefined : errorFields(rejected),
-				usage: await usageRow(acme),
+				usage: await usageRow(),
 				rows: rowsAfter.results
 			}).toStrictEqual({
 				error: {
@@ -729,7 +728,7 @@ describe('tenant registry', () => {
 			ensureTenant(database(), createBody(acme, 'private'), now)
 		);
 
-		expect({ access, usage: await usageRow(acme) }).toStrictEqual({
+		expect({ access, usage: await usageRow() }).toStrictEqual({
 			access: { access: 'public' },
 			usage: { quotaBytes: undefined }
 		});
@@ -741,7 +740,7 @@ describe('tenant registry', () => {
 	});
 
 	it('creates the usage row on a retry after a crash left only the tenant row', async () => {
-		const body = quotaBody(acme, 1000);
+		const body = quotaBody(1000);
 
 		await database()
 			.insert(d1Schema.tenant)
@@ -998,7 +997,7 @@ describe('tenant registry', () => {
 
 		expect({
 			row,
-			usage: await usageRow(acme),
+			usage: await usageRow(),
 			defaultCache,
 			reProvision
 		}).toStrictEqual({
@@ -1113,7 +1112,7 @@ describe('tenant lifecycle operations', () => {
 		await ensureTenant(database(), createBody(acme), now);
 
 		await setTenantReadCredential(database(), acme, readCredential('reader'));
-		const row = await storedReadVerifier(acme);
+		const row = await storedReadVerifier();
 
 		expect({
 			user: row.readUser,
@@ -1131,7 +1130,7 @@ describe('tenant lifecycle operations', () => {
 	});
 
 	it('clears a read credential to empty columns', async () => {
-		await ensureTenant(database(), privateBodyWithRead(acme), now);
+		await ensureTenant(database(), privateBodyWithRead(), now);
 
 		await clearTenantReadCredential(database(), acme);
 		const row = await database()
@@ -1221,7 +1220,7 @@ describe('private cache read credentials', () => {
 			now
 		);
 
-		expect(await storedCacheCredentials(acme)).toStrictEqual([
+		expect(await storedCacheCredentials()).toStrictEqual([
 			{
 				cache: builds,
 				readUser: 'reader',
@@ -1272,7 +1271,7 @@ describe('private cache read credentials', () => {
 			readCredential('rotated', rotatedReadPassword),
 			now
 		);
-		const [stored] = await storedCacheCredentials(acme, rotatedReadPassword);
+		const [stored] = await storedCacheCredentials(rotatedReadPassword);
 
 		expect({
 			stored,
@@ -1312,7 +1311,7 @@ describe('private cache read credentials', () => {
 
 		await clearCacheReadCredential(database(), acme, builds);
 
-		expect(await storedCacheCredentials(acme)).toStrictEqual([
+		expect(await storedCacheCredentials()).toStrictEqual([
 			{
 				cache: guides,
 				readUser: 'reader',
@@ -1328,7 +1327,7 @@ describe('private cache read credentials', () => {
 
 		await clearCacheReadCredential(database(), acme, builds);
 
-		expect(await storedCacheCredentials(acme)).toStrictEqual([]);
+		expect(await storedCacheCredentials()).toStrictEqual([]);
 	});
 
 	it('deletes every cache credential when the tenant is finalised', async () => {
@@ -1351,7 +1350,7 @@ describe('private cache read credentials', () => {
 
 		await finaliseOffboardedTenant(database(), acme);
 
-		expect(await storedCacheCredentials(acme)).toStrictEqual([]);
+		expect(await storedCacheCredentials()).toStrictEqual([]);
 	});
 
 	it.each(
@@ -1386,7 +1385,7 @@ describe('private cache read credentials', () => {
 			now
 		);
 
-		expect(await storedCacheCredentials(acme)).toStrictEqual([
+		expect(await storedCacheCredentials()).toStrictEqual([
 			{
 				cache: builds,
 				readUser: 'reader',
@@ -1418,7 +1417,7 @@ describe('private cache read credentials', () => {
 
 		expect({
 			error: await error,
-			stored: await storedCacheCredentials(acme)
+			stored: await storedCacheCredentials()
 		}).toStrictEqual({
 			error: {
 				name: 'TenantRetiredError',
@@ -1444,7 +1443,7 @@ describe('private cache read credentials', () => {
 
 		expect({
 			error: await rejectionFields(() => rotation),
-			stored: await storedCacheCredentials(acme)
+			stored: await storedCacheCredentials()
 		}).toStrictEqual({
 			error: {
 				name: 'TenantNotFoundError',
@@ -1469,15 +1468,11 @@ describe('private cache read credentials', () => {
 	);
 });
 
-async function chargeUsage(
-	id: TenantId,
-	bytes: number,
-	casBytes: number
-): Promise<void> {
+async function chargeUsage(): Promise<void> {
 	await database()
 		.update(d1Schema.tenantUsage)
-		.set({ bytes, casBytes })
-		.where(eq(d1Schema.tenantUsage.tenant, id))
+		.set({ bytes: 60, casBytes: 20 })
+		.where(eq(d1Schema.tenantUsage.tenant, acme))
 		.run();
 }
 
@@ -1489,8 +1484,8 @@ const unlimited: TenantQuota = { kind: 'unlimited' };
 
 describe('getTenantQuota', () => {
 	it('reads the limit and charged bytes while a tenant changes state', async () => {
-		await provision(quotaBody(acme, 100));
-		await chargeUsage(acme, 60, 20);
+		await provision(quotaBody(100));
+		await chargeUsage();
 		const active = await getTenantQuota(database(), acme);
 		await setTenantStatus(database(), acme, 'suspended');
 		const suspended = await getTenantQuota(database(), acme);
@@ -1501,7 +1496,7 @@ describe('getTenantQuota', () => {
 			active,
 			suspended,
 			offboarding,
-			stored: await usageRow(acme)
+			stored: await usageRow()
 		}).toStrictEqual({
 			active: { id: acme, quota: limitedTo(100), usedBytes: 80 },
 			suspended: { id: acme, quota: limitedTo(100), usedBytes: 80 },
@@ -1512,11 +1507,11 @@ describe('getTenantQuota', () => {
 
 	it('reports unlimited storage without changing the usage row', async () => {
 		await provision(createBody(acme));
-		await chargeUsage(acme, 60, 20);
+		await chargeUsage();
 
 		expect({
 			read: await getTenantQuota(database(), acme),
-			stored: await usageRow(acme)
+			stored: await usageRow()
 		}).toStrictEqual({
 			read: { id: acme, quota: unlimited, usedBytes: 80 },
 			stored: { quotaBytes: undefined }
@@ -1572,8 +1567,8 @@ describe('getTenantQuota', () => {
 
 describe('setTenantQuota', () => {
 	it('raises, lowers to the charged bytes, and clears a quota', async () => {
-		await provision(quotaBody(acme, 100));
-		await chargeUsage(acme, 60, 20);
+		await provision(quotaBody(100));
+		await chargeUsage();
 
 		const raised = await setTenantQuota(database(), acme, limitedTo(500), now);
 		const lowered = await setTenantQuota(database(), acme, limitedTo(80), now);
@@ -1583,7 +1578,7 @@ describe('setTenantQuota', () => {
 			raised,
 			lowered,
 			cleared,
-			stored: await usageRow(acme)
+			stored: await usageRow()
 		}).toStrictEqual({
 			raised: { id: acme, quota: limitedTo(500), usedBytes: 80 },
 			lowered: { id: acme, quota: limitedTo(80), usedBytes: 80 },
@@ -1602,15 +1597,15 @@ describe('setTenantQuota', () => {
 			now
 		);
 
-		expect({ limited, stored: await usageRow(acme) }).toStrictEqual({
+		expect({ limited, stored: await usageRow() }).toStrictEqual({
 			limited: { id: acme, quota: limitedTo(1024), usedBytes: 0 },
 			stored: { quotaBytes: 1024 }
 		});
 	});
 
 	it('refuses a quota below the charged bytes and keeps the old one', async () => {
-		await provision(quotaBody(acme, 100));
-		await chargeUsage(acme, 60, 20);
+		await provision(quotaBody(100));
+		await chargeUsage();
 
 		const rejected = await rejectedBy(() =>
 			setTenantQuota(database(), acme, limitedTo(79), now)
@@ -1621,7 +1616,7 @@ describe('setTenantQuota', () => {
 				...errorFields(rejected),
 				usedBytes: z.object({ usedBytes: z.number() }).parse(rejected).usedBytes
 			},
-			stored: await usageRow(acme)
+			stored: await usageRow()
 		}).toStrictEqual({
 			error: {
 				name: 'TenantQuotaBelowUsageError',
@@ -1650,7 +1645,7 @@ describe('setTenantQuota', () => {
 		{
 			name: 'being removed',
 			setup: async () => {
-				await provision(quotaBody(acme, 100));
+				await provision(quotaBody(100));
 				await setTenantStatus(database(), acme, 'offboarding');
 			},
 			fields: {
@@ -1662,7 +1657,7 @@ describe('setTenantQuota', () => {
 		{
 			name: 'offboarded',
 			setup: async () => {
-				await provision(quotaBody(acme, 100));
+				await provision(quotaBody(100));
 				await setTenantStatus(database(), acme, 'offboarding');
 				await finaliseOffboardedTenant(database(), acme);
 			},

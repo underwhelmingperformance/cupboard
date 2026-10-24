@@ -8,9 +8,9 @@ type Binding = NonNullable<Metadata['bindings']>[number];
 
 export interface ScriptMetadata extends Metadata {
 	/**
-	 * Declarative Durable Object class lifecycle. The Cloudflare upload API
-	 * accepts this field, but the pinned SDK's metadata type predates it.
-	 */
+	Declarative Durable Object class lifecycle. The Cloudflare upload API
+	accepts this field, but the pinned SDK's metadata type predates it.
+	*/
 	readonly exports?: Readonly<Record<string, DurableObjectExport>>;
 	readonly cache_options: {
 		readonly enabled: boolean;
@@ -19,9 +19,9 @@ export interface ScriptMetadata extends Metadata {
 }
 
 /**
- * Live resource identifiers resolved by name during reconciliation. R2 buckets
- * and queues are bound by name, so only D1 and KV need an id lookup.
- */
+Live resource identifiers resolved by name during reconciliation. R2 buckets
+and queues are bound by name, so only D1 and KV need an id lookup.
+*/
 export interface ResolvedResources {
 	readonly d1: ReadonlyMap<string, DatabaseId>;
 	readonly kv: ReadonlyMap<string, KvNamespaceId>;
@@ -125,12 +125,12 @@ function bindingsFor(
 }
 
 /**
- * Build the multipart upload metadata for a Worker from its config and the
- * resolved resource ids. `vars` become `plain_text` bindings; `keep_bindings`
- * preserves secrets and variables set out of band across content uploads,
- * which is what `keep_vars: true` in both wrangler configs preserves them. A
- * binding that this metadata lists is still deployed from here.
- */
+Build the multipart upload metadata for a Worker from its config and the
+resolved resource ids. `vars` become `plain_text` bindings; `keep_bindings`
+preserves secrets and variables set out of band across content uploads,
+which is what `keep_vars: true` in both wrangler configs preserves them. A
+binding that this metadata lists is still deployed from here.
+*/
 export function buildScriptMetadata(
 	worker: WorkerConfig,
 	resources: ResolvedResources

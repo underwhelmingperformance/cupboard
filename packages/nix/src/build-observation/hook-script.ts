@@ -16,10 +16,10 @@ function shellQuote(value: string): string {
 }
 
 /**
- * The event line produced by the generated script's `printf`. Nix supplies
- * `OUT_PATHS` as a space-separated list. The function wraps each path in JSON
- * quotes; store paths contain no characters that require JSON escaping.
- */
+The event line produced by the generated script's `printf`. Nix supplies
+`OUT_PATHS` as a space-separated list. The function wraps each path in JSON
+quotes; store paths contain no characters that require JSON escaping.
+*/
 export function composeBuildEventLine(
 	invocationId: InvocationId,
 	derivationPath: string,
@@ -35,12 +35,12 @@ export function composeBuildEventLine(
 }
 
 /**
- * The `/bin/sh` post-build hook for one invocation. It runs as the store's
- * user. Nix supplies `OUT_PATHS` as a space-separated list, which the hook
- * converts into one versioned event. The hook then invokes the compiled helper
- * with the event on standard input. For a daemonless run, it first creates a GC
- * root for each completed output through the local store.
- */
+The `/bin/sh` post-build hook for one invocation. It runs as the store's
+user. Nix supplies `OUT_PATHS` as a space-separated list, which the hook
+converts into one versioned event. The hook then invokes the compiled helper
+with the event on standard input. For a daemonless run, it first creates a GC
+root for each completed output through the local store.
+*/
 export function renderHookScript(options: HookScriptOptions): string {
 	const invocationId = shellQuote(options.invocationId);
 	const helper = shellQuote(options.helperPath);

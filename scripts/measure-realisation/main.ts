@@ -25,8 +25,8 @@ import { measureRealisation, type RealisationReport } from './measurement.ts';
 import { renderBudgetResult, renderSummary } from './summary.ts';
 
 /**
- * The substituter used when the command receives no `--substituter` option.
- */
+The substituter used when the command receives no `--substituter` option.
+*/
 export const defaultSubstituters = ['https://cache.nixos.org'] as const;
 
 export interface MeasureRealisationOptions {

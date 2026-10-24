@@ -142,9 +142,7 @@ describe('schemaTransitions', () => {
 	it('declares only contract steps that an object can record', () => {
 		expect(
 			new Set(
-				schemaTransitions.flatMap((transition) =>
-					transition.contractStep === undefined ? [] : [transition.contractStep]
-				)
+				schemaTransitions.flatMap((transition) => transition.contractStep ?? [])
 			)
 		).toStrictEqual(new Set([expansionLocalStep]));
 	});

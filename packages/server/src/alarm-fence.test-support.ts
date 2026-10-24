@@ -1,13 +1,13 @@
 /**
- * Alarm fences for the Workers test pool. A fence disables `setAlarm` on a
- * Durable Object while it is open.
- *
- * Workerd replaces an instance of a Durable Object when it evicts or resets
- * the object, and the replacement has its own storage object. The fence depth
- * is therefore kept by object ID. The test worker's `CupboardServer` calls
- * {@link applyAlarmFence} in its constructor, so a replacement constructed
- * while a fence is open also has alarm arming disabled.
- */
+Alarm fences for the Workers test pool. A fence disables `setAlarm` on a
+Durable Object while it is open.
+
+Workerd replaces an instance of a Durable Object when it evicts or resets
+the object, and the replacement has its own storage object. The fence depth
+is therefore kept by object ID. The test worker's `CupboardServer` calls
+{@link applyAlarmFence} in its constructor, so a replacement constructed
+while a fence is open also has alarm arming disabled.
+*/
 
 const fenceDepths = new Map<string, number>();
 
@@ -57,9 +57,9 @@ export function isAlarmFenceOpen(state: DurableObjectState): boolean {
 }
 
 /**
- * Opens a fence for the object. Overlapping fences share a count, and arming
- * stays disabled until the last of them closes.
- */
+Opens a fence for the object. Overlapping fences share a count, and arming
+stays disabled until the last of them closes.
+*/
 export function openAlarmFence(state: DurableObjectState): void {
 	const id = state.id.toString();
 

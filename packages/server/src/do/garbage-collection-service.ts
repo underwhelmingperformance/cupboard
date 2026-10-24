@@ -66,18 +66,18 @@ import { type RetentionService } from './retention-service.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
 
 /**
- * The items one phase step reads before the pass consults its row budget.
- *
- * The budget decides how much of a backlog one invocation clears. A step
- * always runs whole, so this decides only by how much a step can overshoot
- * the budget: a larger step spends fewer statements per item and overshoots
- * by more.
- *
- * Do not size a step from the rows the budget has left. A row is not an
- * item: each phase spends several rows per item it reads, by a factor that
- * differs per phase, so a step sized that way spends a multiple of the
- * budget.
- */
+The items one phase step reads before the pass consults its row budget.
+
+The budget decides how much of a backlog one invocation clears. A step
+always runs whole, so this decides only by how much a step can overshoot
+the budget: a larger step spends fewer statements per item and overshoots
+by more.
+
+Do not size a step from the rows the budget has left. A row is not an
+item: each phase spends several rows per item it reads, by a factor that
+differs per phase, so a step sized that way spends a multiple of the
+budget.
+*/
 export const phaseStepSize = 128;
 
 // The roots one expiry step inspects. A step size like `phaseStepSize`; the
@@ -85,10 +85,10 @@ export const phaseStepSize = 128;
 export const maxRootsExpiredPerRun = 32;
 
 /**
- * Reachability comes from retention targets, grace entries and the references
- * of reachable narinfo rows. Seed queries and expected barrier trigger names
- * share this list, so adding a seed source also requires its write barrier.
- */
+Reachability comes from retention targets, grace entries and the references
+of reachable narinfo rows. Seed queries and expected barrier trigger names
+share this list, so adding a seed source also requires its write barrier.
+*/
 const reachabilitySources = [
 	{
 		role: 'seed',
@@ -123,8 +123,8 @@ const seedSources: readonly SeedSource[] = reachabilitySources.filter(
 const barrierTriggerPrefix = 'garbage_collection_barrier_';
 
 /**
- * The expected write-barrier triggers and the tables they protect.
- */
+The expected write-barrier triggers and the tables they protect.
+*/
 export const barrierTriggers: readonly {
 	readonly name: string;
 	readonly table: string;
@@ -138,14 +138,14 @@ export const barrierTriggers: readonly {
 });
 
 /**
- * Builds one ordered page of targets for roots that have just expired. The
- * query must include every root from the expiry pass so its ordering and limit
- * apply to the complete target set. Splitting the roots across queries would
- * give each subset its own page and could omit targets from the first global
- * page.
- *
- * The parameter test imports this builder and inspects the statement it makes.
- */
+Builds one ordered page of targets for roots that have just expired. The
+query must include every root from the expiry pass so its ordering and limit
+apply to the complete target set. Splitting the roots across queries would
+give each subset its own page and could omit targets from the first global
+page.
+
+The parameter test imports this builder and inspects the statement it makes.
+*/
 export function expiredRootTargetSelect(
 	database: SchemaDatabase,
 	cacheId: CacheId,
@@ -425,7 +425,7 @@ export class GarbageCollectionService {
 
 					return anchorIso === undefined
 						? []
-						: [{ storePathHash: target.storePathHash, anchorIso }];
+						: { storePathHash: target.storePathHash, anchorIso };
 				}),
 				tx
 			);
@@ -642,16 +642,16 @@ export class GarbageCollectionService {
 	}
 
 	/**
-	 * Walks the frontier until the budget is spent or the mark completes.
-	 *
-	 * Each iteration is one step: it pops a path from the frontier and marks it,
-	 * or it walks a step of one path's references. The budget is consulted after
-	 * a step, so the first one always runs.
-	 *
-	 * The path being walked and the reference cursor are kept in local
-	 * variables. Nothing else writes the scan row while the pass runs, so they
-	 * stay equal to what the row holds.
-	 */
+	Walks the frontier until the budget is spent or the mark completes.
+
+	Each iteration is one step: it pops a path from the frontier and marks it,
+	or it walks a step of one path's references. The budget is consulted after
+	a step, so the first one always runs.
+
+	The path being walked and the reference cursor are kept in local
+	variables. Nothing else writes the scan row while the pass runs, so they
+	stay equal to what the row holds.
+	*/
 	private advanceMark(
 		cache: ResolvedCache,
 		scan: typeof schema.garbageCollectionScans.$inferSelect
@@ -810,10 +810,10 @@ export class GarbageCollectionService {
 	}
 
 	/**
-	 * An empty cursor means collection has not started. Preserve a non-empty
-	 * cursor when returning from marking so collection resumes after the last
-	 * scanned hash and does not repeat the empty-cache guard.
-	 */
+	An empty cursor means collection has not started. Preserve a non-empty
+	cursor when returning from marking so collection resumes after the last
+	scanned hash and does not repeat the empty-cache guard.
+	*/
 	private finishMark(
 		cache: ResolvedCache,
 		scan: typeof schema.garbageCollectionScans.$inferSelect
@@ -859,16 +859,16 @@ export class GarbageCollectionService {
 	}
 
 	/**
-	 * An upload still in flight for the path the outer statement is looking at.
-	 *
-	 * `pending` and `committing` are live commit states: verification may still
-	 * settle them, so a path with such an upload is not collectable.
-	 *
-	 * `pending_upload_gc_path_idx` covers `(cache, json_extract(metadata_json,
-	 * '$.storePathHash'), verdict)`. Migration 0032 creates it and `schema.ts`
-	 * does not declare it, so Drizzle gives no warning when this predicate stops
-	 * matching the index expression.
-	 */
+	An upload still in flight for the path the outer statement is looking at.
+
+	`pending` and `committing` are live commit states: verification may still
+	settle them, so a path with such an upload is not collectable.
+
+	`pending_upload_gc_path_idx` covers `(cache, json_extract(metadata_json,
+	'$.storePathHash'), verdict)`. Migration 0032 creates it and `schema.ts`
+	does not declare it, so Drizzle gives no warning when this predicate stops
+	matching the index expression.
+	*/
 	private inFlightUpload(cache: ResolvedCache) {
 		const reservedVerdict = or(
 			eq(schema.pendingUploads.verdict, 'committing'),
@@ -889,12 +889,12 @@ export class GarbageCollectionService {
 	}
 
 	/**
-	 * Collects the unreachable paths of one step.
-	 *
-	 * The step reads a page and deletes from that page. A delete that searched
-	 * for collectable paths itself would scan past every marked path until it
-	 * found its limit, however far that is.
-	 */
+	Collects the unreachable paths of one step.
+
+	The step reads a page and deletes from that page. A delete that searched
+	for collectable paths itself would scan past every marked path until it
+	found its limit, however far that is.
+	*/
 	private advanceCollect(
 		cache: ResolvedCache,
 		now: IsoTimestamp,
@@ -1024,9 +1024,9 @@ export class GarbageCollectionService {
 	}
 
 	/**
-	 * SQLite drops a table's triggers when a migration rebuilds it. Do not
-	 * collect against marks until every write-barrier trigger is restored.
-	 */
+	SQLite drops a table's triggers when a migration rebuilds it. Do not
+	collect against marks until every write-barrier trigger is restored.
+	*/
 	private assertBarrierPresent(): void {
 		const present = new Set(
 			this.context.db
@@ -1047,18 +1047,18 @@ export class GarbageCollectionService {
 	}
 
 	/**
-	 * Advances one cache's collection scan until the invocation's row budget is
-	 * spent, leaving the phase it stopped in recorded for the next invocation.
-	 *
-	 * The phases draw on one budget in sequence, so an expensive early phase can
-	 * leave a later one nothing to spend. That does not starve the later phase,
-	 * because the input of each phase drains within a scan: a root expires once,
-	 * a grace row is deleted as it is processed, the seed set is fixed when the
-	 * scan starts, the mark frontier shrinks as paths are marked, and a collected
-	 * path is deleted. The expensive phase is therefore cheap on the next
-	 * invocation, which follows immediately because the pass re-arms its alarm
-	 * while work remains.
-	 */
+	Advances one cache's collection scan until the invocation's row budget is
+	spent, leaving the phase it stopped in recorded for the next invocation.
+
+	The phases draw on one budget in sequence, so an expensive early phase can
+	leave a later one nothing to spend. That does not starve the later phase,
+	because the input of each phase drains within a scan: a root expires once,
+	a grace row is deleted as it is processed, the seed set is fixed when the
+	scan starts, the mark frontier shrinks as paths are marked, and a collected
+	path is deleted. The expensive phase is therefore cheap on the next
+	invocation, which follows immediately because the pass re-arms its alarm
+	while work remains.
+	*/
 	private collectUnreachable(
 		cache: ResolvedCache,
 		now: IsoTimestamp
@@ -1229,7 +1229,7 @@ export class GarbageCollectionService {
 			const parsed = uploadIdSchema.safeParse(
 				key.split('/', 4)[3]?.replace(/\.nar\.zst$/u, '')
 			);
-			return parsed.success ? [parsed.data] : [];
+			return parsed.success ? parsed.data : [];
 		});
 		for (const page of jsonValueLists(operationIds)) {
 			const operations = this.context.db
@@ -1540,11 +1540,11 @@ export class GarbageCollectionService {
 	}
 
 	/**
-	 * Deletes expired refresh-token families a step at a time until the budget is
-	 * spent or none is left. A family row is deleted only after its last member,
-	 * so a partly deleted family is found again by the next pass without a
-	 * cursor.
-	 */
+	Deletes expired refresh-token families a step at a time until the budget is
+	spent or none is left. A family row is deleted only after its last member,
+	so a partly deleted family is found again by the next pass without a
+	cursor.
+	*/
 	private collectExpiredRefreshFamilies(
 		now: IsoTimestamp
 	): ExpiredRefreshFamilyCollection {

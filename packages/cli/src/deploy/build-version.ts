@@ -5,11 +5,11 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 /**
- * The version stamped into a build. `CUPBOARD_BUILD_VERSION` wins when set, so a
- * build without a Git checkout (such as a Nix flake working from an exported
- * source tree) can supply the revision itself. Otherwise it is the short Git
- * revision, suffixed `+dirty` when the working tree has uncommitted changes.
- */
+The version stamped into a build. `CUPBOARD_BUILD_VERSION` wins when set, so a
+build without a Git checkout (such as a Nix flake working from an exported
+source tree) can supply the revision itself. Otherwise it is the short Git
+revision, suffixed `+dirty` when the working tree has uncommitted changes.
+*/
 export async function resolveBuildVersion(
 	checkoutRoot: string
 ): Promise<string> {

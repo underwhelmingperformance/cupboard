@@ -114,12 +114,11 @@ async function runTransport(
 }
 
 async function transportFailure(
-	command: 'configure' | 'configure-input' | 'validate',
 	directory: string,
 	inputs: TransportEnvironment
 ): Promise<string> {
 	try {
-		await runTransport(command, directory, inputs);
+		await runTransport('validate', directory, inputs);
 	} catch (error: unknown) {
 		if (
 			error instanceof Error &&
@@ -149,7 +148,7 @@ describe('SSH transport preparation', () => {
 		}
 	])('rejects builders containing $name', async ({ builders }) => {
 		const directory = await temporaryDirectory();
-		const failure = await transportFailure('validate', directory, {
+		const failure = await transportFailure(directory, {
 			remote: 'true',
 			builders,
 			builderKnownHosts: 'builder.example.com ssh-ed25519 AAAAC3NzaFixture'
@@ -253,7 +252,7 @@ describe('SSH transport preparation', () => {
 		])
 	)('rejects $name', async ({ directive, inputs, inputName }) => {
 		const directory = await temporaryDirectory();
-		const failure = await transportFailure('validate', directory, inputs);
+		const failure = await transportFailure(directory, inputs);
 
 		expect(failure).toContain(`${inputName} must not use ${directive}`);
 	});
@@ -298,7 +297,7 @@ describe('SSH transport preparation', () => {
 		{ directive: 'Include', config: 'iNcLuDe=/tmp/unmanaged.conf' }
 	])('rejects obscured $directive syntax', async ({ directive, config }) => {
 		const directory = await temporaryDirectory();
-		const failure = await transportFailure('validate', directory, {
+		const failure = await transportFailure(directory, {
 			store: 'ssh-ng://nix@store.example.com',
 			storeSshConfig: config,
 			storeKnownHosts: 'store.example.com ssh-ed25519 AAAAC3NzaFixture'
@@ -333,7 +332,7 @@ describe('SSH transport preparation', () => {
 
 	it('rejects an unsupported directive rather than passing it to OpenSSH', async () => {
 		const directory = await temporaryDirectory();
-		const failure = await transportFailure('validate', directory, {
+		const failure = await transportFailure(directory, {
 			store: 'ssh-ng://nix@store.example.com',
 			storeSshConfig: 'Host store.example.com\n  ForwardAgent yes',
 			storeKnownHosts: 'store.example.com ssh-ed25519 AAAAC3NzaFixture'
@@ -346,7 +345,7 @@ describe('SSH transport preparation', () => {
 
 	it('rejects connection directives outside a Host block', async () => {
 		const directory = await temporaryDirectory();
-		const failure = await transportFailure('validate', directory, {
+		const failure = await transportFailure(directory, {
 			store: 'ssh-ng://nix@store.example.com',
 			storeSshConfig: 'User nix\nHost store.example.com',
 			storeKnownHosts: 'store.example.com ssh-ed25519 AAAAC3NzaFixture'
@@ -368,7 +367,7 @@ describe('SSH transport preparation', () => {
 		}
 	])('rejects a direct-store identity in the $name', async ({ store }) => {
 		const directory = await temporaryDirectory();
-		const failure = await transportFailure('validate', directory, {
+		const failure = await transportFailure(directory, {
 			store,
 			storeKnownHosts: 'store.example.com ssh-ed25519 AAAAC3NzaFixture'
 		});
@@ -401,7 +400,7 @@ describe('SSH transport preparation', () => {
 		}
 	])('rejects a builder identity in the $name', async ({ builders, error }) => {
 		const directory = await temporaryDirectory();
-		const failure = await transportFailure('validate', directory, {
+		const failure = await transportFailure(directory, {
 			remote: 'true',
 			builders,
 			builderKnownHosts: 'builder.example.com ssh-ed25519 AAAAC3NzaFixture'
@@ -933,7 +932,7 @@ describe('SSH transport preparation', () => {
 		}
 	])('rejects $name', async ({ inputs, error }) => {
 		const directory = await temporaryDirectory();
-		const failure = await transportFailure('validate', directory, inputs);
+		const failure = await transportFailure(directory, inputs);
 
 		expect(failure).toContain(error);
 	});

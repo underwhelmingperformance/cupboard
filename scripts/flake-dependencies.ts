@@ -34,10 +34,10 @@ export type FetchPurpose = 'resolve' | 'confirm';
 
 export interface StoreFetcher {
 	/**
-	 * Fetch the store against the recorded hash, returning the corrected hash
-	 * when the recorded one no longer matches, and undefined when it still
-	 * does.
-	 */
+	Fetch the store against the recorded hash, returning the corrected hash
+	when the recorded one no longer matches, and undefined when it still
+	does.
+	*/
 	resolveHash(purpose: FetchPurpose): Promise<string | undefined>;
 }
 
@@ -224,13 +224,14 @@ async function refetchStoreHash(
 	};
 }
 
-const repoRoot = path.resolve(import.meta.dirname, '..');
+const repositoryRoot = path.resolve(import.meta.dirname, '..');
 
-function repositoryWorkspace(root: string): Workspace {
-	const hashesPath = path.join(root, hashesFileName);
+function repositoryWorkspace(): Workspace {
+	const hashesPath = path.join(repositoryRoot, hashesFileName);
 
 	return {
-		readLockfile: () => readFileSync(path.join(root, 'pnpm-lock.yaml')),
+		readLockfile: () =>
+			readFileSync(path.join(repositoryRoot, 'pnpm-lock.yaml')),
 		readHashesFile: () => readFileSync(hashesPath, 'utf8'),
 		writeHashesFile: (text) => {
 			writeFileSync(hashesPath, text);
@@ -323,7 +324,7 @@ function buildProgram(): Command {
 			`fail when ${hashesFileName} was resolved from a different lockfile`
 		)
 		.action(() => {
-			checkFlakeDependencies(repositoryWorkspace(repoRoot));
+			checkFlakeDependencies(repositoryWorkspace());
 			scriptReporter().success(
 				'The flake pnpm store hash matches pnpm-lock.yaml.'
 			);
@@ -337,8 +338,8 @@ function buildProgram(): Command {
 		.action(async () => {
 			const reporter = scriptReporter();
 			const outcome = await updateFlakeDependencies(
-				repositoryWorkspace(repoRoot),
-				nixStoreFetcher(repoRoot, reporter)
+				repositoryWorkspace(),
+				nixStoreFetcher(repositoryRoot, reporter)
 			);
 
 			const message = updateMessages[outcome.kind](outcome.store);

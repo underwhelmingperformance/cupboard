@@ -1025,7 +1025,7 @@ describe('deployment session commands', () => {
 				.configureOutput({ writeErr: vi.fn() });
 			registerDeploymentCommands(program);
 			server.listen({ onUnhandledFrame: 'error' });
-			const stdout = vi
+			const canWriteStdout = vi
 				.spyOn(process.stdout, 'write')
 				.mockImplementation(() => true);
 			try {
@@ -1037,7 +1037,7 @@ describe('deployment session commands', () => {
 					{ from: 'user' }
 				);
 			} finally {
-				stdout.mockRestore();
+				canWriteStdout.mockRestore();
 				server.close();
 			}
 

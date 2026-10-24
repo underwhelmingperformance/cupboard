@@ -43,12 +43,12 @@ export const committedEdgeHintSchema = z.object({
 export type CommittedEdgeHint = z.infer<typeof committedEdgeHintSchema>;
 
 /**
- * Shared facts prefetched by the front Worker for one negotiation. The Worker
- * reads every NAR hash in the request, so absence from a list means that no row
- * existed at the time of the read. Reuse requires a readable reference that the
- * negotiating token may reuse; global blob state alone never proves
- * availability.
- */
+Shared facts prefetched by the front Worker for one negotiation. The Worker
+reads every NAR hash in the request, so absence from a list means that no row
+existed at the time of the read. Reuse requires a readable reference that the
+negotiating token may reuse; global blob state alone never proves
+availability.
+*/
 export const negotiateHintsSchema = z.object({
 	blobStates: z.array(blobStateHintSchema),
 	reusableReferences: z.array(reusableReferenceSchema),
@@ -85,10 +85,10 @@ export const hintTtlMs = 30_000;
 export const hintCapacity = 64;
 
 /**
- * Stores prefetched negotiation facts until the following dispatch consumes
- * them. Only RPC can stage a value, and the random token is accepted once. If
- * an instance loses or evicts the value, negotiation reads the facts itself.
- */
+Stores prefetched negotiation facts until the following dispatch consumes
+them. Only RPC can stage a value, and the random token is accepted once. If
+an instance loses or evicts the value, negotiation reads the facts itself.
+*/
 export class NegotiateHintStore {
 	private readonly staged = new Map<
 		string,

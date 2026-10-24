@@ -57,8 +57,8 @@ export class OidcTokenVerificationError extends Error {
 }
 
 /**
- * The token's `iat` is older than the maximum token age of the verification.
- */
+The token's `iat` is older than the maximum token age of the verification.
+*/
 export class OidcTokenTooOldError extends OidcTokenVerificationError {
 	constructor(options: { readonly cause: unknown }) {
 		super(options, 'Subject token is older than the maximum token age');
@@ -120,10 +120,10 @@ export class OidcDiscoveryError extends Error {
 }
 
 /**
- * Decodes unverified claims so the caller can find a configured issuer and
- * audience for verification. The caller must not use these claims for policy
- * selection or authorisation.
- */
+Decodes unverified claims so the caller can find a configured issuer and
+audience for verification. The caller must not use these claims for policy
+selection or authorisation.
+*/
 export function decodeInboundClaims(token: string): OidcClaims {
 	try {
 		return decodeJwt(token);
@@ -136,10 +136,10 @@ export interface InboundVerifyOptions {
 	readonly issuer: OidcIssuer;
 	readonly audience: OidcAudience;
 	/**
-	 * Audiences that this deployment accepts in addition to `audience` when
-	 * the token's `aud` claim is an array. Verification fails if any
-	 * additional audience is absent from this set.
-	 */
+	Audiences that this deployment accepts in addition to `audience` when
+	the token's `aud` claim is an array. Verification fails if any
+	additional audience is absent from this set.
+	*/
 	readonly trustedAudiences: ReadonlySet<string>;
 	readonly algorithms: readonly string[];
 	readonly requireIdTokenClaims?: boolean;
@@ -170,12 +170,12 @@ function isTokenVerificationFailure(error: unknown): boolean {
 }
 
 /**
- * Verifies the signature, issuer, audience, expiry and algorithm with the
- * supplied key resolver. A token that fails verification throws
- * `OidcTokenVerificationError`. The resolver that `OidcDiscoveryStore` returns
- * fetches the issuer's JWKS and reports a failed fetch as
- * `OidcKeysUnreachableError`. Every other error propagates unchanged.
- */
+Verifies the signature, issuer, audience, expiry and algorithm with the
+supplied key resolver. A token that fails verification throws
+`OidcTokenVerificationError`. The resolver that `OidcDiscoveryStore` returns
+fetches the issuer's JWKS and reports a failed fetch as
+`OidcKeysUnreachableError`. Every other error propagates unchanged.
+*/
 export async function verifyInboundOidcToken(
 	resolveKey: JWTVerifyGetKey,
 	token: string,
@@ -320,10 +320,10 @@ interface BoundedFetchOptions {
 }
 
 /**
- * Fetches and buffers one response within a byte limit. The returned response
- * contains only the bounded bytes, so a downstream parser cannot bypass the
- * limit by calling `text()` or `json()` itself.
- */
+Fetches and buffers one response within a byte limit. The returned response
+contains only the bounded bytes, so a downstream parser cannot bypass the
+limit by calling `text()` or `json()` itself.
+*/
 async function fetchBoundedResponse(
 	fetcher: typeof fetch,
 	input: string | URL | Request,
@@ -346,10 +346,10 @@ async function fetchBoundedResponse(
 }
 
 /**
- * Fetches the issuer's metadata and returns its JWKS URL and advertised
- * ID-token algorithms. The metadata issuer must exactly match the configured
- * issuer before either value is used.
- */
+Fetches the issuer's metadata and returns its JWKS URL and advertised
+ID-token algorithms. The metadata issuer must exactly match the configured
+issuer before either value is used.
+*/
 export async function fetchOidcDiscovery(
 	issuer: OidcIssuer,
 	fetcher: typeof fetch = fetch,
@@ -428,9 +428,9 @@ export async function fetchOidcDiscovery(
 }
 
 /**
- * Returns the algorithms that the issuer advertises and Cupboard permits. An
- * empty result causes verification to reject every token from that issuer.
- */
+Returns the algorithms that the issuer advertises and Cupboard permits. An
+empty result causes verification to reject every token from that issuer.
+*/
 export function intersectAlgorithms(
 	advertised: readonly string[],
 	allowlist: readonly string[]
@@ -455,10 +455,10 @@ export interface OidcDiscoveryStoreOptions {
 }
 
 /**
- * Caches each issuer's discovered algorithm set and JWKS resolver for ten
- * minutes. Concurrent first resolutions share one promise. A failed resolution
- * is removed so the next request retries.
- */
+Caches each issuer's discovered algorithm set and JWKS resolver for ten
+minutes. Concurrent first resolutions share one promise. A failed resolution
+is removed so the next request retries.
+*/
 export class OidcDiscoveryStore {
 	private readonly issuers = new Map<OidcIssuer, CachedIssuer>();
 

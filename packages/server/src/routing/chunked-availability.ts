@@ -40,8 +40,8 @@ function chunkSizeFor(
 }
 
 /**
- * One narinfo head and one NAR head per hash.
- */
+One narinfo head and one NAR head per hash.
+*/
 export const cacheAvailabilityChunkSize = cacheAvailabilityChunkSizeFor(
 	workersInvocationAllowances.free.subrequests
 );
@@ -55,9 +55,9 @@ export function cacheAvailabilityChunkSizeFor(allowance: number): number {
 }
 
 /**
- * One NAR head per distinct NAR among a hash's copies, at most
- * `reuseDistinctNarLimit`.
- */
+One NAR head per distinct NAR among a hash's copies, at most
+`reuseDistinctNarLimit`.
+*/
 export const reuseViewAvailabilityChunkSize = reuseViewAvailabilityChunkSizeFor(
 	workersInvocationAllowances.free.subrequests
 );
@@ -71,19 +71,19 @@ export function reuseViewAvailabilityChunkSizeFor(allowance: number): number {
 }
 
 /**
- * Answers an availability page through the tenant Durable Object a chunk at a
- * time.
- *
- * The subrequest ceiling is per invocation, and each request the Worker sends
- * to the object is an invocation with its own allowance. A page whose R2 heads
- * would exceed one allowance is therefore split into chunks the object answers
- * within one, sent with bounded concurrency, and merged in request order. A
- * chunk the object refuses is returned as it is, so its status and retry
- * advice reach the client.
- *
- * Each chunk carries the request's credential: the object authenticates a
- * read of a private reuse view itself.
- */
+Answers an availability page through the tenant Durable Object a chunk at a
+time.
+
+The subrequest ceiling is per invocation, and each request the Worker sends
+to the object is an invocation with its own allowance. A page whose R2 heads
+would exceed one allowance is therefore split into chunks the object answers
+within one, sent with bounded concurrency, and merged in request order. A
+chunk the object refuses is returned as it is, so its status and retry
+advice reach the client.
+
+Each chunk carries the request's credential: the object authenticates a
+read of a private reuse view itself.
+*/
 export async function answerAvailabilityInChunks(
 	context: Context<WorkerHonoEnv>,
 	storePathHashes: readonly StorePathHash[],
@@ -111,9 +111,9 @@ export async function answerAvailabilityInChunks(
 }
 
 /**
- * Sends each chunk of `storePathHashes` through `sendChunk` and merges the
- * answers. `sendChunk` receives at most `chunkSize` hashes per call.
- */
+Sends each chunk of `storePathHashes` through `sendChunk` and merges the
+answers. `sendChunk` receives at most `chunkSize` hashes per call.
+*/
 export async function mergeAvailabilityChunks(
 	sendChunk: (storePathHashes: readonly StorePathHash[]) => Promise<Response>,
 	storePathHashes: readonly StorePathHash[],

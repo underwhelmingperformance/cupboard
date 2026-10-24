@@ -96,16 +96,16 @@ async function fireAlarm(): Promise<void> {
 }
 
 /**
- * Runs collection passes one unit of work at a time and holds the continuation
- * they arm.
- *
- * The runtime can deliver an alarm it has already queued, and deleting the
- * alarm does not cancel that delivery. A delivery would advance the walk under
- * the alarm's own budget instead of the one these tests set. Each driven pass
- * therefore removes the continuation, so a stray delivery finds no work and
- * returns without advancing the walk. `restore` puts the continuation back so
- * the alarms resume the remaining work.
- */
+Runs collection passes one unit of work at a time and holds the continuation
+they arm.
+
+The runtime can deliver an alarm it has already queued, and deleting the
+alarm does not cancel that delivery. A delivery would advance the walk under
+the alarm's own budget instead of the one these tests set. Each driven pass
+therefore removes the continuation, so a stray delivery finds no work and
+returns without advancing the walk. `restore` puts the continuation back so
+the alarms resume the remaining work.
+*/
 class DrivenCollection {
 	private continuation: unknown;
 
@@ -1004,9 +1004,9 @@ describe('garbage collection narinfo-deletion continuation', () => {
 });
 
 /**
- * The cache columns of every collection-state row and of the verification
- * cursor. A cache-keyed table is read in cache order.
- */
+The cache columns of every collection-state row and of the verification
+cursor. A cache-keyed table is read in cache order.
+*/
 interface CollectionStateIdentities {
 	readonly scans: { cacheId: number }[];
 	readonly frontier: { cacheId: number }[];

@@ -7,10 +7,10 @@ import type { DeploymentConfig } from './config.ts';
 import type { ScriptName } from './identifiers.ts';
 
 /**
- * The deployment's URL: the custom domain, or the script's workers.dev
- * hostname when the account has a workers.dev subdomain. This function only
- * reads the subdomain. Onboarding enables the workers.dev route.
- */
+The deployment's URL: the custom domain, or the script's workers.dev
+hostname when the account has a workers.dev subdomain. This function only
+reads the subdomain. Onboarding enables the workers.dev route.
+*/
 export async function deploymentUrl(
 	api: Pick<CloudflareApi, 'getWorkersDevSubdomain'>,
 	controlScriptName: ScriptName,
@@ -28,16 +28,16 @@ export async function deploymentUrl(
 }
 
 /**
- * The control Worker variable in which each deploy records the deployment's
- * URL. The deploy checks admin tokens against that URL and requests it as the
- * default CI audience. The control Worker does not read the variable.
- */
+The control Worker variable in which each deploy records the deployment's
+URL. The deploy checks admin tokens against that URL and requests it as the
+default CI audience. The control Worker does not read the variable.
+*/
 export const deploymentUrlVariable = 'CUPBOARD_DEPLOYMENT_URL';
 
 /**
- * Records `url` as the deployment's URL on the control Worker. The config is
- * unchanged when the deployment has no URL.
- */
+Records `url` as the deployment's URL on the control Worker. The config is
+unchanged when the deployment has no URL.
+*/
 export function withDeploymentUrl(
 	config: DeploymentConfig,
 	url: string | undefined
@@ -64,9 +64,9 @@ const recordedUrlBindingSchema = z.looseObject({
 const recordedUrlSchema = z.url({ protocol: /^https$/ });
 
 /**
- * The control Worker records a deployment URL that is not an HTTPS URL. The
- * deploy sends admin credentials to that URL, so it refuses the value.
- */
+The control Worker records a deployment URL that is not an HTTPS URL. The
+deploy sends admin credentials to that URL, so it refuses the value.
+*/
 export class RecordedDeploymentUrlInvalidError extends CliError {
 	override readonly humanMessage: string;
 	constructor(public readonly value: string) {
@@ -84,9 +84,9 @@ export class RecordedDeploymentUrlInvalidError extends CliError {
 }
 
 /**
- * The deployment URL that the last deploy recorded in the control Worker's
- * bindings. Undefined for a Worker that an earlier release deployed.
- */
+The deployment URL that the last deploy recorded in the control Worker's
+bindings. Undefined for a Worker that an earlier release deployed.
+*/
 export function recordedDeploymentUrl(
 	bindings: readonly unknown[]
 ): URL | undefined {

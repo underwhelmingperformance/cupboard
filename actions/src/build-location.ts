@@ -1,8 +1,8 @@
 /**
- * Where a cohort job realises its targets. A job with a remote store builds
- * there. Otherwise, a cohort that sets `remote` builds on the remote builders
- * from the `builders` setting, and any other cohort builds on its runner.
- */
+Where a cohort job realises its targets. A job with a remote store builds
+there. Otherwise, a cohort that sets `remote` builds on the remote builders
+from the `builders` setting, and any other cohort builds on its runner.
+*/
 export type BuildLocation =
 	| { readonly kind: 'runner'; readonly runner: string }
 	| { readonly kind: 'builders'; readonly hosts: readonly string[] }
@@ -44,9 +44,9 @@ export function cohortBuildLocation(
 }
 
 /**
- * The text for a plan's builder column: `local` for a build on the runner, and
- * otherwise the remote host.
- */
+The text for a plan's builder column: `local` for a build on the runner, and
+otherwise the remote host.
+*/
 export function builderDescription(location: BuildLocation): string {
 	return location.kind === 'runner' ? 'local' : remoteDescription(location);
 }
@@ -57,13 +57,13 @@ export interface JobNameCohort {
 }
 
 /**
- * A short display name for a cohort job. A cohort with one target uses the
- * target's root suffix, which is unique in the manifest, such as
- * `aarch64-linux/hello on eu.nixbuild.net`. A larger cohort uses its system
- * and target count, such as `x86_64-linux on eu.nixbuild.net (8 targets)`. The
- * place is the runner label for a build on the runner, and the remote host
- * otherwise.
- */
+A short display name for a cohort job. A cohort with one target uses the
+target's root suffix, which is unique in the manifest, such as
+`aarch64-linux/hello on eu.nixbuild.net`. A larger cohort uses its system
+and target count, such as `x86_64-linux on eu.nixbuild.net (8 targets)`. The
+place is the runner label for a build on the runner, and the remote host
+otherwise.
+*/
 export function cohortJobName(
 	cohort: JobNameCohort,
 	location: BuildLocation

@@ -120,11 +120,11 @@ const preUploadTransitions = {
 };
 
 /**
- * Wakes the tenants and waits for them as the deploy does, then checks that
- * every active or suspended tenant has recorded `requiredStep`. The wake goes
- * through the maintenance queue, and each woken tenant object continues its
- * own work on its alarm.
- */
+Wakes the tenants and waits for them as the deploy does, then checks that
+every active or suspended tenant has recorded `requiredStep`. The wake goes
+through the maintenance queue, and each woken tenant object continues its
+own work on its alarm.
+*/
 async function wakeUntilStep(
 	server: StagedDeploymentServer,
 	client: DeploymentClient,
@@ -166,9 +166,9 @@ function d1QueryApi(server: StagedDeploymentServer): D1QueryApi {
 }
 
 /**
- * Expands the intermediate release before its upload. A rerun after the
- * handoff expands and uploads the current release.
- */
+Expands the intermediate release before its upload. A rerun after the
+handoff expands and uploads the current release.
+*/
 async function deployOverPredecessor(
 	server: StagedDeploymentServer,
 	now = deployedAt
@@ -193,11 +193,11 @@ async function deployOverPredecessor(
 }
 
 /**
- * Completes the transitions as the deploy does once both Workers serve the
- * build: checks that every active or suspended tenant has recorded the required
- * local step, applies the contract migrations and records the transition
- * complete.
- */
+Completes the transitions as the deploy does once both Workers serve the
+build: checks that every active or suspended tenant has recorded the required
+local step, applies the contract migrations and records the transition
+complete.
+*/
 async function contractOverPredecessor(
 	server: StagedDeploymentServer,
 	now = deployedAt
@@ -258,9 +258,9 @@ it.each(['predecessor', 'intermediate'] as const)(
 );
 
 /**
- * The tenants that `LocalStepUnreachedError` lists when the deploy stops before
- * the contract migrations, or undefined when it applied them.
- */
+The tenants that `LocalStepUnreachedError` lists when the deploy stops before
+the contract migrations, or undefined when it applied them.
+*/
 async function stoppedBeforeContract(
 	server: StagedDeploymentServer
 ): Promise<{ pending: number; stragglers: readonly string[] } | undefined> {

@@ -60,9 +60,9 @@ type DeferredUpload = Awaited<ReturnType<typeof deferFreshUpload>>;
 const pushConcurrency = 6;
 
 /**
- * Stages `count` fresh uploads with bytes unique to this fixture. The distinct
- * seeds ensure each promotion must write a new canonical object.
- */
+Stages `count` fresh uploads with bytes unique to this fixture. The distinct
+seeds ensure each promotion must write a new canonical object.
+*/
 async function deferFreshUploads(
 	server: string,
 	count: number,
@@ -968,14 +968,14 @@ const replacementVerdictJson = JSON.stringify({
 });
 
 /**
- * Records one consumer's verdict and, while that verdict is being applied,
- * revokes its claim and puts a second consumer's verdict on the row. Reports
- * the row state after the first application finishes.
- *
- * The interleave runs when the application reads the shared blob row, which is
- * the first D1 read it makes. From that point the first consumer no longer owns
- * the row, so it stops and clears the verdict it read.
- */
+Records one consumer's verdict and, while that verdict is being applied,
+revokes its claim and puts a second consumer's verdict on the row. Reports
+the row state after the first application finishes.
+
+The interleave runs when the application reads the shared blob row, which is
+the first D1 read it makes. From that point the first consumer no longer owns
+the row, so it stops and clears the verdict it read.
+*/
 async function driveVerdictAfterRevoke(server: string): Promise<{
 	readonly page: RecordedVerdictPage;
 	readonly didInterleave: boolean;
@@ -1082,13 +1082,13 @@ describe('recorded verdict fencing', () => {
 const malformedVerdictJson = '{"owner"';
 
 /**
- * Claims three deferred uploads and records a verdict for each. The recording
- * applies one and leaves two on their rows; the fixture then replaces the
- * lower-numbered held verdict with text that is not JSON and runs two alarms.
- *
- * A drain pass applies one verdict, so the first alarm reaches the malformed
- * one and the second reaches the verdict behind it.
- */
+Claims three deferred uploads and records a verdict for each. The recording
+applies one and leaves two on their rows; the fixture then replaces the
+lower-numbered held verdict with text that is not JSON and runs two alarms.
+
+A drain pass applies one verdict, so the first alarm reaches the malformed
+one and the second reaches the verdict behind it.
+*/
 async function driveMalformedVerdict(server: string): Promise<{
 	readonly heldAfterRecord: number;
 	readonly heldAfterFirstAlarm: number;

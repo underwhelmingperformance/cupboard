@@ -20,10 +20,10 @@ const copyActivityStartSchema = z.object({
 });
 
 /**
- * Parses the records in one `json-log-path` file. Nix writes one JSON document
- * per line. The file comes from another process, so malformed lines are skipped
- * and each caller ignores unrecognised record types.
- */
+Parses the records in one `json-log-path` file. Nix writes one JSON document
+per line. The file comes from another process, so malformed lines are skipped
+and each caller ignores unrecognised record types.
+*/
 export function* activityLogRecords(log: string): Generator {
 	for (const line of log.split(/\r?\n/u)) {
 		if (line === '') {
@@ -39,14 +39,14 @@ export function* activityLogRecords(log: string): Generator {
 }
 
 /**
- * Extracts copy evidence from the supplied activity logs. Each map entry lists
- * the source stores from this run's `actCopyPath` events, deduplicated in log
- * order. Several sources mean that Nix started more than one transfer for the
- * path, for example after a fetch failed.
- *
- * The map omits paths with no copy event in these logs. This includes paths
- * that were already valid and copies performed outside these invocations.
- */
+Extracts copy evidence from the supplied activity logs. Each map entry lists
+the source stores from this run's `actCopyPath` events, deduplicated in log
+order. Several sources mean that Nix started more than one transfer for the
+path, for example after a fetch failed.
+
+The map omits paths with no copy event in these logs. This includes paths
+that were already valid and copies performed outside these invocations.
+*/
 export function copySources(
 	logs: readonly string[]
 ): ReadonlyMap<StorePathString, readonly string[]> {
@@ -89,9 +89,9 @@ const buildFailureMessageSchema = z.object({
 });
 
 /**
- * Returns the first derivation whose builder failed in the supplied activity
- * logs. Messages about failed dependencies do not identify a failed builder.
- */
+Returns the first derivation whose builder failed in the supplied activity
+logs. Messages about failed dependencies do not identify a failed builder.
+*/
 export function firstBuildFailure(
 	logs: readonly string[]
 ): StorePathString | undefined {

@@ -117,11 +117,11 @@ export class PublicationUnmodelledFinding extends CheckFinding {
 }
 
 /**
- * What an operator can change when a filter excludes the modelled branch.
- * `select-branch` produces a hint to use `--branch`. `change-filter` is for a
- * preset job whose `branch` input is the default branch. For that job,
- * `--branch` does not change the modelled branch.
- */
+What an operator can change when a filter excludes the modelled branch.
+`select-branch` produces a hint to use `--branch`. `change-filter` is for a
+preset job whose `branch` input is the default branch. For that job,
+`--branch` does not change the modelled branch.
+*/
 export type FilterRemedy = 'select-branch' | 'change-filter' | 'none';
 
 const filterRemedies: Readonly<Record<FilterRemedy, string>> = {
@@ -387,8 +387,8 @@ function scalar(
 }
 
 /**
- * Whether a job uses the flake workflow's `pull-request-and-branch` preset.
- */
+Whether a job uses the flake workflow's `pull-request-and-branch` preset.
+*/
 export function isPresetJob(job: DiscoveredPublishingJob): boolean {
 	return (
 		job.kind === 'flake' && job.inputs.preset === 'pull-request-and-branch'
@@ -407,10 +407,10 @@ function unresolved(reason: string): JobCache {
 }
 
 /**
- * The cache that a job publishes to. The installable workflow accepts a
- * named-cache URL or a cache input, and the flake workflow accepts only the
- * cache input.
- */
+The cache that a job publishes to. The installable workflow accepts a
+named-cache URL or a cache input, and the flake workflow accepts only the
+cache input.
+*/
 export function jobCache(job: DiscoveredPublishingJob): JobCache {
 	const input = scalar(job, 'cache');
 
@@ -494,9 +494,9 @@ function flakeRoots(rootPrefix: string): FlakeRoots | undefined {
 }
 
 /**
- * The publication requests of one flake workflow run. The workflow creates
- * and closes or reopens the cache only for a pull request under the preset.
- */
+The publication requests of one flake workflow run. The workflow creates
+and closes or reopens the cache only for a pull request under the preset.
+*/
 export function flakeRequests(
 	cache: CacheScope,
 	{ target, run }: FlakeRoots,
@@ -1039,12 +1039,12 @@ export function modelPublishingJob(
 	}
 
 	const pullRequestTemplates =
-		cacheInput.template !== undefined && rootInputValue.template !== undefined
-			? {
+		cacheInput.template === undefined || rootInputValue.template === undefined
+			? undefined
+			: {
 					cache: cacheInput.template,
 					root: `${rootInputValue.template}/`
-				}
-			: undefined;
+				};
 
 	const context: ModelContext = {
 		isPreset,
@@ -1326,8 +1326,8 @@ export function modelPublishingJob(
 }
 
 /**
- * Includes the merged-close identity when a PR run manages its cache.
- */
+Includes the merged-close identity when a PR run manages its cache.
+*/
 export function withMergedCloseCases(
 	cases: readonly PublicationCase[],
 	identity: RepositoryIdentity

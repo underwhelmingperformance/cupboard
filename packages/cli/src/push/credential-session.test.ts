@@ -22,8 +22,7 @@ function credential(
 }
 
 const base = Date.parse('2026-06-30T12:00:00.000Z');
-const minutes = (n: number): string =>
-	new Date(base + n * 60_000).toISOString();
+const minutes = (): string => new Date(base + 60 * 60_000).toISOString();
 
 describe('credentialSession', () => {
 	it('issues once and reuses the credential while it is comfortably valid', async () => {
@@ -32,7 +31,7 @@ describe('credentialSession', () => {
 			(pushId) => {
 				issued.push(pushId);
 
-				return Promise.resolve(credential({ expiresAt: minutes(60) }));
+				return Promise.resolve(credential({ expiresAt: minutes() }));
 			},
 			{ now: () => base }
 		);
@@ -98,7 +97,7 @@ describe('credentialSession', () => {
 
 		const credentialPromise = session.provider();
 		const pushIdPromise = session.pushId();
-		resolveIssue(credential({ expiresAt: minutes(60) }));
+		resolveIssue(credential({ expiresAt: minutes() }));
 
 		const resolvedCredential = await credentialPromise;
 

@@ -41,11 +41,11 @@ interface PullRequestTenant {
 }
 
 /**
- * Starts a tenant configured the way `cupboard github setup` configures one,
- * by adding the same pull-request trust rule that command writes. The rule
- * builder pins the real GitHub issuer, which the stub cannot sign for, so the
- * issuer is the one field the fixture replaces.
- */
+Starts a tenant configured the way `cupboard github setup` configures one,
+by adding the same pull-request trust rule that command writes. The rule
+builder pins the real GitHub issuer, which the stub cannot sign for, so the
+issuer is the one field the fixture replaces.
+*/
 function withPullRequestTenant(
 	prefix: string,
 	body: (tenant: PullRequestTenant) => Promise<void>

@@ -113,10 +113,10 @@ export interface DemoteCursor {
 }
 
 /**
- * Builds the registry update, deletion-queue insert, and object-state delete
- * for one chunk of expired NAR objects. The delete returns the rows that still
- * satisfied the fence when it ran.
- */
+Builds the registry update, deletion-queue insert, and object-state delete
+for one chunk of expired NAR objects. The delete returns the rows that still
+satisfied the fence when it ran.
+*/
 export function buildBlobCollection(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	narHashes: JsonValueList<NixSha256HashString>,
@@ -194,9 +194,9 @@ export function buildBlobCollection(
 }
 
 /**
- * Builds the registry update, deletion-queue insert, and object-state delete
- * for one chunk of expired content-addressed objects.
- */
+Builds the registry update, deletion-queue insert, and object-state delete
+for one chunk of expired content-addressed objects.
+*/
 export function buildCasCollection(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	digests: JsonValueList<Sha256HexDigest>,
@@ -274,29 +274,29 @@ export function buildCasCollection(
 }
 
 /**
- * One version of a NAR object, as the demote scan captured it.
- */
+One version of a NAR object, as the demote scan captured it.
+*/
 export interface BlobStateVersion {
 	readonly narHash: NixSha256HashString;
 	readonly incarnation: number;
 }
 
 /**
- * One version of a content-addressed object, as the demote scan captured it.
- */
+One version of a content-addressed object, as the demote scan captured it.
+*/
 export interface CasObjectVersion {
 	readonly digest: Sha256HexDigest;
 	readonly incarnation: number;
 }
 
 /**
- * Builds the registry retirement and the object-state delete for the NAR object
- * versions a demote scan captured. A later promotion writes a different version
- * and therefore survives both statements.
- *
- * The parameter test imports this builder so it inspects the production
- * statements.
- */
+Builds the registry retirement and the object-state delete for the NAR object
+versions a demote scan captured. A later promotion writes a different version
+and therefore survives both statements.
+
+The parameter test imports this builder so it inspects the production
+statements.
+*/
 export function fencedBlobStateDeletion(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	rows: JsonRowList<BlobStateVersion>
@@ -328,9 +328,9 @@ export function fencedBlobStateDeletion(
 }
 
 /**
- * Builds the registry retirement and the object delete for the CAS object
- * versions a demote scan captured.
- */
+Builds the registry retirement and the object delete for the CAS object
+versions a demote scan captured.
+*/
 export function fencedCasObjectDeletion(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	rows: JsonRowList<CasObjectVersion>
@@ -789,7 +789,7 @@ export class BlobReaperService {
 
 					return fenceIncarnation === undefined
 						? []
-						: [{ digest: row.digest, fenceIncarnation }];
+						: { digest: row.digest, fenceIncarnation };
 				})
 			);
 		}

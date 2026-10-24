@@ -41,11 +41,11 @@ const oneHourLater = '2026-01-01T01:00:00.000Z';
 const twoHoursLater = '2026-01-01T02:00:00.000Z';
 
 /**
- * A CI-style push grant set: negotiate and commit on the default cache, plus
- * `root:attach` on one root selector when named. It authorises exactly the
- * push-with-run-root path, so tests can prove what a token without the attach
- * grant is refused.
- */
+A CI-style push grant set: negotiate and commit on the default cache, plus
+`root:attach` on one root selector when named. It authorises exactly the
+push-with-run-root path, so tests can prove what a token without the attach
+grant is refused.
+*/
 function pushGrants(attachRootSelector?: string): AuthorizationDetails {
 	return authorizationDetailsSchema.parse([
 		{
@@ -176,7 +176,7 @@ describe('negotiate binds the run root', () => {
 			await response.json()
 		);
 		const uploadIds = negotiated.uploads.flatMap((decision) =>
-			decision.action === 'skip' ? [] : [decision.uploadId]
+			decision.action === 'skip' ? [] : decision.uploadId
 		);
 
 		expect({
@@ -378,7 +378,7 @@ describe('negotiate binds the run root', () => {
 			await response.json()
 		);
 		const uploadIds = negotiated.uploads.flatMap((decision) =>
-			decision.action === 'skip' ? [] : [decision.uploadId]
+			decision.action === 'skip' ? [] : decision.uploadId
 		);
 
 		expect({

@@ -165,11 +165,11 @@ function eventText(event: TransitionEvent<string>): string {
 }
 
 /**
- * A walk over an in-memory SQLite database, so the deploy's statements run
- * as D1 runs them. The fixture records every write batch, counts the serving
- * checks, records each step passed to `wakeTenants`, and sets every
- * tenant's step to that step.
- */
+A walk over an in-memory SQLite database, so the deploy's statements run
+as D1 runs them. The fixture records every write batch, counts the serving
+checks, records each step passed to `wakeTenants`, and sets every
+tenant's step to that step.
+*/
 function fixture(): Fixture {
 	const database = new DatabaseSync(':memory:');
 	const writes: string[] = [];
@@ -263,7 +263,7 @@ function applied(database: DatabaseSync): string[] {
 	return database
 		.prepare('SELECT name FROM d1_migrations ORDER BY name')
 		.all()
-		.flatMap((row) => (typeof row.name === 'string' ? [row.name] : []));
+		.flatMap((row) => (typeof row.name === 'string' ? row.name : []));
 }
 
 // Each row as `state@updated_at`, followed by `;contracted@contracted_at` when

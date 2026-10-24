@@ -183,10 +183,10 @@ export class PublicKeyFetchError extends CodedError {
 }
 
 /**
- * Assert a version is already in the canonical `v<major>.<minor>.<patch>` form
- * the build step resolves it to, returning it unchanged. Canonicalisation lives
- * in the build script alone; the rest of the pipeline only checks the shape.
- */
+Assert a version is already in the canonical `v<major>.<minor>.<patch>` form
+the build step resolves it to, returning it unchanged. Canonicalisation lives
+in the build script alone; the rest of the pipeline only checks the shape.
+*/
 export function assertCanonicalVersion(version: string): string {
 	if (version === '') {
 		throw new MissingInputError('version');
@@ -232,11 +232,11 @@ type FetchLike = (url: string) => Promise<Response>;
 const maximumPublishedKeyBytes = 64 * 1024;
 
 /**
- * Fetches all public keys published by the release cache at `/pubkey`. During a
- * key rotation the endpoint lists more than one key. A client's
- * `trusted-public-keys` must list all of them, because a path may be signed
- * with any of them.
- */
+Fetches all public keys published by the release cache at `/pubkey`. During a
+key rotation the endpoint lists more than one key. A client's
+`trusted-public-keys` must list all of them, because a path may be signed
+with any of them.
+*/
 export async function fetchCachePublicKeys(
 	baseUrl: URL,
 	fetchLike: FetchLike = fetch

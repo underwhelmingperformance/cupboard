@@ -83,10 +83,10 @@ interface ModuleCase extends Scenario {
 }
 
 /**
- * Writes the private cache's file as the case requires and returns its path.
- * An unreachable file is inside a directory that the test account cannot
- * enter.
- */
+Writes the private cache's file as the case requires and returns its path.
+An unreachable file is inside a directory that the test account cannot
+enter.
+*/
 async function privateFile(root: string, file: PrivateFile): Promise<string> {
 	const directory = path.join(root, 'secrets');
 	const substitutersFile = path.join(directory, 'cupboard-release.conf');
@@ -104,9 +104,9 @@ async function privateFile(root: string, file: PrivateFile): Promise<string> {
 }
 
 /**
- * Reads the settings that Nix derives from the system `nix.conf` in
- * `NIX_CONF_DIR` and the user-level files in `NIX_USER_CONF_FILES`.
- */
+Reads the settings that Nix derives from the system `nix.conf` in
+`NIX_CONF_DIR` and the user-level files in `NIX_USER_CONF_FILES`.
+*/
 async function shownSettings(
 	environment: NodeJS.ProcessEnv
 ): Promise<NixSettings> {
@@ -130,12 +130,12 @@ async function shownSettings(
 }
 
 /**
- * Renders the module's `nix.conf` for the scenario and returns the settings
- * that Nix reads, together with the settings of an empty configuration for
- * comparison. The NixOS module's file is the system `nix.conf`. The Home
- * Manager module's file is a user-level `nix.conf`, which Nix reads after a
- * system file that lists the system cache.
- */
+Renders the module's `nix.conf` for the scenario and returns the settings
+that Nix reads, together with the settings of an empty configuration for
+comparison. The NixOS module's file is the system `nix.conf`. The Home
+Manager module's file is a user-level `nix.conf`, which Nix reads after a
+system file that lists the system cache.
+*/
 async function renderedSettings(
 	scenario: Scenario
 ): Promise<{ readonly rendered: NixSettings; readonly empty: NixSettings }> {

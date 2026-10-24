@@ -79,12 +79,12 @@ async function publishCommittedPaths(server: string): Promise<void> {
 }
 
 /**
- * Deletes the cache, leaves a garbage-collection continuation beside the
- * teardown backlog, and runs alarms until both are drained. Reports which
- * maintenance pass ran and how many deletions remain.
- *
- * The alarms are complete handler calls, measured under the input gate.
- */
+Deletes the cache, leaves a garbage-collection continuation beside the
+teardown backlog, and runs alarms until both are drained. Reports which
+maintenance pass ran and how many deletions remain.
+
+The alarms are complete handler calls, measured under the input gate.
+*/
 async function driveAlarms(
 	server: string,
 	maxAlarms: number
@@ -211,15 +211,15 @@ async function isObjectPresent(key: string): Promise<boolean> {
 }
 
 /**
- * Commits three paths, then queues them for reconciliation and removes the
- * published narinfo object of the first, so that one target needs a restore.
- * Injects `fault` for the first attempt at that target, runs two alarms, and
- * reports the queue and the object after each.
- *
- * The queueing, the removal and both alarm handler calls happen under the input
- * gate. A negotiation would also arm an alarm, which could reconcile the targets
- * before the fixture removes the object that the pass must repair.
- */
+Commits three paths, then queues them for reconciliation and removes the
+published narinfo object of the first, so that one target needs a restore.
+Injects `fault` for the first attempt at that target, runs two alarms, and
+reports the queue and the object after each.
+
+The queueing, the removal and both alarm handler calls happen under the input
+gate. A negotiation would also arm an alarm, which could reconcile the targets
+before the fixture removes the object that the pass must repair.
+*/
 async function driveReconcileWithFault(
 	server: string,
 	fault: ReconcileFault

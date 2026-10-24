@@ -291,11 +291,11 @@ export async function publicationReadAuthority(
 }
 
 /**
- * The token request of a push that publishes by reference from a private
- * reuse view. The destination reuses a stored NAR only for a token that can
- * read it, so the push requests `view:content-read` beside its push grants,
- * whatever credential the run uses to read the view.
- */
+The token request of a push that publishes by reference from a private
+reuse view. The destination reuses a stored NAR only for a token that can
+read it, so the push requests `view:content-read` beside its push grants,
+whatever credential the run uses to read the view.
+*/
 function privateViewReferencePush(
 	publication: PublicationCase,
 	view: string | undefined,

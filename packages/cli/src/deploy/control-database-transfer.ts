@@ -182,8 +182,8 @@ async function isReady(options: TransferOptions): Promise<boolean> {
 			'target readiness record is missing or duplicated'
 		);
 	}
-	const [row] = rows;
-	const [source, state] = markerSchema.parse(JSON.parse(row ?? 'null'));
+	const [row = 'null'] = rows;
+	const [source, state] = markerSchema.parse(JSON.parse(row));
 	if (source !== options.source) {
 		throw new ControlDatabaseTransferError(
 			'target was initialised from another database'
@@ -209,9 +209,9 @@ async function freezeSource(options: TransferOptions): Promise<void> {
 }
 
 /**
- * Copies frozen control authority in bounded pages. The caller records the
- * irreversible transition and checks both deployed Worker versions first.
- */
+Copies frozen control authority in bounded pages. The caller records the
+irreversible transition and checks both deployed Worker versions first.
+*/
 export async function transferControlDatabase(
 	options: TransferOptions
 ): Promise<void> {

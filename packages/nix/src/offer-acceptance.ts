@@ -13,18 +13,18 @@ import type { AcceptsOffer } from './substitutable-closure.ts';
 export type ReadKeyFile = (filePath: string) => string | undefined;
 
 /**
- * Creates the acceptance policy for offers discovered through substituters.
- * Disabling `require-sigs` accepts every offer. Otherwise, an offer must come
- * from a trusted substituter or have a valid signature from a configured
- * public key or the public half of a readable secret key. An unreadable or
- * malformed secret key file contributes no key.
- *
- * Nix exempts content-addressed paths from the signature requirement. This
- * policy does not, because applying that exemption safely would require
- * reconstructing and validating the store path from the content address. A
- * false rejection makes Nix build the path; a false exemption could fetch
- * unverified contents.
- */
+Creates the acceptance policy for offers discovered through substituters.
+Disabling `require-sigs` accepts every offer. Otherwise, an offer must come
+from a trusted substituter or have a valid signature from a configured
+public key or the public half of a readable secret key. An unreadable or
+malformed secret key file contributes no key.
+
+Nix exempts content-addressed paths from the signature requirement. This
+policy does not, because applying that exemption safely would require
+reconstructing and validating the store path from the content address. A
+false rejection makes Nix build the path; a false exemption could fetch
+unverified contents.
+*/
 export function offerAcceptance(
 	settings: NixSignatureSettings,
 	readKeyFile: ReadKeyFile
@@ -56,7 +56,7 @@ function publishedHalves(
 		const published =
 			contents === undefined ? undefined : publicKeyOfSecret(contents);
 
-		return published === undefined ? [] : [published.value];
+		return published === undefined ? [] : published.value;
 	});
 }
 

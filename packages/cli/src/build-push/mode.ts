@@ -3,11 +3,11 @@ import { UntrustedDaemonError } from '../errors.ts';
 import type { BuildPushPreflight } from './preflight.ts';
 
 /**
- * How a run publishes what it builds. In streamed mode, the build hook reports
- * each completed output, and Cupboard publishes the output while the build
- * continues. In reconciled local mode, Cupboard waits for the build and then
- * publishes its successful outputs.
- */
+How a run publishes what it builds. In streamed mode, the build hook reports
+each completed output, and Cupboard publishes the output while the build
+continues. In reconciled local mode, Cupboard waits for the build and then
+publishes its successful outputs.
+*/
 export type BuildPushMode =
 	| { readonly kind: 'streamed'; readonly preflight: BuildPushPreflight }
 	| {
@@ -16,11 +16,11 @@ export type BuildPushMode =
 	  };
 
 /**
- * Selects a publication mode from the preflight result. When the daemon does
- * not trust the current user, Nix ignores a build hook configured for one
- * command. Cupboard therefore publishes after the build. Every other preflight
- * failure ends the run.
- */
+Selects a publication mode from the preflight result. When the daemon does
+not trust the current user, Nix ignores a build hook configured for one
+command. Cupboard therefore publishes after the build. Every other preflight
+failure ends the run.
+*/
 export async function selectBuildPushMode(
 	preflight: () => Promise<BuildPushPreflight>
 ): Promise<BuildPushMode> {

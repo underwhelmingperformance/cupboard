@@ -159,10 +159,10 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 	}
 
 	/**
-	 * The response frames buffered so far, cleared. A fake that bridges this
-	 * transport onto another byte channel (an ssh child's stdio) emits them
-	 * there after each write.
-	 */
+	The response frames buffered so far, cleared. A fake that bridges this
+	transport onto another byte channel (an ssh child's stdio) emits them
+	there after each write.
+	*/
 	takeResponses(): readonly Buffer[] {
 		const frames = [...this.pendingBytes];
 		this.pendingBytes.length = 0;
@@ -222,10 +222,10 @@ export interface FakeSubstitutablePathInfo {
 }
 
 /**
- * What the fake daemon's permitted substituters offer, keyed by store path.
- * A path with no entry is served by none of them, which is how the real
- * operation reports a path its substituters do not have.
- */
+What the fake daemon's permitted substituters offer, keyed by store path.
+A path with no entry is served by none of them, which is how the real
+operation reports a path its substituters do not have.
+*/
 export type FakeSubstitutablePathInfos = Readonly<
 	Record<string, FakeSubstitutablePathInfo>
 >;
@@ -339,7 +339,7 @@ function queryPathInfosResponse(
 	const infos = requested.flatMap((storePath) => {
 		const info = paths[storePath];
 
-		return info === undefined ? [] : [{ storePath, info }];
+		return info === undefined ? [] : { storePath, info };
 	});
 	const response = new ProtocolWriter();
 	response.writeInteger(0x61_6c_74_73);
@@ -439,9 +439,9 @@ function queryDerivationOutputMapResponse(
 	response.writeInteger(0x61_6c_74_73);
 	response.writeInteger(entries.length);
 
-	for (const [output, storePath] of entries) {
+	for (const [output, storePath = ''] of entries) {
 		response.writeString(output);
-		response.writeString(storePath ?? '');
+		response.writeString(storePath);
 	}
 
 	return response.bytes();

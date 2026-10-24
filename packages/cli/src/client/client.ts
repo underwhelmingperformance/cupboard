@@ -266,10 +266,10 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Opens one authenticated WebSocket for path commits and their deferred
-	 * verification results. Each commit resolves after durable acknowledgement;
-	 * its `settled` promise reports final availability.
-	 */
+	Opens one authenticated WebSocket for path commits and their deferred
+	verification results. Each commit resolves after durable acknowledgement;
+	its `settled` promise reports final availability.
+	*/
 	async openCommitSession(
 		token: AccessCredential,
 		options: CommitOptions = {}
@@ -283,9 +283,9 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Commits a single upload over its own session. Used to re-drive one path that
-	 * a push had to renegotiate; the bulk push commits over a shared session.
-	 */
+	Commits a single upload over its own session. Used to re-drive one path that
+	a push had to renegotiate; the bulk push commits over a shared session.
+	*/
 	async commit(
 		token: AccessCredential,
 		target: CommitTarget,
@@ -330,13 +330,13 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Claims (or idempotently re-claims) global admin of the deployment at the
-	 * bootstrap `POST /signup` endpoint. The endpoint takes no bearer token: it
-	 * requires the claim secret, and the external OIDC subject token identifies
-	 * the principal that claims the deployment. It takes a urlencoded body,
-	 * with the binding of a nonce-bound subject token. The response includes a
-	 * control session for the principal.
-	 */
+	Claims (or idempotently re-claims) global admin of the deployment at the
+	bootstrap `POST /signup` endpoint. The endpoint takes no bearer token: it
+	requires the claim secret, and the external OIDC subject token identifies
+	the principal that claims the deployment. It takes a urlencoded body,
+	with the binding of a nonce-bound subject token. The response includes a
+	control session for the principal.
+	*/
 	async signup(
 		request: Pick<SignupRequest, 'subject_token' | 'claim_secret'>,
 		binding?: SubjectTokenBinding
@@ -408,9 +408,9 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Exchanges an external identity for the requested authority at the OAuth
-	 * endpoint. `binding` is the seed and targets of a nonce-bound ID token.
-	 */
+	Exchanges an external identity for the requested authority at the OAuth
+	endpoint. `binding` is the seed and targets of a nonce-bound ID token.
+	*/
 	async tokenExchange(
 		subjectToken: string,
 		subjectTokenType: string,
@@ -431,11 +431,11 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Narrows a token this deployment issued to a subset of its grants. The
-	 * presented token is the subject; the server recognises it by signature and
-	 * confines the new token to `authorizationDetails`, refusing anything the
-	 * presenter could not already do.
-	 */
+	Narrows a token this deployment issued to a subset of its grants. The
+	presented token is the subject; the server recognises it by signature and
+	confines the new token to `authorizationDetails`, refusing anything the
+	presenter could not already do.
+	*/
 	async tokenExchangeAttenuate(
 		currentToken: string,
 		authorizationDetails: AuthorizationDetails
@@ -448,11 +448,11 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Renews a session at the OAuth `POST /token` endpoint with the RFC 6749
-	 * refresh_token grant. The server rotates the credential on first use. For
-	 * one minute, a retry of the consumed token can return the same successor.
-	 * Callers must persist each successful response.
-	 */
+	Renews a session at the OAuth `POST /token` endpoint with the RFC 6749
+	refresh_token grant. The server rotates the credential on first use. For
+	one minute, a retry of the consumed token can return the same successor.
+	Callers must persist each successful response.
+	*/
 	async tokenRefresh(refreshToken: string): Promise<TokenResponse> {
 		const response = await this.postTokenForm({
 			grant_type: refreshTokenGrantType,
@@ -469,12 +469,12 @@ export interface CupboardClientOptions {
 }
 
 /**
- * The path identity lets a verdict settle the upload even if it arrives before
- * the acknowledgement.
- * `retention` is set when the original negotiation response acknowledged
- * `upload-grace-facts`. On an identity-based reconnect, it asks a capable server
- * to return the stored grace fact after the pending row has been cleared.
- */
+The path identity lets a verdict settle the upload even if it arrives before
+the acknowledgement.
+`retention` is set when the original negotiation response acknowledged
+`upload-grace-facts`. On an identity-based reconnect, it asks a capable server
+to return the stored grace fact after the pending row has been cleared.
+*/
 export interface CommitTarget {
 	readonly publication?: {
 		readonly pushId: PushId;
@@ -489,9 +489,9 @@ export interface CommitTarget {
 
 export interface CommitOptions {
 	/**
-	 * Bounds how long a deferred upload waits for its verdict, and how long the
-	 * session as a whole waits for the server to grant commit capacity.
-	 */
+	Bounds how long a deferred upload waits for its verdict, and how long the
+	session as a whole waits for the server to grant commit capacity.
+	*/
 	readonly timeoutSeconds?: number;
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 	/**
@@ -499,9 +499,9 @@ export interface CommitOptions {
 	*/
 	readonly onFailure?: (error: Error) => void;
 	/**
-	 * Called when the session starts waiting for commit capacity, and again when
-	 * it stops, so a progress display can report the fact.
-	 */
+	Called when the session starts waiting for commit capacity, and again when
+	it stops, so a progress display can report the fact.
+	*/
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 	/**
 	Returns the push ID that the commit session sends with each `renew-uploads`
@@ -522,8 +522,8 @@ function rayOf(response: Response): string | undefined {
 }
 
 /**
- * Parses a local cache name before the CLI constructs a request.
- */
+Parses a local cache name before the CLI constructs a request.
+*/
 export function cacheNameFor(name: string): CacheName {
 	const parsed = cacheNameSchema.safeParse(name);
 

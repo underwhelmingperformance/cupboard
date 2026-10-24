@@ -35,17 +35,17 @@ const repositoryVariable = '{repository_id}';
 const pullRequestVariable = '{pr}';
 
 /**
- * The cache a pull-request rule binds, as a template over verified claims.
- */
+The cache a pull-request rule binds, as a template over verified claims.
+*/
 export function pullRequestCacheTemplate(): string {
 	return pullRequestCacheName(repositoryVariable, pullRequestVariable);
 }
 
 /**
- * The retention root a pull-request rule binds. The root string already
- * contains the repository, so the pull-request number alone distinguishes one
- * root from another and the repository id is not repeated in it.
- */
+The retention root a pull-request rule binds. The root string already
+contains the repository, so the pull-request number alone distinguishes one
+root from another and the repository id is not repeated in it.
+*/
 export function pullRequestRootTemplate(repositoryFullName: string): string {
 	return `github:${repositoryFullName}/pr-${pullRequestVariable}/`;
 }
@@ -108,19 +108,23 @@ export function parseWorkflowReference(reference: string): WorkflowReference {
 		throw new WorkflowReferenceMalformedError(reference);
 	}
 
-	const [owner, repo, ...pathParts] = prefix.split('/');
+	const [owner, repository, ...pathParts] = prefix.split('/');
 
-	if (owner === undefined || repo === undefined || pathParts.length === 0) {
+	if (
+		owner === undefined ||
+		repository === undefined ||
+		pathParts.length === 0
+	) {
 		throw new WorkflowReferenceMalformedError(reference);
 	}
 
 	const path = pathParts.join('/');
 
-	if (owner === '' || repo === '' || !workflowPathPattern.test(path)) {
+	if (owner === '' || repository === '' || !workflowPathPattern.test(path)) {
 		throw new WorkflowReferenceMalformedError(reference);
 	}
 
-	return { reference, owner, repo, path, pin };
+	return { reference, owner, repo: repository, path, pin };
 }
 
 export function parseExactWorkflowReference(
@@ -206,10 +210,10 @@ function isBranchReference(branch: string): boolean {
 }
 
 /**
- * Returns an exact `job_workflow_ref` value for a commit, branch or tag. A tag pattern
- * becomes an anchored RE2 pattern. The owner, repository and workflow path
- * remain literal, and only the tag can contain wildcards.
- */
+Returns an exact `job_workflow_ref` value for a commit, branch or tag. A tag pattern
+becomes an anchored RE2 pattern. The owner, repository and workflow path
+remain literal, and only the tag can contain wildcards.
+*/
 export function workflowReferenceClaim(parsed: WorkflowReference): ClaimMatch {
 	if (parsed.pin.kind !== 'tag-pattern') {
 		return parsed.reference;
@@ -223,10 +227,10 @@ export function workflowReferenceClaim(parsed: WorkflowReference): ClaimMatch {
 }
 
 /**
- * Tests whether two workflow-reference matchers can accept the same exact
- * reference. Returns `undefined` when both are patterns and either one differs
- * from the canonical form produced by {@link workflowReferenceClaim}.
- */
+Tests whether two workflow-reference matchers can accept the same exact
+reference. Returns `undefined` when both are patterns and either one differs
+from the canonical form produced by {@link workflowReferenceClaim}.
+*/
 export function workflowReferenceClaimsOverlap(
 	left: ClaimMatch,
 	right: ClaimMatch

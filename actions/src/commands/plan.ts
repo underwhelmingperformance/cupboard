@@ -281,9 +281,9 @@ export interface PlanInputs {
 	readonly packCapacity: number;
 	readonly store: string;
 	/**
-	 * The Nix `builders` specification that remote cohorts use. The plan reads
-	 * it only to show the builder's host in job names and in the job summary.
-	 */
+	The Nix `builders` specification that remote cohorts use. The plan reads
+	it only to show the builder's host in job names and in the job summary.
+	*/
 	readonly builders: string;
 	readonly build: 'missing' | 'rebuild';
 	readonly substituter: 'leave' | 'copy';
@@ -291,27 +291,27 @@ export interface PlanInputs {
 }
 
 /**
- * Dependencies that callers can replace to run planning without spawning Nix
- * or Cupboard processes or making network requests.
- */
+Dependencies that callers can replace to run planning without spawning Nix
+or Cupboard processes or making network requests.
+*/
 export interface PlanDependencies {
 	readonly buildSettings?: NixBuildSettings;
 	readonly evaluator?: NixEvaluator;
 	/**
-	 * When omitted, planning reads the store directory from the runner's Nix
-	 * configuration. Nix evaluation reports output paths relative to this
-	 * directory.
-	 */
+	When omitted, planning reads the store directory from the runner's Nix
+	configuration. Nix evaluation reports output paths relative to this
+	directory.
+	*/
 	readonly storeDirectory?: StoreDirectory;
 	readonly fetcher?: typeof fetch;
 	readonly runner?: EnsureRunner;
 	readonly signal?: AbortSignal;
 	readonly createArtifactName?: () => string;
 	/**
-	 * When packing is enabled, returns each surviving target's substitutable NAR
-	 * size by attribute. The default runs `cupboard plan measure` against the
-	 * selected build store.
-	 */
+	When packing is enabled, returns each surviving target's substitutable NAR
+	size by attribute. The default runs `cupboard plan measure` against the
+	selected build store.
+	*/
 	readonly measurer?: (
 		cohorts: readonly Cohort[],
 		evaluations: readonly TargetEvaluation[]
@@ -1314,11 +1314,11 @@ async function targetCoverageOutcome(
 }
 
 /**
- * Returns an advisory prune decision for every cohort. The filter reads only
- * retention roots, so each remaining job still calculates its partition
- * against the selected store. A failed check keeps the cohort in the matrix
- * and records the reason without failing the plan.
- */
+Returns an advisory prune decision for every cohort. The filter reads only
+retention roots, so each remaining job still calculates its partition
+against the selected store. A failed check keeps the cohort in the matrix
+and records the reason without failing the plan.
+*/
 export async function cohortPreFilter(
 	inputs: PlanInputs,
 	plan: Pick<PublishPlan, 'cohorts'>,
@@ -1447,11 +1447,11 @@ interface MeasurableTarget {
 }
 
 /**
- * Measures each surviving target's substitutable NAR size by invoking
- * `cupboard plan measure` once per target against the selected build store. If
- * any measurement fails, returns an empty map; the planner retains the cohorts
- * from the manifest and succeeds.
- */
+Measures each surviving target's substitutable NAR size by invoking
+`cupboard plan measure` once per target against the selected build store. If
+any measurement fails, returns an empty map; the planner retains the cohorts
+from the manifest and succeeds.
+*/
 export function packingMeasurer(
 	inputs: PlanInputs,
 	reporter: Reporter,

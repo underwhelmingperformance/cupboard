@@ -124,9 +124,9 @@ const jwtAlgorithm = authJwtAlgorithm;
 const clockToleranceSeconds = accessJwtClockToleranceSeconds;
 
 /**
- * Keeps the outgoing key live through the longest access-token lifetime,
- * verifier clock tolerance, and retirement margin.
- */
+Keeps the outgoing key live through the longest access-token lifetime,
+verifier clock tolerance, and retirement margin.
+*/
 export function scheduledAccessKeyRetireAt(rotatedAt: Date): IsoTimestamp {
 	const retireAt = new Date(
 		rotatedAt.getTime() +

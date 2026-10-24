@@ -37,11 +37,11 @@ export interface PublicationSelection {
 }
 
 /**
- * Selects realised outputs for publication. Observed builds are published.
- * Under `leave`, other outputs are excluded only when external consumers can
- * obtain their complete matching closure under the configured signature policy.
- * Tenant caches and reuse views do not establish external availability.
- */
+Selects realised outputs for publication. Observed builds are published.
+Under `leave`, other outputs are excluded only when external consumers can
+obtain their complete matching closure under the configured signature policy.
+Tenant caches and reuse views do not establish external availability.
+*/
 export async function selectPublicationPaths(
 	candidates: readonly PublicationCandidate[],
 	options: PublicationSelectionOptions
@@ -98,7 +98,7 @@ export async function selectPublicationPaths(
 		options.signal?.throwIfAborted();
 		return selected();
 	}
-	const accepts = offerAcceptance(settings.signatures, (filePath) => {
+	const doesAccept = offerAcceptance(settings.signatures, (filePath) => {
 		try {
 			return readFileSync(filePath, 'utf8');
 		} catch {
@@ -120,7 +120,7 @@ export async function selectPublicationPaths(
 				const verdict = await store.resolveSubstitutableClosure(
 					candidate.storePath,
 					{
-						accepts,
+						accepts: doesAccept,
 
 						...(options.signal !== undefined && { signal: options.signal })
 					}

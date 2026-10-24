@@ -8,8 +8,8 @@ export interface LocalDevelopmentEnvironment {
 }
 
 /**
- * Whether local development may use a loopback HTTP issuer.
- */
+Whether local development may use a loopback HTTP issuer.
+*/
 export function canUseLoopbackHttp(env: LocalDevelopmentEnvironment): boolean {
 	return env.CUPBOARD_LOCAL_DEV === '1' || env.CUPBOARD_LOCAL_DEV === 'true';
 }

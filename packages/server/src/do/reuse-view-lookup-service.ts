@@ -70,21 +70,21 @@ import {
 } from './subrequest-slice.ts';
 
 /**
- * The most distinct NARs one store path may have among its backed copies
- * before a lookup stops. The probe heads one object for each distinct NAR, so
- * this bounds the R2 requests one path costs; copies that agree share one NAR
- * and cost one head however many caches hold them. A path over the limit is
- * served as a miss without the probe, which its disagreeing copies would make
- * it in any case.
- */
+The most distinct NARs one store path may have among its backed copies
+before a lookup stops. The probe heads one object for each distinct NAR, so
+this bounds the R2 requests one path costs; copies that agree share one NAR
+and cost one head however many caches hold them. A path over the limit is
+served as a miss without the probe, which its disagreeing copies would make
+it in any case.
+*/
 export const reuseDistinctNarLimit = 16;
 
 /**
- * The D1 calls a batch probe makes before its NAR heads: one batch each for
- * the committed edges, the blob metadata and the tenant ownership of its
- * candidates. Each list is bound as one parameter, so the count does not grow
- * with the batch.
- */
+The D1 calls a batch probe makes before its NAR heads: one batch each for
+the committed edges, the blob metadata and the tenant ownership of its
+candidates. Each list is bound as one parameter, so the count does not grow
+with the batch.
+*/
 export const reuseViewProbeD1CallsPerChunk = 3;
 
 type CandidateRow = typeof schema.narInfos.$inferSelect;
@@ -139,18 +139,18 @@ function recordedObjectVersions(
 
 		return blob === undefined
 			? []
-			: [{ narHash: candidate.narHash, incarnation: blob.incarnation }];
+			: { narHash: candidate.narHash, incarnation: blob.incarnation };
 	});
 }
 
 /**
- * One candidate version, as the edge lookup compares it.
- *
- * SQL compares a row list column by column, and a comparison against NULL
- * never matches, so the default cache's absent name uses an empty string
- * and the statement reads the column through `coalesce`. A cache name has at
- * least one character, so no named cache collides with that.
- */
+One candidate version, as the edge lookup compares it.
+
+SQL compares a row list column by column, and a comparison against NULL
+never matches, so the default cache's absent name uses an empty string
+and the statement reads the column through `coalesce`. A cache name has at
+least one character, so no named cache collides with that.
+*/
 interface CandidateVersion {
 	readonly cacheKind: CacheScope['kind'];
 	readonly cacheName: string;
@@ -163,9 +163,9 @@ function listedCacheName(scope: CacheScope): string {
 }
 
 /**
- * How many distinct NARs each path has among `candidates`, which is the number
- * of heads its probe costs.
- */
+How many distinct NARs each path has among `candidates`, which is the number
+of heads its probe costs.
+*/
 function distinctNarCounts(
 	candidates: readonly CandidateRow[]
 ): ReadonlyMap<StorePathHash, number> {
@@ -185,9 +185,9 @@ function distinctNarCounts(
 }
 
 /**
- * The backed candidates without those of any path over
- * `reuseDistinctNarLimit`. Each path over the limit is logged once.
- */
+The backed candidates without those of any path over
+`reuseDistinctNarLimit`. Each path over the limit is logged once.
+*/
 function withinDistinctNarLimit(
 	logger: Logger,
 	view: ReuseViewName,
@@ -237,12 +237,12 @@ function versionKey(version: {
 }
 
 /**
- * Builds the query for the committed reference edges of one list of candidate
- * versions. The versions travel as a row list, so the query binds the same
- * parameters however many caches hold the path.
- *
- * The parameter test imports this builder and inspects the statement it makes.
- */
+Builds the query for the committed reference edges of one list of candidate
+versions. The versions travel as a row list, so the query binds the same
+parameters however many caches hold the path.
+
+The parameter test imports this builder and inspects the statement it makes.
+*/
 export function reuseEdgeSelect(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -297,12 +297,12 @@ export function reuseEdgeSelect(
 }
 
 /**
- * The NAR URL a view's narinfo advertises, relative to the base URL the reader
- * addressed the view with.
- *
- * The NAR remains under the view's stable route. The route resolves the view
- * again and applies the same access check as the narinfo request.
- */
+The NAR URL a view's narinfo advertises, relative to the base URL the reader
+addressed the view with.
+
+The NAR remains under the view's stable route. The route resolves the view
+again and applies the same access check as the narinfo request.
+*/
 function narUrlForView(
 	narHash: NixSha256HashString,
 	incarnation: number
@@ -313,20 +313,20 @@ function narUrlForView(
 }
 
 /**
- * Resolves narinfos through a reuse view. Unlike ordinary narinfo reads, this
- * path enters the Durable Object so it can fence the view revision and local
- * candidate generations. Shared D1 and R2 reads run outside the input gate,
- * followed by a synchronous revalidation under the gate.
- */
+Resolves narinfos through a reuse view. Unlike ordinary narinfo reads, this
+path enters the Durable Object so it can fence the view revision and local
+candidate generations. Shared D1 and R2 reads run outside the input gate,
+followed by a synchronous revalidation under the gate.
+*/
 export class ReuseViewLookupService {
 	constructor(private readonly context: ServerContext) {}
 
 	/**
-	 * The cache a candidate belongs to.
-	 *
-	 * A candidate reached this service through a join on `cache_identity`, so a
-	 * null here means the row refers to no cache and the repository refuses it.
-	 */
+	The cache a candidate belongs to.
+
+	A candidate reached this service through a join on `cache_identity`, so a
+	null here means the row refers to no cache and the repository refuses it.
+	*/
 	private candidateCache(
 		candidate: Pick<CandidateRow, 'cacheId'>
 	): ResolvedCache {
@@ -363,12 +363,12 @@ export class ReuseViewLookupService {
 	}
 
 	/**
-	 * The narinfo rows for paths matching `hashFilter` in every selected cache.
-	 *
-	 * The selectors use one bound list, so a view of any width reads its
-	 * candidates in one statement, and the primary key gives at most one row per
-	 * cache and path.
-	 */
+	The narinfo rows for paths matching `hashFilter` in every selected cache.
+
+	The selectors use one bound list, so a view of any width reads its
+	candidates in one statement, and the primary key gives at most one row per
+	cache and path.
+	*/
 	private candidateRows(
 		selectors: readonly ReuseViewSelector[],
 		access: CacheAccessMode,
@@ -1103,10 +1103,10 @@ export class ReuseViewLookupService {
 	}
 
 	/**
-	 * Builds the authority that decides which stored NARs a push into
-	 * `destination` may reuse. The authority includes the membership of each
-	 * reuse view that the grants cover for `view:content-read`.
-	 */
+	Builds the authority that decides which stored NARs a push into
+	`destination` may reuse. The authority includes the membership of each
+	reuse view that the grants cover for `view:content-read`.
+	*/
 	reuseAuthority(
 		destination: CacheScope,
 		grants: AuthorizationDetails
@@ -1133,12 +1133,12 @@ export class ReuseViewLookupService {
 	}
 
 	/**
-	 * Returns a virtual narinfo when every usable source agrees on the path.
-	 * Unknown views, absent or conflicting candidates, a path with more
-	 * distinct NARs than `reuseDistinctNarLimit`, and concurrent mutations
-	 * return `undefined`. Shared-state failures throw a retryable error instead
-	 * of appearing to be a missing path.
-	 */
+	Returns a virtual narinfo when every usable source agrees on the path.
+	Unknown views, absent or conflicting candidates, a path with more
+	distinct NARs than `reuseDistinctNarLimit`, and concurrent mutations
+	return `undefined`. Shared-state failures throw a retryable error instead
+	of appearing to be a missing path.
+	*/
 	async lookup(
 		logger: Logger,
 		view: ReuseViewName,
@@ -1166,10 +1166,10 @@ export class ReuseViewLookupService {
 	}
 
 	/**
-	 * Renders complete narinfos from one verified view snapshot. A mutation
-	 * invalidates the batch explicitly, so the caller can retry the request.
-	 * Entries render as the caller consumes them to permit a bounded response.
-	 */
+	Renders complete narinfos from one verified view snapshot. A mutation
+	invalidates the batch explicitly, so the caller can retry the request.
+	Entries render as the caller consumes them to permit a bounded response.
+	*/
 	async metadata(
 		logger: Logger,
 		view: ReuseViewName,
@@ -1216,12 +1216,12 @@ export class ReuseViewLookupService {
 	}
 
 	/**
-	 * Deduplicates the requested hashes and returns those without one verified,
-	 * unambiguous candidate. A concurrent view mutation invalidates the complete
-	 * batch rather than mixing revisions. The Worker sends one chunk of a page
-	 * per request, sized so the batch's worst-case heads fit this invocation's
-	 * subrequest slice (`chunked-availability.ts`).
-	 */
+	Deduplicates the requested hashes and returns those without one verified,
+	unambiguous candidate. A concurrent view mutation invalidates the complete
+	batch rather than mixing revisions. The Worker sends one chunk of a page
+	per request, sized so the batch's worst-case heads fit this invocation's
+	subrequest slice (`chunked-availability.ts`).
+	*/
 	async missingStorePathHashes(
 		logger: Logger,
 		view: ReuseViewName,

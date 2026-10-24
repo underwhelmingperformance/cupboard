@@ -63,9 +63,9 @@ export function configureClackUi(): void {
 }
 
 /**
- * Lays out label/value rows with aligned columns, ready for a clack note or box.
- * Labels are dimmed so the values carry the emphasis.
- */
+Lays out label/value rows with aligned columns, ready for a clack note or box.
+Labels are dimmed so the values carry the emphasis.
+*/
 export function formatRows(
 	rows: readonly ResultRow[],
 	colours: Colours = pc,
@@ -148,9 +148,9 @@ const OSC8 = `${String.fromCodePoint(0x1b)}]8;;`;
 const BEL = String.fromCodePoint(0x07);
 
 /**
- * Emits the OSC 8 escape sequence that associates `text` with `url`. Whether
- * the text becomes clickable depends on the terminal's OSC 8 support.
- */
+Emits the OSC 8 escape sequence that associates `text` with `url`. Whether
+the text becomes clickable depends on the terminal's OSC 8 support.
+*/
 export function terminalLink(text: string, url: string): string {
 	return `${OSC8}${url}${BEL}${text}${OSC8}${BEL}`;
 }
@@ -212,19 +212,19 @@ export interface ConfirmOptions {
 	*/
 	readonly detail?: string;
 	/**
-	 * Proceed without asking, whether or not the run can prompt. When this is
-	 * undefined, the `assumeYes` option of `createCliUi` decides. If the effective
-	 * `assumeYes` value is false, an interactive run prompts and a
-	 * non-interactive run throws {@link ConfirmationRequiredError}.
-	 */
+	Proceed without asking, whether or not the run can prompt. When this is
+	undefined, the `assumeYes` option of `createCliUi` decides. If the effective
+	`assumeYes` value is false, an interactive run prompts and a
+	non-interactive run throws {@link ConfirmationRequiredError}.
+	*/
 	readonly assumeYes?: boolean;
 }
 
 /**
- * Thrown when a non-interactive command requires confirmation and `--yes` was
- * not given. The command cannot prompt, so it exits with a message that requires
- * `--yes`.
- */
+Thrown when a non-interactive command requires confirmation and `--yes` was
+not given. The command cannot prompt, so it exits with a message that requires
+`--yes`.
+*/
 export class ConfirmationRequiredError extends Error {
 	constructor(message: string) {
 		super(
@@ -256,17 +256,17 @@ interface TtyStream {
 }
 
 /**
- * Where Clack renders. A TTY, such as stderr, can also show prompts.
- */
+Where Clack renders. A TTY, such as stderr, can also show prompts.
+*/
 type UiStream = Writable & TtyStream;
 
 /**
- * Checks only whether the selected mode and streams can support prompts:
- * terminal mode with TTY stdin and stderr, where prompts render. Stdout does
- * not matter, so a prompt still works while stdout is captured.
- * {@link createCliUi} separately disables prompts when Clack reports a CI
- * environment.
- */
+Checks only whether the selected mode and streams can support prompts:
+terminal mode with TTY stdin and stderr, where prompts render. Stdout does
+not matter, so a prompt still works while stdout is captured.
+{@link createCliUi} separately disables prompts when Clack reports a CI
+environment.
+*/
 export function isInteractive(streams: {
 	readonly mode: ReporterMode;
 	readonly stdin: TtyStream;
@@ -280,14 +280,14 @@ export function isInteractive(streams: {
 }
 
 /**
- * Terminal mode uses Clack. JSON and GitHub modes suppress introductions,
- * conclusions and notes, then use the selected {@link CliUi.reporter}.
- */
+Terminal mode uses Clack. JSON and GitHub modes suppress introductions,
+conclusions and notes, then use the selected {@link CliUi.reporter}.
+*/
 export interface CliUi {
 	/**
-	 * When false, confirmations require `--yes` and the other prompt methods
-	 * return their cancelled or undefined outcome without prompting.
-	 */
+	When false, confirmations require `--yes` and the other prompt methods
+	return their cancelled or undefined outcome without prompting.
+	*/
 	readonly interactive: boolean;
 	intro(title: string): void;
 	outro(message: string): void;
@@ -298,8 +298,8 @@ export interface CliUi {
 	warn(message: string): void;
 	note(title: string, rows: readonly ResultRow[]): void;
 	/**
-	 * Delegates to {@link Reporter.data}; `out` selects the destination.
-	 */
+	Delegates to {@link Reporter.data}; `out` selects the destination.
+	*/
 	data(text: string): void;
 	confirm(options: ConfirmOptions): Promise<ConfirmOutcome>;
 	/**
@@ -317,9 +317,9 @@ export interface CliUi {
 	): Promise<readonly T[] | undefined>;
 	editText(options: TextEditOptions): Promise<TextEdit>;
 	/**
-	 * Ask for a value typed inline after a fixed prefix (a URL the value
-	 * completes, say). There is no default; undefined when cancelled.
-	 */
+	Ask for a value typed inline after a fixed prefix (a URL the value
+	completes, say). There is no default; undefined when cancelled.
+	*/
 	prefixedText(options: PrefixedTextOptions): Promise<string | undefined>;
 	/**
 	Masks the value and returns undefined when cancelled.
@@ -330,48 +330,48 @@ export interface CliUi {
 	): Promise<string | undefined>;
 	openBrowser(url: string): void;
 	/**
-	 * The command's shared reporter: Clack in terminal mode, line-delimited JSON
-	 * in JSON mode, or GitHub rendering in GitHub mode.
-	 */
+	The command's shared reporter: Clack in terminal mode, line-delimited JSON
+	in JSON mode, or GitHub rendering in GitHub mode.
+	*/
 	reporter(): Reporter;
 }
 
 export interface CliUiOptions {
 	readonly mode: ReporterMode;
 	/**
-	 * Formats GitHub error annotations without changing the thrown error.
-	 */
+	Formats GitHub error annotations without changing the thrown error.
+	*/
 	readonly formatError?: ReporterOptions['formatError'];
 	readonly presentation?: PresentationLevel;
 	/**
-	 * Whether to emit ANSI colour (the `--colour`/`--no-colour` flag). Defaults to
-	 * picocolors' own detection over `NO_COLOR`, `FORCE_COLOR` and the TTY.
-	 */
+	Whether to emit ANSI colour (the `--colour`/`--no-colour` flag). Defaults to
+	picocolors' own detection over `NO_COLOR`, `FORCE_COLOR` and the TTY.
+	*/
 	readonly colour?: boolean;
 	readonly assumeYes?: boolean;
 	/**
-	 * Overrides both the stream eligibility from {@link isInteractive} and
-	 * Clack's CI check. Tests use this to exercise prompt-independent paths.
-	 */
+	Overrides both the stream eligibility from {@link isInteractive} and
+	Clack's CI check. Tests use this to exercise prompt-independent paths.
+	*/
 	readonly interactive?: boolean;
 	/**
-	 * Destination for everything but data: Clack's UI and prompts, JSON events
-	 * and GitHub rendering. Defaults to stderr.
-	 */
+	Destination for everything but data: Clack's UI and prompts, JSON events
+	and GitHub rendering. Defaults to stderr.
+	*/
 	readonly stream?: UiStream;
 	/**
-	 * Destination for data, so it can be captured alone. Defaults to stdout.
-	 */
+	Destination for data, so it can be captured alone. Defaults to stdout.
+	*/
 	readonly out?: NodeJS.WritableStream;
 	/**
-	 * A path to which every mode appends one JSONL event per result (the CLI's
-	 * `--result-file`).
-	 */
+	A path to which every mode appends one JSONL event per result (the CLI's
+	`--result-file`).
+	*/
 	readonly resultFile?: string;
 	/**
-	 * Aborts the active spinner, bar or task so an interrupted command (Ctrl-C)
-	 * renders it as cancelled.
-	 */
+	Aborts the active spinner, bar or task so an interrupted command (Ctrl-C)
+	renders it as cancelled.
+	*/
 	readonly signal?: AbortSignal;
 }
 
@@ -645,7 +645,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 			const answer = await password({
 				message,
 				output,
-				validate: (value) => problem(value ?? '')
+				validate: (value = '') => problem(value)
 			});
 
 			return isCancel(answer) ? undefined : answer;
@@ -731,11 +731,11 @@ interface UnitNotes {
 }
 
 /**
- * Clack has one live region, so spinners and progress bars buffer warnings until
- * their animation ends. A task log can show a warning inside its live region;
- * the warning is still repeated after the task closes so clearing or collapsing
- * the task cannot hide it.
- */
+Clack has one live region, so spinners and progress bars buffer warnings until
+their animation ends. A task log can show a warning inside its live region;
+the warning is still repeated after the task closes so clearing or collapsing
+the task cannot hide it.
+*/
 function unitNotes(
 	output: Writable,
 	live?: (message: string) => void

@@ -187,9 +187,9 @@ export type CacheName = z.infer<typeof cacheNameSchema>;
 export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
 
 /**
- * Which cache something refers to. The default cache has no name, so it is a
- * variant of its own rather than a reserved name.
- */
+Which cache something refers to. The default cache has no name, so it is a
+variant of its own rather than a reserved name.
+*/
 export const cacheScopeSchema = z.discriminatedUnion('kind', [
 	z.strictObject({ kind: z.literal('default') }),
 	z.strictObject({ kind: z.literal('named'), name: cacheNameSchema })
@@ -197,8 +197,8 @@ export const cacheScopeSchema = z.discriminatedUnion('kind', [
 export type CacheScope = z.output<typeof cacheScopeSchema>;
 
 /**
- * Whether two scopes refer to the same cache.
- */
+Whether two scopes refer to the same cache.
+*/
 export function isSameCacheScope(left: CacheScope, right: CacheScope): boolean {
 	if (left.kind !== right.kind) {
 		return false;
@@ -259,9 +259,9 @@ export const cacheGenerationSchema = z
 export type CacheGeneration = z.infer<typeof cacheGenerationSchema>;
 
 /**
- * The generation of a cache that has never been deleted, and the one a reader
- * assumes for a cache with no lifecycle row.
- */
+The generation of a cache that has never been deleted, and the one a reader
+assumes for a cache with no lifecycle row.
+*/
 export const firstCacheGeneration = cacheGenerationSchema.parse(1);
 
 // The read revision of one cache: a counter that changes when the cache's read
@@ -282,11 +282,11 @@ export const referencesSchema = z
 	.max(referencesMaxLength);
 
 /**
- * A narinfo's references read back from the row that holds them. It has no
- * maximum: rows written under an earlier `referencesMaxLength` cannot be
- * revalidated, so a read that enforced the bound would refuse a narinfo the
- * server itself accepted. Ingest applies the bound through `referencesSchema`.
- */
+A narinfo's references read back from the row that holds them. It has no
+maximum: rows written under an earlier `referencesMaxLength` cannot be
+revalidated, so a read that enforced the bound would refuse a narinfo the
+server itself accepted. Ingest applies the bound through `referencesSchema`.
+*/
 export const storedReferencesSchema = z.array(storePathBasenameSchema);
 
 // A single free-form narinfo metadata line (`Deriver`, `CA`): bounded and free

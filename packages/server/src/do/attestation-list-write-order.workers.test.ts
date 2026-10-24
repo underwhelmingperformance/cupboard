@@ -47,10 +47,10 @@ async function settled(pending: Promise<unknown>): Promise<void> {
 }
 
 /**
- * An {@link R2Bucket} that pauses the first put of `stalledKey` until the caller
- * invokes `release`. This models a publication that continues after the
- * caller's deadline expires.
- */
+An {@link R2Bucket} that pauses the first put of `stalledKey` until the caller
+invokes `release`. This models a publication that continues after the
+caller's deadline expires.
+*/
 function stallingBucket(
 	target: R2Bucket,
 	stalledKey: string

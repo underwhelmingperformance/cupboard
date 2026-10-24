@@ -189,9 +189,9 @@ async function trustedControlIdentity(
 		readonly claims?: Readonly<Record<string, unknown>>;
 		readonly issuedAt?: number;
 		/**
-		 * False for a token without the default nonce for the deployment URL. A
-		 * token whose audience is the deployment URL never has it.
-		 */
+		False for a token without the default nonce for the deployment URL. A
+		token whose audience is the deployment URL never has it.
+		*/
 		readonly isNonceBound?: boolean;
 	} = {}
 ): Promise<TrustedControlIdentity> {
@@ -354,10 +354,10 @@ async function revocationOutcome(
 	};
 }
 
-function memberIdOf(refreshToken: string | undefined): string {
+function memberIdOf(refreshToken: string | undefined = ''): string {
 	const [memberId] = z
 		.tuple([z.uuid(), z.string(), z.string(), z.string()])
-		.parse((refreshToken ?? '').split('.'));
+		.parse(refreshToken.split('.'));
 
 	return memberId;
 }

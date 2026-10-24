@@ -5,9 +5,9 @@ import { TokenRateLimitedError } from '../errors.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 
 /**
- * The surface of a token, signup or revocation request. Each surface has its
- * own budget for each client.
- */
+The surface of a token, signup or revocation request. Each surface has its
+own budget for each client.
+*/
 export type TokenRequestSurface =
 	| { readonly kind: 'control' }
 	| { readonly kind: 'tenant'; readonly tenant: string };
@@ -62,9 +62,9 @@ function ipv6Groups(address: string): readonly number[] | undefined {
 }
 
 /**
- * Refuses the request when its client has spent the budget for its surface.
- * The request body is not read.
- */
+Refuses the request when its client has spent the budget for its surface.
+The request body is not read.
+*/
 export async function limitTokenRequests(
 	context: Context<WorkerHonoEnv>,
 	surface: TokenRequestSurface,

@@ -30,8 +30,8 @@ import {
 } from '../test-support.ts';
 
 /**
- * Removes the fixture tenant's view if it exists.
- */
+Removes the fixture tenant's view if it exists.
+*/
 export async function removeView(name = 'reuse'): Promise<void> {
 	const token = await initialiseViaWorker();
 	const response = await authorisedWorkerFetch(
@@ -44,8 +44,8 @@ export async function removeView(name = 'reuse'): Promise<void> {
 }
 
 /**
- * Defines or replaces one of the fixture tenant's views through the admin API.
- */
+Defines or replaces one of the fixture tenant's views through the admin API.
+*/
 export async function setView(
 	selectors: readonly ReuseViewSelectorInput[],
 	name = 'reuse',
@@ -73,10 +73,10 @@ export function lookupPath(storePathHash: string, view = 'reuse'): string {
 }
 
 /**
- * Commits a verifiable path into a named cache of the fixture tenant through
- * the Worker, so the row lands in the Durable Object the read path serves
- * from.
- */
+Commits a verifiable path into a named cache of the fixture tenant through
+the Worker, so the row lands in the Durable Object the read path serves
+from.
+*/
 export async function committedPath(
 	seed: string,
 	cache: CacheScope,
@@ -104,9 +104,9 @@ export async function committedPath(
 }
 
 /**
- * Inserts a narinfo row with no committed D1 edge behind it, indistinguishable
- * in the local table from a generation an in-flight commit has reserved.
- */
+Inserts a narinfo row with no committed D1 edge behind it, indistinguishable
+in the local table from a generation an in-flight commit has reserved.
+*/
 export async function insertUnbackedRow(
 	cache: CacheScope,
 	storePathHash: string,
@@ -134,11 +134,11 @@ export async function insertUnbackedRow(
 }
 
 /**
- * Publishes the same path to another cache: the committed row copied unchanged
- * except for its cache, with a committed edge of its own. Several of these are
- * the shape of one store path published by many branches of a CI setup, whose
- * copies agree and whose narinfo a view should serve.
- */
+Publishes the same path to another cache: the committed row copied unchanged
+except for its cache, with a committed edge of its own. Several of these are
+the shape of one store path published by many branches of a CI setup, whose
+copies agree and whose narinfo a view should serve.
+*/
 export async function insertAgreeingCopy(
 	cache: CacheScope,
 	committedStorePathHash: string,
@@ -185,10 +185,10 @@ export async function insertAgreeingCopy(
 }
 
 /**
- * Inserts a narinfo row for `storePathHash` in `cache` and a matching D1 blob
- * reference. Both records refer to the NAR for `committedStorePathHash`, so
- * lookup tests can distinguish selector filtering from missing backing data.
- */
+Inserts a narinfo row for `storePathHash` in `cache` and a matching D1 blob
+reference. Both records refer to the NAR for `committedStorePathHash`, so
+lookup tests can distinguish selector filtering from missing backing data.
+*/
 export async function insertBackedRow(
 	cache: CacheScope,
 	storePathHash: string,

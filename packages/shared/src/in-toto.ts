@@ -6,20 +6,20 @@ const inTotoStatementType = 'https://in-toto.io/Statement/v1';
 const sha256HexPattern = /^[0-9a-f]{64}$/;
 
 /**
- * Default leaf schemas accept a lowercase hexadecimal SHA-256 digest and any
- * predicate type. Consumers can supply branded or narrower schemas instead.
- */
+Default leaf schemas accept a lowercase hexadecimal SHA-256 digest and any
+predicate type. Consumers can supply branded or narrower schemas instead.
+*/
 export const defaultInTotoLeaves = {
 	sha256: z.string().regex(sha256HexPattern),
 	predicateType: z.string()
 };
 
 /**
- * Creates an in-toto Statement schema from the supplied leaf schemas. This
- * function requires the Statement `_type` and at least one subject. The caller
- * supplies the schemas for subject digests and predicate types. The predicate
- * remains unvalidated for the caller to interpret.
- */
+Creates an in-toto Statement schema from the supplied leaf schemas. This
+function requires the Statement `_type` and at least one subject. The caller
+supplies the schemas for subject digests and predicate types. The predicate
+remains unvalidated for the caller to interpret.
+*/
 export function inTotoStatementSchema<
 	Sha256 extends z.ZodType<string>,
 	PredicateType extends z.ZodType<string>
@@ -64,10 +64,10 @@ export class DsseDecodeError extends Error {
 const defaultStatementSchema = inTotoStatementSchema(defaultInTotoLeaves);
 
 /**
- * Decodes and validates an in-toto Statement from a DSSE payload. Returns the
- * predicate type, each subject's SHA-256 digest, and the unvalidated predicate.
- * Throws {@link InTotoStatementError} if the payload is not a valid Statement.
- */
+Decodes and validates an in-toto Statement from a DSSE payload. Returns the
+predicate type, each subject's SHA-256 digest, and the unvalidated predicate.
+Throws {@link InTotoStatementError} if the payload is not a valid Statement.
+*/
 export function parseInTotoStatement(payload: Uint8Array): InTotoStatement {
 	let statement: z.infer<typeof defaultStatementSchema>;
 
@@ -89,11 +89,11 @@ export function parseInTotoStatement(payload: Uint8Array): InTotoStatement {
 }
 
 /**
- * Decodes a Sigstore DSSE bundle and validates its in-toto Statement with
- * `statementSchema`. Returns both parsed values so the caller can verify the
- * bundle. Throws {@link DsseDecodeError} if the bytes do not contain a valid
- * DSSE bundle and Statement.
- */
+Decodes a Sigstore DSSE bundle and validates its in-toto Statement with
+`statementSchema`. Returns both parsed values so the caller can verify the
+bundle. Throws {@link DsseDecodeError} if the bytes do not contain a valid
+DSSE bundle and Statement.
+*/
 export function decodeDsseStatement<Statement>(
 	bytes: Uint8Array,
 	statementSchema: z.ZodType<Statement>

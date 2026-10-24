@@ -21,13 +21,13 @@ interface CompressedNarFixture {
 }
 
 /**
- * A 24 MiB NAR, compressed in the CLI's format (concatenated independent zstd
- * frames with content checksums) but with one frame per MiB, not one per
- * 16 MiB. workerd's zstd compressor fails once its output exceeds about 40 KiB,
- * so the verifier's workers tests receive this fixture as a binding. Most of
- * each frame is pseudo-random and does not compress, so the compressed object
- * is about 21 MiB and frame boundaries fall inside ranged reads.
- */
+A 24 MiB NAR, compressed in the CLI's format (concatenated independent zstd
+frames with content checksums) but with one frame per MiB, not one per
+16 MiB. workerd's zstd compressor fails once its output exceeds about 40 KiB,
+so the verifier's workers tests receive this fixture as a binding. Most of
+each frame is pseudo-random and does not compress, so the compressed object
+is about 21 MiB and frame boundaries fall inside ranged reads.
+*/
 function compressedNarFixture(): CompressedNarFixture {
 	const frameCount = 24;
 	const nar = new Uint8Array(frameCount * mebibyte);

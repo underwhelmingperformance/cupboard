@@ -1,10 +1,10 @@
 import process from 'node:process';
 
 /**
- * Whether this process runs inside a GitHub Actions job, per the environment
- * contract GitHub documents: `GITHUB_ACTIONS` is `'true'` on a runner.
- * https://docs.github.com/actions/reference/variables-reference
- */
+Whether this process runs inside a GitHub Actions job, per the environment
+contract GitHub documents: `GITHUB_ACTIONS` is `'true'` on a runner.
+https://docs.github.com/actions/reference/variables-reference
+*/
 export function isGithubActions(
 	environment: Readonly<Record<string, string | undefined>> = process.env
 ): boolean {
@@ -30,11 +30,11 @@ export interface WorkflowCommands {
 	group(title: string): void;
 	endGroup(): void;
 	/**
-	 * Registers `value` as a run secret. GitHub Actions replaces every later
-	 * occurrence of it in the log with `***`, so call this before the value can
-	 * reach any output. Outside Actions nothing reads the command and printing
-	 * the value would disclose it, so this writes nothing.
-	 */
+	Registers `value` as a run secret. GitHub Actions replaces every later
+	occurrence of it in the log with `***`, so call this before the value can
+	reach any output. Outside Actions nothing reads the command and printing
+	the value would disclose it, so this writes nothing.
+	*/
 	addMask(value: string): void;
 }
 
@@ -53,11 +53,11 @@ function escapeData(message: string): string {
 }
 
 /**
- * Builds the workflow-command emitters over the given streams. `workflow` and
- * `plain` select their respective rendering explicitly. `auto` uses workflow
- * syntax under GitHub Actions and plain messages elsewhere. Plain errors go to
- * stderr; all other output goes to stdout.
- */
+Builds the workflow-command emitters over the given streams. `workflow` and
+`plain` select their respective rendering explicitly. `auto` uses workflow
+syntax under GitHub Actions and plain messages elsewhere. Plain errors go to
+stderr; all other output goes to stdout.
+*/
 export function workflowCommands(
 	streams: WorkflowCommandStreams = {}
 ): WorkflowCommands {

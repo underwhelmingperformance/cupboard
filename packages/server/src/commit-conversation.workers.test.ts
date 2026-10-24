@@ -18,6 +18,10 @@ function openConversation() {
 	const server = pair[1];
 	server.accept();
 	const conversation = commitSessionFromResponse(
+		// Workers permits 101 for WebSocket upgrades; Fetch still excludes it.
+		// https://developers.cloudflare.com/workers/runtime-apis/websockets/
+		// https://github.com/whatwg/fetch/issues/1759
+		// eslint-disable-next-line unicorn/no-invalid-response-options
 		new Response(undefined, { status: 101, webSocket: pair[0] })
 	);
 	const closed = new Promise<void>((resolve) => {

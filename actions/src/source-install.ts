@@ -270,19 +270,19 @@ async function assertCheckout(
 }
 
 /**
- * Verify the checkout's repository and commit, and reject tracked changes,
- * before Nix reads the source. The build must return one output containing the
- * CLI and its hook relay, and the CLI version must match the resolved commit.
- *
- * Keep the successful out-link as a GC root. If validation fails after the
- * root is created, remove only the directory created for this acquisition.
- */
+Verify the checkout's repository and commit, and reject tracked changes,
+before Nix reads the source. The build must return one output containing the
+CLI and its hook relay, and the CLI version must match the resolved commit.
+
+Keep the successful out-link as a GC root. If validation fails after the
+root is created, remove only the directory created for this acquisition.
+*/
 export async function acquireSourceCupboard(
 	options: AcquireSourceCupboardOptions,
 	dependencies: SourceInstallDependencies = {}
 ): Promise<AcquiredSourceCupboard> {
 	const runCommand = dependencies.runCommand ?? defaultSourceCommandRunner;
-	const inspectExecutable = dependencies.isExecutableFile ?? isExecutableFile;
+	const canExecute = dependencies.isExecutableFile ?? isExecutableFile;
 	const createRoot = dependencies.createRootDirectory ?? createRootDirectory;
 	const removeRoot = dependencies.removeRootDirectory ?? removeRootDirectory;
 	const checkoutDirectory = path.resolve(options.checkoutDirectory);
@@ -323,7 +323,7 @@ export async function acquireSourceCupboard(
 		];
 
 		for (const executable of requiredExecutables) {
-			if (!(await inspectExecutable(executable))) {
+			if (!(await canExecute(executable))) {
 				throw new SourceInstallationIncompleteError(executable);
 			}
 		}

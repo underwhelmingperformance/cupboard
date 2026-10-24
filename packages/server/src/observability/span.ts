@@ -5,10 +5,10 @@ export type SpanAttributes = Readonly<
 >;
 
 /**
- * Runs `body` inside a Cloudflare custom span beneath the active automatic span.
- * Undefined attributes are omitted. The callback still runs when tracing does
- * not record the span.
- */
+Runs `body` inside a Cloudflare custom span beneath the active automatic span.
+Undefined attributes are omitted. The callback still runs when tracing does
+not record the span.
+*/
 export function withSpan<T>(
 	name: string,
 	attributes: SpanAttributes,

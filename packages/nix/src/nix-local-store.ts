@@ -40,9 +40,9 @@ export interface NixStoreDatabase {
 	*/
 	validPaths(storePaths: readonly string[]): readonly string[];
 	/**
-	 * Returns registered output paths for the given derivations, deduplicated and
-	 * sorted.
-	 */
+	Returns registered output paths for the given derivations, deduplicated and
+	sorted.
+	*/
 	derivationOutputs(drvPaths: readonly string[]): readonly string[];
 	close(): void;
 }
@@ -97,15 +97,15 @@ export interface NixStoreRow {
 export interface NixLocalStoreOptions {
 	readonly storeDirectory?: StoreDirectory;
 	/**
-	 * Reads derivations from this physical store directory. A rooted store retains
-	 * its logical store paths while placing their contents below the root.
-	 */
+	Reads derivations from this physical store directory. A rooted store retains
+	its logical store paths while placing their contents below the root.
+	*/
 	readonly realStoreDirectory?: string;
 	readonly readStoreFile?: ReadStoreFile;
 	/**
-	 * Queries configured substituters. Without this dependency, operations that
-	 * require substituter availability are unsupported.
-	 */
+	Queries configured substituters. Without this dependency, operations that
+	require substituter availability are unsupported.
+	*/
 	readonly substituters?: SubstituterClient;
 	/**
 	Aborts a missing-path traversal between levels with the signal's reason.
@@ -118,11 +118,11 @@ export interface NixLocalStoreOptions {
 }
 
 /**
- * Reads path validity and metadata directly from the local store database, as
- * Nix's `LocalStore` does. Closure and path queries therefore work without a
- * running daemon. When configured with substituter queries, the client also
- * performs the availability operations that libstore handles in-process.
- */
+Reads path validity and metadata directly from the local store database, as
+Nix's `LocalStore` does. Closure and path queries therefore work without a
+running daemon. When configured with substituter queries, the client also
+performs the availability operations that libstore handles in-process.
+*/
 export class NixLocalStoreClient implements NixStoreClient {
 	private readonly storeDirectory: StoreDirectory;
 
@@ -376,10 +376,10 @@ const queryReferencesSql =
 const placeholderBatchSize = 500;
 
 /**
- * Open the local store database read-only. The shipped binary embeds a Node
- * runtime with `node:sqlite`, loaded here so a daemon-backed run never loads it
- * and never prints its experimental-feature warning.
- */
+Open the local store database read-only. The shipped binary embeds a Node
+runtime with `node:sqlite`, loaded here so a daemon-backed run never loads it
+and never prints its experimental-feature warning.
+*/
 export function openLocalStoreDatabase(
 	stateDirectory: string
 ): NixStoreDatabase {

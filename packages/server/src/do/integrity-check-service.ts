@@ -36,9 +36,9 @@ import { jsonValueList, jsonValueLists } from './json-list.ts';
 import { hasSubrequestsFor } from './subrequest-slice.ts';
 
 /**
- * The last row checked by the previous pass. The next pass resumes after it.
- * Cache `0` and an empty hash start a new scan.
- */
+The last row checked by the previous pass. The next pass resumes after it.
+Cache `0` and an empty hash start a new scan.
+*/
 export interface CheckCursor {
 	readonly cache: number;
 	readonly storePathHash: string;
@@ -192,11 +192,11 @@ export class IntegrityCheckService {
 	}
 
 	/**
-	 * Checks narinfo rows in (cache, store path hash) order after the cursor.
-	 * When another row exists or the subrequest slice ends, the report's cursor
-	 * identifies the last checked row. Pass that cursor back until it is empty
-	 * to check every path.
-	 */
+	Checks narinfo rows in (cache, store path hash) order after the cursor.
+	When another row exists or the subrequest slice ends, the report's cursor
+	identifies the last checked row. Pass that cursor back until it is empty
+	to check every path.
+	*/
 	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReportInput> {
 		const isResuming = cursor.cache !== 0 || cursor.storePathHash !== '';
 		const page = this.context.db

@@ -55,15 +55,15 @@ export class CloudflareTokenResponseMalformedError extends CloudflareTokenRespon
 }
 
 /**
- * Cupboard's public OAuth client, registered on Cloudflare. A public client
- * has no secret; PKCE binds the authorization code flow instead.
- */
+Cupboard's public OAuth client, registered on Cloudflare. A public client
+has no secret; PKCE binds the authorization code flow instead.
+*/
 export const cloudflareOauthClientId = '6c915db1f16ece47255821ee6ca1d538';
 
 /**
- * The issuer of the Cloudflare login. `cupboard init` and `cupboard login` use
- * it for the admin's identity unless `--oidc-issuer` specifies another.
- */
+The issuer of the Cloudflare login. `cupboard init` and `cupboard login` use
+it for the admin's identity unless `--oidc-issuer` specifies another.
+*/
 export const cloudflareDashIssuer = 'https://dash.cloudflare.com';
 
 const authorizationEndpoint = 'https://dash.cloudflare.com/oauth2/auth';
@@ -83,12 +83,12 @@ export const cloudflareLoopback = {
 } as const;
 
 /**
- * The scopes that a deploy's login requests: what the deploy pipeline needs, as
- * registered on the OAuth client (scope ids correspond to Cloudflare API token
- * permission names), plus `offline_access` so the grant includes a refresh
- * token and repeat deploys do not reopen the browser, and `openid` so the
- * grant includes the deployer's identity in an ID token.
- */
+The scopes that a deploy's login requests: what the deploy pipeline needs, as
+registered on the OAuth client (scope ids correspond to Cloudflare API token
+permission names), plus `offline_access` so the grant includes a refresh
+token and repeat deploys do not reopen the browser, and `openid` so the
+grant includes the deployer's identity in an ID token.
+*/
 export const deployScopes: readonly string[] = [
 	'account-settings.write',
 	'd1.write',
@@ -103,11 +103,11 @@ export const deployScopes: readonly string[] = [
 ];
 
 /**
- * The scopes of a sign-in that only needs an ID token. Cloudflare refuses a
- * request for `openid` alone at the consent step, so this is the deploy's set
- * without `offline_access`. Without that scope, Cloudflare issues no refresh
- * token.
- */
+The scopes of a sign-in that only needs an ID token. Cloudflare refuses a
+request for `openid` alone at the consent step, so this is the deploy's set
+without `offline_access`. Without that scope, Cloudflare issues no refresh
+token.
+*/
 export const signInScopes: readonly string[] = deployScopes.filter(
 	(scope) => scope !== 'offline_access'
 );
@@ -126,10 +126,10 @@ export interface CloudflareGrant {
 	*/
 	readonly subject: string | undefined;
 	/**
-	 * The raw id_token. Only the token from a browser login can be presented to
-	 * a cupboard server: a refreshed one repeats the nonce of the original
-	 * login.
-	 */
+	The raw id_token. Only the token from a browser login can be presented to
+	a cupboard server: a refreshed one repeats the nonce of the original
+	login.
+	*/
 	readonly idToken: string | undefined;
 }
 
@@ -171,10 +171,10 @@ function jwtSubject(idToken: string): string | undefined {
 }
 
 /**
- * The token's `exp` in epoch milliseconds, or undefined when the token does
- * not parse or has no `exp`. The claim is unverified here: it only decides
- * whether a cached access token needs renewing. The server verifies the token.
- */
+The token's `exp` in epoch milliseconds, or undefined when the token does
+not parse or has no `exp`. The claim is unverified here: it only decides
+whether a cached access token needs renewing. The server verifies the token.
+*/
 export function jwtExpiryMs(token: string): number | undefined {
 	const parsed = idTokenExpirySchema.safeParse(decodeJwtPayload(token));
 
@@ -182,9 +182,9 @@ export function jwtExpiryMs(token: string): number | undefined {
 }
 
 /**
- * Logs in to Cloudflare as cupboard's OAuth client: PKCE with a loopback
- * redirect on one of the client's registered ports.
- */
+Logs in to Cloudflare as cupboard's OAuth client: PKCE with a loopback
+redirect on one of the client's registered ports.
+*/
 export async function cloudflareLogin(
 	options: CloudflareLoginOptions
 ): Promise<CloudflareGrant> {
@@ -229,11 +229,11 @@ export async function cloudflareLogin(
 }
 
 /**
- * Renews a grant from its refresh token and preserves the subject. Returns
- * `undefined` if the grant has no refresh token or Cloudflare rejects it with
- * `invalid_grant`, which lets the caller start an interactive login. Transport,
- * server, and malformed-response failures propagate to the caller.
- */
+Renews a grant from its refresh token and preserves the subject. Returns
+`undefined` if the grant has no refresh token or Cloudflare rejects it with
+`invalid_grant`, which lets the caller start an interactive login. Transport,
+server, and malformed-response failures propagate to the caller.
+*/
 export async function refreshCloudflareGrant(
 	previous: CloudflareGrant,
 	fetcher: typeof fetch = resilientFetcher('replay-unsafe'),
@@ -268,9 +268,9 @@ export async function refreshCloudflareGrant(
 }
 
 /**
- * Sends Cloudflare a revocation request for a grant's refresh token (RFC 7009).
- * Cupboard is a public client, so the request includes its client ID.
- */
+Sends Cloudflare a revocation request for a grant's refresh token (RFC 7009).
+Cupboard is a public client, so the request includes its client ID.
+*/
 export function revokeCloudflareGrant(
 	grant: CloudflareGrant,
 	fetcher: typeof fetch,

@@ -11,10 +11,10 @@ import { z } from 'zod';
 import { CliError } from '../errors.ts';
 
 /**
- * A bundle declared the build-origin predicate type, but its predicate does not
- * match the statement's schema. `fields` names each failing part of the
- * predicate as a dotted path.
- */
+A bundle declared the build-origin predicate type, but its predicate does not
+match the statement's schema. `fields` names each failing part of the
+predicate as a dotted path.
+*/
 export class BuildOriginStatementInvalidError extends CliError {
 	constructor(
 		public readonly bundle: string,
@@ -29,15 +29,15 @@ export class BuildOriginStatementInvalidError extends CliError {
 }
 
 /**
- * Returns undefined unless the verified bundle declares the build-origin
- * predicate type. A predicate of another type is never parsed as a Cupboard
- * statement.
- *
- * A bundle that declares the type but fails the schema throws
- * {@link BuildOriginStatementInvalidError}. The predicate type claims origin
- * facts, so treating a malformed predicate as absent would report the bundle
- * as verified without validating those facts.
- */
+Returns undefined unless the verified bundle declares the build-origin
+predicate type. A predicate of another type is never parsed as a Cupboard
+statement.
+
+A bundle that declares the type but fails the schema throws
+{@link BuildOriginStatementInvalidError}. The predicate type claims origin
+facts, so treating a malformed predicate as absent would report the bundle
+as verified without validating those facts.
+*/
 export function buildOriginStatement(
 	result: Pick<VerifyResult, 'bundle' | 'predicateType' | 'predicate'>
 ): BuildOriginPredicate | undefined {

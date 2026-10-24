@@ -1,9 +1,9 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig, type ViteUserConfig } from 'vitest/config';
 
 import { compatibilityTests } from './required-tests.ts';
 import RequiredInstallerTestsReporter from './required-tests-reporter.ts';
 
-export default defineConfig({
+export default defineConfig((): ViteUserConfig => ({
 	test: {
 		include: ['tests/installer/compatibility.test.ts'],
 		fileParallelism: false,
@@ -20,4 +20,4 @@ export default defineConfig({
 			new RequiredInstallerTestsReporter(compatibilityTests)
 		]
 	}
-});
+}));

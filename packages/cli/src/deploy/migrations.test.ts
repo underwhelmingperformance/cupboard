@@ -68,11 +68,11 @@ interface RecordedRow {
 }
 
 /**
- * A database whose tracking table holds the given rows. `columns` states which
- * columns the table already has, so a test can start from a tracking table
- * created before digests were recorded. With `hasTable` false, `sqlite_master`
- * lists no tracking table.
- */
+A database whose tracking table holds the given rows. `columns` states which
+columns the table already has, so a test can start from a tracking table
+created before digests were recorded. With `hasTable` false, `sqlite_master`
+lists no tracking table.
+*/
 function fakeApi(
 	rows: readonly RecordedRow[],
 	columns: readonly string[] = [

@@ -37,9 +37,9 @@ export const maxOutgoingConnections = 6;
 export const maxR2DeleteKeys = 1000;
 
 /**
- * Deletes the keys in batches that satisfy R2's per-call limit. Returns without
- * an R2 request when `keys` is empty.
- */
+Deletes the keys in batches that satisfy R2's per-call limit. Returns without
+an R2 request when `keys` is empty.
+*/
 export async function deleteObjects(
 	bucket: Pick<R2Bucket, 'delete'>,
 	keys: readonly R2ObjectKey[]
@@ -55,10 +55,10 @@ export interface ObjectDeletionPageSource {
 }
 
 /**
- * Drains a durable queue one R2 deletion page at a time. Acknowledges each page
- * only after its deletion succeeds and returns the number of confirmed keys.
- * The continuation policy checks the caller's work budget between pages.
- */
+Drains a durable queue one R2 deletion page at a time. Acknowledges each page
+only after its deletion succeeds and returns the number of confirmed keys.
+The continuation policy checks the caller's work budget between pages.
+*/
 export async function drainObjectDeletionPages(
 	bucket: Pick<R2Bucket, 'delete'>,
 	source: ObjectDeletionPageSource,
@@ -90,15 +90,15 @@ interface FittedBatch {
 }
 
 /**
- * Builds a batch for the widest prefix of `items` whose statements each bind at
- * most `maxBoundParameters` parameters.
- *
- * The loop tries each width from all `items` down to one item. It builds and
- * measures one in-memory batch per width, then returns the first batch that
- * fits. The width decreases one step at a time because a builder's statement
- * count need not decrease with the item count. A larger step could skip the
- * only width that fits.
- */
+Builds a batch for the widest prefix of `items` whose statements each bind at
+most `maxBoundParameters` parameters.
+
+The loop tries each width from all `items` down to one item. It builds and
+measures one in-memory batch per width, then returns the first batch that
+fits. The width decreases one step at a time because a builder's statement
+count need not decrease with the item count. A larger step could skip the
+only width that fits.
+*/
 function fittedBatch(
 	items: readonly unknown[],
 	batchFor: (width: number) => readonly InspectableBatchItem[]
@@ -128,13 +128,13 @@ function fittedBatch(
 }
 
 /**
- * Runs the batch produced by `buildBatch` for each chunk of `items`. Returns the
- * processed prefix, allowing the caller to defer the remaining suffix.
- *
- * Each chunk is narrowed until its statements fit the parameter limit. The
- * function dispatches only complete batches and defers when the current
- * subrequest slice cannot fit another D1 call.
- */
+Runs the batch produced by `buildBatch` for each chunk of `items`. Returns the
+processed prefix, allowing the caller to defer the remaining suffix.
+
+Each chunk is narrowed until its statements fit the parameter limit. The
+function dispatches only complete batches and defers when the current
+subrequest slice cannot fit another D1 call.
+*/
 export async function drainStatementBatches<
 	Item,
 	TSchema extends Record<string, unknown>
@@ -163,9 +163,9 @@ export async function drainStatementBatches<
 }
 
 /**
- * Runs `queries` as a single D1 batch, returning an empty array without any D1
- * call when the input is empty.
- */
+Runs `queries` as a single D1 batch, returning an empty array without any D1
+call when the input is empty.
+*/
 export async function batchNonEmpty<
 	U extends BatchItem<'sqlite'>,
 	TSchema extends Record<string, unknown>
@@ -183,10 +183,10 @@ export async function batchNonEmpty<
 }
 
 /**
- * Returns the NAR hashes with a canonical `nar/<narHash>.nar.zst` object. The
- * function bounds the concurrent `head` requests. A crash can leave a
- * `blob_state` row after its object disappears, so servability checks R2.
- */
+Returns the NAR hashes with a canonical `nar/<narHash>.nar.zst` object. The
+function bounds the concurrent `head` requests. A crash can leave a
+`blob_state` row after its object disappears, so servability checks R2.
+*/
 export async function presentNarObjects(
 	blobs: R2Bucket,
 	objects: readonly (

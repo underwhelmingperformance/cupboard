@@ -4,11 +4,11 @@ import { createServer, type Server } from 'node:http';
 import { StatusCodes } from 'http-status-codes';
 
 /**
- * A loopback HTTP server for redirect tests. It responds to each path in
- * `redirects` with a 307 redirect to `/stolen`, to each path in `responses`
- * with the JSON body that the map gives for it, and to any other path with
- * 404. It records the path of every request.
- */
+A loopback HTTP server for redirect tests. It responds to each path in
+`redirects` with a 307 redirect to `/stolen`, to each path in `responses`
+with the JSON body that the map gives for it, and to any other path with
+404. It records the path of every request.
+*/
 export class RedirectingOrigin {
 	static async start(
 		redirects: readonly string[],

@@ -44,7 +44,7 @@ const loopback = {
 const observabilityScope =
 	'workers-observability.write account-settings.read offline_access';
 
-const repoRoot = path.resolve(fileURLToPath(import.meta.url), '..', '..');
+const repositoryRoot = path.resolve(fileURLToPath(import.meta.url), '..', '..');
 
 const pageLimit = 1000;
 const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;
@@ -254,11 +254,11 @@ export interface SpanEvent {
 }
 
 /**
- * A leaf span kind rolled up across an operation. `busyMs` is the wall time the
- * kind occupied: overlapping spans within a call are merged, so concurrent
- * subrequests (634 R2 HEADs at once) count once against the clock rather than
- * summing past the request's own duration.
- */
+A leaf span kind rolled up across an operation. `busyMs` is the wall time the
+kind occupied: overlapping spans within a call are merged, so concurrent
+subrequests (634 R2 HEADs at once) count once against the clock rather than
+summing past the request's own duration.
+*/
 export interface SpanStat {
 	readonly name: string;
 	readonly count: number;
@@ -444,11 +444,11 @@ function normaliseSegment(
 }
 
 /**
- * Collapses a request path's dynamic segments to placeholders so that pushes of
- * different store paths to different tenants share one operation bucket. The
- * path is treated as already URL-encoded, so an encoded root name keeps its
- * slashes inside a single segment.
- */
+Collapses a request path's dynamic segments to placeholders so that pushes of
+different store paths to different tenants share one operation bucket. The
+path is treated as already URL-encoded, so an encoded root name keeps its
+slashes inside a single segment.
+*/
 export function normalisePath(rawPath: string): string {
 	const withoutQuery = rawPath.split('?', 1)[0] ?? rawPath;
 	const parts = withoutQuery.split('/');
@@ -485,11 +485,11 @@ function stripTenantPrefix(requestPath: string): string {
 }
 
 /**
- * Reduces a request URL or path to the operation key that both layers share:
- * the worker's own logs record the inner Durable Object request (no host, no
- * `/t/<tenant>` prefix), while a trace records the outer request. Stripping the
- * scheme, host and tenant prefix lets a trace's timing join the log's row cost.
- */
+Reduces a request URL or path to the operation key that both layers share:
+the worker's own logs record the inner Durable Object request (no host, no
+`/t/<tenant>` prefix), while a trace records the outer request. Stripping the
+scheme, host and tenant prefix lets a trace's timing join the log's row cost.
+*/
 export function canonicalPath(rawPathOrUrl: string): string {
 	return normalisePath(stripTenantPrefix(pathOfUrl(rawPathOrUrl)));
 }
@@ -606,13 +606,9 @@ const spanSchema = z.object({
 export function parseWorkerLog(event: unknown): WorkerLog | undefined {
 	const parsed = eventSchema.safeParse(event);
 
-	if (!parsed.success) {
-		return undefined;
-	}
-
 	// The events view also includes span events. Row accounting uses only Worker
 	// console events with a structured message.
-	if (typeof parsed.data.source !== 'object') {
+	if (!parsed.success || typeof parsed.data.source !== 'object') {
 		return undefined;
 	}
 
@@ -760,10 +756,10 @@ export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 }
 
 /**
- * The most recent run of activity: the window from the start of the trailing
- * cluster (everything not separated from the newest point by a gap longer than
- * `gapMs`) to the newest point. Returns undefined when there is no activity.
- */
+The most recent run of activity: the window from the start of the trailing
+cluster (everything not separated from the newest point by a gap longer than
+`gapMs`) to the newest point. Returns undefined when there is no activity.
+*/
 export function detectSession(
 	timestamps: readonly number[],
 	gapMs: number
@@ -795,11 +791,11 @@ export function detectSession(
 }
 
 /**
- * Whether the timestamps collected so far already contain a gap wider than
- * `gapMs`. A view is walked newest-first, so once such a gap opens every row
- * still to come is older than it: the trailing session is fully bracketed and
- * the walk can stop without paging the rest of the search window.
- */
+Whether the timestamps collected so far already contain a gap wider than
+`gapMs`. A view is walked newest-first, so once such a gap opens every row
+still to come is older than it: the trailing session is fully bracketed and
+the walk can stop without paging the rest of the search window.
+*/
 export function hasSessionBoundary(
 	timestamps: readonly number[],
 	gapMs: number
@@ -849,11 +845,11 @@ interface Bucket {
 }
 
 /**
- * The wall time covered by a set of intervals, overlaps counted once: the
- * intervals are sorted and merged, then their lengths summed. This is how
- * concurrent subrequests of one kind add up to time on the clock rather than to
- * their summed durations.
- */
+The wall time covered by a set of intervals, overlaps counted once: the
+intervals are sorted and merged, then their lengths summed. This is how
+concurrent subrequests of one kind add up to time on the clock rather than to
+their summed durations.
+*/
 export function mergeBusy(
 	intervals: readonly (readonly [number, number])[]
 ): number {
@@ -1125,7 +1121,7 @@ function completeProbeCount(
 		return 'unknown';
 	}
 
-	return values.reduce<number>((sum, value) => sum + (value ?? 0), 0);
+	return values.reduce<number>((sum, value = 0) => sum + value, 0);
 }
 
 function metadataProbeStats(spans: readonly SpanEvent[]): MetadataProbeStat[] {
@@ -1308,10 +1304,10 @@ function dominantCost(op: OperationStat): string {
 }
 
 /**
- * The one-line headline, focused on the push request path (the `fetch` group)
- * when there is one: its costliest operation, how much of the group's time it
- * takes, and whether that time is inside or outside traced leaf spans.
- */
+The one-line headline, focused on the push request path (the `fetch` group)
+when there is one: its costliest operation, how much of the group's time it
+takes, and whether that time is inside or outside traced leaf spans.
+*/
 export function buildVerdict(
 	groups: readonly OperationGroup[],
 	isTracingAvailable: boolean
@@ -1770,9 +1766,12 @@ function isFresh(grant: Grant, now: number): boolean {
 }
 
 async function loadClientId(): Promise<string> {
-	const raw = await readFile(path.join(repoRoot, 'cf_analytics_client_id'), {
-		encoding: 'utf8'
-	});
+	const raw = await readFile(
+		path.join(repositoryRoot, 'cf_analytics_client_id'),
+		{
+			encoding: 'utf8'
+		}
+	);
 	const clientId = raw.trim();
 
 	if (clientId === '') {
@@ -2601,10 +2600,10 @@ export async function fetchTelemetry(
 }
 
 /**
- * Renders the analysis: the result card and per-group notes in terminal mode.
- * JSON mode writes the analysis alone to stdout, apart from the progress
- * events on stderr, so it can be piped or redirected on its own.
- */
+Renders the analysis: the result card and per-group notes in terminal mode.
+JSON mode writes the analysis alone to stdout, apart from the progress
+events on stderr, so it can be piped or redirected on its own.
+*/
 export function renderAnalysis(
 	ui: CliUi,
 	reporter: Reporter,

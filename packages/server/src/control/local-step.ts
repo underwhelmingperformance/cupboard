@@ -35,22 +35,22 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 const wakeConcurrency = 4;
 
 /**
- * The most tenants that one wake message lists.
- */
+The most tenants that one wake message lists.
+*/
 export const localStepWakeBatchSize = 20;
 
 /**
- * A maintenance-queue message that wakes each listed tenant's object.
- */
+A maintenance-queue message that wakes each listed tenant's object.
+*/
 export interface LocalStepWakeMessage {
 	readonly kind: 'local-step';
 	readonly tenants: readonly TenantId[];
 }
 
 /**
- * The pending tenants that a wake sends a message for: those that are stalled
- * or unwoken, in slug order.
- */
+The pending tenants that a wake sends a message for: those that are stalled
+or unwoken, in slug order.
+*/
 export interface LocalStepWakeSelection {
 	readonly required: LocalStep;
 	readonly pending: number;
@@ -58,8 +58,8 @@ export interface LocalStepWakeSelection {
 }
 
 /**
- * Calls one tenant object's `reportLocalStep`.
- */
+Calls one tenant object's `reportLocalStep`.
+*/
 export type ReportLocalStep = (
 	tenant: TenantId,
 	required: LocalStep
@@ -85,11 +85,11 @@ const statusCountsSchema = z.object({
 });
 
 /**
- * The classes of a pending tenant, as `localStepStatusSchema` defines them,
- * for the stall window that starts at `since`. A tenant row matches exactly
- * one class. A row that has an attempt at the outstanding work is working or
- * stalled according to its last progress; a row without one is unwoken.
- */
+The classes of a pending tenant, as `localStepStatusSchema` defines them,
+for the stall window that starts at `since`. A tenant row matches exactly
+one class. A row that has an attempt at the outstanding work is working or
+stalled according to its last progress; a row without one is unwoken.
+*/
 function pendingClasses(since: IsoTimestamp): {
 	readonly working: SQL;
 	readonly stalled: SQL;
@@ -112,9 +112,9 @@ function windowStart(now: Date): IsoTimestamp {
 }
 
 /**
- * Returns the required local step for the recorded transitions, as
- * `requiredLocalStepFrom` defines it.
- */
+Returns the required local step for the recorded transitions, as
+`requiredLocalStepFrom` defines it.
+*/
 export async function requiredLocalStep(env: Env): Promise<LocalStep> {
 	return requiredLocalStepFrom(
 		await readRecordedTransitions(controlDatabase(env))
@@ -122,10 +122,10 @@ export async function requiredLocalStep(env: Env): Promise<LocalStep> {
 }
 
 /**
- * Reports readiness for the required data step and this build's tenant schema.
- * It classifies pending tenants against the stall window before `now`, with
- * counts and samples for each class from one D1 batch.
- */
+Reports readiness for the required data step and this build's tenant schema.
+It classifies pending tenants against the stall window before `now`, with
+counts and samples for each class from one D1 batch.
+*/
 export async function controlLocalStepStatus(
 	env: Env,
 	now: Date = new Date()
@@ -203,10 +203,10 @@ export async function controlLocalStepStatus(
 }
 
 /**
- * Selects the pending tenants to wake: every pending tenant that is not
- * working, measured against the stall window before `now`. One D1 statement
- * reads every pending tenant, so the selection also counts them.
- */
+Selects the pending tenants to wake: every pending tenant that is not
+working, measured against the stall window before `now`. One D1 statement
+reads every pending tenant, so the selection also counts them.
+*/
 export async function selectLocalStepWakes(
 	env: Env,
 	now: Date = new Date()
@@ -232,10 +232,10 @@ export async function selectLocalStepWakes(
 }
 
 /**
- * Enqueues a wake for every pending tenant that is not working, with up to
- * `localStepWakeBatchSize` tenants in each message. `localStep.wake` calls
- * this, and every cron tick enqueues the same selection.
- */
+Enqueues a wake for every pending tenant that is not working, with up to
+`localStepWakeBatchSize` tenants in each message. `localStep.wake` calls
+this, and every cron tick enqueues the same selection.
+*/
 export async function enqueueLocalStepWakes(
 	env: Env,
 	queue: Pick<Queue<LocalStepWakeMessage>, 'sendBatch'> = env.MAINTENANCE_QUEUE
@@ -255,9 +255,9 @@ export async function enqueueLocalStepWakes(
 }
 
 /**
- * The wake messages for `tenants`, each listing up to
- * `localStepWakeBatchSize` of them.
- */
+The wake messages for `tenants`, each listing up to
+`localStepWakeBatchSize` of them.
+*/
 export function localStepWakeMessages(
 	tenants: readonly TenantId[]
 ): LocalStepWakeMessage[] {
@@ -268,18 +268,18 @@ export function localStepWakeMessages(
 }
 
 /**
- * Wakes each listed tenant that is still below the required local step, with
- * `wakeConcurrency` wakes in flight. Each woken object runs a page of its
- * work, continues on its alarm, and writes its own attempts to its tenant row.
- * When a wake rejects, or finds an unconfigured object, this function writes
- * the failure itself, as soon as that wake ends. The write applies only while
- * the tenant is still pending and the row's attempt time is still the one
- * that this function read before the wake, so a failure does not replace an
- * attempt that the object wrote in the meantime.
- *
- * It throws only when D1 cannot be read or written, so the queue delivers
- * the message again.
- */
+Wakes each listed tenant that is still below the required local step, with
+`wakeConcurrency` wakes in flight. Each woken object runs a page of its
+work, continues on its alarm, and writes its own attempts to its tenant row.
+When a wake rejects, or finds an unconfigured object, this function writes
+the failure itself, as soon as that wake ends. The write applies only while
+the tenant is still pending and the row's attempt time is still the one
+that this function read before the wake, so a failure does not replace an
+attempt that the object wrote in the meantime.
+
+It throws only when D1 cannot be read or written, so the queue delivers
+the message again.
+*/
 export async function wakeLocalStepTenants(
 	logger: Logger,
 	env: Env,

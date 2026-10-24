@@ -10,14 +10,14 @@ import { SubrequestSliceExceededError } from '../errors.ts';
 import { wrapDispatchedMethods } from './dispatch-scope.ts';
 
 /**
- * Tracks D1 and R2 binding calls against one dispatch's subrequest allowance.
- *
- * Cloudflare does not expose its live subrequest count. Redirects and other
- * bindings can consume calls that this slice does not record, so admission
- * also leaves a reserve. A maintenance pass checks {@link hasSubrequestsFor}
- * before each unit of work and saves its cursor when the allowance is too low
- * to continue.
- */
+Tracks D1 and R2 binding calls against one dispatch's subrequest allowance.
+
+Cloudflare does not expose its live subrequest count. Redirects and other
+bindings can consume calls that this slice does not record, so admission
+also leaves a reserve. A maintenance pass checks {@link hasSubrequestsFor}
+before each unit of work and saves its cursor when the allowance is too low
+to continue.
+*/
 class SubrequestSlice {
 	private spent = 0;
 	private held = 0;
@@ -58,11 +58,11 @@ class SubrequestSlice {
 const sliceScope = new AsyncLocalStorage<SubrequestSlice>();
 
 /**
- * The part of a slice that {@link hasSubrequestsFor} never admits. Redirects
- * and bindings outside the D1 and R2 wrappers may consume calls that the
- * slice cannot count. The reserve is a chosen margin, not a measured upper
- * bound on those calls.
- */
+The part of a slice that {@link hasSubrequestsFor} never admits. Redirects
+and bindings outside the D1 and R2 wrappers may consume calls that the
+slice cannot count. The reserve is a chosen margin, not a measured upper
+bound on those calls.
+*/
 export const subrequestSliceReserve = subrequestSafetyReserve;
 
 export interface SubrequestSliceOptions {
@@ -77,11 +77,11 @@ export interface SubrequestSliceOptions {
 }
 
 /**
- * Runs `body` under one dispatch's slice of the object's subrequests.
- *
- * A nested call reuses the enclosing slice, so every dispatched method can open
- * one without giving the same pass a second share.
- */
+Runs `body` under one dispatch's slice of the object's subrequests.
+
+A nested call reuses the enclosing slice, so every dispatched method can open
+one without giving the same pass a second share.
+*/
 export function withSubrequestSlice<T>(
 	body: () => T,
 	options: SubrequestSliceOptions = {}
@@ -100,16 +100,16 @@ export function withSubrequestSlice<T>(
 }
 
 /**
- * Whether the current pass can afford `subrequests` more R2 or D1 calls.
- *
- * A pass asks before each unit of work and defers when the answer is no.
- * Reserve the calls that finish the pass by asking for them alongside the
- * unit, so running out partway cannot prevent the work already done from
- * being recorded.
- *
- * Outside a slice nothing is metered and the answer is yes. Worker entrypoints
- * and Durable Object dispatches open slices.
- */
+Whether the current pass can afford `subrequests` more R2 or D1 calls.
+
+A pass asks before each unit of work and defers when the answer is no.
+Reserve the calls that finish the pass by asking for them alongside the
+unit, so running out partway cannot prevent the work already done from
+being recorded.
+
+Outside a slice nothing is metered and the answer is yes. Worker entrypoints
+and Durable Object dispatches open slices.
+*/
 export function hasSubrequestsFor(subrequests: number): boolean {
 	return sliceScope.getStore()?.admits(subrequests) ?? true;
 }
@@ -147,20 +147,20 @@ export async function withHeldSubrequests<T>(
 }
 
 /**
- * Subrequests that a pass sets aside for a call that it will make later.
- * `hasSubrequestsFor` does not admit them for other work. Call `release` just
- * before making the call, or once the call is no longer needed; a second call
- * has no effect.
- */
+Subrequests that a pass sets aside for a call that it will make later.
+`hasSubrequestsFor` does not admit them for other work. Call `release` just
+before making the call, or once the call is no longer needed; a second call
+has no effect.
+*/
 export interface SubrequestHold {
 	release(): void;
 }
 
 /**
- * Sets `subrequests` of the current slice aside until the returned
- * `SubrequestHold` is released. Outside a slice nothing is metered, and
- * releasing the hold has no effect.
- */
+Sets `subrequests` of the current slice aside until the returned
+`SubrequestHold` is released. Outside a slice nothing is metered, and
+releasing the hold has no effect.
+*/
 export function holdSubrequests(subrequests: number): SubrequestHold {
 	const slice = sliceScope.getStore();
 	let isReleased = false;
@@ -179,10 +179,10 @@ export function holdSubrequests(subrequests: number): SubrequestHold {
 }
 
 /**
- * Refuses a unit of work the current slice cannot afford. A caller uses this
- * where the unit was sized by the sender to fit one invocation, so a refusal
- * is a defect in that sizing and not a condition to defer on.
- */
+Refuses a unit of work the current slice cannot afford. A caller uses this
+where the unit was sized by the sender to fit one invocation, so a refusal
+is a defect in that sizing and not a condition to defer on.
+*/
 export function requireSubrequestsFor(
 	subrequests: number,
 	subject: string
@@ -193,11 +193,11 @@ export function requireSubrequestsFor(
 }
 
 /**
- * Records `subrequests` against the current slice. The bounded R2 and D1
- * bindings call this before each call they make; a D1 batch is one call.
- * Durable Object storage is not counted, because the runtime counts no storage
- * operation as a subrequest; the row budget measures that work.
- */
+Records `subrequests` against the current slice. The bounded R2 and D1
+bindings call this before each call they make; a D1 batch is one call.
+Durable Object storage is not counted, because the runtime counts no storage
+operation as a subrequest; the row budget measures that work.
+*/
 export function spendSubrequests(
 	subrequests: number,
 	subject = 'binding call'
@@ -206,9 +206,9 @@ export function spendSubrequests(
 }
 
 /**
- * Wraps every method on `prototype` so each dispatch runs under one slice, and
- * so nested dispatches share it.
- */
+Wraps every method on `prototype` so each dispatch runs under one slice, and
+so nested dispatches share it.
+*/
 export function enterSubrequestSliceOnDispatch<Receiver extends object>(
 	prototype: Receiver,
 	allowanceOf: (receiver: Receiver) => number

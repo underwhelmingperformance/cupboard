@@ -1,9 +1,9 @@
 import { CodedError } from '@cupboard/shared/errors';
 
 /**
- * No candidate runtime directory yields a hook socket path that fits within
- * `sun_path`, so the invocation endpoint cannot be created anywhere.
- */
+No candidate runtime directory yields a hook socket path that fits within
+`sun_path`, so the invocation endpoint cannot be created anywhere.
+*/
 export class SocketPathTooLongError extends CodedError {
 	constructor(
 		public readonly socketPath: string,
@@ -72,11 +72,11 @@ export class BuildEventConnectionClosedError extends Error {
 }
 
 /**
- * The daemon does not trust this client, so it would silently ignore the
- * invocation's `post-build-hook` override. The listener would therefore receive
- * no completed-output events. Refuse the build before it starts;
- * `requiredSetting` is the daemon setting that must list the user.
- */
+The daemon does not trust this client, so it would silently ignore the
+invocation's `post-build-hook` override. The listener would therefore receive
+no completed-output events. Refuse the build before it starts;
+`requiredSetting` is the daemon setting that must list the user.
+*/
 export class UntrustedDaemonError extends CodedError {
 	public readonly requiredSetting = 'trusted-users';
 
@@ -114,10 +114,10 @@ export class RemoteBuildPushStoreError extends CodedError {
 }
 
 /**
- * The effective configuration already sets `post-build-hook`. Nix supports
- * exactly one, so streaming mode refuses; it never silently overrides an
- * operator's hook.
- */
+The effective configuration already sets `post-build-hook`. Nix supports
+exactly one, so streaming mode refuses; it never silently overrides an
+operator's hook.
+*/
 export class PostBuildHookConflictError extends CodedError {
 	constructor(public readonly existingHook: string) {
 		super(
@@ -129,10 +129,10 @@ export class PostBuildHookConflictError extends CodedError {
 }
 
 /**
- * This installation has no compiled hook helper at any expected location, so
- * streaming publication cannot start. `candidates` lists every location that
- * was checked.
- */
+This installation has no compiled hook helper at any expected location, so
+streaming publication cannot start. `candidates` lists every location that
+was checked.
+*/
 export class HookHelperMissingError extends CodedError {
 	constructor(public readonly candidates: readonly string[]) {
 		super(
@@ -144,10 +144,10 @@ export class HookHelperMissingError extends CodedError {
 }
 
 /**
- * A well-formed build event naming an output path outside the selected store
- * directory. Only paths beneath that directory are publication candidates, so
- * the event is refused before anything enters the accepted set.
- */
+A well-formed build event naming an output path outside the selected store
+directory. Only paths beneath that directory are publication candidates, so
+the event is refused before anything enters the accepted set.
+*/
 export class BuildEventOutsideStoreError extends BuildEventRejectedError {
 	constructor(
 		public readonly storePath: string,

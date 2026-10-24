@@ -21,15 +21,15 @@ import { isolatedEnvironment } from '../support/nix.ts';
 import type { Oracle } from './oracle.ts';
 
 /**
- * `nix path-info` reads a narinfo straight from a `file://` cache, which is
- * why the fixtures are served that way: Nix keeps a disk cache of the narinfos
- * it has read from a substituter, and a `file://` store bypasses it, so each
- * case observes the document it just wrote. Reading it needs the `nix-command`
- * feature, which the isolated configuration does not enable.
- *
- * `--json-format 1` pins the parsed response shape so a later format cannot
- * silently change field semantics.
- */
+`nix path-info` reads a narinfo straight from a `file://` cache, which is
+why the fixtures are served that way: Nix keeps a disk cache of the narinfos
+it has read from a substituter, and a `file://` store bypasses it, so each
+case observes the document it just wrote. Reading it needs the `nix-command`
+feature, which the isolated configuration does not enable.
+
+`--json-format 1` pins the parsed response shape so a later format cannot
+silently change field semantics.
+*/
 export function pathInfoArguments(
 	directory: string,
 	storePath: StorePathString
@@ -67,9 +67,9 @@ const fixtureSignature =
 	'cHVycG9zZXMtb25seS1wYWRkaW5nLXh4eHh4eHh4eHh4eHh4eHg=';
 
 /**
- * A valid narinfo used as the base for every fixture. Fields follow cache
- * output order, and each fixture specifies only its changes.
- */
+A valid narinfo used as the base for every fixture. Fields follow cache
+output order, and each fixture specifies only its changes.
+*/
 const wellFormedFields: readonly (readonly [string, string])[] = [
 	['StorePath', fixtureStorePath],
 	['URL', 'nar/example.nar.xz'],
@@ -85,9 +85,9 @@ const wellFormedFields: readonly (readonly [string, string])[] = [
 
 export interface NarinfoFixture {
 	/**
-	 * Values replacing the well-formed document's, keyed by field name.
-	 * `undefined` drops the field.
-	 */
+	Values replacing the well-formed document's, keyed by field name.
+	`undefined` drops the field.
+	*/
 	readonly fields?: Readonly<Record<string, string | undefined>>;
 	/**
 	Whole lines added after the document, for a field written twice.
@@ -113,7 +113,7 @@ export function narinfoDocument(fixture: NarinfoFixture): string {
 			? changed[name]
 			: wellFormedValues.get(name);
 
-		return value === undefined ? [] : [`${name}: ${value}`];
+		return value === undefined ? [] : `${name}: ${value}`;
 	});
 
 	const document = [...lines, ...(fixture.extraLines ?? [])].join('\n');
@@ -174,9 +174,9 @@ export class InvalidPathInfoError extends Error {
 }
 
 /**
- * Parses the `nix path-info` result for the path. Nix prints a null entry and
- * exits zero when no substituter has the path, so absence is a normal result.
- */
+Parses the `nix path-info` result for the path. Nix prints a null entry and
+exits zero when no substituter has the path, so absence is a normal result.
+*/
 export function oracleOffer(
 	output: string,
 	storePath: StorePathString
@@ -234,9 +234,9 @@ export interface ClientAnswer {
 }
 
 /**
- * Opens the directory as the client's only substituter and queries the fixture
- * path using the store URI parameters configured for both sides.
- */
+Opens the directory as the client's only substituter and queries the fixture
+path using the store URI parameters configured for both sides.
+*/
 export async function askClient(
 	directory: string,
 	parameters = ''
@@ -358,11 +358,11 @@ function oracleVerdictOf(
 }
 
 /**
- * Reports whether our client accepts a document rejected by the oracle. Our
- * client targets the stricter behaviour of Nix master, so rejecting an extra
- * document is allowed. Accepting a document rejected by the oracle is a
- * conformance failure because Nix would decline to fetch that path.
- */
+Reports whether our client accepts a document rejected by the oracle. Our
+client targets the stricter behaviour of Nix master, so rejecting an extra
+document is allowed. Accepting a document rejected by the oracle is a
+conformance failure because Nix would decline to fetch that path.
+*/
 export function looserThanOracle(outcome: NarinfoOutcome): readonly string[] {
 	return outcome.oracle === 'rejected' && outcome.client !== 'rejected'
 		? [`our client reported ${outcome.client}, but Nix rejected the document`]

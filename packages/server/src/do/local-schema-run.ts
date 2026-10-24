@@ -27,10 +27,10 @@ const reportedSchemaKey = 'migration:reported-schema';
 const progressWriteIntervalMs = 30_000;
 
 /**
- * Reports schema completion and pending migration work to the control plane.
- * The journal's final index defines the required schema, independently of the
- * local steps for data work.
- */
+Reports schema completion and pending migration work to the control plane.
+The journal's final index defines the required schema, independently of the
+local steps for data work.
+*/
 export class LocalSchemaRun {
 	private progressWrittenAt: number | undefined;
 

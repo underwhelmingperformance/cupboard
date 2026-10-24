@@ -249,9 +249,11 @@ function byteChunks(
 					const value = chunks[index];
 					index += 1;
 
-					return value === undefined
-						? Promise.resolve({ done: true as const, value: undefined })
-						: Promise.resolve({ done: false as const, value });
+					return Promise.resolve(
+						value === undefined
+							? { done: true as const, value: undefined }
+							: { done: false as const, value }
+					);
 				}
 			};
 		}

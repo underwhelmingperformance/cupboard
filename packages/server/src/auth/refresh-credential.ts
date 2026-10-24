@@ -83,9 +83,9 @@ export type AuthenticatedRefreshAuthority = Omit<
 };
 
 /**
- * The control plane derives its keys from `CONTROL_KEY_WRAP_SECRET`, which the
- * tenant Worker never has.
- */
+The control plane derives its keys from `CONTROL_KEY_WRAP_SECRET`, which the
+tenant Worker never has.
+*/
 export type RefreshKeyContext =
 	| {
 			readonly kind: 'tenant';
@@ -95,11 +95,11 @@ export type RefreshKeyContext =
 	| { readonly kind: 'control'; readonly wrappingSecret: string };
 
 /**
- * A bounded opaque credential whose complete value is authenticated by member
- * state. Version 2 seals the authority with AES-GCM, so a client cannot read
- * the identity or the grants. Version 1 contains the authority as readable
- * JSON. The server still accepts version 1 but issues only version 2.
- */
+A bounded opaque credential whose complete value is authenticated by member
+state. Version 2 seals the authority with AES-GCM, so a client cannot read
+the identity or the grants. Version 1 contains the authority as readable
+JSON. The server still accepts version 1 but issues only version 2.
+*/
 export class RefreshCredential {
 	static async issue(
 		authority: RefreshAuthorityClaims,
@@ -364,10 +364,10 @@ async function decryptOrUndefined(
 }
 
 /**
- * Encrypts a successor credential for the spent member that it replaces. A
- * retry that presents the spent credential within the grace window can then
- * recover the successor.
- */
+Encrypts a successor credential for the spent member that it replaces. A
+retry that presents the spent credential within the grace window can then
+recover the successor.
+*/
 export async function sealRefreshSuccessor(
 	context: RefreshKeyContext,
 	presented: RefreshCredential,
@@ -385,9 +385,9 @@ export async function sealRefreshSuccessor(
 }
 
 /**
- * Decrypts a successor envelope with the spent credential that sealed it.
- * Returns undefined for a missing, malformed or unauthenticated envelope.
- */
+Decrypts a successor envelope with the spent credential that sealed it.
+Returns undefined for a missing, malformed or unauthenticated envelope.
+*/
 export async function openRefreshSuccessor(
 	context: RefreshKeyContext,
 	presented: RefreshCredential,

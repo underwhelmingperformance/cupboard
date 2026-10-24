@@ -23,8 +23,8 @@ export type DaemonCommandRunner = (
 ) => DaemonChildProcess;
 
 /**
- * Cleanup sends SIGKILL if the child has not exited this long after SIGTERM.
- */
+Cleanup sends SIGKILL if the child has not exited this long after SIGTERM.
+*/
 export const daemonProcessTerminationGraceMs = 5000;
 
 export interface ScheduledDaemonProcessKill {
@@ -51,10 +51,10 @@ const scheduleDaemonProcessKill: ScheduleDaemonProcessKill = (
 };
 
 /**
- * Returns a runner whose children receive `env` as their whole environment.
- * Nix reads its configuration, store and cache directories from that
- * environment.
- */
+Returns a runner whose children receive `env` as their whole environment.
+Nix reads its configuration, store and cache directories from that
+environment.
+*/
 export function daemonProcessRunner(
 	env: Readonly<Record<string, string | undefined>>
 ): DaemonCommandRunner {
@@ -70,10 +70,10 @@ export const spawnDaemonProcess: DaemonCommandRunner = daemonProcessRunner(
 );
 
 /**
- * Runs one daemon child for each connection and exchanges the worker protocol
- * through its standard input and output. Closing the connection sends SIGTERM,
- * waits for the grace period, then sends SIGKILL if the child has not exited.
- */
+Runs one daemon child for each connection and exchanges the worker protocol
+through its standard input and output. Closing the connection sends SIGTERM,
+waits for the grace period, then sends SIGKILL if the child has not exited.
+*/
 export function createProcessNixDaemonConnector(
 	command: string,
 	commandArguments: readonly string[],

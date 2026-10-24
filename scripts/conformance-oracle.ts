@@ -91,9 +91,9 @@ export type NixSettingValueType =
 export type NixSettingTypes = Readonly<Record<string, NixSettingValueType>>;
 
 /**
- * The C++ integer width inferred from values accepted by the pinned Nix. The
- * JSON configuration output does not report this width.
- */
+The C++ integer width inferred from values accepted by the pinned Nix. The
+JSON configuration output does not report this width.
+*/
 export type NixIntegerWidth = 'uint32' | 'int64' | 'uint64';
 
 export type NixIntegerWidths = Readonly<Record<string, NixIntegerWidth>>;
@@ -131,12 +131,12 @@ export class UnknownIntegerWidthError extends CodedError {
 }
 
 /**
- * Infers the declared width from accepted boundary values. An unsigned 32-bit
- * setting accepts the 32-bit maximum but rejects both 64-bit maxima. An
- * unsigned 64-bit setting accepts the unsigned 64-bit maximum. A signed 64-bit
- * setting accepts a negative value and the signed maximum, but rejects the
- * unsigned maximum.
- */
+Infers the declared width from accepted boundary values. An unsigned 32-bit
+setting accepts the 32-bit maximum but rejects both 64-bit maxima. An
+unsigned 64-bit setting accepts the unsigned 64-bit maximum. A signed 64-bit
+setting accepts a negative value and the signed maximum, but rejects the
+unsigned maximum.
+*/
 export function integerWidthOf(
 	setting: string,
 	accepted: AcceptedWidthProbes
@@ -391,9 +391,9 @@ function settingKey(name: string): string {
 }
 
 /**
- * Renders the settings table as a module for the client. Sorting the names
- * makes an oracle update show only semantic changes in its diff.
- */
+Renders the settings table as a module for the client. Sorting the names
+makes an oracle update show only semantic changes in its diff.
+*/
 export function renderSettingTypes(
 	system: OracleSystem,
 	version: string,
@@ -572,11 +572,11 @@ function settingValueType(value: unknown): NixSettingValueType | undefined {
 }
 
 /**
- * Reads the value type of each setting in a `nix config show --json` document.
- * The result includes settings gated by experimental features because their
- * default values still reveal the type that Nix validates when the feature is
- * enabled.
- */
+Reads the value type of each setting in a `nix config show --json` document.
+The result includes settings gated by experimental features because their
+default values still reveal the type that Nix validates when the feature is
+enabled.
+*/
 export function parseSettingTypes(document: string): NixSettingTypes {
 	let parsed: unknown;
 
@@ -626,10 +626,10 @@ export interface NixOptions {
 }
 
 /**
- * Runs a `nix` command to completion and returns its status and output. A
- * conformance case compares acceptance with the oracle, so non-zero exit
- * statuses are returned to the caller.
- */
+Runs a `nix` command to completion and returns its status and output. A
+conformance case compares acceptance with the oracle, so non-zero exit
+statuses are returned to the caller.
+*/
 export function runNix(
 	binary: string,
 	arguments_: readonly string[],
@@ -665,20 +665,20 @@ export function runNix(
 }
 
 /**
- * Where the builds in this file keep their out-links. Nix registers an out-link
- * as an indirect garbage-collection root, and every caller reads the store path
- * after the build returns, so without a link a collection can remove the result
- * first.
- */
+Where the builds in this file keep their out-links. Nix registers an out-link
+as an indirect garbage-collection root, and every caller reads the store path
+after the build returns, so without a link a collection can remove the result
+first.
+*/
 const conformanceOutLinkDirectory = path.join(
 	tmpdir(),
 	'cupboard-conformance-out-links'
 );
 
 /**
- * Creates a separate out-link for each run. Nix replaces an existing out-link,
- * so sharing the path would let concurrent builds replace each other's root.
- */
+Creates a separate out-link for each run. Nix replaces an existing out-link,
+so sharing the path would let concurrent builds replace each other's root.
+*/
 function createConformanceNixOutLink(): {
 	outLink: string;
 	release: () => void;
@@ -698,11 +698,11 @@ function createConformanceNixOutLink(): {
 }
 
 /**
- * Builds the pinned flake output with the ambient environment so Nix can use
- * the substituters configured on this machine.
- *
- * A missing `nix` binary and a failed build both make the oracle unavailable.
- */
+Builds the pinned flake output with the ambient environment so Nix can use
+the substituters configured on this machine.
+
+A missing `nix` binary and a failed build both make the oracle unavailable.
+*/
 async function buildConformanceNix(
 	root: string,
 	outLink: string
@@ -804,9 +804,9 @@ async function readBuiltOracleProbe(
 }
 
 /**
- * A built oracle and its garbage-collection root. Call `releaseOutLink` when
- * the binary is no longer needed.
- */
+A built oracle and its garbage-collection root. Call `releaseOutLink` when
+the binary is no longer needed.
+*/
 export interface ResolvedConformanceNix {
 	readonly binary: string;
 	readonly outLink: string;
@@ -814,12 +814,12 @@ export interface ResolvedConformanceNix {
 }
 
 /**
- * Builds the pinned flake output and returns its `nix` binary. The build must
- * print exactly one output store path.
- *
- * The caller owns the returned out-link and must release it after use. Build
- * or output-validation failures remove the link before propagating.
- */
+Builds the pinned flake output and returns its `nix` binary. The build must
+print exactly one output store path.
+
+The caller owns the returned out-link and must release it after use. Build
+or output-validation failures remove the link before propagating.
+*/
 export async function resolveConformanceNixBinary(
 	root: string
 ): Promise<ResolvedConformanceNix> {
@@ -899,10 +899,10 @@ export async function readNixSystem(
 }
 
 /**
- * An environment that isolates the pinned Nix from host configuration. It uses
- * an empty system file and disables user files so invalid host configuration
- * cannot affect the reported settings.
- */
+An environment that isolates the pinned Nix from host configuration. It uses
+an empty system file and disables user files so invalid host configuration
+cannot affect the reported settings.
+*/
 function settingsEnvironment(home: string): NodeJS.ProcessEnv {
 	const configDirectory = path.join(home, 'nix-conf');
 
@@ -1005,10 +1005,15 @@ async function readNixSettingTypes(binary: string): Promise<NixSettingTypes> {
 	}
 }
 
-const repoRoot = path.resolve(import.meta.dirname, '..');
+const repositoryRoot = path.resolve(import.meta.dirname, '..');
 
-function repositoryWorkspace(root: string): OracleWorkspace {
-	const recordPath = path.join(root, 'tests', 'conformance', oracleFileName);
+function repositoryWorkspace(): OracleWorkspace {
+	const recordPath = path.join(
+		repositoryRoot,
+		'tests',
+		'conformance',
+		oracleFileName
+	);
 
 	return {
 		readOracleFile: () => readFileSync(recordPath, 'utf8'),
@@ -1018,7 +1023,7 @@ function repositoryWorkspace(root: string): OracleWorkspace {
 		writeSettingTypesFile: (system, text) => {
 			writeFileSync(
 				path.join(
-					root,
+					repositoryRoot,
 					'packages',
 					'nix',
 					'src',
@@ -1074,7 +1079,7 @@ function buildProgram(): Command {
 		.action(async () => {
 			const { nixSettingTables } = await import('#nix-setting-types');
 
-			checkConformanceOracle(repositoryWorkspace(repoRoot), nixSettingTables);
+			checkConformanceOracle(repositoryWorkspace(), nixSettingTables);
 			scriptReporter().success(
 				`${oracleFilePath} and the generated settings tables record the same Nix versions.`
 			);
@@ -1096,7 +1101,9 @@ function buildProgram(): Command {
 				`Building ${String(systems.length)} conformance oracle probe${systems.length === 1 ? '' : 's'}`,
 				async (context) => {
 					const resolved = await Promise.all(
-						systems.map((system) => readFlakeOracleProbe(repoRoot, system))
+						systems.map((system) =>
+							readFlakeOracleProbe(repositoryRoot, system)
+						)
 					);
 
 					for (const probe of resolved) {
@@ -1106,10 +1113,7 @@ function buildProgram(): Command {
 					return resolved;
 				}
 			);
-			const outcome = updateConformanceOracle(
-				repositoryWorkspace(repoRoot),
-				probes
-			);
+			const outcome = updateConformanceOracle(repositoryWorkspace(), probes);
 
 			const message = updateMessages[outcome.kind](outcome.record);
 

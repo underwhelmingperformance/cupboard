@@ -84,9 +84,9 @@ import type { DeployUi, TextEdit } from './ui.ts';
 import * as deployUi from './ui.ts';
 
 /**
- * A sign-in whose ID tokens have `claims` and the requested nonce. `onSignIn`
- * runs for each sign-in.
- */
+A sign-in whose ID tokens have `claims` and the requested nonce. `onSignIn`
+runs for each sign-in.
+*/
 function signInWith(
 	claims: Record<string, unknown>,
 	onSignIn?: () => void
@@ -1359,9 +1359,9 @@ function labelledProvider(label: string): TokenProvider {
 }
 
 /**
- * Credential sources that record each call and return a provider whose token
- * shows which source created it and for which origin.
- */
+Credential sources that record each call and return a provider whose token
+shows which source created it and for which origin.
+*/
 function recordingSources(): {
 	readonly calls: string[];
 	readonly sources: AdminCredentialSources;
@@ -1512,13 +1512,13 @@ describe('establishAuthority', () => {
 	);
 
 	/**
-	 * A Cloudflare account whose `cupboard` database has an admin and whose
-	 * `fresh` database has none. The Workers are bound to `cupboard`, and the
-	 * control Worker has `recordedUrl` as its recorded deployment URL when that
-	 * is given. `routedDomain` is the only custom domain routed to the control
-	 * Worker. With `isControlDeleted`, only the tenant Worker exists. Every read
-	 * is recorded.
-	 */
+	A Cloudflare account whose `cupboard` database has an admin and whose
+	`fresh` database has none. The Workers are bound to `cupboard`, and the
+	control Worker has `recordedUrl` as its recorded deployment URL when that
+	is given. `routedDomain` is the only custom domain routed to the control
+	Worker. With `isControlDeleted`, only the tenant Worker exists. Every read
+	is recorded.
+	*/
 	function claimedAccount(
 		calls: string[],
 		options: {

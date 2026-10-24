@@ -52,12 +52,12 @@ export type ControlRpc = JsonifiedClient<
 >;
 
 /**
- * Creates a tenant admin client from the protocol contract and validates each
- * successful response against the procedure's output schema. The client
- * preserves a tenant path prefix in the base URL. After a 401, it refreshes a
- * provider-backed credential once and retries the request. Either the client's
- * signal or the signal passed to one call aborts that call.
- */
+Creates a tenant admin client from the protocol contract and validates each
+successful response against the procedure's output schema. The client
+preserves a tenant path prefix in the base URL. After a 401, it refreshes a
+provider-backed credential once and retries the request. Either the client's
+signal or the signal passed to one call aborts that call.
+*/
 export function tenantRpc(
 	baseUrl: URL,
 	options: TenantRpcOptions = {}
@@ -66,10 +66,10 @@ export function tenantRpc(
 }
 
 /**
- * Creates a control-plane client from the protocol contract and validates each
- * successful response against the procedure's output schema. The client appends
- * `/control` to the deployment's bare URL.
- */
+Creates a control-plane client from the protocol contract and validates each
+successful response against the procedure's output schema. The client appends
+`/control` to the deployment's bare URL.
+*/
 export function controlRpc(
 	baseUrl: URL,
 	options: TenantRpcOptions = {}
@@ -141,18 +141,18 @@ function derivedClient<C extends AnyContractRouter>(
 }
 
 /**
- * Options for one call of an admin procedure.
- */
+Options for one call of an admin procedure.
+*/
 export interface CallOptions {
 	readonly signal?: AbortSignal | undefined;
 }
 
 /**
- * Returns the deadline options for page requests that call `procedure`. `name`
- * identifies the procedure in debug logs and in a deadline expiry. The
- * contract's replay safety for the procedure decides whether a request that
- * missed its deadline is sent again.
- */
+Returns the deadline options for page requests that call `procedure`. `name`
+identifies the procedure in debug logs and in a deadline expiry. The
+contract's replay safety for the procedure decides whether a request that
+missed its deadline is sent again.
+*/
 export function procedureDeadline(
 	name: string,
 	procedure: { readonly '~orpc': { readonly meta: AuthzMeta } },
@@ -211,11 +211,11 @@ const typedServerErrorStatuses = new Set<number>([
 ]);
 
 /**
- * Checks an error response before oRPC decodes it, so that the error keeps the
- * response's HTTP status. The client treats every response that is not a 2xx
- * as an error. {@link statusError} turns a 507 into a
- * {@link QuotaExceededError}.
- */
+Checks an error response before oRPC decodes it, so that the error keeps the
+response's HTTP status. The client treats every response that is not a 2xx
+as an error. {@link statusError} turns a 507 into a
+{@link QuotaExceededError}.
+*/
 async function checkResponse(
 	request: Request,
 	response: Response

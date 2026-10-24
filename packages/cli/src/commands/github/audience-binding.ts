@@ -10,9 +10,9 @@ import { type RepositoryIdentity } from '../oidc-trust/github.ts';
 import { githubActionsIssuer } from './claims.ts';
 
 /**
- * A tenant accepts a job token only when its audience is the tenant URL. A job
- * cannot request a token with a target-bound nonce.
- */
+A tenant accepts a job token only when its audience is the tenant URL. A job
+cannot request a token with a target-bound nonce.
+*/
 function unboundAudienceRules(
 	rules: readonly OidcTrustRule[],
 	identity: RepositoryIdentity,

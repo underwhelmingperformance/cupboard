@@ -1559,7 +1559,9 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 								attrs: members.map((member) => member.attribute),
 								installables: members.map((member) => member.installable),
 								queryInstallables: members.map((member) => member.target),
-								expectedPaths: [single.outputs[0], undefined],
+								// Unknown output paths are null in cohort JSON.
+								// eslint-disable-next-line unicorn/no-null
+								expectedPaths: [single.outputs[0] ?? null, null],
 								roots: members.map((member) => member.root),
 								system,
 								os: 'linux',

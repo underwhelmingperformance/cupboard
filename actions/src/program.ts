@@ -36,8 +36,8 @@ interface ActionSignalSource {
 }
 
 /**
- * Services that command registrations use instead of process-owned defaults.
- */
+Services that command registrations use instead of process-owned defaults.
+*/
 export interface ActionProgramDependencies {
 	readonly attestSign?: AttestSignDependencies;
 }
@@ -57,10 +57,10 @@ export class ActionSignalError extends CodedError {
 }
 
 /**
- * Creates the command tree for the composite GitHub Action. Commands receive
- * the supplied environment when they resolve runner-derived defaults. Other
- * process-owned services can be replaced through `dependencies`.
- */
+Creates the command tree for the composite GitHub Action. Commands receive
+the supplied environment when they resolve runner-derived defaults. Other
+process-owned services can be replaced through `dependencies`.
+*/
 export function buildProgram(
 	environment: Environment = env,
 	signal?: AbortSignal,
@@ -96,9 +96,9 @@ export function buildProgram(
 }
 
 /**
- * Parses the arguments, runs the matching subcommand, and returns its process
- * exit code. Logging uses GitHub Actions workflow commands.
- */
+Parses the arguments, runs the matching subcommand, and returns its process
+exit code. Logging uses GitHub Actions workflow commands.
+*/
 export async function runAction(
 	argument: readonly string[],
 	environment: Environment = env,

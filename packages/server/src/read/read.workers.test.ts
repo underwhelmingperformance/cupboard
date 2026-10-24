@@ -9,7 +9,6 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
-import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { sql } from 'drizzle-orm';
@@ -62,11 +61,8 @@ function cacheAuthority(
 	return { kind: 'cache', scope, access };
 }
 
-function viewAuthority(
-	access: CacheAccessMode,
-	selectors: readonly ReuseViewSelector[] = [{ kind: 'all' }]
-): NarAuthority {
-	return { kind: 'view', access, selectors };
+function viewAuthority(access: CacheAccessMode): NarAuthority {
+	return { kind: 'view', access, selectors: [{ kind: 'all' }] };
 }
 
 const defaultPublicAuthority = cacheAuthority(defaultCache());
@@ -143,20 +139,22 @@ function seedCacheGeneration(
 
 	// Each cache kind has its own partial unique index, so name the matching
 	// conflict target.
-	return cache.kind === 'default'
-		? insert.onConflictDoUpdate({
-				target: d1Schema.cacheLifecycle.tenant,
-				targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'default'`,
-				set
-			})
-		: insert.onConflictDoUpdate({
-				target: [
-					d1Schema.cacheLifecycle.tenant,
-					d1Schema.cacheLifecycle.cacheName
-				],
-				targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'named'`,
-				set
-			});
+	return insert.onConflictDoUpdate(
+		cache.kind === 'default'
+			? {
+					target: d1Schema.cacheLifecycle.tenant,
+					targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'default'`,
+					set
+				}
+			: {
+					target: [
+						d1Schema.cacheLifecycle.tenant,
+						d1Schema.cacheLifecycle.cacheName
+					],
+					targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'named'`,
+					set
+				}
+	);
 }
 
 async function serveWithFaults(failures: number): Promise<Response> {
@@ -976,7 +974,7 @@ describe('preceding reference authority queries', () => {
 			const queries = contract.queries.flatMap((query, index) =>
 				index === boundary
 					? [query, 'SELECT * FROM interrupted_authority_contract']
-					: [query]
+					: query
 			);
 			try {
 				await expect(

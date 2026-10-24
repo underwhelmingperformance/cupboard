@@ -32,9 +32,9 @@ const silentReporter: Reporter = {
 };
 
 /**
- * A Cloudflare API endpoint that records the requests that reach it. Like
- * `fetch`, it refuses a request whose signal has aborted.
- */
+A Cloudflare API endpoint that records the requests that reach it. Like
+`fetch`, it refuses a request whose signal has aborted.
+*/
 function recordingCloudflare(): {
 	readonly requests: string[];
 	readonly fetcher: typeof fetch;

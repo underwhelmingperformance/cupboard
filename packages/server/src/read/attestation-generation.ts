@@ -20,16 +20,16 @@ export function recordedListGeneration(
 }
 
 /**
- * Whether the list describes the currently committed narinfo generation.
- *
- * A path keeps one list object across all of its commits. A commit without an
- * attestation leaves the object from the previous generation in place. The
- * generation in the object metadata identifies which commit produced the list,
- * including after another cache reuses the stored name.
- *
- * Generation metadata was introduced after public-cache list objects. A
- * private cache therefore cannot accept an object without it.
- */
+Whether the list describes the currently committed narinfo generation.
+
+A path keeps one list object across all of its commits. A commit without an
+attestation leaves the object from the previous generation in place. The
+generation in the object metadata identifies which commit produced the list,
+including after another cache reuses the stored name.
+
+Generation metadata was introduced after public-cache list objects. A
+private cache therefore cannot accept an object without it.
+*/
 export function isListOfCommittedGeneration(
 	object: R2Object,
 	cache: { readonly access: 'public' | 'private' },

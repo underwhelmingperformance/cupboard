@@ -5,9 +5,9 @@ export type PositiveSafeInteger = number & {
 };
 
 /**
- * Validates a count used to bound work or allocate workers. The count must be
- * a positive integer that JavaScript can represent exactly.
- */
+Validates a count used to bound work or allocate workers. The count must be
+a positive integer that JavaScript can represent exactly.
+*/
 export function positiveSafeInteger(
 	value: number,
 	name: string

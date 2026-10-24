@@ -40,9 +40,9 @@ export interface CacheProjectionOutcome {
 	readonly projected: number;
 	readonly hasMore: boolean;
 	/**
-	 * Whether this call saved the projection's cursor. It is false only when
-	 * an earlier call finished the projection.
-	 */
+	Whether this call saved the projection's cursor. It is false only when
+	an earlier call finished the projection.
+	*/
 	readonly progressed: boolean;
 }
 
@@ -56,16 +56,16 @@ function identityKey(scope: CacheScope): string {
 }
 
 /**
- * Writes the missing shared lifecycle rows for this tenant's live caches, up
- * to {@link maxCachesProjectedPerRun} of them per call.
- *
- * Older builds did not create a lifecycle row when registering an empty
- * cache. Fill those gaps so D1 records every live cache in the local catalogue.
- *
- * A tenant with more caches than fit one call keeps rows to project. The
- * caller then leaves the local step unrecorded, so the control plane wakes
- * the object again.
- */
+Writes the missing shared lifecycle rows for this tenant's live caches, up
+to {@link maxCachesProjectedPerRun} of them per call.
+
+Older builds did not create a lifecycle row when registering an empty
+cache. Fill those gaps so D1 records every live cache in the local catalogue.
+
+A tenant with more caches than fit one call keeps rows to project. The
+caller then leaves the local step unrecorded, so the control plane wakes
+the object again.
+*/
 export async function projectLocalCacheLifecycles(
 	context: ServerContext,
 	tenant: TenantId

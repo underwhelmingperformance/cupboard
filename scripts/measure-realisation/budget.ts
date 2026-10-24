@@ -58,10 +58,10 @@ const groupBudgetsSchema = z
 	);
 
 /**
- * Reads target and group keys and their measurements while ignoring other
- * report fields. New report fields therefore do not invalidate an existing
- * baseline, and a hand-written baseline needs only these values.
- */
+Reads target and group keys and their measurements while ignoring other
+report fields. New report fields therefore do not invalidate an existing
+baseline, and a hand-written baseline needs only these values.
+*/
 export const realisationBaselineSchema = z.object({
 	targets: targetBudgetsSchema,
 	groups: groupBudgetsSchema,
@@ -132,10 +132,10 @@ export interface BudgetOptions {
 }
 
 /**
- * Compares each measurement with its baseline multiplied by one plus the
- * tolerance. Measurements absent from the baseline are reported as unbudgeted
- * but do not fail the gate, so a new target can establish a baseline.
- */
+Compares each measurement with its baseline multiplied by one plus the
+tolerance. Measurements absent from the baseline are reported as unbudgeted
+but do not fail the gate, so a new target can establish a baseline.
+*/
 export function checkBudgets(options: BudgetOptions): BudgetResult {
 	const tolerance = options.tolerance ?? defaultTolerance;
 	const targetBudgets = new Map(

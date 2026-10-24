@@ -1300,7 +1300,7 @@ function publicationRecoveryRecipe(
 		create: 1,
 		copy: 2,
 		indexes: statements.flatMap((statement, index) =>
-			statement.startsWith('CREATE INDEX ') ? [index] : []
+			statement.startsWith('CREATE INDEX ') ? index : []
 		)
 	};
 	const dropTriggers = statements.filter((statement) =>
@@ -1414,7 +1414,7 @@ function protectedInheritanceRecipe(
 		const indexes = statements.flatMap((statement, index) =>
 			statement.startsWith('CREATE INDEX ') &&
 			statement.includes(`ON \`${table}\``)
-				? [index]
+				? index
 				: []
 		);
 		const triggers = statements.filter(
@@ -1590,7 +1590,7 @@ function retryLimitsRecipe(
 		create: 9,
 		copy: 10,
 		indexes: statements.flatMap((statement, index) =>
-			statement.startsWith('CREATE INDEX `pending_upload_') ? [index] : []
+			statement.startsWith('CREATE INDEX `pending_upload_') ? index : []
 		)
 	};
 	const dropTrigger = statementAt(statements, 11);

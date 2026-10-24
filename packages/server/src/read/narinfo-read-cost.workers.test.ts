@@ -24,13 +24,13 @@ import {
 } from '../test-support.ts';
 
 /**
- * A D1 binding that counts round trips rather than statements: one for a batch,
- * whatever it holds, and one for a statement run on its own.
- *
- * Admission reads the tenant row, the cache credential and the cache lifecycle
- * in a single batch, so a read that consults nothing else spends exactly one
- * round trip.
- */
+A D1 binding that counts round trips rather than statements: one for a batch,
+whatever it holds, and one for a statement run on its own.
+
+Admission reads the tenant row, the cache credential and the cache lifecycle
+in a single batch, so a read that consults nothing else spends exactly one
+round trip.
+*/
 function roundTripCountingD1(inner: D1Database): {
 	readonly binding: D1Database;
 	readonly roundTrips: () => number;

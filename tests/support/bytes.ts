@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 
 /**
- * Returns `length` bytes from a xorshift generator. The same seed always gives
- * the same bytes, and zstd cannot compress them.
- */
+Returns `length` bytes from a xorshift generator. The same seed always gives
+the same bytes, and zstd cannot compress them.
+*/
 export function pseudoRandomBytes(length: number, seed: number): Uint8Array {
 	const words = new Uint32Array(Math.ceil(length / 4));
 	let state = seed | 1;
@@ -19,10 +19,10 @@ export function pseudoRandomBytes(length: number, seed: number): Uint8Array {
 }
 
 /**
- * Returns the length and SHA-256 digest of `bytes`. Tests compare these
- * instead of multi-megabyte buffers, which take seconds to compare element by
- * element.
- */
+Returns the length and SHA-256 digest of `bytes`. Tests compare these
+instead of multi-megabyte buffers, which take seconds to compare element by
+element.
+*/
 export function fingerprint(bytes: Uint8Array): {
 	readonly size: number;
 	readonly sha256: string;

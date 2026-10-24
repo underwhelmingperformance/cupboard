@@ -71,10 +71,10 @@ async function readBuildHook(
 }
 
 /**
- * Wraps the effective build hook with the job's SSH options. The override is
- * passed through NIX_CONFIG to a trusted daemon. Local filesystem stores
- * inherit the job's environment and do not require an adapter.
- */
+Wraps the effective build hook with the job's SSH options. The override is
+passed through NIX_CONFIG to a trusted daemon. Local filesystem stores
+inherit the job's environment and do not require an adapter.
+*/
 export async function prepareBuilderHook(
 	environment: Environment,
 	dependencies: BuilderHookDependencies = {}
@@ -132,8 +132,8 @@ export async function prepareBuilderHook(
 }
 
 /**
- * Removes the adapter after the job's build and publication steps finish.
- */
+Removes the adapter after the job's build and publication steps finish.
+*/
 export async function removeBuilderHook(directory: string): Promise<void> {
 	if (
 		path.dirname(directory) !== temporaryRoot ||
