@@ -244,7 +244,16 @@ describe('cupboardDebugArguments', () => {
 	it.each([
 		{ status: 0, output: '' },
 		{ status: 1, output: 'failed to start' },
+		{ status: 1, output: "error: unknown option '--output-mode'\n" },
 		{ status: 2, output: 'invalid JSON' },
+		{
+			status: 2,
+			output: JSON.stringify({
+				event: 'error',
+				name: 'CommanderError',
+				message: "error: unknown option '--output-mode'"
+			})
+		},
 		{
 			status: 2,
 			output: JSON.stringify({
@@ -262,7 +271,7 @@ describe('cupboardDebugArguments', () => {
 			})
 		}
 	])(
-		'rejects an unexpected parser probe response: $status $output',
+		'skips log files for an unrecognised parser response: $status $output',
 		async (logFileProbe) => {
 			const binary = await fakeCupboard({
 				results: [],
@@ -270,11 +279,11 @@ describe('cupboardDebugArguments', () => {
 				logFileProbe
 			});
 
-			await expect(
-				cupboardDebugArguments(binary, {
+			expect(
+				await cupboardDebugArguments(binary, {
 					CUPBOARD_LOG_DIRECTORY: await runnerTemporary()
 				})
-			).rejects.toBeInstanceOf(CommandFailedError);
+			).toStrictEqual([]);
 		}
 	);
 
@@ -403,28 +412,37 @@ describe('runCupboard', () => {
 		});
 	});
 
-	it('reads results from the JSON stderr protocol of an older release', async () => {
-		const temporary = await runnerTemporary();
-		const captureArgvFile = path.join(temporary, 'argv.json');
-		const binary = await fakeCupboard({
-			results: [summaryEvent],
-			exitCode: 0,
-			captureArgvFile,
-			supportsResultFile: false
-		});
+	it.each([false, true])(
+		'reads legacy results with diagnostic capture enabled: %s',
+		async (captureLogs) => {
+			const temporary = await runnerTemporary();
+			const captureArgvFile = path.join(temporary, 'argv.json');
+			const binary = await fakeCupboard({
+				results: [summaryEvent],
+				exitCode: 0,
+				captureArgvFile,
+				supportsResultFile: false,
+				logFileProbe: { status: 1, output: 'unrecognised option\n' }
+			});
 
-		const results = await runCupboard(binary, ['--no-colour', 'push', 'url'], {
-			RUNNER_TEMP: temporary
-		});
-		const argv = z
-			.array(z.string())
-			.parse(JSON.parse(await readFile(captureArgvFile, 'utf8')));
+			const results = await runCupboard(
+				binary,
+				['--no-colour', 'push', 'url'],
+				{
+					RUNNER_TEMP: temporary,
+					...(captureLogs && { CUPBOARD_LOG_DIRECTORY: temporary })
+				}
+			);
+			const argv = z
+				.array(z.string())
+				.parse(JSON.parse(await readFile(captureArgvFile, 'utf8')));
 
-		expect({ results, argv }).toStrictEqual({
-			results: [summaryEvent],
-			argv: ['--output-mode', 'json', '--no-colour', 'push', 'url']
-		});
-	});
+			expect({ results, argv }).toStrictEqual({
+				results: [summaryEvent],
+				argv: ['--output-mode', 'json', '--no-colour', 'push', 'url']
+			});
+		}
+	);
 
 	it('turns warnings from an older release into workflow warnings', async () => {
 		const temporary = await runnerTemporary();
