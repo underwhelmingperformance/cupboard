@@ -4,9 +4,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { cacheMetadataRequestSchema } from '@cupboard/protocol/cache-metadata';
-import { initialiseTracing } from '@cupboard/shared/node-tracing';
+import { initialiseTracing, stopTracing } from '@cupboard/shared/node-tracing';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
-import { propagation, trace } from '@opentelemetry/api';
+import { trace } from '@opentelemetry/api';
+import { StatusCodes } from 'http-status-codes';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -38,10 +39,7 @@ const destination = new URL('https://cache.example.test/t/acme');
 const reuse = new URL('https://cache.example.test/t/acme/reuse/prs');
 
 beforeAll(initialiseTracing);
-afterAll(() => {
-	trace.disable();
-	propagation.disable();
-});
+afterAll(stopTracing);
 
 function narinfo(storePath: StorePathString): string {
 	return `StorePath: ${storePath}\nURL: nar/file.nar\nCompression: none\nFileHash: sha256:${'0'.repeat(64)}\nFileSize: 1\nNarHash: sha256:${'0'.repeat(64)}\nNarSize: 1\nReferences: \n`;
@@ -61,13 +59,45 @@ function fetcher(
 		);
 		return Promise.resolve(
 			path === undefined
-				? new Response(undefined, { status: 404 })
+				? new Response(undefined, { status: StatusCodes.NOT_FOUND })
 				: new Response(narinfo(path))
 		);
 	};
 }
 
 describe('tenantDependencyReferences', () => {
+	it('continues the active command trace during metadata discovery', async () => {
+		await trace.getTracer('test').startActiveSpan('command', async (span) => {
+			const requests: string[] = [];
+			const progress = new Set<string>();
+
+			try {
+				await tenantDependencyReferences([wrapper], {
+					tenantUrl: destination,
+					sources: [{ url: destination, paths: [] }],
+					onProgress: (event) => progress.add(event.traceId),
+					fetch: (_input, init) => {
+						requests.push(
+							new Headers(init?.headers).get('traceparent')?.split('-', 2)[1] ??
+								''
+						);
+
+						return Promise.resolve(
+							new Response(undefined, { status: StatusCodes.NOT_FOUND })
+						);
+					}
+				});
+
+				expect({ requests, progress: [...progress] }).toStrictEqual({
+					requests: [span.spanContext().traceId],
+					progress: [span.spanContext().traceId]
+				});
+			} finally {
+				span.end();
+			}
+		});
+	});
+
 	it('reports completed paths before the remaining dependency requests finish', async () => {
 		const progress: {
 			checked: number;
@@ -114,7 +144,7 @@ describe('tenantDependencyReferences', () => {
 		expect(progress).toStrictEqual([
 			{ checked: 1, total: 2, found: 1, mode: 'legacy' }
 		]);
-		pending.resolve(new Response(undefined, { status: 404 }));
+		pending.resolve(new Response(undefined, { status: StatusCodes.NOT_FOUND }));
 		await operation;
 		expect({ progress, ids }).toStrictEqual({
 			progress: [
@@ -145,7 +175,9 @@ describe('tenantDependencyReferences', () => {
 					contexts.push(
 						new Headers(init?.headers).get('traceparent') ?? undefined
 					);
-					return Promise.resolve(new Response(undefined, { status: 404 }));
+					return Promise.resolve(
+						new Response(undefined, { status: StatusCodes.NOT_FOUND })
+					);
 				}
 			});
 			expect(contexts).toStrictEqual([
@@ -159,7 +191,7 @@ describe('tenantDependencyReferences', () => {
 		const contexts: (string | undefined)[] = [];
 		const external = createServer((request, response) => {
 			contexts.push(request.headers.traceparent?.toString());
-			response.writeHead(404).end();
+			response.writeHead(StatusCodes.NOT_FOUND).end();
 		});
 		external.listen(0, '127.0.0.1');
 		await once(external, 'listening');
@@ -169,7 +201,7 @@ describe('tenantDependencyReferences', () => {
 		}
 		const tenant = createServer((_request, response) => {
 			response
-				.writeHead(302, {
+				.writeHead(StatusCodes.MOVED_TEMPORARILY, {
 					location: `http://127.0.0.1:${String(address.port)}/narinfo`
 				})
 				.end();
@@ -263,7 +295,7 @@ describe('tenantDependencyReferences', () => {
 				) {
 					return Promise.resolve(
 						new Response(undefined, {
-							status: 404,
+							status: StatusCodes.NOT_FOUND,
 							headers: { 'x-cupboard-read-capabilities': 'path-info-v1' }
 						})
 					);
@@ -277,7 +309,7 @@ describe('tenantDependencyReferences', () => {
 					shouldRetry = false;
 					return Promise.resolve(
 						new Response(undefined, {
-							status: 503,
+							status: StatusCodes.SERVICE_UNAVAILABLE,
 							headers: { 'retry-after': '0' }
 						})
 					);
@@ -356,7 +388,10 @@ describe('tenantDependencyReferences', () => {
 						path !== undefined &&
 						heldDependencies.has(path)
 							? new Response(narinfo(path), { headers })
-							: new Response(undefined, { status: 404, headers })
+							: new Response(undefined, {
+									status: StatusCodes.NOT_FOUND,
+									headers
+								})
 					);
 				}
 				if (typeof init?.body !== 'string') {

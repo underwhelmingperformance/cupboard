@@ -617,6 +617,9 @@ importers:
       '@opentelemetry/core':
         specifier: ^3.0.0
         version: 3.0.0(@opentelemetry/api@1.10.0)
+      http-status-codes:
+        specifier: 'catalog:'
+        version: 2.3.0
       undici:
         specifier: ^8.11.2
         version: 8.12.2
@@ -627,9 +630,6 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 25.9.9
-      http-status-codes:
-        specifier: 'catalog:'
-        version: 2.3.0
       typescript:
         specifier: 'catalog:'
         version: 6.0.3
