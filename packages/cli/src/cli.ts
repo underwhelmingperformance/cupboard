@@ -11,6 +11,7 @@ import {
 	rootLogger,
 	type Sink
 } from '@cupboard/logger';
+import { createFileSink, type FileLogging } from '@cupboard/logger/file';
 import { jsonLinesSink } from '@cupboard/logger/sinks';
 import {
 	type PresentationLevel,
@@ -63,6 +64,7 @@ export interface GlobalOptions {
 	readonly outputMode?: ReporterMode;
 	readonly colour?: boolean;
 	readonly resultFile?: string;
+	readonly logFile?: string;
 	readonly details?: boolean;
 	readonly debug?: boolean;
 }
@@ -118,6 +120,7 @@ export function commandLogger(): Logger {
 
 export interface ProgramOptions {
 	readonly signal?: AbortSignal;
+	readonly onFileLogging?: (logging: FileLogging) => void;
 }
 
 export function buildProgram(options: ProgramOptions = {}): Command {
@@ -137,6 +140,10 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 		)
 		.option('--details', 'show additional configuration and domain information')
 		.option('--debug', 'include details and internal diagnostics')
+		.option(
+			'--log-file <path>',
+			'replace this file with trace-level JSONL logs (.zst or .gz for compression)'
+		)
 		.option('--colour', 'force ANSI colour output')
 		.option('--no-colour', 'disable ANSI colour output')
 		.option(
@@ -164,9 +171,17 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 		// name for its handler.
 		.hook('preAction', (_thisCommand, actionCommand) => {
 			const mode = reporterModeFromGlobals(command);
+			const filename = command.opts<GlobalOptions>().logFile;
+			const file =
+				filename === undefined ? undefined : createFileSink(filename);
+
+			if (file !== undefined) {
+				options.onFileLogging?.(file);
+			}
 
 			configureLogging({
 				sink: loggingSink(mode, colourFromGlobals(command)),
+				...(file !== undefined && { fileSink: file.sink }),
 				lowestLevel:
 					presentationFromGlobals(command) === 'debug' ? 'debug' : 'warning'
 			});
