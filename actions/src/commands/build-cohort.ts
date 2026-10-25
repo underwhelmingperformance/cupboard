@@ -2044,15 +2044,16 @@ async function settleCohortBuild(
 		...new Set([...(partition?.attachOnly ?? []), ...selectedTargets])
 	].toSorted(byCodeUnit);
 	const targetPathSet = new Set(targetPaths);
-	const intermediatePaths = [
-		...new Set([
-			...selectedPublicationPaths,
-			...closureReferences
-				.values()
-				.flatMap((entries) => entries.map((entry) => entry.storePath))
-		])
-	]
-		.filter((storePath) => !targetPathSet.has(storePath))
+	const referencedPaths = new Set<string>(
+		closureReferences
+			.values()
+			.flatMap((entries) => entries.map((entry) => entry.storePath))
+	);
+	const intermediatePaths = [...new Set(selectedPublicationPaths)]
+		.filter(
+			(storePath) =>
+				!targetPathSet.has(storePath) && !referencedPaths.has(storePath)
+		)
 		.toSorted(byCodeUnit);
 	const referencePaths = partition?.publishByReference ?? [];
 	const leftUpstream = [
