@@ -903,7 +903,7 @@ async function writePlan(
 	await setOutput(
 		environment,
 		'target-matrix',
-		matrix('target', targetMatrix(inputs, plan))
+		JSON.stringify({ include: targetMatrix(inputs, plan) })
 	);
 	const prunedKeys = new Set(
 		cohortDecisions
