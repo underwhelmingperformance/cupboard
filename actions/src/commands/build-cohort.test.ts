@@ -6818,8 +6818,18 @@ if (args.includes('--help')) {
 						.map((entry) => entry.storePath);
 				})
 			);
+			const localIntermediates = await Promise.all(
+				run.calls
+					.filter((call) => call.includes('--intermediate-paths-file'))
+					.map((call) =>
+						readPathManifest(
+							argumentValue(call, '--intermediate-paths-file') ?? ''
+						)
+					)
+			);
 			expect({
 				probePaths,
+				localIntermediates: localIntermediates.flat(),
 				delegation: run.calls
 					.filter((call) => call[1] === 'build-push')
 					.map((call) => call.includes('--no-reference-dependencies')),
@@ -6838,6 +6848,7 @@ if (args.includes('--help')) {
 				)
 			}).toStrictEqual({
 				probePaths: [[storePathSchema.parse(referencePath)]],
+				localIntermediates: [],
 				delegation: source === 'build' ? [true] : [],
 				intermediates: [referencePath],
 				paths:
@@ -6877,10 +6888,13 @@ if (args.includes('--help')) {
 			new Map(),
 			{
 				closureTargets: [appPath],
+				referencedClosure: [appPath, referencePath].map((storePath) =>
+					storePathSchema.parse(storePath)
+				),
 				materialisedClosure: [appPath, referencePath].map((storePath) =>
 					storePathSchema.parse(storePath)
 				),
-				streamedPublicationPaths: [libraryBuiltPath]
+				streamedPublicationPaths: [libraryBuiltPath, floatingBuiltPath]
 			}
 		);
 		const roots = await Promise.all(
@@ -6915,13 +6929,13 @@ if (args.includes('--help')) {
 			published: receipt.paths
 		}).toStrictEqual({
 			targets: [appPath, libraryBuiltPath],
-			intermediates: [referencePath],
-			published: [appPath, libraryBuiltPath, referencePath],
+			intermediates: [floatingBuiltPath],
+			published: [appPath, libraryBuiltPath, floatingBuiltPath, referencePath],
 			roots: [
 				{
 					root: 'github:owner/repo/main/app',
 					targets: [],
-					intermediates: [referencePath]
+					intermediates: [floatingBuiltPath]
 				},
 				{
 					root: 'github:owner/repo/main/lib',
@@ -8942,7 +8956,14 @@ if (args.includes('--help')) {
 		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
 		const receipt: unknown = JSON.parse(await readFile(receiptFile, 'utf8'));
 
-		expect({ materialiseCalls: run.materialiseCalls, receipt }).toStrictEqual({
+		expect({
+			materialiseCalls: run.materialiseCalls,
+			intermediates: await readPathManifest(
+				path.join(directory, 'cupboard-cohort-intermediate-paths.txt')
+			),
+			receipt
+		}).toStrictEqual({
+			intermediates: [],
 			materialiseCalls: [
 				{
 					sources: [
