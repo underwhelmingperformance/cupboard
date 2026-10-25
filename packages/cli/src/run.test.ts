@@ -6,9 +6,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { readLogFile } from '@cupboard/logger/file';
+import { usageExitCode } from '@cupboard/shared/errors';
 import { maxTransientRetries } from '@cupboard/shared/retry';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { z } from 'zod';
 
 import { overQuotaAdvice } from './errors.ts';
 import { runCli } from './run.ts';
@@ -36,7 +38,44 @@ vi.mock('./deploy/command.ts', async (importOriginal) => {
 	};
 });
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe('runCli', () => {
+	it.each([
+		{ option: '--log-file', code: 'commander.optionMissingArgument' },
+		{ option: '--unknown-option', code: 'commander.unknownOption' }
+	])(
+		'reports a structured parser code for $option',
+		async ({ option, code }) => {
+			let output = '';
+			vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+				output += String(chunk);
+				return true;
+			});
+			const status = await runCli([
+				'node',
+				'cupboard',
+				'--output-mode',
+				'json',
+				option
+			]);
+			const event = z
+				.object({
+					event: z.literal('error'),
+					name: z.literal('CommanderError'),
+					code: z.string()
+				})
+				.parse(JSON.parse(output));
+
+			expect({ status, event }).toStrictEqual({
+				status: usageExitCode,
+				event: { event: 'error', name: 'CommanderError', code }
+			});
+		}
+	);
+
 	it.each([
 		{ name: 'the version', argv: ['--version'] },
 		{ name: 'the root help', argv: ['--help'] },

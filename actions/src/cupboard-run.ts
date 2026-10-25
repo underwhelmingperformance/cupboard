@@ -179,10 +179,10 @@ export async function cupboardDebugArguments(
 	];
 }
 
-const parserErrorSchema = z.object({
+const missingOptionArgumentSchema = z.object({
 	event: z.literal('error'),
 	name: z.literal('CommanderError'),
-	message: z.string()
+	code: z.literal('commander.optionMissingArgument')
 });
 
 async function canLogToFile(
@@ -204,13 +204,9 @@ async function canLogToFile(
 		failure = undefined;
 	}
 
-	const parsed = parserErrorSchema.safeParse(failure);
+	const parsed = missingOptionArgumentSchema.safeParse(failure);
 
-	if (
-		probe.status === usageExitCode &&
-		parsed.success &&
-		parsed.data.message === "error: option '--log-file <path>' argument missing"
-	) {
+	if (probe.status === usageExitCode && parsed.success) {
 		return true;
 	}
 

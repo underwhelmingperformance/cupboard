@@ -54,7 +54,7 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 		"const fs = require('node:fs');",
 		'const argv = process.argv.slice(2);',
 		"if (argv.at(-1) === '--log-file') {",
-		`  process.stderr.write(${JSON.stringify(options.logFileProbe?.output ?? JSON.stringify({ event: 'error', name: 'CommanderError', message: "error: unknown option '--log-file'" }))});`,
+		`  process.stderr.write(${JSON.stringify(options.logFileProbe?.output ?? JSON.stringify({ event: 'error', name: 'CommanderError', code: 'commander.unknownOption', message: "error: unknown option '--log-file'" }))});`,
 		`  process.exit(${String(options.logFileProbe?.status ?? 2)});`,
 		'}',
 		`if (${JSON.stringify(options.captureEnvironmentFile ?? '')}) { fs.writeFileSync(${JSON.stringify(options.captureEnvironmentFile ?? '')}, JSON.stringify({deferred: process.env.CUPBOARD_DEFER_ERROR_ANNOTATIONS ?? ''})); }`,
@@ -202,12 +202,27 @@ describe('cupboardDebugArguments', () => {
 	it.each([
 		{
 			supported: true,
+			code: 'commander.optionMissingArgument',
+			message: 'The parser wording can change.'
+		},
+		{
+			supported: true,
+			code: 'commander.optionMissingArgument',
+			message: undefined
+		},
+		{
+			supported: false,
+			code: 'commander.unknownOption',
 			message: "error: option '--log-file <path>' argument missing"
 		},
-		{ supported: false, message: "error: unknown option '--log-file'" }
+		{
+			supported: false,
+			code: undefined,
+			message: "error: option '--log-file <path>' argument missing"
+		}
 	])(
 		'probes the parser for log file support ($supported)',
-		async ({ supported, message }) => {
+		async ({ supported, code, message }) => {
 			const temporary = await runnerTemporary();
 			const captureArgvFile = path.join(temporary, 'executed.json');
 			const binary = await fakeCupboard({
@@ -219,6 +234,7 @@ describe('cupboardDebugArguments', () => {
 					output: JSON.stringify({
 						event: 'error',
 						name: 'CommanderError',
+						code,
 						message
 					})
 				}
@@ -243,6 +259,14 @@ describe('cupboardDebugArguments', () => {
 
 	it.each([
 		{ status: 0, output: '' },
+		{
+			status: 0,
+			output: JSON.stringify({
+				event: 'error',
+				name: 'CommanderError',
+				code: 'commander.optionMissingArgument'
+			})
+		},
 		{ status: 1, output: 'failed to start' },
 		{ status: 1, output: "error: unknown option '--output-mode'\n" },
 		{ status: 2, output: 'invalid JSON' },
@@ -251,6 +275,7 @@ describe('cupboardDebugArguments', () => {
 			output: JSON.stringify({
 				event: 'error',
 				name: 'CommanderError',
+				code: 'commander.unknownOption',
 				message: "error: unknown option '--output-mode'"
 			})
 		},
@@ -259,6 +284,7 @@ describe('cupboardDebugArguments', () => {
 			output: JSON.stringify({
 				event: 'error',
 				name: 'Error',
+				code: 'commander.optionMissingArgument',
 				message: "error: unknown option '--log-file'"
 			})
 		},

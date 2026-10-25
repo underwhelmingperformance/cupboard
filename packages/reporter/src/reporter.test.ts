@@ -592,6 +592,21 @@ describe('createReporter', () => {
 			}
 		]);
 	});
+
+	it('preserves a machine-readable error code in JSON', () => {
+		const { events, reporter } = jsonReporter();
+
+		reporter.error(new ReporterTestError('parser.optionMissingArgument'));
+
+		expect(events()).toStrictEqual([
+			{
+				event: 'error',
+				name: 'Error',
+				message: 'reporter test failure',
+				code: 'parser.optionMissingArgument'
+			}
+		]);
+	});
 });
 
 describe('createGithubReporter', () => {
