@@ -1566,6 +1566,79 @@ describe('cohortPreFilter', () => {
 });
 
 describe('cohort-matrix output', () => {
+	it('plans 260 targets in three cohort jobs', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const output = path.join(directory, 'output');
+		const targets = Array.from({ length: 260 }, (_, index) => ({
+			...target,
+			attr: `.#packages.x86_64-linux.app-${String(index)}`,
+			rootSuffix: `x86_64-linux/app-${String(index)}`,
+			cohort: `group-${String(index % 3)}`
+		}));
+
+		await planAction(
+			{ ...baseOptions, targets: JSON.stringify(targets) },
+			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output },
+			recordingGithubReporter().reporter
+		);
+
+		const outputs = await readFile(output, 'utf8');
+		const targetMatrixLine = outputs
+			.split('\n')
+			.find((line) => line.startsWith('target-matrix='));
+		const targetMatrix: unknown = JSON.parse(
+			targetMatrixLine?.slice('target-matrix='.length) ?? '{}'
+		);
+
+		expect(targetMatrix).toStrictEqual({
+			include: targets.map((entry) => ({
+				attr: entry.attr,
+				system: entry.system,
+				os: entry.os,
+				remote: entry.remote,
+				bestEffort: false,
+				rootSuffix: entry.rootSuffix,
+				outputs: ['out'],
+				root: `github:owner/repo/main/${entry.rootSuffix}`,
+				runsOn: entry.os
+			}))
+		});
+
+		expect(await cohortMatrixTolerance(output)).toStrictEqual(
+			['group-0', 'group-1', 'group-2'].map((cohort) => ({
+				attrs: targets
+					.filter((entry) => entry.cohort === cohort)
+					.map((entry) => entry.attr),
+				bestEffort: false
+			}))
+		);
+	});
+
+	it('rejects more than 256 cohort jobs', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const targets = Array.from(
+			{ length: maximumMatrixJobs + 1 },
+			(_, index) => ({
+				...target,
+				attr: `.#packages.x86_64-linux.app-${String(index)}`,
+				rootSuffix: `x86_64-linux/app-${String(index)}`
+			})
+		);
+
+		await expect(
+			planAction(
+				{ ...baseOptions, targets: JSON.stringify(targets) },
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'output')
+				},
+				recordingGithubReporter().reporter
+			)
+		).rejects.toThrow(
+			new MatrixJobLimitError('cohort', targets.length, maximumMatrixJobs)
+		);
+	});
+
 	it.each([
 		{
 			reason: 'selected targets are rebuilt',
