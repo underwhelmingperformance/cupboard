@@ -757,13 +757,19 @@ function createJsonReporter(
 function describeError(error: unknown): {
 	name: string;
 	message: string;
+	code?: string;
 	causes?: string[];
 } {
 	const causes = errorCauses(error);
+	const code =
+		error instanceof Error && 'code' in error && typeof error.code === 'string'
+			? error.code
+			: undefined;
 
 	return {
 		name: error instanceof Error ? error.name : 'Error',
 		message: error instanceof Error ? error.message : String(error),
+		...(code !== undefined && { code }),
 		...(causes.length > 0 && { causes })
 	};
 }
