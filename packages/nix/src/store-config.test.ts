@@ -314,7 +314,11 @@ describe('microarchitectureLevelsOf', () => {
 });
 
 describe('discoverNixArchiveSettings', () => {
-	it.each([
+	it.each<{
+		readonly name: string;
+		readonly fixture: Fixture;
+		readonly expected: boolean;
+	}>([
 		{ name: 'the Darwin default', fixture: {}, expected: true },
 		{
 			name: 'the Linux default',
@@ -346,6 +350,28 @@ describe('discoverNixArchiveSettings', () => {
 				files: { '/etc/nix/nix.conf': 'use-case-hack = true' }
 			},
 			expected: false
+		},
+		{
+			name: 'the default with an unreadable default machines file',
+			fixture: { unreadable: ['/etc/nix/machines'] },
+			expected: true
+		},
+		{
+			name: 'an explicit setting with an unreadable builders file',
+			fixture: {
+				env: {
+					NIX_CONFIG: 'use-case-hack = false\nbuilders = @/etc/nix/builders'
+				},
+				unreadable: ['/etc/nix/builders']
+			},
+			expected: false
+		},
+		{
+			name: 'the default with a recursive machines file',
+			fixture: {
+				files: { '/etc/nix/machines': '@/etc/nix/machines\n' }
+			},
+			expected: true
 		}
 	])('uses $name', ({ fixture, expected }) => {
 		expect(discoverNixArchiveSettings(environmentFrom(fixture))).toStrictEqual({

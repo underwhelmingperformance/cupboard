@@ -556,7 +556,7 @@ depends on the host OS, not the configured build system.
 export function discoverNixArchiveSettings(
 	dependencies: NixConfigEnvironment = defaultNixConfigEnvironment
 ): NixArchiveSettings {
-	const { settings } = mergedSettings(dependencies);
+	const { settings } = loadSettings(dependencies);
 	const configured = settings.get('use-case-hack');
 
 	return {
@@ -663,8 +663,6 @@ function canonicalDirectory(value: string): string {
 		: normalised;
 }
 
-// Merge all sources for this process, but mark only user and inline assignments
-// for forwarding. The daemon reads the system file itself.
 function mergedSettings(dependencies: NixConfigEnvironment): {
 	readonly settings: Map<string, string>;
 	readonly daemonSetOptions: NixDaemonSetOptions;
@@ -674,6 +672,26 @@ function mergedSettings(dependencies: NixConfigEnvironment): {
 	readonly fileTransfer: NixFileTransferSettings;
 	readonly signatures: NixSignatureSettings;
 	readonly unknownSettings: readonly string[];
+} {
+	const { settings, daemonSettings } = loadSettings(dependencies);
+
+	return {
+		settings,
+		daemonSetOptions: daemonSettings.setOptions(),
+		daemonOverrides: daemonSettings.overrides(),
+		substitution: daemonSettings.substitution(),
+		building: daemonSettings.building(),
+		fileTransfer: daemonSettings.fileTransfer(),
+		signatures: daemonSettings.signatures(),
+		unknownSettings: daemonSettings.unknownSettings()
+	};
+}
+
+// Merge all sources for this process, but mark only user and inline assignments
+// for forwarding. The daemon reads the system file itself.
+function loadSettings(dependencies: NixConfigEnvironment): {
+	readonly settings: Map<string, string>;
+	readonly daemonSettings: EffectiveSettings;
 } {
 	const settings = new Map<string, string>();
 	const daemonSettings = new EffectiveSettings(
@@ -717,16 +735,7 @@ function mergedSettings(dependencies: NixConfigEnvironment): {
 		);
 	}
 
-	return {
-		settings,
-		daemonSetOptions: daemonSettings.setOptions(),
-		daemonOverrides: daemonSettings.overrides(),
-		substitution: daemonSettings.substitution(),
-		building: daemonSettings.building(),
-		fileTransfer: daemonSettings.fileTransfer(),
-		signatures: daemonSettings.signatures(),
-		unknownSettings: daemonSettings.unknownSettings()
-	};
+	return { settings, daemonSettings };
 }
 
 // The user files in falling precedence, the way Nix enumerates them: the
