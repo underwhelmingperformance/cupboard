@@ -341,7 +341,8 @@ export async function materialiseCachedClosure(
 				withReadAuthentication(options.fetch ?? fetch, {
 					tenantUrl: source.url
 				}),
-				'replay-safe'
+				'replay-safe',
+				{ trustedOrigin: new URL(source.url).origin }
 			);
 			sourceFetchers.set(source, fetcher);
 		}

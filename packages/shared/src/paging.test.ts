@@ -69,6 +69,54 @@ function timeoutFields(failure: unknown): unknown {
 }
 
 describe('requestWithDeadline', () => {
+	it.each(['recovered', 'exhausted', 'cancelled'] as const)(
+		'records one logical %s outcome across attempts',
+		async (outcome) => {
+			const records = captureLogs();
+			const controller = new AbortController();
+			let attempts = 0;
+			vi.useFakeTimers();
+			try {
+				const pending = requestWithDeadline(
+					(signal) => {
+						attempts += 1;
+						return outcome === 'recovered' && attempts === 2
+							? Promise.resolve('ok')
+							: stalled(signal);
+					},
+					{ ...replaySafe, signal: controller.signal }
+				);
+				const settled =
+					outcome === 'recovered'
+						? expect(pending).resolves.toBe('ok')
+						: expect(pending).rejects.toBeInstanceOf(
+								outcome === 'exhausted' ? ProbeTimeoutError : TestFailure
+							);
+				if (outcome === 'cancelled') {
+					controller.abort(new TestFailure());
+				}
+				await vi.runAllTimersAsync();
+				await settled;
+				expect(
+					records
+						.filter((record) => record.message === 'logical probe finished')
+						.map(({ properties }) => ({
+							attempts: properties.attempts,
+							disposition: properties.disposition
+						}))
+				).toStrictEqual([
+					{
+						attempts:
+							outcome === 'recovered' ? 2 : outcome === 'exhausted' ? 3 : 1,
+						disposition: outcome
+					}
+				]);
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
+
 	it('starts a fresh attempt after its deadline expires and returns its result', async () => {
 		let attempts = 0;
 
@@ -250,8 +298,16 @@ describe('requestWithDeadline', () => {
 				records: [
 					probeLog('probe attempt finished', {
 						procedure: 'caches.list',
+						probeId: expect.any(String),
 						attempt: 1,
 						outcome: 'timed out',
+						elapsedMs: probeDeadlineMs
+					}),
+					probeLog('logical probe finished', {
+						procedure: 'caches.list',
+						probeId: expect.any(String),
+						attempts: 1,
+						disposition: 'exhausted',
 						elapsedMs: probeDeadlineMs
 					})
 				]
@@ -709,7 +765,11 @@ describe('probe debug logs', () => {
 			random.mockRestore();
 		}
 
-		const probe = { url: 'https://cache.test/api/v1/path-info' };
+		const probe = {
+			url: 'https://cache.test/api/v1/path-info',
+			probeId: records[0]?.properties.probeId
+		};
+		expect(probe.probeId).toEqual(expect.any(String));
 		expect(records).toStrictEqual([
 			probeLog('probe attempt finished', {
 				...probe,
@@ -727,6 +787,12 @@ describe('probe debug logs', () => {
 				attempt: 2,
 				outcome: 'succeeded',
 				elapsedMs: 0
+			}),
+			probeLog('logical probe finished', {
+				...probe,
+				attempts: 2,
+				disposition: 'recovered',
+				elapsedMs: probeDeadlineMs + 125
 			})
 		]);
 	});
@@ -742,10 +808,12 @@ describe('probe debug logs', () => {
 		});
 
 		expect(
-			records.map(({ properties }) => ({
-				inputs: properties.inputs,
-				outcome: properties.outcome
-			}))
+			records
+				.filter((record) => record.message === 'probe attempt finished')
+				.map(({ properties }) => ({
+					inputs: properties.inputs,
+					outcome: properties.outcome
+				}))
 		).toStrictEqual([
 			{ inputs: 2, outcome: 'succeeded' },
 			{ inputs: 1, outcome: 'succeeded' }
@@ -777,10 +845,18 @@ describe('probe debug logs', () => {
 			isTestFailure: true,
 			records: [
 				probeLog('probe attempt finished', {
+					probeId: expect.any(String),
 					url: 'https://cache.test/a.narinfo',
 					attempt: 1,
 					outcome: 'failed',
 					errorName: 'TestFailure',
+					elapsedMs: 0
+				}),
+				probeLog('logical probe finished', {
+					probeId: expect.any(String),
+					url: 'https://cache.test/a.narinfo',
+					attempts: 1,
+					disposition: 'failed',
 					elapsedMs: 0
 				})
 			]

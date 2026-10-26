@@ -103,6 +103,11 @@ describe('native build diagnostic', () => {
 
 describe('native build logging', () => {
 	it('writes a probe record from the build as a workflow debug line', async () => {
+		const probeId = '12345678-1234-4234-8234-123456789abc';
+		const uuid = vi.spyOn(crypto, 'randomUUID').mockReturnValue(probeId);
+		onTestFinished(() => {
+			uuid.mockRestore();
+		});
 		vi.stubEnv('GITHUB_ACTIONS', 'true');
 		stopLogging();
 		onTestFinished(() => {
@@ -127,7 +132,10 @@ describe('native build logging', () => {
 
 		expect(canWriteOutput.mock.calls).toStrictEqual([
 			[
-				'::debug::probe attempt finished url=https://cache.example.test/a.narinfo attempt=1 outcome=succeeded elapsedMs=0\n'
+				`::debug::probe attempt finished probeId=${probeId} url=https://cache.example.test/a.narinfo attempt=1 outcome=succeeded elapsedMs=0\n`
+			],
+			[
+				`::debug::logical probe finished probeId=${probeId} url=https://cache.example.test/a.narinfo attempts=1 disposition=succeeded elapsedMs=0\n`
 			]
 		]);
 	});

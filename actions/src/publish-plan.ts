@@ -716,7 +716,8 @@ async function availablePathsAt(
 		withReadAuthentication(options.fetcher ?? fetch, {
 			tenantUrl: options.baseUrl
 		}),
-		'replay-safe'
+		'replay-safe',
+		{ trustedOrigin: new URL(options.baseUrl).origin }
 	);
 	const headers = {
 		'content-type': 'application/json',

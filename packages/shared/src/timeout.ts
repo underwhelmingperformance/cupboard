@@ -1,5 +1,11 @@
 import { CodedError, transientExitCode } from './errors.ts';
 
+const deadlineAborts = new WeakSet<AbortSignal>();
+
+export function isDeadlineAbort(signal: AbortSignal | undefined): boolean {
+	return signal !== undefined && signal.aborted && deadlineAborts.has(signal);
+}
+
 async function completionSignal(pending: Promise<unknown>): Promise<void> {
 	try {
 		await pending;
@@ -75,6 +81,7 @@ export async function attemptWithDeadline<T>(
 		timer = setTimeout(() => {
 			const error = makeError();
 			reject(error);
+			deadlineAborts.add(attemptSignal);
 			deadlineController.abort(error);
 		}, deadlineMs);
 		abandon = () => {
