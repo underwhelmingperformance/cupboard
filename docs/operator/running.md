@@ -119,9 +119,14 @@ pnpm diagnose:push --client-logs /tmp/cupboard-diagnostics \
 The report lists diagnostic artifacts for the workflow run and reads plain,
 compressed and rotated files from the supplied directory. It reports attempt and
 response counts, failures, recovery, cancellation, dropped records and
-incomplete files. The GitHub job's recorded times bound the query. Without a job
-URL or `--since`, client timestamps bound the query with an allowance of one
-minute on either side for clock differences.
+incomplete files. Probe attempt deadlines and final logical probe outcomes are
+separate: three expired attempts can exhaust one probe. HTTP deadline aborts are
+not caller cancellation. The report excludes both from transport-failure counts
+and reports HTTP attempt deadlines and caller cancellations separately. Older
+transport failures without a classification are reported as unclassified. The
+GitHub job's recorded times bound the query. Without a job URL or `--since`,
+client timestamps bound the query with an allowance of one minute on either side
+for clock differences.
 
 When client logs are supplied, the report selects server activity by returned
 request IDs, Ray IDs and exact client trace/span pairs in untrusted server
@@ -131,12 +136,31 @@ records share a matching identifier. Path/time candidates are reported
 separately and do not select server activity. Client trace IDs never identify
 native server traces.
 
-Without client logs, the report covers the whole query window, which can include
-concurrent jobs. A quiet interval does not identify a job boundary. Server
-telemetry can be sampled, delayed or unavailable, and clocks can differ. An
-unmatched client record does not prove that the server did not execute the
-request. These diagnostics do not change retry limits or make replay-unsafe
-operations safe to repeat.
+To follow reads across both Workers in one report, add
+`--control-worker cupboard` to the default tenant-Worker query. To restrict a
+long job to its failure interval, supply both `--from` and `--to` as UTC
+timestamps. This interval overrides the job timing and cannot be combined with
+`--since`:
+
+```sh
+pnpm diagnose:push --client-logs /tmp/cupboard-diagnostics \
+  --worker cupboard-tenant --control-worker cupboard \
+  --from 2026-10-26T01:26:00Z --to 2026-10-26T01:29:00Z
+```
+
+When native trace IDs are already known, add `--trace-id <id> [id...]` to
+retrieve only those traces. Supply the control and tenant trace IDs separately;
+the client OpenTelemetry trace ID is not a native trace ID. The query batches
+identifiers and pages both Workers through one bounded query pool. The report
+labels identifier-filtered retrieval as deliberately partial. Omit `--trace-id`
+to retrieve the interval before selecting activity through the client logs.
+
+Without client logs or a trace-ID filter, the report covers the whole query
+window, which can include concurrent jobs. A quiet interval does not identify a
+job boundary. Server telemetry can be sampled, delayed or unavailable, and
+clocks can differ. An unmatched client record does not prove that the server did
+not execute the request. These diagnostics do not change retry limits or make
+replay-unsafe operations safe to repeat.
 
 [custom-spans]:
   https://developers.cloudflare.com/workers/observability/traces/custom-spans/
@@ -176,10 +200,11 @@ pnpm diagnose:push --worker cupboard-tenant --since 2880 --status 500 \
 ```
 
 `--since` is in minutes. A status query requires either `--since` or a GitHub
-Actions job URL. `--hostname` restricts the query to an exact request Host
-header; omit it to query every hostname for the selected Worker. Add `--json` to
-get the matching requests with their timestamps, request IDs and trace IDs. URLs
-in the report exclude credentials, query parameters and fragments.
+Actions job URL, or an explicit `--from`/`--to` interval. `--hostname` restricts
+the query to an exact request Host header; omit it to query every hostname for
+the selected Worker. Add `--json` to get the matching requests with their
+timestamps, request IDs and trace IDs. URLs in the report exclude credentials,
+query parameters and fragments.
 
 This mode queries invocation response records. Errors inside an open commit
 WebSocket or an RPC invocation do not necessarily produce an HTTP 500 response.
@@ -214,6 +239,14 @@ terminal outcomes at debug level. Each logical read has a `storageOperationId`
 and a bounded `objectKey`; the identifier also accompanies late completion and
 cleanup logs. The `r2-get` span records its outcome and attempt count. The
 recorded time excludes body transfer.
+
+The diagnostic report includes `get()` lifecycle records, native R2 outcomes,
+invocation outcomes and invocation wall time separately from span duration.
+Missing-object probes are separate from native read failures. A span without
+terminal response attributes has an unknown outcome, even if its duration is
+zero or its metadata says `OK`. Cancelled invocations can force-close spans, so
+the recorded span duration can understate the elapsed time. A missing terminal
+record does not prove that the backend did not execute the operation.
 
 Verify both deployed Worker revisions as well as the action or CLI revision.
 Updating only the client does not enable server deadlines. After deployment,

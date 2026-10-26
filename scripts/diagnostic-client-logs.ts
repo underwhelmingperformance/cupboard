@@ -40,6 +40,22 @@ export interface ClientDiagnostics {
 	readonly recoveredOperations: number;
 	readonly exhaustedOperations: number;
 	readonly cancelledOperations: number;
+	readonly deadlineOperations: number;
+	readonly attemptDeadlines: number;
+	readonly httpAttemptDeadlines: number;
+	readonly httpAttemptCancellations: number;
+	readonly unclassifiedTransportFailures: number;
+	readonly logicalProbes: Readonly<
+		Record<
+			| 'succeeded'
+			| 'recovered'
+			| 'exhausted'
+			| 'cancelled'
+			| 'failed'
+			| 'unknown',
+			number
+		>
+	>;
 	readonly droppedRecords: number;
 	readonly transportFailureFraction: number | undefined;
 	readonly refusalFraction: number | undefined;
@@ -486,10 +502,45 @@ export function analyseClientLogs(
 		(record) => record.msg === 'HTTP response headers received'
 	);
 	const attempts = count('HTTP attempt started');
-	const transportFailures = count('HTTP attempt failed');
+	const failedAttempts = collection.records.filter(
+		(record) => record.msg === 'HTTP attempt failed'
+	);
+	const transportFailures = failedAttempts.filter(
+		(record) =>
+			record.failureKind === undefined || record.failureKind === 'transport'
+	).length;
 	const refusals = responses.filter(
 		(record) => (number(record.status) ?? 0) >= firstErrorStatus
 	).length;
+	const operationCount = (disposition: string): number =>
+		collection.records.filter(
+			(record) =>
+				(record.msg === 'HTTP operation completed' ||
+					record.msg === 'HTTP operation failed') &&
+				record.disposition === disposition
+		).length;
+	const logicalProbes = {
+		succeeded: 0,
+		recovered: 0,
+		exhausted: 0,
+		cancelled: 0,
+		failed: 0,
+		unknown: 0
+	};
+	const logicalDisposition = z.enum([
+		'succeeded',
+		'recovered',
+		'exhausted',
+		'cancelled',
+		'failed'
+	]);
+	for (const record of collection.records) {
+		if (record.msg !== 'logical probe finished') {
+			continue;
+		}
+		const disposition = logicalDisposition.safeParse(record.disposition);
+		logicalProbes[disposition.success ? disposition.data : 'unknown'] += 1;
+	}
 
 	for (const record of collection.records) {
 		if (
@@ -548,15 +599,25 @@ export function analyseClientLogs(
 		responses: responses.length,
 		transportFailures,
 		bodyFailures: count('HTTP response body failed'),
-		recoveredOperations: collection.records.filter(
-			(record) => record.disposition === 'recovered'
+		recoveredOperations: operationCount('recovered'),
+		exhaustedOperations: operationCount('exhausted'),
+		cancelledOperations: operationCount('cancelled'),
+		deadlineOperations: operationCount('deadline'),
+		attemptDeadlines: collection.records.filter(
+			(record) =>
+				record.msg === 'probe attempt finished' &&
+				record.outcome === 'timed out'
 		).length,
-		exhaustedOperations: collection.records.filter(
-			(record) => record.disposition === 'exhausted'
+		httpAttemptDeadlines: failedAttempts.filter(
+			(record) => record.failureKind === 'deadline'
 		).length,
-		cancelledOperations: collection.records.filter(
-			(record) => record.disposition === 'cancelled'
+		httpAttemptCancellations: failedAttempts.filter(
+			(record) => record.failureKind === 'cancelled'
 		).length,
+		unclassifiedTransportFailures: failedAttempts.filter(
+			(record) => record.failureKind === undefined
+		).length,
+		logicalProbes,
 		droppedRecords: collection.records.reduce(
 			(sum, record) => sum + (number(record.droppedRecords) ?? 0),
 			0
