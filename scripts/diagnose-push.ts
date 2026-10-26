@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { type CliUi, createCliUi, resolveReporterMode } from '@cupboard/cli-ui';
 import type { Reporter, ReporterMode, ResultRow } from '@cupboard/reporter';
+import { chunk } from '@cupboard/shared/collections';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import Cloudflare from 'cloudflare';
 import type { TelemetryQueryParams } from 'cloudflare/resources/workers/observability/telemetry';
@@ -36,13 +37,18 @@ import {
 	type TelemetrySelection as ClientTelemetrySelection
 } from './diagnostic-client-logs.ts';
 
-type WindowSource = 'github-job' | 'client-log-timestamps' | 'lookback';
+type WindowSource =
+	'github-job' | 'client-log-timestamps' | 'lookback' | 'explicit-interval';
 
 interface DiagnosticAttachments {
 	readonly scope?: {
 		readonly windowSource: WindowSource;
 		readonly selection: ClientTelemetrySelection;
+		readonly workers?: readonly string[];
+		readonly retrieval?: 'identifier-filtered';
 	};
+	readonly storageReads?: readonly StorageReadEvent[];
+	readonly workerInvocations?: readonly WorkerInvocation[];
 	readonly clientDiagnostics?: ClientDiagnostics;
 	readonly logArtifacts?: LogArtifactDiscovery;
 }
@@ -272,6 +278,60 @@ export interface SpanEvent {
 	readonly startMs: number;
 	readonly endMs: number;
 	readonly probe?: ProbeAttributes;
+	readonly r2Outcome?: 'succeeded' | 'missing' | 'failed' | 'unknown';
+	readonly invocation?: {
+		readonly outcome: string;
+		readonly wallTimeMs: number | undefined;
+	};
+}
+
+export interface StorageReadEvent {
+	readonly timestamp: number;
+	readonly storageOperationId: string;
+	readonly message: string;
+	readonly requestId?: string;
+	readonly traceId?: string;
+	readonly objectKey?: string;
+	readonly disposition?: string;
+	readonly attempt?: number;
+	readonly attempts?: number;
+	readonly elapsedMs?: number;
+}
+
+const storageReadSchema = z.object({
+	storageOperationId: z.string().max(128),
+	requestId: z.string().max(128).optional(),
+	objectKey: z.string().max(1024).optional(),
+	disposition: z.string().max(64).optional(),
+	attempt: z.number().int().nonnegative().optional(),
+	attempts: z.number().int().nonnegative().optional(),
+	elapsedMs: z.number().nonnegative().optional()
+});
+
+export function parseStorageReadEvent(
+	event: unknown
+): StorageReadEvent | undefined {
+	const parsed = eventSchema.safeParse(event);
+	if (!parsed.success || typeof parsed.data.source !== 'object') {
+		return undefined;
+	}
+	const source = parsed.data.source;
+	const fields = storageReadSchema.safeParse(source);
+	const message = z.string().safeParse(source.msg ?? source.message).data;
+	if (message === undefined || !fields.success) {
+		return undefined;
+	}
+	const traceId = z
+		.string()
+		.safeParse(
+			probeSourceValue(structuredSource.parse(event), '$metadata.traceId')
+		).data;
+	return {
+		...fields.data,
+		message,
+		timestamp: parsed.data.timestamp,
+		...(traceId !== undefined && { traceId })
+	};
 }
 
 /**
@@ -334,6 +394,47 @@ export interface HttpStatusAnalysis extends DiagnosticAttachments {
 	readonly status: number;
 	readonly hostname: string | undefined;
 	readonly requests: readonly HttpRequest[];
+}
+
+export interface WorkerInvocation {
+	readonly timestamp: number;
+	readonly requestId: string;
+	readonly traceId: string | undefined;
+	readonly worker: string | undefined;
+	readonly outcome: string;
+	readonly wallTimeMs: number | undefined;
+}
+
+const workerInvocationSchema = z.object({
+	timestamp: z.number(),
+	$metadata: z.object({
+		type: z.literal('cf-worker-event'),
+		requestId: z.string(),
+		traceId: z.string().optional(),
+		service: z.string().optional()
+	}),
+	$workers: z.object({
+		outcome: z.string(),
+		wallTimeMs: z.number().nonnegative().optional()
+	})
+});
+
+export function parseWorkerInvocation(
+	event: unknown
+): WorkerInvocation | undefined {
+	const parsed = workerInvocationSchema.safeParse(event);
+	if (!parsed.success) {
+		return undefined;
+	}
+	const { timestamp, $metadata: metadata, $workers: workers } = parsed.data;
+	return {
+		timestamp,
+		requestId: metadata.requestId,
+		traceId: metadata.traceId,
+		worker: metadata.service,
+		outcome: workers.outcome,
+		wallTimeMs: workers.wallTimeMs
+	};
 }
 
 const httpStatusSchema = z.number().int().min(StatusCodes.CONTINUE).max(599);
@@ -426,6 +527,17 @@ export type Verdict =
 	  };
 
 export interface Analysis extends DiagnosticAttachments {
+	readonly nativeReads?: {
+		readonly outcomes: Readonly<
+			Record<'succeeded' | 'missing' | 'failed' | 'unknown', number>
+		>;
+		readonly invocations: readonly {
+			readonly traceId: string;
+			readonly outcome: string;
+			readonly wallTimeMs: number | undefined;
+			readonly spanDurationMs: number;
+		}[];
+	};
 	readonly metadataProbes?: readonly MetadataProbeStat[];
 	readonly worker: string;
 	readonly window: TimeWindow;
@@ -794,6 +906,26 @@ export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 					structuredSource.safeParse(parsed.data.source).data
 				)
 			: undefined;
+	const source = structuredSource.safeParse(parsed.data.source).data ?? {};
+	const outcome = z
+		.string()
+		.safeParse(probeSourceValue(source, 'cloudflare.outcome')).data;
+	const wallTimeMs = z
+		.number()
+		.nonnegative()
+		.safeParse(
+			probeSourceValue(source, 'cloudflare.wall_time_ms') ?? source.wall_time_ms
+		).data;
+	const r2Success = probeSourceValue(source, 'cloudflare.r2.response.success');
+	const r2Code = probeSourceValue(source, 'cloudflare.r2.error.code');
+	const r2Outcome =
+		r2Code === 10_007
+			? 'missing'
+			: r2Success === true
+				? 'succeeded'
+				: r2Success === false || typeof r2Code === 'number'
+					? 'failed'
+					: 'unknown';
 
 	return {
 		traceId: meta.traceId,
@@ -802,6 +934,8 @@ export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 		name,
 		startMs,
 		endMs,
+		...(name === 'r2_get' && { r2Outcome }),
+		...(outcome !== undefined && { invocation: { outcome, wallTimeMs } }),
 		...(probe !== undefined && { probe })
 	};
 }
@@ -1075,8 +1209,30 @@ export function analyse(
 
 	const groups = groupOperations(operations);
 	const metadataProbes = metadataProbeStats(spans);
+	const nativeOutcomes = { succeeded: 0, missing: 0, failed: 0, unknown: 0 };
+	for (const span of spans) {
+		if (span.r2Outcome !== undefined) {
+			nativeOutcomes[span.r2Outcome] += 1;
+		}
+	}
+	const nativeInvocations = spans
+		.toSorted((left, right) => right.startMs - left.startMs)
+		.flatMap((span) =>
+			span.invocation === undefined
+				? []
+				: {
+						traceId: span.traceId,
+						...span.invocation,
+						spanDurationMs: span.endMs - span.startMs
+					}
+		);
 
 	return {
+		...(spans.some(
+			(span) => span.r2Outcome !== undefined || span.invocation !== undefined
+		) && {
+			nativeReads: { outcomes: nativeOutcomes, invocations: nativeInvocations }
+		}),
 		...(metadataProbes.length > 0 && { metadataProbes }),
 		worker,
 		window,
@@ -1515,6 +1671,9 @@ export function traceErrorRows(analysis: Analysis): ResultRow[] {
 
 interface Options {
 	readonly clientLogs?: string;
+	readonly controlWorker?: string;
+	readonly interval?: TimeWindow;
+	readonly traceIds?: readonly string[];
 	readonly worker: string;
 	readonly searchMinutes: number;
 	readonly sinceMinutes: number | undefined;
@@ -1576,6 +1735,10 @@ export class InvalidStatusQueryError extends DiagnoseError {
 
 interface ProgramFlags {
 	readonly clientLogs?: string;
+	readonly controlWorker?: string;
+	readonly from?: number;
+	readonly to?: number;
+	readonly traceId?: readonly string[];
 	readonly worker: string;
 	readonly search: number;
 	readonly since?: number;
@@ -1598,6 +1761,25 @@ export function parseOptions(arguments_: readonly string[]): Options {
 			'use the start and completion times of a GitHub Actions job'
 		)
 		.option('--worker <name>', 'Worker script to query', 'cupboard-tenant')
+		.option(
+			'--control-worker <name>',
+			'also query this control Worker in the same report'
+		)
+		.option(
+			'--from <timestamp>',
+			'start of an explicit UTC failure interval',
+			utcTimestamp
+		)
+		.option(
+			'--to <timestamp>',
+			'end of an explicit UTC failure interval',
+			utcTimestamp
+		)
+		.option(
+			'--trace-id <ids...>',
+			'retrieve only these native trace IDs',
+			nativeTraceIdArgument
+		)
 		.option(
 			'--client-logs <directory>',
 			'read client diagnostic logs from an extracted artifact directory'
@@ -1631,12 +1813,28 @@ export function parseOptions(arguments_: readonly string[]): Options {
 	program.parse(arguments_, { from: 'user' });
 
 	const flags = program.opts<ProgramFlags>();
+	if (
+		(flags.from === undefined) !== (flags.to === undefined) ||
+		(flags.from !== undefined &&
+			flags.to !== undefined &&
+			flags.from >= flags.to)
+	) {
+		throw new InvalidStatusQueryError(
+			'--from and --to must specify an increasing UTC interval'
+		);
+	}
+	if (flags.from !== undefined && flags.since !== undefined) {
+		throw new InvalidStatusQueryError(
+			'--since cannot be combined with --from and --to'
+		);
+	}
 	const githubJobUrl = program.args[0];
 
 	if (
 		githubJobUrl === undefined &&
 		flags.status !== undefined &&
-		flags.since === undefined
+		flags.since === undefined &&
+		flags.from === undefined
 	) {
 		throw new InvalidStatusQueryError(
 			'--status requires --since <minutes> or a GitHub Actions job URL'
@@ -1648,6 +1846,14 @@ export function parseOptions(arguments_: readonly string[]): Options {
 	}
 
 	return {
+		...(flags.controlWorker !== undefined && {
+			controlWorker: flags.controlWorker
+		}),
+		...(flags.from !== undefined &&
+			flags.to !== undefined && {
+				interval: { from: flags.from, to: flags.to }
+			}),
+		...(flags.traceId !== undefined && { traceIds: flags.traceId }),
 		...(flags.clientLogs !== undefined && { clientLogs: flags.clientLogs }),
 		worker: flags.worker,
 		searchMinutes: flags.search,
@@ -1660,6 +1866,31 @@ export function parseOptions(arguments_: readonly string[]): Options {
 		githubJob:
 			githubJobUrl === undefined ? undefined : parseGitHubJobUrl(githubJobUrl)
 	};
+}
+
+function utcTimestamp(value: string): number {
+	const timestamp = Date.parse(value);
+	if (
+		!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u.test(value) ||
+		!Number.isFinite(timestamp)
+	) {
+		throw new InvalidArgumentError(
+			'Expected a UTC timestamp such as 2026-10-26T01:26:00Z.'
+		);
+	}
+	return timestamp;
+}
+
+function nativeTraceIdArgument(
+	value: string,
+	previous: readonly string[] = []
+): readonly string[] {
+	if (!/^[0-9a-f]{1,32}$/u.test(value) || /^0+$/u.test(value)) {
+		throw new InvalidArgumentError(
+			'Expected a nonzero hexadecimal native trace ID of at most 32 characters.'
+		);
+	}
+	return [...previous, value];
 }
 
 const githubJobPath =
@@ -1983,6 +2214,8 @@ function serviceFilter(worker: string): {
 
 interface TelemetrySelection {
 	readonly worker: string;
+	readonly controlWorker?: string;
+	readonly traceIds?: readonly string[];
 	readonly status?: number | undefined;
 	readonly hostname?: string | undefined;
 }
@@ -1993,6 +2226,14 @@ function telemetryParameters(
 	const filters: NonNullable<TelemetryQueryParams.Parameters['filters']> = [
 		serviceFilter(selection.worker)
 	];
+	if (selection.traceIds !== undefined) {
+		filters.push({
+			key: '$metadata.traceId',
+			operation: 'in',
+			type: 'string',
+			value: selection.traceIds.join(',')
+		});
+	}
 
 	if (selection.status !== undefined) {
 		filters.push(
@@ -2537,6 +2778,19 @@ export async function fetchTelemetry(
 	) => void
 ): Promise<Record<TelemetryView, unknown[]>> {
 	const slices = sliceWindow(window);
+	const workers = [
+		...new Set([
+			selection.worker,
+			...(selection.controlWorker === undefined
+				? []
+				: [selection.controlWorker])
+		])
+	];
+	const identifierBatches =
+		selection.traceIds === undefined
+			? [undefined]
+			: chunk([...new Set(selection.traceIds)], 50);
+	const totalSlices = slices.length * workers.length * identifierBatches.length;
 	const views: readonly TelemetryView[] =
 		selection.status === undefined ? ['events', 'traces'] : ['events'];
 	const progress: Record<TelemetryView, ViewProgress> = {
@@ -2545,41 +2799,52 @@ export async function fetchTelemetry(
 	};
 	const out: Record<TelemetryView, unknown[]> = { events: [], traces: [] };
 
-	const tasks = views.flatMap((view) =>
-		slices.map((slice) => ({ view, slice }))
+	const tasks = workers.flatMap((worker) =>
+		identifierBatches.flatMap((traceIds) =>
+			views.flatMap((view) =>
+				slices.map((slice) => ({ worker, traceIds, view, slice }))
+			)
+		)
 	);
 
-	const query: TelemetryQuery = (parameters) =>
-		client.workers.observability.telemetry.query({
-			account_id: accountId,
-			queryId: 'cupboard-diagnose-push',
-			parameters: telemetryParameters(selection),
-			...parameters
-		});
+	await mapWithConcurrency(
+		tasks,
+		fetchConcurrency,
+		async ({ worker, traceIds, view, slice }) => {
+			const query: TelemetryQuery = (parameters) =>
+				client.workers.observability.telemetry.query({
+					account_id: accountId,
+					queryId: 'cupboard-diagnose-push',
+					parameters: telemetryParameters({
+						...selection,
+						worker,
+						...(traceIds !== undefined && { traceIds })
+					}),
+					...parameters
+				});
+			const rows = await fetchPaged(
+				query,
+				view,
+				slice,
+				timestampOf[view],
+				cursorOf[view],
+				(pageRows) => {
+					progress[view].rows += pageRows;
+					progress[view].pages += 1;
+					onProgress(view, progress[view], totalSlices);
+				},
+				defaultSleep
+			);
+			progress[view].slicesDone += 1;
+			onProgress(view, progress[view], totalSlices);
 
-	await mapWithConcurrency(tasks, fetchConcurrency, async ({ view, slice }) => {
-		const rows = await fetchPaged(
-			query,
-			view,
-			slice,
-			timestampOf[view],
-			cursorOf[view],
-			(pageRows) => {
-				progress[view].rows += pageRows;
-				progress[view].pages += 1;
-				onProgress(view, progress[view], slices.length);
-			},
-			defaultSleep
-		);
-		progress[view].slicesDone += 1;
-		onProgress(view, progress[view], slices.length);
-
-		// A slice can contain tens of thousands of rows; spreading them into push
-		// would overflow the argument stack, so append element by element.
-		for (const row of rows) {
-			out[view].push(row);
+			// A slice can contain tens of thousands of rows; spreading them into push
+			// would overflow the argument stack, so append element by element.
+			for (const row of rows) {
+				out[view].push(row);
+			}
 		}
-	});
+	);
 
 	return out;
 }
@@ -2631,6 +2896,26 @@ export function renderAnalysis(
 
 	if (analysis.traceErrors.length > 0) {
 		ui.note('Trace errors', traceErrorRows(analysis));
+	}
+	if (analysis.nativeReads !== undefined) {
+		ui.note('Native R2 evidence', [
+			{
+				label: 'Read outcomes',
+				value: JSON.stringify(analysis.nativeReads.outcomes)
+			},
+			{
+				label: 'Coverage limit',
+				value:
+					'Unknown reads have no terminal response attributes. Span duration, including zero, does not establish success. Force-closed spans can understate elapsed time.'
+			},
+			...analysis.nativeReads.invocations
+				.filter((invocation) => invocation.outcome !== 'ok')
+				.slice(0, slowestCount)
+				.map((invocation) => ({
+					label: `Trace ${invocation.traceId} · ${invocation.outcome}`,
+					value: `Invocation wall time ${invocation.wallTimeMs === undefined ? 'unknown' : formatMs(invocation.wallTimeMs)} · span duration ${formatMs(invocation.spanDurationMs)}`
+				}))
+		]);
 	}
 }
 
@@ -2713,6 +2998,18 @@ function renderDiagnosticAttachments(
 		ui.note('Telemetry selection', [
 			{ label: 'Query window', value: scope.windowSource },
 			{ label: 'Selection', value: selection.kind },
+			...(scope.workers === undefined
+				? []
+				: [{ label: 'Workers', value: scope.workers.join(', ') }]),
+			...(scope.retrieval === undefined
+				? []
+				: [
+						{
+							label: 'Retrieval',
+							value:
+								'Identifier-filtered; deliberately excludes other requests in the interval.'
+						}
+					]),
 			...(selection.kind === 'client-identifiers'
 				? [
 						{
@@ -2748,7 +3045,20 @@ function renderDiagnosticAttachments(
 			},
 			{
 				label: 'Operations',
-				value: `${String(client.recoveredOperations)} recovered, ${String(client.exhaustedOperations)} exhausted, ${String(client.cancelledOperations)} cancelled`
+				value: `${String(client.recoveredOperations)} recovered, ${String(client.exhaustedOperations)} exhausted, ${String(client.cancelledOperations)} cancelled, ${String(client.deadlineOperations)} deadline expiries`
+			},
+			{
+				label: 'HTTP attempt aborts',
+				value: `${String(client.httpAttemptDeadlines)} deadline expiries, ${String(client.httpAttemptCancellations)} caller cancellations`
+			},
+			{
+				label: 'Probe attempt deadlines',
+				value: String(client.attemptDeadlines)
+			},
+			{ label: 'Logical probes', value: JSON.stringify(client.logicalProbes) },
+			{
+				label: 'Unclassified transport failures',
+				value: `${String(client.unclassifiedTransportFailures)} (older records may lack failure classification)`
 			},
 			{
 				label: 'Correlation (records)',
@@ -2763,6 +3073,40 @@ function renderDiagnosticAttachments(
 	}
 
 	const discovery = analysis.logArtifacts;
+	const failedInvocations =
+		analysis.workerInvocations?.filter(
+			(invocation) => invocation.outcome !== 'ok'
+		) ?? [];
+	if (failedInvocations.length > 0) {
+		ui.note(
+			'Invocation outcomes',
+			failedInvocations
+				.toSorted((left, right) => right.timestamp - left.timestamp)
+				.slice(0, slowestCount)
+				.map((invocation) => ({
+					label: `${invocation.worker ?? 'unknown Worker'} · ${invocation.outcome}`,
+					value: `Request ${invocation.requestId} · trace ${invocation.traceId ?? 'unknown'} · wall time ${invocation.wallTimeMs === undefined ? 'unknown' : formatMs(invocation.wallTimeMs)}`
+				}))
+		);
+	}
+	const storageReads = analysis.storageReads;
+	if (storageReads !== undefined && storageReads.length > 0) {
+		ui.note(
+			'R2 get lifecycle',
+			storageReads
+				.filter(
+					(event) =>
+						event.message !== 'R2 get attempt started' &&
+						event.message !== 'R2 get started'
+				)
+				.toSorted((left, right) => left.timestamp - right.timestamp)
+				.slice(-slowestCount)
+				.map((event) => ({
+					label: `${event.storageOperationId} · ${event.message}`,
+					value: `${event.disposition ?? 'unknown'} · ${event.attempts === undefined ? 'unknown attempts' : `${String(event.attempts)} attempts`} · request ${event.requestId ?? 'unknown'} · trace ${event.traceId ?? 'unknown'}`
+				}))
+		);
+	}
 
 	if (discovery !== undefined) {
 		ui.note('Workflow diagnostic artifacts', [
@@ -2784,6 +3128,9 @@ async function resolveTelemetryWindow(
 	reporter: Reporter,
 	clientLogs: ClientLogCollection | undefined
 ): Promise<{ readonly window: TimeWindow; readonly source: WindowSource }> {
+	if (options.interval !== undefined) {
+		return { window: options.interval, source: 'explicit-interval' };
+	}
 	const githubJob = options.githubJob;
 
 	if (githubJob !== undefined) {
@@ -2811,12 +3158,16 @@ async function resolveTelemetryWindow(
 async function main(): Promise<void> {
 	const now = Date.now();
 	const options = parseOptions(argv.slice(2));
+	const workerLabel = [
+		options.worker,
+		...(options.controlWorker === undefined ? [] : [options.controlWorker])
+	].join(', ');
 
 	const ui = createCliUi({ mode: options.mode });
 	const reporter = ui.reporter();
 
 	ui.intro(
-		`${options.status === undefined ? 'Push' : 'HTTP status'} diagnostic: ${options.worker}`
+		`${options.status === undefined ? 'Push' : 'HTTP status'} diagnostic: ${workerLabel}`
 	);
 	const directory = options.clientLogs;
 	const clientLogs =
@@ -2883,7 +3234,22 @@ async function main(): Promise<void> {
 	const rawTraces = selected.traces;
 
 	const diagnosticAttachments: DiagnosticAttachments = {
-		scope: { windowSource, selection: selected.selection },
+		workerInvocations: rawEvents
+			.map((event) => parseWorkerInvocation(event))
+			.filter((event) => event !== undefined),
+		scope: {
+			windowSource,
+			selection: selected.selection,
+			...(options.controlWorker !== undefined && {
+				workers: [options.worker, options.controlWorker]
+			}),
+			...(options.traceIds !== undefined && {
+				retrieval: 'identifier-filtered'
+			})
+		},
+		storageReads: rawEvents
+			.map((event) => parseStorageReadEvent(event))
+			.filter((event) => event !== undefined),
 		...(clientLogs !== undefined && {
 			clientDiagnostics: analyseClientLogs(clientLogs, [
 				...fetchedTelemetry.rawEvents,
@@ -2908,7 +3274,7 @@ async function main(): Promise<void> {
 
 		renderHttpStatusAnalysis(ui, reporter, options.mode, {
 			...diagnosticAttachments,
-			worker: options.worker,
+			worker: workerLabel,
 			window: searchWindow,
 			status: options.status,
 			hostname: options.hostname,
@@ -2952,7 +3318,7 @@ async function main(): Promise<void> {
 		context.fact('spans in window', formatCount(windowedSpans.length));
 
 		return analyse(
-			options.worker,
+			workerLabel,
 			window,
 			logs.filter((log) => isInWindow(log.timestamp)),
 			traces.filter((trace) => isInWindow(trace.startMs)),

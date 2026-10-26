@@ -28,6 +28,122 @@ function collection(
 }
 
 describe('client diagnostic logs', () => {
+	it('keeps transport operations separate from logical probe results and old unknown failures', () => {
+		const result = analyseClientLogs(
+			collection([
+				{ msg: 'probe attempt finished', outcome: 'timed out' },
+				{ msg: 'probe attempt finished', outcome: 'timed out' },
+				{ msg: 'HTTP operation failed', disposition: 'deadline' },
+				{ msg: 'HTTP operation completed', disposition: 'recovered' },
+				{ msg: 'HTTP attempt failed' },
+				{ msg: 'HTTP attempt failed', failureKind: 'transport' },
+				{ msg: 'HTTP attempt failed', failureKind: 'deadline' },
+				{ msg: 'HTTP attempt failed', failureKind: 'cancelled' },
+				{ msg: 'HTTP attempt started' },
+				{ msg: 'HTTP attempt started' },
+				{ msg: 'HTTP attempt started' },
+				{ msg: 'HTTP attempt started' },
+				{ msg: 'logical probe finished', disposition: 'recovered' },
+				{ msg: 'logical probe finished', disposition: 'exhausted' },
+				{ msg: 'logical probe finished', disposition: 'cancelled' }
+			]),
+			[]
+		);
+		expect(result).toStrictEqual({
+			files: 1,
+			records: 15,
+			incompleteFiles: [],
+			unreadableFiles: [],
+			truncated: false,
+			attempts: 4,
+			responses: 0,
+			transportFailures: 2,
+			bodyFailures: 0,
+			recoveredOperations: 1,
+			exhaustedOperations: 0,
+			cancelledOperations: 0,
+			deadlineOperations: 1,
+			attemptDeadlines: 2,
+			httpAttemptDeadlines: 1,
+			httpAttemptCancellations: 1,
+			unclassifiedTransportFailures: 1,
+			logicalProbes: {
+				succeeded: 0,
+				recovered: 1,
+				exhausted: 1,
+				cancelled: 1,
+				failed: 0,
+				unknown: 0
+			},
+			droppedRecords: 0,
+			transportFailureFraction: 0.5,
+			refusalFraction: undefined,
+			correlation: {
+				requestId: 0,
+				ray: 0,
+				untrustedClientParent: 0,
+				pathTimeCandidate: 0,
+				unmatched: 4
+			},
+			caveats: [
+				'server-telemetry',
+				'untrusted-client-parent',
+				'path-and-time',
+				'client-log-coverage'
+			]
+		});
+	});
+
+	it('follows a no-response client attempt across both Workers without selecting a concurrent job', () => {
+		const client = collection([
+			{ msg: 'HTTP attempt failed', trace_id: 'client', span_id: 'attempt' }
+		]);
+		const control = {
+			source: {
+				clientTraceId: 'client',
+				clientSpanId: 'attempt',
+				requestId: 'shared'
+			},
+			$metadata: { service: 'cupboard', traceId: 'control' }
+		};
+		const tenant = {
+			source: { requestId: 'shared' },
+			$metadata: { service: 'cupboard-tenant', traceId: 'tenant' }
+		};
+		const late = {
+			source: { msg: 'storage request completed after timeout' },
+			$metadata: { traceId: 'tenant' }
+		};
+		const unrelated = {
+			source: {
+				clientTraceId: 'client',
+				clientSpanId: 'other',
+				requestId: 'other'
+			},
+			$metadata: { traceId: 'unrelated' }
+		};
+		expect(
+			selectClientTelemetry(
+				client,
+				[late, unrelated, tenant, control],
+				[
+					{ traceId: 'control' },
+					{ traceId: 'tenant' },
+					{ traceId: 'unrelated' }
+				]
+			)
+		).toStrictEqual({
+			events: [late, tenant, control],
+			traces: [{ traceId: 'control' }, { traceId: 'tenant' }],
+			selection: {
+				kind: 'client-identifiers',
+				matchedBy: { requestId: 0, ray: 0, untrustedClientParent: 1 },
+				excludedEvents: 1,
+				excludedTraces: 1
+			}
+		});
+	});
+
 	it('selects one client across overlapping jobs and long quiet intervals', () => {
 		const client = collection([
 			{ requestId: 'server-request', timestamp: 1000 },
@@ -251,6 +367,19 @@ describe('client diagnostic logs', () => {
 			recoveredOperations: 1,
 			exhaustedOperations: 1,
 			cancelledOperations: 1,
+			deadlineOperations: 0,
+			attemptDeadlines: 0,
+			httpAttemptDeadlines: 0,
+			httpAttemptCancellations: 0,
+			unclassifiedTransportFailures: 3,
+			logicalProbes: {
+				succeeded: 0,
+				recovered: 0,
+				exhausted: 0,
+				cancelled: 0,
+				failed: 0,
+				unknown: 0
+			},
 			droppedRecords: 3,
 			transportFailureFraction: 0.6,
 			refusalFraction: 0.5,

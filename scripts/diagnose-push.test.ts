@@ -31,7 +31,9 @@ import {
 	parseHttpRequest,
 	parseOptions,
 	parseSpanEvent,
+	parseStorageReadEvent,
 	parseTraceSummary,
+	parseWorkerInvocation,
 	parseWorkerLog,
 	percentile,
 	renderAnalysis,
@@ -69,7 +71,101 @@ const httpEvent = {
 	}
 };
 
+function nativeTraceQuery(worker: string, view: string): unknown {
+	return {
+		queryId: 'cupboard-diagnose-push',
+		parameters: {
+			filterCombination: 'and',
+			filters: [
+				{
+					key: '$metadata.service',
+					operation: 'eq',
+					type: 'string',
+					value: worker
+				},
+				{
+					key: '$metadata.traceId',
+					operation: 'in',
+					type: 'string',
+					value: 'a'.repeat(32)
+				}
+			]
+		},
+		view,
+		limit: view === 'events' ? 1000 : 500,
+		timeframe: { from: 0, to: 3 }
+	};
+}
+
 describe('HTTP status queries', () => {
+	it('accepts an explicit failure interval and a cross-Worker native trace selection', () => {
+		expect(
+			parseOptions([
+				'--control-worker',
+				'cupboard',
+				'--from',
+				'2026-10-26T01:26:00Z',
+				'--to',
+				'2026-10-26T01:29:00Z',
+				'--trace-id',
+				'a'.repeat(32),
+				'--json'
+			])
+		).toStrictEqual({
+			worker: 'cupboard-tenant',
+			controlWorker: 'cupboard',
+			interval: {
+				from: Date.parse('2026-10-26T01:26:00Z'),
+				to: Date.parse('2026-10-26T01:29:00Z')
+			},
+			traceIds: ['a'.repeat(32)],
+			searchMinutes: 120,
+			sinceMinutes: undefined,
+			account: undefined,
+			mode: 'json',
+			forceLogin: false,
+			githubJob: undefined,
+			status: undefined,
+			hostname: undefined
+		});
+	});
+
+	it('queries native identifiers across both Workers without broadening to the whole interval', async () => {
+		const bodies: unknown[] = [];
+		const client = new Cloudflare({
+			apiToken: 'test',
+			fetch: (_url, init) => {
+				bodies.push(JSON.parse(z.string().parse(init?.body)));
+				return Promise.resolve(
+					Response.json({
+						success: true,
+						result: { events: { events: [] }, traces: [] }
+					})
+				);
+			}
+		});
+		const result = await fetchTelemetry(
+			client,
+			'account',
+			{
+				worker: 'cupboard-tenant',
+				controlWorker: 'cupboard',
+				traceIds: ['a'.repeat(32)]
+			},
+			{ from: 1, to: 2 },
+			vi.fn()
+		);
+		expect({ result, bodies }).toStrictEqual({
+			result: { events: [], traces: [] },
+			bodies: [
+				nativeTraceQuery('cupboard-tenant', 'events'),
+				nativeTraceQuery('cupboard-tenant', 'traces'),
+				nativeTraceQuery('cupboard', 'events'),
+				nativeTraceQuery('cupboard', 'traces')
+			]
+		});
+	});
+
 	it('requires an explicit window for a status query', () => {
 		expect(() => parseOptions(['--status', '500'])).toThrow(
 			InvalidStatusQueryError
@@ -675,6 +771,136 @@ describe('parseTraceSummary', () => {
 });
 
 describe('parseSpanEvent', () => {
+	it('retains a cancelled invocation without requiring response headers or spans', () => {
+		expect(
+			parseWorkerInvocation({
+				timestamp: 1,
+				$metadata: {
+					type: 'cf-worker-event',
+					requestId: 'ray',
+					traceId: 'control',
+					service: 'cupboard'
+				},
+				$workers: {
+					outcome: 'canceled',
+					wallTimeMs: 30_000,
+					event: { request: { url: 'https://secret.invalid/?token=private' } }
+				}
+			})
+		).toStrictEqual({
+			timestamp: 1,
+			requestId: 'ray',
+			traceId: 'control',
+			worker: 'cupboard',
+			outcome: 'canceled',
+			wallTimeMs: 30_000
+		});
+	});
+
+	it('preserves R2 get identity and excludes raw provider errors', () => {
+		expect(
+			parseStorageReadEvent({
+				timestamp: 1,
+				$metadata: { traceId: 'native' },
+				source: {
+					msg: 'R2 get failed',
+					storageOperationId: 'operation',
+					requestId: 'request',
+					objectKey: 't/acme/nar/key',
+					disposition: 'timeout',
+					attempts: 1,
+					elapsedMs: 15_000,
+					error: { message: 'private provider data' }
+				}
+			})
+		).toStrictEqual({
+			timestamp: 1,
+			traceId: 'native',
+			message: 'R2 get failed',
+			storageOperationId: 'operation',
+			requestId: 'request',
+			objectKey: 't/acme/nar/key',
+			disposition: 'timeout',
+			attempts: 1,
+			elapsedMs: 15_000
+		});
+	});
+
+	it('does not interpret a zero-duration R2 span without response attributes as success', () => {
+		expect(
+			parseSpanEvent({
+				timestamp: 1000,
+				source: { cloudflare: { r2: { operation: 'GetObject' } } },
+				$metadata: {
+					type: 'span',
+					traceId: 'native',
+					spanName: 'r2_get',
+					startTime: 1000,
+					endTime: 1000
+				}
+			})
+		).toStrictEqual({
+			traceId: 'native',
+			spanId: undefined,
+			parentSpanId: undefined,
+			name: 'r2_get',
+			startMs: 1000,
+			endMs: 1000,
+			r2Outcome: 'unknown'
+		});
+	});
+
+	it('keeps invocation wall time and cancellation separate from span duration', () => {
+		expect(
+			parseSpanEvent({
+				timestamp: 1000,
+				source: { cloudflare: { outcome: 'canceled' }, wall_time_ms: 30_000 },
+				$metadata: {
+					type: 'span',
+					traceId: 'native',
+					spanName: 'fetch',
+					startTime: 1000,
+					endTime: 1000
+				}
+			})
+		).toStrictEqual({
+			traceId: 'native',
+			spanId: undefined,
+			parentSpanId: undefined,
+			name: 'fetch',
+			startMs: 1000,
+			endMs: 1000,
+			invocation: { outcome: 'canceled', wallTimeMs: 30_000 }
+		});
+	});
+
+	it.each([
+		[10_007, 'missing'],
+		[10_001, 'failed']
+	] as const)(
+		'separates native R2 code %s from incomplete reads',
+		(code, r2Outcome) => {
+			expect(
+				parseSpanEvent({
+					timestamp: 1,
+					source: {
+						'cloudflare.r2.response.success': false,
+						'cloudflare.r2.error.code': code
+					},
+					$metadata: { type: 'span', traceId: 'native', spanName: 'r2_get' }
+				})
+			).toStrictEqual({
+				traceId: 'native',
+				spanId: undefined,
+				parentSpanId: undefined,
+				name: 'r2_get',
+				startMs: 1,
+				endMs: 1,
+				r2Outcome
+			});
+		}
+	);
+
 	it('parses a span with its duration and tree links', () => {
 		const event = {
 			timestamp: 1000,
@@ -1984,6 +2210,97 @@ describe('renderAnalysis', () => {
 		expect(captured.data).toStrictEqual([JSON.stringify(analysis)]);
 		expect(captured.results).toStrictEqual([]);
 		expect(captured.notes).toStrictEqual([]);
+	});
+
+	it('orders native invocation spans by start time', () => {
+		const spans: SpanEvent[] = [2, 3, 1].map((id) => ({
+			traceId: `trace-${String(id)}`,
+			spanId: undefined,
+			parentSpanId: undefined,
+			name: 'Worker',
+			startMs: id * 1000,
+			endMs: id * 1000 + 100,
+			invocation: { outcome: 'canceled', wallTimeMs: 30_000 }
+		}));
+		const result = analyse('worker', { from: 0, to: 4000 }, [], [], spans);
+		expect(result.nativeReads).toStrictEqual({
+			outcomes: { succeeded: 0, missing: 0, failed: 0, unknown: 0 },
+			invocations: [3, 2, 1].map((id) => ({
+				traceId: `trace-${String(id)}`,
+				outcome: 'canceled',
+				wallTimeMs: 30_000,
+				spanDurationMs: 100
+			}))
+		});
+	});
+
+	it('selects the latest telemetry before limiting displayed records', () => {
+		const { ui, captured } = fakeCliUi();
+		const ids = [14, ...Array.from({ length: 13 }, (_, index) => index + 1)];
+		renderAnalysis(ui, ui.reporter(), 'terminal', {
+			...analysis,
+			groups: [],
+			slowest: [],
+			workerInvocations: [
+				...ids.map((timestamp) => ({
+					timestamp,
+					requestId: `request-${String(timestamp)}`,
+					traceId: 'trace',
+					worker: 'cupboard-tenant',
+					outcome: 'canceled',
+					wallTimeMs: 30_000
+				})),
+				{
+					timestamp: 15,
+					requestId: 'ok',
+					traceId: 'trace',
+					worker: 'cupboard-tenant',
+					outcome: 'ok',
+					wallTimeMs: 1
+				}
+			],
+			storageReads: [
+				...ids.map((timestamp) => ({
+					timestamp,
+					storageOperationId: `operation-${String(timestamp)}`,
+					message: 'R2 get failed',
+					disposition: 'timeout',
+					attempts: 1,
+					requestId: 'request',
+					traceId: 'trace'
+				})),
+				{
+					timestamp: 15,
+					storageOperationId: 'started',
+					message: 'R2 get started'
+				},
+				{
+					timestamp: 16,
+					storageOperationId: 'attempt',
+					message: 'R2 get attempt started'
+				}
+			]
+		});
+		expect(captured.notes).toStrictEqual([
+			{
+				title: 'Invocation outcomes',
+				body: noteBody(
+					Array.from({ length: 12 }, (_, index) => ({
+						label: 'cupboard-tenant · canceled',
+						value: `Request request-${String(14 - index)} · trace trace · wall time 30.0s`
+					}))
+				)
+			},
+			{
+				title: 'R2 get lifecycle',
+				body: noteBody(
+					Array.from({ length: 12 }, (_, index) => ({
+						label: `operation-${String(index + 3)} · R2 get failed`,
+						value: 'timeout · 1 attempts · request request · trace trace'
+					}))
+				)
+			}
+		]);
 	});
 
 	it('renders the result card and notes in terminal mode', () => {
