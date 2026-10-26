@@ -16,6 +16,77 @@ function never(): Promise<never> {
 
 describe('boundedSubrequest', () => {
 	it.each([false, true])(
+		'observes late cleanup without replacing the timeout (cleanup rejects=%s)',
+		async (rejectsCleanup) => {
+			const capture = startCapture();
+			const operation = Promise.withResolvers<string>();
+			const cleanup = vi.fn((_result: string) =>
+				rejectsCleanup
+					? Promise.reject(new Error('cleanup failed'))
+					: Promise.resolve()
+			);
+			vi.useFakeTimers();
+			try {
+				const pending = boundedSubrequest(
+					() => operation.promise,
+					'r2.get',
+					10,
+					cleanup
+				);
+				const rejected = expect(pending).rejects.toBeInstanceOf(
+					SubrequestTimeoutError
+				);
+				await vi.advanceTimersByTimeAsync(10);
+				await rejected;
+				operation.resolve('late');
+				await vi.advanceTimersByTimeAsync(0);
+				expect({
+					cleanups: cleanup.mock.calls,
+					cleanupFailures: capture.logs
+						.filter(
+							(log) => log.message === 'storage late-result cleanup failed'
+						)
+						.map((log) => log.properties.operation)
+				}).toStrictEqual({
+					cleanups: [['late']],
+					cleanupFailures: rejectsCleanup ? ['r2.get'] : []
+				});
+			} finally {
+				capture.stop();
+				vi.useRealTimers();
+			}
+		}
+	);
+
+	it('cleans a result that settles during enclosing deadline expiry', async () => {
+		vi.useFakeTimers();
+		const operation = Promise.withResolvers<string>();
+		const cleanup = vi.fn((_result: string) => Promise.resolve());
+		try {
+			const pending = withDeadlineBudget(10, () => {
+				setTimeout(() => {
+					operation.resolve('expired');
+				}, 10);
+				return boundedSubrequest(
+					() => operation.promise,
+					'r2.get',
+					10,
+					cleanup
+				);
+			});
+			const rejected = expect(pending).rejects.toMatchObject({
+				name: 'SubrequestTimeoutError',
+				subrequest: 'r2.get'
+			});
+			await vi.advanceTimersByTimeAsync(10);
+			await rejected;
+			expect(cleanup.mock.calls).toStrictEqual([['expired']]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it.each([false, true])(
 		'records a late storage result after timeout (failed=%s)',
 		async (hasFailed) => {
 			const capture = startCapture();

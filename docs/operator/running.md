@@ -185,6 +185,44 @@ This mode queries invocation response records. Errors inside an open commit
 WebSocket or an RPC invocation do not necessarily produce an HTTP 500 response.
 Cloudflare's log retention and sampling limit which responses can be found.
 
+### R2 read failures
+
+Waiting for `R2Bucket.get()` to return has a total budget of 15 seconds. An
+enclosing storage deadline can shorten that budget. The server retries only
+completed native rejections for internal error (10001), unavailable service
+(10043) and rate limiting (10058), with at most three attempts and jittered
+backoff inside the same budget. Missing objects and conditional metadata-only
+results are not retried. Retries stop before consuming the invocation's
+subrequest reserve. See [R2 error codes][r2-errors] for the provider
+definitions.
+
+A pending native `get()` is not retried within the same server request. When the
+wait times out, or recognised transient rejections exhaust the attempt limit,
+HTTP reads return 503 with `Retry-After: 5`. The timer ends before the caller
+consumes the returned stream. A healthy NAR stream can continue beyond 15
+seconds. A body failure does not repeat `get()` or replay bytes, and this policy
+does not change write retries.
+
+The native binding has no abort option for `get`. A timed-out operation can
+continue after the server returns 503. The server observes late rejection and
+cancels a late unused body once, best-effort within the invocation's lifetime.
+Cleanup does not prove that Cloudflare cancelled the underlying operation. A
+client retry can overlap abandoned work in an earlier invocation.
+
+The `cupboard.storage.read` logger records `get()` starts, attempts, retries and
+terminal outcomes at debug level. Each logical read has a `storageOperationId`
+and a bounded `objectKey`; the identifier also accompanies late completion and
+cleanup logs. The `r2-get` span records its outcome and attempt count. The
+recorded time excludes body transfer.
+
+Verify both deployed Worker revisions as well as the action or CLI revision.
+Updating only the client does not enable server deadlines. After deployment,
+compare normal read latency, timeout counts, late completions and log volume. A
+bounded 503 improves failure handling but does not establish the cause of an R2
+stall.
+
+[r2-errors]: https://developers.cloudflare.com/r2/api/error-codes/
+
 ### Maintenance failures
 
 When a tenant's maintenance or removal fails, the failure is recorded in the D1

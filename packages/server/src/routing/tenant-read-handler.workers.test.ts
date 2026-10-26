@@ -6,12 +6,12 @@ import {
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
 import { noCost } from '../do/operation-cost.test-support.ts';
-import { narInfoCacheControl } from '../http/http.ts';
+import { narInfoCacheControl, narInfoObjectKey } from '../http/http.ts';
 import {
 	bootstrap,
 	currentOrigin,
@@ -43,6 +43,60 @@ async function tenantRead(request: Request): Promise<ReadOutcome> {
 
 describe('tenant Worker reads', () => {
 	beforeEach(resetTestServer);
+
+	it('returns an uncacheable retryable refusal when R2 get hangs', async () => {
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPath(init.token, metadata);
+		const url = new URL(
+			`/t/${fixtureTenant}/${metadata.storePathHash}.narinfo`,
+			currentOrigin()
+		);
+		const request = canonicalCacheRequest(new Request(url), {
+			generation: firstCacheGeneration,
+			readRevision: firstCacheReadRevision
+		});
+		const started = Promise.withResolvers<undefined>();
+		const completion = Promise.withResolvers<R2ObjectBody | null>();
+		const get = vi.spyOn(env.BLOBS, 'get').mockImplementation(() => {
+			started.resolve(undefined);
+			return completion.promise;
+		});
+		const ctx = createExecutionContext();
+		vi.useFakeTimers();
+		try {
+			const pending = tenantReadFetch(request, boundedWorkerEnv(env), ctx);
+			await started.promise;
+			await vi.advanceTimersByTimeAsync(15_000);
+			const response = await pending;
+			expect({
+				status: response.status,
+				retryAfter: response.headers.get('retry-after'),
+				cacheControl: response.headers.get('cache-control'),
+				calls: get.mock.calls
+			}).toStrictEqual({
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				retryAfter: '5',
+				cacheControl: 'no-store',
+				calls: [
+					[
+						narInfoObjectKey(
+							fixtureTenant,
+							metadata.storePathHash,
+							{ kind: 'default' },
+							firstCacheGeneration
+						),
+						undefined
+					]
+				]
+			});
+		} finally {
+			completion.reject(new Error('Test completed'));
+			get.mockRestore();
+			vi.useRealTimers();
+			await waitOnExecutionContext(ctx);
+		}
+	});
 
 	it('refuses a request without an admitted cache version and keeps the refusal out of Workers Cache', async () => {
 		const init = await bootstrap();

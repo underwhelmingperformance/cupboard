@@ -52,6 +52,7 @@ import {
 	TenantNotConfiguredError
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
+import type { withSpan } from '../observability/span.ts';
 import {
 	canUseLoopbackHttp,
 	isAllowedIssuerTransport
@@ -184,7 +185,11 @@ export class ServerContext {
 	// to the same key behind it so they cannot land out of order.
 	readonly objectWrites = new ObjectWriteOrder();
 
-	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
+	constructor(
+		ctx: DurableObjectState,
+		env: RuntimeEnv,
+		observeRead?: typeof withSpan
+	) {
 		this.ctx = ctx;
 		// Bound all storage subrequests before a service can use them. Otherwise a
 		// stalled request inside the input gate can force the runtime to reset the
@@ -193,7 +198,7 @@ export class ServerContext {
 		// These wrappers reach only the bindings this object holds. Worker code
 		// reaches D1 and R2 through `boundedWorkerEnv`, which also counts their
 		// terminal calls. The row meter applies only to Durable Object storage.
-		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS) };
+		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS, observeRead) };
 		this.discovery = new OidcDiscoveryStore({
 			canUseLoopbackHttp: canUseLoopbackHttp(env)
 		});
