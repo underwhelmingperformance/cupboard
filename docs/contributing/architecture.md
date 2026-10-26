@@ -687,8 +687,9 @@ The requests are under the tenant URL.
 4. Each upload worker compresses one NAR with zstd and uploads it straight to
    R2, using an S3 client. NAR bytes never pass through a Worker.
 
-   Local NAR export follows Nix's `use-case-hack` setting, which defaults to
-   enabled on macOS. It removes Nix's case-collision suffixes from archive
+   Local NAR export preserves raw filename and symlink-target bytes, including
+   non-UTF-8 sequences. It follows Nix's `use-case-hack` setting, which defaults
+   to enabled on macOS. It removes Nix's case-collision suffixes from archive
    filenames before sorting entries, but uses the physical filenames to read the
    tree. Symlink targets remain unchanged. Entries that restore to the same
    filename are rejected.

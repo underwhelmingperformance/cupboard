@@ -137,6 +137,131 @@ describe('hashNar', () => {
 });
 
 describe('NarArchive', () => {
+	it('preserves non-UTF-8 symlink targets', async () => {
+		await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+			const link = pathModule.join(directory, 'link');
+			const target = Buffer.from([0x66, 0x80, 0xff]);
+
+			await symlink(target, link);
+
+			const expected = Buffer.from(
+				['nix-archive-1', '(', 'type', 'symlink', 'target', target, ')']
+					.map((value) => narString(value))
+					.join(''),
+				'latin1'
+			);
+
+			await expectArchiveBytes(new NarArchive(link), expected);
+		});
+	});
+
+	it.skipIf(process.platform !== 'linux').each([true, false])(
+		'preserves non-UTF-8 filenames with use-case-hack=%s',
+		async (useCaseHack) => {
+			await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+				const prefix = Buffer.from(`${directory}/`);
+				const rawName = Buffer.from([0x64, 0x80]);
+				const physicalName = Buffer.concat([
+					rawName,
+					Buffer.from('~nix~case~hack~1')
+				]);
+				const nested = Buffer.concat([prefix, physicalName]);
+				const largeName = Buffer.from([0x66, 0xff]);
+				const contents = pseudoRandomBytes(70_003, 31);
+
+				await mkdir(nested);
+				await writeFile(
+					Buffer.concat([nested, Buffer.from('/'), largeName]),
+					contents
+				);
+
+				const entries: NarFixtureEntry[] = [
+					{
+						name: Buffer.from([0x80]),
+						node: ['type', 'regular', 'contents', 'first']
+					},
+					{
+						name: Buffer.from('\u{FFFD}'),
+						node: ['type', 'regular', 'contents', 'replacement']
+					},
+					{
+						name: Buffer.from([0xff]),
+						node: ['type', 'regular', 'contents', 'last']
+					}
+				];
+
+				for (const entry of entries) {
+					await writeFile(
+						Buffer.concat([prefix, entry.name]),
+						entry.node.at(-1) ?? ''
+					);
+				}
+
+				entries.push({
+					name: useCaseHack ? rawName : physicalName,
+					node: [
+						'type',
+						'directory',
+						'entry',
+						'(',
+						'name',
+						largeName,
+						'node',
+						'(',
+						'type',
+						'regular',
+						'contents',
+						contents,
+						')',
+						')'
+					]
+				});
+
+				const linkName = Buffer.from([0xfe]);
+				const target = Buffer.from([0xff]);
+
+				await symlink(target, Buffer.concat([prefix, linkName]));
+
+				entries.push({
+					name: linkName,
+					node: ['type', 'symlink', 'target', target]
+				});
+
+				const sorted = entries.toSorted((left, right) =>
+					Buffer.compare(left.name, right.name)
+				);
+				const expected = Buffer.from(
+					[
+						'nix-archive-1',
+						'(',
+						'type',
+						'directory',
+						...sorted.flatMap((entry) => [
+							'entry',
+							'(',
+							'name',
+							entry.name,
+							'node',
+							'(',
+							...entry.node,
+							')',
+							')'
+						]),
+						')'
+					]
+						.map((value) => narString(value))
+						.join(''),
+					'latin1'
+				);
+
+				await expectArchiveBytes(
+					new NarArchive(directory, { useCaseHack }),
+					expected
+				);
+			});
+		}
+	);
+
 	it.each([true, false])(
 		'serialises restored filenames with use-case-hack=%s',
 		async (useCaseHack) => {
@@ -576,8 +701,35 @@ async function narText(path: string): Promise<string> {
 	return Buffer.concat(await collectNar(path)).toString('latin1');
 }
 
-function narString(value: string): string {
-	const bytes = Buffer.from(value, 'utf8');
+interface NarFixtureEntry {
+	readonly name: Buffer;
+	readonly node: readonly (string | Uint8Array)[];
+}
+
+async function expectArchiveBytes(
+	archive: NarArchive,
+	expected: Buffer
+): Promise<void> {
+	const bytes = Buffer.concat(await collect(archive));
+	const stream = Buffer.concat(await Array.fromAsync(archive.stream()));
+	const suffix = Buffer.concat(await collect(archive.open(73)));
+
+	expect({ bytes, stream, suffix, digest: await archive.hash() }).toStrictEqual(
+		{
+			bytes: expected,
+			stream: expected,
+			suffix: expected.subarray(73),
+			digest: {
+				narHash: toNixSha256(createHash('sha256').update(expected).digest()),
+				narSize: expected.byteLength
+			}
+		}
+	);
+}
+
+function narString(value: string | Uint8Array): string {
+	const bytes =
+		typeof value === 'string' ? Buffer.from(value, 'utf8') : Buffer.from(value);
 	const length = Buffer.alloc(8);
 	length.writeBigUInt64LE(BigInt(bytes.byteLength));
 
