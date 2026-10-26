@@ -67,6 +67,7 @@ export { withReadAuthentication } from './read-authentication.ts';
 export type { NixDaemonClientOptions, NixStoreKind } from './store-client.ts';
 export { createNixDaemonStoreClient } from './store-client.ts';
 export type {
+	NixArchiveSettings,
 	NixBuildSettings,
 	NixDaemonOverrides,
 	NixDaemonSetOptions,
@@ -79,6 +80,7 @@ export {
 	defaultFileTransferSettings,
 	defaultNixConfigEnvironment,
 	defaultSignatureSettings,
+	discoverNixArchiveSettings,
 	discoverNixStoreConfig
 } from './store-config.ts';
 export type {

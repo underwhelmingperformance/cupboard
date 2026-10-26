@@ -175,6 +175,14 @@ client already supports the new names, but the pinned oracle doesn't have them
 yet. A third test checks that the oracle still doesn't have them. When a newer
 oracle adds them, this test fails until the adapter is updated.
 
+## Exporting NARs
+
+The CLI's local NAR serialiser is compared byte-for-byte with
+`nix-store --dump`. The fixture includes nested filenames with Nix's macOS
+case-collision suffixes and a symlink whose target includes those suffixes. Both
+enabled and disabled `use-case-hack` settings are tested. The comparison also
+checks the NAR hash, size and decompressed upload bytes.
+
 ## Reading narinfo files from a substituter
 
 Our substituter client must reject every narinfo that libstore rejects.

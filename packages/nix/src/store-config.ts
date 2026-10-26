@@ -62,6 +62,14 @@ export interface NixStoreConfig {
 	readonly postBuildHook?: string;
 }
 
+export interface NixArchiveSettings {
+	/**
+	Whether NAR export removes Nix's macOS case-collision suffixes from
+	directory entries.
+	*/
+	readonly useCaseHack: boolean;
+}
+
 export interface NixDaemonSetOptions {
 	readonly keepFailed?: boolean;
 	readonly keepGoing?: boolean;
@@ -540,6 +548,24 @@ export const defaultNixConfigEnvironment: NixConfigEnvironment = {
 	currentSystem: () => nixSystemOf(arch, platform),
 	probes: defaultMachineProbes
 };
+
+/**
+Resolves NAR filename restoration from Nix's configuration. The default
+depends on the host OS, not the configured build system.
+*/
+export function discoverNixArchiveSettings(
+	dependencies: NixConfigEnvironment = defaultNixConfigEnvironment
+): NixArchiveSettings {
+	const { settings } = mergedSettings(dependencies);
+	const configured = settings.get('use-case-hack');
+
+	return {
+		useCaseHack:
+			configured === undefined
+				? kernelOf(dependencies.currentSystem()) === 'darwin'
+				: isEnabledSettingValue('use-case-hack', configured)
+	};
+}
 
 /**
 Resolves the store configuration with Nix's source precedence. The system

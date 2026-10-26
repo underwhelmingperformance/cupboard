@@ -12,6 +12,10 @@ import { type FileHandle, open } from 'node:fs/promises';
 import pathModule from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 
+import {
+	discoverNixArchiveSettings,
+	type NixArchiveSettings
+} from '@cupboard/nix';
 import type { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { toNixSha256 } from '@cupboard/nix-store/hash';
 import { withIterableCleanup } from '@cupboard/shared/cleanup';
@@ -66,6 +70,18 @@ export class NarFileShrankError extends NarError {
 	}
 }
 
+export class NarFilenameCollisionError extends NarError {
+	constructor(
+		public readonly firstPath: string,
+		public readonly secondPath: string
+	) {
+		super(`NAR filename collision between ${firstPath} and ${secondPath}`);
+		this.name = 'NarFilenameCollisionError';
+	}
+}
+
+const caseHackSuffix = '~nix~case~hack~';
+
 const pieceSize = 1024 * 1024;
 
 const fileChunkSize = 64 * 1024;
@@ -91,22 +107,25 @@ tree's metadata to find the node that contains the offset, without reading
 the contents of the files before it.
 */
 export class NarArchive implements AsyncIterable<Uint8Array>, NarSource {
-	constructor(public readonly path: string) {}
+	constructor(
+		public readonly path: string,
+		private readonly settings: NixArchiveSettings = discoverNixArchiveSettings()
+	) {}
 
 	[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
-		return narFromPath(this.path)[Symbol.asyncIterator]();
+		return narFromPath(this.path, 0, this.settings)[Symbol.asyncIterator]();
 	}
 
 	open(offset: number): AsyncIterable<Uint8Array> {
-		return narFromPath(this.path, offset);
+		return narFromPath(this.path, offset, this.settings);
 	}
 
 	stream(): ReadableStream<Uint8Array> {
-		return byteStream(narFromPath(this.path));
+		return byteStream(narFromPath(this.path, 0, this.settings));
 	}
 
 	hash(): Promise<NarDigest> {
-		return hashNar(this.path);
+		return hashNar(this.path, this.settings);
 	}
 }
 
@@ -115,7 +134,8 @@ Serialises the tree at `path` as a NAR and yields its bytes from `offset`.
 */
 export async function* narFromPath(
 	path: string,
-	offset = 0
+	offset = 0,
+	settings: NixArchiveSettings = discoverNixArchiveSettings()
 ): AsyncIterable<Uint8Array> {
 	const writer = new NarWriter(offset);
 	const turns = new EventLoopTurns();
@@ -126,7 +146,7 @@ export async function* narFromPath(
 
 	for (;;) {
 		if (next !== undefined) {
-			yield* narNode(writer, next, directories);
+			yield* narNode(writer, next, directories, settings);
 			await turns.afterNode(writer.written);
 		}
 
@@ -149,11 +169,14 @@ export async function* narFromPath(
 	yield* writer.finish();
 }
 
-export async function hashNar(path: string): Promise<NarDigest> {
+export async function hashNar(
+	path: string,
+	settings: NixArchiveSettings = discoverNixArchiveSettings()
+): Promise<NarDigest> {
 	const hash = createHash('sha256');
 	let size = 0;
 
-	for await (const chunk of narFromPath(path)) {
+	for await (const chunk of narFromPath(path, 0, settings)) {
 		hash.update(chunk);
 		size += chunk.byteLength;
 	}
@@ -185,16 +208,20 @@ class EventLoopTurns {
 	}
 }
 
+interface NarDirectoryEntry {
+	readonly archiveName: string;
+	readonly fileName: string;
+}
+
 /**
-A directory whose entries are being written, in the byte order of their
-names.
+A directory whose entries are being written, in archive filename order.
 */
 class OpenDirectory {
 	private index = 0;
 
 	constructor(
 		private readonly path: string,
-		private readonly entries: readonly string[]
+		private readonly entries: readonly NarDirectoryEntry[]
 	) {}
 
 	/**
@@ -209,10 +236,40 @@ class OpenDirectory {
 		}
 
 		this.index += 1;
-		writer.strings('entry', '(', 'name', entry, 'node');
 
-		return pathModule.join(this.path, entry);
+		writer.strings('entry', '(', 'name', entry.archiveName, 'node');
+
+		return pathModule.join(this.path, entry.fileName);
 	}
+}
+
+function directoryEntries(
+	directory: string,
+	settings: NixArchiveSettings
+): readonly NarDirectoryEntry[] {
+	const entries = new Map<string, NarDirectoryEntry>();
+
+	for (const fileName of readdirSync(directory).toSorted(compareNarNames)) {
+		const marker = settings.useCaseHack ? fileName.indexOf(caseHackSuffix) : -1;
+		const archiveName = marker === -1 ? fileName : fileName.slice(0, marker);
+		const previous = entries.get(archiveName);
+
+		if (previous !== undefined) {
+			throw new NarFilenameCollisionError(
+				pathModule.join(directory, previous.fileName),
+				pathModule.join(directory, fileName)
+			);
+		}
+
+		entries.set(archiveName, { archiveName, fileName });
+	}
+
+	return entries
+		.values()
+		.toArray()
+		.toSorted((left, right) =>
+			compareNarNames(left.archiveName, right.archiveName)
+		);
 }
 
 // Writes one node. For a directory, this writes only the node's type and
@@ -220,7 +277,8 @@ class OpenDirectory {
 async function* narNode(
 	writer: NarWriter,
 	path: string,
-	directories: OpenDirectory[]
+	directories: OpenDirectory[],
+	settings: NixArchiveSettings
 ): AsyncIterable<Uint8Array> {
 	const stats = lstatSync(path);
 
@@ -232,9 +290,9 @@ async function* narNode(
 
 	if (stats.isDirectory()) {
 		writer.strings('type', 'directory');
-		directories.push(
-			new OpenDirectory(path, readdirSync(path).toSorted(compareNarNames))
-		);
+
+		directories.push(new OpenDirectory(path, directoryEntries(path, settings)));
+
 		return;
 	}
 
