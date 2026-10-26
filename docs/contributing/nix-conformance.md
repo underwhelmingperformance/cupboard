@@ -180,8 +180,10 @@ oracle adds them, this test fails until the adapter is updated.
 The CLI's local NAR serialiser is compared byte-for-byte with
 `nix-store --dump`. The fixture includes nested filenames with Nix's macOS
 case-collision suffixes and a symlink whose target includes those suffixes. Both
-enabled and disabled `use-case-hack` settings are tested. The comparison also
-checks the NAR hash, size and decompressed upload bytes.
+enabled and disabled `use-case-hack` settings are tested. Further fixtures check
+non-UTF-8 symlink targets on every supported platform and non-UTF-8 filenames on
+Linux. The comparisons also check the NAR hash, size, streamed bytes, reads from
+an offset and decompressed upload bytes.
 
 ## Reading narinfo files from a substituter
 

@@ -140,7 +140,7 @@ export async function* narFromPath(
 	const writer = new NarWriter(offset);
 	const turns = new EventLoopTurns();
 	const directories: OpenDirectory[] = [];
-	let next: string | undefined = path;
+	let next: NarPath | undefined = new NarPath(Buffer.from(path));
 
 	writer.string('nix-archive-1');
 
@@ -208,9 +208,23 @@ class EventLoopTurns {
 	}
 }
 
+class NarPath {
+	constructor(readonly bytes: Buffer) {}
+
+	child(name: Buffer): NarPath {
+		return new NarPath(
+			Buffer.concat([this.bytes, Buffer.from(pathModule.sep), name])
+		);
+	}
+
+	toString(): string {
+		return this.bytes.toString();
+	}
+}
+
 interface NarDirectoryEntry {
-	readonly archiveName: string;
-	readonly fileName: string;
+	readonly archiveName: Buffer;
+	readonly fileName: Buffer;
 }
 
 /**
@@ -220,7 +234,7 @@ class OpenDirectory {
 	private index = 0;
 
 	constructor(
-		private readonly path: string,
+		private readonly path: NarPath,
 		private readonly entries: readonly NarDirectoryEntry[]
 	) {}
 
@@ -228,7 +242,7 @@ class OpenDirectory {
 	Writes the start of the next entry and returns the path of its node, or
 	returns `undefined` once every entry has been written.
 	*/
-	nextEntry(writer: NarWriter): string | undefined {
+	nextEntry(writer: NarWriter): NarPath | undefined {
 		const entry = this.entries[this.index];
 
 		if (entry === undefined) {
@@ -237,53 +251,61 @@ class OpenDirectory {
 
 		this.index += 1;
 
-		writer.strings('entry', '(', 'name', entry.archiveName, 'node');
+		writer.strings('entry', '(', 'name');
+		writer.bytes(entry.archiveName);
+		writer.string('node');
 
-		return pathModule.join(this.path, entry.fileName);
+		return this.path.child(entry.fileName);
 	}
 }
 
 function directoryEntries(
-	directory: string,
+	directory: NarPath,
 	settings: NixArchiveSettings
 ): readonly NarDirectoryEntry[] {
-	const entries = new Map<string, NarDirectoryEntry>();
+	const entries = readdirSync(directory.bytes, { encoding: 'buffer' })
+		.map((fileName): NarDirectoryEntry => {
+			const marker = settings.useCaseHack
+				? fileName.indexOf(caseHackSuffix)
+				: -1;
 
-	for (const fileName of readdirSync(directory).toSorted(compareNarNames)) {
-		const marker = settings.useCaseHack ? fileName.indexOf(caseHackSuffix) : -1;
-		const archiveName = marker === -1 ? fileName : fileName.slice(0, marker);
-		const previous = entries.get(archiveName);
+			return {
+				archiveName: marker === -1 ? fileName : fileName.subarray(0, marker),
+				fileName
+			};
+		})
+		.toSorted(
+			(left, right) =>
+				Buffer.compare(left.archiveName, right.archiveName) ||
+				Buffer.compare(left.fileName, right.fileName)
+		);
 
-		if (previous !== undefined) {
+	for (const [index, entry] of entries.entries()) {
+		const previous = entries[index - 1];
+
+		if (previous?.archiveName.equals(entry.archiveName)) {
 			throw new NarFilenameCollisionError(
-				pathModule.join(directory, previous.fileName),
-				pathModule.join(directory, fileName)
+				directory.child(previous.fileName).toString(),
+				directory.child(entry.fileName).toString()
 			);
 		}
-
-		entries.set(archiveName, { archiveName, fileName });
 	}
 
-	return entries
-		.values()
-		.toArray()
-		.toSorted((left, right) =>
-			compareNarNames(left.archiveName, right.archiveName)
-		);
+	return entries;
 }
 
 // Writes one node. For a directory, this writes only the node's type and
 // pushes the directory onto `directories`; `narFromPath` writes its entries.
 async function* narNode(
 	writer: NarWriter,
-	path: string,
+	path: NarPath,
 	directories: OpenDirectory[],
 	settings: NixArchiveSettings
 ): AsyncIterable<Uint8Array> {
-	const stats = lstatSync(path);
+	const stats = lstatSync(path.bytes);
 
 	if (!stats.isDirectory() && !stats.isFile() && !stats.isSymbolicLink()) {
-		throw new UnsupportedNarPathTypeError(path);
+		throw new UnsupportedNarPathTypeError(path.toString());
 	}
 
 	writer.string('(');
@@ -297,7 +319,8 @@ async function* narNode(
 	}
 
 	if (stats.isSymbolicLink()) {
-		writer.strings('type', 'symlink', 'target', readlinkSync(path));
+		writer.strings('type', 'symlink', 'target');
+		writer.bytes(readlinkSync(path.bytes, { encoding: 'buffer' }));
 		closeNode(writer, directories);
 		yield* writer.complete();
 		return;
@@ -346,10 +369,10 @@ function closeNode(
 }
 
 // Returns `undefined` when the opened file is larger than `syncReadMaxBytes`.
-function readSmallFile(path: string): Buffer | undefined {
+function readSmallFile(path: NarPath): Buffer | undefined {
 	// One descriptor for the size and the bytes, so `fstat` measures the file
 	// that is read even if the path is replaced on disk.
-	const descriptor = openSync(path, 'r');
+	const descriptor = openSync(path.bytes, 'r');
 
 	try {
 		const { size } = fstatSync(descriptor);
@@ -370,7 +393,7 @@ function readSmallFile(path: string): Buffer | undefined {
 			);
 
 			if (bytesRead === 0) {
-				throw new NarFileShrankError(path, size, position);
+				throw new NarFileShrankError(path.toString(), size, position);
 			}
 
 			position += bytesRead;
@@ -384,10 +407,10 @@ function readSmallFile(path: string): Buffer | undefined {
 
 async function* narLargeFile(
 	writer: NarWriter,
-	path: string
+	path: NarPath
 ): AsyncIterable<Uint8Array> {
 	// One handle for the size and the bytes, as in `readSmallFile`.
-	const file = await open(path, 'r');
+	const file = await open(path.bytes, 'r');
 
 	yield* withIterableCleanup(narFileContents(writer, file, path), () =>
 		file.close()
@@ -397,7 +420,7 @@ async function* narLargeFile(
 async function* narFileContents(
 	writer: NarWriter,
 	file: FileHandle,
-	path: string
+	path: NarPath
 ): AsyncIterable<Uint8Array> {
 	const { size } = await file.stat();
 	const buffer = Buffer.allocUnsafe(Math.min(fileChunkSize, size));
@@ -413,7 +436,7 @@ async function* narFileContents(
 		);
 
 		if (bytesRead === 0) {
-			throw new NarFileShrankError(path, size, position);
+			throw new NarFileShrankError(path.toString(), size, position);
 		}
 
 		position += bytesRead;
@@ -515,8 +538,4 @@ function createLengthPrefix(length: number): Uint8Array {
 
 function paddingLength(length: number): number {
 	return (8 - (length % 8)) % 8;
-}
-
-function compareNarNames(left: string, right: string): number {
-	return Buffer.compare(Buffer.from(left), Buffer.from(right));
 }
