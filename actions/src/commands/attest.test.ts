@@ -13,10 +13,12 @@ import {
 	scaiPredicateType
 } from '@cupboard/protocol/scai';
 import { createGithubReporter } from '@cupboard/reporter';
+import { initialiseTracing, stopTracing } from '@cupboard/shared/node-tracing';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
+import { currentHttpAttemptTraceHeaders } from '../../../packages/shared/src/fetch-observation.ts';
 import {
 	stalledResponse,
 	untilOnlyStalledRequestPending
@@ -756,7 +758,12 @@ describe('attestAction committed cache verification', () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
 		const receiptFile = await receiptFileIn(directory);
 		const checksumsFile = path.join(directory, 'subjects.txt');
-		const requests: { url: string; authorization?: string }[] = [];
+		const requests: {
+			url: string;
+			authorization?: string;
+			propagated: boolean;
+		}[] = [];
+		initialiseTracing();
 
 		try {
 			await attestAction(
@@ -775,8 +782,15 @@ describe('attestAction committed cache verification', () => {
 				createGithubReporter(),
 				{
 					fetch: (input, init) => {
+						const url = requestUrl(input);
+						const origin = new URL(url).origin;
+						const traceparent =
+							currentHttpAttemptTraceHeaders(origin)?.traceparent ?? '';
 						requests.push({
 							url: requestUrl(input),
+							propagated: /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/u.test(
+								traceparent
+							),
 							authorization:
 								new Headers(init?.headers).get('authorization') ?? undefined
 						});
@@ -801,10 +815,12 @@ describe('attestAction committed cache verification', () => {
 				requests: [
 					{
 						url: 'https://cache.example.test/t/acme/cache/builds/nix-cache-info',
+						propagated: true,
 						authorization: undefined
 					},
 					{
 						url: 'https://cache.example.test/t/acme/cache/builds/3123456789abcdfghijklmnpqrsvwxyz.narinfo',
+						propagated: true,
 						authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
 					}
 				],
@@ -812,6 +828,7 @@ describe('attestAction committed cache verification', () => {
 				builtChecksums: '\n'
 			});
 		} finally {
+			await stopTracing();
 			await rm(directory, { recursive: true, force: true });
 		}
 	});

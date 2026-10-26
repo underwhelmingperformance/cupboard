@@ -736,6 +736,8 @@ it('writes a probe record from the worker to stderr, which keeps stdout for the 
 		vi.restoreAllMocks();
 	});
 	vi.useFakeTimers();
+	const probeId = '12345678-1234-4234-8234-123456789abc';
+	vi.spyOn(crypto, 'randomUUID').mockReturnValue(probeId);
 	const canWriteStdout = vi
 		.spyOn(process.stdout, 'write')
 		.mockReturnValue(true);
@@ -762,7 +764,10 @@ it('writes a probe record from the worker to stderr, which keeps stdout for the 
 		stdout: [],
 		stderr: [
 			[
-				'::debug::probe attempt finished url=https://cache.example.test/api/v1/missing-paths attempt=1 outcome=succeeded elapsedMs=0\n'
+				`::debug::probe attempt finished probeId=${probeId} url=https://cache.example.test/api/v1/missing-paths attempt=1 outcome=succeeded elapsedMs=0\n`
+			],
+			[
+				`::debug::logical probe finished probeId=${probeId} url=https://cache.example.test/api/v1/missing-paths attempts=1 disposition=succeeded elapsedMs=0\n`
 			]
 		]
 	});

@@ -12,6 +12,7 @@ import {
 import { StatusCodes } from 'http-status-codes';
 
 import type { ReplaySafety } from './retry.ts';
+import { isDeadlineAbort } from './timeout.ts';
 
 const firstErrorStatus: number = StatusCodes.BAD_REQUEST;
 
@@ -180,8 +181,9 @@ export async function observeFetchOperation(
 					logger.debug('HTTP operation failed', () => ({
 						operation,
 						attempts: state.attempts,
-						disposition:
-							details.signal?.aborted === true
+						disposition: isDeadlineAbort(details.signal)
+							? 'deadline'
+							: details.signal?.aborted === true
 								? 'cancelled'
 								: (state.disposition ?? 'failed'),
 						replaySafety: details.replaySafety,
@@ -291,8 +293,16 @@ export async function observeFetchAttempt(
 						return response;
 					} catch (error) {
 						span.setStatus({ code: SpanStatusCode.ERROR });
+						const signal =
+							init?.signal ??
+							(input instanceof Request ? input.signal : undefined);
 						logger.debug('HTTP attempt failed', () => ({
 							...fields,
+							failureKind: isDeadlineAbort(signal)
+								? 'deadline'
+								: signal?.aborted === true
+									? 'cancelled'
+									: 'transport',
 							elapsedMs: performance.now() - started,
 							error
 						}));

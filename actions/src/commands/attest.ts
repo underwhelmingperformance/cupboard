@@ -382,7 +382,8 @@ async function committedPathInfos(
 		withReadAuthentication(dependencies.fetch ?? fetch, {
 			tenantUrl: inputs.url
 		}),
-		'replay-safe'
+		'replay-safe',
+		{ trustedOrigin: new URL(inputs.url).origin }
 	);
 	const base = canonicalHref(cacheUrlFor(inputs.url, inputs.cache));
 	const credential = readCredential(inputs);
@@ -464,7 +465,9 @@ export async function attestAction(
 	);
 	const fetcher = dependencies.fetch ?? fetch;
 	const destinationAccess = await cacheAccess(
-		retryingFetcher(fetcher, 'replay-safe'),
+		retryingFetcher(fetcher, 'replay-safe', {
+			trustedOrigin: new URL(inputs.url).origin
+		}),
 		cacheUrlFor(inputs.url, inputs.cache)
 	);
 	const { subjects, built, reproduced, skipped } = await resolveAttestation(

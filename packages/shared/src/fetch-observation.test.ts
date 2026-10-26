@@ -1,21 +1,93 @@
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 
-import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { context, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { NoopSpanProcessor } from '@opentelemetry/sdk-trace';
 import { StatusCodes } from 'http-status-codes';
 import { afterAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 
+import { stalledResponse } from '../../../tests/support/stalled-request.ts';
+
 import { captureLogs } from './log-capture.test-support.ts';
 import { initialiseTracing, stopTracing } from './node-tracing.ts';
+import { fetchWithProbeRetries } from './paging.ts';
 import { readResponseBytes, readResponseJson } from './response-body.ts';
 import { retryingFetcher } from './retry.ts';
+import { ProbeTimeoutError } from './timeout.ts';
 
 initialiseTracing();
 
 afterAll(stopTracing);
 
 describe('HTTP attempt observation', () => {
+	it('propagates the exact attempt span on failed and recovered requests', async () => {
+		const requests: { header: string | null; expected: string }[] = [];
+		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+		const fetcher = retryingFetcher(
+			(_input, init) => {
+				const span = trace.getSpanContext(context.active());
+				if (span === undefined) {
+					throw new Error('Expected an active client span');
+				}
+				requests.push({
+					header: new Headers(init?.headers).get('traceparent'),
+					expected: `00-${span.traceId}-${span.spanId}-01`
+				});
+				return requests.length === 1
+					? Promise.reject(
+							new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } })
+						)
+					: Promise.resolve(new Response('ok'));
+			},
+			'replay-safe',
+			{ trustedOrigin: 'https://cache.example.test' }
+		);
+		try {
+			await fetcher('https://cache.example.test/read', { redirect: 'manual' });
+			const [first, second] = requests;
+			expect(requests).toStrictEqual([
+				{
+					header: first?.expected,
+					expected: first?.expected
+				},
+				{
+					header: second?.expected,
+					expected: second?.expected
+				}
+			]);
+		} finally {
+			random.mockRestore();
+		}
+	});
+
+	it('classifies probe deadlines separately from caller cancellation', async () => {
+		const records = captureLogs();
+		const fetcher = retryingFetcher(
+			(_input, init) => stalledResponse(init?.signal),
+			'replay-safe'
+		);
+		vi.useFakeTimers();
+		try {
+			const pending = fetchWithProbeRetries(
+				fetcher,
+				'https://cache.example.test/info',
+				undefined,
+				(response) => response.text(),
+				{ deadlineMs: 10 }
+			);
+			const settled = expect(pending).rejects.toBeInstanceOf(ProbeTimeoutError);
+			await vi.runAllTimersAsync();
+			await settled;
+			expect(
+				records
+					.filter((record) => record.message === 'HTTP operation failed')
+					.map(({ properties }) => properties.disposition)
+			).toStrictEqual(['deadline', 'deadline', 'deadline']);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('ends the attempt span when request preparation fails', async () => {
 		const records = captureLogs();
 		const completed = vi.spyOn(NoopSpanProcessor.prototype, 'onEnd');

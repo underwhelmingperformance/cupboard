@@ -1,4 +1,4 @@
-import { getLogger } from '@logtape/logtape';
+import { getLogger, withContext } from '@logtape/logtape';
 
 import { chunk, type ProgressivePage } from './collections.ts';
 import { mapWithConcurrency } from './concurrency.ts';
@@ -70,6 +70,11 @@ type ProbeOutcome =
 	| { readonly outcome: 'timed out' }
 	| { readonly outcome: 'failed'; readonly errorName: string };
 
+interface ProbeObservation {
+	attempts: number;
+	disposition: 'succeeded' | 'recovered' | 'exhausted' | 'failed';
+}
+
 function failureOutcome(error: unknown, isExpiry: boolean): ProbeOutcome {
 	if (isExpiry) {
 		return { outcome: 'timed out' };
@@ -97,15 +102,43 @@ attempt and each retry is logged at debug level.
 Put transport retries inside `request`. One deadline then covers each
 attempt and its transport retries.
 */
-export async function requestWithDeadline<T>(
+export function requestWithDeadline<T>(
 	request: (signal: AbortSignal) => Promise<T>,
 	options: DeadlineOptions
+): Promise<T> {
+	return withContext({ probeId: crypto.randomUUID() }, async () => {
+		const observation: ProbeObservation = {
+			attempts: 0,
+			disposition: 'failed'
+		};
+		const startedAt = Date.now();
+		try {
+			return await requestAttempts(request, options, observation);
+		} finally {
+			logger.debug('logical probe finished', () => ({
+				...options.target,
+				...observation,
+				disposition:
+					options.signal?.aborted === true
+						? 'cancelled'
+						: observation.disposition,
+				elapsedMs: Date.now() - startedAt
+			}));
+		}
+	});
+}
+
+async function requestAttempts<T>(
+	request: (signal: AbortSignal) => Promise<T>,
+	options: DeadlineOptions,
+	observation: ProbeObservation
 ): Promise<T> {
 	const attempts =
 		options.replaySafety === 'replay-safe' ? maxProbeAttempts : 1;
 
 	for (let attempt = 1; ; attempt += 1) {
 		options.signal?.throwIfAborted();
+		observation.attempts = attempt;
 
 		let expiry: ProbeTimeoutError | undefined;
 		const startedAt = Date.now();
@@ -122,6 +155,7 @@ export async function requestWithDeadline<T>(
 				outcome: 'succeeded',
 				elapsedMs: Date.now() - startedAt
 			}));
+			observation.disposition = attempt > 1 ? 'recovered' : 'succeeded';
 
 			return result;
 		} catch (error) {
@@ -138,6 +172,7 @@ export async function requestWithDeadline<T>(
 				options.signal?.aborted === true ||
 				attempt >= attempts
 			) {
+				observation.disposition = isExpiry ? 'exhausted' : 'failed';
 				throw error;
 			}
 		}

@@ -1667,7 +1667,9 @@ async function fetchCacheAccessState(
 	credential?: BasicCredential,
 	isAuthenticated = false
 ): Promise<'public' | 'private' | 'absent' | 'challenge'> {
-	const plain = retryingFetcher(dependencies.fetch ?? fetch, 'replay-safe');
+	const plain = retryingFetcher(dependencies.fetch ?? fetch, 'replay-safe', {
+		trustedOrigin: cacheUrl.origin
+	});
 	const fetcher =
 		credential === undefined && isAuthenticated
 			? withReadAuthentication(plain, {
@@ -1882,7 +1884,8 @@ export async function resolveSubstituters(
 		withReadAuthentication(dependencies.fetch ?? fetch, {
 			tenantUrl: parsedNamedCacheTenant(options.cacheUrl) ?? options.cacheUrl
 		}),
-		'replay-safe'
+		'replay-safe',
+		{ trustedOrigin: options.cacheUrl.origin }
 	);
 	const tenantHeaders =
 		options.readUser === ''
@@ -2080,7 +2083,7 @@ export async function fetchCachePublicKeyAt(
 	const url = canonicalHref(endpoint);
 
 	return fetchWithProbeRetries(
-		retryingFetcher(fetcher, 'replay-safe'),
+		retryingFetcher(fetcher, 'replay-safe', { trustedOrigin: endpoint.origin }),
 		url,
 		{
 			headers: cachePublicKeyRequestHeaders(),
