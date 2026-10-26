@@ -13,6 +13,7 @@ import {
 import {
 	defaultFileTransferSettings,
 	defaultSignatureSettings,
+	discoverNixArchiveSettings,
 	discoverNixStoreConfig,
 	microarchitectureLevelsOf,
 	type NixBuildSettings,
@@ -309,6 +310,47 @@ describe('microarchitectureLevelsOf', () => {
 			'x86_64-v3',
 			'x86_64-v4'
 		]);
+	});
+});
+
+describe('discoverNixArchiveSettings', () => {
+	it.each([
+		{ name: 'the Darwin default', fixture: {}, expected: true },
+		{
+			name: 'the Linux default',
+			fixture: { currentSystem: () => 'x86_64-linux' },
+			expected: false
+		},
+		{
+			name: 'the host OS rather than the configured build system',
+			fixture: { env: { NIX_CONFIG: 'system = x86_64-linux' } },
+			expected: true
+		},
+		{
+			name: 'an explicit Darwin opt-out',
+			fixture: { env: { NIX_CONFIG: 'use-case-hack = false' } },
+			expected: false
+		},
+		{
+			name: 'an explicit Linux opt-in',
+			fixture: {
+				currentSystem: () => 'aarch64-linux',
+				env: { NIX_CONFIG: 'use-case-hack = true' }
+			},
+			expected: true
+		},
+		{
+			name: 'inline configuration ahead of files',
+			fixture: {
+				env: { NIX_CONFIG: 'use-case-hack = false' },
+				files: { '/etc/nix/nix.conf': 'use-case-hack = true' }
+			},
+			expected: false
+		}
+	])('uses $name', ({ fixture, expected }) => {
+		expect(discoverNixArchiveSettings(environmentFrom(fixture))).toStrictEqual({
+			useCaseHack: expected
+		});
 	});
 });
 

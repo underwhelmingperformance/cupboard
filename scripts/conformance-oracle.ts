@@ -623,6 +623,7 @@ export interface NixResult {
 export interface NixOptions {
 	readonly cwd?: string;
 	readonly env?: NodeJS.ProcessEnv;
+	readonly stdoutEncoding?: BufferEncoding;
 }
 
 /**
@@ -657,7 +658,9 @@ export function runNix(
 		child.once('close', (status) => {
 			resolve({
 				status,
-				stdout: Buffer.concat(stdout).toString('utf8'),
+				stdout: Buffer.concat(stdout).toString(
+					options.stdoutEncoding ?? 'utf8'
+				),
 				stderr: Buffer.concat(stderr).toString('utf8')
 			});
 		});

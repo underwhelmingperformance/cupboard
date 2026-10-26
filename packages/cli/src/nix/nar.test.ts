@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import pathModule from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { pseudoRandomBytes } from '../../../../tests/support/bytes.ts';
@@ -14,6 +14,7 @@ import {
 	InvalidNixSha256HashError,
 	InvalidSha256DigestLengthError,
 	NarArchive,
+	NarFilenameCollisionError,
 	narFromPath,
 	NixSha256Hash,
 	toNixBase32,
@@ -136,6 +137,119 @@ describe('hashNar', () => {
 });
 
 describe('NarArchive', () => {
+	it.each([true, false])(
+		'serialises restored filenames with use-case-hack=%s',
+		async (useCaseHack) => {
+			await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+				await writeFile(
+					pathModule.join(directory, 'a~nix~case~hack~1'),
+					'first'
+				);
+				await symlink('a~nix~case~hack~1', pathModule.join(directory, 'a-'));
+
+				const entries = [
+					{
+						name: useCaseHack ? 'a' : 'a~nix~case~hack~1',
+						node: ['type', 'regular', 'contents', 'first']
+					},
+					{
+						name: 'a-',
+						node: ['type', 'symlink', 'target', 'a~nix~case~hack~1']
+					}
+				].toSorted((left, right) =>
+					Buffer.compare(Buffer.from(left.name), Buffer.from(right.name))
+				);
+
+				const expected = Buffer.from(
+					[
+						'nix-archive-1',
+						'(',
+						'type',
+						'directory',
+						...entries.flatMap((entry) => [
+							'entry',
+							'(',
+							'name',
+							entry.name,
+							'node',
+							'(',
+							...entry.node,
+							')',
+							')'
+						]),
+						')'
+					]
+						.map((value) => narString(value))
+						.join(''),
+					'latin1'
+				);
+
+				const archive = new NarArchive(directory, { useCaseHack });
+				const streamed = await Array.fromAsync(archive.stream());
+				const suffix = await collect(archive.open(73));
+
+				expect({
+					bytes: Buffer.concat(await collect(archive)),
+					stream: Buffer.concat(streamed),
+					suffix: Buffer.concat(suffix),
+					digest: await archive.hash()
+				}).toStrictEqual({
+					bytes: expected,
+					stream: expected,
+					suffix: expected.subarray(73),
+					digest: {
+						narHash: toNixSha256(
+							createHash('sha256').update(expected).digest()
+						),
+						narSize: expected.byteLength
+					}
+				});
+			});
+		}
+	);
+
+	it.each([true, false])(
+		'reads use-case-hack=%s from NIX_CONFIG',
+		async (useCaseHack) => {
+			vi.stubEnv('NIX_CONFIG', `use-case-hack = ${String(useCaseHack)}`);
+
+			try {
+				await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+					await writeFile(
+						pathModule.join(directory, 'a~nix~case~hack~1'),
+						'first'
+					);
+
+					const archive = new NarArchive(directory);
+					const expected = new NarArchive(directory, { useCaseHack });
+
+					expect(await archive.hash()).toStrictEqual(await expected.hash());
+				});
+			} finally {
+				vi.unstubAllEnvs();
+			}
+		}
+	);
+
+	it('rejects directory entries that restore to the same filename', async () => {
+		await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+			await writeFile(pathModule.join(directory, 'a'), 'first');
+			await writeFile(
+				pathModule.join(directory, 'a~nix~case~hack~1'),
+				'second'
+			);
+
+			await expect(
+				collect(new NarArchive(directory, { useCaseHack: true }))
+			).rejects.toStrictEqual(
+				new NarFilenameCollisionError(
+					pathModule.join(directory, 'a'),
+					pathModule.join(directory, 'a~nix~case~hack~1')
+				)
+			);
+		});
+	});
+
 	it('serialises a tree of many small files exactly as nix-store --dump does', async () => {
 		await withTemporaryDirectory('cupboard-nar-', async (directory) => {
 			await writeNarTree(directory);
