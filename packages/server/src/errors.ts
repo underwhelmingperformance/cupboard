@@ -1597,6 +1597,16 @@ export class SubrequestTimeoutError extends ServerHttpError {
 	}
 }
 
+export class R2ReadUnavailableError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor(public override readonly cause: unknown) {
+		super('R2 get was temporarily unavailable');
+		this.name = 'R2ReadUnavailableError';
+	}
+}
+
 export class AttestationUploadNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 

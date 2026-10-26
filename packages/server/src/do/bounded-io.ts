@@ -1,4 +1,5 @@
 import { UnboundableIoError } from '../errors.ts';
+import type { withSpan } from '../observability/span.ts';
 
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
 import {
@@ -6,6 +7,7 @@ import {
 	type OperationCost,
 	type R2Operation
 } from './operation-cost.ts';
+import { getR2Object } from './r2-read.ts';
 import { admitBoundParameters } from './statement-admission.ts';
 import { spendSubrequests } from './subrequest-slice.ts';
 
@@ -129,10 +131,9 @@ function passThrough(target: object, property: PropertyKey): unknown {
 }
 
 /**
-Wraps a Worker's D1 and R2 bindings with the deadlines and subrequest
-accounting used by Durable Objects. R2 `get` and `put` can transfer NAR
-bytes, so they have no per-call deadline; an enclosing deadline still
-applies. Other bindings receive no deadline or accounting wrapper.
+Wraps a Worker's D1 and R2 bindings with deadlines and subrequest accounting.
+R2 reads bound the wait for `get()` to return separately from body streaming.
+Uploads use only an enclosing deadline. Other bindings receive no wrapper.
 */
 export function boundedWorkerEnv<
 	T extends {
@@ -140,14 +141,14 @@ export function boundedWorkerEnv<
 		readonly CUPBOARD_DB: D1Database;
 		readonly CONTROL_DB?: D1Database;
 	}
->(env: T): T {
+>(env: T, observeRead?: typeof withSpan): T {
 	// A proxy, not a spread: tests supply a service binding through a `get`
 	// trap, which a spread would not copy.
 	return new Proxy(env, {
 		get(target, property) {
 			switch (property) {
 				case 'BLOBS': {
-					return boundedBlobs(target.BLOBS);
+					return boundedBlobs(target.BLOBS, observeRead);
 				}
 				case 'CONTROL_DB': {
 					return target.CONTROL_DB === undefined
@@ -166,11 +167,14 @@ export function boundedWorkerEnv<
 }
 
 /**
-Wraps an {@link R2Bucket} with deadlines. `head`, `delete` and `list` use the
-per-call limit. `get` and `put` transfer blob bytes, so they use the enclosing
-critical-section deadline and can continue without the input gate.
+Wraps an {@link R2Bucket} with storage deadlines. Reads bound the wait for
+`get()` to return, retry transient rejections and clean up late bodies.
+Uploads use only the enclosing critical-section deadline.
 */
-export function boundedBlobs(bucket: R2Bucket): R2Bucket {
+export function boundedBlobs(
+	bucket: R2Bucket,
+	observeRead?: typeof withSpan
+): R2Bucket {
 	return new Proxy(bucket, {
 		get(target, property) {
 			switch (property) {
@@ -178,12 +182,17 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 					return bounded(target.head.bind(target), 'r2.head', r2Call('head'));
 				}
 				case 'get': {
-					return bounded(
-						target.get.bind(target),
-						'r2.get',
-						r2Call('get'),
-						unboundedCapMs
-					);
+					return (key: string, options?: R2GetOptions) =>
+						getR2Object(
+							() => {
+								spendSubrequests(1, 'r2.get');
+								const call = target.get(key, options);
+								currentOperationCost()?.recordR2Call('get');
+								return call;
+							},
+							key,
+							observeRead
+						);
 				}
 				case 'put': {
 					return bounded(

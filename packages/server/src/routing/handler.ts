@@ -54,6 +54,7 @@ import {
 	rootLogger
 } from '../observability/logging.ts';
 import { withPublicRequest } from '../observability/request-context.ts';
+import { withSpan } from '../observability/span.ts';
 import { canUseLoopbackHttp } from '../oidc/issuer-policy.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import { uploadRequestSubrequestsFor } from '../policy/upload-pages.ts';
@@ -555,7 +556,7 @@ export default {
 	fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
 		withPublicRequest(request, (internal) =>
 			withSubrequestSlice(
-				() => app.fetch(internal, boundedWorkerEnv(env), ctx),
+				() => app.fetch(internal, boundedWorkerEnv(env, withSpan), ctx),
 				{
 					subrequests: subrequestsPerInvocation(env)
 				}
@@ -569,7 +570,7 @@ export default {
 			() =>
 				withOperationCost(
 					'cron-enqueue',
-					() => enqueueMaintenanceJobs(boundedWorkerEnv(env)),
+					() => enqueueMaintenanceJobs(boundedWorkerEnv(env, withSpan)),
 					(cost) => {
 						logMethodFinished(
 							rootLogger().with({ method: 'cron-enqueue' }),
@@ -584,7 +585,11 @@ export default {
 	async queue(batch, env) {
 		await withSubrequestSlice(
 			() =>
-				handleMaintenanceQueue(batch, boundedWorkerEnv(env), narReadBuffers),
+				handleMaintenanceQueue(
+					batch,
+					boundedWorkerEnv(env, withSpan),
+					narReadBuffers
+				),
 			{ subrequests: subrequestsPerInvocation(env) }
 		);
 	}

@@ -8,6 +8,7 @@ import {
 	WorkersCacheUnavailableError
 } from './errors.ts';
 import { withInternalRequest } from './observability/request-context.ts';
+import { withSpan } from './observability/span.ts';
 import { subrequestsPerInvocation } from './policy/subrequests.ts';
 import { tenantReadFetch } from './routing/tenant-read-handler.ts';
 
@@ -47,7 +48,12 @@ export class CachedTenantReads extends WorkerEntrypoint<TenantEnv> {
 	override fetch(request: Request): Promise<Response> {
 		return withInternalRequest(request, () =>
 			withSubrequestSlice(
-				() => tenantReadFetch(request, boundedWorkerEnv(this.env), this.ctx),
+				() =>
+					tenantReadFetch(
+						request,
+						boundedWorkerEnv(this.env, withSpan),
+						this.ctx
+					),
 				{ subrequests: subrequestsPerInvocation(this.env) }
 			)
 		);

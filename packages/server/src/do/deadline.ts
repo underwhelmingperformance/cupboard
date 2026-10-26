@@ -10,9 +10,6 @@ import { SubrequestTimeoutError } from '../errors.ts';
 // so a stalled subrequest returns a retryable error before the reset.
 export const criticalSectionBudgetMs = 25_000;
 
-// Metadata calls always use the per-call limit. R2 byte transfers may take
-// longer outside a critical section and inherit only the collective budget
-// when they run inside one.
 const perCallCapMs = 15_000;
 
 interface DeadlineScope {
@@ -109,16 +106,26 @@ export function currentDeadlineSignal(): AbortSignal | undefined {
 	return deadlineScope.getStore()?.signal;
 }
 
+export function remainingDeadlineMs(): number | undefined {
+	const scope = deadlineScope.getStore();
+
+	return scope === undefined
+		? undefined
+		: Math.max(0, scope.deadline - Date.now());
+}
+
 /**
-Bounds one subrequest by the remaining scope budget and `capMs`. Byte
-transfers pass an infinite cap, so this layer limits them only inside a
-deadline scope. A timed-out operation can still finish and must be safe to
-retry.
+Bounds one subrequest by the remaining scope budget and `capMs`. Uploads
+pass an infinite cap, so this layer limits them only inside a deadline
+scope. A timed-out operation can still finish and must be safe to retry.
+The optional cleanup receives only abandoned results, never a result
+returned to the caller.
 */
 export async function boundedSubrequest<T>(
 	operation: () => Promise<T>,
 	subrequest: string,
-	capMs: number = perCallCapMs
+	capMs: number = perCallCapMs,
+	onLateResult?: (result: T) => Promise<void>
 ): Promise<T> {
 	const deadline = deadlineScope.getStore();
 	const remaining =
@@ -134,7 +141,7 @@ export async function boundedSubrequest<T>(
 		deadlineMs: Number.isFinite(ms) ? ms : undefined
 	};
 
-	if (ms <= 0) {
+	if (ms <= 0 || currentDeadlineSignal()?.aborted === true) {
 		logger.debug('storage request refused', {
 			...fields,
 			disposition: 'budget-exhausted'
@@ -145,15 +152,9 @@ export async function boundedSubrequest<T>(
 	const completion = { hasTimedOut: false };
 
 	const recordLateCompletion = async (pending: Promise<T>): Promise<void> => {
+		let result: T;
 		try {
-			await pending;
-
-			if (completion.hasTimedOut) {
-				logger.debug('storage request completed after timeout', {
-					...fields,
-					elapsedMs: performance.now() - started
-				});
-			}
+			result = await pending;
 		} catch (error) {
 			if (completion.hasTimedOut) {
 				logger.debug('storage request failed after timeout', {
@@ -162,6 +163,22 @@ export async function boundedSubrequest<T>(
 					error
 				});
 			}
+			return;
+		}
+
+		if (!completion.hasTimedOut && deadline?.signal.aborted !== true) {
+			return;
+		}
+
+		logger.debug('storage request completed after timeout', {
+			...fields,
+			elapsedMs: performance.now() - started
+		});
+
+		try {
+			await onLateResult?.(result);
+		} catch (error) {
+			logger.debug('storage late-result cleanup failed', { ...fields, error });
 		}
 	};
 	const execute = (): Promise<T> => {
@@ -179,6 +196,11 @@ export async function boundedSubrequest<T>(
 					return new SubrequestTimeoutError(subrequest, abandoned);
 				})
 			: execute());
+
+		if (deadline?.signal.aborted === true) {
+			throw new SubrequestTimeoutError(subrequest);
+		}
+
 		logger.trace('storage request completed', {
 			...fields,
 			elapsedMs: performance.now() - started
@@ -186,14 +208,20 @@ export async function boundedSubrequest<T>(
 
 		return result;
 	} catch (error) {
+		const failure =
+			deadline?.signal.aborted === true &&
+			!(error instanceof SubrequestTimeoutError)
+				? new SubrequestTimeoutError(subrequest)
+				: error;
 		logger.debug('storage request failed', {
 			...fields,
 			elapsedMs: performance.now() - started,
-			disposition: completion.hasTimedOut ? 'timeout' : 'failed',
-			error
+			disposition:
+				failure instanceof SubrequestTimeoutError ? 'timeout' : 'failed',
+			error: failure
 		});
 
-		throw error;
+		throw failure;
 	}
 }
 
