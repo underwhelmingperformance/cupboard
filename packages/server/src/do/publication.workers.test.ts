@@ -4953,6 +4953,215 @@ it('decides whether another operation committed a shared reservation outside the
 	}
 });
 
+it("keeps a newer publication's run root target when a failed upload of the same path cleans up", async () => {
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-prune-newer-root');
+	const path = uploadPathNegotiation(
+		uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		})
+	);
+	const [failing] = await plannedEntries(token, '/uploads/plan', [path]);
+	if (failing === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	await putNarBytes(
+		publicationStagingKey(fixtureTenant, testPushId, failing.operationId),
+		nar
+	);
+	const session = await openCommitSession(token, undefined, publicationSession);
+	try {
+		session.send({
+			op: 'publish-batch',
+			pushId: testPushId,
+			entries: [
+				{
+					...failing,
+					blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+				}
+			]
+		});
+		await session.nextFrame();
+		await session.nextFrame();
+	} finally {
+		await closeSessionAndWait(session.socket);
+	}
+	const claim = await currentServer().claimVerificationBatch(
+		10,
+		Number.MAX_SAFE_INTEGER
+	);
+	// The failing upload's cleanup stops after the gate that reclaims its
+	// reservation.
+	const cleanup = new DurableObjectPause();
+	const isMarkedTerminal = vi
+		.spyOn(UploadStateService.prototype, 'markUploadTerminal')
+		.mockImplementationOnce(async function (
+			this: UploadStateService,
+			...arguments_
+		) {
+			isMarkedTerminal.mockRestore();
+			await cleanup.stop();
+			return this.markUploadTerminal(...arguments_);
+		});
+	try {
+		const failed = currentServer().recordVerifications(claim.owner, [
+			{
+				uploadId: failing.operationId,
+				verdict: {
+					kind: 'verified',
+					verification: {
+						ok: false,
+						reason: 'nar-hash-mismatch',
+						actualNarHash: nixSha256Hash('8')
+					}
+				}
+			}
+		]);
+		await cleanup.reached();
+		// A newer publication of the path attaches it to its run root meanwhile.
+		await runInDurableObject(currentServer(), (instance) => {
+			const cache = instance.context.cacheRepository.require(defaultCache());
+			instance.context.db
+				.insert(schema.retentionRootTargets)
+				.values({
+					cacheId: cache.id,
+					rootName: rootNameSchema.parse('run'),
+					storePathHash: path.storePathHash,
+					storePath: path.storePath
+				})
+				.run();
+			return Promise.resolve();
+		});
+		await cleanup.release();
+		await failed;
+	} finally {
+		isMarkedTerminal.mockRestore();
+		await cleanup.release();
+	}
+	const after = await runInDurableObject(currentServer(), (instance) =>
+		Promise.resolve({
+			targets: instance.context.db
+				.select({
+					rootName: schema.retentionRootTargets.rootName,
+					storePathHash: schema.retentionRootTargets.storePathHash
+				})
+				.from(schema.retentionRootTargets)
+				.all(),
+			narInfos: instance.context.db
+				.select({ storePathHash: schema.narInfos.storePathHash })
+				.from(schema.narInfos)
+				.all(),
+			failing: new PublicationStore(instance.context).get(failing.operationId)
+				?.state
+		})
+	);
+	expect(after).toStrictEqual({
+		targets: [{ rootName: 'run', storePathHash: path.storePathHash }],
+		narInfos: [],
+		failing: 'failed'
+	});
+});
+
+it('removes the retention targets of a reservation that a reuse commit reclaims when the tenant is suspended', async () => {
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-session-suspended-prune');
+	const narFields = {
+		fileSize: nar.narBytes.byteLength,
+		fileHash: nar.fileHash,
+		narHash: nar.narHash,
+		narSize: nar.narSize
+	};
+	const path = uploadPathNegotiation(uploadMetadata(narFields));
+	const [reusing] = await plannedEntries(token, '/uploads/plan', [path]);
+	if (reusing === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	// Another path makes the NAR reusable.
+	await commitPath(
+		token,
+		uploadMetadata({
+			...narFields,
+			name: 'session-suspended-prune',
+			storePathHash: '5'.repeat(32)
+		}),
+		nar
+	);
+	// A root includes the path. The tenant is suspended after the reuse commit
+	// reserves the row and before it is charged.
+	const materialise = await runInDurableObject(currentServer(), (instance) => {
+		const cache = instance.context.cacheRepository.require(defaultCache());
+		instance.context.db
+			.insert(schema.retentionRootTargets)
+			.values({
+				cacheId: cache.id,
+				rootName: rootNameSchema.parse('run'),
+				storePathHash: path.storePathHash,
+				storePath: path.storePath
+			})
+			.run();
+		const spy = vi
+			.spyOn(CommitPipelineService.prototype, 'materialiseBatched')
+			.mockImplementationOnce(async function (
+				this: CommitPipelineService,
+				...arguments_
+			) {
+				spy.mockRestore();
+				await suspendTenant(fixtureTenant);
+				return this.materialiseBatched(...arguments_);
+			});
+		return Promise.resolve(spy);
+	});
+	let answer: unknown[];
+	try {
+		const frames = await admit(token, testPushId, {
+			...reusing,
+			blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+		});
+		answer = frames.map((frame) => {
+			if (frame.ev !== 'error') {
+				return frame;
+			}
+			const { message, ...facts } = frame;
+			return { ...facts, hasMessage: message.length > 0 };
+		});
+	} finally {
+		materialise.mockRestore();
+	}
+	const after = await runInDurableObject(currentServer(), (instance) =>
+		Promise.resolve({
+			narInfos: instance.context.db
+				.select({ storePathHash: schema.narInfos.storePathHash })
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+				.all(),
+			targets: instance.context.db
+				.select({ storePathHash: schema.retentionRootTargets.storePathHash })
+				.from(schema.retentionRootTargets)
+				.where(
+					eq(schema.retentionRootTargets.storePathHash, path.storePathHash)
+				)
+				.all()
+		})
+	);
+	expect({ answer, after }).toStrictEqual({
+		answer: [
+			{ ev: 'publication-accepted', uploadId: reusing.operationId },
+			{
+				ev: 'error',
+				uploadId: reusing.operationId,
+				status: StatusCodes.FORBIDDEN,
+				hasMessage: true
+			}
+		],
+		after: { narInfos: [], targets: [] }
+	});
+});
+
 it("keeps another operation's reservation when an operation without bytes expires", async () => {
 	await resetTestServer();
 	const token = await initialise();

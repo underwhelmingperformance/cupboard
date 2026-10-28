@@ -1078,6 +1078,23 @@ export class VerificationService {
 			: 'shared';
 	}
 
+	// Call inside the gate that reclaimed the row. Once the gate reopens, a
+	// newer generation of the path can attach its own retention targets, which
+	// the prune would remove. A superseded row belongs to a newer generation and
+	// a shared row stays reserved, so their targets stay.
+	private pruneReclaimedTargets(
+		pending: PendingUploadRow,
+		metadata: UploadPathNegotiation,
+		result: 'reclaimed' | 'committed-current' | 'superseded' | 'shared'
+	): void {
+		if (result === 'reclaimed') {
+			this.pruneRetentionTargets(
+				this.cache(pending.cacheId),
+				metadata.storePathHash
+			);
+		}
+	}
+
 	private async finishExhaustedUpload(
 		logger: Logger,
 		pending: PendingUploadRow,
@@ -1116,12 +1133,7 @@ export class VerificationService {
 				return;
 			}
 			if (result !== 'committed-current') {
-				if (result === 'reclaimed') {
-					this.pruneRetentionTargets(
-						this.cache(pending.cacheId),
-						metadata.storePathHash
-					);
-				}
+				this.pruneReclaimedTargets(pending, metadata, result);
 				return failed;
 			}
 			const grace = parseStoredGraceDecision(pending.graceDecisionJson);
@@ -2037,6 +2049,7 @@ export class VerificationService {
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return 'superseded' as const;
 				}
+				this.pruneReclaimedTargets(pending, metadata, result);
 
 				// The winning generation must receive this upload's retention decision and
 				// run-root attachment before the waiter is notified.
@@ -2105,16 +2118,6 @@ export class VerificationService {
 			}
 
 			this.notifyWaiters(pending, 'absent');
-
-			// A superseded row belongs to a replacement that still holds the
-			// path, so its retention targets must survive; only a genuinely
-			// reclaimed path releases them.
-			if (reclaim === 'reclaimed') {
-				this.pruneRetentionTargets(
-					this.cache(pending.cacheId),
-					metadata.storePathHash
-				);
-			}
 
 			return 'applied';
 		}
@@ -2265,9 +2268,11 @@ export class VerificationService {
 				shared
 			);
 
-			return this.ownsActiveClaim(owner, pending, signal)
-				? result
-				: ('superseded' as const);
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
+				return 'superseded' as const;
+			}
+			this.pruneReclaimedTargets(pending, metadata, result);
+			return result;
 		});
 
 		if (
@@ -2287,16 +2292,6 @@ export class VerificationService {
 
 		if (!isSettled) {
 			return false;
-		}
-
-		// A superseded row belongs to a replacement that still holds the path,
-		// so its retention targets must survive; only a genuinely reclaimed
-		// path releases them.
-		if (reclaim === 'reclaimed') {
-			this.pruneRetentionTargets(
-				this.cache(pending.cacheId),
-				metadata.storePathHash
-			);
 		}
 
 		this.notifyWaiters(pending, verdict);
@@ -5039,9 +5034,6 @@ export class VerificationService {
 			// dropping the marker.
 			const reserved = this.narInfoRow(pending.cacheId, metadata.storePathHash);
 
-			let reclaim: 'reclaimed' | 'committed-current' | 'superseded' | 'shared' =
-				'superseded';
-
 			if (reserved?.narHash === metadata.narHash) {
 				const shared = await this.sharedReservation(
 					pending,
@@ -5052,7 +5044,7 @@ export class VerificationService {
 				// the identity proof: the input gate reopens the moment that
 				// callback completes, so a confirmation outside it could race a
 				// delete or recommit queued behind the gate.
-				reclaim = await this.context.criticalSection(async () => {
+				const reclaim = await this.context.criticalSection(async () => {
 					if (!this.ownsActiveClaim(owner, pending, signal)) {
 						return 'superseded' as const;
 					}
@@ -5068,6 +5060,7 @@ export class VerificationService {
 					if (!this.ownsActiveClaim(owner, pending, signal)) {
 						return 'superseded' as const;
 					}
+					this.pruneReclaimedTargets(pending, metadata, result);
 
 					// This upload lost the race, so its own captured decision
 					// never ran; apply it against the winning generation before
@@ -5142,16 +5135,6 @@ export class VerificationService {
 			}
 
 			this.notifyWaiters(pending, 'absent');
-
-			// A superseded or recommitted row still holds the path, so its
-			// retention targets must survive; only a genuinely reclaimed path
-			// releases them.
-			if (reclaim === 'reclaimed') {
-				this.pruneRetentionTargets(
-					this.cache(pending.cacheId),
-					metadata.storePathHash
-				);
-			}
 
 			return true;
 		}
