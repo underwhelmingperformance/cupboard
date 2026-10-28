@@ -68,7 +68,6 @@ import {
 	defaultCacheStatsPath,
 	deletePath,
 	expectConditionalNotModified,
-	expectDateConditionalNotModified,
 	expectNarResponse,
 	expectSingleCommitDecision,
 	expectSingleUploadDecision,
@@ -656,10 +655,6 @@ describe('upload flow', () => {
 			`/${metadata.storePathHash}.narinfo`,
 			readFetch
 		);
-		await expectDateConditionalNotModified(
-			`/${metadata.storePathHash}.narinfo`,
-			readFetch
-		);
 
 		const skip = await negotiateUploads(init.token, [metadata]);
 
@@ -679,7 +674,6 @@ describe('upload flow', () => {
 		);
 		const narPath = `/${await currentNarObjectKey(metadata.narHash)}`;
 		await expectConditionalNotModified(narPath, readFetch);
-		await expectDateConditionalNotModified(narPath, readFetch);
 	});
 
 	// The per-pull-request workflow pushes to `pr-<number>` without creating

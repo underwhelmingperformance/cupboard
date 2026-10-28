@@ -111,14 +111,40 @@ describe('tenant Worker reads', () => {
 			readRevision: firstCacheReadRevision
 		});
 		// The key a control Worker that adds no cache version forwards.
-		const unversioned = new Request(`${url.href}?cache-key-version=2`);
+		const unversioned = new URL(versioned.url);
+		unversioned.searchParams.delete('cache-generation');
+		unversioned.searchParams.delete('cache-read-revision');
 
 		expect({
 			versioned: await tenantRead(versioned),
-			unversioned: await tenantRead(unversioned)
+			unversioned: await tenantRead(new Request(unversioned))
 		}).toStrictEqual({
 			versioned: { status: StatusCodes.OK, cacheControl: narInfoCacheControl },
 			unversioned: { status: StatusCodes.NOT_FOUND, cacheControl: 'no-store' }
+		});
+	});
+
+	it('serves a request keyed by another cache key version without letting Workers Cache store it', async () => {
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPath(init.token, metadata);
+		const url = new URL(
+			`/t/${fixtureTenant}/${metadata.storePathHash}.narinfo`,
+			currentOrigin()
+		);
+		const current = canonicalCacheRequest(new Request(url), {
+			generation: firstCacheGeneration,
+			readRevision: firstCacheReadRevision
+		});
+		const other = new URL(current.url);
+		other.searchParams.set('cache-key-version', '2');
+
+		expect({
+			current: await tenantRead(current),
+			other: await tenantRead(new Request(other))
+		}).toStrictEqual({
+			current: { status: StatusCodes.OK, cacheControl: narInfoCacheControl },
+			other: { status: StatusCodes.OK, cacheControl: 'no-store' }
 		});
 	});
 

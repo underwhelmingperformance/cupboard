@@ -637,7 +637,7 @@ describe('cache metadata probe', () => {
 		}).toStrictEqual({
 			status: StatusCodes.OK,
 			forwarded: paths.map((storePath) => ({
-				url: `${currentOrigin()}/t/${fixtureTenant}/${StorePath.hash(storePath)}.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1`,
+				url: `${currentOrigin()}/t/${fixtureTenant}/${StorePath.hash(storePath)}.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1`,
 				headers: {
 					accept: 'text/x-nix-narinfo',
 					'x-request-id': response.headers.get('x-request-id')

@@ -86,6 +86,7 @@ import {
 	attestationStagingObjectKey,
 	casObjectKey,
 	isNotModified,
+	objectEtag,
 	parseAttestationDigestName,
 	type R2ObjectKey,
 	uncachedNotFoundResponse,
@@ -601,6 +602,9 @@ export class AttestationsService {
 			);
 	}
 
+	// This method serves attestation lists and bundles. Every tenant that
+	// attaches the same bundle shares one CAS object, so the response has no
+	// `Last-Modified`.
 	private async serveTenantObject(
 		request: Request,
 		key: string,
@@ -621,8 +625,7 @@ export class AttestationsService {
 		const headers = new Headers({
 			'cache-control': cacheControl,
 			'content-type': contentType,
-			etag: object.httpEtag,
-			'last-modified': object.uploaded.toUTCString()
+			etag: objectEtag(object)
 		});
 		headers.set('content-length', String(object.size));
 

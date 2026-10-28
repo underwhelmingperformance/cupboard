@@ -1,4 +1,5 @@
 import { type Logger, rootLogger } from '@cupboard/logger';
+import { bytesToHex } from '@cupboard/nix-store/encoding';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { NixPublicKey } from '@cupboard/nix-store/public-key';
@@ -3795,14 +3796,14 @@ export async function expectNarResponse(
 		contentLength: response.headers.get('content-length'),
 		contentType: response.headers.get('content-type'),
 		etag: typeof etag,
-		lastModified: typeof response.headers.get('last-modified')
+		lastModified: response.headers.get('last-modified') ?? undefined
 	}).toStrictEqual({
 		status: StatusCodes.OK,
 		cacheControl: 'public, max-age=31536000, immutable',
 		contentLength: String(narBytes.length),
 		contentType: 'application/zstd',
 		etag: 'string',
-		lastModified: 'string'
+		lastModified: undefined
 	});
 
 	const body = new Uint8Array(await response.arrayBuffer());
@@ -3843,39 +3844,6 @@ export async function expectConditionalNotModified(
 	});
 }
 
-export async function expectDateConditionalNotModified(
-	pathname: string,
-	fetcher: (
-		pathname: string,
-		init?: RequestInit
-	) => Promise<Response> = fetchPath
-): Promise<void> {
-	const fresh = await fetcher(pathname);
-	const lastModified = fresh.headers.get('last-modified');
-
-	expect(typeof lastModified).toBe('string');
-
-	const response = await fetcher(pathname, {
-		headers: {
-			'if-modified-since': lastModified ?? ''
-		}
-	});
-
-	expect({
-		status: response.status,
-		body: await response.text(),
-		cacheControl: response.headers.get('cache-control'),
-		contentLength: response.headers.get('content-length'),
-		lastModified: response.headers.get('last-modified')
-	}).toStrictEqual({
-		status: StatusCodes.NOT_MODIFIED,
-		body: '',
-		cacheControl: fresh.headers.get('cache-control'),
-		contentLength: fresh.headers.get('content-length'),
-		lastModified
-	});
-}
-
 export async function expectTextResponse(
 	pathname: string,
 	expected: {
@@ -3900,10 +3868,7 @@ export async function expectTextResponse(
 		contentLength: response.headers.get('content-length'),
 		contentType: response.headers.get('content-type'),
 		etag: typeof response.headers.get('etag'),
-		lastModified:
-			response.headers.get('last-modified') === null
-				? undefined
-				: typeof response.headers.get('last-modified')
+		lastModified: response.headers.get('last-modified') ?? undefined
 	}).toStrictEqual({
 		status: StatusCodes.OK,
 		body: expected.method === 'HEAD' ? '' : expected.body,
@@ -3911,7 +3876,7 @@ export async function expectTextResponse(
 		contentLength: String(encoder.encode(expected.body).length),
 		contentType: expected.contentType,
 		etag: 'string',
-		lastModified: pathname.endsWith('.narinfo') ? 'string' : undefined
+		lastModified: undefined
 	});
 }
 
@@ -4128,6 +4093,26 @@ export function hexBytes(value: string): Uint8Array {
 	}
 
 	return bytes;
+}
+
+/**
+The R2 version of the object at `key`, which changes on every write.
+*/
+export async function storedObjectVersion(
+	key: R2ObjectKey
+): Promise<string | undefined> {
+	const object = await env.BLOBS.head(key);
+
+	return object?.version;
+}
+
+/**
+The ETag of a response served from an R2 object with these bytes.
+*/
+export async function md5Etag(bytes: Uint8Array): Promise<string> {
+	const digest = await crypto.subtle.digest('MD5', bytes);
+
+	return `"md5:${bytesToHex(new Uint8Array(digest))}"`;
 }
 
 // Wraps `payload` in a single uncompressed-block ("stored") zstd frame. It

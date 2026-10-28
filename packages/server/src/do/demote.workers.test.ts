@@ -8,6 +8,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env as tenantEnv } from 'cloudflare:workers';
+import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
@@ -24,10 +25,13 @@ import {
 	cacheWriteGrants,
 	clearBlobStorage,
 	currentNarObjectKey,
+	handlerFetch,
 	issueTokenForTenant,
+	md5Etag,
 	provisionNamedTenant,
 	pushPathToTenant,
 	resetTestServer,
+	storedObjectVersion,
 	testBase,
 	testControlEnv,
 	testServerFor,
@@ -307,6 +311,99 @@ describe('missing blob demotion', () => {
 			oldUrl: lostKey,
 			newUrl: current,
 			current
+		});
+	});
+
+	it('serves a narinfo that another tenant restored without the time of the restoring write', async () => {
+		const first = await committedTenantPath('restored-narinfo');
+		const secondTenant = tenantIdSchema.parse(
+			`demote-test-${String(tenantNumbers.next().value)}`
+		);
+		const issuer = await provisionNamedTenant(secondTenant);
+		const secondToken = await issueTokenForTenant(
+			testServerFor(secondTenant),
+			issuer,
+			cacheWriteGrants()
+		);
+		await pushPathToTenant(
+			secondTenant,
+			secondToken,
+			first.metadata,
+			first.nar
+		);
+		await env.BLOBS.delete(await currentNarObjectKey(first.narHash));
+		await pushPathToTenant(
+			first.tenant,
+			first.token,
+			first.metadata,
+			first.nar
+		);
+		const messages: MaintenanceQueueMessage[] = [];
+		await enqueueNarInfoRefreshTenants(env, first.narHash, undefined, {
+			sendBatch: (batch) => {
+				messages.push(...Array.from(batch, (entry) => entry.body));
+
+				return Promise.resolve({
+					metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } }
+				});
+			}
+		});
+		const secondMessage = messages.find(
+			(message) =>
+				message.kind === 'narinfo-refresh-tenant' &&
+				message.tenant === secondTenant
+		);
+
+		if (secondMessage === undefined) {
+			throw new Error('The second tenant received no narinfo refresh');
+		}
+
+		const key = narInfoObjectKey(secondTenant, first.metadata.storePathHash, {
+			kind: 'default'
+		});
+		const ownVersion = await storedObjectVersion(key);
+		await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			secondMessage
+		);
+		await runInDurableObject(testServerFor(secondTenant), (instance) =>
+			instance.alarm()
+		);
+		const restored = await env.BLOBS.get(key);
+		const body = new Uint8Array((await restored?.arrayBuffer()) ?? []);
+		const read = async (init?: RequestInit) => {
+			const response = await handlerFetch(
+				`/t/${secondTenant}/${first.metadata.storePathHash}.narinfo`,
+				init
+			);
+			await response.arrayBuffer();
+
+			return {
+				status: response.status,
+				etag: response.headers.get('etag'),
+				lastModified: response.headers.get('last-modified') ?? undefined
+			};
+		};
+		const served = {
+			status: StatusCodes.OK,
+			etag: await md5Etag(body),
+			lastModified: undefined
+		};
+
+		expect({
+			ownVersion: typeof ownVersion,
+			isRewritten: restored !== null && restored.version !== ownVersion,
+			get: await read(),
+			ifModifiedSince: await read({
+				headers: { 'if-modified-since': 'Fri, 01 Jan 2100 00:00:00 GMT' }
+			})
+		}).toStrictEqual({
+			ownVersion: 'string',
+			isRewritten: true,
+			get: served,
+			ifModifiedSince: served
 		});
 	});
 

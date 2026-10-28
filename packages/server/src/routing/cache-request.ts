@@ -9,17 +9,19 @@ import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
 // read revision.
 const generationParameter = 'cache-generation';
 const readRevisionParameter = 'cache-read-revision';
+const keyVersionParameter = 'cache-key-version';
 
 /**
 The version component in the Workers Cache key for public reads.
 
 Workers Cache keys a stored response by the request path and query. Deploying
 new code does not remove responses written by an earlier version. Increment
-this value when a change alters which readers may receive a response, so a
-new deployment uses a cache-key format that earlier versions did not
-populate.
+this value when stored responses must not be served after a change, for
+example when the change alters which readers may receive a response or what a
+response contains. A new deployment then uses a cache-key format that earlier
+versions did not populate.
 */
-const cacheKeyVersion = '2';
+const cacheKeyVersion = '3';
 
 /**
 Creates the request used as the Workers Cache key for a public tenant read.
@@ -43,7 +45,7 @@ export function canonicalCacheRequest(
 	const canonical = new URL(request.url);
 	canonical.search = '';
 	canonical.hash = '';
-	canonical.searchParams.set('cache-key-version', cacheKeyVersion);
+	canonical.searchParams.set(keyVersionParameter, cacheKeyVersion);
 	canonical.searchParams.set(generationParameter, String(version.generation));
 	canonical.searchParams.set(
 		readRevisionParameter,
@@ -81,4 +83,19 @@ export function cacheRequestVersion(
 	}
 
 	return { generation: generation.data, readRevision: readRevision.data };
+}
+
+/**
+Whether {@link canonicalCacheRequest} of this version built the request's key.
+
+During a deployment, the control Worker can build keys of a newer version than
+the tenant Worker that serves them. The older tenant Worker must not store its
+responses under the newer key, because the newer key exists so that responses
+from earlier versions are no longer served.
+*/
+export function hasCurrentCacheKeyVersion(request: Request): boolean {
+	return (
+		new URL(request.url).searchParams.get(keyVersionParameter) ===
+		cacheKeyVersion
+	);
 }
