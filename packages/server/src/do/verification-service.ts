@@ -85,6 +85,7 @@ import { type AttestationsService } from './attestations-service.ts';
 import { maxOutgoingConnections } from './bulk.ts';
 import {
 	type CommitPipelineService,
+	type NarInfoReplacement,
 	type PrefetchedMaterialisationFacts
 } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
@@ -839,6 +840,7 @@ interface PreparedSettle {
 	readonly pending: typeof schema.pendingUploads.$inferSelect;
 	readonly metadata: UploadPathNegotiation;
 	readonly generation: NarInfoGeneration;
+	readonly replacement?: NarInfoReplacement;
 	readonly owner: string;
 }
 
@@ -869,7 +871,11 @@ type PreparedWithoutDecode =
 	PreparedVerdict | { readonly kind: 'requires-decode' };
 
 type PendingReservation =
-	| { readonly kind: 'reserved'; readonly generation: NarInfoGeneration }
+	| {
+			readonly kind: 'reserved';
+			readonly generation: NarInfoGeneration;
+			readonly replacement?: NarInfoReplacement;
+	  }
 	| { readonly kind: 'applied' }
 	| { readonly kind: 'ignored' };
 
@@ -1407,13 +1413,14 @@ export class VerificationService {
 			pending,
 			metadata,
 			owner,
-			signal
+			signal,
+			verification.ok
 		);
 
 		if (reservation.kind !== 'reserved') {
 			return reservation;
 		}
-		const { generation } = reservation;
+		const { generation, replacement } = reservation;
 
 		const finalised = await this.finaliseIfAlreadyCommitted(
 			logger,
@@ -1445,7 +1452,7 @@ export class VerificationService {
 
 		return {
 			kind: 'ready',
-			settle: { pending, metadata, generation, owner }
+			settle: { pending, metadata, generation, replacement, owner }
 		};
 	}
 
@@ -1543,6 +1550,7 @@ export class VerificationService {
 				pending,
 				metadata,
 				generation: reservation.generation,
+				replacement: reservation.replacement,
 				owner
 			}
 		};
@@ -1574,12 +1582,15 @@ export class VerificationService {
 		}
 	}
 
+	// `isVerified` is whether the upload's bytes are valid. Only valid bytes
+	// replace a committed path whose NAR is missing.
 	private async reservePendingRow(
 		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathNegotiation,
 		owner: string,
-		signal?: AbortSignal
+		signal?: AbortSignal,
+		isVerified = true
 	): Promise<PendingReservation> {
 		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return { kind: 'ignored' };
@@ -1591,12 +1602,24 @@ export class VerificationService {
 			pending.retentionEpoch,
 			() => this.ownsActiveClaim(owner, pending, signal)
 		);
+		const replacement =
+			isVerified && reserved?.kind === 'lost'
+				? await this.planLostPathReplacement(pending, metadata, owner, signal)
+				: undefined;
 
 		if (
 			reserved === undefined ||
 			!this.ownsActiveClaim(owner, pending, signal)
 		) {
 			return { kind: 'ignored' };
+		}
+
+		if (replacement !== undefined) {
+			return {
+				kind: 'reserved',
+				generation: replacement.row.generation,
+				replacement
+			};
 		}
 
 		if (reserved.kind === 'lost') {
@@ -1620,6 +1643,92 @@ export class VerificationService {
 		return { kind: 'reserved', generation: reserved.generation };
 	}
 
+	/**
+	Plans the replacement of the path's committed row by this upload when the
+	row's NAR is missing. The row stays until the charge of the upload's own
+	generation succeeds, and that charge's gate replaces it. A failed,
+	refused or late charge therefore leaves the row as it was. A charge that
+	reaches D1 without the replacement leaves an edge for the planned
+	generation, which the plan's queued cleanup removes after the charge's
+	deadline.
+
+	The NAR is read before the plan, and the replacement checks only that the
+	row is unchanged. Another upload can restore the NAR in place in between.
+	The upload then replaces a served path with its own verified bytes for the
+	same store path, after its own commit is durable, so the path stays
+	served.
+	*/
+	private async planLostPathReplacement(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: UploadPathNegotiation,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<NarInfoReplacement | undefined> {
+		const cache = this.cache(pending.cacheId);
+		const row = this.narInfoRow(cache.id, metadata.storePathHash);
+		if (
+			row === undefined ||
+			row.narHash === metadata.narHash ||
+			!(await this.narInfoObjects.hasCommittedReference(cache, row)) ||
+			(await this.isCurrentNarPresent(row.narHash))
+		) {
+			return undefined;
+		}
+		const planned = await this.commitPipeline.planReplacement(
+			cache,
+			metadata,
+			row,
+			{
+				retentionEpoch: pending.retentionEpoch,
+				recoveryDeadline: parseStoredGraceDecision(pending.graceDecisionJson)
+					?.recoveryDeadline,
+				isStillOwned: () => this.ownsActiveClaim(owner, pending, signal),
+				queueCleanup: (handle, replacement, chargeDeadline) => {
+					this.deletionQueue.queueReplacementCleanup(
+						handle,
+						cache,
+						replacement,
+						chargeDeadline
+					);
+				}
+			}
+		);
+		if (planned === undefined) {
+			return undefined;
+		}
+		return {
+			...planned,
+			// The transaction keeps every write that this makes, so check the lost
+			// row before removing the cleanup.
+			removeLost: (handle) => {
+				const current = handle
+					.select({
+						generation: schema.narInfos.generation,
+						narHash: schema.narInfos.narHash
+					})
+					.from(schema.narInfos)
+					.where(
+						and(
+							eq(schema.narInfos.cacheId, cache.id),
+							eq(schema.narInfos.storePathHash, planned.lost.storePathHash)
+						)
+					)
+					.get();
+				return (
+					current?.generation === planned.lost.generation &&
+					current.narHash === planned.lost.narHash &&
+					this.deletionQueue.cancelReplacementCleanup(
+						handle,
+						cache.id,
+						planned.row.storePathHash,
+						planned.row.generation
+					) &&
+					this.deletionQueue.removeNarInfoRow(handle, planned.lost)
+				);
+			}
+		};
+	}
+
 	// A crash can leave a committed generation and its pending marker after the
 	// private staging bytes have been deleted. Re-decoding that row would turn a
 	// successful upload into a mismatch, so finish the remaining bookkeeping from
@@ -1632,6 +1741,19 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<FinaliseCommittedResult> {
+		const isCommitted = await this.commitPipeline.isGenerationCommitted(
+			this.cache(pending.cacheId),
+			metadata,
+			generation
+		);
+		if (!this.ownsActiveClaim(owner, pending, signal)) {
+			return 'ignored';
+		}
+		// The generation can be committed while its NAR is missing. Promotion
+		// then restores the NAR from this upload's bytes.
+		if (!isCommitted || !(await this.isCurrentNarPresent(metadata.narHash))) {
+			return 'continue';
+		}
 		return this.whileDeletingStaging(pending, async () => {
 			const result = await this.context.criticalSection(() =>
 				this.finaliseIfAlreadyCommittedLocked(
@@ -1660,18 +1782,8 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<FinaliseCommittedResult> {
-		const isCommitted = await this.commitPipeline.isGenerationCommitted(
-			this.cache(pending.cacheId),
-			metadata,
-			generation
-		);
-
 		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return 'ignored';
-		}
-
-		if (!isCommitted) {
-			return 'continue';
 		}
 
 		// The flush applies captured grace after the durable charge. An interruption
@@ -1933,6 +2045,7 @@ export class VerificationService {
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
+		replacement: NarInfoReplacement | undefined,
 		prefetched: PrefetchedMaterialisationFacts | undefined,
 		owner: string,
 		signal?: AbortSignal
@@ -1965,7 +2078,8 @@ export class VerificationService {
 			mustOwnBlob: false,
 			// Check the claim again inside the charge gate. A competing pass might have
 			// removed the row or recorded a terminal verdict during the earlier awaits.
-			isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
+			isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal),
+			replacement
 		});
 
 		if (outcome.kind === 'deferred') {
@@ -1999,7 +2113,8 @@ export class VerificationService {
 				mustOwnBlob: false,
 				graceDecision,
 				attachRootName: pending.attachRootName ?? undefined,
-				isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
+				isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal),
+				replacement
 			});
 
 			if (retried.kind === 'deferred') {
@@ -4494,6 +4609,7 @@ export class VerificationService {
 								item.pending,
 								item.metadata,
 								item.generation,
+								item.replacement,
 								prefetched?.get(item.metadata.narHash),
 								item.owner,
 								signal
@@ -4968,6 +5084,7 @@ export class VerificationService {
 						item.pending,
 						item.metadata,
 						item.generation,
+						item.replacement,
 						prefetched?.get(item.metadata.narHash),
 						item.owner,
 						signal

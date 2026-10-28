@@ -47,6 +47,7 @@ import {
 	beforeCacheIdentityContract,
 	bootstrap,
 	currentServer,
+	latestMigrationIndex,
 	migrateThrough,
 	migrateThroughConvertedCatalogue,
 	testServerFor,
@@ -2260,6 +2261,7 @@ describe('migrations', () => {
 				await migrateThrough(state, 78);
 
 				const scans = state.storage.sql.exec(selectScans).toArray();
+				await migrateThrough(state, latestMigrationIndex);
 				const cache = instance.context.cacheRepository.resolvedForId(
 					cacheIdSchema.parse(10)
 				);
@@ -2398,6 +2400,44 @@ describe('migrations', () => {
 				}
 			],
 			index: [{ name: 'state' }, { name: 'recovery_deadline' }, { name: 'id' }]
+		});
+	});
+
+	it('adds an empty replacement cleanup table at 0080 and keeps narinfo rows', async () => {
+		const insertNarInfo =
+			"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES (1, '00000000000000000000000000000001', '/nix/store/00000000000000000000000000000001-app', 'sha256:nar', 1, '[]', '2026-01-01T00:00:00.000Z')";
+		const selectNarInfos =
+			'SELECT cache_id, store_path_hash, generation FROM narinfo';
+		const selectCleanups =
+			'SELECT count(*) AS cleanups FROM replacement_charge_cleanup';
+		const selectIndexColumns =
+			"SELECT name FROM pragma_index_info('replacement_charge_cleanup_due_idx') ORDER BY seqno";
+
+		const result = await runInDurableObject(
+			testServerFor('migration-replacement-charge-cleanup'),
+			async (_instance, state) => {
+				await migrateThrough(state, 79);
+				state.storage.sql.exec(insertNarInfo);
+				await migrateThrough(state, 80);
+
+				return {
+					narInfos: state.storage.sql.exec(selectNarInfos).toArray(),
+					cleanups: state.storage.sql.exec(selectCleanups).one(),
+					index: state.storage.sql.exec(selectIndexColumns).toArray()
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			narInfos: [
+				{
+					cache_id: 1,
+					store_path_hash: '00000000000000000000000000000001',
+					generation: 0
+				}
+			],
+			cleanups: { cleanups: 0 },
+			index: [{ name: 'due_at' }]
 		});
 	});
 

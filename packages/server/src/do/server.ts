@@ -3360,11 +3360,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			{
 				key: 'garbage-collection',
 				// A deletion deferred for inheritance becomes work again when the
-				// pending upload that defers it expires.
-				workAt: async (now) =>
-					(await this.hasGarbageCollectionContinuation())
-						? now
-						: this.deletionQueue.deferralWakeAt(),
+				// pending upload that defers it expires. A replacement cleanup
+				// becomes work when it is due.
+				workAt: async (now) => {
+					if (await this.hasGarbageCollectionContinuation()) {
+						return now;
+					}
+					const times = [
+						await this.deletionQueue.deferralWakeAt(),
+						this.deletionQueue.replacementCleanupDueAt()
+					].filter((time) => time !== undefined);
+					return times.length === 0 ? undefined : Math.min(...times);
+				},
 				run: async () => {
 					if (await this.hasGarbageCollectionContinuation()) {
 						await this.resumeGarbageCollection();

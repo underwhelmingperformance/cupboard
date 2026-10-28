@@ -277,7 +277,7 @@ describe('garbage collection cost', () => {
 
 			expect(await cronSweepCost()).toStrictEqual({
 				invocations: 1,
-				rowsRead: 283,
+				rowsRead: 287,
 				rowsWritten: 5
 			});
 		}));
@@ -300,8 +300,8 @@ describe('garbage collection cost', () => {
 			const manyDeadlines = await cronSweepCost();
 
 			expect({ fewDeadlines, manyDeadlines }).toStrictEqual({
-				fewDeadlines: { invocations: 1, rowsRead: 287, rowsWritten: 5 },
-				manyDeadlines: { invocations: 1, rowsRead: 287, rowsWritten: 5 }
+				fewDeadlines: { invocations: 1, rowsRead: 291, rowsWritten: 5 },
+				manyDeadlines: { invocations: 1, rowsRead: 291, rowsWritten: 5 }
 			});
 		}));
 
@@ -322,7 +322,7 @@ describe('garbage collection cost', () => {
 
 			expect(await cronSweepCost()).toStrictEqual({
 				invocations: 1,
-				rowsRead: 539,
+				rowsRead: 543,
 				rowsWritten: 5
 			});
 		}));
@@ -343,8 +343,8 @@ describe('garbage collection cost', () => {
 			const twoHundredDeleted = await cronSweepCost();
 
 			expect({ fourDeleted, twoHundredDeleted }).toStrictEqual({
-				fourDeleted: { invocations: 1, rowsRead: 283, rowsWritten: 5 },
-				twoHundredDeleted: { invocations: 1, rowsRead: 283, rowsWritten: 5 }
+				fourDeleted: { invocations: 1, rowsRead: 287, rowsWritten: 5 },
+				twoHundredDeleted: { invocations: 1, rowsRead: 287, rowsWritten: 5 }
 			});
 		}));
 
@@ -365,8 +365,8 @@ describe('garbage collection cost', () => {
 			});
 
 			expect({ idle, waiting: await cronSweepCost() }).toStrictEqual({
-				idle: { invocations: 1, rowsRead: 283, rowsWritten: 5 },
-				waiting: { invocations: 1, rowsRead: 281, rowsWritten: 5 }
+				idle: { invocations: 1, rowsRead: 287, rowsWritten: 5 },
+				waiting: { invocations: 1, rowsRead: 285, rowsWritten: 5 }
 			});
 		}));
 
@@ -384,7 +384,7 @@ describe('garbage collection cost', () => {
 				cost: await cronSweepCost(),
 				deleted: before - (await uploadCount())
 			}).toStrictEqual({
-				cost: { invocations: 1, rowsRead: 401, rowsWritten: 25 },
+				cost: { invocations: 1, rowsRead: 405, rowsWritten: 25 },
 				deleted: 4 * uploadsPerVerdict
 			});
 		}));
@@ -409,7 +409,7 @@ describe('garbage collection cost', () => {
 				deleted: before - (await uploadCount()),
 				continuation: await hasContinuation()
 			}).toStrictEqual({
-				cost: { invocations: 1, rowsRead: 148, rowsWritten: 20 },
+				cost: { invocations: 1, rowsRead: 149, rowsWritten: 20 },
 				deleted: 4 * uploadsPerVerdict,
 				continuation: false
 			});
@@ -453,7 +453,7 @@ describe('garbage collection cost', () => {
 			const unchanged = { inputsChanged: false, scanCompletedAt: firstSweepAt };
 
 			expect({ cost, caches }).toStrictEqual({
-				cost: { invocations: 2, rowsRead: 9232, rowsWritten: 2836 },
+				cost: { invocations: 2, rowsRead: 9240, rowsWritten: 2836 },
 				caches: {
 					isAddedPathKept: false,
 					completions: {

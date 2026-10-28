@@ -7,6 +7,7 @@ import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	type RootName,
+	type SigningKeyGeneration,
 	signingKeyGenerationSchema,
 	type StorePathHash,
 	type StorePathString,
@@ -82,6 +83,7 @@ import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type MaterialiseOutcome,
 	type ReserveOutcome,
+	type SchemaWriter,
 	type ServerContext
 } from './context.ts';
 import {
@@ -209,7 +211,56 @@ export interface MaterialiseRequest {
 	check and the generation fence.
 	*/
 	readonly isStillSettleable?: () => boolean;
+	/**
+	Replace a committed row whose NAR the caller found missing. The flush
+	charges `generation` while that row stays, and only a charge that succeeds
+	replaces it, in the same gate and transaction.
+	*/
+	readonly replacement?: NarInfoReplacement;
 }
+
+type NarInfoRow = typeof schema.narInfos.$inferSelect;
+
+/**
+The planned replacement of a path's committed row by an upload of another
+NAR. `row` is the upload's row at a generation that no other commit of the
+path can take. The charge of that generation cannot reach D1 after
+`chargeDeadline`. `removeLost` removes the cleanup that the plan queued for
+the generation, removes `lost` and queues its cleanup, all in the given
+transaction. It returns false, and writes nothing, when the path's row has
+changed or the cleanup is no longer queued.
+*/
+export interface NarInfoReplacement {
+	readonly lost: NarInfoRow;
+	readonly row: typeof schema.narInfos.$inferInsert & {
+		readonly generation: NarInfoGeneration;
+		readonly sigsJson: string;
+	};
+	readonly chargeDeadline: IsoTimestamp;
+	readonly removeLost: (handle: SchemaWriter) => boolean;
+}
+
+/**
+The inputs of {@link CommitPipelineService.planReplacement}.
+`recoveryDeadline` is the upload's recovery deadline, which the charge
+statements enforce with D1's clock. `queueCleanup` records the cleanup of
+the planned generation in the plan's transaction.
+*/
+export interface ReplacementPlanInput {
+	readonly retentionEpoch: number;
+	readonly recoveryDeadline: IsoTimestamp | undefined;
+	readonly isStillOwned: () => boolean;
+	readonly queueCleanup: (
+		handle: SchemaWriter,
+		row: NarInfoReplacement['row'],
+		chargeDeadline: IsoTimestamp
+	) => void;
+}
+
+// An upload without a recovery deadline gets a deadline for its replacement
+// charge, so that the cleanup of the planned generation runs after any charge
+// can reach D1.
+const replacementChargeWindowMs = 60 * 60 * 1000;
 
 export type BatchedMaterialiseOutcome =
 	| MaterialiseOutcome
@@ -718,6 +769,133 @@ export class CommitPipelineService {
 		return rival !== undefined;
 	}
 
+	// Whether a commit that finds an uncommitted reservation of its path waits
+	// for verification. It waits while a live upload shares the reservation.
+	// Otherwise no upload can complete the reservation, and the commit reclaims
+	// it so retries do not wait for the periodic recovery scan.
+	private async defersToReservation(
+		uploadId: UploadId,
+		cache: ResolvedCache,
+		row: typeof schema.narInfos.$inferSelect,
+		nowIso: IsoTimestamp
+	): Promise<boolean> {
+		if (this.hasLiveRival(cache, row.narHash, uploadId, nowIso)) {
+			this.uploadState.markUploadPending(uploadId);
+			return true;
+		}
+		await this.context.criticalSection(() =>
+			this.reclaimReservedRow(
+				cache,
+				row.storePathHash,
+				row.generation,
+				row.narHash
+			)
+		);
+		return false;
+	}
+
+	// Whether Nix can fetch the committed row. The availability read repairs a
+	// missing narinfo object when the row's NAR is present.
+	private async isServed(
+		cache: ResolvedCache,
+		row: typeof schema.narInfos.$inferSelect
+	): Promise<boolean> {
+		const versions = await this.narInfoObjects.servableNarInfoVersions(cache, [
+			row.storePathHash
+		]);
+		const served = versions.get(row.storePathHash);
+		return (
+			served?.generation === row.generation && served.narHash === row.narHash
+		);
+	}
+
+	// Nix signatures cover the uncompressed NAR identity, not its compressed
+	// encoding. The compressed file hash and size are therefore unnecessary here.
+	private async narInfoSignatures(metadata: UploadPathNegotiation): Promise<{
+		readonly sigsJson: string;
+		readonly signatureGeneration: SigningKeyGeneration;
+	}> {
+		const signingKeys = await this.signingKeysService.signingKeys();
+		const fingerprint = narFingerprint(
+			new StorePath(metadata.storePath),
+			metadata.narHash,
+			metadata.narSize,
+			metadata.references
+		);
+		const signatures = await Promise.all(
+			signingKeys.map((key) =>
+				signNixFingerprint(key.privateJwk, fingerprint, key.publicKey.name)
+			)
+		);
+		return {
+			sigsJson: JSON.stringify(signatures.map((signature) => signature.value)),
+			signatureGeneration: signingKeyGenerationSchema.parse(
+				Math.max(0, ...signingKeys.map((key) => key.generation))
+			)
+		};
+	}
+
+	private nextGeneration(
+		handle: SchemaWriter,
+		cache: ResolvedCache,
+		storePathHash: StorePathHash
+	): NarInfoGeneration {
+		const seq = handle
+			.select({ next: schema.generationSeq.nextGeneration })
+			.from(schema.generationSeq)
+			.where(
+				and(
+					cacheIdentityCondition(
+						schema.generationSeq.cacheKind,
+						schema.generationSeq.cacheName,
+						cache.scope
+					),
+					eq(schema.generationSeq.storePathHash, storePathHash)
+				)
+			)
+			.get();
+		return seq?.next ?? narInfoGenerationSchema.parse(0);
+	}
+
+	// Moves the path's generation sequence past `generation`.
+	private advanceGeneration(
+		handle: SchemaWriter,
+		cache: ResolvedCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration
+	): void {
+		const nextGeneration = narInfoGenerationSchema.parse(generation + 1);
+		const sequence = handle.insert(schema.generationSeq).values({
+			...cacheIdentityColumns(cache.scope),
+			storePathHash,
+			nextGeneration
+		});
+
+		// Each cache kind has its own partial unique index, so name the matching
+		// conflict target.
+		if (cache.scope.kind === 'default') {
+			sequence
+				.onConflictDoUpdate({
+					target: schema.generationSeq.storePathHash,
+					targetWhere: sql`${schema.generationSeq.cacheKind} = 'default'`,
+					set: { nextGeneration }
+				})
+				.run();
+			return;
+		}
+
+		sequence
+			.onConflictDoUpdate({
+				target: [
+					schema.generationSeq.cacheName,
+					schema.generationSeq.storePathHash
+				],
+				targetWhere: sql`${schema.generationSeq.cacheKind} = 'named'`,
+				set: { nextGeneration }
+			})
+			.run();
+	}
+
 	private async ownsHash(
 		tenant: TenantId,
 		narHash: NixSha256HashString
@@ -1203,8 +1381,16 @@ export class CommitPipelineService {
 			.get();
 
 		// Fence on both generation and hash so a recommit cannot attach this edge
-		// to a replacement narinfo row.
-		if (row?.generation !== generation || row.narHash !== metadata.narHash) {
+		// to a replacement narinfo row. A planned replacement charges its own
+		// generation while the row that it replaces stays.
+		const expected = request.replacement?.lost ?? {
+			generation,
+			narHash: metadata.narHash
+		};
+		if (
+			row?.generation !== expected.generation ||
+			row.narHash !== expected.narHash
+		) {
 			return { outcome: { kind: 'superseded' } };
 		}
 
@@ -1215,7 +1401,10 @@ export class CommitPipelineService {
 		}
 
 		return {
-			narInfo: this.narInfoObjects.buildNarInfo(row, probe.blob),
+			narInfo: this.narInfoObjects.buildNarInfo(
+				request.replacement?.row ?? row,
+				probe.blob
+			),
 			blob: probe.blob
 		};
 	}
@@ -1235,6 +1424,7 @@ export class CommitPipelineService {
 			readonly publication: PublicationColumns;
 		}[] = [];
 
+		const replaced = new Set<string>();
 		for (const [index, request] of requests.entries()) {
 			if (
 				request.isStillSettleable !== undefined &&
@@ -1242,6 +1432,16 @@ export class CommitPipelineService {
 			) {
 				outcomes[index] = { kind: 'gone' };
 				continue;
+			}
+
+			// Only one upload of a flush can replace a path's row.
+			const replacedKey = `${String(request.cache.id)} ${request.metadata.storePathHash}`;
+			if (request.replacement !== undefined && replaced.has(replacedKey)) {
+				outcomes[index] = { kind: 'superseded' };
+				continue;
+			}
+			if (request.replacement !== undefined) {
+				replaced.add(replacedKey);
 			}
 
 			if (
@@ -1280,7 +1480,9 @@ export class CommitPipelineService {
 				generation: charge.request.generation,
 				blob: charge.blob,
 				publication: charge.publication,
-				recoveryDeadline: charge.request.graceDecision?.recoveryDeadline
+				recoveryDeadline:
+					charge.request.replacement?.chargeDeadline ??
+					charge.request.graceDecision?.recoveryDeadline
 			}))
 		);
 
@@ -1292,7 +1494,9 @@ export class CommitPipelineService {
 					generation: charge.request.generation,
 					blob: charge.blob,
 					publication: charge.publication,
-					recoveryDeadline: charge.request.graceDecision?.recoveryDeadline
+					recoveryDeadline:
+						charge.request.replacement?.chargeDeadline ??
+						charge.request.graceDecision?.recoveryDeadline
 				});
 				outcomes[charge.index] = settledOutcome(single, charge.narInfo);
 			}
@@ -1309,10 +1513,33 @@ export class CommitPipelineService {
 			}
 		}
 
+		for (const charge of chargeable) {
+			const { replacement } = charge.request;
+			if (
+				replacement !== undefined &&
+				outcomes[charge.index]?.kind === 'materialised' &&
+				!this.replaceLostRow(replacement)
+			) {
+				outcomes[charge.index] = { kind: 'superseded' };
+			}
+		}
+
 		this.applyCapturedGrace(requests, outcomes);
 		this.applyRootAttach(requests, outcomes);
 
 		return outcomes;
+	}
+
+	// Replaces the lost row with the upload's row in one transaction, after the
+	// charge of the upload's generation succeeded.
+	private replaceLostRow(replacement: NarInfoReplacement): boolean {
+		return this.context.db.transaction((tx) => {
+			if (!replacement.removeLost(tx)) {
+				return false;
+			}
+			tx.insert(schema.narInfos).values(replacement.row).run();
+			return true;
+		});
 	}
 
 	// Apply the negotiated grace decision before releasing the generation fence.
@@ -1618,9 +1845,10 @@ export class CommitPipelineService {
 				metadata.storePathHash
 			);
 
-			if (winner === undefined) {
-				// Keep the pending upload while the winning saga has no committed edge.
-				// Verification will resolve both contenders.
+			// Keep the pending upload while the winning saga has no committed edge,
+			// and while the winner has lost its NAR. Verification resolves both
+			// contenders, and it replaces a winner whose NAR is missing.
+			if (winner === undefined || !(await this.isServed(cache, winner))) {
 				await this.requestVerification(logger, this.context.requireTenant());
 
 				return {
@@ -1632,11 +1860,6 @@ export class CommitPipelineService {
 					})
 				};
 			}
-
-			await this.narInfoObjects.ensureNarInfoObject(
-				cache,
-				winner.storePathHash
-			);
 
 			// Apply this upload's retention decision to the winner before deleting
 			// the pending row that stores the decision.
@@ -1854,14 +2077,14 @@ export class CommitPipelineService {
 				};
 			}
 
-			if (
-				await this.narInfoObjects.hasCommittedReference(cache, existingNarInfo)
-			) {
-				await this.narInfoObjects.ensureNarInfoObject(
-					cache,
-					existingNarInfo.storePathHash
-				);
-
+			// A committed path that cannot be served has lost its NAR. The commit
+			// goes on with this upload's bytes, and verification restores the NAR or
+			// replaces the path's row.
+			const isCommitted = await this.narInfoObjects.hasCommittedReference(
+				cache,
+				existingNarInfo
+			);
+			if (isCommitted && (await this.isServed(cache, existingNarInfo))) {
 				// Apply this upload's retention decision to the winner before
 				// deleting the pending row that stores the decision.
 				const confirmed = confirmGrace(
@@ -1917,10 +2140,15 @@ export class CommitPipelineService {
 				};
 			}
 
-			if (this.hasLiveRival(cache, existingNarInfo.narHash, uploadId, nowIso)) {
-				// Keep this upload for verification while another live saga owns the
-				// reservation. Verification will decide which version remains.
-				this.uploadState.markUploadPending(uploadId);
+			if (
+				!isCommitted &&
+				(await this.defersToReservation(
+					uploadId,
+					cache,
+					existingNarInfo,
+					nowIso
+				))
+			) {
 				await this.requestVerification(logger, this.context.requireTenant());
 
 				return {
@@ -1932,17 +2160,6 @@ export class CommitPipelineService {
 					})
 				};
 			}
-
-			// No upload can complete this reservation. Reclaim it here so retries
-			// do not wait for the periodic recovery scan.
-			await this.context.criticalSection(() =>
-				this.reclaimReservedRow(
-					cache,
-					metadata.storePathHash,
-					existingNarInfo.generation,
-					existingNarInfo.narHash
-				)
-			);
 		}
 
 		const canonicalKey = narObjectKey(metadata.narHash);
@@ -2065,6 +2282,75 @@ export class CommitPipelineService {
 		};
 	}
 
+	/**
+	Plans the replacement of `lost`, a committed row whose NAR the caller
+	found missing, by a row for the upload. The upload's row takes the path's
+	next generation, and the sequence moves past it, so no other commit of the
+	path can take that generation. The path keeps `lost` until the charge of
+	the upload's generation succeeds, which replaces it (see
+	{@link MaterialiseRequest.replacement}).
+
+	The charge can reach D1 after the flush stops waiting for it, or before a
+	reset that prevents the replacement. The plan therefore queues the cleanup
+	of the planned generation, which runs after the charge's deadline unless
+	the replacement removes it. Returns `undefined` when the path's row is no
+	longer `lost` or the caller no longer owns the upload.
+	*/
+	async planReplacement(
+		cache: ResolvedCache,
+		metadata: UploadPathNegotiation,
+		lost: NarInfoRow,
+		input: ReplacementPlanInput
+	): Promise<Omit<NarInfoReplacement, 'removeLost'> | undefined> {
+		const now = new Date();
+		const chargeDeadline =
+			input.recoveryDeadline ??
+			isoTimestamp(new Date(now.getTime() + replacementChargeWindowMs));
+		const { sigsJson, signatureGeneration } =
+			await this.narInfoSignatures(metadata);
+		if (!input.isStillOwned()) {
+			return;
+		}
+		return this.context.db.transaction((tx) => {
+			const current = tx
+				.select()
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cacheId, cache.id),
+						eq(schema.narInfos.storePathHash, metadata.storePathHash)
+					)
+				)
+				.get();
+			if (
+				!input.isStillOwned() ||
+				current?.generation !== lost.generation ||
+				current.narHash !== lost.narHash
+			) {
+				return;
+			}
+			const generation = this.nextGeneration(tx, cache, metadata.storePathHash);
+			this.advanceGeneration(tx, cache, metadata.storePathHash, generation);
+			const row = {
+				cacheId: cache.id,
+				storePathHash: metadata.storePathHash,
+				storePath: metadata.storePath,
+				narHash: metadata.narHash,
+				narSize: metadata.narSize,
+				referencesJson: JSON.stringify(metadata.references),
+				deriver: metadata.deriver,
+				ca: metadata.ca,
+				sigsJson,
+				generation,
+				signatureGeneration,
+				createdAt: isoTimestamp(now),
+				retentionEpoch: input.retentionEpoch
+			};
+			input.queueCleanup(tx, row, chargeDeadline);
+			return { lost: current, row, chargeDeadline };
+		});
+	}
+
 	// Reserve the row before writing its committed edge. A reservation alone is
 	// not servable. Generate its identity in the same transaction, and never
 	// reuse a generation after deletion.
@@ -2086,28 +2372,12 @@ export class CommitPipelineService {
 		isStillOwned?: () => boolean
 	): Promise<ReserveOutcome | undefined> {
 		const now = isoTimestamp(new Date());
-		const signingKeys = await this.signingKeysService.signingKeys();
-		// Nix signatures cover the uncompressed NAR identity, not its compressed
-		// encoding. The compressed file hash and size are therefore unnecessary here.
-		const fingerprint = narFingerprint(
-			new StorePath(metadata.storePath),
-			metadata.narHash,
-			metadata.narSize,
-			metadata.references
-		);
-		const signatures = await Promise.all(
-			signingKeys.map((key) =>
-				signNixFingerprint(key.privateJwk, fingerprint, key.publicKey.name)
-			)
-		);
+		const { sigsJson, signatureGeneration } =
+			await this.narInfoSignatures(metadata);
 		if (isStillOwned?.() === false) {
 			return;
 		}
 
-		const sigs = signatures.map((signature) => signature.value);
-		const signatureGeneration = signingKeyGenerationSchema.parse(
-			Math.max(0, ...signingKeys.map((key) => key.generation))
-		);
 		const referencesJson = JSON.stringify(metadata.references);
 
 		// Read, stamp, and advance the generation atomically. The sequence survives
@@ -2117,21 +2387,7 @@ export class CommitPipelineService {
 				return;
 			}
 
-			const seq = tx
-				.select({ next: schema.generationSeq.nextGeneration })
-				.from(schema.generationSeq)
-				.where(
-					and(
-						cacheIdentityCondition(
-							schema.generationSeq.cacheKind,
-							schema.generationSeq.cacheName,
-							cache.scope
-						),
-						eq(schema.generationSeq.storePathHash, metadata.storePathHash)
-					)
-				)
-				.get();
-			const generation = seq?.next ?? narInfoGenerationSchema.parse(0);
+			const generation = this.nextGeneration(tx, cache, metadata.storePathHash);
 			const inserted = tx
 				.insert(schema.narInfos)
 				.values({
@@ -2143,7 +2399,7 @@ export class CommitPipelineService {
 					referencesJson,
 					deriver: metadata.deriver,
 					ca: metadata.ca,
-					sigsJson: JSON.stringify(sigs),
+					sigsJson,
 					generation,
 					signatureGeneration,
 					retentionEpoch,
@@ -2154,39 +2410,7 @@ export class CommitPipelineService {
 				.all();
 
 			if (inserted.length > 0) {
-				const nextGeneration = narInfoGenerationSchema.parse(generation + 1);
-
-				// Each cache kind has its own partial unique index, so name the
-				// matching conflict target.
-				const sequence = tx.insert(schema.generationSeq).values({
-					...cacheIdentityColumns(cache.scope),
-					storePathHash: metadata.storePathHash,
-					nextGeneration
-				});
-
-				if (cache.scope.kind === 'default') {
-					sequence
-						.onConflictDoUpdate({
-							target: schema.generationSeq.storePathHash,
-							targetWhere: sql`${schema.generationSeq.cacheKind} = 'default'`,
-							set: { nextGeneration }
-						})
-						.run();
-
-					return { kind: 'reserved', generation };
-				}
-
-				sequence
-					.onConflictDoUpdate({
-						target: [
-							schema.generationSeq.cacheName,
-							schema.generationSeq.storePathHash
-						],
-						targetWhere: sql`${schema.generationSeq.cacheKind} = 'named'`,
-						set: { nextGeneration }
-					})
-					.run();
-
+				this.advanceGeneration(tx, cache, metadata.storePathHash, generation);
 				return { kind: 'reserved', generation };
 			}
 

@@ -11,6 +11,7 @@ import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type DeletePathResponseInput } from '@cupboard/protocol/upload';
 import {
 	and,
+	asc,
 	desc,
 	eq,
 	exists,
@@ -18,6 +19,8 @@ import {
 	inArray,
 	isNull,
 	lt,
+	lte,
+	min,
 	notExists,
 	or,
 	type SQL,
@@ -166,6 +169,13 @@ export const maxFencedRetireRows = 45;
 const teardownChunksPerFlush = 4;
 export const maxNarInfoDeletionsFlushedPerRun =
 	teardownChunksPerFlush * maxFencedRetireRows;
+
+// D1 compares a charge's deadline with its own clock, which can differ from
+// this object's clock.
+const replacementCleanupMarginMs = 10 * 60 * 1000;
+
+// The replacement cleanups that one garbage collection queues for deletion.
+const maxReplacementCleanupsQueuedPerRun = 1000;
 
 // One query finds the attestation references of every path in a chunk.
 const attestationQuerySubrequestsPerChunk = 1;
@@ -1818,6 +1828,175 @@ export class DeletionQueueService {
 		});
 	}
 
+	/**
+	Removes `row` while the path's row still has its generation and NAR hash,
+	together with the path's grace deadline, and queues the row's cleanup.
+	Returns whether the row was removed. Call it in the transaction that
+	decides the removal.
+	*/
+	removeNarInfoRow(
+		handle: SchemaWriter,
+		row: typeof schema.narInfos.$inferSelect
+	): boolean {
+		const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
+		const deleted = handle
+			.delete(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cacheId, cache.id),
+					eq(schema.narInfos.storePathHash, row.storePathHash),
+					eq(schema.narInfos.generation, row.generation),
+					eq(schema.narInfos.narHash, row.narHash)
+				)
+			)
+			.returning({ storePathHash: schema.narInfos.storePathHash })
+			.get();
+
+		if (deleted === undefined) {
+			return false;
+		}
+
+		handle
+			.delete(schema.retentionGrace)
+			.where(
+				and(
+					eq(schema.retentionGrace.cacheId, cache.id),
+					eq(schema.retentionGrace.storePathHash, row.storePathHash)
+				)
+			)
+			.run();
+		this.enqueueNarInfoDeletion(
+			handle,
+			cache,
+			row.storePathHash,
+			row.narHash,
+			row.generation,
+			isoTimestamp(new Date())
+		);
+
+		return true;
+	}
+
+	/**
+	Records the generation of a planned replacement, whose charge can reach D1
+	until `chargeDeadline`. Unless the replacement removes the entry, garbage
+	collection queues the generation for narinfo deletion after the deadline.
+	*/
+	queueReplacementCleanup(
+		handle: SchemaWriter,
+		cache: ResolvedCache,
+		entry: TornDownNarInfo,
+		chargeDeadline: IsoTimestamp
+	): void {
+		const dueAt = new Date(
+			Date.parse(chargeDeadline) + replacementCleanupMarginMs
+		);
+		handle
+			.insert(schema.replacementChargeCleanups)
+			.values({
+				cacheId: cache.id,
+				storePathHash: entry.storePathHash,
+				generation: entry.generation,
+				narHash: entry.narHash,
+				dueAt: isoTimestamp(dueAt)
+			})
+			.run();
+	}
+
+	/**
+	Removes the cleanup of a planned replacement. Returns false when the entry
+	is gone because garbage collection has queued the generation for deletion.
+	*/
+	cancelReplacementCleanup(
+		handle: SchemaWriter,
+		cacheId: CacheId,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration
+	): boolean {
+		const table = schema.replacementChargeCleanups;
+		const removed = handle
+			.delete(table)
+			.where(
+				and(
+					eq(table.cacheId, cacheId),
+					eq(table.storePathHash, storePathHash),
+					eq(table.generation, generation)
+				)
+			)
+			.returning({ generation: table.generation })
+			.get();
+
+		return removed !== undefined;
+	}
+
+	/**
+	Queues the narinfo deletion of the replacement cleanups that are due at
+	`now`, at most one page. Returns whether the page was full.
+	*/
+	queueDueReplacementCleanups(now: IsoTimestamp): boolean {
+		const table = schema.replacementChargeCleanups;
+
+		return this.context.db.transaction((tx) => {
+			const due = tx
+				.select({
+					cacheId: table.cacheId,
+					storePathHash: table.storePathHash,
+					generation: table.generation,
+					narHash: table.narHash
+				})
+				.from(table)
+				.where(lte(table.dueAt, now))
+				.orderBy(asc(table.dueAt))
+				.limit(maxReplacementCleanupsQueuedPerRun)
+				.all();
+			const byCache = Map.groupBy(due, (entry) => entry.cacheId);
+
+			for (const [cacheId, rows] of byCache) {
+				const entries = rows.map(({ storePathHash, generation, narHash }) => ({
+					storePathHash,
+					generation,
+					narHash
+				}));
+				this.enqueueNarInfoDeletions(
+					tx,
+					this.context.cacheRepository.resolvedForId(cacheId),
+					entries,
+					now
+				);
+
+				for (const list of jsonRowLists(entries)) {
+					tx.delete(table)
+						.where(
+							and(
+								eq(table.cacheId, cacheId),
+								list.matches({
+									storePathHash: table.storePathHash,
+									generation: table.generation
+								})
+							)
+						)
+						.run();
+				}
+			}
+
+			return due.length === maxReplacementCleanupsQueuedPerRun;
+		});
+	}
+
+	/**
+	The time at which the next replacement cleanup is due, or `undefined` when
+	there is none.
+	*/
+	replacementCleanupDueAt(): number | undefined {
+		const table = schema.replacementChargeCleanups;
+		const row = this.context.db
+			.select({ dueAt: min(table.dueAt) })
+			.from(table)
+			.get();
+
+		return row?.dueAt == undefined ? undefined : Date.parse(row.dueAt);
+	}
+
 	// The caller must hold the critical section. Remove the stale row and enqueue
 	// cleanup atomically so an interrupted reconciliation cannot recreate the
 	// path. Garbage collection retries any object cleanup left in the queue.
@@ -1828,45 +2007,10 @@ export class DeletionQueueService {
 	): Promise<boolean> {
 		await new PathReadAuthorityService(this.context).requireWritable();
 
-		const now = isoTimestamp(new Date());
 		const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
-		const wasRemoved = this.context.db.transaction((tx) => {
-			const deleted = tx
-				.delete(schema.narInfos)
-				.where(
-					and(
-						eq(schema.narInfos.cacheId, cache.id),
-						eq(schema.narInfos.storePathHash, row.storePathHash),
-						eq(schema.narInfos.generation, row.generation),
-						eq(schema.narInfos.narHash, row.narHash)
-					)
-				)
-				.returning({ storePathHash: schema.narInfos.storePathHash })
-				.get();
-
-			if (deleted === undefined) {
-				return false;
-			}
-
-			tx.delete(schema.retentionGrace)
-				.where(
-					and(
-						eq(schema.retentionGrace.cacheId, cache.id),
-						eq(schema.retentionGrace.storePathHash, row.storePathHash)
-					)
-				)
-				.run();
-			this.enqueueNarInfoDeletion(
-				tx,
-				cache,
-				row.storePathHash,
-				row.narHash,
-				row.generation,
-				now
-			);
-
-			return true;
-		});
+		const wasRemoved = this.context.db.transaction((tx) =>
+			this.removeNarInfoRow(tx, row)
+		);
 
 		if (!wasRemoved || shouldDeferCleanup) {
 			return wasRemoved;

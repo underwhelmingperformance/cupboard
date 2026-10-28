@@ -664,9 +664,19 @@ The paced WebSocket accepts `publish-batch` with complete metadata and expected
 generation. Clients commit every selected path, including `skip` decisions. The
 server derives staging keys and rechecks availability and reuse authority. A
 `publication-accepted` frame follows durable SQLite admission. `upload-required`
-asks the client to send bytes and resubmit the same operation. A reference-only
-publication fails if bytes are required and it has no NAR source. Batches
-contain one to 100 entries and encoded messages are limited to 4 MiB.
+asks the client to send bytes and resubmit the same operation. Admission keeps
+the row of a committed path that cannot be served, for example because its NAR
+is gone, and asks for bytes. An upload of the same NAR restores the canonical
+NAR, and the committed row is served again. An upload of another NAR replaces
+the row in the gate that records the upload's charge. A charge that fails, is
+over quota or misses the recovery deadline leaves the row unchanged. A charge
+can also reach D1 without the replacement, after a reset or after the wait for
+it timed out. Garbage collection then deletes the edge of the upload's
+generation once that charge can no longer reach D1, 10 minutes after its
+deadline. The deadline is the recovery deadline, or one hour after the
+replacement is planned for an upload without one. A reference-only publication
+fails if bytes are required and it has no NAR source. Batches contain one to 100
+entries and encoded messages are limited to 4 MiB.
 
 First admission creates or adopts the expected cache generation and captures
 retention. Deletion between planning and admission produces a generation

@@ -464,6 +464,16 @@ export class UploadsService {
 		);
 	}
 
+	// The operation's state and the path's narinfo row.
+	private admissionKey(cache: ResolvedCache, entry: PublicationEntry): string {
+		return JSON.stringify({
+			state:
+				new PublicationStore(this.context).get(entry.operationId)?.state ??
+				'none',
+			path: this.pathRowKey(cache, entry)
+		});
+	}
+
 	// The path's narinfo row. A commit or deletion of the path by another
 	// operation changes it.
 	private pathRowKey(cache: ResolvedCache, entry: PublicationEntry): string {
@@ -696,15 +706,23 @@ export class UploadsService {
 		if (blob === undefined) {
 			await this.context.stagingDeletes.finished(staged);
 		}
-		await this.context.criticalSection(async () => {
+		// The gate checks only local state, so whether a completed operation's
+		// path is served is read before it.
+		const observed = this.admissionKey(cache, entry);
+		const repairable =
+			operations.get(entry.operationId)?.state === 'servable'
+				? await this.narInfoObjects.servableStorePathHashes(cache, [
+						entry.metadata.storePathHash
+					])
+				: new Set<StorePathHash>();
+		await this.context.criticalSection(() => {
 			this.requireCurrentCache(cache, true);
 			if (operations.get(entry.operationId)?.state === 'servable') {
-				const available = await this.narInfoObjects.servableStorePathHashes(
-					cache,
-					[entry.metadata.storePathHash]
-				);
-				if (available.has(entry.metadata.storePathHash)) {
-					return;
+				if (this.admissionKey(cache, entry) !== observed) {
+					throw new PublicationPathChangedError();
+				}
+				if (repairable.has(entry.metadata.storePathHash)) {
+					return Promise.resolve();
 				}
 			}
 			if (Date.now() >= Date.parse(deadline)) {
@@ -848,37 +866,40 @@ export class UploadsService {
 					.onConflictDoNothing()
 					.run();
 			});
-			return;
+			return Promise.resolve();
 		});
 		await armAlarmNoLaterThan(this.context.ctx.storage, Date.parse(deadline));
 		if (blob !== undefined) {
 			await this.uploadState.clearReaperTimers([entry.metadata.narHash]);
 		}
 		let isServed = present.has(entry.metadata.storePathHash);
+		// A committed path that is not served may have lost its NAR. Admission
+		// keeps the path's row and asks for the bytes, and verification of the
+		// bytes restores the NAR or replaces the row. The reference is read before
+		// availability, so a reservation that another upload commits between the
+		// two reads counts as uncommitted.
+		let wasCommitted = false;
 		if (!isServed) {
-			await this.context.criticalSection(async () => {
+			const checked = this.pathRowKey(cache, entry);
+			const existing = this.existingNarInfos(cache, [
+				entry.metadata.storePathHash
+			]).get(entry.metadata.storePathHash);
+			wasCommitted =
+				existing !== undefined &&
+				(await this.narInfoObjects.hasCommittedReference(cache, existing));
+			const available = await this.narInfoObjects.servableStorePathHashes(
+				cache,
+				[entry.metadata.storePathHash]
+			);
+			isServed = available.has(entry.metadata.storePathHash);
+			await this.context.criticalSection(() => {
 				this.requireCurrentCache(cache, true);
 				operations.assertLive(entry.operationId);
-				const available = await this.narInfoObjects.servableStorePathHashes(
-					cache,
-					[entry.metadata.storePathHash]
-				);
-				isServed = available.has(entry.metadata.storePathHash);
-				pathRow = this.pathRowKey(cache, entry);
-				if (isServed) {
-					return;
+				if (this.pathRowKey(cache, entry) !== checked) {
+					throw new PublicationPathChangedError();
 				}
-				const existing = this.existingNarInfos(cache, [
-					entry.metadata.storePathHash
-				]).get(entry.metadata.storePathHash);
-				if (
-					existing === undefined ||
-					!(await this.narInfoObjects.hasCommittedReference(cache, existing))
-				) {
-					return;
-				}
-				await this.deletionQueue.reconcileMissingNar(existing, undefined, true);
-				pathRow = this.pathRowKey(cache, entry);
+				pathRow = checked;
+				return Promise.resolve();
 			});
 		}
 
@@ -917,7 +938,10 @@ export class UploadsService {
 		// The last availability check decided whether the path is served. A commit
 		// or deletion of the path since then changes its narinfo row or commits its
 		// reservation, so admission runs again and checks the path again.
-		if (isReservationCommitted || this.pathRowKey(cache, entry) !== pathRow) {
+		if (
+			(isReservationCommitted && !wasCommitted) ||
+			this.pathRowKey(cache, entry) !== pathRow
+		) {
 			throw new PublicationPathChangedError();
 		}
 		const requiresUpload = isStagedMissing && stagedKey() === staged;
