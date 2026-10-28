@@ -44,6 +44,7 @@ import {
 	narObjectKey,
 	type NarObjectName,
 	notFoundResponse,
+	objectEtag,
 	type R2ObjectKey,
 	r2ObjectKeySchema,
 	uncachedNotFoundResponse
@@ -632,6 +633,10 @@ function privatise(headers: Headers, isPublicCache: boolean): Headers {
 // The tag lets a deletion invalidate a public cache's NAR response once that
 // cache stops referencing the hash. Private and reuse-view reads are no-store
 // and therefore need no tag.
+//
+// Every tenant that publishes the same NAR shares one R2 object. Its upload
+// time would tell a reader when some tenant stored the NAR, so the response
+// has no `Last-Modified`.
 function narHeaders(
 	object: R2Object,
 	tenant: TenantId,
@@ -641,8 +646,7 @@ function narHeaders(
 	const headers = new Headers({
 		'cache-control': narCacheControl,
 		'content-type': 'application/zstd',
-		etag: object.httpEtag,
-		'last-modified': object.uploaded.toUTCString()
+		etag: objectEtag(object)
 	});
 
 	if (cache !== undefined) {
@@ -654,6 +658,8 @@ function narHeaders(
 	return headers;
 }
 
+// Another tenant's upload of the NAR can restore it and rewrite this cache's
+// narinfo object, so the response has no `Last-Modified`.
 function narInfoHeaders(
 	object: R2Object,
 	tenant: TenantId,
@@ -667,8 +673,7 @@ function narInfoHeaders(
 	// the policy for existing narinfos too.
 	headers.set('cache-control', narInfoCacheControl);
 	headers.set('cache-tag', narInfoCacheTag(tenant, cache, storePathHash));
-	headers.set('etag', object.httpEtag);
-	headers.set('last-modified', object.uploaded.toUTCString());
+	headers.set('etag', objectEtag(object));
 	headers.set('content-length', String(object.size));
 
 	return headers;

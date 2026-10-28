@@ -1160,10 +1160,20 @@ has stored a particular NAR. cupboard is designed to avoid that:
 - The upload is verified first. Only then is it matched to the existing copy.
 - A NAR read is only allowed if the reading cache itself refers to the NAR.
 
-One signal remains. After uploading, a NAR that already exists may become
-available to download sooner than a new one would. This is documented rather
-than hidden. A mode that makes every new reference wait the same length of time
-is listed as a future feature.
+NAR, narinfo and attestation bundle responses don't include the upload time of
+an R2 object. Their only validator is the `ETag`, which is the MD5 of the stored
+bytes.
+
+Some signals remain:
+
+- After uploading, a NAR that already exists may become available to download
+  sooner than a new one would. A mode that makes every new reference wait the
+  same length of time is listed as a future feature.
+- When a NAR already exists, a later publisher's narinfo and NAR reads use the
+  stored object's encoding. Its `FileHash`, `FileSize`, `ETag` and
+  `Content-Length` can differ from the publisher's own upload.
+- The NAR URL contains the incarnation number of the shared object, which can
+  show that the NAR was stored before.
 
 ## The admin API
 

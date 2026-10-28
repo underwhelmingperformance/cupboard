@@ -297,6 +297,20 @@ export function parseAttestationDigestName(
 	return parsed.success ? parsed.data : undefined;
 }
 
+/**
+The `ETag` of a response built from an R2 object. cupboard writes every
+served object with a single put, so R2's ETag for it is the MD5 of its bytes.
+
+Earlier responses used R2's bare ETag and also sent `Last-Modified`, which
+could be another tenant's upload time. A downstream cache that revalidates a
+stored response keeps every header that the 304 leaves out (RFC 9111,
+section 4.3.4). The `md5:` prefix stops those stored ETags from matching, so
+the revalidation returns a full response, which replaces the stored headers.
+*/
+export function objectEtag(object: R2Object): string {
+	return `"md5:${object.etag}"`;
+}
+
 export function isNotModified(request: Request, headers: Headers): boolean {
 	const ifNoneMatch = request.headers.get('if-none-match');
 

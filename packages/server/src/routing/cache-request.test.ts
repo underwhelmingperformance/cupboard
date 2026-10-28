@@ -36,7 +36,7 @@ describe('canonicalCacheRequest', () => {
 			method: canonical.method,
 			ifNoneMatch: canonical.headers.get('if-none-match')
 		}).toStrictEqual({
-			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1',
+			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1',
 			method: 'HEAD',
 			ifNoneMatch: '"abc"'
 		});
@@ -57,8 +57,8 @@ describe('canonicalCacheRequest', () => {
 		);
 
 		expect(requests.map((request) => request.url)).toStrictEqual([
-			'https://cache.example/t/acme/abc.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1',
-			'https://cache.example/t/acme/abc.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1'
+			'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1',
+			'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1'
 		]);
 	});
 
@@ -71,7 +71,7 @@ describe('canonicalCacheRequest', () => {
 				readRevision: secondCacheReadRevision
 			}).url
 		).toStrictEqual(
-			'https://cache.example/t/acme/abc.narinfo?cache-key-version=2&cache-generation=2&cache-read-revision=2'
+			'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=2&cache-read-revision=2'
 		);
 	});
 
@@ -96,7 +96,7 @@ describe('canonicalCacheRequest', () => {
 			method: canonical.method,
 			headers: headerSet(canonical)
 		}).toStrictEqual({
-			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1',
+			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1',
 			method: 'GET',
 			headers: {
 				accept: 'text/x-nix-narinfo',

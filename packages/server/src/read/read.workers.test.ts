@@ -32,7 +32,7 @@ import {
 	narObjectKey,
 	type NarObjectName
 } from '../http/http.ts';
-import { defaultCache, flakyD1, namedCache } from '../test-support.ts';
+import { defaultCache, flakyD1, md5Etag, namedCache } from '../test-support.ts';
 
 import {
 	missingStorePathHashes,
@@ -172,6 +172,44 @@ async function serveWithFaults(failures: number): Promise<Response> {
 	);
 	return response;
 }
+
+async function conditionalNarRead(ifNoneMatch: string) {
+	const response = await serveNar(
+		new Request('https://cache.example/nar/probe', {
+			headers: { 'if-none-match': ifNoneMatch }
+		}),
+		env,
+		tenant,
+		parsedNar(),
+		defaultPublicAuthority,
+		false
+	);
+
+	return {
+		status: response.status,
+		etag: response.headers.get('etag'),
+		body: await response.text()
+	};
+}
+
+describe('NAR response validators', () => {
+	it('answers the bare R2 ETag with the full response', async () => {
+		await seedOwnedNar();
+		const etag = await md5Etag(new TextEncoder().encode(narBytes));
+
+		try {
+			expect({
+				bare: await conditionalNarRead(etag.replace('"md5:', '"')),
+				current: await conditionalNarRead(etag)
+			}).toStrictEqual({
+				bare: { status: StatusCodes.OK, etag, body: narBytes },
+				current: { status: StatusCodes.NOT_MODIFIED, etag, body: '' }
+			});
+		} finally {
+			await env.BLOBS.delete(narObjectKey(narHash));
+		}
+	});
+});
 
 describe('NAR serve under shared-fact read faults', () => {
 	it('marks every private miss as uncacheable', async () => {

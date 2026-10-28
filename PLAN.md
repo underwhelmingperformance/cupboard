@@ -434,8 +434,9 @@ operational endpoints live with the features that use them.
   - [x] conditional request support if cheap
 - [x] Tests:
   - [x] Integration: `ETag` and `Cache-Control` present on narinfo and NAR
-        responses; a conditional GET with matching `If-None-Match` returns 304;
-        matching `If-Modified-Since` likewise.
+        responses; a conditional GET with matching `If-None-Match` returns 304.
+        Neither response has `Last-Modified`, so `If-Modified-Since` alone
+        returns 200.
 
 ## Data Model
 
@@ -697,10 +698,11 @@ up the narinfo object when a path's NAR has already vanished (stale recovery).
 ### NAR blobs from R2 and the edge
 
 - [x] Serve `GET` and `HEAD` `/nar/<narHash>.nar.zst` from `BLOBS.get`, building
-      the immutable response from the R2 object metadata (ETag, uploaded, size).
+      the immutable response from the R2 object metadata (ETag and size).
       Workers Cache checks and populates the response before and after the
       tenant entrypoint runs.
-- [x] Keep conditional `If-None-Match` and `If-Modified-Since` 304 handling.
+- [x] Keep conditional `If-None-Match` 304 handling. The response has no
+      `Last-Modified`, so `If-Modified-Since` alone returns 200.
 - [x] NAR objects are content-addressed and immutable, so edge copies never need
       invalidation; deleting one only frees R2 storage. `/nar/<hash>` stays
       public and is guessable by anyone who knows the hash, so the safety
@@ -747,7 +749,7 @@ up the narinfo object when a path's NAR has already vanished (stale recovery).
       (`onlyIf`, semantics to confirm) is an optional guard, not a correctness
       requirement, since determinism makes any overwrite byte-identical.
 - [x] Serve `GET` and `HEAD` `/<storePathHash>.narinfo` from R2 through Workers
-      Cache, with ETag, last-modified, and 304 driven by the R2 object.
+      Cache, with the ETag and 304 driven by the R2 object.
 - [x] Stop reading the narinfo row on the read path; it remains only for GC and
       stats.
 - [x] Tests:

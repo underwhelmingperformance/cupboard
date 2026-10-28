@@ -27,7 +27,10 @@ import {
 	serveNarInfo
 } from '../read/read.ts';
 
-import { cacheRequestVersion } from './cache-request.ts';
+import {
+	cacheRequestVersion,
+	hasCurrentCacheKeyVersion
+} from './cache-request.ts';
 import { tenantServer } from './durable-object.ts';
 import { isLiteralNamespacePath, parseTenantPath } from './tenant-routing.ts';
 
@@ -164,6 +167,16 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 		context.set('generation', version.generation);
 		context.set('tenantRest', route.rest);
 		await next();
+
+		if (hasCurrentCacheKeyVersion(context.req.raw)) {
+			return;
+		}
+
+		const uncached = noStore(context.res);
+		// Hono copies the previous response's headers over a replacement, which
+		// would restore its `Cache-Control`. Clear the previous response first.
+		context.res = undefined;
+		context.res = uncached;
 	});
 
 	// The control Worker sends only public cache reads here. Private reads remain

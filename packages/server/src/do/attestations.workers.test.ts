@@ -92,6 +92,7 @@ import {
 	initialiseViaWorker,
 	interleaveBeforeInsert,
 	issueTokenForTenant,
+	md5Etag,
 	namedCache,
 	narDigestHex,
 	pendingAttestationRows,
@@ -105,6 +106,7 @@ import {
 	resolvedCache,
 	restartTestServers,
 	sigstoreBundleBytes,
+	storedObjectVersion,
 	tenantBlobRows,
 	tenantCasBlobRows,
 	tenantUsageRow,
@@ -379,6 +381,57 @@ describe('attestation attach and reads', () => {
 				{ tenant: acme, digest, size: bundle.byteLength },
 				{ tenant: fixtureTenant, digest, size: bundle.byteLength }
 			]
+		});
+	});
+
+	it('serves a shared bundle to a later attacher without the upload time of the shared object', async () => {
+		const { token, metadata, bundle, digest } = await committedPathBundle();
+		const acme = tenantIdSchema.parse('acme');
+		await provisionNamedTenant(acme);
+		await fileAttestationReference({
+			uploadId: 'shared-acme',
+			bytes: bundle,
+			tenant: acme,
+			storePathHash: storePathHashSchema.parse('c'.repeat(32)),
+			generation: 0,
+			predicateType
+		});
+		const key = await currentCasObjectKey(digest);
+		const firstVersion = await storedObjectVersion(key);
+		await attachBundle(token, metadata.storePathHash, bundle);
+
+		const read = async (init?: RequestInit) => {
+			const response = await readFetch(`/attestation-bundles/${digest}`, init);
+			await response.arrayBuffer();
+
+			return {
+				status: response.status,
+				etag: response.headers.get('etag'),
+				lastModified: response.headers.get('last-modified') ?? undefined
+			};
+		};
+		const etag = await md5Etag(bundle);
+		const served = { status: StatusCodes.OK, etag, lastModified: undefined };
+
+		expect({
+			firstVersion: typeof firstVersion,
+			object: {
+				key: await currentCasObjectKey(digest),
+				version: await storedObjectVersion(key)
+			},
+			get: await read(),
+			head: await read({ method: 'HEAD' }),
+			ifModifiedSince: await read({
+				headers: { 'if-modified-since': 'Fri, 01 Jan 2100 00:00:00 GMT' }
+			}),
+			ifNoneMatch: await read({ headers: { 'if-none-match': etag } })
+		}).toStrictEqual({
+			firstVersion: 'string',
+			object: { key, version: firstVersion },
+			get: served,
+			head: served,
+			ifModifiedSince: served,
+			ifNoneMatch: { ...served, status: StatusCodes.NOT_MODIFIED }
 		});
 	});
 

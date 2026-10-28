@@ -552,14 +552,118 @@ function uploadPageRequest(inner: Request, body: unknown): Request {
 	});
 }
 
+/**
+Removes `Last-Modified` from a response before it reaches the client.
+
+Earlier versions of the tenant Worker and its Durable Object set
+`Last-Modified` to the R2 upload time of objects that tenants share. During a
+deployment the control Worker can relay a response from an earlier version, and
+Workers Cache can return a response that an earlier version stored under a
+current key. Removing the header here covers every relayed response, whichever
+version produced it.
+*/
+function withoutLastModified(response: Response): Response {
+	// Do not rebuild a WebSocket upgrade response: that detaches its socket.
+	if (response.webSocket !== null || !response.headers.has('last-modified')) {
+		return response;
+	}
+
+	const headers = new Headers(response.headers);
+	headers.delete('last-modified');
+
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers
+	});
+}
+
+// An `If-Range` value is an entity tag when it starts with a quote, optionally
+// after the weak prefix, and an HTTP date otherwise (RFC 9110, section 13.1.5).
+const entityTagPattern = /^(?:W\/)?"/u;
+
+// The members of an `If-None-Match` list: entity tags and the `*` wildcard.
+const entityTagListPattern = /(?:W\/)?"[^"]*"|\*/gu;
+
+// The bare R2 ETag that earlier versions sent: the MD5 of a single put, or the
+// part digest and part count of a multipart upload. Current responses prefix
+// the MD5 with `md5:`, and other responses use `sha256:`.
+const legacyEtagPattern = /^(?:W\/)?"[0-9a-f]{32}(?:-\d+)?"$/u;
+
+function isLegacyRangeCondition(ifRange: string): boolean {
+	return !entityTagPattern.test(ifRange) || legacyEtagPattern.test(ifRange);
+}
+
+function currentEntityTags(ifNoneMatch: string): string | undefined {
+	const tags = (ifNoneMatch.match(entityTagListPattern) ?? []).filter(
+		(tag) => !legacyEtagPattern.test(tag)
+	);
+
+	return tags.length === 0 ? undefined : tags.join(', ');
+}
+
+/**
+Removes conditions that an earlier release answered from facts about a shared
+object, before any route sees the request.
+
+During a deployment the control Worker can forward a request to an earlier
+version of the tenant Worker or its Durable Object. That version compared
+`If-Modified-Since` with the R2 upload time of objects that tenants share, so
+its choice between 200 and 304 reveals that time. It also answered its bare R2
+ETag with 304, so a downstream cache that revalidates a response stored before
+this release keeps that response's `Last-Modified`.
+
+Remove `If-Modified-Since` and `If-Unmodified-Since`, and remove the legacy
+ETags from `If-None-Match`. Remove an `If-Range` that contains a date or a
+legacy ETag together with its `Range`, so the response is the full
+representation. Other entity tags depend only on the stored bytes and remain.
+*/
+function withoutLegacyConditions(request: Request): Request {
+	const ifNoneMatch = request.headers.get('if-none-match');
+	const ifRange = request.headers.get('if-range');
+	const headers = new Headers(request.headers);
+	headers.delete('if-modified-since');
+	headers.delete('if-unmodified-since');
+	headers.delete('if-none-match');
+
+	const kept =
+		ifNoneMatch === null ? undefined : currentEntityTags(ifNoneMatch);
+
+	if (kept !== undefined) {
+		headers.set('if-none-match', kept);
+	}
+
+	if (ifRange !== null && isLegacyRangeCondition(ifRange)) {
+		headers.delete('if-range');
+		headers.delete('range');
+	}
+
+	return new Request(request, { headers });
+}
+
+function hasConditions(request: Request): boolean {
+	return [
+		'if-modified-since',
+		'if-unmodified-since',
+		'if-none-match',
+		'if-range'
+	].some((header) => request.headers.has(header));
+}
+
+function withoutRevealingConditions(request: Request): Request {
+	return hasConditions(request) ? withoutLegacyConditions(request) : request;
+}
+
 export default {
-	fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
-		withPublicRequest(request, (internal) =>
-			withSubrequestSlice(
-				() => app.fetch(internal, boundedWorkerEnv(env, withSpan), ctx),
-				{
-					subrequests: subrequestsPerInvocation(env)
-				}
+	fetch: async (request: Request, env: Env, ctx: ExecutionContext) =>
+		withoutLastModified(
+			await withPublicRequest(withoutRevealingConditions(request), (internal) =>
+				withSubrequestSlice(
+					() => app.fetch(internal, boundedWorkerEnv(env, withSpan), ctx),
+					{
+						subrequests: subrequestsPerInvocation(env)
+					}
+				)
 			)
 		),
 
