@@ -83,6 +83,7 @@ import {
 	verifyCurrentTenant
 } from '../test-support.ts';
 
+import { AttestationsService } from './attestations-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
@@ -2641,6 +2642,762 @@ describe('publication subscriptions to terminal operations', () => {
 		}
 	);
 
+	it('reads whether an expiring generation is committed outside the input gate', async () => {
+		const token = await initialise();
+		const { entry, path, pushId } = await completedPublication(
+			token,
+			'publication-expiry-committed-outside-gate',
+			{ isConfirmationPending: true }
+		);
+		const probe = new GateProbe();
+		const spies = await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(schema.publicationOperations)
+				.set({ recoveryDeadline: new Date(Date.now() - 1).toISOString() })
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+			const isGenerationCharged = vi
+				.spyOn(CommitPipelineService.prototype, 'isGenerationCharged')
+				.mockImplementationOnce(function (
+					this: CommitPipelineService,
+					...arguments_
+				) {
+					isGenerationCharged.mockRestore();
+					return probe.around(() => this.isGenerationCharged(...arguments_));
+				});
+			return Promise.resolve([
+				probe.watch(instance.context),
+				isGenerationCharged
+			]);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({ op: 'subscribe-publication', pushId, entries: [entry] });
+			const first = session.nextFrame();
+			const stopped = await probe.first(first);
+			// Another request reaches the object while the read waits.
+			const during = await snapshot();
+			await probe.pause.release();
+			const answer = refusalFacts(await first);
+			const after = await snapshot();
+			expect({
+				stopped,
+				calls: probe.calls,
+				during: during.operations.map((operation) => operation.state),
+				answer,
+				after: after.operations.map((operation) => operation.state)
+			}).toStrictEqual({
+				stopped: 'stopped',
+				calls: [false],
+				during: ['accepted'],
+				answer: {
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: {
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						status: 'already-present'
+					},
+					grace: {}
+				},
+				after: ['servable']
+			});
+		} finally {
+			await probe.pause.release();
+			for (const spy of spies) {
+				spy.mockRestore();
+			}
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it("deletes an expired operation's staged object outside the input gate", async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('k')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		expect(await admit(token, testPushId, entry)).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: entry.operationId },
+			{ ev: 'upload-required', uploadId: entry.operationId }
+		]);
+		const staged = r2ObjectKeySchema.parse(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId)
+		);
+		await env.BLOBS.put(staged, new Uint8Array([1, 2, 3]));
+		const probe = new GateProbe();
+		const spies = await runInDurableObject(currentServer(), (instance) => {
+			const deadline = new Date(Date.now() - 1).toISOString();
+			instance.context.db
+				.update(schema.publicationOperations)
+				.set({ recoveryDeadline: deadline })
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+			instance.context.db
+				.update(schema.pendingUploads)
+				.set({ recoveryDeadline: deadline })
+				.where(eq(schema.pendingUploads.id, entry.operationId))
+				.run();
+			const blobs = instance.context.env.BLOBS;
+			const originalDelete = blobs.delete.bind(blobs);
+			const deletion = vi
+				.spyOn(blobs, 'delete')
+				.mockImplementation((keys) =>
+					keys === staged
+						? probe.around(() => originalDelete(keys))
+						: originalDelete(keys)
+				);
+			return Promise.resolve([probe.watch(instance.context), deletion]);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			const first = session.nextFrame();
+			const stopped = await probe.first(first);
+			// Another request reaches the object while the delete waits.
+			const during = await snapshot();
+			await probe.pause.release();
+			const answer = refusalFacts(await first);
+			const after = await snapshot();
+			expect({
+				stopped,
+				calls: probe.calls,
+				during: {
+					states: during.operations.map((operation) => operation.state),
+					pending: during.pending.length
+				},
+				answer,
+				after: {
+					states: after.operations.map((operation) => operation.state),
+					isStaged: (await env.BLOBS.head(staged)) !== null
+				}
+			}).toStrictEqual({
+				stopped: 'stopped',
+				calls: [false],
+				during: { states: ['expired'], pending: 0 },
+				answer: {
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'recovery-expired',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				},
+				after: { states: ['expired'], isStaged: false }
+			});
+		} finally {
+			await probe.pause.release();
+			for (const spy of spies) {
+				spy.mockRestore();
+			}
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('completes an expiring operation whose generation is committed but whose narinfo object is missing', async () => {
+		const token = await initialise();
+		const { entry, path, pushId } = await completedPublication(
+			token,
+			'publication-expiry-committed-unpublished',
+			{ isConfirmationPending: true }
+		);
+		// The Durable Object stopped after the commit's D1 charge and before it
+		// published the narinfo object.
+		await runInDurableObject(currentServer(), async (instance) => {
+			const cache = instance.context.cacheRepository.require(defaultCache());
+			await env.BLOBS.delete(
+				new NarInfoObjectsService(instance.context).objectKey(
+					cache,
+					path.storePathHash
+				)
+			);
+			instance.context.db
+				.update(schema.publicationOperations)
+				.set({ recoveryDeadline: new Date(Date.now() - 1).toISOString() })
+				.where(eq(schema.publicationOperations.id, entry.operationId))
+				.run();
+		});
+		const answer = await subscribe(token, undefined, pushId, entry);
+		const after = await snapshot();
+		expect({
+			answer,
+			states: after.operations.map((operation) => operation.state),
+			pending: after.pending.length
+		}).toStrictEqual({
+			answer: {
+				ev: 'settled',
+				uploadId: entry.operationId,
+				response: {
+					storePathHash: path.storePathHash,
+					narHash: path.narHash,
+					status: 'already-present'
+				},
+				grace: {}
+			},
+			states: ['servable'],
+			pending: 0
+		});
+	});
+
+	it('expires an operation whose committed path has lost its NAR and keeps the path', async () => {
+		const token = await initialise();
+		const { entry, path } = await completedPublication(
+			token,
+			'publication-expiry-nar-missing',
+			{ isConfirmationPending: true }
+		);
+		await env.BLOBS.delete(await currentNarObjectKey(path.narHash));
+		const enqueued: unknown[] = [];
+		const expired = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				instance.context.db
+					.update(schema.publicationOperations)
+					.set({ recoveryDeadline: new Date(Date.now() - 1).toISOString() })
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				const reconcile = vi
+					.spyOn(ReconcileQueueService.prototype, 'enqueue')
+					.mockImplementation((_origin, targets) => {
+						enqueued.push(...targets);
+						return Promise.resolve();
+					});
+				try {
+					await asOneInvocation(() =>
+						verificationOf(instance).expirePublications(rootLogger())
+					);
+				} finally {
+					reconcile.mockRestore();
+				}
+				return {
+					state: new PublicationStore(instance.context).get(entry.operationId)
+						?.state,
+					narInfos: instance.context.db
+						.select({
+							storePathHash: schema.narInfos.storePathHash,
+							generation: schema.narInfos.generation
+						})
+						.from(schema.narInfos)
+						.all()
+				};
+			}
+		);
+		expect({ expired, enqueued }).toStrictEqual({
+			expired: {
+				state: 'expired',
+				narInfos: [{ storePathHash: path.storePathHash, generation: 0 }]
+			},
+			enqueued: []
+		});
+	});
+
+	it('completes an expiring operation whose narinfo object is being published', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-expiry-publishing');
+		const [planned] = await plannedEntries(token, '/uploads/plan', [
+			uploadPathNegotiation(
+				uploadMetadata({
+					fileSize: nar.narBytes.byteLength,
+					fileHash: nar.fileHash,
+					narHash: nar.narHash,
+					narSize: nar.narSize
+				})
+			)
+		]);
+		if (planned === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+		const entry = { ...planned, blob };
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			nar
+		);
+		await admit(token, testPushId, entry);
+		const claim = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+		// Verification has charged the commit and stops before it publishes the
+		// narinfo object. The recovery deadline then passes and expiry runs.
+		const publication = new DurableObjectPause();
+		const isPublished = vi
+			.spyOn(NarInfoObjectsService.prototype, 'publishNarInfoObjectWhile')
+			.mockImplementationOnce(async function (
+				this: NarInfoObjectsService,
+				...arguments_
+			) {
+				isPublished.mockRestore();
+				await publication.stop();
+				return this.publishNarInfoObjectWhile(...arguments_);
+			});
+		try {
+			const recorded = currentServer().recordVerifications(claim.owner, [
+				{
+					uploadId: entry.operationId,
+					verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+				}
+			]);
+			await publication.reached();
+			const inherited = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const deadline = new Date(Date.now() - 1).toISOString();
+					instance.context.db
+						.update(schema.publicationOperations)
+						.set({ recoveryDeadline: deadline })
+						.where(eq(schema.publicationOperations.id, entry.operationId))
+						.run();
+					instance.context.db
+						.update(schema.pendingUploads)
+						.set({ recoveryDeadline: deadline })
+						.where(eq(schema.pendingUploads.id, entry.operationId))
+						.run();
+					const inheritance = vi.spyOn(
+						AttestationsService.prototype,
+						'queueInheritance'
+					);
+					try {
+						await asOneInvocation(() =>
+							verificationOf(instance).expirePublications(rootLogger())
+						);
+						return {
+							calls: inheritance.mock.calls.map(
+								([, storePathHash, generation, narHash, uploadId]) => ({
+									storePathHash,
+									generation,
+									narHash,
+									uploadId
+								})
+							),
+							generation: instance.context.db
+								.select({ generation: schema.narInfos.generation })
+								.from(schema.narInfos)
+								.get()?.generation
+						};
+					} finally {
+						inheritance.mockRestore();
+					}
+				}
+			);
+			const expired = await snapshot();
+			await publication.release();
+			await recorded;
+			expect({
+				expired: {
+					states: expired.operations.map((operation) => operation.state),
+					pending: expired.pending.length,
+					inherited: inherited.calls
+				},
+				answer: await subscribe(token, undefined, testPushId, entry)
+			}).toStrictEqual({
+				expired: {
+					states: ['servable'],
+					pending: 0,
+					inherited: [
+						{
+							storePathHash: entry.metadata.storePathHash,
+							generation: inherited.generation,
+							narHash: entry.metadata.narHash,
+							uploadId: entry.operationId
+						}
+					]
+				},
+				answer: {
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: {
+						storePathHash: entry.metadata.storePathHash,
+						narHash: entry.metadata.narHash,
+						status: 'already-present'
+					},
+					grace: {}
+				}
+			});
+		} finally {
+			isPublished.mockRestore();
+			await publication.release();
+		}
+	});
+
+	it.each([
+		{ pass: 'a replay', isRun: false },
+		{ pass: 'the expiry run', isRun: true }
+	])(
+		'expires the operation and sends its verdict when the cleanup after the gate of $pass fails',
+		async ({ isRun }) => {
+			const token = await initialise();
+			const nar = await verifiableNar(
+				`publication-expiry-verdict-failure-${String(isRun)}`
+			);
+			const [planned] = await plannedEntries(token, '/uploads/plan', [
+				uploadPathNegotiation(
+					uploadMetadata({
+						fileSize: nar.narBytes.byteLength,
+						fileHash: nar.fileHash,
+						narHash: nar.narHash,
+						narSize: nar.narSize
+					})
+				)
+			]);
+			if (planned === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			const entry = {
+				...planned,
+				blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+			};
+			await putNarBytes(
+				publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+				nar
+			);
+			const session = await openCommitSession(
+				token,
+				undefined,
+				publicationSession
+			);
+			try {
+				session.send({
+					op: 'publish-batch',
+					pushId: testPushId,
+					entries: [entry]
+				});
+				await session.nextFrame();
+				await session.nextFrame();
+				const expiry = await runInDurableObject(
+					currentServer(),
+					async (instance, state) => {
+						const deadline = new Date(Date.now() - 1).toISOString();
+						instance.context.db
+							.update(schema.publicationOperations)
+							.set({ recoveryDeadline: deadline })
+							.where(eq(schema.publicationOperations.id, entry.operationId))
+							.run();
+						instance.context.db
+							.update(schema.pendingUploads)
+							.set({ recoveryDeadline: deadline })
+							.where(eq(schema.pendingUploads.id, entry.operationId))
+							.run();
+						// The D1 write that concludes the upload fails after the gate.
+						const conclusion = vi
+							.spyOn(UploadStateService.prototype, 'concludeClearedUpload')
+							.mockRejectedValueOnce(new PublicationExpiryFault());
+						try {
+							await asOneInvocation(() =>
+								isRun
+									? verificationOf(instance).expirePublications(rootLogger())
+									: verificationOf(instance).expireOperation(
+											rootLogger(),
+											entry.operationId
+										)
+							);
+						} finally {
+							conclusion.mockRestore();
+						}
+						return {
+							state: new PublicationStore(instance.context).get(
+								entry.operationId
+							)?.state,
+							retryAt: await state.storage.get(
+								'maintenance:publication-expiry-retry-at'
+							),
+							cursor: await state.storage.get(
+								'maintenance:publication-expiry-cursor'
+							)
+						};
+					}
+				);
+				// The next frame is the verdict. Without it, the answer to this
+				// subscription would come first.
+				session.send({
+					op: 'subscribe-publication',
+					pushId: testPushId,
+					entries: [entry]
+				});
+				expect({
+					expiry,
+					frame: refusalFacts(await session.nextFrame())
+				}).toStrictEqual({
+					expiry: { state: 'expired', retryAt: undefined, cursor: undefined },
+					frame: {
+						ev: 'verdict',
+						uploadId: entry.operationId,
+						status: 'absent',
+						grace: {}
+					}
+				});
+			} finally {
+				await closeSessionAndWait(session.socket);
+			}
+		}
+	);
+
+	it('publishes the narinfo object of an expiring operation again after the publish fails', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-expiry-publish-failure');
+		const [planned] = await plannedEntries(token, '/uploads/plan', [
+			uploadPathNegotiation(
+				uploadMetadata({
+					fileSize: nar.narBytes.byteLength,
+					fileHash: nar.fileHash,
+					narHash: nar.narHash,
+					narSize: nar.narSize
+				})
+			)
+		]);
+		if (planned === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+		const entry = { ...planned, blob };
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			nar
+		);
+		const expiryRun = (instance: CupboardServer) =>
+			asOneInvocation(async () => {
+				await verificationOf(instance).expirePublications(rootLogger());
+				const cache = instance.context.cacheRepository.require(defaultCache());
+				const object = await env.BLOBS.head(
+					new NarInfoObjectsService(instance.context).objectKey(
+						cache,
+						entry.metadata.storePathHash
+					)
+				);
+				return {
+					state: new PublicationStore(instance.context).get(entry.operationId)
+						?.state,
+					pending: instance.context.db
+						.select({ id: schema.pendingUploads.id })
+						.from(schema.pendingUploads)
+						.all().length,
+					isPublished: object !== null
+				};
+			});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			const admitted = [
+				refusalFacts(await session.nextFrame()),
+				refusalFacts(await session.nextFrame())
+			];
+			const claim = await currentServer().claimVerificationBatch(
+				10,
+				Number.MAX_SAFE_INTEGER
+			);
+			// Verification charges the commit and stops before it publishes the
+			// narinfo object. The recovery deadline then passes.
+			const publication = new DurableObjectPause();
+			const isPublished = vi
+				.spyOn(NarInfoObjectsService.prototype, 'publishNarInfoObjectWhile')
+				.mockImplementationOnce(async function (
+					this: NarInfoObjectsService,
+					...arguments_
+				) {
+					isPublished.mockRestore();
+					await publication.stop();
+					return this.publishNarInfoObjectWhile(...arguments_);
+				});
+			try {
+				const recorded = currentServer().recordVerifications(claim.owner, [
+					{
+						uploadId: entry.operationId,
+						verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+					}
+				]);
+				await publication.reached();
+				const failed = await runInDurableObject(
+					currentServer(),
+					async (instance) => {
+						const deadline = new Date(Date.now() - 1).toISOString();
+						instance.context.db
+							.update(schema.publicationOperations)
+							.set({ recoveryDeadline: deadline })
+							.where(eq(schema.publicationOperations.id, entry.operationId))
+							.run();
+						instance.context.db
+							.update(schema.pendingUploads)
+							.set({ recoveryDeadline: deadline })
+							.where(eq(schema.pendingUploads.id, entry.operationId))
+							.run();
+						const put = vi
+							.spyOn(NarInfoObjectsService.prototype, 'putNarInfoObject')
+							.mockRejectedValueOnce(new PublicationExpiryFault());
+						try {
+							return await expiryRun(instance);
+						} finally {
+							put.mockRestore();
+						}
+					}
+				);
+				// The retry time passes, and the next expiry run publishes the
+				// object.
+				const retried = await runInDurableObject(
+					currentServer(),
+					async (instance, state) => {
+						await state.storage.delete(
+							'maintenance:publication-expiry-retry-at'
+						);
+						return expiryRun(instance);
+					}
+				);
+				const frame = refusalFacts(await session.nextFrame());
+				await publication.release();
+				await recorded;
+				expect({ admitted, failed, retried, frame }).toStrictEqual({
+					admitted: [
+						{ ev: 'publication-accepted', uploadId: entry.operationId },
+						{
+							ev: 'deferred',
+							uploadId: entry.operationId,
+							storePathHash: entry.metadata.storePathHash,
+							narHash: entry.metadata.narHash,
+							grace: {}
+						}
+					],
+					failed: { state: 'accepted', pending: 1, isPublished: false },
+					retried: { state: 'servable', pending: 0, isPublished: true },
+					frame: {
+						ev: 'verdict',
+						uploadId: entry.operationId,
+						status: 'servable',
+						grace: {}
+					}
+				});
+			} finally {
+				isPublished.mockRestore();
+				await publication.release();
+			}
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('completes an expiring operation whose charged generation another started commit shares', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-expiry-shared-charged');
+		const path = uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		);
+		const [expiring] = await plannedEntries(token, '/uploads/plan', [path]);
+		const [live] = await plannedEntries(token, '/uploads/plan', [path], {
+			name: rootNameSchema.parse('run'),
+			retention: { kind: 'inherit' }
+		});
+		if (expiring === undefined || live === undefined) {
+			throw new Error('Expected two planned entries');
+		}
+		const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+		// Both operations start their commits, which share one reservation.
+		for (const entry of [expiring, live]) {
+			await putNarBytes(
+				publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+				nar
+			);
+			await admit(token, testPushId, { ...entry, blob });
+		}
+		const claim = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+		// The expiring operation's verification charges the commit and stops
+		// before it publishes the narinfo object.
+		const publication = new DurableObjectPause();
+		const isPublished = vi
+			.spyOn(NarInfoObjectsService.prototype, 'publishNarInfoObjectWhile')
+			.mockImplementationOnce(async function (
+				this: NarInfoObjectsService,
+				...arguments_
+			) {
+				isPublished.mockRestore();
+				await publication.stop();
+				return this.publishNarInfoObjectWhile(...arguments_);
+			});
+		try {
+			const recorded = currentServer().recordVerifications(claim.owner, [
+				{
+					uploadId: expiring.operationId,
+					verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+				}
+			]);
+			await publication.reached();
+			const outcome = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const deadline = new Date(Date.now() - 1).toISOString();
+					instance.context.db
+						.update(schema.publicationOperations)
+						.set({ recoveryDeadline: deadline })
+						.where(eq(schema.publicationOperations.id, expiring.operationId))
+						.run();
+					instance.context.db
+						.update(schema.pendingUploads)
+						.set({ recoveryDeadline: deadline })
+						.where(eq(schema.pendingUploads.id, expiring.operationId))
+						.run();
+					await asOneInvocation(() =>
+						verificationOf(instance).expirePublications(rootLogger())
+					);
+					const cache =
+						instance.context.cacheRepository.require(defaultCache());
+					const store = new PublicationStore(instance.context);
+					const object = await env.BLOBS.head(
+						new NarInfoObjectsService(instance.context).objectKey(
+							cache,
+							path.storePathHash
+						)
+					);
+					return {
+						expiring: store.get(expiring.operationId)?.state,
+						live: store.get(live.operationId)?.state,
+						narInfos: instance.context.db
+							.select({ storePathHash: schema.narInfos.storePathHash })
+							.from(schema.narInfos)
+							.all(),
+						isPublished: object !== null
+					};
+				}
+			);
+			await publication.release();
+			await recorded;
+			expect(outcome).toStrictEqual({
+				expiring: 'servable',
+				live: 'accepted',
+				narInfos: [{ storePathHash: path.storePathHash }],
+				isPublished: true
+			});
+		} finally {
+			isPublished.mockRestore();
+			await publication.release();
+		}
+	});
+
 	it('refuses with parameters-changed a subscription with no record whose identity does not match', async () => {
 		const token = await initialise();
 		const [entry] = await plannedEntries(token, '/uploads/plan', [
@@ -3031,7 +3788,7 @@ describe('publication subscriptions to terminal operations', () => {
 				`publication-expiry-${name}`,
 				{ isConfirmationPending: true }
 			);
-			const isGenerationCommitted = await runInDurableObject(
+			const isGenerationCharged = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
 					instance.context.db
@@ -3046,7 +3803,7 @@ describe('publication subscriptions to terminal operations', () => {
 						);
 					}
 					return vi
-						.spyOn(CommitPipelineService.prototype, 'isGenerationCommitted')
+						.spyOn(CommitPipelineService.prototype, 'isGenerationCharged')
 						.mockRejectedValue(new PublicationExpiryFault());
 				}
 			);
@@ -3067,7 +3824,7 @@ describe('publication subscriptions to terminal operations', () => {
 					states: ['accepted']
 				});
 			} finally {
-				isGenerationCommitted.mockRestore();
+				isGenerationCharged.mockRestore();
 			}
 		}
 	);
@@ -4237,6 +4994,64 @@ describe('publication admission of an operation that changes state', () => {
 				spy.mockRestore();
 			}
 			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('finishes a committed upload whose pending row remains with its D1 calls outside the input gate', async () => {
+		const token = await initialise();
+		await completedPublication(token, 'publication-finalise-outside-gate', {
+			isConfirmationPending: true
+		});
+		const probe = new GateProbe();
+		const spies = await runInDurableObject(currentServer(), (instance) => {
+			const verdict = vi
+				.spyOn(CommitPipelineService.prototype, 'publicationStatus')
+				.mockImplementation(function (
+					this: CommitPipelineService,
+					...arguments_
+				) {
+					verdict.mockRestore();
+					return probe.around(() => this.publicationStatus(...arguments_));
+				});
+			const conclusion = vi
+				.spyOn(UploadStateService.prototype, 'concludeClearedUpload')
+				.mockImplementation(function (this: UploadStateService, ...arguments_) {
+					conclusion.mockRestore();
+					return probe.around(() => this.concludeClearedUpload(...arguments_));
+				});
+			return Promise.resolve([
+				probe.watch(instance.context),
+				verdict,
+				conclusion
+			]);
+		});
+		try {
+			const pass = verifyCurrentTenant();
+			const first = await probe.first(pass);
+			// Another request reaches the object while the read waits.
+			const during = await snapshot();
+			await probe.pause.release();
+			await pass;
+			const after = await snapshot();
+			expect({
+				first,
+				calls: probe.calls,
+				during: during.operations.map((operation) => operation.state),
+				after: {
+					states: after.operations.map((operation) => operation.state),
+					pending: after.pending.length
+				}
+			}).toStrictEqual({
+				first: 'stopped',
+				calls: [false, false],
+				during: ['accepted'],
+				after: { states: ['servable'], pending: 0 }
+			});
+		} finally {
+			await probe.pause.release();
+			for (const spy of spies) {
+				spy.mockRestore();
+			}
 		}
 	});
 
