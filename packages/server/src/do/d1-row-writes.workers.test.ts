@@ -4,16 +4,22 @@ import {
 	predicateTypeSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import {
+	publicationCapability,
+	uploadPlanResponseSchema
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	batchCosts,
+	recordTableWrites,
 	type StatementCost
 } from '../d1-statements.test-support.ts';
 import {
 	armBlobReaperTimer,
+	authorisedFetch,
 	blobStateArmTimes,
 	casObjectRows,
 	casObjectVersionChanges,
@@ -22,13 +28,19 @@ import {
 	currentServer,
 	defaultCache,
 	initialise,
+	namedCache,
 	narObjectVersionChanges,
+	openCommitSession,
 	resetTestServer,
 	runCasReaperToCompletion,
 	stageAttestationBundle,
+	testPushId,
 	uploadMetadata,
+	uploadPathNegotiation,
 	verifiableNar
 } from '../test-support.ts';
+
+import { UploadStateService } from './upload-state-service.ts';
 
 function batchesWith(
 	batches: readonly StatementCost[][],
@@ -123,6 +135,119 @@ describe('D1 rows written', () => {
 				],
 				deadlines: [{ narHash: nar.narHash, deleteAfter: undefined }]
 			});
+		}
+	);
+
+	it.each([
+		{ deadline: 'no deadline', armed: undefined, written: [0] },
+		{ deadline: 'a deadline', armed: 'before admission', written: [2] },
+		{
+			deadline: 'a deadline set after admission reads the blob state',
+			armed: 'during admission',
+			written: [2, 2]
+		}
+	] as const)(
+		'clears a reused NAR deadline at admission only when one is set ($deadline)',
+		async ({ armed, written }) => {
+			const token = await initialise();
+			const nar = await verifiableNar('admission-reuse-rows');
+			const metadata = uploadMetadata({
+				storePathHash: 'a'.repeat(32),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			await commitPath(token, metadata, nar);
+
+			const response = await authorisedFetch(
+				'/cache/reuse/uploads/plan',
+				token,
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						pushId: testPushId,
+						paths: [uploadPathNegotiation(metadata)]
+					})
+				}
+			);
+			const plan = uploadPlanResponseSchema.parse(await response.json());
+			const [upload] = plan.uploads;
+			if (upload === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+
+			if (armed === 'before admission') {
+				await armBlobReaperTimer(nar.narHash);
+			} else if (armed === 'during admission') {
+				vi.spyOn(
+					UploadStateService.prototype,
+					'presentCanonicalNars'
+				).mockImplementation(async (narHashes) => {
+					await armBlobReaperTimer(nar.narHash);
+
+					return new Set(narHashes);
+				});
+			}
+			const conversation = await openCommitSession(
+				token,
+				namedCache('reuse'),
+				publicationCapability
+			);
+			const frames: unknown[] = [];
+
+			try {
+				const writes = await recordTableWrites(
+					env.CUPBOARD_DB,
+					'blob_state',
+					async () => {
+						conversation.send({
+							op: 'publish-batch',
+							pushId: testPushId,
+							entries: [
+								{
+									operationId: upload.operationId,
+									cacheGeneration: plan.cacheGeneration,
+									metadata: uploadPathNegotiation(metadata)
+								}
+							]
+						});
+						frames.push(
+							await conversation.nextFrame(),
+							await conversation.nextFrame()
+						);
+					}
+				);
+
+				expect({
+					action: upload.action,
+					frames,
+					writes,
+					deadlines: await blobStateArmTimes()
+				}).toStrictEqual({
+					action: 'commit',
+					frames: [
+						{ ev: 'publication-accepted', uploadId: upload.operationId },
+						{
+							ev: 'deferred',
+							uploadId: upload.operationId,
+							storePathHash: metadata.storePathHash,
+							narHash: nar.narHash,
+							grace: {}
+						}
+					],
+					writes: written.map((rows) => ({
+						scope: 'webSocketMessage',
+						statement: 'update blob_state',
+						written: rows
+					})),
+					deadlines: [{ narHash: nar.narHash, deleteAfter: undefined }]
+				});
+			} finally {
+				conversation.socket.close();
+				vi.restoreAllMocks();
+			}
 		}
 	);
 

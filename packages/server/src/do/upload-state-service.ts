@@ -186,9 +186,9 @@ export class UploadStateService {
 		}
 	}
 
-	// After negotiate returns a commit decision, the client can use the canonical
-	// bytes until commit binds the new reference. Clear armed timers before
-	// returning the decision so the reaper cannot remove the blob in that interval.
+	// Negotiation and admission clear armed timers before they answer a reuse
+	// entry. The reaper can arm a timer again if the blob loses its last
+	// reference before the commit adds a new one.
 	async clearReaperTimers(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<void> {
@@ -203,7 +203,12 @@ export class UploadStateService {
 				this.context.d1
 					.update(d1Schema.blobState)
 					.set({ deleteAfter: sql`null` })
-					.where(inArray(d1Schema.blobState.narHash, list))
+					.where(
+						and(
+							inArray(d1Schema.blobState.narHash, list),
+							isNotNull(d1Schema.blobState.deleteAfter)
+						)
+					)
 					.run()
 		);
 	}
