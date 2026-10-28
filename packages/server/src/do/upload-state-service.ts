@@ -65,6 +65,7 @@ import { type CanonicalBlob } from './upload-metadata.ts';
 import { WorkSequenceService } from './work-sequence-service.ts';
 
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
+type PendingUploadRow = typeof schema.pendingUploads.$inferSelect;
 
 // Negotiation offers a reuse commit from D1 rows, which cannot show that the
 // canonical object is gone. A key under this prefix records a NAR hash whose
@@ -197,14 +198,15 @@ export class UploadStateService {
 		uploadId: UploadId,
 		conclusion: UploadConclusion,
 		owner?: string
-	): Promise<boolean> {
-		if (!(await this.clearPendingUpload(uploadId, conclusion, owner))) {
-			return false;
+	): Promise<PendingUploadRow | undefined> {
+		const cleared = await this.clearPendingUpload(uploadId, conclusion, owner);
+		if (cleared === undefined) {
+			return undefined;
 		}
 		await this.context.ctx.storage.delete(
 			`${pendingNarRefreshPrefix}${uploadId}`
 		);
-		return true;
+		return cleared;
 	}
 
 	// Negotiation and admission clear armed timers before they answer a reuse
@@ -435,13 +437,16 @@ export class UploadStateService {
 
 	An `absent` outcome leaves a publication operation accepted so the client
 	can publish it again, unless `absentPublication` is `fail-publication`.
+
+	Returns the deleted row. Its session is the one that the client attached
+	last, which can differ from a copy of the row read earlier.
 	*/
 	async clearPendingUpload(
 		uploadId: UploadId,
 		conclusion: UploadConclusion,
 		owner?: string,
 		absentPublication: AbsentPublication = 'keep-publication-accepted'
-	): Promise<boolean> {
+	): Promise<PendingUploadRow | undefined> {
 		const deleted = this.context.db.transaction(() => {
 			const [deleted] = this.context.db
 				.delete(schema.pendingUploads)
@@ -475,7 +480,7 @@ export class UploadStateService {
 			return deleted;
 		});
 		if (deleted === undefined) {
-			return false;
+			return undefined;
 		}
 
 		// A terminal row concluded its promotion when it became terminal.
@@ -483,7 +488,7 @@ export class UploadStateService {
 			await concludePromotion(this.context.d1, deleted, conclusion);
 		}
 
-		return true;
+		return deleted;
 	}
 
 	/**
@@ -529,18 +534,21 @@ export class UploadStateService {
 		narHash: NixSha256HashString,
 		conclusion: UploadConclusion,
 		owner?: string
-	): Promise<boolean> {
+	): Promise<PendingUploadRow | undefined> {
 		if (r2Key === narObjectKey(narHash)) {
 			return this.clearPendingUploadAndRefresh(uploadId, conclusion, owner);
 		}
 		return this.context.stagingDeletes.around(r2Key, async () => {
-			if (
-				!(await this.clearPendingUploadAndRefresh(uploadId, conclusion, owner))
-			) {
-				return false;
+			const cleared = await this.clearPendingUploadAndRefresh(
+				uploadId,
+				conclusion,
+				owner
+			);
+			if (cleared === undefined) {
+				return;
 			}
 			await this.context.stagingDeletes.delete(this.context.env.BLOBS, r2Key);
-			return true;
+			return cleared;
 		});
 	}
 

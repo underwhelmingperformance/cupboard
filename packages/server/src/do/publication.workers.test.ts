@@ -22,7 +22,7 @@ import {
 	type UploadPathNegotiation,
 	uploadPlanResponseSchema
 } from '@cupboard/protocol/upload';
-import { uploadIdSchema } from '@cupboard/protocol/upload';
+import { sessionIdSchema, uploadIdSchema } from '@cupboard/protocol/upload';
 import { CountingSemaphore } from '@cupboard/shared/concurrency';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -5066,6 +5066,233 @@ it("keeps a newer publication's run root target when a failed upload of the same
 	});
 });
 
+it('sends the verdict to the session that subscribes after verification reads the pending row', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-verdict-reconnect');
+	const [planned] = await plannedEntries(token, '/uploads/plan', [
+		uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		)
+	]);
+	if (planned === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+	const entry = { ...planned, blob };
+	await putNarBytes(
+		publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+		nar
+	);
+	const first = await openCommitSession(token, undefined, publicationSession);
+	try {
+		first.send({ op: 'publish-batch', pushId: testPushId, entries: [entry] });
+		await first.nextFrame();
+		await first.nextFrame();
+	} finally {
+		await closeSessionAndWait(first.socket);
+	}
+	const claim = await currentServer().claimVerificationBatch(
+		10,
+		Number.MAX_SAFE_INTEGER
+	);
+	// Verification has read the pending row and stops before it publishes
+	// the narinfo object.
+	const publication = new DurableObjectPause();
+	const isPublished = vi
+		.spyOn(NarInfoObjectsService.prototype, 'publishNarInfoObjectWhile')
+		.mockImplementationOnce(async function (
+			this: NarInfoObjectsService,
+			...arguments_
+		) {
+			isPublished.mockRestore();
+			await publication.stop();
+			return this.publishNarInfoObjectWhile(...arguments_);
+		});
+	const reconnected = await openCommitSession(
+		token,
+		undefined,
+		publicationSession
+	);
+	try {
+		const recorded = currentServer().recordVerifications(claim.owner, [
+			{
+				uploadId: entry.operationId,
+				verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+			}
+		]);
+		await publication.reached();
+		reconnected.send({
+			op: 'subscribe-publication',
+			pushId: testPushId,
+			entries: [entry]
+		});
+		const deferred = await reconnected.nextFrame();
+		await publication.release();
+		await recorded;
+		// The next frame on the reconnected session is the verdict. Without it,
+		// the answer to this second subscription would come first.
+		reconnected.send({
+			op: 'subscribe-publication',
+			pushId: testPushId,
+			entries: [entry]
+		});
+		expect([deferred, await reconnected.nextFrame()]).toStrictEqual([
+			{
+				ev: 'deferred',
+				uploadId: entry.operationId,
+				storePathHash: entry.metadata.storePathHash,
+				narHash: entry.metadata.narHash,
+				grace: {}
+			},
+			{
+				ev: 'verdict',
+				uploadId: entry.operationId,
+				status: 'servable',
+				grace: {}
+			}
+		]);
+	} finally {
+		isPublished.mockRestore();
+		await publication.release();
+		await closeSessionAndWait(reconnected.socket);
+	}
+});
+
+it('sends a cleared upload verdict to the session of the deleted row when a repair accepts the operation again', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-verdict-repair');
+	const [planned] = await plannedEntries(token, '/uploads/plan', [
+		uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		)
+	]);
+	if (planned === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+	const entry = { ...planned, blob };
+	await putNarBytes(
+		publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+		nar
+	);
+	const original = await openCommitSession(
+		token,
+		undefined,
+		publicationSession
+	);
+	const repair = await openCommitSession(token, undefined, publicationSession);
+	try {
+		original.send({
+			op: 'publish-batch',
+			pushId: testPushId,
+			entries: [entry]
+		});
+		await original.nextFrame();
+		await original.nextFrame();
+		const claim = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+		// Verification deletes the pending row and concludes the upload in D1.
+		// During that await, a repair accepts the operation again from another
+		// session. The repair's pending row has the same ID and a new accepted
+		// sequence.
+		const conclusion = await runInDurableObject(currentServer(), (instance) => {
+			const { ctx, db } = instance.context;
+			const repairSession = ctx
+				.getWebSockets()
+				.flatMap((socket) => ctx.getTags(socket))
+				.map((tag) => sessionIdSchema.parse(tag))
+				.find(
+					(tag) =>
+						db
+							.select({ id: schema.pendingUploads.id })
+							.from(schema.pendingUploads)
+							.where(eq(schema.pendingUploads.sessionId, tag))
+							.get() === undefined
+				);
+			const spy = vi
+				.spyOn(UploadStateService.prototype, 'clearPendingUpload')
+				.mockImplementationOnce(async function (
+					this: UploadStateService,
+					...arguments_
+				) {
+					spy.mockRestore();
+					const cleared = await this.clearPendingUpload(...arguments_);
+					if (cleared !== undefined) {
+						db.insert(schema.pendingUploads)
+							.values({
+								...cleared,
+								acceptedSequence: new WorkSequenceService(db).allocate(),
+								verdict: sql`null`,
+								sessionId: repairSession
+							})
+							.run();
+					}
+					return cleared;
+				});
+			return Promise.resolve(spy);
+		});
+		try {
+			await currentServer().recordVerifications(claim.owner, [
+				{
+					uploadId: entry.operationId,
+					verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+				}
+			]);
+		} finally {
+			conclusion.mockRestore();
+		}
+		// Each session's next frame answers this subscription, unless a verdict
+		// was sent to it first.
+		for (const session of [original, repair]) {
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			});
+		}
+		expect({
+			original: refusalFacts(await original.nextFrame()),
+			repair: refusalFacts(await repair.nextFrame())
+		}).toStrictEqual({
+			original: {
+				ev: 'verdict',
+				uploadId: entry.operationId,
+				status: 'servable',
+				grace: {}
+			},
+			repair: {
+				ev: 'settled',
+				uploadId: entry.operationId,
+				response: {
+					storePathHash: entry.metadata.storePathHash,
+					narHash: entry.metadata.narHash,
+					status: 'already-present'
+				},
+				grace: {}
+			}
+		});
+	} finally {
+		await closeSessionAndWait(original.socket);
+		await closeSessionAndWait(repair.socket);
+	}
+});
+
 it('removes the retention targets of a reservation that a reuse commit reclaims when the tenant is suspended', async () => {
 	await resetTestServer();
 	const token = await initialise();
@@ -6016,16 +6243,16 @@ it("deletes an exhausted upload's staged object only after its operation is term
 			const observed: unknown[] = [];
 			const isKeyTracked = () =>
 				instance.context.stagingDeletes.has(r2ObjectKeySchema.parse(staged));
-			const isPendingUploadCleared = vi.spyOn(
+			const pendingUploadClear = vi.spyOn(
 				UploadStateService.prototype,
 				'clearPendingUpload'
 			);
-			isPendingUploadCleared.mockImplementationOnce(function (
+			pendingUploadClear.mockImplementationOnce(function (
 				this: UploadStateService,
 				...arguments_
 			) {
 				observed.push({ step: 'clear', isTracked: isKeyTracked() });
-				isPendingUploadCleared.mockRestore();
+				pendingUploadClear.mockRestore();
 				return this.clearPendingUpload(...arguments_);
 			});
 			const blobs = instance.context.env.BLOBS;
