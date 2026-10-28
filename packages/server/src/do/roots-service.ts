@@ -31,6 +31,7 @@ import { CacheClosureService } from './cache-closure-service.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
 import {
 	type RootSetCommand,
+	type SchemaDatabase,
 	type SchemaWriter,
 	type ServerContext
 } from './context.ts';
@@ -671,14 +672,25 @@ export class RootsService {
 		cache: ResolvedCache,
 		storePathHash: StorePathHash
 	): void {
-		this.context.db
-			.delete(schema.retentionRootTargets)
-			.where(
-				and(
-					eq(schema.retentionRootTargets.cacheId, cache.id),
-					eq(schema.retentionRootTargets.storePathHash, storePathHash)
-				)
-			)
-			.run();
+		deleteRetentionTargets(this.context.db, cache, storePathHash);
 	}
+}
+
+/**
+Removes a path from every retention root of a cache.
+*/
+export function deleteRetentionTargets(
+	database: SchemaDatabase,
+	cache: ResolvedCache,
+	storePathHash: StorePathHash
+): void {
+	database
+		.delete(schema.retentionRootTargets)
+		.where(
+			and(
+				eq(schema.retentionRootTargets.cacheId, cache.id),
+				eq(schema.retentionRootTargets.storePathHash, storePathHash)
+			)
+		)
+		.run();
 }

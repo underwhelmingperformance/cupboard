@@ -108,6 +108,7 @@ import {
 	reusableReference,
 	type ReuseAuthority
 } from './reuse-authority.ts';
+import { deleteRetentionTargets } from './roots-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { affordableSubrequestOperations } from './subrequest-slice.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
@@ -560,12 +561,21 @@ export class CommitPipelineService {
 				if (this.uploadState.hasOtherStartedCommit(uploadId, cache, metadata)) {
 					return;
 				}
-				await this.reclaimReservedRow(
+				const result = await this.reclaimReservedRow(
 					cache,
 					metadata.storePathHash,
 					generation,
 					metadata.narHash
 				);
+				// Once the gate reopens, a newer generation of the path can attach
+				// its own retention targets, which this removal would take.
+				if (result === 'reclaimed') {
+					deleteRetentionTargets(
+						this.context.db,
+						cache,
+						metadata.storePathHash
+					);
+				}
 			});
 			await this.uploadState.clearPendingUpload(uploadId, {
 				logger,
