@@ -38,9 +38,22 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi
+} from 'vitest';
 import { z } from 'zod';
 
+import {
+	deliverAlarms,
+	ignoreAlarmDeliveries
+} from '../alarm-fence.test-support.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import { authorisedByPathGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -100,9 +113,9 @@ import {
 	testServerFor,
 	uploadMetadata,
 	uploadPathNegotiation,
-	verifiableNar,
-	withoutAlarmArming
+	verifiableNar
 } from '../test-support.ts';
+import { CupboardServer as TestCupboardServer } from '../test-worker.ts';
 
 import { type MaintenanceProgress } from './alarm.ts';
 import { AttestationCasService } from './attestation-cas-service.ts';
@@ -125,7 +138,11 @@ import {
 } from './path-read-authority-service.ts';
 import { ProtectedInheritanceService } from './protected-inheritance-service.ts';
 import { rowsRemaining, withRowBudget } from './row-budget.ts';
-import { CupboardServer, maintenancePassCursorKey } from './server.ts';
+import {
+	CupboardServer,
+	gcContinuationKey,
+	maintenancePassCursorKey
+} from './server.ts';
 import {
 	subrequestsAvailable,
 	subrequestSliceReserve,
@@ -189,17 +206,23 @@ function orpcErrorBodyShape(body: unknown): {
 }
 
 describe('attestation attach and reads', () => {
+	// The tests work on the fixture tenant's Durable Object. Its alarm passes
+	// retire deletions and drain queues, so a delivery between two steps of a
+	// test changes the state that the test inspects. Each test runs the passes
+	// that it needs.
+	beforeAll(() => {
+		ignoreAlarmDeliveries(fixtureWorkerServer().id);
+	});
+
+	afterAll(() => {
+		deliverAlarms(fixtureWorkerServer().id);
+	});
+
 	beforeEach(async () => {
 		vi.useRealTimers();
+		await emptyFixtureServer();
 		await resetTestServer();
 		await clearBlobStorage();
-		// The scheduler delivers the alarm that a commit arms. Stop that alarm
-		// from draining the inheritance queue, so that each test drains it with
-		// `drainInheritance`.
-		vi.spyOn(
-			AttestationsService.prototype,
-			'nextInheritanceAt'
-		).mockReturnValue(undefined);
 	});
 
 	afterEach(() => {
@@ -2018,10 +2041,6 @@ describe('attestation attach and reads', () => {
 	it('keeps the alarm armed for a retry when an earlier alarm runs, and retries through the alarm', async () => {
 		const { destination, metadata } =
 			await reusedPathWithSourceBundle('retry-alarm');
-		const nextInheritanceAt = vi.spyOn(
-			AttestationsService.prototype,
-			'nextInheritanceAt'
-		);
 		const failing = vi
 			.spyOn(AttestationsService.prototype, 'inheritFromTenant')
 			.mockRejectedValueOnce(new Error('attestation lookup failed'));
@@ -2033,16 +2052,14 @@ describe('attestation attach and reads', () => {
 					rootLogger()
 				);
 				failing.mockRestore();
-				// The commit armed an alarm. Until the failed attempt is recorded, its
-				// delivery must not run the inheritance pass.
-				nextInheritanceAt.mockRestore();
 				const [queued] = instance.context.db
 					.select({ notBefore: schema.attestationInheritances.notBefore })
 					.from(schema.attestationInheritances)
 					.all();
 				// An earlier alarm, such as one that a commit arms, runs first.
-				await state.storage.setAlarm(Date.now());
-				await instance.alarm();
+				// Workerd clears the deadline when it delivers an alarm.
+				await state.storage.deleteAlarm();
+				await testWorkerServer(instance).runAlarmPass();
 
 				return {
 					retryAt:
@@ -2052,24 +2069,31 @@ describe('attestation attach and reads', () => {
 			}
 		);
 		await makeQueuedInheritancesDue();
-		await runInDurableObject(fixtureWorkerServer(), async (instance, state) => {
-			// Start the rotation at the inheritance pass.
-			await state.storage.put(maintenancePassCursorKey, 'garbage-collection');
-			await instance.alarm();
-		});
+		const cursor = await runInDurableObject(
+			fixtureWorkerServer(),
+			async (instance, state) => {
+				// Start the rotation at the inheritance pass.
+				await state.storage.put(
+					maintenancePassCursorKey,
+					'read-authority-demotion'
+				);
+				await testWorkerServer(instance).runAlarmPass();
+
+				return state.storage.get(maintenancePassCursorKey);
+			}
+		);
 		const list = await readFetch(
 			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
 		);
 
 		expect({
-			isArmedForRetry:
-				retry.retryAt !== undefined &&
-				retry.armedAt !== null &&
-				retry.armedAt <= retry.retryAt,
+			armedAt: retry.armedAt,
+			cursor,
 			queued: await queuedInheritances(),
 			listStatus: list.status
 		}).toStrictEqual({
-			isArmedForRetry: true,
+			armedAt: retry.retryAt,
+			cursor: 'attestation-inheritance',
 			queued: [],
 			listStatus: StatusCodes.OK
 		});
@@ -2316,122 +2340,147 @@ describe('attestation attach and reads', () => {
 				listStatus: StatusCodes.OK,
 				protections: []
 			});
+			const retired = await flushDeletionQueue();
+			const remaining = await database
+				.select({
+					cacheKind: d1Schema.attestationReference.cacheKind,
+					digest: d1Schema.attestationReference.digest
+				})
+				.from(d1Schema.attestationReference)
+				.where(eq(d1Schema.attestationReference.digest, digest));
+			const listAfter = await readFetch(
+				`/cache/${destination.name}/attestations/${metadata.storePathHash}`,
+				{ headers: { authorization: `Bearer ${token}` } }
+			);
+			const bundleAfter = await readFetch(
+				`/cache/${destination.name}/attestation-bundles/${digest}`,
+				{ headers: { authorization: `Bearer ${token}` } }
+			);
+			expect({
+				retired,
+				remaining,
+				listStatus: listAfter.status,
+				bundle: new Uint8Array(await bundleAfter.arrayBuffer())
+			}).toStrictEqual({
+				retired: 1,
+				remaining: [{ cacheKind: 'named', digest }],
+				listStatus: StatusCodes.OK,
+				bundle: sigstoreBundleBytes(narDigestHex(metadata.narHash))
+			});
 		}
 	);
 
 	it.each(['before', 'after'] as const)(
 		'recovers protected inheritance after a $0 pending-clear storage fault',
 		async (boundary) => {
-			await withoutAlarmArming(async () => {
-				const { token, metadata, bundle, digest } = await committedPathBundle();
-				await attachBundle(token, metadata.storePathHash, bundle);
-				await drainInheritance();
-				const destination = namedCache('pending-clear-recovery');
-				await putWorkerTestCache(token, destination, 'private');
-				const negotiated = await authorisedWorkerFetch(
-					`/cache/${destination.name}/uploads`,
-					token,
-					{
-						method: 'POST',
-						headers: { 'content-type': 'application/json' },
-						body: JSON.stringify({
-							pushId: await testPushIdFor(fixtureTenant),
-							paths: [uploadPathNegotiation(metadata)]
-						})
-					}
-				);
-				const decision = z
-					.tuple([uploadDecisionSchema])
-					.parse(
-						uploadNegotiateResponseSchema.parse(await negotiated.json()).uploads
-					)[0];
-				if (decision.action !== 'commit') {
-					throw new Error('The destination must reuse the canonical NAR.');
-				}
-				await deleteFixtureSource(metadata.storePathHash);
-				await runInDurableObject(fixtureWorkerServer(), (_instance, state) => {
-					state.storage.sql.exec(
-						`CREATE TRIGGER pending_clear_fault ${boundary} DELETE ON pending_upload BEGIN SELECT RAISE(ABORT, 'pending clear fault'); END`
-					);
-				});
-				await expect(
-					commitUploadViaWorker(token, decision.uploadId, {
-						tenant: fixtureTenant,
-						cache: destination
+			const { token, metadata, bundle, digest } = await committedPathBundle();
+			await attachBundle(token, metadata.storePathHash, bundle);
+			await drainInheritance();
+			const destination = namedCache('pending-clear-recovery');
+			await putWorkerTestCache(token, destination, 'private');
+			const negotiated = await authorisedWorkerFetch(
+				`/cache/${destination.name}/uploads`,
+				token,
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						pushId: await testPushIdFor(fixtureTenant),
+						paths: [uploadPathNegotiation(metadata)]
 					})
-				).rejects.toThrow();
-				const persisted = await runInDurableObject(
-					fixtureWorkerServer(),
-					(instance, state) => {
-						const cache = resolvedCache(instance.context, destination);
-						const pending = instance.context.db
-							.select()
-							.from(schema.pendingUploads)
-							.where(eq(schema.pendingUploads.id, decision.uploadId))
-							.get();
-						const queue = instance.context.db
-							.select()
-							.from(schema.attestationInheritances)
-							.where(eq(schema.attestationInheritances.cacheId, cache.id))
-							.get();
-						if (pending === undefined || queue === undefined) {
-							throw new Error(
-								'Pending work and inheritance must both be durable before clearing.'
-							);
-						}
-						state.storage.sql.exec('DROP TRIGGER pending_clear_fault');
-						return { pending, queue };
-					}
+				}
+			);
+			const decision = z
+				.tuple([uploadDecisionSchema])
+				.parse(
+					uploadNegotiateResponseSchema.parse(await negotiated.json()).uploads
+				)[0];
+			if (decision.action !== 'commit') {
+				throw new Error('The destination must reuse the canonical NAR.');
+			}
+			await deleteFixtureSource(metadata.storePathHash);
+			await runInDurableObject(fixtureWorkerServer(), (_instance, state) => {
+				state.storage.sql.exec(
+					`CREATE TRIGGER pending_clear_fault ${boundary} DELETE ON pending_upload BEGIN SELECT RAISE(ABORT, 'pending clear fault'); END`
 				);
-				expect({
-					uploadId: persisted.queue.acceptedUploadId,
-					acceptedSequence: persisted.queue.acceptedSequence,
-					acceptedExpiresAt: persisted.queue.acceptedExpiresAt,
-					commitStartedSequence: persisted.queue.commitStartedSequence
-				}).toStrictEqual({
-					uploadId: decision.uploadId,
-					acceptedSequence: persisted.pending.acceptedSequence,
-					acceptedExpiresAt: persisted.pending.acceptedExpiresAt,
-					commitStartedSequence: persisted.pending.commitStartedSequence
-				});
-				await commitUploadViaWorker(token, decision.uploadId, {
+			});
+			await expect(
+				commitUploadViaWorker(token, decision.uploadId, {
 					tenant: fixtureTenant,
 					cache: destination
-				});
-				const recovered = await runInDurableObject(
-					fixtureWorkerServer(),
-					(instance) => ({
-						pending: instance.context.db
-							.select()
-							.from(schema.pendingUploads)
-							.where(eq(schema.pendingUploads.id, decision.uploadId))
-							.all(),
-						queue: instance.context.db
-							.select()
-							.from(schema.attestationInheritances)
-							.where(
-								eq(
-									schema.attestationInheritances.cacheId,
-									resolvedCache(instance.context, destination).id
-								)
+				})
+			).rejects.toThrow();
+			const persisted = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance, state) => {
+					const cache = resolvedCache(instance.context, destination);
+					const pending = instance.context.db
+						.select()
+						.from(schema.pendingUploads)
+						.where(eq(schema.pendingUploads.id, decision.uploadId))
+						.get();
+					const queue = instance.context.db
+						.select()
+						.from(schema.attestationInheritances)
+						.where(eq(schema.attestationInheritances.cacheId, cache.id))
+						.get();
+					if (pending === undefined || queue === undefined) {
+						throw new Error(
+							'Pending work and inheritance must both be durable before clearing.'
+						);
+					}
+					state.storage.sql.exec('DROP TRIGGER pending_clear_fault');
+					return { pending, queue };
+				}
+			);
+			expect({
+				uploadId: persisted.queue.acceptedUploadId,
+				acceptedSequence: persisted.queue.acceptedSequence,
+				acceptedExpiresAt: persisted.queue.acceptedExpiresAt,
+				commitStartedSequence: persisted.queue.commitStartedSequence
+			}).toStrictEqual({
+				uploadId: decision.uploadId,
+				acceptedSequence: persisted.pending.acceptedSequence,
+				acceptedExpiresAt: persisted.pending.acceptedExpiresAt,
+				commitStartedSequence: persisted.pending.commitStartedSequence
+			});
+			await commitUploadViaWorker(token, decision.uploadId, {
+				tenant: fixtureTenant,
+				cache: destination
+			});
+			const recovered = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) => ({
+					pending: instance.context.db
+						.select()
+						.from(schema.pendingUploads)
+						.where(eq(schema.pendingUploads.id, decision.uploadId))
+						.all(),
+					queue: instance.context.db
+						.select()
+						.from(schema.attestationInheritances)
+						.where(
+							eq(
+								schema.attestationInheritances.cacheId,
+								resolvedCache(instance.context, destination).id
 							)
-							.get()
-					})
-				);
-				expect(recovered).toStrictEqual({
-					pending: [],
-					queue: persisted.queue
-				});
-				await drainInheritance();
-				const response = await readFetch(
-					`/cache/${destination.name}/attestation-bundles/${digest}`,
-					{ headers: { authorization: `Bearer ${token}` } }
-				);
-				expect({
-					status: response.status,
-					bytes: new Uint8Array(await response.arrayBuffer())
-				}).toStrictEqual({ status: 200, bytes: bundle });
-			}, fixtureWorkerServer());
+						)
+						.get()
+				})
+			);
+			expect(recovered).toStrictEqual({
+				pending: [],
+				queue: persisted.queue
+			});
+			await drainInheritance();
+			const response = await readFetch(
+				`/cache/${destination.name}/attestation-bundles/${digest}`,
+				{ headers: { authorization: `Bearer ${token}` } }
+			);
+			expect({
+				status: response.status,
+				bytes: new Uint8Array(await response.arrayBuffer())
+			}).toStrictEqual({ status: 200, bytes: bundle });
 		}
 	);
 
@@ -2664,137 +2713,134 @@ describe('attestation attach and reads', () => {
 	] as const)(
 		'uses the first commit sequence to decide expired work eligibility %s',
 		async (phase) => {
-			await withoutAlarmArming(async () => {
-				const { token, metadata } = await reusedPathWithSourceBundle(
-					'expiry-cutoff',
-					'private'
+			const { token, metadata } = await reusedPathWithSourceBundle(
+				'expiry-cutoff',
+				'private'
+			);
+			const expired = namedCache('expired-work');
+			await putWorkerTestCache(token, expired, 'private');
+			const negotiated = await authorisedWorkerFetch(
+				`/cache/${expired.name}/uploads`,
+				token,
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						pushId: await testPushIdFor(fixtureTenant),
+						paths: [uploadPathNegotiation(metadata)]
+					})
+				}
+			);
+			const decision = z
+				.tuple([uploadDecisionSchema])
+				.parse(
+					uploadNegotiateResponseSchema.parse(await negotiated.json()).uploads
+				)[0];
+			if (decision.action === 'skip') {
+				throw new Error(
+					'The expired destination must receive an upload identity.'
 				);
-				const expired = namedCache('expired-work');
-				await putWorkerTestCache(token, expired, 'private');
-				const negotiated = await authorisedWorkerFetch(
-					`/cache/${expired.name}/uploads`,
-					token,
-					{
-						method: 'POST',
-						headers: { 'content-type': 'application/json' },
-						body: JSON.stringify({
-							pushId: await testPushIdFor(fixtureTenant),
-							paths: [uploadPathNegotiation(metadata)]
-						})
-					}
-				);
-				const decision = z
-					.tuple([uploadDecisionSchema])
-					.parse(
-						uploadNegotiateResponseSchema.parse(await negotiated.json()).uploads
-					)[0];
-				if (decision.action === 'skip') {
-					throw new Error(
-						'The expired destination must receive an upload identity.'
+			}
+			const expiry = isoTimestamp(new Date(Date.now() - 60_000));
+			await runInDurableObject(fixtureWorkerServer(), (instance) => {
+				instance.context.db
+					.update(schema.pendingUploads)
+					.set({ expiresAt: expiry, acceptedExpiresAt: expiry })
+					.where(eq(schema.pendingUploads.id, decision.uploadId))
+					.run();
+				if (phase === 'before-deletion') {
+					new UploadStateService(instance.context).markUploadCommitting(
+						decision.uploadId
 					);
 				}
-				const expiry = isoTimestamp(new Date(Date.now() - 60_000));
-				await runInDurableObject(fixtureWorkerServer(), (instance) => {
-					instance.context.db
-						.update(schema.pendingUploads)
-						.set({ expiresAt: expiry, acceptedExpiresAt: expiry })
-						.where(eq(schema.pendingUploads.id, decision.uploadId))
-						.run();
-					if (phase === 'before-deletion') {
+			});
+			await deleteFixtureSource(metadata.storePathHash);
+			const result = await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance) => {
+					const cache = resolvedCache(instance.context, expired);
+					const pending = schema.pendingUploads;
+
+					switch (phase) {
+						case 'after-deletion': {
+							new UploadStateService(instance.context).markUploadCommitting(
+								decision.uploadId
+							);
+							break;
+						}
+						case 'renewed-after-deletion': {
+							const state = new UploadStateService(instance.context);
+							state.markUploadPending(decision.uploadId);
+							await state.markUploadTerminal(
+								decision.uploadId,
+								'servable',
+								rootLogger()
+							);
+							break;
+						}
+						default: {
+							break;
+						}
+					}
+
+					const first = instance.context.db
+						.select()
+						.from(pending)
+						.where(eq(pending.id, decision.uploadId))
+						.get();
+					if (first === undefined) {
+						throw new Error(
+							'The pending destination identity must remain available.'
+						);
+					}
+					if (phase === 'before-deletion' || phase === 'after-deletion') {
 						new UploadStateService(instance.context).markUploadCommitting(
 							decision.uploadId
 						);
 					}
-				});
-				await deleteFixtureSource(metadata.storePathHash);
-				const result = await runInDurableObject(
-					fixtureWorkerServer(),
-					async (instance) => {
-						const cache = resolvedCache(instance.context, expired);
-						const pending = schema.pendingUploads;
+					await attestationsFor(instance.context).queueInheritance(
+						cache,
+						metadata.storePathHash,
+						narInfoGenerationSchema.parse(0),
+						metadata.narHash,
+						decision.uploadId
+					);
+					const queue = instance.context.db
+						.select({
+							uploadId: schema.attestationInheritances.acceptedUploadId,
+							expiry: schema.attestationInheritances.acceptedExpiresAt,
+							firstCommit: schema.attestationInheritances.commitStartedSequence
+						})
+						.from(schema.attestationInheritances)
+						.where(eq(schema.attestationInheritances.cacheId, cache.id))
+						.get();
+					const source = resolvedCache(instance.context);
+					const isEligible = new ProtectedInheritanceService(
+						instance.context
+					).isReferenceProtected(
+						cache,
+						metadata.storePathHash,
+						narInfoGenerationSchema.parse(0),
+						source.id,
+						narInfoGenerationSchema.parse(0)
+					);
 
-						switch (phase) {
-							case 'after-deletion': {
-								new UploadStateService(instance.context).markUploadCommitting(
-									decision.uploadId
-								);
-								break;
-							}
-							case 'renewed-after-deletion': {
-								const state = new UploadStateService(instance.context);
-								state.markUploadPending(decision.uploadId);
-								await state.markUploadTerminal(
-									decision.uploadId,
-									'servable',
-									rootLogger()
-								);
-								break;
-							}
-							default: {
-								break;
-							}
-						}
-
-						const first = instance.context.db
-							.select()
-							.from(pending)
-							.where(eq(pending.id, decision.uploadId))
-							.get();
-						if (first === undefined) {
-							throw new Error(
-								'The pending destination identity must remain available.'
-							);
-						}
-						if (phase === 'before-deletion' || phase === 'after-deletion') {
-							new UploadStateService(instance.context).markUploadCommitting(
-								decision.uploadId
-							);
-						}
-						await attestationsFor(instance.context).queueInheritance(
-							cache,
-							metadata.storePathHash,
-							narInfoGenerationSchema.parse(0),
-							metadata.narHash,
-							decision.uploadId
-						);
-						const queue = instance.context.db
-							.select({
-								uploadId: schema.attestationInheritances.acceptedUploadId,
-								expiry: schema.attestationInheritances.acceptedExpiresAt,
-								firstCommit:
-									schema.attestationInheritances.commitStartedSequence
-							})
-							.from(schema.attestationInheritances)
-							.where(eq(schema.attestationInheritances.cacheId, cache.id))
-							.get();
-						const source = resolvedCache(instance.context);
-						const isEligible = new ProtectedInheritanceService(
-							instance.context
-						).isReferenceProtected(
-							cache,
-							metadata.storePathHash,
-							narInfoGenerationSchema.parse(0),
-							source.id,
-							narInfoGenerationSchema.parse(0)
-						);
-
-						return {
-							queue,
-							firstCommit: first.commitStartedSequence,
-							isEligible
-						};
-					}
-				);
-				expect(result).toStrictEqual({
-					queue: {
-						uploadId: decision.uploadId,
-						expiry,
-						firstCommit: result.firstCommit
-					},
-					firstCommit: result.firstCommit,
-					isEligible: phase === 'before-deletion'
-				});
-			}, fixtureWorkerServer());
+					return {
+						queue,
+						firstCommit: first.commitStartedSequence,
+						isEligible
+					};
+				}
+			);
+			expect(result).toStrictEqual({
+				queue: {
+					uploadId: decision.uploadId,
+					expiry,
+					firstCommit: result.firstCommit
+				},
+				firstCommit: result.firstCommit,
+				isEligible: phase === 'before-deletion'
+			});
 		}
 	);
 
@@ -3190,63 +3236,12 @@ describe('attestation attach and reads', () => {
 				`deletion-${boundary}`,
 				'private'
 			);
-			const interruption = await runInDurableObject(
-				fixtureWorkerServer(),
-				async (instance, state) => {
-					const injected = new Error('interrupted explicit deletion');
-
-					const inner = instance.context.env.CUPBOARD_DB;
-					let isRevocation = false;
-					const binding: D1Database = {
-						prepare(query) {
-							if (query.startsWith('insert into "path_read_revocation"')) {
-								isRevocation = true;
-							}
-							return inner.prepare(query);
-						},
-						async batch<T>(statements: D1PreparedStatement[]) {
-							if (isRevocation) {
-								isRevocation = false;
-								if (boundary === 'before-revocation') {
-									throw injected;
-								}
-								await inner.batch<T>(statements);
-								throw injected;
-							}
-							return inner.batch<T>(statements);
-						},
-						exec: (query) => inner.exec(query),
-						withSession: (constraint) => inner.withSession(constraint),
-						dump: () =>
-							Promise.reject(new Error('The fault fixture does not dump D1.'))
-					};
-					const context = new ServerContext(state, {
-						...instance.context.env,
-						CUPBOARD_DB: binding
-					});
-					try {
-						await deletionQueueFor(context).deleteStorePath(
-							defaultCacheScope,
-							metadata.storePathHash,
-							internalOrigin
-						);
-						return false;
-					} catch (error) {
-						const fence = await inner
-							.prepare(
-								'SELECT generation FROM path_read_revocation WHERE tenant = ? AND cache_kind = ? AND store_path_hash = ?'
-							)
-							.bind(fixtureTenant, 'default', metadata.storePathHash)
-							.first();
-						return {
-							interrupted: error === injected,
-							fence: fence ?? undefined,
-							pending: await state.storage.get(pathReadDemotionPendingKey)
-						};
-					}
-				}
+			const interruption = await interruptExplicitDeletion(
+				metadata.storePathHash,
+				boundary
 			);
 			const retried = await deleteFixtureSource(metadata.storePathHash);
+			const fence = await readRevocationFence(metadata.storePathHash);
 			const protectedRows = await runInDurableObject(
 				fixtureWorkerServer(),
 				(instance) =>
@@ -3261,19 +3256,23 @@ describe('attestation attach and reads', () => {
 			expect({
 				interruption,
 				retried,
+				fence,
 				protections: protectedRows
 			}).toStrictEqual({
 				interruption: {
 					interrupted: true,
-					fence:
-						boundary === 'after-revocation' ? { generation: 0 } : undefined,
-					pending: true
+					atFailure: {
+						fence:
+							boundary === 'after-revocation' ? { generation: 0 } : undefined,
+						pending: true
+					}
 				},
 				retried: {
 					storePathHash: metadata.storePathHash,
 					deleted: true,
 					narScheduledForDeletion: false
 				},
+				fence: { generation: 0 },
 				protections: [
 					{
 						storePathHash: metadata.storePathHash,
@@ -3284,6 +3283,80 @@ describe('attestation attach and reads', () => {
 			await drainInheritance();
 		}
 	);
+
+	it('revokes reads in an alarm collection pass after an explicit deletion fails before revocation', async () => {
+		const { destination, metadata, digest, token } =
+			await reusedPathWithSourceBundle('deletion-collected', 'private');
+		const interruption = await interruptExplicitDeletion(
+			metadata.storePathHash,
+			'before-revocation'
+		);
+		const collected = await runInDurableObject(
+			fixtureWorkerServer(),
+			async (instance, state) => {
+				// An earlier pass left a tenant-wide collection continuation, and
+				// collection follows signing-key backfill in the pass rotation.
+				await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
+				await state.storage.put(
+					maintenancePassCursorKey,
+					'signing-key-backfill'
+				);
+				await testWorkerServer(instance).runAlarmPass();
+				const table = schema.narInfoDeletions;
+
+				return {
+					pass: await state.storage.get(maintenancePassCursorKey),
+					fence: await readRevocationFence(metadata.storePathHash),
+					queued: instance.context.db
+						.select({
+							storePathHash: table.storePathHash,
+							generation: table.generation,
+							narHash: table.narHash,
+							explicit: table.explicit,
+							withdrawn: table.withdrawn
+						})
+						.from(table)
+						.all()
+				};
+			}
+		);
+		const retried = await deleteFixtureSource(metadata.storePathHash);
+		await drainInheritance();
+		const bundle = await readFetch(
+			`/cache/${destination.name}/attestation-bundles/${digest}`,
+			{ headers: { authorization: `Bearer ${token}` } }
+		);
+		expect({
+			interruption,
+			collected,
+			retried,
+			bundle: new Uint8Array(await bundle.arrayBuffer())
+		}).toStrictEqual({
+			interruption: {
+				interrupted: true,
+				atFailure: { fence: undefined, pending: true }
+			},
+			collected: {
+				pass: 'garbage-collection',
+				fence: { generation: 0 },
+				queued: [
+					{
+						storePathHash: metadata.storePathHash,
+						generation: 0,
+						narHash: metadata.narHash,
+						explicit: true,
+						withdrawn: true
+					}
+				]
+			},
+			retried: {
+				storePathHash: metadata.storePathHash,
+				deleted: true,
+				narScheduledForDeletion: false
+			},
+			bundle: sigstoreBundleBytes(narDigestHex(metadata.narHash))
+		});
+	});
 
 	it('does not reference or list bundles for a generation that the path no longer has', async () => {
 		const { destination, metadata, token } = await reusedPathWithSourceBundle(
@@ -3886,6 +3959,46 @@ describe('attestation attach and reads', () => {
 				narInfoGenerationSchema.parse(0),
 				narInfoGenerationSchema.parse(1)
 			]
+		});
+		const retired = await flushDeletionQueue();
+		const queued = await runInDurableObject(fixtureWorkerServer(), (instance) =>
+			instance.context.db
+				.select({ generation: schema.narInfoDeletions.generation })
+				.from(schema.narInfoDeletions)
+				.where(
+					eq(
+						schema.narInfoDeletions.cacheId,
+						resolvedCache(instance.context, cache).id
+					)
+				)
+				.all()
+		);
+		const remaining = await database
+			.select({ generation: d1Schema.attestationReference.generation })
+			.from(d1Schema.attestationReference)
+			.where(eq(d1Schema.attestationReference.digest, digest));
+		const list = await readFetch(
+			`/cache/${cache.name}/attestations/${metadata.storePathHash}`,
+			{ headers: { authorization: `Bearer ${token}` } }
+		);
+		const served = await readFetch(
+			`/cache/${cache.name}/attestation-bundles/${digest}`,
+			{ headers: { authorization: `Bearer ${token}` } }
+		);
+		// The flush counts deleted narinfo objects. Generation 1 owns the object,
+		// so retiring generation 0 deletes none.
+		expect({
+			retired,
+			queued,
+			generations: remaining.map((row) => row.generation),
+			listStatus: list.status,
+			bundle: new Uint8Array(await served.arrayBuffer())
+		}).toStrictEqual({
+			retired: 0,
+			queued: [],
+			generations: [narInfoGenerationSchema.parse(1)],
+			listStatus: StatusCodes.OK,
+			bundle
 		});
 	});
 
@@ -4603,6 +4716,35 @@ function attestationsFor(context: ServerContext): AttestationsService {
 	);
 }
 
+// Empties the fixture tenant's Durable Object and resets its instance, so a
+// test starts without the queue entries, caches and maintenance state that
+// earlier tests left in it.
+async function emptyFixtureServer(): Promise<void> {
+	await runInDurableObject(fixtureWorkerServer(), async (instance, state) => {
+		await instance.purgeStorage();
+		await state.storage.deleteAlarm();
+	});
+	await restartTestServers();
+}
+
+function testWorkerServer(instance: CupboardServer): TestCupboardServer {
+	if (!(instance instanceof TestCupboardServer)) {
+		throw new TypeError('The fixture object must run the test worker class.');
+	}
+
+	return instance;
+}
+
+// Runs the garbage-collection flush of the deletion queue and returns the
+// number of narinfo objects that it deleted.
+async function flushDeletionQueue(): Promise<number> {
+	return runInDurableObject(fixtureWorkerServer(), (instance) =>
+		instance.context.criticalSection(() =>
+			deletionQueueFor(instance.context).flushQueuedNarInfoDeletions()
+		)
+	);
+}
+
 // Runs one drain of the inheritance queue, as the maintenance alarm does.
 async function drainInheritance(): Promise<MaintenanceProgress> {
 	const outcome = await runInDurableObject(fixtureWorkerServer(), (instance) =>
@@ -4633,6 +4775,91 @@ async function deleteFixtureSource(
 			internalOrigin
 		)
 	);
+}
+
+// The default cache's read revocation fence for the path.
+function readRevocationFence(
+	storePathHash: ReturnType<typeof storePathHashSchema.parse>
+) {
+	const fence = d1Schema.pathReadRevocation;
+
+	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ generation: fence.generation })
+		.from(fence)
+		.where(
+			and(
+				eq(fence.tenant, fixtureTenant),
+				eq(fence.cacheKind, 'default'),
+				eq(fence.storePathHash, storePathHash)
+			)
+		)
+		.get();
+}
+
+// Deletes the path from the default cache through a D1 binding that fails the
+// read revocation batch, either before or after the batch writes the fence.
+async function interruptExplicitDeletion(
+	storePathHash: ReturnType<typeof storePathHashSchema.parse>,
+	boundary: 'before-revocation' | 'after-revocation'
+) {
+	return runInDurableObject(fixtureWorkerServer(), async (instance, state) => {
+		const injected = new Error('interrupted explicit deletion');
+		const inner = instance.context.env.CUPBOARD_DB;
+		let isRevocation = false;
+		let atFailure:
+			| {
+					readonly fence: Awaited<ReturnType<typeof readRevocationFence>>;
+					readonly pending: unknown;
+			  }
+			| undefined;
+		const binding: D1Database = {
+			prepare(query) {
+				if (query.startsWith('insert into "path_read_revocation"')) {
+					isRevocation = true;
+				}
+				return inner.prepare(query);
+			},
+			async batch<T>(statements: D1PreparedStatement[]) {
+				if (!isRevocation) {
+					return inner.batch<T>(statements);
+				}
+
+				isRevocation = false;
+				if (boundary === 'after-revocation') {
+					await inner.batch<T>(statements);
+				}
+
+				// Read before the deletion's critical section closes. After that, a
+				// garbage-collection pass can write the fence for the queued explicit
+				// deletion.
+				atFailure = {
+					fence: await readRevocationFence(storePathHash),
+					pending: await state.storage.get(pathReadDemotionPendingKey)
+				};
+				throw injected;
+			},
+			exec: (query) => inner.exec(query),
+			withSession: (constraint) => inner.withSession(constraint),
+			dump: () =>
+				Promise.reject(new Error('The fault fixture does not dump D1.'))
+		};
+		const context = new ServerContext(state, {
+			...instance.context.env,
+			CUPBOARD_DB: binding
+		});
+
+		try {
+			await deletionQueueFor(context).deleteStorePath(
+				defaultCacheScope,
+				storePathHash,
+				internalOrigin
+			);
+		} catch (error) {
+			return { interrupted: error === injected, atFailure };
+		}
+
+		return { interrupted: false, atFailure };
+	});
 }
 
 // Publishes a path to the default cache with one bundle, then publishes it to a

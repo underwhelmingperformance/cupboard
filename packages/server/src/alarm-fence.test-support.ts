@@ -84,3 +84,26 @@ export function closeAlarmFence(state: DurableObjectState): void {
 	fenceDepths.delete(id);
 	restoreArming(state.storage);
 }
+
+const ignoredDeliveries = new Set<string>();
+
+/**
+Makes the test worker's `CupboardServer` ignore alarms that workerd delivers
+to the object, until {@link deliverAlarms} is called. A test then runs each
+pass itself with `runAlarmPass`.
+
+Workerd delivers an alarm that is already due even after `deleteAlarm`, and
+an alarm fence only stops new arming. The set is kept by object ID, so it
+also applies to an instance that replaces the object.
+*/
+export function ignoreAlarmDeliveries(id: DurableObjectId): void {
+	ignoredDeliveries.add(id.toString());
+}
+
+export function deliverAlarms(id: DurableObjectId): void {
+	ignoredDeliveries.delete(id.toString());
+}
+
+export function isAlarmDeliveryIgnored(state: DurableObjectState): boolean {
+	return ignoredDeliveries.has(state.id.toString());
+}

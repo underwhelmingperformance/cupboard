@@ -1,6 +1,7 @@
 import {
 	applyAlarmFence,
 	closeAlarmFence,
+	isAlarmDeliveryIgnored,
 	isAlarmFenceOpen,
 	openAlarmFence
 } from './alarm-fence.test-support.ts';
@@ -28,8 +29,16 @@ export class CupboardServer extends ProductionCupboardServer {
 		await this.#testState.storage.deleteAlarm();
 	}
 
+	override alarm(): Promise<void> {
+		if (isAlarmDeliveryIgnored(this.#testState)) {
+			return Promise.resolve();
+		}
+
+		return super.alarm();
+	}
+
 	runAlarmPass(): Promise<void> {
-		return this.alarm();
+		return super.alarm();
 	}
 
 	endManualAlarms(): void {
