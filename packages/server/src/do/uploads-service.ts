@@ -556,7 +556,8 @@ export class UploadsService {
 		});
 		if (identity.id !== entry.operationId) {
 			throw new PublicationConflictError(
-				'The publication identity does not match its parameters.'
+				'The publication identity does not match its parameters.',
+				'parameters-changed'
 			);
 		}
 		const operations = new PublicationStore(this.context);
@@ -567,13 +568,19 @@ export class UploadsService {
 			entry.blob !== undefined &&
 			original.blobJson !== JSON.stringify(entry.blob)
 		) {
-			throw new PublicationConflictError('The compressed declaration changed.');
+			throw new PublicationConflictError(
+				'The compressed declaration changed.',
+				'declaration-changed'
+			);
 		}
 		if (
 			original !== undefined &&
 			original.canonicalJson !== identity.canonical
 		) {
-			throw new PublicationConflictError('The publication parameters changed.');
+			throw new PublicationConflictError(
+				'The publication parameters changed.',
+				'parameters-changed'
+			);
 		}
 		if (
 			original === undefined &&
@@ -725,7 +732,8 @@ export class UploadsService {
 					current.blobJson !== declared
 				) {
 					throw new PublicationConflictError(
-						'The compressed declaration changed.'
+						'The compressed declaration changed.',
+						'declaration-changed'
 					);
 				}
 				const graceSeconds = this.retention.resolveGraceSeconds(cache);

@@ -665,14 +665,18 @@ accepts one `resend` for each subscription.
 
 The releases v0.0.47 to v0.0.49 accept `publication-v1` but not
 `publication-refusal-reasons`. They know only six refusal reasons and fail the
-whole session on any other reason, so the server does not send them `resend`.
-When such a client subscribes to an operation that needs work, the server admits
-the entry as it admits a `publish-batch` entry. The client does not count a
+whole session on any other reason, so the server does not send them `resend`,
+`declaration-changed` or `parameters-changed`. A client that accepts
+`publication-refusal-reasons` fails only the refused entry when it does not know
+a reason, so a later reason needs no new capability. When a client without the
+capability subscribes to an operation that needs work, the server admits the
+entry as it admits a `publish-batch` entry. The client does not count a
 subscription against its grant, so the entry counts as one in-flight entry of
 the tenant's commit credit while it runs, even when the tenant has no
 unallocated credit. Every subscribed entry runs under the tenant's commit entry
 semaphore, so these entries exceed the tenant's credit budget by at most the
-semaphore's size.
+semaphore's size. A changed declaration and changed parameters are refused with
+`invalid-publication` and status 409.
 
 For both protocols, the client opens its publication session on the first commit
 or upload renewal. Capability probing uses a separate connection and completes

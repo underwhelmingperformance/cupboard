@@ -1634,7 +1634,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				identity.canonical !== operation.canonicalJson
 			) {
 				throw new PublicationConflictError(
-					'The publication parameters changed.'
+					'The publication parameters changed.',
+					'parameters-changed'
 				);
 			}
 			if (operation.state === 'servable') {
@@ -4422,6 +4423,10 @@ function releasedRefusalReason(
 	switch (reason) {
 		case 'resend': {
 			return 'temporary-failure';
+		}
+		case 'declaration-changed':
+		case 'parameters-changed': {
+			return 'invalid-publication';
 		}
 		default: {
 			return reason;

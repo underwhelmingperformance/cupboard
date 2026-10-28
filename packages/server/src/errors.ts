@@ -49,7 +49,10 @@ export class PublicationConflictError extends ServerHttpError {
 	constructor(
 		message: string,
 		readonly reason:
-			'generation-conflict' | 'invalid-publication' = 'invalid-publication'
+			| 'generation-conflict'
+			| 'declaration-changed'
+			| 'parameters-changed'
+			| 'invalid-publication' = 'invalid-publication'
 	) {
 		super(message);
 		this.name = 'PublicationConflictError';

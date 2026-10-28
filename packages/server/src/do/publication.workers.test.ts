@@ -381,11 +381,12 @@ it('refuses a plan after its cache is deleted and reports the next generation', 
 				}
 			]
 		});
-		expect(await conversation.nextFrame()).toMatchObject({
+		expect(refusalFacts(await conversation.nextFrame())).toStrictEqual({
 			ev: 'publication-refused',
 			uploadId: first.operationId,
 			reason: 'generation-conflict',
-			status: 409
+			status: StatusCodes.CONFLICT,
+			hasMessage: true
 		});
 		const replanned = await authorisedFetch(
 			'/cache/recreated/uploads/plan',
@@ -449,14 +450,15 @@ it('replays a completed publication after pending cleanup and recovery expiry', 
 			uploadId: first.operationId
 		});
 		const outcome = await conversation.nextFrame();
-		expect(outcome).toMatchObject({
+		expect(outcome).toStrictEqual({
 			ev: 'settled',
 			uploadId: first.operationId,
 			response: {
 				status: 'already-present',
 				storePathHash: metadata.storePathHash,
 				narHash: metadata.narHash
-			}
+			},
+			grace: {}
 		});
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
@@ -602,7 +604,7 @@ it.each(
 	}
 );
 
-it('recovers a newly uploaded publication after disconnect and rejects a changed declaration', async () => {
+it('recovers a newly uploaded publication after disconnect and rejects changed inputs', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
 	const token = await initialise();
@@ -646,8 +648,13 @@ it('recovers a newly uploaded publication after disconnect and rejects a changed
 			ev: 'publication-accepted',
 			uploadId: first.operationId
 		});
-		const result = await conversation.nextFrame();
-		expect(['settled', 'deferred']).toContain(result.ev);
+		expect(await conversation.nextFrame()).toStrictEqual({
+			ev: 'deferred',
+			uploadId: first.operationId,
+			storePathHash: metadata.storePathHash,
+			narHash: metadata.narHash,
+			grace: {}
+		});
 	} finally {
 		conversation.socket.close();
 	}
@@ -670,10 +677,15 @@ it('recovers a newly uploaded publication after disconnect and rejects a changed
 			pushId: testPushId,
 			entries: [entry]
 		});
-		expect(await reconnected.nextFrame()).toMatchObject({
+		expect(await reconnected.nextFrame()).toStrictEqual({
 			ev: 'settled',
 			uploadId: first.operationId,
-			response: { status: 'already-present', narHash: metadata.narHash }
+			response: {
+				status: 'already-present',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash
+			},
+			grace: {}
 		});
 		reconnected.send({
 			op: 'publish-batch',
@@ -682,11 +694,24 @@ it('recovers a newly uploaded publication after disconnect and rejects a changed
 				{ ...entry, blob: { ...entry.blob, fileSize: entry.blob.fileSize + 1 } }
 			]
 		});
-		expect(await reconnected.nextFrame()).toMatchObject({
+		expect(refusalFacts(await reconnected.nextFrame())).toStrictEqual({
 			ev: 'publication-refused',
 			uploadId: first.operationId,
+			reason: 'declaration-changed',
+			status: StatusCodes.CONFLICT,
+			hasMessage: true
+		});
+		reconnected.send({
+			op: 'publish-batch',
+			pushId: testPushId,
+			entries: [{ ...entry, metadata: { ...path, narSize: path.narSize + 1 } }]
+		});
+		expect(refusalFacts(await reconnected.nextFrame())).toStrictEqual({
+			ev: 'publication-refused',
+			uploadId: first.operationId,
+			reason: 'parameters-changed',
 			status: 409,
-			message: 'The compressed declaration changed.'
+			hasMessage: true
 		});
 		expect(await snapshot()).toStrictEqual(completed);
 	} finally {
@@ -787,12 +812,12 @@ it.each([-1, 0])(
 				pushId: testPushId,
 				entries: [entry]
 			});
-			expect(await conversation.nextFrame()).toStrictEqual({
+			expect(refusalFacts(await conversation.nextFrame())).toStrictEqual({
 				ev: 'publication-refused',
 				uploadId: first.operationId,
 				reason: 'recovery-expired',
 				status: 503,
-				message: 'The upload recovery deadline expired. Start a fresh push.'
+				hasMessage: true
 			});
 			const claims = await currentServer().claimVerificationBatch(
 				10,
@@ -1296,6 +1321,91 @@ describe('publication commit credit', () => {
 		}
 	});
 
+	it.each([
+		{
+			capabilities: releasedPublication,
+			declaration: 'invalid-publication',
+			parameters: 'invalid-publication'
+		},
+		{
+			capabilities: creditedPublication,
+			declaration: 'declaration-changed',
+			parameters: 'parameters-changed'
+		}
+	] as const)(
+		'refuses changed publication inputs with $declaration and $parameters for a session that accepts $capabilities',
+		async ({ capabilities, declaration, parameters }) => {
+			vi.setSystemTime(vi.getRealSystemTime());
+			const token = await initialise();
+			const nar = await verifiableNar('publication-changed-inputs');
+			const [planned] = await plannedEntries(token, '/uploads/plan', [
+				uploadPathNegotiation(
+					uploadMetadata({
+						fileSize: nar.narBytes.byteLength,
+						fileHash: nar.fileHash,
+						narHash: nar.narHash,
+						narSize: nar.narSize
+					})
+				)
+			]);
+			if (planned === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			const blob = {
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			};
+			const entry = { ...planned, blob };
+			await putNarBytes(
+				publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+				nar
+			);
+			const session = await openCommitSession(
+				token,
+				defaultCache(),
+				capabilities
+			);
+			const answers = [];
+			try {
+				session.send({
+					op: 'publish-batch',
+					pushId: testPushId,
+					entries: [entry]
+				});
+				await session.nextFrame();
+				await session.nextFrame();
+				for (const changed of [
+					{ ...entry, blob: { ...blob, fileSize: blob.fileSize + 1 } },
+					{
+						...entry,
+						metadata: {
+							...entry.metadata,
+							narSize: entry.metadata.narSize + 1
+						}
+					}
+				]) {
+					session.send({
+						op: 'publish-batch',
+						pushId: testPushId,
+						entries: [changed]
+					});
+					answers.push(refusalFacts(await session.nextFrame()));
+				}
+			} finally {
+				await closeSessionAndWait(session.socket);
+			}
+			expect(answers).toStrictEqual(
+				[declaration, parameters].map((reason) => ({
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason,
+					status: StatusCodes.CONFLICT,
+					hasMessage: true
+				}))
+			);
+		}
+	);
+
 	it.each(['commit', 'commit-batch'] as const)(
 		"answers each entry of a %s message whose cache does not exist, and leaves the session's credit equal to the client's count",
 		async (op) => {
@@ -1554,6 +1664,49 @@ describe('publication subscriptions', () => {
 				uploadId: entry.operationId,
 				reason: 'push-expired',
 				status: StatusCodes.SERVICE_UNAVAILABLE,
+				hasMessage: true
+			});
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('refuses a subscription whose parameters differ from the accepted operation', async () => {
+		const token = await initialise();
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			distinctPath('1')
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			await session.nextFrame();
+			await session.nextFrame();
+			session.send({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [
+					{
+						...entry,
+						metadata: { ...entry.metadata, narSize: entry.metadata.narSize + 1 }
+					}
+				]
+			});
+			expect(refusalFacts(await session.nextFrame())).toStrictEqual({
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'parameters-changed',
+				status: StatusCodes.CONFLICT,
 				hasMessage: true
 			});
 		} finally {
