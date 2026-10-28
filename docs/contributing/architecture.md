@@ -648,13 +648,21 @@ retain their resulting path identity after pending cleanup.
 Unfinished recovery stops 24 hours after first acceptance. Push expiry does not
 cancel accepted work, but prevents new operations and new transfers. Claims,
 verification requests and the D1 publication fence enforce the recovery
-deadline; late workers cannot publish. Expiry first checks durable completion,
-then releases unfinished reservations through recoverable cleanup. Successful
-publications use ordinary canonical-object retention. Terminal operation records
-are pruned after the later of push expiry and recovery expiry, plus 15 minutes.
-A completed replay in `publish-batch` rechecks availability; repair requires the
-original lease and recovery window. Otherwise the client must start a fresh
-push.
+deadline, so a worker cannot charge a commit after it. Expiry first checks
+durable completion. When the path's current generation with the operation's NAR
+was charged before the deadline, by this upload or another one, expiry publishes
+the narinfo object if it is missing and then completes the operation with its
+grace and run root, whether or not another started commit shares the
+reservation. A failed publish leaves the operation accepted for the next expiry
+run. An operation whose charged path cannot be served, for example because its
+NAR is gone, expires with the verdict `absent`, and the path keeps its row for a
+later upload to restore or replace. Expiry releases the reservation of an
+unfinished operation through recoverable cleanup, unless another started commit
+shares it. Successful publications use ordinary canonical-object retention.
+Terminal operation records are pruned after the later of push expiry and
+recovery expiry, plus 15 minutes. A completed replay in `publish-batch` rechecks
+availability; repair requires the original lease and recovery window. Otherwise
+the client must start a fresh push.
 
 Reconnects resend complete unacknowledged entries and use
 `subscribe-publication` for acknowledged operations. Capability loss after an

@@ -447,7 +447,32 @@ export class UploadStateService {
 		owner?: string,
 		absentPublication: AbsentPublication = 'keep-publication-accepted'
 	): Promise<PendingUploadRow | undefined> {
-		const deleted = this.context.db.transaction(() => {
+		const deleted = this.clearPendingUploadRow(
+			uploadId,
+			conclusion,
+			owner,
+			absentPublication
+		);
+		if (deleted === undefined) {
+			return undefined;
+		}
+		await this.concludeClearedUpload(deleted, conclusion);
+		return deleted;
+	}
+
+	/**
+	The local part of {@link clearPendingUpload}: it removes the row and records
+	the publication operation's outcome in one transaction. The caller then
+	passes the deleted row to {@link concludeClearedUpload}, which writes to D1,
+	so a caller inside the input gate can do that after the gate.
+	*/
+	clearPendingUploadRow(
+		uploadId: UploadId,
+		conclusion: UploadConclusion,
+		owner?: string,
+		absentPublication: AbsentPublication = 'keep-publication-accepted'
+	): PendingUploadRow | undefined {
+		return this.context.db.transaction(() => {
 			const [deleted] = this.context.db
 				.delete(schema.pendingUploads)
 				.where(
@@ -479,16 +504,16 @@ export class UploadStateService {
 
 			return deleted;
 		});
-		if (deleted === undefined) {
-			return undefined;
-		}
+	}
 
+	async concludeClearedUpload(
+		deleted: PendingUploadRow,
+		conclusion: UploadConclusion
+	): Promise<void> {
 		// A terminal row concluded its promotion when it became terminal.
 		if (deleted.verdict === 'pending' || deleted.verdict === 'committing') {
 			await concludePromotion(this.context.d1, deleted, conclusion);
 		}
-
-		return deleted;
 	}
 
 	/**

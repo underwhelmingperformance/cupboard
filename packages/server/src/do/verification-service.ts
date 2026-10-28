@@ -60,6 +60,7 @@ import * as schema from '../db/schema.ts';
 import {
 	ObjectIncarnationReservationContendedError,
 	PublicationExpiryPendingError,
+	PublicationStateChangedError,
 	StagedObjectDigestMismatchError,
 	SubrequestSliceExceededError,
 	TenantWritesStoppedError,
@@ -144,6 +145,9 @@ type PendingUploadRow = typeof schema.pendingUploads.$inferSelect;
 export const pendingSettlePrefetchSubrequests = 2;
 
 const maxExpiredPublicationsPerRun = 25;
+// Expiry reads its state again at most this many times when the state changes
+// during its D1 and R2 reads.
+const maxExpiryReads = 3;
 
 // A claim reads this many claimable rows beyond the rows that it needs, so it
 // can skip the expired rows of up to 25 operations, which is the number that
@@ -456,6 +460,42 @@ Authenticated reads and the availability probe refuse such an object, but a
 public read serves it.
 */
 type NarInfoObjectState = 'current' | 'missing' | 'obsolete' | 'unrecorded';
+
+interface ExpiryState {
+	readonly operation?: typeof schema.publicationOperations.$inferSelect;
+	readonly pending?: PendingUploadRow;
+	readonly metadata?: UploadPathNegotiation;
+	readonly cache?: ResolvedCache;
+	readonly row?: NarInfoRow;
+}
+
+type ExpiryOutcome =
+	| { readonly kind: 'done' | 'changed' }
+	| {
+			readonly kind: 'cleared';
+			readonly cleared: PendingUploadRow;
+			readonly verdict: 'servable' | 'absent';
+	  };
+
+// The state of the generation in the path's row, as expiry reads it before its
+// gate: no charged commit, a charged commit whose narinfo object is published,
+// or a charged commit that Nix cannot fetch because its NAR is missing.
+type ExpiryCommit = 'uncharged' | 'servable' | 'unservable';
+
+function expiryStateKey(state: ExpiryState): string {
+	return JSON.stringify({
+		operation: state.operation ?? 'none',
+		pending: state.pending ?? 'none',
+		cache:
+			state.cache === undefined
+				? 'none'
+				: { id: state.cache.id, generation: state.cache.generation },
+		row:
+			state.row === undefined
+				? 'none'
+				: { generation: state.row.generation, narHash: state.row.narHash }
+	});
+}
 
 // The generation that verification had committed when the caller read a
 // shared reservation, or nothing when it had not.
@@ -1754,23 +1794,37 @@ export class VerificationService {
 		if (!isCommitted || !(await this.isCurrentNarPresent(metadata.narHash))) {
 			return 'continue';
 		}
+		// The verdict applies while the path's row keeps the generation, which
+		// the gate checks.
+		const verdict = await this.publicationVerdict(
+			pending,
+			metadata,
+			generation
+		);
 		return this.whileDeletingStaging(pending, async () => {
-			const result = await this.context.criticalSection(() =>
+			const cleared = await this.context.criticalSection(() =>
 				this.finaliseIfAlreadyCommittedLocked(
 					logger,
 					pending,
 					metadata,
 					generation,
+					verdict,
 					owner,
 					signal
 				)
 			);
-
-			if (result === 'applied') {
-				await this.deleteStagingObjectBestEffort(pending, signal);
+			if (cleared === 'continue' || cleared === 'ignored') {
+				return cleared;
 			}
 
-			return result;
+			this.notifyWaiters(cleared, verdict);
+			await this.uploadState.concludeClearedUpload(cleared, {
+				logger,
+				outcome: verdict
+			});
+			await this.deleteStagingObjectBestEffort(pending, signal);
+
+			return 'applied';
 		});
 	}
 
@@ -1779,9 +1833,10 @@ export class VerificationService {
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
+		verdict: 'servable' | 'absent',
 		owner: string,
 		signal?: AbortSignal
-	): Promise<FinaliseCommittedResult> {
+	): Promise<'continue' | 'ignored' | PendingUploadRow> {
 		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return 'ignored';
 		}
@@ -1821,26 +1876,16 @@ export class VerificationService {
 		);
 
 		await this.inheritAfterCommit(pending, metadata, generation);
-		const verdict = await this.publicationVerdict(
-			pending,
-			metadata,
-			generation
-		);
 		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return 'ignored';
 		}
-		const cleared = await this.uploadState.clearPendingUpload(
-			pending.id,
-			{ logger, outcome: verdict },
-			owner
+		return (
+			this.uploadState.clearPendingUploadRow(
+				pending.id,
+				{ logger, outcome: verdict },
+				owner
+			) ?? 'ignored'
 		);
-		if (cleared === undefined) {
-			return 'ignored';
-		}
-
-		this.notifyWaiters(cleared, verdict);
-
-		return 'applied';
 	}
 
 	private async promoteForCommit(
@@ -2535,103 +2580,245 @@ export class VerificationService {
 		];
 	}
 
+	// The local state that expiry reads before its remote reads and again
+	// inside its gate.
+	private expiryState(id: UploadId): ExpiryState {
+		const operation = new PublicationStore(this.context).get(id);
+		const pending = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, id))
+			.get();
+		if (pending === undefined) {
+			return { operation };
+		}
+		const metadata = parseStoredUploadPathMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+		const cache = this.context.cacheRepository.resolve(
+			this.context.cacheRepository.scopeForId(pending.cacheId)
+		);
+		return {
+			operation,
+			pending,
+			metadata,
+			cache,
+			row:
+				cache === undefined
+					? undefined
+					: this.narInfoRow(cache.id, metadata.storePathHash)
+		};
+	}
+
+	// The commit reads, the narinfo object's publication and the staged object's
+	// delete run outside the input gate. When the local state that the reads
+	// saw changes before the gate, expiry reads it again.
 	private async expirePublication(
 		logger: Logger,
 		store: PublicationStore,
 		operation: typeof schema.publicationOperations.$inferSelect
 	): Promise<void> {
-		await this.context.criticalSection(async () => {
-			const current = store.get(operation.id);
-			if (current?.state !== 'accepted') {
+		for (let read = 0; read < maxExpiryReads; read += 1) {
+			const observed = this.expiryState(operation.id);
+			if (observed.operation?.state !== 'accepted') {
 				return;
 			}
-			const pending = this.context.db
-				.select()
-				.from(schema.pendingUploads)
-				.where(eq(schema.pendingUploads.id, operation.id))
-				.get();
-			if (pending !== undefined) {
-				const metadata = parseStoredUploadPathMetadata(
-					pending.id,
-					pending.metadataJson
+			const commit = await this.expiryCommit(observed);
+			const expire = async () => {
+				const outcome = await this.context.criticalSection(() =>
+					this.expireObserved(logger, store, observed, commit)
 				);
-				const cache = this.context.cacheRepository.resolve(
-					this.context.cacheRepository.scopeForId(pending.cacheId)
-				);
-				if (cache !== undefined) {
-					const row = this.narInfoRow(cache.id, metadata.storePathHash);
-					if (
-						row !== undefined &&
-						(await this.commitPipeline.isGenerationCommitted(
-							cache,
-							metadata,
-							row.generation
-						))
-					) {
-						confirmGrace(
-							this.context,
-							this.retention,
-							cache,
-							metadata.storePathHash,
-							row.generation,
-							metadata.narHash,
-							parseStoredGraceDecision(pending.graceDecisionJson)
-						);
-						this.commitPipeline.attachRootTarget(
-							cache,
-							pending.attachRootName,
-							metadata.storePathHash,
-							metadata.storePath,
-							pending.retentionEpoch
-						);
-						this.context.db
-							.update(schema.pendingUploads)
-							.set({ claimOwner: sql`null` })
-							.where(eq(schema.pendingUploads.id, pending.id))
-							.run();
-						const cleared = await this.uploadState.clearPendingUpload(
-							pending.id,
-							{ logger, outcome: 'servable' }
-						);
-						this.notifyWaiters(cleared ?? pending, 'servable');
-						return;
-					}
-					// Only a started commit reserves a narinfo row, and started
-					// commits of the same path and NAR share one reservation.
-					if (
-						row?.narHash === metadata.narHash &&
-						pending.verdict !== null &&
-						!this.uploadState.hasOtherStartedCommit(pending.id, cache, metadata)
-					) {
-						const result = await this.commitPipeline.reclaimReservedRow(
-							cache,
-							metadata.storePathHash,
-							row.generation,
-							row.narHash
-						);
-						if (result === 'reclaimed') {
-							this.pruneRetentionTargets(cache, metadata.storePathHash);
-						}
-					}
+				if (outcome.kind !== 'cleared') {
+					return outcome;
 				}
-				this.context.db
-					.update(schema.pendingUploads)
-					.set({ claimOwner: sql`null` })
-					.where(eq(schema.pendingUploads.id, pending.id))
-					.run();
-				const cleared = await this.uploadState.clearPendingUploadAndStaging(
-					pending.id,
-					pending.r2Key,
-					pending.narHash,
-					{ logger, outcome: 'absent' }
-				);
-				this.notifyWaiters(cleared ?? pending, 'absent');
+				// The gate recorded the outcome, so the session receives its verdict,
+				// and the operation counts as expired, even when the cleanup after the
+				// gate fails. Orphan staging collection deletes a staged object that
+				// the cleanup leaves.
+				this.notifyWaiters(outcome.cleared, outcome.verdict);
+				try {
+					await this.uploadState.concludeClearedUpload(outcome.cleared, {
+						logger,
+						outcome: outcome.verdict
+					});
+					if (outcome.verdict === 'absent') {
+						await this.uploadState.clearDeliveredNarRefresh(outcome.cleared.id);
+						await this.deleteStagingObject(outcome.cleared);
+					}
+				} catch (error) {
+					logger.warn('publication expiry cleanup failed', {
+						operationId: outcome.cleared.id,
+						error
+					});
+				}
+				return outcome;
+			};
+			const { pending } = observed;
+			const outcome =
+				pending === undefined || pending.r2Key === narObjectKey(pending.narHash)
+					? await expire()
+					: await this.context.stagingDeletes.around(pending.r2Key, expire);
+			if (outcome.kind === 'changed') {
+				continue;
 			}
-			store.finish(operation.id, 'expired');
+			return;
+		}
+		throw new PublicationStateChangedError();
+	}
+
+	// A verification charges the commit in D1 before it publishes the narinfo
+	// object, so a charged generation can lack its object. Publish the object
+	// here, before the gate completes the operation and its session receives
+	// `servable`. A failed publish throws, and the operation stays accepted for
+	// the next expiry run.
+	private async expiryCommit(observed: ExpiryState): Promise<ExpiryCommit> {
+		const { metadata, cache, row } = observed;
+		if (
+			metadata === undefined ||
+			cache === undefined ||
+			row?.narHash !== metadata.narHash ||
+			!(await this.commitPipeline.isGenerationCharged(
+				cache,
+				metadata,
+				row.generation
+			))
+		) {
+			return 'uncharged';
+		}
+		const versions = await this.narInfoObjects.servableNarInfoVersions(cache, [
+			metadata.storePathHash
+		]);
+		const served = versions.get(metadata.storePathHash);
+		if (
+			served?.generation === row.generation &&
+			served.narHash === row.narHash
+		) {
+			return 'servable';
+		}
+		// The charged path may have lost its NAR. The operation expires as
+		// `absent` and keeps the path's row, so a later upload of the path
+		// restores the NAR or replaces the row.
+		return 'unservable';
+	}
+
+	// Call inside the input gate. `expirePublication` read `observed` and
+	// `commit` before the gate. A charged generation stays charged while the
+	// path's row keeps it, so `commit` still applies when the state is
+	// unchanged.
+	private async expireObserved(
+		logger: Logger,
+		store: PublicationStore,
+		observed: ExpiryState,
+		commit: ExpiryCommit
+	): Promise<ExpiryOutcome> {
+		const id = observed.operation?.id;
+		if (id === undefined) {
+			return { kind: 'done' };
+		}
+		const current = this.expiryState(id);
+		if (current.operation?.state !== 'accepted') {
+			return { kind: 'done' };
+		}
+		if (expiryStateKey(current) !== expiryStateKey(observed)) {
+			return { kind: 'changed' };
+		}
+		const { pending, metadata, cache, row } = current;
+		if (pending === undefined || metadata === undefined) {
+			store.finish(id, 'expired');
 			logger.debug('publication recovery expired', {
-				operationId: operation.id,
-				recoveryDeadline: operation.recoveryDeadline
+				operationId: id,
+				recoveryDeadline: current.operation.recoveryDeadline
 			});
+			return { kind: 'done' };
+		}
+		if (cache !== undefined && row !== undefined && commit === 'servable') {
+			return this.completeExpiring(logger, pending, metadata, cache, row);
+		}
+		// Only a started commit reserves a narinfo row, and started commits of
+		// the same path and NAR share one reservation. The reclaim reads the
+		// reservation's D1 edge inside the gate: before the gate, another commit
+		// of the reservation could still commit it and clear its own pending row,
+		// and the reclaim would then delete a published path.
+		if (
+			commit === 'uncharged' &&
+			cache !== undefined &&
+			row?.narHash === metadata.narHash &&
+			pending.verdict !== null &&
+			!this.uploadState.hasOtherStartedCommit(pending.id, cache, metadata)
+		) {
+			const result = await this.commitPipeline.reclaimReservedRow(
+				cache,
+				metadata.storePathHash,
+				row.generation,
+				row.narHash
+			);
+			if (result === 'committed-current') {
+				// A commit was charged after the read before the gate. Read again,
+				// so that expiry publishes the narinfo object before it completes
+				// the operation.
+				return { kind: 'changed' };
+			}
+			if (result === 'reclaimed') {
+				this.pruneRetentionTargets(cache, metadata.storePathHash);
+			}
+		}
+		const cleared = this.clearExpiredUpload(pending.id, logger, 'absent');
+		store.finish(id, 'expired');
+		logger.debug('publication recovery expired', {
+			operationId: id,
+			recoveryDeadline: current.operation.recoveryDeadline
+		});
+		return cleared === undefined
+			? { kind: 'done' }
+			: { kind: 'cleared', cleared, verdict: 'absent' };
+	}
+
+	// Completes an expiring operation whose generation is committed, inside the
+	// gate that proved it.
+	private async completeExpiring(
+		logger: Logger,
+		pending: PendingUploadRow,
+		metadata: UploadPathNegotiation,
+		cache: ResolvedCache,
+		row: NarInfoRow
+	): Promise<ExpiryOutcome> {
+		confirmGrace(
+			this.context,
+			this.retention,
+			cache,
+			metadata.storePathHash,
+			row.generation,
+			metadata.narHash,
+			parseStoredGraceDecision(pending.graceDecisionJson)
+		);
+		this.commitPipeline.attachRootTarget(
+			cache,
+			pending.attachRootName,
+			metadata.storePathHash,
+			metadata.storePath,
+			pending.retentionEpoch
+		);
+		await this.inheritAfterCommit(pending, metadata, row.generation);
+		const cleared = this.clearExpiredUpload(pending.id, logger, 'servable');
+		return cleared === undefined
+			? { kind: 'done' }
+			: { kind: 'cleared', cleared, verdict: 'servable' };
+	}
+
+	private clearExpiredUpload(
+		uploadId: UploadId,
+		logger: Logger,
+		outcome: 'servable' | 'absent'
+	): PendingUploadRow | undefined {
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ claimOwner: sql`null` })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
+		return this.uploadState.clearPendingUploadRow(uploadId, {
+			logger,
+			outcome
 		});
 	}
 
@@ -4280,9 +4467,9 @@ export class VerificationService {
 		) {
 			return;
 		}
-		// A failure leaves the operation accepted, and the next expiry run can
-		// still confirm it. The caller refuses the entry with a retryable error,
-		// and the client sends the entry again.
+		// A failure before the gate leaves the operation accepted, and the next
+		// expiry run can still confirm it. The caller refuses the entry with a
+		// retryable error, and the client sends the entry again.
 		try {
 			await this.expirePublication(logger, store, operation);
 		} catch (error) {
