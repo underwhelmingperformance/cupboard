@@ -1832,6 +1832,8 @@ export class GarbageCollectionService {
 	): ExpiredRowCollection {
 		const hasMoreRefreshCredentialMaintenance =
 			this.collectRefreshCredentialMaintenance(now);
+		const hasMoreReplacementCleanups =
+			this.deletionQueue.queueDueReplacementCleanups(now);
 		const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
 		const hasMoreExpiredSubjectNonces = this.collectExpiredSubjectNonces(now);
 
@@ -1903,6 +1905,7 @@ export class GarbageCollectionService {
 			hasMorePendingRows,
 			hasMoreWork:
 				hasMoreRefreshCredentialMaintenance ||
+				hasMoreReplacementCleanups ||
 				expiredRefreshFamilies.hasMoreWork ||
 				hasMoreExpiredSubjectNonces ||
 				hasMorePendingRows,

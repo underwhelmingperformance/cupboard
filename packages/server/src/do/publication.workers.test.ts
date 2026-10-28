@@ -2,8 +2,10 @@ import { rootLogger } from '@cupboard/logger';
 import {
 	cacheGenerationSchema,
 	type CacheScope,
+	graceSecondsSchema,
 	narInfoGenerationSchema,
-	rootNameSchema
+	rootNameSchema,
+	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { publicationStagingKey } from '@cupboard/protocol/publication';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -26,11 +28,19 @@ import { sessionIdSchema, uploadIdSchema } from '@cupboard/protocol/upload';
 import { CountingSemaphore } from '@cupboard/shared/concurrency';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq, isNotNull, sql } from 'drizzle-orm';
+import { eq, is, isNotNull, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { SQLiteSelectBase } from 'drizzle-orm/sqlite-core';
 import { StatusCodes } from 'http-status-codes';
 import { decodeJwt } from 'jose';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type MockInstance,
+	vi
+} from 'vitest';
 
 import { PushCredentialIssuer } from '../blob/push-credential.ts';
 import { resumeTenant } from '../control/tenant-registry.ts';
@@ -49,10 +59,12 @@ import {
 	commitCreditAccept,
 	commitPath,
 	commitUpload,
+	CommitVerdictError,
 	currentNarObjectKey,
 	currentServer,
 	defaultCache,
 	deletePath,
+	garbageCollectionOf,
 	initialise,
 	namedCache,
 	nixSha256Hash,
@@ -73,11 +85,13 @@ import {
 
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
+import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	publicationFailureJson,
 	PublicationStore
 } from './publication-store.ts';
+import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { type CupboardServer } from './server.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService } from './uploads-service.ts';
@@ -950,9 +964,14 @@ could not reach the object while the input gate is closed.
 */
 class GateProbe {
 	private running = 0;
+	private passed = 0;
 	private isStopped = false;
 	readonly calls: boolean[] = [];
 	readonly pause = new DurableObjectPause();
+
+	// The probe lets `skipped` calls made outside a critical section run before
+	// it stops one.
+	constructor(private readonly skipped = 0) {}
 
 	// Called inside the Durable Object.
 	watch(context: CupboardServer['context']) {
@@ -973,10 +992,15 @@ class GateProbe {
 	async around<T>(call: () => Promise<T>): Promise<T> {
 		const isInGate = this.running > 0;
 		this.calls.push(isInGate);
-		if (!isInGate && !this.isStopped) {
-			this.isStopped = true;
-			await this.pause.stop();
+		if (isInGate || this.isStopped) {
+			return call();
 		}
+		if (this.passed < this.skipped) {
+			this.passed += 1;
+			return call();
+		}
+		this.isStopped = true;
+		await this.pause.stop();
 		return call();
 	}
 
@@ -2399,6 +2423,113 @@ async function expectNoFurtherFrame(
 	});
 }
 
+// Commits an entry's uploaded bytes and runs verification. Returns the commit's
+// status, or the verdict that failed the commit.
+async function commitOutcome(token: string, uploadId: UploadId) {
+	try {
+		const response = await commitUpload(token, uploadId);
+		return response.status;
+	} catch (error) {
+		if (error instanceof CommitVerdictError) {
+			return error.verdict;
+		}
+		throw error;
+	}
+}
+
+// Commits a path with the NAR `lost`, deletes that NAR, and stages a commit of
+// the path with another NAR for verification. The commit waits for
+// verification, so the caller decides when verification runs.
+async function lostPathUpload(token: string, label: string) {
+	const lost = await verifiableNar(`${label}-lost`);
+	await commitPath(
+		token,
+		uploadMetadata({
+			fileSize: lost.narBytes.byteLength,
+			fileHash: lost.fileHash,
+			narHash: lost.narHash,
+			narSize: lost.narSize
+		}),
+		lost
+	);
+	const canonical = await currentNarObjectKey(lost.narHash);
+	const stored = await env.BLOBS.get(canonical);
+	if (stored === null) {
+		throw new Error('Expected the canonical NAR');
+	}
+	const lostBytes = await stored.arrayBuffer();
+	await env.BLOBS.delete(canonical);
+	const nar = await verifiableNar(`${label}-replacement`);
+	const metadata = uploadMetadata({
+		fileSize: nar.narBytes.byteLength,
+		fileHash: nar.fileHash,
+		narHash: nar.narHash,
+		narSize: nar.narSize
+	});
+	const [planned] = await plannedEntries(token, '/uploads/plan', [
+		uploadPathNegotiation(metadata)
+	]);
+	if (planned === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	const entry = {
+		...planned,
+		blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+	};
+	await admit(token, testPushId, entry);
+	await putNarBytes(
+		publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+		nar
+	);
+	const committed = await commitUpload(
+		token,
+		entry.operationId,
+		defaultCache(),
+		{ wait: false }
+	);
+	return { lost, canonical, lostBytes, nar, metadata, entry, committed };
+}
+
+// The start of the first statement of a charge batch.
+const chargeGateQuery =
+	'select "tenant"."status", "tenant_usage"."tenant" from "tenant"';
+
+// The path's local row, its D1 reference edges and the generations of its
+// queued replacement cleanups, in generation order.
+async function pathRowAndEdges(storePathHash: StorePathHash) {
+	const edges = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({
+			generation: d1Schema.blobReference.generation,
+			narHash: d1Schema.blobReference.narHash
+		})
+		.from(d1Schema.blobReference)
+		.where(eq(d1Schema.blobReference.storePathHash, storePathHash))
+		.orderBy(d1Schema.blobReference.generation)
+		.all();
+	const local = await runInDurableObject(currentServer(), (instance) => {
+		const { db } = instance.context;
+		const cleanups = schema.replacementChargeCleanups;
+		return Promise.resolve({
+			row: db
+				.select({
+					generation: schema.narInfos.generation,
+					narHash: schema.narInfos.narHash
+				})
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.get(),
+			cleanups: db
+				.select({ generation: cleanups.generation })
+				.from(cleanups)
+				.where(eq(cleanups.storePathHash, storePathHash))
+				.orderBy(cleanups.generation)
+				.all()
+				.map((cleanup) => cleanup.generation)
+		});
+	});
+	return { row: local.row, edges, cleanups: local.cleanups };
+}
+
 describe('publication subscriptions to terminal operations', () => {
 	beforeEach(async () => {
 		vi.setSystemTime(vi.getRealSystemTime());
@@ -3702,6 +3833,905 @@ describe('publication admission of an operation that changes state', () => {
 			head.mockRestore();
 			await closeSessionAndWait(session.socket);
 		}
+	});
+
+	it('reads the availability of a completed operation outside the input gate when it repairs it', async () => {
+		const token = await initialise();
+		const { entry, pushId } = await completedPublication(
+			token,
+			'publication-repair-outside-gate'
+		);
+		await deletePath(token, entry.metadata.storePathHash);
+		// Each availability check reads the path's narinfo object. The first
+		// check runs before admission enters a gate, so the probe stops the
+		// second.
+		const probe = new GateProbe(1);
+		const spies = await runInDurableObject(currentServer(), (instance) => {
+			const cache = instance.context.cacheRepository.require(defaultCache());
+			const object = new NarInfoObjectsService(instance.context).objectKey(
+				cache,
+				entry.metadata.storePathHash
+			);
+			const blobs = instance.context.env.BLOBS;
+			const originalHead = blobs.head.bind(blobs);
+			const head = vi
+				.spyOn(blobs, 'head')
+				.mockImplementation((key) =>
+					key === object
+						? probe.around(() => originalHead(key))
+						: originalHead(key)
+				);
+			return Promise.resolve([probe.watch(instance.context), head]);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({ op: 'publish-batch', pushId, entries: [entry] });
+			const first = session.nextFrame();
+			const stopped = await probe.first(first);
+			// Another request reaches the object while the check waits.
+			const during = await snapshot();
+			await probe.pause.release();
+			expect({
+				stopped,
+				during: during.operations.map((operation) => operation.state),
+				answer: [
+					refusalFacts(await first),
+					refusalFacts(await session.nextFrame())
+				],
+				calls: probe.calls
+			}).toStrictEqual({
+				stopped: 'stopped',
+				during: ['servable'],
+				answer: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				],
+				calls: [false, false, false]
+			});
+		} finally {
+			await probe.pause.release();
+			for (const spy of spies) {
+				spy.mockRestore();
+			}
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it("keeps a reservation that another upload commits while admission reads the path's availability", async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-reconcile-committing');
+		const path = uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		);
+		const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+		const [publishing] = await plannedEntries(token, '/uploads/plan', [path], {
+			name: rootNameSchema.parse('run'),
+			retention: { kind: 'inherit' }
+		});
+		const [admitted] = await plannedEntries(token, '/uploads/plan', [path]);
+		if (publishing === undefined || admitted === undefined) {
+			throw new Error('Expected two planned entries');
+		}
+		await runInDurableObject(currentServer(), (instance) => {
+			const cache = instance.context.cacheRepository.require(defaultCache());
+			instance.context.db
+				.update(schema.cacheIdentities)
+				.set({ graceSeconds: graceSecondsSchema.parse(3600) })
+				.where(eq(schema.cacheIdentities.id, cache.id))
+				.run();
+			return Promise.resolve();
+		});
+		// The publishing operation reserves the path and waits for verification.
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, publishing.operationId),
+			nar
+		);
+		expect(
+			await admit(token, testPushId, { ...publishing, blob })
+		).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: publishing.operationId },
+			{
+				ev: 'deferred',
+				uploadId: publishing.operationId,
+				storePathHash: path.storePathHash,
+				narHash: path.narHash,
+				grace: { graceSeconds: 3600 }
+			}
+		]);
+		const claim = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+		// Admission stops before it reads whether the path's row is committed.
+		const pause = new DurableObjectPause();
+		const isCommitted = vi
+			.spyOn(NarInfoObjectsService.prototype, 'hasCommittedReference')
+			.mockImplementationOnce(async function (
+				this: NarInfoObjectsService,
+				...arguments_
+			) {
+				isCommitted.mockRestore();
+				await pause.stop();
+				return this.hasCommittedReference(...arguments_);
+			});
+		const published = () =>
+			runInDurableObject(currentServer(), async (instance) => {
+				const cache = instance.context.cacheRepository.require(defaultCache());
+				const object = new NarInfoObjectsService(instance.context).objectKey(
+					cache,
+					path.storePathHash
+				);
+				return {
+					narInfos: instance.context.db
+						.select({
+							storePathHash: schema.narInfos.storePathHash,
+							generation: schema.narInfos.generation
+						})
+						.from(schema.narInfos)
+						.all(),
+					grace: instance.context.db
+						.select({
+							storePathHash: schema.retentionGrace.storePathHash,
+							retainUntil: schema.retentionGrace.retainUntil
+						})
+						.from(schema.retentionGrace)
+						.all(),
+					isObjectPresent:
+						(await instance.context.env.BLOBS.head(object)) !== null,
+					state: new PublicationStore(instance.context).get(
+						publishing.operationId
+					)?.state
+				};
+			});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [admitted]
+			});
+			await pause.reached();
+			// The publishing operation's verification commits its reservation.
+			await currentServer().recordVerifications(claim.owner, [
+				{
+					uploadId: publishing.operationId,
+					verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+				}
+			]);
+			const committed = await published();
+			await pause.release();
+			const first = refusalFacts(await session.nextFrame());
+			const answer =
+				first.ev === 'publication-accepted'
+					? [first, refusalFacts(await session.nextFrame())]
+					: [first];
+			const retainUntil = committed.grace[0]?.retainUntil;
+			expect({ committed, after: await published(), answer }).toStrictEqual({
+				committed: {
+					narInfos: [{ storePathHash: path.storePathHash, generation: 0 }],
+					grace: [{ storePathHash: path.storePathHash, retainUntil }],
+					isObjectPresent: true,
+					state: 'servable'
+				},
+				after: committed,
+				answer: [
+					{ ev: 'publication-accepted', uploadId: admitted.operationId },
+					{
+						ev: 'settled',
+						uploadId: admitted.operationId,
+						response: {
+							storePathHash: path.storePathHash,
+							narHash: path.narHash,
+							status: 'already-present'
+						},
+						grace: { retainUntil }
+					}
+				]
+			});
+		} finally {
+			await pause.release();
+			isCommitted.mockRestore();
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it('keeps a committed path whose NAR is restored while admission reads its availability', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-restored-during-admission');
+		const metadata = uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		});
+		await commitPath(token, metadata, nar);
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			uploadPathNegotiation(metadata)
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const canonical = await currentNarObjectKey(nar.narHash);
+		const stored = await env.BLOBS.get(canonical);
+		if (stored === null) {
+			throw new Error('Expected the canonical NAR');
+		}
+		const bytes = await stored.arrayBuffer();
+		await env.BLOBS.delete(canonical);
+		// Admission reads the path's availability twice before its last gate.
+		// The second read finds the NAR missing, and another upload restores
+		// the NAR before the gate.
+		const enqueued: unknown[] = [];
+		const spies = await runInDurableObject(currentServer(), () => {
+			// Each read restores the spy and calls the real method, so the next
+			// read is spied again.
+			const spyOnRead = (read: number): MockInstance => {
+				const spy = vi
+					.spyOn(NarInfoObjectsService.prototype, 'servableStorePathHashes')
+					.mockImplementationOnce(async function (
+						this: NarInfoObjectsService,
+						...arguments_
+					) {
+						spy.mockRestore();
+						const result = await this.servableStorePathHashes(...arguments_);
+						if (read === 2) {
+							await env.BLOBS.put(canonical, bytes);
+						} else {
+							spyOnRead(read + 1);
+						}
+						return result;
+					});
+				return spy;
+			};
+			const available = spyOnRead(1);
+			const reconcile = vi
+				.spyOn(ReconcileQueueService.prototype, 'enqueue')
+				.mockImplementation((_origin, targets) => {
+					enqueued.push(...targets);
+					return Promise.resolve();
+				});
+			return Promise.resolve([available, reconcile]);
+		});
+		let answer;
+		try {
+			answer = await admit(token, testPushId, entry);
+		} finally {
+			for (const spy of spies) {
+				spy.mockRestore();
+			}
+		}
+		const kept = await runInDurableObject(currentServer(), (instance) =>
+			Promise.resolve(
+				instance.context.db
+					.select({ storePathHash: schema.narInfos.storePathHash })
+					.from(schema.narInfos)
+					.all()
+			)
+		);
+		// The client sends the entry again before it uploads the bytes.
+		const resent = await admit(token, testPushId, entry);
+		expect({ answer, kept, enqueued, resent }).toStrictEqual({
+			answer: [
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{ ev: 'upload-required', uploadId: entry.operationId }
+			],
+			kept: [{ storePathHash: metadata.storePathHash }],
+			enqueued: [],
+			resent: [
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: {
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash,
+						status: 'already-present'
+					},
+					grace: {}
+				}
+			]
+		});
+	});
+
+	it('reads whether a path without its NAR is committed outside the input gate', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-reconcile-outside-gate');
+		const metadata = uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		});
+		await commitPath(token, metadata, nar);
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			uploadPathNegotiation(metadata)
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
+		const probe = new GateProbe();
+		const enqueued: unknown[] = [];
+		const spies = await runInDurableObject(currentServer(), (instance) => {
+			const reconcile = vi
+				.spyOn(ReconcileQueueService.prototype, 'enqueue')
+				.mockImplementation((_origin, targets) => {
+					enqueued.push(...targets);
+					return Promise.resolve();
+				});
+			const isCommitted = vi
+				.spyOn(NarInfoObjectsService.prototype, 'hasCommittedReference')
+				.mockImplementationOnce(function (
+					this: NarInfoObjectsService,
+					...arguments_
+				) {
+					isCommitted.mockRestore();
+					return probe.around(() => this.hasCommittedReference(...arguments_));
+				});
+			return Promise.resolve([
+				probe.watch(instance.context),
+				isCommitted,
+				reconcile
+			]);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			const first = session.nextFrame();
+			const stopped = await probe.first(first);
+			// Another request reaches the object while the read waits.
+			const during = await snapshot();
+			await probe.pause.release();
+			expect({
+				stopped,
+				calls: probe.calls,
+				during: during.operations.map((operation) => operation.state),
+				answer: [
+					refusalFacts(await first),
+					refusalFacts(await session.nextFrame())
+				],
+				narInfos: await runInDurableObject(currentServer(), (instance) =>
+					Promise.resolve(
+						instance.context.db
+							.select({ storePathHash: schema.narInfos.storePathHash })
+							.from(schema.narInfos)
+							.all()
+					)
+				),
+				enqueued
+			}).toStrictEqual({
+				stopped: 'stopped',
+				calls: [false],
+				during: ['accepted'],
+				answer: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				],
+				narInfos: [{ storePathHash: metadata.storePathHash }],
+				enqueued: []
+			});
+		} finally {
+			await probe.pause.release();
+			for (const spy of spies) {
+				spy.mockRestore();
+			}
+			await closeSessionAndWait(session.socket);
+		}
+	});
+
+	it.each([
+		{ upload: 'the same NAR', isSameNar: true },
+		{ upload: 'a different NAR', isSameNar: false }
+	])(
+		'publishes a committed path whose NAR is missing from an upload of $upload',
+		async ({ isSameNar }) => {
+			const token = await initialise();
+			const lost = await verifiableNar('publication-lost-nar');
+			const lostMetadata = uploadMetadata({
+				fileSize: lost.narBytes.byteLength,
+				fileHash: lost.fileHash,
+				narHash: lost.narHash,
+				narSize: lost.narSize
+			});
+			await commitPath(token, lostMetadata, lost);
+			await env.BLOBS.delete(await currentNarObjectKey(lost.narHash));
+			const nar = isSameNar
+				? lost
+				: await verifiableNar('publication-replacing-nar');
+			const metadata = uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			});
+			const [planned] = await plannedEntries(token, '/uploads/plan', [
+				uploadPathNegotiation(metadata)
+			]);
+			if (planned === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			const entry = {
+				...planned,
+				blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+			};
+			const path = () =>
+				runInDurableObject(currentServer(), async (instance) => {
+					const cache =
+						instance.context.cacheRepository.require(defaultCache());
+					const served = await new NarInfoObjectsService(
+						instance.context
+					).servableNarInfoVersions(cache, [metadata.storePathHash]);
+					return {
+						rows: instance.context.db
+							.select({
+								generation: schema.narInfos.generation,
+								narHash: schema.narInfos.narHash
+							})
+							.from(schema.narInfos)
+							.all(),
+						served: served.get(metadata.storePathHash)
+					};
+				});
+			const enqueued: unknown[] = [];
+			const reconcile = await runInDurableObject(currentServer(), () =>
+				Promise.resolve(
+					vi
+						.spyOn(ReconcileQueueService.prototype, 'enqueue')
+						.mockImplementation((_origin, targets) => {
+							enqueued.push(...targets);
+							return Promise.resolve();
+						})
+				)
+			);
+			try {
+				const answer = await admit(token, testPushId, entry);
+				const admitted = await path();
+				await putNarBytes(
+					publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+					nar
+				);
+				const verdict = await commitOutcome(token, entry.operationId);
+				const published = await path();
+				const resent = await admit(token, testPushId, entry);
+				const generation = narInfoGenerationSchema.parse(isSameNar ? 0 : 1);
+				expect({
+					answer,
+					admitted,
+					verdict,
+					published,
+					resent,
+					enqueued
+				}).toStrictEqual({
+					answer: [
+						{ ev: 'publication-accepted', uploadId: entry.operationId },
+						{ ev: 'upload-required', uploadId: entry.operationId }
+					],
+					admitted: {
+						rows: [{ generation: 0, narHash: lost.narHash }],
+						served: undefined
+					},
+					// The same NAR restores the generation that another upload
+					// published, so this upload's verdict is `absent`. The entry is
+					// answered with `settled` when the client sends it again.
+					verdict: isSameNar ? 'absent' : 'committed',
+					published: {
+						rows: [{ generation, narHash: nar.narHash }],
+						served: { generation, narHash: nar.narHash }
+					},
+					resent: [
+						...(isSameNar
+							? [{ ev: 'publication-accepted', uploadId: entry.operationId }]
+							: []),
+						{
+							ev: 'settled',
+							uploadId: entry.operationId,
+							response: {
+								storePathHash: metadata.storePathHash,
+								narHash: nar.narHash,
+								status: 'already-present'
+							},
+							grace: {}
+						}
+					],
+					enqueued: []
+				});
+			} finally {
+				reconcile.mockRestore();
+			}
+		}
+	);
+
+	it('replaces a committed path whose NAR is missing with a NAR that the cache can reuse', async () => {
+		const token = await initialise();
+		const lost = await verifiableNar('publication-lost-nar-reuse');
+		await commitPath(
+			token,
+			uploadMetadata({
+				fileSize: lost.narBytes.byteLength,
+				fileHash: lost.fileHash,
+				narHash: lost.narHash,
+				narSize: lost.narSize
+			}),
+			lost
+		);
+		await env.BLOBS.delete(await currentNarObjectKey(lost.narHash));
+		const nar = await verifiableNar('publication-reused-nar');
+		const fields = {
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		};
+		await commitPath(
+			token,
+			uploadMetadata({ ...fields, storePathHash: '2'.repeat(32) }),
+			nar
+		);
+		const metadata = uploadMetadata(fields);
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			uploadPathNegotiation(metadata)
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const answer = await admit(token, testPushId, entry);
+		await verifyCurrentTenant();
+		const published = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const cache = instance.context.cacheRepository.require(defaultCache());
+				const served = await new NarInfoObjectsService(
+					instance.context
+				).servableNarInfoVersions(cache, [metadata.storePathHash]);
+				return {
+					row: instance.context.db
+						.select({
+							generation: schema.narInfos.generation,
+							narHash: schema.narInfos.narHash
+						})
+						.from(schema.narInfos)
+						.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+						.get(),
+					served: served.get(metadata.storePathHash),
+					state: new PublicationStore(instance.context).get(entry.operationId)
+						?.state
+				};
+			}
+		);
+		const generation = narInfoGenerationSchema.parse(1);
+		expect({ answer, published }).toStrictEqual({
+			answer: [
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'deferred',
+					uploadId: entry.operationId,
+					storePathHash: metadata.storePathHash,
+					narHash: nar.narHash,
+					grace: {}
+				}
+			],
+			published: {
+				row: { generation, narHash: nar.narHash },
+				served: { generation, narHash: nar.narHash },
+				state: 'servable'
+			}
+		});
+	});
+
+	it('keeps a committed path that another upload restores when the upload of another NAR cannot commit', async () => {
+		const token = await initialise();
+		const { lost, canonical, lostBytes, nar, metadata, entry, committed } =
+			await lostPathUpload(token, 'publication-restored-before-replacement');
+		// The tenant's quota then has no room for the other NAR, so its charge is
+		// refused.
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await database
+			.update(d1Schema.tenantUsage)
+			.set({ quotaBytes: sql`${d1Schema.tenantUsage.bytes}` })
+			.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+			.run();
+		// Verification reads the lost NAR as missing, and another upload restores
+		// the NAR right after that read.
+		const head = await runInDurableObject(currentServer(), (instance) => {
+			const blobs = instance.context.env.BLOBS;
+			const originalHead = blobs.head.bind(blobs);
+			let isRestored = false;
+			return Promise.resolve(
+				vi.spyOn(blobs, 'head').mockImplementation(async (key) => {
+					const object = await originalHead(key);
+					if (key === canonical && object === null && !isRestored) {
+						isRestored = true;
+						await env.BLOBS.put(canonical, lostBytes);
+					}
+					return object;
+				})
+			);
+		});
+		try {
+			await verifyCurrentTenant();
+		} finally {
+			head.mockRestore();
+		}
+		const after = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const cache = instance.context.cacheRepository.require(defaultCache());
+				const served = await new NarInfoObjectsService(
+					instance.context
+				).servableNarInfoVersions(cache, [metadata.storePathHash]);
+				return {
+					rows: instance.context.db
+						.select({
+							generation: schema.narInfos.generation,
+							narHash: schema.narInfos.narHash
+						})
+						.from(schema.narInfos)
+						.all(),
+					served: served.get(metadata.storePathHash),
+					state: new PublicationStore(instance.context).get(entry.operationId)
+						?.state
+				};
+			}
+		);
+		const generation = narInfoGenerationSchema.parse(0);
+		expect({ committed, after }).toStrictEqual({
+			committed: {
+				storePathHash: metadata.storePathHash,
+				narHash: nar.narHash,
+				status: 'pending'
+			},
+			after: {
+				rows: [{ generation, narHash: lost.narHash }],
+				served: { generation, narHash: lost.narHash },
+				state: 'failed'
+			}
+		});
+	});
+
+	it.each([
+		{ fault: 'a reset after the charge', isTimeout: false },
+		{
+			fault: 'a charge that reaches D1 after its wait timed out',
+			isTimeout: true
+		}
+	])(
+		'removes the edge of a replacement that $fault leaves once the charge deadline passes',
+		async ({ isTimeout }) => {
+			const token = await initialise();
+			const { lost, nar, metadata } = await lostPathUpload(
+				token,
+				'publication-orphaned-replacement'
+			);
+			// The charge reaches D1, and the replacement of the lost row does not
+			// happen: the object resets before it, or the flush stops waiting for
+			// the batched charge and for its retry of each charge.
+			const restore = await runInDurableObject(currentServer(), (instance) => {
+				if (!isTimeout) {
+					const isRowRemoved = vi
+						.spyOn(DeletionQueueService.prototype, 'removeNarInfoRow')
+						.mockImplementationOnce(() => {
+							throw new Error('reset');
+						});
+					return Promise.resolve(() => {
+						isRowRemoved.mockRestore();
+					});
+				}
+				const { d1 } = instance.context;
+				const batch = d1.batch.bind(d1);
+				let timeouts = 2;
+				const charge = vi
+					.spyOn(d1, 'batch')
+					.mockImplementation(async (statements) => {
+						const [first] = statements;
+						if (
+							timeouts === 0 ||
+							!is(first, SQLiteSelectBase) ||
+							!first.toSQL().sql.startsWith(chargeGateQuery)
+						) {
+							return batch(statements);
+						}
+						timeouts -= 1;
+						await batch(statements);
+						throw new SubrequestTimeoutError(
+							'd1.batch',
+							Promise.resolve(undefined)
+						);
+					});
+				return Promise.resolve(() => {
+					charge.mockRestore();
+				});
+			});
+			const start = Date.now();
+			let orphaned;
+			try {
+				await verifyCurrentTenant();
+				orphaned = await pathRowAndEdges(metadata.storePathHash);
+			} finally {
+				restore();
+			}
+			// Expiry ends the upload after its recovery deadline. Collection runs
+			// before the cleanup is due, and again after it.
+			const collectAt = async (minutesAfterDeadline: number) => {
+				vi.setSystemTime(
+					new Date(
+						start + 24 * 60 * 60 * 1000 + minutesAfterDeadline * 60 * 1000
+					)
+				);
+				await runInDurableObject(currentServer(), async (instance) => {
+					await asOneInvocation(() =>
+						verificationOf(instance).expirePublications(rootLogger())
+					);
+					await asOneInvocation(() =>
+						garbageCollectionOf(instance).collectExpiredRowsWithoutScan(
+							rootLogger()
+						)
+					);
+				});
+				return pathRowAndEdges(metadata.storePathHash);
+			};
+			const beforeDue = await collectAt(5);
+			const collected = await collectAt(11);
+			const lostRow = {
+				generation: narInfoGenerationSchema.parse(0),
+				narHash: lost.narHash
+			};
+			const planned = {
+				generation: narInfoGenerationSchema.parse(1),
+				narHash: nar.narHash
+			};
+			const kept = {
+				row: lostRow,
+				edges: [lostRow, planned],
+				cleanups: [planned.generation]
+			};
+			expect({ orphaned, beforeDue, collected }).toStrictEqual({
+				orphaned: kept,
+				beforeDue: kept,
+				collected: { row: lostRow, edges: [lostRow], cleanups: [] }
+			});
+		}
+	);
+
+	it.each([
+		{ completion: 'before its charge deadline', isLate: false },
+		{ completion: 'after its charge deadline passes', isLate: true }
+	])(
+		'keeps the edge of a replacement whose charge completes $completion',
+		async ({ isLate }) => {
+			const token = await initialise();
+			const { lost, nar, metadata, committed } = await lostPathUpload(
+				token,
+				'publication-committed-replacement'
+			);
+			const afterDue = Date.now() + 24 * 60 * 60 * 1000 + 11 * 60 * 1000;
+			// The charge reaches D1 before its deadline. In the late case, the
+			// flush resumes only after the cleanup of the planned generation is
+			// due.
+			const charge = await runInDurableObject(currentServer(), (instance) => {
+				const { d1 } = instance.context;
+				const batch = d1.batch.bind(d1);
+				return Promise.resolve(
+					vi.spyOn(d1, 'batch').mockImplementation(async (statements) => {
+						const result = await batch(statements);
+						const [first] = statements;
+						if (
+							isLate &&
+							is(first, SQLiteSelectBase) &&
+							first.toSQL().sql.startsWith(chargeGateQuery)
+						) {
+							vi.setSystemTime(new Date(afterDue));
+						}
+						return result;
+					})
+				);
+			});
+			let replaced;
+			try {
+				await verifyCurrentTenant();
+				replaced = await pathRowAndEdges(metadata.storePathHash);
+			} finally {
+				charge.mockRestore();
+			}
+			vi.setSystemTime(new Date(afterDue));
+			await runInDurableObject(currentServer(), async (instance) => {
+				await asOneInvocation(() =>
+					garbageCollectionOf(instance).collectExpiredRowsWithoutScan(
+						rootLogger()
+					)
+				);
+			});
+			const collected = await pathRowAndEdges(metadata.storePathHash);
+			const lostRow = {
+				generation: narInfoGenerationSchema.parse(0),
+				narHash: lost.narHash
+			};
+			const row = {
+				generation: narInfoGenerationSchema.parse(1),
+				narHash: nar.narHash
+			};
+			expect({ committed, replaced, collected }).toStrictEqual({
+				committed: {
+					storePathHash: metadata.storePathHash,
+					narHash: nar.narHash,
+					status: 'pending'
+				},
+				replaced: { row, edges: [lostRow, row], cleanups: [] },
+				collected: { row, edges: [row], cleanups: [] }
+			});
+		}
+	);
+
+	it('keeps the cleanup of a replacement whose lost row changes after the charge', async () => {
+		const token = await initialise();
+		const { lost, nar, metadata } = await lostPathUpload(
+			token,
+			'publication-changed-before-replacement'
+		);
+		const changed = narInfoGenerationSchema.parse(7);
+		// Another commit changes the lost row while the charge waits for D1.
+		const charge = await runInDurableObject(currentServer(), (instance) => {
+			const { db, d1 } = instance.context;
+			const batch = d1.batch.bind(d1);
+			const spy = vi
+				.spyOn(d1, 'batch')
+				.mockImplementation(async (statements) => {
+					const result = await batch(statements);
+					const [first] = statements;
+					if (
+						is(first, SQLiteSelectBase) &&
+						first.toSQL().sql.startsWith(chargeGateQuery)
+					) {
+						spy.mockRestore();
+						db.update(schema.narInfos)
+							.set({ generation: changed })
+							.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+							.run();
+					}
+					return result;
+				});
+			return Promise.resolve(spy);
+		});
+		let afterCharge;
+		try {
+			await verifyCurrentTenant();
+			afterCharge = await pathRowAndEdges(metadata.storePathHash);
+		} finally {
+			charge.mockRestore();
+		}
+		const planned = {
+			generation: narInfoGenerationSchema.parse(1),
+			narHash: nar.narHash
+		};
+		// The planned generation's edge stays until its cleanup is due.
+		expect(afterCharge).toStrictEqual({
+			row: { generation: changed, narHash: lost.narHash },
+			edges: [
+				{ generation: narInfoGenerationSchema.parse(0), narHash: lost.narHash },
+				planned
+			],
+			cleanups: [planned.generation]
+		});
 	});
 
 	it('answers a publish-batch entry as a subscription does when its push expires during admission', async () => {

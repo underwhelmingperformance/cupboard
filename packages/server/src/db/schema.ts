@@ -654,6 +654,29 @@ export const narInfoDeletions = sqliteTable(
 );
 
 /**
+The generations of planned narinfo replacements whose charge can still reach
+D1. The row that a replacement inserts removes the entry in the same
+transaction. Otherwise garbage collection queues the generation for narinfo
+deletion once `due_at` passes, which is after the charge's D1 deadline.
+*/
+export const replacementChargeCleanups = sqliteTable(
+	'replacement_charge_cleanup',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		dueAt: text('due_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.cacheId, table.storePathHash, table.generation]
+		}),
+		index('replacement_charge_cleanup_due_idx').on(table.dueAt)
+	]
+);
+
+/**
 Committed paths that have yet to inherit attestations from other caches. The
 maintenance alarm drains the rows. A row leaves the queue when inheritance
 ends or its narinfo row no longer has the queued generation. Failed attempts

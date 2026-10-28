@@ -513,7 +513,16 @@ export class NarInfoObjectsService {
 	}
 
 	buildNarInfo(
-		row: typeof schema.narInfos.$inferSelect,
+		row: Pick<
+			typeof schema.narInfos.$inferSelect,
+			| 'storePath'
+			| 'storePathHash'
+			| 'narHash'
+			| 'narSize'
+			| 'referencesJson'
+			| 'sigsJson'
+		> &
+			Pick<typeof schema.narInfos.$inferInsert, 'deriver' | 'ca'>,
 		blob: NarInfoBlobFields
 	): NarInfo {
 		return new NarInfo(
