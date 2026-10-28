@@ -398,13 +398,22 @@ describe('batched verify fault isolation', () => {
 				Number.MAX_SAFE_INTEGER
 			);
 			await runInDurableObject(currentServer(), async (instance) => {
-				expect(
-					await new UploadStateService(instance.context).clearPendingUpload(
-						stale.uploadId,
-						{ logger: rootLogger(), outcome: 'servable' },
-						replacement.owner
-					)
-				).toBe(true);
+				const row = instance.context.db
+					.select()
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, stale.uploadId))
+					.get();
+				const cleared = await new UploadStateService(
+					instance.context
+				).clearPendingUpload(
+					stale.uploadId,
+					{ logger: rootLogger(), outcome: 'servable' },
+					replacement.owner
+				);
+				expect({ isRead: row !== undefined, cleared }).toStrictEqual({
+					isRead: true,
+					cleared: row
+				});
 			});
 			release(undefined);
 			await stalePass;

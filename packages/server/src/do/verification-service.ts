@@ -1193,18 +1193,19 @@ export class VerificationService {
 		}
 		const didClearAndDelete = async () => {
 			await this.uploadState.clearDeliveredNarRefresh(pending.id);
-			if (
-				!this.ownsActiveClaim(owner, pending, signal) ||
-				!(await this.uploadState.clearPendingUpload(
-					pending.id,
-					{ logger, outcome: resolution.verdict },
-					owner,
-					resolution.absentPublication
-				))
-			) {
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return false;
 			}
-			this.notifyWaiters(pending, resolution.verdict);
+			const cleared = await this.uploadState.clearPendingUpload(
+				pending.id,
+				{ logger, outcome: resolution.verdict },
+				owner,
+				resolution.absentPublication
+			);
+			if (cleared === undefined) {
+				return false;
+			}
+			this.notifyWaiters(cleared, resolution.verdict);
 			if (isPublication) {
 				await this.deleteStagingObjectBestEffort(pending, signal);
 			}
@@ -1284,19 +1285,24 @@ export class VerificationService {
 	}
 
 	// Re-read the session after settlement awaits because `attachSession` can
-	// move the waiter to a reconnected socket. Use the captured ID if settlement
-	// has already removed the row.
-	private currentSessionId(
-		uploadId: UploadId,
-		captured: SessionId | null
-	): SessionId | null {
+	// move the waiter to a reconnected socket. A repair of a publication creates
+	// a new pending row with the same ID and a new accepted sequence, and that
+	// row's session waits for the repair. Read only the row of the same
+	// acceptance, and use the captured row's session after settlement has
+	// removed that row.
+	private currentSessionId(pending: PendingUploadRow): SessionId | null {
 		const row = this.context.db
 			.select({ sessionId: schema.pendingUploads.sessionId })
 			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, uploadId))
+			.where(
+				and(
+					eq(schema.pendingUploads.id, pending.id),
+					eq(schema.pendingUploads.acceptedSequence, pending.acceptedSequence)
+				)
+			)
 			.get();
 
-		return row === undefined ? captured : row.sessionId;
+		return row === undefined ? pending.sessionId : row.sessionId;
 	}
 
 	private async publicationVerdict(
@@ -1317,7 +1323,7 @@ export class VerificationService {
 		pending: typeof schema.pendingUploads.$inferSelect,
 		status: UploadStatusResponse['status']
 	): void {
-		const sessionId = this.currentSessionId(pending.id, pending.sessionId);
+		const sessionId = this.currentSessionId(pending);
 
 		if (sessionId === null) {
 			return;
@@ -1594,7 +1600,7 @@ export class VerificationService {
 		}
 
 		if (reserved.kind === 'lost') {
-			const didApply = await this.uploadState.clearPendingUploadAndStaging(
+			const cleared = await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
 				metadata.narHash,
@@ -1602,11 +1608,13 @@ export class VerificationService {
 				owner
 			);
 
-			if (didApply) {
-				this.notifyWaiters(pending, 'absent');
+			if (cleared === undefined) {
+				return { kind: 'ignored' };
 			}
 
-			return { kind: didApply ? 'applied' : 'ignored' };
+			this.notifyWaiters(cleared, 'absent');
+
+			return { kind: 'applied' };
 		}
 
 		return { kind: 'reserved', generation: reserved.generation };
@@ -1706,18 +1714,19 @@ export class VerificationService {
 			metadata,
 			generation
 		);
-		if (
-			!this.ownsActiveClaim(owner, pending, signal) ||
-			!(await this.uploadState.clearPendingUpload(
-				pending.id,
-				{ logger, outcome: verdict },
-				owner
-			))
-		) {
+		if (!this.ownsActiveClaim(owner, pending, signal)) {
+			return 'ignored';
+		}
+		const cleared = await this.uploadState.clearPendingUpload(
+			pending.id,
+			{ logger, outcome: verdict },
+			owner
+		);
+		if (cleared === undefined) {
 			return 'ignored';
 		}
 
-		this.notifyWaiters(pending, verdict);
+		this.notifyWaiters(cleared, verdict);
 
 		return 'applied';
 	}
@@ -2086,17 +2095,17 @@ export class VerificationService {
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return 'ignored';
 				}
-				const didApply = await this.uploadState.clearPendingUpload(
+				const cleared = await this.uploadState.clearPendingUpload(
 					pending.id,
 					{ logger, outcome: verdict },
 					owner
 				);
 
-				if (!didApply) {
+				if (cleared === undefined) {
 					return 'ignored';
 				}
 
-				this.notifyWaiters(pending, verdict);
+				this.notifyWaiters(cleared, verdict);
 
 				return 'applied';
 			}
@@ -2105,7 +2114,7 @@ export class VerificationService {
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return 'ignored';
 			}
-			const didApply = await this.uploadState.clearPendingUploadAndStaging(
+			const cleared = await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
 				metadata.narHash,
@@ -2113,11 +2122,11 @@ export class VerificationService {
 				owner
 			);
 
-			if (!didApply) {
+			if (cleared === undefined) {
 				return 'ignored';
 			}
 
-			this.notifyWaiters(pending, 'absent');
+			this.notifyWaiters(cleared, 'absent');
 
 			return 'applied';
 		}
@@ -2151,17 +2160,17 @@ export class VerificationService {
 				return 'ignored';
 			}
 			return this.whileDeletingStaging(pending, async () => {
-				const wasCleared = await this.uploadState.clearPendingUpload(
+				const cleared = await this.uploadState.clearPendingUpload(
 					pending.id,
 					{ logger, outcome: verdict },
 					owner
 				);
 
-				if (!wasCleared) {
+				if (cleared === undefined) {
 					return 'ignored';
 				}
 
-				this.notifyWaiters(pending, verdict);
+				this.notifyWaiters(cleared, verdict);
 				await this.deleteStagingObjectBestEffort(pending, signal);
 
 				return 'applied';
@@ -2172,18 +2181,19 @@ export class VerificationService {
 		// upload row; the reaper collects any unreferenced object it promoted.
 		signal?.throwIfAborted();
 		return this.whileDeletingStaging(pending, async () => {
-			if (
-				!this.ownsActiveClaim(owner, pending, signal) ||
-				!(await this.uploadState.clearPendingUpload(
-					pending.id,
-					{ logger, outcome: 'absent' },
-					owner
-				))
-			) {
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
+				return 'ignored';
+			}
+			const cleared = await this.uploadState.clearPendingUpload(
+				pending.id,
+				{ logger, outcome: 'absent' },
+				owner
+			);
+			if (cleared === undefined) {
 				return 'ignored';
 			}
 
-			this.notifyWaiters(pending, 'absent');
+			this.notifyWaiters(cleared, 'absent');
 			await this.deleteStagingObject(pending);
 
 			return 'applied';
@@ -2464,11 +2474,11 @@ export class VerificationService {
 							.set({ claimOwner: sql`null` })
 							.where(eq(schema.pendingUploads.id, pending.id))
 							.run();
-						await this.uploadState.clearPendingUpload(pending.id, {
-							logger,
-							outcome: 'servable'
-						});
-						this.notifyWaiters(pending, 'servable');
+						const cleared = await this.uploadState.clearPendingUpload(
+							pending.id,
+							{ logger, outcome: 'servable' }
+						);
+						this.notifyWaiters(cleared ?? pending, 'servable');
 						return;
 					}
 					// Only a started commit reserves a narinfo row, and started
@@ -2494,13 +2504,13 @@ export class VerificationService {
 					.set({ claimOwner: sql`null` })
 					.where(eq(schema.pendingUploads.id, pending.id))
 					.run();
-				await this.uploadState.clearPendingUploadAndStaging(
+				const cleared = await this.uploadState.clearPendingUploadAndStaging(
 					pending.id,
 					pending.r2Key,
 					pending.narHash,
 					{ logger, outcome: 'absent' }
 				);
-				this.notifyWaiters(pending, 'absent');
+				this.notifyWaiters(cleared ?? pending, 'absent');
 			}
 			store.finish(operation.id, 'expired');
 			logger.debug('publication recovery expired', {
@@ -5107,22 +5117,24 @@ export class VerificationService {
 					if (!this.ownsActiveClaim(owner, pending, signal)) {
 						return false;
 					}
-					const didApply = await this.uploadState.clearPendingUpload(
+					const cleared = await this.uploadState.clearPendingUpload(
 						pending.id,
 						{ logger, outcome: verdict },
 						owner
 					);
 
-					if (didApply) {
-						this.notifyWaiters(pending, verdict);
+					if (cleared === undefined) {
+						return false;
 					}
 
-					return didApply;
+					this.notifyWaiters(cleared, verdict);
+
+					return true;
 				}
 			}
 
 			signal?.throwIfAborted();
-			const didApply = await this.uploadState.clearPendingUploadAndStaging(
+			const cleared = await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
 				metadata.narHash,
@@ -5130,11 +5142,11 @@ export class VerificationService {
 				owner
 			);
 
-			if (!didApply) {
+			if (cleared === undefined) {
 				return false;
 			}
 
-			this.notifyWaiters(pending, 'absent');
+			this.notifyWaiters(cleared, 'absent');
 
 			return true;
 		}

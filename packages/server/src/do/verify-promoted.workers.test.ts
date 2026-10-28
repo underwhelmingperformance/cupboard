@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import * as schema from '../db/schema.ts';
 import { narInfoObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -61,17 +62,31 @@ describe('recording an older promoted verdict', () => {
 			async (instance) => {
 				const uploads = new UploadStateService(instance.context);
 				await uploads.markPendingNarRefresh(upload.uploadId);
-				const wasCleared = await uploads.clearPendingUpload(upload.uploadId, {
+				const row = instance.context.db
+					.select()
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, upload.uploadId))
+					.get();
+				const cleared = await uploads.clearPendingUpload(upload.uploadId, {
 					logger: rootLogger(),
 					outcome: 'servable'
 				});
 				return {
-					wasCleared,
+					row,
+					cleared,
 					refreshPending: uploads.hasPendingNarRefresh(upload.uploadId)
 				};
 			}
 		);
-		expect(result).toStrictEqual({ wasCleared: true, refreshPending: false });
+		expect({
+			isRead: result.row !== undefined,
+			cleared: result.cleared,
+			refreshPending: result.refreshPending
+		}).toStrictEqual({
+			isRead: true,
+			cleared: result.row,
+			refreshPending: false
+		});
 	});
 
 	it('imports a live legacy refresh beyond the first migration page before recovery', async () => {
