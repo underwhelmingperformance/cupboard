@@ -406,10 +406,13 @@ export function commitCreditCapabilityToken(openingGrant: number): string {
 
 export const publicationCapability = 'publication-v1';
 
-// A client accepts this token when it parses the publication refusal reason
-// `resend`. Clients that accept only `publication-v1` fail the whole session on
-// a reason that they do not know, so the server sends `resend` only to a client
-// that accepts this token.
+// A client accepts this token when it parses the publication refusal reasons
+// `resend`, `declaration-changed` and `parameters-changed`. Clients that accept
+// only `publication-v1` fail the whole session on a reason that they do not
+// know, so the server sends these reasons only to a client that accepts this
+// token. A client that accepts this token fails only the refused entry when it
+// does not know the reason, so the server can send it a later reason without
+// another token.
 export const publicationRefusalReasonsCapability =
 	'publication-refusal-reasons';
 
@@ -551,6 +554,8 @@ export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 			'recovery-expired',
 			'push-expired',
 			'generation-conflict',
+			'declaration-changed',
+			'parameters-changed',
 			'invalid-publication',
 			'forbidden',
 			'resend',

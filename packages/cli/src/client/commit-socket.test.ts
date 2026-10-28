@@ -4434,77 +4434,74 @@ describe('publication operations', () => {
 		});
 		session.close();
 	});
-	it('sends a subscribed entry again in a publish batch when the server asks for a resend', async () => {
-		const first = new FakeCommitSocket();
-		const second = new FakeCommitSocket();
-		const session = openSessionOver([first, second]);
-		const result = session.commit(publicationTarget);
-		first.emit('upgrade', {
-			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
-		});
-		first.emit('open');
-		await Promise.resolve();
-		first.emit(
-			'message',
-			frame({ ev: 'publication-accepted', uploadId: operationId })
-		);
-		first.emit('close', 1006, 'lost result');
-		await vi.advanceTimersByTimeAsync(5000);
-		second.emit('upgrade', {
-			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
-		});
-		second.emit('open');
-		second.emit(
-			'message',
-			frame({
+
+	it.each([
+		{ name: 'when the server asks for a resend', extra: {} },
+		{
+			name: 'when a resend refusal has a field that the client does not know',
+			extra: { retryAfterSeconds: 5 }
+		}
+	])(
+		'sends a subscribed entry again in a publish batch $name',
+		async ({ extra }) => {
+			const first = new FakeCommitSocket();
+			const second = new FakeCommitSocket();
+			const session = openSessionOver([first, second]);
+			const result = session.commit(publicationTarget);
+			const refusal = JSON.stringify({
 				ev: 'publication-refused',
 				uploadId: operationId,
 				reason: 'resend',
 				status: StatusCodes.SERVICE_UNAVAILABLE,
-				message: 'Send it again.'
-			})
-		);
-		await Promise.resolve();
-		const publish = JSON.stringify({
-			op: 'publish-batch',
-			pushId: publication.pushId,
-			entries: [publication.entry]
-		});
-		expect(second.sent).toStrictEqual([
-			JSON.stringify({
-				op: 'subscribe-publication',
-				pushId: publication.pushId,
-				entries: [publication.entry]
-			}),
-			publish
-		]);
-		second.emit(
-			'message',
-			frame({
-				ev: 'publication-refused',
-				uploadId: operationId,
-				reason: 'resend',
-				status: StatusCodes.SERVICE_UNAVAILABLE,
-				message: 'Send it again.'
-			})
-		);
-		await expect(ackOf(result)).rejects.toStrictEqual(
-			new PublicationRefusedError(
-				'resend',
-				StatusCodes.SERVICE_UNAVAILABLE,
-				'Send it again.'
-			)
-		);
-		expect(second.sent).toStrictEqual([
-			JSON.stringify({
-				op: 'subscribe-publication',
-				pushId: publication.pushId,
-				entries: [publication.entry]
-			}),
-			publish
-		]);
-		session.close();
-	});
+				message: 'Send it again.',
+				...extra
+			});
+			first.emit('upgrade', {
+				headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+			});
+			first.emit('open');
+			await Promise.resolve();
+			first.emit(
+				'message',
+				frame({ ev: 'publication-accepted', uploadId: operationId })
+			);
+			first.emit('close', 1006, 'lost result');
+			await vi.advanceTimersByTimeAsync(5000);
+			second.emit('upgrade', {
+				headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+			});
+			second.emit('open');
+			second.emit('message', refusal);
+			await Promise.resolve();
+			const sent = [
+				JSON.stringify({
+					op: 'subscribe-publication',
+					pushId: publication.pushId,
+					entries: [publication.entry]
+				}),
+				JSON.stringify({
+					op: 'publish-batch',
+					pushId: publication.pushId,
+					entries: [publication.entry]
+				})
+			];
+			const resent = [...second.sent];
+			// The client accepts one resend for each subscription.
+			second.emit('message', refusal);
+			await expect(ackOf(result)).rejects.toStrictEqual(
+				new PublicationRefusedError(
+					'resend',
+					StatusCodes.SERVICE_UNAVAILABLE,
+					'Send it again.'
+				)
+			);
+			expect({ resent, sent: second.sent }).toStrictEqual({
+				resent: sent,
+				sent
+			});
+			session.close();
+		}
+	);
 
 	it.each([
 		{ name: 'a resubscription answers resend', isAcceptedAgain: false },
@@ -4655,6 +4652,185 @@ describe('publication operations', () => {
 				publish
 			],
 			outcome: { storePathHash, narHash, status: 'committed' }
+		});
+		session.close();
+	});
+
+	it.each([
+		{ name: 'a reason that the client does not know', extra: {} },
+		{
+			name: 'an unknown reason and a field that the client does not know',
+			extra: { retryAfterSeconds: 5 }
+		}
+	])(
+		'fails only the refused entry when a refusal has $name',
+		async ({ extra }) => {
+			const socket = new FakeCommitSocket();
+			const onFailure = vi.fn();
+			const session = openSession(socket, { onFailure });
+			const refused = session.commit(publicationTarget);
+			const committed = session.commit(target);
+			const rejected = expect(ackOf(refused)).rejects.toStrictEqual(
+				new PublicationRefusedError(
+					'future-reason',
+					StatusCodes.CONFLICT,
+					'Refused.'
+				)
+			);
+			socket.emit('upgrade', {
+				headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+			});
+			socket.emit('open');
+			await Promise.resolve();
+			// A later server's reason, which the frame schema does not list.
+			socket.emit(
+				'message',
+				JSON.stringify({
+					ev: 'publication-refused',
+					uploadId: operationId,
+					reason: 'future-reason',
+					status: StatusCodes.CONFLICT,
+					message: 'Refused.',
+					...extra
+				})
+			);
+			await rejected;
+			socket.emit(
+				'message',
+				frame({
+					ev: 'settled',
+					uploadId: target.uploadId,
+					response: { storePathHash, narHash, status: 'committed' }
+				})
+			);
+			expect({
+				committed: await ackOf(committed),
+				failures: onFailure.mock.calls.length
+			}).toStrictEqual({
+				committed: { storePathHash, narHash, status: 'committed' },
+				failures: 0
+			});
+			session.close();
+		}
+	);
+
+	it('fails the session when a refusal has an upload ID that is not a publication ID', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const commit = session.commit(publicationTarget);
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		socket.emit('open');
+		await Promise.resolve();
+		socket.emit(
+			'message',
+			JSON.stringify({
+				ev: 'publication-refused',
+				uploadId: 'not-a-publication-id',
+				reason: 'recovery-expired',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				message: 'Refused.'
+			})
+		);
+		const error = await rejectedBy(commit, CommitSocketProtocolError);
+		expect({ name: error.name, path: error.path }).toStrictEqual({
+			name: 'CommitSocketProtocolError',
+			path
+		});
+	});
+
+	it('retries an entry refused with temporary-failure and a field that the client does not know', async () => {
+		const socket = new FakeCommitSocket();
+		const onFailure = vi.fn();
+		const session = openSession(socket, { onFailure });
+		const result = session.commit(publicationTarget);
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		socket.emit('open');
+		await Promise.resolve();
+		socket.emit(
+			'message',
+			JSON.stringify({
+				ev: 'publication-refused',
+				uploadId: operationId,
+				reason: 'temporary-failure',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				message: 'Retry.',
+				retryAfterSeconds: 5
+			})
+		);
+		await vi.advanceTimersByTimeAsync(60_000);
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId: operationId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+		const publish = JSON.stringify({
+			op: 'publish-batch',
+			pushId: publication.pushId,
+			entries: [publication.entry]
+		});
+		expect({
+			sent: socket.sent.filter((sent) => sent !== 'ping'),
+			outcome: await ackOf(result),
+			failures: onFailure.mock.calls.length
+		}).toStrictEqual({
+			sent: [publish, publish],
+			outcome: { storePathHash, narHash, status: 'committed' },
+			failures: 0
+		});
+		session.close();
+	});
+
+	it('fails the verdict of an acknowledged entry when a refusal has a reason that the client does not know', async () => {
+		const socket = new FakeCommitSocket();
+		const onFailure = vi.fn();
+		const session = openSession(socket, { onFailure });
+		const refused = session.commit(publicationTarget);
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		socket.emit('open');
+		await Promise.resolve();
+		socket.emit(
+			'message',
+			frame({ ev: 'publication-accepted', uploadId: operationId })
+		);
+		socket.emit(
+			'message',
+			frame({ ev: 'deferred', uploadId: operationId, storePathHash, narHash })
+		);
+		const acknowledged = await ackOf(refused);
+		const failed = expect(settledOf(refused)).rejects.toStrictEqual(
+			new PublicationRefusedError(
+				'future-reason',
+				StatusCodes.CONFLICT,
+				'Refused.'
+			)
+		);
+		// A later server's reason, which the frame schema does not list.
+		socket.emit(
+			'message',
+			JSON.stringify({
+				ev: 'publication-refused',
+				uploadId: operationId,
+				reason: 'future-reason',
+				status: StatusCodes.CONFLICT,
+				message: 'Refused.'
+			})
+		);
+		await failed;
+		expect({
+			acknowledged,
+			failures: onFailure.mock.calls.length
+		}).toStrictEqual({
+			acknowledged: { storePathHash, narHash, status: 'pending' },
+			failures: 0
 		});
 		session.close();
 	});

@@ -18,6 +18,7 @@ import {
 	type CommitSessionRequestInput,
 	publicationCapability,
 	type PublicationEntry,
+	publicationIdSchema,
 	publicationMaxFrameBytes,
 	type PushId,
 	retentionMarkerAttribute,
@@ -333,6 +334,18 @@ function deferredSettle(): {
 }
 
 const frameEnvelopeSchema = z.looseObject({ ev: z.string() });
+
+// A later server can refuse an entry for a reason that this client does not
+// know, and such a refusal fails only that entry. A later server can also add
+// fields to a refusal. A refusal with a reason that this client knows is
+// then handled by that reason.
+const unknownRefusalSchema = z.object({
+	ev: z.literal('publication-refused'),
+	uploadId: publicationIdSchema,
+	reason: z.string(),
+	status: z.number().int(),
+	message: z.string()
+});
 
 function parseTokenAttributes(parts: readonly string[]): CapabilityAttributes {
 	const attributes: Record<string, string> = {};
@@ -1141,7 +1154,38 @@ export function runCommitSession(
 			return;
 		}
 
-		const parsed = commitSessionFrameSchema.safeParse(json);
+		const strict = commitSessionFrameSchema.safeParse(json);
+		const loose = strict.success
+			? undefined
+			: unknownRefusalSchema.safeParse(json).data;
+		// A refusal whose reason this client knows is handled as that reason, even
+		// when a later server added a field to it.
+		const parsed =
+			loose === undefined
+				? strict
+				: commitSessionFrameSchema.safeParse({
+						ev: loose.ev,
+						uploadId: loose.uploadId,
+						reason: loose.reason,
+						status: loose.status,
+						message: loose.message
+					});
+		const refusal = parsed.success ? undefined : loose;
+
+		if (refusal !== undefined) {
+			releaseChunkForUploadId(refusal.uploadId);
+			finishEntry(refusal.uploadId, (entry) => {
+				const error = new PublicationRefusedError(
+					refusal.reason,
+					refusal.status,
+					refusal.message
+				);
+				entry.settleFailed(error);
+				entry.rejectAck(error);
+			});
+
+			return;
+		}
 
 		if (!parsed.success) {
 			failSession(
