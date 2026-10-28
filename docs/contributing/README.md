@@ -249,7 +249,7 @@ failure or cancellation.
 | `check:deps`                      | Runs `syncpack lint` over the workspace's `package.json` files.                                                                                                                                    |                                                                      |
 | `check:action-bundles`            | Checks that the native build action's generated bundles match its TypeScript source.                                                                                                               |                                                                      |
 | `check:format`                    | Runs `prettier --check .`.                                                                                                                                                                         |                                                                      |
-| `check:lint`                      | Runs `eslint .`.                                                                                                                                                                                   |                                                                      |
+| `check:lint`                      | Runs ESLint in three processes, for `packages/server`, the other packages and the rest, so that no process keeps every TypeScript program and each fits in Node's default heap.                    |                                                                      |
 | `check:knip`                      | Runs Knip, to find unused and unlisted dependencies.                                                                                                                                               |                                                                      |
 | `check:types`                     | Runs each package's `check:types`. The server's script also checks that the Wrangler binding types are current.                                                                                    |                                                                      |
 | `check:types:root`                | Runs `tsc` over `actions/`, `scripts/` and the shared test code.                                                                                                                                   |                                                                      |
@@ -310,7 +310,8 @@ once and also checks:
 ### Fixing problems automatically
 
 `pnpm fix` fixes what it can for you. It runs `syncpack format`,
-`prettier --write .` and `eslint . --fix`.
+`prettier --write .` and ESLint with `--fix`, in the same three processes as
+`check:lint`.
 
 ## Keeping generated files up to date
 
