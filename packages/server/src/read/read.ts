@@ -35,6 +35,7 @@ import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { requireSubrequestsFor } from '../do/subrequest-slice.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
+import { ByteRangeRequest } from '../http/byte-range.ts';
 import { narCacheTag, narInfoCacheTag } from '../http/cache-tags.ts';
 import {
 	isNotModified,
@@ -214,19 +215,21 @@ export async function serveNar(
 		return isPrivate ? uncachedNotFoundResponse() : notFoundResponse();
 	}
 
-	return serveR2(
-		request,
-		env,
-		narObjectKey(nar.narHash, nar.incarnation),
-		(object) =>
-			narHeaders(
-				object,
-				tenant,
-				nar.narHash,
-				!isPrivate && authority.kind === 'cache' ? authority.scope : undefined
-			),
-		!isPrivate
-	);
+	const key = narObjectKey(nar.narHash, nar.incarnation);
+	const headersFor = (object: R2Object): Headers =>
+		narHeaders(
+			object,
+			tenant,
+			nar.narHash,
+			!isPrivate && authority.kind === 'cache' ? authority.scope : undefined
+		);
+	const range = ByteRangeRequest.of(request);
+
+	if (range !== undefined) {
+		return serveR2Range(request, env, key, headersFor, !isPrivate, range);
+	}
+
+	return serveR2(request, env, key, headersFor, !isPrivate);
 }
 
 /**
@@ -560,7 +563,8 @@ export async function missingStorePathHashes(
 }
 
 // Public origin requests reach the cache-owning tenant Worker only after
-// control admission; private requests stay on the uncached control Worker.
+// control admission. Private requests, and public NAR requests for a range
+// after byte 0, stay on the control Worker.
 //
 // `isServable` validates an object after R2 returns it. An authenticated
 // narinfo read uses the predicate to refuse an object whose recorded narinfo
@@ -620,6 +624,66 @@ function r2Response(
 	return new Response(body, { headers });
 }
 
+/**
+Serves the bytes of an R2 object that a range request selects.
+
+An R2 `head` call reads the object's size, so the response can refuse an
+unsatisfiable range before it reads any bytes. The refusal is `no-store`,
+because a cache that stored it under the object's URL could return it to
+requests for other ranges.
+*/
+async function serveR2Range(
+	request: Request,
+	env: ReadEnv,
+	key: R2ObjectKey,
+	headersFor: (object: R2Object) => Headers,
+	isPublicCache: boolean,
+	range: ByteRangeRequest
+): Promise<Response> {
+	const object = await env.BLOBS.head(key);
+
+	if (object === null) {
+		return isPublicCache ? notFoundResponse() : uncachedNotFoundResponse();
+	}
+
+	const headers = privatise(headersFor(object), isPublicCache);
+
+	if (isNotModified(request, headers)) {
+		return notModified(headers);
+	}
+
+	const selection = range.select(object.size, objectEtag(object));
+
+	if (selection.kind === 'whole') {
+		return serveR2(request, env, key, headersFor, isPublicCache);
+	}
+
+	headers.set('content-range', selection.contentRange);
+
+	if (selection.kind === 'unsatisfiable') {
+		headers.delete('content-length');
+		headers.set('cache-control', 'no-store');
+
+		return new Response(undefined, {
+			status: StatusCodes.REQUESTED_RANGE_NOT_SATISFIABLE,
+			headers
+		});
+	}
+
+	const partial = await env.BLOBS.get(key, { range: selection.span });
+
+	if (partial === null) {
+		return isPublicCache ? notFoundResponse() : uncachedNotFoundResponse();
+	}
+
+	headers.set('content-length', String(selection.span.length));
+
+	return new Response(partial.body, {
+		status: StatusCodes.PARTIAL_CONTENT,
+		headers
+	});
+}
+
 // An authenticated body must not enter Workers Cache or an intermediary cache.
 // Replace its public cache policy with `no-store`.
 function privatise(headers: Headers, isPublicCache: boolean): Headers {
@@ -644,6 +708,7 @@ function narHeaders(
 	cache: CacheScope | undefined
 ): Headers {
 	const headers = new Headers({
+		'accept-ranges': 'bytes',
 		'cache-control': narCacheControl,
 		'content-type': 'application/zstd',
 		etag: objectEtag(object)
