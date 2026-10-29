@@ -11,6 +11,16 @@ allowBuilds:
   ssh2: false
   workerd: true
 
+# Without these packages, recheck uses its JavaScript build on every platform.
+# The native and Java builds would add about 180 MB to the flake's pnpm store.
+ignoredOptionalDependencies:
+  - recheck-jar
+  - recheck-linux-arm64
+  - recheck-linux-x64
+  - recheck-macos-arm64
+  - recheck-macos-x64
+  - recheck-windows-x64
+
 minimumReleaseAge: 1440
 
 onlyBuiltDependencies:
