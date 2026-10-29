@@ -5,7 +5,11 @@ import {
 	type StorePathHash,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { byCodeUnit, resolveRootTargets } from '@cupboard/nix-store/store-path';
+import {
+	byCodeUnit,
+	type ResolvedRootTarget,
+	resolveRootTargets
+} from '@cupboard/nix-store/store-path';
 import {
 	type CacheRootRetention,
 	type RootEnsureBody,
@@ -69,6 +73,23 @@ function rootExpiry(
 	return isoTimestamp(new Date(now.getTime() + retention.seconds * 1000));
 }
 
+function isSameTargetSet(
+	stored: readonly ResolvedRootTarget[],
+	requested: readonly ResolvedRootTarget[]
+): boolean {
+	if (stored.length !== requested.length) {
+		return false;
+	}
+
+	const storedPaths = new Map(
+		stored.map((target) => [target.storePathHash, target.storePath])
+	);
+
+	return requested.every(
+		(target) => storedPaths.get(target.storePathHash) === target.storePath
+	);
+}
+
 export class RootsService {
 	constructor(
 		private readonly context: ServerContext,
@@ -89,14 +110,16 @@ export class RootsService {
 				: request.retention;
 		const expiresAt = rootExpiry(resolvedRetention, now);
 
-		// The targets the replacement releases receive a grace deadline, so they
-		// are read before the wholesale delete below discards them.
+		// A replacement gives each target that it releases a grace deadline, so
+		// read the stored targets before the delete below discards them.
 		const requested = new Set<string>(
 			request.targets.map((target) => target.storePathHash)
 		);
-		const released = this.rootTargetRows(cache, request.name)
+		const stored = this.rootTargetRows(cache, request.name);
+		const released = stored
 			.map((target) => target.storePathHash)
 			.filter((storePathHash) => !requested.has(storePathHash));
+		const isTargetSetChanged = !isSameTargetSet(stored, request.targets);
 
 		// A set request replaces the complete target set. Preserve the original
 		// creation time while storing no expiry as SQL NULL.
@@ -113,14 +136,20 @@ export class RootsService {
 				.get();
 			const created = existing?.createdAt ?? nowIso;
 
-			tx.delete(schema.retentionRootTargets)
-				.where(
-					and(
-						eq(schema.retentionRootTargets.cacheId, cache.id),
-						eq(schema.retentionRootTargets.rootName, request.name)
+			// Deleting or inserting a target row sets the cache's collection-input
+			// flag. A cache that received an unchanged set at least once per minimum
+			// scan interval would then never become current, and would be scanned
+			// in every interval.
+			if (isTargetSetChanged) {
+				tx.delete(schema.retentionRootTargets)
+					.where(
+						and(
+							eq(schema.retentionRootTargets.cacheId, cache.id),
+							eq(schema.retentionRootTargets.rootName, request.name)
+						)
 					)
-				)
-				.run();
+					.run();
+			}
 			tx.delete(schema.retentionRoots)
 				.where(
 					and(
@@ -142,17 +171,19 @@ export class RootsService {
 				})
 				.run();
 
-			for (const targets of jsonRowLists(request.targets)) {
-				tx.insert(schema.retentionRootTargets)
-					.select(
-						targets.insertSource([
-							sql`${cache.id}`,
-							sql`${request.name}`,
-							targets.column('storePathHash'),
-							targets.column('storePath')
-						])
-					)
-					.run();
+			if (isTargetSetChanged) {
+				for (const targets of jsonRowLists(request.targets)) {
+					tx.insert(schema.retentionRootTargets)
+						.select(
+							targets.insertSource([
+								sql`${cache.id}`,
+								sql`${request.name}`,
+								targets.column('storePathHash'),
+								targets.column('storePath')
+							])
+						)
+						.run();
+				}
 			}
 
 			// Applied inside the same transaction as the delete above: a crash

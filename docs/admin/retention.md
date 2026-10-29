@@ -80,6 +80,12 @@ path that was a target before, and isn't now, is released. If the cache has a
 grace period, the grace period keeps the store path for a while. Otherwise
 nothing keeps it.
 
+Setting a root to the targets that it already has keeps those targets and
+releases nothing, so it doesn't make the cache need
+[garbage collection](#garbage-collection). Like any other write, it restarts the
+root's TTL. In a cache that was closed and reopened, it also replaces the expiry
+that the close gave the root, so the root retains its targets again.
+
 One `root set` or `root ensure` request accepts at most 149 targets. Both
 commands replace the complete target set, so use several roots if that set is
 larger. Run roots grow through additive updates and have no total target limit.
