@@ -79,31 +79,100 @@ load_nix_database() {
   done
 }
 
+sha256_of() {
+  local digest
+  if command -v sha256sum >/dev/null; then
+    read -r digest _ < <(sha256sum "$1")
+  else
+    read -r digest _ < <(shasum -a 256 "$1")
+  fi
+  printf '%s\n' "$digest"
+}
+
+install_archive() (
+  local system=$1 tar=$2 name pin expected actual
+  name="nix-$nix_version-$system.tar.zstd"
+  pin="sha256_${system//-/_}"
+  expected=${!pin:-}
+  if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "::error::versions.env does not set $pin to a lowercase hexadecimal SHA-256 digest for $name." >&2
+    return 1
+  fi
+
+  # The subshell confines archive. Bash 3.2 unsets a local variable before the
+  # EXIT trap runs, so declaring it local would leave the file behind.
+  archive=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/nix-archive.XXXXXX")
+  trap 'rm -f "$archive"' EXIT
+  curl --fail --silent --show-error --location --retry 3 --retry-connrefused \
+    --output "$archive" \
+    "https://github.com/nixbuild/nix-quick-install-action/releases/download/$archive_release/$name"
+  actual=$(sha256_of "$archive")
+  if [[ "$actual" != "$expected" ]]; then
+    echo "::error::$name has SHA-256 digest $actual, but versions.env expects $expected. If nix_version and archive_release have not changed, the upstream release asset has changed: investigate it and do not update the pin. actions/install-nix/README.md describes how to record the digests for a new version." >&2
+    return 1
+  fi
+
+  prepare_store "$system"
+  "$tar" --skip-old-files --strip-components 1 -x -I unzstd -C /nix -f "$archive"
+)
+
+replace_file() {
+  local temporary
+  temporary=$(mktemp "$1.XXXXXX")
+  cat > "$temporary"
+  mv -f "$temporary" "$1"
+}
+
+write_netrc() {
+  local netrc=$HOME/.netrc
+  {
+    if [[ -e "$netrc" ]]; then
+      awk '
+        tolower($1) == "machine" || tolower($1) == "default" {
+          skip = tolower($1) == "machine" && tolower($2) == "github.com"
+        }
+        /^[[:space:]]*#/ || !skip
+      ' "$netrc"
+    fi
+    printf 'machine github.com\nlogin github-token\npassword %s\n' "$GITHUB_ACCESS_TOKEN"
+  } | replace_file "$netrc"
+}
+
+configure_nix() {
+  local directory configuration
+  directory="${XDG_CONFIG_HOME:-$HOME/.config}/nix"
+  configuration="$directory/nix.conf"
+  mkdir -p "$directory"
+  touch "$configuration"
+  if [[ -n "${GITHUB_ACCESS_TOKEN:-}" ]]; then
+    printf 'access-tokens = github.com=%s\n' "$GITHUB_ACCESS_TOKEN" \
+      | replace_file "$directory/github-access-token.conf"
+    write_netrc
+  fi
+
+  {
+    awk '!/^access-tokens = github\.com=[^[:space:]]*$/' "$configuration"
+    if [[ -n "${GITHUB_ACCESS_TOKEN:-}" ]] \
+      && ! grep -qxF '!include github-access-token.conf' "$configuration"; then
+      printf '\n!include github-access-token.conf\n'
+    fi
+    printf '\nextra-experimental-features = nix-command flakes\naccept-flake-config = true\n'
+  } | replace_file "$configuration"
+}
+
 main() {
-  local system tar nix configuration
+  local system tar nix
   # shellcheck source=versions.env
   source "${BASH_SOURCE[0]%/*}/versions.env"
   system=$(nix_system "$(uname -m)" "$(uname -s)")
   enable_kvm "$system"
-  prepare_store "$system"
 
   tar=tar
   if [[ "$system" == *-darwin ]]; then
     tar=gtar
   fi
-  curl --fail --silent --show-error --location --retry 3 --retry-connrefused \
-    "https://github.com/nixbuild/nix-quick-install-action/releases/download/$archive_release/nix-$nix_version-$system.tar.zstd" \
-    | "$tar" --skip-old-files --strip-components 1 -x -I unzstd -C /nix
-
-  configuration="${XDG_CONFIG_HOME:-$HOME/.config}/nix/nix.conf"
-  mkdir -p "$(dirname "$configuration")"
-  touch "$configuration"
-  if [[ -n "${GITHUB_ACCESS_TOKEN:-}" ]]; then
-    printf '\naccess-tokens = github.com=%s\n' "$GITHUB_ACCESS_TOKEN" >> "$configuration"
-    printf 'machine github.com\nlogin github-token\npassword %s\n' "$GITHUB_ACCESS_TOKEN" >> "$HOME/.netrc"
-    chmod 600 "$HOME/.netrc"
-  fi
-  printf '\nextra-experimental-features = nix-command flakes\naccept-flake-config = true\n' >> "$configuration"
+  install_archive "$system" "$tar"
+  configure_nix
 
   nix=$(readlink /nix/var/nix-quick-install-action/nix)
   load_nix_database "$nix" /nix/var/nix-quick-install-action/registration
