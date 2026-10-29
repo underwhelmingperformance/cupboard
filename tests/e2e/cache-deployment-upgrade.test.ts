@@ -226,7 +226,7 @@ it.each(['predecessor', 'intermediate'] as const)(
 			if (stage === 'intermediate') {
 				await deployOverPredecessor(server);
 			}
-			const database = await server.database();
+			const database = server.database();
 			const before = await database
 				.prepare('SELECT name, type, sql FROM sqlite_master ORDER BY name')
 				.all();
@@ -795,8 +795,8 @@ it('moves predecessor control authority to a separate database', async () => {
 		const client = await server.deploymentClient();
 		await wakeUntilStep(server, client, expansionLocalStep);
 		await contractOverPredecessor(server);
-		const control = await server.controlDatabase();
-		const shared = await server.database();
+		const control = server.controlDatabase();
+		const shared = server.database();
 		const ready = await control
 			.prepare(
 				"SELECT source_database_id, state FROM control_database_ready WHERE id = 'current'"
@@ -895,8 +895,8 @@ it('completes a transfer when another deploy contracts during a source schema re
 			}
 		});
 		const states = await completeTransitions(first);
-		const target = await server.controlDatabase();
-		const shared = await server.database();
+		const target = server.controlDatabase();
+		const shared = server.database();
 		expect({
 			didContract,
 			states: Object.fromEntries(states),
@@ -1075,13 +1075,13 @@ it('uses Cloudflare recovery only while a real control transfer remains frozen',
 		await expect(completeTransitions(readyInterrupted)).rejects.toThrow(
 			'Interrupted after readiness'
 		);
-		const control = await server.controlDatabase();
-		const shared = await server.database();
+		const control = server.controlDatabase();
+		const shared = server.database();
 		const copied = await shared
 			.prepare(
 				"SELECT copied_at FROM control_database_split WHERE id = 'current'"
 			)
-			.first<{ copied_at: string | null }>();
+			.first();
 		expect({
 			authority: await establishAuthority(plans, world),
 			credentialReads,
