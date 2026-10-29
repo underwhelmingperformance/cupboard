@@ -124,22 +124,6 @@ const readCredential = {
 
 const nonReplayableMutations = [
 	{
-		name: 'a root replacement',
-		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.roots.set.inDefaultCache({
-				name: rootNameSchema.parse('channel'),
-				targets: []
-			})
-	},
-	{
-		name: 'a root ensure',
-		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.roots.ensure.inDefaultCache({
-				name: rootNameSchema.parse('channel'),
-				targets: [storePathSchema.parse(storePath)]
-			})
-	},
-	{
 		name: 'a cache registration',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
 			rpc.caches.put.inNamedCache({
@@ -158,11 +142,47 @@ const nonReplayableMutations = [
 	}
 ] as const;
 
+// Node's fetch rejects this way when the peer resets a reused keep-alive socket
+// after the request was sent.
+function connectionReset(): Response {
+	throw new TypeError('fetch failed', {
+		cause: Object.assign(new Error('read ECONNRESET'), {
+			code: 'ECONNRESET',
+			errno: -104,
+			syscall: 'read'
+		})
+	});
+}
+
+const rootSummary = {
+	name: 'channel',
+	expiresAt: '2026-01-15T00:00:00.000Z',
+	expired: false,
+	createdAt: '2026-01-01T00:00:00.000Z',
+	updatedAt: '2026-01-01T00:00:00.000Z',
+	targets: [
+		{
+			storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
+			storePath,
+			present: true
+		}
+	]
+};
+
 // Each of these replaces state the server already holds, so the contract marks it
 // `replay-safe` and a transient failure may be sent again.
 const idempotentMutations = [
 	{
 		name: 'a reuse-view replacement',
+		response: {
+			name: 'shared',
+			access: 'public',
+			revision: 1,
+			priority: 40,
+			selectors: [{ kind: 'prefix', prefix: 'build' }],
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z'
+		},
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
 			rpc.reuseViews.set({
 				name: reuseViewNameSchema.parse('shared'),
@@ -172,9 +192,28 @@ const idempotentMutations = [
 	},
 	{
 		name: 'an upload confirmation',
+		response: { paths: [{ storePathHash: 'a'.repeat(32), confirmed: true }] },
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
 			rpc.uploads.confirm.inDefaultCache({
 				storePathHashes: [storePathHashSchema.parse('a'.repeat(32))]
+			})
+	},
+	{
+		name: 'a root replacement',
+		response: rootSummary,
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.roots.set.inDefaultCache({
+				name: rootNameSchema.parse('channel'),
+				targets: [storePathSchema.parse(storePath)]
+			})
+	},
+	{
+		name: 'a root ensure',
+		response: { status: 'retained', root: rootSummary },
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.roots.ensure.inDefaultCache({
+				name: rootNameSchema.parse('channel'),
+				targets: [storePathSchema.parse(storePath)]
 			})
 	}
 ] as const;
@@ -630,11 +669,7 @@ describe('tenantRpc', () => {
 			{
 				...mutation,
 				failure: 'a lost response',
-				response: (): Response => {
-					throw new TypeError('fetch failed', {
-						cause: { code: 'ECONNRESET' }
-					});
-				}
+				response: connectionReset
 			},
 			{ ...mutation, failure: 'a gateway failure', response: badGateway }
 		])
@@ -660,30 +695,33 @@ describe('tenantRpc', () => {
 		}
 	});
 
-	// The fetcher does not retry the second status, so the call ends after exactly
-	// two attempts. Neither response body has to satisfy the contract's output.
-	it.each(idempotentMutations)(
-		'retries $name after a gateway failure',
-		async ({ request }) => {
+	it.each(
+		idempotentMutations.flatMap((mutation) => [
+			{ ...mutation, failure: 'a connection reset', failed: connectionReset },
+			{ ...mutation, failure: 'a gateway failure', failed: badGateway }
+		])
+	)(
+		'sends $name again after $failure and returns its response',
+		async ({ request, response, failed }) => {
 			vi.useFakeTimers();
 
 			try {
 				const { fetcher, captured } = capturingFetcher([
-					badGateway,
-					notImplemented
+					failed,
+					() => Response.json(response)
 				]);
 				const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
 					credential: 'admin-token',
 					fetcher
 				});
 
-				const pending = rejectedBy(() => request(rpc));
+				const pending = request(rpc);
 				await vi.advanceTimersByTimeAsync(60_000);
 
 				expect({
-					rejection: (await pending) instanceof CupboardHttpError,
+					value: await pending,
 					attempts: captured.length
-				}).toStrictEqual({ rejection: true, attempts: 2 });
+				}).toStrictEqual({ value: response, attempts: 2 });
 			} finally {
 				vi.useRealTimers();
 			}

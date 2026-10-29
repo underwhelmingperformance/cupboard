@@ -35,7 +35,8 @@ const rootSet = writableCacheScopedProcedure(
 		suffix: '/roots/{name}',
 		requires: 'root:set',
 		resource: { root: { field: 'name' } },
-		maintenance: true
+		maintenance: true,
+		replaySafety: 'replay-safe'
 	},
 	{ name: rootNameSchema, ...rootSetBodySchema.shape },
 	rootSetResponseSchema
@@ -47,7 +48,8 @@ const rootEnsure = writableCacheScopedProcedure(
 		suffix: '/roots/{name}/ensure',
 		requires: 'root:set',
 		resource: { root: { field: 'name' } },
-		maintenance: true
+		maintenance: true,
+		replaySafety: 'replay-safe'
 	},
 	{ name: rootNameSchema, ...rootEnsureBodySchema.shape },
 	rootEnsureResponseSchema
