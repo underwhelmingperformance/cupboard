@@ -1856,11 +1856,20 @@ describe('pinned Nix client', () => {
 		const installs = workflows.flatMap((workflow) =>
 			stepsUsing(workflow, nixInstaller).map(({ step }) => step.with)
 		);
+		const digest: unknown = expect.stringMatching(/^[0-9a-f]{64}$/u);
 
 		expect({
 			installs,
 			prepareInstalls: action.includes(`uses: ${nixInstaller}`),
-			versions,
+			versions: Object.fromEntries(
+				versions
+					.split('\n')
+					.filter(Boolean)
+					.map((line) => [
+						line.slice(0, line.indexOf('=')),
+						line.slice(line.indexOf('=') + 1)
+					])
+			),
 			otherInstallers: workflows.flatMap((workflow) =>
 				allSteps(workflow)
 					.map(({ step }) => step.uses)
@@ -1876,7 +1885,14 @@ describe('pinned Nix client', () => {
 		}).toStrictEqual({
 			installs: Array.from({ length: 14 }),
 			prepareInstalls: true,
-			versions: `nix_version=${nixClientVersion}\narchive_release=v35\n`,
+			versions: {
+				nix_version: nixClientVersion,
+				archive_release: 'v35',
+				sha256_x86_64_linux: digest,
+				sha256_aarch64_linux: digest,
+				sha256_x86_64_darwin: digest,
+				sha256_aarch64_darwin: digest
+			},
 			otherInstallers: [],
 			remoteDaemon: true
 		});

@@ -199,6 +199,8 @@ jobs:
         run: node tests/installer/lifecycle/record.ts local-filesystem
       - run: pnpm install --frozen-lockfile
       - name: Record the production store
+        env:
+          GITHUB_ACCESS_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           export TRIAL_RESULTS="$RUNNER_TEMP/nix-installer-production"
