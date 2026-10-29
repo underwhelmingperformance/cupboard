@@ -87,7 +87,8 @@ import { maxOutgoingConnections } from './bulk.ts';
 import {
 	type CommitPipelineService,
 	type NarInfoReplacement,
-	type PrefetchedMaterialisationFacts
+	type PrefetchedMaterialisationFacts,
+	type ReservationRead
 } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type SchemaDatabase, type ServerContext } from './context.ts';
@@ -479,8 +480,11 @@ type ExpiryOutcome =
 
 // The state of the generation in the path's row, as expiry reads it before its
 // gate: no charged commit, a charged commit whose narinfo object is published,
-// or a charged commit that Nix cannot fetch because its NAR is missing.
-type ExpiryCommit = 'uncharged' | 'servable' | 'unservable';
+// or a charged commit that Nix cannot fetch because its NAR is missing. The
+// read of an uncharged reservation goes to `releaseReservation` in the gate.
+type ExpiryCommit =
+	| { readonly kind: 'uncharged'; readonly read?: ReservationRead }
+	| { readonly kind: 'servable' | 'unservable' };
 
 function expiryStateKey(state: ExpiryState): string {
 	return JSON.stringify({
@@ -495,12 +499,6 @@ function expiryStateKey(state: ExpiryState): string {
 				? 'none'
 				: { generation: state.row.generation, narHash: state.row.narHash }
 	});
-}
-
-// The generation that verification had committed when the caller read a
-// shared reservation, or nothing when it had not.
-interface SharedReservation {
-	readonly committed?: NarInfoGeneration;
 }
 
 interface RowObservation {
@@ -991,7 +989,7 @@ export function buildLeaseUpdate(
 ) {
 	return database
 		.update(schema.pendingUploads)
-		.set({ claimedAt, claimOwner: owner })
+		.set({ claimedAt, claimOwner: owner, commitReleased: false })
 		.where(inArray(schema.pendingUploads.id, uploadIds));
 }
 
@@ -1064,82 +1062,8 @@ export class VerificationService {
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly uploadState: UploadStateService,
 		private readonly retention: RetentionService,
-		private readonly attestations: AttestationsService,
-		// A failed verification must remove the path from every retention root. A
-		// root can include the path while its bytes are still being verified.
-		private readonly pruneRetentionTargets: (
-			cache: ResolvedCache,
-			storePathHash: StorePathHash
-		) => void
+		private readonly attestations: AttestationsService
 	) {}
-
-	// Reads, before the caller's input gate, whether verification charged the
-	// commit of a reservation that another started commit shares. A charged
-	// generation is committed even before its narinfo object is published, and
-	// it stays committed while the path's row keeps it, so `reclaimUnsharedRow`
-	// can use the result inside the gate.
-	private async sharedReservation(
-		pending: PendingUploadRow,
-		metadata: UploadPathNegotiation,
-		generation: NarInfoGeneration
-	): Promise<SharedReservation> {
-		const cache = this.cache(pending.cacheId);
-		if (
-			!this.uploadState.hasOtherStartedCommit(pending.id, cache, metadata) ||
-			!(await this.commitPipeline.isGenerationCharged(
-				cache,
-				metadata,
-				generation
-			))
-		) {
-			return {};
-		}
-		return { committed: generation };
-	}
-
-	// Started commits of the same path and NAR share one reservation, so a
-	// failed upload keeps the row while another started commit uses it.
-	private async reclaimUnsharedRow(
-		pending: PendingUploadRow,
-		metadata: UploadPathNegotiation,
-		generation: NarInfoGeneration,
-		isStillSettleable: () => boolean,
-		shared: SharedReservation
-	): Promise<'reclaimed' | 'committed-current' | 'superseded' | 'shared'> {
-		const cache = this.cache(pending.cacheId);
-		if (!this.uploadState.hasOtherStartedCommit(pending.id, cache, metadata)) {
-			return this.commitPipeline.reclaimReservedRow(
-				cache,
-				metadata.storePathHash,
-				generation,
-				metadata.narHash,
-				isStillSettleable
-			);
-		}
-		const row = this.narInfoRow(cache.id, metadata.storePathHash);
-		return shared.committed === generation &&
-			row?.generation === generation &&
-			row.narHash === metadata.narHash
-			? 'committed-current'
-			: 'shared';
-	}
-
-	// Call inside the gate that reclaimed the row. Once the gate reopens, a
-	// newer generation of the path can attach its own retention targets, which
-	// the prune would remove. A superseded row belongs to a newer generation and
-	// a shared row stays reserved, so their targets stay.
-	private pruneReclaimedTargets(
-		pending: PendingUploadRow,
-		metadata: UploadPathNegotiation,
-		result: 'reclaimed' | 'committed-current' | 'superseded' | 'shared'
-	): void {
-		if (result === 'reclaimed') {
-			this.pruneRetentionTargets(
-				this.cache(pending.cacheId),
-				metadata.storePathHash
-			);
-		}
-	}
 
 	private async finishExhaustedUpload(
 		logger: Logger,
@@ -1152,10 +1076,20 @@ export class VerificationService {
 			pending.metadataJson
 		);
 		const reserved = this.narInfoRow(pending.cacheId, metadata.storePathHash);
-		const shared =
+		const read =
 			reserved?.narHash === metadata.narHash
-				? await this.sharedReservation(pending, metadata, reserved.generation)
-				: {};
+				? await this.commitPipeline.readReservation(
+						this.cache(pending.cacheId),
+						metadata,
+						reserved.generation
+					)
+				: undefined;
+		// The verdict of a charged generation applies while the path's row keeps
+		// the generation, which the gate checks.
+		const chargedVerdict =
+			read?.isCharged === true
+				? await this.publicationVerdict(pending, metadata, read.generation)
+				: 'absent';
 		const failed = {
 			verdict: 'absent' as const,
 			absentPublication: 'fail-publication' as const
@@ -1168,18 +1102,26 @@ export class VerificationService {
 			if (row?.narHash !== metadata.narHash) {
 				return failed;
 			}
-			const result = await this.reclaimUnsharedRow(
-				pending,
-				metadata,
-				row.generation,
-				() => this.ownsActiveClaim(owner, pending, signal),
-				shared
-			);
-			if (!this.ownsActiveClaim(owner, pending, signal)) {
+			// The row changed after the read, so a later pass decides.
+			if (read?.generation !== row.generation) {
+				return;
+			}
+			const result = await this.commitPipeline.releaseReservation({
+				uploadId: pending.id,
+				cache: this.cache(pending.cacheId),
+				path: metadata,
+				generation: row.generation,
+				reason: 'failed-upload',
+				read,
+				isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
+			});
+			if (
+				result === 'stale-read' ||
+				!this.ownsActiveClaim(owner, pending, signal)
+			) {
 				return;
 			}
 			if (result !== 'committed-current') {
-				this.pruneReclaimedTargets(pending, metadata, result);
 				return failed;
 			}
 			const grace = parseStoredGraceDecision(pending.graceDecisionJson);
@@ -1210,11 +1152,7 @@ export class VerificationService {
 			// made the charge, the verdict is `absent`, and the operation stays
 			// accepted so that a resend is answered from the published path.
 			return {
-				verdict: await this.publicationVerdict(
-					pending,
-					metadata,
-					row.generation
-				),
+				verdict: chargedVerdict,
 				absentPublication: 'keep-publication-accepted' as const
 			};
 		});
@@ -2197,8 +2135,8 @@ export class VerificationService {
 			// identity proof: the input gate reopens the moment that callback
 			// completes, so a confirmation outside it could race a delete or
 			// recommit queued behind the gate.
-			const shared = await this.sharedReservation(
-				pending,
+			const read = await this.commitPipeline.readReservation(
+				this.cache(pending.cacheId),
 				metadata,
 				generation
 			);
@@ -2207,18 +2145,19 @@ export class VerificationService {
 					return 'superseded' as const;
 				}
 
-				const result = await this.reclaimUnsharedRow(
-					pending,
-					metadata,
-					generation,
-					() => this.ownsActiveClaim(owner, pending, signal),
-					shared
-				);
+				const result = await this.commitPipeline.releaseReservation({
+					uploadId: pending.id,
+					cache: this.cache(pending.cacheId),
+					path: metadata,
+					generation: generation,
+					reason: 'failed-upload',
+					read,
+					isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
+				});
 
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return 'superseded' as const;
 				}
-				this.pruneReclaimedTargets(pending, metadata, result);
 
 				// The winning generation must receive this upload's retention decision and
 				// run-root attachment before the waiter is notified.
@@ -2243,6 +2182,11 @@ export class VerificationService {
 
 				return result;
 			});
+
+			// A later pass decides with a new read.
+			if (reclaim === 'stale-read') {
+				return 'ignored';
+			}
 
 			if (reclaim === 'committed-current') {
 				signal?.throwIfAborted();
@@ -2424,29 +2368,36 @@ export class VerificationService {
 		signal?: AbortSignal
 	): Promise<boolean> {
 		signal?.throwIfAborted();
-		const shared = await this.sharedReservation(pending, metadata, generation);
+		const read = await this.commitPipeline.readReservation(
+			this.cache(pending.cacheId),
+			metadata,
+			generation
+		);
 		const reclaim = await this.context.criticalSection(async () => {
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return 'superseded' as const;
 			}
 
-			const result = await this.reclaimUnsharedRow(
-				pending,
-				metadata,
-				generation,
-				() => this.ownsActiveClaim(owner, pending, signal),
-				shared
-			);
+			const result = await this.commitPipeline.releaseReservation({
+				uploadId: pending.id,
+				cache: this.cache(pending.cacheId),
+				path: metadata,
+				generation: generation,
+				reason: 'failed-upload',
+				read,
+				isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
+			});
 
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return 'superseded' as const;
 			}
-			this.pruneReclaimedTargets(pending, metadata, result);
 			return result;
 		});
 
+		// After `stale-read`, a later pass decides with a new read.
 		if (
 			reclaim === 'committed-current' ||
+			reclaim === 'stale-read' ||
 			!this.ownsActiveClaim(owner, pending, signal)
 		) {
 			return false;
@@ -2677,14 +2628,17 @@ export class VerificationService {
 		if (
 			metadata === undefined ||
 			cache === undefined ||
-			row?.narHash !== metadata.narHash ||
-			!(await this.commitPipeline.isGenerationCharged(
-				cache,
-				metadata,
-				row.generation
-			))
+			row?.narHash !== metadata.narHash
 		) {
-			return 'uncharged';
+			return { kind: 'uncharged' };
+		}
+		const read = await this.commitPipeline.readReservation(
+			cache,
+			metadata,
+			row.generation
+		);
+		if (!read.isCharged) {
+			return { kind: 'uncharged', read };
 		}
 		const versions = await this.narInfoObjects.servableNarInfoVersions(cache, [
 			metadata.storePathHash
@@ -2694,12 +2648,12 @@ export class VerificationService {
 			served?.generation === row.generation &&
 			served.narHash === row.narHash
 		) {
-			return 'servable';
+			return { kind: 'servable' };
 		}
 		// The charged path may have lost its NAR. The operation expires as
 		// `absent` and keeps the path's row, so a later upload of the path
 		// restores the NAR or replaces the row.
-		return 'unservable';
+		return { kind: 'unservable' };
 	}
 
 	// Call inside the input gate. `expirePublication` read `observed` and
@@ -2732,35 +2686,33 @@ export class VerificationService {
 			});
 			return { kind: 'done' };
 		}
-		if (cache !== undefined && row !== undefined && commit === 'servable') {
+		if (
+			cache !== undefined &&
+			row !== undefined &&
+			commit.kind === 'servable'
+		) {
 			return this.completeExpiring(logger, pending, metadata, cache, row);
 		}
-		// Only a started commit reserves a narinfo row, and started commits of
-		// the same path and NAR share one reservation. The reclaim reads the
-		// reservation's D1 edge inside the gate: before the gate, another commit
-		// of the reservation could still commit it and clear its own pending row,
-		// and the reclaim would then delete a published path.
+		// Only a started commit reserves a narinfo row.
 		if (
-			commit === 'uncharged' &&
 			cache !== undefined &&
-			row?.narHash === metadata.narHash &&
 			pending.verdict !== null &&
-			!this.uploadState.hasOtherStartedCommit(pending.id, cache, metadata)
+			commit.kind === 'uncharged' &&
+			commit.read !== undefined
 		) {
-			const result = await this.commitPipeline.reclaimReservedRow(
+			const result = await this.commitPipeline.releaseReservation({
+				uploadId: pending.id,
 				cache,
-				metadata.storePathHash,
-				row.generation,
-				row.narHash
-			);
-			if (result === 'committed-current') {
+				path: metadata,
+				generation: commit.read.generation,
+				reason: 'failed-upload',
+				read: commit.read
+			});
+			if (result === 'committed-current' || result === 'stale-read') {
 				// A commit was charged after the read before the gate. Read again,
 				// so that expiry publishes the narinfo object before it completes
 				// the operation.
 				return { kind: 'changed' };
-			}
-			if (result === 'reclaimed') {
-				this.pruneRetentionTargets(cache, metadata.storePathHash);
 			}
 		}
 		const cleared = this.clearExpiredUpload(pending.id, logger, 'absent');
@@ -4984,7 +4936,7 @@ export class VerificationService {
 			const filter = and(eq(schema.pendingUploads.id, row.id), eligible);
 			const pending = this.context.db
 				.update(schema.pendingUploads)
-				.set({ claimOwner: owner, claimedAt })
+				.set({ claimOwner: owner, claimedAt, commitReleased: false })
 				.where(filter)
 				.returning()
 				.all()
@@ -5341,102 +5293,106 @@ export class VerificationService {
 			pending.metadataJson
 		);
 
-		if (pending.r2Key === narObjectKey(metadata.narHash)) {
-			// A reuse commit that crashed after reserving its narinfo row leaves that
-			// row behind; with the canonical object gone it can never materialise, and
-			// a root may already reference it (as not-present). Reclaim it before
-			// dropping the marker.
-			const reserved = this.narInfoRow(pending.cacheId, metadata.storePathHash);
+		// A commit that crashed after reserving its narinfo row leaves that row
+		// behind, and a root may already reference the path. Release the
+		// reservation before dropping the marker.
+		const reserved = this.narInfoRow(pending.cacheId, metadata.storePathHash);
 
-			if (reserved?.narHash === metadata.narHash) {
-				const shared = await this.sharedReservation(
+		if (reserved?.narHash === metadata.narHash) {
+			const read = await this.commitPipeline.readReservation(
+				this.cache(pending.cacheId),
+				metadata,
+				reserved.generation
+			);
+			// The grace confirmation runs inside the same gated callback as
+			// the identity proof: the input gate reopens the moment that
+			// callback completes, so a confirmation outside it could race a
+			// delete or recommit queued behind the gate.
+			const reclaim = await this.context.criticalSection(async () => {
+				if (!this.ownsActiveClaim(owner, pending, signal)) {
+					return 'superseded' as const;
+				}
+
+				const result = await this.commitPipeline.releaseReservation({
+					uploadId: pending.id,
+					cache: this.cache(pending.cacheId),
+					path: metadata,
+					generation: reserved.generation,
+					reason: 'failed-upload',
+					read,
+					isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
+				});
+
+				if (!this.ownsActiveClaim(owner, pending, signal)) {
+					return 'superseded' as const;
+				}
+
+				// This upload lost the race, so its own captured decision
+				// never ran; apply it against the winning generation before
+				// notifying, or a positive policy would grant nothing. The
+				// push's run root retains the path for the same reason,
+				// under the same proof.
+				if (result === 'committed-current') {
+					this.commitPipeline.attachRootTarget(
+						this.cache(pending.cacheId),
+						pending.attachRootName,
+						metadata.storePathHash,
+						metadata.storePath,
+						pending.retentionEpoch
+					);
+					confirmGrace(
+						this.context,
+						this.retention,
+						this.cache(pending.cacheId),
+						metadata.storePathHash,
+						reserved.generation,
+						metadata.narHash,
+						parseStoredGraceDecision(pending.graceDecisionJson)
+					);
+				}
+
+				return result;
+			});
+
+			// After `stale-read`, a later pass decides with a new read.
+			if (
+				reclaim === 'stale-read' ||
+				!this.ownsActiveClaim(owner, pending, signal)
+			) {
+				return false;
+			}
+
+			// A concurrent pass has already committed this generation, so this
+			// missing verdict is stale. Clear the pending row without pruning the
+			// path's root, and report whether this upload published the generation.
+			if (reclaim === 'committed-current') {
+				signal?.throwIfAborted();
+				await this.inheritAfterCommit(pending, metadata, reserved.generation);
+				const verdict = await this.publicationVerdict(
 					pending,
 					metadata,
 					reserved.generation
 				);
-				// The grace confirmation runs inside the same gated callback as
-				// the identity proof: the input gate reopens the moment that
-				// callback completes, so a confirmation outside it could race a
-				// delete or recommit queued behind the gate.
-				const reclaim = await this.context.criticalSection(async () => {
-					if (!this.ownsActiveClaim(owner, pending, signal)) {
-						return 'superseded' as const;
-					}
-
-					const result = await this.reclaimUnsharedRow(
-						pending,
-						metadata,
-						reserved.generation,
-						() => this.ownsActiveClaim(owner, pending, signal),
-						shared
-					);
-
-					if (!this.ownsActiveClaim(owner, pending, signal)) {
-						return 'superseded' as const;
-					}
-					this.pruneReclaimedTargets(pending, metadata, result);
-
-					// This upload lost the race, so its own captured decision
-					// never ran; apply it against the winning generation before
-					// notifying, or a positive policy would grant nothing. The
-					// push's run root retains the path for the same reason,
-					// under the same proof.
-					if (result === 'committed-current') {
-						this.commitPipeline.attachRootTarget(
-							this.cache(pending.cacheId),
-							pending.attachRootName,
-							metadata.storePathHash,
-							metadata.storePath,
-							pending.retentionEpoch
-						);
-						confirmGrace(
-							this.context,
-							this.retention,
-							this.cache(pending.cacheId),
-							metadata.storePathHash,
-							reserved.generation,
-							metadata.narHash,
-							parseStoredGraceDecision(pending.graceDecisionJson)
-						);
-					}
-
-					return result;
-				});
-
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return false;
 				}
+				const cleared = await this.uploadState.clearPendingUpload(
+					pending.id,
+					{ logger, outcome: verdict },
+					owner
+				);
 
-				// A concurrent pass has already committed this generation, so this
-				// missing verdict is stale. Clear the pending row without pruning the
-				// path's root, and report whether this upload published the generation.
-				if (reclaim === 'committed-current') {
-					signal?.throwIfAborted();
-					await this.inheritAfterCommit(pending, metadata, reserved.generation);
-					const verdict = await this.publicationVerdict(
-						pending,
-						metadata,
-						reserved.generation
-					);
-					if (!this.ownsActiveClaim(owner, pending, signal)) {
-						return false;
-					}
-					const cleared = await this.uploadState.clearPendingUpload(
-						pending.id,
-						{ logger, outcome: verdict },
-						owner
-					);
-
-					if (cleared === undefined) {
-						return false;
-					}
-
-					this.notifyWaiters(cleared, verdict);
-
-					return true;
+				if (cleared === undefined) {
+					return false;
 				}
-			}
 
+				this.notifyWaiters(cleared, verdict);
+
+				return true;
+			}
+		}
+
+		if (pending.r2Key === narObjectKey(metadata.narHash)) {
 			signal?.throwIfAborted();
 			const cleared = await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
@@ -5466,10 +5422,6 @@ export class VerificationService {
 		if (!isSettled) {
 			return false;
 		}
-		this.pruneRetentionTargets(
-			this.cache(pending.cacheId),
-			metadata.storePathHash
-		);
 		this.notifyWaiters(pending, 'mismatch');
 		await this.deleteStagingObjectBestEffort(pending, signal);
 

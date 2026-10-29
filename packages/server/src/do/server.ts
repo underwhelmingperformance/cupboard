@@ -622,16 +622,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.retention,
 			this.narInfoObjects
 		);
-		this.uploads = new UploadsService(
-			this.context,
-			this.cacheRegistration,
-			this.uploadState,
-			this.narInfoObjects,
-			this.deletionQueue,
-			this.reconcileQueue,
-			this.retention,
-			this.roots
-		);
 		this.commitPipeline = new CommitPipelineService(
 			this.context,
 			this.signingKeys,
@@ -640,6 +630,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.retention,
 			this.attestations
 		);
+		this.uploads = new UploadsService(
+			this.context,
+			this.cacheRegistration,
+			this.uploadState,
+			this.narInfoObjects,
+			this.deletionQueue,
+			this.reconcileQueue,
+			this.retention,
+			this.roots,
+			this.commitPipeline
+		);
 		this.verification = new VerificationService(
 			this.context,
 			this.commitPipeline,
@@ -647,10 +648,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.narInfoObjects,
 			this.uploadState,
 			this.retention,
-			this.attestations,
-			(cache, storePathHash) => {
-				this.roots.pruneRetentionTargets(cache, storePathHash);
-			}
+			this.attestations
 		);
 		this.offboarding = new OffboardingService(this.context);
 		this.maintenanceEligibility = new MaintenanceEligibilityService(

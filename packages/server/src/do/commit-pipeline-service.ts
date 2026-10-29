@@ -61,6 +61,7 @@ import {
 	BlobDeclarationConflictError,
 	NarTooLargeError,
 	QuotaExceededError,
+	SubrequestTimeoutError,
 	TenantUsageMissingError,
 	TenantWritesStoppedError,
 	UploadCacheMismatchError,
@@ -103,6 +104,7 @@ import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { ProtectedInheritanceService } from './protected-inheritance-service.ts';
 import { PublicationStore } from './publication-store.ts';
+import { ReservationCharges } from './reservation-charges.ts';
 import { type RetentionService } from './retention-service.ts';
 import {
 	readableReferenceSelect,
@@ -110,7 +112,6 @@ import {
 	reusableReference,
 	type ReuseAuthority
 } from './reuse-authority.ts';
-import { deleteRetentionTargets } from './roots-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { affordableSubrequestOperations } from './subrequest-slice.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
@@ -152,6 +153,33 @@ export interface TenantAccount {
 	readonly casBytes: number | null;
 	readonly quotaBytes: number | null;
 }
+
+// What a caller read about a reservation before its input gate: whether a
+// commit of the generation was charged in D1, and the mark of recent charges
+// that it took before that read.
+export interface ReservationRead {
+	readonly generation: NarInfoGeneration;
+	readonly isCharged: boolean;
+	readonly mark: number;
+}
+
+// A failed upload gives up its claim on the reservation. An abandoned
+// reservation has no upload that can complete it, and the committing upload
+// takes the path's row next.
+export interface ReservationRelease {
+	readonly uploadId: UploadId;
+	readonly cache: ResolvedCache;
+	readonly path: Pick<UploadPathNegotiation, 'storePathHash' | 'narHash'>;
+	readonly generation: NarInfoGeneration;
+	readonly reason: 'failed-upload' | 'abandoned-reservation';
+	readonly read: ReservationRead;
+	readonly isStillSettleable?: () => boolean;
+}
+
+// `stale-read` keeps the row: a commit of the reservation was charged after
+// the caller's read, so the read cannot show whether the row is committed.
+export type ReservationReleaseResult =
+	'reclaimed' | 'committed-current' | 'superseded' | 'shared' | 'stale-read';
 
 // The columns the charge batch's leading read returns. `TenantAccount` is a
 // superset, so `refuseUnmeteredTenant` accepts either.
@@ -377,6 +405,7 @@ export class CommitPipelineService {
 
 	private readonly materialiseQueue: PendingMaterialise[] = [];
 	private materialiseDrain: Promise<void> | undefined;
+	private readonly reservationCharges = new ReservationCharges();
 
 	constructor(
 		private readonly context: ServerContext,
@@ -606,28 +635,27 @@ export class CommitPipelineService {
 		}
 
 		if (outcome.kind === 'tenant-inactive') {
-			// Started commits of the same path and NAR share one reservation, and
-			// the tenant can be resumed, so another started commit keeps the row.
-			await this.context.criticalSection(async () => {
-				if (this.uploadState.hasOtherStartedCommit(uploadId, cache, metadata)) {
-					return;
-				}
-				const result = await this.reclaimReservedRow(
+			// The tenant can be resumed, so another started commit of the
+			// reservation can still complete it.
+			const read = await this.readReservation(cache, metadata, generation);
+			const release = await this.context.criticalSection(() =>
+				this.releaseReservation({
+					uploadId,
 					cache,
-					metadata.storePathHash,
+					path: metadata,
 					generation,
-					metadata.narHash
+					reason: 'failed-upload',
+					read
+				})
+			);
+			if (release === 'stale-read') {
+				return this.deferToVerification(
+					logger,
+					uploadId,
+					metadata,
+					graceDecision
 				);
-				// Once the gate reopens, a newer generation of the path can attach
-				// its own retention targets, which this removal would take.
-				if (result === 'reclaimed') {
-					deleteRetentionTargets(
-						this.context.db,
-						cache,
-						metadata.storePathHash
-					);
-				}
-			});
+			}
 			await this.uploadState.clearPendingUpload(uploadId, {
 				logger,
 				outcome: 'absent'
@@ -642,14 +670,20 @@ export class CommitPipelineService {
 		// The probe can report a missing canonical NAR after another saga has already
 		// committed this generation. Check the current generation before reclaiming
 		// it, and apply grace and root retention before releasing the same gate.
+		const read = await this.readReservation(cache, metadata, generation);
 		const confirmed = await this.context.criticalSection(async () => {
-			const reclaim = await this.reclaimReservedRow(
+			const reclaim = await this.releaseReservation({
+				uploadId,
 				cache,
-				metadata.storePathHash,
+				path: metadata,
 				generation,
-				metadata.narHash
-			);
+				reason: 'failed-upload',
+				read
+			});
 
+			if (reclaim === 'stale-read') {
+				return reclaim;
+			}
 			if (reclaim !== 'committed-current') {
 				return;
 			}
@@ -674,6 +708,15 @@ export class CommitPipelineService {
 				graceDecision
 			);
 		});
+
+		if (confirmed === 'stale-read') {
+			return this.deferToVerification(
+				logger,
+				uploadId,
+				metadata,
+				graceDecision
+			);
+		}
 
 		if (confirmed !== undefined) {
 			await this.attestations.queueInheritance(
@@ -713,6 +756,9 @@ export class CommitPipelineService {
 			outcome: 'absent'
 		});
 
+		if (outcome.kind === 'over-quota') {
+			throw new QuotaExceededError(this.context.requireTenant());
+		}
 		throw new UploadedObjectNotFoundError(canonicalKey);
 	}
 
@@ -770,9 +816,11 @@ export class CommitPipelineService {
 	}
 
 	// Whether a commit that finds an uncommitted reservation of its path waits
-	// for verification. It waits while a live upload shares the reservation.
-	// Otherwise no upload can complete the reservation, and the commit reclaims
-	// it so retries do not wait for the periodic recovery scan.
+	// for verification. It waits while a live upload or another started commit
+	// shares the reservation. Otherwise no upload can complete the reservation,
+	// and the commit reclaims it so retries do not wait for the periodic
+	// recovery scan. A started commit past its expiry still shares the
+	// reservation.
 	private async defersToReservation(
 		uploadId: UploadId,
 		cache: ResolvedCache,
@@ -783,15 +831,43 @@ export class CommitPipelineService {
 			this.uploadState.markUploadPending(uploadId);
 			return true;
 		}
-		await this.context.criticalSection(() =>
-			this.reclaimReservedRow(
+		const read = await this.readReservation(cache, row, row.generation);
+		const release = await this.context.criticalSection(() =>
+			this.releaseReservation({
+				uploadId,
 				cache,
-				row.storePathHash,
-				row.generation,
-				row.narHash
-			)
+				path: row,
+				generation: row.generation,
+				reason: 'abandoned-reservation',
+				read
+			})
 		);
-		return false;
+		if (release !== 'shared' && release !== 'stale-read') {
+			return false;
+		}
+		this.uploadState.markUploadPending(uploadId);
+		return true;
+	}
+
+	// A release read can go stale when a commit of the reservation is charged
+	// after it. The upload keeps its pending row, and verification decides its
+	// outcome with a new read.
+	private async deferToVerification(
+		logger: Logger,
+		uploadId: UploadId,
+		metadata: UploadPathNegotiation,
+		graceDecision: GraceDecision | undefined
+	): Promise<CommitOutcome> {
+		this.uploadState.markUploadPending(uploadId);
+		await this.requestVerification(logger, this.context.requireTenant());
+		return {
+			kind: 'deferred',
+			storePathHash: metadata.storePathHash,
+			narHash: metadata.narHash,
+			...(graceDecision?.reportsGrace === true && {
+				grace: capturedGraceFact(graceDecision)
+			})
+		};
 	}
 
 	// Whether Nix can fetch the committed row. The availability read repairs a
@@ -1231,13 +1307,37 @@ export class CommitPipelineService {
 		const references = charges.map((charge) =>
 			this.chargedReferenceSelect(tenant, charge)
 		);
-		const [gate, ...rest] = await this.context.d1.batch([
-			this.tenantChargeGateSelect(tenant),
-			...charges.flatMap((charge) =>
-				this.chargeStatements(tenant, charge, now)
-			),
-			...references
-		]);
+		const record = () => {
+			for (const charge of charges) {
+				this.reservationCharges.record({
+					cacheId: charge.cache.id,
+					storePathHash: charge.metadata.storePathHash,
+					generation: charge.generation
+				});
+			}
+		};
+		let results;
+		try {
+			results = await this.context.d1.batch([
+				this.tenantChargeGateSelect(tenant),
+				...charges.flatMap((charge) =>
+					this.chargeStatements(tenant, charge, now)
+				),
+				...references
+			]);
+		} catch (error) {
+			// A batch that outlasts its bound can still reach D1.
+			if (
+				error instanceof SubrequestTimeoutError &&
+				error.abandoned !== undefined
+			) {
+				void error.abandoned.finally(record);
+			}
+			throw error;
+		} finally {
+			record();
+		}
+		const [gate, ...rest] = results;
 
 		return {
 			gate: gate.at(0),
@@ -1754,6 +1854,141 @@ export class CommitPipelineService {
 		for (const item of queued) {
 			item.resolve({ kind: 'deferred' });
 		}
+	}
+
+	// Call only inside the input gate, through `releaseReservation`. Reclaim the
+	// row only if its generation and hash still match and no committed edge
+	// exists for that identity. Old edges can survive deletion and recommit until
+	// the deletion backlog drains.
+	private async reclaimReservedRow(
+		cache: ResolvedCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration,
+		narHash: NixSha256HashString,
+		isCharged: boolean,
+		isStillSettleable?: () => boolean
+	): Promise<'reclaimed' | 'committed-current' | 'superseded'> {
+		const current = this.context.db
+			.select({
+				generation: schema.narInfos.generation,
+				narHash: schema.narInfos.narHash
+			})
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cacheId, cache.id),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+
+		if (current === undefined) {
+			return 'reclaimed';
+		}
+
+		if (current.generation !== generation || current.narHash !== narHash) {
+			return 'superseded';
+		}
+
+		if (isStillSettleable !== undefined && !isStillSettleable()) {
+			return 'superseded';
+		}
+
+		if (isCharged) {
+			return 'committed-current';
+		}
+
+		await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
+
+		if (isStillSettleable !== undefined && !isStillSettleable()) {
+			return 'superseded';
+		}
+
+		// Delete the grace deadline with the reserved row. A dangling deadline could
+		// otherwise retain a later generation of the same path.
+		this.context.db.transaction((tx) => {
+			tx.delete(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cacheId, cache.id),
+						eq(schema.narInfos.storePathHash, storePathHash),
+						eq(schema.narInfos.generation, generation),
+						eq(schema.narInfos.narHash, narHash)
+					)
+				)
+				.run();
+
+			tx.delete(schema.retentionGrace)
+				.where(
+					and(
+						eq(schema.retentionGrace.cacheId, cache.id),
+						eq(schema.retentionGrace.storePathHash, storePathHash)
+					)
+				)
+				.run();
+		});
+
+		return 'reclaimed';
+	}
+
+	private async decideRelease(
+		request: ReservationRelease
+	): Promise<ReservationReleaseResult> {
+		const { uploadId, cache, path, generation, read } = request;
+		const isCharged = read.isCharged && read.generation === generation;
+		if (
+			!isCharged &&
+			this.reservationCharges.isChargedSince(
+				{
+					cacheId: cache.id,
+					storePathHash: path.storePathHash,
+					generation
+				},
+				read.mark
+			)
+		) {
+			return 'stale-read';
+		}
+		if (this.uploadState.hasOtherStartedCommit(uploadId, cache, path)) {
+			const row = this.context.db
+				.select({
+					generation: schema.narInfos.generation,
+					narHash: schema.narInfos.narHash
+				})
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cacheId, cache.id),
+						eq(schema.narInfos.storePathHash, path.storePathHash)
+					)
+				)
+				.get();
+			return isCharged &&
+				row?.generation === generation &&
+				row.narHash === path.narHash
+				? 'committed-current'
+				: 'shared';
+		}
+		const result = await this.reclaimReservedRow(
+			cache,
+			path.storePathHash,
+			generation,
+			path.narHash,
+			isCharged,
+			request.isStillSettleable
+		);
+		if (result === 'reclaimed') {
+			this.context.db
+				.delete(schema.retentionRootTargets)
+				.where(
+					and(
+						eq(schema.retentionRootTargets.cacheId, cache.id),
+						eq(schema.retentionRootTargets.storePathHash, path.storePathHash)
+					)
+				)
+				.run();
+		}
+		return result;
 	}
 
 	private async drainMaterialiseQueue(logger: Logger): Promise<void> {
@@ -2646,7 +2881,7 @@ export class CommitPipelineService {
 	// still lack its object.
 	async isGenerationCharged(
 		cache: ResolvedCache,
-		metadata: UploadPathNegotiation,
+		metadata: Pick<UploadPathNegotiation, 'storePathHash' | 'narHash'>,
 		generation: NarInfoGeneration
 	): Promise<boolean> {
 		const tenant = this.context.requireTenant();
@@ -2684,95 +2919,62 @@ export class CommitPipelineService {
 		});
 	}
 
-	// Call only inside the input gate. Reclaim the row only if its generation and
-	// hash still match and no committed edge exists for that identity. Old edges
-	// can survive deletion and recommit until the deletion backlog drains.
-	async reclaimReservedRow(
+	/**
+	Reads, before the caller's input gate, whether a commit of the reserved
+	generation was charged in D1. A charged generation is committed even
+	before its narinfo object is published, and it stays committed while the
+	path's row keeps it. Pass the result to {@link releaseReservation} inside
+	the gate.
+	*/
+	async readReservation(
 		cache: ResolvedCache,
-		storePathHash: StorePathHash,
-		generation: NarInfoGeneration,
-		narHash: NixSha256HashString,
-		isStillSettleable?: () => boolean
-	): Promise<'reclaimed' | 'committed-current' | 'superseded'> {
-		const current = this.context.db
-			.select({
-				generation: schema.narInfos.generation,
-				narHash: schema.narInfos.narHash
-			})
-			.from(schema.narInfos)
-			.where(
-				and(
-					eq(schema.narInfos.cacheId, cache.id),
-					eq(schema.narInfos.storePathHash, storePathHash)
-				)
-			)
-			.get();
+		path: Pick<UploadPathNegotiation, 'storePathHash' | 'narHash'>,
+		generation: NarInfoGeneration
+	): Promise<ReservationRead> {
+		const mark = this.reservationCharges.mark();
+		const isCharged = await this.isGenerationCharged(cache, path, generation);
+		return { generation, isCharged, mark };
+	}
 
-		if (current === undefined) {
-			return 'reclaimed';
+	/**
+	Releases an upload's reservation of a path's narinfo row. Every caller that
+	gives up a reservation goes through this method. Call it inside the input
+	gate that decides the outcome, with the result of
+	{@link readReservation} for the same generation.
+
+	The read decides the outcome only while it is current. The charge batch is
+	the only writer of reference edges, so a read that showed no charge is
+	current unless the batch charged a commit of the reservation after the
+	read. The result is then `stale-read`, and the row stays.
+
+	Started commits of the same path and NAR share one reservation, so the row
+	stays while another started commit uses it. The result is then
+	`committed-current` when the read showed the generation charged, and
+	`shared` otherwise. Without another started commit, the row is reclaimed
+	unless it has changed or its commit was charged.
+
+	A reclaim removes the path from every retention root in the same gate. The
+	path has no row afterwards, so every target belongs to the reclaimed
+	reservation. Once the gate reopens, a newer generation of the path can
+	attach its own targets, which a later removal would take.
+
+	A failed upload stops counting as a started commit of the reservation when
+	the result fails it. Another upload of the reservation that fails before
+	this upload clears its pending row then reclaims the row, which neither
+	upload would otherwise do.
+	*/
+	async releaseReservation(
+		request: ReservationRelease
+	): Promise<ReservationReleaseResult> {
+		const result = await this.decideRelease(request);
+		if (
+			result !== 'committed-current' &&
+			result !== 'stale-read' &&
+			request.reason === 'failed-upload' &&
+			request.isStillSettleable?.() !== false
+		) {
+			this.uploadState.releaseStartedCommit(request.uploadId);
 		}
-
-		if (current.generation !== generation || current.narHash !== narHash) {
-			return 'superseded';
-		}
-
-		const tenant = this.context.requireTenant();
-		const materialised = await this.context.d1
-			.select({ narHash: d1Schema.blobReference.narHash })
-			.from(d1Schema.blobReference)
-			.where(
-				and(
-					eq(d1Schema.blobReference.tenant, tenant),
-					cacheIdentityCondition(
-						d1Schema.blobReference.cacheKind,
-						d1Schema.blobReference.cacheName,
-						cache.scope
-					),
-					eq(d1Schema.blobReference.storePathHash, storePathHash),
-					eq(d1Schema.blobReference.generation, generation),
-					eq(d1Schema.blobReference.narHash, narHash)
-				)
-			)
-			.get();
-
-		if (isStillSettleable !== undefined && !isStillSettleable()) {
-			return 'superseded';
-		}
-
-		if (materialised !== undefined) {
-			return 'committed-current';
-		}
-
-		await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
-
-		if (isStillSettleable !== undefined && !isStillSettleable()) {
-			return 'superseded';
-		}
-
-		// Delete the grace deadline with the reserved row. A dangling deadline could
-		// otherwise retain a later generation of the same path.
-		this.context.db.transaction((tx) => {
-			tx.delete(schema.narInfos)
-				.where(
-					and(
-						eq(schema.narInfos.cacheId, cache.id),
-						eq(schema.narInfos.storePathHash, storePathHash),
-						eq(schema.narInfos.generation, generation),
-						eq(schema.narInfos.narHash, narHash)
-					)
-				)
-				.run();
-
-			tx.delete(schema.retentionGrace)
-				.where(
-					and(
-						eq(schema.retentionGrace.cacheId, cache.id),
-						eq(schema.retentionGrace.storePathHash, storePathHash)
-					)
-				)
-				.run();
-		});
-
-		return 'reclaimed';
+		return result;
 	}
 }

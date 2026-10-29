@@ -66,6 +66,7 @@ import { requireServedStorePaths } from '../policy/served-store.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
+import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import {
@@ -205,7 +206,8 @@ export class UploadsService {
 		private readonly deletionQueue: DeletionQueueService,
 		private readonly reconcileQueue: ReconcileQueueService,
 		private readonly retention: RetentionService,
-		private readonly roots: RootsService
+		private readonly roots: RootsService,
+		private readonly commitPipeline: CommitPipelineService
 	) {}
 
 	private async publicationGeneration(
@@ -493,6 +495,68 @@ export class UploadsService {
 		return JSON.stringify(row ?? 'none');
 	}
 
+	// A replayed operation's pending row can refer to a canonical NAR that is
+	// gone. When the row's commit started and reserved the path's narinfo row,
+	// or a verification pass has claimed the row, admission answers the entry
+	// from the row and leaves the row to verification. Verification's
+	// missing-object path releases the reservation and clears the row as
+	// `absent`, or clears it with the publication's verdict when the
+	// reservation's generation is charged. Admission does not release the
+	// reservation itself, so the client's request does not make the R2 delete
+	// of the reservation's narinfo object. Otherwise nothing is reserved, and
+	// admission clears the row as `absent` and asks for the bytes.
+	private async clearMissingReuse(
+		cache: ResolvedCache,
+		entry: PublicationEntry
+	): Promise<void> {
+		const pendingRow = () =>
+			this.context.db
+				.select()
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, entry.operationId))
+				.get();
+		const observed = pendingRow();
+		if (observed?.r2Key !== narObjectKey(entry.metadata.narHash)) {
+			return;
+		}
+		const reserved = this.existingNarInfos(cache, [
+			entry.metadata.storePathHash
+		]).get(entry.metadata.storePathHash);
+		const isReserved =
+			(observed.verdict === 'committing' || observed.verdict === 'pending') &&
+			reserved?.narHash === entry.metadata.narHash;
+		if (isReserved || observed.claimOwner !== null) {
+			return;
+		}
+		const observedPath = this.pathRowKey(cache, entry);
+		const operations = new PublicationStore(this.context);
+		const cleared = await this.context.criticalSection(() => {
+			this.requireCurrentCache(cache, true);
+			if (
+				JSON.stringify(pendingRow()) !== JSON.stringify(observed) ||
+				this.pathRowKey(cache, entry) !== observedPath
+			) {
+				throw new PublicationPathChangedError();
+			}
+			if (operations.get(entry.operationId)?.state !== 'accepted') {
+				return Promise.resolve(undefined);
+			}
+			operations.assertLive(entry.operationId);
+			return Promise.resolve(
+				this.uploadState.clearPendingUploadRow(entry.operationId, {
+					logger: rootLogger(),
+					outcome: 'absent'
+				})
+			);
+		});
+		if (cleared !== undefined) {
+			await this.uploadState.concludeClearedUpload(cleared, {
+				logger: rootLogger(),
+				outcome: 'absent'
+			});
+		}
+	}
+
 	uploadStatus(uploadId: UploadId): UploadStatusResponse {
 		const pending = this.context.db
 			.select({ verdict: schema.pendingUploads.verdict })
@@ -660,26 +724,7 @@ export class UploadsService {
 			? reusable.get(entry.metadata.narHash)
 			: undefined;
 		if (original !== undefined && blob === undefined) {
-			await this.context.criticalSection(async () => {
-				this.requireCurrentCache(cache, true);
-				const pending = this.context.db
-					.select()
-					.from(schema.pendingUploads)
-					.where(eq(schema.pendingUploads.id, entry.operationId))
-					.get();
-				if (
-					pending?.r2Key !== narObjectKey(entry.metadata.narHash) ||
-					operations.get(entry.operationId)?.state !== 'accepted'
-				) {
-					return;
-				}
-				operations.assertLive(entry.operationId);
-				await this.uploadState.clearPendingUpload(
-					entry.operationId,
-					{ logger: rootLogger(), outcome: 'absent' },
-					pending.claimOwner ?? undefined
-				);
-			});
+			await this.clearMissingReuse(cache, entry);
 		}
 
 		const pushExpiry = pushIdExpiresAtSeconds(pushId);
