@@ -3168,6 +3168,65 @@ export class VerificationService {
 		}
 	}
 
+	/**
+	Releases the specified leases while `owner` still owns them, except where
+	a verdict is recorded. A recorded verdict keeps its lease, so the verdict
+	drain applies it without decoding the NAR again.
+	*/
+	releaseUnrecordedClaimLeases(
+		owner: string,
+		uploadIds: readonly UploadId[]
+	): void {
+		const distinctIds = [...new Set(uploadIds)];
+
+		for (const ids of jsonValueLists(distinctIds)) {
+			this.context.db
+				.update(schema.pendingUploads)
+				.set({ claimedAt: sql`null`, claimOwner: sql`null` })
+				.where(
+					and(
+						inArray(schema.pendingUploads.id, ids),
+						eq(schema.pendingUploads.claimOwner, owner),
+						isNull(schema.pendingUploads.recordedVerdictJson)
+					)
+				)
+				.run();
+		}
+	}
+
+	/**
+	The uploads in `uploadIds` that `owner` still claims without a stored
+	verdict. A record call that reached its budget reports them, because
+	`holdVerdicts` stores every other verdict before the call awaits anything,
+	and the verdict drain applies the stored ones.
+	*/
+	unheldClaims(owner: string, uploadIds: readonly UploadId[]): UploadId[] {
+		const unheld: UploadId[] = [];
+		const distinctIds = [...new Set(uploadIds)];
+		const awaitingVerdict = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
+
+		for (const ids of jsonValueLists(distinctIds)) {
+			const rows = this.context.db
+				.select({ id: schema.pendingUploads.id })
+				.from(schema.pendingUploads)
+				.where(
+					and(
+						inArray(schema.pendingUploads.id, ids),
+						eq(schema.pendingUploads.claimOwner, owner),
+						isNull(schema.pendingUploads.recordedVerdictJson),
+						awaitingVerdict
+					)
+				)
+				.all();
+			unheld.push(...rows.map((row) => row.id));
+		}
+
+		return unheld;
+	}
+
 	renewClaimLeases(owner: string, uploadIds: readonly UploadId[]): boolean {
 		if (uploadIds.length === 0) {
 			return true;

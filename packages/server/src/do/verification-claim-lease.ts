@@ -98,9 +98,13 @@ operation remains in progress. A failed renewal rejects a successful
 operation so the caller leaves the upload pending. The upload's existing
 status and generation checks make the next attempt safe. If both the
 operation and a renewal fail, the operation's error remains authoritative.
+
+`renew` receives a signal that aborts when the operation stops or finishes.
+A renewal that is still in progress when the operation finishes is abandoned,
+and its outcome is ignored.
 */
 export async function withRenewedVerificationClaim<T>(
-	renew: () => Promise<void>,
+	renew: (signal: AbortSignal) => Promise<void>,
 	work: (signal: AbortSignal) => Promise<T>,
 	budgetMs?: number,
 	outerSignal?: AbortSignal
@@ -126,7 +130,10 @@ export async function withRenewedVerificationClaim<T>(
 				}, budgetMs);
 
 	try {
-		await raceVerificationOperation(renew(), controller.signal);
+		await raceVerificationOperation(
+			renew(controller.signal),
+			controller.signal
+		);
 	} catch (error) {
 		clearTimeout(deadline);
 		outerSignal?.removeEventListener('abort', onOuterAbort);
@@ -135,10 +142,16 @@ export async function withRenewedVerificationClaim<T>(
 
 	let renewal: Promise<void> | undefined;
 	let renewalFailure: { readonly error: unknown } | undefined;
+	const finished = new AbortController();
+	const renewalSignal = AbortSignal.any([controller.signal, finished.signal]);
 	const renewOnce = async (): Promise<void> => {
 		try {
-			await raceVerificationOperation(renew(), controller.signal);
+			await raceVerificationOperation(renew(renewalSignal), renewalSignal);
 		} catch (error) {
+			if (finished.signal.aborted) {
+				return;
+			}
+
 			renewalFailure ??= { error };
 			controller.abort(error);
 		}
@@ -176,6 +189,7 @@ export async function withRenewedVerificationClaim<T>(
 		clearInterval(timer);
 		clearTimeout(deadline);
 		outerSignal?.removeEventListener('abort', onOuterAbort);
+		finished.abort();
 		const finalRenewal = renewal;
 		await finalRenewal;
 	}

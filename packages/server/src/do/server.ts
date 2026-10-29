@@ -312,9 +312,11 @@ export type VerificationClaimRpcResult =
 /**
 The internal result of a budgeted verification record RPC.
 */
+// A timed-out call lists `unheld`: the uploads that the claim owner still
+// claims without a stored verdict. An object of an earlier version omits it.
 export type VerificationRecordRpcResult =
 	| { readonly kind: 'recorded'; readonly applied: number }
-	| { readonly kind: 'timed-out' };
+	| { readonly kind: 'timed-out'; readonly unheld?: readonly UploadId[] };
 
 // The negotiate and preview routes on both paths: the bare default-cache path
 // and the named-cache path. A response to one of these advertises the
@@ -3623,6 +3625,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
+	Releases the claims on uploads whose verdicts a queue consumer could not
+	record, so the next pass can claim them without waiting for their leases
+	to expire. See {@link VerificationService.releaseUnrecordedClaimLeases}.
+	*/
+	async releaseVerificationClaims(
+		owner: string,
+		uploadIds: readonly UploadId[]
+	): Promise<void> {
+		if (uploadIds.length > maxVerificationRpcRows) {
+			throw new RangeError(
+				`A verification release may contain at most ${String(maxVerificationRpcRows)} upload IDs.`
+			);
+		}
+
+		await this.initialise();
+		this.verification.releaseUnrecordedClaimLeases(owner, uploadIds);
+	}
+
+	/**
 	Checks the token and cache grant before the Worker reads shared hints.
 	*/
 	async authoriseNegotiateHints(
@@ -3752,7 +3773,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return { kind: 'recorded', applied };
 		} catch (error) {
 			if (error instanceof SubrequestTimeoutError) {
-				return { kind: 'timed-out' };
+				return {
+					kind: 'timed-out',
+					unheld: this.verification.unheldClaims(
+						owner,
+						results.map((result) => result.uploadId)
+					)
+				};
 			}
 
 			throw error;

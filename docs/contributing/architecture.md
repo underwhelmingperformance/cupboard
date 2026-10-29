@@ -888,6 +888,56 @@ The requests are under the tenant URL.
    later pass retries it. There is no limit on the total time for one upload,
    but the whole pass stops when its 14-minute budget ends.
 
+   The consumer sends each verdict to the tenant's object when its verification
+   finishes. Verdicts that finish while a call is in progress go in the next
+   call. When a call fails, the consumer repeats it with a new stub, because
+   Cloudflare documents that many exceptions leave a stub broken. Cloudflare's
+   [error-handling guide][do-errors] says that an error marked `retryable` can
+   be retried for an idempotent request, and that an error marked `overloaded`
+   should not be retried. The guide does not mention the `durableObjectReset`
+   mark. The consumer also retries a reset, because its calls are idempotent and
+   a reset discards only the object's in-memory state.
+
+   After a retryable fault or a reset, the consumer waits 1, 2, 4, 8 and 15
+   seconds between attempts. These waits total 30 seconds, plus the time that
+   the attempts take, and cover the restart of a tenant object that the runtime
+   has reset. After any other failure, it makes two more attempts, 500
+   milliseconds apart. Each of the two schedules counts its own attempts during
+   a run of consecutive failures, and a successful call starts a new run. Once a
+   schedule is spent, a later failure of that kind gets no retry until a call
+   succeeds. The next call includes the verdicts of a failed call. After an
+   overload, the consumer sends no further record call in the pass, and the pass
+   fails.
+
+   The object stores the verdicts of a call before it applies any, and its
+   verdict drain applies stored verdicts from its alarm. A record call that
+   reaches its budget while it applies verdicts replies `timed-out` and lists
+   the uploads without a stored verdict. When that list is empty, the consumer
+   treats the verdicts as recorded and sends them no further call. An object of
+   an earlier version does not send the list, so the consumer then retries as
+   after any other failure.
+
+   The object can receive a verdict twice when a reply is lost. While the pass
+   still owns the claim, the object stores the same verdict again. Once the
+   verdict has been applied, the pass no longer owns the claim and the object
+   skips the verdict. For a canonical object that the consumer wrote, it gives
+   up only a version that is still pending for the same pass, never a live one.
+
+   The consumer renews its claims when the pass starts and then every three
+   minutes. A renewal that fails with a retryable fault or a reset is repeated
+   with a new stub after the same waits. If the renewal still fails, the pass
+   stops. A renewal that is still in progress when the pass finishes is
+   abandoned.
+
+   If the pass stops or fails before its budget ends, the consumer releases the
+   claims on uploads without a recorded verdict and fails the queue message,
+   which the queue delivers again after 60 seconds. The next pass can then claim
+   those uploads at once, without waiting for their six-minute claim leases to
+   expire.
+
+   [do-errors]:
+     https://developers.cloudflare.com/durable-objects/best-practices/error-handling/
+
    When a commit declared the compressed object's SHA-256 and size, and the NAR
    has no canonical object yet, the consumer promotes the upload in the same
    read. It asks the tenant's object to reserve the next version of the
