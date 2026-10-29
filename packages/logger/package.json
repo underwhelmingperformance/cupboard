@@ -10,6 +10,7 @@
 	"devDependencies": {
 		"@types/node": "catalog:",
 		"http-status-codes": "catalog:",
+		"recheck": "^4.6.2",
 		"typescript": "catalog:",
 		"vitest": "catalog:"
 	},
@@ -22,6 +23,7 @@
 	"license": "AGPL-3.0-or-later",
 	"private": true,
 	"scripts": {
+		"bench": "vitest bench --run",
 		"check:types": "tsc --noEmit",
 		"test": "vitest run --passWithNoTests"
 	},

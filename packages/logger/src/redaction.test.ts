@@ -1,3 +1,6 @@
+import { spawn } from 'node:child_process';
+import { constants } from 'node:os';
+
 import { traceLogFields } from '@cupboard/shared/log-context';
 import {
 	initialiseTracing,
@@ -6,9 +9,11 @@ import {
 } from '@cupboard/shared/node-tracing';
 import { resetSync } from '@logtape/logtape';
 import { StatusCodes } from 'http-status-codes';
+import { check } from 'recheck';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { configureLogging, getLogger, type LogRecord } from './config.ts';
+import { redactingSink, textPatterns } from './redaction.ts';
 import { serialiseLogProperties } from './serialisation.ts';
 import { githubActionsSink, jsonLinesSink } from './sinks.ts';
 
@@ -34,6 +39,28 @@ function render(properties: Record<string, unknown>): unknown {
 	return result;
 }
 
+/**
+Redacts a record whose tagged-template message interpolates `value`, and
+returns the message that the sink receives.
+*/
+function redactedMessage(value: unknown): readonly unknown[] {
+	let message: readonly unknown[] = [];
+	const sink = redactingSink((record) => {
+		message = record.message;
+	});
+
+	sink({
+		timestamp: 0,
+		category: ['cupboard'],
+		level: 'info',
+		rawMessage: Object.assign(['detail ', ''], { raw: ['detail ', ''] }),
+		message: ['detail ', value, ''],
+		properties: {}
+	});
+
+	return message;
+}
+
 afterEach(() => {
 	resetSync();
 });
@@ -45,6 +72,15 @@ describe('log redaction', () => {
 		['refresh_token=opaque-credential', 'refresh_token=[redacted]'],
 		['client_secret=opaque-credential', 'client_secret=[redacted]'],
 		['api_key=opaque-credential', 'api_key=[redacted]'],
+		['pa\u{17F}sword=opaque-credential', 'pa\u{17F}sword=[redacted]'],
+		['api_\u{212A}ey=opaque-credential', 'api_\u{212A}ey=[redacted]'],
+		['passphrase: opaque-credential', 'passphrase: [redacted]'],
+		['--private-key=opaque-credential', '--private-key=[redacted]'],
+		[
+			JSON.stringify({ signature: 'opaque-credential' }),
+			JSON.stringify({ signature: '[redacted]' })
+		],
+		['password="unterminated value', 'password="[redacted]"'],
 		[
 			JSON.stringify({ password: 'before"after' }),
 			JSON.stringify({ password: '[redacted]' })
@@ -104,6 +140,224 @@ describe('log redaction', () => {
 			category: 'cupboard',
 			msg: 'request failed',
 			detail: expected
+		});
+	});
+
+	it.each([
+		[
+			['push', '--read-password', 'opaque-credential', '--github-oidc'],
+			['push', '--read-password', '[redacted]', '--github-oidc']
+		],
+		[
+			['setup', '--github-token=opaque-credential', '--cache', 'main'],
+			['setup', '--github-token=[redacted]', '--cache', 'main']
+		],
+		[
+			['plan', 'cohort', '--view-read-password', '--read-password', 'x'],
+			['plan', 'cohort', '--view-read-password', '[redacted]', '[redacted]']
+		],
+		[
+			['deploy', '--api-key', 'opaque-credential', '--yes'],
+			['deploy', '--api-key', '[redacted]', '--yes']
+		],
+		[
+			['deploy', '--api_key=opaque-credential', '--yes'],
+			['deploy', '--api_key=[redacted]', '--yes']
+		]
+	])('redacts option values in argument lists: %j', (spawnargs, expected) => {
+		expect(render({ spawnargs })).toStrictEqual({
+			timestamp: 0,
+			level: 'error',
+			category: 'cupboard',
+			msg: 'request failed',
+			spawnargs: expected
+		});
+	});
+
+	it.each([
+		[
+			'cupboard push --read-password opaque-credential --github-oidc',
+			'cupboard push --read-password [redacted] --github-oidc'
+		],
+		[
+			'cupboard setup --github-token\topaque-credential',
+			'cupboard setup --github-token\t[redacted]'
+		],
+		['deploy -api-key opaque-credential', 'deploy -api-key [redacted]'],
+		[
+			'push --read-pa\u{17F}sword opaque-credential',
+			'push --read-pa\u{17F}sword [redacted]'
+		],
+		[
+			"deploy --api-key 'alpha beta gamma' --yes",
+			"deploy --api-key '[redacted]' --yes"
+		],
+		['deploy --passphrase "alpha beta', 'deploy --passphrase "[redacted]"']
+	])('redacts option values in a command line: %s', (detail, expected) => {
+		expect(render({ detail })).toStrictEqual({
+			timestamp: 0,
+			level: 'error',
+			category: 'cupboard',
+			msg: 'request failed',
+			detail: expected
+		});
+	});
+
+	it('redacts the arguments of a command that could not be started', async () => {
+		const child = spawn('/nonexistent/cupboard', [
+			'push',
+			'--read-password',
+			'opaque-credential',
+			'--github-token=opaque-credential'
+		]);
+		const error = await new Promise<unknown>((resolve) => {
+			child.once('error', resolve);
+		});
+
+		if (!(error instanceof Error)) {
+			throw new TypeError('spawn did not report an Error');
+		}
+
+		expect(render({ error })).toStrictEqual({
+			timestamp: 0,
+			level: 'error',
+			category: 'cupboard',
+			msg: 'request failed',
+			errorName: 'Error',
+			errorMessage: 'spawn /nonexistent/cupboard ENOENT',
+			errorStack: error.stack,
+			errorDetails: {
+				name: 'Error',
+				message: 'spawn /nonexistent/cupboard ENOENT',
+				stack: error.stack,
+				errno: -constants.errno.ENOENT,
+				code: 'ENOENT',
+				syscall: 'spawn /nonexistent/cupboard',
+				path: '/nonexistent/cupboard',
+				spawnargs: [
+					'push',
+					'--read-password',
+					'[redacted]',
+					'--github-token=[redacted]'
+				]
+			}
+		});
+	});
+
+	it.each(['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_'])(
+		'redacts a GitHub token with the %s prefix',
+		(prefix) => {
+			expect(
+				render({ detail: `clone with ${prefix}${'A1b2'.repeat(9)} failed` })
+			).toStrictEqual({
+				timestamp: 0,
+				level: 'error',
+				category: 'cupboard',
+				msg: 'request failed',
+				detail: 'clone with [redacted] failed'
+			});
+		}
+	);
+
+	it.each(Object.entries(textPatterns))(
+		'proves the %s pattern linear',
+		async (_name, pattern) => {
+			// An infinite time limit never expires, so the analysis finishes however
+			// long it takes on a loaded machine.
+			const diagnostics = await check(pattern.source, pattern.flags, {
+				checker: 'automaton',
+				timeout: Infinity,
+				attackTimeout: Infinity,
+				incubationTimeout: Infinity,
+				seedingTimeout: Infinity
+			});
+
+			expect(diagnostics).toStrictEqual({
+				source: pattern.source,
+				flags: pattern.flags,
+				status: 'safe',
+				checker: 'automaton',
+				complexity: { type: 'linear', summary: 'linear', isFuzz: false }
+			});
+		}
+	);
+
+	it.each([
+		[
+			'a token that crosses the truncation point',
+			`${'x'.repeat(4090)} ghp_${'A1b2'.repeat(9)} ${'y'.repeat(100)}`,
+			`${'x'.repeat(4090)} [reda[truncated]`
+		],
+		[
+			'a value that continues past the scanned text',
+			`token="${'a'.repeat(9000)}"`,
+			'token="[redacted]"[truncated]'
+		],
+		[
+			'a character that crosses the end of the scanned text',
+			`token=${'a'.repeat(5000)} ${'b'.repeat(3184)}\u{1F600}z`,
+			`token=[redacted] ${'b'.repeat(3184)}\u{1F600}[truncated]`
+		],
+		[
+			'a character that ends at the end of the scanned text',
+			`token=${'a'.repeat(5000)} ${'b'.repeat(3184)}\u{1F600}`,
+			`token=[redacted] ${'b'.repeat(3184)}\u{1F600}`
+		],
+		[
+			'a JWT whose second dot is past the scanned text',
+			`value eyJ${'a'.repeat(5000)}.${'b'.repeat(5000)}.c2lnbmF0dXJl`,
+			'value [JWT REDACTED][truncated]'
+		],
+		[
+			'a character that crosses the truncation point',
+			`${'x'.repeat(4095)}\u{1F600}${'y'.repeat(10)}`,
+			`${'x'.repeat(4095)}\u{1F600}[truncated]`
+		]
+	])('redacts and truncates %s', (_case, detail, expected) => {
+		expect(render({ detail })).toStrictEqual({
+			timestamp: 0,
+			level: 'error',
+			category: 'cupboard',
+			msg: 'request failed',
+			detail: expected
+		});
+	});
+
+	it('bounds the depth of a message value', () => {
+		let value: Record<string, unknown> = { leaf: true };
+
+		for (let depth = 0; depth < 12_000; depth += 1) {
+			value = { child: value };
+		}
+
+		expect(redactedMessage(value)).toStrictEqual(['detail [object Object]']);
+	});
+
+	it('bounds the breadth of an array in a message', () => {
+		const value = Array.from({ length: 100_000 }, (_, index) => index);
+
+		expect(redactedMessage(value)).toStrictEqual([
+			`detail ${value.slice(0, 64).join(',')}`
+		]);
+	});
+
+	it('bounds visits to a wide object in a message', () => {
+		const value: Record<string, unknown> = {};
+		let reads = 0;
+
+		for (let index = 0; index < 1000; index += 1) {
+			Object.defineProperty(value, `field${String(index)}`, {
+				enumerable: true,
+				get: () => {
+					reads += 1;
+					return index;
+				}
+			});
+		}
+
+		expect({ message: redactedMessage(value), reads }).toStrictEqual({
+			message: ['detail [object Object]'],
+			reads: 64
 		});
 	});
 

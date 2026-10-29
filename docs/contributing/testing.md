@@ -289,6 +289,16 @@ under Miniflare. They need Nix.
 Some packages have their own benchmarks, in `*.bench.ts` files. To run the CLI's
 benchmarks, use `pnpm --filter @cupboard/cli bench`.
 
+To run the benchmarks for the logger's credential scanner, use
+`pnpm --filter @cupboard/logger bench`. For each input shape, they compare the
+time to scan eight 8 KiB inputs with the time to scan one 64 KiB input. When the
+scan is linear in the length of the text, the two times are about the same. The
+logger's unit tests do not measure time. They prove each redaction pattern
+linear with [recheck][recheck], and they count the characters that the scanner
+reads.
+
+[recheck]: https://makenowjust-labs.github.io/recheck/
+
 ## Test fixtures
 
 | Path                                          | Contents                                                                                                 |
