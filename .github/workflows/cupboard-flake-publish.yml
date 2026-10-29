@@ -213,6 +213,18 @@ on:
         required: false
         default: false
         type: boolean
+      fail-on-divergence:
+        description:
+          Fail a cohort when the cache already serves different contents for a
+          path that the cohort built in the runner's own store. By default, the
+          cohort keeps the cache's copy, treats the path as published, and
+          reports the path in a warning and in the job summary. A path that the
+          cohort did not build, and every path of a cohort with store set,
+          always keeps the cache's copy. Needs cupboard v0.0.50 or newer; with
+          an earlier release, the cohort fails before it builds.
+        required: false
+        default: false
+        type: boolean
       nix-config:
         description:
           Flake attribute that evaluates to extra nix.conf text for the plan and
@@ -759,6 +771,7 @@ jobs:
             needs.configure.outputs.root-prefix, github.run_id) }}
           run-root-ttl: ${{ inputs.run-root-ttl }}
           run-root-permanent: ${{ inputs.run-root-permanent }}
+          fail-on-divergence: ${{ inputs.fail-on-divergence }}
 
       - uses: $/actions/attest
         id: attest

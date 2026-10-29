@@ -39,7 +39,11 @@ import {
 	pushSummaryResultKind
 } from '@cupboard/protocol/reports';
 import { referencePublicationManifestSchema } from '@cupboard/protocol/upload';
-import type { Reporter, ReporterResultEvent } from '@cupboard/reporter';
+import type {
+	Reporter,
+	ReporterResultEvent,
+	ResultPayload
+} from '@cupboard/reporter';
 import {
 	type ChildProcessEscalationScheduler,
 	terminationGracePeriodMs
@@ -63,6 +67,7 @@ import {
 	CommandOutputTooLargeError,
 	CupboardReportedError,
 	EnvironmentCredentialVersionError,
+	FailOnDivergenceUnsupportedError,
 	InvalidMaxJobsError,
 	LocalBuildExpectedPathMissingError,
 	LocalBuildOutputsMissingError,
@@ -420,6 +425,42 @@ it.each(['outputs', 'built', 'closure'] as const)(
 				'leave',
 				'--publication-scope',
 				publish
+			]
+		);
+	}
+);
+
+it.each([
+	{ failOnDivergence: undefined, strict: [] },
+	{ failOnDivergence: 'false', strict: [] },
+	{ failOnDivergence: 'true', strict: ['--fail-on-divergence'] }
+])(
+	'passes the divergence choice $failOnDivergence to a local streamed build',
+	({ failOnDivergence, strict }) => {
+		const inputs = resolveBuildCohortInputs(
+			{
+				...baseOptions(),
+				...(failOnDivergence !== undefined && { failOnDivergence })
+			},
+			{ RUNNER_TEMP: '/tmp' }
+		);
+
+		expect(cohortBuildPushArguments(inputs, '/tmp/cohorts.json')).toStrictEqual(
+			[
+				'--no-colour',
+				'build-push',
+				baseOptions().url,
+				'--github-oidc',
+				'--no-retain',
+				'--no-reference-dependencies',
+				'--cohorts-file',
+				'/tmp/cohorts.json',
+				'--receipt-file',
+				'/tmp/cupboard-cohort-receipt.json',
+				'--aggregate-receipt-v3',
+				'--substituter',
+				'leave',
+				...strict
 			]
 		);
 	}
@@ -5973,6 +6014,7 @@ if (args.includes('--help')) {
 
 	interface PublicationRun {
 		readonly calls: readonly (readonly string[])[];
+		readonly reportedResults: readonly ResultPayload[];
 		readonly planInput: unknown;
 		readonly receiptLine: string | undefined;
 		readonly cohortsFile: unknown;
@@ -6048,9 +6090,11 @@ if (args.includes('--help')) {
 			readonly streamedPublicationPaths?: readonly string[];
 			readonly streamedFailed?: readonly string[];
 			readonly streamedBuilt?: readonly string[];
+			readonly receiptPushResults?: readonly ReporterResultEvent[];
 		} = {}
 	): Promise<PublicationRun> {
 		const calls: (readonly string[])[] = [];
+		const reportedResults: ResultPayload[] = [];
 		const lifecycle: string[] = [];
 		const sequence: string[] = [];
 		const progress: RecordedProgress[] = [];
@@ -6311,6 +6355,14 @@ if (args.includes('--help')) {
 						receiptFile,
 						`${JSON.stringify({ version: 3, paths, subjects })}\n`
 					);
+				}
+
+				if (
+					flowPlan.receiptPushResults !== undefined &&
+					arguments_[1] === 'push' &&
+					arguments_.includes('--store')
+				) {
+					return flowPlan.receiptPushResults;
 				}
 
 				return cupboardStub({
@@ -6626,13 +6678,18 @@ if (args.includes('--help')) {
 
 					return Promise.resolve(flowPlan.materialisedClosure ?? []);
 				},
-				reporter: recordingReporter(
-					warnings,
-					progress,
-					information,
-					warningMessages,
-					flowPlan.phaseFacts
-				),
+				reporter: {
+					...recordingReporter(
+						warnings,
+						progress,
+						information,
+						warningMessages,
+						flowPlan.phaseFacts
+					),
+					result(payload) {
+						reportedResults.push(payload);
+					}
+				},
 				signal
 			});
 		} catch (error: unknown) {
@@ -6660,6 +6717,7 @@ if (args.includes('--help')) {
 
 		return {
 			calls,
+			reportedResults,
 			planInput,
 			receiptLine: outputRaw
 				.split('\n')
@@ -6691,6 +6749,55 @@ if (args.includes('--help')) {
 			}
 		};
 	}
+
+	it('lists the paths that a remote-store publication kept from the cache in the job summary', async () => {
+		const localNarHash = NixSha256Hash.fromDigest(
+			Buffer.alloc(32, 0xaa)
+		).toString();
+		const cacheNarHash = NixSha256Hash.fromDigest(
+			Buffer.alloc(32, 0xbb)
+		).toString();
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				publish: 'outputs',
+				store: 'ssh-ng://build@example.test'
+			},
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				receiptPushResults: [
+					{
+						kind: 'divergence-summary',
+						data: {
+							diverged: [
+								{ storePath: libraryBuiltPath, localNarHash, cacheNarHash }
+							]
+						}
+					}
+				]
+			}
+		);
+
+		expect(
+			run.reportedResults
+				.filter((result) => result.kind === 'cohort-summary')
+				.map((result) =>
+					result.rows.filter((row) => row.label === "Kept the cache's copy")
+				)
+		).toStrictEqual([
+			[
+				{
+					label: "Kept the cache's copy",
+					value: `${path.basename(libraryBuiltPath)} (local ${localNarHash}, cache ${cacheNarHash})`
+				}
+			]
+		]);
+	});
 
 	// The caller removes this directory after publication to release the GC
 	// roots, so the action must return its path.
@@ -9890,7 +9997,8 @@ if (args.includes('--help')) {
 
 function cohortSummaryText(
 	targetRows: readonly string[],
-	uploaded = '1,968 paths'
+	uploaded = '1,968 paths',
+	divergedRows: readonly string[] = []
 ): string {
 	return [
 		'### Targets',
@@ -9899,6 +10007,7 @@ function cohortSummaryText(
 		'| --- | --- |',
 		'| Duration | 12m 34.0s |',
 		`| Uploaded during the build | ${uploaded} |`,
+		...divergedRows,
 		'',
 		'| Target | Root | Outcome | Uploaded paths | Uploaded bytes | Root expiry |',
 		'| --- | --- | --- | --- | --- | --- |',
@@ -9995,12 +10104,18 @@ describe('cohort job summary', () => {
 		shouldIncludeLog = false,
 		options: {
 			readonly buildSummary?: ReporterResultEvent;
+			readonly divergenceSummary?: ReporterResultEvent;
 			readonly hasRootUploads?: boolean;
+			readonly failOnDivergence?: {
+				readonly cliOptions: ReadonlySet<string>;
+			};
 		} = {}
 	): Promise<{
 		readonly summary: readonly unknown[];
 		readonly log?: string;
+		readonly buildPushArguments?: readonly (readonly string[])[];
 	}> {
+		const buildPushArguments: (readonly string[])[] = [];
 		const builtPaths = [
 			...(failedTargets.includes(libraryQueryInstallable)
 				? []
@@ -10071,16 +10186,19 @@ describe('cohort job summary', () => {
 					})}\n`
 				);
 
+				buildPushArguments.push(arguments_);
+				const results = [
+					options.buildSummary ?? buildSummary,
+					...(options.divergenceSummary === undefined
+						? []
+						: [options.divergenceSummary])
+				];
+
 				if (failedTargets.length > 0) {
-					throw new CupboardReportedError(
-						1,
-						[options.buildSummary ?? buildSummary],
-						undefined,
-						true
-					);
+					throw new CupboardReportedError(1, results, undefined, true);
 				}
 
-				return [options.buildSummary ?? buildSummary];
+				return results;
 			}
 		);
 		const times = [1000, 755_000];
@@ -10104,18 +10222,29 @@ describe('cohort job summary', () => {
 				}),
 				publish: 'outputs',
 				bestEffort: 'true',
-				ttl: '7d'
+				ttl: '7d',
+				...(options.failOnDivergence !== undefined && {
+					failOnDivergence: 'true'
+				})
 			},
 			environment,
 			{
 				runCupboard: runCupboardMock,
 				runNixBuild,
 				reporter,
-				now: () => times.shift() ?? 755_000
+				now: () => times.shift() ?? 755_000,
+				...(options.failOnDivergence !== undefined && {
+					inspectCommandOptions: () =>
+						Promise.resolve(options.failOnDivergence?.cliOptions ?? new Set())
+				})
 			}
 		);
 
-		return { summary, ...(shouldIncludeLog && { log: log() }) };
+		return {
+			summary,
+			...(shouldIncludeLog && { log: log() }),
+			...(options.failOnDivergence !== undefined && { buildPushArguments })
+		};
 	}
 
 	it('groups the materialisation and drift evaluation of cohort targets', async () => {
@@ -10181,6 +10310,80 @@ describe('cohort job summary', () => {
 					)
 				}
 			]
+		});
+	});
+
+	it('lists each diverged path once with both NAR hashes', async () => {
+		const localNarHash = NixSha256Hash.fromDigest(
+			Buffer.alloc(32, 0xaa)
+		).toString();
+		const cacheNarHash = NixSha256Hash.fromDigest(
+			Buffer.alloc(32, 0xbb)
+		).toString();
+		const diverged = [floatingBuiltPath, libraryBuiltPath].map((storePath) => ({
+			storePath,
+			localNarHash,
+			cacheNarHash
+		}));
+
+		expect(
+			await summarise([], false, false, {
+				divergenceSummary: {
+					kind: 'divergence-summary',
+					data: { diverged: [...diverged, ...diverged] }
+				}
+			})
+		).toStrictEqual({
+			summary: [
+				{
+					path: jobSummaryFile,
+					text: cohortSummaryText(
+						[
+							String.raw`| .#packages.x86\_64-linux.app | github:owner/repo/main/app | Already served | 0 | 0 B | 7d after this run |`,
+							String.raw`| .#packages.x86\_64-linux.lib | github:owner/repo/main/lib | Built | 1 | 2.05 kB | 7d after this run |`,
+							String.raw`| .#packages.x86\_64-linux.floating | github:owner/repo/main/floating | Built | 2 | 1.5 MB | 7d after this run |`
+						],
+						'1,968 paths',
+						[floatingBuiltPath, libraryBuiltPath].map(
+							(storePath) =>
+								`| Kept the cache's copy | ${path.basename(storePath)} (local ${localNarHash}, cache ${cacheNarHash}) |`
+						)
+					)
+				}
+			]
+		});
+	});
+
+	it('passes --fail-on-divergence to a CLI that supports it', async () => {
+		const run = await summarise([], false, false, {
+			failOnDivergence: { cliOptions: new Set(['--fail-on-divergence']) }
+		});
+
+		expect(
+			run.buildPushArguments?.map((arguments_) =>
+				arguments_.filter((argument) => argument === '--fail-on-divergence')
+			)
+		).toStrictEqual([['--fail-on-divergence']]);
+	});
+
+	it('refuses fail-on-divergence before building with a CLI that lacks the option', async () => {
+		let error: unknown;
+
+		try {
+			await summarise([], false, false, {
+				failOnDivergence: { cliOptions: new Set() }
+			});
+		} catch (error_) {
+			error = error_;
+		}
+
+		expect(
+			error instanceof FailOnDivergenceUnsupportedError
+				? { name: error.name, minimumTag: error.minimumTag }
+				: error
+		).toStrictEqual({
+			name: 'FailOnDivergenceUnsupportedError',
+			minimumTag: 'v0.0.50'
 		});
 	});
 

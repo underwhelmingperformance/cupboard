@@ -40,6 +40,7 @@ import {
 	type BatchStore,
 	BuildOutputBatcher
 } from './batching.ts';
+import { BuildOutputDivergences, type DivergencePolicy } from './divergence.ts';
 
 const pathA = storePathSchema.parse(
 	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -50,6 +51,30 @@ const pathB = storePathSchema.parse(
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
 const divergentNarHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xbb));
 const runRoot = uploadAttachRootSchema.parse({ name: 'github:acme/repo/run' });
+const divergenceOfA = {
+	storePath: pathA,
+	localNarHash: narHash.toString(),
+	cacheNarHash: divergentNarHash.toString()
+};
+const divergenceCases: readonly {
+	readonly policy: DivergencePolicy;
+	readonly outcomes: readonly BatchPathOutcome[];
+	readonly failures: readonly {
+		readonly storePath: StorePathString;
+		readonly name: string;
+	}[];
+}[] = [
+	{
+		policy: 'concede',
+		outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+		failures: []
+	},
+	{
+		policy: 'fail',
+		outcomes: [],
+		failures: [{ storePath: pathA, name: 'BuildOutputDivergedError' }]
+	}
+];
 
 function pathInfo(storePath: StorePathString): NixValidPathInfo {
 	return {
@@ -140,6 +165,7 @@ interface HarnessOptions {
 	*/
 	readonly commitSession?: CommitSession;
 	readonly compressedBody?: Uint8Array;
+	readonly divergences?: BuildOutputDivergences;
 }
 
 function harness(options: HarnessOptions = {}): Harness {
@@ -278,6 +304,9 @@ function harness(options: HarnessOptions = {}): Harness {
 		...(options.commitSession !== undefined && {
 			session: options.commitSession
 		}),
+		...(options.divergences !== undefined && {
+			divergences: options.divergences
+		}),
 		onOutcome: (outcome) => {
 			outcomes.push(outcome);
 		},
@@ -298,36 +327,56 @@ afterEach(() => {
 });
 
 describe('BuildOutputBatcher', () => {
-	it('refuses a divergent committed NAR through the legacy protocol', async () => {
-		const { batcher, outcomes, failures } = harness({
-			actions: new Map([[pathA, 'commit']]),
-			commitSession: {
-				commit: (target) =>
-					Promise.resolve({
-						storePathHash: target.storePathHash,
-						narHash: divergentNarHash.value,
-						status: 'committed',
-						settled: Promise.resolve()
-					}),
-				close: vi.fn()
-			}
-		});
-		batcher.enqueue(pathA);
-		await vi.advanceTimersByTimeAsync(500);
-		await batcher.settled();
-		expect({
-			outcomes,
-			candidates: batcher.candidates,
-			failures: failures.map((failure) => ({
-				storePath: failure.storePath,
-				name: failure.reason instanceof Error ? failure.reason.name : undefined
+	it.each(
+		divergenceCases.flatMap((divergenceCase) =>
+			(['already-present', 'committed'] as const).map((status) => ({
+				...divergenceCase,
+				status
 			}))
-		}).toStrictEqual({
-			outcomes: [],
-			candidates: [pathA],
-			failures: [{ storePath: pathA, name: 'BuildOutputDivergedError' }]
-		});
-	});
+		)
+	)(
+		'handles a divergent $status commit under the $policy policy',
+		async ({
+			policy,
+			status,
+			outcomes: expectedOutcomes,
+			failures: expected
+		}) => {
+			const divergences = new BuildOutputDivergences(policy);
+			const { batcher, outcomes, failures } = harness({
+				actions: new Map([[pathA, 'commit']]),
+				divergences,
+				commitSession: {
+					commit: (target) =>
+						Promise.resolve({
+							storePathHash: target.storePathHash,
+							narHash: divergentNarHash.value,
+							status,
+							settled: Promise.resolve()
+						}),
+					close: vi.fn()
+				}
+			});
+			batcher.enqueue(pathA);
+			await vi.advanceTimersByTimeAsync(500);
+			await batcher.settled();
+			expect({
+				outcomes,
+				candidates: batcher.candidates,
+				failures: failures.map((failure) => ({
+					storePath: failure.storePath,
+					name:
+						failure.reason instanceof Error ? failure.reason.name : undefined
+				})),
+				diverged: divergences.list()
+			}).toStrictEqual({
+				outcomes: expectedOutcomes,
+				candidates: expected.length === 0 ? [] : [pathA],
+				failures: expected,
+				diverged: policy === 'concede' ? [divergenceOfA] : []
+			});
+		}
+	);
 	it.each([
 		{ action: 'skip', refusals: 0, succeeds: true, transfers: 0, attempts: 1 },
 		{ action: 'skip', refusals: 1, succeeds: true, transfers: 1, attempts: 2 },
@@ -571,35 +620,43 @@ describe('BuildOutputBatcher', () => {
 		});
 	});
 
-	it('returns a divergent destination skip to the candidate set', async () => {
-		const { batcher, failures, outcomes } = harness({
-			decisions: (paths) =>
-				paths.map((path) =>
-					uploadDecisionSchema.parse({
-						action: 'skip',
-						storePathHash: path.storePathHash,
-						narHash: divergentNarHash.toString()
-					})
-				)
-		});
+	it.each(divergenceCases)(
+		'handles a divergent destination skip under the $policy policy',
+		async ({ policy, outcomes: expectedOutcomes, failures: expected }) => {
+			const divergences = new BuildOutputDivergences(policy);
+			const { batcher, failures, outcomes } = harness({
+				divergences,
+				decisions: (paths) =>
+					paths.map((path) =>
+						uploadDecisionSchema.parse({
+							action: 'skip',
+							storePathHash: path.storePathHash,
+							narHash: divergentNarHash.toString()
+						})
+					)
+			});
 
-		batcher.enqueue(pathA);
-		await vi.advanceTimersByTimeAsync(500);
-		await batcher.settled();
+			batcher.enqueue(pathA);
+			await vi.advanceTimersByTimeAsync(500);
+			await batcher.settled();
 
-		expect({
-			candidates: batcher.candidates,
-			outcomes,
-			failures: failures.map((failure) => ({
-				storePath: failure.storePath,
-				name: failure.reason instanceof Error ? failure.reason.name : undefined
-			}))
-		}).toStrictEqual({
-			candidates: [pathA],
-			outcomes: [],
-			failures: [{ storePath: pathA, name: 'BuildOutputDivergedError' }]
-		});
-	});
+			expect({
+				candidates: batcher.candidates,
+				outcomes,
+				failures: failures.map((failure) => ({
+					storePath: failure.storePath,
+					name:
+						failure.reason instanceof Error ? failure.reason.name : undefined
+				})),
+				diverged: divergences.list()
+			}).toStrictEqual({
+				candidates: expected.length === 0 ? [] : [pathA],
+				outcomes: expectedOutcomes,
+				failures: expected,
+				diverged: policy === 'concede' ? [divergenceOfA] : []
+			});
+		}
+	);
 
 	it('flushes at the batch bound without waiting', async () => {
 		const { batcher, events } = harness({ maxEntries: 2 });

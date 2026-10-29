@@ -79,7 +79,10 @@ import {
 	type WaitTimeoutSeconds,
 	waitTimeoutSecondsSchema
 } from '../duration.ts';
-import { PublicationUploadRequiredError } from '../errors.ts';
+import {
+	BuildOutputDivergedError,
+	PublicationUploadRequiredError
+} from '../errors.ts';
 import {
 	type FailedPushPath,
 	type PushCommand,
@@ -112,7 +115,11 @@ import {
 	TransferTotals,
 	uploadObserver
 } from './compression-report.ts';
-import { narDivergence } from './divergence.ts';
+import {
+	narDivergence,
+	reportDivergences,
+	warnDivergences
+} from './divergence.ts';
 import type { CompressedNarUpload, NarUploadObserver } from './nar-upload.ts';
 import {
 	exactUploadDecisions,
@@ -217,6 +224,12 @@ export interface PushDependencies {
 	activity log, copied subjects contain no source URL.
 	*/
 	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
+	/**
+	Selects the local paths that fail the push when the cache already serves
+	different contents for them. Every other such path keeps the cache's copy.
+	By default, every path keeps the cache's copy.
+	*/
+	readonly refuseDivergence?: (info: NixValidPathInfo) => boolean;
 }
 
 // Compress and upload several NARs concurrently so zstd work can overlap R2
@@ -313,7 +326,8 @@ function failedPushPath(record: PushFailureRecord): FailedPushPath {
 		path,
 		stage: 'verify',
 		verdict:
-			record.cause instanceof UploadVerificationFailedError
+			record.cause instanceof UploadVerificationFailedError ||
+			record.cause instanceof BuildOutputDivergedError
 				? 'failed'
 				: 'pending'
 	};
@@ -509,6 +523,7 @@ interface PushRuntimeDependencies {
 	readonly alreadyHeld?: readonly string[];
 	readonly claimable?: readonly string[];
 	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
+	readonly refuseDivergence?: (info: NixValidPathInfo) => boolean;
 }
 
 // Keep the publication kind so local collection is reported differently for
@@ -888,6 +903,57 @@ async function runPushFlow(
 	// collected and the next negotiation requests an upload. Keep only the
 	// latest action for the summary counts.
 	const effectiveActions = new Map<StorePathHash, UploadDecision['action']>();
+	const localInfoByHash = new Map(
+		localPathInfos(resolved).map((info) => [
+			StorePath.hash(info.storePath),
+			info
+		])
+	);
+	const refusalOf = (
+		storePathHash: StorePathHash
+	): BuildOutputDivergedError | undefined => {
+		const difference = divergent.get(storePathHash);
+		const info = localInfoByHash.get(storePathHash);
+
+		if (
+			difference === undefined ||
+			info === undefined ||
+			dependencies.refuseDivergence?.(info) !== true
+		) {
+			return undefined;
+		}
+
+		return new BuildOutputDivergedError(
+			difference.storePath,
+			difference.localNarHash,
+			difference.cacheNarHash
+		);
+	};
+	// Records the NAR hash that the cache serves after a commit. Returns the
+	// refusal when the caller refuses divergence for the path.
+	const noteCommitOutcome = (
+		outcome: Pick<CommitOutcome, 'storePathHash' | 'narHash'>
+	): BuildOutputDivergedError | undefined => {
+		const difference = divergentSkips(resolved, [
+			{
+				action: 'skip',
+				storePathHash: outcome.storePathHash,
+				narHash: outcome.narHash
+			}
+		]);
+		requireReferenceSnapshotIdentity(resolved, difference);
+
+		if (difference.size === 0) {
+			divergent.delete(outcome.storePathHash);
+			return undefined;
+		}
+
+		for (const [hash, skip] of difference) {
+			divergent.set(hash, skip);
+		}
+
+		return refusalOf(outcome.storePathHash);
+	};
 
 	const negotiateGroup = async (
 		paths: readonly UploadPathNegotiationFields[]
@@ -901,7 +967,6 @@ async function runPushFlow(
 		const groupDivergent = divergentSkips(resolved, response.uploads);
 
 		requireReferenceSnapshotIdentity(resolved, groupDivergent);
-		warnDivergentSkips(reporter, groupDivergent);
 
 		for (const [storePathHash, skip] of groupDivergent) {
 			divergent.set(storePathHash, skip);
@@ -1062,10 +1127,34 @@ async function runPushFlow(
 					);
 				};
 
+				const recordRefusal = (refusal: BuildOutputDivergedError): void => {
+					failures.push({
+						storePathHash: StorePath.hash(refusal.storePath),
+						storePath: refusal.storePath,
+						stage: 'verify',
+						cause: refusal
+					});
+					bar.warn(
+						'verification failed',
+						`${StorePath.basename(refusal.storePath)}: ${failureReason(refusal)}`,
+						{
+							humanMessage: `${StorePath.basename(refusal.storePath)}: ${formatHumanError(refusal, { debug: reporter.presentation === 'debug' })}`
+						}
+					);
+				};
 				const publishDecision = async (
 					initialDecision: UploadDecision,
 					hasGraceFacts: boolean
 				): Promise<void> => {
+					const refusal = isSkip(initialDecision)
+						? refusalOf(initialDecision.storePathHash)
+						: undefined;
+
+					if (refusal !== undefined) {
+						recordRefusal(refusal);
+						return;
+					}
+
 					const publication = client.publicationFor?.(initialDecision);
 					const decision: UploadDecision =
 						publication !== undefined && initialDecision.action === 'skip'
@@ -1128,6 +1217,7 @@ async function runPushFlow(
 					}
 
 					let outcome: CommitOutcome;
+					let commitRefusal: BuildOutputDivergedError | undefined;
 
 					try {
 						outcome = await commitNegotiated(
@@ -1136,27 +1226,7 @@ async function runPushFlow(
 							hasGraceFacts,
 							blob
 						);
-						const actualDifference = divergentSkips(resolved, [
-							{
-								action: 'skip',
-								storePathHash: outcome.storePathHash,
-								narHash: outcome.narHash
-							}
-						]);
-						requireReferenceSnapshotIdentity(resolved, actualDifference);
-						const unreported = new Map(
-							[...actualDifference].filter(
-								([hash, difference]) =>
-									divergent.get(hash)?.cacheNarHash !== difference.cacheNarHash
-							)
-						);
-						warnDivergentSkips(reporter, unreported);
-						if (actualDifference.size === 0) {
-							divergent.delete(outcome.storePathHash);
-						}
-						for (const [hash, difference] of actualDifference) {
-							divergent.set(hash, difference);
-						}
+						commitRefusal = noteCommitOutcome(outcome);
 					} catch (error) {
 						if (isAbortError(error)) {
 							throw error;
@@ -1175,6 +1245,11 @@ async function runPushFlow(
 								humanMessage: `${StorePath.basename(storePath)}: path submission failed: ${formatHumanError(error, { debug: reporter.presentation === 'debug' })}`
 							}
 						);
+						return;
+					}
+
+					if (commitRefusal !== undefined) {
+						recordRefusal(commitRefusal);
 						return;
 					}
 
@@ -1275,7 +1350,12 @@ async function runPushFlow(
 					const verdicts = await Promise.allSettled(
 						commit.pending.map(async (entry) => {
 							try {
-								await awaitDeferredVerdict(entry, commitContext, outcomes);
+								await awaitDeferredVerdict(
+									entry,
+									commitContext,
+									outcomes,
+									noteCommitOutcome
+								);
 							} finally {
 								bar.advance(1);
 							}
@@ -1346,6 +1426,15 @@ async function runPushFlow(
 		const reusedBlobs = actions.filter((action) => action === 'commit').length;
 		const failedStorePathHashes = new Set(
 			failures.map((failure) => failure.storePathHash)
+		);
+		reportDivergences(
+			reporter,
+			divergent
+				.entries()
+				.filter(([hash]) => !failedStorePathHashes.has(hash))
+				.map(([, skip]) => skip)
+				.toArray()
+				.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath))
 		);
 		const skipped = [...effectiveActions].filter(
 			([hash, action]) => action === 'skip' && !failedStorePathHashes.has(hash)
@@ -1538,7 +1627,13 @@ async function reportDryRun(
 
 	const divergent = divergentSkips(resolved, preview.uploads);
 	requireReferenceSnapshotIdentity(resolved, divergent);
-	warnDivergentSkips(reporter, divergent);
+	warnDivergences(
+		reporter,
+		divergent
+			.values()
+			.toArray()
+			.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath))
+	);
 
 	const wouldUpload = preview.uploads.filter(
 		(decision) => decision.action === 'upload'
@@ -2306,7 +2401,10 @@ interface PendingCommit {
 async function awaitDeferredVerdict(
 	entry: PendingCommit,
 	context: CommitContext,
-	outcomes: Map<StorePathHash, CommitOutcome>
+	outcomes: Map<StorePathHash, CommitOutcome>,
+	noteCommitOutcome: (
+		outcome: CommitOutcome
+	) => BuildOutputDivergedError | undefined
 ): Promise<void> {
 	try {
 		await entry.settled;
@@ -2317,6 +2415,12 @@ async function awaitDeferredVerdict(
 
 		const redriven = await redriveExpiredCommit(entry.decision, context);
 		outcomes.set(redriven.storePathHash, redriven);
+		const refusal = noteCommitOutcome(redriven);
+
+		if (refusal !== undefined) {
+			throw refusal;
+		}
+
 		await redriven.settled;
 	}
 }
@@ -2458,29 +2562,6 @@ function requireReferenceSnapshotIdentity(
 			path.storePath,
 			difference.localNarHash,
 			difference.cacheNarHash
-		);
-	}
-}
-
-// Different NAR hashes for the same store path are evidence of a
-// non-reproducible realisation. Preview and negotiation report the same cached
-// hash, so both modes use the same warning.
-function warnDivergentSkips(
-	reporter: Reporter,
-	divergent: ReadonlyMap<StorePathHash, DivergentSkip>
-): void {
-	for (const skip of divergent.values()) {
-		reporter.warn(
-			'divergent',
-			`${StorePath.basename(skip.storePath)}: local NAR ${skip.localNarHash} ` +
-				`differs from the cached copy ${skip.cacheNarHash}; the cache keeps ` +
-				`its copy`,
-			{
-				humanMessage:
-					reporter.presentation === 'debug'
-						? `${StorePath.basename(skip.storePath)}: local NAR ${skip.localNarHash} differs from the cached copy ${skip.cacheNarHash}; the cache keeps its copy`
-						: `${StorePath.basename(skip.storePath)}: local contents differ from the cached copy. The cached copy is unchanged.`
-			}
 		);
 	}
 }

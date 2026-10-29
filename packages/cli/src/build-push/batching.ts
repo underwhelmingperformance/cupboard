@@ -33,7 +33,7 @@ import {
 	type UploadReport
 } from '../push/upload-transfer.ts';
 
-import { requireMatchingBuildOutput } from './divergence.ts';
+import { BuildOutputDivergences } from './divergence.ts';
 
 export const flushMaxWaitMs = 500;
 
@@ -94,6 +94,11 @@ export interface BuildOutputBatcherOptions {
 	*/
 	readonly uploadClock?: UploadClock;
 	readonly uploadReport?: UploadReport;
+	/**
+	Compares each build output with the cache's copy. Defaults to conceding
+	every divergence.
+	*/
+	readonly divergences?: BuildOutputDivergences;
 	readonly onOutcome?: (outcome: BatchPathOutcome) => void;
 	readonly onFailure?: (failure: BatchPathFailure) => void;
 }
@@ -147,10 +152,13 @@ export class BuildOutputBatcher {
 		Promise<CommitVerdict>
 	>();
 	private readonly pendingVerdicts = new Set<StorePathString>();
+	private readonly divergences: BuildOutputDivergences;
 	private timer: NodeJS.Timeout | undefined;
 	private chain: Promise<void> = Promise.resolve();
 
-	constructor(private readonly options: BuildOutputBatcherOptions) {}
+	constructor(private readonly options: BuildOutputBatcherOptions) {
+		this.divergences = options.divergences ?? new BuildOutputDivergences();
+	}
 
 	private maxEntries(): number {
 		return this.options.maxEntries ?? commitBatchMaxEntries;
@@ -290,7 +298,7 @@ export class BuildOutputBatcher {
 
 		if (decision.action === 'skip') {
 			try {
-				requireMatchingBuildOutput(item.path, decision);
+				this.divergences.compare(item.path, decision.narHash);
 			} catch (error) {
 				this.settlePath(storePath, error, remaining);
 				return;
@@ -308,7 +316,8 @@ export class BuildOutputBatcher {
 		let wasAlreadyPresent: boolean;
 		try {
 			const outcome = await this.uploadAndCommit(decision, item.path);
-			wasAlreadyPresent = outcome.status === 'already-present';
+			wasAlreadyPresent =
+				outcome.status === 'already-present' || this.divergences.has(storePath);
 			this.pendingVerdicts.add(storePath);
 			this.verdicts.set(
 				storePath,
@@ -370,11 +379,7 @@ export class BuildOutputBatcher {
 				narHash: decision.narHash,
 				...(blob !== undefined && { blob })
 			});
-			requireMatchingBuildOutput(info, {
-				action: 'skip',
-				storePathHash: outcome.storePathHash,
-				narHash: outcome.narHash
-			});
+			this.divergences.compare(info, outcome.narHash);
 			return outcome;
 		} catch (error) {
 			if (

@@ -1,6 +1,10 @@
+import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	buildSummaryResultKind,
 	buildSummarySchema,
+	type DivergenceSummary,
+	divergenceSummaryResultKind,
+	divergenceSummarySchema,
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
@@ -83,6 +87,26 @@ function eventUploads(event: ReporterResultEvent): UploadTally | undefined {
 	return summary === undefined
 		? undefined
 		: { paths: summary.uploadedPaths, bytes: summary.uploadedBytes };
+}
+
+/**
+A path whose local copy differed from the copy that the cache already served.
+The run kept the cache's copy.
+*/
+export type DivergedPath = DivergenceSummary['diverged'][number];
+
+/**
+Reads the diverged paths from the results of one or more `cupboard push` or
+`cupboard build-push` runs.
+*/
+export function divergedPaths(
+	results: readonly ReporterResultEvent[]
+): readonly DivergedPath[] {
+	return results.flatMap((event) =>
+		event.kind === divergenceSummaryResultKind
+			? (divergenceSummarySchema.safeParse(event.data).data?.diverged ?? [])
+			: []
+	);
 }
 
 /**
@@ -235,13 +259,14 @@ export interface CohortSummary {
 	The uploads that happened before the job set the roots.
 	*/
 	readonly buildUploads?: UploadTally;
+	readonly diverged?: readonly DivergedPath[];
 	readonly roots: readonly CohortRootSummary[];
 }
 
 /**
 The cohort job's summary: its duration, the uploads that happened while it
-built, and one row for each root with the root's targets, outcome, uploads
-and expiry.
+built, the paths for which the build kept the cache's copy, and one row for
+each root with the root's targets, outcome, uploads and expiry.
 */
 export function cohortSummaryResult(
 	summary: CohortSummary
@@ -259,7 +284,13 @@ export function cohortSummaryResult(
 							label: 'Uploaded during the build',
 							value: uploadText(summary.buildUploads)
 						}
-					])
+					]),
+			...new Map((summary.diverged ?? []).map((path) => [path.storePath, path]))
+				.values()
+				.map((path) => ({
+					label: "Kept the cache's copy",
+					value: `${StorePath.basename(path.storePath)} (local ${path.localNarHash}, cache ${path.cacheNarHash})`
+				}))
 		],
 		table: ResultTable.of(
 			[

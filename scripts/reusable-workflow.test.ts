@@ -1036,7 +1036,8 @@ describe('cohort planning and publication', () => {
 				'run-root':
 					"${{ format('{0}/_cupboard-run/{1}', needs.configure.outputs.root-prefix, github.run_id) }}",
 				'run-root-ttl': '${{ inputs.run-root-ttl }}',
-				'run-root-permanent': '${{ inputs.run-root-permanent }}'
+				'run-root-permanent': '${{ inputs.run-root-permanent }}',
+				'fail-on-divergence': '${{ inputs.fail-on-divergence }}'
 			}
 		]);
 	});

@@ -49,6 +49,7 @@ import { SequentialNarSource } from '../nix/nar-source.ts';
 import type { PushClient } from '../push/push.ts';
 
 import type { BatchPathOutcome } from './batching.ts';
+import { BuildOutputDivergences, type DivergencePolicy } from './divergence.ts';
 import {
 	reconcileBuild,
 	type ReconcileOptions,
@@ -82,6 +83,11 @@ const rootTwo = rootNameSchema.parse('github:acme/repo/two');
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
 const divergentNarHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xbb));
 const substituterSignature = 'cache.example.org-1:c2ln';
+const divergenceOfA = {
+	storePath: pathA,
+	localNarHash: narHash.toString(),
+	cacheNarHash: divergentNarHash.toString()
+};
 
 function target(storePath: StorePathString, root?: RootName): ReconcileTarget {
 	return {
@@ -452,49 +458,176 @@ describe('reconcileBuild', () => {
 		}
 	);
 
-	it('refuses a divergent committed NAR through the legacy protocol', async () => {
-		const fixture = harness({
-			valid: [pathA],
-			actions: new Map([[pathA, 'commit']])
-		});
-		const result = await reconcileWith(fixture, {
-			targets: [target(pathA)],
-			client: {
-				...fixture.client,
-				commit: (target) =>
-					Promise.resolve({
-						storePathHash: target.storePathHash,
-						narHash: divergentNarHash.value,
-						status: 'committed',
-						settled: Promise.resolve()
-					})
-			}
-		});
-		expect({
-			paths: result.receipt.paths,
-			subjects: result.receipt.subjects,
-			outcomes: result.receipt.outcomes,
-			failures: result.failures.map((failure) => ({
-				storePath: failure.storePath,
-				reason: failure.reason,
-				name: failure.cause instanceof Error ? failure.cause.name : undefined
+	it.each(
+		(['concede', 'fail'] as const).flatMap((policy) =>
+			(['already-present', 'committed'] as const).map((status) => ({
+				policy,
+				status
 			}))
-		}).toStrictEqual({
-			paths: [],
-			subjects: [],
-			outcomes: [
-				{ storePath: pathA, outcome: 'failed', reason: 'verification' }
-			],
-			failures: [
-				{
-					storePath: pathA,
-					reason: 'verification',
-					name: 'BuildOutputDivergedError'
+		)
+	)(
+		'handles a divergent $status commit under the $policy policy',
+		async ({ policy, status }) => {
+			const fixture = harness({
+				valid: [pathA],
+				actions: new Map([[pathA, 'commit']])
+			});
+			const divergences = new BuildOutputDivergences(policy);
+			const result = await reconcileWith(fixture, {
+				targets: [target(pathA)],
+				divergences,
+				client: {
+					...fixture.client,
+					commit: (target) =>
+						Promise.resolve({
+							storePathHash: target.storePathHash,
+							narHash: divergentNarHash.value,
+							status,
+							settled: Promise.resolve()
+						})
 				}
-			]
-		});
-	});
-	it('refuses a destination copy whose NAR differs from the build output', async () => {
+			});
+			expect({
+				receipt: result.receipt,
+				failures: result.failures.map((failure) => ({
+					storePath: failure.storePath,
+					reason: failure.reason,
+					name: failure.cause instanceof Error ? failure.cause.name : undefined
+				})),
+				diverged: divergences.list()
+			}).toStrictEqual(
+				policy === 'concede'
+					? {
+							receipt: {
+								version: 3,
+								paths: [pathA],
+								subjects: [],
+								outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+								uploaded: [],
+								failed: [],
+								collected: []
+							},
+							failures: [],
+							diverged: [divergenceOfA]
+						}
+					: {
+							receipt: {
+								version: 3,
+								paths: [],
+								subjects: [],
+								outcomes: [
+									{
+										outcome: 'failed',
+										storePath: pathA,
+										reason: 'verification'
+									}
+								],
+								uploaded: [],
+								failed: [pathA],
+								collected: []
+							},
+							failures: [
+								{
+									storePath: pathA,
+									reason: 'verification',
+									name: 'BuildOutputDivergedError'
+								}
+							],
+							diverged: []
+						}
+			);
+		}
+	);
+
+	it.each(['concede', 'fail'] as const)(
+		'handles a destination copy whose NAR differs from the build output under the %s policy',
+		async (policy) => {
+			const fixture = harness({
+				valid: [pathA, pathB],
+				decisions: (paths) =>
+					paths.map((path) =>
+						uploadDecisionSchema.parse({
+							action: 'skip',
+							storePathHash: StorePath.hash(
+								storePathSchema.parse(path.storePath)
+							),
+							narHash: divergentNarHash.toString()
+						})
+					)
+			});
+			const divergences = new BuildOutputDivergences(policy);
+			const result = await reconcileWith(fixture, {
+				targets: [target(pathA, rootOne)],
+				intermediatePaths: [pathB],
+				divergences
+			});
+			const divergenceOfB = {
+				...divergenceOfA,
+				storePath: pathB
+			};
+
+			expect({
+				receipt: result.receipt,
+				roots: result.roots,
+				rootReplacements: fixture.rootReplacements,
+				failures: result.failures.map((failure) => ({
+					storePath: failure.storePath,
+					reason: failure.reason,
+					name: failure.cause instanceof Error ? failure.cause.name : undefined
+				})),
+				diverged: divergences.list()
+			}).toStrictEqual(
+				policy === 'concede'
+					? {
+							receipt: {
+								version: 3,
+								paths: [pathA, pathB],
+								subjects: [],
+								outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+								uploaded: [],
+								failed: [],
+								collected: []
+							},
+							roots: [{ root: rootOne, applied: true, targets: [pathA] }],
+							rootReplacements: [
+								{
+									name: rootOne,
+									body: { targets: [pathA], retention: { kind: 'inherit' } }
+								}
+							],
+							failures: [],
+							diverged: [divergenceOfA, divergenceOfB]
+						}
+					: {
+							receipt: {
+								version: 3,
+								paths: [],
+								subjects: [],
+								outcomes: [
+									{
+										outcome: 'failed',
+										storePath: pathA,
+										reason: 'verification'
+									}
+								],
+								uploaded: [],
+								failed: [pathA, pathB],
+								collected: []
+							},
+							roots: [{ root: rootOne, applied: false, targets: [pathA] }],
+							rootReplacements: [],
+							failures: [pathA, pathB].map((storePath) => ({
+								storePath,
+								reason: 'verification',
+								name: 'BuildOutputDivergedError'
+							})),
+							diverged: []
+						}
+			);
+		}
+	);
+
+	it('does not count a streamed publication as uploaded when the cache keeps another copy', async () => {
 		const fixture = harness({
 			valid: [pathA],
 			decisions: (paths) =>
@@ -508,40 +641,99 @@ describe('reconcileBuild', () => {
 					})
 				)
 		});
+		const divergences = new BuildOutputDivergences();
 		const result = await reconcileWith(fixture, {
-			targets: [target(pathA, rootOne)]
+			targets: [target(pathA)],
+			outcomes: new Map<StorePathString, BatchPathOutcome>([
+				[pathA, { outcome: 'published', storePath: pathA }]
+			]),
+			wait: false,
+			divergences
 		});
 
 		expect({
 			receipt: result.receipt,
-			roots: result.roots,
-			rootReplacements: fixture.rootReplacements,
-			failures: result.failures.map((failure) => ({
-				storePath: failure.storePath,
-				reason: failure.reason,
-				name: failure.cause instanceof Error ? failure.cause.name : undefined
-			}))
+			diverged: divergences.list()
 		}).toStrictEqual({
 			receipt: {
 				version: 3,
-				paths: [],
+				paths: [pathA],
 				subjects: [],
-				outcomes: [
-					{ outcome: 'failed', storePath: pathA, reason: 'verification' }
-				],
+				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
 				uploaded: [],
-				failed: [pathA],
+				failed: [],
 				collected: []
 			},
-			roots: [{ root: rootOne, applied: false, targets: [pathA] }],
-			rootReplacements: [],
-			failures: [
+			diverged: [divergenceOfA]
+		});
+	});
+
+	it('commits a divergent publication skip so that the cache retains it as an already-present path', async () => {
+		const fixture = harness({
+			valid: [pathA],
+			decisions: (paths) =>
+				paths.map((path) =>
+					uploadDecisionSchema.parse({
+						action: 'skip',
+						storePathHash: StorePath.hash(
+							storePathSchema.parse(path.storePath)
+						),
+						narHash: divergentNarHash.toString()
+					})
+				)
+		});
+		const upload = uploadActionDecisionSchema.parse(
+			decisionFor(pathA, 'upload')
+		);
+		const commit = vi.fn<CommitSession['commit']>((commitTarget) =>
+			Promise.resolve({
+				storePathHash: commitTarget.storePathHash,
+				narHash: divergentNarHash.toString(),
+				status: 'already-present',
+				settled: Promise.resolve()
+			})
+		);
+		const divergences = new BuildOutputDivergences();
+		const result = await reconcileWith(fixture, {
+			targets: [target(pathA, rootOne)],
+			client: { ...fixture.client, publicationFor: () => upload },
+			session: { commit, close: vi.fn() },
+			divergences
+		});
+
+		expect({
+			result,
+			commits: commit.mock.calls.flat(),
+			rootReplacements: fixture.rootReplacements,
+			diverged: divergences.list()
+		}).toStrictEqual({
+			result: {
+				receipt: {
+					version: 3,
+					paths: [pathA],
+					subjects: [],
+					outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+					uploaded: [],
+					failed: [],
+					collected: []
+				},
+				roots: [{ root: rootOne, applied: true, targets: [pathA] }],
+				failures: []
+			},
+			commits: [
 				{
-					storePath: pathA,
-					reason: 'verification',
-					name: 'BuildOutputDivergedError'
+					uploadId: upload.uploadId,
+					storePathHash: upload.storePathHash,
+					narHash: upload.narHash
 				}
-			]
+			],
+			rootReplacements: [
+				{
+					name: rootOne,
+					body: { targets: [pathA], retention: { kind: 'inherit' } }
+				}
+			],
+			diverged: [divergenceOfA]
 		});
 	});
 
@@ -1411,6 +1603,7 @@ describe('reconcileBuild over a shared commit session', () => {
 		readonly name: string;
 		readonly preview: () => Promise<UploadPreviewResponse>;
 		readonly cause: Error;
+		readonly policy?: DivergencePolicy;
 	}[] = [
 		...(['upload', 'commit'] as const).map((action) => ({
 			name: `an unconfirmed ${action} decision`,
@@ -1427,7 +1620,8 @@ describe('reconcileBuild over a shared commit session', () => {
 			cause: absent
 		})),
 		{
-			name: 'a different destination NAR',
+			name: 'a different destination NAR under the fail policy',
+			policy: 'fail',
 			preview: () =>
 				Promise.resolve({
 					uploads: [
@@ -1471,7 +1665,7 @@ describe('reconcileBuild over a shared commit session', () => {
 
 	it.each(confirmationCases)(
 		'preserves failure for $name after an absent verdict',
-		async ({ preview, cause }) => {
+		async ({ preview, cause, policy }) => {
 			const fixture = harness({
 				valid: [pathA],
 				actions: new Map([[pathA, 'commit' as const]])
@@ -1480,6 +1674,7 @@ describe('reconcileBuild over a shared commit session', () => {
 			let commitCalls = 0;
 			const result = await reconcileWith(fixture, {
 				targets: [target(pathA, rootOne)],
+				divergences: new BuildOutputDivergences(policy),
 				client: {
 					...fixture.client,
 					commit: () => {
@@ -1582,9 +1777,18 @@ describe('reconcileBuild over a shared commit session', () => {
 		}
 	);
 
-	it.each(['acknowledgement', 'deferred verdict'] as const)(
-		'confirms a matching destination copy after an absent %s without retrying publication',
-		async (failurePhase) => {
+	it.each(
+		(['acknowledgement', 'deferred verdict'] as const).flatMap((failurePhase) =>
+			(['matching', 'different'] as const).map((copy) => ({
+				failurePhase,
+				copy
+			}))
+		)
+	)(
+		'confirms a $copy destination copy after an absent $failurePhase without retrying publication',
+		async ({ failurePhase, copy }) => {
+			const cacheNarHash = copy === 'matching' ? narHash : divergentNarHash;
+			const divergences = new BuildOutputDivergences();
 			const bytes = Buffer.from('compressed NAR');
 			const fileHash = NixSha256Hash.fromDigest(
 				createHash('sha256').update(bytes).digest()
@@ -1607,7 +1811,14 @@ describe('reconcileBuild over a shared commit session', () => {
 				},
 				preview: (body) => {
 					previewRequests.push(body);
-					return Promise.resolve({ uploads: [decisionFor(pathA, 'skip')] });
+					return Promise.resolve({
+						uploads: [
+							{
+								...decisionFor(pathA, 'skip'),
+								narHash: cacheNarHash.toString()
+							}
+						]
+					});
 				}
 			};
 			const session: CommitSession = {
@@ -1636,11 +1847,13 @@ describe('reconcileBuild over a shared commit session', () => {
 					body: new Response(bytes).body ?? emptyStream(),
 					digest: () => ({ narHash, narSize: 4 })
 				}),
-				session
+				session,
+				divergences
 			});
 
 			expect({
 				result,
+				diverged: divergences.list(),
 				previewRequests,
 				negotiations: fixture.negotiatedPaths,
 				uploadedKeys: fixture.uploadedKeys,
@@ -1652,7 +1865,7 @@ describe('reconcileBuild over a shared commit session', () => {
 					receipt: {
 						version: 3,
 						paths: [pathA],
-						subjects: heldSubjects([pathA]),
+						subjects: copy === 'matching' ? heldSubjects([pathA]) : [],
 						outcomes: [{ outcome: 'destination-served', storePath: pathA }],
 						uploaded: [],
 						failed: [],
@@ -1661,6 +1874,7 @@ describe('reconcileBuild over a shared commit session', () => {
 					roots: [{ root: rootOne, applied: true, targets: [pathA] }],
 					failures: []
 				},
+				diverged: copy === 'matching' ? [] : [divergenceOfA],
 				previewRequests: [
 					{
 						paths: [

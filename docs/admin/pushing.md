@@ -277,6 +277,36 @@ reason: the build, the upload, verification, removal from the local store, or
 the retention root. Each reason shows up to ten store paths and the first error,
 so you don't need `--debug` to see what failed.
 
+### When the cache already has a different copy
+
+A derivation that isn't reproducible can produce different contents from one
+build to the next. If another push publishes the store path first, the cache
+keeps that copy. Within a cache the first writer wins, as in Nix, Cachix and
+Hydra.
+
+When the cache already serves different contents for a path, `cupboard push` and
+`build-push` keep the cache's copy, treat the path as published and report the
+divergence. Publication compares only the NAR hashes. It doesn't establish that
+the two copies are interchangeable: an output that was built against the local
+copy can depend on contents that differ in the cache's copy. The path joins the
+run root, and a target joins its root, in the same way as a path that the cache
+already had. The `build-push` receipt lists the path without a subject, because
+the cache serves contents that the local store didn't produce.
+[Attestation][attestation] therefore doesn't sign it.
+
+[attestation]: ../ci/attestation.md
+
+Both commands list these paths in one warning. With `--debug`, the warning also
+shows both NAR hashes of each path. When a path diverged, the JSON output also
+has a `divergence-summary` result, except for `cupboard push --dry-run`, which
+only warns. The result's `diverged` array lists each path with `storePath`, the
+local `localNarHash` and the cache's `cacheNarHash`.
+
+To fail instead, add `--fail-on-divergence` to `build-push`. It then refuses
+each of these paths that the run built and exits with status 74. A path that the
+run didn't build, such as a substituted dependency, still keeps the cache's
+copy.
+
 ### Exit statuses
 
 `build-push` uses different exit statuses for a failed build and for failed

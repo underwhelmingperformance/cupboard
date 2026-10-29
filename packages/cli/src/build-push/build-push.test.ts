@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 import { setImmediate } from 'node:timers/promises';
 
 import {
@@ -24,13 +25,17 @@ import {
 	invocationIdSchema
 } from '@cupboard/protocol/build';
 import {
+	uploadAttachRootSchema,
 	type UploadDecisionInput,
 	uploadDecisionSchema,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import {
+	createGithubReporter,
 	formatBytes,
 	formatDuration,
+	type MessagePresentation,
+	type PresentationLevel,
 	type Reporter,
 	type ResultPayload
 } from '@cupboard/reporter';
@@ -285,7 +290,7 @@ function emitTwoEventsCommand(socketPath: string): ChildCommand {
 interface RecordedRun {
 	readonly phases: string[];
 	readonly results: ResultPayload[];
-	readonly warnings: { label: string; value?: string }[];
+	readonly warnings: { label: string; value?: string; humanMessage?: string }[];
 	readonly info: string[];
 	readonly storeCalls: string[];
 }
@@ -293,16 +298,28 @@ interface RecordedRun {
 function recordingReporter(
 	record: RecordedRun,
 	phaseFacts?: { phase: string; label: string; value: string }[],
-	phaseStarted?: (label: string) => void
+	phaseStarted?: (label: string) => void,
+	presentation?: PresentationLevel
 ): Reporter {
-	const recordWarn = (label: string, value?: string): void => {
-		record.warnings.push({ label, value });
+	const recordWarn = (
+		label: string,
+		value?: string,
+		display?: MessagePresentation
+	): void => {
+		record.warnings.push({
+			label,
+			value,
+			...(display?.humanMessage !== undefined && {
+				humanMessage: display.humanMessage
+			})
+		});
 	};
 	const recordResult = (payload: ResultPayload): void => {
 		record.results.push(payload);
 	};
 
 	return {
+		...(presentation !== undefined && { presentation }),
 		phase: (label, body) => {
 			record.phases.push(label);
 			phaseStarted?.(label);
@@ -405,6 +422,11 @@ interface ConstructedFlowConfig {
 }
 
 interface FlowConfig {
+	readonly presentation?: PresentationLevel;
+	/**
+	Replaces the recording reporter, whose records then stay empty.
+	*/
+	readonly reporter?: Reporter;
 	readonly now?: () => number;
 	readonly signal?: AbortSignal;
 	readonly publicationClient?: Pick<PushClient, 'negotiate' | 'commit'>;
@@ -1048,7 +1070,13 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	try {
 		await runBuildPush(
 			{ invocation, receiptFile, ...config.options },
-			recordingReporter(record, config.phaseFacts, config.phaseStarted),
+			config.reporter ??
+				recordingReporter(
+					record,
+					config.phaseFacts,
+					config.phaseStarted,
+					config.presentation
+				),
 			dependencies
 		);
 	} catch (error) {
@@ -1082,6 +1110,92 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		batchSessions,
 		protectionCalls,
 		rootLinkDirectory
+	};
+}
+
+const cacheNarHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xbb));
+const divergedRoot = rootNameSchema.parse('github:acme/app/main');
+const divergedRunRoot = uploadAttachRootSchema.parse({
+	name: 'github:acme/app/run-1'
+});
+const divergenceLead =
+	'The cache already serves different contents for these paths and keeps its own copies';
+
+function divergenceText(storePaths: readonly StorePathString[]): string {
+	return storePaths
+		.map(
+			(storePath) =>
+				`${StorePath.basename(storePath)} (local ${narHash.toString()}, cache ${cacheNarHash.toString()})`
+		)
+		.join(', ');
+}
+
+function divergedEntries(storePaths: readonly StorePathString[]): unknown[] {
+	return storePaths.map((storePath) => ({
+		storePath,
+		localNarHash: narHash.toString(),
+		cacheNarHash: cacheNarHash.toString()
+	}));
+}
+
+function divergenceSummaries(results: readonly ResultPayload[]): unknown[] {
+	return results
+		.filter((result) => result.kind === 'divergence-summary')
+		.map((result) => result.data);
+}
+
+/**
+A run that builds the target pathA and the intermediate pathB, while the
+cache already serves different contents for both paths.
+*/
+function divergedFlow(): {
+	readonly config: FlowConfig;
+	readonly commits: unknown[];
+	readonly attachRoots: () => unknown[];
+} {
+	const attachRoots: unknown[] = [];
+	const commits: unknown[] = [];
+
+	return {
+		config: {
+			emitTwoEvents: true,
+			valid: [pathA, pathB],
+			options: {
+				root: divergedRoot,
+				runRoot: divergedRunRoot,
+				intermediatePaths: [pathB]
+			},
+			publicationClient: {
+				negotiate(body) {
+					attachRoots.push(body.attachRoot);
+
+					return Promise.resolve({
+						uploads: body.paths.map((candidate) =>
+							uploadDecisionSchema.parse({
+								action: 'skip',
+								storePathHash: candidate.storePathHash,
+								narHash: cacheNarHash.toString()
+							})
+						)
+					});
+				},
+				commit(target) {
+					commits.push(target);
+
+					return Promise.reject(new Error('a skip needs no commit'));
+				}
+			}
+		},
+		commits,
+		attachRoots: () =>
+			new Map(
+				attachRoots.map((attachRoot) => [
+					JSON.stringify(attachRoot),
+					attachRoot
+				])
+			)
+				.values()
+				.toArray()
 	};
 }
 
@@ -1589,12 +1703,314 @@ describe('runBuildPush', () => {
 					'negotiate:2',
 					...(verdict === 'retry' ? ['ack:streamed-2'] : [])
 				],
-				paths: verdict === 'divergent' ? [] : [pathA],
-				error:
-					verdict === 'divergent' ? 'BuildPublicationFailedError' : undefined
+				paths: [pathA],
+				error: undefined
 			});
 		}
 	);
+
+	it.each([
+		{
+			presentation: 'summary',
+			humanMessage: `${divergenceLead}: ${StorePath.basename(pathA)}, ${StorePath.basename(pathB)}. Check the builds for reproducibility. Use --debug to compare the checksums.`
+		},
+		{
+			presentation: 'debug',
+			humanMessage: `${divergenceLead}: ${divergenceText([pathA, pathB])}. Check the builds for reproducibility.`
+		}
+	] as const)(
+		"keeps the cache's copy of a diverged target and intermediate at $presentation level",
+		async ({ presentation, humanMessage }) => {
+			const flow = divergedFlow();
+			const run = await runFlow({ ...flow.config, presentation });
+
+			expect({
+				error: run.error,
+				receipt: await parseReceipt(run.receiptFile),
+				rootRequests: run.rootRequests,
+				attachRoots: flow.attachRoots(),
+				commits: flow.commits,
+				warnings: run.warnings,
+				divergence: divergenceSummaries(run.results)
+			}).toStrictEqual({
+				error: undefined,
+				receipt: {
+					version: 3,
+					paths: [pathA, pathB],
+					subjects: [],
+					outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+					childExitStatus: 0,
+					uploaded: [],
+					failed: [],
+					collected: []
+				},
+				rootRequests: [
+					{
+						name: divergedRoot,
+						body: { targets: [pathA], retention: { kind: 'inherit' } }
+					}
+				],
+				attachRoots: [divergedRunRoot],
+				commits: [],
+				warnings: [
+					{
+						label: 'diverged',
+						value: divergenceText([pathA, pathB]),
+						humanMessage
+					}
+				],
+				divergence: [{ diverged: divergedEntries([pathA, pathB]) }]
+			});
+		}
+	);
+
+	it('annotates the diverged paths with one GitHub warning', async () => {
+		const written: string[] = [];
+		const run = await runFlow({
+			...divergedFlow().config,
+			reporter: createGithubReporter({
+				environment: {},
+				stream: new Writable({
+					write(chunk: Buffer | string, _encoding, callback) {
+						written.push(String(chunk));
+						callback();
+					}
+				}),
+				out: new Writable({
+					write(_chunk, _encoding, callback) {
+						callback();
+					}
+				})
+			})
+		});
+
+		expect({
+			error: run.error,
+			warnings: written
+				.join('')
+				.split('\n')
+				.filter((line) => line.startsWith('::warning::'))
+		}).toStrictEqual({
+			error: undefined,
+			warnings: [
+				`::warning::${divergenceLead}: ${StorePath.basename(pathA)}, ${StorePath.basename(pathB)}. Check the builds for reproducibility. Use --debug to compare the checksums.`
+			]
+		});
+	});
+
+	it('refuses diverged paths with exit status 74 under the fail policy', async () => {
+		const flow = divergedFlow();
+		const run = await runFlow({
+			...flow.config,
+			options: { ...flow.config.options, divergencePolicy: 'fail' }
+		});
+		const error = z.instanceof(BuildPublicationFailedError).parse(run.error);
+		const receipt = await parseReceipt(run.receiptFile);
+
+		expect({
+			error: {
+				name: error.name,
+				exitCode: error.exitCode,
+				failedPaths: error.failedPaths,
+				cause:
+					error.cause instanceof Error
+						? { name: error.cause.name }
+						: error.cause
+			},
+			paths: receipt.paths,
+			rootRequests: run.rootRequests,
+			warnings: run.warnings,
+			divergence: divergenceSummaries(run.results)
+		}).toStrictEqual({
+			error: {
+				name: 'BuildPublicationFailedError',
+				exitCode: 74,
+				failedPaths: [pathA, pathB],
+				cause: { name: 'BuildOutputDivergedError' }
+			},
+			paths: [],
+			rootRequests: [],
+			warnings: [],
+			divergence: []
+		});
+	});
+
+	it("keeps the cache's copy of a path that the run did not build under the fail policy", async () => {
+		const flow = divergedFlow();
+		const run = await runFlow({
+			...flow.config,
+			emitTwoEvents: false,
+			emitEvent: true,
+			options: { ...flow.config.options, divergencePolicy: 'fail' }
+		});
+		const error = z.instanceof(BuildPublicationFailedError).parse(run.error);
+
+		expect({
+			error: {
+				name: error.name,
+				exitCode: error.exitCode,
+				failedPaths: error.failedPaths
+			},
+			warnings: run.warnings,
+			divergence: divergenceSummaries(run.results)
+		}).toStrictEqual({
+			error: {
+				name: 'BuildPublicationFailedError',
+				exitCode: 74,
+				failedPaths: [pathA]
+			},
+			warnings: [
+				{
+					label: 'diverged',
+					value: divergenceText([pathB]),
+					humanMessage: `${divergenceLead}: ${StorePath.basename(pathB)}. Check the builds for reproducibility. Use --debug to compare the checksums.`
+				}
+			],
+			divergence: [{ diverged: divergedEntries([pathB]) }]
+		});
+	});
+
+	it.each(['concede', 'fail'] as const)(
+		'applies the %s policy when it publishes after the build',
+		async (policy) => {
+			const run = await runFlow({
+				preflightFailure: new UntrustedDaemonError('not-trusted'),
+				constructed: { succeedOn: 1, installables: [`${drvA}^*`] },
+				declaredOutputs: [pathA],
+				ultimatePaths: [pathA],
+				valid: [pathA],
+				publicationClient: divergedFlow().config.publicationClient,
+				options: { divergencePolicy: policy }
+			});
+
+			expect({
+				error:
+					run.error instanceof BuildPublicationFailedError
+						? {
+								name: run.error.name,
+								exitCode: run.error.exitCode,
+								failedPaths: run.error.failedPaths
+							}
+						: run.error,
+				warnings: run.warnings.filter(
+					(warning) => warning.label === 'diverged'
+				),
+				divergence: divergenceSummaries(run.results)
+			}).toStrictEqual(
+				policy === 'concede'
+					? {
+							error: undefined,
+							warnings: [
+								{
+									label: 'diverged',
+									value: divergenceText([pathA]),
+									humanMessage: `${divergenceLead}: ${StorePath.basename(pathA)}. Check the builds for reproducibility. Use --debug to compare the checksums.`
+								}
+							],
+							divergence: [{ diverged: divergedEntries([pathA]) }]
+						}
+					: {
+							error: {
+								name: 'BuildPublicationFailedError',
+								exitCode: 74,
+								failedPaths: [StorePath.basename(pathA)]
+							},
+							warnings: [],
+							divergence: []
+						}
+			);
+		}
+	);
+
+	it('refuses a diverged intermediate that the build log shows was built when it publishes after the build', async () => {
+		const run = await runFlow({
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
+			constructed: {
+				succeedOn: 1,
+				installables: [`${drvA}^*`],
+				dependencyPaths: [pathB]
+			},
+			declaredOutputs: [pathA],
+			ultimatePaths: [pathA],
+			valid: [pathA, pathB],
+			closurePaths: [pathA, pathB],
+			publicationClient: {
+				negotiate: (body) =>
+					Promise.resolve({
+						uploads: body.paths.map((candidate) =>
+							uploadDecisionSchema.parse({
+								action: 'skip',
+								storePathHash: candidate.storePathHash,
+								narHash:
+									candidate.storePath === pathB
+										? cacheNarHash.toString()
+										: narHash.toString()
+							})
+						)
+					}),
+				commit: () => Promise.reject(new Error('a skip needs no commit'))
+			},
+			options: { closure: true, divergencePolicy: 'fail' }
+		});
+		const error = z.instanceof(BuildPublicationFailedError).parse(run.error);
+
+		expect({
+			error: {
+				name: error.name,
+				exitCode: error.exitCode,
+				failedPaths: error.failedPaths
+			},
+			divergence: divergenceSummaries(run.results)
+		}).toStrictEqual({
+			error: {
+				name: 'BuildPublicationFailedError',
+				exitCode: 74,
+				failedPaths: [StorePath.basename(pathB)]
+			},
+			divergence: []
+		});
+	});
+
+	it('refuses a diverged rebuilt output whose hook event was lost', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 1,
+				rebuild: true,
+				requireProvenance: true,
+				suppressEvent: true,
+				installables: [`${drvA}^*`]
+			},
+			valid: [pathA],
+			alreadyValid: [pathA],
+			declaredOutputs: [pathA],
+			outPaths: [pathA],
+			ultimatePaths: [pathA],
+			publicationClient: divergedFlow().config.publicationClient,
+			options: { divergencePolicy: 'fail' }
+		});
+		const error = z.instanceof(BuildPublicationFailedError).parse(run.error);
+
+		expect({
+			error: {
+				name: error.name,
+				exitCode: error.exitCode,
+				failedPaths: error.failedPaths,
+				cause:
+					error.cause instanceof Error
+						? { name: error.cause.name }
+						: error.cause
+			},
+			divergence: divergenceSummaries(run.results)
+		}).toStrictEqual({
+			error: {
+				name: 'BuildPublicationFailedError',
+				exitCode: 74,
+				failedPaths: [pathA],
+				cause: { name: 'BuildOutputDivergedError' }
+			},
+			divergence: []
+		});
+	});
 
 	it('finishes no-wait reconciliation while the original streamed verdict remains pending', async () => {
 		const deferred = Promise.withResolvers<undefined>();

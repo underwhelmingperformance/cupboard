@@ -46,6 +46,7 @@ import {
 	cohortSequenceFailure,
 	runCohortSequence
 } from '../build-push/cohorts.ts';
+import type { DivergencePolicy } from '../build-push/divergence.ts';
 import { preflightBuildPush } from '../build-push/preflight.ts';
 import { referenceBuildPushClient } from '../build-push/reference-client.ts';
 import {
@@ -105,11 +106,18 @@ interface BuildPushOptions {
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly uploadConcurrency?: number;
+	readonly failOnDivergence?: boolean;
 	readonly receiptFile?: string;
 	readonly aggregateReceiptV3?: boolean;
 	readonly cohortsFile?: string;
 	readonly gcBetweenCohorts?: boolean;
 	readonly keepGoingCohorts?: boolean;
+}
+
+function divergencePolicyFor(
+	failOnDivergence: boolean | undefined
+): DivergencePolicy {
+	return failOnDivergence === true ? 'fail' : 'concede';
 }
 
 const commandCohortSchema = z.strictObject({
@@ -534,6 +542,10 @@ export function registerBuildPushCommand(
 			parseUploadConcurrency
 		)
 		.option(
+			'--fail-on-divergence',
+			"fail when the cache already serves different contents for a path that this run built. By default, build-push keeps the cache's copy, treats the path as published and reports a warning. Paths that the run did not build always keep the cache's copy."
+		)
+		.option(
 			'--receipt-file <path>',
 			'write the build and publication results as a JSON receipt. With several builds, the file contains {"receipts": [...]}, in build order.'
 		)
@@ -730,7 +742,8 @@ export function registerBuildPushCommand(
 							}),
 							...(options.uploadConcurrency !== undefined && {
 								uploadConcurrency: options.uploadConcurrency
-							})
+							}),
+							divergencePolicy: divergencePolicyFor(options.failOnDivergence)
 						},
 						reporter,
 						{
