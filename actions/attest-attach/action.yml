@@ -109,7 +109,6 @@ runs:
           --cache "$CACHE"
           --audience "$AUDIENCE"
           --read-user "$READ_USER"
-          --read-password "$READ_PASSWORD"
           --receipt-file "$RECEIPT_FILE"
           --checksums-file "$CHECKSUMS_FILE"
           --bundle "$BUNDLE"

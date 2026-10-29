@@ -101,9 +101,14 @@ export interface TenantProbeOptions {
 	readonly cache: CacheScope;
 	readonly view?: string;
 	readonly referenceSource?: ReuseSource;
+	/**
+	The credential for reads of the destination cache.
+	*/
 	readonly credentials?: BasicCredential;
 	/**
-	Overrides credentials for view reads; other probes keep credentials.
+	The credential for reads of the view or reference source. Without it, those
+	reads send no credential, because the destination's credential is for a
+	different cache.
 	*/
 	readonly viewCredentials?: BasicCredential;
 	readonly fetcher?: typeof fetch;
@@ -141,11 +146,12 @@ export function tenantProbesFor(
 				return new Set();
 			}
 			const reference = {
-				...shared,
+				baseUrl: options.baseUrl,
 				paths,
 				...(options.viewCredentials !== undefined && {
 					credentials: options.viewCredentials
-				})
+				}),
+				...(options.fetcher !== undefined && { fetcher: options.fetcher })
 			};
 			if (source.kind === 'view') {
 				return viewServedPaths({ ...reference, view: source.view });

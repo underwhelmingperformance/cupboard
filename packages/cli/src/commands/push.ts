@@ -46,7 +46,6 @@ import {
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
-	ReadCredentialPairError,
 	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
 	ReferenceSourceReadRefusedError,
@@ -71,6 +70,7 @@ import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { cacheAccessFetcher } from './github.ts';
+import { referenceSourceCredentials } from './read-credentials.ts';
 import { rootRetentionChoice } from './retention-choice.ts';
 
 interface PushOptions {
@@ -463,12 +463,12 @@ export function registerPushCommand(
 		)
 		.option(
 			'--read-user <user>',
-			'user name of the read credential for a private --reference-source',
+			'user name of the read credential for a private --reference-source (default: $CUPBOARD_VIEW_READ_USER)',
 			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
-			'password of the read credential for a private --reference-source'
+			'password of the read credential for a private --reference-source (default: $CUPBOARD_VIEW_READ_PASSWORD)'
 		)
 		.option(
 			'--run-root <name>',
@@ -604,12 +604,10 @@ export function registerPushCommand(
 
 			validateRetentionChoice(options);
 
-			if (
-				(options.readUser === undefined) !==
-				(options.readPassword === undefined)
-			) {
-				throw new ReadCredentialPairError();
-			}
+			const referenceCredential =
+				options.referenceSource === undefined
+					? undefined
+					: referenceSourceCredentials(options);
 
 			if (
 				options.referenceReceiptFile !== undefined &&
@@ -753,9 +751,9 @@ export function registerPushCommand(
 				...(options.referenceSource !== undefined && {
 					referenceSource: {
 						url: options.referenceSource,
-						...(options.readUser !== undefined && {
-							readUser: options.readUser,
-							readPassword: options.readPassword
+						...(referenceCredential !== undefined && {
+							readUser: referenceCredential.user,
+							readPassword: referenceCredential.password
 						})
 					}
 				}),

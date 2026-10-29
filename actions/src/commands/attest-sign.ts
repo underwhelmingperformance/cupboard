@@ -361,7 +361,11 @@ export async function attestSignAction(
 	reporter: Reporter = createGithubReporter(),
 	dependencies: AttestSignDependencies = {}
 ): Promise<void> {
-	const inputs = resolveAttestSignInputs(options);
+	const inputs = resolveAttestSignInputs({
+		...options,
+		githubToken:
+			options.githubToken ?? (dependencies.environment ?? env).GH_TOKEN
+	});
 	const io = dependencies.io ?? nodeAttestSignIo;
 	const subjects = await readSubjects(inputs.checksumsFile, io);
 

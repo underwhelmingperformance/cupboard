@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -17,6 +17,7 @@ import {
 	BooleanInputInvalidError,
 	CohortFailureToleranceError,
 	ComponentRootTargetLimitError,
+	EnvironmentCredentialVersionError,
 	MatrixJobLimitError,
 	MissingInputError,
 	PackCapacityInvalidError,
@@ -29,8 +30,10 @@ import {
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
 	RootNameInvalidError,
+	TargetEvaluationError,
 	UrlInputInvalidError
 } from '../errors.ts';
+import type { Environment } from '../inputs.ts';
 import { publishReferenceTargets } from '../plan-reference.ts';
 import {
 	type Cohort,
@@ -199,6 +202,70 @@ describe('planAction', () => {
 			}).toStrictEqual({ evaluations: [], runs: [] });
 		}
 	);
+
+	it.each([
+		{
+			name: 'refuses a CLI that reads no password from its environment',
+			credential: {
+				fallbackReadUser: 'source-reader',
+				fallbackReadPassword: 'source-secret'
+			},
+			error: { minimumVersion: 'v0.0.50', version: 'v0.0.49' },
+			inspected: [['/unused/cupboard', undefined]]
+		},
+		{
+			name: 'does not check the CLI version without a reference credential',
+			credential: {},
+			error: 'evaluated',
+			inspected: []
+		}
+	])('$name', async ({ credential, error, inspected }) => {
+		const evaluation = new Error('evaluation stops the plan');
+		const evaluator = vi.fn(() => Promise.reject(evaluation));
+		const runner = vi.fn(() => Promise.resolve({ stdout: '', stderr: '' }));
+		const fetcher = vi.fn(() => Promise.resolve(new Response('{}')));
+		const inspectVersion = vi.fn(() => Promise.resolve('v0.0.49'));
+		let failure: unknown;
+
+		try {
+			await planAction(
+				{
+					...baseOptions,
+					optimise: 'true',
+					referenceSource: 'https://cupboard.example/t/acme/cache/source',
+					...credential
+				},
+				{ RUNNER_TEMP: '/tmp' },
+				undefined,
+				{
+					evaluator,
+					runner,
+					fetcher,
+					inspectVersion,
+					storeDirectory: storeDirectorySchema.parse('/nix/store'),
+					buildSettings: { systems: ['x86_64-linux'], features: [] }
+				}
+			);
+		} catch (error_) {
+			failure = error_;
+		}
+
+		expect({
+			error:
+				failure instanceof EnvironmentCredentialVersionError
+					? {
+							minimumVersion: failure.minimumVersion,
+							version: failure.version
+						}
+					: failure instanceof TargetEvaluationError &&
+						  failure.cause === evaluation
+						? 'evaluated'
+						: failure,
+			inspected: inspectVersion.mock.calls,
+			runs: runner.mock.calls,
+			probes: fetcher.mock.calls
+		}).toStrictEqual({ error, inspected, runs: [], probes: [] });
+	});
 
 	it('emits every target directly when optimisation is disabled', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
@@ -410,6 +477,29 @@ describe('resolvePlanInputs', () => {
 		);
 
 		expect(inputs.publish).toBe('built');
+	});
+
+	it('reads the read passwords from the action environment', () => {
+		const inputs = resolvePlanInputs(
+			{ ...baseOptions, readUser: 'reader', fallbackReadUser: 'fallback' },
+			{
+				...environment,
+				READ_PASSWORD: 'secret',
+				FALLBACK_READ_PASSWORD: 'fallback-secret'
+			}
+		);
+
+		expect({
+			readUser: inputs.readUser,
+			readPassword: inputs.readPassword,
+			fallbackReadUser: inputs.fallbackReadUser,
+			fallbackReadPassword: inputs.fallbackReadPassword
+		}).toStrictEqual({
+			readUser: 'reader',
+			readPassword: 'secret',
+			fallbackReadUser: 'fallback',
+			fallbackReadPassword: 'fallback-secret'
+		});
 	});
 
 	it('resolves explicit permanent retention', () => {
@@ -2440,6 +2530,107 @@ describe('plan-job reference publication', () => {
 			});
 		}
 	);
+
+	it.each([
+		{
+			name: 'passes the reference read password in the environment',
+			credential: {
+				fallbackReadUser: 'source-reader',
+				fallbackReadPassword: 'source-secret'
+			},
+			credentialArguments: ['--read-user', 'source-reader'],
+			environment: { CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' }
+		},
+		{
+			name: 'leaves the job environment to supply a reference credential',
+			credential: {},
+			credentialArguments: [],
+			environment: {}
+		}
+	])('$name', async ({ credential, credentialArguments, environment }) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-plan-reference-')
+		);
+		const outputPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+		const inputs: PlanInputs = {
+			...resolvePlanInputs(
+				{ ...baseOptions, ...credential },
+				{ RUNNER_TEMP: directory }
+			),
+			targets: [evaluation('app', outputPath).target],
+			referenceSource: 'https://cupboard.example/t/acme'
+		};
+		const calls: {
+			arguments: readonly string[];
+			environment: Environment | undefined;
+		}[] = [];
+		const runner: EnsureRunner = async (
+			_command,
+			arguments_,
+			_signal,
+			commandEnvironment
+		) => {
+			calls.push({
+				arguments: arguments_.filter(
+					(argument) => !argument.startsWith(directory)
+				),
+				environment: commandEnvironment
+			});
+			const resultFile = arguments_[arguments_.indexOf('--result-file') + 1];
+			await writeFile(
+				resultFile ?? '',
+				`${JSON.stringify({
+					kind: 'push-summary',
+					data: {
+						uploadedPaths: 0,
+						reusedBlobs: 1,
+						skipped: 0,
+						uploadedBytes: 0,
+						failures: [],
+						paths: [
+							{
+								storePathHash: '1'.repeat(32),
+								storePath: outputPath,
+								outcome: 'committed'
+							}
+						]
+					}
+				})}\n`
+			);
+			return { stdout: '', stderr: '' };
+		};
+
+		try {
+			await publishReferenceTargets(inputs, [evaluation('app', outputPath)], {
+				runner,
+				fetcher: () =>
+					Promise.resolve(Response.json({ missingStorePathHashes: [] }))
+			});
+
+			expect(calls).toStrictEqual([
+				{
+					arguments: [
+						'--output-mode',
+						'json',
+						'--no-colour',
+						'--result-file',
+						'push',
+						'https://cupboard.example/t/acme',
+						'--reference-paths-file',
+						'--reference-source',
+						'https://cupboard.example/t/acme',
+						'--github-oidc',
+						'--root',
+						'github:owner/repo/main/app',
+						...credentialArguments
+					],
+					environment
+				}
+			]);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
 
 	it.each([
 		{ build: 'rebuild', publish: 'outputs' },

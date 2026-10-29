@@ -1,5 +1,4 @@
 import { readFile } from 'node:fs/promises';
-import { env } from 'node:process';
 
 import {
 	storePathSchema,
@@ -57,7 +56,7 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 import { registerAttestStatusCommand } from './attest-status.ts';
 import { parsePathFile, resolvePushPath } from './push.ts';
-import { readCredentials } from './read-credentials.ts';
+import { environmentValue, readCredentials } from './read-credentials.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
@@ -320,10 +319,7 @@ export function registerAttestCommands(
 			].join('\n')
 		)
 		.action(async (url: URL, paths: string[], options: AttachOptions) => {
-			const readUser =
-				options.readUser ?? parseReadUser(env.CUPBOARD_READ_USER);
-			const readPassword = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
-			readCredentials({ readUser, readPassword });
+			const credential = readCredentials(options);
 			const bundlePaths = await attachmentBundlePaths(
 				options.attestation,
 				options.attestationsFile
@@ -367,8 +363,10 @@ export function registerAttestCommands(
 						{
 							url: resolved.target.tenantUrl,
 							cache,
-							...(readUser !== undefined && { readUser }),
-							...(readPassword !== undefined && { readPassword })
+							...(credential !== undefined && {
+								readUser: credential.user,
+								readPassword: credential.password
+							})
 						},
 						{
 							onProgress: () => {
@@ -517,8 +515,10 @@ export function registerAttestCommands(
 		.action(async (bundles: string[], options: VerifyOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const readUser =
-				options.readUser ?? parseReadUser(env.CUPBOARD_READ_USER);
-			const readPassword = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
+				options.readUser ??
+				parseReadUser(environmentValue('CUPBOARD_READ_USER'));
+			const readPassword =
+				options.readPassword ?? environmentValue('CUPBOARD_READ_PASSWORD');
 			const common = {
 				certificateIdentity: options.certificateIdentity,
 				certificateIdentityRegex: options.certificateIdentityRegex,

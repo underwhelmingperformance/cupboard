@@ -76,7 +76,6 @@ runs:
           --workflow-repository "$WORKFLOW_REPOSITORY"
           --workflow-ref "$WORKFLOW_REF"
           --workflow-sha "$WORKFLOW_SHA"
-          --github-token "$GH_TOKEN"
           --github-api-url "$GITHUB_API_URL_INPUT"
           --github-graphql-url "$GITHUB_GRAPHQL_URL_INPUT")
         node --experimental-transform-types \

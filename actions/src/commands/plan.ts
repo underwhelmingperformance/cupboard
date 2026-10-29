@@ -45,7 +45,11 @@ import {
 	cohortBuildLocation,
 	cohortJobName
 } from '../build-location.ts';
-import { cupboardDebugArguments } from '../cupboard-run.ts';
+import {
+	cupboardDebugArguments,
+	inspectCupboardVersion,
+	requireEnvironmentCredentialSupport
+} from '../cupboard-run.ts';
 import {
 	BuildRebuildRemoteDispatchError,
 	BuiltPublicationObservationUnsupportedError,
@@ -83,6 +87,7 @@ import {
 } from '../options.ts';
 import { packCohorts } from '../packing.ts';
 import {
+	isPublishingByReference,
 	type PlanReferenceOutcome,
 	publishReferenceTargets
 } from '../plan-reference.ts';
@@ -109,10 +114,15 @@ import {
 } from '../publish-plan.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
+/**
+Runs a cupboard command and returns its output. `environment` contains the
+variables that the command needs in addition to the action's own.
+*/
 export type EnsureRunner = (
 	command: string,
 	arguments_: readonly string[],
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	environment?: Environment
 ) => Promise<{ stdout: string; stderr: string }>;
 
 const maximumCapturedOutputBytes = 16 * 1024 * 1024;
@@ -135,14 +145,15 @@ class CapturedCommandError extends CommandFailedError {
 const defaultEnsureRunner: EnsureRunner = async (
 	command,
 	arguments_,
-	signal
+	signal,
+	environment = {}
 ) => {
 	const debugArguments = await cupboardDebugArguments(command, env, signal);
 	signal?.throwIfAborted();
 
 	const child = spawn(command, [...debugArguments, ...arguments_], {
 		stdio: ['ignore', 'pipe', 'pipe'],
-		env: { ...env, ...subprocessTraceEnvironment() }
+		env: { ...env, ...environment, ...subprocessTraceEnvironment() }
 	});
 	const outputLimit = new AbortController();
 	const lifecycleSignal =
@@ -307,6 +318,7 @@ export interface PlanDependencies {
 	readonly storeDirectory?: StoreDirectory;
 	readonly fetcher?: typeof fetch;
 	readonly runner?: EnsureRunner;
+	readonly inspectVersion?: typeof inspectCupboardVersion;
 	readonly signal?: AbortSignal;
 	readonly createArtifactName?: () => string;
 	/**
@@ -455,7 +467,7 @@ export function resolvePlanInputs(
 	// Both credential halves are taken verbatim: surrounding whitespace is
 	// part of a credential, so only its complete absence means "not set".
 	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? '';
+	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
 
 	if (readUser !== '' && readPassword === '') {
 		throw new ReadPasswordRequiredError();
@@ -466,7 +478,8 @@ export function resolvePlanInputs(
 	}
 
 	const fallbackReadUser = providedReadUser(options.fallbackReadUser);
-	const fallbackReadPassword = options.fallbackReadPassword ?? '';
+	const fallbackReadPassword =
+		options.fallbackReadPassword ?? environment.FALLBACK_READ_PASSWORD ?? '';
 	if (fallbackReadUser !== '' && fallbackReadPassword === '') {
 		throw new ReadPasswordRequiredError();
 	}
@@ -657,6 +670,17 @@ export async function planAction(
 	}
 	if (inputs.publish === 'built' && inputs.store !== '') {
 		throw new BuiltPublicationObservationUnsupportedError();
+	}
+	if (
+		inputs.optimise &&
+		isPublishingByReference(inputs) &&
+		inputs.fallbackReadUser !== ''
+	) {
+		await requireEnvironmentCredentialSupport(
+			inputs.cupboardPath,
+			dependencies.inspectVersion ?? inspectCupboardVersion,
+			dependencies.signal
+		);
 	}
 
 	const { plan, evaluations, referencePublications } = inputs.optimise

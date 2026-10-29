@@ -87,8 +87,13 @@ import {
 	uploadTally
 } from '../cohort-summary.ts';
 import {
+	type CupboardInvocation,
 	type CupboardRunDependencies,
-	runCupboard as defaultRunCupboard
+	inspectCupboardVersion,
+	readCredentialInvocation,
+	requireEnvironmentCredentialSupport,
+	runCupboard as defaultRunCupboard,
+	withoutReadCredential
 } from '../cupboard-run.ts';
 import { ReferenceSourceInvalidError } from '../errors.ts';
 import {
@@ -526,7 +531,7 @@ export function resolveBuildCohortInputs(
 	}
 
 	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? '';
+	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
 
 	if (readUser !== '' && readPassword === '') {
 		throw new ReadPasswordRequiredError();
@@ -537,7 +542,8 @@ export function resolveBuildCohortInputs(
 	}
 
 	const fallbackReadUser = providedReadUser(options.fallbackReadUser);
-	const fallbackReadPassword = options.fallbackReadPassword ?? '';
+	const fallbackReadPassword =
+		options.fallbackReadPassword ?? environment.FALLBACK_READ_PASSWORD ?? '';
 
 	if (fallbackReadUser !== '' && fallbackReadPassword === '') {
 		throw new FallbackReadPasswordRequiredError();
@@ -808,6 +814,7 @@ export interface BuildCohortDependencies {
 		) => Promise<T>
 	) => Promise<T>;
 	readonly materialiseCachedClosure?: typeof materialiseCachedClosure;
+	readonly inspectVersion?: typeof inspectCupboardVersion;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
 	readonly reporter?: Reporter;
 	readonly signal?: AbortSignal;
@@ -815,6 +822,22 @@ export interface BuildCohortDependencies {
 	Returns the current time in milliseconds, for the job's duration.
 	*/
 	readonly now?: () => number;
+}
+
+/**
+Whether the cohort's cupboard commands receive a read credential: the
+destination's, or the reuse view's for a reuse view or reference source.
+*/
+function hasCommandReadCredential(
+	inputs: Pick<
+		BuildCohortInputs,
+		'url' | 'readUser' | 'fallbackReadUser' | 'reuseView' | 'referenceSource'
+	>
+): boolean {
+	return (
+		inputs.readUser !== '' ||
+		(inputs.fallbackReadUser !== '' && cohortReferenceSource(inputs) !== '')
+	);
 }
 
 function cachedClosureSources(
@@ -900,6 +923,16 @@ export async function buildCohortAction(
 	if (isRemotePublication && unqueryable.length > 0) {
 		throw new RemotePublicationTargetUnresolvedError(
 			unqueryable.map((member) => member.attr)
+		);
+	}
+
+	// Only `plan cohort`, `plan reprobe` and a push with references receive a
+	// read credential, and they run only for queryable members.
+	if (queryable.length > 0 && hasCommandReadCredential(inputs)) {
+		await requireEnvironmentCredentialSupport(
+			inputs.cupboardPath,
+			dependencies.inspectVersion ?? inspectCupboardVersion,
+			dependencies.signal
 		);
 	}
 
@@ -2649,13 +2682,13 @@ interface CohortPushExtras {
 }
 
 /**
-The `cupboard push` arguments for one root group, including built and
+The `cupboard push` invocation for one root group, including built and
 attach-only targets so the atomic root replacement contains the complete
 declared list. A streamed cohort's built paths negotiate as
 already-present skips, so this invocation is the root setting, not a second
 upload.
 */
-export function cohortPushArguments(
+export function cohortPushInvocation(
 	inputs: Pick<
 		BuildCohortInputs,
 		| 'url'
@@ -2677,7 +2710,7 @@ export function cohortPushArguments(
 	>,
 	group: CohortRootGroup,
 	extras: CohortPushExtras
-): readonly string[] {
+): CupboardInvocation {
 	const hasReferences = extras.referencePathsFile !== '';
 	const viewSource = hasReferences ? cohortReferenceSource(inputs) : '';
 	const isViewReference =
@@ -2686,8 +2719,18 @@ export function cohortPushArguments(
 	const readPassword = isViewReference
 		? inputs.fallbackReadPassword
 		: inputs.readPassword;
+	// The destination can be the reference source. Without a destination
+	// credential, push would send the job's view variables to it.
+	const credential =
+		hasReferences && !isViewReference && readUser === ''
+			? withoutReadCredential('reference-source')
+			: readCredentialInvocation(
+					hasReferences ? readUser : '',
+					readPassword,
+					'reference-source'
+				);
 
-	return [
+	const arguments_ = [
 		'--no-colour',
 		'push',
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
@@ -2718,9 +2761,7 @@ export function cohortPushArguments(
 		...(extras.referenceManifestFile === undefined
 			? []
 			: ['--reference-manifest', extras.referenceManifestFile]),
-		...(readUser !== '' && hasReferences
-			? ['--read-user', readUser, '--read-password', readPassword]
-			: []),
+		...credential.arguments,
 		...(extras.receiptFile === undefined || extras.receiptFile === ''
 			? []
 			: [
@@ -2738,6 +2779,8 @@ export function cohortPushArguments(
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
 		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
 	];
+
+	return { arguments: arguments_, environment: credential.environment };
 }
 
 function cohortReferenceSource(
@@ -2909,7 +2952,7 @@ async function publishCohort(
 	let otherUploads: UploadTally | undefined;
 	const push = async (
 		group: CohortRootGroup | undefined,
-		arguments_: readonly string[],
+		invocation: CupboardInvocation,
 		sources: ReadonlyMap<string, string>
 	): Promise<void> => {
 		let results: readonly ReporterResultEvent[];
@@ -2917,8 +2960,8 @@ async function publishCohort(
 		try {
 			results = await runCupboard(
 				inputs.cupboardPath,
-				arguments_,
-				environment,
+				invocation.arguments,
+				{ ...environment, ...invocation.environment },
 				cupboardRunDependencies
 			);
 		} catch (error) {
@@ -2999,7 +3042,7 @@ async function publishCohort(
 		receiptFiles.push(receiptFile);
 		await push(
 			undefined,
-			cohortPushArguments(
+			cohortPushInvocation(
 				inputs,
 				{ root: '', paths: [], referencePaths: [], complete: false },
 				{
@@ -3032,7 +3075,7 @@ async function publishCohort(
 			receiptFiles.push(receiptFile);
 			await push(
 				group,
-				cohortPushArguments(
+				cohortPushInvocation(
 					inputs,
 					{
 						...group,
@@ -3088,7 +3131,7 @@ async function publishCohort(
 			const targetExtras = await targetPathsFile(index, localPaths);
 			await push(
 				group,
-				cohortPushArguments(
+				cohortPushInvocation(
 					inputs,
 					{ ...group, paths: localPaths },
 					{
@@ -3113,7 +3156,7 @@ async function publishCohort(
 			await writeFile(reusePathsFile, linesOf(group.referencePaths));
 			await push(
 				{ ...group, complete: false },
-				cohortPushArguments(
+				cohortPushInvocation(
 					inputs,
 					{ ...group, paths: [], complete: false },
 					{
@@ -3148,7 +3191,7 @@ async function publishCohort(
 		const targetExtras = await targetPathsFile(index, localPaths);
 		await push(
 			group,
-			cohortPushArguments(
+			cohortPushInvocation(
 				inputs,
 				{
 					...group,
@@ -3278,13 +3321,14 @@ async function reprobeCohort(
 		`${JSON.stringify({ targets }, undefined, 2)}\n`
 	);
 
+	const reprobe = planReprobeInvocation(inputs, targetsFile);
 	let results: readonly ReporterResultEvent[];
 
 	try {
 		results = await runCupboard(
 			inputs.cupboardPath,
-			planReprobeArguments(inputs, targetsFile),
-			environment,
+			reprobe.arguments,
+			{ ...environment, ...reprobe.environment },
 			cupboardRunDependencies
 		);
 	} catch (error) {
@@ -3343,11 +3387,11 @@ function reprobeTargets(
 }
 
 /**
-The `cupboard plan reprobe` arguments for one cohort. The command reads cache
+The `cupboard plan reprobe` invocation for one cohort. The command reads cache
 endpoints without exchanging a token or opening a Nix store. It uses the
 run's read credentials for a cache.
 */
-export function planReprobeArguments(
+export function planReprobeInvocation(
 	inputs: Pick<
 		BuildCohortInputs,
 		| 'url'
@@ -3360,38 +3404,50 @@ export function planReprobeArguments(
 		| 'fallbackReadPassword'
 	>,
 	targetsFile: string
-): readonly string[] {
-	const arguments_ = [
-		'--no-colour',
-		'plan',
-		'reprobe',
-		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
-		'--targets-file',
-		targetsFile
-	];
+): CupboardInvocation {
+	const view = viewReadCredential(inputs);
+	const destination = readCredentialInvocation(
+		inputs.readUser,
+		inputs.readPassword
+	);
 
-	if (cohortReferenceSource(inputs) !== '') {
-		arguments_.push(...referenceProbeArguments(inputs));
-		if (inputs.fallbackReadUser !== '') {
-			arguments_.push(
-				'--view-read-user',
-				inputs.fallbackReadUser,
-				'--view-read-password',
-				inputs.fallbackReadPassword
-			);
-		}
-	}
+	return {
+		arguments: [
+			'--no-colour',
+			'plan',
+			'reprobe',
+			canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
+			'--targets-file',
+			targetsFile,
+			...(cohortReferenceSource(inputs) === ''
+				? []
+				: referenceProbeArguments(inputs)),
+			...view.arguments,
+			...destination.arguments
+		],
+		environment: { ...view.environment, ...destination.environment }
+	};
+}
 
-	if (inputs.readUser !== '') {
-		arguments_.push(
-			'--read-user',
-			inputs.readUser,
-			'--read-password',
-			inputs.readPassword
-		);
-	}
-
-	return arguments_;
+/**
+The credential for the reuse view or reference source that a `cupboard plan`
+command reads.
+*/
+function viewReadCredential(
+	inputs: Pick<
+		BuildCohortInputs,
+		| 'url'
+		| 'reuseView'
+		| 'referenceSource'
+		| 'fallbackReadUser'
+		| 'fallbackReadPassword'
+	>
+): CupboardInvocation {
+	return readCredentialInvocation(
+		cohortReferenceSource(inputs) === '' ? '' : inputs.fallbackReadUser,
+		inputs.fallbackReadPassword,
+		'view'
+	);
 }
 
 function planReprobeResult(
@@ -3480,6 +3536,11 @@ async function planCohort(
 		)}\n`
 	);
 
+	const view = viewReadCredential(inputs);
+	const destination = readCredentialInvocation(
+		inputs.readUser,
+		inputs.readPassword
+	);
 	const arguments_ = [
 		'--no-colour',
 		'plan',
@@ -3498,24 +3559,10 @@ async function planCohort(
 		inputs.publish,
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...referenceProbeArguments(inputs),
-		...(cohortReferenceSource(inputs) === '' || inputs.fallbackReadUser === ''
-			? []
-			: [
-					'--view-read-user',
-					inputs.fallbackReadUser,
-					'--view-read-password',
-					inputs.fallbackReadPassword
-				]),
+		...view.arguments,
 		...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
 		...(inputs.permanent ? ['--permanent'] : []),
-		...(inputs.readUser === ''
-			? []
-			: [
-					'--read-user',
-					inputs.readUser,
-					'--read-password',
-					inputs.readPassword
-				]),
+		...destination.arguments,
 		...(inputs.store === '' ? [] : ['--store', inputs.store])
 	];
 
@@ -3525,7 +3572,7 @@ async function planCohort(
 		results = await runCupboard(
 			inputs.cupboardPath,
 			arguments_,
-			environment,
+			{ ...environment, ...view.environment, ...destination.environment },
 			cupboardRunDependencies
 		);
 	} catch (error) {

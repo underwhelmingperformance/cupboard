@@ -20,10 +20,17 @@ import {
 	workflowCommands
 } from '@cupboard/shared/github-actions';
 import { subprocessTraceEnvironment } from '@cupboard/shared/node-tracing';
+import semverLt from 'semver/functions/lt.js';
+import semverParse from 'semver/functions/parse.js';
 import { z } from 'zod';
 
 import { subprocessLogFile } from './diagnostics/logging.ts';
-import { CommandFailedError, CupboardReportedError } from './errors.ts';
+import {
+	CommandFailedError,
+	CupboardReportedError,
+	CupboardVersionOutputMissingError,
+	EnvironmentCredentialVersionError
+} from './errors.ts';
 import { type Environment, requireEnvironment } from './inputs.ts';
 
 export type CupboardResultProtocol = 'result-file' | 'legacy-stderr';
@@ -38,6 +45,175 @@ different option sets, so actions inspect the installed command before
 constructing arguments.
 */
 export type CommandOptions = ReadonlySet<string>;
+
+/**
+The arguments for one cupboard command and the environment variables that it
+needs in addition to the action's own.
+*/
+export interface CupboardInvocation {
+	readonly arguments: readonly string[];
+	readonly environment: Environment;
+}
+
+const readCredentialRoles = {
+	cache: {
+		userOption: '--read-user',
+		userVariable: 'CUPBOARD_READ_USER',
+		passwordVariable: 'CUPBOARD_READ_PASSWORD'
+	},
+	view: {
+		userOption: '--view-read-user',
+		userVariable: 'CUPBOARD_VIEW_READ_USER',
+		passwordVariable: 'CUPBOARD_VIEW_READ_PASSWORD'
+	},
+	'reference-source': {
+		userOption: '--read-user',
+		userVariable: 'CUPBOARD_VIEW_READ_USER',
+		passwordVariable: 'CUPBOARD_VIEW_READ_PASSWORD'
+	}
+} as const;
+
+/**
+The cache that a read credential is for: the cache that the command addresses,
+the reuse view or reference source of `plan cohort` and `plan reprobe`, or the
+`--reference-source` of `push`.
+*/
+type ReadCredentialRole = keyof typeof readCredentialRoles;
+
+/**
+Passes a read credential to a cupboard command: the user name as an option and
+the password in an environment variable. `cache` uses `--read-user` and
+`CUPBOARD_READ_PASSWORD`, `view` uses `--view-read-user` and
+`CUPBOARD_VIEW_READ_PASSWORD`, and `reference-source` uses `--read-user` and
+`CUPBOARD_VIEW_READ_PASSWORD`.
+
+An empty user name returns no arguments and no variables, so the command reads
+the role's variables from the job's environment, if the job sets them.
+
+Other processes on the runner can read a command line, and Node copies it into
+the error that it reports when a command cannot start, so a password never
+goes on the command line.
+*/
+export function readCredentialInvocation(
+	user: string,
+	password: string,
+	role: ReadCredentialRole = 'cache'
+): CupboardInvocation {
+	const { userOption, passwordVariable } = readCredentialRoles[role];
+
+	if (user === '') {
+		return { arguments: [], environment: {} };
+	}
+
+	return {
+		arguments: [userOption, user],
+		environment: { [passwordVariable]: password }
+	};
+}
+
+/**
+Removes a role's variables from a command's environment. An action uses this
+when it gives the role to a cache other than the one that the variables are
+documented for, so a job's variables do not reach that cache.
+*/
+export function withoutReadCredential(
+	role: ReadCredentialRole
+): CupboardInvocation {
+	const { userVariable, passwordVariable } = readCredentialRoles[role];
+
+	return {
+		arguments: [],
+		environment: { [userVariable]: undefined, [passwordVariable]: undefined }
+	};
+}
+
+/**
+The first release whose `push`, `plan cohort` and `plan reprobe` read a read
+password from the environment.
+*/
+const minimumEnvironmentCredentialVersion = 'v0.0.50';
+
+/**
+Throws {@link EnvironmentCredentialVersionError} when `version` is a release
+older than {@link minimumEnvironmentCredentialVersion}. A development build
+reports 0.0.0 and a build from source reports its commit, so the check
+accepts both.
+*/
+export function assertEnvironmentCredentialSupport(version: string): void {
+	const release = semverParse(version);
+
+	if (
+		release === null ||
+		(release.major === 0 && release.minor === 0 && release.patch === 0) ||
+		!semverLt(release, minimumEnvironmentCredentialVersion)
+	) {
+		return;
+	}
+
+	throw new EnvironmentCredentialVersionError(
+		minimumEnvironmentCredentialVersion,
+		version
+	);
+}
+
+/**
+Reads the version of the CLI at `binaryPath` and applies
+{@link assertEnvironmentCredentialSupport}. An action calls this before it
+starts work that passes a read credential to the CLI.
+*/
+export async function requireEnvironmentCredentialSupport(
+	binaryPath: string,
+	inspectVersion: typeof inspectCupboardVersion,
+	signal?: AbortSignal
+): Promise<void> {
+	assertEnvironmentCredentialSupport(await inspectVersion(binaryPath, signal));
+}
+
+/**
+Returns the version that the CLI at `binaryPath` prints for `--version`.
+*/
+export async function inspectCupboardVersion(
+	binaryPath: string,
+	signal?: AbortSignal
+): Promise<string> {
+	signal?.throwIfAborted();
+
+	const child = spawn(binaryPath, ['--version'], {
+		stdio: ['ignore', 'pipe', 'inherit']
+	});
+	let stdout = '';
+
+	child.stdout.setEncoding('utf8');
+	child.stdout.on('data', (chunk: string) => {
+		stdout += chunk;
+	});
+
+	const result = await waitForAbortableChildProcess(
+		observeChildProcess(child),
+		signal
+	);
+
+	if (result.error !== undefined) {
+		throw new CommandFailedError(
+			binaryPath,
+			result.status,
+			result.error.message,
+			{ cause: result.error }
+		);
+	}
+
+	if (result.status !== 0) {
+		throw new CommandFailedError(binaryPath, result.status);
+	}
+
+	const version = stdout.trim();
+
+	if (version === '') {
+		throw new CupboardVersionOutputMissingError(binaryPath);
+	}
+
+	return version;
+}
 
 export interface CupboardRunResult {
 	readonly protocol: CupboardResultProtocol;
@@ -94,6 +270,7 @@ export async function runCupboardWithProtocol(
 		return runLegacyCupboard(
 			binaryPath,
 			[...debugArguments, ...arguments_],
+			environment,
 			dependencies.legacyCommands ?? workflowCommands(),
 			dependencies.signal
 		);
@@ -336,6 +513,7 @@ async function readCommandOutput(
 async function runLegacyCupboard(
 	binaryPath: string,
 	arguments_: readonly string[],
+	environment: Environment,
 	commands: Pick<WorkflowCommands, 'warning'>,
 	signal?: AbortSignal
 ): Promise<CupboardRunResult> {
@@ -346,7 +524,7 @@ async function runLegacyCupboard(
 	});
 	const child = spawn(binaryPath, ['--output-mode', 'json', ...arguments_], {
 		stdio: ['inherit', 'inherit', 'pipe'],
-		env: { ...process.env, ...subprocessTraceEnvironment() }
+		env: { ...process.env, ...environment, ...subprocessTraceEnvironment() }
 	});
 
 	child.stderr.setEncoding('utf8');

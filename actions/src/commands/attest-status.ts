@@ -21,7 +21,7 @@ import { CodedError, UsageError } from '@cupboard/shared/errors';
 import { type Command } from 'commander';
 import { z } from 'zod';
 
-import { runCupboard } from '../cupboard-run.ts';
+import { readCredentialInvocation, runCupboard } from '../cupboard-run.ts';
 import {
 	MissingInputError,
 	ReadPasswordRequiredError,
@@ -119,7 +119,7 @@ async function attestStatusAction(
 		throw new MissingInputError('receipt-file');
 	}
 	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? '';
+	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
 	if (readUser !== '' && readPassword === '') {
 		throw new ReadPasswordRequiredError();
 	}
@@ -171,6 +171,7 @@ async function attestStatusAction(
 		path.join(environment.RUNNER_TEMP ?? tmpdir(), 'cupboard-coverage-')
 	);
 	const pathsFile = path.join(directory, 'paths.txt');
+	const credential = readCredentialInvocation(readUser, readPassword);
 	try {
 		await writeFile(pathsFile, `${paths.join('\n')}\n`);
 		const results = await runCupboard(
@@ -182,11 +183,9 @@ async function attestStatusAction(
 				canonicalHref(destination),
 				'--paths-file',
 				pathsFile,
-				...(readUser === ''
-					? []
-					: ['--read-user', readUser, '--read-password', readPassword])
+				...credential.arguments
 			],
-			environment,
+			{ ...environment, ...credential.environment },
 			{ signal }
 		);
 		const event = results.findLast(

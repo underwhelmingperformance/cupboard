@@ -69,7 +69,9 @@ export async function resolveCupboardAction(
 	environment: Environment = env,
 	dependencies: ResolveCupboardCommandDependencies = defaultDependencies
 ): Promise<void> {
-	const resolved = await dependencies.resolve(resolveOptions(options));
+	const resolved = await dependencies.resolve(
+		resolveOptions(options, environment)
+	);
 	const reporter =
 		dependencies.reporter ?? createGithubReporter({ environment });
 
@@ -87,13 +89,14 @@ export async function resolveCupboardAction(
 }
 
 function resolveOptions(
-	options: ResolveCupboardCommandOptions
+	options: ResolveCupboardCommandOptions,
+	environment: Environment
 ): ResolveCupboardOptions {
 	return {
 		cupboardVersion: provided(options.cupboardVersion),
 		includePrereleases: true,
 		releaseRepository: options.workflowRepository ?? '',
-		githubToken: options.githubToken ?? '',
+		githubToken: options.githubToken ?? environment.GH_TOKEN ?? '',
 		workflowSha: options.workflowSha ?? '',
 		workflowRef: options.workflowRef ?? '',
 		githubApiUrl: provided(options.githubApiUrl),

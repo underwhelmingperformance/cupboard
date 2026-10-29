@@ -3,22 +3,33 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { Command } from 'commander';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { waitForFile } from '../../tests/support/filesystem.ts';
 
 import {
+	assertEnvironmentCredentialSupport,
 	commandOptionsFromHelp,
 	cupboardDebugArguments,
 	detectCacheSelectionSyntax,
-	runCupboard
+	readCredentialInvocation,
+	runCupboard,
+	withoutReadCredential
 } from './cupboard-run.ts';
 import {
 	CommandFailedError,
 	CupboardReportedError,
+	EnvironmentCredentialVersionError,
 	MissingInputError
 } from './errors.ts';
+
+const credentialVariables = [
+	'CUPBOARD_READ_USER',
+	'CUPBOARD_READ_PASSWORD',
+	'CUPBOARD_VIEW_READ_USER',
+	'CUPBOARD_VIEW_READ_PASSWORD'
+];
 
 interface FakeCupboardOptions {
 	readonly results: readonly object[];
@@ -57,7 +68,7 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 		`  process.stderr.write(${JSON.stringify(options.logFileProbe?.output ?? JSON.stringify({ event: 'error', name: 'CommanderError', code: 'commander.unknownOption', message: "error: unknown option '--log-file'" }))});`,
 		`  process.exit(${String(options.logFileProbe?.status ?? 2)});`,
 		'}',
-		`if (${JSON.stringify(options.captureEnvironmentFile ?? '')}) { fs.writeFileSync(${JSON.stringify(options.captureEnvironmentFile ?? '')}, JSON.stringify({deferred: process.env.CUPBOARD_DEFER_ERROR_ANNOTATIONS ?? ''})); }`,
+		`if (${JSON.stringify(options.captureEnvironmentFile ?? '')}) { fs.writeFileSync(${JSON.stringify(options.captureEnvironmentFile ?? '')}, JSON.stringify({deferred: process.env.CUPBOARD_DEFER_ERROR_ANNOTATIONS ?? '', credentials: Object.fromEntries(${JSON.stringify(credentialVariables)}.filter((name) => name in process.env).map((name) => [name, process.env[name]]))})); }`,
 		"if (argv.includes('--help')) {",
 		`  if (argv[0] === '--help' && ${JSON.stringify(options.rootHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.rootHelp ?? '')}); process.exit(0); }`,
 		`  if (argv[0] === 'push' && ${JSON.stringify(options.pushHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.pushHelp ?? '')}); process.exit(0); }`,
@@ -380,6 +391,165 @@ const summaryEvent = {
 	kind: 'push-summary',
 	data: { uploadedPaths: 2, reusedBlobs: 1, skipped: 0, uploadedBytes: 4096 }
 };
+
+describe('readCredentialInvocation', () => {
+	it.each([
+		{
+			target: 'cache',
+			user: 'reader',
+			expected: {
+				arguments: ['--read-user', 'reader'],
+				environment: { CUPBOARD_READ_PASSWORD: 'secret' }
+			}
+		},
+		{
+			target: 'cache',
+			user: '',
+			expected: { arguments: [], environment: {} }
+		},
+		{
+			target: 'view',
+			user: 'reader',
+			expected: {
+				arguments: ['--view-read-user', 'reader'],
+				environment: { CUPBOARD_VIEW_READ_PASSWORD: 'secret' }
+			}
+		},
+		{
+			target: 'view',
+			user: '',
+			expected: { arguments: [], environment: {} }
+		},
+		{
+			target: 'reference-source',
+			user: 'reader',
+			expected: {
+				arguments: ['--read-user', 'reader'],
+				environment: { CUPBOARD_VIEW_READ_PASSWORD: 'secret' }
+			}
+		},
+		{
+			target: 'reference-source',
+			user: '',
+			expected: { arguments: [], environment: {} }
+		}
+	] as const)(
+		'passes the $target credential for user "$user"',
+		({ target, user, expected }) => {
+			expect(readCredentialInvocation(user, 'secret', target)).toStrictEqual(
+				expected
+			);
+		}
+	);
+});
+
+describe('withoutReadCredential', () => {
+	it.each([
+		{
+			role: 'cache',
+			environment: {
+				CUPBOARD_READ_USER: undefined,
+				CUPBOARD_READ_PASSWORD: undefined
+			}
+		},
+		{
+			role: 'reference-source',
+			environment: {
+				CUPBOARD_VIEW_READ_USER: undefined,
+				CUPBOARD_VIEW_READ_PASSWORD: undefined
+			}
+		}
+	] as const)('removes the $role variables', ({ role, environment }) => {
+		expect(withoutReadCredential(role)).toStrictEqual({
+			arguments: [],
+			environment
+		});
+	});
+});
+
+describe('assertEnvironmentCredentialSupport', () => {
+	it.each([
+		'v0.0.50',
+		'v0.1.0',
+		'1.0.0',
+		'0.0.0',
+		'v0.0.0-ci',
+		'1a2b3c4',
+		'dev'
+	])('accepts a CLI that reports %s', (version) => {
+		expect(() => {
+			assertEnvironmentCredentialSupport(version);
+		}).not.toThrow();
+	});
+
+	it.each(['v0.0.49', '0.0.19'])(
+		'rejects a release older than v0.0.50: %s',
+		(version) => {
+			let error: unknown;
+
+			try {
+				assertEnvironmentCredentialSupport(version);
+			} catch (error_) {
+				error = error_;
+			}
+
+			expect({
+				isTyped: error instanceof EnvironmentCredentialVersionError,
+				fields:
+					error instanceof EnvironmentCredentialVersionError
+						? {
+								minimumVersion: error.minimumVersion,
+								version: error.version
+							}
+						: undefined
+			}).toStrictEqual({
+				isTyped: true,
+				fields: { minimumVersion: 'v0.0.50', version }
+			});
+		}
+	);
+});
+
+describe('runCupboard credential variables', () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	it.each([
+		{ protocol: 'result-file', supportsResultFile: true },
+		{ protocol: 'legacy stderr', supportsResultFile: false }
+	])(
+		'passes job-level credentials for a role without one and removes stripped ones ($protocol)',
+		async ({ supportsResultFile }) => {
+			const temporary = await runnerTemporary();
+			const captureEnvironmentFile = path.join(temporary, 'environment.json');
+			const binary = await fakeCupboard({
+				results: [summaryEvent],
+				exitCode: 0,
+				captureEnvironmentFile,
+				supportsResultFile
+			});
+
+			for (const variable of credentialVariables) {
+				vi.stubEnv(variable, `job-${variable}`);
+			}
+
+			await runCupboard(binary, ['plan'], {
+				RUNNER_TEMP: temporary,
+				...readCredentialInvocation('', '', 'cache').environment,
+				...withoutReadCredential('view').environment
+			});
+			const childEnvironment = z
+				.object({ credentials: z.record(z.string(), z.string()) })
+				.parse(JSON.parse(await readFile(captureEnvironmentFile, 'utf8')));
+
+			expect(childEnvironment.credentials).toStrictEqual({
+				CUPBOARD_READ_USER: 'job-CUPBOARD_READ_USER',
+				CUPBOARD_READ_PASSWORD: 'job-CUPBOARD_READ_PASSWORD'
+			});
+		}
+	);
+});
 
 describe('runCupboard', () => {
 	it('passes GitHub output and result-file arguments under RUNNER_TEMP', async () => {

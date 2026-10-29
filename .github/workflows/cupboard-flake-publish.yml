@@ -142,6 +142,7 @@ on:
           An exact cupboard release tag to install, or latest. If empty, the
           workflow installs the release that was published from its own commit.
           If there is no such release, it builds cupboard from that commit.
+          Static read credentials need v0.0.50 or later.
         required: false
         type: string
       maximise-space:

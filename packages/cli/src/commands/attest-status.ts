@@ -1,5 +1,3 @@
-import { env } from 'node:process';
-
 import {
 	predicateTypeSchema,
 	storePathSchema
@@ -137,10 +135,7 @@ export function registerAttestStatusCommand(
 							return parsed.data;
 						});
 			const target = cacheTargetFromUrl(url);
-			const credential = readCredentials({
-				readUser: options.readUser ?? parseReadUser(env.CUPBOARD_READ_USER),
-				readPassword: options.readPassword ?? env.CUPBOARD_READ_PASSWORD
-			});
+			const credential = readCredentials(options);
 			if (credential !== undefined && options.githubOidc === true) {
 				throw new StatusOptionsError(
 					'--github-oidc cannot be combined with static read credentials. Remove the read credential options and environment variables.'

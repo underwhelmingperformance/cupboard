@@ -1,5 +1,5 @@
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
@@ -26,22 +26,35 @@ import {
 	type Reporter,
 	type ResultPayload
 } from '@cupboard/reporter';
+import { readUserSchema } from '@cupboard/shared/http';
 import { Command } from 'commander';
+import { StatusCodes } from 'http-status-codes';
 import { fetch as undiciFetch, Response } from 'undici';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	maxSubstituterDocumentByteLength,
 	openSubstituters,
 	SubstituterClient
 } from '../../../nix/src/substituter.ts';
+import { cacheTargetFromUrl } from '../cache-target.ts';
 import { cliExitCode } from '../cli.ts';
 import {
 	type RecordedCall,
 	recordingCacheScopedClient
 } from '../client/cache-scoped.test-support.ts';
-import { InvalidStoreUriError } from '../errors.ts';
+import {
+	InvalidCohortTargetsFileError,
+	InvalidStoreUriError
+} from '../errors.ts';
 import { confirmUpstreamAvailabilityWith } from '../plan/upstream-confirmation.ts';
+import {
+	basicAuthorization,
+	environmentCredentialCases,
+	readCredentialVariables,
+	type RecordedRequest,
+	withRecordingServer
+} from '../test-support.ts';
 
 const defaultCache: CacheScope = { kind: 'default' };
 
@@ -64,6 +77,7 @@ import {
 import type { CohortTarget } from '../plan/cohort-target.ts';
 
 import {
+	planProbes,
 	planRootClient,
 	requeryUnknownWith,
 	resolvePlannedSubstitutionPolicy
@@ -71,6 +85,7 @@ import {
 import {
 	type PlanCohortDependencies,
 	type PlanCohortRunOptions,
+	type PlanProbeOptions,
 	registerPlanCommands,
 	runPlanCohort
 } from './plan-cohort.ts';
@@ -1249,7 +1264,229 @@ function silentProgram(): Command {
 	return program;
 }
 
+/**
+Probes the destination and a reference source in the same tenant through a
+recording server, and returns the requests.
+*/
+async function probeRequests(
+	options: Omit<PlanProbeOptions, 'referenceSource'>
+): Promise<readonly RecordedRequest[]> {
+	return withRecordingServer(
+		() => ({
+			status: StatusCodes.OK,
+			body: JSON.stringify({ missingStorePathHashes: [] })
+		}),
+		async (origin, requests) => {
+			const probes = planProbes(
+				cacheTargetFromUrl(new URL(`${origin}/t/acme`)),
+				{
+					...options,
+					referenceSource: new URL(`${origin}/t/acme/cache/source`)
+				}
+			);
+
+			await probes.destinationServed([appPath]);
+			await probes.viewServed([appPath]);
+
+			return [...requests];
+		}
+	);
+}
+
+describe('planProbes', () => {
+	beforeEach(() => {
+		for (const variable of readCredentialVariables) {
+			vi.stubEnv(variable, undefined);
+		}
+	});
+
+	const environmentCredentials = {
+		CUPBOARD_READ_USER: 'destination-reader',
+		CUPBOARD_READ_PASSWORD: 'destination-secret',
+		CUPBOARD_VIEW_READ_USER: 'view-reader',
+		CUPBOARD_VIEW_READ_PASSWORD: 'view-secret'
+	};
+	const optionCredentials = {
+		readUser: readUserSchema.parse('option-destination-reader'),
+		readPassword: 'option-destination-secret',
+		viewReadUser: readUserSchema.parse('option-view-reader'),
+		viewReadPassword: 'option-view-secret'
+	};
+
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	it.each([
+		{
+			name: 'a reuse view with credentials from the environment',
+			source: (_origin: string) => ({ reuseView: 'pr-view' }),
+			sourcePath: '/t/acme/reuse/pr-view/api/v1/missing-paths',
+			options: {},
+			destination: {
+				user: 'destination-reader',
+				password: 'destination-secret'
+			},
+			view: { user: 'view-reader', password: 'view-secret' }
+		},
+		{
+			name: 'a reference source with credentials from the environment',
+			source: (origin: string) => ({
+				referenceSource: new URL(`${origin}/t/acme/cache/source`)
+			}),
+			sourcePath: '/t/acme/cache/source/api/v1/missing-paths',
+			options: {},
+			destination: {
+				user: 'destination-reader',
+				password: 'destination-secret'
+			},
+			view: { user: 'view-reader', password: 'view-secret' }
+		},
+		{
+			name: 'a reuse view with options in preference to the environment',
+			source: (_origin: string) => ({ reuseView: 'pr-view' }),
+			sourcePath: '/t/acme/reuse/pr-view/api/v1/missing-paths',
+			options: optionCredentials,
+			destination: {
+				user: 'option-destination-reader',
+				password: 'option-destination-secret'
+			},
+			view: { user: 'option-view-reader', password: 'option-view-secret' }
+		}
+	] as const)(
+		'sends each cache its own credential for $name',
+		async ({ source, sourcePath, options, destination, view }) => {
+			for (const [variable, value] of Object.entries(environmentCredentials)) {
+				vi.stubEnv(variable, value);
+			}
+
+			await withRecordingServer(
+				() => ({
+					status: StatusCodes.OK,
+					body: JSON.stringify({ missingStorePathHashes: [] })
+				}),
+				async (origin, requests) => {
+					const probes = planProbes(
+						cacheTargetFromUrl(new URL(`${origin}/t/acme`)),
+						{ ...source(origin), ...options }
+					);
+
+					await probes.destinationServed([appPath]);
+					await probes.viewServed([appPath]);
+
+					expect(requests).toStrictEqual([
+						{
+							method: 'POST',
+							path: '/t/acme/api/v1/missing-paths',
+							authorization: basicAuthorization(
+								destination.user,
+								destination.password
+							)
+						},
+						{
+							method: 'POST',
+							path: sourcePath,
+							authorization: basicAuthorization(view.user, view.password)
+						}
+					]);
+				}
+			);
+		}
+	);
+
+	it.each(environmentCredentialCases)(
+		'pairs a $flag option with $variable for the $role',
+		async ({ flag, value, variable, variableValue, role }) => {
+			vi.stubEnv(variable, variableValue);
+
+			const options = {
+				'--read-user': { readUser: readUserSchema.parse(value) },
+				'--read-password': { readPassword: value },
+				'--view-read-user': { viewReadUser: readUserSchema.parse(value) },
+				'--view-read-password': { viewReadPassword: value }
+			}[flag];
+			const credential = basicAuthorization('reader', 'synthetic-secret');
+
+			expect(await probeRequests(options)).toStrictEqual([
+				{
+					method: 'POST',
+					path: '/t/acme/api/v1/missing-paths',
+					authorization: role === 'destination' ? credential : undefined
+				},
+				{
+					method: 'POST',
+					path: '/t/acme/cache/source/api/v1/missing-paths',
+					authorization: role === 'source' ? credential : undefined
+				}
+			]);
+		}
+	);
+
+	it('sends a reference source no credential when only the destination variables are set', async () => {
+		vi.stubEnv('CUPBOARD_READ_USER', 'destination-reader');
+		vi.stubEnv('CUPBOARD_READ_PASSWORD', 'destination-secret');
+
+		expect(await probeRequests({})).toStrictEqual([
+			{
+				method: 'POST',
+				path: '/t/acme/api/v1/missing-paths',
+				authorization: basicAuthorization(
+					'destination-reader',
+					'destination-secret'
+				)
+			},
+			{
+				method: 'POST',
+				path: '/t/acme/cache/source/api/v1/missing-paths',
+				authorization: undefined
+			}
+		]);
+	});
+});
+
 describe('plan cohort command', () => {
+	beforeEach(() => {
+		for (const variable of readCredentialVariables) {
+			vi.stubEnv(variable, undefined);
+		}
+	});
+
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	it.each(environmentCredentialCases)(
+		'accepts $flag with $variable from the environment',
+		async ({ flag, value, variable, variableValue }) => {
+			const directory = mkdtempSync(
+				path.join(tmpdir(), 'cupboard-plan-credentials-')
+			);
+			const targetsFile = path.join(directory, 'targets.json');
+			vi.stubEnv(variable, variableValue);
+
+			try {
+				await writeFile(targetsFile, 'not json');
+
+				await expect(
+					silentProgram().parseAsync(
+						[
+							'plan',
+							'cohort',
+							'https://cache.example.workers.dev/t/acme',
+							'--targets-file',
+							targetsFile,
+							flag,
+							value
+						],
+						{ from: 'user' }
+					)
+				).rejects.toBeInstanceOf(InvalidCohortTargetsFileError);
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
 	it.each([
 		{ publish: 'none' as const, authenticated: false },
 		{ publish: 'outputs' as const, authenticated: true },
@@ -1301,30 +1538,70 @@ describe('plan cohort command', () => {
 		});
 	});
 
+	const destinationVariables = {
+		user: 'CUPBOARD_READ_USER',
+		password: 'CUPBOARD_READ_PASSWORD'
+	};
+	const viewVariables = {
+		user: 'CUPBOARD_VIEW_READ_USER',
+		password: 'CUPBOARD_VIEW_READ_PASSWORD'
+	};
+
+	it('does not read the view variables without a reuse view or reference source', async () => {
+		const directory = mkdtempSync(
+			path.join(tmpdir(), 'cupboard-plan-credentials-')
+		);
+		const targetsFile = path.join(directory, 'targets.json');
+		vi.stubEnv('CUPBOARD_VIEW_READ_USER', 'source-reader');
+
+		try {
+			await writeFile(targetsFile, 'not json');
+
+			await expect(
+				silentProgram().parseAsync(
+					[
+						'plan',
+						'cohort',
+						'https://cache.example.workers.dev/t/acme',
+						'--targets-file',
+						targetsFile
+					],
+					{ from: 'user' }
+				)
+			).rejects.toBeInstanceOf(InvalidCohortTargetsFileError);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it.each([
 		{
 			flag: '--read-user',
 			value: 'reader',
-			pair: '--read-user and --read-password'
+			view: [],
+			variables: destinationVariables
 		},
 		{
 			flag: '--read-password',
 			value: 'synthetic-secret',
-			pair: '--read-user and --read-password'
+			view: [],
+			variables: destinationVariables
 		},
 		{
 			flag: '--view-read-user',
 			value: 'reader',
-			pair: '--view-read-user and --view-read-password'
+			view: ['--reuse-view', 'pr-view'],
+			variables: viewVariables
 		},
 		{
 			flag: '--view-read-password',
 			value: 'synthetic-secret',
-			pair: '--view-read-user and --view-read-password'
+			view: ['--reuse-view', 'pr-view'],
+			variables: viewVariables
 		}
 	])(
 		'rejects an incomplete $flag pair before reading targets',
-		async ({ flag, value, pair }) => {
+		async ({ flag, value, view, variables }) => {
 			const directory = mkdtempSync(
 				path.join(tmpdir(), 'cupboard-plan-credentials-')
 			);
@@ -1339,13 +1616,14 @@ describe('plan cohort command', () => {
 							'--targets-file',
 							path.join(directory, 'missing.json'),
 							flag,
-							value
+							value,
+							...view
 						],
 						{ from: 'user' }
 					)
 				).rejects.toMatchObject({
 					name: 'ReadCredentialPairError',
-					message: `${pair} must be supplied together`
+					variables
 				});
 			} finally {
 				rmSync(directory, { recursive: true, force: true });

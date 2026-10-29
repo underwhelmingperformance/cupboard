@@ -15,6 +15,7 @@ import { formatErrorWithCauses } from '@cupboard/shared/errors';
 import { type ReadUser } from '@cupboard/shared/http';
 
 import { type EnsureRunner, type PlanInputs } from './commands/plan.ts';
+import { readCredentialInvocation } from './cupboard-run.ts';
 import {
 	CacheAvailabilityQueryError,
 	PlanReferencePublicationIncompleteError
@@ -47,17 +48,28 @@ export interface ReferencePlanDependencies {
 	readonly signal?: AbortSignal;
 }
 
+/**
+Whether the plan job publishes targets by reference from the reference
+source. The publication runs `cupboard push` with the reference source's read
+credential.
+*/
+export function isPublishingByReference(
+	inputs: Pick<ReferencePlanInputs, 'referenceSource' | 'build' | 'publish'>
+): boolean {
+	return (
+		inputs.referenceSource !== '' &&
+		inputs.build === 'missing' &&
+		inputs.publish === 'outputs'
+	);
+}
+
 export async function publishReferenceTargets(
 	inputs: ReferencePlanInputs,
 	evaluations: readonly TargetEvaluation[],
 	dependencies: ReferencePlanDependencies
 ): Promise<readonly PlanReferenceOutcome[]> {
 	dependencies.signal?.throwIfAborted();
-	if (
-		inputs.referenceSource === '' ||
-		inputs.build !== 'missing' ||
-		inputs.publish !== 'outputs'
-	) {
+	if (!isPublishingByReference(inputs)) {
 		return [];
 	}
 
@@ -173,6 +185,11 @@ async function publishRoot(
 	const pathsFile = `${stem}.paths`;
 	const resultFile = `${stem}.jsonl`;
 	await writeFile(pathsFile, `${paths.join('\n')}\n`);
+	const credential = readCredentialInvocation(
+		inputs.fallbackReadUser,
+		inputs.fallbackReadPassword,
+		'reference-source'
+	);
 	await dependencies.runner(
 		inputs.cupboardPath,
 		[
@@ -193,16 +210,10 @@ async function publishRoot(
 			...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 			...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
 			...(inputs.permanent ? ['--permanent'] : []),
-			...(inputs.fallbackReadUser === ''
-				? []
-				: [
-						'--read-user',
-						inputs.fallbackReadUser,
-						'--read-password',
-						inputs.fallbackReadPassword
-					])
+			...credential.arguments
 		],
-		dependencies.signal
+		dependencies.signal,
+		credential.environment
 	);
 	const event = parseReporterResults(await readFile(resultFile, 'utf8')).find(
 		(result) => result.kind === pushSummaryResultKind
