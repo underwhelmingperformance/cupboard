@@ -491,6 +491,32 @@ The action's outputs report what it did: `uploaded-paths`, `reused-blobs`,
 `skipped-paths` and `uploaded-bytes`. It also outputs the `cupboard-path` and
 `cupboard-version` that it used.
 
+## Diagnostic logs
+
+The first cupboard action in a job uploads the job's diagnostic logs from its
+post step, as an artifact with the `cupboard-diagnostics-` prefix. The artifact
+expires after five days, or sooner if the repository's artifact retention is
+shorter. Anyone who can read the repository can download it.
+
+To turn the upload off, set `CUPBOARD_DIAGNOSTICS_ARTIFACT` to `false` in the
+job's `env`. The post step of the first action reads the variable, and a later
+step's `env` doesn't reach it. Any value other than `true` or `false`, including
+an empty one, also turns the upload off, with a warning.
+
+```yaml
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      CUPBOARD_DIAGNOSTICS_ARTIFACT: 'false'
+```
+
+`cupboard-publish.yml` has a `diagnostics-artifact` input that sets the
+variable. See [Logs][logs] for the contents of the logs and the logger's
+redaction rules.
+
+[logs]: ../operator/running.md#logs
+
 ## Selecting a cupboard version
 
 `setup` and `push` install a cupboard release. `cupboard-version` chooses which:

@@ -62,6 +62,7 @@ The calling job must grant:
 | `plan-runner` | string | `ubuntu-latest` | Runner label for the configure, plan and cache-removal jobs. The plan job evaluates the flake with the input SSH key and can request an OIDC token. If your repository has self-hosted runners, keep this on a GitHub-hosted label or restrict the job with runner groups. See docs/security.md#runners. |
 | `enable-packing` | boolean | `false` | Pack small single-target cohorts into as few jobs as fit within pack-capacity, using measured closure sizes. Without packing, each cohort gets its own job. Off by default. A cohort without a measurement is not packed. |
 | `pack-capacity` | string |  | Disk space in bytes that each packed job can use. Required when enable-packing is true. |
+| `diagnostics-artifact` | boolean | `true` | Upload each job's diagnostic logs as an artifact that expires after five days. Anyone who can read the repository can download the artifact. Set to false to skip the upload. |
 
 #### Secrets
 
@@ -134,6 +135,7 @@ The calling job must grant:
 | `plan-runner` | string | `ubuntu-latest` | Runner label for the configure, plan and cache-removal jobs. The plan job evaluates the flake with the input SSH key and can request an OIDC token. If your repository has self-hosted runners, keep this on a GitHub-hosted label or restrict the job with runner groups. See docs/security.md#runners. |
 | `enable-packing` | boolean | `false` | Pack small single-target cohorts into as few jobs as fit within pack-capacity, using measured closure sizes. Without packing, each cohort gets its own job. Off by default. A cohort without a measurement is not packed. |
 | `pack-capacity` | string |  | Disk space in bytes that each packed job can use. Required when enable-packing is true. |
+| `diagnostics-artifact` | boolean | `true` | Upload each job's diagnostic logs as an artifact that expires after five days. Anyone who can read the repository can download the artifact. Set to false to skip the upload. |
 
 #### Secrets
 
@@ -189,6 +191,7 @@ The calling job must grant:
 | `runs-on` | string | `ubuntu-24.04` | Runner label to build on. |
 | `trusted-public-key` | string |  | Nix public key to trust for reads from the cache. If empty, the job downloads the cache's current key from /pubkey and trusts it. |
 | `cupboard-version` | string |  | An exact cupboard release tag to install, or latest. If empty, the workflow installs the release that was published from its own commit. If there is no such release, it builds cupboard from that commit. |
+| `diagnostics-artifact` | boolean | `true` | Upload each job's diagnostic logs as an artifact that expires after five days. Anyone who can read the repository can download the artifact. Set to false to skip the upload. |
 
 ## Actions
 

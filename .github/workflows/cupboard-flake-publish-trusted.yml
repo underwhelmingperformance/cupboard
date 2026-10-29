@@ -288,6 +288,14 @@ on:
         required: false
         default: ''
         type: string
+      diagnostics-artifact:
+        description:
+          Upload each job's diagnostic logs as an artifact that expires after
+          five days. Anyone who can read the repository can download the
+          artifact. Set to false to skip the upload.
+        required: false
+        default: true
+        type: boolean
     secrets:
       builder_ssh_key:
         description: SSH private key for the remote builders.
@@ -351,6 +359,8 @@ on:
           credential in each URL.
         required: false
 permissions: {}
+env:
+  CUPBOARD_DIAGNOSTICS_ARTIFACT: ${{ inputs.diagnostics-artifact }}
 jobs:
   lookup:
     name: Resolve the merged pull request
@@ -417,6 +427,7 @@ jobs:
       plan-runner: ${{ inputs.plan-runner }}
       enable-packing: ${{ inputs.enable-packing }}
       pack-capacity: ${{ inputs.pack-capacity }}
+      diagnostics-artifact: ${{ inputs.diagnostics-artifact }}
       merged-pull-request: ${{ needs.lookup.outputs.pull-request }}
     secrets:
       builder_ssh_key: ${{ secrets.builder_ssh_key }}

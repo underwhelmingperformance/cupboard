@@ -4,8 +4,12 @@ import path from 'node:path';
 
 import { getLogger } from '@cupboard/logger';
 import { readLogFile } from '@cupboard/logger/file';
-import { stopLogging } from '@cupboard/logger/testing';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+	type CapturedLog,
+	capturingSink,
+	stopLogging
+} from '@cupboard/logger/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { diagnosticsDirectoryKey, startActionLogging } from './logging.ts';
 import { uploadDiagnostics } from './upload.ts';
@@ -13,7 +17,9 @@ import { uploadDiagnostics } from './upload.ts';
 const mocks = vi.hoisted(() => ({
 	state: new Map<string, string>(),
 	warning: vi.fn(),
-	upload: vi.fn(() => Promise.resolve({ id: 1, size: 1 }))
+	upload: vi.fn((_name: string, ..._rest: unknown[]) =>
+		Promise.resolve({ id: 1, size: 1 })
+	)
 }));
 
 vi.mock('@actions/core', () => ({
@@ -34,6 +40,12 @@ vi.mock('@actions/artifact', () => ({
 }));
 
 const directories: string[] = [];
+
+// A runner can set either variable, so each test starts with both unset.
+beforeEach(() => {
+	vi.stubEnv('CUPBOARD_DIAGNOSTICS_ARTIFACT', undefined);
+	vi.stubEnv('GITHUB_RETENTION_DAYS', undefined);
+});
 
 afterEach(async () => {
 	stopLogging();
@@ -109,10 +121,101 @@ describe('action diagnostic logging', () => {
 				expect.stringMatching(/^cupboard-diagnostics-/u),
 				files.map((file) => path.join(directory, file)),
 				directory,
-				{ compressionLevel: 0 }
+				{ compressionLevel: 0, retentionDays: 5 }
 			]
 		]);
 	});
+
+	it.each([
+		{
+			value: undefined,
+			uploads: 1,
+			level: 'info',
+			message: 'uploading diagnostic artifact'
+		},
+		{
+			value: 'true',
+			uploads: 1,
+			level: 'info',
+			message: 'uploading diagnostic artifact'
+		},
+		{
+			value: 'false',
+			uploads: 0,
+			level: 'info',
+			message: 'diagnostic artifact upload is turned off'
+		},
+		...['off', ''].map((value) => ({
+			value,
+			uploads: 0,
+			level: 'warning',
+			message:
+				'not uploading diagnostic logs: CUPBOARD_DIAGNOSTICS_ARTIFACT must be true or false'
+		}))
+	])(
+		'reads CUPBOARD_DIAGNOSTICS_ARTIFACT=$value',
+		async ({ value, uploads, level, message }) => {
+			const temporary = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-action-logs-')
+			);
+			directories.push(temporary);
+			const captured: CapturedLog[] = [];
+			const logging = startActionLogging(
+				{ GITHUB_ACTIONS: 'true', RUNNER_TEMP: temporary },
+				capturingSink(captured)
+			);
+			getLogger('cupboard').trace('only process');
+			await logging?.close();
+			vi.stubEnv('CUPBOARD_DIAGNOSTICS_ARTIFACT', value);
+
+			await uploadDiagnostics();
+
+			const uploadedNames = mocks.upload.mock.calls.map(([name]) => name);
+			const properties =
+				uploads === 0 ? {} : { artifactName: uploadedNames[0] };
+
+			expect({
+				uploads: uploadedNames.length,
+				logs: captured.map((log) => ({
+					level: log.level,
+					message: log.message,
+					properties: log.properties
+				}))
+			}).toStrictEqual({
+				uploads,
+				logs: [{ level, message, properties }]
+			});
+		}
+	);
+
+	it.each([
+		{ repository: undefined, retentionDays: 5 },
+		{ repository: '90', retentionDays: 5 },
+		{ repository: '5', retentionDays: 5 },
+		{ repository: '3', retentionDays: 3 },
+		{ repository: '0', retentionDays: 5 },
+		{ repository: 'many', retentionDays: 5 }
+	])(
+		'requests $retentionDays days with a repository retention of $repository',
+		async ({ repository, retentionDays }) => {
+			const temporary = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-action-logs-')
+			);
+			directories.push(temporary);
+			const logging = startActionLogging(
+				{ GITHUB_ACTIONS: 'true', RUNNER_TEMP: temporary },
+				capturingSink([])
+			);
+			await logging?.close();
+			vi.stubEnv('GITHUB_RETENTION_DAYS', repository);
+
+			await uploadDiagnostics();
+
+			expect(mocks.upload.mock.calls.map((call) => call[3])).toStrictEqual([
+				{ compressionLevel: 0, retentionDays }
+			]);
+		}
+	);
 
 	it('does not upload from an action that did not establish the job directory', async () => {
 		await uploadDiagnostics();
