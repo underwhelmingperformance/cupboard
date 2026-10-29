@@ -154,16 +154,25 @@ function uploadsServiceFor(context: ServerContext): UploadsService {
 	);
 
 	const retention = new RetentionService(context);
+	const uploadState = new UploadStateService(context);
 
 	return new UploadsService(
 		context,
 		registration,
-		new UploadStateService(context),
+		uploadState,
 		narInfoObjects,
 		deletionQueue,
 		new ReconcileQueueService(context),
 		retention,
-		new RootsService(context, registration, retention, narInfoObjects)
+		new RootsService(context, registration, retention, narInfoObjects),
+		new CommitPipelineService(
+			context,
+			new SigningKeysService(context, narInfoObjects),
+			uploadState,
+			narInfoObjects,
+			retention,
+			attestations
+		)
 	);
 }
 
@@ -2130,10 +2139,7 @@ function verificationFor(context: ServerContext): VerificationService {
 		narInfoObjects,
 		uploadState,
 		retention,
-		attestations,
-		() => {
-			// Intentionally empty test callback.
-		}
+		attestations
 	);
 }
 

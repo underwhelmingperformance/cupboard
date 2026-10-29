@@ -18,7 +18,6 @@ import {
 	inArray,
 	isNotNull,
 	isNull,
-	ne,
 	or,
 	sql
 } from 'drizzle-orm';
@@ -620,36 +619,47 @@ export class UploadStateService {
 		return new Set(rows.flatMap((row) => row.sessionId ?? []));
 	}
 
-	// Started commits of the same path and NAR share one reservation.
-	// `pending_upload_gc_path_idx` covers the cache, the metadata's store path
-	// hash and the verdict, so keep those predicates in this form. The NAR hash
-	// then filters the rows that the index finds.
+	// Started commits of the same path and NAR share one reservation. A commit
+	// that `releaseStartedCommit` released does not count.
+	// `pending_upload_unreleased_commit_idx` lists only the started commits that
+	// were not released, by cache, path and NAR hash, so the query reads at most
+	// two of its rows: this upload's and one other. SQLite would choose an index
+	// that also lists released commits, so the query names this one.
 	hasOtherStartedCommit(
 		uploadId: UploadId,
 		cache: ResolvedCache,
 		metadata: Pick<UploadPathNegotiation, 'storePathHash' | 'narHash'>
 	): boolean {
-		const uploadPath = sql`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
-		const startedVerdict = or(
-			eq(schema.pendingUploads.verdict, 'committing'),
-			eq(schema.pendingUploads.verdict, 'pending')
+		const others = this.context.db.all<{ id: UploadId }>(
+			sql`SELECT id FROM pending_upload INDEXED BY pending_upload_unreleased_commit_idx
+			    WHERE cache_id = ${cache.id}
+			      AND json_extract(metadata_json, '$.storePathHash') = ${metadata.storePathHash}
+			      AND nar_hash = ${metadata.narHash}
+			      AND verdict IN ('committing', 'pending')
+			      AND commit_released = 0
+			      AND id <> ${uploadId}
+			    LIMIT 1`
 		);
-		const other = this.context.db
-			.select({ id: schema.pendingUploads.id })
-			.from(schema.pendingUploads)
-			.where(
-				and(
-					eq(schema.pendingUploads.cacheId, cache.id),
-					eq(uploadPath, metadata.storePathHash),
-					eq(schema.pendingUploads.narHash, metadata.narHash),
-					startedVerdict,
-					ne(schema.pendingUploads.id, uploadId)
-				)
-			)
-			.limit(1)
-			.get();
 
-		return other !== undefined;
+		return others.length > 0;
+	}
+
+	/**
+	Records that a failed upload no longer shares the reservation that its
+	commit started with. Call it inside the gate that decides to fail the
+	upload. The upload's pending row can stay for some time after that gate,
+	and another upload of the same reservation must not keep the row for it.
+
+	The commit counts as started again when it starts again or a verification
+	pass claims the row. A repair's new commit of the same operation has a new
+	pending row, which counts.
+	*/
+	releaseStartedCommit(uploadId: UploadId): void {
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ commitReleased: true })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
 	}
 
 	// Set this marker before reservation or promotion. After a crash, verification
@@ -663,7 +673,8 @@ export class UploadStateService {
 					commitStartedSequence: sql`coalesce(${schema.pendingUploads.commitStartedSequence}, ${new WorkSequenceService(tx).allocate()})`,
 					committedAt: sql`coalesce(${schema.pendingUploads.committedAt}, ${isoTimestamp(new Date())})`,
 					claimedAt: sql`null`,
-					claimOwner: sql`null`
+					claimOwner: sql`null`,
+					commitReleased: false
 				})
 				.where(eq(schema.pendingUploads.id, uploadId))
 				.run();

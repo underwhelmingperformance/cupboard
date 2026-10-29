@@ -930,9 +930,9 @@ describe('terminal verdicts against straggling verifications', () => {
 					const releaseStage = Promise.withResolvers<undefined>();
 					const clockReached = Promise.withResolvers<undefined>();
 					const releaseClock = Promise.withResolvers<undefined>();
-					const originalStage = delayed.reclaimReservedRow.bind(delayed);
+					const originalStage = delayed.releaseReservation.bind(delayed);
 					const stage = vi
-						.spyOn(delayed, 'reclaimReservedRow')
+						.spyOn(delayed, 'releaseReservation')
 						.mockImplementation(async (...parameters) => {
 							stageReached.resolve(undefined);
 							await releaseStage.promise;
@@ -1776,13 +1776,13 @@ describe('terminal verdicts against straggling verifications', () => {
 								commitPipeline: CommitPipelineService;
 							}
 						).commitPipeline;
-						const originalReclaim = pipeline.reclaimReservedRow.bind(pipeline);
+						const originalReclaim = pipeline.releaseReservation.bind(pipeline);
 						const { promise: held, resolve: release } =
 							Promise.withResolvers<undefined>();
 						const { promise: reached, resolve: didReach } =
 							Promise.withResolvers<undefined>();
 						const reclaim = vi
-							.spyOn(pipeline, 'reclaimReservedRow')
+							.spyOn(pipeline, 'releaseReservation')
 							.mockImplementation(async (...arguments_) => {
 								didReach(undefined);
 								await held;

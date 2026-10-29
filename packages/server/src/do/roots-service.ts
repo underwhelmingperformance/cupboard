@@ -31,7 +31,6 @@ import { CacheClosureService } from './cache-closure-service.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
 import {
 	type RootSetCommand,
-	type SchemaDatabase,
 	type SchemaWriter,
 	type ServerContext
 } from './context.ts';
@@ -665,32 +664,4 @@ export class RootsService {
 			return { name, removed: existing !== undefined };
 		});
 	}
-
-	// A deferred upload that fails verification cannot become servable. Remove it
-	// from every root so later listings do not continue to advertise it.
-	pruneRetentionTargets(
-		cache: ResolvedCache,
-		storePathHash: StorePathHash
-	): void {
-		deleteRetentionTargets(this.context.db, cache, storePathHash);
-	}
-}
-
-/**
-Removes a path from every retention root of a cache.
-*/
-export function deleteRetentionTargets(
-	database: SchemaDatabase,
-	cache: ResolvedCache,
-	storePathHash: StorePathHash
-): void {
-	database
-		.delete(schema.retentionRootTargets)
-		.where(
-			and(
-				eq(schema.retentionRootTargets.cacheId, cache.id),
-				eq(schema.retentionRootTargets.storePathHash, storePathHash)
-			)
-		)
-		.run();
 }

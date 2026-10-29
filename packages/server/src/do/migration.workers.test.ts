@@ -2441,6 +2441,30 @@ describe('migrations', () => {
 		});
 	});
 
+	it('counts an existing started commit through the index of unreleased commits at 0081', async () => {
+		const insertPending =
+			"INSERT INTO pending_upload(id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict,claim_owner,commit_started_sequence) VALUES ('started',1,'sha256:nar','staging/started','{\"storePathHash\":\"path\"}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','committing','pass',3)";
+		const selectStarted = `SELECT id, commit_released FROM pending_upload INDEXED BY pending_upload_unreleased_commit_idx
+			WHERE cache_id = 1
+			  AND json_extract(metadata_json, '$.storePathHash') = 'path'
+			  AND nar_hash = 'sha256:nar'
+			  AND verdict IN ('committing', 'pending')
+			  AND commit_released = 0`;
+
+		const result = await runInDurableObject(
+			testServerFor('migration-released-commit'),
+			async (_instance, state) => {
+				await migrateThrough(state, 80);
+				state.storage.sql.exec(insertPending);
+				await migrateThrough(state, 81);
+
+				return state.storage.sql.exec(selectStarted).toArray();
+			}
+		);
+
+		expect(result).toStrictEqual([{ id: 'started', commit_released: 0 }]);
+	});
+
 	it('leaves the blob declaration, commit time and promotion record null for a pending upload created before 0075', async () => {
 		const insertUndeclaredPendingUpload =
 			"INSERT INTO pending_upload (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES ('u1', 0, 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', 'committing')";
@@ -3498,7 +3522,7 @@ it('adds close metadata within a one-row allowance for 5,000 roots, uploads and 
 			const indexes = () =>
 				Array.from(
 					state.storage.sql.exec<{ name: string; sql: string }>(
-						"SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='pending_upload' AND sql IS NOT NULL AND name <> 'pending_upload_cache_retention_epoch_idx' ORDER BY name"
+						"SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='pending_upload' AND sql IS NOT NULL AND name NOT IN ('pending_upload_cache_retention_epoch_idx', 'pending_upload_unreleased_commit_idx') ORDER BY name"
 					),
 					(row) => ({
 						...row,

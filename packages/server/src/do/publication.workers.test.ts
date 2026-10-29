@@ -5,7 +5,8 @@ import {
 	graceSecondsSchema,
 	narInfoGenerationSchema,
 	rootNameSchema,
-	type StorePathHash
+	type StorePathHash,
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { publicationStagingKey } from '@cupboard/protocol/publication';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -93,6 +94,7 @@ import {
 	PublicationStore
 } from './publication-store.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
+import { ReservationCharges } from './reservation-charges.ts';
 import { type CupboardServer } from './server.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService } from './uploads-service.ts';
@@ -1018,6 +1020,33 @@ class GateProbe {
 		};
 		return Promise.race([stopped(), finished()]);
 	}
+}
+
+// Passes every D1 read of one reference edge through `probe`. The commit
+// pipeline reads the edge with this statement to decide whether a commit of a
+// reservation was charged. Called inside the Durable Object.
+function probeEdgeReads(
+	probe: GateProbe,
+	context: CupboardServer['context']
+): MockInstance {
+	const database = context.env.CUPBOARD_DB;
+	const prepare = database.prepare.bind(database);
+	return vi.spyOn(database, 'prepare').mockImplementation((query) => {
+		const statement = prepare(query);
+		if (!query.startsWith('select "nar_hash" from "blob_ref_storage"')) {
+			return statement;
+		}
+		const bind = statement.bind.bind(statement);
+		return Object.assign(statement, {
+			bind: (...values: unknown[]) => {
+				const bound = bind(...values);
+				const raw = bound.raw.bind(bound);
+				return Object.assign(bound, {
+					raw: () => probe.around(() => raw())
+				});
+			}
+		});
+	});
 }
 
 function refusalFacts(frame: CommitSessionFrame) {
@@ -3029,6 +3058,111 @@ describe('publication subscriptions to terminal operations', () => {
 			});
 		} finally {
 			isPublished.mockRestore();
+			await publication.release();
+		}
+	});
+
+	it('reads an expiring operation again when another commit of its reservation is charged before the gate', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-expiry-shared-charge');
+		const path = uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		);
+		const [expiring] = await plannedEntries(token, '/uploads/plan', [path]);
+		const [sharing] = await plannedEntries(token, '/uploads/plan', [path], {
+			name: rootNameSchema.parse('run'),
+			retention: { kind: 'inherit' }
+		});
+		if (expiring === undefined || sharing === undefined) {
+			throw new Error('Expected two planned entries');
+		}
+		const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+		// Both operations start their commits, which share one reservation.
+		for (const entry of [expiring, sharing]) {
+			await putNarBytes(
+				publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+				nar
+			);
+			await admit(token, testPushId, { ...entry, blob });
+		}
+		const claim = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+		// Expiry reads the generation as uncharged and stops before its gate.
+		// The other operation's verification then charges the generation and
+		// stops before it publishes the narinfo object, so its commit still
+		// shares the reservation at expiry's gate.
+		const read = new DurableObjectPause();
+		const isCharged = vi
+			.spyOn(CommitPipelineService.prototype, 'isGenerationCharged')
+			.mockImplementationOnce(async function (
+				this: CommitPipelineService,
+				...arguments_
+			) {
+				isCharged.mockRestore();
+				const wasCharged = await this.isGenerationCharged(...arguments_);
+				await read.stop();
+				return wasCharged;
+			});
+		const publication = new DurableObjectPause();
+		const isPublished = vi
+			.spyOn(NarInfoObjectsService.prototype, 'publishNarInfoObjectWhile')
+			.mockImplementationOnce(async function (
+				this: NarInfoObjectsService,
+				...arguments_
+			) {
+				isPublished.mockRestore();
+				await publication.stop();
+				return this.publishNarInfoObjectWhile(...arguments_);
+			});
+		try {
+			const expiry = runInDurableObject(currentServer(), async (instance) => {
+				const deadline = new Date(Date.now() - 1).toISOString();
+				instance.context.db
+					.update(schema.publicationOperations)
+					.set({ recoveryDeadline: deadline })
+					.where(eq(schema.publicationOperations.id, expiring.operationId))
+					.run();
+				instance.context.db
+					.update(schema.pendingUploads)
+					.set({ recoveryDeadline: deadline })
+					.where(eq(schema.pendingUploads.id, expiring.operationId))
+					.run();
+				await asOneInvocation(() =>
+					verificationOf(instance).expirePublications(rootLogger())
+				);
+			});
+			await read.reached();
+			const recorded = currentServer().recordVerifications(claim.owner, [
+				{
+					uploadId: sharing.operationId,
+					verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+				}
+			]);
+			await publication.reached();
+			await read.release();
+			await expiry;
+			const expired = await snapshot();
+			await publication.release();
+			await recorded;
+			expect(
+				Object.fromEntries(
+					expired.operations.map((operation) => [operation.id, operation.state])
+				)
+			).toStrictEqual({
+				[expiring.operationId]: 'servable',
+				[sharing.operationId]: 'accepted'
+			});
+		} finally {
+			isCharged.mockRestore();
+			isPublished.mockRestore();
+			await read.release();
 			await publication.release();
 		}
 	});
@@ -5177,6 +5311,229 @@ describe('publication admission of an operation that changes state', () => {
 		}
 	);
 
+	it.each([
+		{ claim: 'no claim', isClaimed: false },
+		{ claim: 'a verification claim', isClaimed: true }
+	])(
+		'leaves a replayed reuse commit whose canonical NAR is gone and that has $claim to verification',
+		async ({ isClaimed }) => {
+			const token = await initialise();
+			const nar = await verifiableNar(
+				`publication-gone-reuse-${String(isClaimed)}`
+			);
+			const fields = {
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			};
+			await commitPath(
+				token,
+				uploadMetadata({ ...fields, storePathHash: '2'.repeat(32) }),
+				nar
+			);
+			const metadata = uploadMetadata(fields);
+			const [entry] = await plannedEntries(token, '/uploads/plan', [
+				uploadPathNegotiation(metadata)
+			]);
+			if (entry === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			// The reuse commit starts and reserves the path's row, and its charge
+			// is deferred to verification.
+			const materialise = await runInDurableObject(currentServer(), () =>
+				Promise.resolve(
+					vi
+						.spyOn(CommitPipelineService.prototype, 'materialiseBatched')
+						.mockResolvedValueOnce({ kind: 'deferred' })
+				)
+			);
+			let started;
+			try {
+				started = await admit(token, testPushId, entry);
+			} finally {
+				materialise.mockRestore();
+			}
+			if (isClaimed) {
+				// A verification pass claims the upload before it reads the NAR.
+				await runInDurableObject(currentServer(), (instance) => {
+					instance.context.db
+						.update(schema.pendingUploads)
+						.set({
+							claimOwner: 'verification-pass',
+							claimedAt: isoTimestamp(new Date())
+						})
+						.run();
+					return Promise.resolve();
+				});
+			}
+			const state = () =>
+				runInDurableObject(currentServer(), (instance) =>
+					Promise.resolve({
+						narInfos: instance.context.db
+							.select({ storePathHash: schema.narInfos.storePathHash })
+							.from(schema.narInfos)
+							.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+							.all(),
+						pending: instance.context.db
+							.select({
+								r2Key: schema.pendingUploads.r2Key,
+								verdict: schema.pendingUploads.verdict,
+								claimOwner: schema.pendingUploads.claimOwner
+							})
+							.from(schema.pendingUploads)
+							.all()
+							.map(({ claimOwner, verdict, ...row }) => ({
+								...row,
+								verdict: verdict ?? 'none',
+								isClaimed: claimOwner !== null
+							}))
+					})
+				);
+			const before = await state();
+			await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
+			// The R2 delete of the reserved row's narinfo object stalls.
+			const probe = new GateProbe();
+			const stall = await runInDurableObject(currentServer(), (instance) => {
+				const spy = vi
+					.spyOn(NarInfoObjectsService.prototype, 'deleteNarInfoObject')
+					.mockImplementation(function (
+						this: NarInfoObjectsService,
+						...arguments_
+					) {
+						spy.mockRestore();
+						return probe.around(() => this.deleteNarInfoObject(...arguments_));
+					});
+				const gate = probe.watch(instance.context);
+				return Promise.resolve(() => {
+					spy.mockRestore();
+					gate.mockRestore();
+				});
+			});
+			let admission;
+			try {
+				const answering = admit(token, testPushId, entry);
+				const first = await probe.first(answering);
+				await probe.pause.release();
+				admission = { first, deletes: probe.calls, answer: await answering };
+			} finally {
+				await probe.pause.release();
+				stall();
+			}
+			const after = await state();
+			const deferred = {
+				ev: 'deferred',
+				uploadId: entry.operationId,
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				grace: {}
+			};
+			// A verification pass reclaims the reservation and clears the row. A
+			// pass that does not own the claim leaves a claimed row to its owner.
+			await verifyCurrentTenant();
+			const verified = await state();
+			const resent = await admit(token, testPushId, entry);
+			expect({ started, admission, after, verified, resent }).toStrictEqual({
+				started: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					deferred
+				],
+				admission: {
+					first: 'finished',
+					deletes: [],
+					answer: [
+						{ ev: 'publication-accepted', uploadId: entry.operationId },
+						deferred
+					]
+				},
+				after: before,
+				verified: isClaimed ? before : { narInfos: [], pending: [] },
+				resent: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					isClaimed
+						? deferred
+						: { ev: 'upload-required', uploadId: entry.operationId }
+				]
+			});
+		}
+	);
+
+	it('admits again a replayed reuse entry whose canonical NAR is gone when its pending row changes before the gate', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-gone-reuse-changed');
+		const fields = {
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		};
+		await commitPath(
+			token,
+			uploadMetadata({ ...fields, storePathHash: '2'.repeat(32) }),
+			nar
+		);
+		const metadata = uploadMetadata(fields);
+		const [entry] = await plannedEntries(token, '/uploads/plan', [
+			uploadPathNegotiation(metadata)
+		]);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const materialise = await runInDurableObject(currentServer(), () =>
+			Promise.resolve(
+				vi
+					.spyOn(CommitPipelineService.prototype, 'materialiseBatched')
+					.mockResolvedValueOnce({ kind: 'deferred' })
+			)
+		);
+		try {
+			await admit(token, testPushId, entry);
+		} finally {
+			materialise.mockRestore();
+		}
+		// The reuse row's commit has not started and reserved nothing, as after a
+		// crash before the commit starts.
+		await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			db.update(schema.pendingUploads)
+				.set({ verdict: sql`null`, commitStartedSequence: sql`null` })
+				.where(eq(schema.pendingUploads.id, entry.operationId))
+				.run();
+			db.delete(schema.narInfos)
+				.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+				.run();
+			return Promise.resolve();
+		});
+		await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
+		// A renewal of the upload changes its pending row while admission waits
+		// for the gate.
+		const renewed = isoTimestamp(new Date(Date.now() + 60 * 60 * 1000));
+		const renewal = await runInDurableObject(currentServer(), (instance) => {
+			const { context } = instance;
+			const enter = context.criticalSection.bind(context);
+			return Promise.resolve(
+				vi.spyOn(context, 'criticalSection').mockImplementationOnce((run) => {
+					context.db
+						.update(schema.pendingUploads)
+						.set({ expiresAt: renewed })
+						.where(eq(schema.pendingUploads.id, entry.operationId))
+						.run();
+					return enter(run);
+				})
+			);
+		});
+		let answer;
+		try {
+			answer = await admit(token, testPushId, entry);
+		} finally {
+			renewal.mockRestore();
+		}
+		expect(answer).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: entry.operationId },
+			{ ev: 'upload-required', uploadId: entry.operationId }
+		]);
+	});
+
 	it('replaces a committed path whose NAR is missing with a NAR that the cache can reuse', async () => {
 		const token = await initialise();
 		const lost = await verifiableNar('publication-lost-nar-reuse');
@@ -6688,6 +7045,705 @@ it("keeps another operation's reservation when a reuse commit of the same path f
 	}
 });
 
+it.each(
+	(['blob-gone', 'tenant-inactive'] as const).flatMap((failure) =>
+		(['charge', 'overflow'] as const).map((race) => ({ failure, race }))
+	)
+)(
+	'keeps a reuse commit whose release read is stale after $failure because of a $race',
+	async ({ failure, race }) => {
+		vi.setSystemTime(vi.getRealSystemTime());
+		await resetTestServer();
+		const token = await initialise();
+		const nar = await verifiableNar(
+			`publication-stale-release-${failure}-${race}`
+		);
+		const narFields = {
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		};
+		const path = uploadPathNegotiation(uploadMetadata(narFields));
+		const [reusing] = await plannedEntries(token, '/uploads/plan', [path], {
+			name: rootNameSchema.parse('run'),
+			retention: { kind: 'inherit' }
+		});
+		const [live] = await plannedEntries(token, '/uploads/plan', [path]);
+		if (reusing === undefined || live === undefined) {
+			throw new Error('Expected two planned entries');
+		}
+		const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+		if (race === 'charge') {
+			expect(await admit(token, testPushId, live)).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: live.operationId },
+				{ ev: 'upload-required', uploadId: live.operationId }
+			]);
+			await putNarBytes(
+				publicationStagingKey(fixtureTenant, testPushId, live.operationId),
+				nar
+			);
+		}
+		// Another path makes the NAR reusable.
+		await commitPath(
+			token,
+			uploadMetadata({ ...narFields, storePathHash: '3'.repeat(32) }),
+			nar
+		);
+		// The reuse commit reserves the row and fails. For a charge, the live
+		// operation's commit then shares the reservation. The read of the
+		// reservation stops until the test releases it.
+		const read = new DurableObjectPause();
+		let recordCharge:
+			| ((reservation: Parameters<ReservationCharges['record']>[0]) => void)
+			| undefined;
+		const spies = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const materialise = vi
+				.spyOn(CommitPipelineService.prototype, 'materialiseBatched')
+				.mockImplementationOnce(() => {
+					materialise.mockRestore();
+					if (race === 'charge') {
+						db.update(schema.pendingUploads)
+							.set({ verdict: 'pending' })
+							.where(eq(schema.pendingUploads.id, live.operationId))
+							.run();
+					}
+					return Promise.resolve(
+						failure === 'blob-gone'
+							? { kind: 'blob-gone' as const }
+							: {
+									kind: 'tenant-inactive' as const,
+									tenantStatus: 'suspended' as const
+								}
+					);
+				});
+			const mark = vi
+				.spyOn(ReservationCharges.prototype, 'mark')
+				.mockImplementationOnce(function (this: ReservationCharges) {
+					mark.mockRestore();
+					recordCharge = (reservation) => {
+						this.record(reservation);
+					};
+					return this.mark();
+				});
+			const isCharged = vi
+				.spyOn(CommitPipelineService.prototype, 'isGenerationCharged')
+				.mockImplementationOnce(async function (
+					this: CommitPipelineService,
+					...arguments_
+				) {
+					isCharged.mockRestore();
+					const wasCharged = await this.isGenerationCharged(...arguments_);
+					await read.stop();
+					return wasCharged;
+				});
+			return Promise.resolve([materialise, mark, isCharged]);
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [{ ...reusing, blob }]
+			});
+			const accepted = refusalFacts(await session.nextFrame());
+			await read.reached();
+			if (race === 'charge') {
+				// Another pass has claimed the reuse commit, and the live operation's
+				// verification charges the shared generation.
+				await runInDurableObject(currentServer(), (instance) => {
+					instance.context.db
+						.update(schema.pendingUploads)
+						.set({
+							claimOwner: 'other-pass',
+							claimedAt: isoTimestamp(new Date())
+						})
+						.where(eq(schema.pendingUploads.id, reusing.operationId))
+						.run();
+					return Promise.resolve();
+				});
+				await recordClaimedVerification(live.operationId, {
+					ok: true,
+					...blob
+				});
+			} else {
+				// Unrelated charges push the reservation out of the charge history.
+				await runInDurableObject(currentServer(), (instance) => {
+					const cache =
+						instance.context.cacheRepository.require(defaultCache());
+					for (let index = 0; index <= 1024; index += 1) {
+						recordCharge?.({
+							cacheId: cache.id,
+							storePathHash: storePathHashSchema.parse(
+								String(index).padStart(32, '0')
+							),
+							generation: narInfoGenerationSchema.parse(0)
+						});
+					}
+					return Promise.resolve();
+				});
+			}
+			await read.release();
+			const answer = refusalFacts(await session.nextFrame());
+			const owners = await runInDurableObject(currentServer(), (instance) =>
+				Promise.resolve({
+					narInfos: instance.context.db
+						.select({ storePathHash: schema.narInfos.storePathHash })
+						.from(schema.narInfos)
+						.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+						.all(),
+					pending: instance.context.db
+						.select({
+							id: schema.pendingUploads.id,
+							verdict: schema.pendingUploads.verdict
+						})
+						.from(schema.pendingUploads)
+						.where(eq(schema.pendingUploads.id, reusing.operationId))
+						.all()
+				})
+			);
+			await verifyCurrentTenant();
+			const after = await runInDurableObject(currentServer(), (instance) => {
+				const store = new PublicationStore(instance.context);
+				return Promise.resolve({
+					targets: instance.context.db
+						.select({
+							rootName: schema.retentionRootTargets.rootName,
+							storePathHash: schema.retentionRootTargets.storePathHash
+						})
+						.from(schema.retentionRootTargets)
+						.all(),
+					pending: instance.context.db
+						.select({ id: schema.pendingUploads.id })
+						.from(schema.pendingUploads)
+						.all(),
+					reusing: store.get(reusing.operationId)?.state
+				});
+			});
+			expect({ accepted, answer, owners, after }).toStrictEqual({
+				accepted: { ev: 'publication-accepted', uploadId: reusing.operationId },
+				answer: {
+					ev: 'deferred',
+					uploadId: reusing.operationId,
+					storePathHash: path.storePathHash,
+					narHash: path.narHash,
+					grace: {}
+				},
+				owners: {
+					narInfos: [{ storePathHash: path.storePathHash }],
+					pending: [{ id: reusing.operationId, verdict: 'pending' }]
+				},
+				// The reuse commit applies its run root to the generation that
+				// another upload charged, or to its own.
+				after: {
+					targets: [{ rootName: 'run', storePathHash: path.storePathHash }],
+					pending: [],
+					reusing: race === 'charge' ? 'accepted' : 'servable'
+				}
+			});
+		} finally {
+			for (const spy of spies) {
+				spy.mockRestore();
+			}
+			await read.release();
+			await closeSessionAndWait(session.socket);
+		}
+	}
+);
+
+it("keeps another operation's reservation when a reuse commit of the same path is over quota", async () => {
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-shared-reuse-over-quota');
+	const narFields = {
+		fileSize: nar.narBytes.byteLength,
+		fileHash: nar.fileHash,
+		narHash: nar.narHash,
+		narSize: nar.narSize
+	};
+	const path = uploadPathNegotiation(uploadMetadata(narFields));
+	const [reusing] = await plannedEntries(token, '/uploads/plan', [path]);
+	const [live] = await plannedEntries(token, '/uploads/plan', [path], {
+		name: rootNameSchema.parse('run'),
+		retention: { kind: 'inherit' }
+	});
+	if (reusing === undefined || live === undefined) {
+		throw new Error('Expected two planned entries');
+	}
+	const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+	const session = await openCommitSession(token, undefined, publicationSession);
+	try {
+		session.send({ op: 'publish-batch', pushId: testPushId, entries: [live] });
+		await session.nextFrame();
+		await session.nextFrame();
+		// Another path makes the NAR reusable, and the live operation's bytes
+		// arrive.
+		await commitPath(
+			token,
+			uploadMetadata({
+				...narFields,
+				name: 'shared-reuse-over-quota',
+				storePathHash: '3'.repeat(32)
+			}),
+			nar
+		);
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, live.operationId),
+			nar
+		);
+		// After the reuse commit reserves the row, the live operation starts its
+		// commit, which shares the reservation. The reuse commit's charge then
+		// exceeds the quota.
+		const materialise = await runInDurableObject(
+			currentServer(),
+			(instance) => {
+				const { db } = instance.context;
+				const spy = vi
+					.spyOn(CommitPipelineService.prototype, 'materialiseBatched')
+					.mockImplementationOnce(() => {
+						spy.mockRestore();
+						db.update(schema.pendingUploads)
+							.set({ verdict: 'pending' })
+							.where(eq(schema.pendingUploads.id, live.operationId))
+							.run();
+						return Promise.resolve({ kind: 'over-quota' as const });
+					});
+				return Promise.resolve(spy);
+			}
+		);
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [{ ...reusing, blob }]
+			});
+			const answer = [];
+			for (const frame of [
+				await session.nextFrame(),
+				await session.nextFrame()
+			]) {
+				if (frame.ev !== 'error') {
+					answer.push(frame);
+					continue;
+				}
+				const { message, ...facts } = frame;
+				answer.push({ ...facts, hasMessage: message.length > 0 });
+			}
+			const after = await runInDurableObject(currentServer(), (instance) => {
+				const store = new PublicationStore(instance.context);
+				return Promise.resolve({
+					narInfos: instance.context.db
+						.select({ storePathHash: schema.narInfos.storePathHash })
+						.from(schema.narInfos)
+						.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+						.all(),
+					live: store.get(live.operationId)?.state
+				});
+			});
+			expect({ answer, after }).toStrictEqual({
+				answer: [
+					{ ev: 'publication-accepted', uploadId: reusing.operationId },
+					{
+						ev: 'error',
+						uploadId: reusing.operationId,
+						status: StatusCodes.INSUFFICIENT_STORAGE,
+						hasMessage: true
+					}
+				],
+				after: {
+					narInfos: [{ storePathHash: path.storePathHash }],
+					live: 'accepted'
+				}
+			});
+		} finally {
+			materialise.mockRestore();
+		}
+	} finally {
+		await closeSessionAndWait(session.socket);
+	}
+});
+
+it("keeps another operation's run root target when an upload of the same path finds its staged object missing", async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-shared-missing-object');
+	const path = uploadPathNegotiation(
+		uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		})
+	);
+	const [live] = await plannedEntries(token, '/uploads/plan', [path], {
+		name: rootNameSchema.parse('run'),
+		retention: { kind: 'inherit' }
+	});
+	const [missing] = await plannedEntries(token, '/uploads/plan', [path]);
+	if (missing === undefined || live === undefined) {
+		throw new Error('Expected two planned entries');
+	}
+	const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+	// Both operations start their commits, which share one reservation.
+	for (const entry of [live, missing]) {
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			nar
+		);
+		await admit(token, testPushId, { ...entry, blob });
+	}
+	const claim = await currentServer().claimVerificationBatch(
+		10,
+		Number.MAX_SAFE_INTEGER
+	);
+	// The live operation's commit completes and attaches the path to its run
+	// root. The other operation's staged object is then missing.
+	await currentServer().recordVerifications(claim.owner, [
+		{
+			uploadId: live.operationId,
+			verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+		}
+	]);
+	await currentServer().recordVerifications(claim.owner, [
+		{ uploadId: missing.operationId, verdict: { kind: 'missing' } }
+	]);
+	const after = await runInDurableObject(currentServer(), (instance) => {
+		const store = new PublicationStore(instance.context);
+		return Promise.resolve({
+			targets: instance.context.db
+				.select({
+					rootName: schema.retentionRootTargets.rootName,
+					storePathHash: schema.retentionRootTargets.storePathHash
+				})
+				.from(schema.retentionRootTargets)
+				.all(),
+			narInfos: instance.context.db
+				.select({ storePathHash: schema.narInfos.storePathHash })
+				.from(schema.narInfos)
+				.all(),
+			live: store.get(live.operationId)?.state,
+			missing: store.get(missing.operationId)?.state
+		});
+	});
+	expect(after).toStrictEqual({
+		targets: [{ rootName: 'run', storePathHash: path.storePathHash }],
+		narInfos: [{ storePathHash: path.storePathHash }],
+		live: 'servable',
+		missing: 'accepted'
+	});
+});
+
+it('records the charge of a timed-out batch again when the batch finishes', async () => {
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-abandoned-charge');
+	const metadata = uploadMetadata({
+		fileSize: nar.narBytes.byteLength,
+		fileHash: nar.fileHash,
+		narHash: nar.narHash,
+		narSize: nar.narSize
+	});
+	// The first charge batch reaches D1, and its bounded wait times out
+	// before it settles.
+	let settle: (() => Promise<void>) | undefined;
+	const spies = await runInDurableObject(currentServer(), (instance) => {
+		// The promise belongs to the Durable Object's context, where it settles.
+		const { promise: abandoned, resolve } = Promise.withResolvers<undefined>();
+		settle = async () => {
+			resolve(undefined);
+			await abandoned;
+		};
+		const { d1 } = instance.context;
+		const batch = d1.batch.bind(d1);
+		const charge = vi
+			.spyOn(d1, 'batch')
+			.mockImplementation(async (statements) => {
+				const [first] = statements;
+				if (
+					!is(first, SQLiteSelectBase) ||
+					!first.toSQL().sql.startsWith(chargeGateQuery)
+				) {
+					return batch(statements);
+				}
+				charge.mockRestore();
+				await batch(statements);
+				throw new SubrequestTimeoutError('d1.batch', abandoned);
+			});
+		return Promise.resolve(charge);
+	});
+	const record = vi.spyOn(ReservationCharges.prototype, 'record');
+	const recorded = () =>
+		record.mock.calls.filter(
+			([reservation]) => reservation.storePathHash === metadata.storePathHash
+		).length;
+	try {
+		await commitPath(token, metadata, nar);
+		const beforeFinishing = recorded();
+		await runInDurableObject(currentServer(), () => settle?.());
+		expect({ beforeFinishing, afterFinishing: recorded() }).toStrictEqual({
+			beforeFinishing: 2,
+			afterFinishing: 3
+		});
+	} finally {
+		spies.mockRestore();
+		record.mockRestore();
+	}
+});
+
+it('reads whether a reservation is committed outside the input gate when an upload finds its staged object missing', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-missing-object-gate');
+	const path = uploadPathNegotiation(
+		uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		})
+	);
+	const [missing] = await plannedEntries(token, '/uploads/plan', [path]);
+	if (missing === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	await putNarBytes(
+		publicationStagingKey(fixtureTenant, testPushId, missing.operationId),
+		nar
+	);
+	// The commit starts and reserves the path's row. No other commit shares
+	// the reservation.
+	await admit(token, testPushId, {
+		...missing,
+		blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+	});
+	const claim = await currentServer().claimVerificationBatch(
+		10,
+		Number.MAX_SAFE_INTEGER
+	);
+	const probe = new GateProbe();
+	const spies = await runInDurableObject(currentServer(), (instance) =>
+		Promise.resolve([
+			probe.watch(instance.context),
+			probeEdgeReads(probe, instance.context)
+		])
+	);
+	try {
+		const recorded = currentServer().recordVerifications(claim.owner, [
+			{ uploadId: missing.operationId, verdict: { kind: 'missing' } }
+		]);
+		const stopped = await probe.first(recorded);
+		// Another request reaches the object while the read waits.
+		const during = await snapshot();
+		await probe.pause.release();
+		await recorded;
+		const after = await runInDurableObject(currentServer(), (instance) =>
+			Promise.resolve({
+				narInfos: instance.context.db
+					.select({ storePathHash: schema.narInfos.storePathHash })
+					.from(schema.narInfos)
+					.all(),
+				state: new PublicationStore(instance.context).get(missing.operationId)
+					?.state
+			})
+		);
+		expect({
+			stopped,
+			calls: probe.calls,
+			during: during.operations.map((operation) => operation.state),
+			after
+		}).toStrictEqual({
+			stopped: 'stopped',
+			calls: [false],
+			during: ['accepted'],
+			after: { narInfos: [], state: 'failed' }
+		});
+	} finally {
+		await probe.pause.release();
+		for (const spy of spies) {
+			spy.mockRestore();
+		}
+	}
+});
+
+it('reclaims a shared reservation when both of its uploads are exhausted at the same time', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	const token = await initialise();
+	const rounds = [];
+	for (const round of ['1', '2', '3']) {
+		const nar = await verifiableNar(`publication-shared-exhausted-${round}`);
+		const path = uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				storePathHash: round.repeat(32)
+			})
+		);
+		const [first] = await plannedEntries(token, '/uploads/plan', [path]);
+		const [second] = await plannedEntries(token, '/uploads/plan', [path], {
+			name: rootNameSchema.parse('run'),
+			retention: { kind: 'inherit' }
+		});
+		if (first === undefined || second === undefined) {
+			throw new Error('Expected two planned entries');
+		}
+		const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+		// Both operations start their commits, which share one reservation.
+		for (const entry of [first, second]) {
+			await putNarBytes(
+				publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+				nar
+			);
+			await admit(token, testPushId, { ...entry, blob });
+		}
+		// The first upload's pass decides inside its gate and stops before it
+		// clears its pending row. A second pass then fails the other upload.
+		const cleanup = new DurableObjectPause();
+		const spy = await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(schema.pendingUploads)
+				.set({ verdict: 'pending', settleExhaustion: 'attempt-limit' })
+				.run();
+			const refresh = vi
+				.spyOn(UploadStateService.prototype, 'clearDeliveredNarRefresh')
+				.mockImplementationOnce(async function (
+					this: UploadStateService,
+					...arguments_
+				) {
+					refresh.mockRestore();
+					await cleanup.stop();
+					return this.clearDeliveredNarRefresh(...arguments_);
+				});
+			return Promise.resolve(refresh);
+		});
+		try {
+			const firstPass = runInDurableObject(currentServer(), (instance) =>
+				asOneInvocation(() =>
+					verificationOf(instance).processExhaustedUploads(rootLogger())
+				)
+			);
+			await cleanup.reached();
+			await runInDurableObject(currentServer(), (instance) =>
+				asOneInvocation(() =>
+					verificationOf(instance).processExhaustedUploads(rootLogger())
+				)
+			);
+			await cleanup.release();
+			await firstPass;
+			rounds.push(
+				await runInDurableObject(currentServer(), (instance) => {
+					const store = new PublicationStore(instance.context);
+					return Promise.resolve({
+						narInfos: instance.context.db
+							.select({ storePathHash: schema.narInfos.storePathHash })
+							.from(schema.narInfos)
+							.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+							.all(),
+						pending: instance.context.db
+							.select({ id: schema.pendingUploads.id })
+							.from(schema.pendingUploads)
+							.all(),
+						states: [first, second].map(
+							(entry) => store.get(entry.operationId)?.state
+						)
+					});
+				})
+			);
+		} finally {
+			spy.mockRestore();
+			await cleanup.release();
+		}
+	}
+	const concluded = {
+		narInfos: [],
+		pending: [],
+		states: ['failed', 'failed']
+	};
+	expect(rounds).toStrictEqual([concluded, concluded, concluded]);
+});
+
+it.each([
+	{ change: 'a verification pass claims it', isNewCommit: false },
+	{ change: 'its commit starts again', isNewCommit: true }
+])(
+	'counts a released commit as started again when $change',
+	async ({ isNewCommit }) => {
+		await resetTestServer();
+		const token = await initialise();
+		const nar = await verifiableNar(
+			`publication-released-${String(isNewCommit)}`
+		);
+		const path = uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
+			})
+		);
+		const [live] = await plannedEntries(token, '/uploads/plan', [path]);
+		const [failed] = await plannedEntries(token, '/uploads/plan', [path], {
+			name: rootNameSchema.parse('run'),
+			retention: { kind: 'inherit' }
+		});
+		if (live === undefined || failed === undefined) {
+			throw new Error('Expected two planned entries');
+		}
+		const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+		// Both operations start their commits, which share one reservation.
+		for (const entry of [live, failed]) {
+			await putNarBytes(
+				publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+				nar
+			);
+			await admit(token, testPushId, { ...entry, blob });
+		}
+		const isShared = () =>
+			runInDurableObject(currentServer(), (instance) => {
+				const cache = instance.context.cacheRepository.require(defaultCache());
+				return Promise.resolve(
+					uploadStateOf(instance).hasOtherStartedCommit(
+						live.operationId,
+						cache,
+						path
+					)
+				);
+			});
+		const isSharedWhenStarted = await isShared();
+		await runInDurableObject(currentServer(), (instance) => {
+			uploadStateOf(instance).releaseStartedCommit(failed.operationId);
+			return Promise.resolve();
+		});
+		const isSharedWhenReleased = await isShared();
+		if (isNewCommit) {
+			await runInDurableObject(currentServer(), (instance) => {
+				uploadStateOf(instance).markUploadCommitting(failed.operationId);
+				return Promise.resolve();
+			});
+		} else {
+			await currentServer().claimVerificationBatch(10, Number.MAX_SAFE_INTEGER);
+		}
+		expect({
+			isSharedWhenStarted,
+			isSharedWhenReleased,
+			isSharedAfterChange: await isShared()
+		}).toStrictEqual({
+			isSharedWhenStarted: true,
+			isSharedWhenReleased: false,
+			isSharedAfterChange: true
+		});
+	}
+);
+
 it('decides whether another operation committed a shared reservation outside the input gate', async () => {
 	await resetTestServer();
 	const token = await initialise();
@@ -6796,6 +7852,259 @@ it('decides whether another operation committed a shared reservation outside the
 			spy.mockRestore();
 		}
 	}
+});
+
+it('reads the verdict of an exhausted upload whose reservation another operation committed outside the input gate', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-exhausted-verdict-gate');
+	const path = uploadPathNegotiation(
+		uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		})
+	);
+	const [exhausted] = await plannedEntries(token, '/uploads/plan', [path]);
+	const [committed] = await plannedEntries(token, '/uploads/plan', [path], {
+		name: rootNameSchema.parse('run'),
+		retention: { kind: 'inherit' }
+	});
+	if (exhausted === undefined || committed === undefined) {
+		throw new Error('Expected two planned entries');
+	}
+	const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+	// Both operations start their commits, which share one reservation, and
+	// the second operation's commit completes.
+	for (const entry of [exhausted, committed]) {
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			nar
+		);
+		await admit(token, testPushId, { ...entry, blob });
+	}
+	const claim = await currentServer().claimVerificationBatch(
+		10,
+		Number.MAX_SAFE_INTEGER
+	);
+	// The commit's inheritance work would arm an alarm whose pass could
+	// process the exhausted upload before the test's pass does.
+	const inheritance = await runInDurableObject(currentServer(), () =>
+		Promise.resolve(
+			vi
+				.spyOn(AttestationsService.prototype, 'queueInheritance')
+				.mockResolvedValue(undefined)
+		)
+	);
+	try {
+		await currentServer().recordVerifications(claim.owner, [
+			{
+				uploadId: committed.operationId,
+				verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+			}
+		]);
+	} finally {
+		inheritance.mockRestore();
+	}
+	const probe = new GateProbe();
+	const spies = await runInDurableObject(currentServer(), (instance) => {
+		instance.context.db
+			.update(schema.pendingUploads)
+			.set({
+				verdict: 'pending',
+				settleExhaustion: 'attempt-limit',
+				claimOwner: sql`null`,
+				claimedAt: sql`null`
+			})
+			.where(eq(schema.pendingUploads.id, exhausted.operationId))
+			.run();
+		const publicationStatus = vi
+			.spyOn(CommitPipelineService.prototype, 'publicationStatus')
+			.mockImplementation(function (
+				this: CommitPipelineService,
+				...arguments_
+			) {
+				publicationStatus.mockRestore();
+				return probe.around(() => this.publicationStatus(...arguments_));
+			});
+		return Promise.resolve([probe.watch(instance.context), publicationStatus]);
+	});
+	try {
+		const pass = runInDurableObject(currentServer(), (instance) =>
+			asOneInvocation(() =>
+				verificationOf(instance).processExhaustedUploads(rootLogger())
+			)
+		);
+		const first = await probe.first(pass);
+		// Another request reaches the object while the read waits.
+		const during = await snapshot();
+		await probe.pause.release();
+		await pass;
+		const outcome = await runInDurableObject(currentServer(), (instance) => {
+			const store = new PublicationStore(instance.context);
+			return Promise.resolve({
+				narInfos: instance.context.db
+					.select({ storePathHash: schema.narInfos.storePathHash })
+					.from(schema.narInfos)
+					.all(),
+				exhausted: store.get(exhausted.operationId)?.state,
+				committed: store.get(committed.operationId)?.state
+			});
+		});
+		expect({
+			first,
+			calls: probe.calls,
+			during: Object.fromEntries(
+				during.operations.map((operation) => [operation.id, operation.state])
+			),
+			outcome
+		}).toStrictEqual({
+			first: 'stopped',
+			calls: [false],
+			during: {
+				[exhausted.operationId]: 'accepted',
+				[committed.operationId]: 'servable'
+			},
+			outcome: {
+				narInfos: [{ storePathHash: path.storePathHash }],
+				exhausted: 'accepted',
+				committed: 'servable'
+			}
+		});
+	} finally {
+		await probe.pause.release();
+		for (const spy of spies) {
+			spy.mockRestore();
+		}
+	}
+});
+
+it('keeps an exhausted publication accepted when another upload of its path and NAR committed the shared reservation', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	const token = await initialise();
+	const nar = await verifiableNar('publication-exhausted-shared-commit');
+	const path = uploadPathNegotiation(
+		uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		})
+	);
+	const [exhausted] = await plannedEntries(token, '/uploads/plan', [path]);
+	const [committed] = await plannedEntries(token, '/uploads/plan', [path], {
+		name: rootNameSchema.parse('run'),
+		retention: { kind: 'inherit' }
+	});
+	if (exhausted === undefined || committed === undefined) {
+		throw new Error('Expected two planned entries');
+	}
+	const blob = { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength };
+	// Both operations start their commits, which share one reservation, and
+	// the second operation's commit completes.
+	for (const entry of [exhausted, committed]) {
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			nar
+		);
+		await admit(token, testPushId, { ...entry, blob });
+	}
+	const claim = await currentServer().claimVerificationBatch(
+		10,
+		Number.MAX_SAFE_INTEGER
+	);
+	const inheritance = await runInDurableObject(currentServer(), () =>
+		Promise.resolve(
+			vi
+				.spyOn(AttestationsService.prototype, 'queueInheritance')
+				.mockResolvedValue(undefined)
+		)
+	);
+	try {
+		await currentServer().recordVerifications(claim.owner, [
+			{
+				uploadId: committed.operationId,
+				verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+			}
+		]);
+	} finally {
+		inheritance.mockRestore();
+	}
+	await runInDurableObject(currentServer(), (instance) => {
+		instance.context.db
+			.update(schema.pendingUploads)
+			.set({
+				verdict: 'pending',
+				settleExhaustion: 'attempt-limit',
+				claimOwner: sql`null`,
+				claimedAt: sql`null`
+			})
+			.where(eq(schema.pendingUploads.id, exhausted.operationId))
+			.run();
+		return Promise.resolve();
+	});
+	// A session waits for the exhausted operation's verdict.
+	const session = await openCommitSession(token, undefined, publicationSession);
+	let subscribed;
+	let verdict;
+	let state;
+	try {
+		session.send({
+			op: 'subscribe-publication',
+			pushId: testPushId,
+			entries: [{ ...exhausted, blob }]
+		});
+		subscribed = refusalFacts(await session.nextFrame());
+		state = await runInDurableObject(currentServer(), async (instance) => {
+			await asOneInvocation(() =>
+				verificationOf(instance).processExhaustedUploads(rootLogger())
+			);
+			const store = new PublicationStore(instance.context);
+			return {
+				exhausted: store.get(exhausted.operationId)?.state,
+				pending: instance.context.db
+					.select({ id: schema.pendingUploads.id })
+					.from(schema.pendingUploads)
+					.all()
+			};
+		});
+		verdict = refusalFacts(await session.nextFrame());
+	} finally {
+		await closeSessionAndWait(session.socket);
+	}
+	const resend = await admit(token, testPushId, { ...exhausted, blob });
+	expect({ subscribed, verdict, state, resend }).toStrictEqual({
+		subscribed: {
+			ev: 'deferred',
+			uploadId: exhausted.operationId,
+			storePathHash: path.storePathHash,
+			narHash: nar.narHash,
+			grace: {}
+		},
+		verdict: {
+			ev: 'verdict',
+			uploadId: exhausted.operationId,
+			status: 'absent',
+			grace: {}
+		},
+		state: { exhausted: 'accepted', pending: [] },
+		resend: [
+			{ ev: 'publication-accepted', uploadId: exhausted.operationId },
+			{
+				ev: 'settled',
+				uploadId: exhausted.operationId,
+				response: {
+					storePathHash: path.storePathHash,
+					narHash: nar.narHash,
+					status: 'already-present'
+				},
+				grace: {}
+			}
+		]
+	});
 });
 
 it("keeps a newer publication's run root target when a failed upload of the same path cleans up", async () => {
@@ -8252,6 +9561,54 @@ it('finds a shared reservation with the same rows read however many uploads shar
 	const large = await sharedReservationRowsRead(1000);
 	expect(large).toStrictEqual({ isShared: true, rowsRead: small.rowsRead });
 });
+
+// Inserts `released` uploads of one path and NAR whose commits a failure
+// released, then one started upload of them when `hasActive` is true, and
+// returns the rows that the check for another started commit reads.
+async function releasedSiblingRowsRead(
+	released: number,
+	hasActive: boolean
+): Promise<{ readonly isShared: boolean; readonly rowsRead: number }> {
+	await resetTestServer();
+	await initialise();
+	return runInDurableObject(currentServer(), (instance) => {
+		const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+		insertCommittedUploads(instance, released, 'released', expiresAt);
+		instance.context.db
+			.update(schema.pendingUploads)
+			.set({ commitReleased: true })
+			.run();
+		if (hasActive) {
+			insertCommittedUploads(instance, 1, 'active', expiresAt);
+		}
+		const cache = instance.context.cacheRepository.require(defaultCache());
+		const { dbCost } = instance.context;
+		dbCost.recordOutstanding();
+		const before = dbCost.rowsRead;
+		const isShared = uploadStateOf(instance).hasOtherStartedCommit(
+			uploadIdSchema.parse('failing'),
+			cache,
+			{
+				storePathHash: distinctPath('1').storePathHash,
+				narHash: nixSha256Hash('1')
+			}
+		);
+		dbCost.recordOutstanding();
+		return Promise.resolve({ isShared, rowsRead: dbCost.rowsRead - before });
+	});
+}
+
+it.each([
+	{ remaining: 'one started upload after them', hasActive: true },
+	{ remaining: 'no started upload', hasActive: false }
+])(
+	'reads the same rows for a shared reservation whatever the number of released uploads, with $remaining',
+	async ({ hasActive }) => {
+		const few = await releasedSiblingRowsRead(10, hasActive);
+		const many = await releasedSiblingRowsRead(10_000, hasActive);
+		expect(many).toStrictEqual({ isShared: hasActive, rowsRead: few.rowsRead });
+	}
+);
 
 it('refuses a repair of an operation that completes during admission when its push ID does not verify', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());

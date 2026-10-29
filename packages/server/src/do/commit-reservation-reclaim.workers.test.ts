@@ -6,7 +6,7 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import type { UploadId } from '@cupboard/protocol/upload';
+import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -244,6 +244,70 @@ describe('when a commit retry finds an abandoned reservation', () => {
 				narHash: retried.narHash,
 				status: 'committed'
 			}
+		});
+	});
+
+	it('defers while an expired started commit still shares the reservation', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('reservation-shared-expired');
+		const metadata = uploadMetadata({
+			name: 'shared',
+			storePathHash: 'b'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const started = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(started.r2Key, nar);
+		// The first upload's commit reserved the row and waits for verification.
+		// Its expiry time passes, which a legacy upload's verification retries
+		// can outlast.
+		await seedReservedNarInfo(metadata);
+		await markUploadPendingVerification(started.uploadId);
+		await expireUpload(started.uploadId);
+		const retry = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(retry.r2Key, nar);
+
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const result = await pipelineFor(instance.context).commit(
+					rootLogger(),
+					resolvedCache(instance.context),
+					retry.uploadId,
+					ownerAuthority(resolvedCache(instance.context))
+				);
+				return {
+					result,
+					narInfos: instance.context.db
+						.select({ generation: schema.narInfos.generation })
+						.from(schema.narInfos)
+						.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+						.all()
+				};
+			}
+		);
+
+		const startedRow = await pendingUploadSnapshot(started.uploadId);
+		const retryRow = await pendingUploadSnapshot(retry.uploadId);
+		expect({
+			...outcome,
+			verdicts: [startedRow?.verdict, retryRow?.verdict]
+		}).toStrictEqual({
+			result: {
+				kind: 'deferred',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash
+			},
+			narInfos: [{ generation: 0 }],
+			verdicts: ['pending', 'pending']
 		});
 	});
 });
@@ -550,15 +614,28 @@ describe('when reclaiming a row after failed verification', () => {
 				await seedEdge(edgeGeneration, metadata.narHash);
 			}
 
-			const result = await runInDurableObject(currentServer(), (instance) =>
-				instance.context.criticalSection(() =>
-					pipelineFor(instance.context).reclaimReservedRow(
-						resolvedCache(instance.context),
-						metadata.storePathHash,
-						narInfoGenerationSchema.parse(7),
-						metadata.narHash
-					)
-				)
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const pipeline = pipelineFor(instance.context);
+					const cache = resolvedCache(instance.context);
+					const generation = narInfoGenerationSchema.parse(7);
+					const read = await pipeline.readReservation(
+						cache,
+						metadata,
+						generation
+					);
+					return instance.context.criticalSection(() =>
+						pipeline.releaseReservation({
+							uploadId: uploadIdSchema.parse('reclaiming'),
+							cache,
+							path: metadata,
+							generation,
+							reason: 'abandoned-reservation',
+							read
+						})
+					);
+				}
 			);
 			const after = await runInDurableObject(currentServer(), (instance) => ({
 				surviving: instance.context.db
@@ -596,15 +673,28 @@ describe('when reclaiming a row after failed verification', () => {
 			name: 'vanished'
 		});
 
-		const result = await runInDurableObject(currentServer(), (instance) =>
-			instance.context.criticalSection(() =>
-				pipelineFor(instance.context).reclaimReservedRow(
-					resolvedCache(instance.context),
-					metadata.storePathHash,
-					narInfoGenerationSchema.parse(7),
-					metadata.narHash
-				)
-			)
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const pipeline = pipelineFor(instance.context);
+				const cache = resolvedCache(instance.context);
+				const generation = narInfoGenerationSchema.parse(7);
+				const read = await pipeline.readReservation(
+					cache,
+					metadata,
+					generation
+				);
+				return instance.context.criticalSection(() =>
+					pipeline.releaseReservation({
+						uploadId: uploadIdSchema.parse('reclaiming'),
+						cache,
+						path: metadata,
+						generation,
+						reason: 'abandoned-reservation',
+						read
+					})
+				);
+			}
 		);
 
 		expect(result).toBe('reclaimed');

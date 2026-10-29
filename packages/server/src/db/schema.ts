@@ -467,6 +467,13 @@ export const pendingUploads = sqliteTable(
 		// re-drive clears them without changing the retry deadline.
 		claimedAt: text('claimed_at').$type<IsoTimestamp>(),
 		claimOwner: text('claim_owner'),
+		// Whether a failure released the upload's share of its reservation. A new
+		// start of the commit or a verification claim clears it, and the commit
+		// counts as started again. `pending_upload_unreleased_commit_idx` lists
+		// the started commits for which it is false.
+		commitReleased: integer('commit_released', { mode: 'boolean' })
+			.notNull()
+			.default(false),
 		// Capture the retention decision during negotiation so a later cache update
 		// cannot alter this upload. Null also supports rows created before decisions
 		// were stored and means that the cache granted no grace.
