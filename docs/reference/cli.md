@@ -771,6 +771,12 @@ Options:
                                     1h; default 10m)
   --upload-concurrency <n>          number of NAR uploads to run in parallel
                                     (default 6)
+  --fail-on-divergence              fail when the cache already serves different
+                                    contents for a path that this run built. By
+                                    default, build-push keeps the cache's copy,
+                                    treats the path as published and reports a
+                                    warning. Paths that the run did not build
+                                    always keep the cache's copy.
   --receipt-file <path>             write the build and publication results as a
                                     JSON receipt. With several builds, the file
                                     contains {"receipts": [...]}, in build

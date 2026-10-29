@@ -80,6 +80,8 @@ import {
 	cohortFailureResult,
 	type CohortRootSummary,
 	cohortSummaryResult,
+	type DivergedPath,
+	divergedPaths,
 	outcomeOrder,
 	recordedRoots,
 	type TargetOutcome,
@@ -89,6 +91,7 @@ import {
 import {
 	type CupboardInvocation,
 	type CupboardRunDependencies,
+	inspectCommandOptions,
 	inspectCupboardVersion,
 	readCredentialInvocation,
 	requireEnvironmentCredentialSupport,
@@ -111,6 +114,7 @@ import {
 	CommandFailedError,
 	CommandOutputTooLargeError,
 	CupboardReportedError,
+	FailOnDivergenceUnsupportedError,
 	FallbackReadPasswordRequiredError,
 	FallbackReadUserRequiredError,
 	InvalidMaxJobsError,
@@ -432,6 +436,7 @@ export interface BuildCohortOptions {
 	readonly substituter?: string;
 	readonly bestEffort?: string;
 	readonly gcBetweenCohorts?: string;
+	readonly failOnDivergence?: string;
 	readonly runRoot?: string;
 	readonly runRootTtl?: string;
 	readonly runRootPermanent?: string;
@@ -465,6 +470,7 @@ export interface BuildCohortInputs {
 	readonly substituter: 'leave' | 'copy';
 	readonly allBestEffort: boolean;
 	readonly gcBetweenCohorts: boolean;
+	readonly failOnDivergence: boolean;
 	readonly runRoot: string;
 	readonly runRootTtl: string;
 	readonly runRootPermanent: boolean;
@@ -650,6 +656,11 @@ export function resolveBuildCohortInputs(
 			options.gcBetweenCohorts,
 			false
 		),
+		failOnDivergence: isEnabled(
+			'fail-on-divergence',
+			options.failOnDivergence,
+			false
+		),
 		runRoot,
 		runRootTtl,
 		runRootPermanent: isRunRootPermanent,
@@ -751,6 +762,11 @@ export function registerBuildCohortCommand(
 			'false'
 		)
 		.option(
+			'--fail-on-divergence <boolean>',
+			"fail when the cache already serves different contents for a path that the runner's build produced, instead of keeping the cache's copy (true or false)",
+			'false'
+		)
+		.option(
 			'--run-root <name>',
 			'run root every published path joins as it commits'
 		)
@@ -816,6 +832,7 @@ export interface BuildCohortDependencies {
 	readonly materialiseCachedClosure?: typeof materialiseCachedClosure;
 	readonly inspectVersion?: typeof inspectCupboardVersion;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
+	readonly inspectCommandOptions?: typeof inspectCommandOptions;
 	readonly reporter?: Reporter;
 	readonly signal?: AbortSignal;
 	/**
@@ -838,6 +855,30 @@ function hasCommandReadCredential(
 		inputs.readUser !== '' ||
 		(inputs.fallbackReadUser !== '' && cohortReferenceSource(inputs) !== '')
 	);
+}
+
+export const minimumFailOnDivergenceRelease = 'v0.0.50';
+
+/**
+Refuses a strict request that the installed CLI cannot honour. Releases
+before the option fail on a diverged path while the build runs, but keep the
+cache's copy when they publish after the build, so omitting the option would
+not keep the strict behaviour.
+*/
+async function requireFailOnDivergenceSupport(
+	inputs: Pick<BuildCohortInputs, 'failOnDivergence' | 'cupboardPath'>,
+	inspect: typeof inspectCommandOptions,
+	signal: AbortSignal | undefined
+): Promise<void> {
+	if (!inputs.failOnDivergence) {
+		return;
+	}
+
+	const options = await inspect(inputs.cupboardPath, ['build-push'], signal);
+
+	if (!options.has('--fail-on-divergence')) {
+		throw new FailOnDivergenceUnsupportedError(minimumFailOnDivergenceRelease);
+	}
 }
 
 function cachedClosureSources(
@@ -932,6 +973,14 @@ export async function buildCohortAction(
 		await requireEnvironmentCredentialSupport(
 			inputs.cupboardPath,
 			dependencies.inspectVersion ?? inspectCupboardVersion,
+			dependencies.signal
+		);
+	}
+
+	if (inputs.push && inputs.store === '') {
+		await requireFailOnDivergenceSupport(
+			inputs,
+			dependencies.inspectCommandOptions ?? inspectCommandOptions,
 			dependencies.signal
 		);
 	}
@@ -1076,10 +1125,11 @@ export async function buildCohortAction(
 			  }
 			| undefined;
 		let buildUploads: UploadTally | undefined;
+		let diverged: readonly DivergedPath[] = [];
 
 		if (isStreamed) {
 			try {
-				buildUploads = await runBuildPushCohort(
+				const results = await runBuildPushCohort(
 					inputs,
 					buildInstallables,
 					provenanceRebuilds,
@@ -1088,6 +1138,8 @@ export async function buildCohortAction(
 					cupboardRunDependencies,
 					inputs.publish === 'built' ? localDependencyBuilds : []
 				);
+				buildUploads = uploadTally(results);
+				diverged = divergedPaths(results);
 			} catch (error) {
 				if (!inputs.allBestEffort) {
 					const uploads =
@@ -1110,6 +1162,7 @@ export async function buildCohortAction(
 					inputs.receiptFile
 				);
 				buildUploads = uploadTally(streamedFailure.error.results);
+				diverged = divergedPaths(streamedFailure.error.results);
 
 				const terminalFailure = streamedFailure.receipt.terminalFailure;
 
@@ -1148,7 +1201,8 @@ export async function buildCohortAction(
 			cupboardRunDependencies,
 			reporter,
 			duration: () => now() - startedAt,
-			buildUploads
+			buildUploads,
+			diverged
 		};
 
 		if (execution.kind === 'remote') {
@@ -1809,6 +1863,7 @@ interface SettleCohortBuildContext {
 	readonly reporter: Reporter;
 	readonly duration: () => number;
 	readonly buildUploads: UploadTally | undefined;
+	readonly diverged: readonly DivergedPath[];
 }
 
 // Complete every operation that reads realised paths before returning. Remote
@@ -2131,6 +2186,7 @@ async function settleCohortBuild(
 		inputs.push && inputs.store !== '' && selectedPublicationPaths.length > 0;
 
 	let buildUploads = context.buildUploads;
+	let diverged = context.diverged;
 
 	if (isReconciled) {
 		const publicationPathsFile = `${inputs.targetPathsFile}.publication`;
@@ -2142,6 +2198,7 @@ async function settleCohortBuild(
 			cupboardRunDependencies
 		);
 		buildUploads = addUploads(buildUploads, uploadTally(results));
+		diverged = [...diverged, ...divergedPaths(results)];
 	}
 
 	if (terminalFailure !== undefined) {
@@ -2249,6 +2306,7 @@ async function settleCohortBuild(
 			...(uploadsBeforeRoots !== undefined && {
 				buildUploads: uploadsBeforeRoots
 			}),
+			...(diverged.length > 0 && { diverged }),
 			roots
 		})
 	);
@@ -2373,6 +2431,7 @@ export function cohortBuildPushArguments(
 		| 'allBestEffort'
 		| 'publish'
 		| 'substituter'
+		| 'failOnDivergence'
 	>,
 	cohortsFile: string
 ): readonly string[] {
@@ -2398,7 +2457,8 @@ export function cohortBuildPushArguments(
 		...(inputs.allBestEffort ? ['--keep-going-cohorts'] : []),
 		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
-		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
+		...(inputs.runRootPermanent ? ['--run-root-permanent'] : []),
+		...(inputs.failOnDivergence ? ['--fail-on-divergence'] : [])
 	];
 }
 
@@ -2437,7 +2497,7 @@ async function runBuildPushCohort(
 	runCupboard: typeof defaultRunCupboard,
 	cupboardRunDependencies: CupboardRunDependencies | undefined,
 	dependencyBuilds: readonly RemoteDependencyBuild[] = []
-): Promise<UploadTally | undefined> {
+): Promise<readonly ReporterResultEvent[]> {
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
 	const cohortsFile = path.join(
 		runnerTemporary,
@@ -2470,7 +2530,7 @@ async function runBuildPushCohort(
 		attr: member.attr,
 		root: member.root
 	}));
-	const results = await runCupboard(
+	return runCupboard(
 		inputs.cupboardPath,
 		cohortBuildPushArguments(inputs, cohortsFile),
 		{
@@ -2482,7 +2542,6 @@ async function runBuildPushCohort(
 			deferErrorAnnotations: inputs.allBestEffort
 		}
 	);
-	return uploadTally(results);
 }
 
 /**

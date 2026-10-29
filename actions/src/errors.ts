@@ -861,6 +861,15 @@ export class CupboardVersionOutputMissingError extends CodedError {
 	}
 }
 
+export class FailOnDivergenceUnsupportedError extends UsageError {
+	constructor(public readonly minimumTag: string) {
+		super(
+			`fail-on-divergence: true needs cupboard ${minimumTag} or newer, whose build-push has the --fail-on-divergence option. Select ${minimumTag} or newer, or set fail-on-divergence: false.`
+		);
+		this.name = 'FailOnDivergenceUnsupportedError';
+	}
+}
+
 export class PushPathsFileUnsupportedError extends UsageError {
 	constructor(public readonly version: string) {
 		super(

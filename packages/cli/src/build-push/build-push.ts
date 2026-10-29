@@ -107,6 +107,7 @@ import {
 	TransferTotals,
 	uploadObserver
 } from '../push/compression-report.ts';
+import { reportDivergences } from '../push/divergence.ts';
 import { PublicationCollection } from '../push/publication.ts';
 import {
 	type CompressNar,
@@ -121,6 +122,11 @@ import {
 } from '../push/upload-transfer.ts';
 
 import { type BatchStore, BuildOutputBatcher } from './batching.ts';
+import {
+	BuildOutputDivergences,
+	BuiltPaths,
+	type DivergencePolicy
+} from './divergence.ts';
 import { buildPushModeDescription, selectBuildPushMode } from './mode.ts';
 import type { BuildPushPreflight } from './preflight.ts';
 import {
@@ -199,6 +205,11 @@ export interface BuildPushRunOptions {
 	readonly wait?: boolean;
 	readonly waitTimeoutSeconds?: WaitTimeoutSeconds;
 	readonly uploadConcurrency?: number;
+	/**
+	The `fail` policy applies only to paths that this run built. Defaults to
+	`concede`.
+	*/
+	readonly divergencePolicy?: DivergencePolicy;
 }
 
 export type BuildPushStore = ReconcileOptions['store'] &
@@ -397,10 +408,14 @@ function contextualBuildReporter(
 			});
 		},
 		result(payload) {
-			reporter.result({
-				...payload,
-				title: `${payload.title ?? 'Result'}: ${context}`
-			});
+			// The divergence summary has no title or rows, so it has no heading
+			// to name the context in.
+			if (payload.title === undefined) {
+				reporter.result(payload);
+				return;
+			}
+
+			reporter.result({ ...payload, title: `${payload.title}: ${context}` });
 		}
 	};
 }
@@ -464,6 +479,11 @@ async function runProtectedStreamedBuildPush(
 	let roots: RootLinkDirectory | undefined;
 	let batcher: BuildOutputBatcher;
 	let listener: BuildEventListener;
+	const builtPaths = new BuiltPaths();
+	const divergences = new BuildOutputDivergences(
+		options.divergencePolicy,
+		(info) => builtPaths.has(info)
+	);
 
 	let maxQueueDepth = 0;
 	const compression = new CompressionTotals();
@@ -525,12 +545,15 @@ async function runProtectedStreamedBuildPush(
 			...(options.uploadConcurrency !== undefined && {
 				uploadConcurrency: options.uploadConcurrency
 			}),
-			uploadReport: reportUpload
+			uploadReport: reportUpload,
+			divergences
 		});
 		listener = await BuildEventListener.listen({
 			socketPath: plan.socketPath,
 			storeDirectory: dependencies.storeDirectory,
 			onEvent: async (event, signal) => {
+				builtPaths.addPaths(event.outputPaths);
+
 				if (event.outputProtection === 'failed') {
 					return;
 				}
@@ -628,18 +651,23 @@ async function runProtectedStreamedBuildPush(
 		const terminalFailure =
 			dependencyFailure ??
 			terminalFailureFor(options.invocation, attempts, exit);
+		const observedDerivations = new Set(
+			attempts.flatMap((attempt) =>
+				parseBuildActivities(attempt.log).map((activity) => activity.derivation)
+			)
+		);
+
+		// A hook event can be lost. The build log and the recovered subjects
+		// still show which paths this run built.
+		builtPaths.addDerivations(observedDerivations);
+		builtPaths.addPaths(builtSubjectPaths(subjects));
 
 		return settleRun(options, reporter, dependencies, {
-			observedDerivations: new Set(
-				attempts.flatMap((attempt) =>
-					parseBuildActivities(attempt.log).map(
-						(activity) => activity.derivation
-					)
-				)
-			),
+			observedDerivations,
 			mode: 'streamed',
 			exit,
 			batcher,
+			divergences,
 			compression,
 			transfer,
 			uploads,
@@ -1586,6 +1614,9 @@ async function publishRealised(
 	}
 
 	let published: BuildReceiptV3 | undefined;
+	const builtPaths = new BuiltPaths();
+	builtPaths.addDerivations(built.observedDerivations);
+	builtPaths.addPaths(builtSubjectPaths(built.subjects));
 
 	try {
 		const shouldRetainTargets = exit.status === 0 && options.root !== undefined;
@@ -1628,6 +1659,9 @@ async function publishRealised(
 			}),
 			...(dependencies.compressNar !== undefined && {
 				compressNar: dependencies.compressNar
+			}),
+			...(options.divergencePolicy === 'fail' && {
+				refuseDivergence: (info: NixValidPathInfo) => builtPaths.has(info)
 			})
 		});
 	} catch (error) {
@@ -1670,6 +1704,14 @@ async function publishRealised(
 	});
 }
 
+function builtSubjectPaths(
+	subjects: readonly BuildSubjectV3Input[]
+): readonly StorePathString[] {
+	return subjects
+		.filter((subject) => subject.origin === 'built')
+		.map((subject) => storePathSchema.parse(subject.storePath));
+}
+
 // Preserve both parts of the publication exit contract: the sysexits category
 // derived from the cause and any unfinished paths reported by the push.
 function publicationFailure(cause: unknown): BuildPublicationFailedError {
@@ -1687,6 +1729,7 @@ interface RunFacts {
 	readonly mode: BuildSummaryInput['mode'];
 	readonly exit: ChildExit;
 	readonly batcher: BuildOutputBatcher;
+	readonly divergences: BuildOutputDivergences;
 	readonly compression: CompressionTotals;
 	readonly transfer: TransferTotals;
 	readonly reportUpload: UploadReport;
@@ -2004,7 +2047,8 @@ async function settleRun(
 					childExitStatus: childExitCode(exit),
 					...(facts.terminalFailure !== undefined && {
 						terminalFailure: facts.terminalFailure
-					})
+					}),
+					divergences: facts.divergences
 				});
 
 				ctx.fact('servable', formatCount(reconciled.receipt.paths.length), {
@@ -2015,6 +2059,15 @@ async function settleRun(
 				return reconciled;
 			},
 			{ humanLabel: 'Checking published outputs' }
+		);
+		const failedPaths = new Set(
+			result.failures.map((failure) => failure.storePath)
+		);
+		reportDivergences(
+			reporter,
+			facts.divergences
+				.list()
+				.filter((divergence) => !failedPaths.has(divergence.storePath))
 		);
 
 		if (

@@ -2826,7 +2826,8 @@ describe('runPush', () => {
 			const results: ResultRow[][] = [];
 			const clientCalls: unknown[] = [];
 			const humanWarnings: string[] = [];
-			const baseReporter = reporter(results, warnings);
+			const payloads: ResultPayload[] = [];
+			const baseReporter = reporter(results, warnings, payloads);
 			const output: Reporter = {
 				...baseReporter,
 				presentation,
@@ -2847,7 +2848,16 @@ describe('runPush', () => {
 				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 			});
 
-			expect({ clientCalls, warnings, humanWarnings }).toStrictEqual({
+			const checksums = `${StorePath.basename(appPath)} (local ${appDigest.narHash.toString()}, cache ${cacheDigest.narHash.toString()})`;
+
+			expect({
+				clientCalls,
+				warnings,
+				humanWarnings,
+				divergence: payloads
+					.filter((payload) => payload.kind === 'divergence-summary')
+					.map((payload) => payload.data)
+			}).toStrictEqual({
 				clientCalls: [
 					{ method: 'negotiate', paths: [appPath] },
 					{
@@ -2861,19 +2871,65 @@ describe('runPush', () => {
 				],
 				humanWarnings: [
 					presentation === 'debug'
-						? `${StorePath.basename(appPath)}: local NAR ${appDigest.narHash.toString()} differs from the cached copy ${cacheDigest.narHash.toString()}; the cache keeps its copy`
-						: `${StorePath.basename(appPath)}: local contents differ from the cached copy. The cached copy is unchanged.`
+						? `The cache already serves different contents for these paths and keeps its own copies: ${checksums}. Check the builds for reproducibility.`
+						: `The cache already serves different contents for these paths and keeps its own copies: ${StorePath.basename(appPath)}. Check the builds for reproducibility. Use --debug to compare the checksums.`
 				],
-				warnings: [
+				warnings: [{ label: 'diverged', value: checksums }],
+				divergence: [
 					{
-						label: 'divergent',
-						value:
-							`${StorePath.basename(appPath)}: local NAR ` +
-							`${appDigest.narHash.toString()} differs from the cached copy ` +
-							`${cacheDigest.narHash.toString()}; the cache keeps its copy`
+						diverged: [
+							{
+								storePath: appPath,
+								localNarHash: appDigest.narHash.toString(),
+								cacheNarHash: cacheDigest.narHash.toString()
+							}
+						]
 					}
 				]
 			});
+		}
+	);
+
+	it.each(['skip', 'commit'] as const)(
+		'refuses a path whose cached contents differ after its %s as a verification failure',
+		async (decision) => {
+			const other = digest(9, 999).narHash;
+			let error: unknown;
+
+			try {
+				await runPush(publication([appPath]), reporter([]), {
+					command: 'cupboard build-push',
+					credential: 'cupboard-login',
+					retain: false,
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+					refuseDivergence: () => true,
+					client:
+						decision === 'skip'
+							? divergentSkipClient(other.toString(), [], [])
+							: {
+									...divergentSkipClient(appDigest.narHash.toString(), [], []),
+									publicationFor: () => publicationUpload(),
+									commit: () =>
+										Promise.resolve({
+											...fallbackCommitResponse(),
+											narHash: other.value,
+											status: 'already-present'
+										})
+								}
+				});
+			} catch (error_) {
+				error = error_;
+			}
+
+			expect(
+				error instanceof PushIncompleteError ? error.push.failures : error
+			).toStrictEqual([
+				{
+					path: StorePath.basename(appPath),
+					stage: 'verify',
+					verdict: 'failed'
+				}
+			]);
 		}
 	);
 
@@ -6139,11 +6195,8 @@ describe('runPush', () => {
 
 		expect(warns).toStrictEqual([
 			{
-				label: 'divergent',
-				value:
-					`${StorePath.basename(appPath)}: local NAR ` +
-					`${appDigest.narHash.toString()} differs from the cached copy ` +
-					`${cacheDigest.narHash.toString()}; the cache keeps its copy`
+				label: 'diverged',
+				value: `${StorePath.basename(appPath)} (local ${appDigest.narHash.toString()}, cache ${cacheDigest.narHash.toString()})`
 			}
 		]);
 	});

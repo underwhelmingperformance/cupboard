@@ -37,7 +37,10 @@ export type CupboardResultProtocol = 'result-file' | 'legacy-stderr';
 export type CacheSelectionSyntax = 'url' | 'flag';
 
 export type CacheCommand =
-	readonly ['push'] | readonly ['attest', 'attach'] | readonly ['run'];
+	| readonly ['push']
+	| readonly ['attest', 'attach']
+	| readonly ['run']
+	| readonly ['build-push'];
 
 /**
 The long options listed by a command's `--help` output. Released CLIs support

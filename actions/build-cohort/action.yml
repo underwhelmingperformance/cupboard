@@ -117,6 +117,17 @@ inputs:
       it needs them. Off by default. When it is off, the action deletes no store
       paths.
     required: false
+  fail-on-divergence:
+    description:
+      Fail when the cache already serves different contents for a path that the
+      build in the runner's own store produced. By default, the action keeps the
+      cache's copy, treats the path as published, and reports the path in a
+      warning and in the job summary. A path that the build did not produce, and
+      every path built in a remote store, always keeps the cache's copy. A
+      cupboard release without the --fail-on-divergence option cannot honour
+      this input, so the action fails before building.
+    required: false
+    default: 'false'
   run-root:
     description: Run root to add every published path to.
     required: false
@@ -238,6 +249,7 @@ runs:
         SUBSTITUTER: ${{ inputs.substituter }}
         BEST_EFFORT: ${{ inputs.best-effort }}
         GC_BETWEEN_COHORTS: ${{ inputs.gc-between-cohorts }}
+        FAIL_ON_DIVERGENCE: ${{ inputs.fail-on-divergence }}
         RUN_ROOT: ${{ inputs.run-root }}
         RUN_ROOT_TTL: ${{ inputs.run-root-ttl }}
         RUN_ROOT_PERMANENT: ${{ inputs.run-root-permanent }}
@@ -267,6 +279,7 @@ runs:
           --substituter "$SUBSTITUTER"
           --best-effort "$BEST_EFFORT"
           --gc-between-cohorts "$GC_BETWEEN_COHORTS"
+          --fail-on-divergence "$FAIL_ON_DIVERGENCE"
           --run-root "$RUN_ROOT"
           --run-root-ttl "$RUN_ROOT_TTL"
           --run-root-permanent "$RUN_ROOT_PERMANENT"

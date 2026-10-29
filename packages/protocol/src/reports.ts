@@ -292,6 +292,27 @@ export const buildSummarySchema = z.strictObject({
 });
 export type BuildSummary = z.output<typeof buildSummarySchema>;
 
+// The `kind` under which `cupboard push` and `cupboard build-push` report the
+// paths whose local copy differs from the copy that the cache already served.
+// A run emits this result only when at least one path diverged. Its own
+// result kind keeps the push and build summaries unchanged, so older readers
+// of those summaries still accept them.
+export const divergenceSummaryResultKind = 'divergence-summary';
+
+// A path whose local NAR differs from the NAR that the cache already served
+// for the same store path. The cache keeps its copy, and the run treats the
+// path as published.
+const divergedPathSchema = z.strictObject({
+	storePath: storePathSchema,
+	localNarHash: nixSha256HashSchema,
+	cacheNarHash: nixSha256HashSchema
+});
+
+export const divergenceSummarySchema = z.strictObject({
+	diverged: z.array(divergedPathSchema).min(1)
+});
+export type DivergenceSummary = z.output<typeof divergenceSummarySchema>;
+
 export type CheckDiscrepancyInput = z.input<typeof checkDiscrepancySchema>;
 export type CheckReportInput = z.input<typeof checkReportSchema>;
 export type ControlCheckReportInput = z.input<typeof controlCheckReportSchema>;
@@ -306,4 +327,5 @@ export type AttestationAttachSummaryInput = z.input<
 	typeof attestationAttachSummarySchema
 >;
 export type BuildSummaryInput = z.input<typeof buildSummarySchema>;
+export type DivergenceSummaryInput = z.input<typeof divergenceSummarySchema>;
 export type CompressionSummaryInput = z.input<typeof compressionSummarySchema>;

@@ -476,6 +476,24 @@ or a selected remote store does not produce runner-local SLSA provenance.
 Eligible existing bundles are inherited without changing the original statement
 or signature.
 
+### When another cohort publishes a path first
+
+Cohorts that run at the same time can build the same derivation. If the
+derivation isn't reproducible, the builds produce different contents, and the
+cohort that publishes first decides what the cache serves. A later cohort keeps
+the cache's copy, treats the path as published and reports the divergence. Its
+job prints a warning that lists these paths, and the job summary lists each one
+with both NAR hashes. Publication doesn't establish that the two copies are
+interchangeable. Attestation doesn't sign these paths, because the cohort didn't
+produce the contents that the cache serves.
+
+To fail the cohort instead, set `fail-on-divergence: true`. The cohort then
+fails for each such path that it built in the runner's own store. A path that
+the cohort didn't build, and every path of a cohort with `store` set, still
+keeps the cache's copy. The input needs cupboard v0.0.50 or newer. With an
+earlier release, the cohort fails before it builds. To find out which
+derivations aren't reproducible, build them again with `nix build --rebuild`.
+
 ## Selecting the cupboard version
 
 Call the workflow at an immutable release tag, such as `@v1.2.3`. The workflow

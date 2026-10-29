@@ -61,7 +61,7 @@ import {
 } from '../push/upload-transfer.ts';
 
 import type { BatchPathOutcome } from './batching.ts';
-import { requireMatchingBuildOutput } from './divergence.ts';
+import { BuildOutputDivergences } from './divergence.ts';
 
 export interface ReconcileTarget {
 	readonly installable: NixDerivedPathString;
@@ -134,6 +134,13 @@ export interface ReconcileOptions {
 	*/
 	readonly subjects?: readonly BuildSubjectV3Input[];
 	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
+	/**
+	Compares each build output with the cache's copy. A conceded path is
+	servable, but it has no subject in the receipt because this run did not
+	produce the bytes that the cache serves. Defaults to conceding every
+	divergence.
+	*/
+	readonly divergences?: BuildOutputDivergences;
 }
 
 export interface ReconciledRoot {
@@ -283,6 +290,7 @@ interface PublicationLedger {
 		{ readonly reason: TargetFailureReason; readonly cause: unknown }
 	>;
 	readonly collected: Set<StorePathString>;
+	readonly divergences: BuildOutputDivergences;
 }
 
 function recordFailure(
@@ -341,7 +349,8 @@ type PublishableDecision = Extract<
 
 async function isBuildOutputServed(
 	info: NixValidPathInfo,
-	client: PushClient
+	client: PushClient,
+	divergences: BuildOutputDivergences
 ): Promise<boolean> {
 	const paths = [prepareStorePathNegotiation(info)];
 	const preview = await client.preview({ paths });
@@ -351,7 +360,7 @@ async function isBuildOutputServed(
 		return false;
 	}
 
-	requireMatchingBuildOutput(info, { ...decision, action: 'skip' });
+	divergences.compare(info, decision.narHash);
 	return true;
 }
 
@@ -434,11 +443,7 @@ async function uploadAndAcknowledge(
 			narHash: decision.narHash,
 			...(blob !== undefined && { blob })
 		});
-		requireMatchingBuildOutput(info, {
-			action: 'skip',
-			storePathHash: outcome.storePathHash,
-			narHash: outcome.narHash
-		});
+		ledger.divergences.compare(info, outcome.narHash);
 	} catch (error) {
 		if (
 			error instanceof PublicationUploadRequiredError &&
@@ -452,7 +457,10 @@ async function uploadAndAcknowledge(
 		return { info, verdict: Promise.resolve({ kind: 'failed', error }) };
 	}
 
-	if (outcome.status !== 'already-present') {
+	if (
+		outcome.status !== 'already-present' &&
+		!ledger.divergences.has(info.storePath)
+	) {
 		ledger.published.add(info.storePath);
 	}
 
@@ -486,7 +494,7 @@ async function recordVerdict(
 		verdict.error.status === 'absent'
 	) {
 		try {
-			if (await isBuildOutputServed(info, options.client)) {
+			if (await isBuildOutputServed(info, options.client, ledger.divergences)) {
 				ledger.servable.add(info.storePath);
 				return;
 			}
@@ -519,7 +527,7 @@ async function publishNegotiated(
 
 	if (decision.action === 'skip') {
 		try {
-			requireMatchingBuildOutput(info, decision);
+			ledger.divergences.compare(info, decision.narHash);
 		} catch (error) {
 			recordFailure(ledger, info.storePath, 'verification', error);
 			return;
@@ -809,7 +817,8 @@ export async function reconcileBuild(
 		servable: new Set(),
 		published: new Set(),
 		failures: new Map(),
-		collected: new Set()
+		collected: new Set(),
+		divergences: options.divergences ?? new BuildOutputDivergences()
 	};
 
 	// Preserve publication provenance from streaming. `publishRequired`
@@ -829,13 +838,23 @@ export async function reconcileBuild(
 
 	const roots = await applyTargetRoots(resolvedTargets, options, ledger);
 	const partition = options.partition;
+	const conceded = new Set(
+		ledger.divergences.list().map((divergence) => divergence.storePath)
+	);
+
+	// A streamed commit can be recorded as published before a rival wins its
+	// verdict, for example with `--no-wait`.
+	for (const storePath of conceded) {
+		ledger.published.delete(storePath);
+	}
+
 	const receipt = buildReceiptV3Schema.parse({
 		version: 3,
 		paths: [...ledger.servable].toSorted(byCodeUnit),
 		subjects: publishedSubjects({
 			described: built,
 			infos,
-			servable: ledger.servable,
+			servable: ledger.servable.difference(conceded),
 			buildStore: autoBuildStore,
 			copiedFrom: options.copiedFrom ?? new Map()
 		}),

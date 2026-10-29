@@ -45,6 +45,28 @@ import {
 	updateAggregateCohortRoot
 } from './build-push.ts';
 
+// The handler tests stop at `runBuildPush`, so they need no Nix store.
+const handlerMocks = vi.hoisted(() => ({
+	runBuildPush:
+		vi.fn<typeof import('../build-push/build-push.ts').runBuildPush>()
+}));
+
+vi.mock('../build-push/build-push.ts', async (importOriginal) => ({
+	...(await importOriginal<typeof import('../build-push/build-push.ts')>()),
+	runBuildPush: handlerMocks.runBuildPush
+}));
+
+vi.mock('@cupboard/nix', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@cupboard/nix')>()),
+	Nix: {
+		open: () => ({
+			storeDirectory: '/nix/store',
+			unknownSettings: [],
+			storePathOnDisk: (storePath: string) => storePath
+		})
+	}
+}));
+
 const tenantUrl = 'https://cupboard.example.workers.dev/t/acme';
 const pathA = storePathSchema.parse(
 	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -475,6 +497,30 @@ describe('registerBuildPushCommand', () => {
 				actionReferences: [enabled],
 				referenceDependencies: enabled
 			});
+		}
+	);
+
+	it.each([
+		{ arguments: [], policy: 'concede' },
+		{ arguments: ['--fail-on-divergence'], policy: 'fail' }
+	])(
+		'passes the $policy divergence policy to the build for $arguments',
+		async ({ arguments: arguments_, policy }) => {
+			handlerMocks.runBuildPush.mockReset();
+			handlerMocks.runBuildPush.mockResolvedValue(
+				buildReceiptV3Schema.parse({ version: 3, paths: [], subjects: [] })
+			);
+
+			await silentProgram().parseAsync(
+				['build-push', tenantUrl, ...arguments_, '--', 'true'],
+				{ from: 'user' }
+			);
+
+			expect(
+				handlerMocks.runBuildPush.mock.calls.map(
+					([options]) => options.divergencePolicy
+				)
+			).toStrictEqual([policy]);
 		}
 	);
 
