@@ -114,6 +114,77 @@ export function remainingDeadlineMs(): number | undefined {
 		: Math.max(0, scope.deadline - Date.now());
 }
 
+export interface PendingSubrequestRecord {
+	readonly operation: string;
+	readonly elapsedMs: number;
+}
+
+interface PendingSubrequest {
+	readonly operation: string;
+	readonly startedAt: number;
+}
+
+/**
+The bounded subrequests that one critical section has started and that have
+not yet resolved or rejected. A subrequest stays here after its deadline
+abandons it, until the binding's own call finishes.
+*/
+export class SectionSubrequests {
+	private readonly pending = new Set<PendingSubrequest>();
+	private deadlineWatch:
+		| { readonly deadline: AbortSignal; readonly onReached: () => void }
+		| undefined;
+
+	/**
+	Calls `onReached` when a bounded subrequest of the section times out at
+	`deadline`. The subrequest's timer and the deadline's own timer are due at
+	the same instant, and either can fire first.
+	*/
+	watchDeadline(deadline: AbortSignal, onReached: () => void): void {
+		this.deadlineWatch = { deadline, onReached };
+	}
+
+	/**
+	Stops calling the watch's callback. A subrequest that the section left
+	running can time out after the section has ended.
+	*/
+	unwatchDeadline(): void {
+		this.deadlineWatch = undefined;
+	}
+
+	timedOutAt(deadline: AbortSignal): void {
+		if (this.deadlineWatch?.deadline === deadline) {
+			this.deadlineWatch.onReached();
+		}
+	}
+
+	track(operation: string, call: Promise<unknown>): void {
+		const entry = { operation, startedAt: Date.now() };
+		const remove = (): void => {
+			this.pending.delete(entry);
+		};
+
+		this.pending.add(entry);
+		void call.then(remove).catch(remove);
+	}
+
+	snapshot(now: number): PendingSubrequestRecord[] {
+		return [...this.pending].map(({ operation, startedAt }) => ({
+			operation,
+			elapsedMs: now - startedAt
+		}));
+	}
+
+	/**
+	Runs `body` and tracks each bounded subrequest that `body` starts.
+	*/
+	run<T>(body: () => Promise<T>): Promise<T> {
+		return sectionScope.run(this, body);
+	}
+}
+
+const sectionScope = new AsyncLocalStorage<SectionSubrequests>();
+
 /**
 Bounds one subrequest by the remaining scope budget and `capMs`. Uploads
 pass an infinite cap, so this layer limits them only inside a deadline
@@ -184,6 +255,7 @@ export async function boundedSubrequest<T>(
 	const execute = (): Promise<T> => {
 		logger.trace('storage request started', fields);
 		const pending = operation();
+		sectionScope.getStore()?.track(subrequest, pending);
 		void recordLateCompletion(pending);
 
 		return pending;
@@ -193,6 +265,11 @@ export async function boundedSubrequest<T>(
 		const result = await (Number.isFinite(ms)
 			? withDeadline(execute, ms, (abandoned) => {
 					completion.hasTimedOut = true;
+
+					if (deadline !== undefined && remaining <= capMs) {
+						sectionScope.getStore()?.timedOutAt(deadline.signal);
+					}
+
 					return new SubrequestTimeoutError(subrequest, abandoned);
 				})
 			: execute());

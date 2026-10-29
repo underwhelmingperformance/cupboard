@@ -61,8 +61,9 @@ import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
 import { boundedBlobs, boundedD1 } from './bounded-io.ts';
+import { observeCriticalSection } from './critical-section-telemetry.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
-import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
+import { criticalSectionBudgetMs } from './deadline.ts';
 import { boundedSubrequest } from './deadline.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
@@ -167,6 +168,7 @@ export type MaterialiseOutcome =
 export class ServerContext {
 	private presigner: R2Presigner | undefined;
 	private credentialIssuer: PushCredentialIssuer | undefined;
+	private readonly enterSpan: typeof withSpan | undefined;
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
 	// One gate per object, so every service uses the same reading of the schema
@@ -192,9 +194,10 @@ export class ServerContext {
 	constructor(
 		ctx: DurableObjectState,
 		env: RuntimeEnv,
-		observeRead?: typeof withSpan
+		enterSpan?: typeof withSpan
 	) {
 		this.ctx = ctx;
+		this.enterSpan = enterSpan;
 		// Bound all storage subrequests before a service can use them. Otherwise a
 		// stalled request inside the input gate can force the runtime to reset the
 		// Durable Object after about 30 seconds.
@@ -202,7 +205,7 @@ export class ServerContext {
 		// These wrappers reach only the bindings this object holds. Worker code
 		// reaches D1 and R2 through `boundedWorkerEnv`, which also counts their
 		// terminal calls. The row meter applies only to Durable Object storage.
-		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS, observeRead) };
+		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS, enterSpan) };
 		this.discovery = new OidcDiscoveryStore({
 			canUseLoopbackHttp: canUseLoopbackHttp(env)
 		});
@@ -230,7 +233,10 @@ export class ServerContext {
 				try {
 					return {
 						ok: true,
-						value: await withDeadlineBudget(this.gateBudgetMs, run)
+						value: await observeCriticalSection(run, {
+							budgetMs: this.gateBudgetMs,
+							withSpan: this.enterSpan
+						})
 					};
 				} catch (error) {
 					return { ok: false, error };

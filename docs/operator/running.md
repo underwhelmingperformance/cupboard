@@ -322,6 +322,30 @@ stall.
 
 [r2-errors]: https://developers.cloudflare.com/r2/api/error-codes/
 
+### Durable Object resets
+
+A tenant's Durable Object runs some steps in a critical section, which keeps
+other requests to the object waiting. If one section runs for about 30 seconds,
+the runtime resets the object and fails every request in progress, with the
+error
+`A call to blockConcurrencyWhile() in a Durable Object waited for too long`. The
+server gives each section a 25-second budget.
+
+Each section opens a `critical-section` span with a `label` attribute. The label
+is the RPC method, request or maintenance pass that entered the section, such as
+`record-verifications` or `attestation-inheritance`. A reset section never
+finishes, and the runtime force-closes its span with the warning
+`span_not_ended`. When a section reaches its budget, the tenant Worker logs a
+`critical section over budget` warning with the `label`, `budgetMs`, `elapsedMs`
+and `pendingSubrequests`. The list contains each unfinished D1, R2 or
+cache-purge call of the section, with its `operation`, such as `d1.batch` or
+`r2.delete`, and its `elapsedMs`. A call stays in the list after its own
+deadline ends, until the binding returns. The span records the same facts in its
+`overBudget`, `budgetMs`, `elapsedMs` and `pendingSubrequests` attributes, the
+last as a JSON array. A section that finishes within its budget writes no log
+record. Neither does a section that an enclosing, shorter deadline stops, such
+as the remaining budget of a verification RPC.
+
 ### Maintenance failures
 
 When a tenant's maintenance or removal fails, the failure is recorded in the D1
