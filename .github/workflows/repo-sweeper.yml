@@ -1,0 +1,43 @@
+name: anthropic-wif-test
+
+on: push
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  call-claude:
+    name: Claude Repo Sweeper
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # Anthropic authentication is via workload identity federation
+      contents: read
+
+    steps:
+      - name: Fetch GitHub OIDC token
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const token = await core.getIDToken('https//api.anthropic.com');
+            core.setSecret(token);
+            core.exportVariable('JWT', token);
+
+      - name: Exchange for an Anthropic access token
+        run: |
+          curl -sS https://api.anthropic.com/v1/oauth/token \
+            -H "content-type: application/json" \
+            --data @- <<JSON | jq 'with_entries(if (.key | test("token$")) then .value = "<redacted>" else . end)'
+          {
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": "$JWT",
+            "federation_rule_id": "fdrl_0163BLjA8XWgcPViwc3BkvJW",
+            "organization_id": "05a1fe43-268f-495f-8822-d0372999f765",
+            "service_account_id": "svac_01DuxLCK4wFYsWvk7qRVqUBq",
+            "workspace_id": "wrkspc_015mCaBjTyK9gkqTAqGzboC8"
+          }
+          JSON
