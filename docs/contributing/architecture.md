@@ -548,7 +548,9 @@ steps:
    `CachedTenantReads` through the service binding. The request includes the
    cache generation and read revision that admission found. `CachedTenantReads`
    serves the read through the Workers Cache, and tags each narinfo so that
-   exactly that narinfo can be purged later.
+   exactly that narinfo can be purged later. A GET for a range of a NAR that
+   starts after byte 0 is the exception: the control Worker serves it from R2,
+   as described below.
 5. A narinfo is the R2 object at the tenant's narinfo key. An origin read checks
    the committed reference in D1 for both public and authenticated caches before
    fetching the object from R2. The check excludes references revoked by path
@@ -562,6 +564,49 @@ steps:
 
 Public NARs are cached for a year, marked as immutable. Public narinfos are
 cached for an hour, with `must-revalidate`.
+
+NAR responses send `Accept-Ranges: bytes`. When the origin serves a GET with a
+single byte range, it answers with a 206 and `Content-Range`. The origin is the
+control Worker for private caches, reuse views and resumed public downloads, and
+the tenant Worker for other public reads. Nix sends such a range to resume an
+interrupted download. An unsatisfiable range receives a 416 with
+`Content-Range: bytes */<size>` and `Cache-Control: no-store`. The response is
+the whole NAR when the request has several ranges or a malformed `Range` header.
+RFC 9110 permits a server to ignore `Range` in both cases. It requires the whole
+NAR when an `If-Range` doesn't match the ETag. A HEAD request ignores `Range`.
+
+An open-ended range that starts exactly at the end of the NAR, such as
+`bytes=<size>-`, also receives the whole NAR. Nix sends that range when a
+transfer fails after its last byte has arrived. libcurl then completes the
+download on a full 200 whose `Content-Length` equals the resume offset, but Nix
+2.34 fails it on a 416. A bounded range that starts at the end receives a 416.
+
+The control Worker sends a public range that starts at byte 0, and a suffix
+range, through Workers Cache to the tenant Worker. The answer depends on the
+cache:
+
+- On a miss, Workers Cache passes the request to the tenant Worker, which
+  answers with a 206. Workers Cache does not store a 206.
+- On a hit, Workers Cache can return the whole stored 200. A deployment did this
+  for every ranged request sent to it through the service binding.
+- On a hit, Workers Cache can also slice the stored response into a 206, as the
+  Cloudflare documentation describes.
+
+Each of these answers is correct for such a range. The `bytes=0-0` probe that
+released CLIs send for `requirePublicNar` accepts both the whole 200 and the
+one-byte 206.
+
+A resumed download always requests a range that starts after byte 0, and libcurl
+fails the resume on a whole 200 unless its `Content-Length` equals the resume
+offset. The control Worker therefore serves such a range from a public cache
+itself, from R2, after the same reference check. An error from that path is
+`no-store`, as it is from the tenant Worker. These ranges are not cached, so
+every request in a resumed or segmented public download costs a D1 reference
+query, an R2 `head` call and a ranged R2 `get`.
+
+When the control Worker relays a full NAR response from Workers Cache, it adds
+`Accept-Ranges: bytes` if the response lacks it. Responses stored by an earlier
+release lack the header and stay fresh for a year.
 
 Public narinfo and NAR reads, and private reads authenticated by static
 credentials, do not wake the tenant's Durable Object. Token-authenticated
