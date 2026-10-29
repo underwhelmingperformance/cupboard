@@ -25,6 +25,7 @@ import { StatusCodes } from 'http-status-codes';
 import { decodeJwt } from 'jose';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { PushCredentialIssuer } from '../blob/push-credential.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
@@ -820,12 +821,13 @@ async function plannedEntries(
 	token: string,
 	planPath: string,
 	paths: readonly UploadPathNegotiation[],
-	attachRoot?: PublicationEntry['attachRoot']
+	attachRoot?: PublicationEntry['attachRoot'],
+	pushId = testPushId
 ): Promise<PublicationEntry[]> {
 	const response = await authorisedFetch(planPath, token, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ pushId: testPushId, paths, attachRoot })
+		body: JSON.stringify({ pushId, paths, attachRoot })
 	});
 	const plan = uploadPlanResponseSchema.parse(await response.json());
 	return paths.map((metadata, index) => {
@@ -2587,6 +2589,110 @@ it('reports expired uploads as work and reads the same rows whatever the expired
 		hasPending: large.hasPending,
 		rowsRead: large.rowsRead
 	}).toStrictEqual({ hasPending: true, rowsRead: small.rowsRead });
+});
+
+it('refuses a repair whose push expires before admission records it', async () => {
+	vi.setSystemTime(vi.getRealSystemTime());
+	await resetTestServer();
+	const token = await initialise();
+	const expiresAt = Math.floor(Date.now() / 1000) + 60;
+	const pushId = await testPushIdFor(fixtureTenant, 3, expiresAt);
+	const nar = await verifiableNar('publication-late-repair');
+	const path = uploadPathNegotiation(
+		uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize
+		})
+	);
+	const [entry] = await plannedEntries(
+		token,
+		'/uploads/plan',
+		[path],
+		undefined,
+		pushId
+	);
+	if (entry === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	await putNarBytes(
+		publicationStagingKey(fixtureTenant, pushId, entry.operationId),
+		nar
+	);
+	const request = {
+		op: 'publish-batch' as const,
+		pushId,
+		entries: [
+			{
+				...entry,
+				blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+			}
+		]
+	};
+	const first = await openCommitSession(token, undefined, publicationSession);
+	try {
+		first.send(request);
+		expect([await first.nextFrame(), await first.nextFrame()]).toStrictEqual([
+			{ ev: 'publication-accepted', uploadId: entry.operationId },
+			{
+				ev: 'deferred',
+				uploadId: entry.operationId,
+				storePathHash: path.storePathHash,
+				narHash: path.narHash,
+				grace: {}
+			}
+		]);
+	} finally {
+		first.socket.close();
+	}
+	await commitUpload(token, entry.operationId);
+	await deletePath(token, path.storePathHash);
+	const replay = await openCommitSession(token, undefined, publicationSession);
+	// Admission checks the push ID's expiry before its transaction. Let the push
+	// expire between that check and the transaction, and record the push ID
+	// checks that ran before the transaction.
+	const isPushIdVerified = vi.spyOn(PushCredentialIssuer.prototype, 'verify');
+	let checksBeforeTransaction = 0;
+	const gate = await runInDurableObject(currentServer(), (instance) => {
+		const { db } = instance.context;
+		const transaction = db.transaction.bind(db);
+		return Promise.resolve(
+			vi.spyOn(db, 'transaction').mockImplementationOnce((run) => {
+				checksBeforeTransaction = isPushIdVerified.mock.calls.length;
+				vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+				return transaction(run);
+			})
+		);
+	});
+	try {
+		replay.send(request);
+		const refused = refusalFacts(await replay.nextFrame());
+		const after = await snapshot();
+		expect({
+			pushIdChecks: isPushIdVerified.mock.settledResults
+				.slice(0, checksBeforeTransaction)
+				.map((result) => result.type === 'fulfilled' && result.value),
+			transactions: gate.mock.calls.length,
+			refused,
+			pending: after.pending
+		}).toStrictEqual({
+			pushIdChecks: [true],
+			transactions: 1,
+			refused: {
+				ev: 'publication-refused',
+				uploadId: entry.operationId,
+				reason: 'push-expired',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				hasMessage: true
+			},
+			pending: []
+		});
+	} finally {
+		gate.mockRestore();
+		isPushIdVerified.mockRestore();
+		replay.socket.close();
+	}
 });
 
 it('claims a live upload behind more than one window of expired uploads that expiry cannot remove', async () => {
