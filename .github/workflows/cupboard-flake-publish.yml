@@ -298,6 +298,14 @@ on:
         required: false
         default: ''
         type: string
+      diagnostics-artifact:
+        description:
+          Upload each job's diagnostic logs as an artifact that expires after
+          five days. Anyone who can read the repository can download the
+          artifact. Set to false to skip the upload.
+        required: false
+        default: true
+        type: boolean
     secrets:
       builder_ssh_key:
         description: SSH private key for the remote builders.
@@ -362,6 +370,9 @@ on:
         required: false
 
 permissions: {}
+
+env:
+  CUPBOARD_DIAGNOSTICS_ARTIFACT: ${{ inputs.diagnostics-artifact }}
 
 jobs:
   # Resolve cupboard, the cache, root prefix, TTL, and reference source once. Every

@@ -23,6 +23,7 @@ This page covers how to:
 - [choose the cupboard version](#selecting-the-cupboard-version);
 - [check that a manifest builds without publishing](#building-without-publishing);
 - [make better use of runner disk space](#making-the-most-of-the-runners);
+- [turn off the diagnostic log artifact](#diagnostic-logs);
 - [upgrade cupboard, add targets and add repositories](#common-tasks).
 
 ## Choosing where to publish
@@ -553,6 +554,17 @@ where supported. The monitor also reports disk space and the processes with the
 largest resident memory use. Resource samples are collected at five-second
 intervals, and monitoring stops when evaluation finishes. Normal runs do not
 collect these diagnostics. Monitor failures do not fail the evaluation.
+
+## Diagnostic logs
+
+Each job uploads the diagnostic logs of its cupboard actions and CLI commands as
+an artifact with the `cupboard-diagnostics-` prefix. The artifact expires after
+five days, or sooner if the repository's artifact retention is shorter. Anyone
+who can read the repository can download it. Set `diagnostics-artifact: false`
+to turn the upload off. See [Logs][logs] for the contents of the logs and the
+logger's redaction rules.
+
+[logs]: ../operator/running.md#logs
 
 ## Common tasks
 

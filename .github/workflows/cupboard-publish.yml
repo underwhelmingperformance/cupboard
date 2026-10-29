@@ -136,9 +136,20 @@ on:
           If there is no such release, it builds cupboard from that commit.
         required: false
         type: string
+      diagnostics-artifact:
+        description:
+          Upload each job's diagnostic logs as an artifact that expires after
+          five days. Anyone who can read the repository can download the
+          artifact. Set to false to skip the upload.
+        required: false
+        default: true
+        type: boolean
 
 # The caller grants the job permissions; nothing runs at workflow scope.
 permissions: {}
+
+env:
+  CUPBOARD_DIAGNOSTICS_ARTIFACT: ${{ inputs.diagnostics-artifact }}
 
 jobs:
   configure:

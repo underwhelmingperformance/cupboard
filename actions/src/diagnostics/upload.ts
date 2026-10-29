@@ -7,8 +7,40 @@ import { configureLogging, rootLogger } from '@cupboard/logger';
 
 import { diagnosticsOwnerState } from './logging.ts';
 
+const uploadChoiceKey = 'CUPBOARD_DIAGNOSTICS_ARTIFACT';
+const maximumRetentionDays = 5;
+
+/**
+Returns five days, or the repository's artifact retention from
+`GITHUB_RETENTION_DAYS` when that is shorter. The artifact client applies a
+shorter repository setting itself, but it also emits a warning annotation, so
+the shorter value is passed here.
+*/
+function artifactRetentionDays(): number {
+	const repositoryDays = Math.trunc(
+		Number(process.env.GITHUB_RETENTION_DAYS ?? '')
+	);
+
+	if (
+		Number.isNaN(repositoryDays) ||
+		repositoryDays <= 0 ||
+		repositoryDays >= maximumRetentionDays
+	) {
+		return maximumRetentionDays;
+	}
+
+	rootLogger().debug('using the repository artifact retention', {
+		retentionDays: repositoryDays
+	});
+
+	return repositoryDays;
+}
+
 /**
 Uploads once from the first action's post step, after later post steps finish.
+The upload happens when `CUPBOARD_DIAGNOSTICS_ARTIFACT` is unset or `true`.
+`false` turns it off. Any other value, including an empty one, also skips the
+upload, with a warning.
 */
 export async function uploadDiagnostics(): Promise<void> {
 	configureLogging();
@@ -16,6 +48,20 @@ export async function uploadDiagnostics(): Promise<void> {
 	const directory = getState(diagnosticsOwnerState);
 
 	if (directory === '') {
+		return;
+	}
+
+	const choice = process.env[uploadChoiceKey];
+
+	if (choice === 'false') {
+		rootLogger().info('diagnostic artifact upload is turned off');
+		return;
+	}
+
+	if (choice !== undefined && choice !== 'true') {
+		rootLogger().warn(
+			`not uploading diagnostic logs: ${uploadChoiceKey} must be true or false`
+		);
 		return;
 	}
 
@@ -35,7 +81,7 @@ export async function uploadDiagnostics(): Promise<void> {
 			artifactName,
 			files,
 			directory,
-			{ compressionLevel: 0 }
+			{ compressionLevel: 0, retentionDays: artifactRetentionDays() }
 		);
 	} catch (error) {
 		rootLogger().warn('could not upload diagnostic logs', { error });

@@ -112,10 +112,54 @@ abruptly terminated process can leave an incomplete final frame or record.
 Cupboard's GitHub Actions enable the same file logger automatically. Each
 process writes a separate file in the job's shared diagnostic directory. The
 first action uploads the directory from its post step after the other post steps
-finish. Artifacts use the `cupboard-diagnostics-` prefix and the repository's
-retention setting. Older CLIs that reject `--log-file` run without CLI file
-logging; the action's own logs remain available. An upload failure produces a
-warning and does not replace the command's result.
+finish. Artifacts use the `cupboard-diagnostics-` prefix and expire after five
+days, or sooner if the repository's artifact retention is shorter. Anyone who
+can read the repository can download them. Older CLIs that reject `--log-file`
+run without CLI file logging; the action's own logs remain available. An upload
+failure produces a warning and does not replace the command's result.
+
+To turn the upload off, set the reusable workflow's `diagnostics-artifact` input
+to `false`. A job that uses the actions directly sets
+`CUPBOARD_DIAGNOSTICS_ARTIFACT: false` in the job's `env` instead. The first
+action's post step reads the variable, and a later step's `env` doesn't reach
+it. Any value other than `true` or `false`, including an empty one, also turns
+the upload off, with a warning.
+
+Before the logger writes a record, it redacts credentials. The credential words
+are `passcode`, `passphrase`, `password`, `secret`, `token`, `credential`,
+`signature`, `authorization`, `cookie`, `privatekey`, or `private` and `key`
+with one character between them, compared without regard to case. The logger
+applies these rules:
+
+- It replaces the value of a field whose name contains a credential word, and of
+  a field named `body`, `requestBody`, `responseBody`, `headers`, `api-key`,
+  `api_key` or `apikey`.
+- In an argument list, such as the arguments of a command that could not start,
+  it replaces the element after a credential option and the value of a
+  `--option=value` element. A credential option's name contains a credential
+  word, `api-key`, `api_key` or `apikey`.
+- In text, it replaces the rest of the line after an `Authorization`,
+  `Proxy-Authorization`, `Cookie` or `Set-Cookie` header name and its colon or
+  equals sign.
+- An `http` or `https` URL and the rest of its line become the URL's origin and
+  path, or only its origin when the path contains a space, a quotation mark or
+  an angle bracket. Text that does not parse as a URL becomes `[redacted URL]`.
+- It replaces the value after a key that contains a credential word, `api-key`,
+  `api_key` or `apikey`, followed by a colon or an equals sign, as in
+  `token=value` or `"password": "value"`. It also replaces the value after a
+  credential option and whitespace, as in `--read-password value`. A quoted
+  value is replaced up to its closing quotation mark, or to the end of the text
+  when it has none. An unquoted value ends at whitespace, and a key's value also
+  ends at a comma, a semicolon or `}`.
+- It replaces the credentials after `Basic` and `Bearer`, GitHub tokens with the
+  `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_` prefix and at least 20
+  more characters, and JSON Web Tokens.
+- It reads at most 8192 characters of a string and keeps at most 4096. A JSON
+  Web Token that starts in the kept text but continues past the 8192 characters
+  is replaced as well. A string that is cut ends with `[truncated]`.
+
+A secret in another format can remain in the logs. The actions don't put read
+passwords or GitHub tokens on a command line.
 
 Public requests receive a fresh `x-request-id` before authentication and
 routing. Client HTTP and WebSocket logs record this response header and

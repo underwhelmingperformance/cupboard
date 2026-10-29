@@ -117,6 +117,7 @@ const jobsSchema = z.record(z.string(), jobSchema);
 const workflowSchema = z.looseObject({
 	name: z.string(),
 	on: triggersSchema,
+	env: scalarMapSchema.optional(),
 	jobs: jobsSchema,
 	concurrency: z
 		.strictObject({
@@ -220,6 +221,26 @@ const reusableWorkflows = [
 	{ name: 'flake publish', file: flakeWorkflow, entryJob: 'configure' },
 	{ name: 'publish', file: publishWorkflow, entryJob: 'configure' }
 ];
+
+describe('diagnostic artifacts', () => {
+	it.each(reusableWorkflows)(
+		'lets a caller of the $name workflow turn off the diagnostic artifact',
+		async ({ file }) => {
+			const workflow = await loadWorkflow(file);
+			const input = workflow.on.workflow_call?.inputs['diagnostics-artifact'];
+
+			expect({
+				type: input?.type,
+				default: input?.default,
+				environment: workflow.env?.CUPBOARD_DIAGNOSTICS_ARTIFACT
+			}).toStrictEqual({
+				type: 'boolean',
+				default: true,
+				environment: '${{ inputs.diagnostics-artifact }}'
+			});
+		}
+	);
+});
 
 it('passes additional runner cache reads to setup in every flake build job', async () => {
 	const workflow = await loadWorkflow(flakeWorkflow);
