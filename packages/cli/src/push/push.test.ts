@@ -2047,117 +2047,162 @@ describe('runPush', () => {
 		});
 	});
 
-	it('re-negotiates in the wait phase when deferred verification reports the path absent', async () => {
-		let negotiations = 0;
-		const uploadedKeys: string[] = [];
-		const commitAttempts: string[] = [];
-		const payloads: ResultPayload[] = [];
-		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
+	it.each(['matching', 'different'] as const)(
+		're-negotiates in the wait phase when deferred verification reports the path absent and the cache serves a %s copy',
+		async (copy) => {
+			const winner = copy === 'matching' ? appDigest : digest(9, 999);
+			let negotiations = 0;
+			const uploadedKeys: string[] = [];
+			const commitAttempts: string[] = [];
+			const payloads: ResultPayload[] = [];
+			const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
-		// The acknowledgement succeeds before `settled` rejects with `absent`, so
-		// only the wait phase can recover the path. Attach an assertion immediately
-		// to keep the rejection handled until that phase awaits it.
-		const absentVerdict = Promise.reject(
-			new UploadVerificationFailedError('upload-defer', 'absent')
-		);
-		const absentObserved = expect(absentVerdict).rejects.toBeInstanceOf(
-			UploadVerificationFailedError
-		);
+			// The acknowledgement succeeds before `settled` rejects with `absent`, so
+			// only the wait phase can recover the path. Attach an assertion immediately
+			// to keep the rejection handled until that phase awaits it.
+			const absentVerdict = Promise.reject(
+				new UploadVerificationFailedError('upload-defer', 'absent')
+			);
+			const absentObserved = expect(absentVerdict).rejects.toBeInstanceOf(
+				UploadVerificationFailedError
+			);
 
-		await runPush(publication([appPath]), reporter([], [], payloads), {
-			command: 'cupboard push',
-			credential: 'cupboard-login',
-			client: {
-				preview: unexpectedPreviewCall,
-				negotiate() {
-					negotiations += 1;
+			const receipt = await runPush(
+				publication([appPath]),
+				reporter([], [], payloads),
+				{
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					buildStore: 'auto',
+					client: {
+						preview: unexpectedPreviewCall,
+						negotiate() {
+							negotiations += 1;
 
-					// The replacement negotiation finds the path already in the cache,
-					// so recovery requires no upload.
-					if (negotiations === 1) {
-						return Promise.resolve(
-							uploadNegotiateResponseSchema.parse({
-								uploads: [
+							// The replacement negotiation finds the path already in the cache,
+							// so recovery requires no upload.
+							if (negotiations === 1) {
+								return Promise.resolve(
+									uploadNegotiateResponseSchema.parse({
+										uploads: [
+											{
+												action: 'upload',
+												storePathHash: StorePath.hash(appPath),
+												narHash: appDigest.narHash.toString(),
+												uploadId: 'upload-defer',
+												r2Key,
+												expiresAt: '2026-05-18T12:00:00.000Z'
+											}
+										]
+									})
+								);
+							}
+
+							return Promise.resolve(
+								uploadNegotiateResponseSchema.parse({
+									uploads: [
+										{
+											action: 'skip',
+											storePathHash: StorePath.hash(appPath),
+											narHash: winner.narHash.toString()
+										}
+									]
+								})
+							);
+						},
+						async uploadNar(key, body) {
+							await collectReadableStream(body);
+							uploadedKeys.push(key);
+						},
+						commit(target) {
+							commitAttempts.push(target.uploadId);
+
+							return Promise.resolve({
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.value,
+								status: 'pending' as const,
+								settled: absentVerdict
+							});
+						},
+						setRoot: (name, body) =>
+							Promise.resolve(rootSummary({ name, ...body }))
+					} satisfies PushClient,
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+					createNarArchive: () => new FakeNarArchive(appDigest),
+					compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+				}
+			);
+
+			// The replacement negotiation found the path in the cache, so the push
+			// succeeds without a verification failure.
+			expect({
+				negotiations,
+				uploadedKeys,
+				commitAttempts,
+				receipt,
+				divergence: payloads
+					.filter((payload) => payload.kind === 'divergence-summary')
+					.map((payload) => payload.data),
+				summary: payloads.find((payload) => payload.kind === 'push-summary')
+					?.data
+			}).toStrictEqual({
+				negotiations: 2,
+				uploadedKeys: [r2Key],
+				commitAttempts: ['upload-defer'],
+				receipt: {
+					version: 3,
+					paths: [appPath],
+					subjects:
+						copy === 'matching'
+							? [
 									{
-										action: 'upload',
-										storePathHash: StorePath.hash(appPath),
-										narHash: appDigest.narHash.toString(),
-										uploadId: 'upload-defer',
-										r2Key,
-										expiresAt: '2026-05-18T12:00:00.000Z'
+										origin: 'store-held',
+										storePath: appPath,
+										narHash: appDigest.narHash.digestHex(),
+										buildStore: 'auto'
 									}
 								]
-							})
-						);
-					}
-
-					return Promise.resolve(
-						uploadNegotiateResponseSchema.parse({
-							uploads: [
+							: [],
+					uploaded: []
+				},
+				divergence:
+					copy === 'matching'
+						? []
+						: [
 								{
-									action: 'skip',
-									storePathHash: StorePath.hash(appPath),
-									narHash: appDigest.narHash.toString()
+									diverged: [
+										{
+											storePath: appPath,
+											localNarHash: appDigest.narHash.toString(),
+											cacheNarHash: winner.narHash.toString()
+										}
+									]
 								}
-							]
+							],
+				summary: {
+					uploadedPaths: 1,
+					reusedBlobs: 0,
+					skipped: 1,
+					uploadedBytes: 14,
+					failures: [],
+					roots: [
+						rootSummary({
+							name: `pin:${StorePath.hash(appPath)}`,
+							targets: [appPath]
 						})
-					);
-				},
-				async uploadNar(key, body) {
-					await collectReadableStream(body);
-					uploadedKeys.push(key);
-				},
-				commit(target) {
-					commitAttempts.push(target.uploadId);
-
-					return Promise.resolve({
-						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.value,
-						status: 'pending' as const,
-						settled: absentVerdict
-					});
-				},
-				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
-			} satisfies PushClient,
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
-		});
-
-		// The replacement negotiation found the path in the cache, so the push
-		// succeeds without a verification failure.
-		expect({
-			negotiations,
-			uploadedKeys,
-			commitAttempts,
-			summary: payloads.at(-1)?.data
-		}).toStrictEqual({
-			negotiations: 2,
-			uploadedKeys: [r2Key],
-			commitAttempts: ['upload-defer'],
-			summary: {
-				uploadedPaths: 1,
-				reusedBlobs: 0,
-				skipped: 1,
-				uploadedBytes: 14,
-				failures: [],
-				roots: [
-					rootSummary({
-						name: `pin:${StorePath.hash(appPath)}`,
-						targets: [appPath]
-					})
-				],
-				paths: [
-					{
-						storePathHash: StorePath.hash(appPath),
-						storePath: appPath,
-						outcome: 'already-present'
-					}
-				]
-			}
-		});
-		await absentObserved;
-	});
+					],
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							outcome: 'already-present'
+						}
+					]
+				}
+			});
+			await absentObserved;
+		}
+	);
 
 	it('with --dry-run, previews without negotiating, uploading or committing', async () => {
 		const results: ResultRow[][] = [];
@@ -6208,7 +6253,8 @@ function receiptPush(
 		PushDependencies,
 		'buildStore' | 'alreadyHeld' | 'claimable' | 'copiedFrom'
 	>,
-	action: 'upload' | 'commit' | 'skip' = 'upload'
+	action: 'upload' | 'commit' | 'skip' = 'upload',
+	cacheNarHash?: NixSha256Hash
 ): Promise<BuildReceiptV3 | undefined> {
 	return runPush(publication([appPath], [runtimePath]), reporter([]), {
 		command: 'cupboard push',
@@ -6223,7 +6269,10 @@ function receiptPush(
 							{
 								action,
 								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
+								narHash:
+									action === 'skip' && cacheNarHash !== undefined
+										? cacheNarHash.toString()
+										: appDigest.narHash.toString(),
 								...(action !== 'skip' && { uploadId: 'upload-app' }),
 								...(action === 'upload' && {
 									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
@@ -6244,7 +6293,16 @@ function receiptPush(
 				}
 				return Promise.resolve();
 			},
-			commit: () => Promise.resolve(fallbackCommitResponse()),
+			commit: () =>
+				Promise.resolve(
+					cacheNarHash === undefined
+						? fallbackCommitResponse()
+						: {
+								...fallbackCommitResponse(),
+								narHash: cacheNarHash.value,
+								status: 'already-present' as const
+							}
+				),
 			setRoot: unexpectedSetRootCall
 		} satisfies PushClient,
 		nix: nixStore({
@@ -6316,6 +6374,25 @@ describe('the build receipt a push writes', () => {
 					runtimeSubject
 				],
 				uploaded
+			});
+		}
+	);
+
+	it.each(['skip', 'commit'] as const)(
+		'lists a path that the cache serves with different contents without a subject after a %s decision',
+		async (action) => {
+			const receipt = await receiptPush(
+				pathInfo(appPath, appDigest, [], appDrv),
+				{ buildStore },
+				action,
+				digest(9, 999).narHash
+			);
+
+			expect(receipt).toStrictEqual({
+				version: 3,
+				paths: [appPath, runtimePath],
+				subjects: [runtimeSubject],
+				uploaded: []
 			});
 		}
 	);
@@ -6514,6 +6591,54 @@ describe('the build receipt a push writes', () => {
 					}
 				],
 				uploaded
+			});
+		}
+	);
+
+	it.each([
+		{ name: 'a build receipt', claims: { buildStore, claimable: [] } },
+		{ name: 'a reference receipt', claims: { referenceReceipt: true } }
+	])(
+		'lists a reference path that the cache serves with different contents without a subject in $name',
+		async ({ claims }) => {
+			const receipt = await runPush(
+				PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
+				reporter([]),
+				{
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					retain: false,
+					...claims,
+					referenceSource: {
+						url: new URL('https://cache.example.workers.dev/t/acme')
+					},
+					fetchReferenceMetadata: () => Promise.resolve(referenceMetadata()),
+					client: {
+						preview: unexpectedPreviewCall,
+						negotiate: () =>
+							Promise.resolve(
+								uploadNegotiateResponseSchema.parse({
+									uploads: [
+										{
+											action: 'skip',
+											storePathHash: StorePath.hash(appPath),
+											narHash: digest(9, 999).narHash.toString()
+										}
+									]
+								})
+							),
+						uploadNar: unexpectedUploadNarCall,
+						commit: unexpectedCommitCall,
+						setRoot: unexpectedSetRootCall
+					} satisfies PushClient
+				}
+			);
+
+			expect(receipt).toStrictEqual({
+				version: 3,
+				paths: [appPath],
+				subjects: [],
+				uploaded: []
 			});
 		}
 	);

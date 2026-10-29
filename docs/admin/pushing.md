@@ -290,9 +290,9 @@ divergence. Publication compares only the NAR hashes. It doesn't establish that
 the two copies are interchangeable: an output that was built against the local
 copy can depend on contents that differ in the cache's copy. The path joins the
 run root, and a target joins its root, in the same way as a path that the cache
-already had. The `build-push` receipt lists the path without a subject, because
-the cache serves contents that the local store didn't produce.
-[Attestation][attestation] therefore doesn't sign it.
+already had. The receipt lists the path without a subject, because the cache
+serves contents that the local store didn't produce. [Attestation][attestation]
+therefore doesn't sign it.
 
 [attestation]: ../ci/attestation.md
 
