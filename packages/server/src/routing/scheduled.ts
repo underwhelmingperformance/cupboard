@@ -7,6 +7,7 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import type { UploadId } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	and,
@@ -74,7 +75,11 @@ import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { withOperationCost } from '../do/operation-cost.ts';
 import { logPromotionAttemptFailed } from '../do/promotion-record.ts';
-import type { VerificationRecordRpcResult } from '../do/server.ts';
+import type {
+	CupboardServer,
+	VerificationClaimRpcResult,
+	VerificationRecordRpcResult
+} from '../do/server.ts';
 import {
 	holdSubrequests,
 	type SubrequestHold
@@ -105,6 +110,10 @@ import {
 import { logMethodFinished } from '../observability/logging.ts';
 import { queueSendBatchSize } from '../policy/queues.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
+import {
+	isDurableObjectCallRetryable,
+	isDurableObjectOverloaded
+} from '../runtime-fault.ts';
 
 import { tenantServer } from './durable-object.ts';
 
@@ -1003,10 +1012,29 @@ function migrateCacheCatalogue(env: Env, id: TenantId): Promise<void> {
 // one verification decode while the other waits for R2.
 const verifyDecodeConcurrency = 2;
 
-// Retry briefly while claim leases are still valid, then fail the queue message
-// so it can be redelivered.
-const recordAttempts = 3;
-const recordRetryDelayMs = 500;
+/**
+The delays between attempts to record verdicts. A claim renewal uses only
+`restart`.
+
+`restart` applies after a fault that {@link isDurableObjectCallRetryable}
+accepts. Its waits total 30 seconds, which covers the restart of a reset
+object. `other` applies after any other failure. After an overload, the
+recorder sends no further call in the pass.
+
+Each schedule counts its own attempts during a run of consecutive failures,
+and a recorded batch starts a new run. Once a schedule is spent, a later
+failure of that kind gets no retry until a batch is recorded.
+*/
+export interface RecordRetrySchedule {
+	readonly restart: readonly number[];
+	readonly other: readonly number[];
+}
+
+export const recordRetrySchedule: RecordRetrySchedule = {
+	restart: [1000, 2000, 4000, 8000, 15_000],
+	other: [500, 500]
+};
+
 const verificationCleanupMarginMs = 1000;
 
 class VerificationPassDeadline {
@@ -1061,82 +1089,126 @@ async function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 	}
 }
 
+type RecordFailure = 'restart' | 'overloaded' | 'other';
+
+function recordFailure(error: unknown): RecordFailure {
+	if (isDurableObjectOverloaded(error)) {
+		return 'overloaded';
+	}
+
+	return isDurableObjectCallRetryable(error) ? 'restart' : 'other';
+}
+
 /**
 Records completed verdicts incrementally through one RPC at a time. Verdicts
-completed during an RPC form the next batch. A failed RPC keeps its batch at
-the front of the buffer and makes `finishRecording` reject so the queue can
-redeliver the idempotent writes.
+completed during an RPC form the next batch. When a batch fails after its
+retries, the next batch includes its verdicts. After an overload, the
+recorder sends nothing more. While a verdict remains unrecorded,
+`finishRecording` rejects so the queue can redeliver the message.
+
+The object can receive a verdict twice when a reply is lost. The second write
+is harmless: while the pass still owns the claim, the object stores the same
+verdict again; once the verdict has been applied, the pass no longer owns the
+claim and the object skips the verdict, and for a canonical object that the
+consumer wrote, it gives up only a version that is still pending for this
+pass, never a live one.
 */
 export class VerdictRecorder {
-	private buffer: VerificationResult[] = [];
+	private pending: VerificationResult[] = [];
+	private unrecorded: VerificationResult[] = [];
 	private flushing: Promise<void> | undefined;
 	private applied = 0;
 	private failure: { readonly error: unknown } | undefined;
+	private isOverloaded = false;
+	private failures = { restart: 0, other: 0 };
 
 	constructor(
 		private readonly logger: Logger,
 		private readonly record: (
 			results: readonly VerificationResult[]
 		) => Promise<number>,
-		private readonly attempts = recordAttempts,
-		private readonly retryDelayMs = recordRetryDelayMs,
+		private readonly retry = recordRetrySchedule,
 		private readonly signal?: AbortSignal
 	) {}
 
 	private async flush(): Promise<void> {
-		while (this.buffer.length > 0) {
-			const batch = this.buffer;
-			this.buffer = [];
+		while (this.pending.length > 0 && !this.isOverloaded) {
+			const batch = [...this.unrecorded, ...this.pending];
+			this.unrecorded = [];
+			this.pending = [];
 
 			try {
 				this.applied += await this.recordWithRetry(batch);
+				this.failure = undefined;
 			} catch (error) {
-				// Preserve order and stop flushing after a failure. The queue retry will
-				// redeliver the idempotent verdicts.
-				this.buffer = [...batch, ...this.buffer];
+				this.unrecorded = batch;
 				this.failure = { error };
-				break;
 			}
 		}
 
 		this.flushing = undefined;
 	}
 
+	/**
+	The wait before the next attempt after `failure`, or `undefined` when the
+	failure gets no retry.
+	*/
+	private retryDelay(failure: RecordFailure): number | undefined {
+		if (failure === 'overloaded') {
+			this.isOverloaded = true;
+
+			return undefined;
+		}
+
+		const delayMs = this.retry[failure].at(this.failures[failure]);
+		this.failures[failure] += 1;
+
+		return delayMs;
+	}
+
 	private async recordWithRetry(
 		batch: readonly VerificationResult[]
 	): Promise<number> {
-		let lastError: unknown;
-
-		for (let attempt = 0; attempt < this.attempts; attempt += 1) {
+		for (;;) {
 			this.signal?.throwIfAborted();
 
-			if (attempt > 0) {
-				await abortableDelay(this.retryDelayMs, this.signal);
-			}
-
 			try {
-				return await this.record(batch);
+				const applied = await this.record(batch);
+				this.failures = { restart: 0, other: 0 };
+
+				return applied;
 			} catch (error) {
-				lastError = error;
+				this.signal?.throwIfAborted();
+				const failure = recordFailure(error);
+				const delayMs = this.retryDelay(failure);
 				this.logger.warn('verification verdicts not recorded', {
 					kind: 'fresh',
 					count: batch.length,
-					attempt: attempt + 1,
-					reason: 'record-rpc-failed'
+					reason: 'record-rpc-failed',
+					failure,
+					retryDelayMs: delayMs
 				});
+
+				if (delayMs === undefined) {
+					throw error;
+				}
+
+				await abortableDelay(delayMs, this.signal);
 			}
 		}
-
-		throw lastError;
 	}
 
 	add(result: VerificationResult): void {
 		this.signal?.throwIfAborted();
-		this.buffer.push(result);
 
-		if (this.failure === undefined) {
-			this.flushing ??= this.flush();
+		if (this.isOverloaded) {
+			this.unrecorded = [...this.unrecorded, result];
+
+			return;
 		}
+
+		this.pending.push(result);
+		this.flushing ??= this.flush();
 	}
 
 	/**
@@ -1157,6 +1229,123 @@ export class VerdictRecorder {
 		this.signal?.throwIfAborted();
 
 		return this.applied;
+	}
+}
+
+/**
+Calls the tenant's Durable Object for one verification pass. Cloudflare
+documents that many exceptions leave a stub broken, so that every later call
+on it fails at once with the same exception. When a call rejects, the calls
+that follow therefore use a new stub.
+*/
+export class TenantObjectCalls {
+	private stub: DurableObjectStub<CupboardServer>;
+
+	constructor(
+		private readonly env: Env,
+		private readonly tenant: TenantId
+	) {
+		this.stub = tenantServer(env, tenant);
+	}
+
+	/**
+	Makes one call, and stops waiting for it when `signal` aborts.
+	*/
+	async call<T>(
+		signal: AbortSignal,
+		rpc: (server: DurableObjectStub<CupboardServer>) => PromiseLike<T>
+	): Promise<T> {
+		const stub = this.stub;
+
+		try {
+			return await raceVerificationOperation(
+				Promise.resolve(rpc(stub)),
+				signal
+			);
+		} catch (error) {
+			// A concurrent call can already have replaced the stub.
+			if (this.stub === stub) {
+				this.stub = tenantServer(this.env, this.tenant);
+			}
+
+			throw error;
+		}
+	}
+
+	/**
+	Makes one call like `call`, and repeats it after a fault that
+	{@link isDurableObjectCallRetryable} accepts, waiting `delays` between
+	attempts. Any other failure, and a fault after the last delay, rejects.
+	*/
+	async callRetryingResets<T>(
+		signal: AbortSignal,
+		delays: readonly number[],
+		rpc: (server: DurableObjectStub<CupboardServer>) => PromiseLike<T>
+	): Promise<T> {
+		for (let attempt = 0; ; attempt += 1) {
+			try {
+				return await this.call(signal, rpc);
+			} catch (error) {
+				const delayMs = isDurableObjectCallRetryable(error)
+					? delays.at(attempt)
+					: undefined;
+
+				if (delayMs === undefined) {
+					throw error;
+				}
+
+				await abortableDelay(delayMs, signal);
+			}
+		}
+	}
+}
+
+/**
+Waits for `pass`. If it rejects before the pass deadline, `release` gives up
+the claims that the pass has not recorded, and the rejection then propagates.
+*/
+async function releaseClaimsIfPassFails<T>(
+	pass: Promise<T>,
+	release: () => Promise<void>,
+	deadline: AbortSignal
+): Promise<T> {
+	try {
+		return await pass;
+	} catch (error) {
+		if (!deadline.aborted) {
+			await release();
+		}
+
+		throw error;
+	}
+}
+
+/**
+Releases the claims on `uploadIds`. The pass could not record their verdicts,
+and the release lets the next delivery of the queue message claim them at
+once. If the release fails too, each claim stays leased until six minutes
+after its last renewal.
+*/
+async function releaseUnrecordedClaims(
+	logger: Logger,
+	tenant: TenantObjectCalls,
+	owner: string,
+	uploadIds: readonly UploadId[],
+	signal: AbortSignal
+): Promise<void> {
+	if (uploadIds.length === 0) {
+		return;
+	}
+
+	try {
+		await tenant.call(signal, (server) =>
+			server.releaseVerificationClaims(owner, uploadIds)
+		);
+	} catch (error) {
+		logger.warn('verification claims not released', {
+			count: uploadIds.length,
+			error
+		});
 	}
 }
 
@@ -1423,23 +1612,24 @@ export async function verifyTenant(
 	id: TenantId,
 	batchSize: number = verifyClaimBatchSize,
 	maxNarBytes: number = verifyClaimMaxNarBytes,
-	budgetMs: number = verificationConsumerBudgetMs
+	budgetMs: number = verificationConsumerBudgetMs,
+	recordRetry: RecordRetrySchedule = recordRetrySchedule
 ): Promise<void> {
 	const deadline = new VerificationPassDeadline(budgetMs);
 
 	try {
-		const server = tenantServer(env, id);
+		const tenant = new TenantObjectCalls(env, id);
 		let batch: PendingVerificationBatch | undefined;
 
 		try {
-			const budgetedClaim = server.claimVerificationBatchWithinBudget(
-				batchSize,
-				maxNarBytes,
-				deadline.remainingWorkMs()
-			);
-			const claimResult = await raceVerificationOperation(
-				Promise.resolve(budgetedClaim),
-				deadline.signal
+			const claimResult = await tenant.call<VerificationClaimRpcResult>(
+				deadline.signal,
+				(server) =>
+					server.claimVerificationBatchWithinBudget(
+						batchSize,
+						maxNarBytes,
+						deadline.remainingWorkMs()
+					)
 			);
 
 			if (claimResult.kind === 'timed-out') {
@@ -1449,19 +1639,17 @@ export async function verifyTenant(
 			batch = claimResult.batch;
 		} catch {
 			deadline.signal.throwIfAborted();
-			const compatibleBatch = (await raceVerificationOperation(
+			const compatibleBatch = (await tenant.call(deadline.signal, (server) =>
 				server.claimVerificationBatch(
 					batchSize,
 					maxNarBytes,
 					deadline.remainingWorkMs()
-				),
-				deadline.signal
+				)
 			)) as PendingVerificationBatch | Omit<PendingVerificationBatch, 'owner'>;
 
 			if (!('owner' in compatibleBatch)) {
-				await raceVerificationOperation(
-					server.requestVerificationPass(),
-					deadline.signal
+				await tenant.call(deadline.signal, (server) =>
+					server.requestVerificationPass()
 				);
 				return;
 			}
@@ -1473,11 +1661,13 @@ export async function verifyTenant(
 		const activeClaims = new ActiveVerificationClaims(
 			claims.map((claim) => claim.uploadId)
 		);
-		const applied = await withRenewedVerificationClaim(
-			async () => {
-				const wereClaimsRenewed = await raceVerificationOperation(
-					server.renewVerificationClaims(owner, activeClaims.remaining()),
-					deadline.signal
+		const pass = withRenewedVerificationClaim(
+			async (renewalSignal) => {
+				const wereClaimsRenewed = await tenant.callRetryingResets(
+					renewalSignal,
+					recordRetry.restart,
+					(server) =>
+						server.renewVerificationClaims(owner, activeClaims.remaining())
 				);
 
 				if (!wereClaimsRenewed) {
@@ -1492,17 +1682,21 @@ export async function verifyTenant(
 				const recorder = new VerdictRecorder(
 					logger.with({ job: 'verify-verdicts' }),
 					async (results) => {
-						const recordRpc = server.recordVerificationsWithinBudget(
-							owner,
-							results,
-							deadline.remainingWorkMs()
-						);
-						const result = await raceVerificationOperation(
-							Promise.resolve<VerificationRecordRpcResult>(recordRpc),
-							signal
+						const result = await tenant.call<VerificationRecordRpcResult>(
+							signal,
+							(server) =>
+								server.recordVerificationsWithinBudget(
+									owner,
+									results,
+									deadline.remainingWorkMs()
+								)
 						);
 
-						if (result.kind === 'timed-out') {
+						// The object stores verdicts before it applies them, and its verdict
+						// drain applies the stored ones. A timed-out call that left no verdict
+						// unstored therefore needs no retry. An object of an earlier version
+						// does not report which verdicts it stored.
+						if (result.kind === 'timed-out' && result.unheld?.length !== 0) {
 							throw new SubrequestTimeoutError('verification.record');
 						}
 
@@ -1510,10 +1704,9 @@ export async function verifyTenant(
 
 						activeClaims.recorded(results.map((result) => result.uploadId));
 
-						return result.applied;
+						return result.kind === 'recorded' ? result.applied : 0;
 					},
-					recordAttempts,
-					recordRetryDelayMs,
+					recordRetry,
 					signal
 				);
 
@@ -1528,14 +1721,9 @@ export async function verifyTenant(
 				// the Durable Object copies its staged object.
 				const reserveCanonicalWrite: CanonicalWriteReserver = async (claim) => {
 					try {
-						const reservation = server.reserveCanonicalWrite(
-							owner,
-							claim.uploadId
-						);
-
-						return await raceVerificationOperation(
-							Promise.resolve<CanonicalWriteReservation>(reservation),
-							signal
+						return await tenant.call<CanonicalWriteReservation>(
+							signal,
+							(server) => server.reserveCanonicalWrite(owner, claim.uploadId)
 						);
 					} catch (error) {
 						signal.throwIfAborted();
@@ -1597,15 +1785,26 @@ export async function verifyTenant(
 			undefined,
 			deadline.signal
 		);
+		const applied = await releaseClaimsIfPassFails(
+			pass,
+			() =>
+				releaseUnrecordedClaims(
+					logger,
+					tenant,
+					owner,
+					activeClaims.remaining(),
+					deadline.signal
+				),
+			deadline.signal
+		);
 
 		// Continue a truncated claim only after applying a verdict. With no progress,
 		// leave retry to cron instead of reclaiming the same rows immediately.
 		const isProgressed = applied > 0;
 
 		if (truncated && isProgressed) {
-			await raceVerificationOperation(
-				server.requestVerificationPass(),
-				deadline.signal
+			await tenant.call(deadline.signal, (server) =>
+				server.requestVerificationPass()
 			);
 		}
 	} finally {

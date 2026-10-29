@@ -24,15 +24,61 @@ describe('verification claim lease', () => {
 	it('renews a claim while its operation remains in progress', async () => {
 		vi.useFakeTimers();
 		const work = Promise.withResolvers<undefined>();
-		const renew = vi.fn(() => Promise.resolve());
+		const renew = vi.fn((_signal: AbortSignal) => Promise.resolve());
 		const running = withRenewedVerificationClaim(renew, () => work.promise);
 
 		await vi.advanceTimersByTimeAsync(verificationClaimRenewalMs * 2);
 
-		expect(renew.mock.calls).toStrictEqual([[], [], []]);
+		expect(renew.mock.calls.map(([signal]) => signal.aborted)).toStrictEqual([
+			false,
+			false,
+			false
+		]);
 
 		work.resolve(undefined);
 		await running;
+	});
+
+	// A renewal can wait between retries. Once the operation has finished, the
+	// pass must not wait for that renewal.
+	it('stops waiting for a renewal when the operation finishes', async () => {
+		vi.useFakeTimers();
+		const work = Promise.withResolvers<string>();
+		const signals: AbortSignal[] = [];
+		const renew = vi.fn(async (signal: AbortSignal) => {
+			signals.push(signal);
+
+			if (signals.length === 1) {
+				return;
+			}
+
+			await new Promise<void>((resolve) => {
+				const timer = setTimeout(resolve, 60_000);
+				signal.addEventListener('abort', () => {
+					clearTimeout(timer);
+					resolve();
+				});
+			});
+		});
+		let outcome: string | undefined;
+		const running = withRenewedVerificationClaim(renew, () => work.promise);
+		void running.then((value) => {
+			outcome = value;
+		});
+
+		await vi.advanceTimersByTimeAsync(verificationClaimRenewalMs);
+		work.resolve('done');
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect({
+			outcome,
+			renewals: signals.length,
+			isRenewalStopped: signals.at(1)?.aborted
+		}).toStrictEqual({
+			outcome: 'done',
+			renewals: 2,
+			isRenewalStopped: true
+		});
 	});
 
 	it('preserves the operation failure when renewal also fails', async () => {

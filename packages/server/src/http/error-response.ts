@@ -6,7 +6,6 @@ import {
 import { ORPCError } from '@orpc/server';
 import type { Context, ErrorHandler } from 'hono';
 import { StatusCodes } from 'http-status-codes';
-import { z } from 'zod';
 
 import {
 	isControlDatabaseMigrationPending,
@@ -29,6 +28,7 @@ import {
 	UploadRequestLimitExceededError
 } from '../errors.ts';
 import { rootLogger } from '../observability/logging.ts';
+import { isRuntimeRetryable } from '../runtime-fault.ts';
 
 import { oauthJsonResponse } from './oauth-response.ts';
 
@@ -174,9 +174,9 @@ export function serverHttpErrorHeaders(error: ServerHttpError): Headers {
 	return headers;
 }
 
-// The Hono error handler applies the same mapping. A D1 overload or a fault the
-// runtime marks retryable is a transient refusal, not a server fault; anything
-// else we do not model uses {@link unmappedErrorResponse}.
+// The Hono error handler applies the same mapping. A D1 overload or a fault that
+// the runtime marks as retryable is a transient refusal, not a server fault;
+// anything else we do not model uses {@link unmappedErrorResponse}.
 export const serverErrorHandler: ErrorHandler = (error, context) => {
 	const mapped = errorResponse(error);
 
@@ -210,31 +210,6 @@ function loggerFor(context: Context): Logger {
 	const ray = context.req.raw.headers.get('cf-ray') ?? undefined;
 
 	return ray === undefined ? rootLogger() : rootLogger().with({ ray });
-}
-
-// Cloudflare can mark a runtime fault as retryable through any of these fields.
-const runtimeFaultFlags = z.object({
-	retryable: z.boolean().optional(),
-	durableObjectReset: z.boolean().optional(),
-	overloaded: z.boolean().optional()
-});
-
-function isRuntimeRetryable(error: unknown): boolean {
-	if (!(error instanceof Error)) {
-		return false;
-	}
-
-	const flags = runtimeFaultFlags.safeParse(error);
-
-	if (!flags.success) {
-		return false;
-	}
-
-	return (
-		flags.data.retryable === true ||
-		flags.data.durableObjectReset === true ||
-		flags.data.overloaded === true
-	);
 }
 
 // Log the full error, but return only the request ray. The ray lets an operator
