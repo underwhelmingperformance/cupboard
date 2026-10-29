@@ -18,6 +18,11 @@ This page is for maintainers who publish cupboard releases.
    release notes and the upgrade instructions. No source preparation or
    versioning commit is needed.
 
+   The draft job downloads only the archive artifacts. Before it creates or
+   updates the draft, it checks that its asset directory contains exactly the
+   four archives and `checksums.txt`, and fails otherwise. When it updates an
+   existing draft, it deletes every other asset attached to that draft.
+
    The release notes include the `nix.conf` lines for using the release cache.
    All of the cache's public keys go on one `extra-trusted-public-keys` line, so
    the lines still work while the cache's signing key is being rotated.

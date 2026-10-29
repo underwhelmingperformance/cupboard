@@ -123,6 +123,19 @@ const fallbackCacheUrl = 'https://cupboard.supply/t/cupboard';
 const releaseCacheName = cacheNameSchema.parse('releases');
 const canonicalVersionPattern =
 	/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
+const checksumsFileName = 'checksums.txt';
+
+export const releaseArchiveNames: readonly string[] = [
+	'cupboard-linux-arm64.tar.gz',
+	'cupboard-linux-x64.tar.gz',
+	'cupboard-macos-arm64.tar.gz',
+	'cupboard-macos-x64.tar.gz'
+];
+
+export const releaseAssetNames: readonly string[] = [
+	checksumsFileName,
+	...releaseArchiveNames
+];
 
 export class MissingInputError extends UsageError {
 	constructor(public readonly input: string) {
@@ -170,6 +183,22 @@ class PublishedReleaseExistsError extends CodedError {
 		super(`a published release for ${version} already exists`);
 		this.name = 'PublishedReleaseExistsError';
 	}
+}
+
+export class ReleaseAssetMismatchError extends CodedError {
+	constructor(
+		public readonly unexpected: readonly string[],
+		public readonly missing: readonly string[]
+	) {
+		super(
+			`release assets differ from the expected files (unexpected: ${describeNames(unexpected)}; missing: ${describeNames(missing)})`
+		);
+		this.name = 'ReleaseAssetMismatchError';
+	}
+}
+
+function describeNames(names: readonly string[]): string {
+	return names.length === 0 ? 'none' : names.join(', ');
 }
 
 export class PublicKeyFetchError extends CodedError {
@@ -299,10 +328,24 @@ export function assetContentType(assetName: string): string {
 	return 'application/octet-stream';
 }
 
-export function checksumTargets(fileNames: readonly string[]): string[] {
-	return fileNames
-		.filter((name) => name.endsWith('.tar.gz'))
+/**
+Returns `expected` when `fileNames` lists exactly those names. Any other name,
+or a missing one, throws `ReleaseAssetMismatchError`.
+*/
+export function matchReleaseFiles(
+	fileNames: readonly string[],
+	expected: readonly string[]
+): string[] {
+	const unexpected = fileNames
+		.filter((name) => !expected.includes(name))
 		.toSorted(compareStrings);
+	const missing = expected.filter((name) => !fileNames.includes(name));
+
+	if (unexpected.length > 0 || missing.length > 0) {
+		throw new ReleaseAssetMismatchError(unexpected, missing);
+	}
+
+	return [...expected];
 }
 
 function compareStrings(a: string, b: string): number {
@@ -326,8 +369,12 @@ export async function checksumsAction(
 	const directory = path.resolve(
 		requireInput(input(environment, 'DIRECTORY'), 'directory')
 	);
-	const checksumsFile = path.join(directory, 'checksums.txt');
-	const targets = checksumTargets(await readdir(directory));
+	const checksumsFile = path.join(directory, checksumsFileName);
+	const fileNames = await readdir(directory);
+	const targets = matchReleaseFiles(
+		fileNames.filter((name) => name !== checksumsFileName),
+		releaseArchiveNames
+	);
 	const entries: ChecksumEntry[] = [];
 
 	for (const name of targets) {
@@ -401,6 +448,11 @@ export async function publishAction(
 					})
 				};
 
+	const assetNames = matchReleaseFiles(
+		await readdir(inputs.directory),
+		releaseAssetNames
+	);
+
 	for (const duplicate of selection.duplicates) {
 		log(`Removing duplicate draft release #${String(duplicate.id)}`);
 		await octokit.rest.repos.deleteRelease({
@@ -410,8 +462,7 @@ export async function publishAction(
 	}
 
 	const release = await upsertDraft(octokit, inputs, draft);
-	const assetFiles = await readdir(inputs.directory);
-	const assetNames = assetFiles.toSorted(compareStrings);
+	await removeUnexpectedAssets(octokit, inputs, release);
 
 	for (const assetName of assetNames) {
 		await uploadReleaseAsset(octokit, inputs, release, assetName);
@@ -453,6 +504,24 @@ async function upsertDraft(
 		...draft.body
 	});
 	return toReleaseSummary(data);
+}
+
+async function removeUnexpectedAssets(
+	octokit: Octokit,
+	inputs: PublishInputs,
+	release: ReleaseSummary
+): Promise<void> {
+	for (const asset of release.assets) {
+		if (releaseAssetNames.includes(asset.name)) {
+			continue;
+		}
+
+		log(`Removing ${asset.name}, which is not a release asset`);
+		await octokit.rest.repos.deleteReleaseAsset({
+			...inputs.repository,
+			asset_id: asset.id
+		});
+	}
 }
 
 async function uploadReleaseAsset(
