@@ -638,6 +638,70 @@ describe('orphan staging reconciliation', () => {
 		}).toStrictEqual({ orphanStagingDeleted: 2, present: [] });
 	});
 
+	it('deletes orphans in both namespaces outside the input gate', async () => {
+		const expiredPushId = await testPushIdFor(fixtureTenant, 1, 1);
+		const keys = [
+			stagingObjectKey(expiredPushId, uploadIdSchema.parse('untracked')),
+			publicationStagingKey(fixtureTenant, expiredPushId, 'b'.repeat(64))
+		];
+		const realNow = await realUploadInstant();
+		await Promise.all(
+			keys.map((key) => env.BLOBS.put(key, new Uint8Array([1, 2, 3])))
+		);
+		vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
+		let gatesHeld = 0;
+		const deletedInGate: boolean[] = [];
+		const gate = await runInDurableObject(currentServer(), (instance) => {
+			const enter = instance.context.criticalSection.bind(instance.context);
+			return Promise.resolve(
+				vi
+					.spyOn(instance.context, 'criticalSection')
+					.mockImplementation(async (run) => {
+						gatesHeld += 1;
+						try {
+							return await enter(run);
+						} finally {
+							gatesHeld -= 1;
+						}
+					})
+			);
+		});
+
+		try {
+			const pass = await collectGarbageIn(currentServer(), {
+				wrapBlobs: (blobs) =>
+					new Proxy(blobs, {
+						get(target, property) {
+							if (property === 'delete') {
+								return (deleted: string | string[]) => {
+									deletedInGate.push(gatesHeld > 0);
+									return target.delete(deleted);
+								};
+							}
+							const value: unknown = Reflect.get(target, property, target);
+							if (typeof value !== 'function') {
+								return value;
+							}
+							const bound: unknown = value.bind(target);
+							return bound;
+						}
+					})
+			});
+
+			expect({
+				orphanStagingDeleted: pass.outcome.orphanStagingDeleted,
+				present: await presentKeys(keys),
+				deletedInGate
+			}).toStrictEqual({
+				orphanStagingDeleted: 2,
+				present: [],
+				deletedInGate: [false, false]
+			});
+		} finally {
+			gate.mockRestore();
+		}
+	});
+
 	it('resumes the listing after the last examined key and restarts from the beginning after the end', async () => {
 		const keys = Array.from(
 			{ length: maxOrphanListPages + 2 },
