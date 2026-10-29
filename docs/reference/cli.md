@@ -619,9 +619,11 @@ Options:
                                     --reference-paths-file (required with
                                     --reference-paths-file)
   --read-user <user>                user name of the read credential for a
-                                    private --reference-source
+                                    private --reference-source (default:
+                                    $CUPBOARD_VIEW_READ_USER)
   --read-password <password>        password of the read credential for a
-                                    private --reference-source
+                                    private --reference-source (default:
+                                    $CUPBOARD_VIEW_READ_PASSWORD)
   --run-root <name>                 also add each pushed path to this run root
                                     as soon as the cache accepts it. This works
                                     independently of --root, and also with
@@ -2542,10 +2544,10 @@ Options:
   --targets-file <path>                         JSON file that describes the cohort's targets
   --reference-source <url>                      cache URL to query for publication by reference
   --reuse-view <name>                           reuse view to query for store paths that other caches already have
-  --read-user <user>                            user name of the read credential for a private cache
-  --read-password <password>                    password of the read credential for a private cache
-  --view-read-user <user>                       user name of the read credential for a private reuse view
-  --view-read-password <password>               password of the read credential for a private reuse view
+  --read-user <user>                            user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)
+  --read-password <password>                    password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)
+  --view-read-user <user>                       user name of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_USER)
+  --view-read-password <password>               password of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_PASSWORD)
   --ttl <duration>                              TTL for the roots that the plan sets for targets that the cache already has
   --permanent                                   keep those roots permanently
   --github-oidc                                 sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session
@@ -2603,12 +2605,14 @@ Options:
   --reuse-view <name>              reuse view to query for store paths that
                                    other caches already have
   --read-user <user>               user name of the read credential for a
-                                   private cache
+                                   private cache (default: $CUPBOARD_READ_USER)
   --read-password <password>       password of the read credential for a private
-                                   cache
+                                   cache (default: $CUPBOARD_READ_PASSWORD)
   --view-read-user <user>          user name of the read credential for a
-                                   private reuse view
+                                   private reuse view (default:
+                                   $CUPBOARD_VIEW_READ_USER)
   --view-read-password <password>  password of the read credential for a private
-                                   reuse view
+                                   reuse view (default:
+                                   $CUPBOARD_VIEW_READ_PASSWORD)
   -h, --help                       display help for command
 ```

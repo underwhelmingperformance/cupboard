@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -22,10 +21,6 @@ import {
 	type Reporter,
 	type ReporterResultEvent
 } from '@cupboard/reporter';
-import {
-	observeChildProcess,
-	waitForAbortableChildProcess
-} from '@cupboard/shared/child-process';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -37,13 +32,12 @@ import {
 	type CupboardRunResult,
 	detectCupboardResultProtocol,
 	inspectCommandOptions,
+	inspectCupboardVersion,
 	runCupboardWithProtocol
 } from '../cupboard-run.ts';
 import {
 	CacheGraceMissingError,
-	CommandFailedError,
 	CupboardReleaseSelectionConflictError,
-	CupboardVersionOutputMissingError,
 	GraceDeadlineMissingError,
 	GraceWaitConflictError,
 	LegacyPushSummaryError,
@@ -464,7 +458,7 @@ export function resolvePushInputs(
 			options.includePrereleases,
 			true
 		),
-		githubToken: provided(options.githubToken) ?? '',
+		githubToken: provided(options.githubToken ?? environment.GH_TOKEN) ?? '',
 		releaseRepository:
 			provided(options.releaseRepository) ??
 			provided(environment.CUPBOARD_ACTION_REPOSITORY) ??
@@ -777,49 +771,6 @@ export async function acquirePushCupboard(
 		},
 		reporter
 	);
-}
-
-export async function inspectCupboardVersion(
-	binaryPath: string,
-	signal?: AbortSignal
-): Promise<string> {
-	signal?.throwIfAborted();
-
-	const child = spawn(binaryPath, ['--version'], {
-		stdio: ['ignore', 'pipe', 'inherit']
-	});
-	let stdout = '';
-
-	child.stdout.setEncoding('utf8');
-	child.stdout.on('data', (chunk: string) => {
-		stdout += chunk;
-	});
-
-	const result = await waitForAbortableChildProcess(
-		observeChildProcess(child),
-		signal
-	);
-
-	if (result.error !== undefined) {
-		throw new CommandFailedError(
-			binaryPath,
-			result.status,
-			result.error.message,
-			{ cause: result.error }
-		);
-	}
-
-	if (result.status !== 0) {
-		throw new CommandFailedError(binaryPath, result.status);
-	}
-
-	const version = stdout.trim();
-
-	if (version === '') {
-		throw new CupboardVersionOutputMissingError(binaryPath);
-	}
-
-	return version;
 }
 
 /**

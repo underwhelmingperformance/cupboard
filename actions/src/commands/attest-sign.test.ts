@@ -533,6 +533,32 @@ describe('attestSignAction', () => {
 		]);
 	});
 
+	it('signs with the GitHub token from the action environment', async () => {
+		const files = workspace();
+		const signing = recordedSigning(files, []);
+		const tokens: string[] = [];
+		const signerFor = signing.dependencies.signerFor;
+
+		if (signerFor === undefined) {
+			throw new Error('The recorded signing has no signer');
+		}
+
+		await attestSignAction(
+			options(files, { githubToken: undefined }),
+			createGithubReporter(),
+			{
+				...signing.dependencies,
+				environment: { GH_TOKEN: 'environment-token' },
+				signerFor: (signerOptions, dependencies) => {
+					tokens.push(signerOptions.githubToken);
+					return signerFor(signerOptions, dependencies);
+				}
+			}
+		);
+
+		expect(tokens).toStrictEqual(['environment-token', 'environment-token']);
+	});
+
 	it('signs build provenance for built paths and build-origin for all accepted subjects', async () => {
 		const files = workspace();
 		const records: SigningRecord[] = [];

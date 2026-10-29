@@ -411,3 +411,91 @@ describe('attestation outputs', () => {
 		});
 	});
 });
+
+describe('secret inputs', () => {
+	const secretWord = String.raw`(?:password|token|secret|api[-_]key|credentials?)(?![\w-])`;
+	const commandLineSecret = new RegExp(
+		String.raw`--(?:[\w-]+-)?${secretWord}|\$\{\{[^}]*?(?:\bsecrets\.|\bgithub\.token\b|\b(?:inputs|env)\.[\w-]*?${secretWord})|\$\{?\w*?${secretWord}`,
+		'giu'
+	);
+	const runStepsSchema = z
+		.array(z.looseObject({ run: z.string().optional() }))
+		.default([]);
+	const actionStepsSchema = z.looseObject({
+		runs: z.looseObject({ steps: runStepsSchema })
+	});
+	const workflowStepsSchema = z.looseObject({
+		jobs: z.record(z.string(), z.looseObject({ steps: runStepsSchema }))
+	});
+	const workflowsDirectory = path.join(repositoryRoot, '.github', 'workflows');
+
+	/**
+	Each secret option, secret expression or secret-named shell variable in a
+	run step's script, prefixed with the file's name.
+	*/
+	function commandLineSecrets(name: string, script: string): string[] {
+		return script
+			.matchAll(commandLineSecret)
+			.map(([match]) => `${name}: ${match}`)
+			.toArray();
+	}
+
+	function runScripts(file: string): string[] {
+		const document: unknown = parse(readFileSync(file, 'utf8'));
+		const steps = file.endsWith('action.yml')
+			? actionStepsSchema.parse(document).runs.steps
+			: Object.values(workflowStepsSchema.parse(document).jobs).flatMap(
+					(job) => job.steps
+				);
+
+		return steps.map((step) => step.run ?? '');
+	}
+
+	it.each([
+		[
+			'cupboard plan --read-password "$PASSWORD"',
+			['--read-password', '$PASSWORD']
+		],
+		['cupboard push --github-token "$TOKEN"', ['--github-token', '$TOKEN']],
+		['cupboard setup --cache-credentials "$JSON"', ['--cache-credentials']],
+		['tool --client-secret "$SECRET"', ['--client-secret', '$SECRET']],
+		['tool --api-key "$KEY"', ['--api-key']],
+		['echo "${{ inputs.read-password }}"', ['${{ inputs.read-password']],
+		['echo "${{ secrets.read_password }}"', ['${{ secrets.']],
+		['echo "${{ github.token }}"', ['${{ github.token']],
+		['echo "${{ env.READ_PASSWORD }}"', ['${{ env.READ_PASSWORD']],
+		['tool "$READ_PASSWORD"', ['$READ_PASSWORD']],
+		['tool --user reader ${GH_TOKEN}', ['${GH_TOKEN']],
+		['cupboard push --token-file "$FILE" --read-user "$USER"', []],
+		['tool --token-file "$TOKEN_FILE"', []],
+		['echo "${{ inputs.read-user }}"', []]
+	])('finds the secrets in %s', (script, expected) => {
+		expect(commandLineSecrets('step', script)).toStrictEqual(
+			expected.map((match) => `step: ${match}`)
+		);
+	});
+
+	it('passes no secret on a command line', () => {
+		const workflows = readdirSync(workflowsDirectory)
+			.filter((name) => /^cupboard-.*\.yml$/u.test(name))
+			.toSorted((left, right) => left.localeCompare(right));
+		const files = [
+			...actionFiles(),
+			...workflows.map((name) => path.join(workflowsDirectory, name))
+		];
+		const secrets = files.flatMap((file) =>
+			runScripts(file).flatMap((script) =>
+				commandLineSecrets(path.relative(repositoryRoot, file), script)
+			)
+		);
+
+		expect({ workflows, secrets }).toStrictEqual({
+			workflows: [
+				'cupboard-flake-publish-trusted.yml',
+				'cupboard-flake-publish.yml',
+				'cupboard-publish.yml'
+			],
+			secrets: []
+		});
+	});
+});

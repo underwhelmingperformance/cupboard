@@ -96,5 +96,4 @@ runs:
             --cupboard-path "$CUPBOARD_PATH" \
             --receipt-file "$RECEIPT_FILE" \
             --bundles-file "$BUNDLES_FILE" \
-            --read-user "$READ_USER" \
-            --read-password "$READ_PASSWORD"
+            --read-user "$READ_USER"

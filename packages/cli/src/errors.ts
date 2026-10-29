@@ -1800,12 +1800,21 @@ export class GithubSetupOwnerRuleConflictError extends CliUsageError {
 }
 
 /**
-Basic read credentials come as a pair; half a pair is a mistake.
+Basic read credentials come as a pair; half a pair is a mistake. `variables`
+lists the environment variables that supply a half that the options omit.
 */
 export class ReadCredentialPairError extends CliUsageError {
-	constructor(target: 'cache' | 'view' = 'cache') {
+	constructor(
+		target: 'cache' | 'view' = 'cache',
+		readonly variables?: { readonly user: string; readonly password: string }
+	) {
 		const prefix = target === 'view' ? '--view-read' : '--read';
-		super(`${prefix}-user and ${prefix}-password must be supplied together`);
+		const pair = `${prefix}-user and ${prefix}-password`;
+		super(
+			variables === undefined
+				? `${pair} must be supplied together`
+				: `${pair} must be supplied together, from the options or from ${variables.user} and ${variables.password}`
+		);
 		this.name = 'ReadCredentialPairError';
 	}
 }

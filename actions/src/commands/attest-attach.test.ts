@@ -14,10 +14,11 @@ import {
 	ReadPasswordRequiredError,
 	ReadUserRequiredError
 } from '../errors.ts';
+import type { Environment } from '../inputs.ts';
 
 import {
 	attestAttachAction,
-	attestAttachArguments,
+	attestAttachInvocation,
 	type AttestAttachOptions,
 	resolveAttestAttachInputs
 } from './attest-attach.ts';
@@ -389,7 +390,7 @@ describe('resolveAttestAttachInputs', () => {
 	});
 });
 
-describe('attestAttachArguments', () => {
+describe('attestAttachInvocation', () => {
 	it('builds the attach argv for the receipt paths', () => {
 		const inputs = resolveAttestAttachInputs(
 			options({
@@ -401,56 +402,63 @@ describe('attestAttachArguments', () => {
 		);
 
 		expect(
-			attestAttachArguments(inputs, [appPath, runtimePath], 'url')
-		).toStrictEqual([
-			'--no-colour',
-			'attest',
-			'attach',
-			'https://cache.example.workers.dev/t/acme/cache/pr-1',
-			appPath,
-			runtimePath,
-			'--github-oidc',
-			'--audience',
-			'https://audience.test',
-			'--read-user',
-			'reader',
-			'--read-password',
-			'secret',
-			'--attestation',
-			'/tmp/bundle.sigstore.json'
-		]);
+			attestAttachInvocation(inputs, [appPath, runtimePath], 'url')
+		).toStrictEqual({
+			arguments: [
+				'--no-colour',
+				'attest',
+				'attach',
+				'https://cache.example.workers.dev/t/acme/cache/pr-1',
+				appPath,
+				runtimePath,
+				'--github-oidc',
+				'--audience',
+				'https://audience.test',
+				'--read-user',
+				'reader',
+				'--attestation',
+				'/tmp/bundle.sigstore.json'
+			],
+			environment: { CUPBOARD_READ_PASSWORD: 'secret' }
+		});
 	});
 
 	it('selects the named cache through the legacy CLI flag', () => {
 		const inputs = resolveAttestAttachInputs(options({ cache: 'pr-1' }));
 
-		expect(attestAttachArguments(inputs, [appPath], 'flag')).toStrictEqual([
-			'--no-colour',
-			'attest',
-			'attach',
-			'https://cache.example.workers.dev/t/acme',
-			appPath,
-			'--github-oidc',
-			'--cache',
-			'pr-1',
-			'--attestation',
-			'/tmp/bundle.sigstore.json'
-		]);
+		expect(attestAttachInvocation(inputs, [appPath], 'flag')).toStrictEqual({
+			arguments: [
+				'--no-colour',
+				'attest',
+				'attach',
+				'https://cache.example.workers.dev/t/acme',
+				appPath,
+				'--github-oidc',
+				'--cache',
+				'pr-1',
+				'--attestation',
+				'/tmp/bundle.sigstore.json'
+			],
+			environment: {}
+		});
 	});
 
 	it('omits the audience and cache flags when not provided', () => {
 		const inputs = resolveAttestAttachInputs(options());
 
-		expect(attestAttachArguments(inputs, [appPath], 'url')).toStrictEqual([
-			'--no-colour',
-			'attest',
-			'attach',
-			'https://cache.example.workers.dev/t/acme',
-			appPath,
-			'--github-oidc',
-			'--attestation',
-			'/tmp/bundle.sigstore.json'
-		]);
+		expect(attestAttachInvocation(inputs, [appPath], 'url')).toStrictEqual({
+			arguments: [
+				'--no-colour',
+				'attest',
+				'attach',
+				'https://cache.example.workers.dev/t/acme',
+				appPath,
+				'--github-oidc',
+				'--attestation',
+				'/tmp/bundle.sigstore.json'
+			],
+			environment: {}
+		});
 	});
 
 	it('attaches the build-provenance and build-origin bundles of one run', () => {
@@ -463,22 +471,77 @@ describe('attestAttachArguments', () => {
 			})
 		);
 
-		expect(attestAttachArguments(inputs, [appPath], 'url')).toStrictEqual([
-			'--no-colour',
-			'attest',
-			'attach',
-			'https://cache.example.workers.dev/t/acme',
-			appPath,
-			'--github-oidc',
-			'--attestation',
-			'/tmp/provenance.sigstore.json',
-			'--attestation',
-			'/tmp/build-origin.sigstore.json'
-		]);
+		expect(attestAttachInvocation(inputs, [appPath], 'url')).toStrictEqual({
+			arguments: [
+				'--no-colour',
+				'attest',
+				'attach',
+				'https://cache.example.workers.dev/t/acme',
+				appPath,
+				'--github-oidc',
+				'--attestation',
+				'/tmp/provenance.sigstore.json',
+				'--attestation',
+				'/tmp/build-origin.sigstore.json'
+			],
+			environment: {}
+		});
 	});
 });
 
 describe('attestAttachAction', () => {
+	it('passes the job environment credential when the read-user input is empty', async () => {
+		const fixture = await writeReceipt([appPath]);
+		const jobEnvironment = {
+			CUPBOARD_READ_USER: 'job-reader',
+			CUPBOARD_READ_PASSWORD: 'job-secret'
+		};
+		const calls: {
+			readonly readUserOption: boolean;
+			readonly credentials: Readonly<Record<string, string | undefined>>;
+		}[] = [];
+
+		try {
+			const manifest = await writeBundleManifest(fixture, [
+				{ predicateType: buildOriginPredicateType, paths: [appPath] }
+			]);
+
+			await attestAttachAction(
+				options({
+					...fixture,
+					bundle: [],
+					bundlesFile: manifest.bundlesFile,
+					readUser: ''
+				}),
+				jobEnvironment,
+				recordingReporter([]),
+				{
+					inspectCommandOptions: () =>
+						Promise.resolve(new Set(['--paths-file', '--attestations-file'])),
+					runCupboard: async (_binaryPath, arguments_, environment) => {
+						calls.push({
+							readUserOption: arguments_.includes('--read-user'),
+							credentials: {
+								CUPBOARD_READ_USER: environment.CUPBOARD_READ_USER,
+								CUPBOARD_READ_PASSWORD: environment.CUPBOARD_READ_PASSWORD
+							}
+						});
+						return attachedResults(await pathsFromAttachArguments(arguments_));
+					}
+				}
+			);
+
+			expect(calls).toStrictEqual([
+				{ readUserOption: false, credentials: jobEnvironment }
+			]);
+		} finally {
+			await rm(path.dirname(fixture.receiptFile), {
+				recursive: true,
+				force: true
+			});
+		}
+	});
+
 	it('attaches overlapping SLSA and explicit custom predicate subjects in one manifest batch', async () => {
 		const fixture = await writeReceipt([appPath, runtimePath]);
 		try {
@@ -664,8 +727,6 @@ describe('attestAttachAction', () => {
 						'pr-1',
 						'--read-user',
 						'reader',
-						'--read-password',
-						'secret',
 						'--attestations-file'
 					],
 					paths: [appPath]
@@ -909,28 +970,26 @@ describe('attestAttachAction', () => {
 		const invocations: {
 			binaryPath: string;
 			arguments: readonly string[];
+			environment: Environment;
 			dependencies: { readonly signal?: AbortSignal } | undefined;
 		}[] = [];
 
 		await attestAttachAction(
-			options({
-				...fixture,
-				readUser: 'reader',
-				readPassword: 'secret'
-			}),
-			{},
+			options({ ...fixture, readUser: 'reader' }),
+			{ READ_PASSWORD: 'secret' },
 			recordingReporter([]),
 			{
 				inspectCommandOptions: fileCapableCommandOptions,
 				runCupboard: async (
 					binaryPath,
 					arguments_,
-					_environment,
+					environment,
 					dependencies
 				) => {
 					invocations.push({
 						binaryPath,
 						arguments: await expandAttachManifestArguments(arguments_),
+						environment,
 						dependencies
 					});
 
@@ -953,11 +1012,13 @@ describe('attestAttachAction', () => {
 					'--github-oidc',
 					'--read-user',
 					'reader',
-					'--read-password',
-					'secret',
 					'--attestation',
 					'/tmp/bundle.sigstore.json'
 				],
+				environment: {
+					READ_PASSWORD: 'secret',
+					CUPBOARD_READ_PASSWORD: 'secret'
+				},
 				dependencies: { signal: controller.signal }
 			}
 		]);

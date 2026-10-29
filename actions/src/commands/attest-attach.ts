@@ -17,8 +17,10 @@ import type { Command } from 'commander';
 import {
 	type CacheSelectionSyntax,
 	cacheSelectionSyntax,
+	type CupboardInvocation,
 	detectCacheSelectionSyntax,
 	inspectCommandOptions,
+	readCredentialInvocation,
 	runCupboard as defaultRunCupboard
 } from '../cupboard-run.ts';
 import {
@@ -188,13 +190,17 @@ export function resolveAttestAttachInputs(
 Attaching uses GitHub OIDC and operates on paths already published by the
 run. The command must not include upload or retention flags.
 */
-export function attestAttachArguments(
+export function attestAttachInvocation(
 	inputs: AttestAttachInputs,
 	paths: readonly string[],
 	cacheSyntax: CacheSelectionSyntax,
 	manifests?: AttestationManifests
-): readonly string[] {
-	return [
+): CupboardInvocation {
+	const credential = readCredentialInvocation(
+		inputs.readUser,
+		inputs.readPassword
+	);
+	const arguments_ = [
 		'--no-colour',
 		'attest',
 		'attach',
@@ -211,18 +217,13 @@ export function attestAttachArguments(
 		...(cacheSyntax === 'flag' && inputs.cache.kind === 'named'
 			? ['--cache', inputs.cache.name]
 			: []),
-		...(inputs.readUser === ''
-			? []
-			: [
-					'--read-user',
-					inputs.readUser,
-					'--read-password',
-					inputs.readPassword
-				]),
+		...credential.arguments,
 		...(manifests === undefined
 			? inputs.bundles.flatMap((bundle) => ['--attestation', bundle])
 			: ['--attestations-file', manifests.bundlesFile])
 	];
+
+	return { arguments: arguments_, environment: credential.environment };
 }
 
 function requireSettledAttachment(
@@ -269,7 +270,10 @@ export async function attestAttachAction(
 ): Promise<void> {
 	dependencies.signal?.throwIfAborted();
 
-	const inputs = resolveAttestAttachInputs(options);
+	const inputs = resolveAttestAttachInputs({
+		...options,
+		readPassword: options.readPassword ?? environment.READ_PASSWORD
+	});
 	const receipt = buildReceiptSchema.parse(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);
@@ -332,7 +336,11 @@ export async function attestAttachAction(
 		throw new AttestationBundlesMissingError();
 	}
 
-	const directArguments = attestAttachArguments(inputs, subjectPaths, 'flag');
+	const directArguments = attestAttachInvocation(
+		inputs,
+		subjectPaths,
+		'flag'
+	).arguments;
 	const canUseLegacyArguments =
 		inputs.bundlesFile === '' &&
 		subjectPaths.length === 1 &&
@@ -346,10 +354,11 @@ export async function attestAttachAction(
 						dependencies.detectCacheSelectionSyntax ??
 						detectCacheSelectionSyntax
 					)(inputs.cupboardPath, ['attest', 'attach'], dependencies.signal);
+		const invocation = attestAttachInvocation(inputs, subjectPaths, syntax);
 		const results = await runCupboard(
 			inputs.cupboardPath,
-			attestAttachArguments(inputs, subjectPaths, syntax),
-			environment,
+			invocation.arguments,
+			{ ...environment, ...invocation.environment },
 			dependencies.signal === undefined ? {} : { signal: dependencies.signal }
 		);
 		requireSettledAttachment(results, subjectPaths);
@@ -378,10 +387,11 @@ export async function attestAttachAction(
 		await writeFile(manifests.pathsFile, `${subjectPaths.join('\n')}\n`);
 		await writeFile(manifests.bundlesFile, `${bundles.join('\n')}\n`);
 		dependencies.signal?.throwIfAborted();
+		const invocation = attestAttachInvocation(inputs, [], syntax, manifests);
 		const results = await runCupboard(
 			inputs.cupboardPath,
-			attestAttachArguments(inputs, [], syntax, manifests),
-			environment,
+			invocation.arguments,
+			{ ...environment, ...invocation.environment },
 			dependencies.signal === undefined ? {} : { signal: dependencies.signal }
 		);
 		requireSettledAttachment(results, subjectPaths);

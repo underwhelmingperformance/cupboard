@@ -197,8 +197,7 @@ runs:
             --predicate-file "$PREDICATE_FILE" \
             --url "$URL" \
             --cache "$CACHE" \
-            --read-user "$READ_USER" \
-            --read-password "$READ_PASSWORD"
+            --read-user "$READ_USER"
 
     - name: Sign the attestation statements
       id: attest
@@ -228,5 +227,4 @@ runs:
           --subject-grouping "$SUBJECT_GROUPING" \
           --inline-bundles "$INLINE_BUNDLES" \
           --output-directory "$output_directory" \
-          --bundles-file "$output_directory/bundles.txt" \
-          --github-token "$GH_TOKEN"
+          --bundles-file "$output_directory/bundles.txt"

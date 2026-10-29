@@ -596,6 +596,29 @@ describe('resolveAttestInputs', () => {
 		});
 	});
 
+	it('reads the read password from the action environment', () => {
+		const inputs = resolveAttestInputs(
+			{
+				receiptFile,
+				url: 'https://cache.example.test/t/acme',
+				readUser: 'reader',
+				checksumsFile: '/runner/temp/subjects.txt'
+			},
+			{ RUNNER_TEMP: '/runner/temp', READ_PASSWORD: 'secret' }
+		);
+
+		expect(inputs).toStrictEqual({
+			receiptFile,
+			url: new URL('https://cache.example.test/t/acme'),
+			cache: { kind: 'default' },
+			readUser: 'reader',
+			readPassword: 'secret',
+			checksumsFile: '/runner/temp/subjects.txt',
+			builtChecksumsFile: '/runner/temp/built-subjects.txt',
+			predicateFile: '/runner/temp/attribute-report.json'
+		});
+	});
+
 	it('allocates separate default files for successive attestation steps', () => {
 		const options = {
 			receiptFile,

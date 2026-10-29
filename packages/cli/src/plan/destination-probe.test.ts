@@ -28,7 +28,7 @@ function requestUrl(input: RequestInfo | URL): string {
 
 describe('tenantProbesFor read credentials', () => {
 	it.each([401, 403])(
-		'refuses a cache-specific credential at a private view with advice: %s',
+		'refuses a view read without a view credential with advice: %s',
 		async (status) => {
 			const requests: string[] = [];
 			const probes = tenantProbesFor({
@@ -67,9 +67,9 @@ describe('tenantProbesFor read credentials', () => {
 	);
 	it.each([
 		{ name: 'separate view credentials', viewPassword: 'view-secret' },
-		{ name: 'the shared credential fallback', viewPassword: undefined }
+		{ name: 'no credential for the view', viewPassword: undefined }
 	])(
-		'uses $name without changing destination reads',
+		'sends $name without changing destination reads',
 		async ({ viewPassword }) => {
 			const requests: ProbeRequest[] = [];
 			const destination = {
@@ -114,7 +114,9 @@ describe('tenantProbesFor read credentials', () => {
 					},
 					{
 						url: `${baseUrl.href}/reuse/reuse/api/v1/missing-paths`,
-						authorization: `Basic ${btoa(`${viewPassword === undefined ? 'reader' : 'view-reader'}:${viewPassword ?? 'cache-secret'}`)}`
+						...(viewPassword !== undefined && {
+							authorization: `Basic ${btoa(`view-reader:${viewPassword}`)}`
+						})
 					}
 				]
 			});

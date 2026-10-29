@@ -60,6 +60,43 @@ describe('resolveCupboardAction', () => {
 		});
 	});
 
+	it('reads the GitHub token from the action environment', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-resolve-'));
+		const resolve = vi.fn(() =>
+			Promise.resolve<ResolvedCupboard>({
+				kind: 'release',
+				repository: 'owner/cupboard',
+				tag: 'v1.2.3',
+				sourceCommit: 'a'.repeat(40)
+			})
+		);
+		const { reporter } = recordingGithubReporter();
+
+		await resolveCupboardAction(
+			{ workflowRepository: 'owner/cupboard' },
+			{
+				GITHUB_OUTPUT: path.join(directory, 'output'),
+				GH_TOKEN: 'github-secret'
+			},
+			{ resolve, reporter }
+		);
+
+		expect(resolve.mock.calls).toStrictEqual([
+			[
+				{
+					cupboardVersion: undefined,
+					includePrereleases: true,
+					releaseRepository: 'owner/cupboard',
+					githubToken: 'github-secret',
+					workflowSha: '',
+					workflowRef: '',
+					githubApiUrl: undefined,
+					githubGraphqlUrl: undefined
+				}
+			]
+		]);
+	});
+
 	it.each([
 		{
 			name: 'release',

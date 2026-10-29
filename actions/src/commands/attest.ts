@@ -295,7 +295,7 @@ export function resolveAttestInputs(
 	}
 
 	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? '';
+	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
 
 	if (readUser !== '' && readPassword === '') {
 		throw new ReadPasswordRequiredError();

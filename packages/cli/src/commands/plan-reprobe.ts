@@ -1,5 +1,4 @@
 import { formatCount, type Reporter } from '@cupboard/reporter';
-import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
 import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
@@ -11,24 +10,17 @@ import {
 	reprobeAvailability
 } from '../plan/availability-reprobe.ts';
 import type { CohortTarget } from '../plan/cohort-target.ts';
-import {
-	cacheReferenceSource,
-	tenantProbesFor
-} from '../plan/destination-probe.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-import { readCohortTargets } from './plan-cohort.ts';
-import { readCredentials } from './read-credentials.ts';
+import {
+	type PlanProbeOptions,
+	planProbes,
+	readCohortTargets
+} from './plan-cohort.ts';
 
-export interface PlanReprobeOptions {
+export interface PlanReprobeOptions extends PlanProbeOptions {
 	readonly targetsFile: string;
-	readonly reuseView?: string;
-	readonly referenceSource?: URL;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
-	readonly viewReadUser?: ReadUser;
-	readonly viewReadPassword?: string;
 }
 
 export interface PlanReprobeRunOptions {
@@ -68,21 +60,21 @@ export function registerPlanReprobeCommand(
 		)
 		.option(
 			'--read-user <user>',
-			'user name of the read credential for a private cache',
+			'user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)',
 			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
-			'password of the read credential for a private cache'
+			'password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)'
 		)
 		.option(
 			'--view-read-user <user>',
-			'user name of the read credential for a private reuse view',
+			'user name of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_USER)',
 			parseReadUser
 		)
 		.option(
 			'--view-read-password <password>',
-			'password of the read credential for a private reuse view'
+			'password of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_PASSWORD)'
 		)
 		.action(
 			async (
@@ -90,31 +82,16 @@ export function registerPlanReprobeCommand(
 				cacheName: string | undefined,
 				options: PlanReprobeOptions
 			) => {
-				const credentials = readCredentials(options);
-				const viewCredentials = readCredentials(options, 'view');
-				const reporter = commandUi(program, programOptions).reporter();
-				const targets = await readCohortTargets(options.targetsFile);
 				const urlTarget = cacheTargetFromUrl(url);
 				const target =
 					cacheName === undefined
 						? urlTarget
 						: cacheTargetWithName(urlTarget, cacheName);
+				const destinationProbes = planProbes(target, options);
+				const reporter = commandUi(program, programOptions).reporter();
+				const targets = await readCohortTargets(options.targetsFile);
 
-				await runPlanReprobe({ targets }, reporter, {
-					destinationProbes: tenantProbesFor({
-						baseUrl: target.tenantUrl,
-						cache: target.cache,
-						...(options.reuseView !== undefined && { view: options.reuseView }),
-						...(options.referenceSource !== undefined && {
-							referenceSource: cacheReferenceSource(
-								target.tenantUrl,
-								options.referenceSource
-							)
-						}),
-						...(credentials !== undefined && { credentials }),
-						...(viewCredentials !== undefined && { viewCredentials })
-					})
-				});
+				await runPlanReprobe({ targets }, reporter, { destinationProbes });
 			}
 		);
 }

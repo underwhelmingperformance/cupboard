@@ -32,7 +32,11 @@ import { type Command, InvalidArgumentError } from 'commander';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { rootEnsureAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
-import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
+import {
+	type CacheTarget,
+	cacheTargetFromUrl,
+	cacheTargetWithName
+} from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { callInCache } from '../client/cache-scoped.ts';
 import { CupboardClient } from '../client/client.ts';
@@ -47,6 +51,7 @@ import {
 	type AvailabilityPartition,
 	type AvailabilityTarget,
 	type BuildPolicy,
+	type DestinationProbes,
 	partitionAvailability,
 	type PlannedSubstitutionPolicy,
 	type PublishScope,
@@ -172,14 +177,8 @@ export async function resolvePlannedSubstitutionPolicy(
 	};
 }
 
-export interface PlanCohortOptions {
+export interface PlanCohortOptions extends PlanProbeOptions {
 	readonly targetsFile: string;
-	readonly reuseView?: string;
-	readonly referenceSource?: URL;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
-	readonly viewReadUser?: ReadUser;
-	readonly viewReadPassword?: string;
 	readonly ttl?: TtlSeconds;
 	readonly permanent?: boolean;
 	readonly githubOidc?: boolean;
@@ -325,21 +324,21 @@ export function registerPlanCommands(
 		)
 		.option(
 			'--read-user <user>',
-			'user name of the read credential for a private cache',
+			'user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)',
 			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
-			'password of the read credential for a private cache'
+			'password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)'
 		)
 		.option(
 			'--view-read-user <user>',
-			'user name of the read credential for a private reuse view',
+			'user name of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_USER)',
 			parseReadUser
 		)
 		.option(
 			'--view-read-password <password>',
-			'password of the read credential for a private reuse view'
+			'password of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_PASSWORD)'
 		)
 		.option(
 			'--ttl <duration>',
@@ -422,16 +421,15 @@ export function registerPlanCommands(
 				cacheName: string | undefined,
 				options: PlanCohortOptions
 			) => {
-				const credentials = readCredentials(options);
-				const viewCredentials = readCredentials(options, 'view');
-				const reporter = commandUi(program, programOptions).reporter();
-				const input = await readCohortPlanInput(options.targetsFile);
-				const { targets } = input;
 				const urlTarget = cacheTargetFromUrl(url);
 				const target =
 					cacheName === undefined
 						? urlTarget
 						: cacheTargetWithName(urlTarget, cacheName);
+				const probes = planProbes(target, options);
+				const reporter = commandUi(program, programOptions).reporter();
+				const input = await readCohortPlanInput(options.targetsFile);
+				const { targets } = input;
 				const cache = target.cache;
 				const rootClient = await planRootClient(
 					options.publish ?? 'outputs',
@@ -474,19 +472,6 @@ export function registerPlanCommands(
 				});
 
 				reportUnknownSettings(reporter, nix.unknownSettings);
-				const probes = tenantProbesFor({
-					baseUrl: target.tenantUrl,
-					cache,
-					...(options.reuseView !== undefined && { view: options.reuseView }),
-					...(options.referenceSource !== undefined && {
-						referenceSource: cacheReferenceSource(
-							target.tenantUrl,
-							options.referenceSource
-						)
-					}),
-					...(credentials !== undefined && { credentials }),
-					...(viewCredentials !== undefined && { viewCredentials })
-				});
 				const { substitution, signatures } = discoverNixStoreConfig();
 				const plannedSubstitutionPolicy =
 					await resolvePlannedSubstitutionPolicy(nix, substitution);
@@ -932,6 +917,51 @@ export async function readCohortPlanInput(
 	}
 
 	return parsed.data;
+}
+
+/**
+Options of `plan cohort` and `plan reprobe` that select the reuse view or
+reference source and supply the read credentials.
+*/
+export interface PlanProbeOptions {
+	readonly reuseView?: string;
+	readonly referenceSource?: URL;
+	readonly readUser?: ReadUser;
+	readonly readPassword?: string;
+	readonly viewReadUser?: ReadUser;
+	readonly viewReadPassword?: string;
+}
+
+/**
+Returns the probes that ask the destination cache, and the reuse view or
+reference source, which paths they have. Requests to the destination use the
+read credential, and requests to the view or reference source use the view
+read credential or no credential. The view credential is read only when the
+command has a view or reference source.
+*/
+export function planProbes(
+	target: CacheTarget,
+	options: PlanProbeOptions
+): DestinationProbes {
+	const credentials = readCredentials(options);
+	const viewCredentials =
+		options.reuseView === undefined && options.referenceSource === undefined
+			? undefined
+			: readCredentials(options, 'view');
+
+	return tenantProbesFor({
+		baseUrl: target.tenantUrl,
+		cache: target.cache,
+		...(options.reuseView !== undefined && { view: options.reuseView }),
+		...(options.referenceSource !== undefined && {
+			referenceSource: cacheReferenceSource(
+				target.tenantUrl,
+				options.referenceSource
+			)
+		}),
+		...(credentials !== undefined && { credentials }),
+		...(viewCredentials !== undefined && { viewCredentials })
+	});
 }
 
 export async function readCohortTargets(

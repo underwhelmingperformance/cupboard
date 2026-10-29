@@ -285,7 +285,6 @@ runs:
           --cupboard-path "$CUPBOARD_PATH"
           --cupboard-version "$CUPBOARD_VERSION"
           --include-prereleases "$INCLUDE_PRERELEASES"
-          --github-token "$GH_TOKEN"
           --release-repository "$RELEASE_REPOSITORY"
           --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
           --install-dir "$INSTALL_DIR"

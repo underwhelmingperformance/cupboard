@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildProgram } from '../../../packages/cli/src/cli.ts';
 import { modelPublishingJob } from '../../../packages/cli/src/commands/github/publication.ts';
 import { pushCommandAuthorizationDetails } from '../../../packages/cli/src/commands/push.ts';
+import { inspectCupboardVersion } from '../cupboard-run.ts';
 import {
 	BooleanInputInvalidError,
 	CupboardReleaseSelectionConflictError,
@@ -46,7 +47,6 @@ import {
 	aggregatePushSummaries,
 	buildPushArguments,
 	hasUngracedPath,
-	inspectCupboardVersion,
 	mergePublishedBuildSubjects,
 	pathsMissingGraceDeadline,
 	permanenceForCommand,
@@ -622,6 +622,15 @@ describe('resolvePushInputs', () => {
 
 	it('applies defaults when optional flags are absent', () => {
 		expect(resolvePushInputs(baseOptions, environment)).toStrictEqual(defaults);
+	});
+
+	it('reads the GitHub token from the action environment', () => {
+		expect(
+			resolvePushInputs(baseOptions, {
+				...environment,
+				GH_TOKEN: 'github-secret'
+			})
+		).toStrictEqual({ ...defaults, githubToken: 'github-secret' });
 	});
 
 	it('returns the configured remote store URI unchanged', () => {

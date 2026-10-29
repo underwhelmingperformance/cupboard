@@ -842,6 +842,18 @@ export class ReleaseInstallationRollbackError extends CodedError {
 	}
 }
 
+export class EnvironmentCredentialVersionError extends UsageError {
+	constructor(
+		public readonly minimumVersion: string,
+		public readonly version: string
+	) {
+		super(
+			`cupboard ${version} cannot take a read password from its environment; select cupboard ${minimumVersion} or later to use a read credential`
+		);
+		this.name = 'EnvironmentCredentialVersionError';
+	}
+}
+
 export class CupboardVersionOutputMissingError extends CodedError {
 	constructor(public readonly binaryPath: string) {
 		super(`${binaryPath} --version produced no output`);
