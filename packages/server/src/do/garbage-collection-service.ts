@@ -12,6 +12,7 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { pushIdSchema, uploadIdSchema } from '@cupboard/protocol/upload';
 import { type PushId } from '@cupboard/protocol/upload';
+import { chunk } from '@cupboard/shared/collections';
 import {
 	and,
 	asc,
@@ -49,7 +50,11 @@ import {
 	stagingPrefix
 } from '../http/http.ts';
 
-import { deleteObjects, maxOutgoingConnections } from './bulk.ts';
+import {
+	deleteObjects,
+	maxOutgoingConnections,
+	maxR2DeleteKeys
+} from './bulk.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import {
 	type GarbageCollectionOutcome,
@@ -1179,7 +1184,7 @@ export class GarbageCollectionService {
 	/**
 	Advances the collection scan of one cache. Clears the input flag of the
 	cache when a new scan starts and after the scan's own writes.
-	
+
 	This method must stay synchronous. No request can write while it runs, so
 	every write to an input table during the call is the scan's own, which the
 	scan already accounts for. The explicit return type makes an `async`
@@ -1219,7 +1224,7 @@ export class GarbageCollectionService {
 	/**
 	Advances one cache's collection scan until the invocation's row budget is
 	spent, leaving the phase it stopped in recorded for the next invocation.
-	
+
 	The phases draw on one budget in sequence, so an expensive early phase can
 	leave a later one nothing to spend. That does not starve the later phase,
 	because the input of each phase drains within a scan: a root expires once,
@@ -1576,14 +1581,22 @@ export class GarbageCollectionService {
 
 		const { keys, resumeAfter, wasCapped } = scan;
 
-		if (keys.length > 0) {
-			await this.context.criticalSection(async () => {
-				const owned = this.trackedStagingKeys(keys);
-				await deleteObjects(
-					this.context.env.BLOBS,
-					keys.filter((key) => !owned.has(key))
-				);
+		// Recheck tracking under the gate and delete outside it. A key that is
+		// untracked at the recheck stays untracked during the delete:
+		// - legacy negotiation creates a new key for every upload;
+		// - this scan selected only `staging-v2/` keys whose push ID does not
+		//   verify. New admission records an operation, and a repair records a
+		//   pending row, only when the push ID verified before the gate and has
+		//   not expired inside it;
+		// - the recheck treats an accepted operation's key as tracked until its
+		//   recovery deadline, and admission refuses a resend after that
+		//   deadline inside the gate.
+		for (const batch of chunk(keys, maxR2DeleteKeys)) {
+			const untracked = await this.context.criticalSection(() => {
+				const tracked = this.trackedStagingKeys(batch);
+				return Promise.resolve(batch.filter((key) => !tracked.has(key)));
 			});
+			await deleteObjects(this.context.env.BLOBS, untracked);
 		}
 		await this.saveOrphanStagingResumeKey(resumeAfter, prefix);
 
@@ -1901,7 +1914,7 @@ export class GarbageCollectionService {
 	Advances the scan of one cache if it has a scan in progress, or needs a
 	new one and the minimum interval allows it, and reads its
 	managed-retirement state.
-	
+
 	A scan also deletes close events that no root or pending upload of an
 	older retention epoch needs any more. Such an upload can expire after the
 	scan completes, and deleting an expired terminal upload does not set the
