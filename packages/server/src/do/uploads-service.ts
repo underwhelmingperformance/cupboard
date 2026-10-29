@@ -669,7 +669,11 @@ export class UploadsService {
 			throw new InvalidPushIdError();
 		}
 		const now = new Date();
-		if (original?.state === 'servable' && now.getTime() >= pushExpiry * 1000) {
+		if (
+			original?.state === 'servable' &&
+			(now.getTime() >= pushExpiry * 1000 ||
+				!(await this.context.pushCredentials().verify(pushId)))
+		) {
 			throw new PublicationPushExpiredError();
 		}
 		const deadline =
@@ -705,6 +709,12 @@ export class UploadsService {
 				}
 				if (current?.state === 'expired') {
 					throw new PublicationRecoveryExpiredError();
+				}
+				// Orphan staging collection deletes a staging object outside the
+				// gate once its push expires, so a repair must not start tracking
+				// the object after the push expires.
+				if (current?.state === 'servable' && Date.now() >= pushExpiry * 1000) {
+					throw new PublicationPushExpiredError();
 				}
 				const declared =
 					entry.blob === undefined ? undefined : JSON.stringify(entry.blob);
