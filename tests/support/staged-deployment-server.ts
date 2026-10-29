@@ -20,7 +20,11 @@ import {
 	tenantReadCredentialSchema,
 	type TenantStatus
 } from '@cupboard/protocol/tenants';
-import { Miniflare, type MiniflareOptions } from 'miniflare';
+import {
+	Miniflare,
+	type MiniflareOptions,
+	type WorkerOptions
+} from 'miniflare';
 import { z } from 'zod';
 
 import { controlRpc, tenantRpc } from '../../packages/cli/src/client/orpc.ts';
@@ -59,6 +63,13 @@ import {
 } from './intermediate-deployment.ts';
 import { StubOidcIssuer } from './oidc-issuer.ts';
 import { signBound } from './subject-binding.ts';
+import {
+	bindingsWorker,
+	bindingsWorkerScript,
+	type TestD1Database,
+	type TestR2Bucket,
+	WorkerBindings
+} from './worker-bindings.ts';
 
 const controlScript = 'cupboard';
 const tenantScript = 'cupboard-tenant';
@@ -70,13 +81,13 @@ const controlDatabaseName = 'cupboard-upgrade-control';
 const controlDatabaseId = databaseIdSchema.parse(
 	'cupboard-upgrade-control-database'
 );
-const schemaScript = 'cupboard-upgrade-schema';
 const databaseValidationSecret = 'upgrade-fixture-control-validation';
 const blobsBinding = 'BLOBS';
 const blobsBucket = 'cupboard-upgrade-blobs';
 const recoveryBucket = 'cupboard-upgrade-recovery';
 const maintenanceQueue = 'cupboard-upgrade-maintenance';
 const tenantCacheBinding = 'TENANT_CACHE';
+const tenantCacheNamespace = 'cupboard-upgrade-tenant-cache';
 const pathHash = storePathHashSchema.parse('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 const legacyCacheName = cacheNameSchema.parse('builds');
 const attestationDigest = 'a'.repeat(64);
@@ -261,7 +272,7 @@ type PersistedRuntime =
 	  };
 
 function d1Api(
-	database: Awaited<ReturnType<Miniflare['getD1Database']>>
+	database: TestD1Database
 ): Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> {
 	return {
 		async d1QueryBatch(_databaseId, statements) {
@@ -329,23 +340,21 @@ export async function buildPredecessorBundles(
 	return { control: control.code, tenant: tenant.code };
 }
 
-function schemaWorker() {
-	return {
-		name: schemaScript,
-		modules: true,
-		script:
-			'export default { fetch() { return new Response(null, { status: 404 }); } };',
-		compatibilityDate: '2026-05-15',
+function stagedBindingsWorker(script: string): WorkerOptions {
+	return bindingsWorker(script, {
 		d1Databases: {
 			[databaseBinding]: databaseName,
 			[controlDatabaseBinding]: controlDatabaseName
-		}
-	};
+		},
+		r2Buckets: { [blobsBinding]: blobsBucket },
+		kvNamespaces: { [tenantCacheBinding]: tenantCacheNamespace }
+	});
 }
 
 function predecessorOptions(
 	paths: StagedDeploymentPaths,
-	bundles: FixtureBundles
+	bundles: FixtureBundles,
+	bindingsScript: string
 ): MiniflareOptions {
 	return {
 		...persistenceOptions(paths),
@@ -386,14 +395,15 @@ function predecessorOptions(
 					CUPBOARD_AUTH_AUDIENCE: 'cupboard'
 				}
 			},
-			schemaWorker()
+			stagedBindingsWorker(bindingsScript)
 		]
 	};
 }
 
 function currentOptions(
 	paths: StagedDeploymentPaths,
-	artifact: DeploymentArtifact
+	artifact: DeploymentArtifact,
+	bindingsScript: string
 ): MiniflareOptions {
 	const tenantBindings = commonBindings();
 	const controlBindings = {
@@ -440,7 +450,7 @@ function currentOptions(
 					DEPLOYMENT_RECOVERY: recoveryBucket
 				},
 				kvNamespaces: {
-					[tenantCacheBinding]: 'cupboard-upgrade-tenant-cache',
+					[tenantCacheBinding]: tenantCacheNamespace,
 					CRON_STATE: 'cupboard-upgrade-cron-state'
 				},
 				queueProducers: {
@@ -487,18 +497,19 @@ function currentOptions(
 				},
 				bindings: tenantBindings
 			},
-			schemaWorker()
+			stagedBindingsWorker(bindingsScript)
 		]
 	};
 }
 
 function runtimeOptions(
 	paths: StagedDeploymentPaths,
-	runtime: PersistedRuntime
+	runtime: PersistedRuntime,
+	bindingsScript: string
 ): MiniflareOptions {
 	return runtime.kind === 'predecessor'
-		? predecessorOptions(paths, runtime.bundles)
-		: currentOptions(paths, runtime.artifact);
+		? predecessorOptions(paths, runtime.bundles, bindingsScript)
+		: currentOptions(paths, runtime.artifact, bindingsScript);
 }
 
 async function persistencePaths(): Promise<StagedDeploymentPaths> {
@@ -517,20 +528,24 @@ async function persistencePaths(): Promise<StagedDeploymentPaths> {
 export class StagedDeploymentServer {
 	static async start(checkoutRoot: string): Promise<StagedDeploymentServer> {
 		const shared = await sharedStagedDeployment(checkoutRoot);
-		const [paths, bundles, artifact] = await Promise.all([
+		const [paths, bundles, artifact, bindingsScript] = await Promise.all([
 			persistencePaths(),
 			shared?.bundles ?? buildPredecessorBundles(checkoutRoot),
 			shared?.artifact ??
-				buildArtifactFromTree(checkoutRoot, createEsbuildBundler())
+				buildArtifactFromTree(checkoutRoot, createEsbuildBundler()),
+			bindingsWorkerScript()
 		]);
 		const issuer = await StubOidcIssuer.start();
-		const miniflare = new Miniflare(predecessorOptions(paths, bundles));
+		const miniflare = new Miniflare(
+			predecessorOptions(paths, bundles, bindingsScript)
+		);
 		const server = new StagedDeploymentServer(
 			paths,
 			artifact,
 			issuer,
 			miniflare,
-			{ kind: 'predecessor', bundles }
+			{ kind: 'predecessor', bundles },
+			bindingsScript
 		);
 
 		await server.applyPredecessorSchema();
@@ -543,14 +558,21 @@ export class StagedDeploymentServer {
 		readonly artifact: DeploymentArtifact,
 		private readonly issuer: StubOidcIssuer,
 		private miniflare: Miniflare,
-		private persistedRuntime: PersistedRuntime
+		private persistedRuntime: PersistedRuntime,
+		private readonly bindingsScript: string
 	) {}
+
+	private get bindings(): WorkerBindings {
+		return new WorkerBindings(this.miniflare);
+	}
 
 	private async deployArtifact(
 		artifact: DeploymentArtifact,
 		stage: 'intermediate' | 'current'
 	): Promise<void> {
-		await this.miniflare.setOptions(currentOptions(this.paths, artifact));
+		await this.miniflare.setOptions(
+			currentOptions(this.paths, artifact, this.bindingsScript)
+		);
 		this.persistedRuntime = { kind: 'release', stage, artifact };
 		const health = await this.workerFetch('/_health');
 
@@ -641,7 +663,7 @@ export class StagedDeploymentServer {
 	}
 
 	private async seedD1(): Promise<void> {
-		const database = await this.database();
+		const database = this.database();
 		const createdAt = '2026-01-01T00:00:00.000Z';
 		const statuses: readonly (readonly [
 			FixtureTenant,
@@ -768,16 +790,16 @@ export class StagedDeploymentServer {
 			''
 		].join('\n');
 
-		const bucket = await this.bucket();
+		const bucket = this.bucket();
 
 		await bucket.put(key, body, {
-			httpMetadata: { contentType: 'text/x-nix-narinfo; charset=utf-8' }
+			contentType: 'text/x-nix-narinfo; charset=utf-8'
 		});
 		await bucket.put(
 			`t/upgrade-suspended/narinfo/private/secrets/${pathHash}`,
 			body,
 			{
-				httpMetadata: { contentType: 'text/x-nix-narinfo; charset=utf-8' },
+				contentType: 'text/x-nix-narinfo; charset=utf-8',
 				customMetadata: {
 					generation: '0',
 					narHash,
@@ -786,7 +808,7 @@ export class StagedDeploymentServer {
 				}
 			}
 		);
-		const database = await this.database();
+		const database = this.database();
 		await database.batch([
 			database.prepare(
 				`INSERT INTO blob_ref (tenant, cache, store_path_hash, generation, nar_hash, cache_generation)
@@ -973,9 +995,9 @@ export class StagedDeploymentServer {
 	get api(): Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> {
 		return {
 			d1QueryBatch: async (id, statements) =>
-				d1Api(await this.database(id)).d1QueryBatch(id, statements),
+				d1Api(this.database(id)).d1QueryBatch(id, statements),
 			d1QueryRows: async (id, sql) =>
-				d1Api(await this.database(id)).d1QueryRows(id, sql)
+				d1Api(this.database(id)).d1QueryRows(id, sql)
 		};
 	}
 
@@ -1053,7 +1075,7 @@ export class StagedDeploymentServer {
 	}
 
 	async terminalSnapshot(): Promise<TerminalDeploymentSnapshot> {
-		const database = await this.database();
+		const database = this.database();
 		const result = await database
 			.prepare(
 				`SELECT
@@ -1074,7 +1096,7 @@ export class StagedDeploymentServer {
 			.all();
 		const transitions = transitionRowsSchema.parse(transitionRows.results);
 		const tenant = tenantIdSchema.parse('upgrade-active');
-		const bucket = await this.bucket();
+		const bucket = this.bucket();
 		const legacyNarInfo = await bucket.head(
 			`t/${tenant}/narinfo/${legacyCacheName}/${pathHash}`
 		);
@@ -1108,7 +1130,7 @@ export class StagedDeploymentServer {
 	async restart(): Promise<void> {
 		await this.miniflare.dispose();
 		this.miniflare = new Miniflare(
-			runtimeOptions(this.paths, this.persistedRuntime)
+			runtimeOptions(this.paths, this.persistedRuntime, this.bindingsScript)
 		);
 	}
 
@@ -1170,12 +1192,10 @@ export class StagedDeploymentServer {
 	writes the marker that tenant creation would have written.
 	*/
 	async announceTenant(tenant: FixtureTenant): Promise<void> {
-		const members = await this.miniflare.getKVNamespace(
-			tenantCacheBinding,
-			controlScript
+		await this.bindings.putTenantCacheValue(
+			tenantMemberKey(tenantIdSchema.parse(tenant)),
+			'1'
 		);
-
-		await members.put(tenantMemberKey(tenantIdSchema.parse(tenant)), '1');
 	}
 
 	/**
@@ -1270,7 +1290,7 @@ export class StagedDeploymentServer {
 	applied every migration this build carries.
 	*/
 	async catalogueVersion(tenant: FixtureTenant): Promise<number | null> {
-		const database = await this.database();
+		const database = this.database();
 		const row = await database
 			.prepare(
 				'SELECT cache_catalogue_version AS version FROM tenant WHERE id = ?'
@@ -1285,26 +1305,21 @@ export class StagedDeploymentServer {
 		return this.workerFetch(pathname, init);
 	}
 
-	async database(
-		id: DatabaseId = databaseId
-	): Promise<Awaited<ReturnType<Miniflare['getD1Database']>>> {
+	database(id: DatabaseId = databaseId): TestD1Database {
 		if (id !== databaseId && id !== controlDatabaseId) {
 			throw new Error(`Unknown staged database ${id}`);
 		}
-		return this.miniflare.getD1Database(
-			id === controlDatabaseId ? controlDatabaseBinding : databaseBinding,
-			schemaScript
+		return this.bindings.database(
+			id === controlDatabaseId ? controlDatabaseBinding : databaseBinding
 		);
 	}
 
-	async controlDatabase(): Promise<
-		Awaited<ReturnType<Miniflare['getD1Database']>>
-	> {
+	controlDatabase(): TestD1Database {
 		return this.database(controlDatabaseId);
 	}
 
-	async bucket(): Promise<Awaited<ReturnType<Miniflare['getR2Bucket']>>> {
-		return this.miniflare.getR2Bucket(blobsBinding, controlScript);
+	bucket(): TestR2Bucket {
+		return this.bindings.bucket();
 	}
 
 	async stop(): Promise<void> {

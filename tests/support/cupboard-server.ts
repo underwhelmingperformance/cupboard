@@ -39,12 +39,15 @@ import { fixtureTenant } from '../../packages/server/src/routing/tenant-routing.
 
 import { sharedWorkerBundle, type TestWorkerBundle } from './e2e-artifacts.ts';
 import { FakeS3 } from './fake-s3.ts';
-import {
-	type ManualAlarmControl,
-	withManualAlarmControl
-} from './manual-alarms.ts';
+import { withManualAlarmControl } from './manual-alarms.ts';
 import { StubOidcIssuer } from './oidc-issuer.ts';
 import { signBound } from './subject-binding.ts';
+import {
+	bindingsWorker,
+	bindingsWorkerScript,
+	type TestD1Database,
+	WorkerBindings
+} from './worker-bindings.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
 
@@ -81,23 +84,6 @@ type MiniflareRequestInit = NonNullable<
 	Parameters<Miniflare['dispatchFetch']>[1]
 >;
 
-type TestDurableObjectNamespace = Awaited<
-	ReturnType<Miniflare['getDurableObjectNamespace']>
->;
-
-interface ManualAlarmStub extends ManualAlarmControl {
-	isManualAlarmFenceOpen(): Promise<boolean>;
-}
-
-interface ManualAlarmBindings {
-	readonly CUPBOARD_DO: {
-		readonly idFromName: TestDurableObjectNamespace['idFromName'];
-		readonly get: (
-			id: ReturnType<TestDurableObjectNamespace['idFromName']>
-		) => ManualAlarmStub;
-	};
-}
-
 /**
 What the commit sessions of a run did, as counted at the socket the worker
 answered on. A test that needs to prove a publication waited on the socket it
@@ -125,10 +111,9 @@ interface CommitSessionCounters {
 
 type TestServerStartStage =
 	| 'runtime-configuration'
-	| 'database-binding'
+	| 'runtime-start'
 	| 'database-migrations'
 	| 'deployment-transitions'
-	| 'bucket-binding'
 	| 'http-listen'
 	| 'tenant-provisioning';
 
@@ -208,6 +193,7 @@ export class CupboardTestServer {
 		let httpServer: Server | undefined;
 
 		try {
+			const bindingsScript = await bindingsWorkerScript();
 			const worker = new Miniflare({
 				workers: [
 					{
@@ -269,17 +255,30 @@ export class CupboardTestServer {
 						queueProducers: {
 							MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
 						}
-					}
+					},
+					bindingsWorker(bindingsScript, {
+						d1Databases: {
+							CUPBOARD_DB: 'cupboard-e2e',
+							CONTROL_DB: 'cupboard-control-e2e'
+						},
+						r2Buckets: { BLOBS: r2Credentials.bucketName },
+						durableObjects: {
+							CUPBOARD_DO: {
+								className: 'CupboardServer',
+								scriptName: 'cupboard-tenant',
+								useSQLite: true
+							}
+						}
+					})
 				]
 			});
 			cleanupWorker = worker;
-			stage = 'database-binding';
-			const database = await worker.getD1Database('CUPBOARD_DB', 'cupboard');
+			stage = 'runtime-start';
+			await worker.ready;
+			const bindings = new WorkerBindings(worker);
+			const database = bindings.database('CUPBOARD_DB');
+			const controlDatabase = bindings.database('CONTROL_DB');
 			stage = 'database-migrations';
-			const controlDatabase = await worker.getD1Database(
-				'CONTROL_DB',
-				'cupboard'
-			);
 			await applyD1Migrations(database, {
 				directory: 'drizzle-d1',
 				phase: 'expand'
@@ -320,8 +319,6 @@ export class CupboardTestServer {
 					.bind(transition, 'complete', timestamp, timestamp)
 					.run();
 			}
-			stage = 'bucket-binding';
-			const bucket = await worker.getR2Bucket('BLOBS', 'cupboard');
 			const requests: { method: string; path: string; status: number }[] = [];
 			httpServer = createServer((request, response) => {
 				response.on('finish', () => {
@@ -359,7 +356,7 @@ export class CupboardTestServer {
 				url,
 				issuer,
 				worker,
-				bucket,
+				bindings,
 				httpServer,
 				commitCounters,
 				requests
@@ -401,7 +398,7 @@ export class CupboardTestServer {
 		readonly url: URL,
 		readonly issuer: StubOidcIssuer,
 		private readonly worker: Miniflare,
-		private readonly bucket: Awaited<ReturnType<Miniflare['getR2Bucket']>>,
+		private readonly bindings: WorkerBindings,
 		private readonly server: Server,
 		private readonly commitCounters: CommitSessionCounters,
 		readonly requests: readonly {
@@ -481,24 +478,17 @@ export class CupboardTestServer {
 		return url;
 	}
 
-	async withManualAlarms<T>(
+	withManualAlarms<T>(
 		use: (runAlarmPass: () => Promise<void>) => Promise<T>
 	): Promise<T> {
-		const bindings =
-			await this.worker.getBindings<ManualAlarmBindings>('cupboard');
-		const stub = bindings.CUPBOARD_DO.get(
-			bindings.CUPBOARD_DO.idFromName(fixtureTenant)
+		return withManualAlarmControl(
+			this.bindings.manualAlarms(fixtureTenant),
+			use
 		);
-		return withManualAlarmControl(stub, use);
 	}
 
-	async isManualAlarmFenceOpen(): Promise<boolean> {
-		const bindings =
-			await this.worker.getBindings<ManualAlarmBindings>('cupboard');
-		const stub = bindings.CUPBOARD_DO.get(
-			bindings.CUPBOARD_DO.idFromName(fixtureTenant)
-		);
-		return stub.isManualAlarmFenceOpen();
+	isManualAlarmFenceOpen(): Promise<boolean> {
+		return this.bindings.manualAlarms(fixtureTenant).isManualAlarmFenceOpen();
 	}
 
 	/**
@@ -592,8 +582,8 @@ export class CupboardTestServer {
 	}
 
 	async stageObject(r2Key: string, bytes: Uint8Array): Promise<void> {
-		await this.bucket.put(r2Key, bytes, {
-			sha256: createHash('sha256').update(bytes).digest()
+		await this.bindings.bucket().put(r2Key, bytes, {
+			sha256: createHash('sha256').update(bytes).digest('hex')
 		});
 	}
 
@@ -658,10 +648,10 @@ export class CupboardTestServer {
 		readonly audience: string;
 		readonly claims?: Readonly<Record<string, string>>;
 	}): Promise<void> {
-		const d1 = await this.worker.getD1Database('CONTROL_DB', 'cupboard');
 		const now = new Date();
 
-		await d1
+		await this.bindings
+			.database('CONTROL_DB')
 			.prepare(
 				'INSERT INTO control_trust (id, issuer, audience, claims_json, created_at) VALUES (?, ?, ?, ?, ?)'
 			)
@@ -759,7 +749,7 @@ function byCodeUnit(a: string, b: string): number {
 // drizzle names migrations with a zero-padded numeric prefix, so filename order
 // is apply order; statements within a file are split on its breakpoint marker.
 async function applyD1Migrations(
-	d1: Awaited<ReturnType<Miniflare['getD1Database']>>,
+	d1: TestD1Database,
 	spec: {
 		readonly directory: string;
 		readonly phase: 'expand' | 'contract' | 'all';
@@ -776,17 +766,15 @@ async function applyD1Migrations(
 		)
 		.toSorted(byCodeUnit);
 
-	for (const file of files) {
-		const sql = readFileSync(path.join(directory, file), 'utf8');
-		const statements = sql
+	const statements = files.flatMap((file) =>
+		readFileSync(path.join(directory, file), 'utf8')
 			.split('--> statement-breakpoint')
 			.map((statement) => statement.trim())
-			.filter((statement) => statement.length > 0);
+			.filter((statement) => statement.length > 0)
+			.map((sql) => ({ sql, params: [] }))
+	);
 
-		for (const statement of statements) {
-			await d1.prepare(statement).run();
-		}
-	}
+	await d1.run(statements);
 }
 
 // Bundles both Worker scripts into standalone modules. The e2e tenant entrypoint

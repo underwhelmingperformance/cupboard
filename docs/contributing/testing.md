@@ -169,6 +169,28 @@ Miniflare doesn't provide that endpoint, so the test server writes the NAR files
 straight into the R2 bucket binding. Everything else, including negotiation,
 commits, verification and retention, runs as it does in production.
 
+The test harnesses read and write D1 and R2, write the tenant cache in KV, and
+call the manual-alarm methods of the tenant Durable Objects through a separate
+Worker in the same Miniflare instance, `tests/support/bindings-worker.ts`. They
+call that Worker with `Miniflare#dispatchFetch`. They don't use Miniflare's
+binding proxies, such as `getD1Database`. The synchronous operations of those
+proxies keep a connection to workerd open between calls, and after a stall
+workerd can close that connection without reading the next request
+([cloudflare/workers-sdk#16445][workers-sdk-16445]).
+
+This protection depends on the Miniflare version. In Miniflare 4.20260730.0,
+`dispatchFetch` sets undici's `reset` option on every request to workerd, so
+each request uses a new connection. Miniflare 5.20261006 and later reuse these
+connections ([cloudflare/workers-sdk#16243][workers-sdk-16243]). The test
+`starts when workerd stalls past its idle connection timeout` in
+`tests/support/cupboard-server.test.ts` fails if a Miniflare upgrade makes this
+change. A new connection is still exposed to workerd's 15-second header timeout:
+if workerd accepts a connection and then cannot read its request for 15 seconds,
+it answers 408, and the harness reports that response as an error.
+
+[workers-sdk-16445]: https://github.com/cloudflare/workers-sdk/issues/16445
+[workers-sdk-16243]: https://github.com/cloudflare/workers-sdk/issues/16243
+
 The end-to-end tests cover substitution, signing key rotation, private reads,
 named caches, reuse views, sign-up, the control plane, OIDC federation,
 `build-push`, garbage collection and staged upgrades. They need a working Nix
