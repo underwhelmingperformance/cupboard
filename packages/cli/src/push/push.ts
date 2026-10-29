@@ -684,12 +684,15 @@ interface ReceiptClaims {
 
 /**
 Describes published paths from reference narinfos or selected-store metadata.
-Neither source establishes execution during the current invocation.
+Neither source establishes execution during the current invocation. A path
+whose local NAR differs from the cache's copy has no subject, because the
+cache serves bytes that this store did not produce.
 */
 function reconciledReceipt(
 	claims: ReceiptClaims,
 	resolved: readonly ResolvedPushPath[],
-	summaryPaths: readonly PushSummaryPathInput[]
+	summaryPaths: readonly PushSummaryPathInput[],
+	divergent: ReadonlyMap<StorePathHash, DivergentSkip>
 ): BuildReceiptV3 {
 	const servable = new Set<string>();
 	const published = new Set<string>();
@@ -724,13 +727,15 @@ function reconciledReceipt(
 		);
 	}
 
+	const conceded = new Set(divergent.values().map((skip) => skip.storePath));
+
 	return buildReceiptV3Schema.parse({
 		version: 3,
 		paths: [...servable].toSorted(byCodeUnit),
 		subjects: publishedSubjects({
 			described,
 			infos,
-			servable,
+			servable: servable.difference(conceded),
 			buildStore: claims.buildStore,
 			copiedFrom: claims.copiedFrom
 		}),
@@ -740,8 +745,10 @@ function reconciledReceipt(
 
 function referenceReceipt(
 	resolved: readonly ResolvedPushPath[],
-	summaryPaths: readonly PushSummaryPathInput[]
+	summaryPaths: readonly PushSummaryPathInput[],
+	divergent: ReadonlyMap<StorePathHash, DivergentSkip>
 ): BuildReceiptV3 {
+	const conceded = new Set(divergent.values().map((skip) => skip.storePath));
 	const references = new Map<
 		string,
 		Extract<ResolvedPushPath, { readonly source: 'reference' }>
@@ -772,7 +779,9 @@ function referenceReceipt(
 		paths: [...paths].toSorted(byCodeUnit),
 		subjects: resolved
 			.flatMap((reference) =>
-				reference.source === 'reference' && paths.has(reference.storePath)
+				reference.source === 'reference' &&
+				paths.has(reference.storePath) &&
+				!conceded.has(reference.storePath)
 					? [republishedSubject(reference.metadata, reference.sourceUrl)]
 					: []
 			)
@@ -1568,7 +1577,7 @@ async function runPushFlow(
 		}
 
 		if (dependencies.referenceReceipt === true) {
-			return referenceReceipt(resolved, summaryPaths);
+			return referenceReceipt(resolved, summaryPaths, divergent);
 		}
 
 		return dependencies.buildStore === undefined
@@ -1579,7 +1588,8 @@ async function runPushFlow(
 						copiedFrom: dependencies.copiedFrom ?? new Map()
 					},
 					resolved,
-					summaryPaths
+					summaryPaths,
+					divergent
 				);
 	} finally {
 		session?.close();
