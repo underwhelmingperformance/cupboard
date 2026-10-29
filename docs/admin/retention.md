@@ -86,6 +86,13 @@ releases nothing, so it doesn't make the cache need
 root's TTL. In a cache that was closed and reopened, it also replaces the expiry
 that the close gave the root, so the root retains its targets again.
 
+Repeating a request therefore has the same result as sending it once, apart from
+a later expiry and update time. The CLI sends a `root set` or `root ensure`
+request again when the connection fails or the server responds with 429, 502,
+503 or 504. If another writer changes the same root between two attempts, the
+second attempt replaces that writer's targets, so a retried write is not an
+exactly-once write.
+
 One `root set` or `root ensure` request accepts at most 149 targets. Both
 commands replace the complete target set, so use several roots if that set is
 larger. Run roots grow through additive updates and have no total target limit.
