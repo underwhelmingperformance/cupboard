@@ -73,6 +73,16 @@ export class ReadUserInvalidError extends UsageError {
 	}
 }
 
+export class ReadUserVariableInvalidError extends UsageError {
+	constructor(
+		public readonly variable: string,
+		public readonly value: string
+	) {
+		super(`${variable} must not contain a colon`);
+		this.name = 'ReadUserVariableInvalidError';
+	}
+}
+
 export class BooleanInputInvalidError extends UsageError {
 	constructor(
 		public readonly input: string,
@@ -478,6 +488,16 @@ export class ReadUserRequiredError extends UsageError {
 	constructor() {
 		super('read-user is required when read-password is supplied');
 		this.name = 'ReadUserRequiredError';
+	}
+}
+
+export class ReadCredentialVariablesIncompleteError extends UsageError {
+	constructor(
+		public readonly userVariable: string,
+		public readonly passwordVariable: string
+	) {
+		super(`${userVariable} and ${passwordVariable} must be set together`);
+		this.name = 'ReadCredentialVariablesIncompleteError';
 	}
 }
 

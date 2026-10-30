@@ -22,6 +22,7 @@ import {
 	MissingInputError,
 	PackCapacityInvalidError,
 	PublishRootTargetLimitError,
+	ReadCredentialVariablesIncompleteError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	RemoteOutputPathUnknownDuringPlanningError,
@@ -210,16 +211,59 @@ describe('planAction', () => {
 				fallbackReadUser: 'source-reader',
 				fallbackReadPassword: 'source-secret'
 			},
+			environment: {},
+			error: { minimumVersion: 'v0.0.50', version: 'v0.0.49' },
+			inspected: [['/unused/cupboard', undefined]]
+		},
+		{
+			name: 'refuses a CLI that ignores a reference credential set as environment variables',
+			credential: {},
+			environment: {
+				CUPBOARD_VIEW_READ_USER: 'source-reader',
+				CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
+			},
 			error: { minimumVersion: 'v0.0.50', version: 'v0.0.49' },
 			inspected: [['/unused/cupboard', undefined]]
 		},
 		{
 			name: 'does not check the CLI version without a reference credential',
 			credential: {},
+			environment: {},
 			error: 'evaluated',
 			inspected: []
-		}
-	])('$name', async ({ credential, error, inspected }) => {
+		},
+		{
+			name: 'does not check the CLI version when the job sets empty credential variables',
+			credential: {},
+			environment: {
+				CUPBOARD_VIEW_READ_USER: '',
+				CUPBOARD_VIEW_READ_PASSWORD: ''
+			},
+			error: 'evaluated',
+			inspected: []
+		},
+		...[
+			{ CUPBOARD_VIEW_READ_USER: 'source-reader' },
+			{
+				CUPBOARD_VIEW_READ_USER: 'source-reader',
+				CUPBOARD_VIEW_READ_PASSWORD: ''
+			},
+			{ CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' },
+			{
+				CUPBOARD_VIEW_READ_USER: '',
+				CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
+			}
+		].map((environment) => ({
+			name: `rejects half a reference credential set as environment variables: ${JSON.stringify(environment)}`,
+			credential: {},
+			environment,
+			error: {
+				userVariable: 'CUPBOARD_VIEW_READ_USER',
+				passwordVariable: 'CUPBOARD_VIEW_READ_PASSWORD'
+			},
+			inspected: []
+		}))
+	])('$name', async ({ credential, environment, error, inspected }) => {
 		const evaluation = new Error('evaluation stops the plan');
 		const evaluator = vi.fn(() => Promise.reject(evaluation));
 		const runner = vi.fn(() => Promise.resolve({ stdout: '', stderr: '' }));
@@ -235,7 +279,7 @@ describe('planAction', () => {
 					referenceSource: 'https://cupboard.example/t/acme/cache/source',
 					...credential
 				},
-				{ RUNNER_TEMP: '/tmp' },
+				{ RUNNER_TEMP: '/tmp', ...environment },
 				undefined,
 				{
 					evaluator,
@@ -257,10 +301,15 @@ describe('planAction', () => {
 							minimumVersion: failure.minimumVersion,
 							version: failure.version
 						}
-					: failure instanceof TargetEvaluationError &&
-						  failure.cause === evaluation
-						? 'evaluated'
-						: failure,
+					: failure instanceof ReadCredentialVariablesIncompleteError
+						? {
+								userVariable: failure.userVariable,
+								passwordVariable: failure.passwordVariable
+							}
+						: failure instanceof TargetEvaluationError &&
+							  failure.cause === evaluation
+							? 'evaluated'
+							: failure,
 			inspected: inspectVersion.mock.calls,
 			runs: runner.mock.calls,
 			probes: fetcher.mock.calls
@@ -2531,106 +2580,137 @@ describe('plan-job reference publication', () => {
 		}
 	);
 
+	const referenceInputs = {
+		fallbackReadUser: 'source-reader',
+		fallbackReadPassword: 'source-secret'
+	};
+	const referenceVariables = {
+		CUPBOARD_VIEW_READ_USER: 'source-reader',
+		CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
+	};
+
 	it.each([
 		{
-			name: 'passes the reference read password in the environment',
-			credential: {
-				fallbackReadUser: 'source-reader',
-				fallbackReadPassword: 'source-secret'
+			source: 'the inputs',
+			credential: referenceInputs,
+			variables: {},
+			credentialArguments: ['--read-user', 'source-reader'],
+			environment: { CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' }
+		},
+		{
+			source: 'environment variables',
+			credential: {},
+			variables: referenceVariables,
+			credentialArguments: ['--read-user', 'source-reader'],
+			environment: { CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' }
+		},
+		{
+			source: 'the inputs over environment variables',
+			credential: referenceInputs,
+			variables: {
+				CUPBOARD_VIEW_READ_USER: 'ignored-reader',
+				CUPBOARD_VIEW_READ_PASSWORD: 'ignored-secret'
 			},
 			credentialArguments: ['--read-user', 'source-reader'],
 			environment: { CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' }
 		},
 		{
-			name: 'leaves the job environment to supply a reference credential',
+			source: 'neither the inputs nor environment variables',
 			credential: {},
+			variables: {},
 			credentialArguments: [],
 			environment: {}
 		}
-	])('$name', async ({ credential, credentialArguments, environment }) => {
-		const directory = await mkdtemp(
-			path.join(tmpdir(), 'cupboard-plan-reference-')
-		);
-		const outputPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
-		const inputs: PlanInputs = {
-			...resolvePlanInputs(
-				{ ...baseOptions, ...credential },
-				{ RUNNER_TEMP: directory }
-			),
-			targets: [evaluation('app', outputPath).target],
-			referenceSource: 'https://cupboard.example/t/acme'
-		};
-		const calls: {
-			arguments: readonly string[];
-			environment: Environment | undefined;
-		}[] = [];
-		const runner: EnsureRunner = async (
-			_command,
-			arguments_,
-			_signal,
-			commandEnvironment
-		) => {
-			calls.push({
-				arguments: arguments_.filter(
-					(argument) => !argument.startsWith(directory)
-				),
-				environment: commandEnvironment
-			});
-			const resultFile = arguments_[arguments_.indexOf('--result-file') + 1];
-			await writeFile(
-				resultFile ?? '',
-				`${JSON.stringify({
-					kind: 'push-summary',
-					data: {
-						uploadedPaths: 0,
-						reusedBlobs: 1,
-						skipped: 0,
-						uploadedBytes: 0,
-						failures: [],
-						paths: [
-							{
-								storePathHash: '1'.repeat(32),
-								storePath: outputPath,
-								outcome: 'committed'
-							}
-						]
-					}
-				})}\n`
+	])(
+		'passes the reference credential from $source to push',
+		async ({ credential, variables, credentialArguments, environment }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-plan-reference-')
 			);
-			return { stdout: '', stderr: '' };
-		};
+			const outputPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+			const inputs: PlanInputs = {
+				...resolvePlanInputs(
+					{
+						...baseOptions,
+						referenceSource: 'https://cupboard.example/t/acme',
+						...credential
+					},
+					{ RUNNER_TEMP: directory, ...variables }
+				),
+				targets: [evaluation('app', outputPath).target]
+			};
+			const calls: {
+				arguments: readonly string[];
+				environment: Environment | undefined;
+			}[] = [];
+			const runner: EnsureRunner = async (
+				_command,
+				arguments_,
+				_signal,
+				commandEnvironment
+			) => {
+				calls.push({
+					arguments: arguments_.filter(
+						(argument) => !argument.startsWith(directory)
+					),
+					environment: commandEnvironment
+				});
+				const resultFile = arguments_[arguments_.indexOf('--result-file') + 1];
+				await writeFile(
+					resultFile ?? '',
+					`${JSON.stringify({
+						kind: 'push-summary',
+						data: {
+							uploadedPaths: 0,
+							reusedBlobs: 1,
+							skipped: 0,
+							uploadedBytes: 0,
+							failures: [],
+							paths: [
+								{
+									storePathHash: '1'.repeat(32),
+									storePath: outputPath,
+									outcome: 'committed'
+								}
+							]
+						}
+					})}\n`
+				);
+				return { stdout: '', stderr: '' };
+			};
 
-		try {
-			await publishReferenceTargets(inputs, [evaluation('app', outputPath)], {
-				runner,
-				fetcher: () =>
-					Promise.resolve(Response.json({ missingStorePathHashes: [] }))
-			});
+			try {
+				await publishReferenceTargets(inputs, [evaluation('app', outputPath)], {
+					runner,
+					fetcher: () =>
+						Promise.resolve(Response.json({ missingStorePathHashes: [] }))
+				});
 
-			expect(calls).toStrictEqual([
-				{
-					arguments: [
-						'--output-mode',
-						'json',
-						'--no-colour',
-						'--result-file',
-						'push',
-						'https://cupboard.example/t/acme',
-						'--reference-paths-file',
-						'--reference-source',
-						'https://cupboard.example/t/acme',
-						'--github-oidc',
-						'--root',
-						'github:owner/repo/main/app',
-						...credentialArguments
-					],
-					environment
-				}
-			]);
-		} finally {
-			await rm(directory, { recursive: true, force: true });
+				expect(calls).toStrictEqual([
+					{
+						arguments: [
+							'--output-mode',
+							'json',
+							'--no-colour',
+							'--result-file',
+							'push',
+							'https://cupboard.example/t/acme',
+							'--reference-paths-file',
+							'--reference-source',
+							'https://cupboard.example/t/acme',
+							'--github-oidc',
+							'--root',
+							'github:owner/repo/main/app',
+							...credentialArguments
+						],
+						environment
+					}
+				]);
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
 		}
-	});
+	);
 
 	it.each([
 		{ build: 'rebuild', publish: 'outputs' },
@@ -3000,6 +3080,129 @@ it.each(['outputs', 'built'] as const)(
 					? [['https://cupboard.example/t/acme', `${appPath}\n`]]
 					: []
 		});
+	}
+);
+
+it.each([
+	{
+		role: 'destination',
+		variables: {
+			CUPBOARD_READ_USER: 'reader',
+			CUPBOARD_READ_PASSWORD: 'secret'
+		},
+		destination: `Basic ${btoa('reader:secret')}`,
+		reference: undefined
+	},
+	{
+		role: 'reference source',
+		variables: {
+			CUPBOARD_VIEW_READ_USER: 'source-reader',
+			CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
+		},
+		destination: undefined,
+		reference: `Basic ${btoa('source-reader:source-secret')}`
+	}
+])(
+	'sends the $role read credential set as environment variables with its availability probe',
+	async ({ variables, destination, reference }) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-plan-job-credential-')
+		);
+		const appPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+		const probes: { url: string; authorization: string | undefined }[] = [];
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			if (!arguments_.includes('push')) {
+				await writeFile(
+					resultFileArgument(arguments_),
+					rootTargetsResultLine([])
+				);
+				return { stdout: '', stderr: '' };
+			}
+			await writeFile(
+				resultFileArgument(arguments_),
+				JSON.stringify({
+					kind: 'push-summary',
+					data: {
+						uploadedPaths: 0,
+						uploadedBytes: 0,
+						reusedBlobs: 1,
+						skipped: 0,
+						failures: [],
+						paths: [
+							{
+								storePathHash: '1'.repeat(32),
+								storePath: appPath,
+								outcome: 'committed'
+							}
+						]
+					}
+				}) + '\n'
+			);
+			return { stdout: '', stderr: '' };
+		};
+
+		try {
+			await planAction(
+				{
+					...baseOptions,
+					cache: 'pr-cache',
+					optimise: 'true',
+					referenceSource: 'https://cupboard.example/t/acme/cache/source'
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'output'),
+					...variables
+				},
+				warningReporter([]),
+				{
+					storeDirectory: storeDirectorySchema.parse('/nix/store'),
+					runner,
+					inspectVersion: () => Promise.resolve('v0.0.50'),
+					evaluator: () =>
+						Promise.resolve({
+							stdout: JSON.stringify({
+								derivations: {
+									[targetRootDrvPath]: {
+										env: { out: appPath },
+										inputs: { drvs: {} },
+										outputs: { out: { path: appPath } }
+									}
+								}
+							})
+						}),
+					fetcher: (input, init) => {
+						const request = new Request(input, init);
+						probes.push({
+							url: request.url,
+							authorization: request.headers.get('authorization') ?? undefined
+						});
+
+						return Promise.resolve(
+							Response.json({
+								missingStorePathHashes: request.url.includes('/cache/pr-cache/')
+									? ['1'.repeat(32)]
+									: []
+							})
+						);
+					},
+					createArtifactName: () => 'job-credential-plan-test'
+				}
+			);
+
+			expect(probes).toStrictEqual([
+				{
+					url: 'https://cupboard.example/t/acme/cache/pr-cache/api/v1/missing-paths',
+					authorization: destination
+				},
+				{
+					url: 'https://cupboard.example/t/acme/cache/source/api/v1/missing-paths',
+					authorization: reference
+				}
+			]);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
 	}
 );
 

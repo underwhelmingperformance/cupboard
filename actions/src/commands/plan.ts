@@ -48,7 +48,8 @@ import {
 import {
 	cupboardDebugArguments,
 	inspectCupboardVersion,
-	requireEnvironmentCredentialSupport
+	requireEnvironmentCredentialSupport,
+	resolveReadCredential
 } from '../cupboard-run.ts';
 import {
 	BuildRebuildRemoteDispatchError,
@@ -487,6 +488,20 @@ export function resolvePlanInputs(
 		throw new ReadUserRequiredError();
 	}
 
+	const destinationCredential = resolveReadCredential(
+		{ user: readUser, password: readPassword },
+		environment,
+		'cache'
+	);
+	const referenceCredential =
+		referenceSource === undefined
+			? { user: fallbackReadUser, password: fallbackReadPassword }
+			: resolveReadCredential(
+					{ user: fallbackReadUser, password: fallbackReadPassword },
+					environment,
+					'reference-source'
+				);
+
 	const temporaryDirectory = requireEnvironment(environment, 'RUNNER_TEMP');
 	const isPackingEnabled = isEnabled(
 		'enable-packing',
@@ -508,12 +523,12 @@ export function resolvePlanInputs(
 		rootPrefix,
 		ttl,
 		permanent: isPermanent,
-		readUser,
-		readPassword,
+		readUser: destinationCredential.user,
+		readPassword: destinationCredential.password,
 		referenceSource:
 			referenceSource === undefined ? '' : canonicalHref(referenceSource),
-		fallbackReadUser,
-		fallbackReadPassword,
+		fallbackReadUser: referenceCredential.user,
+		fallbackReadPassword: referenceCredential.password,
 		audience: provided(options.audience) ?? '',
 		cupboardPath,
 		optimise: isEnabled('optimise', options.optimise, true),

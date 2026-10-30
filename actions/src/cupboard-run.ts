@@ -19,6 +19,7 @@ import {
 	type WorkflowCommands,
 	workflowCommands
 } from '@cupboard/shared/github-actions';
+import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
 import { subprocessTraceEnvironment } from '@cupboard/shared/node-tracing';
 import semverLt from 'semver/functions/lt.js';
 import semverParse from 'semver/functions/parse.js';
@@ -29,7 +30,9 @@ import {
 	CommandFailedError,
 	CupboardReportedError,
 	CupboardVersionOutputMissingError,
-	EnvironmentCredentialVersionError
+	EnvironmentCredentialVersionError,
+	ReadCredentialVariablesIncompleteError,
+	ReadUserVariableInvalidError
 } from './errors.ts';
 import { type Environment, requireEnvironment } from './inputs.ts';
 
@@ -90,8 +93,11 @@ the password in an environment variable. `cache` uses `--read-user` and
 `CUPBOARD_VIEW_READ_PASSWORD`, and `reference-source` uses `--read-user` and
 `CUPBOARD_VIEW_READ_PASSWORD`.
 
-An empty user name returns no arguments and no variables, so the command reads
-the role's variables from the job's environment, if the job sets them.
+An empty user name returns no arguments and no variables, and the command reads
+the role's environment variables if the job sets them. The plan and build-cohort
+actions resolve those variables into their inputs with
+{@link resolveReadCredential} first. For them, an empty user name means that
+neither the inputs nor the environment variables supply a credential.
 
 Other processes on the runner can read a command line, and Node copies it into
 the error that it reports when a command cannot start, so a password never
@@ -128,6 +134,64 @@ export function withoutReadCredential(
 		arguments: [],
 		environment: { [userVariable]: undefined, [passwordVariable]: undefined }
 	};
+}
+
+/**
+A read credential from an action's inputs. An empty user name means that the
+inputs supply no credential.
+*/
+export interface ReadCredentialInput {
+	readonly user: ReadUser | '';
+	readonly password: string;
+}
+
+/**
+Returns the read credential for `role`. An input with a user name takes
+precedence, and the function then ignores the environment variables. Otherwise
+the credential comes from the role's user and password variables, which must
+both be set or both be unset. The action rejects an input user name without an
+input password before it calls this function, so a credential never combines an
+input with a variable.
+
+GitHub Actions sets a variable to an empty string when the secret behind it is
+unset, and the CLI treats an empty variable as unset. Match the CLI so an unset
+secret does not count as a credential.
+
+Throws {@link ReadCredentialVariablesIncompleteError} when only one of the
+variables is set, and {@link ReadUserVariableInvalidError} when the user
+variable contains a colon.
+*/
+export function resolveReadCredential(
+	input: ReadCredentialInput,
+	environment: Environment,
+	role: ReadCredentialRole
+): ReadCredentialInput {
+	if (input.user !== '') {
+		return input;
+	}
+
+	const { userVariable, passwordVariable } = readCredentialRoles[role];
+	const variableUser = environment[userVariable] ?? '';
+	const password = environment[passwordVariable] ?? '';
+
+	if ((variableUser === '') !== (password === '')) {
+		throw new ReadCredentialVariablesIncompleteError(
+			userVariable,
+			passwordVariable
+		);
+	}
+
+	if (variableUser === '') {
+		return { user: '', password: '' };
+	}
+
+	const user = readUserInputSchema.safeParse(variableUser);
+
+	if (!user.success) {
+		throw new ReadUserVariableInvalidError(userVariable, variableUser);
+	}
+
+	return { user: user.data, password };
 }
 
 /**

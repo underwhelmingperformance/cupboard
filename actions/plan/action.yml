@@ -19,10 +19,18 @@ inputs:
       Same-tenant cache URL from which to publish available paths by reference.
     required: false
   fallback-read-user:
-    description: User name of a read credential for the reference source.
+    description:
+      User name of a read credential for the reference source. Leave
+      fallback-read-user and fallback-read-password empty to use the
+      CUPBOARD_VIEW_READ_USER and CUPBOARD_VIEW_READ_PASSWORD environment
+      variables.
     required: false
   fallback-read-password:
-    description: Password of a read credential for the reference source.
+    description:
+      Password of a read credential for the reference source. Leave
+      fallback-read-user and fallback-read-password empty to use the
+      CUPBOARD_VIEW_READ_USER and CUPBOARD_VIEW_READ_PASSWORD environment
+      variables.
     required: false
   read-session-target:
     description:
@@ -55,10 +63,16 @@ inputs:
     required: false
     default: 'false'
   read-user:
-    description: User name of a read credential for a private destination cache.
+    description:
+      User name of a read credential for a private destination cache. Leave
+      read-user and read-password empty to use the CUPBOARD_READ_USER and
+      CUPBOARD_READ_PASSWORD environment variables.
     required: false
   read-password:
-    description: Password of a read credential for a private destination cache.
+    description:
+      Password of a read credential for a private destination cache. Leave
+      read-user and read-password empty to use the CUPBOARD_READ_USER and
+      CUPBOARD_READ_PASSWORD environment variables.
     required: false
   audience:
     description:
