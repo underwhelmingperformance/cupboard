@@ -40,6 +40,16 @@ const cases: readonly {
 		expected: { kind: 'unsatisfiable', contentRange: 'bytes */1000' }
 	},
 	{
+		name: 'an open-ended range that starts at the end selects the whole representation',
+		headers: { range: 'bytes=1000-' },
+		expected: { kind: 'whole' }
+	},
+	{
+		name: 'an open-ended range that starts past the end is unsatisfiable',
+		headers: { range: 'bytes=1001-' },
+		expected: { kind: 'unsatisfiable', contentRange: 'bytes */1000' }
+	},
+	{
 		name: 'the range unit is case-insensitive',
 		headers: { range: 'Bytes=0-0' },
 		expected: {
@@ -70,6 +80,16 @@ const cases: readonly {
 	{
 		name: 'a range whose last position precedes its first is ignored',
 		headers: { range: 'bytes=9-0' },
+		expected: undefined
+	},
+	{
+		name: 'a range with neither position is ignored',
+		headers: { range: 'bytes=-' },
+		expected: undefined
+	},
+	{
+		name: 'a range that is not numeric is ignored',
+		headers: { range: 'bytes=abc' },
 		expected: undefined
 	},
 	{
