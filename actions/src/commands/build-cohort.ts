@@ -95,6 +95,7 @@ import {
 	inspectCupboardVersion,
 	readCredentialInvocation,
 	requireEnvironmentCredentialSupport,
+	resolveReadCredential,
 	runCupboard as defaultRunCupboard,
 	withoutReadCredential
 } from '../cupboard-run.ts';
@@ -559,6 +560,20 @@ export function resolveBuildCohortInputs(
 		throw new FallbackReadUserRequiredError();
 	}
 
+	const destinationCredential = resolveReadCredential(
+		{ user: readUser, password: readPassword },
+		environment,
+		'cache'
+	);
+	const viewCredential =
+		referenceSource === undefined && provided(options.reuseView) === undefined
+			? { user: fallbackReadUser, password: fallbackReadPassword }
+			: resolveReadCredential(
+					{ user: fallbackReadUser, password: fallbackReadPassword },
+					environment,
+					'view'
+				);
+
 	const maxJobs = provided(options.maxJobs) ?? '';
 
 	if (
@@ -640,10 +655,10 @@ export function resolveBuildCohortInputs(
 		ttl,
 		permanent: isPermanent,
 		audience: provided(options.audience) ?? '',
-		readUser,
-		fallbackReadUser,
-		fallbackReadPassword,
-		readPassword,
+		readUser: destinationCredential.user,
+		fallbackReadUser: viewCredential.user,
+		fallbackReadPassword: viewCredential.password,
+		readPassword: destinationCredential.password,
 		maxJobs,
 		store: provided(options.store) ?? '',
 		publish,

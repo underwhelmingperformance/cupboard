@@ -74,8 +74,10 @@ import {
 	LocalBuildOutputsOutsideCohortError,
 	MissingInputError,
 	PlannedTargetNotDerivationError,
+	ReadCredentialVariablesIncompleteError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
+	ReadUserVariableInvalidError,
 	RemoteBuildOutputPathUnknownError,
 	RemoteBuildOutputUndeclaredError,
 	RemoteCohortBuildFailedError,
@@ -399,6 +401,37 @@ function baseOptions(): BuildCohortOptions {
 		cupboardPath: '/opt/cupboard/cupboard'
 	};
 }
+
+const credentialInputs = {
+	readUser: 'destination',
+	readPassword: 'destination-secret',
+	fallbackReadUser: 'fallback',
+	fallbackReadPassword: 'fallback-secret'
+};
+
+const credentialSources = [
+	{ source: 'the inputs', options: credentialInputs, variables: {} },
+	{
+		source: 'environment variables',
+		options: {},
+		variables: {
+			CUPBOARD_READ_USER: 'destination',
+			CUPBOARD_READ_PASSWORD: 'destination-secret',
+			CUPBOARD_VIEW_READ_USER: 'fallback',
+			CUPBOARD_VIEW_READ_PASSWORD: 'fallback-secret'
+		}
+	},
+	{
+		source: 'the inputs over environment variables',
+		options: credentialInputs,
+		variables: {
+			CUPBOARD_READ_USER: 'ignored-destination',
+			CUPBOARD_READ_PASSWORD: 'ignored-destination-secret',
+			CUPBOARD_VIEW_READ_USER: 'ignored-fallback',
+			CUPBOARD_VIEW_READ_PASSWORD: 'ignored-fallback-secret'
+		}
+	}
+];
 
 it.each(['outputs', 'built', 'closure'] as const)(
 	'passes the %s publication scope to a local streamed build',
@@ -3654,7 +3687,8 @@ describe('buildCohortAction', () => {
 	it.each([
 		{
 			name: 'a destination read credential',
-			options: { readUser: 'reader', readPassword: 'secret' }
+			options: { readUser: 'reader', readPassword: 'secret' },
+			variables: {}
 		},
 		{
 			name: 'a reuse view read credential',
@@ -3662,20 +3696,48 @@ describe('buildCohortAction', () => {
 				reuseView: 'pr-view',
 				fallbackReadUser: 'fallback',
 				fallbackReadPassword: 'fallback-secret'
+			},
+			variables: {}
+		},
+		{
+			name: 'a destination read credential set as environment variables',
+			options: {},
+			variables: {
+				CUPBOARD_READ_USER: 'reader',
+				CUPBOARD_READ_PASSWORD: 'secret'
+			}
+		},
+		{
+			name: 'a reuse view read credential set as environment variables',
+			options: { reuseView: 'pr-view' },
+			variables: {
+				CUPBOARD_VIEW_READ_USER: 'fallback',
+				CUPBOARD_VIEW_READ_PASSWORD: 'fallback-secret'
+			}
+		},
+		{
+			name: 'a reference source read credential set as environment variables',
+			options: {
+				referenceSource: 'https://cache.example.test/t/acme/cache/source'
+			},
+			variables: {
+				CUPBOARD_VIEW_READ_USER: 'fallback',
+				CUPBOARD_VIEW_READ_PASSWORD: 'fallback-secret'
 			}
 		}
 	])(
 		'refuses a CLI that reads no password from its environment for $name',
-		async ({ options }) => {
+		async ({ options, variables }) => {
 			const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
 			const inspectVersion = vi.fn(() => Promise.resolve('v0.0.49'));
 			let error: unknown;
 
 			try {
-				await buildCohortAction({ ...baseOptions(), ...options }, environment, {
-					runCupboard: runCupboardMock,
-					inspectVersion
-				});
+				await buildCohortAction(
+					{ ...baseOptions(), ...options },
+					{ ...environment, ...variables },
+					{ runCupboard: runCupboardMock, inspectVersion }
+				);
 			} catch (error_) {
 				error = error_;
 			}
@@ -3690,6 +3752,108 @@ describe('buildCohortAction', () => {
 			}).toStrictEqual({
 				error: { minimumVersion: 'v0.0.50', version: 'v0.0.49' },
 				inspected: [['/opt/cupboard/cupboard', undefined]],
+				cupboardCalls: []
+			});
+		}
+	);
+
+	it.each(
+		[
+			{
+				role: 'destination',
+				options: {},
+				userVariable: 'CUPBOARD_READ_USER',
+				passwordVariable: 'CUPBOARD_READ_PASSWORD'
+			},
+			{
+				role: 'reuse view',
+				options: { reuseView: 'pr-view' },
+				userVariable: 'CUPBOARD_VIEW_READ_USER',
+				passwordVariable: 'CUPBOARD_VIEW_READ_PASSWORD'
+			}
+		].flatMap(({ role, options, userVariable, passwordVariable }) =>
+			[
+				{ [userVariable]: 'reader' },
+				{ [userVariable]: 'reader', [passwordVariable]: '' },
+				{ [passwordVariable]: 'secret' },
+				{ [userVariable]: '', [passwordVariable]: 'secret' }
+			].map((variables) => ({
+				role,
+				options,
+				variables,
+				userVariable,
+				passwordVariable
+			}))
+		)
+	)(
+		'rejects half a $role read credential set as environment variables: $variables',
+		async ({ options, variables, userVariable, passwordVariable }) => {
+			const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
+			const inspectVersion = vi.fn(() => Promise.resolve('v0.0.49'));
+			let error: unknown;
+
+			try {
+				await buildCohortAction(
+					{ ...baseOptions(), ...options },
+					{ ...environment, ...variables },
+					{ runCupboard: runCupboardMock, inspectVersion }
+				);
+			} catch (error_) {
+				error = error_;
+			}
+
+			expect({
+				error:
+					error instanceof ReadCredentialVariablesIncompleteError
+						? {
+								userVariable: error.userVariable,
+								passwordVariable: error.passwordVariable
+							}
+						: error,
+				inspected: inspectVersion.mock.calls,
+				cupboardCalls: runCupboardMock.mock.calls
+			}).toStrictEqual({
+				error: { userVariable, passwordVariable },
+				inspected: [],
+				cupboardCalls: []
+			});
+		}
+	);
+
+	it.each([
+		{ options: {}, variable: 'CUPBOARD_READ_USER' },
+		{ options: { reuseView: 'pr-view' }, variable: 'CUPBOARD_VIEW_READ_USER' }
+	])(
+		'rejects an invalid user name set in $variable',
+		async ({ options, variable }) => {
+			const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
+			const inspectVersion = vi.fn(() => Promise.resolve('v0.0.49'));
+			let error: unknown;
+
+			try {
+				await buildCohortAction(
+					{ ...baseOptions(), ...options },
+					{
+						...environment,
+						[variable]: 'reader:with-colon',
+						[variable.replace('_USER', '_PASSWORD')]: 'secret'
+					},
+					{ runCupboard: runCupboardMock, inspectVersion }
+				);
+			} catch (error_) {
+				error = error_;
+			}
+
+			expect({
+				error:
+					error instanceof ReadUserVariableInvalidError
+						? { variable: error.variable, value: error.value }
+						: error,
+				inspected: inspectVersion.mock.calls,
+				cupboardCalls: runCupboardMock.mock.calls
+			}).toStrictEqual({
+				error: { variable, value: 'reader:with-colon' },
+				inspected: [],
 				cupboardCalls: []
 			});
 		}
@@ -3724,170 +3888,196 @@ describe('buildCohortAction', () => {
 		}).toStrictEqual({ inspected: [], cupboardCalls: [] });
 	});
 
-	it('does not check the CLI version when it passes no read credential', async () => {
-		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
-		const inspectVersion = vi.fn(() => Promise.resolve('v0.0.49'));
-
-		await buildCohortAction(
-			{
-				...baseOptions(),
+	it.each([
+		{
+			name: 'a reuse view credential without a reuse view',
+			options: {
 				fallbackReadUser: 'fallback',
 				fallbackReadPassword: 'fallback-secret'
 			},
-			environment,
-			{
-				runCupboard: runCupboardMock,
-				runNixBuild: () =>
-					Promise.resolve({
-						paths: [libraryBuiltPath, floatingBuiltPath],
-						status: 0,
-						copiedFrom: new Map()
-					}),
-				inspectVersion
+			variables: {}
+		},
+		{
+			name: 'reuse view variables without a reuse view',
+			options: {},
+			variables: {
+				CUPBOARD_VIEW_READ_USER: 'fallback',
+				CUPBOARD_VIEW_READ_PASSWORD: 'fallback-secret'
 			}
-		);
-
-		expect({
-			inspected: inspectVersion.mock.calls,
-			cupboardCalls: runCupboardMock.mock.calls.length
-		}).toStrictEqual({ inspected: [], cupboardCalls: 1 });
-	});
-
-	it('drives the partition from a single plan-cohort invocation and writes structural outputs', async () => {
-		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
-		const runNixBuild = vi.fn((_installables: readonly string[]) =>
-			Promise.resolve({
-				paths: [libraryBuiltPath, floatingBuiltPath],
-				status: 0,
-				copiedFrom: new Map()
-			})
-		);
-
-		await buildCohortAction(
-			{
-				...baseOptions(),
-				reuseView: 'pr-view',
-				readUser: 'reader',
-				readPassword: 'secret',
-				fallbackReadUser: 'fallback',
-				fallbackReadPassword: 'fallback-secret'
-			},
-			environment,
-			{
-				runCupboard: runCupboardMock,
-				runNixBuild,
-				inspectVersion: () => Promise.resolve('v0.0.50')
+		},
+		{
+			name: 'empty credential variables',
+			options: { reuseView: 'pr-view' },
+			variables: {
+				CUPBOARD_READ_USER: '',
+				CUPBOARD_READ_PASSWORD: '',
+				CUPBOARD_VIEW_READ_USER: '',
+				CUPBOARD_VIEW_READ_PASSWORD: ''
 			}
-		);
-
-		expect(runCupboardMock).toHaveBeenCalledTimes(1);
-
-		const call = runCupboardMock.mock.calls[0];
-
-		if (call === undefined) {
-			throw new Error('runCupboard was not called');
 		}
+	])(
+		'does not check the CLI version with $name',
+		async ({ options, variables }) => {
+			const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
+			const inspectVersion = vi.fn(() => Promise.resolve('v0.0.49'));
 
-		const [binaryPath, arguments_, passedEnvironment] = call;
-		const targetsFileIndex = arguments_.indexOf('--targets-file');
-		const targetsFile = arguments_[targetsFileIndex + 1] ?? '';
-		const targetsFileContents = await readFile(targetsFile, 'utf8');
+			await buildCohortAction(
+				{ ...baseOptions(), ...options },
+				{ ...environment, ...variables },
+				{
+					runCupboard: runCupboardMock,
+					runNixBuild: () =>
+						Promise.resolve({
+							paths: [libraryBuiltPath, floatingBuiltPath],
+							status: 0,
+							copiedFrom: new Map()
+						}),
+					inspectVersion
+				}
+			);
 
-		expect({
-			binaryPath,
-			passedEnvironment,
-			argumentsWithoutFilePaths: arguments_.filter(
-				(value) => !value.startsWith(directory)
-			),
-			targetsFile: parseJson(targetsFileContents)
-		}).toStrictEqual({
-			binaryPath: '/opt/cupboard/cupboard',
-			passedEnvironment: {
-				...environment,
-				CUPBOARD_VIEW_READ_PASSWORD: 'fallback-secret',
-				CUPBOARD_READ_PASSWORD: 'secret'
-			},
-			argumentsWithoutFilePaths: [
-				'--no-colour',
-				'plan',
-				'cohort',
-				canonicalHref(new URL('https://cache.example.test/t/acme')),
-				'--targets-file',
-				'--plan-file',
-				'--github-oidc',
-				'--build',
-				'missing',
-				'--substituter',
-				'leave',
-				'--publish',
-				'none',
-				'--reuse-view',
-				'pr-view',
-				'--view-read-user',
-				'fallback',
-				'--read-user',
-				'reader'
-			],
-			targetsFile: {
-				targets: [
-					{
-						attr: '.#packages.x86_64-linux.app',
-						installable: appQueryInstallable,
-						expectedPath: appPath,
-						root: 'github:owner/repo/main/app'
-					},
-					{
-						attr: '.#packages.x86_64-linux.lib',
-						installable: libraryQueryInstallable,
-						root: 'github:owner/repo/main/lib'
-					}
-				]
+			expect({
+				inspected: inspectVersion.mock.calls,
+				cupboardCalls: runCupboardMock.mock.calls.length
+			}).toStrictEqual({ inspected: [], cupboardCalls: 1 });
+		}
+	);
+
+	it.each(credentialSources)(
+		'drives the partition from a single plan-cohort invocation with the credentials from $source',
+		async ({ options, variables }) => {
+			const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
+			const runNixBuild = vi.fn((_installables: readonly string[]) =>
+				Promise.resolve({
+					paths: [libraryBuiltPath, floatingBuiltPath],
+					status: 0,
+					copiedFrom: new Map()
+				})
+			);
+
+			await buildCohortAction(
+				{ ...baseOptions(), reuseView: 'pr-view', ...options },
+				{ ...environment, ...variables },
+				{
+					runCupboard: runCupboardMock,
+					runNixBuild,
+					inspectVersion: () => Promise.resolve('v0.0.50')
+				}
+			);
+
+			expect(runCupboardMock).toHaveBeenCalledTimes(1);
+
+			const call = runCupboardMock.mock.calls[0];
+
+			if (call === undefined) {
+				throw new Error('runCupboard was not called');
 			}
-		});
 
-		expect(runNixBuild).toHaveBeenCalledExactlyOnceWith(
-			[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
-			'',
-			'',
-			outLinkDirectory(directory),
-			undefined
-		);
+			const [binaryPath, arguments_, passedEnvironment] = call;
+			const targetsFileIndex = arguments_.indexOf('--targets-file');
+			const targetsFile = arguments_[targetsFileIndex + 1] ?? '';
+			const targetsFileContents = await readFile(targetsFile, 'utf8');
 
-		const inputs = resolveBuildCohortInputs(baseOptions(), environment);
-		const targetPathsRaw = await readFile(inputs.targetPathsFile, 'utf8');
-		const intermediatePathsRaw = await readFile(
-			inputs.intermediatePathsFile,
-			'utf8'
-		);
-		const referencePathsRaw = await readFile(inputs.referencePathsFile, 'utf8');
-		const leftUpstreamRaw = await readFile(inputs.leftUpstreamFile, 'utf8');
-		const countsRaw = await readFile(inputs.countsFile, 'utf8');
-
-		expect({
-			targetPaths: targetPathsRaw.trim(),
-			intermediatePaths: intermediatePathsRaw,
-			referencePaths: referencePathsRaw.trim(),
-			leftUpstream: parseJson(leftUpstreamRaw),
-			counts: parseJson(countsRaw)
-		}).toStrictEqual({
-			targetPaths: [appPath, floatingBuiltPath, libraryBuiltPath]
-				.toSorted((left, right) => left.localeCompare(right))
-				.join('\n'),
-			intermediatePaths: '',
-			referencePaths: '',
-			leftUpstream: { leftUpstream: [leftUpstreamPath] },
-			counts: {
-				partition: {
-					counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
-					downloadSize: 100,
-					narSize: 200,
-					unknownCount: 0,
-					ceiling: { value: 5, source: 'configured' }
+			expect({
+				binaryPath,
+				passedEnvironment,
+				argumentsWithoutFilePaths: arguments_.filter(
+					(value) => !value.startsWith(directory)
+				),
+				targetsFile: parseJson(targetsFileContents)
+			}).toStrictEqual({
+				binaryPath: '/opt/cupboard/cupboard',
+				passedEnvironment: {
+					...environment,
+					...variables,
+					CUPBOARD_VIEW_READ_PASSWORD: 'fallback-secret',
+					CUPBOARD_READ_PASSWORD: 'destination-secret'
 				},
-				capacity: measuredCapacity
-			}
-		});
-	});
+				argumentsWithoutFilePaths: [
+					'--no-colour',
+					'plan',
+					'cohort',
+					canonicalHref(new URL('https://cache.example.test/t/acme')),
+					'--targets-file',
+					'--plan-file',
+					'--github-oidc',
+					'--build',
+					'missing',
+					'--substituter',
+					'leave',
+					'--publish',
+					'none',
+					'--reuse-view',
+					'pr-view',
+					'--view-read-user',
+					'fallback',
+					'--read-user',
+					'destination'
+				],
+				targetsFile: {
+					targets: [
+						{
+							attr: '.#packages.x86_64-linux.app',
+							installable: appQueryInstallable,
+							expectedPath: appPath,
+							root: 'github:owner/repo/main/app'
+						},
+						{
+							attr: '.#packages.x86_64-linux.lib',
+							installable: libraryQueryInstallable,
+							root: 'github:owner/repo/main/lib'
+						}
+					]
+				}
+			});
+
+			expect(runNixBuild).toHaveBeenCalledExactlyOnceWith(
+				[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
+				'',
+				'',
+				outLinkDirectory(directory),
+				undefined
+			);
+
+			const inputs = resolveBuildCohortInputs(baseOptions(), environment);
+			const targetPathsRaw = await readFile(inputs.targetPathsFile, 'utf8');
+			const intermediatePathsRaw = await readFile(
+				inputs.intermediatePathsFile,
+				'utf8'
+			);
+			const referencePathsRaw = await readFile(
+				inputs.referencePathsFile,
+				'utf8'
+			);
+			const leftUpstreamRaw = await readFile(inputs.leftUpstreamFile, 'utf8');
+			const countsRaw = await readFile(inputs.countsFile, 'utf8');
+
+			expect({
+				targetPaths: targetPathsRaw.trim(),
+				intermediatePaths: intermediatePathsRaw,
+				referencePaths: referencePathsRaw.trim(),
+				leftUpstream: parseJson(leftUpstreamRaw),
+				counts: parseJson(countsRaw)
+			}).toStrictEqual({
+				targetPaths: [appPath, floatingBuiltPath, libraryBuiltPath]
+					.toSorted((left, right) => left.localeCompare(right))
+					.join('\n'),
+				intermediatePaths: '',
+				referencePaths: '',
+				leftUpstream: { leftUpstream: [leftUpstreamPath] },
+				counts: {
+					partition: {
+						counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
+						downloadSize: 100,
+						narSize: 200,
+						unknownCount: 0,
+						ceiling: { value: 5, source: 'configured' }
+					},
+					capacity: measuredCapacity
+				}
+			});
+		}
+	);
 
 	it('passes the build and substituter choices to the cohort planner', async () => {
 		const calls: (readonly string[])[] = [];
@@ -5126,6 +5316,37 @@ describe('buildCohortAction availability confirmation', () => {
 describe('planReprobeInvocation', () => {
 	const url = new URL('https://cache.example.test/t/acme');
 
+	it.each(credentialSources)(
+		'passes the credentials from $source',
+		({ options, variables }) => {
+			const inputs = resolveBuildCohortInputs(
+				{ ...baseOptions(), reuseView: 'pr-view', ...options },
+				{ RUNNER_TEMP: '/tmp', ...variables }
+			);
+
+			expect(planReprobeInvocation(inputs, '/tmp/targets.json')).toStrictEqual({
+				arguments: [
+					'--no-colour',
+					'plan',
+					'reprobe',
+					canonicalHref(url),
+					'--targets-file',
+					'/tmp/targets.json',
+					'--reuse-view',
+					'pr-view',
+					'--view-read-user',
+					'fallback',
+					'--read-user',
+					'destination'
+				],
+				environment: {
+					CUPBOARD_VIEW_READ_PASSWORD: 'fallback-secret',
+					CUPBOARD_READ_PASSWORD: 'destination-secret'
+				}
+			});
+		}
+	);
+
 	it.each<{
 		readonly name: string;
 		readonly inputs: Pick<
@@ -5647,33 +5868,40 @@ describe('rootGroups', () => {
 		});
 	});
 
-	it.each([
-		{
-			name: 'the reuse view',
-			referenceSource: 'https://cache.example.test/t/acme/reuse/pr-view',
-			user: 'fallback',
-			password: 'fallback-secret'
-		},
-		{
-			name: 'a named cache',
-			referenceSource: 'https://cache.example.test/t/acme/cache/release',
-			user: 'destination',
-			password: 'destination-secret'
-		}
-	])(
-		'reads a reference from $name with its own credential',
-		({ referenceSource, user, password }) => {
+	it.each(
+		credentialSources.flatMap(({ source, options, variables }) =>
+			[
+				{
+					name: 'the reuse view',
+					referenceSource: 'https://cache.example.test/t/acme/reuse/pr-view',
+					user: 'fallback',
+					password: 'fallback-secret'
+				},
+				{
+					name: 'a named cache',
+					referenceSource: 'https://cache.example.test/t/acme/cache/release',
+					user: 'destination',
+					password: 'destination-secret'
+				},
+				{
+					name: 'the destination',
+					referenceSource: 'https://cache.example.test/t/acme',
+					user: 'destination',
+					password: 'destination-secret'
+				}
+			].map((reference) => ({ ...reference, source, options, variables }))
+		)
+	)(
+		'reads a reference from $name with its own credential from $source',
+		({ referenceSource, user, password, options, variables }) => {
 			const inputs = resolveBuildCohortInputs(
 				{
 					...baseOptions(),
 					publish: 'outputs',
 					reuseView: 'pr-view',
-					readUser: 'destination',
-					readPassword: 'destination-secret',
-					fallbackReadUser: 'fallback',
-					fallbackReadPassword: 'fallback-secret'
+					...options
 				},
-				{ RUNNER_TEMP: '/tmp' }
+				{ RUNNER_TEMP: '/tmp', ...variables }
 			);
 
 			const invocation = cohortPushInvocation(
@@ -9302,6 +9530,80 @@ if (args.includes('--help')) {
 			}
 		});
 	});
+
+	it.each([
+		{
+			role: 'destination',
+			options: {},
+			variables: {
+				CUPBOARD_READ_USER: 'destination-reader',
+				CUPBOARD_READ_PASSWORD: 'destination-secret'
+			},
+			flow: { closureTargets: [appPath] },
+			sources: [
+				{
+					url: new URL(url),
+					paths: [appPath],
+					credential: {
+						user: 'destination-reader',
+						password: 'destination-secret'
+					}
+				}
+			]
+		},
+		{
+			role: 'reuse view',
+			options: { reuseView: 'release' },
+			variables: {
+				CUPBOARD_VIEW_READ_USER: 'view-reader',
+				CUPBOARD_VIEW_READ_PASSWORD: 'view-secret'
+			},
+			flow: {
+				closureTargets: [appPath],
+				attachOnly: [],
+				publishByReference: [appPath],
+				reprobedBuildSet: []
+			},
+			sources: [
+				{ url: new URL(url), paths: [] },
+				{
+					url: new URL(`${url}/reuse/release`),
+					paths: [appPath],
+					credential: { user: 'view-reader', password: 'view-secret' }
+				}
+			]
+		}
+	])(
+		'materialises a cached closure with the $role read credential set as environment variables',
+		async ({ options, variables, flow, sources }) => {
+			environment = { ...environment, ...variables };
+
+			const run = await runPublicationFlow(
+				{
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson(),
+					publish: 'closure',
+					...options
+				},
+				[],
+				[],
+				[],
+				undefined,
+				new Map(),
+				{
+					...flow,
+					referencedClosure: [
+						storePathSchema.parse(appPath),
+						storePathSchema.parse(referencePath)
+					]
+				}
+			);
+
+			expect(run.materialiseCalls).toStrictEqual([
+				{ sources, store: '', localStore: 'daemon' }
+			]);
+		}
+	);
 
 	it('warns for each manifest path when the destination requests an upload', async () => {
 		const run = await runPublicationFlow(

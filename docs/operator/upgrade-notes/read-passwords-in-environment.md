@@ -11,6 +11,19 @@ before `v0.0.50` must select `v0.0.50` or later, or leave `cupboard-version`
 empty. With an older release, the plan or cohort job fails with
 `EnvironmentCredentialVersionError` before it runs the CLI with a credential.
 
+A workflow that runs the plan or build-cohort action directly can also set a
+read credential in environment variables: `CUPBOARD_READ_USER` and
+`CUPBOARD_READ_PASSWORD` for the destination cache, and
+`CUPBOARD_VIEW_READ_USER` and `CUPBOARD_VIEW_READ_PASSWORD` for the reuse view
+or reference source. With a CLI release before `v0.0.50`, these actions now stop
+with `EnvironmentCredentialVersionError` when the job sets them, for example:
+
+```yaml
+env:
+  CUPBOARD_VIEW_READ_USER: ${{ secrets.CUPBOARD_VIEW_READ_USER }}
+  CUPBOARD_VIEW_READ_PASSWORD: ${{ secrets.CUPBOARD_VIEW_READ_PASSWORD }}
+```
+
 The CLI reads these variables when the matching option is omitted:
 
 - `plan cohort` and `plan reprobe` read the destination cache's credential from
