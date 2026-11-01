@@ -67,7 +67,7 @@ describe('Nix substitution through a reuse view', () => {
 							path.join(directory, 'source-home')
 						);
 						const expression = String.raw`let
-    mk = name: extra: derivation ({ inherit name; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "printf %s result > \"$out\"" ]; } // extra);
+    mk = name: extra: derivation ({ inherit name; testInstance = ${JSON.stringify(directory)}; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "printf %s result > \"$out\"" ]; } // extra);
     client = mk "cupboard-patched-deployment-client" {};
     upstream = mk "cupboard-upstream-build-input" {};
     wrapper = mk "cupboard-activation-wrapper" { tool = client; inherit upstream; };
@@ -314,6 +314,7 @@ describe('Nix substitution through a reuse view', () => {
 							name: 'github:acme/app/run/1'
 						});
 						expect({
+							profileReferences: profileInfo.references,
 							retained: retainedRoot.targets
 								.map((target) => target.storePath)
 								.toSorted((left, right) => left.localeCompare(right)),
@@ -323,6 +324,7 @@ describe('Nix substitution through a reuse view', () => {
 							narRequests: requests.filter((url) => url.includes('/nar/')),
 							unrelatedStatus: unrelatedResponse.status
 						}).toStrictEqual({
+							profileReferences: [],
 							retained: [profile, wrapper, client].toSorted((left, right) =>
 								left.localeCompare(right)
 							),
