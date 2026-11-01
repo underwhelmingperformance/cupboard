@@ -1909,19 +1909,38 @@ export class BuildCommandFailedError extends CliError {
 	constructor(
 		public readonly status: number | undefined,
 		public readonly signal: string | undefined,
-		private readonly code: number
+		private readonly code: number,
+		public readonly failedDerivations: readonly string[] = []
 	) {
-		super(
-			signal === undefined
-				? `The build command failed with status ${String(status ?? code)}`
-				: `The build command was killed by ${signal}`
-		);
+		super(buildCommandFailure(status ?? code, signal, failedDerivations));
 		this.name = 'BuildCommandFailedError';
 	}
 
 	override get exitCode(): number {
 		return this.code;
 	}
+}
+
+function buildCommandFailure(
+	status: number,
+	signal: string | undefined,
+	failedDerivations: readonly string[]
+): string {
+	if (signal !== undefined) {
+		return `The build command was killed by ${signal}`;
+	}
+
+	const [derivation, ...others] = failedDerivations;
+
+	if (derivation === undefined) {
+		return `The build command failed with status ${String(status)}`;
+	}
+
+	if (others.length === 0) {
+		return `Nix could not build ${derivation}. Run \`nix log ${derivation}\` to read its build log.`;
+	}
+
+	return `Nix could not build ${failedDerivations.join(', ')}. Run \`nix log\` with one of these derivations to read its build log.`;
 }
 
 /**

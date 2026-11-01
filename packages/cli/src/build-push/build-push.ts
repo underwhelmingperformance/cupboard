@@ -122,6 +122,7 @@ import {
 } from '../push/upload-transfer.ts';
 
 import { type BatchStore, BuildOutputBatcher } from './batching.ts';
+import { failedDerivations } from './build-failures.ts';
 import { canRetryBuild } from './build-retry.ts';
 import {
 	BuildOutputDivergences,
@@ -267,12 +268,31 @@ export function childExitCode(exit: ChildExit): number {
 	return genericExitCode;
 }
 
+/**
+A build child's exit, with the derivations whose builders failed during the
+run.
+*/
+interface BuildExit extends ChildExit {
+	readonly failedDerivations: readonly StorePathString[];
+}
+
+function buildExit(
+	exit: ChildExit,
+	attempts: readonly SupervisedAttempt[]
+): BuildExit {
+	return {
+		...exit,
+		failedDerivations: exit.status === 0 ? [] : failedDerivations(attempts)
+	};
+}
+
 // Preserve the child's status or terminating signal in every build failure.
-function childFailure(exit: ChildExit): BuildCommandFailedError {
+function childFailure(exit: BuildExit): BuildCommandFailedError {
 	return new BuildCommandFailedError(
 		exit.status,
 		exit.signal,
-		childExitCode(exit)
+		childExitCode(exit),
+		exit.failedDerivations
 	);
 }
 
@@ -611,7 +631,7 @@ async function runProtectedStreamedBuildPush(
 			hookScriptPath
 		);
 		const {
-			exit,
+			exit: childExit,
 			attempts,
 			preExisting = [],
 			terminalFailure: dependencyFailure
@@ -624,6 +644,7 @@ async function runProtectedStreamedBuildPush(
 				targetLinkDirectory
 			)
 		);
+		const exit = buildExit(childExit, attempts);
 
 		// Every helper has connected by the time the child exits, though its
 		// message may still be undelivered. Quiescing the endpoint first makes
@@ -1281,7 +1302,7 @@ async function runReconciledLocalBuildPush(
 		const declared = await declaredOutputs(build, dependencies.store);
 		const initiallyValid = await dependencies.store.queryValidPaths(declared);
 		const {
-			exit,
+			exit: childExit,
 			attempts,
 			terminalFailure: dependencyFailure
 		} = await reporter.phase(buildPushPhases.build, () =>
@@ -1293,6 +1314,7 @@ async function runReconciledLocalBuildPush(
 				outLinkDirectory
 			)
 		);
+		const exit = buildExit(childExit, attempts);
 		const realised = await realisedOutputs(
 			outLinkDirectory,
 			declared,
@@ -1488,7 +1510,7 @@ interface RealisedBuild {
 	readonly realised: readonly string[];
 	readonly subjects: readonly BuildSubjectV3Input[];
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
-	readonly exit: ChildExit;
+	readonly exit: BuildExit;
 	readonly terminalFailure?: TerminalBuildFailureInput;
 }
 
@@ -1731,7 +1753,7 @@ function publicationFailure(cause: unknown): BuildPublicationFailedError {
 interface RunFacts {
 	readonly observedDerivations: ReadonlySet<string>;
 	readonly mode: BuildSummaryInput['mode'];
-	readonly exit: ChildExit;
+	readonly exit: BuildExit;
 	readonly batcher: BuildOutputBatcher;
 	readonly divergences: BuildOutputDivergences;
 	readonly compression: CompressionTotals;
@@ -2439,7 +2461,7 @@ function reportBuildSummary(
 // status, or 128 plus its signal number; a successful build with failed
 // publication exits with the classified sysexits code. An abort among the
 // failure causes is re-raised as the abort so the run exits 130.
-function raiseExitContract(exit: ChildExit, result: ReconcileResult): void {
+function raiseExitContract(exit: BuildExit, result: ReconcileResult): void {
 	if (exit.status !== 0) {
 		throw childFailure(exit);
 	}

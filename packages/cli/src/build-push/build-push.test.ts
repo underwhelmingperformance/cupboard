@@ -3873,11 +3873,45 @@ describe('runBuildPush', () => {
 			attemptIdsIssued: run.attemptIdsIssued,
 			sleeps: run.sleeps
 		}).toStrictEqual({
-			error: new BuildCommandFailedError(1, undefined, 1),
+			error: new BuildCommandFailedError(1, undefined, 1, [drvA]),
 			attemptIdsIssued: 1,
 			sleeps: []
 		});
 	});
+
+	it.each([
+		{ name: 'streamed', preflightFailure: undefined },
+		{
+			name: 'reconciled local',
+			preflightFailure: new UntrustedDaemonError('not-trusted')
+		}
+	])(
+		'lists the derivations whose builders failed in $name mode',
+		async ({ preflightFailure }) => {
+			const run = await runFlow({
+				...(preflightFailure !== undefined && { preflightFailure }),
+				constructed: {
+					succeedOn: 2,
+					attempts: 1,
+					installables: [`${drvA}^out`, `${drvB}^out`],
+					failureLog: [drvB, drvA]
+						.map((derivation) =>
+							JSON.stringify({
+								action: 'msg',
+								level: 0,
+								msg: `error: Cannot build '${derivation}'.\nReason: builder failed with exit code 1.`
+							})
+						)
+						.join('\n')
+				},
+				valid: [pathA]
+			});
+
+			expect(run.error).toStrictEqual(
+				new BuildCommandFailedError(1, undefined, 1, [drvB, drvA])
+			);
+		}
+	);
 
 	it.each([
 		{

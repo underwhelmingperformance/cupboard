@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 
 import { abortable } from '../abort.ts';
 import { audienceSchema } from '../audience.ts';
+import { formatHumanError } from '../human-errors.ts';
 
 import {
 	RunCommandFailedError,
@@ -817,6 +818,23 @@ describe('cupboard run', () => {
 			).rejects.toMatchObject(new RunCommandFailedError(status, undefined));
 
 			expect(netrcPath !== undefined && !existsSync(netrcPath)).toBe(true);
+		}
+	);
+
+	it.each([
+		{ status: 1, signal: undefined },
+		{ status: undefined, signal: 'SIGTERM' as const }
+	])(
+		"reports a failed child with only the child's exit status (%o)",
+		({ status, signal }) => {
+			const error = new RunCommandFailedError(status, signal);
+
+			expect(
+				formatHumanError(error, {
+					action: 'run cupboard run',
+					target: tenantUrl
+				})
+			).toBe(error.message);
 		}
 	);
 });
