@@ -672,6 +672,55 @@ describe('superviseAttemptedBuild', () => {
 		});
 	});
 
+	it.each([true, false])(
+		'stops with a signal that arrives while a failure is classified (retry: %s)',
+		async (isRetryable) => {
+			const directory = await runtimeDirectory();
+			const signals = recordingSignalSource();
+			const sleeps: number[] = [];
+
+			const result = await superviseAttemptedBuild({
+				command: () => ['sh', '-c', 'exit 1'],
+				attempts: 3,
+				canRetry: () => {
+					signals.emit('SIGINT');
+
+					return Promise.resolve(isRetryable);
+				},
+				environment: { PATH: '/usr/bin:/bin' },
+				runtimeDirectory: directory,
+				signalSource: signals.source,
+				nextAttemptId: attemptIds(),
+				runChild: () => Promise.resolve({ status: 1, signal: undefined }),
+				startDelay: (delayMs) => {
+					sleeps.push(delayMs);
+
+					return immediateDelay();
+				}
+			});
+
+			expect({
+				result,
+				sleeps,
+				listeners: signals.listenerCount()
+			}).toStrictEqual({
+				result: {
+					exit: { status: undefined, signal: 'SIGINT' },
+					attempts: [
+						{
+							attempt: 1,
+							attemptId: 'attempt-1',
+							log: '',
+							exit: { status: 1, signal: undefined }
+						}
+					]
+				},
+				sleeps: [],
+				listeners: 0
+			});
+		}
+	);
+
 	it('clears the production retry timer when it is cancelled', async () => {
 		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 

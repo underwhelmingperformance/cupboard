@@ -122,6 +122,7 @@ import {
 } from '../push/upload-transfer.ts';
 
 import { type BatchStore, BuildOutputBatcher } from './batching.ts';
+import { canRetryBuild } from './build-retry.ts';
 import {
 	BuildOutputDivergences,
 	BuiltPaths,
@@ -152,8 +153,10 @@ export const hookScriptFileName = 'post-build-hook.sh';
 export const defaultBuildAttempts = 5;
 
 /**
-A bounded attempt loop retries transient build failures. Per-attempt activity
-logs associate each built path with the attempt that produced it.
+A bounded attempt loop retries a failed build unless every builder failure is
+one that Nix reports as permanent. {@link canRetryBuild} lists the failures
+that are retried. Per-attempt activity logs associate each built path with the
+attempt that produced it.
 */
 export interface ConstructedBuild {
 	/**
@@ -856,6 +859,7 @@ async function runConstructedBuild(
 	return superviseAttemptedBuild({
 		command: (logFile) => constructedNixCommand(build, logFile, outLink),
 		attempts: build.attempts ?? defaultBuildAttempts,
+		canRetry: (attempt) => canRetryBuild(attempt.log, dependencies.store),
 		environment,
 		runtimeDirectory,
 		...(dependencies.signalSource !== undefined && {

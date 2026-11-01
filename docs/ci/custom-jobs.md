@@ -393,11 +393,16 @@ Set `inline-paths: false` when later steps use the path files. The action always
 writes files and counts. By default, the action also writes inline path lists to
 the step outputs.
 
-If the build fails, the action tries again, up to five attempts in total, and
-waits longer after each failure. A successful rebuild that reports no build
-activity fails immediately, because another attempt cannot recover the missing
-observation. If every attempt fails, the step fails. Set `allow-failure` to let
-the job continue anyway.
+If the build fails in a way that another attempt could fix, the action tries
+again, up to five attempts in total, and waits longer after each failure. Nix
+treats a builder failure on the runner as permanent, unless the derivation is a
+fixed-output or impure derivation or the disk was full. The action follows Nix
+and fails without another attempt when every failed builder is permanent. A
+failure on a remote builder is retried, because Nix cannot tell a failed builder
+from a lost connection. A successful rebuild that reports no build activity
+fails immediately, because another attempt cannot recover the missing
+observation. If the last attempt fails, the step fails. Set `allow-failure` to
+let the job continue anyway.
 
 The default `publish: built` includes selected requested outputs and successful
 intermediates reported by the post-build hook. Derivation-backed builds also

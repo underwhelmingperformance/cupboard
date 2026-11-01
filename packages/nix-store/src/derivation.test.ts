@@ -141,6 +141,40 @@ describe('Derivation.outputs', () => {
 	});
 });
 
+describe('Derivation.isSandboxed', () => {
+	it.each([
+		{
+			name: 'an input-addressed derivation',
+			outputs: `("out","${outputPath}","","")`,
+			expected: true
+		},
+		{
+			name: 'a deferred input-addressed derivation',
+			outputs: '("out","","","")',
+			expected: true
+		},
+		{
+			name: 'a floating content-addressed derivation',
+			outputs: '("out","","r:sha256","")',
+			expected: true
+		},
+		{
+			name: 'a fixed-output derivation',
+			outputs: `("out","${outputPath}","r:sha256","0f2s1n0i8g6b9a3c")`,
+			expected: false
+		},
+		{
+			name: 'an impure derivation',
+			outputs: '("out","","r:sha256","impure")',
+			expected: false
+		}
+	])('reports $expected for $name', ({ outputs, expected }) => {
+		const aterm = `Derive([${outputs}],[],[],"aarch64-darwin","/bin/sh",[],[])`;
+
+		expect(Derivation.parse(aterm).isSandboxed).toBe(expected);
+	});
+});
+
 describe('Derivation.inputDerivations', () => {
 	const compiler = '/nix/store/8kw2q3z7m9rvxj4hn5cd6b1ypa0gglsf-gcc.drv';
 	const library = '/nix/store/qc7d0v3rjn8x2mlpf6ashy195wkbdgz9-zlib.drv';

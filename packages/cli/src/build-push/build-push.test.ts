@@ -419,6 +419,7 @@ interface ConstructedFlowConfig {
 	readonly suppressEvent?: boolean;
 	readonly outputProtection?: 'failed';
 	readonly machine?: string;
+	readonly failureLog?: string;
 }
 
 interface FlowConfig {
@@ -536,7 +537,10 @@ const stubNixScript = [
 	'} catch {}',
 	'runs += 1;',
 	'fs.writeFileSync(process.env.STUB_COUNT_FILE, String(runs));',
-	'if (runs < Number(process.env.STUB_SUCCEED_ON) || targets.some((target) => target.failure)) process.exit(1);',
+	'if (runs < Number(process.env.STUB_SUCCEED_ON) || targets.some((target) => target.failure)) {',
+	"\tif (process.env.STUB_FAILURE_LOG) fs.appendFileSync(logFile, process.env.STUB_FAILURE_LOG + '\\n');",
+	'\tprocess.exit(1);',
+	'}',
 	"if (rebuild && process.env.STUB_FAIL_CHECK === '1') process.exit(1);",
 	"const outLinkIndex = args.indexOf('--out-link');",
 	'if (outLinkIndex !== -1) {',
@@ -593,6 +597,7 @@ async function stubNixEnvironment(
 					].join('\n'),
 		STUB_COUNT_FILE: stubCountFile(workspace),
 		STUB_SUCCEED_ON: String(constructed.succeedOn),
+		STUB_FAILURE_LOG: constructed.failureLog ?? '',
 		STUB_TARGETS: JSON.stringify(constructed.targets ?? []),
 		STUB_FAIL_CHECK: constructed.failCheck === true ? '1' : '0',
 		STUB_CHECK_DERIVATIONS:
@@ -3847,6 +3852,30 @@ describe('runBuildPush', () => {
 			error: undefined,
 			attemptIdsIssued: 5,
 			sleeps: [15_000, 30_000, 45_000, 60_000]
+		});
+	});
+
+	it('does not retry a local builder failure of a sandboxed derivation', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 5,
+				failureLog: JSON.stringify({
+					action: 'msg',
+					level: 0,
+					msg: `error: Cannot build '${drvA}'.\nReason: builder failed with exit code 1.`
+				})
+			},
+			valid: [pathA]
+		});
+
+		expect({
+			error: run.error,
+			attemptIdsIssued: run.attemptIdsIssued,
+			sleeps: run.sleeps
+		}).toStrictEqual({
+			error: new BuildCommandFailedError(1, undefined, 1),
+			attemptIdsIssued: 1,
+			sleeps: []
 		});
 	});
 

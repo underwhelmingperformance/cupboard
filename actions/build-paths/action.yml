@@ -55,7 +55,7 @@ inputs:
       Nix configuration.
     required: false
   allow-failure:
-    description: Let the step succeed even if all five build attempts fail.
+    description: Let the step succeed even if the build fails.
     required: false
     default: 'false'
   build:
