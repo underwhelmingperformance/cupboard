@@ -112,6 +112,8 @@ export class RunExecutableNotFoundError extends CliError {
 }
 
 export class RunCommandFailedError extends CliError {
+	override readonly humanMessage: string;
+
 	constructor(
 		readonly status: number | undefined,
 		readonly signal: NodeJS.Signals | undefined
@@ -122,6 +124,7 @@ export class RunCommandFailedError extends CliError {
 				: `Command was terminated by ${signal}`
 		);
 		this.name = 'RunCommandFailedError';
+		this.humanMessage = this.message;
 	}
 
 	override get exitCode(): number {
