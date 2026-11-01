@@ -275,7 +275,7 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 | `installables-file` |  | File that lists the Nix installables to build, one per line. Use it for a long generated list, because action inputs have a size limit. |
 | `keep-going` | `false` | Keep building the other installables after one of them fails. |
 | `max-jobs` |  | Maximum number of local build jobs. Leave empty to use the value from the Nix configuration. |
-| `allow-failure` | `false` | Let the step succeed even if all five build attempts fail. |
+| `allow-failure` | `false` | Let the step succeed even if the build fails. |
 | `build` |  | Control when to build the requested outputs. Defaults to `missing` when `require-provenance` is not enabled. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
 | `require-provenance` |  | Deprecated. `true` selects `build: rebuild`; `false` uses the build mode. `true` conflicts with an explicit `build: missing`. Remove this input and set `build: rebuild` to preserve the execution guarantee. |
 | `publish` | `built` | Publication scope: none, outputs, built, or closure. Built includes completed intermediate outputs observed through the build hook and required dependency outputs available from configured tenant caches. The selected store must be local or a trusted local daemon, with no configured post-build hook. |

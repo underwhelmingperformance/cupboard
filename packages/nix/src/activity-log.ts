@@ -88,28 +88,54 @@ const buildFailureMessageSchema = z.object({
 	raw_msg: z.string().optional()
 });
 
+export interface BuilderFailure {
+	readonly derivation: StorePathString;
+	/**
+	Whether Nix added its note that a full disk may have caused the failure.
+	*/
+	readonly isDiskFull: boolean;
+}
+
+const diskFullNote =
+	'\nnote: build failure may have been caused by lack of free disk space';
+
+/**
+Returns each derivation whose builder failed in one activity log, in log
+order. Messages about failed dependencies do not identify a failed builder.
+*/
+export function builderFailures(log: string): readonly BuilderFailure[] {
+	const failures: BuilderFailure[] = [];
+
+	for (const record of activityLogRecords(log)) {
+		const parsed = buildFailureMessageSchema.safeParse(record).data;
+
+		if (parsed === undefined) {
+			continue;
+		}
+
+		const message = stripVTControlCharacters(parsed.raw_msg ?? parsed.msg);
+		// Match only the start of the message. The log tail of a failed builder can
+		// quote a failure from a nested Nix invocation.
+		const failed =
+			/^(?:error: )?Cannot build '([^']+\.drv)'\.\n\s*Reason: builder /u.exec(
+				message
+			) ?? /^(?:error: )?builder for '([^']+\.drv)' failed/u.exec(message);
+		const derivation = storePathSchema.safeParse(failed?.[1]).data;
+
+		if (derivation !== undefined) {
+			failures.push({ derivation, isDiskFull: message.endsWith(diskFullNote) });
+		}
+	}
+
+	return failures;
+}
+
 /**
 Returns the first derivation whose builder failed in the supplied activity
-logs. Messages about failed dependencies do not identify a failed builder.
+logs.
 */
 export function firstBuildFailure(
 	logs: readonly string[]
 ): StorePathString | undefined {
-	for (const log of logs) {
-		for (const record of activityLogRecords(log)) {
-			const parsed = buildFailureMessageSchema.safeParse(record).data;
-			if (parsed === undefined) {
-				continue;
-			}
-			const message = stripVTControlCharacters(parsed.raw_msg ?? parsed.msg);
-			const failed =
-				/builder for '([^']+\.drv)' failed/u.exec(message) ??
-				/Cannot build '([^']+\.drv)'\.\nReason: builder /u.exec(message);
-			const path = storePathSchema.safeParse(failed?.[1]).data;
-			if (path !== undefined) {
-				return path;
-			}
-		}
-	}
-	return undefined;
+	return logs.flatMap((log) => builderFailures(log)).at(0)?.derivation;
 }

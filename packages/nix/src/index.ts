@@ -1,5 +1,6 @@
 export {
 	activityLogRecords,
+	builderFailures,
 	copySources,
 	firstBuildFailure
 } from './activity-log.ts';

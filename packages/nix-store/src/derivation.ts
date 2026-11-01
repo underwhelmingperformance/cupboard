@@ -34,8 +34,18 @@ export class Derivation {
 
 	readonly inputSources: readonly StorePathString[];
 
+	/**
+	Whether the derivation type is one that Nix calls sandboxed: input-addressed
+	or floating content-addressed, as in `DerivationType::isSandboxed`. The type
+	does not depend on the `sandbox` setting. Fixed-output and impure
+	derivations are not sandboxed, and Nix reports a local failure of their
+	builder as possibly transient.
+	*/
+	readonly isSandboxed: boolean;
+
 	private constructor(elements: readonly ATermValue[]) {
 		this.outputs = derivationOutputs(elements);
+		this.isSandboxed = isSandboxedDerivation(elements);
 		this.inputDerivations = derivationInputs(elements);
 		this.inputSources = derivationSources(elements);
 		this.system = derivationPlatform(elements);
@@ -143,6 +153,19 @@ function derivationOutputs(
 	}
 
 	return declared;
+}
+
+// A fixed output records its hash in the fourth field, and an impure output
+// records the word `impure` there. Input-addressed and floating outputs leave
+// the field empty.
+function isSandboxedDerivation(elements: readonly ATermValue[]): boolean {
+	const outputs = elements[outputIndex];
+
+	if (outputs === undefined || !isSequence(outputs)) {
+		throw new MalformedDerivationError('the outputs are not a list');
+	}
+
+	return outputs.every((output) => isSequence(output) && output[3] === '');
 }
 
 function derivationInputs(

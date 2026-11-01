@@ -259,6 +259,11 @@ export interface AttemptedBuildOptions {
 	Maximum attempts; the loop stops at the first success.
 	*/
 	readonly attempts: number;
+	/**
+	Decides whether a failed attempt is worth repeating. Without it, every
+	failed attempt is repeated until the attempts are spent.
+	*/
+	readonly canRetry?: (attempt: SupervisedAttempt) => Promise<boolean>;
 	readonly environment: ChildEnvironment;
 	readonly runtimeDirectory: string;
 	readonly signalSource?: SignalSource;
@@ -328,8 +333,9 @@ async function readAttemptLog(logFile: string): Promise<string> {
 Runs a constructed build invocation under the bounded attempt loop: each
 attempt gets its own identifier and JSON activity log, a failed attempt
 waits a growing delay before the next, and the loop stops at the first
-success or once the attempts are spent. The invocation runtime directory is
-removed once the run is over, the way {@link superviseBuild} removes it.
+success, at a failure that `canRetry` rejects, or once the attempts are
+spent. The invocation runtime directory is removed once the run is over,
+the way {@link superviseBuild} removes it.
 */
 export async function superviseAttemptedBuild(
 	options: AttemptedBuildOptions
@@ -375,12 +381,13 @@ export async function superviseAttemptedBuild(
 					terminationScheduler: options.terminationScheduler
 				})
 			});
-			attempts.push({
+			const supervised: SupervisedAttempt = {
 				attempt,
 				attemptId,
 				log: await readAttemptLog(logFile),
 				exit
-			});
+			};
+			attempts.push(supervised);
 
 			if (interruptedSignal() !== undefined || exit.signal !== undefined) {
 				exit = {
@@ -396,6 +403,19 @@ export async function superviseAttemptedBuild(
 
 			if (attempt >= options.attempts) {
 				continue;
+			}
+
+			const isRetryable =
+				options.canRetry === undefined || (await options.canRetry(supervised));
+			const interruption = interruptedSignal();
+
+			if (interruption !== undefined) {
+				exit = { status: undefined, signal: interruption };
+				break;
+			}
+
+			if (!isRetryable) {
+				break;
 			}
 
 			const delayInterruption = Promise.withResolvers<undefined>();
