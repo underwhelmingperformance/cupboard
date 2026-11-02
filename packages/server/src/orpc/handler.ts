@@ -11,6 +11,7 @@ import { recordRoute } from '../do/operation-cost.ts';
 
 import { type TenantOrpcContext } from './context.ts';
 import { type ControlOrpcContext, controlRouter } from './control-router.ts';
+import { publicationInputLimitError } from './publication-input-limit.ts';
 import { tenantRouter } from './tenant-router.ts';
 
 /**
@@ -31,12 +32,21 @@ export function contractHandlerOptions<
 			})
 		],
 		clientInterceptors: [
-			(options) => {
+			async (options) => {
 				recordRoute(
 					options.procedure['~orpc'].route.path ?? options.path.join('.')
 				);
 
-				return options.next();
+				try {
+					return await options.next();
+				} catch (error) {
+					throw (
+						publicationInputLimitError(
+							options.procedure['~orpc'].errorMap,
+							error
+						) ?? error
+					);
+				}
 			}
 		],
 		adapterInterceptors: [

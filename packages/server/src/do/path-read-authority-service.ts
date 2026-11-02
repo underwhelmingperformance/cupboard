@@ -13,12 +13,17 @@ import {
 	type ResolvedCache
 } from '../db/cache.ts';
 import * as schema from '../db/d1-schema.ts';
+import * as localSchema from '../db/schema.ts';
 import { PathReadAuthorityMigrationPendingError } from '../errors.ts';
 
 import { armAlarmNoLaterThan, type MaintenanceProgress } from './alarm.ts';
 import { batchNonEmpty, chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type JsonRowList, jsonRowList } from './json-list.ts';
+import {
+	type PublicationManifestAvailabilityIntent,
+	PublicationManifestAvailabilityStore
+} from './publication-manifest-availability-store.ts';
 
 export const pathReadDemotionPendingKey = 'read-authority:demotion-pending';
 export const pathReadDemotionPageSize = 100;
@@ -26,32 +31,13 @@ export const pathReadDemotionPageSize = 100;
 export class PathReadAuthorityService {
 	constructor(private readonly context: ServerContext) {}
 
-	async requireWritable(): Promise<void> {
-		if (this.context.referenceStorageContracted) {
-			return;
-		}
-		await this.context.transitions.refresh();
-		if (
-			!(await this.context.transitions.hasReached(
-				'blob-reference-read-authority',
-				'complete'
-			))
-		) {
-			throw new PathReadAuthorityMigrationPendingError();
-		}
-		this.context.referenceStorageContracted = true;
-	}
-
-	async revoke(
+	private async writeRevocations(
 		cache: ResolvedCache,
 		paths: readonly {
 			readonly storePathHash: StorePathHash;
 			readonly generation: NarInfoGeneration;
 		}[]
 	): Promise<void> {
-		if (paths.length === 0) {
-			return;
-		}
 		await this.context.ctx.storage.put(pathReadDemotionPendingKey, true);
 		const fence = schema.pathReadRevocation;
 		for (const page of chunk(paths, pathReadDemotionPageSize)) {
@@ -88,6 +74,94 @@ export class PathReadAuthorityService {
 			);
 		}
 		await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+	}
+
+	async requireWritable(): Promise<void> {
+		if (this.context.referenceStorageContracted) {
+			return;
+		}
+		await this.context.transitions.refresh();
+		if (
+			!(await this.context.transitions.hasReached(
+				'blob-reference-read-authority',
+				'complete'
+			))
+		) {
+			throw new PathReadAuthorityMigrationPendingError();
+		}
+		this.context.referenceStorageContracted = true;
+	}
+
+	async revoke(
+		cache: ResolvedCache,
+		paths: readonly {
+			readonly storePathHash: StorePathHash;
+			readonly generation: NarInfoGeneration;
+		}[]
+	): Promise<void> {
+		if (paths.length === 0) {
+			return;
+		}
+		const availability = new PublicationManifestAvailabilityStore(
+			this.context.db
+		);
+		const intents = this.context.db.transaction(() =>
+			paths.flatMap((path) => {
+				const row = this.context.db
+					.select()
+					.from(localSchema.narInfos)
+					.where(
+						and(
+							eq(localSchema.narInfos.cacheId, cache.id),
+							eq(localSchema.narInfos.storePathHash, path.storePathHash),
+							eq(localSchema.narInfos.generation, path.generation)
+						)
+					)
+					.get();
+				if (row === undefined) {
+					return [];
+				}
+				const intent = availability.begin(
+					{
+						cacheId: cache.id,
+						cacheGeneration: cache.generation,
+						storePathHash: row.storePathHash,
+						storePath: row.storePath,
+						generation: row.generation,
+						narHash: row.narHash
+					},
+					'revoke'
+				);
+				return intent === undefined ? [] : [intent];
+			})
+		);
+		await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+		await this.writeRevocations(cache, paths);
+		for (const intent of intents) {
+			availability.acknowledge(intent.revision);
+		}
+		const first = intents[0];
+		if (first !== undefined) {
+			availability.drainPage(first.revision);
+		}
+	}
+
+	/**
+	Retry only the original fenced generation; never allocate a replacement intent. Call under the critical section.
+	*/
+	async recoverAvailability(
+		intent: PublicationManifestAvailabilityIntent
+	): Promise<void> {
+		const availability = new PublicationManifestAvailabilityStore(
+			this.context.db
+		);
+		if (availability.isAccepted(intent)) {
+			const cache = this.context.cacheRepository.resolvedForId(intent.cacheId);
+			await this.writeRevocations(cache, [intent]);
+		}
+		// A superseding local generation makes this exact old revocation a safe no-op.
+		availability.acknowledge(intent.revision);
+		availability.drainPage(intent.revision);
 	}
 
 	async hasPending(): Promise<boolean> {

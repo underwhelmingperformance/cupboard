@@ -1,7 +1,8 @@
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
+	buildSummaryReaderSchema,
 	buildSummaryResultKind,
-	buildSummarySchema,
+	buildSummaryV4ResultKind,
 	type DivergenceSummary,
 	divergenceSummaryResultKind,
 	divergenceSummarySchema,
@@ -48,7 +49,9 @@ export function uploadTally(
 	results: readonly ReporterResultEvent[]
 ): UploadTally | undefined {
 	const builds = results.filter(
-		(event) => event.kind === buildSummaryResultKind
+		(event) =>
+			event.kind === buildSummaryResultKind ||
+			event.kind === buildSummaryV4ResultKind
 	);
 	const relevant = builds.length === 0 ? results : builds;
 	let total: UploadTally | undefined;
@@ -59,8 +62,11 @@ export function uploadTally(
 }
 
 function eventUploads(event: ReporterResultEvent): UploadTally | undefined {
-	if (event.kind === buildSummaryResultKind) {
-		const summary = buildSummarySchema.safeParse(event.data).data;
+	if (
+		event.kind === buildSummaryResultKind ||
+		event.kind === buildSummaryV4ResultKind
+	) {
+		const summary = buildSummaryReaderSchema.safeParse(event.data).data;
 
 		return summary === undefined
 			? undefined

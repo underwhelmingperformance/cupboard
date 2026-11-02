@@ -358,7 +358,7 @@ uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
 
 ### actions/attest
 
-Signs SLSA provenance for paths built on the runner in this run. Before signing, the action checks each path and NAR hash against the destination narinfo. Build provenance comes from the current job's receipt.
+Signs SLSA provenance for paths built on the runner in this run. Before signing, the action checks each actual statement subject and NAR hash against the destination narinfo. Build provenance comes from the current job's receipt.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
@@ -370,10 +370,10 @@ uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
 | --- | --- | --- |
 | `inline-bundles` | `true` | Control how bundle lists are returned. `true` writes inline bundle outputs as well as files. `false` returns files without inline bundle outputs. Use `false` for large bundle lists. |
 | `receipt-file` | **required** | Receipt written earlier in the job by actions/build-paths or by a cohort build in the flake publish workflow. |
-| `checksums-file` |  | Where to write the checksums of every accepted receipt path. Defaults to a file in a unique directory under RUNNER_TEMP. |
+| `checksums-file` |  | Where to write the candidate checksums of every named receipt subject. Defaults to a file in a unique directory under RUNNER_TEMP. |
 | `built-checksums-file` |  | Where to write the checksums of the paths that the job built. The build-provenance attestations cover these paths. Defaults to a file next to the checksums file. |
 | `predicate-file` |  | Where to write the SCAI reproduction report. Empty when no local verification rebuild succeeded. Defaults to a file next to the checksums file. |
-| `url` | **required** | Tenant URL of the destination. Before signing, the action checks every path against the narinfo in this tenant's cache. |
+| `url` | **required** | Tenant URL of the destination. Before signing, the action checks each actual statement subject against the narinfo in this tenant's cache. |
 | `cache` |  | Named destination cache. Leave empty to use the default cache. |
 | `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
 | `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
@@ -396,7 +396,7 @@ uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
 | `bundles` | Paths to the generated bundles, one per line. Available when inline-bundles is true. Empty when the action signed no statements. Use bundles-file for publication workflows. |
 | `bundles-file` | File containing the generated bundle paths, one per line. Pass this file to actions/attest-attach. |
 | `checksums-file` | Path to the checksums of the receipt paths selected for signing. Pass this file to actions/attest-attach with the generated bundles. |
-| `subject-count` | Number of accepted receipt paths. |
+| `subject-count` | Number of named receipt candidates, not historical evidence coverage. |
 | `built-checksums-file` | Path to the checksums of the accepted paths that the job built. The build-provenance attestations cover these paths. |
 | `built-subject-count` | Number of accepted paths that the job built. |
 

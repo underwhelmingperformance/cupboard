@@ -11,6 +11,8 @@ import {
 
 import { armAlarmNoLaterThan } from './alarm.ts';
 import type { ServerContext } from './context.ts';
+import { isManifestPublicationCompatible } from './publication-manifest-restriction.ts';
+import { holdManifestPublication } from './publication-manifest-work-holds.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
 const maxTerminalPublicationsPrunedPerRun = 1000;
@@ -91,7 +93,8 @@ export class PublicationStore {
 			'id' | 'cacheId' | 'metadataJson'
 		>
 	): void {
-		if (this.get(pending.id) === undefined) {
+		const publication = this.get(pending.id);
+		if (publication === undefined) {
 			return;
 		}
 		const metadata = parseStoredUploadPathMetadata(
@@ -103,15 +106,45 @@ export class PublicationStore {
 			eq(schema.narInfos.storePathHash, metadata.storePathHash)
 		);
 		const result = this.context.db
-			.select({
-				storePathHash: schema.narInfos.storePathHash,
-				narHash: schema.narInfos.narHash,
-				generation: schema.narInfos.generation
-			})
+			.select()
 			.from(schema.narInfos)
 			.where(identity)
 			.get();
-		this.finish(pending.id, 'servable', JSON.stringify(result));
+		if (publication.manifestOperationId !== null) {
+			const cache = this.context.cacheRepository.resolve(
+				this.context.cacheRepository.scopeForId(pending.cacheId)
+			);
+			if (
+				cache === undefined ||
+				result === undefined ||
+				!isManifestPublicationCompatible(
+					this.context,
+					pending.id,
+					cache,
+					metadata,
+					result
+				)
+			) {
+				this.fail(pending.id, 'mismatch');
+				return;
+			}
+		}
+		this.finish(
+			pending.id,
+			'servable',
+			JSON.stringify(
+				result === undefined
+					? undefined
+					: {
+							storePathHash: result.storePathHash,
+							narHash: result.narHash,
+							generation: result.generation
+						}
+			)
+		);
+		if (result !== undefined) {
+			holdManifestPublication(this.context, publication, result);
+		}
 	}
 
 	finish(

@@ -1,8 +1,12 @@
 import {
+	type CacheGeneration,
+	type NarInfoGeneration,
+	type NixSha256HashString,
 	rootNameMaxLength,
-	rootTtlMaxSeconds
+	rootTtlMaxSeconds,
+	type StorePathHash
 } from '@cupboard/nix-store/scalars';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
 	blobDeclarationAttribute,
@@ -22,6 +26,14 @@ import {
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
 	uploadConfirmMaxPaths,
+	uploadConfirmPresentCapability,
+	uploadConfirmPresentMaxPaths,
+	uploadConfirmPresentMaxRequestBytes,
+	type UploadConfirmPresentPath,
+	type UploadConfirmPresentRequest,
+	type UploadConfirmPresentRequestInput,
+	uploadConfirmPresentRequestSchema,
+	uploadConfirmPresentResponseSchema,
 	uploadConfirmRequestSchema,
 	uploadConfirmResponseSchema,
 	uploadDecisionSchema,
@@ -753,5 +765,175 @@ describe('commit session schemas', () => {
 			request: commitSessionRequestSchema.parse(request),
 			frame: commitSessionFrameSchema.parse(frame)
 		}).toStrictEqual({ request, frame });
+	});
+});
+
+describe('uploadConfirmPresentRequestSchema', () => {
+	const request = { pushId, cacheGeneration: 1, paths: [negotiationPath] };
+
+	it('defines an independent capability and a 32-path page', () => {
+		expect({
+			capability: uploadConfirmPresentCapability,
+			maxPaths: uploadConfirmPresentMaxPaths,
+			maxRequestBytes: uploadConfirmPresentMaxRequestBytes
+		}).toStrictEqual({
+			capability: 'confirm-present-v1',
+			maxPaths: 32,
+			maxRequestBytes: 4 * 1024 * 1024
+		});
+	});
+
+	it('preserves the existing branded scalars and unbranded request input', () => {
+		expectTypeOf<
+			UploadConfirmPresentRequest['cacheGeneration']
+		>().toEqualTypeOf<CacheGeneration>();
+		expectTypeOf<
+			UploadConfirmPresentRequestInput['cacheGeneration']
+		>().toEqualTypeOf<number>();
+		type Confirmed = Extract<UploadConfirmPresentPath, { status: 'confirmed' }>;
+		expectTypeOf<Confirmed['storePathHash']>().toEqualTypeOf<StorePathHash>();
+		expectTypeOf<Confirmed['narHash']>().toEqualTypeOf<NixSha256HashString>();
+		expectTypeOf<Confirmed['generation']>().toEqualTypeOf<NarInfoGeneration>();
+	});
+
+	it('accepts complete immutable metadata and the existing root default', () => {
+		expect(uploadConfirmPresentRequestSchema.parse(request)).toStrictEqual(
+			request
+		);
+		expect(
+			uploadConfirmPresentRequestSchema.parse({
+				...request,
+				attachRoot: { name: 'ci' }
+			})
+		).toStrictEqual({
+			...request,
+			attachRoot: { name: 'ci', retention: { kind: 'inherit' } }
+		});
+	});
+
+	it('accepts the full page with distinct store-path hashes', () => {
+		const paths = Array.from({ length: 33 }, (_, index) => {
+			const hash = index.toString(2).padStart(32, '0');
+			return {
+				...negotiationPath,
+				storePathHash: hash,
+				storePath: `/nix/store/${hash}-name`
+			};
+		});
+		const value = { ...request, paths: paths.slice(0, 32) };
+		expect(uploadConfirmPresentRequestSchema.parse(value)).toStrictEqual(value);
+		expect(
+			uploadConfirmPresentRequestSchema.safeParse({ ...request, paths }).success
+		).toBe(false);
+	});
+
+	it.each([
+		{ ...request, paths: [] },
+		{ ...request, paths: [negotiationPath, negotiationPath] },
+		{
+			...request,
+			paths: [
+				negotiationPath,
+				{ ...negotiationPath, narHash: `sha256:${'2'.repeat(52)}` }
+			]
+		},
+		{
+			...request,
+			paths: [{ ...negotiationPath, storePathHash: '1'.repeat(32) }]
+		},
+		{ ...request, pushId: '../push' },
+		{ ...request, cacheGeneration: 0 },
+		{ ...request, cacheGeneration: 1.5 },
+		{ ...request, cacheGeneration: Number.MAX_SAFE_INTEGER + 1 },
+		{ ...request, cacheGeneration: undefined },
+		{ ...request, operationId: 'not-authority' },
+		{ ...request, retainUntil: '2099-01-01T00:00:00Z' },
+		{ ...request, blob: { fileHash: narHash, fileSize: 1 } },
+		{ ...request, paths: [{ ...negotiationPath, r2Key: 'staged' }] },
+		{ ...request, paths: [{ ...negotiationPath, narSize: 0 }] },
+		{ ...request, paths: [{ ...negotiationPath, narHash: 'not-a-hash' }] },
+		{ ...request, attachRoot: { name: 'ci', extra: true } },
+		{
+			...request,
+			attachRoot: { name: 'ci', retention: { kind: 'duration', seconds: -1 } }
+		}
+	])('rejects invalid or unknown request fields: %j', (value) => {
+		expect(uploadConfirmPresentRequestSchema.safeParse(value).success).toBe(
+			false
+		);
+	});
+});
+
+describe('uploadConfirmPresentResponseSchema', () => {
+	const confirmed = {
+		storePathHash,
+		status: 'confirmed',
+		narHash,
+		generation: 0,
+		grace: {}
+	};
+	const negative = {
+		storePathHash: '1'.repeat(32),
+		status: 'needs-publication'
+	};
+
+	it('preserves ordered positive and negative results and authoritative identity', () => {
+		const value = { paths: [negative, confirmed] };
+		expect(uploadConfirmPresentResponseSchema.parse(value)).toStrictEqual(
+			value
+		);
+	});
+
+	it('accepts 32 results and rejects 33 distinct results', () => {
+		const paths = Array.from({ length: 33 }, (_, index) => ({
+			...confirmed,
+			storePathHash: index.toString(2).padStart(32, '0')
+		}));
+		const value = { paths: paths.slice(0, 32) };
+		expect(uploadConfirmPresentResponseSchema.parse(value)).toStrictEqual(
+			value
+		);
+		expect(
+			uploadConfirmPresentResponseSchema.safeParse({ paths }).success
+		).toBe(false);
+	});
+
+	it.each([
+		{},
+		{ retainUntil: '2026-11-01T01:00:00.000Z' },
+		{ graceSeconds: 0 },
+		{ graceSeconds: 60 }
+	])('accepts the existing grace fact: %j', (grace) => {
+		const value = { paths: [{ ...confirmed, grace }] };
+		expect(uploadConfirmPresentResponseSchema.parse(value)).toStrictEqual(
+			value
+		);
+	});
+
+	it.each([
+		{ paths: [] },
+		{ paths: [confirmed, confirmed] },
+		{ paths: [{ ...confirmed, grace: undefined }] },
+		{ paths: [{ ...confirmed, generation: undefined }] },
+		{ paths: [{ ...confirmed, generation: -1 }] },
+		{ paths: [{ ...confirmed, generation: 0.5 }] },
+		{ paths: [{ ...confirmed, generation: Number.MAX_SAFE_INTEGER + 1 }] },
+		{ paths: [{ ...confirmed, narHash: 'not-a-hash' }] },
+		{ paths: [{ ...confirmed, confirmed: true }] },
+		{
+			paths: [
+				{ ...confirmed, grace: { graceSeconds: 1, retainUntil: 'later' } }
+			]
+		},
+		{ paths: [{ ...confirmed, grace: { extra: true } }] },
+		{ paths: [{ ...negative, narHash }] },
+		{ paths: [{ ...negative, generation: 1 }] },
+		{ paths: [{ ...negative, grace: {} }] },
+		{ paths: [{ ...negative, status: 'absent' }] },
+		{ paths: [confirmed], receipt: 'private' }
+	])('rejects incomplete or ambiguous results: %j', (value) => {
+		expect(uploadConfirmPresentResponseSchema.safeParse(value).success).toBe(
+			false
+		);
 	});
 });

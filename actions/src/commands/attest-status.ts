@@ -140,11 +140,11 @@ async function attestStatusAction(
 		])
 	);
 	const copiedPaths = new Set(
-		receipt.version === 3
-			? receipt.subjects
+		receipt.version === 2
+			? []
+			: receipt.subjects
 					.filter((subject) => subject.origin === 'copied')
 					.map((subject) => StorePath.hash(subject.storePath))
-			: []
 	);
 	if (
 		new Set(pathHashes).size !== paths.length ||

@@ -5,11 +5,12 @@ import { type VerifyReportInput } from '@cupboard/protocol/reports';
 import { type GcResponseInput } from '@cupboard/protocol/retention';
 import { publicationCapability } from '@cupboard/protocol/upload';
 import {
+	type UploadConfirmPresentRequest,
 	uploadGraceFactsCapability,
 	type UploadNegotiateRequest,
 	type UploadPreviewRequest
 } from '@cupboard/protocol/upload';
-import { implement } from '@orpc/server';
+import { implement, ORPCError } from '@orpc/server';
 
 import { type AccessClaims } from '../auth/auth.ts';
 import { hasAcceptedCapability } from '../http/capabilities.ts';
@@ -28,10 +29,24 @@ import { bridgedError } from './error-bridge.ts';
 // tokens satisfy every tenant scope.
 const os = implement(tenantContract)
 	.$context<TenantOrpcContext>()
-	.use(async ({ context, next }) => {
+	.use(async ({ context, procedure, next }) => {
 		try {
 			return await next();
 		} catch (error) {
+			if (error instanceof ORPCError) {
+				const declaredErrors: Record<string, { status?: number } | undefined> =
+					procedure['~orpc'].errorMap;
+				const code = String(error.code);
+				const declared = declaredErrors[code];
+				if (declared !== undefined) {
+					throw new ORPCError(error.code, {
+						...declared,
+						message: error.message,
+						data: error.data,
+						cause: error
+					});
+				}
+			}
 			throw bridgedError(context.logger, error, context.resHeaders);
 		}
 	})
@@ -57,6 +72,128 @@ const os = implement(tenantContract)
 	);
 
 export const tenantRouter = os.router({
+	publication: {
+		lookup: {
+			inDefaultCache: os.publication.lookup.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.manifestRepository.lookup(
+						context.cache,
+						context.claims.grants,
+						input
+					)
+			),
+			inNamedCache: os.publication.lookup.inNamedCache.handler(
+				({ input, context }) => {
+					const { cacheName, ...request } = input;
+					return context.services.manifestRepository.lookup(
+						{ kind: 'named', name: cacheName },
+						context.claims.grants,
+						request
+					);
+				}
+			)
+		},
+		captureBegin: {
+			inDefaultCache: os.publication.captureBegin.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.manifestCapture.captureBegin(
+						context.cache,
+						context.claims.grants,
+						input
+					)
+			),
+			inNamedCache: os.publication.captureBegin.inNamedCache.handler(
+				({ input, context }) => {
+					const { cacheName, ...request } = input;
+					return context.services.manifestCapture.captureBegin(
+						{ kind: 'named', name: cacheName },
+						context.claims.grants,
+						request
+					);
+				}
+			)
+		},
+		capturePage: {
+			inDefaultCache: os.publication.capturePage.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.manifestCapture.capturePage(
+						context.cache,
+						context.claims.grants,
+						input
+					)
+			),
+			inNamedCache: os.publication.capturePage.inNamedCache.handler(
+				({ input, context }) => {
+					const { cacheName, ...request } = input;
+					return context.services.manifestCapture.capturePage(
+						{ kind: 'named', name: cacheName },
+						context.claims.grants,
+						request
+					);
+				}
+			)
+		},
+		captureSeal: {
+			inDefaultCache: os.publication.captureSeal.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.manifestCapture.captureSeal(
+						context.cache,
+						context.claims.grants,
+						input
+					)
+			),
+			inNamedCache: os.publication.captureSeal.inNamedCache.handler(
+				({ input, context }) => {
+					const { cacheName, ...request } = input;
+					return context.services.manifestCapture.captureSeal(
+						{ kind: 'named', name: cacheName },
+						context.claims.grants,
+						request
+					);
+				}
+			)
+		},
+		ensure: {
+			inDefaultCache: os.publication.ensure.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.ensureManifest(
+						context.cache,
+						context.claims.grants,
+						input
+					)
+			),
+			inNamedCache: os.publication.ensure.inNamedCache.handler(
+				({ input, context }) => {
+					const { cacheName, ...request } = input;
+					return context.services.ensureManifest(
+						{ kind: 'named', name: cacheName },
+						context.claims.grants,
+						request
+					);
+				}
+			)
+		},
+		status: {
+			inDefaultCache: os.publication.status.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.manifestStatus(
+						context.cache,
+						context.claims.grants,
+						input
+					)
+			),
+			inNamedCache: os.publication.status.inNamedCache.handler(
+				({ input, context }) => {
+					const { cacheName, ...request } = input;
+					return context.services.manifestStatus(
+						{ kind: 'named', name: cacheName },
+						context.claims.grants,
+						request
+					);
+				}
+			)
+		}
+	},
 	policies: {
 		list: os.policies.list.handler(({ context }) =>
 			context.services.legacyRetention.list()
@@ -327,6 +464,14 @@ export const tenantRouter = os.router({
 		)
 	},
 	uploads: {
+		confirmPresent: {
+			inDefaultCache: os.uploads.confirmPresent.inDefaultCache.handler(
+				({ input, context }) => confirmPresent(context, input)
+			),
+			inNamedCache: os.uploads.confirmPresent.inNamedCache.handler(
+				({ input, context }) => confirmPresent(context, input)
+			)
+		},
 		plan: {
 			inDefaultCache: os.uploads.plan.inDefaultCache.handler(
 				({ input, context }) => planUpload(context, input)
@@ -612,4 +757,19 @@ async function runVerify(
 	const batch = Math.min(limit ?? verificationBatchSize, verificationBatchSize);
 
 	return services.runVerification(logger, purgeOrigin, batch);
+}
+
+function confirmPresent(
+	context: TenantOrpcContext & { readonly claims: AccessClaims },
+	input: UploadConfirmPresentRequest
+) {
+	if (input.attachRoot !== undefined) {
+		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
+	}
+	return context.services.confirmation.confirmPresent(context.cache, {
+		pushId: input.pushId,
+		cacheGeneration: input.cacheGeneration,
+		paths: input.paths,
+		...(input.attachRoot !== undefined && { attachRoot: input.attachRoot })
+	});
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -8,7 +8,8 @@ import {
 	discoverNixStoreConfig,
 	Nix,
 	type NixDaemonClientOptions,
-	type NixStoreConfig
+	type NixStoreConfig,
+	tenantReferenceSources
 } from '@cupboard/nix';
 import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
@@ -23,6 +24,8 @@ import {
 	buildReceiptSchema,
 	type BuildReceiptV3,
 	buildReceiptV3Schema,
+	type BuildReceiptV4,
+	buildReceiptV4Schema,
 	type BuildSubjectV3,
 	invocationIdSchema
 } from '@cupboard/protocol/build';
@@ -48,6 +51,17 @@ import {
 } from '../build-push/cohorts.ts';
 import type { DivergencePolicy } from '../build-push/divergence.ts';
 import { preflightBuildPush } from '../build-push/preflight.ts';
+import {
+	buildPublicationWorkflow,
+	publicationSourceForUrl
+} from '../build-push/publication-client.ts';
+import {
+	assertPublicationRequestsRecovery,
+	completePublicationRequests,
+	publicationRequestsCompletionFile,
+	writePublicationFile
+} from '../build-push/publication-requests.ts';
+import { publicGitHubRecoveryIdentity } from '../build-push/recovery-identity.ts';
 import { referenceBuildPushClient } from '../build-push/reference-client.ts';
 import {
 	type ChildCommand,
@@ -79,6 +93,10 @@ import { pushClientFor } from '../push/push-client.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
+import {
+	BuildReceiptNegotiation,
+	parseReceiptVersions
+} from './build-push-receipts.ts';
 import { parsePathFile, validateRetentionChoice } from './push.ts';
 import { rootRetentionChoice } from './retention-choice.ts';
 
@@ -109,6 +127,7 @@ interface BuildPushOptions {
 	readonly failOnDivergence?: boolean;
 	readonly receiptFile?: string;
 	readonly aggregateReceiptV3?: boolean;
+	readonly aggregateReceipt?: readonly number[];
 	readonly cohortsFile?: string;
 	readonly gcBetweenCohorts?: boolean;
 	readonly keepGoingCohorts?: boolean;
@@ -287,14 +306,24 @@ function recordAggregateSubject(
 }
 
 /**
-Combines version 3 cohort receipts. A `built` subject takes precedence when
+Combines version 3 and capability-selected version 4 cohort receipts. A `built` subject takes precedence when
 another cohort later finds the same path in its store, and terminal target
 failures remain distinct from command failures.
 */
 export function aggregateBuildReceipts(
 	receipts: readonly BuildReceipt[]
-): BuildReceiptV3 {
-	const parsed = receipts.map((receipt) => buildReceiptV3Schema.parse(receipt));
+): BuildReceiptV3 | BuildReceiptV4 {
+	const publicationSets = receipts.flatMap((receipt) =>
+		receipt.version === 4 ? (receipt.publicationSets ?? []) : []
+	);
+	const parsed = receipts.map((receipt) => {
+		if (receipt.version !== 4) {
+			return buildReceiptV3Schema.parse(receipt);
+		}
+		const { publicationSets: _publicationSets, ...legacy } =
+			buildReceiptV4Schema.parse(receipt);
+		return buildReceiptV3Schema.parse({ ...legacy, version: 3 });
+	});
 	const terminalFailures = parsed.flatMap((receipt) =>
 		receipt.terminalFailure === undefined ? [] : [receipt.terminalFailure]
 	);
@@ -325,7 +354,7 @@ export function aggregateBuildReceipts(
 		}
 	}
 
-	return buildReceiptV3Schema.parse({
+	const aggregate = buildReceiptV3Schema.parse({
 		version: 3,
 		paths: unique(parsed.flatMap((receipt) => receipt.paths)),
 		subjects: subjects.values().toArray(),
@@ -342,17 +371,23 @@ export function aggregateBuildReceipts(
 			)
 		})
 	});
+	return receipts.some((receipt) => receipt.version === 4)
+		? buildReceiptV4Schema.parse({ ...aggregate, version: 4, publicationSets })
+		: aggregate;
 }
 
 /**
 Keeps the public multi-receipt envelope unless the caller explicitly asks
-for the version 3 aggregate used by the action output.
+for the aggregate used by the action output, preserving negotiated V4 sets.
 */
 export function multiCohortReceiptDocument(
 	receipts: readonly BuildReceipt[],
-	shouldAggregateReceiptV3: boolean
-): BuildReceiptV3 | { readonly receipts: readonly BuildReceipt[] } {
-	return shouldAggregateReceiptV3
+	shouldAggregate: boolean
+):
+	| BuildReceiptV3
+	| BuildReceiptV4
+	| { readonly receipts: readonly BuildReceipt[] } {
+	return shouldAggregate
 		? aggregateBuildReceipts(receipts)
 		: { receipts: [...receipts] };
 }
@@ -366,8 +401,8 @@ interface AggregateCohortRootOptions {
 }
 
 /**
-Leaves the aggregate root unchanged after any cohort failure. Once every
-cohort succeeds, replaces it with the deduplicated targets from all cohorts.
+Keeps the aggregate root unchanged after a cohort failure or until every cohort
+has reported its accepted selection. An empty reported selection is complete.
 */
 export async function updateAggregateCohortRoot(
 	options: AggregateCohortRootOptions,
@@ -377,13 +412,14 @@ export async function updateAggregateCohortRoot(
 		return;
 	}
 
-	const targetGroups = Array.from({ length: options.cohortCount }).flatMap(
-		(_unused, index) => {
-			const targets = options.settledTargets.get(index + 1);
-
-			return targets === undefined ? [] : [targets];
+	const targetGroups: (readonly StorePathString[])[] = [];
+	for (let cohort = 1; cohort <= options.cohortCount; cohort += 1) {
+		const targets = options.settledTargets.get(cohort);
+		if (targets === undefined) {
+			return;
 		}
-	);
+		targetGroups.push(targets);
+	}
 	const targets = aggregateCohortTargets(targetGroups);
 
 	await setRoot(options.root, {
@@ -551,7 +587,12 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--aggregate-receipt-v3',
-			'with several cohorts, write one combined version 3 receipt instead of {"receipts": [...]}'
+			'write one combined version 3 receipt; preserve the legacy receipt contract'
+		)
+		.option(
+			'--aggregate-receipt <versions>',
+			'write one combined receipt using the highest mutually supported version from this comma-separated list (e.g. 3,4)',
+			parseReceiptVersions
 		)
 		.option(
 			'--cohorts-file <path>',
@@ -598,6 +639,7 @@ export function registerBuildPushCommand(
 		)
 		.action(
 			async (url: URL, commandParts: string[], options: BuildPushOptions) => {
+				const receipts = BuildReceiptNegotiation.forConsumer(options);
 				validateRetentionChoice(options);
 				const delimited = splitDelimitedCachePositionals(
 					commandParts,
@@ -623,6 +665,59 @@ export function registerBuildPushCommand(
 					delimited.cacheName === undefined
 						? urlTarget
 						: cacheTargetWithName(urlTarget, delimited.cacheName);
+				const cohorts: readonly BuildInvocation[] =
+					options.cohortsFile === undefined
+						? [{ kind: 'command', command: childCommand(delimited.payload) }]
+						: parseCohortsFile(await readFile(options.cohortsFile, 'utf8'));
+
+				const intermediatePaths =
+					options.intermediatePathsFile === undefined
+						? undefined
+						: parseStorePathFile(
+								await readFile(options.intermediatePathsFile, 'utf8')
+							);
+				const commandInvocationFingerprint = createHash('sha256')
+					.update(
+						JSON.stringify({
+							workingDirectory: process.cwd(),
+							github: publicGitHubRecoveryIdentity(process.env),
+							destination: cacheUrl(target.tenantUrl, target.cache),
+							cohorts,
+							root: targetRoot,
+							retention: rootRetentionChoice(options.ttl, options.permanent),
+							runRoot: options.runRoot,
+							runRootRetention: rootRetentionChoice(
+								options.runRootTtl,
+								options.runRootPermanent
+							),
+							publicationScope: options.publicationScope,
+							referenceDependencies: options.referenceDependencies,
+							closure: options.closure,
+							substituter: options.substituter,
+							intermediatePaths,
+							wait: options.wait,
+							waitTimeout: options.waitTimeout,
+							uploadConcurrency: options.uploadConcurrency,
+							divergencePolicy: divergencePolicyFor(options.failOnDivergence),
+							gcBetweenCohorts: options.gcBetweenCohorts,
+							keepGoingCohorts: options.keepGoingCohorts,
+							githubOidc: options.githubOidc,
+							audience:
+								options.audience ?? audienceSchema.parse(target.tenantUrl),
+							receiptVersion: receipts.version,
+							aggregateReceipt: receipts.shouldAggregate
+						})
+					)
+					.digest('hex');
+				if (options.receiptFile !== undefined) {
+					await assertPublicationRequestsRecovery(
+						options.receiptFile,
+						receipts.version === 4 && options.referenceDependencies !== false
+							? commandInvocationFingerprint
+							: undefined
+					);
+				}
+
 				const credential = await authenticateForPush(
 					CupboardClient.fromUrl(target.tenantUrl, {
 						cache: target.cache,
@@ -643,17 +738,6 @@ export function registerBuildPushCommand(
 					}
 				);
 
-				const cohorts: readonly BuildInvocation[] =
-					options.cohortsFile === undefined
-						? [{ kind: 'command', command: childCommand(delimited.payload) }]
-						: parseCohortsFile(await readFile(options.cohortsFile, 'utf8'));
-
-				const intermediatePaths =
-					options.intermediatePathsFile === undefined
-						? undefined
-						: parseStorePathFile(
-								await readFile(options.intermediatePathsFile, 'utf8')
-							);
 				const reporter = commandUi(program, programOptions).reporter();
 				const cache = target.cache;
 				const authorizationDetails = pushAuthorizationDetails({
@@ -670,6 +754,7 @@ export function registerBuildPushCommand(
 				});
 
 				const config = discoverNixStoreConfig();
+
 				let daemon: ReturnType<typeof createNixDaemonStoreClient> | undefined;
 				const openDaemon = (): ReturnType<
 					typeof createNixDaemonStoreClient
@@ -693,19 +778,30 @@ export function registerBuildPushCommand(
 						? options.receiptFile
 						: path.join(sequenceDirectory, `cohort-${String(cohort)}.json`);
 				const settledTargets = new Map<number, readonly StorePathString[]>();
+				const requestsFileFor = (cohort: number): string | undefined =>
+					options.receiptFile === undefined
+						? undefined
+						: sequenceDirectory === undefined
+							? `${options.receiptFile}.publication-requests.json`
+							: `${options.receiptFile}.cohort-${String(cohort)}.publication-requests.json`;
+				let finalReceipt:
+					| BuildReceipt
+					| ReturnType<typeof multiCohortReceiptDocument>
+					| undefined;
 
 				// Each cohort is its own supervising invocation, with its own
 				// identity, runtime endpoint and preflight.
-				const runCohort = (
+				const runCohort = async (
 					invocation: BuildInvocation,
 					cohort: number
 				): ReturnType<typeof runBuildPush> => {
 					const invocationId = invocationIdSchema.parse(randomUUID());
 					const receiptFile = receiptFileFor(cohort);
 
-					return runBuildPush(
+					const receipt = await runBuildPush(
 						{
 							invocation,
+							commandInvocationFingerprint,
 							substituter: options.substituter,
 							tenantUrl: target.tenantUrl,
 							destinationUrl: cacheUrl(target.tenantUrl, cache),
@@ -736,6 +832,11 @@ export function registerBuildPushCommand(
 							...(receiptFile !== undefined && {
 								receiptFile
 							}),
+							...(options.receiptFile !== undefined && {
+								publicationRequestsFile: requestsFileFor(cohort),
+								publicationRequestsCompletionFile:
+									publicationRequestsCompletionFile(options.receiptFile)
+							}),
 							...(options.wait !== undefined && { wait: options.wait }),
 							...(options.waitTimeout !== undefined && {
 								waitTimeoutSeconds: options.waitTimeout
@@ -751,6 +852,24 @@ export function registerBuildPushCommand(
 								signal: programOptions.signal
 							}),
 							client: pushClient,
+							...(receipts.version === 4 &&
+								options.referenceDependencies !== false && {
+									publicationWorkflow: buildPublicationWorkflow(
+										target,
+										{
+											githubOidc: options.githubOidc,
+											audience:
+												options.audience ??
+												audienceSchema.parse(target.tenantUrl)
+										},
+										programOptions.signal
+									)
+								}),
+							publicationSources: tenantReferenceSources(
+								target.tenantUrl,
+								[{ url: cacheUrl(target.tenantUrl, cache), paths: [] }],
+								config.substitution.substituters
+							).map((source) => publicationSourceForUrl(source.url)),
 							referenceClient: (sources) =>
 								referenceBuildPushClient(sources, {
 									tenantUrl: target.tenantUrl,
@@ -803,6 +922,7 @@ export function registerBuildPushCommand(
 								})
 						}
 					);
+					return receipts.receive(receipt);
 				};
 
 				try {
@@ -819,12 +939,24 @@ export function registerBuildPushCommand(
 						},
 						{
 							runCohort,
-							recoverReceipt: (_error, cohort) => {
+							recoverReceipt: async (_error, cohort) => {
 								const receiptFile = receiptFileFor(cohort);
+								if (receiptFile === undefined) {
+									return;
+								}
+								const receipt = await writtenReceipt(receiptFile);
+								if (receipt === undefined) {
+									return;
+								}
+								const negotiated = receipts.receive(receipt);
+								if (negotiated.version !== receipt.version) {
+									await writePublicationFile(
+										receiptFile,
+										`${JSON.stringify(negotiated, undefined, '\t')}\n`
+									);
+								}
 
-								return receiptFile === undefined
-									? Promise.resolve(undefined)
-									: writtenReceipt(receiptFile);
+								return negotiated;
 							},
 							collect: betweenCohortCollector(reporter, {
 								signal: programOptions.signal
@@ -836,7 +968,7 @@ export function registerBuildPushCommand(
 					if (cohorts.length > 1 && options.receiptFile !== undefined) {
 						const receipt = multiCohortReceiptDocument(
 							result.receipts,
-							options.aggregateReceiptV3 === true
+							receipts.shouldAggregate
 						);
 						await writeFile(
 							options.receiptFile,
@@ -863,11 +995,34 @@ export function registerBuildPushCommand(
 					if (failure !== undefined) {
 						throw failure.error;
 					}
+					finalReceipt =
+						cohorts.length > 1
+							? multiCohortReceiptDocument(
+									result.receipts,
+									receipts.shouldAggregate
+								)
+							: result.receipts[0];
 				} finally {
 					if (sequenceDirectory !== undefined) {
 						await rm(sequenceDirectory, { recursive: true, force: true });
 					}
 				}
+				if (finalReceipt === undefined || options.receiptFile === undefined) {
+					return;
+				}
+				programOptions.signal?.throwIfAborted();
+				await writePublicationFile(
+					options.receiptFile,
+					`${JSON.stringify(finalReceipt, undefined, '\t')}\n`
+				);
+				programOptions.signal?.throwIfAborted();
+				await completePublicationRequests(
+					options.receiptFile,
+					cohorts
+						.map((_cohort, index) => requestsFileFor(index + 1))
+						.filter((file) => file !== undefined),
+					programOptions.signal
+				);
 			}
 		);
 }

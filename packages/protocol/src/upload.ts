@@ -274,6 +274,65 @@ export type UploadConfirmResponse = z.output<
 	typeof uploadConfirmResponseSchema
 >;
 
+// One immutable page is one durable retention receipt. Retries must keep the
+// same metadata, root and order; a new push is a new retention event.
+export const uploadConfirmPresentMaxPaths = 32;
+
+const hasUniqueStorePathHashes = (
+	paths: readonly { readonly storePathHash: string }[]
+): boolean =>
+	new Set(paths.map((path) => path.storePathHash)).size === paths.length;
+
+const uniqueStorePathHashesMessage =
+	'Each store-path hash must appear once in the confirmation page';
+
+export const uploadConfirmPresentRequestSchema = z.strictObject({
+	pushId: pushIdSchema,
+	cacheGeneration: cacheGenerationSchema,
+	paths: z
+		.array(uploadPathNegotiationSchema)
+		.min(1)
+		.max(uploadConfirmPresentMaxPaths)
+		.refine(hasUniqueStorePathHashes, uniqueStorePathHashesMessage),
+	attachRoot: uploadAttachRootSchema.optional()
+});
+export type UploadConfirmPresentRequest = z.output<
+	typeof uploadConfirmPresentRequestSchema
+>;
+
+// A positive identifies the server's current winner, which can differ from
+// the requested NAR. A negative applies no retention and uses ordinary
+// publication with the caller's original metadata and operation identity.
+export const uploadConfirmPresentPathSchema = z.discriminatedUnion('status', [
+	z.strictObject({
+		storePathHash: storePathHashSchema,
+		status: z.literal('confirmed'),
+		narHash: nixSha256HashSchema,
+		generation: narInfoGenerationSchema,
+		grace: uploadGraceFactSchema
+	}),
+	z.strictObject({
+		storePathHash: storePathHashSchema,
+		status: z.literal('needs-publication')
+	})
+]);
+export type UploadConfirmPresentPath = z.output<
+	typeof uploadConfirmPresentPathSchema
+>;
+
+// Exactly one result per requested path, in request order. Request/response
+// correspondence is checked by the caller in addition to schema validation.
+export const uploadConfirmPresentResponseSchema = z.strictObject({
+	paths: z
+		.array(uploadConfirmPresentPathSchema)
+		.min(1)
+		.max(uploadConfirmPresentMaxPaths)
+		.refine(hasUniqueStorePathHashes, uniqueStorePathHashesMessage)
+});
+export type UploadConfirmPresentResponse = z.output<
+	typeof uploadConfirmPresentResponseSchema
+>;
+
 export const commitResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
@@ -406,6 +465,10 @@ export function commitCreditCapabilityToken(openingGrant: number): string {
 
 export const publicationCapability = 'publication-v1';
 
+// Independent of publication-v1. Clients select confirmation only when both
+// are advertised; neither legacy bodies nor commit frames change.
+export const uploadConfirmPresentCapability = 'confirm-present-v1';
+
 // A client accepts this token when it parses the publication refusal reasons
 // `resend`, `declaration-changed` and `parameters-changed`. Clients that accept
 // only `publication-v1` fail the whole session on a reason that they do not
@@ -433,6 +496,10 @@ export type CommitBlobDeclaration = z.output<
 >;
 
 export const publicationMaxFrameBytes = 4 * 1024 * 1024;
+
+// The transport must enforce this on raw bytes, like publication frames.
+// A path's reference list can exceed this even within the 32-path schema cap.
+export const uploadConfirmPresentMaxRequestBytes = publicationMaxFrameBytes;
 export const publicationIdSchema = uploadIdSchema.refine((value) =>
 	/^[0-9a-f]{64}$/u.test(value)
 );
@@ -698,6 +765,15 @@ export type UploadConfirmedPathInput = z.input<
 >;
 export type UploadConfirmResponseInput = z.input<
 	typeof uploadConfirmResponseSchema
+>;
+export type UploadConfirmPresentRequestInput = z.input<
+	typeof uploadConfirmPresentRequestSchema
+>;
+export type UploadConfirmPresentPathInput = z.input<
+	typeof uploadConfirmPresentPathSchema
+>;
+export type UploadConfirmPresentResponseInput = z.input<
+	typeof uploadConfirmPresentResponseSchema
 >;
 export type CommitResponseInput = z.input<typeof commitResponseSchema>;
 export type StatsResponseInput = z.input<typeof statsResponseSchema>;

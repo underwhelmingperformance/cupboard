@@ -11,6 +11,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	buildReceiptV3Schema,
+	buildReceiptV4Schema,
 	derivationPathSchema
 } from '@cupboard/protocol/build';
 import { Command, CommanderError } from 'commander';
@@ -189,7 +190,10 @@ describe('aggregateCohortTargets', () => {
 				cohortCount: 2,
 				failed: false,
 				root,
-				settledTargets: new Map(),
+				settledTargets: new Map([
+					[1, []],
+					[2, []]
+				]),
 				retention: { kind: 'inherit' }
 			},
 			setRoot
@@ -198,6 +202,26 @@ describe('aggregateCohortTargets', () => {
 		expect(setRoot.mock.calls).toStrictEqual([
 			[root, { targets: [], retention: { kind: 'inherit' } }]
 		]);
+	});
+
+	it('requires settlement for each actual cohort, not just enough map entries', async () => {
+		const setRoot = vi.fn(() => Promise.resolve());
+
+		await updateAggregateCohortRoot(
+			{
+				cohortCount: 2,
+				failed: false,
+				root,
+				settledTargets: new Map([
+					[1, []],
+					[3, [pathA]]
+				]),
+				retention: { kind: 'inherit' }
+			},
+			setRoot
+		);
+
+		expect(setRoot.mock.calls).toStrictEqual([]);
 	});
 
 	it('does not replace the root when any cohort failed', async () => {
@@ -981,5 +1005,73 @@ describe('betweenCohortCollector', () => {
 		controller.abort(reason);
 
 		await expect(collecting).rejects.toBe(reason);
+	});
+});
+
+describe('compact publication receipt reconciliation', () => {
+	it('keeps overlapping V4 sets separate from distinct paths when aggregating V3 and V4', () => {
+		const storePath = `/nix/store/${'1'.repeat(32)}-app`;
+		const set = {
+			result: {
+				cache: { kind: 'default' },
+				cacheGeneration: 1,
+				storePath,
+				narHash: `sha256:${'0'.repeat(52)}`,
+				generation: 1
+			},
+			digest: 'a'.repeat(64),
+			memberCount: 100,
+			origin: 'build-selection',
+			materialisation: 'complete'
+		};
+		const legacy = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [storePath],
+			subjects: []
+		});
+		const compact = buildReceiptV4Schema.parse({
+			version: 4,
+			paths: [],
+			subjects: [],
+			publicationSets: [set, set]
+		});
+		const aggregate = aggregateBuildReceipts([legacy, compact]);
+		expect(aggregate).toMatchObject({
+			version: 4,
+			paths: [storePath],
+			subjects: [],
+			publicationSets: [set, set]
+		});
+		expect(multiCohortReceiptDocument([legacy, compact], false)).toEqual({
+			receipts: [legacy, compact]
+		});
+	});
+
+	it('retains the target-failure precedence of a partial V4 cohort receipt', async () => {
+		const receipt = buildReceiptV4Schema.parse({
+			version: 4,
+			paths: [],
+			subjects: [],
+			publicationSets: [],
+			childExitStatus: 42,
+			terminalFailure: { kind: 'target-build', failedTargets: ['.#app'] },
+			failed: []
+		});
+		const failure = new BuildCommandFailedError(42, undefined, 42);
+		const result = await runCohortSequence(
+			{
+				cohorts: [{ kind: 'constructed', build: { installables: ['.#app'] } }],
+				keepGoingCohorts: true
+			},
+			{
+				runCohort: () => Promise.reject(failure),
+				recoverReceipt: () => Promise.resolve(receipt)
+			}
+		);
+		expect(result.failures[0]).toMatchObject({
+			kind: 'target-build',
+			error: failure
+		});
+		expect(result.receipts).toEqual([receipt]);
 	});
 });

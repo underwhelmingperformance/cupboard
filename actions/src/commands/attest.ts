@@ -4,19 +4,18 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { withReadAuthentication } from '@cupboard/nix';
-import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import type { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type CacheScope,
+	storePathBasenameSchema,
+	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	type BuildReceipt,
 	buildReceiptSchema,
-	type BuildReceiptV2Input,
-	type BuildReceiptV3Input,
 	type BuildSubjectV3Input
 } from '@cupboard/protocol/build';
 import { scaiPredicateType } from '@cupboard/protocol/scai';
@@ -34,16 +33,19 @@ import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 
-import type { DestinationAccess } from '../attestation-signing.ts';
+import type {
+	AttestationSubject,
+	DestinationAccess
+} from '../attestation-signing.ts';
 import {
+	AttestationSubjectNotAcceptedError,
 	CacheAccessProbeError,
 	CommittedSubjectInvalidError,
 	CommittedSubjectUnavailableError,
 	MissingInputError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
-	SubjectNarHashMovedError,
-	SubjectNotHeldError
+	SubjectNarHashMovedError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
@@ -63,29 +65,35 @@ interface StorePathDigest {
 	readonly sha256: string;
 }
 
-export interface AttestOptions {
-	readonly receiptFile?: string;
-	readonly checksumsFile?: string;
-	readonly builtChecksumsFile?: string;
-	readonly predicateFile?: string;
+export interface AttestationDestinationOptions {
 	readonly url?: string;
 	readonly cache?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
 }
 
-export interface AttestInputs {
-	readonly receiptFile: string;
-	readonly checksumsFile: string;
-	readonly builtChecksumsFile: string;
-	readonly predicateFile: string;
+export interface AttestationDestination {
 	readonly url: URL;
 	readonly cache: CacheScope;
 	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
 }
 
-export interface CommittedPathInfo {
+export interface AttestOptions extends AttestationDestinationOptions {
+	readonly receiptFile?: string;
+	readonly checksumsFile?: string;
+	readonly builtChecksumsFile?: string;
+	readonly predicateFile?: string;
+}
+
+export interface AttestInputs extends AttestationDestination {
+	readonly receiptFile: string;
+	readonly checksumsFile: string;
+	readonly builtChecksumsFile: string;
+	readonly predicateFile: string;
+}
+
+interface CommittedPathInfo {
 	readonly storePath: StorePathString;
 	readonly narHash: NixSha256Hash;
 }
@@ -120,102 +128,17 @@ export async function cacheAccess(
 }
 
 /**
-For a version 2 receipt, treats every accepted subject as built by this run.
-Version 2 did not distinguish other origins.
+Build provenance describes executions supervised on the coordinating runner,
+including verification rebuilds, not remote or store-attributed builds.
 */
-export function attestationSubjects(
-	infos: readonly CommittedPathInfo[],
-	receipt: BuildReceiptV2Input
-): AttestationSubjects {
-	const subjects: StorePathDigest[] = [];
-	const receiptSubjects = new Map(
-		receipt.subjects.map((subject) => [subject.storePath, subject])
+function isRunnerLocalBuild(
+	subject: BuildSubjectV3Input
+): subject is Extract<BuildSubjectV3Input, { origin: 'built' }> {
+	return (
+		subject.origin === 'built' &&
+		subject.verification === 'local' &&
+		(subject.machine ?? '') === ''
 	);
-	const skipped = receipt.paths.filter(
-		(storePath) => !receiptSubjects.has(storePath)
-	);
-
-	for (const info of infos) {
-		const built = receiptSubjects.get(info.storePath);
-		if (built === undefined) {
-			continue;
-		}
-		requireMatchingNarHash(info, built.narHash);
-
-		subjects.push({
-			storePath: info.storePath,
-			sha256: info.narHash.digestHex()
-		});
-	}
-
-	return { subjects, built: subjects, reproduced: [], skipped };
-}
-
-export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
-
-/**
-A subject is signed under this repository's identity, so the destination
-cache must have committed narinfo for every subject with the recorded NAR
-hash. An absent path or a different hash fails the run. The receipt supplies
-the build provenance; a cache's deriver can refer to another derivation of
-the same fixed-output path.
-
-The build store may have garbage-collected the path since the build, so
-the check reads the committed metadata from the destination cache rather
-than from the build store.
-*/
-export function provenancedSubjects(
-	receipt: BuildReceiptV3Input,
-	held: SelectedPathInfos
-): AttestationSubjects {
-	const subjects: StorePathDigest[] = [];
-	const built: StorePathDigest[] = [];
-	const reproduced: ReproducedSubject[] = [];
-	const named = new Set(receipt.subjects.map((subject) => subject.storePath));
-	const skipped = receipt.paths.filter((storePath) => !named.has(storePath));
-
-	for (const subject of receipt.subjects) {
-		requireBacked(subject, held.get(subject.storePath));
-
-		const digest = {
-			storePath: subject.storePath,
-			sha256: subject.narHash
-		};
-
-		subjects.push(digest);
-
-		// Build provenance covers the executions this run supervised on the
-		// coordinating machine. A verification rebuild counts: the run
-		// re-executed the derivation here and Nix matched the stored output.
-		// A remote builder's execution and a path attributed to the store's
-		// records describe builds this run cannot report on.
-		if (!(
-			subject.origin === 'built' &&
-			subject.verification === 'local' &&
-			(subject.machine ?? '') === ''
-		)) {
-			continue;
-		}
-
-		built.push(digest);
-
-		if (subject.reproduced === true) {
-			reproduced.push({ ...digest, derivation: subject.derivation });
-		}
-	}
-
-	return { subjects, built, reproduced, skipped };
-}
-
-function requireBacked(
-	subject: BuildSubjectV3Input,
-	info: CommittedPathInfo | undefined
-): void {
-	if (info === undefined) {
-		throw new SubjectNotHeldError(subject.storePath, subject.origin);
-	}
-
-	requireMatchingNarHash(info, subject.narHash);
 }
 
 function requireMatchingNarHash(
@@ -251,7 +174,7 @@ export function registerAttestCommand(
 		)
 		.option(
 			'--checksums-file <path>',
-			'Write the checksums for all accepted receipt subjects here. Defaults to a unique directory under RUNNER_TEMP.'
+			'Write candidate checksums for all named receipt subjects here. Defaults to a unique directory under RUNNER_TEMP.'
 		)
 		.option(
 			'--built-checksums-file <path>',
@@ -263,7 +186,7 @@ export function registerAttestCommand(
 		)
 		.requiredOption(
 			'--url <url>',
-			'Check every subject against the narinfos this cupboard tenant has committed.'
+			'Identify the destination tenant for signing policy defaults.'
 		)
 		.option(
 			'--cache <name>',
@@ -288,6 +211,34 @@ export function resolveAttestInputs(
 	if (receiptFile === undefined) {
 		throw new MissingInputError('receipt-file');
 	}
+	const destination = resolveAttestationDestination(options, environment);
+
+	const checksumsFile =
+		provided(options.checksumsFile) ??
+		path.join(
+			requireEnvironment(environment, 'RUNNER_TEMP'),
+			'cupboard-attestations',
+			randomUUID(),
+			'subjects.txt'
+		);
+
+	return {
+		receiptFile,
+		...destination,
+		checksumsFile,
+		builtChecksumsFile:
+			provided(options.builtChecksumsFile) ??
+			path.join(path.dirname(checksumsFile), 'built-subjects.txt'),
+		predicateFile:
+			provided(options.predicateFile) ??
+			path.join(path.dirname(checksumsFile), 'attribute-report.json')
+	};
+}
+
+export function resolveAttestationDestination(
+	options: AttestationDestinationOptions,
+	environment: Environment
+): AttestationDestination {
 	const url = providedUrl('url', options.url);
 
 	if (url === undefined) {
@@ -305,28 +256,11 @@ export function resolveAttestInputs(
 		throw new ReadUserRequiredError();
 	}
 
-	const checksumsFile =
-		provided(options.checksumsFile) ??
-		path.join(
-			requireEnvironment(environment, 'RUNNER_TEMP'),
-			'cupboard-attestations',
-			randomUUID(),
-			'subjects.txt'
-		);
-
 	return {
-		receiptFile,
 		url,
 		cache: providedCacheSelection(options.cache),
 		readUser,
-		readPassword,
-		checksumsFile,
-		builtChecksumsFile:
-			provided(options.builtChecksumsFile) ??
-			path.join(path.dirname(checksumsFile), 'built-subjects.txt'),
-		predicateFile:
-			provided(options.predicateFile) ??
-			path.join(path.dirname(checksumsFile), 'attribute-report.json')
+		readPassword
 	};
 }
 
@@ -334,83 +268,131 @@ export interface AttestDependencies {
 	readonly fetch?: typeof fetch;
 }
 
-function readCredential(inputs: AttestInputs): BasicCredential | undefined {
+function readCredential(
+	inputs: AttestationDestination
+): BasicCredential | undefined {
 	return inputs.readUser === ''
 		? undefined
 		: { user: inputs.readUser, password: inputs.readPassword };
 }
 
-async function resolveAttestation(
-	receipt: BuildReceipt,
-	inputs: AttestInputs,
-	dependencies: AttestDependencies,
-	reporter: Reporter
-): Promise<AttestationSubjects> {
-	const paths =
-		receipt.version === 3
-			? receipt.subjects.map((subject) => subject.storePath)
-			: receipt.paths;
-	const infos = await reporter.progress(
-		'Checking published attestation subjects',
-		{ total: paths.length },
-		(progress) =>
-			committedPathInfos(paths, inputs, dependencies, () => {
-				progress.advance();
-			})
-	);
-
-	if (receipt.version === 3) {
-		return provenancedSubjects(
-			receipt,
-			new Map(infos.map((info) => [info.storePath, info]))
-		);
+/**
+Receipt identities remain candidates for custom statements. Destination reads
+belong to signing, once the actual statement subjects have been selected.
+Version 2 has no identity for path-only entries, so those entries stay skipped.
+*/
+export function receiptCandidates(receipt: BuildReceipt): AttestationSubjects {
+	const paths = new Set(receipt.paths);
+	const names = new Set<string>();
+	const invalid: string[] = [];
+	if (paths.size !== receipt.paths.length) {
+		invalid.push(...receipt.paths);
 	}
-
-	return attestationSubjects(infos, receipt);
+	for (const subject of receipt.subjects) {
+		const name = path.basename(subject.storePath);
+		if (!paths.has(subject.storePath) || names.has(name)) {
+			invalid.push(subject.storePath);
+		}
+		names.add(name);
+	}
+	if (invalid.length > 0) {
+		throw new AttestationSubjectNotAcceptedError(invalid);
+	}
+	const subjects = receipt.subjects.map((subject) => ({
+		storePath: subject.storePath,
+		sha256: subject.narHash
+	}));
+	const namedPaths = new Set(
+		receipt.subjects.map((subject) => subject.storePath)
+	);
+	const skipped = receipt.paths.filter(
+		(storePath) => !namedPaths.has(storePath)
+	);
+	if (receipt.version === 2) {
+		return { subjects, built: subjects, reproduced: [], skipped };
+	}
+	const built: StorePathDigest[] = [];
+	const reproduced: ReproducedSubject[] = [];
+	for (const subject of receipt.subjects) {
+		if (!isRunnerLocalBuild(subject)) {
+			continue;
+		}
+		const digest = { storePath: subject.storePath, sha256: subject.narHash };
+		built.push(digest);
+		if (subject.reproduced === true) {
+			reproduced.push({ ...digest, derivation: subject.derivation });
+		}
+	}
+	return { subjects, built, reproduced, skipped };
 }
 
-const committedPathConcurrency = 6;
-const maximumNarInfoBytes = 1024 * 1024;
-
-async function committedPathInfos(
-	paths: readonly StorePathString[],
-	inputs: AttestInputs,
+/**
+Only actual statement subjects are checked. Without a receipt, legacy checksum
+files identify basenames but not store directories: read the selected narinfo
+and require its basename and NAR hash instead of guessing a store directory.
+*/
+export async function validateDestinationSubjects(
+	subjects: readonly AttestationSubject[],
+	inputs: AttestationDestination,
 	dependencies: AttestDependencies,
-	advance: () => void
-): Promise<readonly CommittedPathInfo[]> {
+	reporter: Reporter,
+	receipt?: BuildReceipt
+): Promise<void> {
+	if (subjects.length === 0) {
+		return;
+	}
+	const paths = new Map(
+		receipt?.subjects.map((subject) => [
+			path.basename(subject.storePath),
+			subject.storePath
+		])
+	);
+	// Validate all names before starting reads.
+	for (const subject of subjects) {
+		storePathBasenameSchema.parse(subject.name);
+	}
 	const fetcher = retryingFetcher(
 		withReadAuthentication(dependencies.fetch ?? fetch, {
 			tenantUrl: inputs.url
 		}),
 		'replay-safe',
-		{ trustedOrigin: new URL(inputs.url).origin }
+		{ trustedOrigin: inputs.url.origin }
 	);
 	const base = canonicalHref(cacheUrlFor(inputs.url, inputs.cache));
-	const credential = readCredential(inputs);
-
-	return mapWithConcurrency(
-		paths,
-		committedPathConcurrency,
-		async (storePath) => {
-			const info = await fetchCommittedPathInfo(
-				fetcher,
-				base,
-				storePath,
-				credential
-			);
-			advance();
-			return info;
-		}
+	await reporter.progress(
+		'Checking published attestation subjects',
+		{ total: subjects.length },
+		(progress) =>
+			mapWithConcurrency(
+				subjects,
+				committedPathConcurrency,
+				async (subject) => {
+					const info = await fetchCommittedPathInfo(
+						fetcher,
+						base,
+						subject.name,
+						readCredential(inputs),
+						paths.get(subject.name)
+					);
+					requireMatchingNarHash(info, subject.sha256);
+					progress.advance();
+				}
+			)
 	);
 }
+
+const committedPathConcurrency = 6;
+const maximumNarInfoBytes = 1024 * 1024;
 
 async function fetchCommittedPathInfo(
 	fetcher: typeof fetch,
 	base: string,
-	storePath: StorePathString,
-	credential: BasicCredential | undefined
+	name: string,
+	credential: BasicCredential | undefined,
+	expectedPath?: StorePathString
 ): Promise<CommittedPathInfo> {
-	const target = `${base}/${StorePath.hash(storePath)}.narinfo`;
+	const storePath = expectedPath ?? name;
+	const target = `${base}/${storePathBasenameSchema.parse(name).slice(0, 32)}.narinfo`;
 	const source = await fetchWithProbeRetries(
 		fetcher,
 		target,
@@ -440,7 +422,10 @@ async function fetchCommittedPathInfo(
 		throw new CommittedSubjectInvalidError(storePath, error);
 	}
 
-	if (narInfo.storePath.value !== storePath) {
+	if (
+		narInfo.storePath.basename !== name ||
+		(expectedPath !== undefined && narInfo.storePath.value !== expectedPath)
+	) {
 		throw new CommittedSubjectInvalidError(
 			storePath,
 			new Error(`narinfo names ${narInfo.storePath.value}`)
@@ -448,7 +433,7 @@ async function fetchCommittedPathInfo(
 	}
 
 	return {
-		storePath,
+		storePath: storePathSchema.parse(narInfo.storePath.value),
 		narHash: narInfo.narHash
 	};
 }
@@ -463,18 +448,13 @@ export async function attestAction(
 	const receipt = buildReceiptSchema.parse(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);
+	const { subjects, built, reproduced, skipped } = receiptCandidates(receipt);
 	const fetcher = dependencies.fetch ?? fetch;
 	const destinationAccess = await cacheAccess(
 		retryingFetcher(fetcher, 'replay-safe', {
 			trustedOrigin: new URL(inputs.url).origin
 		}),
 		cacheUrlFor(inputs.url, inputs.cache)
-	);
-	const { subjects, built, reproduced, skipped } = await resolveAttestation(
-		receipt,
-		inputs,
-		{ ...dependencies, fetch: fetcher },
-		reporter
 	);
 
 	for (const storePath of skipped) {

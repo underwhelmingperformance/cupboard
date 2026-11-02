@@ -89,7 +89,8 @@ async function maintenancePassCost(
 
 // Negotiation runs once per path, so its row cost must remain independent of the
 // number of pending uploads. Each measurement includes eligibility
-// reconciliation in the same Durable Object call.
+// reconciliation in the same Durable Object call. Lifecycle intent discovery
+// adds one indexed read before other backlogs can short-circuit reconciliation.
 describe('upload negotiation cost', () => {
 	beforeEach(resetTestServer);
 
@@ -103,8 +104,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 41,
-			largeBacklogCost: 41
+			emptyBacklogCost: 47,
+			largeBacklogCost: 47
 		});
 	});
 
@@ -120,8 +121,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 25,
-			largeBacklogCost: 25
+			smallBacklogCost: 31,
+			largeBacklogCost: 31
 		});
 	});
 
@@ -138,8 +139,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 25,
-			largeBacklogCost: 25
+			smallBacklogCost: 31,
+			largeBacklogCost: 31
 		});
 	});
 
@@ -153,8 +154,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 6,
-			largeBacklogCost: 6
+			smallBacklogCost: 10,
+			largeBacklogCost: 10
 		});
 	});
 
@@ -176,8 +177,8 @@ describe('upload negotiation cost', () => {
 			});
 			const largeBacklogCost = await reconcileCost();
 			expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-				smallBacklogCost: 7,
-				largeBacklogCost: 7
+				smallBacklogCost: 11,
+				largeBacklogCost: 11
 			});
 		});
 	});
@@ -192,8 +193,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 3,
-			largeBacklogCost: 3
+			smallBacklogCost: 7,
+			largeBacklogCost: 7
 		});
 	});
 
@@ -236,9 +237,9 @@ describe('upload negotiation cost', () => {
 		const sparseDue = await reconcileCost();
 
 		expect({ smallDeferred, largeDeferred, sparseDue }).toStrictEqual({
-			smallDeferred: 23,
-			largeDeferred: 23,
-			sparseDue: 3
+			smallDeferred: 29,
+			largeDeferred: 29,
+			sparseDue: 7
 		});
 	});
 });
@@ -286,6 +287,11 @@ async function seedNarInfoDeletions(
 }
 
 // These entrypoints bypass `fetch`; each must retain its explicit cost meter.
+// Every full collection pass validates the SQLite trigger catalogue. The final
+// manifest schema adds 18 cardinality/proof-guard entries, six availability
+// entries and eight local-identity/lifecycle entries beyond the original schema.
+// Empty availability probes read no rows. Lifecycle discovery reads one row per
+// probe: four in a steady full pass, two when a one-unit budget stops the scan.
 describe('maintenance pass cost', () => {
 	beforeEach(resetTestServer);
 
@@ -442,8 +448,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 269,
-			largeBacklogCost: 269
+			smallBacklogCost: 373,
+			largeBacklogCost: 373
 		});
 	});
 
@@ -453,12 +459,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 253,
+				rowsRead: 355,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 253,
+				rowsRead: 355,
 				usesIndex: true,
 				sorts: false
 			}
@@ -495,8 +501,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 279,
-			largeBacklogCost: 279
+			smallBacklogCost: 378,
+			largeBacklogCost: 378
 		});
 	});
 
@@ -527,8 +533,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 911, rowsWritten: 130 },
-			largeBacklog: { rowsRead: 911, rowsWritten: 130 }
+			smallBacklog: { rowsRead: 1010, rowsWritten: 130 },
+			largeBacklog: { rowsRead: 1010, rowsWritten: 130 }
 		});
 	});
 
@@ -554,8 +560,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 305,
-			largeBacklogCost: 305
+			smallBacklogCost: 409,
+			largeBacklogCost: 409
 		});
 	});
 });

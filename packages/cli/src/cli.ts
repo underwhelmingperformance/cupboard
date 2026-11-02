@@ -48,6 +48,7 @@ import {
 import { registerPlanCommands } from './commands/plan-cohort.ts';
 import { registerPolicyCommands } from './commands/policy.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
+import { registerPublicationResultCommand } from './commands/publication-result.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerReuseViewCommands } from './commands/reuse-view.ts';
 import { registerRootCommands } from './commands/root.ts';
@@ -217,6 +218,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerDeleteCommand(program, options);
 	registerRootCommands(program, options);
 	registerConfirmCommand(program, options);
+	registerPublicationResultCommand(program, options);
 	registerKeyCommands(program, options);
 	registerAuthKeyCommands(program, options);
 	registerSessionCommands(program, options);

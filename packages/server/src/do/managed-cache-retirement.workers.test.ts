@@ -508,6 +508,9 @@ describe('managed cache retirement', () => {
 				entry.properties.method === 'managed-retirement'
 		);
 
+		// The identity update costs four reads and five writes, including its
+		// trigger's singleton lifecycle stamp and indexed lifecycle intent. The
+		// managed-retirement deletion adds the remaining two writes.
 		expect(lines).toStrictEqual([
 			{
 				level: 'info',
@@ -516,8 +519,8 @@ describe('managed cache retirement', () => {
 				properties: {
 					method: 'managed-retirement',
 					...noCost,
-					rowsRead: 18,
-					rowsWritten: 4,
+					rowsRead: 21,
+					rowsWritten: 7,
 					d1Calls: 2,
 					d1RowsRead: 1,
 					d1RowsWritten: 1,
@@ -655,6 +658,11 @@ describe('managed cache retirement', () => {
 			)
 			.map((entry) => entry.properties);
 
+		// Full collection passes validate the whole SQLite trigger catalogue.
+		// Empty availability probes read no rows.
+		// Empty manifest maintenance adds 14 reads: six cleanup probes, three
+		// post-scan work probes and five eligibility/deadline probes. Neither
+		// changes the writes, external-resource counts or blocked cache's wake.
 		expect({
 			cacheLive: await isCacheLive(),
 			wake: await maintenanceWakeAt(),
@@ -666,7 +674,7 @@ describe('managed cache retirement', () => {
 				{
 					method: 'garbage-collection',
 					...noCost,
-					rowsRead: 284,
+					rowsRead: 388,
 					rowsWritten: 3,
 					d1Calls: 2,
 					d1RowsRead: 2,

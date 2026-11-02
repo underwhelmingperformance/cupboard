@@ -20,6 +20,8 @@ import * as schema from '../db/schema.ts';
 
 import { type ServerContext } from './context.ts';
 import { GarbageCollectionInputs } from './garbage-collection-inputs.ts';
+import { PublicationManifestAvailabilityStore } from './publication-manifest-availability-store.ts';
+import { PublicationManifestCleanup } from './publication-manifest-cleanup.ts';
 import {
 	subrequestSliceReserve,
 	withHeldSubrequests
@@ -68,6 +70,14 @@ export class MaintenanceEligibilityService {
 	// Indexed existence checks keep this calculation independent of the number
 	// of pending uploads and queued deletions.
 	private hasImmediateWork(now: IsoTimestamp): boolean {
+		if (
+			new PublicationManifestAvailabilityStore(this.context.db).nextIntent(
+				true
+			) !== undefined ||
+			new PublicationManifestCleanup(this.context.db).hasWork(now)
+		) {
+			return true;
+		}
 		const retryAt = new UploadRetrySchedule(this.context).projectedAt();
 		if (retryAt !== undefined && retryAt <= Date.parse(now)) {
 			return true;
@@ -159,6 +169,7 @@ export class MaintenanceEligibilityService {
 	// managed-cache retirement deadline when no immediate work is recorded.
 	private earliestFutureWake(now: IsoTimestamp): IsoTimestamp | undefined {
 		return [
+			new PublicationManifestCleanup(this.context.db).nextWake(),
 			this.earliestSettleRetry(now),
 			this.earliestInheritanceWake(),
 			this.earliestUploadExpiry(),

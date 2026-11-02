@@ -54,6 +54,8 @@ describe('buildProgram', () => {
 			'node',
 			'cupboard-action',
 			'attest-sign',
+			'--url',
+			'https://cupboard.example.workers.dev/t/acme',
 			'--checksums-file',
 			'subjects',
 			'--built-checksums-file',

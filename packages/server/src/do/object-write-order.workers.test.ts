@@ -17,7 +17,8 @@ import {
 	resetTestServer,
 	resolvedCache,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { boundedBlobs } from './bounded-io.ts';
@@ -119,103 +120,105 @@ describe('path-keyed object write ordering', () => {
 	});
 
 	it('waits for an abandoned delete before issuing a later put', async () => {
-		const token = await initialise();
-		const nar = await verifiableNar('write-order');
-		const metadata = uploadMetadata({
-			name: 'ordered',
-			storePathHash: 'c'.repeat(32),
-			narHash: nar.narHash,
-			fileHash: nar.fileHash,
-			fileSize: nar.narBytes.byteLength,
-			narSize: nar.narSize
-		});
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const nar = await verifiableNar('write-order');
+			const metadata = uploadMetadata({
+				name: 'ordered',
+				storePathHash: 'c'.repeat(32),
+				narHash: nar.narHash,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength,
+				narSize: nar.narSize
+			});
 
-		await commitPath(token, metadata, nar);
+			await commitPath(token, metadata, nar);
 
-		const committed = await narInfoObjectText(metadata.storePathHash);
+			const committed = await narInfoObjectText(metadata.storePathHash);
 
-		expect(committed).toBeDefined();
+			expect(committed).toBeDefined();
 
-		await runInDurableObject(currentServer(), async (instance) => {
-			const context = instance.context;
-			const cache = resolvedCache(context, cacheScope);
-			const storePathHash = storePathHashSchema.parse(metadata.storePathHash);
-			const key = narInfoObjectKey(fixtureTenant, storePathHash, cache.scope);
-			const { bucket, release, landed, puts } = stallingBucket(
-				context.env.BLOBS,
-				key
-			);
+			await runInDurableObject(currentServer(), async (instance) => {
+				const context = instance.context;
+				const cache = resolvedCache(context, cacheScope);
+				const storePathHash = storePathHashSchema.parse(metadata.storePathHash);
+				const key = narInfoObjectKey(fixtureTenant, storePathHash, cache.scope);
+				const { bucket, release, landed, puts } = stallingBucket(
+					context.env.BLOBS,
+					key
+				);
 
-			context.env = { ...context.env, BLOBS: boundedBlobs(bucket) };
+				context.env = { ...context.env, BLOBS: boundedBlobs(bucket) };
 
-			const service = new NarInfoObjectsService(context);
+				const service = new NarInfoObjectsService(context);
 
-			const deletion = expect(
-				context.criticalSection(() =>
-					service.deleteNarInfoObject(cache, storePathHash)
-				)
-			).rejects.toBeInstanceOf(SubrequestTimeoutError);
-			await deletion;
-
-			const row = context.db
-				.select()
-				.from(schema.narInfos)
-				.where(
-					and(
-						eq(schema.narInfos.cacheId, cache.id),
-						eq(schema.narInfos.storePathHash, storePathHash)
+				const deletion = expect(
+					context.criticalSection(() =>
+						service.deleteNarInfoObject(cache, storePathHash)
 					)
-				)
-				.get();
+				).rejects.toBeInstanceOf(SubrequestTimeoutError);
+				await deletion;
 
-			expect(row).toBeDefined();
+				const row = context.db
+					.select()
+					.from(schema.narInfos)
+					.where(
+						and(
+							eq(schema.narInfos.cacheId, cache.id),
+							eq(schema.narInfos.storePathHash, storePathHash)
+						)
+					)
+					.get();
 
-			if (row === undefined) {
-				return;
-			}
+				expect(row).toBeDefined();
 
-			const narInfo = await service.narInfoFromRow(row);
-
-			expect(narInfo).toBeDefined();
-
-			if (narInfo === undefined) {
-				return;
-			}
-
-			const writeStarted = Promise.withResolvers<undefined>();
-			const write = context.objectWrites.write.bind(context.objectWrites);
-			vi.spyOn(context.objectWrites, 'write').mockImplementation(
-				<T>(
-					keys: readonly R2ObjectKey[],
-					mutate: () => Promise<T>
-				): Promise<T> => {
-					const pending = write(keys, mutate);
-					writeStarted.resolve(undefined);
-
-					return pending;
+				if (row === undefined) {
+					return;
 				}
-			);
-			const put = service.putNarInfoObject(
-				cache,
-				storePathHash,
-				{
-					generation: row.generation,
-					narHash: row.narHash,
-					narUrl: narInfo.url,
-					signatureGeneration:
-						row.pendingSignatureGeneration ?? row.signatureGeneration
-				},
-				narInfo
-			);
 
-			await writeStarted.promise;
-			expect(puts()).toBe(0);
+				const narInfo = await service.narInfoFromRow(row);
 
-			release();
-			await landed;
-			await put;
+				expect(narInfo).toBeDefined();
+
+				if (narInfo === undefined) {
+					return;
+				}
+
+				const writeStarted = Promise.withResolvers<undefined>();
+				const write = context.objectWrites.write.bind(context.objectWrites);
+				vi.spyOn(context.objectWrites, 'write').mockImplementation(
+					<T>(
+						keys: readonly R2ObjectKey[],
+						mutate: () => Promise<T>
+					): Promise<T> => {
+						const pending = write(keys, mutate);
+						writeStarted.resolve(undefined);
+
+						return pending;
+					}
+				);
+				const put = service.putNarInfoObject(
+					cache,
+					storePathHash,
+					{
+						generation: row.generation,
+						narHash: row.narHash,
+						narUrl: narInfo.url,
+						signatureGeneration:
+							row.pendingSignatureGeneration ?? row.signatureGeneration
+					},
+					narInfo
+				);
+
+				await writeStarted.promise;
+				expect(puts()).toBe(0);
+
+				release();
+				await landed;
+				await put;
+			});
+
+			expect(await narInfoObjectText(metadata.storePathHash)).toBe(committed);
 		});
-
-		expect(await narInfoObjectText(metadata.storePathHash)).toBe(committed);
 	});
 });

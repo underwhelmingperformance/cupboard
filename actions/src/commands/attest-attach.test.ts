@@ -26,6 +26,20 @@ import {
 const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
 
+const compactSet = {
+	result: {
+		storePath: '/nix/store/5123456789abcdfghijklmnpqrsvwxyz-publication',
+		narHash: `sha256:${'1'.repeat(52)}`,
+		generation: 0,
+		cache: { kind: 'default' },
+		cacheGeneration: 1
+	},
+	digest: 'a'.repeat(64),
+	memberCount: 100_000,
+	origin: 'build-selection',
+	materialisation: 'complete'
+};
+
 function options(
 	overrides: Partial<AttestAttachOptions> = {}
 ): AttestAttachOptions {
@@ -167,7 +181,7 @@ async function writeReceipt(paths: readonly string[]): Promise<ReceiptFixture> {
 	return { receiptFile, checksumsFile };
 }
 
-async function writeMixedReceipt(): Promise<ReceiptFixture> {
+async function writeMixedReceipt(version: 3 | 4 = 3): Promise<ReceiptFixture> {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attach-'));
 	const receiptFile = path.join(directory, 'receipt.json');
 	const checksumsFile = path.join(directory, 'subjects.txt');
@@ -177,7 +191,8 @@ async function writeMixedReceipt(): Promise<ReceiptFixture> {
 	await writeFile(
 		receiptFile,
 		JSON.stringify({
-			version: 3,
+			version,
+			...(version === 4 && { publicationSets: [compactSet] }),
 			paths: [appPath, runtimePath, heldPath, republishedPath],
 			subjects: [
 				{
@@ -1093,35 +1108,38 @@ describe('attestAttachAction', () => {
 		]);
 	});
 
-	it('attaches only selected built and copied subjects from a mixed receipt', async () => {
-		const fixture = await writeMixedReceipt();
-		const invocations: string[][] = [];
+	it.each([3, 4] as const)(
+		'attaches only selected built and copied subjects from a mixed V%s receipt',
+		async (version) => {
+			const fixture = await writeMixedReceipt(version);
+			const invocations: string[][] = [];
 
-		await attestAttachAction(options(fixture), {}, recordingReporter([]), {
-			inspectCommandOptions: fileCapableCommandOptions,
-			runCupboard: async (_binaryPath, arguments_) => {
-				invocations.push([
-					...(await expandAttachManifestArguments(arguments_))
-				]);
+			await attestAttachAction(options(fixture), {}, recordingReporter([]), {
+				inspectCommandOptions: fileCapableCommandOptions,
+				runCupboard: async (_binaryPath, arguments_) => {
+					invocations.push([
+						...(await expandAttachManifestArguments(arguments_))
+					]);
 
-				return attachedResults([appPath, runtimePath]);
-			}
-		});
+					return attachedResults([appPath, runtimePath]);
+				}
+			});
 
-		expect(invocations).toStrictEqual([
-			[
-				'--no-colour',
-				'attest',
-				'attach',
-				'https://cache.example.workers.dev/t/acme',
-				appPath,
-				runtimePath,
-				'--github-oidc',
-				'--attestation',
-				'/tmp/bundle.sigstore.json'
-			]
-		]);
-	});
+			expect(invocations).toStrictEqual([
+				[
+					'--no-colour',
+					'attest',
+					'attach',
+					'https://cache.example.workers.dev/t/acme',
+					appPath,
+					runtimePath,
+					'--github-oidc',
+					'--attestation',
+					'/tmp/bundle.sigstore.json'
+				]
+			]);
+		}
+	);
 
 	it('attaches only built subjects when the checksums select the built paths', async () => {
 		const fixture = await writeMixedReceipt();
@@ -1267,31 +1285,45 @@ describe('attestAttachAction', () => {
 		);
 	});
 
-	it('warns and skips cupboard for a receipt with no subjects', async () => {
-		const fixture = await writeReceipt([]);
-		const warnings: string[] = [];
-		const invocations: unknown[] = [];
-
-		await attestAttachAction(
-			options(fixture),
-			{},
-			recordingReporter(warnings),
-			{
-				runCupboard: (binaryPath, arguments_) => {
-					invocations.push({ binaryPath, arguments: arguments_ });
-
-					return Promise.resolve([]);
-				}
+	it.each([2, 4])(
+		'warns and skips cupboard for a V%s receipt with no subjects',
+		async (version) => {
+			const fixture = await writeReceipt([]);
+			if (version === 4) {
+				await writeFile(
+					fixture.receiptFile,
+					JSON.stringify({
+						version,
+						paths: [],
+						subjects: [],
+						publicationSets: [compactSet]
+					})
+				);
 			}
-		);
+			const warnings: string[] = [];
+			const invocations: unknown[] = [];
 
-		expect({ invocations, warnings }).toStrictEqual({
-			invocations: [],
-			warnings: [
-				'The checksums file selects no receipt subjects; skipping attestation attachment'
-			]
-		});
-	});
+			await attestAttachAction(
+				options(fixture),
+				{},
+				recordingReporter(warnings),
+				{
+					runCupboard: (binaryPath, arguments_) => {
+						invocations.push({ binaryPath, arguments: arguments_ });
+
+						return Promise.resolve([]);
+					}
+				}
+			);
+
+			expect({ invocations, warnings }).toStrictEqual({
+				invocations: [],
+				warnings: [
+					'The checksums file selects no receipt subjects; skipping attestation attachment'
+				]
+			});
+		}
+	);
 
 	it('fails when the CLI does not attach every signed subject', async () => {
 		const fixture = await writeReceipt([appPath, runtimePath]);

@@ -5,6 +5,7 @@ import { keysContract } from './keys.ts';
 import { oidcTrustContract } from './oidc-trust.ts';
 import { pathsContract } from './paths.ts';
 import { policiesContract } from './policies.ts';
+import { publicationManifestsContract } from './publication-manifests.ts';
 import { checkContract } from './reports.ts';
 import { reuseViewsContract } from './reuse-views.ts';
 import { rootsContract } from './roots.ts';
@@ -20,6 +21,7 @@ CLI both derive their implementations from this contract.
 */
 export const tenantContract = {
 	policies: policiesContract,
+	publication: publicationManifestsContract,
 	caches: cachesContract,
 	keys: keysContract,
 	sessions: sessionsContract,

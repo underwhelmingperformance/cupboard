@@ -12,6 +12,7 @@ import {
 	publicationRecoveryMs,
 	publicationStagingKey
 } from '@cupboard/protocol/publication';
+import type { PublicationOperationId } from '@cupboard/protocol/publication-manifests';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	commitBlobDeclarationSchema,
@@ -84,6 +85,10 @@ import {
 	type NegotiateHints
 } from './negotiate-hints.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
+import {
+	requireManifestPublication,
+	requireManifestPublicationOrigin
+} from './publication-manifest-restriction.ts';
 import { PublicationStore } from './publication-store.ts';
 import {
 	type ReconcileQueueService,
@@ -624,7 +629,9 @@ export class UploadsService {
 		scope: CacheScope,
 		pushId: PushId,
 		entry: PublicationEntry,
-		grants: AuthorizationDetails
+		grants: AuthorizationDetails,
+		recoveryDeadline?: IsoTimestamp,
+		manifestOperationId?: PublicationOperationId
 	): Promise<{
 		readonly cache: ResolvedCache;
 		readonly kind: 'pending' | 'needs-upload' | 'concluded';
@@ -660,7 +667,8 @@ export class UploadsService {
 		}
 		if (
 			original !== undefined &&
-			original.canonicalJson !== identity.canonical
+			(original.canonicalJson !== identity.canonical ||
+				(original.manifestOperationId ?? undefined) !== manifestOperationId)
 		) {
 			throw new PublicationConflictError(
 				'The publication parameters changed.',
@@ -698,6 +706,14 @@ export class UploadsService {
 			throw new PublicationConflictError(
 				'The cache generation changed. Start a fresh push.',
 				'generation-conflict'
+			);
+		}
+		if (original !== undefined) {
+			requireManifestPublication(
+				this.context,
+				entry.operationId,
+				cache,
+				entry.metadata
 			);
 		}
 		let pathRow = this.pathRowKey(cache, entry);
@@ -738,7 +754,14 @@ export class UploadsService {
 		const isPushVerified = await this.context.pushCredentials().verify(pushId);
 		const deadline =
 			original?.recoveryDeadline ??
-			new Date(now.getTime() + publicationRecoveryMs).toISOString();
+			new Date(
+				Math.min(
+					now.getTime() + publicationRecoveryMs,
+					recoveryDeadline === undefined
+						? Infinity
+						: Date.parse(recoveryDeadline)
+				)
+			).toISOString();
 		const pruneAfter = new Date(
 			Math.max(pushExpiry * 1000, Date.parse(deadline)) +
 				publicationCleanupMarginMs
@@ -775,6 +798,39 @@ export class UploadsService {
 			}
 			this.context.db.transaction((tx) => {
 				const current = operations.get(entry.operationId);
+				if (current === undefined) {
+					const admission = requireManifestPublicationOrigin(
+						this.context,
+						scope,
+						pushId,
+						entry,
+						manifestOperationId
+					);
+					// Accepted pending work can recover before the manifest publisher
+					// binds this admission.
+					if (admission?.cacheId === null) {
+						tx.update(schema.publicationManifestAdmissions)
+							.set({ cacheId: cache.id })
+							.where(
+								eq(
+									schema.publicationManifestAdmissions.operationId,
+									admission.operationId
+								)
+							)
+							.run();
+					}
+				} else if (
+					(current.manifestOperationId ?? undefined) !== manifestOperationId ||
+					current.canonicalJson !== identity.canonical ||
+					current.pushId !== pushId ||
+					current.cacheId !== cache.id ||
+					current.cacheGeneration !== cache.generation
+				) {
+					throw new PublicationConflictError(
+						'The publication parameters changed.',
+						'parameters-changed'
+					);
+				}
 				if (current?.state === 'failed') {
 					throw new PublicationConflictError(
 						'The publication failed. Start a fresh push.'
@@ -826,6 +882,7 @@ export class UploadsService {
 							cacheGeneration: cache.generation,
 							pushId,
 							canonicalJson: identity.canonical,
+							manifestOperationId,
 							acceptedAt: now.toISOString(),
 							pushExpiresAt: new Date(pushExpiry * 1000).toISOString(),
 							recoveryDeadline: deadline,
@@ -834,6 +891,12 @@ export class UploadsService {
 							graceDecisionJson: graceJson
 						})
 						.run();
+					requireManifestPublication(
+						this.context,
+						entry.operationId,
+						cache,
+						entry.metadata
+					);
 					if (entry.attachRoot !== undefined) {
 						this.roots.bindRunRoot(
 							cache,
@@ -848,6 +911,12 @@ export class UploadsService {
 						.where(eq(schema.publicationOperations.id, entry.operationId))
 						.run();
 				}
+				requireManifestPublication(
+					this.context,
+					entry.operationId,
+					cache,
+					entry.metadata
+				);
 				const savedBlob =
 					current?.blobJson === null || current?.blobJson === undefined
 						? entry.blob

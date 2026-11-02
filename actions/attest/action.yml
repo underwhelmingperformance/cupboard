@@ -1,8 +1,9 @@
 name: Attest cupboard store paths
 description:
   Signs SLSA provenance for paths built on the runner in this run. Before
-  signing, the action checks each path and NAR hash against the destination
-  narinfo. Build provenance comes from the current job's receipt.
+  signing, the action checks each actual statement subject and NAR hash against
+  the destination narinfo. Build provenance comes from the current job's
+  receipt.
 inputs:
   inline-bundles:
     description:
@@ -18,8 +19,8 @@ inputs:
     required: true
   checksums-file:
     description:
-      Where to write the checksums of every accepted receipt path. Defaults to a
-      file in a unique directory under RUNNER_TEMP.
+      Where to write the candidate checksums of every named receipt subject.
+      Defaults to a file in a unique directory under RUNNER_TEMP.
     required: false
   built-checksums-file:
     description:
@@ -35,8 +36,8 @@ inputs:
     required: false
   url:
     description:
-      Tenant URL of the destination. Before signing, the action checks every
-      path against the narinfo in this tenant's cache.
+      Tenant URL of the destination. Before signing, the action checks each
+      actual statement subject against the narinfo in this tenant's cache.
     required: true
   cache:
     description: Named destination cache. Leave empty to use the default cache.
@@ -127,7 +128,8 @@ outputs:
       file to actions/attest-attach with the generated bundles.
     value: ${{ steps.attest.outputs.checksums-file }}
   subject-count:
-    description: Number of accepted receipt paths.
+    description:
+      Number of named receipt candidates, not historical evidence coverage.
     value: ${{ steps.subjects.outputs.subject-count }}
   built-checksums-file:
     description:
@@ -204,6 +206,15 @@ runs:
       if: ${{ steps.subjects.outputs.subject-count != '0' }}
       shell: bash
       env:
+        URL: ${{ inputs.url }}
+        CACHE: ${{ inputs.cache }}
+        CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_AUDIENCE: ${{ inputs.audience }}
+        READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
+        READ_SESSION_VIEW: ${{ inputs.read-session-view }}
+        READ_USER: ${{ inputs.read-user }}
+        READ_PASSWORD: ${{ inputs.read-password }}
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         CHECKSUMS_FILE: ${{ steps.subjects.outputs.checksums-file }}
         BUILT_CHECKSUMS_FILE: ${{ steps.subjects.outputs.built-checksums-file }}
@@ -215,16 +226,22 @@ runs:
         GH_TOKEN: ${{ inputs.github-token || github.token }}
       run: |
         output_directory="$(mktemp -d "$RUNNER_TEMP/cupboard-attest.XXXXXX")"
-        node --experimental-transform-types \
-          --disable-warning=ExperimentalWarning \
-          "$GITHUB_ACTION_PATH/../src/main.ts" attest-sign \
-          --checksums-file "$CHECKSUMS_FILE" \
-          --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
-          --receipt-file "$RECEIPT_FILE" \
-          --destination-access "$DESTINATION_ACCESS" \
-          --signing-profile "$SIGNING_PROFILE" \
-          --upload-to-github "$UPLOAD_TO_GITHUB" \
-          --subject-grouping "$SUBJECT_GROUPING" \
-          --inline-bundles "$INLINE_BUNDLES" \
-          --output-directory "$output_directory" \
-          --bundles-file "$output_directory/bundles.txt"
+        source "$GITHUB_ACTION_PATH/../read-session.sh"
+        run_with_read_session \
+          "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \
+          node --experimental-transform-types \
+            --disable-warning=ExperimentalWarning \
+            "$GITHUB_ACTION_PATH/../src/main.ts" attest-sign \
+            --url "$URL" \
+            --cache "$CACHE" \
+            --read-user "$READ_USER" \
+            --checksums-file "$CHECKSUMS_FILE" \
+            --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
+            --receipt-file "$RECEIPT_FILE" \
+            --destination-access "$DESTINATION_ACCESS" \
+            --signing-profile "$SIGNING_PROFILE" \
+            --upload-to-github "$UPLOAD_TO_GITHUB" \
+            --subject-grouping "$SUBJECT_GROUPING" \
+            --inline-bundles "$INLINE_BUNDLES" \
+            --output-directory "$output_directory" \
+            --bundles-file "$output_directory/bundles.txt"

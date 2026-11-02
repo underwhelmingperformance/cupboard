@@ -30,6 +30,8 @@ import {
 
 import { CacheClosureService } from './cache-closure-service.ts';
 import { phaseStepSize } from './garbage-collection-service.ts';
+import { PublicationManifestAvailabilityStore } from './publication-manifest-availability-store.ts';
+import { withRowBudget } from './row-budget.ts';
 import { gcContinuationKey } from './server.ts';
 
 const cache = namedCache('pr-1');
@@ -801,23 +803,29 @@ describe('cache close', () => {
 		const costs = [];
 		for (const count of [3, 200]) {
 			await resetTestServer();
-			const token = await createCache();
-			await runInDurableObject(currentServer(), (instance, state) => {
-				const cacheId = instance.context.cacheRepository.require(cache).id;
-				for (let index = 0; index < count; index += 1) {
-					state.storage.sql.exec(
-						'INSERT INTO retention_root(cache_id, name, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-						cacheId,
-						`run-${String(index)}`,
-						'2099-01-01T00:00:00.000Z',
-						testBase.toISOString(),
-						testBase.toISOString()
+			const cost = await withoutAlarmArming(async () => {
+				const token = await createCache();
+				// D1 persists across the local reset, so registration can enqueue lifecycle work.
+				await runInDurableObject(currentServer(), (instance) => {
+					const availability = new PublicationManifestAvailabilityStore(
+						instance.context.db
 					);
-				}
-			});
-			const cost = await runInDurableObject(
-				currentServer(),
-				async (instance) => {
+					expect(withRowBudget(() => availability.drain())).toBe(false);
+				});
+				await runInDurableObject(currentServer(), (instance, state) => {
+					const cacheId = instance.context.cacheRepository.require(cache).id;
+					for (let index = 0; index < count; index += 1) {
+						state.storage.sql.exec(
+							'INSERT INTO retention_root(cache_id, name, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+							cacheId,
+							`run-${String(index)}`,
+							'2099-01-01T00:00:00.000Z',
+							testBase.toISOString(),
+							testBase.toISOString()
+						);
+					}
+				});
+				return runInDurableObject(currentServer(), async (instance) => {
 					instance.context.dbCost.recordOutstanding();
 					const before = instance.context.dbCost.rowsRead;
 					const response = await instance.fetch(
@@ -842,8 +850,8 @@ describe('cache close', () => {
 						close,
 						materialise: instance.context.dbCost.rowsRead - materialiseBefore
 					};
-				}
-			);
+				});
+			});
 			costs.push(cost);
 		}
 		expect(costs[1]).toStrictEqual(costs[0]);

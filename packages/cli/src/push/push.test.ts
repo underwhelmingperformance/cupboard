@@ -31,6 +31,7 @@ import {
 } from '@cupboard/protocol/retention';
 import {
 	uploadActionDecisionSchema,
+	uploadConfirmPresentResponseSchema,
 	type UploadNegotiateRequestInput,
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadataFields,
@@ -58,6 +59,7 @@ import {
 	AttestationDivergedPathError,
 	AttestationSubjectNotPushedError,
 	authExitCode,
+	BuildOutputDivergedError,
 	CupboardHttpError,
 	type FailedPushPath,
 	type IncompletePushExitStatus,
@@ -418,6 +420,15 @@ describe('runPush', () => {
 							})
 						),
 					publicationFor: () => upload,
+					confirmPresent: (selected) =>
+						Promise.resolve(
+							uploadConfirmPresentResponseSchema.parse({
+								paths: selected.map((decision) => ({
+									storePathHash: decision.storePathHash,
+									status: 'needs-publication'
+								}))
+							})
+						),
 					uploadNar: async (key, body) => {
 						await collectReadableStream(body);
 						events.push(`upload:${key}`);
@@ -7333,3 +7344,457 @@ async function flushMicrotasks(): Promise<void> {
 		await Promise.resolve();
 	}
 }
+
+describe('runPush confirmation', () => {
+	it.each(['confirmed', 'needs-publication', 'diverged'] as const)(
+		'reconciles a %s planned skip without inventing an upload',
+		async (status) => {
+			const payloads: ResultPayload[] = [];
+			const upload = publicationUpload();
+			const winner =
+				status === 'diverged'
+					? runtimeDigest.narHash.value
+					: appDigest.narHash.value;
+			const grace = { retainUntil: '2099-01-01T00:00:00.000Z' };
+			const confirmPresent = vi.fn(() =>
+				Promise.resolve(
+					uploadConfirmPresentResponseSchema.parse({
+						paths: [
+							status === 'needs-publication'
+								? { storePathHash: StorePath.hash(appPath), status }
+								: {
+										storePathHash: StorePath.hash(appPath),
+										status: 'confirmed' as const,
+										narHash: winner,
+										generation: 7,
+										grace
+									}
+						]
+					})
+				)
+			);
+			const commit = vi.fn(() =>
+				Promise.resolve({
+					...fallbackCommitResponse(),
+					status: 'already-present' as const,
+					grace
+				})
+			);
+			const uploadNar = vi.fn(unexpectedUploadNarCall);
+			const nar = vi.fn(() => new FakeNarArchive(appDigest));
+			const receipt = await runPush(
+				publication([appPath]),
+				reporter([], [], payloads),
+				{
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					retain: false,
+					attest: false,
+					buildStore: 'local',
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+					client: {
+						...skipClient([], []),
+						publicationFor: () => upload,
+						confirmPresent,
+						commit,
+						uploadNar
+					},
+					createNarArchive: nar
+				}
+			);
+			expect({
+				confirmations: confirmPresent.mock.calls,
+				commits: commit.mock.calls.length,
+				uploads: uploadNar.mock.calls,
+				reads: nar.mock.calls,
+				summary: payloads.find(
+					(payload) => payload.kind === pushSummaryResultKind
+				)?.data,
+				receipt
+			}).toStrictEqual({
+				confirmations: [
+					[
+						[
+							{
+								action: 'skip',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.value
+							}
+						]
+					]
+				],
+				commits: status === 'needs-publication' ? 1 : 0,
+				uploads: [],
+				reads: [],
+				summary: {
+					uploadedPaths: 0,
+					reusedBlobs: 0,
+					skipped: 1,
+					uploadedBytes: 0,
+					failures: [],
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							outcome: 'already-present',
+							grace
+						}
+					]
+				},
+				receipt: {
+					version: 3,
+					paths: [appPath],
+					uploaded: [],
+					subjects:
+						status === 'diverged'
+							? []
+							: [
+									{
+										storePath: appPath,
+										narHash: '01'.repeat(32),
+										origin: 'store-held',
+										buildStore: 'local'
+									}
+								]
+				}
+			});
+		}
+	);
+});
+
+describe('runPush confirmation selection', () => {
+	it('confirms selected skips before publishing mixed negative and commit decisions, preserving the run root', async () => {
+		const payloads: ResultPayload[] = [];
+		const events: string[] = [];
+		const builderPath = storePathSchema.parse(
+			`/nix/store/${'4'.repeat(32)}-builder`
+		);
+		const infos = [
+			pathInfo(appPath, appDigest, []),
+			pathInfo(runtimePath, runtimeDigest, []),
+			pathInfo(builderPath, appDigest, [])
+		];
+		const runRoot = {
+			name: 'run',
+			retention: { kind: 'duration' as const, seconds: 3600 }
+		};
+		const negotiate = vi.fn<PushClient['negotiate']>((body) => {
+			events.push('plan');
+			return Promise.resolve(
+				uploadNegotiateResponseSchema.parse({
+					uploads: body.paths.map((path) => ({
+						action: path.storePath === builderPath ? 'commit' : 'skip',
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						...(path.storePath === builderPath && { uploadId: 'builder' })
+					}))
+				})
+			);
+		});
+		const confirmPresent = vi.fn<NonNullable<PushClient['confirmPresent']>>(
+			(selected) => {
+				events.push('confirm');
+				return Promise.resolve(
+					uploadConfirmPresentResponseSchema.parse({
+						paths: selected.map((path) =>
+							path.storePathHash === StorePath.hash(appPath)
+								? {
+										storePathHash: path.storePathHash,
+										status: 'confirmed',
+										narHash: path.narHash,
+										generation: 7,
+										grace: { graceSeconds: 0 }
+									}
+								: {
+										storePathHash: path.storePathHash,
+										status: 'needs-publication'
+									}
+						)
+					})
+				);
+			}
+		);
+		const commit = vi.fn<CommitSession['commit']>((target) => {
+			events.push(`commit:${target.uploadId}`);
+			return Promise.resolve({
+				storePathHash: target.storePathHash,
+				narHash: target.narHash,
+				status: 'already-present',
+				grace: {},
+				settled: Promise.resolve()
+			});
+		});
+		const uploadNar = vi.fn(unexpectedUploadNarCall);
+		const renewUploads = vi.fn();
+		const localStore = nixStore(
+			Object.fromEntries(infos.map((info) => [info.storePath, info]))
+		);
+		const receipt = await runPush(
+			publication(infos.map((info) => info.storePath)),
+			reporter([], [], payloads),
+			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				retain: false,
+				attest: false,
+				runRoot,
+				buildStore: 'local',
+				nix: localStore,
+				client: {
+					...skipClient([], []),
+					negotiate,
+					confirmPresent,
+					publicationFor: (decision) =>
+						decision.action === 'skip'
+							? uploadActionDecisionSchema.parse({
+									...publicationUpload(),
+									storePathHash: decision.storePathHash,
+									narHash: decision.narHash,
+									uploadId: decision.storePathHash
+								})
+							: undefined,
+					commit,
+					uploadNar,
+					openCommitSession: () =>
+						Promise.resolve({ commit, renewUploads, close: vi.fn() })
+				}
+			}
+		);
+		expect({
+			events,
+			planned: negotiate.mock.calls,
+			confirmations: confirmPresent.mock.calls,
+			uploads: uploadNar.mock.calls,
+			renewals: renewUploads.mock.calls,
+			summary: payloads.find(
+				(payload) => payload.kind === pushSummaryResultKind
+			)?.data,
+			receipt
+		}).toStrictEqual({
+			events: [
+				'plan',
+				'confirm',
+				`commit:${StorePath.hash(runtimePath)}`,
+				'commit:builder'
+			],
+			planned: [
+				[
+					{
+						paths: infos.map((info) => prepareStorePathNegotiation(info)),
+						attachRoot: runRoot
+					}
+				]
+			],
+			confirmations: [
+				[
+					infos.slice(0, 2).map((info) => ({
+						action: 'skip',
+						storePathHash: StorePath.hash(info.storePath),
+						narHash: info.narHash.value
+					}))
+				]
+			],
+			uploads: [],
+			renewals: [],
+			summary: {
+				uploadedPaths: 0,
+				reusedBlobs: 1,
+				skipped: 2,
+				uploadedBytes: 0,
+				failures: [],
+				paths: infos.map((info) => ({
+					storePathHash: StorePath.hash(info.storePath),
+					storePath: info.storePath,
+					outcome: 'already-present',
+					grace: info.storePath === appPath ? { graceSeconds: 0 } : {}
+				}))
+			},
+			receipt: {
+				version: 3,
+				paths: infos.map((info) => info.storePath),
+				uploaded: [],
+				subjects: infos.map((info) => ({
+					origin: 'store-held',
+					storePath: info.storePath,
+					narHash: info.narHash.digestHex(),
+					buildStore: 'local'
+				}))
+			}
+		});
+	});
+
+	it.each(['planned', 'confirmed'] as const)(
+		'preserves divergence refusals for %s winners',
+		async (stage) => {
+			const confirmPresent = vi.fn<NonNullable<PushClient['confirmPresent']>>(
+				(selected) => {
+					const response = uploadConfirmPresentResponseSchema.parse({
+						paths: selected.map((path) => ({
+							storePathHash: path.storePathHash,
+							status: 'confirmed',
+							narHash: runtimeDigest.narHash.value,
+							generation: 7,
+							grace: {}
+						}))
+					});
+					return Promise.resolve(response);
+				}
+			);
+			const commit = vi.fn(unexpectedCommitCall);
+			const payloads: ResultPayload[] = [];
+			const store = nixStore({ [appPath]: pathInfo(appPath, appDigest, []) });
+			await expect(
+				runPush(publication([appPath]), reporter([], [], payloads), {
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					retain: false,
+					attest: false,
+					refuseDivergence: () => true,
+					nix: store,
+					client: {
+						...skipClient([], []),
+						negotiate: () =>
+							Promise.resolve(
+								uploadNegotiateResponseSchema.parse({
+									uploads: [
+										{
+											action: 'skip',
+											storePathHash: StorePath.hash(appPath),
+											narHash:
+												stage === 'planned'
+													? runtimeDigest.narHash.value
+													: appDigest.narHash.value
+										}
+									]
+								})
+							),
+						publicationFor: () => publicationUpload(),
+						confirmPresent,
+						commit
+					}
+				})
+			).rejects.toBeInstanceOf(PushIncompleteError);
+			expect({
+				confirmations: confirmPresent.mock.calls.length,
+				commits: commit.mock.calls,
+				paths: payloads.find(
+					(payload) => payload.kind === pushSummaryResultKind
+				)?.data
+			}).toStrictEqual({
+				confirmations: stage === 'planned' ? 0 : 1,
+				commits: [],
+				paths: {
+					uploadedPaths: 0,
+					reusedBlobs: 0,
+					skipped: 0,
+					uploadedBytes: 0,
+					paths: [],
+					failures: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							stage: 'verify',
+							reason: new BuildOutputDivergedError(
+								appPath,
+								appDigest.narHash.value,
+								runtimeDigest.narHash.value
+							).message
+						}
+					]
+				}
+			});
+		}
+	);
+
+	it.each([false, true])(
+		'uses authoritative confirmation for captured references, divergence=%s',
+		async (diverged) => {
+			const commit = vi.fn(unexpectedCommitCall);
+			const collection = PublicationCollection.of({
+				targets: [],
+				references: [
+					{
+						storePath: appPath,
+						kind: 'target',
+						source: new URL('https://cache.example.workers.dev/t/acme'),
+						metadata: referenceMetadata()
+					}
+				]
+			});
+			const push = runPush(collection, reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				retain: false,
+				attest: false,
+				referenceReceipt: true,
+				client: {
+					...skipClient([], []),
+					publicationFor: () => publicationUpload(),
+					confirmPresent: (selected) =>
+						Promise.resolve(
+							uploadConfirmPresentResponseSchema.parse({
+								paths: selected.map((path) => ({
+									storePathHash: path.storePathHash,
+									status: 'confirmed',
+									narHash: diverged
+										? runtimeDigest.narHash.value
+										: path.narHash,
+									generation: 7,
+									grace: {}
+								}))
+							})
+						),
+					commit
+				}
+			});
+			if (diverged) {
+				await expect(push).rejects.toBeInstanceOf(
+					ReferenceSnapshotDivergedError
+				);
+			} else {
+				expect(await push).toStrictEqual({
+					version: 3,
+					paths: [appPath],
+					uploaded: [],
+					subjects: [
+						{
+							origin: 'republished',
+							storePath: appPath,
+							narHash: appDigest.narHash.digestHex(),
+							signatures: [referenceSignature],
+							metadataSource: 'https://cache.example.workers.dev/t/acme'
+						}
+					]
+				});
+			}
+			expect(commit.mock.calls).toStrictEqual([]);
+		}
+	);
+
+	it('propagates an ambiguous confirmation failure without committing or uploading the planned skip', async () => {
+		const commit = vi.fn(unexpectedCommitCall);
+		const uploadNar = vi.fn(unexpectedUploadNarCall);
+		const failure = new Error('confirmation failed');
+		const store = nixStore({ [appPath]: pathInfo(appPath, appDigest, []) });
+		await expect(
+			runPush(publication([appPath]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				retain: false,
+				attest: false,
+				nix: store,
+				client: {
+					...skipClient([], []),
+					publicationFor: () => publicationUpload(),
+					confirmPresent: () => Promise.reject(failure),
+					commit,
+					uploadNar
+				}
+			})
+		).rejects.toBe(failure);
+		expect({
+			commits: commit.mock.calls,
+			uploads: uploadNar.mock.calls
+		}).toStrictEqual({ commits: [], uploads: [] });
+	});
+});

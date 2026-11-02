@@ -18,14 +18,37 @@ import {
 	renderHookScript
 } from '@cupboard/nix/build-observation';
 import {
+	cacheNameSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import { invocationIdSchema } from '@cupboard/protocol/build';
-import type { Reporter } from '@cupboard/reporter';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+	buildReceiptV3Schema,
+	buildReceiptV4Schema,
+	invocationIdSchema
+} from '@cupboard/protocol/build';
+import {
+	compactPublicationSetSchema,
+	publicationManifestIdentity,
+	type PublicationResultIdentity,
+	publicationResultIdentitySchema
+} from '@cupboard/protocol/publication-manifests';
+import {
+	publicationCaptureEnvelopeSchema,
+	type PublicationWorkflowRequest,
+	publicationWorkflowRequestSchema
+} from '@cupboard/protocol/publication-workflow';
+import {
+	parseReporterResults,
+	type Reporter,
+	type ReporterResultEvent
+} from '@cupboard/reporter';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import * as cohortAction from '../../actions/src/commands/build-cohort.ts';
+import { commandOptionsFromHelp } from '../../actions/src/cupboard-run.ts';
+import { writeCachedSession } from '../../packages/cli/src/auth/token-store.ts';
 import {
 	type BuildPushRunOptions,
 	hookScriptFileName,
@@ -33,12 +56,17 @@ import {
 } from '../../packages/cli/src/build-push/build-push.ts';
 import { preflightBuildPush } from '../../packages/cli/src/build-push/preflight.ts';
 import type { ChildCommand } from '../../packages/cli/src/build-push/supervisor.ts';
+import { buildProgram } from '../../packages/cli/src/cli.ts';
+import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import {
 	BuildCommandFailedError,
 	BuildEventHandlingError,
 	BuildPublicationFailedError
 } from '../../packages/cli/src/errors.ts';
+import { publicationWorkflowFor } from '../../packages/cli/src/publication/publication-client.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
+import * as pushClientFactory from '../../packages/cli/src/push/push-client.ts';
+import * as helperLocator from '../../packages/nix/src/build-observation/helper-resolution.ts';
 import {
 	createNixDaemonStoreClient,
 	discoverNixStoreConfig,
@@ -59,6 +87,10 @@ const clockHelperSource = path.resolve(
 	'../fixtures/hook-relay-clock.c'
 );
 const fakeDrvPath = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-e2e.drv';
+
+async function readCoordinatorJson(file: string): Promise<unknown> {
+	return JSON.parse(await readFile(file, 'utf8')) as unknown;
+}
 
 function waitForChildClose(child: ChildProcess): Promise<number | null> {
 	return new Promise((resolve, reject) => {
@@ -751,6 +783,641 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 				failedPaths: [freshPath],
 				runtimeDirectoryRemoved: true
 			});
+		});
+
+		it.each(['fresh', 'existing'] as const)(
+			'prepares a %s native warm run root through the production publication adapter',
+			async (kind) => {
+				const directory = await mkdtemp(path.join(workspace, 'native-root-'));
+				const token = await server.ownerAdminToken();
+				const cache = {
+					kind: 'named' as const,
+					name: cacheNameSchema.parse(`native-${kind}`)
+				};
+				const loopbackClient = server.pushClient(token, { cache });
+				const factory = vi
+					.spyOn(pushClientFactory, 'pushClientFor')
+					.mockReturnValue(loopbackClient);
+				vi.stubEnv('XDG_CONFIG_HOME', path.join(directory, 'config'));
+				vi.stubEnv(
+					'NIX_CONFIG',
+					'experimental-features = nix-command flakes\nsubstituters ='
+				);
+				try {
+					await writeCachedSession({ accessToken: token }, server.tenantUrl);
+					const rpc = tenantRpc(server.tenantUrl, { credential: token });
+					await rpc.caches.put.inNamedCache({
+						cacheName: cache.name,
+						access: 'public',
+						priority: 40
+					});
+					await buildProgram().parseAsync(
+						[
+							'--output-mode',
+							'json',
+							'push',
+							server.tenantUrl.href,
+							cache.name,
+							outA,
+							outB,
+							'--no-retain'
+						],
+						{ from: 'user' }
+					);
+					const workflow = publicationWorkflowFor(server.tenantUrl, token, {
+						cache
+					});
+					const captured = await workflow.execute({
+						operation: 'capture',
+						input: {
+							result: { storePath: outA },
+							members: [{ storePath: outA }],
+							origin: 'legacy-selection'
+						}
+					});
+					if (captured.operation !== 'capture' || !captured.supported) {
+						throw new Error('Fixture must capture an accepted warm result');
+					}
+					const root = `run/native-${kind}`;
+					const targetRoot = `main/native-${kind}`;
+					const sentinel = {
+						storePathHash: StorePath.hash(outB),
+						storePath: outB,
+						present: true
+					};
+					const timestamp: unknown = expect.any(String);
+					if (kind === 'existing') {
+						const previous = await rpc.roots.set.inNamedCache({
+							cacheName: cache.name,
+							name: root,
+							targets: [outB],
+							retention: { kind: 'duration', seconds: 60 }
+						});
+						expect(previous).toStrictEqual({
+							name: root,
+							expiresAt: timestamp,
+							expired: false,
+							createdAt: timestamp,
+							updatedAt: timestamp,
+							targets: [sentinel]
+						});
+						expect(Date.parse(previous.expiresAt ?? '')).toBeGreaterThan(
+							Date.now()
+						);
+					}
+					await rpc.roots.set.inNamedCache({
+						cacheName: cache.name,
+						name: targetRoot,
+						targets: [outB],
+						retention: { kind: 'permanent' }
+					});
+					const cohortsFile = path.join(directory, 'cohorts.json');
+					const receiptFile = path.join(directory, 'receipt.json');
+					const resultFile = path.join(directory, 'results.jsonl');
+					await writeFile(
+						cohortsFile,
+						JSON.stringify({ cohorts: [{ installables: [outA] }] })
+					);
+					const requestsBefore = server.requests.length;
+					const entriesBefore = server.publicationEntriesSent;
+					const sessionsBefore = server.commitSessions;
+					await buildProgram().parseAsync(
+						[
+							'--output-mode',
+							'json',
+							'--result-file',
+							resultFile,
+							'build-push',
+							server.tenantUrl.href,
+							cache.name,
+							'--cohorts-file',
+							cohortsFile,
+							'--receipt-file',
+							receiptFile,
+							'--aggregate-receipt',
+							'3,4',
+							'--root',
+							targetRoot,
+							'--permanent',
+							'--run-root',
+							root,
+							'--run-root-permanent'
+						],
+						{ from: 'user' }
+					);
+					const requests = server.requests.slice(requestsBefore);
+					const publicationSet = {
+						...captured.output,
+						materialisation: 'complete'
+					};
+					expect(
+						buildReceiptV4Schema.parse(await readCoordinatorJson(receiptFile))
+					).toEqual({
+						version: 4,
+						paths: [],
+						subjects: [],
+						childExitStatus: 0,
+						publicationSets: [publicationSet]
+					});
+					expect(
+						parseReporterResults(await readFile(resultFile, 'utf8'))
+					).toEqual([
+						{
+							kind: 'build-summary-v4',
+							data: {
+								mode: 'streamed',
+								store: nixConfig.storeDirectory,
+								targetPaths: 1,
+								intermediatePaths: 0,
+								queueDepth: 0,
+								uploadedPaths: 0,
+								skipped: 0,
+								childExitStatus: 0,
+								unconfirmedPaths: [],
+								version: 4,
+								publicationSets: [publicationSet]
+							}
+						}
+					]);
+					const targets = [
+						{
+							storePathHash: StorePath.hash(outA),
+							storePath: outA,
+							present: true
+						},
+						...(kind === 'existing' ? [sentinel] : [])
+					].toSorted((left, right) =>
+						left.storePath.localeCompare(right.storePath)
+					);
+					expect(
+						await rpc.roots.targets.inNamedCache({
+							cacheName: cache.name,
+							name: root
+						})
+					).toEqual({ targets });
+					expect(
+						await rpc.roots.targets.inNamedCache({
+							cacheName: cache.name,
+							name: targetRoot
+						})
+					).toEqual({
+						targets: targets.filter((target) => target.storePath === outA)
+					});
+					const roots = await rpc.roots.list.inNamedCache({
+						cacheName: cache.name
+					});
+					expect(roots).toEqual({
+						roots: [targetRoot, root].map((name) => ({
+							name,
+							expired: false,
+							targetCount: name === root ? targets.length : 1,
+							createdAt: timestamp,
+							updatedAt: timestamp
+						}))
+					});
+					expect({
+						entries: server.publicationEntriesSent,
+						sessions: server.commitSessions
+					}).toEqual({ entries: entriesBefore, sessions: sessionsBefore });
+					expect(requests).toEqual([
+						{
+							method: 'POST',
+							path: `${server.tenantUrl.pathname}/cache/${cache.name}/uploads/credential`,
+							status: 200
+						},
+						{
+							method: 'POST',
+							path: `${server.tenantUrl.pathname}/cache/${cache.name}/publication-results/lookup`,
+							status: 200
+						},
+						{
+							method: 'POST',
+							path: `${server.tenantUrl.pathname}/cache/${cache.name}/uploads/credential`,
+							status: 200
+						},
+						{
+							method: 'POST',
+							path: `${server.tenantUrl.pathname}/cache/${cache.name}/uploads`,
+							status: 200
+						},
+						{
+							method: 'POST',
+							path: `${server.tenantUrl.pathname}/cache/${cache.name}/uploads/plan`,
+							status: 200
+						},
+						{
+							method: 'POST',
+							path: `${server.tenantUrl.pathname}/cache/${cache.name}/publication-results/ensure`,
+							status: 200
+						},
+						{
+							method: 'PUT',
+							path: `${server.tenantUrl.pathname}/cache/${cache.name}/roots/${encodeURIComponent(targetRoot)}`,
+							status: 200
+						}
+					]);
+				} finally {
+					factory.mockRestore();
+					vi.unstubAllEnvs();
+				}
+			}
+		);
+
+		it('records the action-settled build-only tool after a strict V3 subordinate CLI build and reuses the exact app set', async (context) => {
+			if (!isDaemonTrusted) {
+				if (process.env.CI === undefined) {
+					context.skip();
+				}
+
+				throw new Error('The end-to-end Nix daemon must trust its test client');
+			}
+			const directory = await mkdtemp(path.join(workspace, 'coordinator-'));
+			const runtimeBase = await mkdtemp('/tmp/cbc-');
+			const token = await server.ownerAdminToken();
+			// Construct before spying: this factory itself calls pushClientFor.
+			const loopbackClient = server.pushClient(token);
+			const resolveHelper = helperLocator.resolveHookHelper;
+			const factory = vi
+				.spyOn(pushClientFactory, 'pushClientFor')
+				.mockReturnValue(loopbackClient);
+			const locator = vi
+				.spyOn(helperLocator, 'resolveHookHelper')
+				.mockImplementation(() =>
+					resolveHelper({ executablePath: path.join(workspace, 'cupboard') })
+				);
+			vi.stubEnv('XDG_CONFIG_HOME', path.join(directory, 'config'));
+			vi.stubEnv('XDG_RUNTIME_DIR', runtimeBase);
+			vi.stubEnv(
+				'NIX_CONFIG',
+				[
+					'experimental-features = nix-command flakes',
+					'substituters =',
+					'builders =',
+					'sandbox = false'
+				].join('\n')
+			);
+			try {
+				await writeCachedSession({ accessToken: token }, server.tenantUrl);
+				const seed = randomUUID().replaceAll('-', '');
+				const expressionFile = path.join(directory, 'coordinator.nix');
+				await writeFile(
+					expressionFile,
+					`let
+					make = name: extra: builtins.derivation ({
+						name = "cupboard-coordinator-${seed}-" + name;
+						system = builtins.currentSystem;
+						builder = "/bin/sh";
+						args = [ "-c" "echo ${seed} > $out" ];
+					} // extra);
+					tool = make "tool" {};
+				in { inherit tool; sibling = make "sibling" {}; app = make "app" { buildTool = tool; }; }
+				`
+				);
+				const derivation = async (attribute: string) => {
+					const result = await run('nix-instantiate', [
+						expressionFile,
+						'-A',
+						attribute
+					]);
+					return storePathSchema.parse(result.stdout.trim());
+				};
+				const appDrv = await derivation('app');
+				const toolDrv = await derivation('tool');
+				const siblingDrv = await derivation('sibling');
+				const output = async (drv: StorePathString) => {
+					const result = await run('nix-store', ['--query', '--outputs', drv]);
+					return storePathSchema.parse(result.stdout.trim());
+				};
+				const app = await output(appDrv);
+				const tool = await output(toolDrv);
+				const sibling = await output(siblingDrv);
+				await run('nix-build', [
+					expressionFile,
+					'-A',
+					'tool',
+					'-A',
+					'sibling',
+					'--no-out-link'
+				]);
+				const commands: (readonly string[])[] = [];
+				const requests: PublicationWorkflowRequest[] = [];
+				let commandCounter = 0;
+				let expectedAppResult: PublicationResultIdentity | undefined;
+				let subordinate:
+					ReturnType<typeof buildReceiptV3Schema.parse> | undefined;
+				const option = (argv: readonly string[], name: string): string => {
+					const index = argv.indexOf(name);
+					const value = argv[index + 1];
+					if (index === -1 || value === undefined) {
+						throw new Error(`Missing ${name}`);
+					}
+					return value;
+				};
+				const cli = async (
+					_binary: string,
+					argv: readonly string[]
+				): Promise<readonly ReporterResultEvent[]> => {
+					commands.push(argv);
+					commandCounter += 1;
+					if (argv[1] === 'publication-result') {
+						const requestFile = option(argv, '--request-file');
+						const input = publicationWorkflowRequestSchema
+							.or(publicationCaptureEnvelopeSchema)
+							.parse(await readCoordinatorJson(requestFile));
+						requests.push('version' in input ? input.request : input);
+					}
+					const resultFile = path.join(
+						directory,
+						`results-${String(commandCounter)}.jsonl`
+					);
+					await buildProgram().parseAsync(
+						[
+							'--output-mode',
+							'json',
+							'--result-file',
+							resultFile,
+							...argv.filter((argument) => argument !== '--github-oidc'),
+							// Disk-sized reserves can exceed free space on large hosts.
+							...(argv[1] === 'plan' && argv[2] === 'cohort'
+								? [
+										'--headroom-fraction',
+										'0',
+										'--headroom-absolute-minimum',
+										'1048576'
+									]
+								: [])
+						],
+						{ from: 'user' }
+					);
+					if (argv[1] === 'build-push') {
+						expect(argv).toContain('--aggregate-receipt-v3');
+						expect(argv).toContain('--no-reference-dependencies');
+						const receipt = await readCoordinatorJson(
+							option(argv, '--receipt-file')
+						);
+						subordinate = buildReceiptV3Schema.parse(receipt);
+						expect(subordinate.paths).toEqual([app]);
+						const rpc = tenantRpc(server.tenantUrl, { credential: token });
+						const accepted = await rpc.publication.lookup.inDefaultCache({
+							source: { cache: { kind: 'default' } },
+							results: [{ storePath: app }]
+						});
+						const entry = accepted.entries[0];
+						if (entry?.kind !== 'missing') {
+							throw new Error(
+								'Subordinate preempted the action publication capture'
+							);
+						}
+						const allocated = publicationResultIdentitySchema.parse(
+							entry.result
+						);
+						const source = await nix.queryPathInfo(app);
+						expectedAppResult = publicationResultIdentitySchema.parse({
+							storePath: app,
+							narHash: source.narHash.toString(),
+							generation: allocated.generation,
+							cache: { kind: 'default' },
+							cacheGeneration: allocated.cacheGeneration
+						});
+						const lookup = await rpc.publication.lookup.inDefaultCache({
+							source: { cache: { kind: 'default' } },
+							results: [{ storePath: app }]
+						});
+						expect(lookup).toEqual({
+							entries: [{ kind: 'missing', result: expectedAppResult }]
+						});
+					}
+					return parseReporterResults(await readFile(resultFile, 'utf8'));
+				};
+				await cli('in-process-cupboard', [
+					'--no-colour',
+					'push',
+					server.tenantUrl.href,
+					tool,
+					sibling,
+					'--no-retain'
+				]);
+				const graph = vi.fn(cohortAction.resolveLocalDerivationGraph);
+				const materialise = vi.fn(cohortAction.materialiseDerivationGraph);
+				const build = vi.fn(cohortAction.runNixBuild);
+				const show = vi.fn(cohortAction.runNixDerivationShow);
+				let isWarmRepeat = false;
+				const receiptFile = path.join(directory, 'receipt.json');
+				const options = {
+					url: server.tenantUrl.href,
+					cupboardPath: 'in-process-cupboard',
+					publish: 'built',
+					substituter: 'copy',
+					receiptFile
+				};
+				const { stdout: system } = await run('nix', [
+					'eval',
+					'--raw',
+					'--impure',
+					'--expr',
+					'builtins.currentSystem'
+				]);
+				const matrix = (shouldIncludeSibling: boolean) =>
+					JSON.stringify({
+						key: 'coordinator',
+						attrs: shouldIncludeSibling ? ['app', 'sibling'] : ['app'],
+						installables: shouldIncludeSibling
+							? [appDrv + '^out', siblingDrv + '^out']
+							: [appDrv + '^out'],
+						queryInstallables: shouldIncludeSibling
+							? [appDrv + '^out', siblingDrv + '^out']
+							: [appDrv + '^out'],
+						expectedPaths: shouldIncludeSibling ? [app, sibling] : [app],
+						roots: shouldIncludeSibling
+							? ['github:acme/app/main', 'github:acme/sibling/main']
+							: ['github:acme/app/main'],
+						system: system.trim(),
+						os: process.platform,
+						remote: false,
+						runsOn: 'local'
+					});
+				const dependencies: cohortAction.BuildCohortDependencies = {
+					runCupboard: cli,
+					reporter: recordingReporter({ warnings: [] }),
+					hasPublicationSupport: () => {
+						const command = buildProgram().commands.find(
+							(entry) => entry.name() === 'publication-result'
+						);
+						return Promise.resolve(
+							command !== undefined &&
+								commandOptionsFromHelp(command.helpInformation()).has(
+									'--request-file'
+								)
+						);
+					},
+					inspectCommandOptions: (_binary, names) => {
+						let command = buildProgram();
+						for (const name of names) {
+							const child = command.commands.find(
+								(entry) => entry.name() === name
+							);
+							if (child === undefined) {
+								throw new Error(`Unsupported command ${name}`);
+							}
+							command = child;
+						}
+						return Promise.resolve(
+							commandOptionsFromHelp(command.helpInformation())
+						);
+					},
+					resolveLocalDerivationGraph: graph,
+					materialiseDerivationGraph: materialise,
+					runNixBuild: build,
+					runNixDerivationShow: show,
+					withLocalDerivationRoots: (derivations, use, signal) => {
+						if (isWarmRepeat) {
+							throw new Error('Warm repeat rooted derivations');
+						}
+						return cohortAction.runWithLocalDerivationRoots(
+							derivations,
+							use,
+							signal
+						);
+					}
+				};
+				const environment = {
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'github-output')
+				};
+				await cohortAction.buildCohortAction(
+					{ ...options, cohortJson: matrix(true) },
+					environment,
+					dependencies
+				);
+				expect(subordinate?.version).toBe(3);
+				expect(locator).toHaveBeenCalledTimes(1);
+				const appInfo = await nix.queryPathInfo(app);
+				const toolInfo = await nix.queryPathInfo(tool);
+				expect(appInfo.references).toEqual([]);
+				const graphRun = graph.mock.results[0];
+				if (graphRun?.type !== 'return') {
+					throw new Error(
+						'Cold action did not resolve the real derivation graph'
+					);
+				}
+				const selectionGraph = await graphRun.value;
+				expect(selectionGraph.dependencyOutputs).toContainEqual({
+					storePath: tool,
+					requiredBy: [appDrv]
+				});
+				if (expectedAppResult === undefined) {
+					throw new Error(
+						'Subordinate did not record the allocated app identity'
+					);
+				}
+				const generatedId: unknown = expect.stringMatching(
+					/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/
+				);
+				expect(subordinate?.subjects).toEqual([
+					{
+						origin: 'built',
+						storePath: app,
+						narHash: appInfo.narHash.digestHex(),
+						derivation: appDrv,
+						buildStore: 'auto',
+						verification: 'local',
+						attempt: 1,
+						attemptId: generatedId
+					}
+				]);
+				const identity = await publicationManifestIdentity([
+					{ storePath: app, narHash: appInfo.narHash.toString() },
+					{ storePath: tool, narHash: toolInfo.narHash.toString() }
+				]);
+				const capture = requests.find(
+					(request) =>
+						request.operation === 'capture' &&
+						request.input.result.storePath === app
+				);
+				expect(capture).toEqual({
+					operation: 'capture',
+					input: {
+						result: { storePath: app, narHash: appInfo.narHash.toString() },
+						members: identity.members,
+						origin: 'build-selection',
+						requestId: generatedId
+					}
+				});
+				const cold = buildReceiptV4Schema.parse(
+					JSON.parse(await readFile(receiptFile, 'utf8'))
+				);
+				const appSet = cold.publicationSets?.find(
+					(set) => set.result.storePath === app
+				);
+				const expectedAppSet = compactPublicationSetSchema.parse({
+					result: expectedAppResult,
+					digest: identity.digest,
+					memberCount: 2,
+					origin: 'build-selection',
+					materialisation: 'complete'
+				});
+				expect(appSet).toEqual(expectedAppSet);
+				const lookup = await tenantRpc(server.tenantUrl, {
+					credential: token
+				}).publication.lookup.inDefaultCache({
+					source: { cache: { kind: 'default' } },
+					results: [{ storePath: app }]
+				});
+				expect(lookup).toEqual({
+					entries: [
+						{
+							kind: 'recorded',
+							complete: true,
+							publication: {
+								result: expectedAppResult,
+								digest: identity.digest,
+								memberCount: 2,
+								origin: 'build-selection'
+							}
+						}
+					]
+				});
+				const forbidden = () => {
+					throw new Error('Warm repeat performed graph/build/member work');
+				};
+				graph.mockImplementation(forbidden);
+				materialise.mockImplementation(forbidden);
+				build.mockImplementation(forbidden);
+				show.mockImplementation(forbidden);
+				isWarmRepeat = true;
+				commands.length = 0;
+				requests.length = 0;
+				const entriesBefore = server.publicationEntriesSent;
+				await cohortAction.buildCohortAction(
+					{ ...options, cohortJson: matrix(false) },
+					environment,
+					dependencies
+				);
+				const warm = buildReceiptV4Schema.parse(
+					JSON.parse(await readFile(receiptFile, 'utf8'))
+				);
+				expect(warm).toEqual({
+					version: 4,
+					paths: [app],
+					subjects: [],
+					publicationSets: [expectedAppSet]
+				});
+				expect(commands.map((argv) => argv[1])).toEqual([
+					'publication-result',
+					'publication-result',
+					'root'
+				]);
+				expect(requests.map((request) => request.operation)).toEqual([
+					'lookup',
+					'ensure'
+				]);
+				expect(server.publicationEntriesSent).toBe(entriesBefore);
+			} finally {
+				factory.mockRestore();
+				locator.mockRestore();
+				vi.unstubAllEnvs();
+				await rm(runtimeBase, { recursive: true, force: true });
+			}
 		});
 
 		it('publishes the outputs of a real multi-output nix build', async (context) => {

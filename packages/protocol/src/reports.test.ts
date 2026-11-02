@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	buildSummaryReaderSchema,
 	buildSummarySchema,
+	buildSummaryV4ResultKind,
+	buildSummaryV4Schema,
 	checkDiscrepancySchema,
 	checkReportSchema,
 	pushSummarySchema,
@@ -420,5 +423,63 @@ describe('buildSummarySchema', () => {
 		}
 	])('rejects $name', ({ value }) => {
 		expect(buildSummarySchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('buildSummaryV4Schema', () => {
+	const summary = {
+		mode: 'streamed',
+		store: 'auto',
+		targetPaths: 1,
+		intermediatePaths: 0,
+		queueDepth: 0,
+		uploadedPaths: 0,
+		skipped: 1,
+		childExitStatus: 0,
+		unconfirmedPaths: []
+	};
+	const set = {
+		result: {
+			cache: { kind: 'default' },
+			cacheGeneration: 1,
+			storePath: `/nix/store/${storePathHash}-app`,
+			generation: 0,
+			narHash
+		},
+		digest: 'a'.repeat(64),
+		memberCount: 100_000,
+		origin: 'build-selection',
+		materialisation: 'complete'
+	};
+	const value = { ...summary, version: 4, publicationSets: [set] };
+
+	it('uses a selected result kind distinct from legacy build-summary', () => {
+		expect(buildSummaryV4ResultKind).toBe('build-summary-v4');
+	});
+
+	it('reports complete compact sets without reinterpreting upload counts', () => {
+		expect(buildSummaryV4Schema.parse(value)).toStrictEqual(value);
+		expect(buildSummaryReaderSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('reads legacy summaries without inserting version or optional fields', () => {
+		expect(buildSummaryReaderSchema.parse(summary)).toStrictEqual(summary);
+		expect(buildSummarySchema.parse(summary)).toStrictEqual(summary);
+	});
+
+	it('keeps new fields out of legacy output and refuses incomplete sets', () => {
+		expect(buildSummarySchema.safeParse(value).success).toBe(false);
+		expect(
+			buildSummarySchema.safeParse({ ...summary, publicationSets: [] }).success
+		).toBe(false);
+		expect(
+			buildSummaryV4Schema.safeParse({ ...value, version: 3 }).success
+		).toBe(false);
+		expect(
+			buildSummaryV4Schema.safeParse({
+				...value,
+				publicationSets: [{ ...set, materialisation: 'pending' }]
+			}).success
+		).toBe(false);
 	});
 });

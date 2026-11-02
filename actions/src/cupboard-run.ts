@@ -544,11 +544,46 @@ export async function inspectCommandOptions(
 	return commandOptionsFromHelp(help.output);
 }
 
+/**
+Probe the hidden command itself; top-level help deliberately omits it.
+*/
+export async function hasPublicationResultSupport(
+	binaryPath: string,
+	signal?: AbortSignal
+): Promise<boolean> {
+	const help = await readCommandOutput(
+		binaryPath,
+		['publication-result', '--help'],
+		signal,
+		'both'
+	);
+	if (
+		help.status === 0 &&
+		help.output.startsWith('Usage: cupboard publication-result ') &&
+		commandOptionsFromHelp(help.output).has('--request-file')
+	) {
+		return true;
+	}
+	// Only the old command parser's explicit rejection is non-support. A
+	// failed executable, malformed help or provider error is not a downgrade.
+	if (
+		help.status === usageExitCode &&
+		/error: unknown command ['"]publication-result['"]/u.test(help.output)
+	) {
+		return false;
+	}
+	throw new CommandFailedError(
+		binaryPath,
+		help.status,
+		'unexpected publication-result help'
+	);
+}
+
 async function readCommandOutput(
 	binaryPath: string,
 	arguments_: readonly string[],
 	signal?: AbortSignal,
-	outputStream: 'stdout' | 'stderr' = 'stdout'
+	outputStream: 'stdout' | 'stderr' | 'both' = 'stdout'
 ): Promise<{ readonly status: number | null; readonly output: string }> {
 	signal?.throwIfAborted();
 
@@ -558,12 +593,19 @@ async function readCommandOutput(
 	});
 	let output = '';
 
-	const stream = child[outputStream];
-	child[outputStream === 'stdout' ? 'stderr' : 'stdout'].resume();
-	stream.setEncoding('utf8');
-	stream.on('data', (chunk: string) => {
-		output += chunk;
-	});
+	const streams =
+		outputStream === 'both'
+			? [child.stdout, child.stderr]
+			: [child[outputStream]];
+	if (outputStream !== 'both') {
+		child[outputStream === 'stdout' ? 'stderr' : 'stdout'].resume();
+	}
+	for (const stream of streams) {
+		stream.setEncoding('utf8');
+		stream.on('data', (chunk: string) => {
+			output += chunk;
+		});
+	}
 
 	const result = await waitForAbortableChildProcess(
 		observeChildProcess(child),

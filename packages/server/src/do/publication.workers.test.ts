@@ -1,4 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheGenerationSchema,
 	type CacheScope,
@@ -8,7 +10,15 @@ import {
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
+import { cacheMetadataMaxNarInfoBytes } from '@cupboard/protocol/cache-metadata';
 import { publicationStagingKey } from '@cupboard/protocol/publication';
+import {
+	createPublicationRequestId,
+	publicationCaptureBeginResponseSchema,
+	publicationCaptureSealResponseSchema,
+	publicationEnsureResponseSchema
+} from '@cupboard/protocol/publication-manifests';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	acceptCapabilitiesHeader,
@@ -21,6 +31,8 @@ import {
 	pushCredentialSchema,
 	type PushId,
 	uploadCapabilitiesHeader,
+	uploadConfirmPresentCapability,
+	uploadConfirmPresentResponseSchema,
 	type UploadId,
 	type UploadPathNegotiation,
 	uploadPlanResponseSchema
@@ -79,9 +91,11 @@ import {
 	uploadMetadata,
 	uploadPathNegotiation,
 	uploadStateOf,
+	type VerifiableNar,
 	verifiableNar,
 	verificationOf,
-	verifyCurrentTenant
+	verifyCurrentTenant,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { AttestationsService } from './attestations-service.ts';
@@ -2322,15 +2336,20 @@ async function completedPublication(
 		readonly cacheName?: string;
 		readonly pushId?: PushId;
 		readonly isConfirmationPending?: boolean;
+		readonly nar?: VerifiableNar;
+		readonly references?: string[];
+		readonly storePathHash?: string;
 	} = {}
 ) {
-	const nar = await verifiableNar(label);
+	const nar = options.nar ?? (await verifiableNar(label));
 	const path = uploadPathNegotiation(
 		uploadMetadata({
 			fileSize: nar.narBytes.byteLength,
 			fileHash: nar.fileHash,
 			narHash: nar.narHash,
-			narSize: nar.narSize
+			narSize: nar.narSize,
+			references: options.references,
+			storePathHash: options.storePathHash
 		})
 	);
 	const pushId = options.pushId ?? testPushId;
@@ -4743,16 +4762,34 @@ describe('publication admission of an operation that changes state', () => {
 				cache,
 				entry.metadata.storePathHash
 			);
-			const blobs = instance.context.env.BLOBS;
-			const originalHead = blobs.head.bind(blobs);
-			const head = vi
-				.spyOn(blobs, 'head')
-				.mockImplementation((key) =>
-					key === object
-						? probe.around(() => originalHead(key))
-						: originalHead(key)
-				);
-			return Promise.resolve([probe.watch(instance.context), head]);
+			const originalEnv = instance.context.env;
+			const blobs = originalEnv.BLOBS;
+			const originalGet = blobs.get.bind(blobs);
+			// The bounded GET wrapper calls the native method dynamically.
+			// Intercept the environment binding to avoid recursive delegation.
+			instance.context.env = {
+				...originalEnv,
+				BLOBS: new Proxy(blobs, {
+					get(target, property, receiver) {
+						if (property === 'get') {
+							return (key: string) =>
+								key === object
+									? probe.around(() => originalGet(key))
+									: originalGet(key);
+						}
+						const value: unknown = Reflect.get(target, property, receiver);
+						return value;
+					}
+				})
+			};
+			return Promise.resolve([
+				probe.watch(instance.context),
+				{
+					mockRestore: () => {
+						instance.context.env = originalEnv;
+					}
+				}
+			]);
 		});
 		const session = await openCommitSession(
 			token,
@@ -9683,105 +9720,111 @@ it('refuses a repair of an operation that completes during admission when its pu
 it('refuses a repair whose push expires before admission records it', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
-	const token = await initialise();
-	const expiresAt = Math.floor(Date.now() / 1000) + 60;
-	const pushId = await testPushIdFor(fixtureTenant, 3, expiresAt);
-	const nar = await verifiableNar('publication-late-repair');
-	const path = uploadPathNegotiation(
-		uploadMetadata({
-			fileSize: nar.narBytes.byteLength,
-			fileHash: nar.fileHash,
-			narHash: nar.narHash,
-			narSize: nar.narSize
-		})
-	);
-	const [entry] = await plannedEntries(
-		token,
-		'/uploads/plan',
-		[path],
-		undefined,
-		pushId
-	);
-	if (entry === undefined) {
-		throw new Error('Expected a planned entry');
-	}
-	await putNarBytes(
-		publicationStagingKey(fixtureTenant, pushId, entry.operationId),
-		nar
-	);
-	const request = {
-		op: 'publish-batch' as const,
-		pushId,
-		entries: [
-			{
-				...entry,
-				blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
-			}
-		]
-	};
-	const first = await openCommitSession(token, undefined, publicationSession);
-	try {
-		first.send(request);
-		expect([await first.nextFrame(), await first.nextFrame()]).toStrictEqual([
-			{ ev: 'publication-accepted', uploadId: entry.operationId },
-			{
-				ev: 'deferred',
-				uploadId: entry.operationId,
-				storePathHash: path.storePathHash,
-				narHash: path.narHash,
-				grace: {}
-			}
-		]);
-	} finally {
-		first.socket.close();
-	}
-	await commitUpload(token, entry.operationId);
-	await deletePath(token, path.storePathHash);
-	const replay = await openCommitSession(token, undefined, publicationSession);
-	// Admission checks the push ID's expiry before its transaction. Let the push
-	// expire between that check and the transaction, and record the push ID
-	// checks that ran before the transaction.
-	const isPushIdVerified = vi.spyOn(PushCredentialIssuer.prototype, 'verify');
-	let checksBeforeTransaction = 0;
-	const gate = await runInDurableObject(currentServer(), (instance) => {
-		const { db } = instance.context;
-		const transaction = db.transaction.bind(db);
-		return Promise.resolve(
-			vi.spyOn(db, 'transaction').mockImplementationOnce((run) => {
-				checksBeforeTransaction = isPushIdVerified.mock.calls.length;
-				vi.setSystemTime(new Date((expiresAt + 1) * 1000));
-				return transaction(run);
+	await withoutAlarmArming(async () => {
+		const token = await initialise();
+		const expiresAt = Math.floor(Date.now() / 1000) + 60;
+		const pushId = await testPushIdFor(fixtureTenant, 3, expiresAt);
+		const nar = await verifiableNar('publication-late-repair');
+		const path = uploadPathNegotiation(
+			uploadMetadata({
+				fileSize: nar.narBytes.byteLength,
+				fileHash: nar.fileHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize
 			})
 		);
-	});
-	try {
-		replay.send(request);
-		const refused = refusalFacts(await replay.nextFrame());
-		const after = await snapshot();
-		expect({
-			pushIdChecks: isPushIdVerified.mock.settledResults
-				.slice(0, checksBeforeTransaction)
-				.map((result) => result.type === 'fulfilled' && result.value),
-			transactions: gate.mock.calls.length,
-			refused,
-			pending: after.pending
-		}).toStrictEqual({
-			pushIdChecks: [true],
-			transactions: 1,
-			refused: {
-				ev: 'publication-refused',
-				uploadId: entry.operationId,
-				reason: 'push-expired',
-				status: StatusCodes.SERVICE_UNAVAILABLE,
-				hasMessage: true
-			},
-			pending: []
+		const [entry] = await plannedEntries(
+			token,
+			'/uploads/plan',
+			[path],
+			undefined,
+			pushId
+		);
+		if (entry === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, pushId, entry.operationId),
+			nar
+		);
+		const request = {
+			op: 'publish-batch' as const,
+			pushId,
+			entries: [
+				{
+					...entry,
+					blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+				}
+			]
+		};
+		const first = await openCommitSession(token, undefined, publicationSession);
+		try {
+			first.send(request);
+			expect([await first.nextFrame(), await first.nextFrame()]).toStrictEqual([
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'deferred',
+					uploadId: entry.operationId,
+					storePathHash: path.storePathHash,
+					narHash: path.narHash,
+					grace: {}
+				}
+			]);
+		} finally {
+			first.socket.close();
+		}
+		await commitUpload(token, entry.operationId);
+		await deletePath(token, path.storePathHash);
+		const replay = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		// Admission checks the push ID's expiry before its transaction. Let the push
+		// expire between that check and the transaction, and record the push ID
+		// checks that ran before the transaction.
+		const isPushIdVerified = vi.spyOn(PushCredentialIssuer.prototype, 'verify');
+		let checksBeforeTransaction = 0;
+		const gate = await runInDurableObject(currentServer(), (instance) => {
+			const { db } = instance.context;
+			const transaction = db.transaction.bind(db);
+			return Promise.resolve(
+				vi.spyOn(db, 'transaction').mockImplementationOnce((run) => {
+					checksBeforeTransaction = isPushIdVerified.mock.calls.length;
+					vi.setSystemTime(new Date((expiresAt + 1) * 1000));
+					return transaction(run);
+				})
+			);
 		});
-	} finally {
-		gate.mockRestore();
-		isPushIdVerified.mockRestore();
-		replay.socket.close();
-	}
+		try {
+			replay.send(request);
+			const refused = refusalFacts(await replay.nextFrame());
+			const after = await snapshot();
+			expect({
+				pushIdChecks: isPushIdVerified.mock.settledResults
+					.slice(0, checksBeforeTransaction)
+					.map((result) => result.type === 'fulfilled' && result.value),
+				transactions: gate.mock.calls.length,
+				refused,
+				pending: after.pending
+			}).toStrictEqual({
+				pushIdChecks: [true],
+				transactions: 1,
+				refused: {
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'push-expired',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				},
+				pending: []
+			});
+		} finally {
+			gate.mockRestore();
+			isPushIdVerified.mockRestore();
+			replay.socket.close();
+		}
+	});
 });
 
 it('claims a live upload behind more than one window of expired uploads that expiry cannot remove', async () => {
@@ -10259,3 +10302,310 @@ it('claims a live upload behind more than one window of expired uploads once cla
 	}
 	expect(claimed).toStrictEqual([['live-0'], []]);
 });
+
+// NAR strings are little-endian uint64 byte lengths followed by eight-byte
+// padded data. This regular file contains every declared reference's full path.
+async function largeReferenceNar(
+	references: readonly string[]
+): Promise<VerifiableNar> {
+	const utf8 = new TextEncoder();
+	const strings = [
+		'nix-archive-1',
+		'(',
+		'type',
+		'regular',
+		'contents',
+		references.map((reference) => `/nix/store/${reference}`).join('\n'),
+		')'
+	].map((value) => utf8.encode(value));
+	const bytes = new Uint8Array(
+		strings.reduce(
+			(size, value) => size + 8 + Math.ceil(value.byteLength / 8) * 8,
+			0
+		)
+	);
+	const view = new DataView(bytes.buffer);
+	let offset = 0;
+	for (const value of strings) {
+		view.setBigUint64(offset, BigInt(value.byteLength), true);
+		bytes.set(value, offset + 8);
+		offset += 8 + Math.ceil(value.byteLength / 8) * 8;
+	}
+	const compressedStream = new Blob([bytes])
+		.stream()
+		.pipeThrough(zstdCompressionStream());
+	const compressed = new Uint8Array(
+		await new Response(compressedStream).arrayBuffer()
+	);
+	return {
+		narBytes: compressed,
+		narHash: NixSha256Hash.fromDigest(
+			new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+		).value,
+		narSize: bytes.byteLength,
+		fileHash: NixSha256Hash.fromDigest(
+			new Uint8Array(await crypto.subtle.digest('SHA-256', compressed))
+		).value
+	};
+}
+
+it.each(
+	(
+		[
+			'ordinary-admission',
+			'ordinary-replay',
+			'negotiated-confirmation',
+			'manifest'
+		] as const
+	).map((mode, index) => ({
+		mode,
+		storePathHash: String(index + 100).padStart(32, '0')
+	}))
+)(
+	'recognises an admitted >1 MiB narinfo during $mode',
+	async ({ mode, storePathHash }) => {
+		vi.setSystemTime(vi.getRealSystemTime());
+		await resetTestServer();
+		const token = await initialise();
+		const references = Array.from(
+			{ length: 5000 },
+			(_, index) => `${String(index).padStart(32, '0')}-${'r'.repeat(211)}`
+		);
+		const nar = await largeReferenceNar(references);
+		const { entry, path } = await completedPublication(
+			token,
+			'large-reference-projection',
+			{
+				nar,
+				references,
+				storePathHash
+			}
+		);
+		const version = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const cache = instance.context.cacheRepository.require(defaultCache());
+				const row = instance.context.db
+					.select()
+					.from(schema.narInfos)
+					.where(eq(schema.narInfos.cacheId, cache.id))
+					.get();
+				if (row === undefined) {
+					throw new Error('Missing verified narinfo');
+				}
+				const objects = new NarInfoObjectsService(instance.context);
+				const object = await env.BLOBS.get(
+					objects.objectKey(cache, path.storePathHash)
+				);
+				if (object === null) {
+					throw new Error('Missing published narinfo');
+				}
+				expect(object.size).toBeGreaterThan(cacheMetadataMaxNarInfoBytes);
+				expect(NarInfo.parse(await object.text()).references).toStrictEqual(
+					references
+				);
+				expect(
+					new PublicationStore(instance.context).get(entry.operationId)?.state
+				).toBe('servable');
+				expect(await objects.hasCommittedReference(cache, row)).toBe(true);
+				return {
+					storePath: row.storePath,
+					narHash: row.narHash,
+					generation: row.generation
+				};
+			}
+		);
+		if (mode === 'ordinary-admission' || mode === 'ordinary-replay') {
+			const pushId =
+				mode === 'ordinary-admission'
+					? await testPushIdFor(fixtureTenant, 1)
+					: testPushId;
+			const [request] =
+				mode === 'ordinary-admission'
+					? await plannedEntries(
+							token,
+							'/uploads/plan',
+							[path],
+							undefined,
+							pushId
+						)
+					: [entry];
+			if (request === undefined) {
+				throw new Error('Missing planned publication');
+			}
+			const frames = await admit(token, pushId, request);
+			const outcome = {
+				ev: 'settled',
+				uploadId: request.operationId,
+				response: {
+					status: 'already-present',
+					storePathHash: path.storePathHash,
+					narHash: path.narHash
+				},
+				grace: {}
+			};
+			expect(frames).toStrictEqual(
+				mode === 'ordinary-admission'
+					? [
+							{ ev: 'publication-accepted', uploadId: request.operationId },
+							outcome
+						]
+					: [outcome]
+			);
+			const before = await snapshot();
+			expect(await admit(token, pushId, request)).toStrictEqual([outcome]);
+			expect(await snapshot()).toStrictEqual(before);
+			return;
+		}
+		if (mode === 'negotiated-confirmation') {
+			const credential = await authorisedFetch('/uploads/credential', token, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					[acceptCapabilitiesHeader]: `${publicationCapability},${uploadConfirmPresentCapability}`
+				},
+				body: '{}'
+			});
+			expect(credential.headers.get(uploadCapabilitiesHeader)).toBe(
+				`${publicationCapability},${uploadConfirmPresentCapability}`
+			);
+			const push = pushCredentialSchema.parse(await credential.json());
+			const request = {
+				pushId: push.pushId,
+				cacheGeneration: entry.cacheGeneration,
+				paths: [path]
+			};
+			const send = () =>
+				authorisedFetch('/uploads/confirm-present', token, {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify(request)
+				});
+			const first = await send();
+			expect(first.status).toBe(200);
+			const response = uploadConfirmPresentResponseSchema.parse(
+				await first.json()
+			);
+			expect(response).toStrictEqual({
+				paths: [
+					{
+						storePathHash: path.storePathHash,
+						status: 'confirmed',
+						narHash: version.narHash,
+						generation: version.generation,
+						grace: {}
+					}
+				]
+			});
+			const before = await snapshot();
+			const replay = await send();
+			expect({
+				status: replay.status,
+				response: uploadConfirmPresentResponseSchema.parse(await replay.json())
+			}).toStrictEqual({ status: 200, response });
+			expect(await snapshot()).toStrictEqual(before);
+			return;
+		}
+		const call = (
+			suffix: string,
+			body: unknown,
+			method = 'POST',
+			cachePrefix = ''
+		) =>
+			authorisedFetch(`${cachePrefix}/publication-results${suffix}`, token, {
+				method,
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify(body)
+			});
+		const begun = await call('/captures', {
+			result: version,
+			expectedCacheGeneration: entry.cacheGeneration,
+			requestId: createPublicationRequestId(),
+			origin: 'build-selection',
+			memberCount: 1
+		});
+		expect(begun.status).toBe(200);
+		const begin = publicationCaptureBeginResponseSchema.parse(
+			await begun.json()
+		);
+		if (begin.kind !== 'staging') {
+			throw new Error('Expected staging');
+		}
+		const page = await call(
+			`/captures/${begin.operationId}/pages/0`,
+			{ members: [version] },
+			'PUT'
+		);
+		expect(page.status).toBe(200);
+		let captured:
+			| Extract<
+					ReturnType<typeof publicationCaptureSealResponseSchema.parse>,
+					{ kind: 'captured' }
+			  >
+			| undefined;
+		for (let step = 0; step < 12; step += 1) {
+			const response = await call(`/captures/${begin.operationId}/seal`, {});
+			expect(response.status).toBe(200);
+			const result = publicationCaptureSealResponseSchema.parse(
+				await response.json()
+			);
+			if (result.kind === 'captured') {
+				captured = result;
+				break;
+			}
+		}
+		if (captured === undefined) {
+			throw new Error('Capture did not converge');
+		}
+		const request = {
+			source: captured.publication,
+			expectedDestinationGeneration: entry.cacheGeneration,
+			requestId: createPublicationRequestId()
+		};
+		let complete:
+			ReturnType<typeof publicationEnsureResponseSchema.parse> | undefined;
+		for (let step = 0; step < 100; step += 1) {
+			const response = await call(
+				'/ensure',
+				request,
+				'POST',
+				'/cache/large-reference-ensure'
+			);
+			expect(response.status).toBe(200);
+			complete = publicationEnsureResponseSchema.parse(await response.json());
+			if (complete.kind === 'complete') {
+				break;
+			}
+			await verifyCurrentTenant();
+		}
+		const destination = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const scope = namedCache('large-reference-ensure');
+				const cache = instance.context.cacheRepository.require(scope);
+				const objects = new NarInfoObjectsService(instance.context);
+				const versions = await objects.servableNarInfoVersions(cache, [
+					path.storePathHash
+				]);
+				const served = versions.get(path.storePathHash);
+				if (served === undefined) {
+					throw new Error('Missing served destination');
+				}
+				return {
+					cache: scope,
+					cacheGeneration: cache.generation,
+					generation: served.generation
+				};
+			}
+		);
+		expect(complete).toStrictEqual({
+			kind: 'complete',
+			publication: {
+				...captured.publication,
+				result: { ...captured.publication.result, ...destination },
+				materialisation: 'complete'
+			},
+			association: 'created'
+		});
+	}
+);

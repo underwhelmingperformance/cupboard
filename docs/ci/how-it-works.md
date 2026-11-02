@@ -82,8 +82,9 @@ JSON conversion. Planning checks the following constraints:
 
 With `build: missing` and `publish: outputs`, the plan can omit a cohort when
 its requested roots already retain the outputs that the destination cache
-serves. With `publish: built`, cohort jobs still select required dependency
-outputs from the configured tenant sources, even when all requested outputs are
+serves. With `publish: built`, cohort jobs reuse a recorded publication set when
+one exists for the exact result. Otherwise they select required dependency
+outputs from the configured tenant sources, even when the requested output is
 cached. Available targets skip their builds inside the cohort. An attestation's
 presence does not decide whether to build. With `build: rebuild`, each requested
 output is built again on the configured builder, even if it is already
@@ -111,9 +112,13 @@ Each cohort job goes through these steps:
    for remote builders, a remote store, and private flake inputs.
 2. It adds the destination cache to Nix's substituters. If the run uses a reuse
    view, it adds that too, after the destination.
-3. It evaluates each target's `attr` again, and fails if the result no longer
-   matches the `rootDrvPath` that the plan used. This catches a flake that
-   changed between jobs.
+3. For predictable single-output targets, it first looks up exact recorded
+   publications in the destination and then the configured tenant source. It
+   materialises recorded sets without runner-side derivation graph evaluation,
+   individual member probes or member receipts. Other targets evaluate their
+   `attr` again and fail if it no longer matches the plan's `rootDrvPath`.
+   Unknown and multi-output selections, and `build: rebuild`, keep the bounded
+   build path.
 4. It sorts the targets by how they are available, and prints the groups in the
    log. `build: rebuild` puts each requested output in the build work even if
    the output was already available.
@@ -124,12 +129,47 @@ Each cohort job goes through these steps:
    Dependencies absent from those sources cause no additional build or download.
    With `publish: closure`, it also publishes their runtime references. With
    `publish: none`, it publishes nothing.
-6. After publication succeeds, it sets each published target's retention root.
+6. After all selected outputs of a named target root are accepted, it uses
+   `root ensure` to replace that root with the complete warm/cold selection and
+   the requested retention. A `build-required` response fails the job; it does
+   not start another build or publication attempt.
 7. With `attest: true`, it signs build provenance for builds observed on the
    runner plus an attribute report for successful local verification rebuilds,
    and attaches those bundles to the published paths. Signing and attachment
    happen after publication; a failure fails the job but does not remove paths
    from the cache.
+
+A cold or legacy result records the footprint actually accepted by the
+publication commands. Each result owns its required dependency outputs and
+observed build-only tools, not its sibling targets. Deliberately upstream paths
+are excluded. If another publisher recorded the result first, the action
+materialises that winner instead of assuming its own proposed footprint won.
+Reuse through a view pins the resolved view revision and exact source result.
+
+Only genuine initial CLI or server non-support uses the legacy path. Provider,
+authentication and stale-selection errors, or lost support after recording a
+selection, fail without rebuilding its members. If a cohort has no early lookup
+candidates, the action probes the first accepted cold target before creating
+capture recovery. Initial old-server non-support preserves the completed legacy
+publication and V3 receipt without rebuilding the cohort.
+
+Interrupted attempts keep exact capture/ensure replay IDs beside the receipt.
+Capture checkpoints also preserve the exact accepted result and member versions
+before the first mutation, so a lost response cannot select a replacement
+generation on recovery. The action keeps a separate private file for each
+capture through later result, root and receipt failures. The action atomically
+writes and syncs the final receipt before completing recorded work or a
+journalled cold build. A fully successful invocation removes local recovery
+state, so the next invocation renews retention as a new event. Recorded sets
+supply no new signing subjects.
+
+Recovery files use private ownership directories to exclude concurrent
+publication writers. A directory left after a crash is not reclaimed
+automatically. If an ownership error reports a lock directory, preserve the
+receipts, journals and capture files. Verify that the original writer is
+inactive before removing only the reported lock directory. Ambiguous unfinished
+capture state from an older journal format fails without selecting fresh
+membership.
 
 ### The four groups in the log
 
@@ -186,7 +226,10 @@ narinfo.
 Cohorts run in parallel, and they often share dependencies. To avoid building
 the same dependency twice, every cohort job adds each path that it publishes to
 one shared retention root for the whole run, called the run root. Its name is
-`<root-prefix>/_cupboard-run/<run-id>`.
+`<root-prefix>/_cupboard-run/<run-id>`. Recorded publication prepares this root
+through an empty upload negotiation and attaches each exact owning result.
+Preparation extends retention without replacing targets accumulated by other
+cohorts. This additive run root is separate from named target-root replacement.
 
 When a cohort needs a dependency that another cohort has already published, the
 cohort downloads the dependency from the cache instead of building it again. The
@@ -220,10 +263,18 @@ they share the same run root as the original attempt.
 ## Where to look when something goes wrong
 
 The `cupboard-publication-<cohort key>` artifact contains the complete JSON
-results from each cohort job, including every publication path. The
+results from each cohort job, including explicit this-run publication paths. The
 `cupboard-publish` workflow uses the artifact `cupboard-publication`. Failed
 jobs upload these results too. Older CLI releases that do not write result files
 skip the artifact.
+
+The actions read both V3 and V4 publication receipts. A V4 receipt can also
+identify complete recorded publication sets without listing their members. Its
+`subjects` remain the paths whose origins this run actually observed; a recorded
+set does not supply attestation subjects. Sets can overlap, so adding their
+`memberCount` values does not give a unique path count. Upload summaries count
+actual uploads, not set members. The attestation reader also accepts V2 build
+receipts.
 
 - The run's summary page has a section for each job. The configure job lists the
   publication settings and the `nix.conf` lines for reading the destination
@@ -241,7 +292,7 @@ skip the artifact.
   and published, and why it refused to build, if it did. For example, it refuses
   when the runner has too little disk for the closure, or when too many paths
   can't be downloaded from any substituter.
-- A cohort job that published nothing writes no receipt and signs nothing.
+- A cohort job with no selected statement subjects signs nothing.
 - To inspect cache read probes, re-run the failed job with debug logging
   enabled. The log reports each probe attempt with its outcome and duration, and
   each retry with its delay. For a retry after a transient HTTP status, the log

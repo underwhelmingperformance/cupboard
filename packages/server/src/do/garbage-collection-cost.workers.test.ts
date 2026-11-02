@@ -266,7 +266,13 @@ async function uploadCount(): Promise<number> {
 }
 
 // The cost of collection passes on a tenant whose caches have all been
-// scanned once.
+// scanned once. Migration 0083 adds 82 sqlite_master rows to trigger validation:
+// 51 original manifest entries, 18 cardinality/proof guards, six availability
+// entries and seven local-identity/lifecycle entries (including both preparation
+// triggers). Empty availability probes read no rows; each lifecycle discovery
+// reads one. A steady full pass makes four lifecycle probes; a deferral makes
+// three and does not validate the catalogue.
+// A marked path also visits the association phase (three reads and one write).
 describe('garbage collection cost', () => {
 	beforeEach(resetTestServer);
 
@@ -277,7 +283,7 @@ describe('garbage collection cost', () => {
 
 			expect(await cronSweepCost()).toStrictEqual({
 				invocations: 1,
-				rowsRead: 288,
+				rowsRead: 390,
 				rowsWritten: 5
 			});
 		}));
@@ -300,8 +306,8 @@ describe('garbage collection cost', () => {
 			const manyDeadlines = await cronSweepCost();
 
 			expect({ fewDeadlines, manyDeadlines }).toStrictEqual({
-				fewDeadlines: { invocations: 1, rowsRead: 292, rowsWritten: 5 },
-				manyDeadlines: { invocations: 1, rowsRead: 292, rowsWritten: 5 }
+				fewDeadlines: { invocations: 1, rowsRead: 394, rowsWritten: 5 },
+				manyDeadlines: { invocations: 1, rowsRead: 394, rowsWritten: 5 }
 			});
 		}));
 
@@ -322,7 +328,7 @@ describe('garbage collection cost', () => {
 
 			expect(await cronSweepCost()).toStrictEqual({
 				invocations: 1,
-				rowsRead: 544,
+				rowsRead: 646,
 				rowsWritten: 5
 			});
 		}));
@@ -343,8 +349,8 @@ describe('garbage collection cost', () => {
 			const twoHundredDeleted = await cronSweepCost();
 
 			expect({ fourDeleted, twoHundredDeleted }).toStrictEqual({
-				fourDeleted: { invocations: 1, rowsRead: 288, rowsWritten: 5 },
-				twoHundredDeleted: { invocations: 1, rowsRead: 288, rowsWritten: 5 }
+				fourDeleted: { invocations: 1, rowsRead: 390, rowsWritten: 5 },
+				twoHundredDeleted: { invocations: 1, rowsRead: 390, rowsWritten: 5 }
 			});
 		}));
 
@@ -365,8 +371,8 @@ describe('garbage collection cost', () => {
 			});
 
 			expect({ idle, waiting: await cronSweepCost() }).toStrictEqual({
-				idle: { invocations: 1, rowsRead: 288, rowsWritten: 5 },
-				waiting: { invocations: 1, rowsRead: 286, rowsWritten: 5 }
+				idle: { invocations: 1, rowsRead: 390, rowsWritten: 5 },
+				waiting: { invocations: 1, rowsRead: 388, rowsWritten: 5 }
 			});
 		}));
 
@@ -384,7 +390,7 @@ describe('garbage collection cost', () => {
 				cost: await cronSweepCost(),
 				deleted: before - (await uploadCount())
 			}).toStrictEqual({
-				cost: { invocations: 1, rowsRead: 406, rowsWritten: 25 },
+				cost: { invocations: 1, rowsRead: 508, rowsWritten: 25 },
 				deleted: 4 * uploadsPerVerdict
 			});
 		}));
@@ -409,14 +415,17 @@ describe('garbage collection cost', () => {
 				deleted: before - (await uploadCount()),
 				continuation: await hasContinuation()
 			}).toStrictEqual({
-				cost: { invocations: 1, rowsRead: 149, rowsWritten: 20 },
+				cost: { invocations: 1, rowsRead: 161, rowsWritten: 20 },
 				deleted: 4 * uploadsPerVerdict,
 				continuation: false
 			});
 		}));
 
 	// The scan of the changed cache ends its invocation, and the next one
-	// skips the remaining caches.
+	// skips the remaining caches. Both invocations validate the catalogue; deleting
+	// the one unreferenced path also preselects its accepted version (two reads).
+	// Its local invalidation writes the clock, version fence and indexed intent;
+	// bounded draining removes the intent, fence and obsolete local identity.
 	it('scans only the cache that changed', async () =>
 		withoutAlarmArming(async () => {
 			const added = syntheticStorePathHash(10_000);
@@ -453,7 +462,7 @@ describe('garbage collection cost', () => {
 			const unchanged = { inputsChanged: false, scanCompletedAt: firstSweepAt };
 
 			expect({ cost, caches }).toStrictEqual({
-				cost: { invocations: 2, rowsRead: 9242, rowsWritten: 2836 },
+				cost: { invocations: 2, rowsRead: 10_508, rowsWritten: 3195 },
 				caches: {
 					isAddedPathKept: false,
 					completions: {

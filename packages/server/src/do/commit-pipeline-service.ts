@@ -60,6 +60,7 @@ import * as schema from '../db/schema.ts';
 import {
 	BlobDeclarationConflictError,
 	NarTooLargeError,
+	PublicationStateChangedError,
 	QuotaExceededError,
 	SubrequestTimeoutError,
 	TenantUsageMissingError,
@@ -103,6 +104,10 @@ import {
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { ProtectedInheritanceService } from './protected-inheritance-service.ts';
+import {
+	isManifestPublicationCompatible,
+	requireManifestPublication
+} from './publication-manifest-restriction.ts';
 import { PublicationStore } from './publication-store.ts';
 import { ReservationCharges } from './reservation-charges.ts';
 import { type RetentionService } from './retention-service.ts';
@@ -516,8 +521,15 @@ export class CommitPipelineService {
 		const reserved = await this.reserveNarInfoRow(
 			cache,
 			metadata,
-			retentionEpoch
+			retentionEpoch,
+			() => {
+				requireManifestPublication(this.context, uploadId, cache, metadata);
+				return true;
+			}
 		);
+		if (reserved === undefined) {
+			throw new PublicationStateChangedError();
+		}
 
 		if (reserved.kind === 'lost') {
 			return this.concedeToWinner(
@@ -672,6 +684,7 @@ export class CommitPipelineService {
 		// it, and apply grace and root retention before releasing the same gate.
 		const read = await this.readReservation(cache, metadata, generation);
 		const confirmed = await this.context.criticalSection(async () => {
+			requireManifestPublication(this.context, uploadId, cache, metadata);
 			const reclaim = await this.releaseReservation({
 				uploadId,
 				cache,
@@ -1480,6 +1493,18 @@ export class CommitPipelineService {
 			)
 			.get();
 
+		if (
+			!isManifestPublicationCompatible(
+				this.context,
+				request.uploadId,
+				cache,
+				metadata,
+				row
+			)
+		) {
+			return { outcome: { kind: 'superseded' } };
+		}
+
 		// Fence on both generation and hash so a recommit cannot attach this edge
 		// to a replacement narinfo row. A planned replacement charges its own
 		// generation while the row that it replaces stays.
@@ -2075,6 +2100,7 @@ export class CommitPipelineService {
 		// bounded number of times, then leave the upload for verification so churn
 		// cannot pin this request indefinitely.
 		for (let attempt = 0; attempt < concedeAttemptLimit; attempt += 1) {
+			requireManifestPublication(this.context, uploadId, cache, metadata);
 			const winner = await this.narInfoObjects.committedNarInfoRow(
 				cache,
 				metadata.storePathHash
@@ -2098,6 +2124,7 @@ export class CommitPipelineService {
 
 			// Apply this upload's retention decision to the winner before deleting
 			// the pending row that stores the decision.
+			requireManifestPublication(this.context, uploadId, cache, metadata);
 			const confirmed = confirmGrace(
 				this.context,
 				this.retention,
@@ -2234,6 +2261,11 @@ export class CommitPipelineService {
 		}
 
 		new PublicationStore(this.context).assertLive(uploadId);
+		const metadata = parseStoredUploadPathMetadata(
+			uploadId,
+			pending.metadataJson
+		);
+		requireManifestPublication(this.context, uploadId, cache, metadata);
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 		const nowIso = isoTimestamp(new Date());
 
@@ -2271,10 +2303,6 @@ export class CommitPipelineService {
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 
-		const metadata = parseStoredUploadPathMetadata(
-			uploadId,
-			pending.metadataJson
-		);
 		const tenant = this.context.requireTenant();
 		const account = advisory?.account ?? (await this.tenantAccount(tenant));
 
@@ -2322,6 +2350,7 @@ export class CommitPipelineService {
 			if (isCommitted && (await this.isServed(cache, existingNarInfo))) {
 				// Apply this upload's retention decision to the winner before
 				// deleting the pending row that stores the decision.
+				requireManifestPublication(this.context, uploadId, cache, metadata);
 				const confirmed = confirmGrace(
 					this.context,
 					this.retention,
@@ -2460,6 +2489,7 @@ export class CommitPipelineService {
 		// Store the saga marker before any reservation or handoff. After a crash,
 		// verification can distinguish this work from an upload still receiving
 		// bytes and resume it.
+		requireManifestPublication(this.context, uploadId, cache, metadata);
 		this.uploadState.markUploadCommitting(uploadId);
 
 		// The initiating session receives the returned commit result. Exclude it
@@ -2503,7 +2533,15 @@ export class CommitPipelineService {
 
 		// Reserve the row before verification so a root can retain it during the
 		// verification window. The verification pass repeats this idempotently.
-		await this.reserveNarInfoRow(cache, metadata, pending.retentionEpoch);
+		await this.reserveNarInfoRow(
+			cache,
+			metadata,
+			pending.retentionEpoch,
+			() => {
+				requireManifestPublication(this.context, uploadId, cache, metadata);
+				return true;
+			}
+		);
 
 		await this.requestVerification(logger, tenant);
 

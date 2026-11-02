@@ -54,7 +54,7 @@ import {
 	PredicateSourceConflictError,
 	PredicateTypeRequiredError
 } from '../errors.ts';
-import type { Environment } from '../inputs.ts';
+import { type Environment, parseLines } from '../inputs.ts';
 import { isEnabled, provided, providedChoice } from '../options.ts';
 import { parseChecksums } from '../release-install.ts';
 import {
@@ -67,7 +67,16 @@ import {
 	statementSignerFor
 } from '../sigstore-signing.ts';
 
-export interface AttestSignOptions {
+import {
+	type AttestationDestination,
+	type AttestationDestinationOptions,
+	type AttestDependencies,
+	receiptCandidates,
+	resolveAttestationDestination,
+	validateDestinationSubjects
+} from './attest.ts';
+
+export interface AttestSignOptions extends AttestationDestinationOptions {
 	readonly receiptFile?: string;
 	readonly inlineBundles?: string;
 	readonly checksumsFile?: string;
@@ -85,7 +94,7 @@ export interface AttestSignOptions {
 	readonly subjectGrouping?: string;
 }
 
-export interface AttestSignInputs {
+export interface AttestSignInputs extends AttestationDestination {
 	readonly receiptFile: string;
 	readonly shouldEmitInlineBundles: boolean;
 	readonly checksumsFile: string;
@@ -112,7 +121,8 @@ export interface AttestSignIo {
 	) => Promise<void>;
 }
 
-export interface AttestSignDependencies extends SigningDependencies {
+export interface AttestSignDependencies
+	extends SigningDependencies, AttestDependencies {
 	/**
 	Defaults to {@link statementSignerFor}.
 	*/
@@ -130,6 +140,7 @@ export interface AttestSignDependencies extends SigningDependencies {
 }
 
 const predicateDocumentSchema = z.looseObject({});
+type PredicateDocument = z.infer<typeof predicateDocumentSchema>;
 const maximumGithubAttestationSubjects = 1024;
 // Base64 expands the statement payload, and the certificate and witnesses add
 // bytes. Check the signed bundle below because witness sizes can vary.
@@ -153,6 +164,19 @@ export function registerAttestSignCommand(
 		.requiredOption(
 			'--built-checksums-file <path>',
 			'Read the subjects this run built from this checksums file. The build-provenance statements cover them.'
+		)
+		.requiredOption(
+			'--url <url>',
+			'Destination tenant URL. Validate actual statement subjects before signing.'
+		)
+		.option('--cache <name>', 'Named destination cache.')
+		.option(
+			'--read-user <user>',
+			'Username for destination-cache reads. Requires --read-password.'
+		)
+		.option(
+			'--read-password <password>',
+			'Password for destination-cache reads. Defaults to READ_PASSWORD; prefer the environment to avoid exposing credentials in argv.'
 		)
 		.option(
 			'--receipt-file <path>',
@@ -212,7 +236,8 @@ export function registerAttestSignCommand(
 }
 
 export function resolveAttestSignInputs(
-	options: AttestSignOptions
+	options: AttestSignOptions,
+	environment: Environment = env
 ): AttestSignInputs {
 	const checksumsFile = provided(options.checksumsFile);
 
@@ -254,6 +279,7 @@ export function resolveAttestSignInputs(
 	);
 
 	return {
+		...resolveAttestationDestination(options, environment),
 		receiptFile,
 		shouldEmitInlineBundles,
 		checksumsFile,
@@ -310,7 +336,11 @@ async function readSubjects(
 	checksumsFile: string,
 	io: AttestSignIo
 ): Promise<readonly AttestationSubject[]> {
-	const checksums = parseChecksums(await io.readText(checksumsFile));
+	const source = await io.readText(checksumsFile);
+	const checksums = parseChecksums(source);
+	if (parseLines(source).length !== checksums.size) {
+		throw new AttestationSubjectNotAcceptedError(checksums.keys().toArray());
+	}
 
 	return [...checksums].map(([name, sha256]) => ({ name, sha256 }));
 }
@@ -318,7 +348,7 @@ async function readSubjects(
 async function readPredicate(
 	predicateFile: string,
 	io: AttestSignIo
-): Promise<object> {
+): Promise<PredicateDocument> {
 	const source = await io.readText(predicateFile);
 	let document: unknown;
 
@@ -361,27 +391,42 @@ export async function attestSignAction(
 	reporter: Reporter = createGithubReporter(),
 	dependencies: AttestSignDependencies = {}
 ): Promise<void> {
-	const inputs = resolveAttestSignInputs({
-		...options,
-		githubToken:
-			options.githubToken ?? (dependencies.environment ?? env).GH_TOKEN
-	});
+	const environment = dependencies.environment ?? env;
+	const inputs = resolveAttestSignInputs(
+		{
+			...options,
+			githubToken: options.githubToken ?? environment.GH_TOKEN
+		},
+		environment
+	);
 	const io = dependencies.io ?? nodeAttestSignIo;
 	const subjects = await readSubjects(inputs.checksumsFile, io);
 
-	if (subjects.length === 0) {
-		throw new AttestationSubjectsMissingError(inputs.checksumsFile);
-	}
-
 	const builtSubjects = await readSubjects(inputs.builtChecksumsFile, io);
 	requireAcceptedSubjects(builtSubjects, subjects);
+	const receipt =
+		inputs.receiptFile === ''
+			? undefined
+			: buildReceiptSchema.parse(
+					JSON.parse(await io.readText(inputs.receiptFile))
+				);
+	if (receipt !== undefined) {
+		const candidates = receiptCandidates(receipt);
+		const asSubjects = (digests: typeof candidates.subjects) =>
+			digests.map((subject) => ({
+				name: path.basename(subject.storePath),
+				sha256: subject.sha256
+			}));
+		requireAcceptedSubjects(subjects, asSubjects(candidates.subjects));
+		requireAcceptedSubjects(builtSubjects, asSubjects(candidates.built));
+	}
 	const signerFor = dependencies.signerFor ?? statementSignerFor;
 	const provenanceStatement =
 		dependencies.provenanceStatement ?? slsaProvenanceStatement;
 	const signing: SigningDependencies =
 		dependencies.delay === undefined ? {} : { delay: dependencies.delay };
 	const setOutput = dependencies.setOutput ?? setGithubOutput;
-	const custom = await resolveCustomStatement(inputs, io, subjects);
+	const custom = await resolveCustomStatement(inputs, io, subjects, receipt);
 	const signedSubjects =
 		custom === undefined
 			? builtSubjects
@@ -389,6 +434,14 @@ export async function attestSignAction(
 					...builtSubjects.map((subject) => subject.name),
 					...custom.subjects.map((subject) => subject.name)
 				]);
+
+	await validateDestinationSubjects(
+		signedSubjects,
+		inputs,
+		dependencies,
+		reporter,
+		receipt
+	);
 
 	const provenanceBundles =
 		builtSubjects.length === 0
@@ -505,7 +558,7 @@ function runStatement(statement: AttestationStatement): StatementFor {
 
 function customStatementFor(
 	inputs: AttestSignInputs,
-	predicate: object,
+	predicate: PredicateDocument,
 	subjects: readonly AttestationSubject[]
 ): CustomStatement {
 	if (inputs.predicateType === scaiPredicateType) {
@@ -518,15 +571,11 @@ function customStatementFor(
 async function resolveCustomStatement(
 	inputs: AttestSignInputs,
 	io: AttestSignIo,
-	subjects: readonly AttestationSubject[]
+	subjects: readonly AttestationSubject[],
+	receipt?: BuildReceipt
 ): Promise<CustomStatement | undefined> {
-	if (inputs.receiptFile !== '') {
-		const source = await io.readText(inputs.receiptFile);
-		const document: unknown = JSON.parse(source);
-		return reproductionStatementFor(
-			buildReceiptSchema.parse(document),
-			subjects
-		);
+	if (receipt !== undefined) {
+		return reproductionStatementFor(receipt, subjects);
 	}
 
 	if (inputs.predicateFile === '') {
@@ -538,7 +587,7 @@ async function resolveCustomStatement(
 
 function scaiStatementFor(
 	inputs: AttestSignInputs,
-	predicate: object,
+	predicate: PredicateDocument,
 	subjects: readonly AttestationSubject[]
 ): CustomStatement {
 	const report = scaiAttributeReportSchema.parse(predicate);
@@ -610,7 +659,7 @@ function reproductionStatementFor(
 
 function originStatementFor(
 	inputs: AttestSignInputs,
-	predicate: object,
+	predicate: PredicateDocument,
 	subjects: readonly AttestationSubject[]
 ): CustomStatement {
 	if (inputs.policy.grouping === 'run') {

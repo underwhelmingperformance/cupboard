@@ -59,6 +59,15 @@ export class PublicationConflictError extends ServerHttpError {
 	}
 }
 
+export class ConfirmationAvailabilityChangedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+	constructor() {
+		super('Path availability changed during confirmation. Retry the request.');
+		this.name = 'ConfirmationAvailabilityChangedError';
+	}
+}
+
 export class CommitSessionGrantsUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor(public override readonly cause: unknown) {

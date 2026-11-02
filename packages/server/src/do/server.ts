@@ -19,7 +19,15 @@ import {
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type LocalStep } from '@cupboard/protocol/deployment';
 import { isCoveredByToken } from '@cupboard/protocol/grants';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { publicationIdentity } from '@cupboard/protocol/publication';
+import {
+	type PublicationEnsureRequest,
+	publicationManifestMaxRequestBytes,
+	publicationManifestsCapability,
+	type PublicationOperationId,
+	type PublicationStatusRequest
+} from '@cupboard/protocol/publication-manifests';
 import type {
 	R2CredentialCheck,
 	VerifyReportInput
@@ -28,7 +36,7 @@ import {
 	type ReuseViewName,
 	reuseViewNameSchema
 } from '@cupboard/protocol/reuse-views';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type CommitBatchEntry,
 	type CommitBlobDeclaration,
@@ -49,6 +57,9 @@ import {
 	sessionIdSchema,
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
+	uploadConfirmPresentCapability,
+	uploadConfirmPresentMaxPaths,
+	uploadConfirmPresentMaxRequestBytes,
 	uploadGraceFactsCapability,
 	type UploadId,
 	uploadIdSchema,
@@ -201,6 +212,8 @@ import {
 } from './commit-pipeline-service.ts';
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
+import { ConfirmationService } from './confirmation-service.ts';
+import { ConfirmationStore } from './confirmation-store.ts';
 import {
 	type GarbageCollectionOutcome,
 	type GarbageCollectionTarget,
@@ -248,6 +261,12 @@ import {
 	withOperationCost
 } from './operation-cost.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
+import { PublicationManifestAvailabilityStore } from './publication-manifest-availability-store.ts';
+import { PublicationManifestCaptureService } from './publication-manifest-capture.ts';
+import { PublicationManifestCleanup } from './publication-manifest-cleanup.ts';
+import { PublicationManifestEnsureService } from './publication-manifest-ensure.ts';
+import { ProductionPublicationManifestPublisher } from './publication-manifest-production.ts';
+import { PublicationManifestRepository } from './publication-manifest-repository.ts';
 import { publicationFailure, PublicationStore } from './publication-store.ts';
 import { isTransientR2Error } from './r2-read.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
@@ -267,6 +286,7 @@ import { RootsService } from './roots-service.ts';
 import { enterRowBudgetOnDispatch } from './row-budget.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { StatsService } from './stats-service.ts';
+import { hasSubrequestsFor } from './subrequest-slice.ts';
 import { enterSubrequestSliceOnDispatch } from './subrequest-slice.ts';
 import {
 	type TenantIdentity,
@@ -549,6 +569,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly tokenExchange: TokenExchangeService;
 	private readonly refreshSessions: RefreshSessionsService;
 	private readonly uploads: UploadsService;
+	private readonly confirmation: ConfirmationService;
+	private readonly manifestCapture: PublicationManifestCaptureService;
+	private readonly manifestEnsure: PublicationManifestEnsureService;
+	private readonly manifestRepository: PublicationManifestRepository;
 	private readonly commitPipeline: CommitPipelineService;
 	private readonly verification: VerificationService;
 	private readonly roots: RootsService;
@@ -622,6 +646,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.retention,
 			this.narInfoObjects
 		);
+		this.confirmation = new ConfirmationService(
+			this.context,
+			this.narInfoObjects,
+			this.retention,
+			this.roots
+		);
 		this.commitPipeline = new CommitPipelineService(
 			this.context,
 			this.signingKeys,
@@ -641,6 +671,70 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.roots,
 			this.commitPipeline
 		);
+		this.manifestCapture = new PublicationManifestCaptureService(this.context);
+		this.manifestRepository = new PublicationManifestRepository(this.context);
+		this.manifestEnsure = new PublicationManifestEnsureService(
+			this.context,
+			new ProductionPublicationManifestPublisher(this.context, {
+				admit: (scope, pushId, entry, grants, expiresAt, manifestOperationId) =>
+					this.admitPublicationEntry(
+						{ attachment: { cache: scope }, pushId, entry, grants },
+						expiresAt,
+						manifestOperationId
+					),
+				publish: async (
+					scope,
+					pushId,
+					entry,
+					grants,
+					expiresAt,
+					manifestOperationId
+				) => {
+					const admission = await this.admitPublicationEntry(
+						{ attachment: { cache: scope }, pushId, entry, grants },
+						expiresAt,
+						manifestOperationId
+					);
+					if (admission.kind === 'needs-upload') {
+						throw new PublicationStateChangedError();
+					}
+					if (admission.kind !== 'pending') {
+						return;
+					}
+					await this.commitPublicationWithRecovery(
+						{
+							cache: admission.cache,
+							uploadId: entry.operationId,
+							authority: this.reuseLookup.reuseAuthority(scope, grants)
+						},
+						async () => {
+							const { state, facts } = await this.readPublicationReplay(
+								scope,
+								pushId,
+								entry
+							);
+							const operation = state.operation;
+							if (operation?.state === 'failed') {
+								throw new PublicationConflictError(
+									'The publication failed. Start a fresh push.'
+								);
+							}
+							if (operation?.state === 'expired') {
+								throw new PublicationRecoveryExpiredError();
+							}
+							if (
+								operation?.state !== 'servable' ||
+								facts.kind !== 'served' ||
+								facts.frame?.ev !== 'settled'
+							) {
+								throw new PublicationStateChangedError();
+							}
+						}
+					);
+				}
+			})
+		);
+
 		this.verification = new VerificationService(
 			this.context,
 			this.commitPipeline,
@@ -706,13 +800,23 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const pathname = new URL(context.req.url).pathname;
 			const isUploadGraceEndpoint =
 				context.req.method === 'POST' && uploadGracePathPattern.test(pathname);
+			const isConfirmationEndpoint =
+				context.req.method === 'POST' &&
+				/^(?:\/cache\/[^/]+)?\/uploads\/confirm-present$/u.test(pathname);
 			const authenticate = authenticateOnce(() =>
 				this.authKeys.authenticate(context.req.raw)
 			);
 			const contract = new ContractRequest(
 				context.req.raw,
 				authenticate,
-				isUploadGraceEndpoint ? uploadRequestMaxBytes : contractRequestMaxBytes
+				/^(?:\/cache\/[^/]+)?\/publication-results(?:\/|$)/u.test(pathname)
+					? publicationManifestMaxRequestBytes
+					: isConfirmationEndpoint
+						? uploadConfirmPresentMaxRequestBytes
+						: isUploadGraceEndpoint
+							? uploadRequestMaxBytes
+							: contractRequestMaxBytes,
+				isConfirmationEndpoint ? uploadConfirmPresentMaxPaths : undefined
 			);
 			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
 				contract.request,
@@ -752,10 +856,38 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				}
 
 				if (
+					response.ok &&
 					pathname.endsWith('/uploads/credential') &&
-					hasAcceptedCapability(context.req.raw, publicationCapability)
+					(hasAcceptedCapability(
+						context.req.raw,
+						publicationManifestsCapability
+					) ||
+						hasAcceptedCapability(context.req.raw, publicationCapability) ||
+						hasAcceptedCapability(
+							context.req.raw,
+							uploadConfirmPresentCapability
+						))
 				) {
-					response.headers.set(uploadCapabilitiesHeader, publicationCapability);
+					response.headers.set(
+						uploadCapabilitiesHeader,
+						[
+							...(hasAcceptedCapability(
+								context.req.raw,
+								publicationManifestsCapability
+							)
+								? [publicationManifestsCapability]
+								: []),
+							...(hasAcceptedCapability(context.req.raw, publicationCapability)
+								? [publicationCapability]
+								: []),
+							...(hasAcceptedCapability(
+								context.req.raw,
+								uploadConfirmPresentCapability
+							)
+								? [uploadConfirmPresentCapability]
+								: [])
+						].join(',')
+					);
 				}
 				return response;
 			}
@@ -1228,13 +1360,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		// Advertise optional operations on the upgrade response. The credit token
 		// includes the opening grant so a negotiated client can commit immediately.
+		const capabilities = hasNegotiatedCredit
+			? commitCapabilitiesValueWithCredit(openingGrant)
+			: commitCapabilitiesValue;
 		return new Response(undefined, {
 			status: StatusCodes.SWITCHING_PROTOCOLS,
 			webSocket: client,
 			headers: {
-				[commitCapabilitiesHeader]: hasNegotiatedCredit
-					? commitCapabilitiesValueWithCredit(openingGrant)
-					: commitCapabilitiesValue
+				[commitCapabilitiesHeader]: hasAcceptedCapability(
+					request,
+					uploadConfirmPresentCapability
+				)
+					? `${capabilities},${uploadConfirmPresentCapability}`
+					: capabilities
 			}
 		});
 	}
@@ -1583,13 +1721,26 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// admission runs. Admission then refuses the entry, and running it again
 	// reads the path again, so the server retries before the client sees the
 	// refusal.
-	private async admitPublicationEntry(command: PublicationCommand) {
+	private async admitPublicationEntry(
+		command: Pick<PublicationCommand, 'pushId' | 'entry' | 'grants'> & {
+			readonly attachment: Pick<CommitSessionAttachment, 'cache'>;
+		},
+		expiresAt?: IsoTimestamp,
+		manifestOperationId?: PublicationOperationId
+	) {
 		const { attachment, pushId, entry, grants } = command;
 		const scope = attachment.cache;
 		for (let attempt = 1; ; attempt += 1) {
 			try {
 				return await this.afterHotMutation(scope, () =>
-					this.uploads.admitPublication(scope, pushId, entry, grants)
+					this.uploads.admitPublication(
+						scope,
+						pushId,
+						entry,
+						grants,
+						expiresAt,
+						manifestOperationId
+					)
 				);
 			} catch (error) {
 				if (
@@ -1722,32 +1873,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					'parameters-changed'
 				);
 			}
-			for (let read = 0; read < maxPublicationReplayReads; read += 1) {
-				const before = this.publicationReplayState(scope, entry);
-				const facts = await this.publicationReplayFacts(
-					scope,
-					pushId,
-					entry,
-					before
-				);
-				const after = this.publicationReplayState(scope, entry);
-				if (
-					facts.kind !== 'changed' &&
-					replayStateKey(before) === replayStateKey(after)
-				) {
-					return this.answerPublication({
-						socket,
-						attachment,
-						pushId,
-						entry,
-						canonical: identity.canonical,
-						state: after,
-						facts,
-						operationKind
-					});
-				}
-			}
-			throw new PublicationStateChangedError();
+			const { state, facts } = await this.readPublicationReplay(
+				scope,
+				pushId,
+				entry
+			);
+			return this.answerPublication({
+				socket,
+				attachment,
+				pushId,
+				entry,
+				canonical: identity.canonical,
+				state,
+				facts,
+				operationKind
+			});
 		} catch (error) {
 			refusePublication(
 				socket,
@@ -1758,6 +1898,32 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 			return undefined;
 		}
+	}
+
+	// Both socket answers and headless commit-race recovery read the same
+	// authoritative facts and fence every await against durable state changes.
+	private async readPublicationReplay(
+		scope: CacheScope,
+		pushId: PushId,
+		entry: PublicationEntry
+	): Promise<{ state: PublicationReplayState; facts: PublicationReplayFacts }> {
+		for (let read = 0; read < maxPublicationReplayReads; read += 1) {
+			const before = this.publicationReplayState(scope, entry);
+			const facts = await this.publicationReplayFacts(
+				scope,
+				pushId,
+				entry,
+				before
+			);
+			const after = this.publicationReplayState(scope, entry);
+			if (
+				facts.kind !== 'changed' &&
+				replayStateKey(before) === replayStateKey(after)
+			) {
+				return { state: after, facts };
+			}
+		}
+		throw new PublicationStateChangedError();
 	}
 
 	private publicationReplayState(
@@ -2006,6 +2172,49 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return undefined;
 	}
 
+	private async commitPublicationWithRecovery(
+		command: Parameters<CupboardServer['commitPublication']>[0],
+		answerFromState?: () => Promise<void>
+	): Promise<
+		Awaited<ReturnType<CupboardServer['commitPublication']>> | undefined
+	> {
+		try {
+			return await this.commitPublication(command);
+		} catch (error) {
+			if (
+				answerFromState !== undefined &&
+				(this.isConcludedPublication(command.uploadId) ||
+					error instanceof UploadNotFoundError)
+			) {
+				await answerFromState();
+				return;
+			}
+			throw error;
+		}
+	}
+
+	// Both socket and headless manifest publications use this normal commit step.
+	private commitPublication(
+		command: Pick<
+			SessionCommit,
+			'cache' | 'uploadId' | 'authority' | 'advisory' | 'blob'
+		>
+	) {
+		const { cache, uploadId, authority, advisory, blob } = command;
+		return this.metered('commit', (logger) =>
+			this.afterHotMutation(cache.scope, () =>
+				this.commitPipeline.commit(
+					logger,
+					cache,
+					uploadId,
+					authority,
+					advisory,
+					blob
+				)
+			)
+		);
+	}
+
 	// Fail only the affected upload and keep the session open for other entries.
 	// An identity-bearing retry can resolve a missing pending row against the
 	// current committed narinfo generation.
@@ -2027,18 +2236,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// before this returns still routes here.
 			this.uploadState.attachSession(uploadId, sessionId);
 
-			const outcome = await this.metered('commit', (logger) =>
-				this.afterHotMutation(cache.scope, () =>
-					this.commitPipeline.commit(
-						logger,
-						cache,
-						uploadId,
-						authority,
-						advisory,
-						blob
-					)
-				)
+			const outcome = await this.commitPublicationWithRecovery(
+				{
+					cache,
+					uploadId,
+					authority,
+					advisory,
+					blob
+				},
+				answerFromState
 			);
+			if (outcome === undefined) {
+				return;
+			}
 
 			if (outcome.kind === 'settled') {
 				sendCommitSessionFrame(socket, {
@@ -2059,19 +2269,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				...(outcome.grace !== undefined && { grace: outcome.grace })
 			});
 		} catch (error) {
-			// The commit can find that the operation failed, expired or passed its
-			// recovery deadline after admission accepted it. It can also find the
-			// pending row gone, because verification completed the operation or a
-			// pass cleared the row. The replay reads the record again and answers
-			// from it.
-			if (
-				answerFromState !== undefined &&
-				(this.isConcludedPublication(uploadId) ||
-					error instanceof UploadNotFoundError)
-			) {
-				await answerFromState();
-				return;
-			}
 			if (error instanceof PublicationRecoveryExpiredError) {
 				sendCommitSessionFrame(socket, {
 					ev: 'publication-refused',
@@ -2336,6 +2533,66 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	private async ensureManifest(
+		scope: CacheScope,
+		grants: AuthorizationDetails,
+		request: PublicationEnsureRequest
+	) {
+		let response = await this.manifestEnsure.ensure(scope, grants, request);
+		for (let step = 1; step < 64 && response.kind === 'pending'; step += 1) {
+			// Keep a conservative full admission/replay/commit and servability unit
+			// inside the existing invocation slice, including publication retries.
+			if (!hasSubrequestsFor(128)) {
+				break;
+			}
+			const table = schema.publicationManifestOperations;
+			const before = this.context.db
+				.select({
+					phase: table.phase,
+					cursor: table.cursor,
+					progress: table.progressJson
+				})
+				.from(table)
+				.where(eq(table.id, response.operationId))
+				.get();
+			response = await this.manifestEnsure.continue(scope, grants, {
+				operationId: response.operationId
+			});
+			if (response.kind !== 'pending') {
+				break;
+			}
+			const after = this.context.db
+				.select({
+					phase: table.phase,
+					cursor: table.cursor,
+					progress: table.progressJson
+				})
+				.from(table)
+				.where(eq(table.id, response.operationId))
+				.get();
+			if (JSON.stringify(before) === JSON.stringify(after)) {
+				break;
+			}
+		}
+		return response;
+	}
+
+	private manifestStatus(
+		scope: CacheScope,
+		grants: AuthorizationDetails,
+		request: PublicationStatusRequest
+	) {
+		const table = schema.publicationManifestOperations;
+		const operation = this.context.db
+			.select({ kind: table.kind })
+			.from(table)
+			.where(eq(table.id, request.operationId))
+			.get();
+		return operation?.kind === 'ensure'
+			? this.manifestEnsure.status(scope, grants, request)
+			: this.manifestCapture.captureStatus(scope, grants, request);
+	}
+
 	private rpcServices(): TenantRpcServices {
 		return {
 			pendingCache: (id) => this.pendingCache(id),
@@ -2362,6 +2619,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			runGarbageCollection: (logger, cache, purgeOrigin) =>
 				this.collectGarbageInteractive(logger, cache, purgeOrigin),
 			uploads: this.uploads,
+			confirmation: this.confirmation,
+			manifestCapture: this.manifestCapture,
+			manifestRepository: this.manifestRepository,
+			ensureManifest: (scope, grants, request) =>
+				this.ensureManifest(scope, grants, request),
+			manifestStatus: (scope, grants, request) =>
+				this.manifestStatus(scope, grants, request),
 			attestations: this.attestations,
 			runVerification: (logger, purgeOrigin, limit) =>
 				this.verifyInteractive(logger, purgeOrigin, limit)
@@ -3364,7 +3628,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					if (await this.hasGarbageCollectionContinuation()) {
 						return now;
 					}
+					const cleanup = new PublicationManifestCleanup(this.context.db);
+					if (cleanup.hasWork(isoTimestamp(new Date(now)))) {
+						return now;
+					}
+					const manifestAt = cleanup.nextWake();
 					const times = [
+						...(manifestAt === undefined ? [] : [Date.parse(manifestAt)]),
 						await this.deletionQueue.deferralWakeAt(),
 						this.deletionQueue.replacementCleanupDueAt()
 					].filter((time) => time !== undefined);
@@ -3385,15 +3655,32 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'read-authority-demotion',
-				workAt: readyWhen(() =>
-					new PathReadAuthorityService(this.context).hasPending()
+				workAt: readyWhen(
+					async () =>
+						new PublicationManifestAvailabilityStore(
+							this.context.db
+						).nextIntent(true) !== undefined ||
+						(await new PathReadAuthorityService(this.context).hasPending())
 				),
 				run: () =>
 					this.metered('read-authority-demotion', () =>
 						this.withMaintenanceEligibility('continuation', () =>
-							this.context.criticalSection(() =>
-								new PathReadAuthorityService(this.context).drain()
-							)
+							this.context.criticalSection(async () => {
+								const intent = new PublicationManifestAvailabilityStore(
+									this.context.db
+								).nextIntent(true);
+								if (intent !== undefined) {
+									if (intent.kind === 'demote') {
+										await this.narInfoObjects.recoverAvailability(intent);
+									} else {
+										await new PathReadAuthorityService(
+											this.context
+										).recoverAvailability(intent);
+									}
+									return 'progressed';
+								}
+								return new PathReadAuthorityService(this.context).drain();
+							})
 						)
 					)
 			},
@@ -4105,6 +4392,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.uploadState.sessionsAwaitingVerdict()
 		);
 		await this.verification.expirePublications(rootLogger());
+		const confirmations = new ConfirmationStore(this.context);
+		confirmations.prune();
+		await confirmations.armAlarm();
 		await this.clearClosedSessionReuseGrants();
 		await new CommitReuseGrantsService(this.ctx.storage).cleanupExpired(now);
 		await this.armCommitSocketClose();

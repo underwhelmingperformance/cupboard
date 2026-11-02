@@ -37,6 +37,7 @@ import {
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
+import { sha256Hex } from '../crypto/crypto.ts';
 import {
 	cacheScopeFromRow,
 	cacheSelectorsCondition,
@@ -88,6 +89,68 @@ with the batch.
 export const reuseViewProbeD1CallsPerChunk = 3;
 
 type CandidateRow = typeof schema.narInfos.$inferSelect;
+
+type ArbitrationCandidate = Readonly<
+	Pick<CandidateRow, 'cacheId' | 'storePathHash' | 'generation' | 'narHash'> & {
+		readonly semanticDigest: string;
+	}
+>;
+
+/**
+Thin identity and semantic evidence from only the usable candidates of one arbitration.
+*/
+export interface ReuseViewArbitrationSnapshot {
+	readonly view: ReuseViewName;
+	readonly revision: ReuseViewRevision;
+	readonly access: CacheAccessMode;
+	readonly candidates: readonly ArbitrationCandidate[];
+}
+
+export type ReuseViewArbitrationResult =
+	| {
+			readonly kind: 'ready';
+			readonly narInfo: NarInfo;
+			readonly arbitration: ReuseViewArbitrationSnapshot;
+	  }
+	| { readonly kind: 'changed' }
+	| undefined;
+
+type SemanticCandidate = Pick<
+	CandidateRow,
+	| 'storePathHash'
+	| 'storePath'
+	| 'narHash'
+	| 'narSize'
+	| 'referencesJson'
+	| 'deriver'
+	| 'ca'
+>;
+
+// Keep agreement and the retained fence on the same canonical semantics. A digest
+// avoids retaining reference/signature/blob payloads across publication targets.
+function candidateSemanticKey(candidate: SemanticCandidate): string {
+	return JSON.stringify([
+		candidate.storePath,
+		candidate.narHash,
+		candidate.narSize,
+		[
+			...parseStored(
+				storedReferencesSchema,
+				candidate.referencesJson,
+				(cause) =>
+					new StoredReferencesInvalidError(candidate.storePathHash, cause)
+			)
+		].toSorted(byCodeUnit),
+		candidate.deriver,
+		candidate.ca
+	]);
+}
+
+async function candidateSemanticDigest(
+	candidate: SemanticCandidate
+): Promise<string> {
+	return sha256Hex(candidateSemanticKey(candidate));
+}
 
 interface GateSnapshot {
 	readonly tenant: TenantId;
@@ -485,7 +548,9 @@ export class ReuseViewLookupService {
 		return bytes;
 	}
 
-	private candidateRowFilter(candidate: CandidateRow): SQL | undefined {
+	private candidateRowFilter(
+		candidate: Pick<CandidateRow, 'cacheId' | 'storePathHash'>
+	): SQL | undefined {
 		return and(
 			eq(schema.narInfos.cacheId, candidate.cacheId),
 			eq(schema.narInfos.storePathHash, candidate.storePathHash)
@@ -813,60 +878,27 @@ export class ReuseViewLookupService {
 		};
 	}
 
-	// Revalidate the view revision and each surviving candidate under the input
-	// gate. A concurrent view edit, recommit, or deletion then produces a miss
-	// instead of serving a stale generation. Do not recheck candidates already
-	// rejected off-gate: churn in an unusable row must not create a negative Nix
-	// cache entry. Revision numbers also survive deletion, so recreating a view
-	// cannot match a revision captured before deletion.
-	private revalidateSnapshot(
+	private async arbitrationSnapshot(
 		snapshot: GateSnapshot,
 		view: ReuseViewName,
 		verified: VerifiedCandidates
-	): VerifiedCandidates | undefined {
-		const viewRow = this.context.db
-			.select({
-				access: schema.reuseViews.access,
-				revision: schema.reuseViews.revision
-			})
-			.from(schema.reuseViews)
-			.where(eq(schema.reuseViews.name, view))
-			.get();
-
-		if (
-			viewRow?.revision !== snapshot.revision ||
-			viewRow.access !== snapshot.access
-		) {
-			return undefined;
-		}
-
+	): Promise<ReuseViewArbitrationSnapshot> {
+		const candidates: ArbitrationCandidate[] = [];
 		for (const candidate of verified.candidates) {
-			const current = this.context.db
-				.select({
-					access: schema.cacheIdentities.access,
-					deletedAt: schema.cacheIdentities.deletedAt,
-					generation: schema.narInfos.generation,
-					narHash: schema.narInfos.narHash
-				})
-				.from(schema.narInfos)
-				.innerJoin(
-					schema.cacheIdentities,
-					eq(schema.cacheIdentities.id, schema.narInfos.cacheId)
-				)
-				.where(this.candidateRowFilter(candidate))
-				.get();
-
-			if (
-				current?.access !== snapshot.access ||
-				current.deletedAt !== null ||
-				current.generation !== candidate.generation ||
-				current.narHash !== candidate.narHash
-			) {
-				return undefined;
-			}
+			candidates.push({
+				cacheId: candidate.cacheId,
+				storePathHash: candidate.storePathHash,
+				generation: candidate.generation,
+				narHash: candidate.narHash,
+				semanticDigest: await candidateSemanticDigest(candidate)
+			});
 		}
-
-		return verified;
+		return {
+			view,
+			revision: snapshot.revision,
+			access: snapshot.access,
+			candidates
+		};
 	}
 
 	private revalidateCandidates(
@@ -950,25 +982,8 @@ export class ReuseViewLookupService {
 			return false;
 		}
 
-		const referencesFault = (cause: Error): StoredReferencesInvalidError =>
-			new StoredReferencesInvalidError(storePathHash, cause);
 		const semanticKeys = new Set(
-			candidates.map((candidate) =>
-				JSON.stringify([
-					candidate.storePath,
-					candidate.narHash,
-					candidate.narSize,
-					[
-						...parseStored(
-							storedReferencesSchema,
-							candidate.referencesJson,
-							referencesFault
-						)
-					].toSorted(byCodeUnit),
-					candidate.deriver,
-					candidate.ca
-				])
-			)
+			candidates.map((candidate) => candidateSemanticKey(candidate))
 		);
 
 		if (semanticKeys.size > 1) {
@@ -1132,6 +1147,67 @@ export class ReuseViewLookupService {
 		return new ReuseAuthority({ destination, grants, views });
 	}
 
+	// Revalidate the view revision and each surviving candidate under the input
+	// gate. A concurrent view edit, recommit, or deletion then produces a miss
+	// instead of serving a stale generation. Do not recheck candidates already
+	// rejected off-gate: churn in an unusable row must not create a negative Nix
+	// cache entry. Revision numbers also survive deletion, so recreating a view
+	// cannot match a revision captured before deletion.
+	async revalidateArbitration(
+		snapshot: ReuseViewArbitrationSnapshot
+	): Promise<boolean> {
+		const viewRow = this.context.db
+			.select({
+				access: schema.reuseViews.access,
+				revision: schema.reuseViews.revision
+			})
+			.from(schema.reuseViews)
+			.where(eq(schema.reuseViews.name, snapshot.view))
+			.get();
+
+		if (
+			viewRow?.revision !== snapshot.revision ||
+			viewRow.access !== snapshot.access
+		) {
+			return false;
+		}
+
+		for (const candidate of snapshot.candidates) {
+			const current = this.context.db
+				.select({
+					access: schema.cacheIdentities.access,
+					deletedAt: schema.cacheIdentities.deletedAt,
+					generation: schema.narInfos.generation,
+					narHash: schema.narInfos.narHash,
+					storePathHash: schema.narInfos.storePathHash,
+					storePath: schema.narInfos.storePath,
+					narSize: schema.narInfos.narSize,
+					referencesJson: schema.narInfos.referencesJson,
+					deriver: schema.narInfos.deriver,
+					ca: schema.narInfos.ca
+				})
+				.from(schema.narInfos)
+				.innerJoin(
+					schema.cacheIdentities,
+					eq(schema.cacheIdentities.id, schema.narInfos.cacheId)
+				)
+				.where(this.candidateRowFilter(candidate))
+				.get();
+
+			if (
+				current?.access !== snapshot.access ||
+				current.deletedAt !== null ||
+				current.generation !== candidate.generation ||
+				current.narHash !== candidate.narHash ||
+				(await candidateSemanticDigest(current)) !== candidate.semanticDigest
+			) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	/**
 	Returns a virtual narinfo when every usable source agrees on the path.
 	Unknown views, absent or conflicting candidates, a path with more
@@ -1145,6 +1221,24 @@ export class ReuseViewLookupService {
 		access: CacheAccessMode,
 		storePathHash: StorePathHash
 	): Promise<NarInfo | undefined> {
+		const arbitrated = await this.lookupWithArbitration(
+			logger,
+			view,
+			access,
+			storePathHash
+		);
+		return arbitrated?.kind === 'ready' ? arbitrated.narInfo : undefined;
+	}
+
+	/**
+	Internal recorded lookup: distinguish a changed original usable fence from a miss.
+	*/
+	async lookupWithArbitration(
+		logger: Logger,
+		view: ReuseViewName,
+		access: CacheAccessMode,
+		storePathHash: StorePathHash
+	): Promise<ReuseViewArbitrationResult> {
 		const snapshot = await this.context.criticalSection(() =>
 			Promise.resolve(this.snapshotCandidates(view, access, storePathHash))
 		);
@@ -1154,15 +1248,26 @@ export class ReuseViewLookupService {
 		}
 
 		const verified = await this.verifyOffGate(logger, view, snapshot);
-		const settled = await this.context.criticalSection(() =>
-			Promise.resolve(this.revalidateSnapshot(snapshot, view, verified))
+		const arbitration = await this.arbitrationSnapshot(
+			snapshot,
+			view,
+			verified
 		);
-
-		if (settled === undefined) {
-			return undefined;
+		const isCurrent = await this.context.criticalSection(() =>
+			this.revalidateArbitration(arbitration)
+		);
+		if (!isCurrent) {
+			return { kind: 'changed' };
 		}
-
-		return this.renderSingleCandidate(logger, view, storePathHash, settled);
+		const narInfo = this.renderSingleCandidate(
+			logger,
+			view,
+			storePathHash,
+			verified
+		);
+		return narInfo === undefined
+			? undefined
+			: { kind: 'ready', narInfo, arbitration };
 	}
 
 	/**

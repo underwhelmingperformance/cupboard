@@ -92,7 +92,7 @@ import {
 	recordingGithubReporter
 } from '../reporter-testing.ts';
 
-import { provenancedSubjects } from './attest.ts';
+import { receiptCandidates } from './attest.ts';
 import {
 	buildAndRootNixResults,
 	buildCohortAction as productionBuildCohortAction,
@@ -184,6 +184,7 @@ function buildCohortAction(
 	dependencies: BuildCohortDependencies = {}
 ): Promise<void> {
 	return productionBuildCohortAction(options, environment, {
+		hasPublicationSupport: () => Promise.resolve(false),
 		runNixDerivationShow: (installables) =>
 			Promise.resolve(evaluatedDerivations(installables)),
 		materialiseDerivationGraph: () => Promise.resolve(),
@@ -1826,6 +1827,10 @@ describe('resolveLocalDerivationGraph', () => {
 				}
 			],
 			closure: [appDerivation, libraryDerivation],
+			derivationDependencies: [
+				{ derivation: appDerivation, inputs: [libraryDerivation] },
+				{ derivation: libraryDerivation, inputs: [] }
+			],
 			floatingOutputs: [derivedPath(`${libraryDerivation}^dev`)],
 			substitutableDerivations: [appDerivation],
 			outputs: [
@@ -4344,25 +4349,11 @@ describe('buildCohortAction', () => {
 			const receipt = buildReceiptV3Schema.parse(
 				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 			);
-			const held = new Map(
-				receipt.subjects.map((subject) => [
-					subject.storePath,
-					{
-						storePath: subject.storePath,
-						narHash: NixSha256Hash.fromDigest(
-							Buffer.from(subject.narHash, 'hex')
-						),
-						...(subject.derivation !== undefined && {
-							deriver: subject.derivation
-						})
-					}
-				])
-			);
 			const survivors = [floatingBuiltPath, floatingDevelopmentPath].map(
 				(storePath) => ({ storePath, sha256: 'aa'.repeat(32) })
 			);
 
-			expect(provenancedSubjects(receipt, held)).toStrictEqual({
+			expect(receiptCandidates(receipt)).toStrictEqual({
 				subjects: survivors,
 				built: survivors,
 				reproduced: [],

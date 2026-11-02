@@ -45,6 +45,7 @@ import {
 	autoBuildStore,
 	type BuildReceiptV3,
 	buildReceiptV3Schema,
+	type BuildReceiptV4,
 	type BuildSubjectV3Input,
 	type InvocationId,
 	type NixStoreUri,
@@ -52,6 +53,7 @@ import {
 	type TargetFailureReason,
 	type TerminalBuildFailureInput
 } from '@cupboard/protocol/build';
+import type { PublicationLookupSource } from '@cupboard/protocol/publication-manifests';
 import {
 	type BuildSummaryInput,
 	buildSummaryResultKind,
@@ -131,6 +133,10 @@ import {
 } from './divergence.ts';
 import { buildPushModeDescription, selectBuildPushMode } from './mode.ts';
 import type { BuildPushPreflight } from './preflight.ts';
+import type {
+	BuildPublicationWorkflow,
+	PublicationOwnership
+} from './publication-sets.ts';
 import {
 	reconcileBuild,
 	type ReconcileFailure,
@@ -138,6 +144,7 @@ import {
 	type ReconcileResult,
 	type ReconcileTarget
 } from './reconcile.ts';
+import { runRecordedBuildPush } from './recorded-build-push.ts';
 import {
 	type ChildCommand,
 	type ChildExit,
@@ -194,6 +201,8 @@ export type BuildInvocation =
 
 export interface BuildPushRunOptions {
 	readonly context?: string;
+	// Stable whole-command identity, separate from the cohort's output label.
+	readonly commandInvocationFingerprint?: string;
 	readonly invocation: BuildInvocation;
 	readonly root?: RootName;
 	readonly retention?: RootRetentionRequest;
@@ -206,6 +215,9 @@ export interface BuildPushRunOptions {
 	readonly destinationUrl?: URL;
 	readonly intermediatePaths?: readonly StorePathString[];
 	readonly receiptFile?: string;
+	// Cohort receipts can be temporary; replay identity must survive their cleanup.
+	readonly publicationRequestsFile?: string;
+	readonly publicationRequestsCompletionFile?: string;
 	readonly wait?: boolean;
 	readonly waitTimeoutSeconds?: WaitTimeoutSeconds;
 	readonly uploadConcurrency?: number;
@@ -221,6 +233,15 @@ export type BuildPushStore = ReconcileOptions['store'] &
 	Pick<Nix, 'queryPathInfo' | 'queryValidPaths' | 'readDerivation'>;
 
 export interface BuildPushDependencies {
+	/**
+	The current CLI supplies this by default; server capability selects V4 receipts.
+	*/
+	readonly publicationWorkflow?: BuildPublicationWorkflow;
+	/**
+	Destination first, followed by the configured tenant cache/view selectors.
+	*/
+	readonly publicationSources?: readonly PublicationLookupSource[];
+	readonly publicationDependencies?: (ownership: PublicationOwnership) => void;
 	readonly selectPublicationPaths?: typeof selectPublicationPaths;
 	readonly tenantDependencyReferences?: typeof tenantDependencyReferences;
 	readonly referenceClient?: (sources: readonly URL[]) => Promise<PushClient>;
@@ -325,7 +346,7 @@ export async function runBuildPush(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
 	dependencies: BuildPushDependencies
-): Promise<BuildReceiptV3> {
+): Promise<BuildReceiptV3 | BuildReceiptV4> {
 	if (
 		options.publicationScope !== undefined &&
 		(options.invocation.kind !== 'constructed' ||
@@ -334,6 +355,19 @@ export async function runBuildPush(
 	) {
 		throw new PublicationScopeInvalidError();
 	}
+	return runRecordedBuildPush(
+		options,
+		reporter,
+		dependencies,
+		runLegacyBuildPush
+	);
+}
+
+async function runLegacyBuildPush(
+	options: BuildPushRunOptions,
+	reporter: Reporter,
+	dependencies: BuildPushDependencies
+): Promise<BuildReceiptV3> {
 	const context =
 		options.context ??
 		buildOutputContext(
@@ -1856,6 +1890,7 @@ async function publishTenantDependencies(
 				readDerivation: async (path) => {
 					const term =
 						terms.get(path) ?? (await dependencies.store.readDerivation(path));
+					terms.set(path, term);
 					checked += 1;
 					phase.fact('derivations', checked);
 					return term;
@@ -1866,6 +1901,11 @@ async function publishTenantDependencies(
 			});
 		}
 	);
+	dependencies.publicationDependencies?.({
+		outputs,
+		derivations: terms,
+		roots: new Map(terms.entries().filter(([path]) => roots.has(path)))
+	});
 	const paths = outputs
 		.map((output) => output.storePath)
 		.filter((path) => !receipt.paths.includes(path));

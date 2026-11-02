@@ -11,17 +11,25 @@ import {
 import path from 'node:path';
 import process, { env } from 'node:process';
 
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	autoBuildStore,
 	buildReceiptV3Schema,
+	buildReceiptV4Schema,
 	type BuildSubjectV3
 } from '@cupboard/protocol/build';
+import {
+	type CompactPublicationSet,
+	publicationManifestIdentity,
+	type PublicationOrigin
+} from '@cupboard/protocol/publication-manifests';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { hasPublicationResultSupport } from '../../actions/src/cupboard-run.ts';
 import { runAction } from '../../actions/src/program.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import { createBuildPushDaemon } from '../../packages/cli/src/commands/build-push.ts';
@@ -689,9 +697,9 @@ vary under load, so the comparison checks the presence of attempt metadata
 without requiring a particular attempt number or identifier.
 */
 async function recordedReceipt(receiptFile: string): Promise<RecordedReceipt> {
-	const receipt = buildReceiptV3Schema.parse(
-		JSON.parse(await readFile(receiptFile, 'utf8'))
-	);
+	const receipt = z
+		.union([buildReceiptV3Schema, buildReceiptV4Schema])
+		.parse(JSON.parse(await readFile(receiptFile, 'utf8')));
 	const subjects = receipt.subjects
 		.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath))
 		.map((subject) => {
@@ -710,6 +718,12 @@ async function recordedReceipt(receiptFile: string): Promise<RecordedReceipt> {
 		attribution: recordedAttribution(receipt.subjects),
 		receipt: {
 			...receipt,
+			...(receipt.version === 4 &&
+				receipt.publicationSets !== undefined && {
+					publicationSets: receipt.publicationSets.toSorted((left, right) =>
+						byCodeUnit(left.result.storePath, right.result.storePath)
+					)
+				}),
 			subjects,
 			paths: receipt.paths.toSorted(byCodeUnit),
 			...(receipt.uploaded !== undefined && {
@@ -812,7 +826,7 @@ function claimedPaths(options: PublicationPaths): readonly PublishedPath[] {
 		: options.targets;
 }
 
-function expectedReceipt(
+async function expectedReceipt(
 	options: PublicationPaths & {
 		/**
 		The cohort's `store` input, empty for the runner's own store. It
@@ -820,10 +834,12 @@ function expectedReceipt(
 		see {@link isBuildPushCohort}.
 		*/
 		readonly store: string;
+		readonly version?: 3 | 4;
+		readonly publicationMembers?: readonly PublishedPath[];
 		readonly alreadyServed?: boolean;
 		readonly reproduced?: true;
 	}
-): unknown {
+): Promise<unknown> {
 	const isSupervised = isBuildPushCohort(options.store) && fixture().streams;
 	const claimed = claimedPaths(options);
 	const paths = claimed.toSorted(byStorePath).map(({ storePath }) => storePath);
@@ -852,7 +868,16 @@ function expectedReceipt(
 	// A streaming run reconciles the outputs it watched, so its receipt also
 	// records each target's terminal outcome.
 	return {
-		version: 3,
+		version: options.version ?? 4,
+		...((options.version ?? 4) === 4 && {
+			publicationSets: await expectedPublicationSets(
+				options.targets,
+				isBuildPushCohort(options.store)
+					? 'build-selection'
+					: 'legacy-selection',
+				(target) => options.publicationMembers ?? [target]
+			)
+		}),
 		paths,
 		subjects,
 		uploaded: options.alreadyServed === true ? [] : paths,
@@ -873,6 +898,67 @@ function expectedReceipt(
 		// store already holds, so no child of its own reports a status.
 		...(isBuildPushCohort(options.store) && { childExitStatus: 0 })
 	};
+}
+
+/**
+Membership comes from the flake, not the receipt or the server's recorded set.
+Only accepted result generations come from the independent destination lookup.
+*/
+async function expectedPublicationSets(
+	targets: readonly PublishedPath[],
+	origin: PublicationOrigin,
+	membersFor: (target: PublishedPath) => readonly PublishedPath[]
+): Promise<readonly CompactPublicationSet[]> {
+	const prepared = fixture();
+	const rpc = tenantRpc(prepared.server.tenantUrl, {
+		credential: await prepared.server.ownerAdminToken()
+	});
+	const sorted = targets.toSorted(byStorePath);
+	const { entries } = await rpc.publication.lookup.inDefaultCache({
+		source: { cache: { kind: 'default' } },
+		results: sorted.map((target) => ({
+			storePath: storePathSchema.parse(target.storePath),
+			narHash: NixSha256Hash.parsePrefixed(
+				`sha256:${target.narHash}`
+			).toString()
+		}))
+	});
+
+	return Promise.all(
+		sorted.map(async (target, index) => {
+			const entry = entries[index];
+			if (entry?.kind !== 'recorded') {
+				throw new Error(`No recorded publication for ${target.storePath}`);
+			}
+			const identity = await publicationManifestIdentity(
+				membersFor(target).map((member) => ({
+					storePath: storePathSchema.parse(member.storePath),
+					narHash: NixSha256Hash.parsePrefixed(
+						`sha256:${member.narHash}`
+					).toString()
+				}))
+			);
+			const publication = {
+				result: {
+					...entry.publication.result,
+					storePath: storePathSchema.parse(target.storePath),
+					narHash: NixSha256Hash.parsePrefixed(
+						`sha256:${target.narHash}`
+					).toString(),
+					cache: { kind: 'default' as const }
+				},
+				digest: identity.digest,
+				memberCount: identity.members.length,
+				origin
+			};
+			expect(entry).toStrictEqual({
+				kind: 'recorded',
+				complete: true,
+				publication
+			});
+			return { ...publication, materialisation: 'complete' as const };
+		})
+	);
 }
 
 function isBuildPushCohort(store: string): boolean {
@@ -1114,7 +1200,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 						status: 0,
 						targetPaths: paths,
 						attribution: localAttribution(),
-						receipt: expectedReceipt(receiptOptions),
+						receipt: await expectedReceipt(receiptOptions),
 						attestation
 					}
 				]
@@ -1139,7 +1225,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 						// The paths are the same, and the destination already
 						// serves them, so this run rebuilt and claimed them
 						// without republishing their bytes.
-						receipt: expectedReceipt({
+						receipt: await expectedReceipt({
 							...receiptOptions,
 							alreadyServed: true,
 							reproduced: true
@@ -1228,7 +1314,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 						status: 0,
 						targetPaths: paths,
 						attribution: localAttribution(),
-						receipt: expectedReceipt({
+						receipt: await expectedReceipt({
 							built,
 							targets: built,
 							store: '',
@@ -1311,9 +1397,10 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 						status: 0,
 						targetPaths: targets.map(({ storePath }) => storePath),
 						attribution,
-						receipt: expectedReceipt({
+						receipt: await expectedReceipt({
 							built,
 							targets,
+							publicationMembers: built,
 							store: '',
 							attribution
 						}),
@@ -1369,9 +1456,10 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		}).toStrictEqual({
 			cohortStatuses: [0],
 			served: claimed.map(() => 200),
-			// Both build-push and the retention push probe capabilities, then
-			// publish over their own session. Already-present paths also commit.
-			upgrades: 4,
+			// Build-push probes capabilities and publishes over its session. The
+			// result push probes too, but confirms the already-present selection
+			// without opening another ordinary publication session.
+			upgrades: 3,
 			wasPaced: true
 		});
 	});
@@ -1384,7 +1472,10 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 	// packaged installation, so a defect in the release asset fails a test
 	// rather than a consumer's job.
 	describe('installed from a release archive', () => {
-		const installed: { installation?: ReleaseInstallation } = {};
+		const installed: {
+			installation?: ReleaseInstallation;
+			receiptVersion?: 3 | 4;
+		} = {};
 
 		beforeAll(async () => {
 			const prepared = fixture();
@@ -1398,6 +1489,12 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 				archivePath,
 				directory: path.join(prepared.workspace, 'release')
 			});
+			// A genuine older packaged peer has no recorded-publication command.
+			installed.receiptVersion = (await hasPublicationResultSupport(
+				installed.installation.commandPath
+			))
+				? 4
+				: 3;
 		}, 600_000);
 
 		it('publishes a cohort the packaged executable builds and pushes', async () => {
@@ -1495,7 +1592,8 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 							status: 0,
 							targetPaths: paths,
 							attribution,
-							receipt: expectedReceipt({
+							receipt: await expectedReceipt({
+								version: installed.receiptVersion,
 								built,
 								targets: built,
 								store: '',
@@ -1598,7 +1696,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 									.toSorted(byStorePath)
 									.map(({ storePath }) => storePath),
 								attribution: 'no-builds',
-								receipt: expectedReceipt({
+								receipt: await expectedReceipt({
 									built,
 									targets: built,
 									store: store.transportConfiguredStoreUri,
@@ -1784,7 +1882,12 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 									.map(({ storePath }) => storePath),
 								attribution: 'no-builds',
 								receipt: {
-									version: 3,
+									version: 4,
+									publicationSets: await expectedPublicationSets(
+										built,
+										'legacy-selection',
+										(target) => [target, dependency]
+									),
 									paths: published.map(({ storePath }) => storePath),
 									subjects: published.map((entry) =>
 										entry.storePath === dependencyOutput

@@ -575,6 +575,20 @@
 			"when": 1793314008205,
 			"tag": "0081_pending_upload_commit_released",
 			"breakpoints": true
+		},
+		{
+			"idx": 82,
+			"version": "6",
+			"when": 1793548437519,
+			"tag": "0082_confirmation_receipt",
+			"breakpoints": true
+		},
+		{
+			"idx": 83,
+			"version": "6",
+			"when": 1793550644063,
+			"tag": "0083_publication_manifests",
+			"breakpoints": true
 		}
 	]
 }

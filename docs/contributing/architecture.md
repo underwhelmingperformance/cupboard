@@ -217,12 +217,16 @@ The object owns everything that belongs to one tenant alone. That includes:
 - its committed narinfos, each with a generation counter per store path;
 - pending uploads, their verification results, and durable publication
   operations;
+- confirmation receipts and [recorded publication sets][recorded-publications],
+  including their destination proofs and recovery state;
 - staged-object cleanup queued for deleted cache identities;
 - retention roots, what they point at, grace deadlines, and the state of garbage
   collection;
 - the keys that it signs narinfos with, in `signing_key`, and the keys that it
   signs access tokens with, in `auth_key`;
 - OIDC trust rules, refresh-token families, and reuse views.
+
+[recorded-publications]: #recorded-publication-sets
 
 The object also runs the tenant's HTTP app, in `do/server.ts`. The app serves:
 
@@ -473,6 +477,12 @@ These are the jobs that the cron trigger adds:
 A tenant's Durable Object can also add a job. When a commit leaves bytes waiting
 to be verified, the object adds a `tenant-verify` job.
 
+The existing garbage-collection job also expires publication-set receipts and
+admission records, removes temporary work leases, and reclaims retired proof and
+member pages. Indexed deadlines and retirement queues determine its next wake.
+Each cleanup step uses the same row budget as other tenant maintenance;
+publication sets add no separate scheduler.
+
 The control Worker consumes the queue one message at a time, with up to four
 consumers running at once. A message that fails is retried after 60 seconds, up
 to three times. After the third retry, it goes to the dead-letter queue,
@@ -661,8 +671,14 @@ last at most six hours, and cannot outlast the access token or the 24-hour push
 lease.
 
 The paced WebSocket accepts `publish-batch` with complete metadata and expected
-generation. Clients commit every selected path, including `skip` decisions. The
-server derives staging keys and rechecks availability and reuse authority. A
+generation. When both credential and WebSocket negotiation acknowledge
+`confirm-present-v1`, clients confirm selected `skip` decisions through the
+bounded confirmation API. Confirmation rechecks servability and accepted
+identity, applies retention, and records an immutable page receipt without
+creating publication work. Replay checks the recorded identities without
+renewing retention. Negative, individually oversized or unnegotiated skips use
+ordinary publication with their original operation identities. The server
+derives staging keys and rechecks availability and reuse authority. A
 `publication-accepted` frame follows durable SQLite admission. `upload-required`
 asks the client to send bytes and resubmit the same operation. Admission keeps
 the row of a committed path that cannot be served, for example because its NAR
@@ -677,6 +693,13 @@ deadline. The deadline is the recovery deadline, or one hour after the
 replacement is planned for an upload without one. A reference-only publication
 fails if bytes are required and it has no NAR source. Batches contain one to 100
 entries and encoded messages are limited to 4 MiB.
+
+Servability probes read narinfo bodies within an internal bound derived from
+SQLite's row limit and narinfo rendering overhead. The metadata API has a
+separate 1 MiB limit on narinfo bodies. The body's full store path, NAR hash and
+NAR URL must agree with the accepted version and the current NAR incarnation.
+Commit metadata alone cannot establish that the cache serves the expected full
+path.
 
 First admission creates or adopts the expected cache generation and captures
 retention. Deletion between planning and admission produces a generation
@@ -1149,6 +1172,153 @@ The requests are under the tenant URL.
    with `--root`, pin each path with its own `pin:<hash>` root, or publish into
    the cache's grace period with `--no-retain`. Garbage collection deletes
    anything that no root or grace period is keeping.
+
+### Recorded publication sets
+
+The `publication-manifests-v1` capability lets the CLI and cohort actions reuse
+a result's original publication selection before discovering its build
+dependencies again. The association belongs to an exact accepted result: cache
+identity and generation, full store path, NAR hash and narinfo generation. Its
+first complete authorised selection wins. Later availability of another binary
+does not expand that selection. A legacy result without an association uses the
+existing bounded selection once and records it as `legacy-selection`; a new
+build records `build-selection`.
+
+Explicit intermediate paths remain separate from recorded membership. The CLI
+uses its journalled build stage to publish those paths even when every selected
+result is recorded. An existing cold cohort publishes the explicit intermediates
+without adding warm installables to that cohort.
+
+Portable members contain full store paths and NAR hashes. They are deduplicated
+and sorted by code-unit path order. Fixed pages of 64 members have SHA-256 leaf
+digests; the root digest binds the member count and ordered leaf digests. Intake
+page boundaries do not affect this identity. The contract limits a set to
+100,000 members and a manifest request to 64 KiB. Lookup and intake pages
+contain at most 64 entries.
+
+The contract exposes lookup, capture begin/page/seal, ensure and status. Capture
+stages isolated candidate proofs, hashes and publishes bounded pages, then
+selects the completed materialisation in its final transaction. Competing
+candidates never combine their memberships. Capture returns recorded metadata,
+not a materialisation certificate. Ensure must complete the actual winner before
+a caller reports publication success. It checks destination write eligibility
+and current source authority independently, including a selected view's
+membership and revision. A source cache is never substituted for the destination
+to obtain read permission. A concrete view source must also be one of the
+original usable candidates from semantic arbitration. A sibling that becomes
+backed later cannot replace that selection. Final revalidation checks all
+original usable candidates.
+
+A healthy complete destination association avoids member enumeration, per-member
+publication and NAR transfer. Materialising another set proves already-servable
+exact destination versions without ordinary publication. Missing or unhealthy
+members use the ordinary publication coordinator, including its quota,
+verification, recovery and accepted-version checks. Durable admission records
+pin the full request, ordinary push identity and original deadline before
+destination registration. For a destination that was absent at pinning, ordinary
+acceptance binds the admission to the actual cache identity in the pending-work
+transaction. Verification uses that binding to protect completed ordinary work
+until manifest materialisation finishes or expires. Immutable ordinal mappings
+preserve each member's ordinary publication identity across a reset. Each
+ordinary operation also persists its manifest origin and immutable declaration.
+Commit and verification reject a different full path or NAR before retention or
+replacement writes. The ordinary record remains while work is accepted, even
+after parent receipt pruning; normal terminal cleanup reclaims the record.
+Capture and ensure recover for at most 24 hours. Status only observes; a
+foreground caller advances pending work by resubmitting its immutable request
+with current authority.
+
+New ensure request IDs encode their creation time in UUIDv7. An unknown ensure
+request must be less than 24 hours old and no more than five minutes in the
+future. A stored operation or admission instead uses its original server
+recovery deadline. Expired operation receipts remain for another 15 minutes
+before pruning. Once its receipt is pruned, the old ID cannot create another
+retention event. With a receipt file, the CLI journals the complete invocation,
+selected source and immutable requests before remote mutations. Only
+whole-invocation success completes those journals and permits fresh IDs on the
+next invocation. Recovery also binds the available public GitHub run, attempt,
+repository and source identity. The GitHub identity excludes authentication
+credentials.
+
+Before the first capture mutation, local recovery state records the full
+accepted result identity, exact begin request and exact member pages. The native
+CLI stores these checkpoints in its invocation journal. A cohort action gives
+each capture a private request file and records readiness before invoking the
+hidden command. Resolved captures replay the original begin before sending any
+saved pages. A saved initial winner instead receives an exact current lookup.
+Neither path may select a replacement generation or different membership.
+Checkpoints remain available through later result, root and receipt failures.
+Before completing recorded work or a journalled cold build, the action
+atomically writes the final receipt and syncs its contents and parent directory.
+Only then can the action remove the associated capture recovery files.
+Unfinished legacy capture state without exact checkpoints is rejected.
+
+Private directory locks exclude cooperating writers. Native journal mutations
+reload and compare the complete checkpoint under ownership. The action keeps
+receipt-scoped coordinator ownership and uses separate capture-file locks, which
+the hidden command also uses. Existing lock directories fail closed and are not
+reclaimed automatically. Before removing only the reported lock directory,
+verify that the original writer is inactive. Preserve the receipt, journals and
+capture files. Completed action state permits bounded cleanup to resume after
+interruption; unfinished ready capture files are never discarded.
+
+Retaining the result through a root or grace also retains its selected
+publication members through GC edges. GC traverses runtime references and
+associated members with independent resumable cursors. Incomplete associations
+retain surviving exact selected versions. Accepted-version and cache-lifecycle
+changes invalidate completeness. Association finalisation requeues an already
+marked owner so an active scan cannot miss its new edges. Metadata without a
+reachable result is not a permanent root. Temporary accepted-work leases bridge
+normal completion and pending materialisation; they stop protecting terminal or
+expired work without changing user grace or creating member roots.
+
+Local narinfo mutations queue exact-version invalidation in constant work.
+Legacy identity metadata is prepared lazily for each affected path. Cache
+lifecycle mutations use a singleton observation stamp and bounded retirement
+queues; deleted identities do not require a permanent history. Both kinds of
+mutation prevent completeness claims for affected selections until bounded
+invalidation finishes.
+
+Known backing-object demotion and read-authority revocation use durable
+exact-version invalidation intents. A local availability revision fences probes
+that started before a mutation, including across restart and metadata cleanup. A
+probe during an unresolved mutation cannot establish a proof. Temporary cache
+barriers prevent completeness claims until the remote outcome is known and
+matching reverse proofs have been invalidated in pages of at most 64 edges.
+Later healthy observations of the same accepted version remain distinguishable
+from the old proofs. Unaffected associations become usable again after draining,
+without re-publication or a scan of their members. These revisions do not alter
+accepted narinfo generations or create GC roots.
+
+A new warm ensure applies the result's normal grace decision once; replay keeps
+the original deadline. A shared run root is prepared through mutating empty
+upload negotiation and grows through `root:attach`. The native recorded consumer
+uses the workflow's `prepare-run-root` operation; its negotiated push client
+only plans uploads. Named target roots retain their whole-set replacement
+semantics: after all warm and cold results are accepted, `root ensure` replaces
+each root with the complete selection under `root:set`. An unavailable target
+fails that replacement without rebuilding the set.
+
+Receipt producers select the highest version that the consumer supports. The CLI
+accepts `--aggregate-receipt 3,4` from current consumers;
+`--aggregate-receipt-v3` strictly requests V3. An external receipt file without
+version negotiation also defaults to V3. The CLI's native consumer supports V4.
+V3 publication enumerates its selection because that format cannot represent
+implicit recorded members. When dependency publication is delegated through
+`--no-reference-dependencies`, the subordinate CLI does not capture a
+provisional set. The action coordinator captures after completing dependency
+settlement.
+
+Negotiated V4 receipts describe explicit current-run paths and subjects plus
+compact completed publication references. They do not enumerate implicit members
+or invent build evidence, and overlapping member counts are not added to produce
+a distinct-path total. V2/V3 readers remain supported; genuine initial old-peer
+non-support keeps the legacy publication path. Losing support after selecting a
+recorded set, or encountering an authority/provider error, does not select a
+different membership. See [How a publication run works][publication-run] for
+cohort execution and receipt behaviour.
+
+[publication-run]: ../ci/how-it-works.md
 
 ### Exchanging tokens
 

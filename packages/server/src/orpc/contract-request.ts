@@ -5,7 +5,10 @@ import {
 } from '@cupboard/shared/response-body';
 
 import { type AccessClaims } from '../auth/auth.ts';
-import { RequestBodyTooLargeError } from '../errors.ts';
+import {
+	RequestBodyTooLargeError,
+	UploadRequestLimitExceededError
+} from '../errors.ts';
 import { uploadPageSize } from '../policy/upload-pages.ts';
 
 // Apart from upload negotiation and preview, the largest admin input with a
@@ -45,12 +48,14 @@ leaves the original body unread, so a later route can read it.
 */
 export class ContractRequest {
 	#isTooLarge = false;
+	#tooManyPaths = false;
 	readonly request: Request;
 
 	constructor(
 		original: Request,
 		authenticate: () => Promise<unknown>,
-		readonly maximumBytes: number
+		readonly maximumBytes: number,
+		readonly maximumPaths?: number
 	) {
 		this.request =
 			original.body === null
@@ -80,12 +85,31 @@ export class ContractRequest {
 					}
 
 					try {
-						controller.enqueue(
-							await readResponseBytes(original, {
-								description: 'admin API request body',
-								maximumBytes: this.maximumBytes
-							})
-						);
+						const bytes = await readResponseBytes(original, {
+							description: 'admin API request body',
+							maximumBytes: this.maximumBytes
+						});
+						if (this.maximumPaths !== undefined) {
+							let body: unknown;
+							try {
+								body = JSON.parse(new TextDecoder().decode(bytes));
+							} catch {
+								/*
+								The contract reports invalid JSON.
+								*/
+							}
+							if (
+								typeof body === 'object' &&
+								body !== null &&
+								'paths' in body &&
+								Array.isArray(body.paths) &&
+								body.paths.length > this.maximumPaths
+							) {
+								this.#tooManyPaths = true;
+								throw new UploadRequestLimitExceededError(this.maximumPaths);
+							}
+						}
+						controller.enqueue(bytes);
 						controller.close();
 					} catch (error) {
 						this.#isTooLarge = error instanceof RemoteBodyTooLargeError;
@@ -106,6 +130,9 @@ export class ContractRequest {
 	response, so call this after the handler returns.
 	*/
 	refuseOversizeBody(): void {
+		if (this.#tooManyPaths && this.maximumPaths !== undefined) {
+			throw new UploadRequestLimitExceededError(this.maximumPaths);
+		}
 		if (this.#isTooLarge) {
 			throw new RequestBodyTooLargeError(this.maximumBytes);
 		}

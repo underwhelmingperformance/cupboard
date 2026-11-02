@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import {
@@ -22,7 +23,6 @@ import {
 	AttestationPredicateFileError,
 	AttestationSigningError,
 	AttestationSubjectNotAcceptedError,
-	AttestationSubjectsMissingError,
 	BooleanInputInvalidError,
 	BuildOriginSubjectMissingError,
 	ChoiceInputInvalidError,
@@ -31,6 +31,7 @@ import {
 	PredicateSourceConflictError,
 	PredicateTypeRequiredError
 } from '../errors.ts';
+import { parseChecksums } from '../release-install.ts';
 
 import {
 	attestSignAction,
@@ -191,6 +192,7 @@ function options(
 	overrides: Partial<AttestSignOptions> = {}
 ): AttestSignOptions {
 	return {
+		url: 'https://cache.example.test/t/acme',
 		checksumsFile: files.checksumsFile,
 		builtChecksumsFile: files.builtChecksumsFile,
 		predicateFile: files.predicateFile,
@@ -198,6 +200,38 @@ function options(
 		githubToken: 'token',
 		destinationAccess: 'public',
 		...overrides
+	};
+}
+
+function destinationFetcher(files: Workspace): typeof fetch {
+	return (input) => {
+		const url = input instanceof Request ? input.url : input.toString();
+		const hash = path.basename(url, '.narinfo');
+		const subject = [
+			...parseChecksums(files.textFiles.get(files.checksumsFile) ?? '')
+		].find(([name]) => name.startsWith(hash));
+		if (subject === undefined) {
+			return Promise.resolve(new Response(undefined, { status: 404 }));
+		}
+		const [name, digest] = subject;
+		const narHash = NixSha256Hash.fromDigest(
+			Buffer.from(digest, 'hex')
+		).toString();
+		return Promise.resolve(
+			new Response(
+				[
+					`StorePath: /nix/store/${name}`,
+					'URL: nar/test.nar.zst',
+					'Compression: zstd',
+					`FileHash: ${narHash}`,
+					'FileSize: 1',
+					`NarHash: ${narHash}`,
+					'NarSize: 1',
+					'References: ',
+					''
+				].join('\n')
+			)
+		);
 	};
 }
 
@@ -215,6 +249,7 @@ function recordedSigning(
 	const outputs: Record<string, string> = {};
 	const dependencies: AttestSignDependencies = {
 		io: memoryIo(files),
+		fetch: destinationFetcher(files),
 		delay: () => Promise.resolve(),
 		provenanceStatement: () =>
 			Promise.resolve({
@@ -299,7 +334,7 @@ function recordingReporter(reported: string[]): Reporter {
 function checksumLines(count: number): string {
 	return Array.from({ length: count }, (_, index) => {
 		const digest = index.toString(16).padStart(64, '0');
-		const name = `subject-${String(index).padStart(4, '0')}`;
+		const name = `${String(index).padStart(32, '0')}-subject`;
 
 		return `${digest}  ${name}`;
 	}).join('\n');
@@ -318,6 +353,7 @@ describe('resolveAttestSignInputs', () => {
 	it('writes default signing outputs in the selected output directory', () => {
 		expect(
 			resolveAttestSignInputs({
+				url: 'https://cache.example.test/t/acme',
 				checksumsFile: '/runner/temp/inputs/subjects.txt',
 				builtChecksumsFile: '/runner/temp/inputs/built-subjects.txt',
 				outputDirectory: '/runner/temp/signing/first',
@@ -326,6 +362,10 @@ describe('resolveAttestSignInputs', () => {
 				destinationAccess: 'public'
 			})
 		).toStrictEqual({
+			url: new URL('https://cache.example.test/t/acme'),
+			cache: { kind: 'default' },
+			readUser: '',
+			readPassword: '',
 			receiptFile: '',
 			shouldEmitInlineBundles: false,
 			checksumsFile: '/runner/temp/inputs/subjects.txt',
@@ -344,6 +384,7 @@ describe('resolveAttestSignInputs', () => {
 	it('defaults both bundle paths to the checksums file directory', () => {
 		expect(
 			resolveAttestSignInputs({
+				url: 'https://cache.example.test/t/acme',
 				checksumsFile: '/runner/temp/attestations/subjects.txt',
 				builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
 				predicateFile: '/runner/temp/attestations/build-origin.json',
@@ -352,6 +393,10 @@ describe('resolveAttestSignInputs', () => {
 				destinationAccess: 'public'
 			})
 		).toStrictEqual({
+			url: new URL('https://cache.example.test/t/acme'),
+			cache: { kind: 'default' },
+			readUser: '',
+			readPassword: '',
 			receiptFile: '',
 			shouldEmitInlineBundles: true,
 			signedChecksumsFile: '/runner/temp/attestations/signed-subjects.txt',
@@ -368,6 +413,7 @@ describe('resolveAttestSignInputs', () => {
 	});
 
 	const signingInputs = {
+		url: 'https://cache.example.test/t/acme',
 		checksumsFile: '/runner/temp/attestations/subjects.txt',
 		builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
 		githubToken: 'token'
@@ -695,6 +741,28 @@ describe('attestSignAction', () => {
 			});
 		}
 	);
+
+	it('preserves arbitrary custom predicate record fields', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+		const predicate: unknown = JSON.parse(
+			'{"nested":{"values":[true,7,null]},"extension":"retained"}'
+		);
+		files.textFiles.set(files.predicateFile, JSON.stringify(predicate));
+		await attestSignAction(
+			options(files, { predicateType: 'https://example.test/custom' }),
+			createGithubReporter(),
+			signing.dependencies
+		);
+		expect(records.map(({ statement }) => statement)).toStrictEqual([
+			{
+				predicateType: 'https://slsa.dev/provenance/v1',
+				predicate: { buildDefinition: { buildType: 'workflow' } }
+			},
+			{ predicateType: 'https://example.test/custom', predicate }
+		]);
+	});
 
 	it('signs generated reproduction reports from receipt evidence under individual grouping', async () => {
 		const files = workspace();
@@ -1070,23 +1138,23 @@ describe('attestSignAction', () => {
 			batches: [
 				{
 					count: 1024,
-					first: 'subject-0000',
-					last: 'subject-1023'
+					first: '00000000000000000000000000000000-subject',
+					last: '00000000000000000000000000001023-subject'
 				},
 				{
 					count: 1,
-					first: 'subject-1024',
-					last: 'subject-1024'
+					first: '00000000000000000000000000001024-subject',
+					last: '00000000000000000000000000001024-subject'
 				},
 				{
 					count: 1024,
-					first: 'subject-0000',
-					last: 'subject-1023'
+					first: '00000000000000000000000000000000-subject',
+					last: '00000000000000000000000000001023-subject'
 				},
 				{
 					count: 1,
-					first: 'subject-1024',
-					last: 'subject-1024'
+					first: '00000000000000000000000000001024-subject',
+					last: '00000000000000000000000000001024-subject'
 				}
 			],
 			outputs: {
@@ -1296,7 +1364,7 @@ describe('attestSignAction', () => {
 		expect(records).toStrictEqual([]);
 	});
 
-	it('refuses a checksums file that lists no subject', async () => {
+	it('refuses non-empty built subjects when the accepted checksums are empty', async () => {
 		const files = workspace();
 		files.textFiles.set(files.checksumsFile, '');
 
@@ -1306,7 +1374,7 @@ describe('attestSignAction', () => {
 				createGithubReporter(),
 				recordedSigning(files, []).dependencies
 			)
-		).rejects.toBeInstanceOf(AttestationSubjectsMissingError);
+		).rejects.toBeInstanceOf(AttestationSubjectNotAcceptedError);
 	});
 
 	it('rejects a predicate file that does not contain a JSON object before signing', async () => {
@@ -1507,6 +1575,7 @@ describe('attestSignAction', () => {
 			},
 			{
 				io: memoryIo(files),
+				fetch: destinationFetcher(files),
 				setOutput: ignore,
 				provenanceStatement: () =>
 					Promise.resolve({
@@ -1530,7 +1599,7 @@ describe('attestSignAction', () => {
 		);
 
 		expect({ batches, advanced, bundles: files.bundles.size }).toStrictEqual({
-			advanced: [1, 1],
+			advanced: [1, 1, 1, 1],
 			batches: [[appName, runtimeName], [appName], [runtimeName]],
 			bundles: 2
 		});
@@ -1545,6 +1614,7 @@ describe('attestSignAction', () => {
 				createGithubReporter(),
 				{
 					io: memoryIo(files),
+					fetch: destinationFetcher(files),
 					setOutput: ignore,
 					provenanceStatement: () =>
 						Promise.resolve({

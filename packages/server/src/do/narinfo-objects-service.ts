@@ -16,11 +16,11 @@ import {
 	isMetadataOfCommit,
 	isNarInfoObjectOfCommit,
 	isNarInfoObjectVersion,
-	type NarInfoObjectMetadata,
 	narInfoObjectMetadata,
 	type NarInfoObjectVersion,
+	type NarInfoProjection,
 	type NarInfoReferenceVersion,
-	recordedNarInfoMetadata
+	readNarInfoProjection
 } from '../blob/narinfo-object-metadata.ts';
 import { cacheIdentityCondition, type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -37,6 +37,7 @@ import {
 } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
+import { armAlarmNoLaterThan } from './alarm.ts';
 import {
 	batchNonEmpty,
 	deleteObjects,
@@ -47,6 +48,10 @@ import {
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
+import {
+	type PublicationManifestAvailabilityIntent,
+	PublicationManifestAvailabilityStore
+} from './publication-manifest-availability-store.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
@@ -747,37 +752,37 @@ export class NarInfoObjectsService {
 		return committed;
 	}
 
-	// Probe R2 before reading the row snapshot. If a recommit occurs during the
+	// Read bounded R2 bodies before the row snapshot. If a recommit occurs during the
 	// probes, the later row cannot match the older object and takes the repair path.
 	async existingNarInfoObjects(
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
-	): Promise<ReadonlyMap<StorePathHash, NarInfoObjectMetadata>> {
+	): Promise<ReadonlyMap<StorePathHash, NarInfoProjection>> {
 		const present = await mapWithConcurrency(
 			[...new Set(storePathHashes)],
 			maxOutgoingConnections,
 			async (storePathHash) => {
-				const object = await this.context.env.BLOBS.head(
+				const object = await this.context.env.BLOBS.get(
 					this.objectKey(cache, storePathHash)
 				);
-				const metadata = recordedNarInfoMetadata(object);
+				const projection = await readNarInfoProjection(object);
 
-				return metadata === undefined
+				return projection === undefined
 					? undefined
-					: ([storePathHash, metadata] as const);
+					: ([storePathHash, projection] as const);
 			}
 		);
 
 		return new Map(
 			present.filter(
-				(entry): entry is readonly [StorePathHash, NarInfoObjectMetadata] =>
+				(entry): entry is readonly [StorePathHash, NarInfoProjection] =>
 					entry !== undefined
 			)
 		);
 	}
 
 	// A version is servable only when its live row, exact D1 edge, canonical NAR,
-	// and generation-matched narinfo object are all present, and the object
+	// and generation- and full-path-matched narinfo body are all present. The object
 	// records the URL of the NAR's current incarnation. The R2 probes precede the
 	// row snapshot so a concurrent recommit takes the repair path. Callers that
 	// complete work from this result must revalidate the returned generation.
@@ -812,10 +817,11 @@ export class NarInfoObjectsService {
 		const servable = new Map<StorePathHash, NarInfoReferenceVersion>();
 		const isCurrentVersion = (
 			row: NarInfoRow,
-			metadata: NarInfoObjectMetadata | undefined
+			projection: NarInfoProjection | undefined
 		): boolean =>
-			isMetadataOfCommit(metadata, row) &&
-			metadata?.narUrl === currentNarUrls.get(row.narHash);
+			isMetadataOfCommit(projection?.metadata, row) &&
+			projection?.storePath === row.storePath &&
+			projection.metadata?.narUrl === currentNarUrls.get(row.narHash);
 		const hasCurrentObject = (row: NarInfoRow): boolean =>
 			isCurrentVersion(row, present.get(row.storePathHash));
 
@@ -828,9 +834,21 @@ export class NarInfoObjectsService {
 			}
 		}
 
-		const recoverable = committedRows.filter(
-			(row) => !hasCurrentObject(row) && backed.has(row.narHash)
-		);
+		// The same commit cannot acquire a different full path through repair.
+		// A physical row rename is not authority to rewrite its served identity.
+		const recoverable = committedRows.filter((row) => {
+			const projection = present.get(row.storePathHash);
+			const isSupersededCommit =
+				projection?.metadata !== undefined &&
+				!isMetadataOfCommit(projection.metadata, row);
+			return (
+				!hasCurrentObject(row) &&
+				backed.has(row.narHash) &&
+				(projection === undefined ||
+					projection.storePath === row.storePath ||
+					isSupersededCommit)
+			);
+		});
 
 		await this.repairNarInfoObjects(cache, recoverable);
 		const repaired = await this.existingNarInfoObjects(
@@ -944,6 +962,59 @@ export class NarInfoObjectsService {
 		);
 	}
 
+	/**
+	Original durable mutation only. Caller holds the tenant critical section.
+	*/
+	async recoverAvailability(
+		intent: PublicationManifestAvailabilityIntent
+	): Promise<void> {
+		const availability = new PublicationManifestAvailabilityStore(
+			this.context.db
+		);
+		if (availability.isAccepted(intent)) {
+			const cache = this.context.cacheRepository.resolvedForId(intent.cacheId);
+			const state = await this.context.d1
+				.select({ incarnation: d1Schema.blobState.incarnation })
+				.from(d1Schema.blobState)
+				.where(eq(d1Schema.blobState.narHash, intent.narHash))
+				.get();
+			const isBacked =
+				state !== undefined &&
+				(await this.context.env.BLOBS.head(
+					narObjectKey(intent.narHash, state.incarnation)
+				)) !== null;
+			const row = this.narInfoRowsFor(cache, [intent.storePathHash])[0];
+			const canRestore =
+				isBacked &&
+				row !== undefined &&
+				!this.context.offboarding &&
+				(await this.hasCommittedReference(cache, row));
+			const narInfo = canRestore ? await this.narInfoFromRow(row) : undefined;
+			if (narInfo === undefined || row === undefined) {
+				const key = this.objectKey(cache, intent.storePathHash);
+				await this.context.objectWrites.write([key], () =>
+					this.context.env.BLOBS.delete(key)
+				);
+			} else {
+				// Restore the current incarnation/signatures, never replay an old
+				// deletion against a recovered projection or create another intent.
+				await this.putNarInfoObject(
+					cache,
+					intent.storePathHash,
+					{
+						generation: row.generation,
+						narHash: row.narHash,
+						narUrl: narInfo.url,
+						signatureGeneration: effectiveSignatureGeneration(row)
+					},
+					narInfo
+				);
+			}
+		}
+		availability.acknowledge(intent.revision);
+		availability.drainPage(intent.revision);
+	}
+
 	async putNarInfoObject(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash,
@@ -970,11 +1041,7 @@ export class NarInfoObjectsService {
 		cache: ResolvedCache,
 		storePathHash: StorePathHash
 	): Promise<void> {
-		const key = this.objectKey(cache, storePathHash);
-
-		await this.context.objectWrites.write([key], () =>
-			this.context.env.BLOBS.delete(key)
-		);
+		await this.deleteNarInfoObjects(cache, [storePathHash]);
 	}
 
 	async deleteNarInfoObjects(
@@ -989,8 +1056,40 @@ export class NarInfoObjectsService {
 			this.objectKey(cache, storePathHash)
 		);
 
-		await this.context.objectWrites.write(keys, () =>
-			deleteObjects(this.context.env.BLOBS, keys)
+		const availability = new PublicationManifestAvailabilityStore(
+			this.context.db
 		);
+		const intents = this.context.db.transaction(() =>
+			this.narInfoRowsFor(cache, storePathHashes).flatMap((row) => {
+				const intent = availability.begin(
+					{
+						cacheId: cache.id,
+						cacheGeneration: cache.generation,
+						storePathHash: row.storePathHash,
+						storePath: row.storePath,
+						narHash: row.narHash,
+						generation: row.generation
+					},
+					'demote'
+				);
+				return intent === undefined ? [] : [intent];
+			})
+		);
+		if (intents.length > 0) {
+			await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+		}
+		const singleKey = keys.length === 1 ? keys[0] : undefined;
+		await this.context.objectWrites.write(keys, () =>
+			singleKey === undefined
+				? deleteObjects(this.context.env.BLOBS, keys)
+				: this.context.env.BLOBS.delete(singleKey)
+		);
+		for (const intent of intents) {
+			availability.acknowledge(intent.revision);
+		}
+		const first = intents[0];
+		if (first !== undefined) {
+			availability.drainPage(first.revision);
+		}
 	}
 }

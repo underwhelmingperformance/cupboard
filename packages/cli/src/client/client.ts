@@ -36,6 +36,7 @@ import {
 	type PublicationEntry,
 	publicationRefusalReasonsCapability,
 	type PushId,
+	uploadConfirmPresentCapability,
 	type UploadId
 } from '@cupboard/protocol/upload';
 import {
@@ -191,7 +192,7 @@ export class CupboardClient {
 		// declaration even if an intermediary strips the response capability. An
 		// `unsupported` frame is the only signal that permits the local window.
 		const headers = {
-			[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability},${publicationCapability},${publicationRefusalReasonsCapability}`
+			[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability},${publicationCapability},${publicationRefusalReasonsCapability},${uploadConfirmPresentCapability}`
 		};
 		const authorise = () => bearerAttempt(credential, headers);
 

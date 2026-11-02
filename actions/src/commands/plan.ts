@@ -16,7 +16,6 @@ import {
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	type RootEnsureResponse,
-	rootEnsureResponseSchema,
 	rootSetMaxTargets,
 	type RootTarget,
 	rootTargetSchema
@@ -78,6 +77,10 @@ import {
 	RootTargetsResultMissingError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
+import {
+	namedRootEnsureArguments,
+	namedRootEnsureResponse
+} from '../named-root.ts';
 import {
 	isEnabled,
 	provided,
@@ -1130,15 +1133,7 @@ async function ensureRoot(
 		'--no-colour',
 		'--result-file',
 		resultFile,
-		'root',
-		'ensure',
-		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
-		root,
-		...storePaths,
-		'--github-oidc',
-		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
-		...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
-		...(inputs.permanent ? ['--permanent'] : [])
+		...namedRootEnsureArguments(inputs, root, storePaths)
 	];
 
 	try {
@@ -1187,21 +1182,7 @@ function ensureResponse(root: string, recorded: string): RootEnsureResponse {
 		throw new RootEnsureResultInvalidError(root, { cause: error });
 	}
 
-	for (const event of events) {
-		if (event.kind !== 'root-ensure') {
-			continue;
-		}
-
-		const response = rootEnsureResponseSchema.safeParse(event.data);
-
-		if (!response.success) {
-			throw new RootEnsureResultInvalidError(root, { cause: response.error });
-		}
-
-		return response.data;
-	}
-
-	throw new RootEnsureResultMissingError(root);
+	return namedRootEnsureResponse(root, events);
 }
 
 // Refresh the complete reconciled root, including content-addressed and

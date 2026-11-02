@@ -23,13 +23,14 @@ import type {
 	OidcSubject,
 	TrustRuleId
 } from '@cupboard/protocol/oidc';
+import type { PublicationOperationId } from '@cupboard/protocol/publication-manifests';
 import type {
 	ReuseViewName,
 	ReuseViewPriority,
 	ReuseViewRevision
 } from '@cupboard/protocol/reuse-views';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import type { SessionId, UploadId } from '@cupboard/protocol/upload';
+import type { PushId, SessionId, UploadId } from '@cupboard/protocol/upload';
 import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
 import {
 	check,
@@ -416,7 +417,10 @@ export const publicationOperations = sqliteTable(
 		})
 			.notNull()
 			.default('accepted'),
-		resultJson: text('result_json')
+		resultJson: text('result_json'),
+		manifestOperationId: text(
+			'manifest_operation_id'
+		).$type<PublicationOperationId>()
 	},
 	(table) => [
 		index('publication_operation_prune_idx').on(table.state, table.pruneAfter),
@@ -1064,6 +1068,23 @@ export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 	cursor: text('cursor').notNull().default(''),
 	markStorePathHash: text('mark_store_path_hash').$type<StorePathHash>(),
 	referenceCursor: integer('reference_cursor').notNull().default(-1),
+	// Runtime references and selected association edges resume independently.
+	// The selected identity fences a cursor against a concurrent pointer swap.
+	markEdgePhase: text('mark_edge_phase', {
+		enum: ['references', 'association']
+	})
+		.notNull()
+		.default('references'),
+	associationMemberCursor: text('association_member_cursor')
+		.notNull()
+		.default(''),
+	associationMaterialisationId: text('association_materialisation_id'),
+	associationCacheGeneration: integer(
+		'association_cache_generation'
+	).$type<CacheGeneration>(),
+	associationResultGeneration: integer(
+		'association_result_generation'
+	).$type<NarInfoGeneration>(),
 	allowEmptyCollection: integer('allow_empty_collection', { mode: 'boolean' })
 		.notNull()
 		.default(false)
@@ -1247,4 +1268,476 @@ export const grantContraction = sqliteTable(
 		complete: integer('complete', { mode: 'boolean' }).notNull().default(false)
 	},
 	(table) => [check('grant_contraction_singleton_check', sql`${table.id} = 1`)]
+);
+
+// One immutable page records its first retention event, including negatives.
+// Replays never restore retention and must prove the recorded versions again.
+export const confirmationReceipts = sqliteTable(
+	'confirmation_receipt',
+	{
+		id: text('id').primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		pushId: text('push_id').$type<PushId>().notNull(),
+		canonicalJson: text('canonical_json').notNull(),
+		retentionEpoch: integer('retention_epoch').notNull(),
+		graceDecisionJson: text('grace_decision_json').notNull(),
+		graceDeadline: text('grace_deadline').$type<IsoTimestamp>(),
+		resultJson: text('result_json').notNull(),
+		acceptedAt: text('accepted_at').$type<IsoTimestamp>().notNull(),
+		pushExpiresAt: text('push_expires_at').$type<IsoTimestamp>().notNull(),
+		recoveryDeadline: text('recovery_deadline').$type<IsoTimestamp>().notNull(),
+		pruneAfter: text('prune_after').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [index('confirmation_receipt_prune_idx').on(table.pruneAfter)]
+);
+
+// Trigger-maintained cardinalities make finalisation independent of set size.
+// Invalidity is sticky until the owning operation/header is reclaimed; deleting
+// and reinserting a proof must not certify different bytes under an old digest.
+export const publicationManifestCardinalities = sqliteTable(
+	'publication_manifest_cardinality',
+	{
+		kind: text('kind', { enum: ['candidate', 'portable'] }).notNull(),
+		id: text('id').notNull(),
+		memberCount: integer('member_count').notNull().default(0),
+		valid: integer('valid', { mode: 'boolean' }).notNull().default(true)
+	},
+	(table) => [primaryKey({ columns: [table.kind, table.id] })]
+);
+
+// Portable membership is independent of destination path generations. Services
+// publish canonical members in bounded pages before selecting an association.
+// Migration 0083 forbids updates; deletion supports bounded metadata reclamation.
+export const publicationManifests = sqliteTable(
+	'publication_manifest',
+	{
+		digest: text('digest').primaryKey(),
+		version: integer('version').notNull(),
+		memberCount: integer('member_count').notNull()
+	},
+	(table) => [
+		check('publication_manifest_version_check', sql`${table.version} = 1`),
+		check(
+			'publication_manifest_count_check',
+			sql`${table.memberCount} BETWEEN 1 AND 100000`
+		)
+	]
+);
+
+export const publicationManifestMembers = sqliteTable(
+	'publication_manifest_member',
+	{
+		digest: text('digest').notNull(),
+		ordinal: integer('ordinal').notNull(),
+		storePath: text('store_path').$type<StorePathString>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.digest, table.ordinal] }),
+		uniqueIndex('publication_manifest_member_path_idx').on(
+			table.digest,
+			table.storePath
+		),
+		check(
+			'publication_manifest_member_ordinal_check',
+			sql`${table.ordinal} BETWEEN 0 AND 99999`
+		)
+	]
+);
+
+// The full path and NAR are part of every identity comparison, even though a
+// cache/hash/generation key suffices for uniqueness. Completeness is a service-
+// finalised certificate; low-level narinfo/lifecycle writes invalidate it.
+export const resultPublications = sqliteTable(
+	'result_publication',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		resultHash: text('result_hash').$type<StorePathHash>().notNull(),
+		resultPath: text('result_path').$type<StorePathString>().notNull(),
+		resultGeneration: integer('result_generation')
+			.$type<NarInfoGeneration>()
+			.notNull(),
+		resultNarHash: text('result_nar_hash')
+			.$type<NixSha256HashString>()
+			.notNull(),
+		digest: text('digest').notNull(),
+		// Opaque candidate/operation identity, not a portable content digest.
+		materialisationId: text('materialisation_id').notNull(),
+		origin: text('origin', {
+			enum: ['build-selection', 'legacy-selection']
+		}).notNull(),
+		complete: integer('complete', { mode: 'boolean' }).notNull().default(false)
+	},
+	(table) => [
+		primaryKey({
+			columns: [
+				table.cacheId,
+				table.cacheGeneration,
+				table.resultHash,
+				table.resultGeneration
+			]
+		}),
+		index('result_publication_digest_idx').on(table.digest),
+		index('result_publication_materialisation_idx').on(table.materialisationId),
+		check(
+			'result_publication_origin_check',
+			sql`${table.origin} IN ('build-selection', 'legacy-selection')`
+		)
+	]
+);
+
+// Association triggers enqueue old selections independently of operation receipts.
+// Cleanup removes their private member ranges in bounded indexed pages.
+export const publicationManifestRetirements = sqliteTable(
+	'publication_manifest_retirement',
+	{
+		materialisationId: text('materialisation_id').primaryKey(),
+		digest: text('digest')
+	}
+);
+
+// Only the selected materialisation is reachable, even when complete=false.
+// Unselected operations stage private exact-version proofs in disjoint ranges.
+// The reverse index invalidates affected proofs without scanning the catalogue;
+// candidate/path ordering supports canonical sealing and bounded cleanup.
+export const resultPublicationMembers = sqliteTable(
+	'result_publication_member',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		resultHash: text('result_hash').$type<StorePathHash>().notNull(),
+		resultGeneration: integer('result_generation')
+			.$type<NarInfoGeneration>()
+			.notNull(),
+		materialisationId: text('materialisation_id').notNull(),
+		memberHash: text('member_hash').$type<StorePathHash>().notNull(),
+		memberPath: text('member_path').$type<StorePathString>().notNull(),
+		memberNarHash: text('member_nar_hash')
+			.$type<NixSha256HashString>()
+			.notNull(),
+		memberGeneration: integer('member_generation')
+			.$type<NarInfoGeneration>()
+			.notNull(),
+		availabilityRevision: integer('availability_revision').notNull().default(0)
+	},
+	(table) => [
+		primaryKey({
+			columns: [
+				table.cacheId,
+				table.cacheGeneration,
+				table.resultHash,
+				table.resultGeneration,
+				table.materialisationId,
+				table.memberHash
+			]
+		}),
+		index('result_publication_member_reverse_idx').on(
+			table.cacheId,
+			table.cacheGeneration,
+			table.memberHash,
+			table.memberGeneration,
+			table.memberPath,
+			table.memberNarHash,
+			table.materialisationId
+		),
+		uniqueIndex('result_publication_member_candidate_path_idx').on(
+			table.materialisationId,
+			table.memberPath
+		)
+	]
+);
+
+export const publicationManifestWorkHolds = sqliteTable(
+	'publication_manifest_work_hold',
+	{
+		operationId: text('operation_id').notNull(),
+		publicationId: text('publication_id').$type<UploadId>().notNull(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		storePath: text('store_path').$type<StorePathString>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.operationId, table.publicationId] }),
+		index('publication_manifest_work_hold_path_idx').on(
+			table.cacheId,
+			table.storePathHash,
+			table.generation,
+			table.operationId
+		)
+	]
+);
+
+export const publicationManifestAdmissions = sqliteTable(
+	'publication_manifest_admission',
+	{
+		operationId: text('operation_id').primaryKey(),
+		destinationKind: text('destination_kind', {
+			enum: ['default', 'named']
+		}).notNull(),
+		destinationName: text('destination_name').$type<CacheName>(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		cacheId: integer('cache_id').$type<CacheId>(),
+		canonicalJson: text('canonical_json').notNull(),
+		pushId: text('push_id').$type<PushId>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		pruneAfter: text('prune_after').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('publication_manifest_admission_prune_idx').on(
+			table.pruneAfter,
+			table.operationId
+		),
+		uniqueIndex('publication_manifest_admission_push_idx').on(table.pushId),
+		check(
+			'publication_manifest_admission_destination_check',
+			sql`(${table.destinationKind} = 'default' AND ${table.destinationName} IS NULL) OR (${table.destinationKind} = 'named' AND ${table.destinationName} IS NOT NULL)`
+		)
+	]
+);
+
+export const publicationManifestOperations = sqliteTable(
+	'publication_manifest_operation',
+	{
+		id: text('id').primaryKey(),
+		requestId: text('request_id').notNull(),
+		kind: text('kind', { enum: ['capture', 'ensure'] }).notNull(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		canonicalJson: text('canonical_json').notNull(),
+		resultIdentityJson: text('result_identity_json').notNull(),
+		sourceJson: text('source_json'),
+		origin: text('origin', {
+			enum: ['build-selection', 'legacy-selection']
+		}).notNull(),
+		expectedCount: integer('expected_count').notNull(),
+		nextPage: integer('next_page').notNull().default(0),
+		// Intake cursor counts accepted members; later phases define their own cursor.
+		cursor: integer('cursor').notNull().default(0),
+		phase: text('phase', { enum: ['intake', 'sealing', 'publishing'] })
+			.notNull()
+			.default('intake'),
+		candidateDigest: text('candidate_digest'),
+		// Continuations must parse a discriminated progress schema before resuming.
+		progressJson: text('progress_json'),
+		state: text('state', { enum: ['pending', 'complete', 'failed', 'expired'] })
+			.notNull()
+			.default('pending'),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		resultJson: text('result_json'),
+		failureJson: text('failure_json')
+	},
+	(table) => [
+		uniqueIndex('publication_manifest_operation_request_idx').on(
+			table.cacheId,
+			table.cacheGeneration,
+			table.kind,
+			table.requestId
+		),
+		index('publication_manifest_operation_scope_idx').on(
+			table.cacheId,
+			table.cacheGeneration,
+			table.id
+		),
+		index('publication_manifest_operation_expiry_idx').on(
+			table.expiresAt,
+			table.id
+		),
+		index('publication_manifest_operation_candidate_digest_idx').on(
+			table.candidateDigest,
+			table.state,
+			table.id
+		),
+		check(
+			'publication_manifest_operation_phase_check',
+			sql`${table.phase} IN ('intake', 'sealing', 'publishing')`
+		),
+		check(
+			'publication_manifest_operation_count_check',
+			sql`${table.expectedCount} BETWEEN 1 AND 100000`
+		),
+		check(
+			'publication_manifest_operation_progress_check',
+			sql`${table.nextPage} >= 0 AND ${table.cursor} BETWEEN 0 AND ${table.expectedCount}`
+		)
+	]
+);
+
+export const publicationManifestOperationPages = sqliteTable(
+	'publication_manifest_operation_page',
+	{
+		operationId: text('operation_id').notNull(),
+		page: integer('page').notNull(),
+		payloadDigest: text('payload_digest').notNull(),
+		payloadJson: text('payload_json').notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.operationId, table.page] }),
+		check('publication_manifest_operation_page_check', sql`${table.page} >= 0`)
+	]
+);
+
+// A single monotone clock survives bounded reclamation of per-version fences.
+// Lifecycle changes also stamp this singleton; only in-flight observations retry.
+// Neither stamp is an accepted narinfo/cache generation or a stored-proof revocation.
+export const publicationManifestAvailabilityClock = sqliteTable(
+	'publication_manifest_availability_clock',
+	{
+		id: integer('id').primaryKey(),
+		revision: integer('revision').notNull().default(0),
+		lifecycleRevision: integer('lifecycle_revision').notNull().default(0)
+	},
+	(table) => [
+		check(
+			'publication_manifest_availability_clock_check',
+			sql`${table.id} = 1 AND ${table.revision} BETWEEN 0 AND 9007199254740991 AND ${table.lifecycleRevision} BETWEEN 0 AND ${table.revision}`
+		)
+	]
+);
+
+export const publicationManifestAvailabilityRevisions = sqliteTable(
+	'publication_manifest_availability_revision',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		storePath: text('store_path').$type<StorePathString>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		revision: integer('revision').notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [
+				table.cacheId,
+				table.cacheGeneration,
+				table.storePathHash,
+				table.generation,
+				table.storePath,
+				table.narHash
+			]
+		})
+	]
+);
+
+export const publicationManifestAvailabilityIntents = sqliteTable(
+	'publication_manifest_availability_intent',
+	{
+		revision: integer('revision').primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		storePath: text('store_path').$type<StorePathString>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		kind: text('kind', {
+			enum: ['demote', 'revoke', 'local', 'local-replace']
+		}).notNull(),
+		remotePending: integer('remote_pending', { mode: 'boolean' })
+			.notNull()
+			.default(true),
+		cursorMaterialisationId: text('cursor_materialisation_id'),
+		cursorMemberGeneration: integer(
+			'cursor_member_generation'
+		).$type<NarInfoGeneration>(),
+		cursorMemberPath: text('cursor_member_path').$type<StorePathString>(),
+		cursorMemberNarHash: text(
+			'cursor_member_nar_hash'
+		).$type<NixSha256HashString>(),
+		cursorOwnerGeneration: integer(
+			'cursor_owner_generation'
+		).$type<NarInfoGeneration>(),
+		phase: text('phase', { enum: ['proofs', 'owners'] })
+			.notNull()
+			.default('proofs'),
+		replacementGeneration: integer(
+			'replacement_generation'
+		).$type<NarInfoGeneration>(),
+		replacementPath: text('replacement_path').$type<StorePathString>(),
+		replacementNarHash: text(
+			'replacement_nar_hash'
+		).$type<NixSha256HashString>()
+	},
+	(table) => [
+		index('publication_manifest_availability_intent_version_idx').on(
+			table.cacheId,
+			table.cacheGeneration,
+			table.storePathHash,
+			table.generation,
+			table.storePath,
+			table.narHash,
+			table.remotePending,
+			table.revision
+		),
+		index('publication_manifest_availability_intent_pending_idx').on(
+			table.remotePending,
+			table.revision
+		),
+		check(
+			'publication_manifest_availability_intent_kind_check',
+			sql`(${table.kind} IN ('demote','revoke') AND ${table.remotePending} IN (0,1)) OR (${table.kind} IN ('local','local-replace') AND ${table.remotePending} = 0)`
+		)
+	]
+);
+
+// Last actual local identity, including across REPLACE's implicit delete.
+// Legacy identities are seeded by an indexed mutation probe, never a backfill.
+// Deleted mirrors are reclaimed with their bounded local invalidation intents.
+export const publicationManifestLocalIdentities = sqliteTable(
+	'publication_manifest_local_identity',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		storePath: text('store_path').$type<StorePathString>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.cacheId, table.storePathHash] })]
+);
+
+export const publicationManifestLifecycleIntents = sqliteTable(
+	'publication_manifest_lifecycle_intent',
+	{
+		revision: integer('revision').primaryKey(),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		cursorResultHash: text('cursor_result_hash').$type<StorePathHash>(),
+		cursorResultGeneration: integer(
+			'cursor_result_generation'
+		).$type<NarInfoGeneration>(),
+		cursorOperationId: text('cursor_operation_id'),
+		phase: text('phase', { enum: ['associations', 'operations'] })
+			.notNull()
+			.default('associations')
+	},
+	(table) => [
+		index('publication_manifest_lifecycle_intent_scope_idx').on(
+			table.cacheId,
+			table.cacheGeneration,
+			table.revision
+		)
+	]
 );

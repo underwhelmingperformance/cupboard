@@ -56,7 +56,7 @@ afterEach(async () => {
 
 async function fixture(
 	options: {
-		readonly version?: 2 | 3;
+		readonly version?: 2 | 3 | 4;
 		readonly subjectCount?: number;
 		readonly copied?: boolean;
 	} = {}
@@ -139,6 +139,48 @@ function entries() {
 }
 
 describe('publication attestation coverage', () => {
+	it('does not enumerate compact V4 publication sets when explicit paths and subjects are empty', async () => {
+		const files = await fixture({ version: 4, subjectCount: 0 });
+		await writeFile(
+			files.receipt,
+			JSON.stringify({
+				version: 4,
+				paths: [],
+				subjects: [],
+				publicationSets: [
+					{
+						result: {
+							storePath: app,
+							narHash,
+							generation: 0,
+							cache: { kind: 'default' },
+							cacheGeneration: 1
+						},
+						digest: 'a'.repeat(64),
+						memberCount: 100_000,
+						origin: 'build-selection',
+						materialisation: 'complete'
+					}
+				]
+			})
+		);
+		await buildProgram({ RUNNER_TEMP: files.directory }).parseAsync([
+			'node',
+			'action',
+			'attest-status',
+			'--url',
+			'https://cupboard.example.workers.dev/t/acme',
+			'--cupboard-path',
+			'/bin/cupboard',
+			'--receipt-file',
+			files.receipt
+		]);
+		expect({
+			queries: mocks.runCupboard.mock.calls,
+			results: mocks.result.mock.calls
+		}).toStrictEqual({ queries: [], results: [] });
+	});
+
 	it('rejects subjects outside the receipt path list before discovery', async () => {
 		const files = await fixture();
 		const receipt = buildReceiptSchema.parse(
@@ -239,7 +281,9 @@ describe('publication attestation coverage', () => {
 		{ signed: false, version: 3 as const, subjectCount: 4 },
 		{ signed: false, version: 2 as const, subjectCount: 1 },
 		{ signed: false, version: 2 as const, subjectCount: 0 },
-		{ signed: false, version: 3 as const, subjectCount: 1 }
+		{ signed: false, version: 3 as const, subjectCount: 1 },
+		{ signed: true, version: 4 as const, subjectCount: 4, copied: true },
+		{ signed: false, version: 4 as const, subjectCount: 0 }
 	])(
 		'reports every receipt path with version $version, $subjectCount subjects and signing $signed',
 		async ({ signed, version, subjectCount, copied }) => {

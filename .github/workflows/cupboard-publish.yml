@@ -363,22 +363,6 @@ jobs:
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
 
-      - name: Report stored attestation coverage
-        uses: $/actions/attest-status
-        if:
-          ${{ !cancelled() && inputs.publish != 'none' &&
-          steps.push.outputs.receipt-file != '' }}
-        with:
-          url: ${{ inputs.url }}
-          cache: ${{ inputs.cache }}
-          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
-          read-session-target: ${{ steps.setup.outputs.read-session-target }}
-          read-session-view: ${{ steps.setup.outputs.read-session-view }}
-          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
-          audience: ${{ steps.setup.outputs.read-session-audience }}
-          receipt-file: ${{ steps.push.outputs.receipt-file }}
-          bundles-file: ${{ steps.attest.outputs.bundles-file }}
-
       - name: Save complete publication results
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}

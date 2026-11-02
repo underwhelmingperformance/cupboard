@@ -3,6 +3,8 @@ import { z } from 'zod';
 import {
 	pushCredentialSchema,
 	pushIdSchema,
+	uploadConfirmPresentRequestSchema,
+	uploadConfirmPresentResponseSchema,
 	uploadConfirmRequestSchema,
 	uploadConfirmResponseSchema,
 	uploadIdSchema,
@@ -35,6 +37,29 @@ const uploadNegotiateErrors = {
 	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
 };
 
+// Match the existing HTTP error bridge: invalid push IDs use FORBIDDEN,
+// generation changes use CONFLICT, and expired recovery uses
+// SERVICE_UNAVAILABLE. Do not invent publication-frame refusal codes here.
+const confirmPresentErrors = {
+	...uploadNegotiateErrors,
+	CONFLICT: { status: 409 },
+	NOT_FOUND: { status: 404 },
+	SERVICE_UNAVAILABLE: { status: 503 },
+	PAYLOAD_TOO_LARGE: { status: 413 }
+};
+
+const confirmPresent = writableCacheScopedProcedure(
+	{
+		method: 'POST',
+		suffix: '/uploads/confirm-present',
+		requires: 'upload:commit',
+		maintenance: true,
+		replaySafety: 'replay-safe'
+	},
+	uploadConfirmPresentRequestSchema.shape,
+	uploadConfirmPresentResponseSchema
+);
+
 const negotiate = writableCacheScopedProcedure(
 	{
 		method: 'POST',
@@ -64,6 +89,14 @@ const preview = cacheScopedProcedure(
 );
 
 export const uploadsContract = {
+	// Replay safety requires a durable page receipt: replay rechecks its exact
+	// identities without renewing grace or root expiry. The implementation must
+	// separately authorise attachRoot.name with the existing root:attach check;
+	// upload:commit alone never grants root attachment.
+	confirmPresent: {
+		inDefaultCache: confirmPresent.inDefaultCache.errors(confirmPresentErrors),
+		inNamedCache: confirmPresent.inNamedCache.errors(confirmPresentErrors)
+	},
 	plan: cacheScopedProcedure(
 		{
 			method: 'POST',

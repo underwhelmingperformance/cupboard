@@ -326,10 +326,12 @@ async function referenceWalk(): Promise<unknown> {
 				phase: string;
 				markStorePathHash: string | null;
 				referenceCursor: number;
+				markEdgePhase: string;
 			}>(
 				`SELECT phase,
 				        mark_store_path_hash AS markStorePathHash,
-				        reference_cursor AS referenceCursor
+				        reference_cursor AS referenceCursor,
+                        mark_edge_phase AS markEdgePhase
 				 FROM garbage_collection_scan
 				 WHERE cache_id = ?`,
 				cache.id
@@ -632,7 +634,7 @@ describe('garbage collection cap', () => {
 
 		// Drive to the unit that marks the root's own path. The walk continues from
 		// there: the next unit reads the path's one reference and queues it, and the
-		// unit after that marks the reference.
+		// next unit checks the selected association, then the next marks the reference.
 		await driveScanTo(
 			(scan) =>
 				scan?.phase === 'mark' && scan.marks === 1 && scan.frontier === 0
@@ -642,6 +644,9 @@ describe('garbage collection cap', () => {
 		await driven.collectOneUnitOfWork();
 		const parentMarked = await currentScanProgress();
 
+		await driven.collectOneUnitOfWork();
+		const associationWalked = await currentScanProgress();
+		expect(associationWalked).toStrictEqual(parentMarked);
 		await driven.collectOneUnitOfWork();
 		const closureMarked = await currentScanProgress();
 		const progress = { seeded, parentMarked, closureMarked };
@@ -910,23 +915,36 @@ describe('garbage collection cap', () => {
 
 		await driven.collectOneUnitOfWork();
 		const secondStep = await referenceWalk();
+		await driven.collectOneUnitOfWork();
+		const associationStep = await referenceWalk();
 
-		expect({ firstStep, secondStep }).toStrictEqual({
+		expect({ firstStep, secondStep, associationStep }).toStrictEqual({
 			firstStep: {
 				scan: {
 					phase: 'mark',
 					markStorePathHash: parent.storePathHash,
-					referenceCursor: phaseStepSize - 1
+					referenceCursor: phaseStepSize - 1,
+					markEdgePhase: 'references'
 				},
 				frontier: phaseStepSize
 			},
-			// The remaining references fit in one step, so the walk finishes the path
-			// and releases its cursor.
+			// References finish without consuming the independently resumable
+			// association step; only that step releases the owner cursor.
 			secondStep: {
 				scan: {
 					phase: 'mark',
+					markStorePathHash: parent.storePathHash,
+					referenceCursor: phaseStepSize - 1,
+					markEdgePhase: 'association'
+				},
+				frontier: phaseStepSize + 5
+			},
+			associationStep: {
+				scan: {
+					phase: 'mark',
 					markStorePathHash: undefined,
-					referenceCursor: -1
+					referenceCursor: -1,
+					markEdgePhase: 'references'
 				},
 				frontier: phaseStepSize + 5
 			}

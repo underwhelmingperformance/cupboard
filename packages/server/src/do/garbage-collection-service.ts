@@ -72,6 +72,8 @@ import {
 	type JsonValueList,
 	jsonValueLists
 } from './json-list.ts';
+import { PublicationManifestCleanup } from './publication-manifest-cleanup.ts';
+import { prepareManifestWorkHolds } from './publication-manifest-work-holds.ts';
 import { type RetentionService } from './retention-service.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
 
@@ -183,6 +185,53 @@ export const inputTriggers: readonly {
 	table
 }));
 
+/** Migration 0083: associated edges are not seeds. These triggers fence
+exact-version invalidation and writes that can add edges during an active scan. */
+export const publicationCollectionTriggers: readonly {
+	readonly name: string;
+	readonly table: string;
+}[] = [
+	...(['insert', 'update'] as const).flatMap((event) => [
+		{
+			name: `result_publication_barrier_${event}`,
+			table: 'result_publication'
+		},
+		{
+			name: `result_publication_barrier_member_${event}`,
+			table: 'result_publication_member'
+		},
+		{
+			name: `garbage_collection_input_result_publication_${event}`,
+			table: 'result_publication'
+		}
+	]),
+	...(['insert', 'update', 'delete'] as const).map((event) => ({
+		name: `garbage_collection_input_result_publication_member_${event}`,
+		table: 'result_publication_member'
+	})),
+	{
+		name: 'result_publication_narinfo_identical_insert',
+		table: 'narinfo'
+	},
+	...(['insert', 'update'] as const).map((event) => ({
+		name: `result_publication_narinfo_prepare_${event}`,
+		table: 'narinfo'
+	})),
+	...(['insert', 'delete', 'update'] as const).map((event) => ({
+		name: `result_publication_narinfo_${event}`,
+		table: 'narinfo'
+	})),
+	...(['update', 'delete'] as const).map((event) => ({
+		name: `result_publication_cache_identity_${event}`,
+		table: 'cache_identity'
+	})),
+	{ name: 'result_publication_delete', table: 'result_publication' },
+	{
+		name: 'result_publication_materialisation_update',
+		table: 'result_publication'
+	}
+];
+
 const graceProjectionTriggerPrefix = 'retention_grace_by_deadline_';
 
 /**
@@ -208,7 +257,12 @@ skip a cache whose inputs have changed.
 export const collectionTriggers: readonly {
 	readonly name: string;
 	readonly table: string;
-}[] = [...barrierTriggers, ...inputTriggers, ...graceProjectionTriggers];
+}[] = [
+	...barrierTriggers,
+	...inputTriggers,
+	...graceProjectionTriggers,
+	...publicationCollectionTriggers
+];
 
 /**
 Builds one ordered page of targets for roots that have just expired. The
@@ -443,14 +497,14 @@ export class GarbageCollectionService {
 
 	private updateScan(
 		cache: ResolvedCache,
-		set: Partial<
-			Pick<
-				typeof schema.garbageCollectionScans.$inferInsert,
-				'phase' | 'cursor' | 'referenceCursor' | 'allowEmptyCollection'
-			>
-		> & {
-			readonly markStorePathHash?: StorePathHash | SQL;
-		}
+		set: Partial<{
+			[
+				Key in keyof Omit<
+					typeof schema.garbageCollectionScans.$inferInsert,
+					'cacheId'
+				>
+			]: (typeof schema.garbageCollectionScans.$inferInsert)[Key] | SQL;
+		}>
 	): void {
 		this.context.db
 			.update(schema.garbageCollectionScans)
@@ -777,10 +831,10 @@ export class GarbageCollectionService {
 	Walks the frontier until the budget is spent or the mark completes.
 
 	Each iteration is one step: it pops a path from the frontier and marks it,
-	or it walks a step of one path's references. The budget is consulted after
+	or it walks a page of a path's runtime references or selected association. The budget is consulted after
 	a step, so the first one always runs.
 
-	The path being walked and the reference cursor are kept in local
+	The path being walked, edge phase and cursors are kept in local
 	variables. Nothing else writes the scan row while the pass runs, so they
 	stay equal to what the row holds.
 	*/
@@ -790,6 +844,8 @@ export class GarbageCollectionService {
 	): { readonly complete: boolean } {
 		let pending = scan.markStorePathHash ?? undefined;
 		let referenceCursor = scan.referenceCursor;
+		let edgePhase = scan.markEdgePhase;
+		let associationState: typeof scan | undefined = scan;
 
 		for (;;) {
 			let storePathHash: StorePathHash;
@@ -844,7 +900,12 @@ export class GarbageCollectionService {
 						tx.update(schema.garbageCollectionScans)
 							.set({
 								markStorePathHash: row.storePathHash,
-								referenceCursor: -1
+								referenceCursor: -1,
+								markEdgePhase: 'references',
+								associationMemberCursor: '',
+								associationMaterialisationId: sql`null`,
+								associationCacheGeneration: sql`null`,
+								associationResultGeneration: sql`null`
 							})
 							.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
 							.run();
@@ -861,6 +922,8 @@ export class GarbageCollectionService {
 
 				storePathHash = row.storePathHash;
 				referenceCursor = -1;
+				edgePhase = 'references';
+				associationState = undefined;
 
 				if (isRowBudgetExhausted()) {
 					return { complete: false };
@@ -869,16 +932,17 @@ export class GarbageCollectionService {
 				storePathHash = pending;
 			}
 
-			this.validateReferencesContainer(cache, storePathHash);
+			if (edgePhase === 'references') {
+				this.validateReferencesContainer(cache, storePathHash);
 
-			const page = phaseStepSize;
+				const page = phaseStepSize;
 
-			// A new reference source also needs barrier triggers. Otherwise writes
-			// to it after marking could make paths reachable without re-queuing them.
-			const references = this.context.db.all<{
-				referenceIndex: number;
-				reference: unknown;
-			}>(sql`
+				// A new reference source also needs barrier triggers. Otherwise writes
+				// to it after marking could make paths reachable without re-queuing them.
+				const references = this.context.db.all<{
+					referenceIndex: number;
+					reference: unknown;
+				}>(sql`
 				SELECT CAST(json_each.key AS INTEGER) AS referenceIndex,
 				       json_each.value AS reference
 				FROM ${schema.narInfos}, json_each(${schema.narInfos.referencesJson})
@@ -888,28 +952,43 @@ export class GarbageCollectionService {
 				ORDER BY CAST(json_each.key AS INTEGER)
 				LIMIT ${page + 1}
 			`);
-			const batch = references.slice(0, page);
-			const hashes = batch.map(({ reference }) =>
-				this.referenceHash(storePathHash, reference)
-			);
-			const marked = this.existingMarks(cache, hashes);
+				const batch = references.slice(0, page);
+				const hashes = batch.map(({ reference }) =>
+					this.referenceHash(storePathHash, reference)
+				);
+				const marked = this.existingMarks(cache, hashes);
 
-			this.insertFrontier(
-				cache,
-				hashes.filter((hash) => hash !== storePathHash && !marked.has(hash))
-			);
+				this.insertFrontier(
+					cache,
+					hashes.filter((hash) => hash !== storePathHash && !marked.has(hash))
+				);
 
-			if (references.length > batch.length) {
-				this.updateScan(cache, {
-					referenceCursor: batch.at(-1)?.referenceIndex ?? referenceCursor
-				});
+				if (references.length > batch.length) {
+					this.updateScan(cache, {
+						referenceCursor: batch.at(-1)?.referenceIndex ?? referenceCursor
+					});
 
+					return { complete: false };
+				}
+
+				this.updateScan(cache, { markEdgePhase: 'association' });
+				edgePhase = 'association';
+				if (isRowBudgetExhausted()) {
+					return { complete: false };
+				}
+			}
+			if (!this.advanceAssociation(cache, storePathHash, associationState)) {
 				return { complete: false };
 			}
 
 			this.updateScan(cache, {
 				markStorePathHash: sql`null`,
-				referenceCursor: -1
+				referenceCursor: -1,
+				markEdgePhase: 'references',
+				associationMemberCursor: '',
+				associationMaterialisationId: sql`null`,
+				associationCacheGeneration: sql`null`,
+				associationResultGeneration: sql`null`
 			});
 			pending = undefined;
 			referenceCursor = -1;
@@ -918,6 +997,80 @@ export class GarbageCollectionService {
 				return { complete: false };
 			}
 		}
+	}
+
+	/**
+	Pages the selected proof, not portable content or private candidates.
+	Apply the limit before exact-member filtering so stale proofs also cost
+	bounded work. A changed selection starts at the beginning, never at an
+	unrelated materialisation's cursor. Completeness is not a retention root.
+	*/
+	private advanceAssociation(
+		cache: ResolvedCache,
+		owner: StorePathHash,
+		scan: typeof schema.garbageCollectionScans.$inferSelect | undefined
+	): boolean {
+		const association = this.context.db
+			.all<{
+				materialisationId: string;
+				cacheGeneration: typeof schema.cacheIdentities.$inferSelect.generation;
+				resultGeneration: typeof schema.narInfos.$inferSelect.generation;
+			}>(
+				sql`SELECT a.materialisation_id AS materialisationId,
+                       a.cache_generation AS cacheGeneration,
+                       a.result_generation AS resultGeneration
+            FROM narinfo AS n
+            JOIN cache_identity AS c ON c.id = n.cache_id
+            JOIN result_publication AS a
+              ON a.cache_id = n.cache_id AND a.cache_generation = c.generation
+             AND a.result_hash = n.store_path_hash AND a.result_generation = n.generation
+             AND a.result_path = n.store_path AND a.result_nar_hash = n.nar_hash
+            WHERE n.cache_id = ${cache.id} AND n.store_path_hash = ${owner}`
+			)
+			.at(0);
+		if (association === undefined) {
+			return true;
+		}
+		const cursor =
+			scan?.associationMaterialisationId === association.materialisationId &&
+			scan.associationCacheGeneration === association.cacheGeneration &&
+			scan.associationResultGeneration === association.resultGeneration
+				? scan.associationMemberCursor
+				: '';
+		const rows = this.context.db.all<{
+			memberPath: string;
+			memberHash: StorePathHash;
+			current: number;
+		}>(sql`SELECT e.member_path AS memberPath, e.member_hash AS memberHash,
+                (e.cache_id = ${cache.id} AND e.cache_generation = ${association.cacheGeneration}
+                 AND e.result_hash = ${owner} AND e.result_generation = ${association.resultGeneration}
+                 AND EXISTS (SELECT 1 FROM narinfo AS n
+                     WHERE n.cache_id = e.cache_id AND n.store_path_hash = e.member_hash
+                       AND n.generation = e.member_generation AND n.store_path = e.member_path
+                       AND n.nar_hash = e.member_nar_hash)) AS current
+            FROM result_publication_member AS e INDEXED BY result_publication_member_candidate_path_idx
+            WHERE e.materialisation_id = ${association.materialisationId} AND e.member_path > ${cursor}
+            ORDER BY e.member_path LIMIT ${phaseStepSize + 1}`);
+		const batch = rows.slice(0, phaseStepSize);
+		const hashes = batch
+			.filter((row) => row.current === 1)
+			.map((row) => row.memberHash);
+		const marked = this.existingMarks(cache, hashes);
+		this.insertFrontier(
+			cache,
+			hashes.filter((hash) => hash !== owner && !marked.has(hash))
+		);
+		if (rows.length <= batch.length) {
+			return true;
+		}
+		this.updateScan(cache, {
+			markEdgePhase: 'association',
+			associationMemberCursor: batch.at(-1)?.memberPath ?? cursor,
+			associationMaterialisationId: association.materialisationId,
+			associationCacheGeneration: association.cacheGeneration,
+			associationResultGeneration: association.resultGeneration
+		});
+		return false;
 	}
 
 	private hasRetainedPath(cache: ResolvedCache): boolean {
@@ -1039,6 +1192,7 @@ export class GarbageCollectionService {
 		const rows = this.context.db
 			.select({
 				storePathHash: schema.narInfos.storePathHash,
+				storePath: schema.narInfos.storePath,
 				narHash: schema.narInfos.narHash,
 				generation: schema.narInfos.generation
 			})
@@ -1052,12 +1206,24 @@ export class GarbageCollectionService {
 			.orderBy(asc(schema.narInfos.storePathHash))
 			.limit(page + 1)
 			.all();
-		const batch = rows.slice(0, page);
+		const candidates = rows.slice(0, page);
+		const ready = prepareManifestWorkHolds(
+			this.context.db,
+			cache,
+			candidates,
+			now,
+			page
+		);
+		const batch = candidates.slice(0, ready);
 		let pathsCollected = 0;
 
 		for (const paths of jsonRowLists(batch)) {
 			const unmarked = notExists(this.markedPath(cache));
 			const settled = notExists(this.inFlightUpload(cache));
+			// Exact, temporary accepted manifest work is deletion protection, not a seed.
+			const manifestSettled = sql`NOT EXISTS (SELECT 1 FROM publication_manifest_work_hold h INDEXED BY publication_manifest_work_hold_path_idx
+				WHERE h.cache_id = ${schema.narInfos.cacheId} AND h.store_path_hash = ${schema.narInfos.storePathHash}
+				AND h.generation = ${schema.narInfos.generation} AND h.store_path = ${schema.narInfos.storePath} AND h.nar_hash = ${schema.narInfos.narHash} LIMIT 1)`;
 			// Unprocessed frontier rows can reference a candidate for deletion.
 			// Keep this condition even if the caller changes the phase order.
 			const markIsCurrent = notExists(
@@ -1081,6 +1247,7 @@ export class GarbageCollectionService {
 							}),
 							unmarked,
 							settled,
+							manifestSettled,
 							markIsCurrent
 						)
 					)
@@ -1168,7 +1335,8 @@ export class GarbageCollectionService {
 					    WHERE type = 'trigger'
 					      AND (name GLOB ${`${barrierTriggerPrefix}*`}
 					        OR name GLOB ${`${inputTriggerPrefix}*`}
-					        OR name GLOB ${`${graceProjectionTriggerPrefix}*`})`
+					        OR name GLOB ${`${graceProjectionTriggerPrefix}*`}
+				        OR name GLOB ${'result_publication_*'})`
 				)
 				.map((row) => row.name)
 		);
@@ -1830,6 +1998,9 @@ export class GarbageCollectionService {
 		log: Logger,
 		now: IsoTimestamp
 	): ExpiredRowCollection {
+		const hasMorePublicationManifests = new PublicationManifestCleanup(
+			this.context.db
+		).collect(now, phaseStepSize);
 		const hasMoreRefreshCredentialMaintenance =
 			this.collectRefreshCredentialMaintenance(now);
 		const hasMoreReplacementCleanups =
@@ -1904,6 +2075,7 @@ export class GarbageCollectionService {
 			pendingAttestationsDeleted: expiredAttestations.length,
 			hasMorePendingRows,
 			hasMoreWork:
+				hasMorePublicationManifests ||
 				hasMoreRefreshCredentialMaintenance ||
 				hasMoreReplacementCleanups ||
 				expiredRefreshFamilies.hasMoreWork ||
@@ -2186,7 +2358,12 @@ export class GarbageCollectionService {
 			rootsExpired: sum(visited.map((visit) => visit.rootsExpired)),
 			pathsCollected: sum(visited.map((visit) => visit.pathsCollected)),
 			hasMoreExpiredRoots: visited.some((visit) => visit.hasMoreExpiredRoots),
-			hasMoreWork: expired.hasMoreWork || hasMoreWork,
+			// Collection itself can retire associations after expired-row cleanup.
+			// Do not lose that durable continuation when this scan just finished.
+			hasMoreWork:
+				expired.hasMoreWork ||
+				hasMoreWork ||
+				new PublicationManifestCleanup(this.context.db).hasWork(now),
 			narInfosDeleted,
 			orphanStagingDeleted
 		};

@@ -38,11 +38,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, storePathBasename } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import {
-	type BuildReceiptV3,
-	buildReceiptV3Schema,
-	type TerminalBuildFailure
-} from '@cupboard/protocol/build';
+import { type TerminalBuildFailure } from '@cupboard/protocol/build';
 import {
 	availabilityCeilingSchema,
 	describeUnknownPathsRefusal,
@@ -74,6 +70,7 @@ import { readUserInputSchema } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
+import { RecordedCohortPublication } from '../cohort-publication.ts';
 import {
 	addUploads,
 	attributedUploads,
@@ -91,6 +88,7 @@ import {
 import {
 	type CupboardInvocation,
 	type CupboardRunDependencies,
+	hasPublicationResultSupport,
 	inspectCommandOptions,
 	inspectCupboardVersion,
 	readCredentialInvocation,
@@ -151,6 +149,11 @@ import {
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
+import {
+	type PublicationReceipt,
+	publicationReceiptSchema,
+	receiptPublicationSets
+} from '../publication-receipt.ts';
 import { rootRetention } from '../root-retention.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
@@ -846,6 +849,7 @@ export interface BuildCohortDependencies {
 	) => Promise<T>;
 	readonly materialiseCachedClosure?: typeof materialiseCachedClosure;
 	readonly inspectVersion?: typeof inspectCupboardVersion;
+	readonly hasPublicationSupport?: typeof hasPublicationResultSupport;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
 	readonly inspectCommandOptions?: typeof inspectCommandOptions;
 	readonly reporter?: Reporter;
@@ -945,6 +949,197 @@ export async function buildCohortAction(
 	options: BuildCohortOptions,
 	environment: Environment = env,
 	dependencies: BuildCohortDependencies = {}
+): Promise<void> {
+	dependencies.signal?.throwIfAborted();
+	const inputs = resolveBuildCohortInputs(options, environment);
+	if (inputs.publish === 'built' && inputs.store !== '') {
+		throw new BuiltPublicationObservationUnsupportedError();
+	}
+	if (
+		inputs.build === 'rebuild' &&
+		inputs.store === '' &&
+		(inputs.cohort.remote ||
+			(dependencies.buildSettings ?? discoverNixStoreConfig().building)
+				.builders !== undefined)
+	) {
+		throw new BuildRebuildRemoteDispatchError();
+	}
+	if (inputs.push && inputs.store !== '') {
+		const unresolved = membersOf(inputs.cohort).filter(
+			(member) => member.queryInstallable === undefined
+		);
+		if (unresolved.length > 0) {
+			throw new RemotePublicationTargetUnresolvedError(
+				unresolved.map((member) => member.attr)
+			);
+		}
+	}
+
+	if (!inputs.push) {
+		return buildColdCohortAction(options, environment, dependencies);
+	}
+	const reporter =
+		dependencies.reporter ?? createGithubReporter({ environment });
+	const publication = new RecordedCohortPublication(
+		inputs,
+		environment,
+		dependencies.runCupboard ?? defaultRunCupboard,
+		{
+			...dependencies.cupboardRunDependencies,
+			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		}
+	);
+	let hasPublicationFailed = false;
+	try {
+		await publication.open();
+		const hasSupport = await (
+			dependencies.hasPublicationSupport ?? hasPublicationResultSupport
+		)(inputs.cupboardPath, dependencies.signal);
+		if (!hasSupport) {
+			if (publication.requiresSupport()) {
+				throw new Error(
+					'Recorded publication support changed in the installed CLI'
+				);
+			}
+			await publication.close();
+			await buildColdCohortAction(options, environment, dependencies);
+			return;
+		}
+		const started = (dependencies.now ?? Date.now)();
+		await publication.recover();
+		const members = membersOf(inputs.cohort);
+		if (
+			!(await publication.lookup(inputs.build === 'rebuild' ? [] : members))
+		) {
+			await publication.close();
+			await buildColdCohortAction(options, environment, dependencies);
+			return;
+		}
+		const remaining = inputs.cohort.attrs
+			.map((_, index) => index)
+			.filter((index) => {
+				const member = members[index];
+				return (
+					!publication.hasColdSnapshot() &&
+					(member === undefined || !publication.isWarm(member))
+				);
+			});
+		await mkdir(path.dirname(inputs.receiptFile), { recursive: true });
+		for (const file of [
+			inputs.receiptFile,
+			inputs.targetPathsFile,
+			inputs.intermediatePathsFile,
+			inputs.referencePathsFile,
+			inputs.leftUpstreamFile,
+			inputs.countsFile
+		]) {
+			await rm(file, { force: true });
+		}
+		let failure: unknown;
+		try {
+			await publication.ensureWarm();
+			await publication.resumeCold();
+			if (remaining.length === 0) {
+				await publication.retainRoots(members);
+				reporter.result(
+					cohortSummaryResult({
+						durationMs: (dependencies.now ?? Date.now)() - started,
+						roots: publication.summaryRoots([])
+					})
+				);
+			} else {
+				const cohort = inputs.cohort;
+				await buildColdCohortAction(
+					{
+						...options,
+						cohortJson: JSON.stringify({
+							...cohort,
+							attrs: remaining.map((index) => cohort.attrs[index]),
+							installables: remaining.map(
+								(index) => cohort.installables[index]
+							),
+							queryInstallables: remaining.map(
+								(index) => cohort.queryInstallables[index]
+							),
+							expectedPaths: remaining.map(
+								(index) => cohort.expectedPaths[index]
+							),
+							roots: remaining.map((index) => cohort.roots[index])
+						})
+					},
+					environment,
+					{ ...dependencies, reporter },
+					publication,
+					members
+				);
+			}
+			publication.assertColdBuildAccepted();
+		} catch (error) {
+			failure = error;
+			throw error;
+		} finally {
+			await publication.finish(reporter, failure);
+			const readPaths = async (file: string) => {
+				try {
+					const contents = await readFile(file, 'utf8');
+					return contents.split(/\r?\n/u).filter(Boolean);
+				} catch (error) {
+					if (!(
+						error instanceof Error &&
+						'code' in error &&
+						error.code === 'ENOENT'
+					)) {
+						throw error;
+					}
+					return [];
+				}
+			};
+			const targets = [
+				...new Set([
+					...(await readPaths(inputs.targetPathsFile)),
+					...publication.coldTargets(),
+					...publication.sets.map((set) => set.result.storePath)
+				])
+			].toSorted(byCodeUnit);
+			await mkdir(path.dirname(inputs.targetPathsFile), { recursive: true });
+			await writeFile(inputs.targetPathsFile, linesOf(targets));
+			if (remaining.length === 0) {
+				await publication.restoreColdOutputFiles();
+				await setOutput(environment, 'out-link-directory', '');
+			}
+			for (const [name, file] of [
+				['target-paths-file', inputs.targetPathsFile],
+				['intermediate-paths-file', inputs.intermediatePathsFile],
+				['reference-paths-file', inputs.referencePathsFile],
+				['left-upstream-file', inputs.leftUpstreamFile],
+				['counts-file', inputs.countsFile]
+			] as const) {
+				await setOutput(environment, name, file);
+			}
+			const receipt = await publication.receipt();
+			await setOutput(
+				environment,
+				'receipt-file',
+				receipt === undefined ? '' : inputs.receiptFile
+			);
+			if (failure === undefined) {
+				await publication.complete();
+			}
+		}
+	} catch (error) {
+		hasPublicationFailed = true;
+		throw error;
+	} finally {
+		await publication.dispose(hasPublicationFailed);
+	}
+}
+
+async function buildColdCohortAction(
+	options: BuildCohortOptions,
+	environment: Environment = env,
+	dependencies: BuildCohortDependencies = {},
+	publicationCoordinator?: RecordedCohortPublication,
+	allMembers?: readonly CohortMember[]
 ): Promise<void> {
 	dependencies.signal?.throwIfAborted();
 
@@ -1136,7 +1331,7 @@ export async function buildCohortAction(
 		let streamedFailure:
 			| {
 					readonly error: CupboardReportedError;
-					readonly receipt: BuildReceiptV3;
+					readonly receipt: PublicationReceipt;
 			  }
 			| undefined;
 		let buildUploads: UploadTally | undefined;
@@ -1198,6 +1393,9 @@ export async function buildCohortAction(
 
 		const context: SettleCohortBuildContext = {
 			dependencyOutputs: plannedGraph?.dependencyOutputs ?? [],
+			graph: plannedGraph,
+			publicationCoordinator,
+			allMembers,
 			tenantDependencyReferences:
 				dependencies.tenantDependencyReferences ?? tenantDependencyReferences,
 			fetcher: dependencies.fetcher,
@@ -1677,16 +1875,16 @@ async function settledTargetBuildFailure(
 	receiptFile: string
 ): Promise<{
 	readonly error: CupboardReportedError;
-	readonly receipt: BuildReceiptV3;
+	readonly receipt: PublicationReceipt;
 }> {
 	if (!(error instanceof CupboardReportedError)) {
 		throw error;
 	}
 
-	let receipt: BuildReceiptV3;
+	let receipt: PublicationReceipt;
 
 	try {
-		receipt = buildReceiptV3Schema.parse(
+		receipt = publicationReceiptSchema.parse(
 			JSON.parse(await readFile(receiptFile, 'utf8'))
 		);
 	} catch {
@@ -1709,7 +1907,7 @@ async function settledTargetBuildFailure(
 async function resolveStreamedBuildOwners(options: {
 	readonly members: readonly CohortMember[];
 	readonly buildInstallables: readonly string[];
-	readonly receipt: BuildReceiptV3;
+	readonly receipt: PublicationReceipt;
 	readonly inputs: BuildCohortInputs;
 	readonly runNix: typeof runNixBuild;
 	readonly reporter: Reporter;
@@ -1775,10 +1973,10 @@ async function writeRemoteFailureReceipt(
 	shouldPreservePublishedReceipt: boolean,
 	terminalFailure: TerminalBuildFailure
 ): Promise<void> {
-	let receipt: BuildReceiptV3;
+	let receipt: PublicationReceipt;
 
 	if (shouldPreservePublishedReceipt) {
-		const settled = buildReceiptV3Schema.parse(
+		const settled = publicationReceiptSchema.parse(
 			JSON.parse(await readFile(receiptFile, 'utf8'))
 		);
 		receipt = { ...settled, terminalFailure };
@@ -1801,10 +1999,10 @@ export async function mergeCohortReceipts(
 	const receipts = await Promise.all(
 		[...(shouldIncludeExisting ? [receiptFile] : []), ...additionalFiles].map(
 			async (file) =>
-				buildReceiptV3Schema.parse(JSON.parse(await readFile(file, 'utf8')))
+				publicationReceiptSchema.parse(JSON.parse(await readFile(file, 'utf8')))
 		)
 	);
-	const subjects = new Map<string, BuildReceiptV3['subjects'][number]>();
+	const subjects = new Map<string, PublicationReceipt['subjects'][number]>();
 	const originPriority = {
 		'store-held': 0,
 		copied: 1,
@@ -1825,9 +2023,12 @@ export async function mergeCohortReceipts(
 		}
 	}
 
-	const receipt = buildReceiptV3Schema.parse({
+	const receipt = publicationReceiptSchema.parse({
 		...(shouldIncludeExisting && receipts[0]),
-		version: 3,
+		version: receipts.some((item) => item.version === 4) ? 4 : 3,
+		...(receipts.some((item) => item.version === 4) && {
+			publicationSets: receiptPublicationSets(receipts)
+		}),
 		paths: [...new Set(receipts.flatMap((item) => item.paths))].toSorted(
 			byCodeUnit
 		),
@@ -1860,6 +2061,9 @@ function remotePublicationDerivation(
 }
 
 interface SettleCohortBuildContext {
+	readonly graph: LocalDerivationGraph | undefined;
+	readonly publicationCoordinator: RecordedCohortPublication | undefined;
+	readonly allMembers: readonly CohortMember[] | undefined;
 	readonly dependencyOutputs: readonly DependencyOutput[];
 	readonly tenantDependencyReferences: typeof tenantDependencyReferences;
 	readonly fetcher: typeof fetch | undefined;
@@ -1944,7 +2148,7 @@ async function settleCohortBuild(
 	}
 
 	const streamedReceipt = isStreamed
-		? buildReceiptV3Schema.parse(
+		? publicationReceiptSchema.parse(
 				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 			)
 		: undefined;
@@ -2233,7 +2437,10 @@ async function settleCohortBuild(
 	if (inputs.push) {
 		publication = await publishCohort({
 			inputs,
+			publicationCoordinator: context.publicationCoordinator,
+			collectResultReceipts: context.publicationCoordinator !== undefined,
 			collectReceipts:
+				context.publicationCoordinator !== undefined ||
 				(partition?.closureTargets.length ?? 0) > 0 ||
 				referencePaths.length > 0,
 			members,
@@ -2256,6 +2463,84 @@ async function settleCohortBuild(
 		isStreamed || isReconciled || terminalFailure !== undefined,
 		publication.receiptFiles
 	);
+
+	if (context.publicationCoordinator !== undefined) {
+		let receipt: PublicationReceipt;
+		try {
+			receipt = publicationReceiptSchema.parse(
+				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
+			);
+		} catch (error) {
+			if (
+				!(
+					error instanceof Error &&
+					'code' in error &&
+					error.code === 'ENOENT'
+				) ||
+				targetPaths.length + referencePaths.length > 0
+			) {
+				throw error;
+			}
+			receipt = { version: 3, paths: [], subjects: [] };
+			await writeFile(inputs.receiptFile, `${JSON.stringify(receipt)}\n`);
+		}
+		const targetDerivations = new Map<string, Set<StorePathString>>();
+		for (const member of members) {
+			const owned = new Set([
+				...(member.expectedPath === undefined ? [] : [member.expectedPath]),
+				...localBuilds
+					.filter(
+						(entry) =>
+							entry.installable === member.installable ||
+							entry.installable === member.queryInstallable
+					)
+					.flatMap((entry) => entry.outputs),
+				...resultBuilds
+					.filter((entry) => entry.target === member.queryInstallable)
+					.flatMap((entry) =>
+						'outputs' in entry.outcome
+							? Object.values(entry.outcome.outputs)
+							: []
+					)
+			]);
+			for (const output of owned) {
+				const derivation =
+					member.queryInstallable === undefined
+						? receipt.subjects.find((subject) => subject.storePath === output)
+								?.derivation
+						: derivationPathOf(
+								nixDerivedPathSchema.parse(member.queryInstallable)
+							);
+				if (derivation === undefined) {
+					continue;
+				}
+				const owners =
+					targetDerivations.get(output) ?? new Set<StorePathString>();
+				owners.add(storePathSchema.parse(derivation));
+				targetDerivations.set(output, owners);
+			}
+		}
+		await context.publicationCoordinator.capture({
+			receipt,
+			targets: [...targetPaths, ...referencePaths],
+			owners: targetPathOwners(members, { resultBuilds, localBuilds }),
+			targetDerivations,
+			dependencyOutputs: context.dependencyOutputs,
+			graph: context.graph,
+			incompleteRoots,
+			resolveClosure:
+				build.resolveClosure ??
+				((paths) =>
+					Nix.openForAvailability(undefined, {
+						...(cupboardRunDependencies?.signal !== undefined && {
+							signal: cupboardRunDependencies.signal
+						})
+					}).resolveClosure(paths))
+		});
+		await context.publicationCoordinator.retainRoots(
+			context.allMembers ?? members
+		);
+	}
 
 	const receiptFile =
 		isStreamed ||
@@ -2322,7 +2607,7 @@ async function settleCohortBuild(
 				buildUploads: uploadsBeforeRoots
 			}),
 			...(diverged.length > 0 && { diverged }),
-			roots
+			roots: context.publicationCoordinator?.summaryRoots(roots) ?? roots
 		})
 	);
 }
@@ -2878,6 +3163,8 @@ function referenceProbeArguments(
 }
 
 interface PublishCohortOptions {
+	readonly publicationCoordinator?: RecordedCohortPublication;
+	readonly collectResultReceipts?: boolean;
 	readonly inputs: BuildCohortInputs;
 	readonly collectReceipts: boolean;
 	readonly copiedFromFile: string;
@@ -2994,13 +3281,34 @@ async function publishCohort(
 		incompleteRoots
 	} = options;
 	const allTargetPaths = [...paths.targetPaths, ...paths.referencePaths];
-	const groups = rootGroups(members, inputs.cohort.roots, allTargetPaths, {
-		resultBuilds,
-		localBuilds,
-		referencePaths: paths.referencePaths,
-		leftUpstreamPaths,
-		incompleteRoots
-	});
+	const rootSelections = rootGroups(
+		members,
+		inputs.cohort.roots,
+		allTargetPaths,
+		{
+			resultBuilds,
+			localBuilds,
+			referencePaths: paths.referencePaths,
+			leftUpstreamPaths,
+			incompleteRoots
+		}
+	);
+	const groups = rootSelections
+		.map((group) => ({
+			...group,
+			complete:
+				group.complete &&
+				(options.publicationCoordinator === undefined ||
+					(group.paths.length === 0 &&
+						!options.publicationCoordinator.hasWarmRoot(group.root)))
+		}))
+		.filter(
+			(group) =>
+				group.complete ||
+				group.paths.length > 0 ||
+				group.referencePaths.length > 0
+		);
+
 	const referenceSource = cohortReferenceSource(inputs);
 	const destinationSource = canonicalHref(
 		cacheUrlFor(inputs.url, inputs.cache)
@@ -3078,6 +3386,7 @@ async function publishCohort(
 		}
 
 		const hasFullReceipt =
+			options.collectResultReceipts === true ||
 			(inputs.store === '' && inputs.publish === 'closure') ||
 			(referencePathsFile !== '' &&
 				(localPaths.length > 0 || intermediatePathsFile !== ''));
@@ -4277,6 +4586,14 @@ export interface LocalDerivationOutput {
 The local derivation graph that the action passes to cohort planning.
 */
 export interface LocalDerivationGraph {
+	/**
+	Direct dependency edges for the inspected derivations. These edges identify
+	which selected targets depend on an observed floating output.
+	*/
+	readonly derivationDependencies?: readonly {
+		readonly derivation: StorePathString;
+		readonly inputs: readonly StorePathString[];
+	}[];
 	readonly dependencyOutputs?: readonly DependencyOutput[];
 	/**
 	The closure of the top-level derivations.
@@ -4361,16 +4678,26 @@ export async function resolveLocalDerivationGraph(
 		parsedDerivations.map(({ derivation, term }) => [derivation, term])
 	);
 	const requiredOutputs = await dependencyOutputs(derivations, {
-		readDerivation: (path) => {
-			const term = terms.get(path);
-			return term === undefined
-				? nix.readDerivation(path)
-				: Promise.resolve(term);
+		readDerivation: async (path) => {
+			const known = terms.get(path);
+			if (known !== undefined) {
+				return known;
+			}
+			const term = await nix.readDerivation(path);
+			terms.set(path, term);
+			return term;
 		},
 		...(signal !== undefined && { signal })
 	});
 	return {
 		dependencyOutputs: requiredOutputs,
+		derivationDependencies: terms
+			.entries()
+			.map(([derivation, term]) => ({
+				derivation,
+				inputs: term.inputDerivations.keys().toArray()
+			}))
+			.toArray(),
 		closure: closure.map(({ storePath }) => storePath),
 		floatingOutputs: parsedDerivations.flatMap(({ derivation, term }) =>
 			term.outputs

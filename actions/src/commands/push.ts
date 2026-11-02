@@ -4,13 +4,10 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { discoverNixStoreConfig, Nix } from '@cupboard/nix';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import {
-	type BuildReceiptV3,
-	buildReceiptV3Schema
-} from '@cupboard/protocol/build';
 import {
 	type PushSummary,
 	pushSummaryResultKind,
@@ -68,6 +65,11 @@ import {
 	providedCacheSelection,
 	providedUrl
 } from '../options.ts';
+import {
+	type PublicationReceipt,
+	publicationReceiptSchema,
+	receiptPublicationSets
+} from '../publication-receipt.ts';
 import {
 	fallbackReleaseRepository,
 	installCupboard,
@@ -630,10 +632,10 @@ export async function pushAction(
 	if (shouldWriteReceipt) {
 		const publications = await Promise.all(
 			receiptFiles.map(async (file) =>
-				buildReceiptV3Schema.parse(JSON.parse(await readFile(file, 'utf8')))
+				publicationReceiptSchema.parse(JSON.parse(await readFile(file, 'utf8')))
 			)
 		);
-		const build = buildReceiptV3Schema.parse(
+		const build = publicationReceiptSchema.parse(
 			JSON.parse(await readFile(inputs.buildReceiptFile, 'utf8'))
 		);
 		const receipt = mergePublishedBuildSubjects(publications, build);
@@ -927,11 +929,18 @@ function pushReceiptFile(file: string, index: number, count: number): string {
 }
 
 export function mergePublishedBuildSubjects(
-	publications: readonly BuildReceiptV3[],
-	build: BuildReceiptV3
-): BuildReceiptV3 {
-	const paths = new Set(publications.flatMap((receipt) => receipt.paths));
-	const subjects = new Map<string, BuildReceiptV3['subjects'][number]>();
+	publications: readonly PublicationReceipt[],
+	build: PublicationReceipt
+): PublicationReceipt {
+	const publicationSets = receiptPublicationSets(publications);
+	const recordedResults = new Set(
+		publicationSets.map((set) => set.result.storePath)
+	);
+	const paths = new Set([
+		...publications.flatMap((receipt) => receipt.paths),
+		...recordedResults
+	]);
+	const subjects = new Map<string, PublicationReceipt['subjects'][number]>();
 
 	for (const receipt of publications) {
 		for (const subject of receipt.subjects) {
@@ -955,7 +964,9 @@ export function mergePublishedBuildSubjects(
 			subjects.set(subject.storePath, subject);
 		}
 	}
-	const missing = [...paths].filter((storePath) => !subjects.has(storePath));
+	const missing = [...paths].filter(
+		(storePath) => !subjects.has(storePath) && !recordedResults.has(storePath)
+	);
 	if (missing.length > 0) {
 		throw new Error(
 			`Publication receipt omits subjects for: ${missing.join(', ')}`
@@ -968,9 +979,19 @@ export function mergePublishedBuildSubjects(
 		}
 
 		const published = subjects.get(subject.storePath);
+		const isRecorded = publicationSets.some(
+			(set) =>
+				set.result.storePath === subject.storePath &&
+				set.result.narHash ===
+					NixSha256Hash.fromDigest(
+						Buffer.from(subject.narHash, 'hex')
+					).toString()
+		);
 		if (
-			published?.narHash !== subject.narHash ||
-			published.derivation !== subject.derivation
+			published === undefined
+				? !isRecorded
+				: published.narHash !== subject.narHash ||
+					published.derivation !== subject.derivation
 		) {
 			throw new Error(
 				`Published path ${subject.storePath} does not match its build receipt`
@@ -983,17 +1004,27 @@ export function mergePublishedBuildSubjects(
 	const sorted = (values: readonly string[]): string[] =>
 		[...new Set(values)].toSorted(byCodeUnit);
 
-	return buildReceiptV3Schema.parse({
-		version: 3,
+	return publicationReceiptSchema.parse({
+		...build,
+		version: [build, ...publications].some((receipt) => receipt.version === 4)
+			? 4
+			: 3,
+		...([build, ...publications].some((receipt) => receipt.version === 4) && {
+			publicationSets
+		}),
 		paths: sorted([...paths]),
 		subjects: subjects
 			.values()
 			.toArray()
 			.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath)),
-		uploaded: sorted(publications.flatMap((receipt) => receipt.uploaded ?? [])),
-		failed: sorted(publications.flatMap((receipt) => receipt.failed ?? [])),
+		uploaded: sorted(
+			[build, ...publications].flatMap((receipt) => receipt.uploaded ?? [])
+		),
+		failed: sorted(
+			[build, ...publications].flatMap((receipt) => receipt.failed ?? [])
+		),
 		collected: sorted(
-			publications.flatMap((receipt) => receipt.collected ?? [])
+			[build, ...publications].flatMap((receipt) => receipt.collected ?? [])
 		)
 	});
 }

@@ -16,6 +16,7 @@ import {
 } from '@cupboard/protocol/scalars';
 import {
 	type CommitBlobDeclaration,
+	publicationIdSchema,
 	type SessionId,
 	type UploadGraceFact,
 	type UploadId,
@@ -109,6 +110,7 @@ import {
 	type PromotedPath,
 	type PromotionRecord
 } from './promotion-record.ts';
+import { isManifestPublicationCompatible } from './publication-manifest-restriction.ts';
 import { PublicationStore } from './publication-store.ts';
 import {
 	ReconcileQueueService,
@@ -1071,6 +1073,9 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<boolean> {
+		if (await this.refuseDivergentManifest(logger, pending, owner)) {
+			return true;
+		}
 		const metadata = parseStoredUploadPathMetadata(
 			pending.id,
 			pending.metadataJson
@@ -1358,6 +1363,9 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<PreparedVerdict> {
+		if (await this.refuseDivergentManifest(logger, captured, owner)) {
+			return { kind: 'applied' };
+		}
 		const uploadId = captured.id;
 		await this.uploadState.migratePendingNarRefreshMarkers(uploadId);
 		signal?.throwIfAborted();
@@ -1442,6 +1450,9 @@ export class VerificationService {
 	): Promise<PreparedWithoutDecode> {
 		await this.uploadState.migratePendingNarRefreshMarkers(pending.id);
 		signal?.throwIfAborted();
+		if (await this.refuseDivergentManifest(logger, pending, owner)) {
+			return { kind: 'applied' };
+		}
 
 		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return { kind: 'ignored' };
@@ -2628,7 +2639,9 @@ export class VerificationService {
 		if (
 			metadata === undefined ||
 			cache === undefined ||
-			row?.narHash !== metadata.narHash
+			row?.narHash !== metadata.narHash ||
+			(observed.pending !== undefined &&
+				!this.isManifestPendingCompatible(observed.pending))
 		) {
 			return { kind: 'uncharged' };
 		}
@@ -2689,7 +2702,8 @@ export class VerificationService {
 		if (
 			cache !== undefined &&
 			row !== undefined &&
-			commit.kind === 'servable'
+			commit.kind === 'servable' &&
+			this.isManifestPendingCompatible(pending)
 		) {
 			return this.completeExpiring(logger, pending, metadata, cache, row);
 		}
@@ -2698,7 +2712,8 @@ export class VerificationService {
 			cache !== undefined &&
 			pending.verdict !== null &&
 			commit.kind === 'uncharged' &&
-			commit.read !== undefined
+			commit.read !== undefined &&
+			this.isManifestPendingCompatible(pending)
 		) {
 			const result = await this.commitPipeline.releaseReservation({
 				uploadId: pending.id,
@@ -3696,6 +3711,48 @@ export class VerificationService {
 		return this.ownsClaimFor(owner, uploadId);
 	}
 
+	private isManifestPendingCompatible(pending: PendingUploadRow): boolean {
+		if (!publicationIdSchema.safeParse(pending.id).success) {
+			return true;
+		}
+		const metadata = parseStoredUploadPathMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+		return isManifestPublicationCompatible(
+			this.context,
+			pending.id,
+			this.cache(pending.cacheId),
+			metadata
+		);
+	}
+
+	private async refuseDivergentManifest(
+		logger: Logger,
+		pending: PendingUploadRow,
+		owner: string
+	): Promise<boolean> {
+		if (this.isManifestPendingCompatible(pending)) {
+			return false;
+		}
+		if (
+			!this.ownsClaimFor(owner, pending.id, this.recordedVerdictFilter(pending))
+		) {
+			return true;
+		}
+		const cleared = await this.uploadState.clearPendingUploadAndStaging(
+			pending.id,
+			pending.r2Key,
+			pending.narHash,
+			{ logger, outcome: 'mismatch' },
+			owner
+		);
+		if (cleared !== undefined) {
+			this.notifyWaiters(cleared, 'mismatch');
+		}
+		return true;
+	}
+
 	private ownsActiveClaim(
 		owner: string,
 		pending: PendingUploadRow,
@@ -3703,6 +3760,7 @@ export class VerificationService {
 	): boolean {
 		return (
 			signal?.aborted !== true &&
+			this.isManifestPendingCompatible(pending) &&
 			this.ownsClaimFor(owner, pending.id, this.recordedVerdictFilter(pending))
 		);
 	}

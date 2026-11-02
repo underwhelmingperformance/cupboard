@@ -37,6 +37,8 @@ import {
 import {
 	type CommitBlobDeclaration,
 	type UploadAttachRootInput,
+	uploadConfirmPresentPathSchema,
+	type UploadConfirmPresentResponse,
 	type UploadDecision,
 	type UploadNegotiateRequestInput,
 	type UploadNegotiateResponse,
@@ -251,6 +253,10 @@ export type Acknowledged<Response> = Response & {
 };
 
 export interface PushClient extends Partial<AttestationBundleClient> {
+	// Confirms only selected planned skips. Undefined preserves legacy publication.
+	confirmPresent?(
+		decisions: readonly Extract<UploadDecision, { action: 'skip' }>[]
+	): Promise<UploadConfirmPresentResponse | undefined>;
 	publicationFor?(
 		decision: UploadDecision
 	): Extract<UploadDecision, { action: 'upload' }> | undefined;
@@ -907,6 +913,7 @@ async function runPushFlow(
 		])
 	);
 	const decisions: UploadDecision[] = [];
+	const confirmed = new Map<StorePathHash, CommitOutcome>();
 	const divergent = new Map<StorePathHash, DivergentSkip>();
 	// A re-drive can change the action, for example when a reused blob is
 	// collected and the next negotiation requests an upload. Keep only the
@@ -979,6 +986,45 @@ async function runPushFlow(
 
 		for (const [storePathHash, skip] of groupDivergent) {
 			divergent.set(storePathHash, skip);
+		}
+
+		// Keep the existing pre-publication refusal filter: never apply retention
+		// to a planned winner that this invocation already refuses.
+		const selected = response.uploads.filter(
+			(decision): decision is UploadDecisionOf<'skip'> =>
+				isSkip(decision) && refusalOf(decision.storePathHash) === undefined
+		);
+		const confirmation =
+			selected.length === 0
+				? undefined
+				: await client.confirmPresent?.(selected);
+		if (confirmation !== undefined) {
+			if (confirmation.paths.length !== selected.length) {
+				throw new Error('The confirmation response omitted or added paths.');
+			}
+			// Validate the whole response before accepting any winner.
+			const paths = confirmation.paths.map((path, index) => {
+				const parsed = uploadConfirmPresentPathSchema.parse(path);
+				if (parsed.storePathHash !== selected[index]?.storePathHash) {
+					throw new Error(
+						'The confirmation response changed path order or identity.'
+					);
+				}
+				return parsed;
+			});
+			for (const path of paths) {
+				if (path.status !== 'confirmed') {
+					continue;
+				}
+				noteCommitOutcome(path);
+				confirmed.set(path.storePathHash, {
+					storePathHash: path.storePathHash,
+					narHash: path.narHash,
+					status: 'already-present',
+					grace: path.grace,
+					settled: Promise.resolve()
+				});
+			}
 		}
 
 		for (const decision of response.uploads) {
@@ -1103,7 +1149,7 @@ async function runPushFlow(
 			'Publishing paths',
 			{
 				total: resolved.length,
-				humanLabel: 'Uploading and submitting paths'
+				humanLabel: 'Making paths available'
 			},
 			async (bar) => {
 				// A pending outcome means the server reserved the row but has not
@@ -1161,6 +1207,13 @@ async function runPushFlow(
 
 					if (refusal !== undefined) {
 						recordRefusal(refusal);
+						return;
+					}
+
+					const confirmation = confirmed.get(initialDecision.storePathHash);
+					if (confirmation !== undefined && isSkip(initialDecision)) {
+						outcomes.set(confirmation.storePathHash, confirmation);
+						skipped += 1;
 						return;
 					}
 

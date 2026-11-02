@@ -16,7 +16,7 @@ export interface ReproducedSubject {
 export function reproducedSubjects(
 	receipt: BuildReceipt
 ): readonly ReproducedSubject[] {
-	if (receipt.version !== 3) {
+	if (receipt.version === 2) {
 		return [];
 	}
 

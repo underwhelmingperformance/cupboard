@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -11,16 +12,22 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
-import { buildReceiptV3Schema } from '@cupboard/protocol/build';
+import { buildReceiptV4Schema } from '@cupboard/protocol/build';
 import {
 	parseReporterResults,
 	type Reporter,
 	type ReporterResultEvent
 } from '@cupboard/reporter';
+import { Command } from 'commander';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import type { AttestationSubject } from '../../actions/src/attestation-signing.ts';
 import { attestAction } from '../../actions/src/commands/attest.ts';
 import { attestAttachAction } from '../../actions/src/commands/attest-attach.ts';
+import {
+	attestSignAction,
+	type AttestSignDependencies
+} from '../../actions/src/commands/attest-sign.ts';
 import {
 	buildCohortAction,
 	materialiseDerivationGraph,
@@ -30,8 +37,14 @@ import {
 	runWithLocalDerivationRoots,
 	type WithLocalDerivationRoots
 } from '../../actions/src/commands/build-cohort.ts';
-import type { runCupboard } from '../../actions/src/cupboard-run.ts';
 import {
+	commandOptionsFromHelp,
+	type hasPublicationResultSupport,
+	type inspectCommandOptions,
+	type runCupboard
+} from '../../actions/src/cupboard-run.ts';
+import {
+	CommittedSubjectUnavailableError,
 	RemoteCohortBuildFailedError,
 	SubjectNarHashMovedError
 } from '../../actions/src/errors.ts';
@@ -43,7 +56,9 @@ import {
 import { writeCachedSession } from '../../packages/cli/src/auth/token-store.ts';
 import { buildProgram as buildCliProgram } from '../../packages/cli/src/cli.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
+import { registerPublicationResultCommand } from '../../packages/cli/src/commands/publication-result.ts';
 import { parsePathFile } from '../../packages/cli/src/commands/push.ts';
+import { publicationWorkflowFor } from '../../packages/cli/src/publication/publication-client.ts';
 import { PublicationCollection } from '../../packages/cli/src/push/publication.ts';
 import { runPush } from '../../packages/cli/src/push/push.ts';
 import { Nix } from '../../packages/nix/src/nix.ts';
@@ -836,6 +851,10 @@ interface RemotePublicationPlan {
 	readonly server: CupboardTestServer;
 	readonly token: string;
 	readonly uploadBarrier?: AsyncBarrier;
+	readonly publicationRequests?: {
+		readonly pathname: string;
+		readonly body: string;
+	}[];
 }
 
 class AsyncBarrier {
@@ -899,6 +918,13 @@ async function runCancelledBuildCohort(
 				);
 				const controller = new AbortController();
 				const reason = new Error('cancel action-level remote cohort');
+				const earlierFailure = new Error('action rejected before its barrier');
+				await expect(
+					waitForActionBarrier(
+						Promise.withResolvers<undefined>().promise,
+						Promise.reject(earlierFailure)
+					)
+				).rejects.toBe(earlierFailure);
 				const receiptFile = path.join(runDirectory, 'receipt.json');
 				const outputFile = path.join(runDirectory, 'github-output');
 				const plan: RemotePublicationPlan = {
@@ -932,6 +958,7 @@ async function runCancelledBuildCohort(
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
 						{
 							reporter: silentReporter(),
+							hasPublicationSupport: inProcessPublicationSupport,
 							runCupboard: publicationCupboard(plan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
@@ -941,7 +968,7 @@ async function runCancelledBuildCohort(
 					)
 				);
 
-				await started;
+				await waitForActionBarrier(started, action);
 				const stopped = store.waitForBlockingDaemonEvent('stopped');
 				controller.abort(reason);
 
@@ -950,9 +977,14 @@ async function runCancelledBuildCohort(
 				await expect(readFile(receiptFile, 'utf8')).rejects.toMatchObject({
 					code: 'ENOENT'
 				});
-				await expect(readFile(outputFile, 'utf8')).rejects.toMatchObject({
-					code: 'ENOENT'
-				});
+				expect(await readFile(outputFile, 'utf8')).toBe(
+					`target-paths-file=${path.join(runDirectory, 'cupboard-cohort-target-paths.txt')}\n` +
+						`intermediate-paths-file=${path.join(runDirectory, 'cupboard-cohort-intermediate-paths.txt')}\n` +
+						`reference-paths-file=${path.join(runDirectory, 'cupboard-cohort-reference-paths.txt')}\n` +
+						`left-upstream-file=${path.join(runDirectory, 'cupboard-cohort-left-upstream.json')}\n` +
+						`counts-file=${path.join(runDirectory, 'cupboard-cohort-counts.json')}\n` +
+						'receipt-file=\n'
+				);
 
 				const roots = await tenantRpc(server.tenantUrl, {
 					credential: token
@@ -1090,6 +1122,7 @@ async function runAlreadyValidPublication(
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
 						{
 							reporter: silentReporter(),
+							hasPublicationSupport: inProcessPublicationSupport,
 							runCupboard: publicationCupboard(plan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
@@ -1102,9 +1135,7 @@ async function runAlreadyValidPublication(
 					)
 				);
 
-				const receipt = buildReceiptV3Schema.parse(
-					JSON.parse(await readFile(receiptFile, 'utf8'))
-				);
+				const receipt = await readPublicationReceipt(plan, receiptFile);
 				const rpc = tenantRpc(server.tenantUrl, { credential: token });
 				const roots = await rpc.roots.list.inDefaultCache({});
 				const rootTargets = await rpc.roots.targets.inDefaultCache({
@@ -1185,6 +1216,7 @@ async function runAlreadyValidPublication(
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
 						{
 							reporter: silentReporter(),
+							hasPublicationSupport: inProcessPublicationSupport,
 							runCupboard: publicationCupboard(provenancePlan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
@@ -1197,8 +1229,9 @@ async function runAlreadyValidPublication(
 					)
 				);
 
-				const provenanceReceipt = buildReceiptV3Schema.parse(
-					JSON.parse(await readFile(provenanceReceiptFile, 'utf8'))
+				const provenanceReceipt = await readPublicationReceipt(
+					provenancePlan,
+					provenanceReceiptFile
 				);
 				const paths = members.map(({ output }) => output).toSorted(byCodeUnit);
 				// The receipt sorts its subjects by store path, and so does the
@@ -1250,13 +1283,13 @@ async function runAlreadyValidPublication(
 					}
 				}).toStrictEqual({
 					receipt: {
-						version: 3,
+						version: 4,
 						paths,
 						subjects: describedPaths,
 						uploaded: paths
 					},
 					provenanceReceipt: {
-						version: 3,
+						version: 4,
 						paths: [member.output],
 						subjects: [
 							{
@@ -1350,6 +1383,7 @@ async function runAlreadyValidPublication(
 
 				await expect(
 					attestAttachAction(attachOptions, {}, silentReporter(), {
+						inspectCommandOptions: inProcessCommandOptions,
 						runCupboard: () => Promise.reject(attachmentFailure)
 					})
 				).rejects.toBe(attachmentFailure);
@@ -1383,6 +1417,7 @@ async function runAlreadyValidPublication(
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
 						{
 							reporter: silentReporter(),
+							hasPublicationSupport: inProcessPublicationSupport,
 							runCupboard: publicationCupboard(provenancePlan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
@@ -1426,14 +1461,17 @@ async function runAlreadyValidPublication(
 				};
 
 				await attestAttachAction(retryAttachOptions, {}, silentReporter(), {
+					inspectCommandOptions: inProcessCommandOptions,
 					runCupboard: recordingCupboard
 				});
 				await attestAttachAction(retryAttachOptions, {}, silentReporter(), {
+					inspectCommandOptions: inProcessCommandOptions,
 					runCupboard: recordingCupboard
 				});
 
-				const retryReceipt = buildReceiptV3Schema.parse(
-					JSON.parse(await readFile(retryReceiptFile, 'utf8'))
+				const retryReceipt = await readPublicationReceipt(
+					provenancePlan,
+					retryReceiptFile
 				);
 				const attachmentSummaries = attachmentRuns.map(
 					(results) =>
@@ -1578,6 +1616,7 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
 						{
 							reporter: silentReporter(),
+							hasPublicationSupport: inProcessPublicationSupport,
 							runCupboard: publicationCupboard(plan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
@@ -1590,7 +1629,7 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						}
 					)
 				);
-				await uploadBarrier.arrived;
+				await waitForActionBarrier(uploadBarrier.arrived, publication);
 
 				try {
 					await activeStore.exec(['nix', 'store', 'gc']);
@@ -1601,9 +1640,7 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 
 				await publication;
 
-				const receipt = buildReceiptV3Schema.parse(
-					JSON.parse(await readFile(receiptFile, 'utf8'))
-				);
+				const receipt = await readPublicationReceipt(plan, receiptFile);
 				const closureInfos = await withSshOptions(sshOptions, async () => {
 					const remote = Nix.openForAvailability(undefined, {
 						storeUri,
@@ -1668,17 +1705,138 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 					didCollectLocalBeforeCopy: true,
 					didCollectRemoteDuringUpload: true,
 					receipt: {
-						version: 3,
+						version: 4,
 						paths: closurePaths,
 						subjects: expectedSubjects,
 						uploaded: closurePaths
 					},
-					receiptOutput: [`receipt-file=${receiptFile}`]
+					// The cold phase and V4 coordinator publish the same receipt path.
+					receiptOutput: [
+						`receipt-file=${receiptFile}`,
+						`receipt-file=${receiptFile}`
+					]
 				});
 
 				expect(closurePaths).toStrictEqual(
 					[...paths, privateReference].toSorted(byCodeUnit)
 				);
+				const coldReceipt = buildReceiptV4Schema.parse(
+					JSON.parse(await readFile(receiptFile, 'utf8'))
+				);
+				const singleOutput = single.outputs[0];
+				if (singleOutput === undefined) {
+					throw new Error('The single-output member has no output');
+				}
+				const singleSet = coldReceipt.publicationSets?.find(
+					(set) => set.result.storePath === singleOutput
+				);
+				expect(singleSet?.memberCount).toBe(2);
+				expect(
+					coldReceipt.publicationSets
+						?.map((set) => ({
+							storePath: set.result.storePath,
+							memberCount: set.memberCount
+						}))
+						.toSorted((left, right) =>
+							byCodeUnit(left.storePath, right.storePath)
+						)
+				).toStrictEqual(
+					paths.map((storePath) => ({
+						storePath,
+						memberCount: storePath === singleOutput ? 2 : 1
+					}))
+				);
+				// Repeat just the known single output. Its cached runtime dependency
+				// must stay implicit in the compact set, never rediscovered or pushed.
+				const publicationRequests: NonNullable<
+					RemotePublicationPlan['publicationRequests']
+				> = [];
+				const warmReceiptFile = path.join(runDirectory, 'warm-receipt.json');
+				const warmCommands: string[] = [];
+				const runner = publicationCupboard({ ...plan, publicationRequests });
+				const rejectColdWork = (): never => {
+					throw new Error(
+						'Warm repeat must not discover, build or copy dependencies'
+					);
+				};
+				await buildCohortAction(
+					{
+						cohortJson: JSON.stringify({
+							key: 'remote-warm-repeat',
+							attrs: [single.attribute],
+							installables: [single.installable],
+							queryInstallables: [`${single.derivation}^out`],
+							expectedPaths: [singleOutput],
+							roots: [single.root],
+							system,
+							os: 'linux',
+							remote: true,
+							runsOn: 'ubuntu-24.04'
+						}),
+						url: activeServer.tenantUrl.href,
+						cupboardPath: 'in-process-cupboard',
+						store: storeUri,
+						publish: 'closure',
+						receiptFile: warmReceiptFile
+					},
+					{
+						RUNNER_TEMP: runDirectory,
+						GITHUB_OUTPUT: path.join(runDirectory, 'warm-output')
+					},
+					{
+						reporter: silentReporter(),
+						hasPublicationSupport: inProcessPublicationSupport,
+						runCupboard: async (...arguments_) => {
+							const command = arguments_[1][1];
+							if (command === undefined) {
+								throw new Error('Missing in-process command');
+							}
+							warmCommands.push(command);
+							if (command !== 'publication-result' && command !== 'root') {
+								throw new Error(
+									'Warm repeat must not publish members or plan dependencies'
+								);
+							}
+							return runner(...arguments_);
+						},
+						runNixDerivationShow: rejectColdWork,
+						materialiseDerivationGraph: rejectColdWork,
+						withLocalDerivationRoots: rejectColdWork,
+						runNixBuildWithResults: rejectColdWork,
+						runNixCopy: rejectColdWork
+					}
+				);
+				const warmReceipt = buildReceiptV4Schema.parse(
+					JSON.parse(await readFile(warmReceiptFile, 'utf8'))
+				);
+				expect(warmReceipt).toStrictEqual({
+					version: 4,
+					paths: [singleOutput],
+					subjects: [],
+					publicationSets: [singleSet]
+				});
+				expect(warmCommands).toStrictEqual([
+					'publication-result',
+					'publication-result',
+					'root'
+				]);
+				expect(
+					publicationRequests.map((request) =>
+						request.pathname.replace(activeServer.tenantUrl.pathname, '')
+					)
+				).toStrictEqual([
+					'/uploads/credential',
+					'/publication-results/lookup',
+					'/uploads/credential',
+					'/uploads/plan',
+					'/publication-results/ensure'
+				]);
+				for (const request of publicationRequests) {
+					if (request.pathname.endsWith('/uploads/plan')) {
+						expect(JSON.parse(request.body)).toMatchObject({ paths: [] });
+					}
+				}
+
 				await expectLocalStoreAbsence(closurePaths);
 				await withHostEnvironment(() => activeStore.close());
 				store = undefined;
@@ -1788,54 +1946,162 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						'destination-access=public\n'
 				});
 
-				const rejectedChecksumsFile = path.join(
-					runDirectory,
-					'tampered-subjects.txt'
+				const signingRecords: {
+					readonly subjects: readonly AttestationSubject[];
+					readonly predicateType: string;
+				}[] = [];
+				const signingOutputs: Record<string, string> = {};
+				const signing: AttestSignDependencies = {
+					environment: {},
+					setOutput(name, value) {
+						signingOutputs[name] = value;
+					},
+					provenanceStatement: () =>
+						Promise.reject(
+							new Error(
+								'Remote publication must not claim runner-local provenance'
+							)
+						),
+					signerFor:
+						({ subjects }) =>
+						(statement) => {
+							signingRecords.push({
+								subjects,
+								predicateType: statement.predicateType
+							});
+							return Promise.resolve({
+								bundle: '{}',
+								evidence: { tlogEntryCount: 0, timestampCount: 1 }
+							});
+						}
+				};
+				const signingOptions = {
+					checksumsFile,
+					builtChecksumsFile: path.join(runDirectory, 'built-subjects.txt'),
+					url: activeServer.tenantUrl.href,
+					githubToken: 'test-token',
+					destinationAccess: 'public',
+					signingProfile: 'tsa-only',
+					uploadToGithub: 'false'
+				};
+				await attestSignAction(
+					{
+						...signingOptions,
+						receiptFile,
+						outputDirectory: path.join(runDirectory, 'no-provenance')
+					},
+					silentReporter(),
+					{
+						...signing,
+						fetch: () =>
+							Promise.reject(
+								new Error('Unused remote candidates must not be read')
+							)
+					}
 				);
-				const rejectedOutput = path.join(
-					runDirectory,
-					'tampered-attest-output'
+				expect({
+					records: signingRecords,
+					bundles: signingOutputs.bundles,
+					signedChecksums: await readFile(
+						signingOutputs['checksums-file'] ?? '',
+						'utf8'
+					)
+				}).toStrictEqual({ records: [], bundles: '', signedChecksums: '' });
+
+				// An explicit custom statement selects these remote subjects without
+				// attributing their builds to the runner. Only destination metadata
+				// remains available after the remote store has been stopped.
+				const predicateFile = path.join(runDirectory, 'custom-predicate.json');
+				await writeFile(predicateFile, '{}');
+				const customOptions = {
+					...signingOptions,
+					predicateFile,
+					predicateType: 'https://example.test/remote-publication/v1'
+				};
+				await attestSignAction(
+					{
+						...customOptions,
+						outputDirectory: path.join(runDirectory, 'custom-signing')
+					},
+					silentReporter(),
+					signing
 				);
+				expect(signingRecords).toStrictEqual([
+					{
+						subjects: expectedSubjects.map((subject) => ({
+							name: path.basename(subject.storePath),
+							sha256: subject.narHash
+						})),
+						predicateType: customOptions.predicateType
+					}
+				]);
+				signingRecords.length = 0;
+
 				const alteredNarHash = NixSha256Hash.fromDigest(
 					Buffer.alloc(32, 0xff)
 				).toString();
 				const tamperedFetch: typeof fetch = async (input, init) => {
 					const response = await fetch(input, init);
 					const source = await response.text();
-
 					return new Response(
 						source.replace(
 							/^NarHash: .+$/mu,
 							() => `NarHash: ${alteredNarHash}`
 						),
-						{
-							status: response.status,
-							headers: response.headers
-						}
+						{ status: response.status, headers: response.headers }
 					);
 				};
-
-				await expect(
-					attestAction(
-						{
-							receiptFile,
-							checksumsFile: rejectedChecksumsFile,
-							url: activeServer.tenantUrl.href
-						},
-						{
-							RUNNER_TEMP: runDirectory,
-							GITHUB_OUTPUT: rejectedOutput
-						},
-						silentReporter(),
-						{ fetch: tamperedFetch }
-					)
-				).rejects.toBeInstanceOf(SubjectNarHashMovedError);
-				await expect(
-					readFile(rejectedChecksumsFile, 'utf8')
-				).rejects.toMatchObject({ code: 'ENOENT' });
-				await expect(readFile(rejectedOutput, 'utf8')).rejects.toMatchObject({
-					code: 'ENOENT'
-				});
+				const missingFetch: typeof fetch = async (input, init) => {
+					const response = await fetch(input, init);
+					await response.body?.cancel();
+					return new Response(undefined, { status: 404 });
+				};
+				for (const failure of [
+					{
+						name: 'moved',
+						fetcher: tamperedFetch,
+						error: SubjectNarHashMovedError
+					},
+					{
+						name: 'missing',
+						fetcher: missingFetch,
+						error: CommittedSubjectUnavailableError
+					}
+				]) {
+					const outputDirectory = path.join(
+						runDirectory,
+						`rejected-${failure.name}`
+					);
+					const outputs: string[] = [];
+					await expect(
+						attestSignAction(
+							{ ...customOptions, outputDirectory },
+							silentReporter(),
+							{
+								...signing,
+								fetch: failure.fetcher,
+								setOutput: (name) => {
+									outputs.push(name);
+								}
+							}
+						)
+					).rejects.toBeInstanceOf(failure.error);
+					expect({
+						records: signingRecords,
+						outputs,
+						checksumsWritten: existsSync(
+							path.join(outputDirectory, 'signed-subjects.txt')
+						),
+						bundleWritten: existsSync(
+							path.join(outputDirectory, 'build-origin.sigstore.json')
+						)
+					}).toStrictEqual({
+						records: [],
+						outputs: [],
+						checksumsWritten: false,
+						bundleWritten: false
+					});
+				}
 			} finally {
 				const storeToClose = store;
 
@@ -1925,6 +2191,7 @@ async function runRemotePublication(store: NixSshStoreFixture): Promise<void> {
 							{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
 							{
 								reporter: silentReporter(),
+								hasPublicationSupport: inProcessPublicationSupport,
 								runCupboard: publicationCupboard(plan, planning),
 								withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 								runNixDerivationShow: runFixtureNixDerivationShow,
@@ -1947,9 +2214,7 @@ async function runRemotePublication(store: NixSshStoreFixture): Promise<void> {
 					overrides: { substituters: '' }
 				});
 				const info = await remote.queryPathInfo(successful.output);
-				const receipt = buildReceiptV3Schema.parse(
-					JSON.parse(await readFile(receiptFile, 'utf8'))
-				);
+				const receipt = await readPublicationReceipt(plan, receiptFile);
 				const rpc = tenantRpc(server.tenantUrl, { credential: token });
 				const roots = await rpc.roots.list.inDefaultCache({});
 				const rootTargets = await rpc.roots.targets.inDefaultCache({
@@ -1994,7 +2259,7 @@ async function runRemotePublication(store: NixSshStoreFixture): Promise<void> {
 						failures: [{ target: failed.target, outcome: 'permanent-failure' }]
 					},
 					receipt: {
-						version: 3,
+						version: 4,
 						paths: [successful.output],
 						subjects: [
 							{
@@ -2150,6 +2415,7 @@ async function runSixTargetRemotePublication(
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
 						{
 							reporter: silentReporter(),
+							hasPublicationSupport: inProcessPublicationSupport,
 							runCupboard: publicationCupboard(plan, planning),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
@@ -2189,9 +2455,7 @@ async function runSixTargetRemotePublication(
 						buildStore: store.storeUri
 					};
 				});
-				const receipt = buildReceiptV3Schema.parse(
-					JSON.parse(await readFile(receiptFile, 'utf8'))
-				);
+				const receipt = await readPublicationReceipt(plan, receiptFile);
 
 				expect({
 					receipt,
@@ -2199,7 +2463,7 @@ async function runSixTargetRemotePublication(
 					sourceOutput: await store.exec(['cat', sourcefulMember.output])
 				}).toStrictEqual({
 					receipt: {
-						version: 3,
+						version: 4,
 						paths,
 						subjects: expectedSubjects,
 						uploaded: paths
@@ -2353,6 +2617,13 @@ function publicationCupboard(
 	realPlanning?: RealPlanningHarness
 ): typeof runCupboard {
 	return async (_binaryPath, arguments_) => {
+		if (arguments_[1] === 'publication-result') {
+			requiredOption(arguments_, '--request-file');
+			return runInProcessCli(plan, arguments_);
+		}
+		if (arguments_[1] === 'root') {
+			return runInProcessCli(plan, arguments_);
+		}
 		if (arguments_[1] === 'plan' && arguments_[2] === 'cohort') {
 			if (realPlanning !== undefined) {
 				return runRealPlanningCommand(plan, realPlanning, 'cohort', arguments_);
@@ -2390,6 +2661,163 @@ function publicationCupboard(
 	};
 }
 
+async function readPublicationReceipt(
+	plan: RemotePublicationPlan,
+	file: string
+) {
+	const { publicationSets, ...receipt } = buildReceiptV4Schema.parse(
+		JSON.parse(await readFile(file, 'utf8'))
+	);
+	const selected = receipt.subjects.filter(
+		(subject) =>
+			subject.derivation !== undefined &&
+			plan.members.some(
+				(member) => member.target.split('^', 1)[0] === subject.derivation
+			)
+	);
+	expect(
+		publicationSets?.map((set) => set.result.storePath).toSorted(byCodeUnit)
+	).toStrictEqual(
+		selected.map((subject) => subject.storePath).toSorted(byCodeUnit)
+	);
+	const workflow = publicationWorkflowFor(plan.server.tenantUrl, plan.token, {
+		cache: { kind: 'default' }
+	});
+	const sets = publicationSets ?? [];
+	for (const set of sets) {
+		const response = await workflow.execute({
+			operation: 'lookup',
+			input: {
+				source: { cache: { kind: 'default' } },
+				results: [{ storePath: set.result.storePath }]
+			}
+		});
+		expect(response.supported).toBe(true);
+		if (response.operation !== 'lookup' || !response.supported) {
+			throw new Error('Current server did not support lookup');
+		}
+		expect(response.output.entries).toStrictEqual([
+			{
+				kind: 'recorded',
+				complete: true,
+				publication: {
+					result: set.result,
+					digest: set.digest,
+					memberCount: set.memberCount,
+					origin: set.origin
+				}
+			}
+		]);
+		expect(set.materialisation).toBe('complete');
+		const subject = selected.find(
+			(subject) => subject.storePath === set.result.storePath
+		);
+		expect(NixSha256Hash.parse(set.result.narHash).digestHex()).toBe(
+			subject?.narHash
+		);
+	}
+	return receipt;
+}
+
+// The transport implements the current CLI command surface, not an executable
+// named "in-process-cupboard". Inspect that same parser at the capability seam.
+const inProcessPublicationSupport: typeof hasPublicationResultSupport = () =>
+	Promise.resolve(
+		buildCliProgram().commands.some(
+			(command) =>
+				command.name() === 'publication-result' &&
+				commandOptionsFromHelp(command.helpInformation()).has('--request-file')
+		)
+	);
+
+const inProcessCommandOptions: typeof inspectCommandOptions = (
+	_binary,
+	names
+) => {
+	let command = buildCliProgram();
+	for (const name of names) {
+		const child = command.commands.find(
+			(candidate) => candidate.name() === name
+		);
+		if (child === undefined) {
+			throw new Error(`Unsupported in-process command: ${names.join(' ')}`);
+		}
+		command = child;
+	}
+	return Promise.resolve(commandOptionsFromHelp(command.helpInformation()));
+};
+
+async function waitForActionBarrier(
+	barrier: Promise<void>,
+	action: Promise<void>
+): Promise<void> {
+	await Promise.race([
+		barrier,
+		(async () => {
+			await action;
+			throw new Error(
+				'The action completed before entering its expected barrier'
+			);
+		})()
+	]);
+}
+
+async function runInProcessCli(
+	plan: RemotePublicationPlan,
+	arguments_: readonly string[]
+): Promise<readonly ReporterResultEvent[]> {
+	return withTemporaryDirectory('cupboard-remote-cli-', async (directory) =>
+		withConfigHome(path.join(directory, 'config'), async () => {
+			await writeCachedSession(
+				{ accessToken: plan.token },
+				plan.server.tenantUrl
+			);
+			const resultFile = path.join(directory, 'results.jsonl');
+			const isObservingPublication =
+				plan.publicationRequests !== undefined &&
+				arguments_[1] === 'publication-result';
+			const program = isObservingPublication
+				? new Command()
+						.name('cupboard')
+						.option('--output-mode <mode>')
+						.option('--result-file <path>')
+						.option('--no-colour')
+				: buildCliProgram();
+			if (isObservingPublication) {
+				registerPublicationResultCommand(
+					program,
+					{},
+					{
+						workflowFor: (url, credential, options) =>
+							publicationWorkflowFor(url, credential, {
+								...options,
+								fetcher: async (input, init) => {
+									const request = new Request(input, init);
+									plan.publicationRequests?.push({
+										pathname: new URL(request.url).pathname,
+										body: await request.clone().text()
+									});
+									return fetch(request);
+								}
+							})
+					}
+				);
+			}
+			await program.parseAsync(
+				[
+					'--output-mode',
+					'json',
+					'--result-file',
+					resultFile,
+					...arguments_.filter((argument) => argument !== '--github-oidc')
+				],
+				{ from: 'user' }
+			);
+			return parseReporterResults(await readFile(resultFile, 'utf8'));
+		})
+	);
+}
+
 function attestationCupboard(
 	plan: Pick<RemotePublicationPlan, 'server' | 'token'>
 ): typeof runCupboard {
@@ -2404,12 +2832,26 @@ function attestationCupboard(
 		const firstOption = values.findIndex((argument) =>
 			argument.startsWith('--')
 		);
+		const pathsFile = optionValue(arguments_, '--paths-file');
 		const paths = storePathSchema
 			.array()
-			.parse(firstOption === -1 ? values : values.slice(0, firstOption));
-		const attestations = optionValues(arguments_, '--attestation').map(
-			(path) => ({ path })
-		);
+			.parse(
+				pathsFile === undefined
+					? firstOption === -1
+						? values
+						: values.slice(0, firstOption)
+					: parsePathFile(await readFile(pathsFile, 'utf8'))
+			);
+		const bundlesFile = optionValue(arguments_, '--attestations-file');
+		const bundleContents =
+			bundlesFile === undefined
+				? undefined
+				: await readFile(bundlesFile, 'utf8');
+		const bundles =
+			bundleContents === undefined
+				? optionValues(arguments_, '--attestation')
+				: bundleContents.trim().split('\n');
+		const attestations = bundles.map((path) => ({ path }));
 		const pathInfos = await readCommittedAttestationPathInfos(paths, {
 			url: plan.server.tenantUrl,
 			cache: { kind: 'default' }
@@ -2473,8 +2915,7 @@ async function runRealPlanningCommand(
 	const cliArguments = arguments_.filter(
 		(argument) => argument !== '--github-oidc'
 	);
-	const results = await withEnvironmentValue(
-		'XDG_CONFIG_HOME',
+	const results = await withConfigHome(
 		path.join(harness.directory, 'config'),
 		async () => {
 			await writeCachedSession(
@@ -2758,21 +3199,20 @@ function silentReporter(): Reporter {
 	};
 }
 
-async function withEnvironmentValue<T>(
-	name: string,
+async function withConfigHome<T>(
 	value: string,
 	run: () => Promise<T>
 ): Promise<T> {
-	const previous = process.env[name];
-	process.env[name] = value;
+	const previous = process.env.XDG_CONFIG_HOME;
+	process.env.XDG_CONFIG_HOME = value;
 
 	try {
 		return await run();
 	} finally {
 		if (previous === undefined) {
-			Reflect.deleteProperty(process.env, name);
+			Reflect.deleteProperty(process.env, 'XDG_CONFIG_HOME');
 		} else {
-			process.env[name] = previous;
+			process.env.XDG_CONFIG_HOME = previous;
 		}
 	}
 }

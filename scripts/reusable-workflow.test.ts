@@ -955,7 +955,6 @@ describe('cohort planning and publication', () => {
 				cupboardAction('build-cohort'),
 				cupboardAction('attest'),
 				cupboardAction('attest-attach'),
-				cupboardAction('attest-status'),
 				cupboardAction('prepare'),
 				cupboardAction('setup')
 			]
@@ -1096,7 +1095,7 @@ ${sign.run}`
 								...Object.fromEntries(
 									Object.keys(sign.env ?? {}).map((key) => [key, ''])
 								),
-								GITHUB_ACTION_PATH: directory,
+								GITHUB_ACTION_PATH: path.resolve('actions/attest'),
 								RUNNER_TEMP: directory,
 								CHECKSUMS_FILE: path.join(subjectsDirectory, `${step}.txt`),
 								MARKER: step
@@ -1503,193 +1502,31 @@ describe('PR cache closure ordering', () => {
 	);
 });
 
-describe('publication attestation coverage', () => {
+describe('publication attestation reporting', () => {
 	it.each([
-		{
-			file: publishWorkflow,
-			name: 'simple',
-			receipt: '${{ steps.push.outputs.receipt-file }}',
-			condition:
-				"${{ !cancelled() && inputs.publish != 'none' && steps.push.outputs.receipt-file != '' }}",
-			cache: '${{ inputs.cache }}',
-			credentials: {}
-		},
-		{
-			file: flakeWorkflow,
-			name: 'flake',
-			receipt: '${{ steps.build-cohort.outputs.receipt-file }}',
-			condition:
-				"${{ !cancelled() && needs.configure.outputs.publish != 'none' && steps.build-cohort.outputs.receipt-file != '' }}",
-			cache: '${{ needs.configure.outputs.cache }}',
-			credentials: {
-				'read-user':
-					'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
-				'read-password':
-					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}'
-			}
-		}
+		{ file: publishWorkflow, name: 'simple' },
+		{ file: flakeWorkflow, name: 'flake' }
 	])(
-		'reports coverage after attachment even without fresh signing in $name',
-		async ({ file, receipt, condition, cache, credentials }) => {
+		'keeps signing and attachment without automatic stored-evidence discovery in $name',
+		async ({ file }) => {
 			const steps = allSteps(await loadWorkflow(file)).map(({ step }) => step);
-			const index = steps.findIndex(
-				(step) => step.uses === cupboardAction('attest-status')
-			);
-			const step = steps[index];
-			const attach = steps.findIndex(
-				(item) => item.uses === cupboardAction('attest-attach')
-			);
-			expect({ step, afterAttach: index > attach }).toStrictEqual({
-				step: {
-					name: 'Report stored attestation coverage',
-					uses: cupboardAction('attest-status'),
-					if: condition,
-					with: {
-						url: '${{ inputs.url }}',
-						cache,
-						'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
-						'read-session-target':
-							'${{ steps.setup.outputs.read-session-target }}',
-						'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
-						'read-session-caches':
-							'${{ steps.setup.outputs.read-session-caches }}',
-						audience: '${{ steps.setup.outputs.read-session-audience }}',
-						'receipt-file': receipt,
-						'bundles-file': '${{ steps.attest.outputs.bundles-file }}',
-						...credentials
-					}
-				},
-				afterAttach: true
+			const attestationSteps = steps
+				.filter((step) => step.uses?.startsWith(cupboardAction('attest')))
+				.map((step) => ({
+					uses: step.uses,
+					continueOnError: step['continue-on-error'] ?? false
+				}));
+			const discoveryCommands = steps
+				.map((step) => step.run ?? '')
+				.filter((run) => /attest(?:-status|\s+status)/u.test(run));
+
+			expect({ attestationSteps, discoveryCommands }).toStrictEqual({
+				attestationSteps: [
+					{ uses: cupboardAction('attest'), continueOnError: false },
+					{ uses: cupboardAction('attest-attach'), continueOnError: false }
+				],
+				discoveryCommands: []
 			});
-		}
-	);
-
-	it.each([
-		{
-			status: 'success',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'signing-failed',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'attachment-failed',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'cohort-failed',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'success',
-			attest: false,
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'success',
-			publish: 'none',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: false
-		},
-		{
-			status: 'cohort-failed',
-			publish: 'built',
-			receipt: '',
-			cancelled: false,
-			report: false
-		},
-		{
-			status: 'success',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: true,
-			report: false
-		}
-	])(
-		'evaluates coverage reporting for $status with publish=$publish, cancelled=$cancelled and receipt=$receipt',
-		async ({ status, attest = true, publish, receipt, cancelled, report }) => {
-			const results = [];
-
-			for (const file of [publishWorkflow, flakeWorkflow]) {
-				const steps = allSteps(await loadWorkflow(file)).map(
-					({ step }) => step
-				);
-				const reporting = steps.find(
-					(step) => step.uses === cupboardAction('attest-status')
-				);
-				const condition = reporting?.if;
-
-				if (condition === undefined) {
-					throw new Error('The workflow must configure its coverage condition');
-				}
-
-				const hasExplicitStatus =
-					/(?:cancelled|success|failure|always)\(\)/.test(condition);
-				const expression = condition
-					.replaceAll(/^\$\{\{|\}\}$/g, '')
-					.replaceAll('!cancelled()', '"$CANCELLED" != true')
-					.replaceAll('inputs.attest', '"$ATTEST" == true')
-					.replaceAll(
-						/(?:inputs|needs\.configure\.outputs)\.publish/g,
-						'"$PUBLISH"'
-					)
-					.replaceAll(
-						/steps\.(?:push|build-cohort)\.outputs\.receipt-file/g,
-						'"$RECEIPT"'
-					);
-				const implicitStatus = hasExplicitStatus
-					? ''
-					: '"$STATUS" == success && ';
-				const { stdout } = await execFileAsync(
-					'bash',
-					[
-						'-c',
-						`if [[ ${implicitStatus}(${expression}) ]]; then printf true; else printf false; fi`
-					],
-					{
-						env: {
-							...process.env,
-							STATUS: status,
-							PUBLISH: publish,
-							RECEIPT: receipt,
-							CANCELLED: String(cancelled),
-							ATTEST: String(attest)
-						}
-					}
-				);
-				results.push({
-					report: stdout === 'true',
-					failuresPreserved: steps
-						.filter(
-							(step) =>
-								step.uses === cupboardAction('attest') ||
-								step.uses === cupboardAction('attest-attach')
-						)
-						.every((step) => step['continue-on-error'] !== true)
-				});
-			}
-
-			expect(results).toStrictEqual([
-				{ report, failuresPreserved: true },
-				{ report, failuresPreserved: true }
-			]);
 		}
 	);
 });

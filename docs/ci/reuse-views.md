@@ -15,12 +15,19 @@ Every writer of an included cache can offer paths to the view's readers. A view
 that includes PR caches therefore trusts the build environments of all included
 PRs. A PR controls its own `nix-config` and builders.
 
-With `publish: built`, the workflow also publishes required dependency outputs
-available through the view, including build-only tools. For example, reusing a
-profile can also publish its activation wrapper and deployment client into the
-main cache. Consumers then need only the main cache to obtain those tools.
-Dependencies absent from the configured tenant sources cause no additional build
-or download.
+With `publish: built`, a cold or legacy result also selects required dependency
+outputs available through the view, including build-only tools. For example,
+reusing a profile can also publish its activation wrapper and deployment client
+into the main cache. Consumers then need only the main cache to obtain those
+tools. Dependencies absent from the configured tenant sources cause no
+additional build or download.
+
+When the exact result already has a recorded publication set, the workflow
+materialises that original accepted selection without rediscovering its members
+or walking the derivation graph on the runner. Reuse pins the concrete source
+result and the view's resolved revision. A stale revision or a failed provider
+is an error, not permission to rebuild. The view and its source caches remain
+read-only; materialisation and retention changes address the destination.
 
 [trusted-reuse]: ./flake-publish.md#reusing-a-merged-pull-requests-outputs
 
@@ -36,9 +43,9 @@ cupboard reuse-view set https://cupboard.example.workers.dev/t/acme \
 The view includes every cache whose name starts with `gh-123456-pr-`. Those are
 the pull-request caches of the repository whose ID is 123456.
 
-A view doesn't store any paths of its own. cupboard works out which caches the
-view includes each time the view is read. A pull-request cache created later is
-included automatically, without changing the view.
+A view doesn't store any paths of its own. Each read resolves the caches that
+the view currently includes. Pull-request caches created later are included
+automatically, without changing the view.
 
 `--select` says which caches the view includes. You can repeat it, and give
 between 1 and 32 different selectors:

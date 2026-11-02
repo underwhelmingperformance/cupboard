@@ -3,6 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
 	buildEventSchema,
 	buildReceiptSchema,
+	buildReceiptV2Schema,
+	buildReceiptV3Schema,
+	buildReceiptV4Schema,
 	targetOutcomeSchema
 } from './build.ts';
 
@@ -496,5 +499,87 @@ describe('buildReceiptSchema', () => {
 		}
 	])('rejects $name', ({ value }) => {
 		expect(buildReceiptSchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('buildReceiptV4Schema', () => {
+	const set = {
+		result: {
+			cache: { kind: 'default' },
+			cacheGeneration: 1,
+			storePath,
+			generation: 0,
+			narHash: `sha256:${'1'.repeat(52)}`
+		},
+		digest: 'a'.repeat(64),
+		memberCount: 100_000,
+		origin: 'legacy-selection',
+		materialisation: 'complete'
+	};
+	const receipt = {
+		version: 4,
+		paths: [storePath],
+		subjects: [],
+		publicationSets: [set]
+	};
+
+	it('rejects compact publication sets in a V3 receipt', () => {
+		expect(
+			buildReceiptV3Schema.safeParse({ ...receipt, version: 3 }).success
+		).toBe(false);
+	});
+
+	it('keeps implicit set members out of explicit paths and actual signing subjects', () => {
+		expect(buildReceiptV4Schema.parse(receipt)).toStrictEqual(receipt);
+		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
+	});
+
+	it('accepts overlapping sets without interpreting member counts as unique path counts', () => {
+		const value = {
+			...receipt,
+			publicationSets: [
+				set,
+				{ ...set, result: { ...set.result, storePath: outputPath } }
+			]
+		};
+		expect(buildReceiptV4Schema.parse(value)).toStrictEqual(value);
+	});
+
+	it('does not insert absent optional fields into any receipt version', () => {
+		for (const version of [2, 3, 4]) {
+			const value = { version, paths: [], subjects: [] };
+			expect(buildReceiptSchema.parse(value)).toStrictEqual(value);
+		}
+	});
+
+	it('retains actual V3 subject provenance for this-run paths', () => {
+		const subject = {
+			origin: 'copied',
+			storePath,
+			narHash: 'aa'.repeat(32),
+			signatures: []
+		};
+		const value = {
+			...receipt,
+			subjects: [subject],
+			uploaded: [storePath],
+			leftUpstream: [outputPath]
+		};
+		expect(buildReceiptV4Schema.parse(value)).toStrictEqual(value);
+	});
+
+	it('keeps V2/V3 strict and refuses incomplete or enumerated set records', () => {
+		for (const schema of [buildReceiptV2Schema, buildReceiptV3Schema]) {
+			const version = schema === buildReceiptV2Schema ? 2 : 3;
+			expect(schema.safeParse({ ...receipt, version }).success).toBe(false);
+		}
+		for (const publicationSets of [
+			[{ ...set, materialisation: 'pending' }],
+			[{ ...set, members: [storePath] }]
+		]) {
+			expect(
+				buildReceiptV4Schema.safeParse({ ...receipt, publicationSets }).success
+			).toBe(false);
+		}
 	});
 });

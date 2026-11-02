@@ -55,7 +55,7 @@ function failureKind(
 		error.signal === undefined &&
 		error.status !== undefined &&
 		error.status !== 0 &&
-		receipt?.version === 3 &&
+		(receipt?.version === 3 || receipt?.version === 4) &&
 		receipt.childExitStatus === error.status &&
 		receipt.terminalFailure?.kind === 'target-build' &&
 		(receipt.failed?.length ?? 0) === 0
@@ -121,7 +121,10 @@ export async function runCohortSequence(
 
 			if (
 				kind === 'command' &&
-				!(receipt?.version === 3 && receipt.terminalFailure?.kind === 'command')
+				!(
+					(receipt?.version === 3 || receipt?.version === 4) &&
+					receipt.terminalFailure?.kind === 'command'
+				)
 			) {
 				receipts.push({
 					version: 3,

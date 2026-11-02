@@ -38,6 +38,8 @@
 		"./plan": "./src/plan.ts",
 		"./platform": "./src/platform.ts",
 		"./publication": "./src/publication.ts",
+		"./publication-manifests": "./src/publication-manifests.ts",
+		"./publication-workflow": "./src/publication-workflow.ts",
 		"./read-access": "./src/read-access.ts",
 		"./cache-credentials": "./src/cache-credentials.ts",
 		"./reports": "./src/reports.ts",

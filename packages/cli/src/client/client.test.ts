@@ -20,6 +20,7 @@ import {
 	type CommitSessionFrame,
 	publicationCapability,
 	publicationRefusalReasonsCapability,
+	uploadConfirmPresentCapability,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
@@ -529,7 +530,7 @@ interface CapturedConnection {
 	readonly capabilities: string | undefined;
 }
 
-const acceptedCommitCapabilities = `${commitBatchCapability},${commitCreditCapability},${publicationCapability},${publicationRefusalReasonsCapability}`;
+const acceptedCommitCapabilities = `${commitBatchCapability},${commitCreditCapability},${publicationCapability},${publicationRefusalReasonsCapability},${uploadConfirmPresentCapability}`;
 
 // A client whose commit sockets are scripted: the nth connection plays the nth
 // script against its listeners once they are attached.

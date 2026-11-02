@@ -8,6 +8,7 @@ import {
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
+import { compactPublicationSetSchema } from './publication-manifests.ts';
 import { rootSummarySchema } from './retention.ts';
 import { uploadGraceFactSchema } from './upload.ts';
 
@@ -292,6 +293,23 @@ export const buildSummarySchema = z.strictObject({
 });
 export type BuildSummary = z.output<typeof buildSummarySchema>;
 
+// Only capability-selected compact publication emits this result kind. Legacy
+// consumers continue to receive the unchanged unversioned build-summary.
+export const buildSummaryV4ResultKind = 'build-summary-v4';
+export const buildSummaryV4Schema = z.strictObject({
+	...buildSummarySchema.shape,
+	version: z.literal(4),
+	// Set counts may overlap. These are not uploaded paths or signing subjects.
+	publicationSets: z.array(compactPublicationSetSchema).optional()
+});
+export type BuildSummaryV4 = z.output<typeof buildSummaryV4Schema>;
+
+export const buildSummaryReaderSchema = z.union([
+	buildSummarySchema,
+	buildSummaryV4Schema
+]);
+export type BuildSummaryReader = z.output<typeof buildSummaryReaderSchema>;
+
 // The `kind` under which `cupboard push` and `cupboard build-push` report the
 // paths whose local copy differs from the copy that the cache already served.
 // A run emits this result only when at least one path diverged. Its own
@@ -327,5 +345,7 @@ export type AttestationAttachSummaryInput = z.input<
 	typeof attestationAttachSummarySchema
 >;
 export type BuildSummaryInput = z.input<typeof buildSummarySchema>;
+export type BuildSummaryV4Input = z.input<typeof buildSummaryV4Schema>;
+export type BuildSummaryReaderInput = z.input<typeof buildSummaryReaderSchema>;
 export type DivergenceSummaryInput = z.input<typeof divergenceSummarySchema>;
 export type CompressionSummaryInput = z.input<typeof compressionSummarySchema>;

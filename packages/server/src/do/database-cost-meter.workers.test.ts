@@ -84,6 +84,73 @@ describe('db cost meter', () => {
 		});
 	});
 
+	it('measures the manifest cardinality and availability catalogue cost', async () => {
+		await initialise();
+		const measured = await runInDurableObject(
+			currentServer(),
+			(_instance, state) => {
+				const cardinalityNames = new Set([
+					'publication_manifest_cardinality',
+					'sqlite_autoindex_publication_manifest_cardinality_1',
+					'publication_manifest_operation_cardinality_insert',
+					'publication_manifest_operation_cardinality_delete',
+					'publication_manifest_cardinality_insert',
+					'publication_manifest_cardinality_delete',
+					'result_publication_member_cardinality_insert',
+					'result_publication_member_cardinality_delete',
+					'result_publication_member_cardinality_update',
+					'publication_manifest_member_cardinality_insert',
+					'publication_manifest_member_cardinality_delete',
+					'publication_manifest_identical_insert',
+					'publication_manifest_member_identical_insert',
+					'result_publication_member_identical_insert',
+					'result_publication_member_immutable_insert',
+					'result_publication_member_certificate_delete',
+					'result_publication_member_certificate_update',
+					'publication_manifest_member_certificate_delete'
+				]);
+				const localIdentityAndLifecycleNames = new Set([
+					'result_publication_narinfo_identical_insert',
+					'result_publication_narinfo_prepare_insert',
+					'result_publication_narinfo_prepare_update',
+					'publication_manifest_local_identity',
+					'sqlite_autoindex_publication_manifest_local_identity_1',
+					'publication_manifest_lifecycle_intent',
+					'publication_manifest_lifecycle_intent_scope_idx',
+					'publication_manifest_operation_scope_idx'
+				]);
+				const cursor = state.storage.sql.exec<{ name: string }>(
+					'SELECT name FROM sqlite_master'
+				);
+				const names = Array.from(cursor, (row) => row.name);
+
+				// Collection's trigger validation scans this whole catalogue, not
+				// just the matching triggers. Empty availability tables therefore
+				// still add their table and index entries to every full pass.
+				return {
+					rowsRead: cursor.rowsRead,
+					rowsWritten: cursor.rowsWritten,
+					cardinalityEntries: names.filter((name) => cardinalityNames.has(name))
+						.length,
+					availabilityEntries: names.filter((name) =>
+						name.includes('publication_manifest_availability_')
+					).length,
+					localIdentityAndLifecycleEntries: names.filter((name) =>
+						localIdentityAndLifecycleNames.has(name)
+					).length
+				};
+			}
+		);
+
+		expect(measured).toStrictEqual({
+			rowsRead: 288,
+			rowsWritten: 0,
+			cardinalityEntries: 18,
+			availabilityEntries: 6,
+			localIdentityAndLifecycleEntries: 8
+		});
+	});
+
 	it('measures the rows an insert writes', async () => {
 		const measured = await runInDurableObject(currentServer(), (instance) => {
 			const { db, dbCost } = instance.context;
@@ -169,13 +236,16 @@ describe('db cost meter', () => {
 		// request resolves before it negotiates anything. The request also probes
 		// for a managed retirement and durable teardown before eligibility
 		// reconciliation, then checks that the cache is still live before it
-		// inserts the pending upload. The request makes three D1 calls, and one of
-		// them returns no row counts.
+		// inserts the pending upload. Manifest maintenance adds six fixed reads:
+		// four empty-work probes (including lifecycle intent discovery) and two
+		// indexed earliest-deadline probes during
+		// eligibility reconciliation. The request makes three D1 calls, and one
+		// of them returns no row counts.
 		expect(negotiateLine(capture)).toStrictEqual({
 			...negotiateRequest,
 			status: StatusCodes.OK,
 			...noCost,
-			rowsRead: 41,
+			rowsRead: 47,
 			rowsWritten: 11,
 			d1Calls: 3,
 			d1RowsRead: 6,
@@ -208,7 +278,7 @@ describe('db cost meter', () => {
 			...negotiateRequest,
 			status: StatusCodes.OK,
 			...noCost,
-			rowsRead: 41,
+			rowsRead: 47,
 			rowsWritten: 13,
 			d1Calls: 3,
 			d1RowsRead: 6,
@@ -241,7 +311,7 @@ describe('db cost meter', () => {
 			...negotiateRequest,
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
 			...noCost,
-			rowsRead: 41,
+			rowsRead: 47,
 			rowsWritten: 1,
 			d1Calls: 2,
 			d1RowsRead: 6

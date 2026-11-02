@@ -34,6 +34,7 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard root targets`](#cupboard-root-targets)
   - [`cupboard root remove`](#cupboard-root-remove)
 - [`cupboard confirm`](#cupboard-confirm)
+- [`cupboard publication-result`](#cupboard-publication-result)
 - [`cupboard key`](#cupboard-key)
   - [`cupboard key list`](#cupboard-key-list)
   - [`cupboard key rotate`](#cupboard-key-rotate)
@@ -781,9 +782,11 @@ Options:
                                     JSON receipt. With several builds, the file
                                     contains {"receipts": [...]}, in build
                                     order.
-  --aggregate-receipt-v3            with several cohorts, write one combined
-                                    version 3 receipt instead of {"receipts":
-                                    [...]}
+  --aggregate-receipt-v3            write one combined version 3 receipt;
+                                    preserve the legacy receipt contract
+  --aggregate-receipt <versions>    write one combined receipt using the highest
+                                    mutually supported version from this
+                                    comma-separated list (e.g. 3,4)
   --cohorts-file <path>             JSON file of builds to run in order, each
                                     {"command": [...]} or {"installables":
                                     [...]}. Use it instead of a build command
@@ -1091,6 +1094,26 @@ Example:
   # Check paths that a previous job published
   cupboard confirm --github-oidc https://cupboard.example.workers.dev/t/acme \
     /nix/store/<hash>-app /nix/store/<hash>-runtime
+```
+
+### cupboard publication-result
+
+```text
+Usage: cupboard publication-result [options] <url>
+
+Run an internal recorded-publication workflow without transferring NAR bytes.
+
+Arguments:
+  url                    tenant URL (e.g.
+                         https://cupboard.example.workers.dev/t/<slug>)
+
+Options:
+  --request-file <path>  JSON recorded-publication workflow request
+  --github-oidc          sign in with the job's GitHub Actions OIDC token
+                         instead of your saved `cupboard login` session
+  --audience <audience>  OIDC audience to request with --github-oidc (default:
+                         the tenant URL)
+  -h, --help             display help for command
 ```
 
 ### cupboard key

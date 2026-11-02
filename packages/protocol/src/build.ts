@@ -6,6 +6,7 @@ import {
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
+import { compactPublicationSetSchema } from './publication-manifests.ts';
 
 // The store path of the derivation itself. A separate brand distinguishes the
 // `.drv` path from its output paths.
@@ -325,9 +326,20 @@ export const buildReceiptV3Schema = z.strictObject({
 });
 export type BuildReceiptV3 = z.output<typeof buildReceiptV3Schema>;
 
+// Producers select V4 only after confirming consumer support. The paths and
+// subjects remain explicit this-run records; publicationSets never expands
+// implicit members or supplies signing subjects. Sets may overlap.
+export const buildReceiptV4Schema = z.strictObject({
+	...buildReceiptV3Schema.shape,
+	version: z.literal(4),
+	publicationSets: z.array(compactPublicationSetSchema).optional()
+});
+export type BuildReceiptV4 = z.output<typeof buildReceiptV4Schema>;
+
 export const buildReceiptSchema = z.discriminatedUnion('version', [
 	buildReceiptV2Schema,
-	buildReceiptV3Schema
+	buildReceiptV3Schema,
+	buildReceiptV4Schema
 ]);
 export type BuildReceipt = z.output<typeof buildReceiptSchema>;
 
@@ -342,4 +354,5 @@ export type TerminalBuildFailureInput = z.input<
 >;
 export type BuildReceiptV2Input = z.input<typeof buildReceiptV2Schema>;
 export type BuildReceiptV3Input = z.input<typeof buildReceiptV3Schema>;
+export type BuildReceiptV4Input = z.input<typeof buildReceiptV4Schema>;
 export type BuildReceiptInput = z.input<typeof buildReceiptSchema>;

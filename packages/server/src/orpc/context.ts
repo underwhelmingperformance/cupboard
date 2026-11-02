@@ -1,11 +1,19 @@
 import type { Logger } from '@cupboard/logger';
 import type { CacheScope } from '@cupboard/nix-store/scalars';
+import type { AuthorizationDetails } from '@cupboard/protocol/grants';
+import type {
+	PublicationEnsureRequest,
+	PublicationEnsureResponse,
+	PublicationStatusRequest,
+	PublicationStatusResponse
+} from '@cupboard/protocol/publication-manifests';
 import type { VerifyReportInput } from '@cupboard/protocol/reports';
 
 import type { AccessClaims } from '../auth/auth.ts';
 import type { AttestationsService } from '../do/attestations-service.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
 import type { CacheAdminService } from '../do/cache-admin-service.ts';
+import type { ConfirmationService } from '../do/confirmation-service.ts';
 import type { GarbageCollectionOutcome } from '../do/context.ts';
 import type { GarbageCollectionTarget } from '../do/context.ts';
 import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
@@ -13,6 +21,8 @@ import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
 import type { LegacyRetentionService } from '../do/legacy-retention-service.ts';
 import type { NegotiateHints } from '../do/negotiate-hints.ts';
 import type { OidcTrustService } from '../do/oidc-trust-service.ts';
+import type { PublicationManifestCaptureService } from '../do/publication-manifest-capture.ts';
+import type { PublicationManifestRepository } from '../do/publication-manifest-repository.ts';
 import type { RefreshSessionsService } from '../do/refresh-sessions-service.ts';
 import type { RetentionService } from '../do/retention-service.ts';
 import type { ReuseViewAdminService } from '../do/reuse-view-admin-service.ts';
@@ -63,6 +73,19 @@ export interface TenantRpcServices {
 		purgeOrigin: RequestOrigin | undefined
 	): Promise<GarbageCollectionOutcome>;
 	readonly uploads: UploadsService;
+	readonly confirmation: ConfirmationService;
+	readonly manifestCapture: PublicationManifestCaptureService;
+	readonly manifestRepository: PublicationManifestRepository;
+	ensureManifest(
+		scope: CacheScope,
+		grants: AuthorizationDetails,
+		request: PublicationEnsureRequest
+	): Promise<PublicationEnsureResponse>;
+	manifestStatus(
+		scope: CacheScope,
+		grants: AuthorizationDetails,
+		request: PublicationStatusRequest
+	): Promise<PublicationStatusResponse>;
 	readonly attestations: AttestationsService;
 	// Runs an interactive verification pass, serialised against the cron verify
 	// pass on this instance. The router clamps the limit to the batch ceiling.

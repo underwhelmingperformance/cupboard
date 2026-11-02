@@ -2277,9 +2277,11 @@ describe('narinfo deletion queue', () => {
 		});
 		const withUploads = await flushRowsRead(entries.slice(4));
 
+		// Preselecting accepted versions before availability intent creation reads
+		// five rows for these four hashes, even though no accepted row remains.
 		expect({ withoutUploads, withUploads }).toStrictEqual({
-			withoutUploads: 82,
-			withUploads: 82
+			withoutUploads: 87,
+			withUploads: 87
 		});
 	});
 

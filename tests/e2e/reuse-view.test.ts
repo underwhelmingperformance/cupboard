@@ -66,12 +66,13 @@ describe('Nix substitution through a reuse view', () => {
 						const source = await NixStore.host(
 							path.join(directory, 'source-home')
 						);
-						const expression = String.raw`let
+						const fixtureExpression = String.raw`let
     mk = name: extra: derivation ({ inherit name; testInstance = ${JSON.stringify(directory)}; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "printf %s result > \"$out\"" ]; } // extra);
     client = mk "cupboard-patched-deployment-client" {};
     upstream = mk "cupboard-upstream-build-input" {};
     wrapper = mk "cupboard-activation-wrapper" { tool = client; inherit upstream; };
-  in mk "cupboard-profile" { activation = wrapper; }`;
+  in { inherit client upstream wrapper; profile = mk "cupboard-profile" { activation = wrapper; }; }`;
+						const expression = `(${fixtureExpression}).profile`;
 						const profile = storePathSchema.parse(
 							await source.build(expression)
 						);
@@ -122,6 +123,9 @@ describe('Nix substitution through a reuse view', () => {
 								'The profile fixture did not declare its deployment dependencies'
 							);
 						}
+						// A cached profile need not retain its build-only inputs. Realise
+						// every declared fixture output before seeding the source cache.
+						await source.build(`builtins.attrValues (${fixtureExpression})`);
 						const unrelated = await source.build(reuseDerivation);
 						await rpc.caches.put.inNamedCache({
 							cacheName: sourceCache.name,

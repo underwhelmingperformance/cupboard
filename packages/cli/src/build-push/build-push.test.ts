@@ -22,8 +22,10 @@ import {
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
 	buildReceiptV3Schema,
+	buildReceiptV4Schema,
 	invocationIdSchema
 } from '@cupboard/protocol/build';
+import { recordedPublicationSchema } from '@cupboard/protocol/publication-manifests';
 import {
 	uploadAttachRootSchema,
 	type UploadDecisionInput,
@@ -423,6 +425,7 @@ interface ConstructedFlowConfig {
 }
 
 interface FlowConfig {
+	readonly publicationWorkflow?: BuildPushDependencies['publicationWorkflow'];
 	readonly presentation?: PresentationLevel;
 	/**
 	Replaces the recording reporter, whose records then stay empty.
@@ -442,6 +445,7 @@ interface FlowConfig {
 	readonly daemonless?: boolean;
 	readonly command?: ChildCommand;
 	readonly constructed?: ConstructedFlowConfig;
+	readonly priorRootTargets?: readonly StorePathString[];
 	readonly emitEvent?: boolean;
 	readonly emitTwoEvents?: boolean;
 	readonly emitExitStatus?: number;
@@ -490,6 +494,7 @@ interface FlowRun extends RecordedRun {
 	readonly attemptIdsIssued: number;
 	readonly negotiatedPaths: readonly (readonly StorePathString[])[];
 	readonly referenceSources: readonly (readonly string[])[];
+	readonly rootTargets: readonly string[];
 	readonly rootSets: readonly string[];
 	readonly rootRequests: readonly {
 		readonly name: string;
@@ -674,6 +679,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	const sleeps: number[] = [];
 	const negotiatedPaths: StorePathString[][] = [];
 	const referenceSources: string[][] = [];
+	let rootTargets = config.priorRootTargets ?? [];
 	const rootSets: string[] = [];
 	const rootRequests: {
 		name: string;
@@ -775,6 +781,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		setRoot: (name, _body) => {
 			rootSets.push(name);
 			rootRequests.push({ name, body: _body });
+			rootTargets = _body.targets.map((target) =>
+				storePathSchema.parse(target)
+			);
 
 			return Promise.resolve({
 				name: rootNameSchema.parse(name),
@@ -895,6 +904,10 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	};
 
 	const dependencies: BuildPushDependencies = {
+		...(config.publicationWorkflow !== undefined && {
+			publicationWorkflow: config.publicationWorkflow,
+			publicationSources: [{ cache: { kind: 'default' } }]
+		}),
 		...(config.signal !== undefined && { signal: config.signal }),
 		selectPublicationPaths: (candidates, options) => {
 			const leftUpstream = (config.externallyServed ?? []).filter(
@@ -1109,6 +1122,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		attemptIdsIssued,
 		negotiatedPaths,
 		referenceSources,
+		rootTargets,
 		rootSets,
 		rootRequests,
 		settledTargets,
@@ -2091,6 +2105,188 @@ describe('runBuildPush', () => {
 			await runPromise;
 		}
 	});
+
+	it.each([false, true])(
+		'preserves the prior root with an actual pending cold verdict (mixed warm selection: %s)',
+		async (mixed) => {
+			const deferred = Promise.withResolvers<undefined>();
+			const calls: string[] = [];
+			const commits: string[] = [];
+			const warm = recordedPublicationSchema.parse({
+				result: {
+					storePath: pathB,
+					narHash: narHash.toString(),
+					generation: 1,
+					cache: { kind: 'default' },
+					cacheGeneration: 1
+				},
+				digest: 'a'.repeat(64),
+				memberCount: 1,
+				origin: 'build-selection'
+			});
+			const runPromise = runFlow({
+				constructed: {
+					succeedOn: 1,
+					installables: [...(mixed ? [pathB] : []), `${drvA}^out`]
+				},
+				declaredOutputs: [pathA],
+				valid: [pathA],
+				ultimatePaths: [pathA],
+				outPaths: [pathA],
+				priorRootTargets: [pathC],
+				options: {
+					wait: false,
+					root: rootNameSchema.parse('main'),
+					publicationScope: 'outputs'
+				},
+				publicationWorkflow: {
+					execute(request) {
+						calls.push(request.operation);
+						if (request.operation === 'lookup') {
+							return Promise.resolve({
+								operation: 'lookup',
+								supported: true,
+								output: {
+									entries: request.input.results.map(({ storePath }) =>
+										storePath === pathB
+											? { kind: 'recorded', publication: warm, complete: true }
+											: { kind: 'unavailable', storePath }
+									)
+								}
+							});
+						}
+						if (request.operation === 'ensure') {
+							return Promise.resolve({
+								operation: 'ensure',
+								supported: true,
+								output: { ...request.input.source, materialisation: 'complete' }
+							});
+						}
+						throw new Error('Pending outputs must not be captured');
+					}
+				},
+				publicationClient: {
+					negotiate: (body) =>
+						Promise.resolve({
+							uploads: body.paths.map((candidate) =>
+								decisionFor(
+									storePathSchema.parse(candidate.storePath),
+									'commit'
+								)
+							)
+						}),
+					commit: (target) => {
+						commits.push(target.uploadId);
+						return Promise.resolve({
+							...target,
+							status: 'pending',
+							settled: deferred.promise
+						});
+					}
+				}
+			});
+			try {
+				const run = await runPromise;
+				const receipt = buildReceiptV4Schema.parse(
+					JSON.parse(await readFile(run.receiptFile, 'utf8'))
+				);
+				const publicationSets = mixed
+					? [{ ...warm, materialisation: 'complete' }]
+					: [];
+				expect({
+					error: run.error,
+					rootTargets: run.rootTargets,
+					rootRequests: run.rootRequests,
+					settledTargets: run.settledTargets,
+					calls,
+					receipt
+				}).toEqual({
+					error: undefined,
+					rootTargets: [pathC],
+					rootRequests: [],
+					settledTargets: [],
+					calls: mixed ? ['lookup', 'ensure'] : ['lookup'],
+					receipt: {
+						version: 4,
+						paths: [],
+						subjects: [],
+						outcomes: [{ outcome: 'built', storePath: pathA }],
+						childExitStatus: 0,
+						uploaded: [pathA],
+						failed: [],
+						collected: [],
+						publicationSets
+					}
+				});
+				const summary = {
+					mode: 'streamed',
+					store: '/nix/store',
+					targetPaths: mixed ? 2 : 1,
+					intermediatePaths: 0,
+					queueDepth: 0,
+					uploadedPaths: 0,
+					uploadedBytes: 0,
+					pathReferences: [{ storePath: pathA, references: [] }],
+					uploads: [],
+					durationMs: 0,
+					skipped: 0,
+					childExitStatus: 0,
+					unconfirmedPaths: [],
+					version: 4,
+					publicationSets
+				};
+				expect(run.results).toEqual([
+					{
+						kind: 'build-summary-v4',
+						title: 'Build and publication result',
+						data: summary,
+						rows: [
+							{ label: 'Uploaded paths', value: '0' },
+							{
+								label: 'Paths without upload',
+								value: '0 already available or published from a reusable blob'
+							},
+							{ label: 'Bytes uploaded', value: '0 B' },
+							{ label: 'Duration', value: '0ms' },
+							{ label: 'Build exit status', value: '0' }
+						]
+					}
+				]);
+				expect(commits).toEqual([`upload-${StorePath.basename(pathA)}`]);
+				expect(run.commands).toEqual([
+					{ rebuild: false, installables: [`${drvA}^out`] }
+				]);
+				const journal: unknown = JSON.parse(
+					await readFile(`${run.receiptFile}.publication-requests.json`, 'utf8')
+				);
+				const {
+					publicationSets: _sets,
+					version: _version,
+					...coldSummary
+				} = summary;
+				expect(journal).toHaveProperty('snapshots.build', {
+					receipt: {
+						version: 3,
+						paths: [],
+						subjects: [],
+						outcomes: [{ outcome: 'built', storePath: pathA }],
+						childExitStatus: 0,
+						uploaded: [pathA],
+						failed: [],
+						collected: []
+					},
+					targets: [pathA],
+					captures: [],
+					recorded: [],
+					supported: true,
+					summary: { ...coldSummary, targetPaths: 1 }
+				});
+			} finally {
+				deferred.resolve(undefined);
+				await runPromise;
+			}
+		}
+	);
 
 	it('cancels reconciliation with a pending streamed verdict and cleans the runtime', async () => {
 		const deferred = Promise.withResolvers<undefined>();
@@ -3116,6 +3312,108 @@ describe('runBuildPush', () => {
 			});
 		}
 	);
+
+	it('captures the actual tool footprint, then ensures a warm repeat before any graph or member work', async () => {
+		let winner: ReturnType<typeof recordedPublicationSchema.parse> | undefined;
+		const members: string[][] = [];
+		const workflow: NonNullable<BuildPushDependencies['publicationWorkflow']> =
+			{
+				destination: {
+					tenantUrl: 'https://cache.example/t/acme',
+					cache: { kind: 'default' }
+				},
+				execute(request) {
+					if (request.operation === 'lookup') {
+						return Promise.resolve({
+							operation: 'lookup',
+							supported: true,
+							output: {
+								entries: [
+									winner === undefined
+										? { kind: 'unavailable', storePath: pathA }
+										: { kind: 'recorded', publication: winner, complete: true }
+								]
+							}
+						});
+					}
+					if (request.operation === 'capture') {
+						members.push(
+							request.input.members.map((member) => member.storePath)
+						);
+						winner = recordedPublicationSchema.parse({
+							result: {
+								storePath: pathA,
+								narHash: narHash.toString(),
+								generation: 1,
+								cache: { kind: 'default' },
+								cacheGeneration: 1
+							},
+							digest: 'a'.repeat(64),
+							memberCount: request.input.members.length,
+							origin: request.input.origin
+						});
+						return Promise.resolve({
+							operation: 'capture',
+							supported: true,
+							output: winner
+						});
+					}
+					if (request.operation === 'prepare-run-root') {
+						return Promise.resolve({
+							operation: 'prepare-run-root',
+							supported: true,
+							output: { name: request.input.name }
+						});
+					}
+					return Promise.resolve({
+						operation: 'ensure',
+						supported: true,
+						output: { ...request.input.source, materialisation: 'complete' }
+					});
+				}
+			};
+		const config: FlowConfig = {
+			publicationWorkflow: workflow,
+			tenantDependency: true,
+			constructed: {
+				succeedOn: 1,
+				installables: [`${drvA}^out`],
+				dependencyPaths: [pathC]
+			},
+			declaredOutputs: [pathA],
+			valid: [pathA, pathC],
+			ultimatePaths: [pathA, pathC],
+			outPaths: [pathA],
+			options: {
+				publicationScope: 'built',
+				tenantUrl: new URL('https://cache.example/t/acme')
+			}
+		};
+		const first = await runFlow(config);
+		expect(first.error).toBeUndefined();
+		expect(members).toEqual([[pathA, pathC]]);
+		const cold = buildReceiptV4Schema.parse(
+			JSON.parse(await readFile(first.receiptFile, 'utf8'))
+		);
+		expect(cold.paths).toEqual([pathA, pathC]);
+		expect(cold.subjects.every((subject) => subject.origin === 'built')).toBe(
+			true
+		);
+		const repeat = await runFlow(config);
+		expect(repeat.error).toBeUndefined();
+		expect(repeat.commands).toEqual([]);
+		expect(repeat.negotiatedPaths).toEqual([]);
+		expect(repeat.storeCalls).toEqual(['readDerivation before the build']);
+		const warm = buildReceiptV4Schema.parse(
+			JSON.parse(await readFile(repeat.receiptFile, 'utf8'))
+		);
+		expect(warm).toMatchObject({
+			paths: [],
+			subjects: [],
+			publicationSets: [{ memberCount: 2 }]
+		});
+		expect(members).toHaveLength(1);
+	});
 
 	it('delegates tenant dependency references only when explicitly disabled', async () => {
 		const phaseFacts: { phase: string; label: string; value: string }[] = [];

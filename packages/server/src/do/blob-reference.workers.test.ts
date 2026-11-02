@@ -10,6 +10,7 @@ import {
 	commitPath,
 	commitSharedPath,
 	deletePath,
+	drainAttestationInheritance,
 	initialise,
 	narInfoGeneration,
 	negotiateUploads,
@@ -20,7 +21,8 @@ import {
 	singleDecision,
 	tenantBlobRows,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 // Each committed narinfo generation has one `blob_ref_storage` edge. A tenant also has
@@ -248,119 +250,126 @@ describe('blob_ref_storage / tenant_blob reference edges', () => {
 		});
 	});
 
-	it('flushes queued deletion rows for each captured generation', async () => {
-		const token = await initialise();
-		const nar = await verifiableNar('queued-generation-deletion');
-		const metadata = uploadMetadata({
-			storePathHash: 'g'.repeat(32),
-			narHash: nar.narHash,
-			narSize: nar.narSize,
-			fileHash: nar.fileHash,
-			fileSize: nar.narBytes.byteLength
-		});
+	it('flushes queued deletion rows for each captured generation', async () =>
+		withoutAlarmArming(async () => {
+			const token = await initialise();
+			const nar = await verifiableNar('queued-generation-deletion');
+			const metadata = uploadMetadata({
+				storePathHash: 'g'.repeat(32),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
 
-		await commitPath(token, metadata, nar);
-		await queueUnflushedNarInfoDeletion({
-			storePathHash: metadata.storePathHash
-		});
-		await commitSharedPath(token, metadata);
+			await commitPath(token, metadata, nar);
+			await queueUnflushedNarInfoDeletion({
+				storePathHash: metadata.storePathHash
+			});
+			await commitSharedPath(token, metadata);
 
-		const beforeFlush = await blobReferenceRows();
-		await deletePath(token, metadata.storePathHash);
-		await runGcResult();
-
-		expect({
-			beforeFlush,
-			edges: await blobReferenceRows(),
-			tenantBlobs: await tenantBlobRows()
-		}).toStrictEqual({
-			beforeFlush: [
-				{
-					tenant: 'v1',
-					cache: { kind: 'default' },
-					storePathHash: metadata.storePathHash,
-					generation: 0,
-					narHash: nar.narHash,
-					cacheGeneration: 1
-				},
-				{
-					tenant: 'v1',
-					cache: { kind: 'default' },
-					storePathHash: metadata.storePathHash,
-					generation: 1,
-					narHash: nar.narHash,
-					cacheGeneration: 1
-				}
-			],
-			edges: [],
-			tenantBlobs: []
-		});
-	});
-
-	it('deletes a queued narinfo object before retiring its blob edge', async () => {
-		const token = await initialise();
-		const nar = await verifiableNar('queued-object-before-edge');
-		const metadata = uploadMetadata({
-			storePathHash: 'h'.repeat(32),
-			narHash: nar.narHash,
-			narSize: nar.narSize,
-			fileHash: nar.fileHash,
-			fileSize: nar.narBytes.byteLength
-		});
-
-		await commitPath(token, metadata, nar);
-		await queueUnflushedNarInfoDeletion({
-			storePathHash: metadata.storePathHash
-		});
-
-		const objectKey = narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
-			kind: 'default'
-		});
-		const deleteObject = env.BLOBS.delete.bind(env.BLOBS);
-		let edgesAtObjectDelete:
-			Awaited<ReturnType<typeof blobReferenceRows>> | undefined;
-		const deleteWithSnapshot: typeof env.BLOBS.delete = async (key) => {
-			const willDeleteObject = Array.isArray(key)
-				? key.includes(objectKey)
-				: key === objectKey;
-
-			if (willDeleteObject) {
-				edgesAtObjectDelete = await blobReferenceRows();
-			}
-
-			return deleteObject(key);
-		};
-		const deleteSpy = vi
-			.spyOn(env.BLOBS, 'delete')
-			.mockImplementation(deleteWithSnapshot);
-
-		try {
+			const beforeFlush = await blobReferenceRows();
+			await drainAttestationInheritance();
+			await deletePath(token, metadata.storePathHash);
 			await runGcResult();
-		} finally {
-			deleteSpy.mockRestore();
-		}
 
-		expect({
-			edgesAtObjectDelete,
-			afterReplay: {
+			expect({
+				beforeFlush,
 				edges: await blobReferenceRows(),
 				tenantBlobs: await tenantBlobRows()
-			}
-		}).toStrictEqual({
-			edgesAtObjectDelete: [
-				{
-					tenant: fixtureTenant,
-					cache: { kind: 'default' },
-					storePathHash: metadata.storePathHash,
-					generation: 0,
-					narHash: nar.narHash,
-					cacheGeneration: 1
-				}
-			],
-			afterReplay: {
+			}).toStrictEqual({
+				beforeFlush: [
+					{
+						tenant: 'v1',
+						cache: { kind: 'default' },
+						storePathHash: metadata.storePathHash,
+						generation: 0,
+						narHash: nar.narHash,
+						cacheGeneration: 1
+					},
+					{
+						tenant: 'v1',
+						cache: { kind: 'default' },
+						storePathHash: metadata.storePathHash,
+						generation: 1,
+						narHash: nar.narHash,
+						cacheGeneration: 1
+					}
+				],
 				edges: [],
 				tenantBlobs: []
+			});
+		}));
+
+	it('deletes a queued narinfo object before retiring its blob edge', async () =>
+		withoutAlarmArming(async () => {
+			const token = await initialise();
+			const nar = await verifiableNar('queued-object-before-edge');
+			const metadata = uploadMetadata({
+				storePathHash: 'h'.repeat(32),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+
+			await commitPath(token, metadata, nar);
+			await queueUnflushedNarInfoDeletion({
+				storePathHash: metadata.storePathHash
+			});
+
+			const objectKey = narInfoObjectKey(
+				fixtureTenant,
+				metadata.storePathHash,
+				{
+					kind: 'default'
+				}
+			);
+			const deleteObject = env.BLOBS.delete.bind(env.BLOBS);
+			let edgesAtObjectDelete:
+				Awaited<ReturnType<typeof blobReferenceRows>> | undefined;
+			const deleteWithSnapshot: typeof env.BLOBS.delete = async (key) => {
+				const willDeleteObject = Array.isArray(key)
+					? key.includes(objectKey)
+					: key === objectKey;
+
+				if (willDeleteObject) {
+					edgesAtObjectDelete = await blobReferenceRows();
+				}
+
+				return deleteObject(key);
+			};
+			const deleteSpy = vi
+				.spyOn(env.BLOBS, 'delete')
+				.mockImplementation(deleteWithSnapshot);
+
+			try {
+				await runGcResult();
+			} finally {
+				deleteSpy.mockRestore();
 			}
-		});
-	});
+
+			expect({
+				edgesAtObjectDelete,
+				afterReplay: {
+					edges: await blobReferenceRows(),
+					tenantBlobs: await tenantBlobRows()
+				}
+			}).toStrictEqual({
+				edgesAtObjectDelete: [
+					{
+						tenant: fixtureTenant,
+						cache: { kind: 'default' },
+						storePathHash: metadata.storePathHash,
+						generation: 0,
+						narHash: nar.narHash,
+						cacheGeneration: 1
+					}
+				],
+				afterReplay: {
+					edges: [],
+					tenantBlobs: []
+				}
+			});
+		}));
 });

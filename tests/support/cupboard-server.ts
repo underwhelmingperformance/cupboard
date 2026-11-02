@@ -107,6 +107,7 @@ interface CommitSessionCounters {
 	creditFrames: number;
 	queuedFrames: number;
 	abandonedUpgrades: number;
+	publicationEntries: number;
 }
 
 type TestServerStartStage =
@@ -338,7 +339,8 @@ export class CupboardTestServer {
 				upgrades: 0,
 				creditFrames: 0,
 				queuedFrames: 0,
-				abandonedUpgrades: 0
+				abandonedUpgrades: 0,
+				publicationEntries: 0
 			};
 			httpServer.on('upgrade', (request, socket, head) => {
 				void forwardUpgradeToWorker(
@@ -460,6 +462,10 @@ export class CupboardTestServer {
 			queuedFrames: this.commitCounters.queuedFrames,
 			abandonedUpgrades: this.commitCounters.abandonedUpgrades
 		};
+	}
+
+	get publicationEntriesSent(): number {
+		return this.commitCounters.publicationEntries;
 	}
 
 	/**
@@ -996,6 +1002,9 @@ function relaySockets(
 ): void {
 	client.on('message', (data, isBinary) => {
 		const bytes = rawDataBytes(data);
+		if (!isBinary) {
+			countClientPublicationEntries(counters, bytes.toString('utf8'));
+		}
 		workerSocket.send(
 			isBinary ? new Uint8Array(bytes) : bytes.toString('utf8')
 		);
@@ -1028,6 +1037,29 @@ function relaySockets(
 	workerSocket.addEventListener('error', () => {
 		client.close();
 	});
+}
+
+function countClientPublicationEntries(
+	counters: CommitSessionCounters,
+	data: string
+): void {
+	let frame: unknown;
+	try {
+		frame = JSON.parse(data);
+	} catch {
+		return;
+	}
+
+	if (
+		typeof frame === 'object' &&
+		frame !== null &&
+		'op' in frame &&
+		frame.op === 'publish-batch' &&
+		'entries' in frame &&
+		Array.isArray(frame.entries)
+	) {
+		counters.publicationEntries += frame.entries.length;
+	}
 }
 
 function rawDataBytes(data: RawData): Buffer {

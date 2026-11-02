@@ -1,3 +1,4 @@
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	firstCacheGeneration,
 	nixSha256HashSchema,
@@ -34,7 +35,6 @@ import {
 	currentNarObjectKey,
 	currentServer,
 	defaultCache,
-	flakyR2,
 	initialise,
 	namedCache,
 	narBytes,
@@ -100,17 +100,30 @@ function trackR2Puts(inner: R2Bucket): {
 	return { bucket, maximum: () => maximum };
 }
 
-// The first R2 head follows the off-gate identity snapshot and precedes the
-// gated revalidation. Run the mutation there to reproduce a row change between
-// those two reads.
-function rootsServiceWithHeadHook(
+// The first narinfo GET follows the off-gate identity snapshot and precedes
+// gated revalidation. Mutate there, not at the later canonical NAR HEAD.
+function rootsServiceWithNarInfoGetHook(
 	instance: CupboardServer,
 	state: DurableObjectState,
-	onHead: () => void
+	onGet: () => void
 ): { readonly roots: RootsService; readonly cache: ResolvedCache } {
+	const blobs = instance.context.env.BLOBS;
 	const context = new ServerContext(state, {
 		...instance.context.env,
-		BLOBS: flakyR2(instance.context.env.BLOBS, { failures: 0, onMatch: onHead })
+		BLOBS: new Proxy(blobs, {
+			get(target, property, receiver) {
+				if (property === 'get') {
+					return (key: string) => {
+						if (key.startsWith(`t/${fixtureTenant}/narinfo/`)) {
+							onGet();
+						}
+						return blobs.get(key);
+					};
+				}
+				const value: unknown = Reflect.get(target, property, receiver);
+				return value;
+			}
+		})
 	});
 	const narInfoObjects = new NarInfoObjectsService(context);
 	const retention = new RetentionService(context);
@@ -126,12 +139,12 @@ function rootsServiceWithHeadHook(
 	};
 }
 
-function ignoreHead(): void {
+function ignoreNarInfoGet(): void {
 	return;
 }
 
-// Mutate only on the first head so later targets follow the normal path.
-function onceOnHead(mutate: () => void): () => void {
+// Mutate only on the first narinfo GET so later targets follow the normal path.
+function onceOnNarInfoGet(mutate: () => void): () => void {
 	let isFired = false;
 
 	return () => {
@@ -155,10 +168,10 @@ describe('root ensure hardening', () => {
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const { roots, cache } = rootsServiceWithHeadHook(
+				const { roots, cache } = rootsServiceWithNarInfoGetHook(
 					instance,
 					state,
-					onceOnHead(() => {
+					onceOnNarInfoGet(() => {
 						instance.context.db
 							.update(schema.narInfos)
 							.set({ narHash: syntheticNarHash(1) })
@@ -196,10 +209,10 @@ describe('root ensure hardening', () => {
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const { roots, cache } = rootsServiceWithHeadHook(
+				const { roots, cache } = rootsServiceWithNarInfoGetHook(
 					instance,
 					state,
-					ignoreHead
+					ignoreNarInfoGet
 				);
 
 				return roots.ensureRoot(
@@ -235,10 +248,10 @@ describe('root ensure hardening', () => {
 					.where(eq(schema.narInfos.storePathHash, committed.storePathHash))
 					.run();
 
-				const { roots, cache } = rootsServiceWithHeadHook(
+				const { roots, cache } = rootsServiceWithNarInfoGetHook(
 					instance,
 					state,
-					ignoreHead
+					ignoreNarInfoGet
 				);
 
 				return roots.ensureRoot(
@@ -274,20 +287,28 @@ describe('root ensure hardening', () => {
 		}
 
 		const currentBody = await current.text();
-		await env.BLOBS.put(key, 'stale narinfo', {
+		const staleNarHash = syntheticNarHash(4);
+		const staleNarInfo = NarInfo.fromFields({
+			...NarInfo.parse(currentBody).toFields(),
+			narHash: staleNarHash,
+			url: narObjectKey(staleNarHash, 2)
+		});
+		await env.BLOBS.put(key, staleNarInfo.render(), {
 			customMetadata: {
 				generation: '-1',
-				narHash: syntheticNarHash(4)
+				narHash: staleNarHash,
+				narUrl: staleNarInfo.url,
+				signatureGeneration: '1'
 			}
 		});
 
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const { roots, cache } = rootsServiceWithHeadHook(
+				const { roots, cache } = rootsServiceWithNarInfoGetHook(
 					instance,
 					state,
-					ignoreHead
+					ignoreNarInfoGet
 				);
 
 				return roots.ensureRoot(
@@ -320,24 +341,42 @@ describe('root ensure hardening', () => {
 		const token = await initialise();
 		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, committed);
+		const published = await env.BLOBS.get(
+			narInfoObjectKey(fixtureTenant, committed.storePathHash, defaultCache())
+		);
+		if (published === null) {
+			throw new Error('missing source narinfo object');
+		}
+		const sourceFields = NarInfo.parse(await published.text()).toFields();
 		const targets = Array.from({ length: rootSetMaxTargets }, (_, offset) => {
 			const storePathHash = indexedStorePathHash(offset + 1);
-
+			const narHash = syntheticNarHash(offset + 10_000);
+			const storePath = storePathSchema.parse(
+				`/nix/store/${storePathHash}-legacy-${String(offset + 1)}`
+			);
 			return {
-				narHash: syntheticNarHash(offset + 10_000),
+				narHash,
 				storePathHash,
-				storePath: storePathSchema.parse(
-					`/nix/store/${storePathHash}-legacy-${String(offset + 1)}`
-				)
+				storePath,
+				narinfo: NarInfo.fromFields({
+					...sourceFields,
+					narHash,
+					storePath,
+					url: narObjectKey(narHash, 2)
+				}).render()
 			};
 		});
-		await mapWithConcurrency(targets, 6, async ({ narHash, storePathHash }) => {
-			await env.BLOBS.put(narObjectKey(narHash, 2), narBytes);
-			await env.BLOBS.put(
-				narInfoObjectKey(fixtureTenant, storePathHash, defaultCache()),
-				'legacy narinfo\n'
-			);
-		});
+		await mapWithConcurrency(
+			targets,
+			6,
+			async ({ narHash, storePathHash, narinfo }) => {
+				await env.BLOBS.put(narObjectKey(narHash, 2), narBytes);
+				await env.BLOBS.put(
+					narInfoObjectKey(fixtureTenant, storePathHash, defaultCache()),
+					narinfo
+				);
+			}
+		);
 
 		const result = await runInDurableObject(
 			currentServer(),
@@ -457,10 +496,10 @@ describe('root ensure hardening', () => {
 						);
 					const cold = await ensure();
 
-					await mapWithConcurrency(targets, 6, ({ storePathHash }) =>
+					await mapWithConcurrency(targets, 6, ({ storePathHash, narinfo }) =>
 						env.BLOBS.put(
 							narInfoObjectKey(fixtureTenant, storePathHash, defaultCache()),
-							'legacy narinfo\n'
+							narinfo
 						)
 					);
 
@@ -506,10 +545,10 @@ describe('root ensure hardening', () => {
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const { roots, cache } = rootsServiceWithHeadHook(
+				const { roots, cache } = rootsServiceWithNarInfoGetHook(
 					instance,
 					state,
-					onceOnHead(() => {
+					onceOnNarInfoGet(() => {
 						instance.context.db
 							.update(schema.narInfos)
 							.set({ narHash: committed.narHash })
@@ -549,10 +588,10 @@ describe('root ensure hardening', () => {
 		const summary = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const { roots, cache } = rootsServiceWithHeadHook(
+				const { roots, cache } = rootsServiceWithNarInfoGetHook(
 					instance,
 					state,
-					onceOnHead(() => {
+					onceOnNarInfoGet(() => {
 						instance.context.db
 							.update(schema.narInfos)
 							.set({ narHash: syntheticNarHash(2) })
@@ -590,7 +629,11 @@ describe('root ensure hardening', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				const { roots } = rootsServiceWithHeadHook(instance, state, ignoreHead);
+				const { roots } = rootsServiceWithNarInfoGetHook(
+					instance,
+					state,
+					ignoreNarInfoGet
+				);
 				// The path was committed to the default cache, so the new cache cannot
 				// serve it; the cache exists all the same.
 				const response = await roots.ensureRoot(

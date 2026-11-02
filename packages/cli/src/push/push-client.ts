@@ -1,7 +1,8 @@
 import { rootLogger } from '@cupboard/logger';
 import {
 	type CacheScope,
-	type StorePathHash
+	type StorePathHash,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import {
@@ -9,12 +10,23 @@ import {
 	workersInvocationAllowances
 } from '@cupboard/protocol/platform';
 import {
+	uploadConfirmPresentCanonicalPageByteLength,
+	uploadConfirmPresentMaxCanonicalBytes
+} from '@cupboard/protocol/publication';
+import {
 	acceptCapabilitiesHeader,
 	publicationCapability,
 	type PublicationEntry,
 	type UploadActionDecision,
 	uploadAttachRootSchema,
 	uploadCapabilitiesHeader,
+	uploadConfirmPresentCapability,
+	uploadConfirmPresentMaxPaths,
+	uploadConfirmPresentMaxRequestBytes,
+	type UploadConfirmPresentPath,
+	type UploadConfirmPresentRequest,
+	uploadConfirmPresentRequestSchema,
+	uploadConfirmPresentResponseSchema,
 	type UploadDecision,
 	uploadGraceFactsCapability,
 	type UploadId,
@@ -42,6 +54,10 @@ import { CupboardHttpError } from '../errors.ts';
 import { credentialSession } from './credential-session.ts';
 import { type PushClient } from './push.ts';
 import { type BlobUploader, r2BlobUploader } from './r2-upload.ts';
+
+// The tenant ID is not part of credential discovery. Its longest valid ASCII
+// spelling conservatively bounds every canonical page in any tenant.
+const maximumConfirmationTenant = tenantIdSchema.parse('x'.repeat(63));
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 // A missing canonical NAR also retires its old narinfo and reference. Leave
@@ -122,6 +138,8 @@ export function pushClientFor(
 		return { result, hasUploadGraceFacts };
 	};
 	let hasCredentialPublication = false;
+	let hasCredentialConfirmation = false;
+	let hasConfirmation = false;
 	let protocolSelection: Promise<'publication' | 'legacy'> | undefined;
 	const entries = new Map<
 		UploadId,
@@ -138,14 +156,22 @@ export function pushClientFor(
 		fetcher: async (input, init) => {
 			const request = new Request(input, init);
 			const headers = new Headers(request.headers);
-			headers.set(acceptCapabilitiesHeader, publicationCapability);
+			headers.set(
+				acceptCapabilitiesHeader,
+				`${publicationCapability},${uploadConfirmPresentCapability}`
+			);
 			const response = await baseFetcher(new Request(request, { headers }));
 			if (request.url.endsWith('/uploads/credential')) {
-				hasCredentialPublication =
+				const capabilities = new Set(
 					response.headers
 						.get(uploadCapabilitiesHeader)
 						?.split(',')
-						.some((value) => value.trim() === publicationCapability) ?? false;
+						.map((value) => value.trim())
+				);
+				hasCredentialPublication = capabilities.has(publicationCapability);
+				hasCredentialConfirmation = capabilities.has(
+					uploadConfirmPresentCapability
+				);
 			}
 			return response;
 		}
@@ -235,6 +261,9 @@ export function pushClientFor(
 				ready.reject(error);
 			},
 			onCapabilities: (capabilities) => {
+				hasConfirmation =
+					hasCredentialConfirmation &&
+					capabilities.has(uploadConfirmPresentCapability);
 				ready.resolve(capabilities.has(publicationCapability));
 			}
 		});
@@ -342,7 +371,124 @@ export function pushClientFor(
 		return { uploads, hasUploadGraceFacts: true };
 	};
 
+	const confirmationDeadline = procedureDeadline(
+		'uploads.confirmPresent',
+		tenantContract.uploads.confirmPresent.inDefaultCache,
+		{ signal: options.signal }
+	);
+
 	return {
+		confirmPresent: async (decisions) => {
+			const protocol = await publicationProtocol();
+			if (!hasConfirmation || protocol !== 'publication') {
+				return;
+			}
+			const selected = decisions.map((decision) => {
+				const upload = skips.get(decision.storePathHash);
+				const publication =
+					upload === undefined ? undefined : entries.get(upload.uploadId);
+				if (publication === undefined) {
+					throw new Error(
+						'Cannot confirm a path without its publication plan.'
+					);
+				}
+				return publication;
+			});
+			const pages: UploadConfirmPresentRequest[] = [];
+			const bodyFor = (
+				publication: (typeof selected)[number],
+				paths: UploadConfirmPresentRequest['paths']
+			): UploadConfirmPresentRequest =>
+				uploadConfirmPresentRequestSchema.parse({
+					pushId: publication.pushId,
+					cacheGeneration: publication.entry.cacheGeneration,
+					paths,
+					...(publication.entry.attachRoot !== undefined && {
+						attachRoot: publication.entry.attachRoot
+					})
+				});
+			const isEligiblePage = (body: UploadConfirmPresentRequest): boolean =>
+				new TextEncoder().encode(JSON.stringify(body)).byteLength <=
+					uploadConfirmPresentMaxRequestBytes &&
+				uploadConfirmPresentCanonicalPageByteLength({
+					tenant: maximumConfirmationTenant,
+					cache,
+					...body
+				}) <= uploadConfirmPresentMaxCanonicalBytes;
+			let page: UploadConfirmPresentRequest | undefined;
+			for (const publication of selected) {
+				if (
+					page !== undefined &&
+					(page.paths.length === uploadConfirmPresentMaxPaths ||
+						page.pushId !== publication.pushId ||
+						page.cacheGeneration !== publication.entry.cacheGeneration ||
+						JSON.stringify(page.attachRoot) !==
+							JSON.stringify(publication.entry.attachRoot))
+				) {
+					pages.push(page);
+					page = undefined;
+				}
+				const candidate = bodyFor(publication, [
+					...(page?.paths ?? []),
+					publication.entry.metadata
+				]);
+				if (isEligiblePage(candidate)) {
+					page = candidate;
+					continue;
+				}
+				// An individually ineligible path uses its original publication ID.
+				// This is selected before sending, never after an ambiguous reply.
+				if (page === undefined) {
+					continue;
+				}
+				pages.push(page);
+				page = undefined;
+				const single = bodyFor(publication, [publication.entry.metadata]);
+				if (isEligiblePage(single)) {
+					page = single;
+				}
+			}
+			if (page !== undefined) {
+				pages.push(page);
+			}
+			const paths = new Map<StorePathHash, UploadConfirmPresentPath>();
+			// Freeze every page boundary before the first request. Each retry sends
+			// the same parsed body, with no adaptive shrinking or regrouping.
+			for (const body of pages) {
+				const response = await requestWithDeadline(async (signal) => {
+					const result = uploadConfirmPresentResponseSchema.parse(
+						await callInCache(rpc.uploads.confirmPresent, cache, body, {
+							signal
+						})
+					);
+					signal.throwIfAborted();
+					if (
+						result.paths.length !== body.paths.length ||
+						result.paths.some(
+							(path, index) =>
+								path.storePathHash !== body.paths[index]?.storePathHash
+						)
+					) {
+						throw new Error(
+							'The confirmation response changed path count, order or identity.'
+						);
+					}
+					return result;
+				}, confirmationDeadline);
+				for (const path of response.paths) {
+					paths.set(path.storePathHash, path);
+				}
+			}
+			return {
+				paths: selected.map(
+					({ entry }) =>
+						paths.get(entry.metadata.storePathHash) ?? {
+							storePathHash: entry.metadata.storePathHash,
+							status: 'needs-publication'
+						}
+				)
+			};
+		},
 		publicationFor: (decision) =>
 			decision.action === 'skip'
 				? skips.get(decision.storePathHash)

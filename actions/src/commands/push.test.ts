@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
-import { buildReceiptV3Schema } from '@cupboard/protocol/build';
+import {
+	buildReceiptV3Schema,
+	buildReceiptV4Schema
+} from '@cupboard/protocol/build';
 import {
 	type PushSummary,
 	type PushSummaryInput,
@@ -374,6 +377,100 @@ const copiedPath = '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-copy';
 const heldPath = '/nix/store/cccccccccccccccccccccccccccccccc-held';
 
 describe('mergePublishedBuildSubjects', () => {
+	const recordedBuild = buildReceiptV4Schema.parse({
+		version: 4,
+		paths: [storePath],
+		subjects: [
+			{
+				origin: 'built',
+				storePath,
+				narHash: '00'.repeat(32),
+				derivation: `${storePath}.drv`,
+				buildStore: 'auto',
+				verification: 'local'
+			}
+		],
+		childExitStatus: 0,
+		publicationSets: [
+			{
+				result: {
+					cache: { kind: 'named', name: 'source' },
+					cacheGeneration: 1,
+					storePath,
+					narHash: `sha256:${'0'.repeat(52)}`,
+					generation: 1
+				},
+				digest: 'a'.repeat(64),
+				memberCount: 2,
+				origin: 'build-selection',
+				materialisation: 'complete'
+			}
+		]
+	});
+
+	it('does not import source-cache publication evidence for an omitted result', () => {
+		const publication = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [copiedPath],
+			subjects: [
+				{
+					origin: 'copied',
+					storePath: copiedPath,
+					narHash: 'bb'.repeat(32),
+					signatures: []
+				}
+			]
+		});
+
+		expect(
+			mergePublishedBuildSubjects([publication], recordedBuild)
+		).toStrictEqual({
+			version: 4,
+			paths: [copiedPath],
+			subjects: publication.subjects,
+			childExitStatus: 0,
+			publicationSets: [],
+			uploaded: [],
+			failed: [],
+			collected: []
+		});
+	});
+
+	it('uses only the destination materialisation when matching build provenance', () => {
+		const [source] = recordedBuild.publicationSets ?? [];
+		if (source === undefined) {
+			throw new Error('Recorded build fixture has no publication set');
+		}
+		const destination = {
+			...source,
+			result: {
+				...source.result,
+				cache: { kind: 'default' },
+				cacheGeneration: 2,
+				generation: 7
+			}
+		};
+		const publication = buildReceiptV4Schema.parse({
+			version: 4,
+			paths: [],
+			subjects: [],
+			publicationSets: [destination]
+		});
+
+		expect(
+			mergePublishedBuildSubjects([publication], recordedBuild)
+		).toStrictEqual({
+			version: 4,
+			paths: [storePath],
+			subjects: recordedBuild.subjects,
+			childExitStatus: 0,
+			publicationSets: [destination],
+			uploaded: [],
+			failed: [],
+			collected: []
+		});
+	});
+
 	it('keeps closure subjects and imports only matching observed build claims', () => {
 		const publication = buildReceiptV3Schema.parse({
 			version: 3,

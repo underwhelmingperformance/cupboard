@@ -53,26 +53,20 @@ Current servers support pages of up to 32 paths. The client uses bounded
 individual list reads when an older server does not advertise batch discovery.
 Authentication and storage failures fail the status check.
 
-Both publication workflows report coverage after publication and attachment,
-including when signing is disabled or produces no bundles. The report compares
-stored bundle digests with the manifest from the signing step. It lists paths
-with fresh bundles separately from paths with other stored evidence. A path with
-both kinds of evidence appears only in the fresh group. The coverage categories
-are exclusive, so their counts add up to the published path count. Copied paths
-without evidence are reported as fetched upstream and not attested. Other paths
-without evidence are reported separately. All paths in the receipt are checked,
-including older receipts with build subjects for only some paths. The report
-compares the current NAR hash with the receipt's expected hash wherever a
-subject records that hash.
+The publication workflows report signing and attachment results for the current
+run. They do not automatically inspect stored evidence for every receipt path.
+Use `cupboard attest status` explicitly when you need that inventory, including
+for runs that reuse paths without signing new statements.
 
 Discovery reports stored descriptors. Use `attest verify` to check the bundle's
 signature, signer, issuer, predicate and NAR subject. Stored evidence does not
 change build selection or suppress provenance for a fresh local rebuild.
 
 The signing summary reports the actual Sigstore instance, subject count, GitHub
-attestation links and Rekor log indices for the produced bundles. The coverage
-summary links to stored bundles; discovery does not verify those bundles. Long
-lists show at most 20 entries. The machine results retain every entry.
+attestation links and Rekor log indices for the produced bundles. The attachment
+report describes the requested bundle/path pairs and their outcomes. These
+reports do not establish complete historical attestation coverage. Long signing
+lists show at most 20 bundles; the machine results retain every bundle.
 
 ## How a bundle refers to a store path
 
@@ -142,7 +136,13 @@ bundle because the signer cannot infer how arbitrary assertions apply to subject
 subsets. A single-subject report can be partitioned into non-empty assertion
 lists without changing its subjects or evidence. Use `--receipt-file` to
 generate reproduction reports with known assertion associations, or
-`--predicate-file` and `--predicate-type` to sign a supplied report.
+`--predicate-file` and `--predicate-type` to sign a supplied report. The
+internal signing command requires `--url` for the destination tenant and accepts
+`--cache` and the destination's read credentials. Before signing anything, it
+checks every actual statement subject against that cache, including all selected
+subjects of a supplied predicate. Pass passwords through `READ_PASSWORD`, not
+command-line arguments. Private OIDC reads use the renewable read-session
+wrapper, as in the composite action.
 
 [SCAI]: https://github.com/in-toto/attestation/blob/main/spec/predicates/scai.md
 
@@ -151,13 +151,33 @@ generate reproduction reports with known assertion associations, or
 1. The build step writes a **receipt**, which records how the requested outputs
    became available.
 2. The run publishes the paths.
-3. `actions/attest` checks the destination cache's narinfo for each subject
-   recorded in the receipt. If a subject is missing, or its NAR hash or recorded
-   deriver doesn't match the receipt, the step fails. Otherwise, the step signs
-   build provenance for builds observed on the runner and an attribute report
-   recording successful local verification rebuilds. The reusable workflows
-   enable this with `attest: true`, which is the default.
+3. `actions/attest` obtains candidate identities from the receipt, selects the
+   statement subjects, then checks their destination narinfos before signing
+   anything. Each selected subject's full store path and NAR hash must match.
+   Default build provenance covers only eligible runner-local builds; generated
+   reproduction reports also cover selected candidates with identical NAR bytes.
+   Copied, republished, store-held and remote-built paths are not checked merely
+   because they occur in the receipt. If no statements have subjects, signing
+   succeeds without reading any destination narinfos. The reusable workflows
+   enable signing with `attest: true`, which is the default.
 4. `actions/attest-attach` attaches the bundles to the paths in the cache.
+
+The resolver keeps all named receipt subjects in its candidate checksums for
+custom signing. It checks receipt structure without fetching destination
+narinfos: paths and subject basenames must be unique, subjects must occur in the
+receipt's paths, and each identity must have a valid NAR hash. Signing also
+checks candidate and built checksums against the receipt's exact identities and
+runner-local build eligibility when a receipt is supplied. Version 2 receipts
+continue to treat their named subjects as built; path-only entries have no
+recorded identity and remain excluded.
+
+Legacy custom callers can supply checksum files without a receipt. Such files
+record store-path basenames and hashes but not store directories. For these
+selected subjects only, signing reads the destination narinfo, requires its
+basename and NAR hash to match, and uses its recorded store directory rather
+than assuming `/nix/store`. Checksums must name store-path basenames, not
+arbitrary artifact names. Receipt-backed provenance and generated reports use
+the stricter full-path check.
 
 When the server supports grouped attachment, the CLI uploads each distinct
 bundle once and sends the matching paths to the server in pages. The server
@@ -320,9 +340,10 @@ Set `inline-bundles: false` when attachment uses the manifest. The default is
 - `bundles` lists all generated bundles.
 
 `built-checksums-file` and `built-subject-count` describe accepted receipt paths
-whose builds the job observed. `subject-count` counts all accepted receipt
-paths. `checksums-file` lists the paths selected for signing and attachment.
-Pass that file with the bundle manifest to `actions/attest-attach`.
+whose builds the job observed. `subject-count` counts all named receipt
+candidates, not the paths validated at the destination or historical evidence.
+`checksums-file` lists the paths selected for signing and attachment. Pass that
+file with the bundle manifest to `actions/attest-attach`.
 
 ## Private caches
 
