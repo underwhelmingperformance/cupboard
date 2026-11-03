@@ -65,6 +65,7 @@ import { observeCriticalSection } from './critical-section-telemetry.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
 import { criticalSectionBudgetMs } from './deadline.ts';
 import { boundedSubrequest } from './deadline.ts';
+import { NarInfoDemotionWatches } from './narinfo-demotion-watches.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
 import { currentOperationCost } from './operation-cost.ts';
@@ -192,6 +193,7 @@ export class ServerContext {
 	// A timed-out R2 mutation can continue in the background. Keep later writes
 	// to the same key behind it so they cannot land out of order.
 	readonly objectWrites = new ObjectWriteOrder();
+	readonly narInfoDemotions = new NarInfoDemotionWatches();
 
 	constructor(
 		ctx: DurableObjectState,

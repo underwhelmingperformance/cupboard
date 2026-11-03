@@ -5,6 +5,7 @@ import { type VerifyReportInput } from '@cupboard/protocol/reports';
 import { type GcResponseInput } from '@cupboard/protocol/retention';
 import { publicationCapability } from '@cupboard/protocol/upload';
 import {
+	type UploadConfirmPresentRequest,
 	uploadGraceFactsCapability,
 	type UploadNegotiateRequest,
 	type UploadPreviewRequest
@@ -19,9 +20,14 @@ import {
 	verificationBatchSize
 } from '../http/http.ts';
 
-import { authoriseAttachRoot, authoriseRequest } from './authorise.ts';
+import {
+	authoriseAttachRoot,
+	authorisePublication,
+	authoriseRequest
+} from './authorise.ts';
 import { type TenantOrpcContext, type TenantRpcServices } from './context.ts';
 import { bridgedError } from './error-bridge.ts';
+import { MaintenanceChange } from './maintenance-change.ts';
 
 // Apply the contract's scope and maintenance metadata centrally. Every
 // procedure uses the same error bridge and authentication rules, while admin
@@ -48,13 +54,32 @@ const os = implement(tenantContract)
 
 		return next({ context: { claims, maintenanceCache } });
 	})
-	.use(({ context, procedure, next }) =>
-		procedure['~orpc'].meta.maintenance === true
-			? context.services.afterMutation(context.maintenanceCache, async () =>
-					next()
-				)
-			: next()
-	);
+	.use(({ context, procedure, next }) => {
+		const { maintenance } = procedure['~orpc'].meta;
+		const maintenanceChange = new MaintenanceChange();
+		const run = async () => next({ context: { maintenanceChange } });
+
+		if (maintenance === true) {
+			return context.services.afterMutation(context.maintenanceCache, run);
+		}
+
+		if (maintenance !== 'when-changed') {
+			return run();
+		}
+
+		return context.services.afterMutation(
+			context.maintenanceCache,
+			async () => {
+				try {
+					return await run();
+				} catch (error) {
+					maintenanceChange.record();
+					throw error;
+				}
+			},
+			() => maintenanceChange.isRecorded
+		);
+	});
 
 export const tenantRouter = os.router({
 	policies: {
@@ -369,6 +394,14 @@ export const tenantRouter = os.router({
 				({ input, context }) => previewUpload(context, input.paths)
 			)
 		},
+		confirmPresent: {
+			inDefaultCache: os.uploads.confirmPresent.inDefaultCache.handler(
+				({ input, context }) => confirmPresent(context, input)
+			),
+			inNamedCache: os.uploads.confirmPresent.inNamedCache.handler(
+				({ input, context }) => confirmPresent(context, input)
+			)
+		},
 		confirm: {
 			inDefaultCache: os.uploads.confirm.inDefaultCache.handler(
 				({ input, context }) =>
@@ -529,6 +562,27 @@ function negotiateUpload(
 		context.services.takeNegotiateHints(context.request),
 		hasAcceptedCapability(context.request, uploadGraceFactsCapability),
 		context.claims.grants
+	);
+}
+
+function confirmPresent(
+	context: TenantOrpcContext & {
+		readonly claims: AccessClaims;
+		readonly maintenanceChange: MaintenanceChange;
+	},
+	input: UploadConfirmPresentRequest
+) {
+	authorisePublication(context.claims, context.cache);
+	if (input.attachRoot !== undefined) {
+		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
+	}
+
+	return context.services.confirmation.confirmPresent(
+		context.cache,
+		input,
+		() => {
+			context.maintenanceChange.record();
+		}
 	);
 }
 

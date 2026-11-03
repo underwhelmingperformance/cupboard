@@ -458,10 +458,11 @@ export class RootsService {
 		targets: readonly {
 			readonly storePathHash: StorePathHash;
 			readonly storePath: StorePathString;
-		}[]
+		}[],
+		database: SchemaWriter = this.context.db
 	): void {
 		for (const batch of jsonRowLists(targets)) {
-			this.context.db
+			database
 				.insert(schema.retentionRootTargets)
 				.select(
 					batch.insertSource([

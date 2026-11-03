@@ -660,6 +660,52 @@ which unchanged attestation operations still use. Credentials remain write-only,
 last at most six hours, and cannot outlast the access token or the 24-hour push
 lease.
 
+A client can also accept `confirm-present-v1` on the credential request. When
+the server echoes it beside `publication-v1`, the client can confirm planned
+`skip` decisions through `POST /uploads/confirm-present` instead of committing
+them. A request has the plan's cache generation and 1 to 200 paths. Each path
+has its store-path hash, its store path and the client's NAR hash. The
+store-path hash must match the store path, and no hash may appear twice in one
+request. It needs `upload:commit` and `upload:negotiate`, as publication does.
+It can also include a run root, which needs `root:attach`. The server limits a
+request to what six subrequests for each path and three for the request allow
+out of the whole invocation: 149 paths on the Free plan and 200 on the Paid
+plan. It advertises the limit in `x-cupboard-upload-max-paths`. Calls that a
+cold start makes before the confirmation reduce only the number of repairs
+described below. Before its critical section, the server reads the tenant
+status, usage row and cache generation from D1 in one query, and refuses a
+tenant without a usage row as a commit does. It then checks that each path with
+a row is servable. That check can repair a path's narinfo object, which can take
+up to eight more subrequests. The server sets aside two subrequests for the
+maintenance reconcile and repairs only as many paths as the rest allow in that
+worst case. It answers `missing` for the others. Inside the section, one SQLite
+transaction checks that each row still has the version that the servability
+check found, extends the path's grace and attaches the path to the run root.
+When the `blob-demote` scan finds a NAR missing, the tenant object deletes the
+narinfo objects that refer to it and leaves their rows unchanged. The tenant
+object therefore records in memory each such deletion of a path that a
+confirmation is checking, and the transaction answers `missing` for that path.
+The server answers `confirmed` for a path served with the client's NAR hash,
+`diverged` with the cache's NAR hash for a path served with another one, and
+`missing` for every other path. The cache keeps its version of a diverged path.
+
+Confirmation creates no publication operation or pending upload. A replay
+re-evaluates the paths. Its retention changes can only move grace deadlines and
+run-root expiries later, so it is safe to repeat. A replay can also repair a
+stale narinfo object, which rewrites the object in R2 and queues a purge of its
+cached public responses. Without a repair, applying the same confirmation again
+changes nothing while the cache's state is unchanged and the replay's deadlines
+fall in the same clock hours. Without narinfo repairs, a confirmation makes at
+most three D1 calls, and only one when none of its paths has a narinfo row. Each
+repair adds up to five D1 calls. The confirmation's maintenance mode is
+`when-changed`, so the server reconciles maintenance eligibility only after a
+confirmation that wrote rows or failed. That reconcile makes one more D1 call,
+or two when it fails. Grace deadlines and the expiry of a run root with a TTL
+are rounded up to whole hours. A repeat that needs no repair writes no rows and
+makes no reconcile call when its time plus the grace period falls in the same
+clock hour as for the earlier confirmation, and its time plus the run root's TTL
+does too.
+
 The paced WebSocket accepts `publish-batch` with complete metadata and expected
 generation. Clients commit every selected path, including `skip` decisions. The
 server derives staging keys and rechecks availability and reuse authority. A

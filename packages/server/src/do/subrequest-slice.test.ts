@@ -9,6 +9,7 @@ import {
 	requireSubrequestsFor,
 	spendSubrequests,
 	subrequestsAvailable,
+	subrequestSliceBudget,
 	subrequestSliceReserve,
 	withHeldSubrequests,
 	withSubrequestSlice
@@ -67,6 +68,20 @@ describe('a pass asking what it can afford', () => {
 				whole: hasSubrequestsFor(workersInvocationAllowances.free.subrequests)
 			}))
 		).toStrictEqual({ lessTheReserve: true, whole: false });
+	});
+
+	it('reports a budget of the slice less its reserve, whatever has been spent', () => {
+		const budgets = withSubrequestSlice(
+			() => {
+				const before = subrequestSliceBudget();
+				spendSubrequests(4);
+
+				return { before, after: subrequestSliceBudget() };
+			},
+			{ subrequests: 10, reserve: 3 }
+		);
+
+		expect(budgets).toStrictEqual({ before: 7, after: 7 });
 	});
 
 	it('uses the receiver allowance and shares it through nested dispatch', () => {

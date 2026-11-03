@@ -19,9 +19,9 @@ import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 
 import { CacheClosureService } from './cache-closure-service.ts';
-import { type ServerContext } from './context.ts';
+import { type SchemaWriter, type ServerContext } from './context.ts';
 import { hourlyDeadline } from './hourly-deadline.ts';
-import { jsonRowLists, jsonValueLists } from './json-list.ts';
+import { type JsonRowList, jsonRowLists, jsonValueLists } from './json-list.ts';
 import { PublicationStore } from './publication-store.ts';
 import { type RetentionService } from './retention-service.ts';
 
@@ -101,6 +101,38 @@ export function storedGraceFact(
 	return row === undefined ? {} : { retainUntil: row.retainUntil };
 }
 
+interface NarInfoIdentity {
+	readonly generation: NarInfoGeneration;
+	readonly narHash: NixSha256HashString;
+}
+
+interface GraceEntry extends NarInfoIdentity {
+	readonly storePathHash: StorePathHash;
+}
+
+function storedIdentities(
+	database: SchemaWriter,
+	cache: ResolvedCache,
+	batch: JsonRowList<GraceEntry>
+): Map<StorePathHash, NarInfoIdentity> {
+	const rows = database
+		.select({
+			storePathHash: schema.narInfos.storePathHash,
+			generation: schema.narInfos.generation,
+			narHash: schema.narInfos.narHash
+		})
+		.from(schema.narInfos)
+		.where(
+			and(
+				eq(schema.narInfos.cacheId, cache.id),
+				batch.matches({ storePathHash: schema.narInfos.storePathHash })
+			)
+		)
+		.all();
+
+	return new Map(rows.map((row) => [row.storePathHash, row]));
+}
+
 export type ConfirmedGrace =
 	| { readonly matched: true; readonly fact: UploadGraceFact }
 	| { readonly matched: false };
@@ -135,18 +167,21 @@ export function confirmGrace(
 
 /**
 Confirms grace for a whole closure. Only rows whose generation and NAR hash
-still match receive an extension and appear in the result.
+still match receive an extension and appear in the result. With
+`transaction`, the writes join the caller's transaction instead of one
+transaction for each list of rows, and the identity check uses the narinfo
+rows that the caller read in that transaction.
 */
 export function confirmGraceBatch(
 	context: ServerContext,
 	retention: RetentionService,
 	cache: ResolvedCache,
-	entries: readonly {
-		readonly storePathHash: StorePathHash;
-		readonly generation: NarInfoGeneration;
-		readonly narHash: NixSha256HashString;
-	}[],
-	decision: GraceDecision | undefined
+	entries: readonly GraceEntry[],
+	decision: GraceDecision | undefined,
+	transaction?: {
+		readonly database: SchemaWriter;
+		readonly rows: ReadonlyMap<StorePathHash, NarInfoIdentity>;
+	}
 ): Map<StorePathHash, UploadGraceFact> {
 	const graceSeconds = decision?.graceSeconds;
 	const close = new CacheClosureService(context).firstClose(
@@ -172,22 +207,8 @@ export function confirmGraceBatch(
 	// Check identity and apply each list's writes in one transaction. A row that
 	// changes concurrently receives no extension.
 	for (const batch of jsonRowLists(entries)) {
-		context.db.transaction((tx) => {
-			const rows = tx
-				.select({
-					storePathHash: schema.narInfos.storePathHash,
-					generation: schema.narInfos.generation,
-					narHash: schema.narInfos.narHash
-				})
-				.from(schema.narInfos)
-				.where(
-					and(
-						eq(schema.narInfos.cacheId, cache.id),
-						batch.matches({ storePathHash: schema.narInfos.storePathHash })
-					)
-				)
-				.all();
-			const byHash = new Map(rows.map((row) => [row.storePathHash, row]));
+		const apply = (tx: SchemaWriter): void => {
+			const byHash = transaction?.rows ?? storedIdentities(tx, cache, batch);
 			const matchedInList = batch.rows
 				.filter((entry) => {
 					const current = byHash.get(entry.storePathHash);
@@ -213,7 +234,14 @@ export function confirmGraceBatch(
 			if (retainUntil !== undefined) {
 				retention.extendGraceDeadlines(cache, matchedInList, retainUntil, tx);
 			}
-		});
+		};
+
+		if (transaction === undefined) {
+			context.db.transaction(apply);
+			continue;
+		}
+
+		apply(transaction.database);
 	}
 
 	if (retainUntil === undefined) {
@@ -225,7 +253,11 @@ export function confirmGraceBatch(
 		return new Map(matched.map((storePathHash) => [storePathHash, fact]));
 	}
 
-	const deadlines = storedGraceDeadlines(context.db, cache, matched);
+	const deadlines = storedGraceDeadlines(
+		transaction?.database ?? context.db,
+		cache,
+		matched
+	);
 
 	return new Map(
 		matched.map((storePathHash) => {
@@ -246,7 +278,7 @@ replies must report the stored value rather than the latest candidate.
 Paths without a deadline are absent from the result.
 */
 export function storedGraceDeadlines(
-	database: ServerContext['db'],
+	database: SchemaWriter,
 	cache: ResolvedCache,
 	storePathHashes: readonly StorePathHash[]
 ): Map<StorePathHash, IsoTimestamp> {

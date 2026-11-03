@@ -274,6 +274,99 @@ export type UploadConfirmResponse = z.output<
 	typeof uploadConfirmResponseSchema
 >;
 
+export const uploadConfirmPresentMaxPaths = 200;
+
+// Without repairs, the confirmation itself makes at most three D1 calls. After
+// a confirmation that wrote rows or failed, the maintenance reconcile makes one
+// more, or two when the reconcile fails. Each path costs two R2 heads, and
+// repairing its narinfo object costs up to eight more calls. The limit allows
+// six calls for each path out of the dispatch's whole slice. The server repairs
+// only the paths that its remaining subrequests can afford, so calls made
+// before the confirmation, such as a cold start's initialisation, reduce the
+// repairs and leave the limit unchanged.
+const uploadConfirmPresentFixedSubrequests = 3;
+const uploadConfirmPresentSubrequestsPerPath = 6;
+
+/**
+The most paths that one confirmation can probe within `subrequests` binding
+calls, up to `uploadConfirmPresentMaxPaths`. The Free plan's allowance, less
+its reserve, fits 149 paths.
+*/
+export function uploadConfirmPresentMaxPathsFor(subrequests: number): number {
+	return Math.max(
+		0,
+		Math.min(
+			uploadConfirmPresentMaxPaths,
+			Math.floor(
+				(subrequests - uploadConfirmPresentFixedSubrequests) /
+					uploadConfirmPresentSubrequestsPerPath
+			)
+		)
+	);
+}
+
+const hasUniqueStorePathHashes = (
+	paths: readonly { readonly storePathHash: string }[]
+): boolean =>
+	new Set(paths.map((path) => path.storePathHash)).size === paths.length;
+
+export const uploadConfirmPresentRequestSchema = z.strictObject({
+	cacheGeneration: cacheGenerationSchema,
+	attachRoot: uploadAttachRootSchema.optional(),
+	paths: z
+		.array(
+			z
+				.strictObject({
+					storePathHash: storePathHashSchema,
+					storePath: storePathSchema,
+					narHash: nixSha256HashSchema
+				})
+				.refine(isStorePathHashForPath, storePathHashMismatchMessage)
+		)
+		.min(1)
+		.max(uploadConfirmPresentMaxPaths)
+		.refine(
+			hasUniqueStorePathHashes,
+			'Each store-path hash must appear once in a confirmation'
+		)
+});
+export type UploadConfirmPresentRequest = z.output<
+	typeof uploadConfirmPresentRequestSchema
+>;
+
+// `confirmed` and `diverged` paths are served. The confirmation extended
+// their grace when the cache has grace, and attached them to the run root when
+// the request has one. A diverged path is served with the cache's NAR hash,
+// which differs from the declared one. `missing` means that the server did not
+// confirm the path, and the client publishes it. That covers a path without a
+// servable row for the declared store path, a path whose narinfo object needs a
+// repair that the request's subrequests cannot afford, and a path whose row
+// changed after the servability check.
+export const uploadConfirmPresentPathSchema = z.discriminatedUnion('status', [
+	z.strictObject({
+		storePathHash: storePathHashSchema,
+		status: z.enum(['confirmed', 'diverged']),
+		generation: narInfoGenerationSchema,
+		narHash: nixSha256HashSchema,
+		grace: uploadGraceFactSchema
+	}),
+	z.strictObject({
+		storePathHash: storePathHashSchema,
+		status: z.literal('missing')
+	})
+]);
+export type UploadConfirmPresentPath = z.output<
+	typeof uploadConfirmPresentPathSchema
+>;
+
+// One entry for each requested path, in request order.
+export const uploadConfirmPresentResponseSchema = z.strictObject({
+	paths: z.array(uploadConfirmPresentPathSchema)
+});
+export type UploadConfirmPresentResponse = z.output<
+	typeof uploadConfirmPresentResponseSchema
+>;
+
 export const commitResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
@@ -405,6 +498,11 @@ export function commitCreditCapabilityToken(openingGrant: number): string {
 }
 
 export const publicationCapability = 'publication-v1';
+
+// A client accepts this token on the credential request when it can call
+// `uploads.confirmPresent`. The server echoes it beside `publication-v1`, and
+// the client confirms planned skips only when both tokens are echoed.
+export const confirmPresentCapability = 'confirm-present-v1';
 
 // A client accepts this token when it parses the publication refusal reasons
 // `resend`, `declaration-changed` and `parameters-changed`. Clients that accept
@@ -683,6 +781,9 @@ export type UploadNegotiateResponseInput = z.input<
 >;
 export type UploadPreviewRequestInput = z.input<
 	typeof uploadPreviewRequestSchema
+>;
+export type UploadConfirmPresentRequestInput = z.input<
+	typeof uploadConfirmPresentRequestSchema
 >;
 export type UploadPreviewDecisionInput = z.input<
 	typeof uploadPreviewDecisionSchema

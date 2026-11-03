@@ -27,8 +27,12 @@ class SubrequestSlice {
 		private readonly reserve: number
 	) {}
 
+	get budget(): number {
+		return Math.max(0, this.slice - this.reserve);
+	}
+
 	get available(): number {
-		return Math.max(0, this.slice - this.reserve - this.spent - this.held);
+		return Math.max(0, this.budget - this.spent - this.held);
 	}
 
 	/**
@@ -112,6 +116,17 @@ and Durable Object dispatches open slices.
 */
 export function hasSubrequestsFor(subrequests: number): boolean {
 	return sliceScope.getStore()?.admits(subrequests) ?? true;
+}
+
+/**
+The current dispatch's whole slice less its reserve, including the calls that
+the dispatch has already made. A limit that a client learns from one response
+and sends in a later request uses this budget, because a later dispatch can
+spend a different number of calls before it reaches the same check. Outside a
+slice nothing is metered and the budget is unbounded.
+*/
+export function subrequestSliceBudget(): number {
+	return sliceScope.getStore()?.budget ?? Number.MAX_SAFE_INTEGER;
 }
 
 export function subrequestsAvailable(): number {
