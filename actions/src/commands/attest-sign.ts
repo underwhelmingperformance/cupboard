@@ -48,6 +48,7 @@ import {
 	AttestationPredicateFileError,
 	AttestationSubjectNotAcceptedError,
 	AttestationSubjectsMissingError,
+	AttestationSubjectUnverifiedError,
 	BuildOriginSubjectMissingError,
 	MissingInputError,
 	PredicateGroupingUnsupportedError,
@@ -72,6 +73,7 @@ export interface AttestSignOptions {
 	readonly inlineBundles?: string;
 	readonly checksumsFile?: string;
 	readonly builtChecksumsFile?: string;
+	readonly verifiedChecksumsFile?: string;
 	readonly predicateFile?: string;
 	readonly predicateType?: string;
 	readonly bundleFile?: string;
@@ -91,6 +93,7 @@ export interface AttestSignInputs {
 	readonly checksumsFile: string;
 	readonly signedChecksumsFile: string;
 	readonly builtChecksumsFile: string;
+	readonly verifiedChecksumsFile: string;
 	readonly predicateFile: string;
 	readonly predicateType: string;
 	readonly bundleFile: string;
@@ -153,6 +156,10 @@ export function registerAttestSignCommand(
 		.requiredOption(
 			'--built-checksums-file <path>',
 			'Read the subjects this run built from this checksums file. The build-provenance statements cover them.'
+		)
+		.requiredOption(
+			'--verified-checksums-file <path>',
+			'Read the subjects that attest-check verified in the destination cache from this checksums file. Refuse to sign a statement with any other subject.'
 		)
 		.option(
 			'--receipt-file <path>',
@@ -226,6 +233,12 @@ export function resolveAttestSignInputs(
 		throw new MissingInputError('built-checksums-file');
 	}
 
+	const verifiedChecksumsFile = provided(options.verifiedChecksumsFile);
+
+	if (verifiedChecksumsFile === undefined) {
+		throw new MissingInputError('verified-checksums-file');
+	}
+
 	const githubToken = provided(options.githubToken);
 
 	if (githubToken === undefined) {
@@ -259,6 +272,7 @@ export function resolveAttestSignInputs(
 		checksumsFile,
 		signedChecksumsFile: path.join(bundleDirectory, 'signed-subjects.txt'),
 		builtChecksumsFile,
+		verifiedChecksumsFile,
 		predicateFile,
 		predicateType,
 		githubToken,
@@ -355,6 +369,9 @@ const nodeAttestSignIo: AttestSignIo = {
 Build provenance covers paths built by this run. An explicit custom predicate
 applies to the explicitly selected subjects. Generated reproduction reports
 cover only the subjects with locally observed successful verification checks.
+Every subject of every statement must be listed in the verified checksums
+file, which attest-check writes after it has found the subject in the
+destination cache. Otherwise nothing is signed.
 */
 export async function attestSignAction(
 	options: AttestSignOptions,
@@ -389,6 +406,11 @@ export async function attestSignAction(
 					...builtSubjects.map((subject) => subject.name),
 					...custom.subjects.map((subject) => subject.name)
 				]);
+
+	requireVerifiedSubjects(
+		signedSubjects,
+		await readSubjects(inputs.verifiedChecksumsFile, io)
+	);
 
 	const provenanceBundles =
 		builtSubjects.length === 0
@@ -481,21 +503,38 @@ function coveredSubjects(
 	return accepted.filter((subject) => names.has(subject.name));
 }
 
+function unlistedSubjects(
+	selected: readonly AttestationSubject[],
+	listed: readonly AttestationSubject[]
+): readonly string[] {
+	const listedByName = new Map(
+		listed.map((subject) => [subject.name, subject.sha256])
+	);
+
+	return selected
+		.filter((subject) => listedByName.get(subject.name) !== subject.sha256)
+		.map((subject) => subject.name);
+}
+
 function requireAcceptedSubjects(
 	selected: readonly AttestationSubject[],
 	accepted: readonly AttestationSubject[]
 ): void {
-	const acceptedByName = new Map(
-		accepted.map((subject) => [subject.name, subject.sha256])
-	);
-	const mismatched = selected.filter(
-		(subject) => acceptedByName.get(subject.name) !== subject.sha256
-	);
+	const mismatched = unlistedSubjects(selected, accepted);
 
 	if (mismatched.length > 0) {
-		throw new AttestationSubjectNotAcceptedError(
-			mismatched.map((subject) => subject.name)
-		);
+		throw new AttestationSubjectNotAcceptedError(mismatched);
+	}
+}
+
+function requireVerifiedSubjects(
+	signed: readonly AttestationSubject[],
+	verified: readonly AttestationSubject[]
+): void {
+	const unverified = unlistedSubjects(signed, verified);
+
+	if (unverified.length > 0) {
+		throw new AttestationSubjectUnverifiedError(unverified);
 	}
 }
 
@@ -583,22 +622,19 @@ function reproductionStatementFor(
 		sha256: subject.sha256
 	}));
 	requireAcceptedSubjects(selected, accepted);
-	const reproducedByDigest = Map.groupBy(
-		reproduced,
-		(subject) => subject.sha256
+	const reproducedByName = new Map(
+		reproduced.map((subject) => [path.basename(subject.storePath), subject])
 	);
-	const subjects = accepted.filter((subject) =>
-		reproducedByDigest.has(subject.sha256)
+	const subjects = accepted.filter(
+		(subject) => reproducedByName.get(subject.name)?.sha256 === subject.sha256
 	);
 
 	return {
 		subjects,
 		statementFor: (group) => {
-			const digests = new Set(group.map((subject) => subject.sha256));
-			const assertions = digests
-				.values()
-				.flatMap((digest) => reproducedByDigest.get(digest) ?? [])
-				.toArray();
+			const assertions = group.flatMap(
+				(subject) => reproducedByName.get(subject.name) ?? []
+			);
 
 			return {
 				predicateType: scaiPredicateType,

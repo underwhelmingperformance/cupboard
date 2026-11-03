@@ -21,6 +21,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { attestAction } from '../../actions/src/commands/attest.ts';
 import { attestAttachAction } from '../../actions/src/commands/attest-attach.ts';
+import { attestCheckAction } from '../../actions/src/commands/attest-check.ts';
 import {
 	buildCohortAction,
 	materialiseDerivationGraph,
@@ -1788,13 +1789,27 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						'destination-access=public\n'
 				});
 
+				const verifiedChecksumsFile = path.join(
+					runDirectory,
+					'verified-subjects.txt'
+				);
+				await attestCheckAction(
+					{
+						receiptFile,
+						checksumsFile,
+						verifiedChecksumsFile,
+						url: activeServer.tenantUrl.href
+					},
+					{ GITHUB_OUTPUT: path.join(runDirectory, 'check-output') },
+					silentReporter()
+				);
+				expect(await readFile(verifiedChecksumsFile, 'utf8')).toBe(
+					await readFile(checksumsFile, 'utf8')
+				);
+
 				const rejectedChecksumsFile = path.join(
 					runDirectory,
-					'tampered-subjects.txt'
-				);
-				const rejectedOutput = path.join(
-					runDirectory,
-					'tampered-attest-output'
+					'tampered-verified-subjects.txt'
 				);
 				const alteredNarHash = NixSha256Hash.fromDigest(
 					Buffer.alloc(32, 0xff)
@@ -1816,16 +1831,14 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 				};
 
 				await expect(
-					attestAction(
+					attestCheckAction(
 						{
 							receiptFile,
-							checksumsFile: rejectedChecksumsFile,
+							checksumsFile,
+							verifiedChecksumsFile: rejectedChecksumsFile,
 							url: activeServer.tenantUrl.href
 						},
-						{
-							RUNNER_TEMP: runDirectory,
-							GITHUB_OUTPUT: rejectedOutput
-						},
+						{ GITHUB_OUTPUT: path.join(runDirectory, 'tampered-check-output') },
 						silentReporter(),
 						{ fetch: tamperedFetch }
 					)
@@ -1833,9 +1846,6 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 				await expect(
 					readFile(rejectedChecksumsFile, 'utf8')
 				).rejects.toMatchObject({ code: 'ENOENT' });
-				await expect(readFile(rejectedOutput, 'utf8')).rejects.toMatchObject({
-					code: 'ENOENT'
-				});
 			} finally {
 				const storeToClose = store;
 

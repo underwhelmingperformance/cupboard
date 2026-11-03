@@ -13,6 +13,7 @@ import { Command, CommanderError } from 'commander';
 
 import { registerAttestCommand } from './commands/attest.ts';
 import { registerAttestAttachCommand } from './commands/attest-attach.ts';
+import { registerAttestCheckCommand } from './commands/attest-check.ts';
 import {
 	type AttestSignDependencies,
 	registerAttestSignCommand
@@ -85,6 +86,7 @@ export function buildProgram(
 	registerPushCommand(program, environment, signal);
 	registerResolveCupboardCommand(program, environment);
 	registerAttestCommand(program, environment);
+	registerAttestCheckCommand(program, environment);
 	registerAttestSignCommand(program, dependencies.attestSign ?? {});
 	registerAttestAttachCommand(program, environment, signal);
 	registerAttestStatusCommand(program, environment, signal);

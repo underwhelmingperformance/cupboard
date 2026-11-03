@@ -513,10 +513,6 @@ function attestArguments(options: {
 		'--url',
 		options.url,
 		'--cache',
-		'',
-		'--read-user',
-		'',
-		'--read-password',
 		''
 	];
 }

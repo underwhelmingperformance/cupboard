@@ -39,14 +39,14 @@ const publicActions = [
 	'build-paths',
 	'push',
 	'attest',
-	'attest-attach'
+	'attest-attach',
+	'attest-status'
 ] as const;
 const internalActions = [
 	'install-nix',
 	'evaluate-targets',
 	'plan',
 	'build-cohort',
-	'attest-status',
 	'prepare',
 	'prepare-builders',
 	'resolve-cupboard',

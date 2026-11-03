@@ -955,7 +955,6 @@ describe('cohort planning and publication', () => {
 				cupboardAction('build-cohort'),
 				cupboardAction('attest'),
 				cupboardAction('attest-attach'),
-				cupboardAction('attest-status'),
 				cupboardAction('prepare'),
 				cupboardAction('setup')
 			]
@@ -1142,6 +1141,143 @@ ${sign.run}`
 			suppliedToSigner: true
 		});
 	});
+
+	it('checks the built subjects in the read session and signs outside it', async () => {
+		const source: unknown = parse(
+			await readFile(
+				new URL('../actions/attest/action.yml', import.meta.url),
+				'utf8'
+			)
+		);
+		const action = z
+			.object({ runs: z.object({ steps: stepsSchema }) })
+			.parse(source);
+		const steps = action.runs.steps;
+		const checkIndex = steps.findIndex((step) => step.id === 'check');
+		const signIndex = steps.findIndex((step) => step.id === 'attest');
+		const check = steps[checkIndex];
+		const sign = steps[signIndex];
+
+		expect({
+			checkBeforeSign: checkIndex !== -1 && checkIndex < signIndex,
+			check: {
+				if: check?.if,
+				checkedFile: check?.env?.BUILT_CHECKSUMS_FILE,
+				inReadSession: check?.run?.includes('run_with_read_session'),
+				checksBuiltSubjects: check?.run?.includes(
+					'--checksums-file "$BUILT_CHECKSUMS_FILE"'
+				)
+			},
+			sign: {
+				verifiedFile: sign?.env?.VERIFIED_CHECKSUMS_FILE,
+				inReadSession: sign?.run?.includes('run_with_read_session'),
+				readCredentials: Object.keys(sign?.env ?? {}).filter((key) =>
+					key.startsWith('READ_')
+				)
+			}
+		}).toStrictEqual({
+			checkBeforeSign: true,
+			check: {
+				if: "${{ steps.subjects.outputs.subject-count != '0' && steps.subjects.outputs.built-subject-count != '0' }}",
+				checkedFile: '${{ steps.subjects.outputs.built-checksums-file }}',
+				inReadSession: true,
+				checksBuiltSubjects: true
+			},
+			sign: {
+				verifiedFile: '${{ steps.check.outputs.verified-checksums-file }}',
+				inReadSession: false,
+				readCredentials: []
+			}
+		});
+	});
+
+	it.each([
+		{
+			name: 'an empty list when nothing was built',
+			builtCount: '0',
+			checked: '',
+			expected: { isTemporary: true, contents: '' }
+		},
+		{
+			name: 'the checked list when subjects were built',
+			builtCount: '1',
+			checked: 'checked',
+			expected: { isTemporary: false, contents: 'checked subjects\n' }
+		},
+		{
+			name: 'no list when the check did not run for built subjects',
+			builtCount: '1',
+			checked: '',
+			expected: { isTemporary: false, contents: undefined }
+		}
+	])(
+		'passes $name to the signer',
+		async ({ builtCount, checked, expected }) => {
+			const source: unknown = parse(
+				await readFile(
+					new URL('../actions/attest/action.yml', import.meta.url),
+					'utf8'
+				)
+			);
+			const action = z
+				.object({ runs: z.object({ steps: stepsSchema }) })
+				.parse(source);
+			const sign = action.runs.steps.find((step) => step.id === 'attest');
+			if (sign?.run === undefined) {
+				throw new Error('The attestation action has no signing script');
+			}
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-verified-')
+			);
+			const checkedFile =
+				checked === '' ? '' : path.join(directory, 'checked-subjects.txt');
+
+			try {
+				if (checkedFile !== '') {
+					await writeFile(checkedFile, 'checked subjects\n');
+				}
+				const result = await execFileAsync(
+					'bash',
+					[
+						'-c',
+						`
+node() {
+  while (( $# )); do
+    if [[ "$1" == --verified-checksums-file ]]; then
+      printf '%s' "$2"
+      return
+    fi
+    shift
+  done
+}
+${sign.run}`
+					],
+					{
+						env: {
+							...process.env,
+							...Object.fromEntries(
+								Object.keys(sign.env ?? {}).map((key) => [key, ''])
+							),
+							GITHUB_ACTION_PATH: directory,
+							RUNNER_TEMP: directory,
+							BUILT_SUBJECT_COUNT: builtCount,
+							VERIFIED_CHECKSUMS_FILE: checkedFile
+						}
+					}
+				);
+				const passed = result.stdout;
+
+				expect({
+					isTemporary:
+						passed.startsWith(`${directory}/cupboard-attest.`) &&
+						passed !== checkedFile,
+					contents: passed === '' ? undefined : await readFile(passed, 'utf8')
+				}).toStrictEqual(expected);
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
 
 	it.each([publishWorkflow, flakeWorkflow])(
 		'uses the Boolean build-provenance switch in %s',
@@ -1503,192 +1639,24 @@ describe('PR cache closure ordering', () => {
 	);
 });
 
-describe('publication attestation coverage', () => {
+describe('publication attestation reporting', () => {
 	it.each([
-		{
-			file: publishWorkflow,
-			name: 'simple',
-			receipt: '${{ steps.push.outputs.receipt-file }}',
-			condition:
-				"${{ !cancelled() && inputs.publish != 'none' && steps.push.outputs.receipt-file != '' }}",
-			cache: '${{ inputs.cache }}',
-			credentials: {}
-		},
-		{
-			file: flakeWorkflow,
-			name: 'flake',
-			receipt: '${{ steps.build-cohort.outputs.receipt-file }}',
-			condition:
-				"${{ !cancelled() && needs.configure.outputs.publish != 'none' && steps.build-cohort.outputs.receipt-file != '' }}",
-			cache: '${{ needs.configure.outputs.cache }}',
-			credentials: {
-				'read-user':
-					'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
-				'read-password':
-					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}'
-			}
-		}
+		{ name: 'cupboard-publish.yml', file: publishWorkflow },
+		{ name: 'cupboard-flake-publish.yml', file: flakeWorkflow }
 	])(
-		'reports coverage after attachment even without fresh signing in $name',
-		async ({ file, receipt, condition, cache, credentials }) => {
-			const steps = allSteps(await loadWorkflow(file)).map(({ step }) => step);
-			const index = steps.findIndex(
-				(step) => step.uses === cupboardAction('attest-status')
-			);
-			const step = steps[index];
-			const attach = steps.findIndex(
-				(item) => item.uses === cupboardAction('attest-attach')
-			);
-			expect({ step, afterAttach: index > attach }).toStrictEqual({
-				step: {
-					name: 'Report stored attestation coverage',
-					uses: cupboardAction('attest-status'),
-					if: condition,
-					with: {
-						url: '${{ inputs.url }}',
-						cache,
-						'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
-						'read-session-target':
-							'${{ steps.setup.outputs.read-session-target }}',
-						'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
-						'read-session-caches':
-							'${{ steps.setup.outputs.read-session-caches }}',
-						audience: '${{ steps.setup.outputs.read-session-audience }}',
-						'receipt-file': receipt,
-						'bundles-file': '${{ steps.attest.outputs.bundles-file }}',
-						...credentials
-					}
-				},
-				afterAttach: true
-			});
-		}
-	);
+		'reports only the signing and attachment of this run in $name',
+		async ({ file }) => {
+			const steps = allSteps(await loadWorkflow(file))
+				.map(({ step }) => step)
+				.filter((step) => step.uses?.startsWith(cupboardAction('attest')))
+				.map((step) => ({
+					uses: step.uses,
+					continueOnError: step['continue-on-error']
+				}));
 
-	it.each([
-		{
-			status: 'success',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'signing-failed',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'attachment-failed',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'cohort-failed',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'success',
-			attest: false,
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: true
-		},
-		{
-			status: 'success',
-			publish: 'none',
-			receipt: 'receipt.json',
-			cancelled: false,
-			report: false
-		},
-		{
-			status: 'cohort-failed',
-			publish: 'built',
-			receipt: '',
-			cancelled: false,
-			report: false
-		},
-		{
-			status: 'success',
-			publish: 'built',
-			receipt: 'receipt.json',
-			cancelled: true,
-			report: false
-		}
-	])(
-		'evaluates coverage reporting for $status with publish=$publish, cancelled=$cancelled and receipt=$receipt',
-		async ({ status, attest = true, publish, receipt, cancelled, report }) => {
-			const results = [];
-
-			for (const file of [publishWorkflow, flakeWorkflow]) {
-				const steps = allSteps(await loadWorkflow(file)).map(
-					({ step }) => step
-				);
-				const reporting = steps.find(
-					(step) => step.uses === cupboardAction('attest-status')
-				);
-				const condition = reporting?.if;
-
-				if (condition === undefined) {
-					throw new Error('The workflow must configure its coverage condition');
-				}
-
-				const hasExplicitStatus =
-					/(?:cancelled|success|failure|always)\(\)/.test(condition);
-				const expression = condition
-					.replaceAll(/^\$\{\{|\}\}$/g, '')
-					.replaceAll('!cancelled()', '"$CANCELLED" != true')
-					.replaceAll('inputs.attest', '"$ATTEST" == true')
-					.replaceAll(
-						/(?:inputs|needs\.configure\.outputs)\.publish/g,
-						'"$PUBLISH"'
-					)
-					.replaceAll(
-						/steps\.(?:push|build-cohort)\.outputs\.receipt-file/g,
-						'"$RECEIPT"'
-					);
-				const implicitStatus = hasExplicitStatus
-					? ''
-					: '"$STATUS" == success && ';
-				const { stdout } = await execFileAsync(
-					'bash',
-					[
-						'-c',
-						`if [[ ${implicitStatus}(${expression}) ]]; then printf true; else printf false; fi`
-					],
-					{
-						env: {
-							...process.env,
-							STATUS: status,
-							PUBLISH: publish,
-							RECEIPT: receipt,
-							CANCELLED: String(cancelled),
-							ATTEST: String(attest)
-						}
-					}
-				);
-				results.push({
-					report: stdout === 'true',
-					failuresPreserved: steps
-						.filter(
-							(step) =>
-								step.uses === cupboardAction('attest') ||
-								step.uses === cupboardAction('attest-attach')
-						)
-						.every((step) => step['continue-on-error'] !== true)
-				});
-			}
-
-			expect(results).toStrictEqual([
-				{ report, failuresPreserved: true },
-				{ report, failuresPreserved: true }
+			expect(steps).toStrictEqual([
+				{ uses: cupboardAction('attest'), continueOnError: undefined },
+				{ uses: cupboardAction('attest-attach'), continueOnError: undefined }
 			]);
 		}
 	);

@@ -1,8 +1,9 @@
 name: Attest cupboard store paths
 description:
   Signs SLSA provenance for paths built on the runner in this run. Before
-  signing, the action checks each path and NAR hash against the destination
-  narinfo. Build provenance comes from the current job's receipt.
+  signing, the action checks the path and NAR hash of each signed subject
+  against the destination narinfo. Build provenance comes from the current job's
+  receipt.
 inputs:
   inline-bundles:
     description:
@@ -35,8 +36,8 @@ inputs:
     required: false
   url:
     description:
-      Tenant URL of the destination. Before signing, the action checks every
-      path against the narinfo in this tenant's cache.
+      Tenant URL of the destination. Before signing, the action checks each
+      signed subject against the narinfo in this tenant's cache.
     required: true
   cache:
     description: Named destination cache. Leave empty to use the default cache.
@@ -177,6 +178,28 @@ runs:
         PREDICATE_FILE: ${{ inputs.predicate-file }}
         URL: ${{ inputs.url }}
         CACHE: ${{ inputs.cache }}
+      run: |
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" attest \
+          --receipt-file "$RECEIPT_FILE" \
+          --checksums-file "$CHECKSUMS_FILE" \
+          --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
+          --predicate-file "$PREDICATE_FILE" \
+          --url "$URL" \
+          --cache "$CACHE"
+
+    - name: Check the signed subjects at the destination
+      id: check
+      if:
+        ${{ steps.subjects.outputs.subject-count != '0' &&
+        steps.subjects.outputs.built-subject-count != '0' }}
+      shell: bash
+      env:
+        RECEIPT_FILE: ${{ inputs.receipt-file }}
+        BUILT_CHECKSUMS_FILE: ${{ steps.subjects.outputs.built-checksums-file }}
+        URL: ${{ inputs.url }}
+        CACHE: ${{ inputs.cache }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         READ_SESSION_TARGET: ${{ inputs.read-session-target }}
         READ_SESSION_AUDIENCE: ${{ inputs.audience }}
@@ -185,16 +208,16 @@ runs:
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
       run: |
+        verified_directory="$(mktemp -d "$RUNNER_TEMP/cupboard-attest-check.XXXXXX")"
         source "$GITHUB_ACTION_PATH/../read-session.sh"
         run_with_read_session \
           "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \
           node --experimental-transform-types \
             --disable-warning=ExperimentalWarning \
-            "$GITHUB_ACTION_PATH/../src/main.ts" attest \
+            "$GITHUB_ACTION_PATH/../src/main.ts" attest-check \
             --receipt-file "$RECEIPT_FILE" \
-            --checksums-file "$CHECKSUMS_FILE" \
-            --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
-            --predicate-file "$PREDICATE_FILE" \
+            --checksums-file "$BUILT_CHECKSUMS_FILE" \
+            --verified-checksums-file "$verified_directory/verified-subjects.txt" \
             --url "$URL" \
             --cache "$CACHE" \
             --read-user "$READ_USER"
@@ -207,6 +230,9 @@ runs:
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         CHECKSUMS_FILE: ${{ steps.subjects.outputs.checksums-file }}
         BUILT_CHECKSUMS_FILE: ${{ steps.subjects.outputs.built-checksums-file }}
+        BUILT_SUBJECT_COUNT: ${{ steps.subjects.outputs.built-subject-count }}
+        VERIFIED_CHECKSUMS_FILE:
+          ${{ steps.check.outputs.verified-checksums-file }}
         DESTINATION_ACCESS: ${{ steps.subjects.outputs.destination-access }}
         SIGNING_PROFILE: ${{ inputs.signing-profile }}
         UPLOAD_TO_GITHUB: ${{ inputs.upload-to-github }}
@@ -215,11 +241,19 @@ runs:
         GH_TOKEN: ${{ inputs.github-token || github.token }}
       run: |
         output_directory="$(mktemp -d "$RUNNER_TEMP/cupboard-attest.XXXXXX")"
+        # The check step is skipped when nothing was built. An empty verified
+        # list then lets signing proceed only if no statement has a subject.
+        verified_checksums_file="$VERIFIED_CHECKSUMS_FILE"
+        if [[ "$BUILT_SUBJECT_COUNT" == 0 ]]; then
+          verified_checksums_file="$output_directory/verified-subjects.txt"
+          : > "$verified_checksums_file"
+        fi
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" attest-sign \
           --checksums-file "$CHECKSUMS_FILE" \
           --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
+          --verified-checksums-file "$verified_checksums_file" \
           --receipt-file "$RECEIPT_FILE" \
           --destination-access "$DESTINATION_ACCESS" \
           --signing-profile "$SIGNING_PROFILE" \

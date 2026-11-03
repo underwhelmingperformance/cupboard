@@ -4344,25 +4344,11 @@ describe('buildCohortAction', () => {
 			const receipt = buildReceiptV3Schema.parse(
 				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 			);
-			const held = new Map(
-				receipt.subjects.map((subject) => [
-					subject.storePath,
-					{
-						storePath: subject.storePath,
-						narHash: NixSha256Hash.fromDigest(
-							Buffer.from(subject.narHash, 'hex')
-						),
-						...(subject.derivation !== undefined && {
-							deriver: subject.derivation
-						})
-					}
-				])
-			);
 			const survivors = [floatingBuiltPath, floatingDevelopmentPath].map(
 				(storePath) => ({ storePath, sha256: 'aa'.repeat(32) })
 			);
 
-			expect(provenancedSubjects(receipt, held)).toStrictEqual({
+			expect(provenancedSubjects(receipt)).toStrictEqual({
 				subjects: survivors,
 				built: survivors,
 				reproduced: [],

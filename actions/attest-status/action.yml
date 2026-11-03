@@ -1,7 +1,10 @@
 name: Report cupboard attestation coverage
 description:
-  Reports stored attestation metadata for every published receipt path and
-  distinguishes bundles signed in this run from previously stored evidence.
+  Reports stored attestation coverage for every published receipt path. Use it
+  to audit stored evidence. The reusable workflows do not run it. When given the
+  manifest of bundles signed in this run, the report distinguishes them from
+  previously stored evidence. The report reads stored metadata and does not
+  verify signatures.
 inputs:
   url:
     description: Destination tenant URL.
