@@ -27,9 +27,11 @@ import {
 import {
 	buildEventSchema,
 	buildReceiptSchema,
-	buildReceiptV3Schema
+	buildReceiptV3Schema,
+	derivationPathSchema
 } from '@cupboard/protocol/build';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { BuildObservationIncompleteError } from '../build-paths/observation.ts';
 import {
@@ -81,7 +83,7 @@ function buildStart(derivation: string, machine = '') {
 
 describe('CLI verification receipt', () => {
 	it('generates a flake reproduction report from a CLI verification receipt', () => {
-		const derivation = `${app}.drv`;
+		const derivation = derivationPathSchema.parse(`${app}.drv`);
 		const subjects = cliReceiptSubjects(
 			[
 				{
@@ -166,6 +168,18 @@ describe('buildActivities', () => {
 		const log = JSON.stringify({ action: 'start', type: 105, fields: [] });
 
 		expect(() => buildActivities(log)).toThrow();
+	});
+
+	it('rejects a build activity whose derivation is not a store path', () => {
+		const log = buildStart('/nix/store/app.drv');
+
+		expect(() => buildActivities(log)).toThrow(z.ZodError);
+	});
+
+	it('rejects a build activity whose derivation is not a .drv path', () => {
+		const log = buildStart(app);
+
+		expect(() => buildActivities(log)).toThrow(z.ZodError);
 	});
 });
 
@@ -2061,8 +2075,8 @@ function pathInfo(storePath: StorePathString, deriver?: string) {
 
 describe('receiptSubjects', () => {
 	it('returns the first build attempt for a final output that was absent before the build', () => {
-		const appDerivation = `${app}.drv`;
-		const libraryDerivation = `${library}.drv`;
+		const appDerivation = derivationPathSchema.parse(`${app}.drv`);
+		const libraryDerivation = derivationPathSchema.parse(`${library}.drv`);
 		const subjects = receiptSubjects(
 			[
 				{
@@ -2103,7 +2117,12 @@ describe('receiptSubjects', () => {
 				{
 					attempt: 1,
 					attemptId: 'one',
-					activities: [{ derivation: `${app}.drv`, machine: '' }]
+					activities: [
+						{
+							derivation: derivationPathSchema.parse(`${app}.drv`),
+							machine: ''
+						}
+					]
 				}
 			],
 			[pathInfo(app), pathInfo(library, `${library}.drv`)],
@@ -2114,7 +2133,7 @@ describe('receiptSubjects', () => {
 	});
 
 	it('does not attribute an output fetched from an already populated remote builder', () => {
-		const derivation = `${app}.drv`;
+		const derivation = derivationPathSchema.parse(`${app}.drv`);
 		const subjects = receiptSubjects(
 			[
 				{
@@ -2131,7 +2150,7 @@ describe('receiptSubjects', () => {
 	});
 
 	it('does not attribute a local activity to an output that the store copied', () => {
-		const derivation = `${app}.drv`;
+		const derivation = derivationPathSchema.parse(`${app}.drv`);
 		const subjects = receiptSubjects(
 			[
 				{
@@ -2148,8 +2167,8 @@ describe('receiptSubjects', () => {
 	});
 
 	it('attributes only pre-existing outputs whose final derivations were rebuilt', () => {
-		const appDerivation = `${app}.drv`;
-		const libraryDerivation = `${library}.drv`;
+		const appDerivation = derivationPathSchema.parse(`${app}.drv`);
+		const libraryDerivation = derivationPathSchema.parse(`${library}.drv`);
 		const subjects = receiptSubjects(
 			[
 				{

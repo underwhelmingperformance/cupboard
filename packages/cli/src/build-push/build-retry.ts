@@ -1,5 +1,6 @@
 import { builderFailures, type Nix } from '@cupboard/nix';
 import { parseBuildActivities } from '@cupboard/nix/build-observation';
+import type { StorePathString } from '@cupboard/nix-store/scalars';
 
 /**
 Given the activity log of a failed `nix build` attempt, decides whether
@@ -35,7 +36,7 @@ export async function canRetryBuild(
 		return true;
 	}
 
-	const machines = new Map(
+	const machines = new Map<StorePathString, string>(
 		parseBuildActivities(log).map((activity) => [
 			activity.derivation,
 			activity.machine

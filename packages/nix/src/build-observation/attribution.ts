@@ -1,5 +1,9 @@
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import type { BuildSubjectV3Input } from '@cupboard/protocol/build';
+import {
+	type BuildSubjectV3Input,
+	type DerivationPath,
+	derivationPathSchema
+} from '@cupboard/protocol/build';
 import { z } from 'zod';
 
 import { activityLogRecords } from '../activity-log.ts';
@@ -9,7 +13,7 @@ import type { NixValidPathInfo } from '../nix-store.ts';
 An empty `machine` denotes a local build.
 */
 export interface BuildActivity {
-	readonly derivation: string;
+	readonly derivation: DerivationPath;
 	readonly machine: string;
 }
 
@@ -32,14 +36,14 @@ export interface VerifiedBuildOutput {
 const buildActivityStartSchema = z.object({
 	action: z.literal('start'),
 	type: z.literal(105),
-	fields: z.tuple([z.string().endsWith('.drv'), z.string()]).rest(z.unknown())
+	fields: z.tuple([derivationPathSchema, z.string()]).rest(z.unknown())
 });
 
 /**
 Returns build activity for each derivation, preserving any remote dispatch.
 */
 export function parseBuildActivities(log: string): readonly BuildActivity[] {
-	const activities = new Map<string, BuildActivity>();
+	const activities = new Map<DerivationPath, BuildActivity>();
 
 	for (const record of activityLogRecords(log)) {
 		const start = buildActivityStartSchema.safeParse(record);
