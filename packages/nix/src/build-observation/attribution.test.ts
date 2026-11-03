@@ -4,6 +4,10 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import {
+	type DerivationPath,
+	derivationPathSchema
+} from '@cupboard/protocol/build';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -18,8 +22,12 @@ const appPath = storePathSchema.parse(
 const libraryPath = storePathSchema.parse(
 	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
 );
-const appDrv = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv';
-const libraryDrv = '/nix/store/9123456789abcdfghijklmnpqrsvwxyz-lib.drv';
+const appDrv = derivationPathSchema.parse(
+	'/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv'
+);
+const libraryDrv = derivationPathSchema.parse(
+	'/nix/store/9123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+);
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
 
 function startLine(derivation: string, machine: string): string {
@@ -52,7 +60,7 @@ function info(
 function attempt(
 	ordinal: number,
 	activities: readonly {
-		derivation: string;
+		derivation: DerivationPath;
 		machine: string;
 	}[]
 ): BuildAttempt {
@@ -94,6 +102,12 @@ describe('parseBuildActivities', () => {
 				JSON.stringify({ action: 'start', type: 104, fields: [appDrv, ''] }),
 				JSON.stringify({ action: 'start', type: 105, fields: [7, ''] }),
 				JSON.stringify({ action: 'start', type: 105, fields: ['plain', ''] }),
+				JSON.stringify({
+					action: 'start',
+					type: 105,
+					fields: ['/nix/store/app.drv', '']
+				}),
+				JSON.stringify({ action: 'start', type: 105, fields: [appPath, ''] }),
 				''
 			].join('\n'),
 			expected: []

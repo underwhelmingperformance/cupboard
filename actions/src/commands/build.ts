@@ -26,7 +26,9 @@ import {
 	autoBuildStore,
 	type BuildReceiptV2Input,
 	buildReceiptV3Schema,
-	type BuildSubjectV3Input
+	type BuildSubjectV3Input,
+	type DerivationPath,
+	derivationPathSchema
 } from '@cupboard/protocol/build';
 import {
 	observeChildProcess,
@@ -75,7 +77,7 @@ import {
 } from '../options.ts';
 
 export interface BuildActivity {
-	readonly derivation: string;
+	readonly derivation: DerivationPath;
 	readonly machine: string;
 	readonly verifiedByCheck?: boolean;
 }
@@ -258,11 +260,11 @@ const activityHeaderSchema = z.object({
 const buildActivityStartSchema = z.object({
 	action: z.literal('start'),
 	type: z.literal(105),
-	fields: z.tuple([z.string().endsWith('.drv'), z.string()]).rest(z.unknown())
+	fields: z.tuple([derivationPathSchema, z.string()]).rest(z.unknown())
 });
 
 export function buildActivities(log: string): BuildActivity[] {
-	const activities = new Map<string, BuildActivity>();
+	const activities = new Map<DerivationPath, BuildActivity>();
 
 	for (const line of log.split(/\r?\n/u)) {
 		if (line === '') {

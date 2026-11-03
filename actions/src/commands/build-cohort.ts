@@ -5679,7 +5679,7 @@ export async function runNixBuild(
 		})
 	);
 	const activities = logs.flatMap((log) => buildActivities(log));
-	const observed = new Set(
+	const observed = new Set<string>(
 		activities
 			.filter((activity) => activity.machine === '')
 			.map((activity) => activity.derivation)
@@ -5756,7 +5756,7 @@ async function buildOnlyChecks(
 		// Nix may reuse every output without creating an activity log.
 	}
 
-	const executed = new Set(
+	const executed = new Set<string>(
 		buildActivities(log).map((activity) => activity.derivation)
 	);
 	const infos: readonly NixValidPathInfo[] = await Promise.all(

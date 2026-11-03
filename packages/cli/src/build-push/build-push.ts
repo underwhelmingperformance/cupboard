@@ -932,7 +932,7 @@ async function runRebuild(
 	}
 
 	const attempts = [...normal.attempts];
-	const completed = new Set(
+	const completed = new Set<string>(
 		normal.attempts
 			.filter((attempt) => attempt.exit.status === 0)
 			.flatMap((attempt) =>
@@ -1040,7 +1040,7 @@ async function runRebuild(
 			) {
 				throw new BuildRebuildRemoteDispatchError();
 			}
-			const checkedDerivations = new Set(
+			const checkedDerivations = new Set<string>(
 				checked.attempts
 					.filter((attempt) => attempt.exit.status === 0)
 					.flatMap((attempt) =>
