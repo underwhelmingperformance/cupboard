@@ -90,6 +90,18 @@ export class BuildOutputDivergences {
 		this.recorded.set(info.storePath, divergence);
 	}
 
+	/**
+	Whether {@link compare} would refuse the path for this cache NAR hash.
+	*/
+	refuses(info: NixValidPathInfo, cacheNarHash: string): boolean {
+		return (
+			this.policy === 'fail' &&
+			this.isBuilt(info) &&
+			narDivergence(info.storePath, info.narHash.toString(), cacheNarHash) !==
+				undefined
+		);
+	}
+
 	has(storePath: StorePathString): boolean {
 		return this.recorded.has(storePath);
 	}

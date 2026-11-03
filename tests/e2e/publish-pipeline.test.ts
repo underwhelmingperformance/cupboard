@@ -1365,9 +1365,11 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		}).toStrictEqual({
 			cohortStatuses: [0],
 			served: claimed.map(() => 200),
-			// Both build-push and the retention push probe capabilities, then
-			// publish over their own session. Already-present paths also commit.
-			upgrades: 4,
+			// Both build-push and the retention push probe capabilities.
+			// Build-push then publishes over its own session. The retention
+			// push confirms its already-present paths without a session, which
+			// opens only for a commit.
+			upgrades: 3,
 			wasPaced: true
 		});
 	});

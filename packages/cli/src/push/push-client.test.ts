@@ -2,16 +2,21 @@ import { publicationCapability } from '@cupboard/protocol/upload';
 import { uploadPathNegotiationSchema } from '@cupboard/protocol/upload';
 import {
 	acceptCapabilitiesHeader,
+	confirmPresentCapability,
+	type UploadAttachRootInput,
 	uploadCapabilitiesHeader,
 	uploadGraceFactsCapability,
 	uploadIdSchema,
 	uploadNegotiateRequestSchema,
 	uploadPreviewRequestSchema,
+	uploadRequestLimitErrorCode,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import { probeDeadlineMs, ProbeTimeoutError } from '@cupboard/shared/timeout';
 import { ORPCError } from '@orpc/client';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
 import { CupboardClient } from '../client/client.ts';
@@ -807,6 +812,277 @@ it.each([false, true])(
 				commits: [],
 				closes: [[]]
 			});
+		} finally {
+			open.mockRestore();
+		}
+	}
+);
+
+it.each([
+	{
+		echoed: `${publicationCapability},${confirmPresentCapability}`,
+		answer: 'confirms',
+		confirmed: true
+	},
+	{ echoed: publicationCapability, answer: 'confirms', confirmed: false },
+	{
+		echoed: `${publicationCapability},${confirmPresentCapability}`,
+		answer: 'is not found',
+		confirmed: false
+	}
+])(
+	'confirms planned skips only when the server echoes $echoed and $answer',
+	async ({ echoed, answer, confirmed }) => {
+		const operationId = 'a'.repeat(64);
+		const metadata = uploadPathNegotiationSchema.parse({
+			storePathHash: '0'.repeat(32),
+			storePath: `/nix/store/${'0'.repeat(32)}-app`,
+			narHash: `sha256:${'1'.repeat(52)}`,
+			narSize: 1,
+			references: []
+		});
+		const attachRoot: UploadAttachRootInput = {
+			name: 'run',
+			retention: { kind: 'inherit' }
+		};
+		const present = {
+			storePathHash: metadata.storePathHash,
+			status: 'confirmed',
+			generation: 3,
+			narHash: metadata.narHash,
+			grace: { retainUntil: '2026-01-01T02:00:00.000Z' }
+		};
+		const open = vi
+			.spyOn(CupboardClient.prototype, 'openCommitSession')
+			.mockImplementation((_credential, options) => {
+				options?.onCapabilities?.(new Map([[publicationCapability, {}]]));
+				return Promise.resolve({
+					commit: () => Promise.reject(new Error('No commit expected')),
+					close: vi.fn()
+				});
+			});
+		const requests: {
+			path: string;
+			accepted: string | null;
+			body: unknown;
+		}[] = [];
+		const client = pushClientFor(new URL('https://cupboard.test'), 'token', {
+			cache: { kind: 'default' },
+			fetcher: async (input, init) => {
+				const request = new Request(input, init);
+				const path = new URL(request.url).pathname;
+				const body: unknown = await request.json();
+				requests.push({
+					path,
+					accepted: request.headers.get(acceptCapabilitiesHeader),
+					body
+				});
+				if (path === '/uploads/credential') {
+					return Response.json(
+						{
+							pushId: 'push-1',
+							accessKeyId: 'access',
+							secretAccessKey: 'secret',
+							sessionToken: 'session',
+							endpoint: 'https://r2.test',
+							bucket: 'blobs',
+							expiresAt: '2099-01-01T00:00:00.000Z'
+						},
+						{ headers: { [uploadCapabilitiesHeader]: echoed } }
+					);
+				}
+				if (path === '/uploads/plan') {
+					return Response.json({
+						cacheGeneration: 1,
+						pushExpiresAt: '2099-01-01T00:00:00.000Z',
+						uploads: [
+							{
+								action: 'skip',
+								storePathHash: metadata.storePathHash,
+								narHash: metadata.narHash,
+								operationId,
+								r2Key: `staging-v2/acme/push-1/${operationId}.nar.zst`
+							}
+						]
+					});
+				}
+				if (answer === 'is not found') {
+					return new Response('Not found\n', {
+						status: StatusCodes.NOT_FOUND
+					});
+				}
+				return Response.json({ paths: [present] });
+			}
+		});
+		try {
+			const { uploads } = await client.negotiate({
+				paths: [metadata],
+				attachRoot
+			});
+			const skips = uploads.filter((decision) => decision.action === 'skip');
+			const first = await client.confirmPresent?.(skips);
+			const second = await client.confirmPresent?.(skips);
+			const accepted = `${publicationCapability},${confirmPresentCapability}`;
+			const confirmation = {
+				path: '/uploads/confirm-present',
+				accepted,
+				body: {
+					cacheGeneration: 1,
+					attachRoot,
+					paths: [
+						{
+							storePathHash: metadata.storePathHash,
+							storePath: metadata.storePath,
+							narHash: metadata.narHash
+						}
+					]
+				}
+			};
+			expect({ first, second, requests }).toStrictEqual({
+				first: confirmed ? [present] : undefined,
+				second: confirmed ? [present] : undefined,
+				requests: [
+					{ path: '/uploads/credential', accepted, body: {} },
+					{
+						path: '/uploads/plan',
+						accepted,
+						body: { pushId: 'push-1', paths: [metadata], attachRoot }
+					},
+					...(echoed === publicationCapability ? [] : [confirmation]),
+					...(confirmed ? [confirmation] : [])
+				]
+			});
+		} finally {
+			open.mockRestore();
+		}
+	}
+);
+
+const pathEntrySchema = z.object({ storePathHash: z.string() });
+const pathListSchema = z.object({ paths: z.array(pathEntrySchema) });
+
+it.each([
+	{
+		server: 'advertises no limit',
+		advertised: undefined,
+		refusesOver: undefined,
+		calls: [150],
+		pages: [149, 1]
+	},
+	{
+		server: 'advertises 50 paths',
+		advertised: '50',
+		refusesOver: undefined,
+		calls: [1, 120],
+		pages: [1, 50, 50, 20]
+	},
+	{
+		server: 'refuses pages over 60 paths',
+		advertised: '60',
+		refusesOver: 60,
+		calls: [120],
+		pages: [120, 60, 60]
+	}
+])(
+	'sizes confirmation pages when the server $server',
+	async ({ advertised, refusesOver, calls, pages }) => {
+		const paths = Array.from(
+			{ length: calls.reduce((total, count) => total + count, 0) },
+			(_, index) => {
+				const storePathHash = String(index).padStart(32, '0');
+				return uploadPathNegotiationSchema.parse({
+					storePathHash,
+					storePath: `/nix/store/${storePathHash}-app`,
+					narHash: `sha256:${'1'.repeat(52)}`,
+					narSize: 1,
+					references: []
+				});
+			}
+		);
+		const open = vi
+			.spyOn(CupboardClient.prototype, 'openCommitSession')
+			.mockImplementation((_credential, options) => {
+				options?.onCapabilities?.(new Map([[publicationCapability, {}]]));
+				return Promise.resolve({
+					commit: () => Promise.reject(new Error('No commit expected')),
+					close: vi.fn()
+				});
+			});
+		const pageSizes: number[] = [];
+		const limitHeaders: Record<string, string> =
+			advertised === undefined
+				? {}
+				: { [uploadRequestMaxPathsHeader]: advertised };
+		const client = pushClientFor(new URL('https://cupboard.test'), 'token', {
+			cache: { kind: 'default' },
+			fetcher: async (input, init) => {
+				const request = new Request(input, init);
+				const path = new URL(request.url).pathname;
+				if (path === '/uploads/credential') {
+					return Response.json(
+						{
+							pushId: 'push-1',
+							accessKeyId: 'access',
+							secretAccessKey: 'secret',
+							sessionToken: 'session',
+							endpoint: 'https://r2.test',
+							bucket: 'blobs',
+							expiresAt: '2099-01-01T00:00:00.000Z'
+						},
+						{
+							headers: {
+								[uploadCapabilitiesHeader]: `${publicationCapability},${confirmPresentCapability}`
+							}
+						}
+					);
+				}
+				const body = pathListSchema.parse(await request.json());
+				if (path === '/uploads/plan') {
+					return Response.json({
+						cacheGeneration: 1,
+						pushExpiresAt: '2099-01-01T00:00:00.000Z',
+						uploads: body.paths.map(({ storePathHash }) => ({
+							action: 'skip',
+							storePathHash,
+							narHash: `sha256:${'1'.repeat(52)}`,
+							operationId: storePathHash.padStart(64, 'a'),
+							r2Key: `staging-v2/acme/push-1/${storePathHash}.nar.zst`
+						}))
+					});
+				}
+				pageSizes.push(body.paths.length);
+				if (refusesOver !== undefined && body.paths.length > refusesOver) {
+					return Response.json(
+						{
+							defined: true,
+							code: uploadRequestLimitErrorCode,
+							status: StatusCodes.REQUEST_TOO_LONG,
+							message: 'Too many paths',
+							data: { maxPaths: refusesOver }
+						},
+						{ status: StatusCodes.REQUEST_TOO_LONG, headers: limitHeaders }
+					);
+				}
+				return Response.json(
+					{
+						paths: body.paths.map(({ storePathHash }) => ({
+							storePathHash,
+							status: 'missing'
+						}))
+					},
+					{ headers: limitHeaders }
+				);
+			}
+		});
+		try {
+			const { uploads } = await client.negotiate({ paths });
+			const skips = uploads.filter((decision) => decision.action === 'skip');
+			let offset = 0;
+			for (const count of calls) {
+				await client.confirmPresent?.(skips.slice(offset, offset + count));
+				offset += count;
+			}
+			expect(pageSizes).toStrictEqual(pages);
 		} finally {
 			open.mockRestore();
 		}

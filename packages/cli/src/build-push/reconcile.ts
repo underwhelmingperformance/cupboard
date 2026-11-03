@@ -7,10 +7,11 @@ import {
 } from '@cupboard/nix';
 import {
 	type RootName,
+	type StorePathHash,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
 	autoBuildStore,
 	type BuildReceiptV3,
@@ -43,8 +44,10 @@ import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import type { NarSource } from '../nix/nar-source.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import {
+	confirmPlannedSkips,
 	exactUploadDecisions,
 	type NegotiatedPath,
+	type PresentConfirmation,
 	publishJustInTime
 } from '../push/negotiation.ts';
 import { publishedSubjects } from '../push/origin.ts';
@@ -514,7 +517,8 @@ async function publishNegotiated(
 	required: ReadonlyMap<StorePathString, boolean>,
 	options: ReconcileOptions,
 	ledger: PublicationLedger,
-	acknowledged: AcknowledgedPath[]
+	acknowledged: AcknowledgedPath[],
+	confirmations: ReadonlyMap<StorePathHash, PresentConfirmation>
 ): Promise<void> {
 	const info = item.path;
 
@@ -526,10 +530,19 @@ async function publishNegotiated(
 	let { decision } = item;
 
 	if (decision.action === 'skip') {
+		const confirmation = confirmations.get(decision.storePathHash);
 		try {
 			ledger.divergences.compare(info, decision.narHash);
+			if (confirmation !== undefined) {
+				ledger.divergences.compare(info, confirmation.narHash);
+			}
 		} catch (error) {
 			recordFailure(ledger, info.storePath, 'verification', error);
+			return;
+		}
+
+		if (confirmation !== undefined) {
+			ledger.servable.add(info.storePath);
 			return;
 		}
 
@@ -595,6 +608,10 @@ async function publishRequired(
 
 	const concurrency = options.uploadConcurrency ?? defaultUploadConcurrency;
 	const acknowledged: AcknowledgedPath[] = [];
+	const infoByHash = new Map(
+		infos.map((info) => [StorePath.hash(info.storePath), info])
+	);
+	const confirmations = new Map<StorePathHash, PresentConfirmation>();
 
 	await publishJustInTime(
 		{
@@ -606,6 +623,20 @@ async function publishRequired(
 					paths: [...paths],
 					...(options.runRoot !== undefined && { attachRoot: options.runRoot })
 				});
+				const confirmed = await confirmPlannedSkips(
+					options.client.confirmPresent,
+					negotiation.uploads,
+					(skip) => {
+						const info = infoByHash.get(skip.storePathHash);
+						return (
+							info !== undefined &&
+							ledger.divergences.refuses(info, skip.narHash)
+						);
+					}
+				);
+				for (const [storePathHash, confirmation] of confirmed) {
+					confirmations.set(storePathHash, confirmation);
+				}
 
 				return {
 					uploads: negotiation.uploads,
@@ -613,7 +644,15 @@ async function publishRequired(
 				};
 			}
 		},
-		(item) => publishNegotiated(item, required, options, ledger, acknowledged)
+		(item) =>
+			publishNegotiated(
+				item,
+				required,
+				options,
+				ledger,
+				acknowledged,
+				confirmations
+			)
 	);
 
 	await mapWithConcurrency(acknowledged, concurrency, (path) =>

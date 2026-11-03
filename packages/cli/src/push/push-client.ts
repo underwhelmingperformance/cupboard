@@ -10,25 +10,32 @@ import {
 } from '@cupboard/protocol/platform';
 import {
 	acceptCapabilitiesHeader,
+	confirmPresentCapability,
 	publicationCapability,
 	type PublicationEntry,
 	type UploadActionDecision,
 	uploadAttachRootSchema,
 	uploadCapabilitiesHeader,
+	uploadConfirmPresentMaxPaths,
+	uploadConfirmPresentMaxPathsFor,
+	type UploadConfirmPresentPath,
 	type UploadDecision,
 	uploadGraceFactsCapability,
 	type UploadId,
 	uploadNegotiateMaxPaths,
 	uploadPathNegotiationSchema,
+	uploadRequestLimitErrorCode,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
 import {
 	type DeadlineOptions,
+	lookupInPages,
 	lookupPage,
 	requestWithDeadline
 } from '@cupboard/shared/paging';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
+import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 
 import { callInCache } from '../client/cache-scoped.ts';
@@ -37,7 +44,10 @@ import { CupboardClient } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
-import { CupboardHttpError } from '../errors.ts';
+import {
+	CupboardHttpError,
+	UploadNegotiationMismatchError
+} from '../errors.ts';
 
 import { credentialSession } from './credential-session.ts';
 import { type PushClient } from './push.ts';
@@ -56,6 +66,10 @@ const negotiationPageSize = Math.floor(
 // and the push fails. No retry can rescue a slow but healthy page, so its
 // single attempt gets a longer deadline than a replay-safe request.
 const negotiationPageDeadlineMs = 4 * probeDeadlineMs;
+const confirmationConcurrency = 2;
+const confirmationDefaultPageSize = uploadConfirmPresentMaxPathsFor(
+	workersInvocationAllowances.free.subrequests - subrequestSafetyReserve
+);
 
 export interface PushClientOptions {
 	readonly cache: CacheScope;
@@ -122,6 +136,9 @@ export function pushClientFor(
 		return { result, hasUploadGraceFacts };
 	};
 	let hasCredentialPublication = false;
+	let hasCredentialConfirmation = false;
+	let isConfirmationUnavailable = false;
+	let confirmationPageSize = confirmationDefaultPageSize;
 	let protocolSelection: Promise<'publication' | 'legacy'> | undefined;
 	const entries = new Map<
 		UploadId,
@@ -138,14 +155,33 @@ export function pushClientFor(
 		fetcher: async (input, init) => {
 			const request = new Request(input, init);
 			const headers = new Headers(request.headers);
-			headers.set(acceptCapabilitiesHeader, publicationCapability);
+			headers.set(
+				acceptCapabilitiesHeader,
+				`${publicationCapability},${confirmPresentCapability}`
+			);
 			const response = await baseFetcher(new Request(request, { headers }));
 			if (request.url.endsWith('/uploads/credential')) {
-				hasCredentialPublication =
+				const echoed = new Set(
 					response.headers
 						.get(uploadCapabilitiesHeader)
 						?.split(',')
-						.some((value) => value.trim() === publicationCapability) ?? false;
+						.map((value) => value.trim())
+				);
+				hasCredentialPublication = echoed.has(publicationCapability);
+				hasCredentialConfirmation = echoed.has(confirmPresentCapability);
+			}
+			const advertised = Number(
+				response.headers.get(uploadRequestMaxPathsHeader)
+			);
+			if (
+				request.url.endsWith('/uploads/confirm-present') &&
+				Number.isSafeInteger(advertised) &&
+				advertised > 0
+			) {
+				confirmationPageSize = Math.min(
+					advertised,
+					uploadConfirmPresentMaxPaths
+				);
 			}
 			return response;
 		}
@@ -342,7 +378,111 @@ export function pushClientFor(
 		return { uploads, hasUploadGraceFacts: true };
 	};
 
+	const confirmationDeadline = procedureDeadline(
+		'uploads.confirmPresent',
+		tenantContract.uploads.confirmPresent.inDefaultCache,
+		{ signal: options.signal }
+	);
+	const confirmEntries = async (
+		planned: readonly PublicationEntry[]
+	): Promise<UploadConfirmPresentPath[]> => {
+		const [first] = planned;
+		if (first === undefined) {
+			return [];
+		}
+		return lookupInPages(planned, {
+			pageSize: confirmationPageSize,
+			requestSize: () => confirmationPageSize,
+			concurrency: confirmationConcurrency,
+			deadline: confirmationDeadline,
+			isPageTooLarge: (error) =>
+				error instanceof ORPCError &&
+				error.code === uploadRequestLimitErrorCode,
+			request: async (page, signal) => {
+				const { paths } = await callInCache(
+					rpc.uploads.confirmPresent,
+					cache,
+					{
+						cacheGeneration: first.cacheGeneration,
+						paths: page.map(({ metadata }) => ({
+							storePathHash: metadata.storePathHash,
+							storePath: metadata.storePath,
+							narHash: metadata.narHash
+						})),
+						...(first.attachRoot !== undefined && {
+							attachRoot: first.attachRoot
+						})
+					},
+					{ signal }
+				);
+				signal.throwIfAborted();
+				const mismatch = page.find(
+					({ metadata }, index) =>
+						paths[index]?.storePathHash !== metadata.storePathHash
+				);
+				if (mismatch !== undefined || paths.length !== page.length) {
+					const { metadata } = mismatch ?? first;
+					throw new UploadNegotiationMismatchError(
+						'unexpected',
+						metadata.storePathHash,
+						metadata.narHash
+					);
+				}
+				return paths;
+			}
+		});
+	};
+	const confirmPresent: PushClient['confirmPresent'] = async (planned) => {
+		const protocol = await publicationProtocol();
+		if (
+			isConfirmationUnavailable ||
+			!hasCredentialConfirmation ||
+			protocol !== 'publication'
+		) {
+			return;
+		}
+		const groups = Map.groupBy(
+			planned.map((decision) => {
+				const upload = skips.get(decision.storePathHash);
+				const publication =
+					upload === undefined ? undefined : entries.get(upload.uploadId);
+				if (publication === undefined) {
+					throw new UploadNegotiationMismatchError(
+						'unexpected',
+						decision.storePathHash,
+						decision.narHash
+					);
+				}
+				return publication.entry;
+			}),
+			(entry) => JSON.stringify([entry.cacheGeneration, entry.attachRoot])
+		);
+		try {
+			const confirmed = new Map<StorePathHash, UploadConfirmPresentPath>();
+			for (const group of groups.values()) {
+				const answered = await confirmEntries(group);
+				for (const path of answered) {
+					confirmed.set(path.storePathHash, path);
+				}
+			}
+			return planned.map(
+				(decision) =>
+					confirmed.get(decision.storePathHash) ?? {
+						storePathHash: decision.storePathHash,
+						status: 'missing'
+					}
+			);
+		} catch (error) {
+			if (!(error instanceof ORPCError) || error.code !== 'NOT_FOUND') {
+				throw error;
+			}
+			isConfirmationUnavailable = true;
+			return;
+		}
+	};
+
 	return {
+		confirmPresent,
 		publicationFor: (decision) =>
 			decision.action === 'skip'
 				? skips.get(decision.storePathHash)

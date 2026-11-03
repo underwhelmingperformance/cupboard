@@ -2,7 +2,11 @@ import {
 	NixStorePathNotFoundError,
 	type NixValidPathInfo
 } from '@cupboard/nix';
-import type { StorePathString } from '@cupboard/nix-store/scalars';
+import type {
+	StorePathHash,
+	StorePathString
+} from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	commitBatchMaxEntries,
 	type CommitBlobDeclaration,
@@ -20,7 +24,12 @@ import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import type { NarSource } from '../nix/nar-source.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
-import { type NegotiatedPath, publishJustInTime } from '../push/negotiation.ts';
+import {
+	confirmPlannedSkips,
+	type NegotiatedPath,
+	type PresentConfirmation,
+	publishJustInTime
+} from '../push/negotiation.ts';
 import {
 	type CompressNar,
 	defaultUploadConcurrency,
@@ -152,6 +161,10 @@ export class BuildOutputBatcher {
 		Promise<CommitVerdict>
 	>();
 	private readonly pendingVerdicts = new Set<StorePathString>();
+	private readonly confirmations = new Map<
+		StorePathHash,
+		PresentConfirmation
+	>();
 	private readonly divergences: BuildOutputDivergences;
 	private timer: NodeJS.Timeout | undefined;
 	private chain: Promise<void> = Promise.resolve();
@@ -244,6 +257,9 @@ export class BuildOutputBatcher {
 						this.settlePath(storePath, error, remaining);
 					}
 				}
+				const infoByHash = new Map(
+					infos.map((info) => [StorePath.hash(info.storePath), info])
+				);
 
 				// The NAR reads stream into the uploads inside the protected session,
 				// so each path remains available until all its bytes have been sent.
@@ -260,6 +276,23 @@ export class BuildOutputBatcher {
 									attachRoot: this.options.runRoot
 								})
 							});
+							const confirmed = await confirmPlannedSkips(
+								this.options.client.confirmPresent,
+								negotiation.uploads,
+								(skip) => {
+									const info = infoByHash.get(skip.storePathHash);
+									return (
+										info !== undefined &&
+										this.divergences.refuses(info, skip.narHash)
+									);
+								}
+							);
+							for (const decision of negotiation.uploads) {
+								this.confirmations.delete(decision.storePathHash);
+							}
+							for (const [storePathHash, confirmation] of confirmed) {
+								this.confirmations.set(storePathHash, confirmation);
+							}
 
 							return {
 								uploads: negotiation.uploads,
@@ -297,10 +330,20 @@ export class BuildOutputBatcher {
 		let { decision } = item;
 
 		if (decision.action === 'skip') {
+			const confirmation = this.confirmations.get(decision.storePathHash);
 			try {
 				this.divergences.compare(item.path, decision.narHash);
+				if (confirmation !== undefined) {
+					this.divergences.compare(item.path, confirmation.narHash);
+				}
 			} catch (error) {
 				this.settlePath(storePath, error, remaining);
+				return;
+			}
+
+			if (confirmation !== undefined) {
+				remaining.delete(storePath);
+				this.recordOutcome({ outcome: 'destination-served', storePath });
 				return;
 			}
 
