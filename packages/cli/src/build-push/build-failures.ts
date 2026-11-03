@@ -11,7 +11,7 @@ successful attempt. Results follow the order of the remaining failures.
 export function failedDerivations(
 	attempts: readonly Pick<SupervisedAttempt, 'log' | 'exit'>[]
 ): readonly StorePathString[] {
-	const failed = new Map<string, StorePathString>();
+	const failed = new Set<StorePathString>();
 
 	for (const attempt of attempts) {
 		if (attempt.exit.status === 0) {
@@ -23,7 +23,7 @@ export function failedDerivations(
 		}
 
 		for (const failure of builderFailures(attempt.log)) {
-			failed.set(failure.derivation, failure.derivation);
+			failed.add(failure.derivation);
 		}
 	}
 
