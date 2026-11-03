@@ -1187,6 +1187,27 @@ describe('retention grace at publication', () => {
 		});
 	});
 
+	it('rounds the deadline of a publication up to a whole hour', async () => {
+		await useTestServer('publication-rounds');
+		await bootstrap();
+		await setDefaultCacheGrace(1800);
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'published'
+		});
+		vi.setSystemTime(new Date('2026-01-01T00:20:00.000Z'));
+
+		await pushPath(await issueServerSignedToken(adminGrants()), path);
+
+		expect(await graceDeadlineRows(defaultCache())).toStrictEqual([
+			{
+				storePathHash: path.storePathHash,
+				retainUntil: '2026-01-01T01:00:00.000Z'
+			}
+		]);
+	});
+
 	it('grants the deadline to a rooted publication too', async () => {
 		await useTestServer('publication-rooted');
 		const { token } = await bootstrap();
@@ -2412,7 +2433,7 @@ describe('retention grace facts reported to clients', () => {
 
 		const factOf = async (): Promise<unknown> => {
 			const response = await negotiateUploads(
-				token,
+				await issueServerSignedToken(adminGrants()),
 				[path],
 				defaultCache(),
 				shouldReportGrace
@@ -2423,16 +2444,16 @@ describe('retention grace facts reported to clients', () => {
 
 		const first = await factOf();
 
-		vi.setSystemTime(new Date('2026-01-01T00:02:00.000Z'));
+		vi.setSystemTime(new Date('2026-01-01T01:30:00.000Z'));
 		const later = await factOf();
 
-		vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
+		vi.setSystemTime(new Date('2026-01-01T00:30:00.000Z'));
 		const retried = await factOf();
 
 		expect({ first, later, retried }).toStrictEqual({
 			first: { retainUntil: dayAfterStart },
-			later: { retainUntil: '2026-01-02T00:02:00.000Z' },
-			retried: { retainUntil: '2026-01-02T00:02:00.000Z' }
+			later: { retainUntil: '2026-01-02T02:00:00.000Z' },
+			retried: { retainUntil: '2026-01-02T02:00:00.000Z' }
 		});
 	});
 
@@ -3194,6 +3215,52 @@ describe('confirming an unretained publication', () => {
 		});
 	});
 
+	// Publishing at midnight sets a deadline of 01:00, so only a rounded
+	// confirmation can report 02:00.
+	it.each([
+		{
+			now: '2026-01-01T00:00:00.001Z',
+			retainUntil: '2026-01-01T02:00:00.000Z'
+		},
+		{
+			now: '2026-01-01T00:20:00.000Z',
+			retainUntil: '2026-01-01T02:00:00.000Z'
+		},
+		{ now: '2026-01-01T00:59:59.999Z', retainUntil: '2026-01-01T02:00:00.000Z' }
+	])(
+		'rounds the deadline of a confirmation at $now up to $retainUntil',
+		async ({ now, retainUntil }) => {
+			await useTestServer('confirm-rounds');
+			const { token } = await bootstrap();
+			await setDefaultCacheGrace(3600);
+			const path = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('r'),
+				name: 'rounded'
+			});
+			await pushPath(token, path);
+			vi.setSystemTime(new Date(now));
+
+			const confirmed = await confirmPaths(
+				await issueServerSignedToken(adminGrants()),
+				[path.storePathHash]
+			);
+
+			expect(confirmed).toStrictEqual({
+				status: StatusCodes.OK,
+				body: {
+					paths: [
+						{
+							storePathHash: path.storePathHash,
+							confirmed: true,
+							grace: { retainUntil }
+						}
+					]
+				}
+			});
+		}
+	);
+
 	it('refuses a committed path whose canonical backing is gone', async () => {
 		await useTestServer('confirm-lost-backing');
 		const { token } = await bootstrap();
@@ -3327,23 +3394,26 @@ describe('confirming an unretained publication', () => {
 		await pushPath(token, path);
 
 		const graceOf = async (): Promise<unknown> => {
-			const confirmed = await confirmPaths(token, [path.storePathHash]);
+			const confirmed = await confirmPaths(
+				await issueServerSignedToken(adminGrants()),
+				[path.storePathHash]
+			);
 
 			return confirmed.body.paths[0]?.grace;
 		};
 
 		const first = await graceOf();
 
-		vi.setSystemTime(new Date('2026-01-01T00:02:00.000Z'));
+		vi.setSystemTime(new Date('2026-01-01T01:30:00.000Z'));
 		const later = await graceOf();
 
-		vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
+		vi.setSystemTime(new Date('2026-01-01T00:30:00.000Z'));
 		const retried = await graceOf();
 
 		expect({ first, later, retried }).toStrictEqual({
 			first: { retainUntil: dayAfterStart },
-			later: { retainUntil: '2026-01-02T00:02:00.000Z' },
-			retried: { retainUntil: '2026-01-02T00:02:00.000Z' }
+			later: { retainUntil: '2026-01-02T02:00:00.000Z' },
+			retried: { retainUntil: '2026-01-02T02:00:00.000Z' }
 		});
 	});
 
@@ -3758,4 +3828,68 @@ describe('repeating an unchanged retention write', () => {
 			expect(cost).toStrictEqual({ ...noCost, rowsRead });
 		}
 	);
+});
+
+async function bindRunRootAt(time: string) {
+	vi.setSystemTime(new Date(`2026-01-01T${time}Z`));
+	return runInDurableObject(currentServer(), async (instance) => {
+		const { context } = instance;
+		const retention = new RetentionService(context);
+		const roots = new RootsService(
+			context,
+			new CacheRegistrationService(context),
+			retention,
+			new NarInfoObjectsService(context)
+		);
+		let cost: OperationCostRecord | undefined;
+		await withOperationCost(
+			'bind',
+			() => {
+				roots.bindRunRoot(
+					resolvedCache(context),
+					rootNameSchema.parse('run'),
+					rootRetentionRequestSchema.parse({
+						kind: 'duration',
+						seconds: 3600
+					})
+				);
+				return Promise.resolve();
+			},
+			(recorded) => {
+				cost = recorded;
+			}
+		);
+		const root = context.db
+			.select({ expiresAt: schema.retentionRoots.expiresAt })
+			.from(schema.retentionRoots)
+			.get();
+		return { cost, expiresAt: root?.expiresAt };
+	});
+}
+
+describe('binding a run root with a duration', () => {
+	beforeEach(resetTestServer);
+
+	it('rounds the expiry up to a whole hour and writes nothing again in that hour', async () => {
+		await useTestServer('run-root-rounded');
+		await bootstrap();
+		const first = await bindRunRootAt('00:20:00.000');
+		const repeat = await bindRunRootAt('00:40:00.000');
+		const later = await bindRunRootAt('01:00:00.001');
+
+		expect({ first, repeat, later }).toStrictEqual({
+			first: {
+				cost: { ...noCost, rowsRead: 3, rowsWritten: 6 },
+				expiresAt: '2026-01-01T02:00:00.000Z'
+			},
+			repeat: {
+				cost: { ...noCost, rowsRead: 4 },
+				expiresAt: '2026-01-01T02:00:00.000Z'
+			},
+			later: {
+				cost: { ...noCost, rowsRead: 4, rowsWritten: 5 },
+				expiresAt: '2026-01-01T03:00:00.000Z'
+			}
+		});
+	});
 });
