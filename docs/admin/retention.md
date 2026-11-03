@@ -156,7 +156,11 @@ workflow uses a run root automatically, with a 24-hour TTL by default.
 
 Run roots use `--run-root-ttl` or `--run-root-permanent` for their lifetime,
 independently of the ordinary root or pins in the same push. If neither option
-is supplied, the run root inherits the cache's root retention settings.
+is supplied, the run root inherits the cache's root retention settings. A push
+with a TTL keeps the run root until at least the TTL after the push, rounded up
+to the next whole hour, so the push can keep it up to an hour longer than the
+TTL. A run root that already lasts longer keeps its expiry, and a permanent run
+root stays permanent.
 
 ## How long a root lasts
 
@@ -267,6 +271,12 @@ has passed since the most recent of these events:
 - `cupboard confirm` confirmed it.
 - A root released it, because the root was replaced, removed or expired. For an
   expired root, the grace period starts from when the root expired.
+
+For the first three events, cupboard rounds the deadline up to the next whole
+hour, so a store path can be kept for up to an hour longer than the grace
+period. Two pushes set the same deadline when their times plus the grace period
+fall in the same clock hour. With a 30-minute grace period, pushes at 00:20 and
+00:40 set deadlines of 01:00 and 02:00.
 
 A store path's grace deadline only ever moves later. The only way to remove the
 path sooner is `cupboard delete`.

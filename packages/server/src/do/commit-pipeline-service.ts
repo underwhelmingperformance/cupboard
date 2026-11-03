@@ -95,6 +95,7 @@ import {
 	storedGraceDeadlines,
 	storedGraceFact
 } from './grace-decision.ts';
+import { hourlyDeadline } from './hourly-deadline.ts';
 import {
 	jsonRowLists,
 	type JsonValueList,
@@ -1687,8 +1688,7 @@ export class CommitPipelineService {
 			}
 
 			const candidate =
-				close?.graceUntil ??
-				isoTimestamp(new Date(settledAt + (graceSeconds ?? 0) * 1000));
+				close?.graceUntil ?? hourlyDeadline(settledAt, graceSeconds ?? 0);
 			const retainUntil =
 				request.graceDecision?.publicationId === undefined
 					? candidate

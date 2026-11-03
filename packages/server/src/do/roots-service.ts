@@ -38,6 +38,7 @@ import {
 	type SchemaWriter,
 	type ServerContext
 } from './context.ts';
+import { hourlyDeadline } from './hourly-deadline.ts';
 import { jsonRowLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
@@ -393,7 +394,10 @@ export class RootsService {
 	}
 
 	// Binding can extend an existing root's expiry without replacing targets or
-	// releasing paths into grace. Commits add their paths as they finish.
+	// releasing paths into grace. Commits add their paths as they finish. Every
+	// publication in a run binds the root, so the expiry is rounded up to a whole
+	// hour. Repeated binds leave the row unchanged while the bind time plus the
+	// TTL stays within the same hour.
 	bindRunRoot(
 		cache: ResolvedCache,
 		name: RootName,
@@ -409,7 +413,10 @@ export class RootsService {
 			retention.kind === 'inherit'
 				? this.retention.resolveRootRetention(cache, name)
 				: retention;
-		const expiresAt = rootExpiry(resolvedRetention, now);
+		const expiresAt =
+			resolvedRetention.kind === 'permanent'
+				? undefined
+				: hourlyDeadline(now.getTime(), resolvedRetention.seconds);
 
 		database
 			.insert(schema.retentionRoots)

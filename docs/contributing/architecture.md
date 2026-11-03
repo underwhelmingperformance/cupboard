@@ -687,8 +687,9 @@ another pending upload, change a supplied compressed declaration or extend the
 original grace decision. Every first accepted operation captures a grace
 decision, including an operation that confirms an already-served path. That
 confirmation can therefore extend the path's retention to the confirmation time
-plus grace; legacy skips leave its deadline unchanged. Completed operations
-retain their resulting path identity after pending cleanup.
+plus grace, rounded up to a whole hour; legacy skips leave its deadline
+unchanged. Completed operations retain their resulting path identity after
+pending cleanup.
 
 Unfinished recovery stops 24 hours after first acceptance. Push expiry does not
 cancel accepted work, but prevents new operations and new transfers. Claims,

@@ -6,7 +6,6 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	type IsoTimestamp,
-	isoTimestamp,
 	isoTimestampSchema
 } from '@cupboard/protocol/scalars';
 import {
@@ -21,6 +20,7 @@ import * as schema from '../db/schema.ts';
 
 import { CacheClosureService } from './cache-closure-service.ts';
 import { type ServerContext } from './context.ts';
+import { hourlyDeadline } from './hourly-deadline.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { PublicationStore } from './publication-store.ts';
 import { type RetentionService } from './retention-service.ts';
@@ -159,7 +159,7 @@ export function confirmGraceBatch(
 		close?.graceUntil ??
 		(graceSeconds === undefined || graceSeconds === 0
 			? undefined
-			: isoTimestamp(new Date(Date.now() + graceSeconds * 1000)));
+			: hourlyDeadline(Date.now(), graceSeconds));
 	const retainUntil =
 		candidate === undefined || decision?.publicationId === undefined
 			? candidate

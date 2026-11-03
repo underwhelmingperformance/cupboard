@@ -751,7 +751,7 @@ describe('cache close', () => {
 				'a'.repeat(64),
 				'staging/pending-close',
 				testBase.toISOString(),
-				'2026-01-01T00:15:00.000Z'
+				'2026-01-01T01:15:00.000Z'
 			);
 		});
 		await lifecycle(token, 'close');
@@ -760,7 +760,8 @@ describe('cache close', () => {
 			`/cache/pr-1/${uploadMetadata({ fileSize: narBytes.byteLength, references: [] }).storePathHash}.narinfo`
 		);
 		expect(duringGrace.status).toBe(StatusCodes.OK);
-		vi.setSystemTime(new Date(testBase.getTime() + 61_000));
+		// Publication rounds the path's grace deadline up to 01:00.
+		vi.setSystemTime(new Date('2026-01-01T01:00:01.000Z'));
 		await withoutAlarmArming(async () => {
 			for (let pass = 0; pass < 8; pass += 1) {
 				await currentServer().runGarbageCollection();
@@ -769,9 +770,19 @@ describe('cache close', () => {
 				);
 			}
 		});
+		const afterGrace = await readFetch(
+			`/cache/pr-1/${uploadMetadata({ fileSize: narBytes.byteLength, references: [] }).storePathHash}.narinfo`
+		);
+		token = await initialise();
 		const waiting = await authorisedFetch('/caches/pr-1', token);
-		expect(waiting.status).toBe(StatusCodes.OK);
-		vi.setSystemTime(new Date(testBase.getTime() + 16 * 60_000));
+		expect({
+			afterGrace: afterGrace.status,
+			waiting: waiting.status
+		}).toStrictEqual({
+			afterGrace: StatusCodes.NOT_FOUND,
+			waiting: StatusCodes.OK
+		});
+		vi.setSystemTime(new Date('2026-01-01T01:16:00.000Z'));
 		token = await initialise();
 		await withoutAlarmArming(async () => {
 			for (let pass = 0; pass < 8; pass += 1) {
