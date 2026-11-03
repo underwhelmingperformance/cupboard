@@ -3,7 +3,6 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	storePathSchema,
 	type StorePathString
@@ -13,26 +12,12 @@ import {
 	scaiPredicateType
 } from '@cupboard/protocol/scai';
 import { createGithubReporter } from '@cupboard/reporter';
-import { initialiseTracing, stopTracing } from '@cupboard/shared/node-tracing';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
-import { currentHttpAttemptTraceHeaders } from '../../../packages/shared/src/fetch-observation.ts';
-import {
-	stalledResponse,
-	untilOnlyStalledRequestPending
-} from '../../../tests/support/stalled-request.ts';
-import {
-	CacheAccessProbeError,
-	CommittedSubjectInvalidError,
-	CommittedSubjectUnavailableError,
-	MissingInputError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError,
-	SubjectNarHashMovedError,
-	SubjectNotHeldError
-} from '../errors.ts';
+import { stalledResponse } from '../../../tests/support/stalled-request.ts';
+import { CacheAccessProbeError, MissingInputError } from '../errors.ts';
 import { parseChecksums } from '../release-install.ts';
 
 import {
@@ -41,8 +26,7 @@ import {
 	cacheAccess,
 	provenancedSubjects,
 	renderChecksums,
-	resolveAttestInputs,
-	type SelectedPathInfos
+	resolveAttestInputs
 } from './attest.ts';
 
 describe('cacheAccess', () => {
@@ -104,52 +88,16 @@ describe('renderChecksums', () => {
 	});
 });
 
-function attestPathInfo(storePath: StorePathString, digestByte: number) {
-	return {
-		storePath,
-		narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, digestByte))
-	};
-}
-
-function committedNarInfo(
-	storePath: StorePathString,
-	digestByte: number,
-	options?: { readonly deriver?: string }
-): string {
-	const deriver =
-		options === undefined ? path.basename(`${storePath}.drv`) : options.deriver;
-	const hash = NixSha256Hash.fromDigest(
-		Buffer.alloc(32, digestByte)
-	).toString();
-
-	return [
-		`StorePath: ${storePath}`,
-		`URL: nar/${path.basename(storePath)}.nar.zst`,
-		'Compression: zstd',
-		`FileHash: ${hash}`,
-		'FileSize: 1',
-		`NarHash: ${hash}`,
-		'NarSize: 1',
-		'References: ',
-		...(deriver === undefined ? [] : [`Deriver: ${deriver}`]),
-		''
-	].join('\n');
-}
-
-const alternateDerivers = [
-	{
-		name: 'another deriver',
-		options: { deriver: '4123456789abcdfghijklmnpqrsvwxyz-older.drv' }
-	},
-	{ name: 'no deriver', options: {} }
-];
-
 function requestUrl(input: Parameters<typeof fetch>[0]): string {
 	if (input instanceof URL) {
 		return input.href;
 	}
 
 	return typeof input === 'string' ? input : input.url;
+}
+
+function publicCache(): Promise<Response> {
+	return Promise.resolve(new Response());
 }
 
 describe('attestationSubjects', () => {
@@ -161,22 +109,19 @@ describe('attestationSubjects', () => {
 	);
 
 	it('returns only paths listed in the current build receipt', () => {
-		const partitioned = attestationSubjects(
-			[attestPathInfo(builtPath, 0xaa), attestPathInfo(substitutedPath, 0xbb)],
-			{
-				version: 2,
-				paths: [builtPath, substitutedPath],
-				subjects: [
-					{
-						storePath: builtPath,
-						narHash: 'aa'.repeat(32),
-						derivation: `${builtPath}.drv`,
-						attempt: 1,
-						attemptId: 'one'
-					}
-				]
-			}
-		);
+		const partitioned = attestationSubjects({
+			version: 2,
+			paths: [builtPath, substitutedPath],
+			subjects: [
+				{
+					storePath: builtPath,
+					narHash: 'aa'.repeat(32),
+					derivation: `${builtPath}.drv`,
+					attempt: 1,
+					attemptId: 'one'
+				}
+			]
+		});
 
 		expect(partitioned).toStrictEqual({
 			subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
@@ -184,24 +129,6 @@ describe('attestationSubjects', () => {
 			reproduced: [],
 			skipped: [substitutedPath]
 		});
-	});
-
-	it('rejects a NAR hash that changed after the receipt was written', () => {
-		expect(() =>
-			attestationSubjects([attestPathInfo(builtPath, 0xbb)], {
-				version: 2,
-				paths: [builtPath],
-				subjects: [
-					{
-						storePath: builtPath,
-						narHash: 'aa'.repeat(32),
-						derivation: `${builtPath}.drv`,
-						attempt: 1,
-						attemptId: 'one'
-					}
-				]
-			})
-		).toThrow(/NAR hash/u);
 	});
 });
 
@@ -231,8 +158,6 @@ function copiedSubject(storePath: StorePathString, digestByte: string) {
 		signatures: ['cache.example.org-1:c2ln']
 	};
 }
-
-const heldNowhere: SelectedPathInfos = new Map();
 
 describe('provenancedSubjects', () => {
 	const builtPath = storePathSchema.parse(
@@ -266,27 +191,20 @@ describe('provenancedSubjects', () => {
 		}
 	];
 
-	const holdsBuiltPath: SelectedPathInfos = new Map([
-		[builtPath, attestPathInfo(builtPath, 0xaa)]
-	]);
-
 	it.each(realisedHere)(
-		'attests $name whose metadata is committed at the destination',
+		'selects $name for build provenance only when the runner built it',
 		({ verification, isBuilt, machine }) => {
 			expect(
-				provenancedSubjects(
-					{
-						version: 3,
-						paths: [builtPath, substitutedPath],
-						subjects: [
-							{
-								...provenancedSubject(builtPath, 'aa', verification),
-								...(machine !== undefined && { machine })
-							}
-						]
-					},
-					holdsBuiltPath
-				)
+				provenancedSubjects({
+					version: 3,
+					paths: [builtPath, substitutedPath],
+					subjects: [
+						{
+							...provenancedSubject(builtPath, 'aa', verification),
+							...(machine !== undefined && { machine })
+						}
+					]
+				})
 			).toStrictEqual({
 				subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
 				built: isBuilt
@@ -330,24 +248,16 @@ describe('provenancedSubjects', () => {
 				metadataSource: 'https://cache.example.test/t/acme'
 			}
 		}
-	])('accepts identical destination content for $name', ({ subject }) => {
+	])('accepts a $name as a subject', ({ subject }) => {
 		const digest = { storePath: builtPath, sha256: 'aa'.repeat(32) };
 		const isLocal =
 			subject.origin === 'built' && subject.verification === 'local';
-		const held: SelectedPathInfos = new Map([
-			[
-				builtPath,
-				{
-					storePath: builtPath,
-					narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa))
-				}
-			]
-		]);
 		expect(
-			provenancedSubjects(
-				{ version: 3, paths: [builtPath], subjects: [subject] },
-				held
-			)
+			provenancedSubjects({
+				version: 3,
+				paths: [builtPath],
+				subjects: [subject]
+			})
 		).toStrictEqual({
 			subjects: [digest],
 			built: isLocal ? [digest] : [],
@@ -359,108 +269,9 @@ describe('provenancedSubjects', () => {
 		});
 	});
 
-	it.each(realisedHere)(
-		'refuses $name absent from the committed destination',
-		({ verification }) => {
-			let failure: unknown;
-
-			try {
-				provenancedSubjects(
-					{
-						version: 3,
-						paths: [builtPath],
-						subjects: [provenancedSubject(builtPath, 'aa', verification)]
-					},
-					heldNowhere
-				);
-			} catch (error) {
-				failure = error;
-			}
-
-			expect(failure).toBeInstanceOf(SubjectNotHeldError);
-
-			if (failure instanceof SubjectNotHeldError) {
-				expect({
-					storePath: failure.storePath,
-					origin: failure.origin
-				}).toStrictEqual({ storePath: builtPath, origin: 'built' });
-			}
-		}
-	);
-
-	it.each([
-		{
-			name: 'a NAR hash that moved since the receipt was written',
-			digestByte: 0xcc,
-			expected: SubjectNarHashMovedError
-		}
-	])(
-		'refuses attestation when destination metadata contains $name',
-		({ digestByte, expected }) => {
-			const held: SelectedPathInfos = new Map([
-				[
-					builtPath,
-					{
-						storePath: builtPath,
-						narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, digestByte))
-					}
-				]
-			]);
-
-			expect(() =>
-				provenancedSubjects(
-					{
-						version: 3,
-						paths: [builtPath],
-						subjects: [provenancedSubject(builtPath, 'aa', 'local')]
-					},
-					held
-				)
-			).toThrow(expected);
-		}
-	);
-
-	it('refuses a build-store subject absent from the explicitly selected store', () => {
-		expect(() =>
-			provenancedSubjects(
-				{
-					version: 3,
-					paths: [remotePath],
-					subjects: [provenancedSubject(remotePath, 'bb', 'build-store')]
-				},
-				heldNowhere
-			)
-		).toThrow(SubjectNotHeldError);
-	});
-
-	it('accepts a build-store subject present in the selected destination cache', () => {
-		const heldRemotely: SelectedPathInfos = new Map([
-			[remotePath, attestPathInfo(remotePath, 0xbb)]
-		]);
-
-		expect(
-			provenancedSubjects(
-				{
-					version: 3,
-					paths: [remotePath],
-					subjects: [provenancedSubject(remotePath, 'bb', 'build-store')]
-				},
-				heldRemotely
-			)
-		).toStrictEqual({
-			subjects: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
-			built: [],
-			reproduced: [],
-			skipped: []
-		});
-	});
-
 	it.each(['local', 'build-store'] as const)(
 		'accepts a remote subject with %s verification without selecting it for build provenance',
 		(verification) => {
-			const holdsRemotePath: SelectedPathInfos = new Map([
-				[remotePath, attestPathInfo(remotePath, 0xbb)]
-			]);
 			const receipt = {
 				version: 3 as const,
 				paths: [remotePath],
@@ -477,7 +288,7 @@ describe('provenancedSubjects', () => {
 				]
 			};
 
-			expect(provenancedSubjects(receipt, holdsRemotePath)).toStrictEqual({
+			expect(provenancedSubjects(receipt)).toStrictEqual({
 				subjects: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
 				built: [],
 				reproduced: [],
@@ -487,23 +298,15 @@ describe('provenancedSubjects', () => {
 	);
 
 	it('accepts a copied path as a subject but leaves it out of the built list', () => {
-		const holdsBothPaths: SelectedPathInfos = new Map([
-			[builtPath, attestPathInfo(builtPath, 0xaa)],
-			[substitutedPath, attestPathInfo(substitutedPath, 0xdd)]
-		]);
-
 		expect(
-			provenancedSubjects(
-				{
-					version: 3,
-					paths: [builtPath, substitutedPath],
-					subjects: [
-						provenancedSubject(builtPath, 'aa', 'local'),
-						copiedSubject(substitutedPath, 'dd')
-					]
-				},
-				holdsBothPaths
-			)
+			provenancedSubjects({
+				version: 3,
+				paths: [builtPath, substitutedPath],
+				subjects: [
+					provenancedSubject(builtPath, 'aa', 'local'),
+					copiedSubject(substitutedPath, 'dd')
+				]
+			})
 		).toStrictEqual({
 			subjects: [
 				{ storePath: builtPath, sha256: 'aa'.repeat(32) },
@@ -516,9 +319,6 @@ describe('provenancedSubjects', () => {
 	});
 
 	it('accepts a copied subject without a recorded derivation', () => {
-		const held: SelectedPathInfos = new Map([
-			[substitutedPath, attestPathInfo(substitutedPath, 0xdd)]
-		]);
 		const subject = {
 			origin: 'copied' as const,
 			storePath: substitutedPath,
@@ -527,10 +327,11 @@ describe('provenancedSubjects', () => {
 		};
 
 		expect(
-			provenancedSubjects(
-				{ version: 3, paths: [substitutedPath], subjects: [subject] },
-				held
-			)
+			provenancedSubjects({
+				version: 3,
+				paths: [substitutedPath],
+				subjects: [subject]
+			})
 		).toStrictEqual({
 			subjects: [{ storePath: substitutedPath, sha256: 'dd'.repeat(32) }],
 			built: [],
@@ -541,14 +342,11 @@ describe('provenancedSubjects', () => {
 
 	it('collects a verification rebuild as a reproduced subject', () => {
 		expect(
-			provenancedSubjects(
-				{
-					version: 3,
-					paths: [builtPath],
-					subjects: [provenancedSubject(builtPath, 'aa', 'local', true)]
-				},
-				holdsBuiltPath
-			)
+			provenancedSubjects({
+				version: 3,
+				paths: [builtPath],
+				subjects: [provenancedSubject(builtPath, 'aa', 'local', true)]
+			})
 		).toStrictEqual({
 			subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
 			built: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
@@ -572,9 +370,7 @@ describe('resolveAttestInputs', () => {
 			{
 				receiptFile,
 				url: 'https://cache.example.test/t/acme',
-				cache: 'builds',
-				readUser: 'reader',
-				readPassword: 'secret'
+				cache: 'builds'
 			},
 			{ RUNNER_TEMP: '/runner/temp' }
 		);
@@ -588,34 +384,9 @@ describe('resolveAttestInputs', () => {
 			receiptFile,
 			url: new URL('https://cache.example.test/t/acme'),
 			cache: { kind: 'named', name: 'builds' },
-			readUser: 'reader',
-			readPassword: 'secret',
 			checksumsFile: path.join(directory, 'subjects.txt'),
 			builtChecksumsFile: path.join(directory, 'built-subjects.txt'),
 			predicateFile: path.join(directory, 'attribute-report.json')
-		});
-	});
-
-	it('reads the read password from the action environment', () => {
-		const inputs = resolveAttestInputs(
-			{
-				receiptFile,
-				url: 'https://cache.example.test/t/acme',
-				readUser: 'reader',
-				checksumsFile: '/runner/temp/subjects.txt'
-			},
-			{ RUNNER_TEMP: '/runner/temp', READ_PASSWORD: 'secret' }
-		);
-
-		expect(inputs).toStrictEqual({
-			receiptFile,
-			url: new URL('https://cache.example.test/t/acme'),
-			cache: { kind: 'default' },
-			readUser: 'reader',
-			readPassword: 'secret',
-			checksumsFile: '/runner/temp/subjects.txt',
-			builtChecksumsFile: '/runner/temp/built-subjects.txt',
-			predicateFile: '/runner/temp/attribute-report.json'
 		});
 	});
 
@@ -682,8 +453,6 @@ describe('resolveAttestInputs', () => {
 			receiptFile,
 			url: new URL('https://cache.example.test/t/acme'),
 			cache: { kind: 'default' },
-			readUser: '',
-			readPassword: '',
 			checksumsFile: '/somewhere/subjects.txt',
 			builtChecksumsFile: '/somewhere/built-subjects.txt',
 			predicateFile: '/somewhere/attribute-report.json'
@@ -719,31 +488,6 @@ describe('resolveAttestInputs', () => {
 		).toThrow(MissingInputError);
 	});
 
-	it.each([
-		{
-			name: 'read-user alone',
-			readUser: 'reader',
-			errorType: ReadPasswordRequiredError
-		},
-		{
-			name: 'read-password alone',
-			readPassword: 'secret',
-			errorType: ReadUserRequiredError
-		}
-	])('refuses $name', ({ readUser, readPassword, errorType }) => {
-		expect(() =>
-			resolveAttestInputs(
-				{
-					receiptFile,
-					url: 'https://cache.example.test/t/acme',
-					readUser,
-					readPassword
-				},
-				{ RUNNER_TEMP: '/runner/temp' }
-			)
-		).toThrow(errorType);
-	});
-
 	it('does not require RUNNER_TEMP when the checksums file is explicit', () => {
 		const inputs = resolveAttestInputs(
 			{
@@ -758,7 +502,7 @@ describe('resolveAttestInputs', () => {
 	});
 });
 
-describe('attestAction committed cache verification', () => {
+describe('attestAction', () => {
 	const remotePath = storePathSchema.parse(
 		'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
 	);
@@ -777,16 +521,25 @@ describe('attestAction committed cache verification', () => {
 		return receiptFile;
 	}
 
-	it('resolves committed metadata without selecting the remote build for SLSA', async () => {
+	it('resolves the subjects from the receipt without reading their narinfo', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
-		const receiptFile = await receiptFileIn(directory);
+		const builtPath = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+		);
+		const receiptFile = path.join(directory, 'receipt.json');
 		const checksumsFile = path.join(directory, 'subjects.txt');
-		const requests: {
-			url: string;
-			authorization?: string;
-			propagated: boolean;
-		}[] = [];
-		initialiseTracing();
+		const requests: string[] = [];
+		await writeFile(
+			receiptFile,
+			JSON.stringify({
+				version: 3,
+				paths: [builtPath, remotePath],
+				subjects: [
+					provenancedSubject(builtPath, 'aa', 'local'),
+					provenancedSubject(remotePath, 'bb', 'build-store')
+				]
+			})
+		);
 
 		try {
 			await attestAction(
@@ -794,9 +547,7 @@ describe('attestAction committed cache verification', () => {
 					receiptFile,
 					checksumsFile,
 					url: 'https://cache.example.test/t/acme',
-					cache: 'builds',
-					readUser: 'reader',
-					readPassword: 'secret'
+					cache: 'builds'
 				},
 				{
 					RUNNER_TEMP: directory,
@@ -804,25 +555,10 @@ describe('attestAction committed cache verification', () => {
 				},
 				createGithubReporter(),
 				{
-					fetch: (input, init) => {
-						const url = requestUrl(input);
-						const origin = new URL(url).origin;
-						const traceparent =
-							currentHttpAttemptTraceHeaders(origin)?.traceparent ?? '';
-						requests.push({
-							url: requestUrl(input),
-							propagated: /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/u.test(
-								traceparent
-							),
-							authorization:
-								new Headers(init?.headers).get('authorization') ?? undefined
-						});
+					fetch: (input) => {
+						requests.push(requestUrl(input));
 
-						return Promise.resolve(
-							requestUrl(input).includes('/attestations/')
-								? new Response(undefined, { status: StatusCodes.NOT_FOUND })
-								: new Response(committedNarInfo(remotePath, 0xbb))
-						);
+						return Promise.resolve(new Response());
 					}
 				}
 			);
@@ -836,150 +572,14 @@ describe('attestAction committed cache verification', () => {
 				)
 			}).toStrictEqual({
 				requests: [
-					{
-						url: 'https://cache.example.test/t/acme/cache/builds/nix-cache-info',
-						propagated: true,
-						authorization: undefined
-					},
-					{
-						url: 'https://cache.example.test/t/acme/cache/builds/3123456789abcdfghijklmnpqrsvwxyz.narinfo',
-						propagated: true,
-						authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
-					}
+					'https://cache.example.test/t/acme/cache/builds/nix-cache-info'
 				],
-				checksums: `${'bb'.repeat(32)}  ${path.basename(remotePath)}\n`,
-				builtChecksums: '\n'
+				checksums:
+					`${'aa'.repeat(32)}  ${path.basename(builtPath)}\n` +
+					`${'bb'.repeat(32)}  ${path.basename(remotePath)}\n`,
+				builtChecksums: `${'aa'.repeat(32)}  ${path.basename(builtPath)}\n`
 			});
 		} finally {
-			await stopTracing();
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-
-	it('reads a committed narinfo again after it hangs past the deadline', async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
-		const receiptFile = await receiptFileIn(directory);
-		const checksumsFile = path.join(directory, 'subjects.txt');
-		const narInfoUrl =
-			'https://cache.example.test/t/acme/cache/builds/3123456789abcdfghijklmnpqrsvwxyz.narinfo';
-		const requests: string[] = [];
-
-		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-		try {
-			const pending = attestAction(
-				{
-					receiptFile,
-					checksumsFile,
-					url: 'https://cache.example.test/t/acme',
-					cache: 'builds'
-				},
-				{
-					RUNNER_TEMP: directory,
-					GITHUB_OUTPUT: path.join(directory, 'output')
-				},
-				createGithubReporter(),
-				{
-					fetch: (input, init) => {
-						const url = requestUrl(input);
-						requests.push(url);
-						if (
-							url === narInfoUrl &&
-							requests.indexOf(url) === requests.length - 1
-						) {
-							return stalledResponse(init?.signal);
-						}
-
-						return Promise.resolve(
-							url.includes('/attestations/')
-								? new Response(undefined, { status: StatusCodes.NOT_FOUND })
-								: new Response(committedNarInfo(remotePath, 0xbb))
-						);
-					}
-				}
-			);
-			const settled = expect(pending).resolves.toBeUndefined();
-			await untilOnlyStalledRequestPending(() => requests.includes(narInfoUrl));
-			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
-			await settled;
-
-			expect({
-				requests,
-				checksums: await readFile(checksumsFile, 'utf8')
-			}).toStrictEqual({
-				requests: [
-					'https://cache.example.test/t/acme/cache/builds/nix-cache-info',
-					narInfoUrl,
-					narInfoUrl
-				],
-				checksums: `${'bb'.repeat(32)}  ${path.basename(remotePath)}\n`
-			});
-		} finally {
-			vi.useRealTimers();
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-
-	it('uses a renewed wrapper credential for committed metadata only', async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
-		const receiptFile = await receiptFileIn(directory);
-		const netrcFile = path.join(directory, 'netrc');
-		const requests: { url: string; authorization: string | undefined }[] = [];
-
-		try {
-			await writeFile(
-				netrcFile,
-				'machine cache.example.test login cupboard-oidc password token\n'
-			);
-			vi.stubEnv('NIX_CONFIG', `netrc-file = ${netrcFile}`);
-
-			await attestAction(
-				{
-					receiptFile,
-					checksumsFile: path.join(directory, 'subjects.txt'),
-					url: 'https://cache.example.test/t/acme',
-					cache: 'builds'
-				},
-				{
-					RUNNER_TEMP: directory,
-					GITHUB_OUTPUT: path.join(directory, 'output')
-				},
-				createGithubReporter(),
-				{
-					fetch: (input, init) => {
-						const url = requestUrl(input);
-						requests.push({
-							url,
-							authorization:
-								new Headers(init?.headers).get('authorization') ?? undefined
-						});
-
-						if (url.includes('/attestations/')) {
-							return Promise.resolve(
-								new Response(undefined, { status: StatusCodes.NOT_FOUND })
-							);
-						}
-
-						return Promise.resolve(
-							url.endsWith('/nix-cache-info')
-								? new Response(undefined, { status: StatusCodes.UNAUTHORIZED })
-								: new Response(committedNarInfo(remotePath, 0xbb))
-						);
-					}
-				}
-			);
-
-			expect(requests).toStrictEqual([
-				{
-					url: 'https://cache.example.test/t/acme/cache/builds/nix-cache-info',
-					authorization: undefined
-				},
-				{
-					url: 'https://cache.example.test/t/acme/cache/builds/3123456789abcdfghijklmnpqrsvwxyz.narinfo',
-					authorization: `Basic ${Buffer.from('cupboard-oidc:token').toString('base64')}`
-				}
-			]);
-		} finally {
-			vi.unstubAllEnvs();
 			await rm(directory, { recursive: true, force: true });
 		}
 	});
@@ -1016,14 +616,7 @@ describe('attestAction committed cache verification', () => {
 					GITHUB_RUN_ATTEMPT: '1'
 				},
 				createGithubReporter(),
-				{
-					fetch: (input) =>
-						Promise.resolve(
-							requestUrl(input).includes('/attestations/')
-								? new Response(undefined, { status: StatusCodes.NOT_FOUND })
-								: new Response(committedNarInfo(remotePath, 0xbb))
-						)
-				}
+				{ fetch: publicCache }
 			);
 
 			const outputs = await readFile(outputFile, 'utf8');
@@ -1045,16 +638,9 @@ describe('attestAction committed cache verification', () => {
 		}
 	});
 
-	it.each(
-		[false, true].flatMap((hasAdditionalSubject) =>
-			alternateDerivers.map((metadata) => ({
-				hasAdditionalSubject,
-				...metadata
-			}))
-		)
-	)(
-		'preserves the reproduced derivation with $name and additional subject $hasAdditionalSubject',
-		async ({ hasAdditionalSubject, options }) => {
+	it.each([false, true])(
+		'preserves the reproduced derivation with additional subject %s',
+		async (hasAdditionalSubject) => {
 			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
 			const additionalPath = storePathSchema.parse(
 				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -1087,20 +673,7 @@ describe('attestAction committed cache verification', () => {
 					},
 					{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
 					createGithubReporter(),
-					{
-						fetch: (input) =>
-							Promise.resolve(
-								requestUrl(input).includes('/attestations/')
-									? new Response(undefined, { status: StatusCodes.NOT_FOUND })
-									: new Response(
-											requestUrl(input).includes(
-												'0123456789abcdfghijklmnpqrsvwxyz'
-											)
-												? committedNarInfo(additionalPath, 0xcc)
-												: committedNarInfo(remotePath, 0xbb, options)
-										)
-							)
-					}
+					{ fetch: publicCache }
 				);
 
 				const outputs = await readFile(outputFile, 'utf8');
@@ -1178,7 +751,7 @@ describe('attestAction committed cache verification', () => {
 										},
 										{ headers: { 'content-type': 'application/json' } }
 									)
-								: new Response(committedNarInfo(remotePath, 0xbb))
+								: new Response()
 						);
 					}
 				}
@@ -1199,8 +772,7 @@ describe('attestAction committed cache verification', () => {
 				outputs: ['predicate-file=', 'predicate-type='],
 				predicateWritten: false,
 				requests: [
-					'https://cache.example.test/t/acme/cache/builds/nix-cache-info',
-					'https://cache.example.test/t/acme/cache/builds/3123456789abcdfghijklmnpqrsvwxyz.narinfo'
+					'https://cache.example.test/t/acme/cache/builds/nix-cache-info'
 				]
 			});
 		} finally {
@@ -1233,23 +805,7 @@ describe('attestAction committed cache verification', () => {
 					{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
 					createGithubReporter(),
 					{
-						fetch: (input) => {
-							const url = requestUrl(input);
-
-							if (url.endsWith('/nix-cache-info')) {
-								return Promise.resolve(new Response(undefined, { status }));
-							}
-
-							if (url.includes('/attestations/')) {
-								return Promise.resolve(
-									new Response(undefined, { status: StatusCodes.NOT_FOUND })
-								);
-							}
-
-							return Promise.resolve(
-								new Response(committedNarInfo(remotePath, 0xbb))
-							);
-						}
+						fetch: () => Promise.resolve(new Response(undefined, { status }))
 					}
 				);
 
@@ -1293,179 +849,48 @@ describe('attestAction committed cache verification', () => {
 		}
 	});
 
-	it.each(alternateDerivers)(
-		'accepts a version 2 receipt with $name without a reproduction report',
-		async ({ options }) => {
-			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
-			const receiptFile = path.join(directory, 'receipt.json');
-			const predicateFile = path.join(directory, 'attribute-report.json');
-			const outputFile = path.join(directory, 'output');
-			await writeFile(
-				receiptFile,
-				JSON.stringify({
-					version: 2,
-					paths: [remotePath],
-					subjects: [
-						{
-							storePath: remotePath,
-							narHash: 'bb'.repeat(32),
-							derivation: `${remotePath}.drv`,
-							attempt: 1,
-							attemptId: 'attempt-1'
-						}
-					]
-				})
+	it('accepts a version 2 receipt without a reproduction report', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = path.join(directory, 'receipt.json');
+		const predicateFile = path.join(directory, 'attribute-report.json');
+		const outputFile = path.join(directory, 'output');
+		await writeFile(
+			receiptFile,
+			JSON.stringify({
+				version: 2,
+				paths: [remotePath],
+				subjects: [
+					{
+						storePath: remotePath,
+						narHash: 'bb'.repeat(32),
+						derivation: `${remotePath}.drv`,
+						attempt: 1,
+						attemptId: 'attempt-1'
+					}
+				]
+			})
+		);
+
+		try {
+			await attestAction(
+				{
+					receiptFile,
+					checksumsFile: path.join(directory, 'subjects.txt'),
+					url: 'https://cache.example.test/t/acme'
+				},
+				{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
+				createGithubReporter(),
+				{ fetch: publicCache }
 			);
 
-			try {
-				await attestAction(
-					{
-						receiptFile,
-						checksumsFile: path.join(directory, 'subjects.txt'),
-						url: 'https://cache.example.test/t/acme'
-					},
-					{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
-					createGithubReporter(),
-					{
-						fetch: (input) =>
-							Promise.resolve(
-								requestUrl(input).includes('/attestations/')
-									? new Response(undefined, { status: StatusCodes.NOT_FOUND })
-									: new Response(committedNarInfo(remotePath, 0xbb, options))
-							)
-					}
-				);
+			const outputs = await readFile(outputFile, 'utf8');
 
-				const outputs = await readFile(outputFile, 'utf8');
-
-				expect({
-					predicateLine: outputs
-						.split('\n')
-						.find((line) => line.startsWith('predicate-file=')),
-					written: existsSync(predicateFile)
-				}).toStrictEqual({ predicateLine: 'predicate-file=', written: false });
-			} finally {
-				await rm(directory, { recursive: true, force: true });
-			}
-		}
-	);
-
-	it('refuses a subject absent from the committed destination', async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
-		const receiptFile = await receiptFileIn(directory);
-
-		try {
-			await expect(
-				attestAction(
-					{
-						receiptFile,
-						checksumsFile: path.join(directory, 'subjects.txt'),
-						url: 'https://cache.example.test/t/acme'
-					},
-					{ RUNNER_TEMP: directory },
-					createGithubReporter(),
-					{
-						fetch: (input) =>
-							Promise.resolve(
-								requestUrl(input).endsWith('/nix-cache-info')
-									? new Response()
-									: new Response(undefined, { status: StatusCodes.NOT_FOUND })
-							)
-					}
-				)
-			).rejects.toBeInstanceOf(CommittedSubjectUnavailableError);
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-
-	it('reports a cache authentication refusal', async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
-		const receiptFile = await receiptFileIn(directory);
-
-		try {
-			let failure: unknown;
-
-			try {
-				await attestAction(
-					{
-						receiptFile,
-						checksumsFile: path.join(directory, 'subjects.txt'),
-						url: 'https://cache.example.test/t/acme',
-						readUser: 'reader',
-						readPassword: 'wrong'
-					},
-					{ RUNNER_TEMP: directory },
-					createGithubReporter(),
-					{
-						fetch: (input) =>
-							Promise.resolve(
-								requestUrl(input).endsWith('/nix-cache-info')
-									? new Response()
-									: new Response(undefined, {
-											status: StatusCodes.UNAUTHORIZED
-										})
-							)
-					}
-				);
-			} catch (error) {
-				failure = error;
-			}
-
-			expect(failure).toBeInstanceOf(CommittedSubjectUnavailableError);
-
-			if (failure instanceof CommittedSubjectUnavailableError) {
-				expect({
-					storePath: failure.storePath,
-					status: failure.status
-				}).toStrictEqual({
-					storePath: remotePath,
-					status: StatusCodes.UNAUTHORIZED
-				});
-			}
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-
-	it.each([
-		{
-			name: 'malformed metadata',
-			body: 'not a narinfo',
-			expected: CommittedSubjectInvalidError
-		},
-		{
-			name: 'metadata for another path',
-			body: committedNarInfo(
-				storePathSchema.parse(
-					'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-other'
-				),
-				0xbb
-			),
-			expected: CommittedSubjectInvalidError
-		},
-		{
-			name: 'a moved NAR hash',
-			body: committedNarInfo(remotePath, 0xaa),
-			expected: SubjectNarHashMovedError
-		}
-	])('refuses $name from the destination cache', async ({ body, expected }) => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
-		const receiptFile = await receiptFileIn(directory);
-
-		try {
-			await expect(
-				attestAction(
-					{
-						receiptFile,
-						checksumsFile: path.join(directory, 'subjects.txt'),
-						url: 'https://cache.example.test/t/acme'
-					},
-					{ RUNNER_TEMP: directory },
-					createGithubReporter(),
-					{ fetch: () => Promise.resolve(new Response(body)) }
-				)
-			).rejects.toBeInstanceOf(expected);
+			expect({
+				predicateLine: outputs
+					.split('\n')
+					.find((line) => line.startsWith('predicate-file=')),
+				written: existsSync(predicateFile)
+			}).toStrictEqual({ predicateLine: 'predicate-file=', written: false });
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}

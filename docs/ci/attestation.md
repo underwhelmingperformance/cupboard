@@ -53,26 +53,17 @@ Current servers support pages of up to 32 paths. The client uses bounded
 individual list reads when an older server does not advertise batch discovery.
 Authentication and storage failures fail the status check.
 
-Both publication workflows report coverage after publication and attachment,
-including when signing is disabled or produces no bundles. The report compares
-stored bundle digests with the manifest from the signing step. It lists paths
-with fresh bundles separately from paths with other stored evidence. A path with
-both kinds of evidence appears only in the fresh group. The coverage categories
-are exclusive, so their counts add up to the published path count. Copied paths
-without evidence are reported as fetched upstream and not attested. Other paths
-without evidence are reported separately. All paths in the receipt are checked,
-including older receipts with build subjects for only some paths. The report
-compares the current NAR hash with the receipt's expected hash wherever a
-subject records that hash.
+The publication workflows report only the signing and attachment results of the
+current run. They do not read the evidence that earlier runs stored for the
+published paths. Run `cupboard attest status` to audit that evidence.
 
 Discovery reports stored descriptors. Use `attest verify` to check the bundle's
 signature, signer, issuer, predicate and NAR subject. Stored evidence does not
 change build selection or suppress provenance for a fresh local rebuild.
 
 The signing summary reports the actual Sigstore instance, subject count, GitHub
-attestation links and Rekor log indices for the produced bundles. The coverage
-summary links to stored bundles; discovery does not verify those bundles. Long
-lists show at most 20 entries. The machine results retain every entry.
+attestation links and Rekor log indices for the produced bundles. Long lists
+show at most 20 entries. The machine results retain every entry.
 
 ## How a bundle refers to a store path
 
@@ -142,7 +133,12 @@ bundle because the signer cannot infer how arbitrary assertions apply to subject
 subsets. A single-subject report can be partitioned into non-empty assertion
 lists without changing its subjects or evidence. Use `--receipt-file` to
 generate reproduction reports with known assertion associations, or
-`--predicate-file` and `--predicate-type` to sign a supplied report.
+`--predicate-file` and `--predicate-type` to sign a supplied report. Run the
+internal `attest-check` command on the statement subjects first. `attest-sign`
+refuses to sign a statement with a subject that `attest-check` has not found in
+the destination cache with the same store path and NAR hash. A supplied
+predicate covers every accepted subject, so the `--checksums-file` given to
+`attest-check` must list all of them. The list of built subjects is not enough.
 
 [SCAI]: https://github.com/in-toto/attestation/blob/main/spec/predicates/scai.md
 
@@ -151,12 +147,15 @@ generate reproduction reports with known assertion associations, or
 1. The build step writes a **receipt**, which records how the requested outputs
    became available.
 2. The run publishes the paths.
-3. `actions/attest` checks the destination cache's narinfo for each subject
-   recorded in the receipt. If a subject is missing, or its NAR hash or recorded
-   deriver doesn't match the receipt, the step fails. Otherwise, the step signs
-   build provenance for builds observed on the runner and an attribute report
-   recording successful local verification rebuilds. The reusable workflows
-   enable this with `attest: true`, which is the default.
+3. `actions/attest` selects the subjects for build provenance and for an
+   attribute report recording successful local verification rebuilds. Build
+   provenance covers the builds observed on the runner. The action checks the
+   destination cache's narinfo for each selected subject. If a subject is
+   missing, or its store path or NAR hash doesn't match the receipt, the step
+   fails before it signs anything. Otherwise, the step signs the statements.
+   Receipt paths outside these statements, such as copied dependencies, are not
+   checked. The reusable workflows enable this with `attest: true`, which is the
+   default.
 4. `actions/attest-attach` attaches the bundles to the paths in the cache.
 
 When the server supports grouped attachment, the CLI uploads each distinct

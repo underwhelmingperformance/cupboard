@@ -358,7 +358,7 @@ uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
 
 ### actions/attest
 
-Signs SLSA provenance for paths built on the runner in this run. Before signing, the action checks each path and NAR hash against the destination narinfo. Build provenance comes from the current job's receipt.
+Signs SLSA provenance for paths built on the runner in this run. Before signing, the action checks the path and NAR hash of each signed subject against the destination narinfo. Build provenance comes from the current job's receipt.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
@@ -373,7 +373,7 @@ uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
 | `checksums-file` |  | Where to write the checksums of every accepted receipt path. Defaults to a file in a unique directory under RUNNER_TEMP. |
 | `built-checksums-file` |  | Where to write the checksums of the paths that the job built. The build-provenance attestations cover these paths. Defaults to a file next to the checksums file. |
 | `predicate-file` |  | Where to write the SCAI reproduction report. Empty when no local verification rebuild succeeded. Defaults to a file next to the checksums file. |
-| `url` | **required** | Tenant URL of the destination. Before signing, the action checks every path against the narinfo in this tenant's cache. |
+| `url` | **required** | Tenant URL of the destination. Before signing, the action checks each signed subject against the narinfo in this tenant's cache. |
 | `cache` |  | Named destination cache. Leave empty to use the default cache. |
 | `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
 | `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
@@ -426,6 +426,30 @@ uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
 | `bundle` |  | Bundle files from actions/attest, one per line. Empty lines are ignored. |
 | `bundles-file` |  | File containing bundle paths, one per line. |
 
+### actions/attest-status
+
+Reports stored attestation coverage for every published receipt path. Use it to audit stored evidence. The reusable workflows do not run it. When given the manifest of bundles signed in this run, the report distinguishes them from previously stored evidence. The report reads stored metadata and does not verify signatures.
+
+```yaml
+uses: underwhelmingperformance/cupboard/actions/attest-status@<commit> # vX.Y.Z
+```
+
+#### Inputs
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `url` | **required** | Destination tenant URL. |
+| `cache` |  | Named destination cache. Leave empty for the default cache. |
+| `cupboard-path` | **required** | Path to the cupboard executable installed by actions/setup. |
+| `receipt-file` | **required** | Receipt for paths published by this run. |
+| `bundles-file` |  | Manifest of bundles signed in this run. Leave empty when signing was skipped. |
+| `read-session-target` |  | Setup output for OIDC read access. |
+| `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
+| `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
+| `read-session-view` |  | Setup output for an additional reuse view. |
+| `read-user` |  | Destination cache read user. |
+| `read-password` |  | Destination cache read password. |
+
 ## Internal actions
 
-`actions/install-nix`, `actions/evaluate-targets`, `actions/plan`, `actions/build-cohort`, `actions/attest-status`, `actions/prepare`, `actions/prepare-builders`, `actions/resolve-cupboard`, `actions/publication-settings` are building blocks of the reusable workflows. Their inputs can change in any release, so don't call them directly. Use the reusable workflows instead.
+`actions/install-nix`, `actions/evaluate-targets`, `actions/plan`, `actions/build-cohort`, `actions/prepare`, `actions/prepare-builders`, `actions/resolve-cupboard`, `actions/publication-settings` are building blocks of the reusable workflows. Their inputs can change in any release, so don't call them directly. Use the reusable workflows instead.

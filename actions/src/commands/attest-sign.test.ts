@@ -23,6 +23,7 @@ import {
 	AttestationSigningError,
 	AttestationSubjectNotAcceptedError,
 	AttestationSubjectsMissingError,
+	AttestationSubjectUnverifiedError,
 	BooleanInputInvalidError,
 	BuildOriginSubjectMissingError,
 	ChoiceInputInvalidError,
@@ -186,11 +187,13 @@ function memoryIo(files: Workspace): AttestSignIo {
 	};
 }
 
+// The action verifies the built subjects. A custom predicate covers every
+// accepted subject, so its caller verifies the whole checksums file.
 function options(
 	files: Workspace,
 	overrides: Partial<AttestSignOptions> = {}
 ): AttestSignOptions {
-	return {
+	const given = {
 		checksumsFile: files.checksumsFile,
 		builtChecksumsFile: files.builtChecksumsFile,
 		predicateFile: files.predicateFile,
@@ -198,6 +201,14 @@ function options(
 		githubToken: 'token',
 		destinationAccess: 'public',
 		...overrides
+	};
+
+	return {
+		verifiedChecksumsFile:
+			given.predicateFile === ''
+				? files.builtChecksumsFile
+				: files.checksumsFile,
+		...given
 	};
 }
 
@@ -320,6 +331,7 @@ describe('resolveAttestSignInputs', () => {
 			resolveAttestSignInputs({
 				checksumsFile: '/runner/temp/inputs/subjects.txt',
 				builtChecksumsFile: '/runner/temp/inputs/built-subjects.txt',
+				verifiedChecksumsFile: '/runner/temp/inputs/verified-subjects.txt',
 				outputDirectory: '/runner/temp/signing/first',
 				inlineBundles: 'false',
 				githubToken: 'token',
@@ -330,6 +342,7 @@ describe('resolveAttestSignInputs', () => {
 			shouldEmitInlineBundles: false,
 			checksumsFile: '/runner/temp/inputs/subjects.txt',
 			builtChecksumsFile: '/runner/temp/inputs/built-subjects.txt',
+			verifiedChecksumsFile: '/runner/temp/inputs/verified-subjects.txt',
 			signedChecksumsFile: '/runner/temp/signing/first/signed-subjects.txt',
 			predicateFile: '',
 			predicateType: '',
@@ -346,6 +359,8 @@ describe('resolveAttestSignInputs', () => {
 			resolveAttestSignInputs({
 				checksumsFile: '/runner/temp/attestations/subjects.txt',
 				builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
+				verifiedChecksumsFile:
+					'/runner/temp/attestations/verified-subjects.txt',
 				predicateFile: '/runner/temp/attestations/build-origin.json',
 				predicateType: buildOriginPredicateType,
 				githubToken: 'token',
@@ -358,6 +373,7 @@ describe('resolveAttestSignInputs', () => {
 			bundlesFile: '',
 			checksumsFile: '/runner/temp/attestations/subjects.txt',
 			builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
+			verifiedChecksumsFile: '/runner/temp/attestations/verified-subjects.txt',
 			predicateFile: '/runner/temp/attestations/build-origin.json',
 			predicateType: buildOriginPredicateType,
 			githubToken: 'token',
@@ -370,6 +386,7 @@ describe('resolveAttestSignInputs', () => {
 	const signingInputs = {
 		checksumsFile: '/runner/temp/attestations/subjects.txt',
 		builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
+		verifiedChecksumsFile: '/runner/temp/attestations/verified-subjects.txt',
 		githubToken: 'token'
 	};
 
@@ -481,10 +498,20 @@ describe('resolveAttestSignInputs', () => {
 			expected: MissingInputError
 		},
 		{
+			missing: 'verified-checksums-file',
+			options: {
+				checksumsFile: '/runner/temp/subjects.txt',
+				builtChecksumsFile: '/runner/temp/built-subjects.txt',
+				githubToken: 'token'
+			},
+			expected: MissingInputError
+		},
+		{
 			missing: 'github-token',
 			options: {
 				checksumsFile: '/runner/temp/subjects.txt',
-				builtChecksumsFile: '/runner/temp/built-subjects.txt'
+				builtChecksumsFile: '/runner/temp/built-subjects.txt',
+				verifiedChecksumsFile: '/runner/temp/verified-subjects.txt'
 			},
 			expected: MissingInputError
 		},
@@ -493,6 +520,7 @@ describe('resolveAttestSignInputs', () => {
 			options: {
 				checksumsFile: '/runner/temp/subjects.txt',
 				builtChecksumsFile: '/runner/temp/built-subjects.txt',
+				verifiedChecksumsFile: '/runner/temp/verified-subjects.txt',
 				predicateFile: '/runner/temp/build-origin.json',
 				githubToken: 'token'
 			},
@@ -716,6 +744,10 @@ describe('attestSignAction', () => {
 				}))
 			})
 		);
+		files.textFiles.set(
+			files.builtChecksumsFile,
+			`${appDigest}  ${appName}\n${runtimeDigest}  ${runtimeName}\n`
+		);
 
 		await attestSignAction(
 			options(files, {
@@ -728,6 +760,10 @@ describe('attestSignAction', () => {
 			signing.dependencies
 		);
 
+		const provenance = {
+			predicateType: 'https://slsa.dev/provenance/v1',
+			predicate: { buildDefinition: { buildType: 'workflow' } }
+		};
 		expect({
 			records,
 			signedChecksums: files.textFiles.get(files.signedChecksumsFile)
@@ -735,10 +771,12 @@ describe('attestSignAction', () => {
 			records: [
 				{
 					subjects: [{ name: appName, sha256: appDigest }],
-					statement: {
-						predicateType: 'https://slsa.dev/provenance/v1',
-						predicate: { buildDefinition: { buildType: 'workflow' } }
-					},
+					statement: provenance,
+					policy: privatePolicy
+				},
+				{
+					subjects: [{ name: runtimeName, sha256: runtimeDigest }],
+					statement: provenance,
 					policy: privatePolicy
 				},
 				{
@@ -817,11 +855,11 @@ describe('attestSignAction', () => {
 			sha256: index.toString(16).padStart(64, '0')
 		}));
 		const receiptFile = path.join(files.directory, 'receipt.json');
-		files.textFiles.set(
-			files.checksumsFile,
-			subjects.map((subject) => `${subject.sha256}  ${subject.name}\n`).join('')
-		);
-		files.textFiles.set(files.builtChecksumsFile, '');
+		const checksums = subjects
+			.map((subject) => `${subject.sha256}  ${subject.name}\n`)
+			.join('');
+		files.textFiles.set(files.checksumsFile, checksums);
+		files.textFiles.set(files.builtChecksumsFile, checksums);
 		files.textFiles.set(
 			receiptFile,
 			JSON.stringify({
@@ -846,8 +884,16 @@ describe('attestSignAction', () => {
 		);
 
 		const groups = [subjects.slice(0, 1024), subjects.slice(1024)];
-		expect(records).toStrictEqual(
-			groups.map((group) => ({
+		expect(records).toStrictEqual([
+			...groups.map((group) => ({
+				subjects: group,
+				policy: publicPolicy,
+				statement: {
+					predicateType: 'https://slsa.dev/provenance/v1',
+					predicate: { buildDefinition: { buildType: 'workflow' } }
+				}
+			})),
+			...groups.map((group) => ({
 				subjects: group,
 				policy: publicPolicy,
 				statement: {
@@ -866,7 +912,7 @@ describe('attestSignAction', () => {
 					}
 				}
 			}))
-		);
+		]);
 	});
 
 	it('partitions a large single-subject SCAI report without changing evidence or extensions', async () => {
@@ -1582,5 +1628,149 @@ describe('attestSignAction', () => {
 		).rejects.toBeInstanceOf(AttestationSubjectNotAcceptedError);
 
 		expect(records).toStrictEqual([]);
+	});
+
+	it('signs default build provenance when attest-check verified only the built subjects', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+
+		await attestSignAction(
+			options(files, {
+				predicateFile: '',
+				predicateType: '',
+				verifiedChecksumsFile: files.builtChecksumsFile
+			}),
+			recordingReporter([]),
+			signing.dependencies
+		);
+
+		expect(records).toStrictEqual([
+			{
+				subjects: [{ name: appName, sha256: appDigest }],
+				statement: {
+					predicateType: 'https://slsa.dev/provenance/v1',
+					predicate: { buildDefinition: { buildType: 'workflow' } }
+				},
+				policy: publicPolicy
+			}
+		]);
+	});
+
+	it.each([
+		{
+			name: 'build provenance',
+			overrides: { predicateFile: '', predicateType: '' },
+			verified: `${runtimeDigest}  ${runtimeName}\n`,
+			unverified: [appName]
+		},
+		{
+			name: 'a custom predicate',
+			overrides: {},
+			verified: `${appDigest}  ${appName}\n`,
+			unverified: [runtimeName]
+		},
+		{
+			name: 'a subject whose verified digest differs',
+			overrides: { predicateFile: '', predicateType: '' },
+			verified: `${runtimeDigest}  ${appName}\n`,
+			unverified: [appName]
+		}
+	])(
+		'signs nothing when $name covers a subject that attest-check did not verify',
+		async ({ overrides, verified, unverified }) => {
+			const files = workspace();
+			const records: SigningRecord[] = [];
+			const signing = recordedSigning(files, records);
+			const verifiedChecksumsFile = path.join(
+				files.directory,
+				'verified-subjects.txt'
+			);
+			files.textFiles.set(verifiedChecksumsFile, verified);
+
+			await expect(
+				attestSignAction(
+					options(files, { ...overrides, verifiedChecksumsFile }),
+					recordingReporter([]),
+					signing.dependencies
+				)
+			).rejects.toStrictEqual(
+				new AttestationSubjectUnverifiedError(unverified)
+			);
+
+			expect({ records, bundles: [...files.bundles] }).toStrictEqual({
+				records: [],
+				bundles: []
+			});
+		}
+	);
+
+	it('keeps a copied subject with a reproduced digest out of the reproduction report', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+		const receiptFile = path.join(files.directory, 'receipt.json');
+		files.textFiles.set(
+			files.checksumsFile,
+			`${appDigest}  ${appName}\n${appDigest}  ${runtimeName}\n`
+		);
+		files.textFiles.set(
+			receiptFile,
+			JSON.stringify({
+				version: 3,
+				paths: [`/nix/store/${appName}`, `/nix/store/${runtimeName}`],
+				subjects: [
+					{
+						...builtOrigin(appName, appDigest),
+						verification: 'local',
+						reproduced: true
+					},
+					{
+						origin: 'copied',
+						storePath: `/nix/store/${runtimeName}`,
+						narHash: appDigest,
+						signatures: []
+					}
+				]
+			})
+		);
+
+		await attestSignAction(
+			options(files, { receiptFile, predicateFile: '', predicateType: '' }),
+			recordingReporter([]),
+			signing.dependencies
+		);
+
+		expect({
+			records,
+			signedChecksums: files.textFiles.get(files.signedChecksumsFile)
+		}).toStrictEqual({
+			records: [
+				{
+					subjects: [{ name: appName, sha256: appDigest }],
+					statement: {
+						predicateType: 'https://slsa.dev/provenance/v1',
+						predicate: { buildDefinition: { buildType: 'workflow' } }
+					},
+					policy: publicPolicy
+				},
+				{
+					subjects: [{ name: appName, sha256: appDigest }],
+					statement: {
+						predicateType: scaiPredicateType,
+						predicate: {
+							attributes: [
+								{
+									attribute: reproducibleAttribute,
+									conditions: reproductionAssertion.conditions
+								}
+							]
+						}
+					},
+					policy: publicPolicy
+				}
+			],
+			signedChecksums: `${appDigest}  ${appName}\n`
+		});
 	});
 });

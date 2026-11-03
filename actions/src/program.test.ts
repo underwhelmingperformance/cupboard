@@ -58,6 +58,8 @@ describe('buildProgram', () => {
 			'subjects',
 			'--built-checksums-file',
 			'built-subjects',
+			'--verified-checksums-file',
+			'subjects',
 			'--github-token',
 			'token'
 		]);

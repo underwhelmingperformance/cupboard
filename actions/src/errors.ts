@@ -1,5 +1,4 @@
 import type { CacheScope } from '@cupboard/nix-store/scalars';
-import type { SubjectOrigin } from '@cupboard/protocol/build';
 import type { ReporterResultEvent } from '@cupboard/reporter';
 import {
 	CodedError,
@@ -379,6 +378,15 @@ export class AttestationSubjectNotAcceptedError extends UsageError {
 			`Selected subject digests do not match the accepted receipt checksums for: ${subjects.join(', ')}`
 		);
 		this.name = 'AttestationSubjectNotAcceptedError';
+	}
+}
+
+export class AttestationSubjectUnverifiedError extends UsageError {
+	constructor(public readonly subjects: readonly string[]) {
+		super(
+			`attest-check has not verified these subjects in the destination cache: ${subjects.join(', ')}`
+		);
+		this.name = 'AttestationSubjectUnverifiedError';
 	}
 }
 
@@ -961,18 +969,6 @@ export class SubjectNarHashMovedError extends CodedError {
 			`${storePath} was recorded with NAR hash ${recorded}, but the destination cache serves ${held}`
 		);
 		this.name = 'SubjectNarHashMovedError';
-	}
-}
-
-export class SubjectNotHeldError extends CodedError {
-	constructor(
-		public readonly storePath: string,
-		public readonly origin: SubjectOrigin
-	) {
-		super(
-			`${storePath} was recorded with origin ${origin}, but the destination cache does not serve it`
-		);
-		this.name = 'SubjectNotHeldError';
 	}
 }
 

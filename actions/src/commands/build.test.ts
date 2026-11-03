@@ -417,7 +417,7 @@ describe('buildAction', () => {
 					path.join(directory, 'cupboard-publish-paths.txt'),
 					'utf8'
 				),
-				slsaSubjects: provenancedSubjects(receipt, new Map([[app, info]])).built
+				slsaSubjects: provenancedSubjects(receipt).built
 			}).toStrictEqual({
 				executions: warm ? ['normal', 'check'] : ['normal'],
 				receipt: { version: 3, paths: [app], subjects: [subject] },
