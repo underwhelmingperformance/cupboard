@@ -433,7 +433,11 @@ export class RootsService {
 					closeAppliedEpoch: retentionEpoch,
 					closeGraceUntil: sql`NULL`,
 					updatedAt: nowIso
-				}
+				},
+				setWhere: sql`${schema.retentionRoots.retentionEpoch} < ${retentionEpoch}
+					OR ${schema.retentionRoots.closeAppliedEpoch} <> ${retentionEpoch}
+					OR ${schema.retentionRoots.closeGraceUntil} IS NOT NULL
+					OR (${schema.retentionRoots.expiresAt} IS NOT NULL AND (excluded.expires_at IS NULL OR excluded.expires_at > ${schema.retentionRoots.expiresAt}))`
 			})
 			.run();
 	}

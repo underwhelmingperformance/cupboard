@@ -12,6 +12,7 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import { rootRetentionRequestSchema } from '@cupboard/protocol/retention';
 import {
 	type IsoTimestamp,
 	isoTimestamp,
@@ -105,6 +106,11 @@ import {
 	serialiseGraceDecision
 } from './grace-decision.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { noCost } from './operation-cost.test-support.ts';
+import {
+	type OperationCostRecord,
+	withOperationCost
+} from './operation-cost.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { ReuseAuthority } from './reuse-authority.ts';
@@ -3677,4 +3683,79 @@ describe('confirming an unretained publication', () => {
 			confirmByCommitTokenStatus: StatusCodes.FORBIDDEN
 		});
 	});
+});
+
+describe('repeating an unchanged retention write', () => {
+	beforeEach(resetTestServer);
+
+	it.each([
+		{ write: 'grace', retention: undefined, rowsRead: 11 },
+		{ write: 'root', retention: { kind: 'inherit' }, rowsRead: 5 },
+		{
+			write: 'root',
+			retention: { kind: 'duration', seconds: 3600 },
+			rowsRead: 3
+		}
+	])(
+		'writes no rows when a $write write changes nothing (root retention $retention.kind)',
+		async ({ write, retention, rowsRead }) => {
+			await useTestServer(`unchanged-${write}-${retention?.kind ?? 'none'}`);
+			const { token } = await bootstrap();
+			await setDefaultCacheGrace(86_400);
+			const path = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('w'),
+				name: 'unchanged'
+			});
+			await pushPath(token, path);
+
+			const cost = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const { context } = instance;
+					const cache = resolvedCache(context);
+					const retentionService = new RetentionService(context);
+					const narInfoObjects = new NarInfoObjectsService(context);
+					const roots = new RootsService(
+						context,
+						new CacheRegistrationService(context),
+						retentionService,
+						narInfoObjects
+					);
+					const rows = narInfoObjects.narInfoRowsFor(cache, [
+						path.storePathHash
+					]);
+					const repeat = (): void => {
+						if (retention === undefined) {
+							confirmGraceBatch(context, retentionService, cache, rows, {
+								reportsGrace: true,
+								graceSeconds: graceSecondsSchema.parse(86_400)
+							});
+							return;
+						}
+						roots.bindRunRoot(
+							cache,
+							rootNameSchema.parse('run'),
+							rootRetentionRequestSchema.parse(retention)
+						);
+					};
+					repeat();
+					let measured: OperationCostRecord | undefined;
+					await withOperationCost(
+						'repeat',
+						() => {
+							repeat();
+							return Promise.resolve();
+						},
+						(recorded) => {
+							measured = recorded;
+						}
+					);
+					return measured;
+				}
+			);
+
+			expect(cost).toStrictEqual({ ...noCost, rowsRead });
+		}
+	);
 });
