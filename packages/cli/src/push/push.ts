@@ -122,8 +122,11 @@ import {
 } from './divergence.ts';
 import type { CompressedNarUpload, NarUploadObserver } from './nar-upload.ts';
 import {
+	confirmPlannedSkips,
+	type ConfirmPresent,
 	exactUploadDecisions,
 	type NegotiatedGroup,
+	type PresentConfirmation,
 	publishJustInTime
 } from './negotiation.ts';
 import { publishedSubjects, republishedSubject } from './origin.ts';
@@ -251,6 +254,7 @@ export type Acknowledged<Response> = Response & {
 };
 
 export interface PushClient extends Partial<AttestationBundleClient> {
+	confirmPresent?: ConfirmPresent;
 	publicationFor?(
 		decision: UploadDecision
 	): Extract<UploadDecision, { action: 'upload' }> | undefined;
@@ -907,6 +911,7 @@ async function runPushFlow(
 		])
 	);
 	const decisions: UploadDecision[] = [];
+	const presentConfirmations = new Map<StorePathHash, PresentConfirmation>();
 	const divergent = new Map<StorePathHash, DivergentSkip>();
 	// A re-drive can change the action, for example when a reused blob is
 	// collected and the next negotiation requests an upload. Keep only the
@@ -979,6 +984,15 @@ async function runPushFlow(
 
 		for (const [storePathHash, skip] of groupDivergent) {
 			divergent.set(storePathHash, skip);
+		}
+
+		const confirmed = await confirmPlannedSkips(
+			client.confirmPresent,
+			response.uploads,
+			(skip) => refusalOf(skip.storePathHash) !== undefined
+		);
+		for (const [storePathHash, confirmation] of confirmed) {
+			presentConfirmations.set(storePathHash, confirmation);
 		}
 
 		for (const decision of response.uploads) {
@@ -1151,6 +1165,25 @@ async function runPushFlow(
 						}
 					);
 				};
+				const recordCommitFailure = (
+					storePathHash: StorePathHash,
+					error: unknown
+				): void => {
+					const storePath = storePathByHash.get(storePathHash) ?? storePathHash;
+					failures.push({
+						storePathHash,
+						storePath,
+						stage: 'commit',
+						cause: error
+					});
+					bar.warn(
+						'commit failed',
+						`${StorePath.basename(storePath)}: ${failureReason(error)}`,
+						{
+							humanMessage: `${StorePath.basename(storePath)}: path submission failed: ${formatHumanError(error, { debug: reporter.presentation === 'debug' })}`
+						}
+					);
+				};
 				const publishDecision = async (
 					initialDecision: UploadDecision,
 					hasGraceFacts: boolean
@@ -1161,6 +1194,27 @@ async function runPushFlow(
 
 					if (refusal !== undefined) {
 						recordRefusal(refusal);
+						return;
+					}
+
+					const confirmation = isSkip(initialDecision)
+						? presentConfirmations.get(initialDecision.storePathHash)
+						: undefined;
+					if (confirmation !== undefined) {
+						const present = presentOutcome(confirmation);
+						let presentRefusal: BuildOutputDivergedError | undefined;
+						try {
+							presentRefusal = noteCommitOutcome(present);
+						} catch (error) {
+							recordCommitFailure(present.storePathHash, error);
+							return;
+						}
+						if (presentRefusal !== undefined) {
+							recordRefusal(presentRefusal);
+							return;
+						}
+						outcomes.set(present.storePathHash, present);
+						skipped += 1;
 						return;
 					}
 
@@ -1241,19 +1295,7 @@ async function runPushFlow(
 							throw error;
 						}
 
-						failures.push({
-							storePathHash: decision.storePathHash,
-							storePath,
-							stage: 'commit',
-							cause: error
-						});
-						bar.warn(
-							'commit failed',
-							`${StorePath.basename(storePath)}: ${failureReason(error)}`,
-							{
-								humanMessage: `${StorePath.basename(storePath)}: path submission failed: ${formatHumanError(error, { debug: reporter.presentation === 'debug' })}`
-							}
-						);
+						recordCommitFailure(decision.storePathHash, error);
 						return;
 					}
 
@@ -2467,6 +2509,15 @@ async function redriveExpiredCommit(
 	}
 
 	if (isSkip(fresh)) {
+		const confirmed = await confirmPlannedSkips(
+			context.client.confirmPresent,
+			[fresh],
+			() => false
+		);
+		const confirmation = confirmed.get(fresh.storePathHash);
+		if (confirmation !== undefined) {
+			return presentOutcome(confirmation);
+		}
 		const publication = context.client.publicationFor?.(fresh);
 		if (publication !== undefined) {
 			return commitVia(
@@ -2497,6 +2548,16 @@ async function redriveExpiredCommit(
 	context.onUploaded(fresh.storePathHash, upload);
 
 	return commitVia(context, commitTarget(fresh, hasGraceFacts, upload.blob));
+}
+
+function presentOutcome(confirmation: PresentConfirmation): CommitOutcome {
+	return {
+		storePathHash: confirmation.storePathHash,
+		narHash: confirmation.narHash,
+		status: 'already-present',
+		settled: Promise.resolve(),
+		grace: confirmation.grace
+	};
 }
 
 function verifyNarMetadata(

@@ -13,11 +13,14 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	uploadActionDecisionSchema,
 	uploadAttachRootSchema,
+	uploadConfirmPresentPathSchema,
 	type UploadDecisionInput,
 	uploadDecisionSchema,
 	type UploadNegotiateRequestInput,
 	type UploadNegotiateResponse
 } from '@cupboard/protocol/upload';
+import { ProbeTimeoutError } from '@cupboard/shared/timeout';
+import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -56,6 +59,7 @@ const divergenceOfA = {
 	localNarHash: narHash.toString(),
 	cacheNarHash: divergentNarHash.toString()
 };
+const failPolicy: DivergencePolicy = 'fail';
 const divergenceCases: readonly {
 	readonly policy: DivergencePolicy;
 	readonly outcomes: readonly BatchPathOutcome[];
@@ -138,6 +142,7 @@ function emptyStream(): ReadableStream<Uint8Array> {
 
 interface HarnessOptions {
 	readonly publicationFor?: PushClient['publicationFor'];
+	readonly confirmPresent?: PushClient['confirmPresent'];
 	readonly actions?: ReadonlyMap<
 		StorePathString,
 		UploadDecisionInput['action']
@@ -210,6 +215,9 @@ function harness(options: HarnessOptions = {}): Harness {
 	const client: PushClient = {
 		...(options.publicationFor !== undefined && {
 			publicationFor: options.publicationFor
+		}),
+		...(options.confirmPresent !== undefined && {
+			confirmPresent: options.confirmPresent
 		}),
 		negotiate: (body) => {
 			events.push('negotiate');
@@ -470,6 +478,80 @@ describe('BuildOutputBatcher', () => {
 			});
 		}
 	);
+	it.each([
+		{
+			answer: 'confirmed',
+			cacheNarHash: narHash,
+			policy: failPolicy,
+			outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+			failures: [],
+			diverged: []
+		},
+		...divergenceCases.map((divergenceCase) => ({
+			answer: 'diverged',
+			cacheNarHash: divergentNarHash,
+			...divergenceCase,
+			diverged: divergenceCase.policy === 'concede' ? [divergenceOfA] : []
+		}))
+	])(
+		'records a $answer skip without a commit under the $policy policy',
+		async ({
+			answer,
+			cacheNarHash,
+			policy,
+			outcomes: expected,
+			failures: refused,
+			diverged
+		}) => {
+			const divergences = new BuildOutputDivergences(policy);
+			const commit = vi.fn<CommitSession['commit']>(() =>
+				Promise.reject(new Error('No commit expected'))
+			);
+			const confirmPresent = vi.fn<NonNullable<PushClient['confirmPresent']>>(
+				(skips) =>
+					Promise.resolve(
+						skips.map((skip) =>
+							uploadConfirmPresentPathSchema.parse({
+								storePathHash: skip.storePathHash,
+								status: answer,
+								generation: 0,
+								narHash: cacheNarHash.toString(),
+								grace: {}
+							})
+						)
+					)
+			);
+			const { batcher, outcomes, failures } = harness({
+				actions: new Map([[pathA, 'skip']]),
+				publicationFor: () => {
+					throw new Error('No publication expected');
+				},
+				confirmPresent,
+				commitSession: { commit, close: vi.fn() },
+				divergences
+			});
+			batcher.enqueue(pathA);
+			await vi.advanceTimersByTimeAsync(500);
+			await batcher.settled();
+			expect({
+				confirmations: confirmPresent.mock.calls,
+				commits: commit.mock.calls,
+				outcomes,
+				failures: failures.map((failure) => ({
+					storePath: failure.storePath,
+					name:
+						failure.reason instanceof Error ? failure.reason.name : undefined
+				})),
+				diverged: divergences.list()
+			}).toStrictEqual({
+				confirmations: [[[decisionFor(pathA, 'skip')]]],
+				commits: [],
+				outcomes: expected,
+				failures: refused,
+				diverged
+			});
+		}
+	);
 	it('returns every path to the candidate set when negotiation omits decisions', async () => {
 		const { batcher, failures } = harness({ decisions: () => [] });
 
@@ -706,6 +788,124 @@ describe('BuildOutputBatcher', () => {
 				{ outcome: 'published', storePath: pathA }
 			],
 			negotiatedPaths: [[pathA]],
+			candidates: []
+		});
+	});
+
+	it.each([
+		{
+			failure: 'a 503',
+			error: () => new ORPCError('SERVICE_UNAVAILABLE', { status: 503 })
+		},
+		{
+			failure: 'an exhausted deadline',
+			error: () => new ProbeTimeoutError('the uploads.confirmPresent procedure')
+		}
+	])(
+		'publishes uploads and commits skips when confirmation fails with $failure',
+		async ({ error }) => {
+			const commit = vi.fn<CommitSession['commit']>((target) =>
+				Promise.resolve({
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
+					status: 'committed',
+					settled: Promise.resolve()
+				})
+			);
+			const publication = uploadActionDecisionSchema.parse(
+				decisionFor(pathA, 'upload')
+			);
+			const { batcher, outcomes, failures, events } = harness({
+				actions: new Map([
+					[pathA, 'skip'],
+					[pathB, 'upload']
+				]),
+				publicationFor: () => publication,
+				confirmPresent: () => Promise.reject(error()),
+				commitSession: { commit, close: vi.fn() }
+			});
+
+			batcher.enqueue(pathA);
+			batcher.enqueue(pathB);
+			await vi.advanceTimersByTimeAsync(500);
+			await batcher.settled();
+
+			expect({
+				uploads: events.filter((event) => event.startsWith('upload:')),
+				commits: commit.mock.calls.map(([target]) => target.uploadId),
+				outcomes,
+				failures
+			}).toStrictEqual({
+				uploads: [`upload:staging/${StorePath.basename(pathB)}`],
+				commits: [publication.uploadId, `upload-${StorePath.basename(pathB)}`],
+				outcomes: [
+					{ outcome: 'published', storePath: pathA },
+					{ outcome: 'published', storePath: pathB }
+				],
+				failures: []
+			});
+		}
+	);
+
+	it('commits a retried skip that the next confirmation reports missing', async () => {
+		const answers = ['diverged', 'missing'];
+		const confirmPresent = vi.fn<NonNullable<PushClient['confirmPresent']>>(
+			(skips) => {
+				const status = answers.shift();
+				return Promise.resolve(
+					skips.map((skip) =>
+						uploadConfirmPresentPathSchema.parse(
+							status === 'diverged'
+								? {
+										storePathHash: skip.storePathHash,
+										status,
+										generation: 0,
+										narHash: divergentNarHash.toString(),
+										grace: {}
+									}
+								: { storePathHash: skip.storePathHash, status }
+						)
+					)
+				);
+			}
+		);
+		const commit = vi.fn<CommitSession['commit']>((target) =>
+			Promise.resolve({
+				storePathHash: target.storePathHash,
+				narHash: target.narHash,
+				status: 'committed',
+				settled: Promise.resolve()
+			})
+		);
+		const upload = uploadActionDecisionSchema.parse(
+			decisionFor(pathA, 'upload')
+		);
+		const { batcher, outcomes, failures } = harness({
+			actions: new Map([[pathA, 'skip']]),
+			publicationFor: () => upload,
+			confirmPresent,
+			commitSession: { commit, close: vi.fn() },
+			divergences: new BuildOutputDivergences(failPolicy)
+		});
+
+		batcher.enqueue(pathA);
+		await vi.advanceTimersByTimeAsync(500);
+		await batcher.settled();
+		batcher.enqueue(pathA);
+		await batcher.drain();
+
+		expect({
+			failures: failures.map((failure) => ({
+				storePath: failure.storePath,
+				name: failure.reason instanceof Error ? failure.reason.name : undefined
+			})),
+			commits: commit.mock.calls.map(([target]) => target.uploadId),
+			outcomes,
+			candidates: batcher.candidates
+		}).toStrictEqual({
+			failures: [{ storePath: pathA, name: 'BuildOutputDivergedError' }],
+			commits: [upload.uploadId],
+			outcomes: [{ outcome: 'published', storePath: pathA }],
 			candidates: []
 		});
 	});

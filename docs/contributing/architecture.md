@@ -706,9 +706,20 @@ makes no reconcile call when its time plus the grace period falls in the same
 clock hour as for the earlier confirmation, and its time plus the run root's TTL
 does too.
 
+The CLI accepts `confirm-present-v1` and confirms its planned `skip` decisions
+before it commits them. It sends at most two pages at a time, starts with the
+Free plan's limit and then follows the limit that the server advertises. It
+applies its divergence rules to a `diverged` answer as it does to a commit's
+answer.
+
 The paced WebSocket accepts `publish-batch` with complete metadata and expected
-generation. Clients commit every selected path, including `skip` decisions. The
-server derives staging keys and rechecks availability and reuse authority. A
+generation. Clients commit every selected path that confirmation has not
+retained, including `missing` paths. They commit every `skip` decision when the
+server does not echo `confirm-present-v1` or answers `NOT_FOUND`. When a
+confirmation request fails for another reason, the client logs a warning and
+commits every planned skip of that negotiation group, including skips on pages
+that the server had already confirmed. The uploads in the same group go ahead.
+The server derives staging keys and rechecks availability and reuse authority. A
 `publication-accepted` frame follows durable SQLite admission. `upload-required`
 asks the client to send bytes and resubmit the same operation. Admission keeps
 the row of a committed path that cannot be served, for example because its NAR

@@ -24,6 +24,7 @@ import type { RootSetBodyInput } from '@cupboard/protocol/retention';
 import {
 	commitBatchMaxEntries,
 	uploadActionDecisionSchema,
+	uploadConfirmPresentPathSchema,
 	type UploadDecisionInput,
 	uploadDecisionSchema,
 	type UploadNegotiateResponse,
@@ -31,6 +32,7 @@ import {
 	type UploadPreviewResponse,
 	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
+import { ProbeTimeoutError } from '@cupboard/shared/timeout';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -83,6 +85,8 @@ const rootTwo = rootNameSchema.parse('github:acme/repo/two');
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
 const divergentNarHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xbb));
 const substituterSignature = 'cache.example.org-1:c2ln';
+const concede: DivergencePolicy = 'concede';
+const failPolicy: DivergencePolicy = 'fail';
 const divergenceOfA = {
 	storePath: pathA,
 	localNarHash: narHash.toString(),
@@ -454,6 +458,140 @@ describe('reconcileBuild', () => {
 					...((action === 'upload' || index > 0) && { blob })
 				})),
 				uploads: Array.from({ length: transfers }, () => upload.r2Key)
+			});
+		}
+	);
+
+	it.each([
+		{
+			failure: 'a 503',
+			error: () => new ORPCError('SERVICE_UNAVAILABLE', { status: 503 })
+		},
+		{
+			failure: 'an exhausted deadline',
+			error: () => new ProbeTimeoutError('the uploads.confirmPresent procedure')
+		}
+	])(
+		'publishes uploads and commits skips when confirmation fails with $failure',
+		async ({ error }) => {
+			const fixture = harness({
+				valid: [pathA, pathB],
+				actions: new Map([
+					[pathA, 'skip'],
+					[pathB, 'upload']
+				])
+			});
+			const publication = uploadActionDecisionSchema.parse(
+				decisionFor(pathA, 'upload')
+			);
+			const commit = vi.fn<CommitSession['commit']>((target) =>
+				Promise.resolve({
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
+					status: 'committed',
+					settled: Promise.resolve()
+				})
+			);
+
+			const result = await reconcileWith(fixture, {
+				targets: [target(pathA), target(pathB)],
+				client: {
+					...fixture.client,
+					publicationFor: () => publication,
+					confirmPresent: () => Promise.reject(error())
+				},
+				session: { commit, close: vi.fn() }
+			});
+
+			expect({
+				outcomes: result.receipt.outcomes,
+				failures: result.failures,
+				commits: commit.mock.calls
+					.map(([entry]) => entry.uploadId)
+					.toSorted((left, right) => left.localeCompare(right)),
+				uploads: fixture.uploadedKeys
+			}).toStrictEqual({
+				outcomes: [
+					{ outcome: 'built', storePath: pathA },
+					{ outcome: 'built', storePath: pathB }
+				],
+				failures: [],
+				commits: [publication.uploadId, `upload-${StorePath.basename(pathB)}`],
+				uploads: [`staging/${StorePath.basename(pathB)}`]
+			});
+		}
+	);
+
+	it.each([
+		{ answer: 'confirmed', cacheNarHash: narHash, policy: failPolicy },
+		{ answer: 'diverged', cacheNarHash: divergentNarHash, policy: concede },
+		{ answer: 'diverged', cacheNarHash: divergentNarHash, policy: failPolicy }
+	])(
+		'reconciles a $answer skip as its commit would under the $policy policy',
+		async ({ answer, cacheNarHash, policy }) => {
+			const upload = uploadActionDecisionSchema.parse(
+				decisionFor(pathA, 'upload')
+			);
+			const reconcile = async (client: Partial<PushClient>) => {
+				const fixture = harness({
+					valid: [pathA],
+					actions: new Map([[pathA, 'skip']])
+				});
+				const divergences = new BuildOutputDivergences(policy);
+				const commit = vi.fn<CommitSession['commit']>((target) =>
+					Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: cacheNarHash.value,
+						status: 'already-present',
+						settled: Promise.resolve()
+					})
+				);
+				const result = await reconcileWith(fixture, {
+					targets: [target(pathA)],
+					divergences,
+					client: { ...fixture.client, ...client },
+					session: { commit, close: vi.fn() }
+				});
+				return {
+					receipt: result.receipt,
+					failures: result.failures.map((failure) => ({
+						storePath: failure.storePath,
+						reason: failure.reason,
+						name:
+							failure.cause instanceof Error ? failure.cause.name : undefined
+					})),
+					diverged: divergences.list(),
+					commits: commit.mock.calls.length
+				};
+			};
+			const confirmPresent = vi.fn<NonNullable<PushClient['confirmPresent']>>(
+				(skips) =>
+					Promise.resolve(
+						skips.map((skip) =>
+							uploadConfirmPresentPathSchema.parse({
+								storePathHash: skip.storePathHash,
+								status: answer,
+								generation: 0,
+								narHash: cacheNarHash.toString(),
+								grace: {}
+							})
+						)
+					)
+			);
+
+			const today = await reconcile({ publicationFor: () => upload });
+			const confirmed = await reconcile({
+				publicationFor: () => upload,
+				confirmPresent
+			});
+
+			expect({
+				...confirmed,
+				confirmations: confirmPresent.mock.calls
+			}).toStrictEqual({
+				...today,
+				commits: 0,
+				confirmations: [[[decisionFor(pathA, 'skip')]]]
 			});
 		}
 	);

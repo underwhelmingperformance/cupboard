@@ -1,6 +1,14 @@
-import { uploadNegotiateMaxPaths } from '@cupboard/protocol/upload';
+import { rootLogger } from '@cupboard/logger';
+import { type StorePathHash } from '@cupboard/nix-store/scalars';
+import {
+	type UploadConfirmPresentPath,
+	type UploadDecision,
+	uploadNegotiateMaxPaths,
+	type UploadSkipDecision
+} from '@cupboard/protocol/upload';
 import { drainWithConcurrency } from '@cupboard/shared/concurrency';
 
+import { isAbortError } from '../abort.ts';
 import { UploadNegotiationMismatchError } from '../errors.ts';
 
 export interface UploadNegotiationIdentity {
@@ -87,6 +95,67 @@ reporting for it.
 export interface NegotiatedGroup<Decision> {
 	readonly uploads: readonly Decision[];
 	readonly hasUploadGraceFacts: boolean;
+}
+
+/**
+Confirms planned skips without committing them. Resolves to one entry for each
+skip, in order, or to `undefined` when the server does not support
+confirmation.
+*/
+export type ConfirmPresent = (
+	skips: readonly UploadSkipDecision[]
+) => Promise<readonly UploadConfirmPresentPath[] | undefined>;
+
+/**
+A planned skip that the destination serves and has confirmed, with the NAR
+hash that the destination serves for it.
+*/
+export type PresentConfirmation = Exclude<
+	UploadConfirmPresentPath,
+	{ readonly status: 'missing' }
+>;
+
+/**
+Confirms the planned skips in `decisions` for which `isRefused` returns
+false, and returns the retained paths by store-path hash. The result omits a
+path that the destination does not serve, and every path when the client
+cannot confirm skips or the confirmation fails. The caller commits those
+paths, so a failed confirmation costs only the ordinary commits.
+*/
+export async function confirmPlannedSkips(
+	confirmPresent: ConfirmPresent | undefined,
+	decisions: readonly UploadDecision[],
+	isRefused: (skip: UploadSkipDecision) => boolean
+): Promise<ReadonlyMap<StorePathHash, PresentConfirmation>> {
+	const skips = decisions.filter(
+		(decision): decision is UploadSkipDecision =>
+			decision.action === 'skip' && !isRefused(decision)
+	);
+	const confirmed = new Map<StorePathHash, PresentConfirmation>();
+	if (confirmPresent === undefined || skips.length === 0) {
+		return confirmed;
+	}
+
+	let answered: readonly UploadConfirmPresentPath[];
+	try {
+		answered = (await confirmPresent(skips)) ?? [];
+	} catch (error) {
+		if (isAbortError(error)) {
+			throw error;
+		}
+		rootLogger().warn('confirmation failed; committing the planned skips', {
+			error,
+			skips: skips.length
+		});
+		return confirmed;
+	}
+	for (const path of answered) {
+		if (path.status !== 'missing') {
+			confirmed.set(path.storePathHash, path);
+		}
+	}
+
+	return confirmed;
 }
 
 /**
