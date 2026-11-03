@@ -85,9 +85,8 @@ export class RetentionService {
 						schema.retentionGrace.cacheId,
 						schema.retentionGrace.storePathHash
 					],
-					set: {
-						retainUntil: sql`max(${schema.retentionGrace.retainUntil}, excluded.retain_until)`
-					}
+					set: { retainUntil: sql`excluded.retain_until` },
+					setWhere: sql`excluded.retain_until > ${schema.retentionGrace.retainUntil}`
 				})
 				.run();
 		}
@@ -179,7 +178,12 @@ export class RetentionService {
 		writer
 			.update(schema.cacheIdentities)
 			.set({ graceManaged: true })
-			.where(eq(schema.cacheIdentities.id, cache.id))
+			.where(
+				and(
+					eq(schema.cacheIdentities.id, cache.id),
+					eq(schema.cacheIdentities.graceManaged, false)
+				)
+			)
 			.run();
 	}
 
