@@ -32,9 +32,17 @@ export interface AuthzMeta {
 	readonly acceptsControlDatabaseValidationSecret?: true;
 	readonly requires?: Operation;
 	readonly resource?: ResourceSpec;
-	readonly maintenance?: boolean;
+	readonly maintenance?: Maintenance;
 	readonly replaySafety?: ReplaySafety;
 }
+
+/**
+When the server reconciles maintenance eligibility after a procedure. `true`
+reconciles after every call. `'when-changed'` reconciles after a call that
+failed or that recorded a change of state, so a call that changed nothing
+writes nothing.
+*/
+type Maintenance = boolean | 'when-changed';
 
 /**
 The base contract for authenticated procedures. It declares the shared

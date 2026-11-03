@@ -226,3 +226,17 @@ export function authoriseAttachRoot(
 		throw new InsufficientScopeError();
 	}
 }
+
+/**
+Requires `upload:negotiate` beside the contract's `upload:commit`, as a
+publication over the commit session does. Confirming a planned skip retains
+the path for the push, so it needs the same authority as publishing it.
+*/
+export function authorisePublication(
+	claims: AccessClaims,
+	cache: CacheScope
+): void {
+	if (!isCoveredByToken(claims.grants, 'upload:negotiate', { cache })) {
+		throw new InsufficientScopeError();
+	}
+}

@@ -467,7 +467,7 @@ function maintenanceWakeWins(
 // Reconciliation can make one D1 call before an error. The fallback
 // invalidation requires another, so the body reserves two calls. A fresh
 // pass writes its mark before the body starts.
-const trailingEligibilitySubrequests = 2;
+export const trailingEligibilitySubrequests = 2;
 const leadingEligibilitySubrequests = 1;
 
 /**

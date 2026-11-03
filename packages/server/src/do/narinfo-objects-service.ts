@@ -48,8 +48,15 @@ import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
+import { affordableSubrequestOperations } from './subrequest-slice.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
+
+// The most binding calls that repairing one path's narinfo object can make:
+// the blob-state read, a second read when the row's signatures changed, the
+// write, the fence's blob-state read, reference read, third read and rewrite,
+// and the head that checks the result.
+const narInfoRepairSubrequests = 8;
 
 function effectiveSignatureGeneration(row: NarInfoRow): SigningKeyGeneration {
 	return row.pendingSignatureGeneration ?? row.signatureGeneration;
@@ -357,6 +364,7 @@ export class NarInfoObjectsService {
 			return;
 		}
 
+		this.context.narInfoDemotions.record(cache.id, storePathHash);
 		await this.deleteNarInfoObject(cache, storePathHash);
 	}
 
@@ -786,9 +794,13 @@ export class NarInfoObjectsService {
 	// objects of other caches that share it. Repair such an object before
 	// reporting its path as servable, and purge the cached response that still
 	// contains the old URL.
+	//
+	// With `withinSlice`, only the repairs that the current subrequest slice can
+	// afford in the worst case run, and the other paths are left unservable.
 	async servableNarInfoVersions(
 		cache: ResolvedCache,
-		storePathHashes: readonly StorePathHash[]
+		storePathHashes: readonly StorePathHash[],
+		options: { readonly withinSlice?: boolean } = {}
 	): Promise<ReadonlyMap<StorePathHash, NarInfoReferenceVersion>> {
 		const hashes = [...new Set(storePathHashes)];
 		const present = await this.existingNarInfoObjects(cache, hashes);
@@ -828,9 +840,16 @@ export class NarInfoObjectsService {
 			}
 		}
 
-		const recoverable = committedRows.filter(
+		const unrepaired = committedRows.filter(
 			(row) => !hasCurrentObject(row) && backed.has(row.narHash)
 		);
+		const recoverable =
+			options.withinSlice === true
+				? unrepaired.slice(
+						0,
+						affordableSubrequestOperations(narInfoRepairSubrequests)
+					)
+				: unrepaired;
 
 		await this.repairNarInfoObjects(cache, recoverable);
 		const repaired = await this.existingNarInfoObjects(

@@ -6,6 +6,7 @@ import type { AccessClaims } from '../auth/auth.ts';
 import type { AttestationsService } from '../do/attestations-service.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
 import type { CacheAdminService } from '../do/cache-admin-service.ts';
+import type { ConfirmationService } from '../do/confirmation-service.ts';
 import type { GarbageCollectionOutcome } from '../do/context.ts';
 import type { GarbageCollectionTarget } from '../do/context.ts';
 import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
@@ -33,9 +34,11 @@ export interface TenantRpcServices {
 	pendingCache: PendingCacheResolver;
 	// Reconcile maintenance eligibility before a mutation returns. Concurrent
 	// calls share one reconciliation, and an unchanged wake time avoids a D1 write.
+	// With `hasChanged`, reconcile only when it returns true after the body.
 	afterMutation<T>(
 		scope: CacheScope | undefined,
-		body: () => Promise<T>
+		body: () => Promise<T>,
+		hasChanged?: () => boolean
 	): Promise<T>;
 	// Takes the Worker-staged negotiate hints the request's token header
 	// references, at most once; absent, unknown or expired tokens read as no
@@ -63,6 +66,7 @@ export interface TenantRpcServices {
 		purgeOrigin: RequestOrigin | undefined
 	): Promise<GarbageCollectionOutcome>;
 	readonly uploads: UploadsService;
+	readonly confirmation: ConfirmationService;
 	readonly attestations: AttestationsService;
 	// Runs an interactive verification pass, serialised against the cron verify
 	// pass on this instance. The router clamps the limit to the batch ceiling.

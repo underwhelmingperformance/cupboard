@@ -39,6 +39,7 @@ import {
 	type CommitSessionFrameInput,
 	type CommitSessionRequest,
 	commitSessionRequestSchema,
+	confirmPresentCapability,
 	publicationCapability,
 	type PublicationEntry,
 	publicationMaxFrameBytes,
@@ -49,6 +50,7 @@ import {
 	sessionIdSchema,
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
+	uploadConfirmPresentMaxPathsFor,
 	uploadGraceFactsCapability,
 	type UploadId,
 	uploadIdSchema,
@@ -201,6 +203,7 @@ import {
 } from './commit-pipeline-service.ts';
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
+import { ConfirmationService } from './confirmation-service.ts';
 import {
 	type GarbageCollectionOutcome,
 	type GarbageCollectionTarget,
@@ -267,7 +270,10 @@ import { RootsService } from './roots-service.ts';
 import { enterRowBudgetOnDispatch } from './row-budget.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { StatsService } from './stats-service.ts';
-import { enterSubrequestSliceOnDispatch } from './subrequest-slice.ts';
+import {
+	enterSubrequestSliceOnDispatch,
+	subrequestSliceBudget
+} from './subrequest-slice.ts';
 import {
 	type TenantIdentity,
 	TenantIdentityService
@@ -549,6 +555,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly tokenExchange: TokenExchangeService;
 	private readonly refreshSessions: RefreshSessionsService;
 	private readonly uploads: UploadsService;
+	private readonly confirmation: ConfirmationService;
 	private readonly commitPipeline: CommitPipelineService;
 	private readonly verification: VerificationService;
 	private readonly roots: RootsService;
@@ -640,6 +647,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.retention,
 			this.roots,
 			this.commitPipeline
+		);
+		this.confirmation = new ConfirmationService(
+			this.context,
+			this.narInfoObjects,
+			this.retention,
+			this.roots
 		);
 		this.verification = new VerificationService(
 			this.context,
@@ -751,11 +764,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					});
 				}
 
-				if (
-					pathname.endsWith('/uploads/credential') &&
-					hasAcceptedCapability(context.req.raw, publicationCapability)
-				) {
-					response.headers.set(uploadCapabilitiesHeader, publicationCapability);
+				if (pathname.endsWith('/uploads/confirm-present')) {
+					const maxPaths = uploadConfirmPresentMaxPathsFor(
+						subrequestSliceBudget()
+					);
+					response.headers.set(uploadRequestMaxPathsHeader, String(maxPaths));
+				}
+
+				if (pathname.endsWith('/uploads/credential')) {
+					const echoed = [publicationCapability, confirmPresentCapability]
+						.filter((capability) =>
+							hasAcceptedCapability(context.req.raw, capability)
+						)
+						.join(',');
+					if (echoed !== '') {
+						response.headers.set(uploadCapabilitiesHeader, echoed);
+					}
 				}
 				return response;
 			}
@@ -2124,9 +2148,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	//
 	// The pending row also held the negotiated grace decision. If the entry uses
 	// the retention-capable frame, report the path's stored grace without
-	// extending it. Extending an arbitrary path would exercise `upload:confirm`
-	// authority that a commit socket does not have. Keep the legacy frame shape
-	// for an entry without the retention marker.
+	// extending it. Extending an arbitrary path needs `upload:confirm`, or
+	// `upload:negotiate` beside `upload:commit` as `uploads.confirmPresent`
+	// requires, and a legacy commit entry needs only `upload:commit`. Keep the
+	// legacy frame shape for an entry without the retention marker.
 	private async resolveGoneCommit(
 		socket: WebSocket,
 		cache: ResolvedCache,
@@ -2339,7 +2364,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private rpcServices(): TenantRpcServices {
 		return {
 			pendingCache: (id) => this.pendingCache(id),
-			afterMutation: (scope, body) => this.afterMutation(scope, body),
+			afterMutation: (scope, body, hasChanged) =>
+				this.afterMutation(scope, body, hasChanged),
 			takeNegotiateHints: (request) => {
 				const token = request.headers.get(negotiateHintsHeader);
 
@@ -2362,6 +2388,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			runGarbageCollection: (logger, cache, purgeOrigin) =>
 				this.collectGarbageInteractive(logger, cache, purgeOrigin),
 			uploads: this.uploads,
+			confirmation: this.confirmation,
 			attestations: this.attestations,
 			runVerification: (logger, purgeOrigin, limit) =>
 				this.verifyInteractive(logger, purgeOrigin, limit)
@@ -2433,13 +2460,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// on the projection's staleness backstop until the next scheduler tick.
 	private async afterMutation<T>(
 		scope: CacheScope | undefined,
-		body: () => Promise<T>
+		body: () => Promise<T>,
+		hasChanged: () => boolean = () => true
 	): Promise<T> {
 		try {
 			return await body();
 		} finally {
-			this.maintenanceEligibility.invalidateRetirementRecheck(scope);
-			await this.reconcileMaintenanceEligibility();
+			if (hasChanged()) {
+				this.maintenanceEligibility.invalidateRetirementRecheck(scope);
+				await this.reconcileMaintenanceEligibility();
+			}
 		}
 	}
 

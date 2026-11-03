@@ -18,7 +18,7 @@ interface CacheScopedRoute {
 	// The cache comes from the request path. Declare `resource` to add another
 	// resource, such as a root, or to read the cache from a pending row instead.
 	readonly resource?: ResourceSpec;
-	readonly maintenance?: boolean;
+	readonly maintenance?: AuthzMeta['maintenance'];
 	readonly replaySafety?: AuthzMeta['replaySafety'];
 }
 

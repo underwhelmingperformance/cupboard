@@ -1,8 +1,11 @@
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import {
 	pushCredentialSchema,
 	pushIdSchema,
+	uploadConfirmPresentRequestSchema,
+	uploadConfirmPresentResponseSchema,
 	uploadConfirmRequestSchema,
 	uploadConfirmResponseSchema,
 	uploadIdSchema,
@@ -34,6 +37,36 @@ const uploadNegotiateErrors = {
 	...uploadRequestErrors,
 	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
 };
+
+const confirmPresentErrors = {
+	...uploadNegotiateErrors,
+	CONFLICT: { status: StatusCodes.CONFLICT }
+};
+
+// Confirms paths that a plan reported as already served, without staging or
+// committing them. For a path that the server serves, it answers `confirmed`
+// or `diverged`, extends the path's grace when the cache has grace, and
+// attaches the path to `attachRoot` when the request has one. It answers
+// `missing` for a path that the client must publish. The procedure also needs
+// `upload:negotiate`, as publication does, and `root:attach` for the run root.
+//
+// A replay re-evaluates the paths and can only move grace deadlines and
+// run-root expiries later, so the procedure is `replay-safe`. Applying the same
+// confirmation again changes nothing while the cache's state is unchanged and
+// the replay's deadlines fall in the same clock hours. Maintenance runs only
+// after a confirmation that wrote rows or failed, so such a repeat writes
+// nothing.
+const confirmPresent = writableCacheScopedProcedure(
+	{
+		method: 'POST',
+		suffix: '/uploads/confirm-present',
+		requires: 'upload:commit',
+		maintenance: 'when-changed',
+		replaySafety: 'replay-safe'
+	},
+	uploadConfirmPresentRequestSchema.shape,
+	uploadConfirmPresentResponseSchema
+);
 
 const negotiate = writableCacheScopedProcedure(
 	{
@@ -96,6 +129,10 @@ export const uploadsContract = {
 	preview: {
 		inDefaultCache: preview.inDefaultCache.errors(uploadRequestErrors),
 		inNamedCache: preview.inNamedCache.errors(uploadRequestErrors)
+	},
+	confirmPresent: {
+		inDefaultCache: confirmPresent.inDefaultCache.errors(confirmPresentErrors),
+		inNamedCache: confirmPresent.inNamedCache.errors(confirmPresentErrors)
 	},
 
 	// Confirms an unretained publication by store path without uploading bytes.
