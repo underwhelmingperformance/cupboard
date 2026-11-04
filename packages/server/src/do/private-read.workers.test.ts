@@ -162,7 +162,7 @@ describe('per-cache private reads', () => {
 			unauthorisedStatus: StatusCodes.UNAUTHORIZED,
 			wwwAuthenticate: 'Basic realm="cupboard"',
 			narinfoStatus: StatusCodes.OK,
-			narinfoControl: 'no-store',
+			narinfoControl: 'no-store, no-transform',
 			narUnauthorisedStatus: StatusCodes.UNAUTHORIZED,
 			narStatus: StatusCodes.OK,
 			narControl: 'no-store',
@@ -266,7 +266,11 @@ describe('per-cache private reads', () => {
 					status: StatusCodes.OK,
 					cacheControl: 'no-store'
 				},
-				{ path, status: StatusCodes.OK, cacheControl: 'no-store' },
+				{
+					path,
+					status: StatusCodes.OK,
+					cacheControl: 'no-store, no-transform'
+				},
 				{
 					path: routes[2]?.path,
 					status: StatusCodes.OK,
@@ -426,8 +430,8 @@ describe('per-cache private reads', () => {
 			privateControl: privateResponse.headers.get('cache-control'),
 			publicControl: publicResponse.headers.get('cache-control')
 		}).toStrictEqual({
-			privateControl: 'no-store',
-			publicControl: 'public, max-age=3600, must-revalidate'
+			privateControl: 'no-store, no-transform',
+			publicControl: 'public, max-age=3600, must-revalidate, no-transform'
 		});
 	});
 });

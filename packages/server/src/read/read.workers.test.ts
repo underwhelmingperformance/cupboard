@@ -26,6 +26,7 @@ import {
 	PathReadAuthorityMigrationPendingError,
 	SharedFactsUnavailableError
 } from '../errors.ts';
+import { type KeepAlive } from '../http/bounded-body.ts';
 import { narCacheTag } from '../http/cache-tags.ts';
 import {
 	narInfoObjectKey,
@@ -66,6 +67,13 @@ function viewAuthority(access: CacheAccessMode): NarAuthority {
 }
 
 const defaultPublicAuthority = cacheAuthority(defaultCache());
+
+// Each test reads or cancels every bounded body that it receives, so no pipe
+// outlives its test and nothing needs to keep a pipe alive.
+const keptBodies: Promise<void>[] = [];
+const readsBodyItself: KeepAlive = (settled) => {
+	keptBodies.push(settled);
+};
 
 function parsedNar(hash = narHash): NarObjectName {
 	return { narHash: hash, incarnation: 1 };
@@ -243,7 +251,8 @@ describe('NAR serve under shared-fact read faults', () => {
 					generation: firstCacheGeneration
 				},
 				referencingPath,
-				true
+				true,
+				readsBodyItself
 			)
 		]);
 
@@ -637,7 +646,8 @@ describe('private narinfo reference gate', () => {
 				tenant,
 				privateRead,
 				referencingPath,
-				true
+				true,
+				readsBodyItself
 			);
 
 			expect({
@@ -689,8 +699,10 @@ describe('private narinfo reference gate', () => {
 				tenant,
 				{ ...privateRead, generation: cacheGeneration ?? firstCacheGeneration },
 				referencingPath,
-				true
+				true,
+				readsBodyItself
 			);
+			await response.body?.cancel();
 			const missing = await missingStorePathHashes(
 				env.BLOBS,
 				drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
@@ -736,7 +748,8 @@ describe('private narinfo reference gate', () => {
 				tenant,
 				privateRead,
 				referencingPath,
-				true
+				true,
+				readsBodyItself
 			);
 			const missing = await missingStorePathHashes(
 				env.BLOBS,
@@ -770,7 +783,8 @@ describe('private narinfo reference gate', () => {
 			tenant,
 			privateRead,
 			referencingPath,
-			true
+			true,
+			readsBodyItself
 		);
 
 		expect({

@@ -7,7 +7,8 @@ import {
 	boundedSubrequest,
 	criticalSectionBudgetMs,
 	unboundedCapMs,
-	withDeadlineBudget
+	withDeadlineBudget,
+	withoutDeadline
 } from './deadline.ts';
 
 function never(): Promise<never> {
@@ -195,6 +196,41 @@ describe('boundedSubrequest', () => {
 
 			await vi.advanceTimersByTimeAsync(50);
 			await rejects;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('starts a scope outside an enclosing deadline that has passed', async () => {
+		vi.useFakeTimers();
+
+		try {
+			// Work that the enclosing scope starts and that continues after the
+			// scope has ended and its deadline has passed.
+			const continuation: { outcome: Promise<unknown> } = { outcome: never() };
+
+			await withDeadlineBudget(50, () => {
+				continuation.outcome = (async () => {
+					await new Promise((resolve) => setTimeout(resolve, 100));
+
+					try {
+						return {
+							value: await withoutDeadline(() =>
+								withDeadlineBudget(1000, () =>
+									boundedSubrequest(() => Promise.resolve('read'), 'r2.get')
+								)
+							)
+						};
+					} catch (error) {
+						return { error };
+					}
+				})();
+
+				return Promise.resolve();
+			});
+			await vi.advanceTimersByTimeAsync(100);
+
+			expect(await continuation.outcome).toStrictEqual({ value: 'read' });
 		} finally {
 			vi.useRealTimers();
 		}

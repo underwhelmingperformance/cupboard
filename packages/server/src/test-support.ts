@@ -1378,9 +1378,80 @@ export async function handlerFetch(
 		Object.assign({}, env, envOverride),
 		ctx
 	);
+
+	return settledResponse(response, ctx);
+}
+
+/**
+Reads the whole body of `response`, then waits for the background work of
+`ctx`, and returns a response with the same status, headers and bytes. A body
+that failed fails again in the same way after its bytes.
+
+A bounded body keeps its pipe in `waitUntil` until the body has been read, so
+waiting for `ctx` first would wait until the body's deadline.
+*/
+export async function settledResponse(
+	response: Response,
+	ctx: ExecutionContext
+): Promise<Response> {
+	if (response.body === null || response.webSocket !== null) {
+		await waitOnExecutionContext(ctx);
+
+		return response;
+	}
+
+	const chunks: Uint8Array[] = [];
+	const ending: { failure?: { readonly error: unknown } } = {};
+	const reader = response.body.getReader();
+
+	try {
+		for (;;) {
+			const result = await reader.read();
+
+			if (result.done) {
+				break;
+			}
+
+			const value: unknown = result.value;
+
+			if (!(value instanceof Uint8Array)) {
+				throw new TypeError('The response body returned a non-byte chunk');
+			}
+
+			chunks.push(value);
+		}
+	} catch (error) {
+		ending.failure = { error };
+	}
+
 	await waitOnExecutionContext(ctx);
 
-	return response;
+	// Erroring a stream discards its queued chunks, so each chunk is enqueued
+	// only when the reader asks for it.
+	const remaining = chunks.values();
+	const body = new ReadableStream<Uint8Array>({
+		pull(controller) {
+			const next = remaining.next();
+
+			if (!next.done) {
+				controller.enqueue(next.value);
+				return;
+			}
+
+			if (ending.failure === undefined) {
+				controller.close();
+				return;
+			}
+
+			controller.error(ending.failure.error);
+		}
+	});
+
+	return new Response(body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers: response.headers
+	});
 }
 
 /**

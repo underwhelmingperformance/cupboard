@@ -2,6 +2,7 @@ import {
 	cacheGenerationSchema,
 	cacheReadRevisionSchema
 } from '@cupboard/nix-store/scalars';
+import { getPath } from 'hono/utils/url';
 
 import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
 
@@ -20,8 +21,23 @@ this value when stored responses must not be served after a change, for
 example when the change alters which readers may receive a response or what a
 response contains. A new deployment then uses a cache-key format that earlier
 versions did not populate.
+
+Narinfo keys have a version of their own. Their bodies gained a read deadline
+in version 4, and the tenant Worker caches across versions, so a request after
+the deployment could otherwise join a fill that an earlier Worker had left
+stalled. Each narinfo then fills again once in each data centre; NAR keys keep
+their version.
 */
 const cacheKeyVersion = '3';
+const narInfoCacheKeyVersion = '4';
+
+// Hono routes on the decoded path, so `abc%2Enarinfo` reaches the narinfo
+// handler and must have the narinfo version.
+function cacheKeyVersionOf(request: Request): string {
+	return getPath(request).endsWith('.narinfo')
+		? narInfoCacheKeyVersion
+		: cacheKeyVersion;
+}
 
 /**
 Creates the request used as the Workers Cache key for a public tenant read.
@@ -45,7 +61,7 @@ export function canonicalCacheRequest(
 	const canonical = new URL(request.url);
 	canonical.search = '';
 	canonical.hash = '';
-	canonical.searchParams.set(keyVersionParameter, cacheKeyVersion);
+	canonical.searchParams.set(keyVersionParameter, cacheKeyVersionOf(request));
 	canonical.searchParams.set(generationParameter, String(version.generation));
 	canonical.searchParams.set(
 		readRevisionParameter,
@@ -94,8 +110,7 @@ responses under the newer key, because the newer key exists so that responses
 from earlier versions are no longer served.
 */
 export function hasCurrentCacheKeyVersion(request: Request): boolean {
-	return (
-		new URL(request.url).searchParams.get(keyVersionParameter) ===
-		cacheKeyVersion
-	);
+	const { searchParams } = new URL(request.url);
+
+	return searchParams.get(keyVersionParameter) === cacheKeyVersionOf(request);
 }

@@ -7,6 +7,7 @@ import {
 import { type Context, Hono } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 
+import { forbidStoring, keepAliveIn } from '../http/bounded-body.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
 	notFoundResponse,
@@ -14,6 +15,7 @@ import {
 	parseNarInfoName,
 	parseNarName
 } from '../http/http.ts';
+import { readDeadline } from '../http/read-deadline.ts';
 import {
 	loggerMiddleware,
 	requestCostMiddleware
@@ -50,7 +52,7 @@ const minimumErrorStatus: number = StatusCodes.BAD_REQUEST;
 
 function noStore(response: Response): Response {
 	const mutable = new Response(response.body, response);
-	mutable.headers.set('cache-control', 'no-store');
+	forbidStoring(mutable.headers);
 
 	return mutable;
 }
@@ -83,7 +85,7 @@ body stripped, so a separate HEAD registration would never match.
 function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 	const app = new Hono<TenantReadHonoEnv>();
 
-	app.get(String.raw`/:name{[0-9a-z]+\.narinfo}`, (context) => {
+	app.get(String.raw`/:name{[0-9a-z]+\.narinfo}`, readDeadline, (context) => {
 		const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
 
 		if (storePathHash === undefined) {
@@ -96,7 +98,8 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			context.get('tenant'),
 			readScope(context),
 			storePathHash,
-			false
+			false,
+			keepAliveIn(context.executionCtx)
 		);
 	});
 

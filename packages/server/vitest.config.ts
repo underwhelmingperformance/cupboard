@@ -139,9 +139,36 @@ export default defineConfig(async () => {
 									}
 								},
 								serviceBindings: {
-									TEST_CONTROL_DATABASE: 'test-control-database'
+									TEST_CONTROL_DATABASE: 'test-control-database',
+									TEST_STALLING_ORIGIN: 'test-stalling-origin'
 								},
 								workers: [
+									{
+										// Returns a body over a binding, as R2 does. The body contains
+										// `bytes` zero bytes and then stalls. After `releaseMs` it fails,
+										// so a read without a deadline still ends. The pending timer also
+										// stops workerd from cancelling the stalled request as hung.
+										name: 'test-stalling-origin',
+										modules: true,
+										compatibilityDate: '2026-08-18',
+										script: `export default {
+  fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const bytes = Number(url.searchParams.get('bytes') ?? '0');
+    const releaseMs = Number(url.searchParams.get('releaseMs') ?? '2000');
+    const { readable, writable } = new IdentityTransformStream();
+    const writer = writable.getWriter();
+    ctx.waitUntil((async () => {
+      try {
+        if (bytes > 0) await writer.write(new Uint8Array(bytes));
+        await new Promise((resolve) => setTimeout(resolve, releaseMs));
+        await writer.abort(new Error('stall released'));
+      } catch {}
+    })());
+    return new Response(readable);
+  }
+};`
+									},
 									{
 										name: 'test-control-database',
 										modules: true,

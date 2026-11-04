@@ -35,6 +35,12 @@ import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { requireSubrequestsFor } from '../do/subrequest-slice.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
+import {
+	boundedBody,
+	boundedBodyHeaders,
+	forbidStoring,
+	type KeepAlive
+} from '../http/bounded-body.ts';
 import { ByteRangeRequest } from '../http/byte-range.ts';
 import { narCacheTag, narInfoCacheTag } from '../http/cache-tags.ts';
 import {
@@ -50,6 +56,7 @@ import {
 	r2ObjectKeySchema,
 	uncachedNotFoundResponse
 } from '../http/http.ts';
+import { remainingReadBudgetMs } from '../http/read-deadline.ts';
 
 import {
 	isReadAuthorised,
@@ -229,7 +236,7 @@ export async function serveNar(
 		return serveR2Range(request, env, key, headersFor, !isPrivate, range);
 	}
 
-	return serveR2(request, env, key, headersFor, !isPrivate);
+	return serveR2(request, env, key, { headersFor }, !isPrivate);
 }
 
 /**
@@ -453,7 +460,8 @@ export async function serveNarInfo(
 	tenant: TenantId,
 	cache: ReadScope,
 	storePathHash: StorePathHash,
-	isAuthenticatedRead: boolean
+	isAuthenticatedRead: boolean,
+	keepAlive: KeepAlive
 ): Promise<Response> {
 	const key = narInfoObjectKey(
 		tenant,
@@ -461,8 +469,6 @@ export async function serveNarInfo(
 		cache.scope,
 		cache.generation
 	);
-	const headersFor = (object: R2Object): Headers =>
-		narInfoHeaders(object, tenant, cache.scope, storePathHash);
 
 	const versions = await authorisedNarInfoVersions(
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
@@ -482,9 +488,23 @@ export async function serveNarInfo(
 		request,
 		env,
 		key,
-		headersFor,
-		!isAuthenticatedRead,
-		(object) => isNarInfoObjectOfCommit(object, current)
+		{
+			headersFor: (object) =>
+				boundedBodyHeaders(
+					narInfoHeaders(object, tenant, cache.scope, storePathHash),
+					object.size
+				),
+			bodyFor: (object) =>
+				boundedBody(
+					object.body,
+					object.size,
+					remainingReadBudgetMs(),
+					{ operation: 'narinfo.body', objectKey: key },
+					keepAlive
+				),
+			isServable: (object) => isNarInfoObjectOfCommit(object, current)
+		},
+		!isAuthenticatedRead
 	);
 }
 
@@ -562,66 +582,81 @@ export async function missingStorePathHashes(
 	);
 }
 
+/**
+How a read turns an R2 object into a response.
+
+`bodyFor` bounds the body; without it the response streams the stored body
+as it is. `isServable` validates an object after R2 returns it. An
+authenticated narinfo read uses the predicate to refuse an object whose
+recorded narinfo generation or NAR hash belongs to a superseded commit.
+*/
+interface R2Representation {
+	readonly headersFor: (object: R2Object) => Headers;
+	readonly bodyFor?: (object: R2ObjectBody) => ReadableStream;
+	readonly isServable?: (object: R2Object) => boolean;
+}
+
 // Public origin requests reach the cache-owning tenant Worker only after
 // control admission. Private requests, and public NAR requests for a range
 // after byte 0, stay on the control Worker.
-//
-// `isServable` validates an object after R2 returns it. An authenticated
-// narinfo read uses the predicate to refuse an object whose recorded narinfo
-// generation or NAR hash belongs to a superseded commit.
 async function serveR2(
 	request: Request,
 	env: ReadEnv,
 	key: R2ObjectKey,
-	headersFor: (object: R2Object) => Headers,
-	isPublicCache: boolean,
-	isServable?: (object: R2Object) => boolean
+	representation: R2Representation,
+	isPublicCache: boolean
 ): Promise<Response> {
 	if (!isPublicCache && request.method === 'HEAD') {
 		return r2Response(
 			request,
 			await env.BLOBS.head(key),
-			headersFor,
-			isPublicCache,
-			isServable
+			representation,
+			isPublicCache
 		);
 	}
 
-	const object = await env.BLOBS.get(key);
-
 	return r2Response(
 		request,
-		object,
-		headersFor,
-		isPublicCache,
-		isServable,
-		object?.body
+		await env.BLOBS.get(key),
+		representation,
+		isPublicCache
 	);
 }
 
 function r2Response(
 	request: Request,
-	object: R2Object | null,
-	headersFor: (object: R2Object) => Headers,
-	isPublicCache: boolean,
-	isServable?: (object: R2Object) => boolean,
-	body?: BodyInit
+	object: R2Object | R2ObjectBody | null,
+	representation: R2Representation,
+	isPublicCache: boolean
 ): Response {
 	if (object === null) {
 		return isPublicCache ? notFoundResponse() : uncachedNotFoundResponse();
 	}
 
-	if (isServable !== undefined && !isServable(object)) {
+	if (
+		representation.isServable !== undefined &&
+		!representation.isServable(object)
+	) {
 		return uncachedNotFoundResponse();
 	}
 
-	const headers = privatise(headersFor(object), isPublicCache);
+	const headers = privatise(representation.headersFor(object), isPublicCache);
 
 	if (isNotModified(request, headers)) {
 		return notModified(headers);
 	}
 
-	return new Response(body, { headers });
+	if (!('body' in object)) {
+		return new Response(undefined, { headers });
+	}
+
+	// Hono answers HEAD with the GET handler's response and discards its body.
+	// A bounded body that nothing reads would wait until its deadline.
+	if (representation.bodyFor === undefined || request.method === 'HEAD') {
+		return new Response(object.body, { headers });
+	}
+
+	return new Response(representation.bodyFor(object), { headers });
 }
 
 /**
@@ -655,7 +690,7 @@ async function serveR2Range(
 	const selection = range.select(object.size, objectEtag(object));
 
 	if (selection.kind === 'whole') {
-		return serveR2(request, env, key, headersFor, isPublicCache);
+		return serveR2(request, env, key, { headersFor }, isPublicCache);
 	}
 
 	headers.set('content-range', selection.contentRange);
@@ -688,7 +723,7 @@ async function serveR2Range(
 // Replace its public cache policy with `no-store`.
 function privatise(headers: Headers, isPublicCache: boolean): Headers {
 	if (!isPublicCache) {
-		headers.set('cache-control', 'no-store');
+		forbidStoring(headers);
 	}
 
 	return headers;

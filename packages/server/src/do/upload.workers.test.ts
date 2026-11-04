@@ -639,13 +639,13 @@ describe('upload flow', () => {
 		);
 
 		expect(legacyMetadata.headers.get('cache-control')).toBe(
-			'public, max-age=3600, must-revalidate'
+			'public, max-age=3600, must-revalidate, no-transform'
 		);
 		await expectTextResponse(
 			`/${metadata.storePathHash}.narinfo`,
 			{
 				body: narInfo.render(),
-				cacheControl: 'public, max-age=3600, must-revalidate',
+				cacheControl: 'public, max-age=3600, must-revalidate, no-transform',
 				contentType: 'text/x-nix-narinfo; charset=utf-8',
 				method: 'HEAD'
 			},

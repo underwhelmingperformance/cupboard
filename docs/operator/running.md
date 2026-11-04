@@ -296,6 +296,16 @@ consumes the returned stream. A healthy NAR stream can continue beyond 15
 seconds. A body failure does not repeat `get()` or replay bytes, and this policy
 does not change write retries.
 
+A narinfo read has its own deadline of 20 seconds, which also covers its body.
+When a narinfo body stops arriving and the deadline passes, the server ends the
+body early, and the `cupboard.storage.stream` logger writes the warning
+`response body deadline passed` with the operation, the object key, the declared
+length and `deadlineMs`, the time in milliseconds that remained for the body
+when it started. The Workers runtime also logs an uncaught exception for that
+invocation. The server writes no record for any other early end of a body, such
+as a client that disconnects. A read whose earlier steps leave its body less
+than a second returns 503 with `Retry-After` before the body starts.
+
 The native binding has no abort option for `get`. A timed-out operation can
 continue after the server returns 503. The server observes late rejection and
 cancels a late unused body once, best-effort within the invocation's lifetime.
