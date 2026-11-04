@@ -191,8 +191,8 @@ export interface CallOptions {
 /**
 Returns the deadline options for page requests that call `procedure`. `name`
 identifies the procedure in debug logs and in a deadline expiry. The
-contract's replay safety for the procedure decides whether a request that
-missed its deadline is sent again.
+contract's replay safety for the procedure decides whether a request is
+sent again after it misses its deadline or its response body fails.
 */
 export function procedureDeadline(
 	name: string,

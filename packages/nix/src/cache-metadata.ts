@@ -28,7 +28,7 @@ import {
 	readResponseBytes,
 	readResponseText
 } from '@cupboard/shared/response-body';
-import { loggedUrl } from '@cupboard/shared/retry';
+import { loggedUrl, responseBodyFailureCode } from '@cupboard/shared/retry';
 
 const narInfoConcurrency = 6;
 const utf8 = new TextEncoder();
@@ -418,8 +418,11 @@ export class CachedClosureReader {
 				maximumBytes: cacheMetadataMaxRequestBytes,
 				...(this.signal && { signal: this.signal })
 			});
-		} catch {
+		} catch (error) {
 			this.signal?.throwIfAborted();
+			if (responseBodyFailureCode(error) !== undefined) {
+				throw error;
+			}
 			throw new CachedClosureSourceInvalidError(
 				this.source.url,
 				'the metadata error response could not be read as bounded UTF-8'
@@ -515,6 +518,9 @@ export class CachedClosureReader {
 			);
 		} catch (error) {
 			this.signal?.throwIfAborted();
+			if (responseBodyFailureCode(error) !== undefined) {
+				throw error;
+			}
 			throw new CachedClosureSourceInvalidError(
 				this.source.url,
 				`the metadata response is invalid: ${String(error)}`

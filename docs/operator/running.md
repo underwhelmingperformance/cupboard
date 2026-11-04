@@ -185,14 +185,16 @@ pnpm diagnose:push --client-logs /tmp/cupboard-diagnostics \
 The report lists diagnostic artifacts for the workflow run and reads plain,
 compressed and rotated files from the supplied directory. It reports attempt and
 response counts, failures, recovery, cancellation, dropped records and
-incomplete files. Probe attempt deadlines and final logical probe outcomes are
-separate: three expired attempts can exhaust one probe. HTTP deadline aborts are
-not caller cancellation. The report excludes both from transport-failure counts
-and reports HTTP attempt deadlines and caller cancellations separately. Older
-transport failures without a classification are reported as unclassified. The
-GitHub job's recorded times bound the query. Without a job URL or `--since`,
-client timestamps bound the query with an allowance of one minute on either side
-for clock differences.
+incomplete files. It counts probe attempts that missed their deadline and probe
+attempts whose response body failed partway, separately from the final outcome
+of each logical probe. Three such attempts exhaust a replay-safe probe, and one
+exhausts a replay-unsafe probe. HTTP deadline aborts are not caller
+cancellation. The report excludes both from transport-failure counts and reports
+HTTP attempt deadlines and caller cancellations separately. Older transport
+failures without a classification are reported as unclassified. The GitHub job's
+recorded times bound the query. Without a job URL or `--since`, client
+timestamps bound the query with an allowance of one minute on either side for
+clock differences.
 
 When client logs are supplied, the report selects server activity by returned
 request IDs, Ray IDs and exact client trace/span pairs in untrusted server

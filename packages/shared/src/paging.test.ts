@@ -1,9 +1,13 @@
 import { once } from 'node:events';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import {
+	destroyAfterHeaders,
+	loopbackServer
+} from '../../../tests/support/loopback-server.ts';
 import { stalledResponse } from '../../../tests/support/stalled-request.ts';
 
 import { collectProgressively } from './collections.ts';
@@ -21,11 +25,12 @@ import {
 	PageResultCountError,
 	requestWithDeadline
 } from './paging.ts';
+import { readResponseText } from './response-body.ts';
 import { probeDeadlineMs, ProbeTimeoutError } from './timeout.ts';
 
 class TestFailure extends Error {
-	constructor() {
-		super('test failure');
+	constructor(options?: ErrorOptions) {
+		super('test failure', options);
 		this.name = 'TestFailure';
 	}
 }
@@ -451,6 +456,326 @@ describe('fetchWithProbeRetries', () => {
 				server.closeAllConnections();
 				server.close();
 				await once(server, 'close');
+			}
+		}
+	);
+});
+
+interface ProbeServer {
+	readonly url: string;
+	requests(): number;
+	/**
+	Releases a response that waits for the client to receive its headers.
+	*/
+	headersReceived(): void;
+	close(): Promise<void>;
+}
+
+type Misbehaviour = (
+	response: ServerResponse,
+	headersReceived: Promise<void>
+) => void;
+
+/**
+Starts a local HTTP server whose first `failingRequests` requests receive
+`misbehave`. Every later request receives `response body`.
+*/
+async function probeServer(
+	failingRequests: number,
+	misbehave: Misbehaviour
+): Promise<ProbeServer> {
+	let requests = 0;
+	const headers = Promise.withResolvers<undefined>();
+	const server = await loopbackServer((_request, response) => {
+		requests += 1;
+		if (requests > failingRequests) {
+			response.end('response body');
+			return;
+		}
+		misbehave(response, headers.promise);
+	});
+
+	return {
+		url: `${server.origin}/probe`,
+		requests: () => requests,
+		headersReceived: () => {
+			headers.resolve(undefined);
+		},
+		close: () => server.close()
+	};
+}
+
+const bodyFailures = [
+	{
+		name: 'destroys the socket after the headers',
+		code: 'UND_ERR_SOCKET',
+		misbehave: destroyAfterHeaders()
+	},
+	{
+		name: 'ends a Connection: close response before its Content-Length',
+		code: 'UND_ERR_RES_CONTENT_LENGTH_MISMATCH',
+		misbehave: (response: ServerResponse) => {
+			response.socket?.end(
+				'HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial'
+			);
+		}
+	},
+	{
+		name: 'resets the connection after the headers',
+		code: 'ECONNRESET',
+		misbehave: (response: ServerResponse, headersReceived: Promise<void>) => {
+			response.writeHead(200, { 'content-length': '100' });
+			response.write('partial');
+			// The client's kernel can discard unread data when the reset
+			// arrives, so reset only after the client has the headers.
+			void headersReceived.then(() => response.socket?.resetAndDestroy());
+		}
+	}
+] as const;
+
+/**
+Sends a gzip-encoded response whose bytes are not gzip, so decoding the
+body fails after the headers.
+*/
+const corruptGzip: Misbehaviour = (response) => {
+	response.writeHead(200, {
+		'content-encoding': 'gzip',
+		'content-length': '20'
+	});
+	response.end(Buffer.alloc(20, 7));
+};
+
+/**
+Lists the name and code of `error` and of each error in its cause chain.
+*/
+function errorChain(error: unknown): { name: string; code: unknown }[] {
+	const chain: { name: string; code: unknown }[] = [];
+	for (
+		let current: unknown = error;
+		current instanceof Error;
+		current = current.cause
+	) {
+		chain.push({
+			name: current.name,
+			code: 'code' in current ? current.code : undefined
+		});
+	}
+	return chain;
+}
+
+function untimed(record: CapturedRecord): CapturedRecord {
+	const { elapsedMs: _elapsedMs, ...properties } = record.properties;
+	return { ...record, properties };
+}
+
+function bodyFailureFields(failure: unknown): unknown {
+	return failure instanceof TypeError &&
+		failure.cause instanceof Error &&
+		'code' in failure.cause
+		? { name: failure.name, causeCode: failure.cause.code }
+		: failure;
+}
+
+describe('response body failures', () => {
+	it.each(bodyFailures)(
+		'sends a replay-safe probe again when the server $name',
+		async ({ code, misbehave }) => {
+			const records = captureLogs();
+			const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+			const server = await probeServer(1, misbehave);
+			try {
+				const body = await fetchWithProbeRetries(
+					fetch,
+					server.url,
+					undefined,
+					(response) => {
+						server.headersReceived();
+						return response.text();
+					}
+				);
+				const probe: Record<string, unknown> = {
+					url: server.url,
+					probeId: expect.any(String)
+				};
+
+				expect({
+					body,
+					requests: server.requests(),
+					records: records.map((record) => untimed(record))
+				}).toStrictEqual({
+					body: 'response body',
+					requests: 2,
+					records: [
+						probeLog('probe attempt finished', {
+							...probe,
+							attempt: 1,
+							outcome: 'body failed',
+							code
+						}),
+						probeLog('retrying probe after its response body failed', {
+							...probe,
+							nextAttempt: 2,
+							delayMs: 0
+						}),
+						probeLog('probe attempt finished', {
+							...probe,
+							attempt: 2,
+							outcome: 'succeeded'
+						}),
+						probeLog('logical probe finished', {
+							...probe,
+							attempts: 2,
+							disposition: 'recovered'
+						})
+					]
+				});
+			} finally {
+				random.mockRestore();
+				await server.close();
+			}
+		}
+	);
+
+	it('sends a probe again when consume reports the body failure as the cause of its own error', async () => {
+		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+		const server = await probeServer(1, destroyAfterHeaders());
+		try {
+			const body = await fetchWithProbeRetries(
+				fetch,
+				server.url,
+				undefined,
+				async (response) => {
+					try {
+						return await response.text();
+					} catch (error) {
+						throw new Error('The response is invalid', { cause: error });
+					}
+				}
+			);
+
+			expect({ body, requests: server.requests() }).toStrictEqual({
+				body: 'response body',
+				requests: 2
+			});
+		} finally {
+			random.mockRestore();
+			await server.close();
+		}
+	});
+
+	it.each([
+		{
+			name: 'a parse error that consume raises',
+			misbehave: (response: ServerResponse) => {
+				response.end('not json');
+			},
+			consume: (response: Response): Promise<unknown> => response.json(),
+			failure: [{ name: 'SyntaxError', code: undefined }]
+		},
+		{
+			name: 'a size limit that consume raises',
+			misbehave: (response: ServerResponse) => {
+				response.end('response body');
+			},
+			consume: (response: Response): Promise<unknown> =>
+				readResponseText(response, {
+					description: 'probe response',
+					maximumBytes: 1
+				}),
+			failure: [{ name: 'RemoteBodyTooLargeError', code: undefined }]
+		},
+		{
+			name: 'a connection closed before the headers',
+			misbehave: (response: ServerResponse) => {
+				response.socket?.destroy();
+			},
+			consume: (response: Response): Promise<unknown> => response.text(),
+			failure: [
+				{ name: 'TypeError', code: undefined },
+				{ name: 'SocketError', code: 'UND_ERR_SOCKET' }
+			]
+		},
+		{
+			name: 'a corrupt gzip body',
+			misbehave: corruptGzip,
+			consume: (response: Response): Promise<unknown> => response.text(),
+			failure: [
+				{ name: 'TypeError', code: undefined },
+				{ name: 'Error', code: 'Z_DATA_ERROR' }
+			]
+		},
+		{
+			name: 'a corrupt gzip body that consume wraps',
+			misbehave: corruptGzip,
+			consume: async (response: Response): Promise<unknown> => {
+				try {
+					return await response.text();
+				} catch (error) {
+					throw new TestFailure({ cause: error });
+				}
+			},
+			failure: [
+				{ name: 'TestFailure', code: undefined },
+				{ name: 'TypeError', code: undefined },
+				{ name: 'Error', code: 'Z_DATA_ERROR' }
+			]
+		}
+	])(
+		'rejects with $name without another attempt',
+		async ({ misbehave, consume, failure }) => {
+			const server = await probeServer(Infinity, misbehave);
+			try {
+				const error = await rejectionOf(
+					fetchWithProbeRetries(fetch, server.url, undefined, consume)
+				);
+
+				expect({
+					failure: errorChain(error),
+					requests: server.requests()
+				}).toStrictEqual({ failure, requests: 1 });
+			} finally {
+				await server.close();
+			}
+		}
+	);
+
+	it.each([
+		{ replaySafety: 'replay-safe', attempts: maxProbeAttempts },
+		{ replaySafety: 'replay-unsafe', attempts: 1 }
+	] as const)(
+		'makes $attempts attempts at a $replaySafety request whose body always fails',
+		async ({ replaySafety, attempts }) => {
+			const records = captureLogs();
+			const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+			const server = await probeServer(Infinity, destroyAfterHeaders());
+			try {
+				const failure = await rejectionOf(
+					requestWithDeadline(
+						async (signal) => {
+							const response = await fetch(server.url, { signal });
+							return response.text();
+						},
+						{ target: { url: server.url }, replaySafety }
+					)
+				);
+
+				expect({
+					failure: bodyFailureFields(failure),
+					requests: server.requests(),
+					logical: records
+						.filter((record) => record.message === 'logical probe finished')
+						.map(({ properties }) => ({
+							attempts: properties.attempts,
+							disposition: properties.disposition
+						}))
+				}).toStrictEqual({
+					failure: { name: 'TypeError', causeCode: 'UND_ERR_SOCKET' },
+					requests: attempts,
+					logical: [{ attempts, disposition: 'exhausted' }]
+				});
+			} finally {
+				random.mockRestore();
+				await server.close();
 			}
 		}
 	);
