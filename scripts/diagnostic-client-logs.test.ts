@@ -33,6 +33,11 @@ describe('client diagnostic logs', () => {
 			collection([
 				{ msg: 'probe attempt finished', outcome: 'timed out' },
 				{ msg: 'probe attempt finished', outcome: 'timed out' },
+				{
+					msg: 'probe attempt finished',
+					outcome: 'body failed',
+					code: 'UND_ERR_SOCKET'
+				},
 				{ msg: 'HTTP operation failed', disposition: 'deadline' },
 				{ msg: 'HTTP operation completed', disposition: 'recovered' },
 				{ msg: 'HTTP attempt failed' },
@@ -51,7 +56,7 @@ describe('client diagnostic logs', () => {
 		);
 		expect(result).toStrictEqual({
 			files: 1,
-			records: 15,
+			records: 16,
 			incompleteFiles: [],
 			unreadableFiles: [],
 			truncated: false,
@@ -64,6 +69,7 @@ describe('client diagnostic logs', () => {
 			cancelledOperations: 0,
 			deadlineOperations: 1,
 			attemptDeadlines: 2,
+			attemptBodyFailures: 1,
 			httpAttemptDeadlines: 1,
 			httpAttemptCancellations: 1,
 			unclassifiedTransportFailures: 1,
@@ -369,6 +375,7 @@ describe('client diagnostic logs', () => {
 			cancelledOperations: 1,
 			deadlineOperations: 0,
 			attemptDeadlines: 0,
+			attemptBodyFailures: 0,
 			httpAttemptDeadlines: 0,
 			httpAttemptCancellations: 0,
 			unclassifiedTransportFailures: 3,

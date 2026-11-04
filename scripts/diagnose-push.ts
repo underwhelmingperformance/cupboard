@@ -3052,8 +3052,8 @@ function renderDiagnosticAttachments(
 				value: `${String(client.httpAttemptDeadlines)} deadline expiries, ${String(client.httpAttemptCancellations)} caller cancellations`
 			},
 			{
-				label: 'Probe attempt deadlines',
-				value: String(client.attemptDeadlines)
+				label: 'Probe attempt failures',
+				value: `${String(client.attemptDeadlines)} deadline expiries, ${String(client.attemptBodyFailures)} response body failures`
 			},
 			{ label: 'Logical probes', value: JSON.stringify(client.logicalProbes) },
 			{

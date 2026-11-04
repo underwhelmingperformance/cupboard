@@ -302,6 +302,54 @@ export function isFetchNetworkError(error: unknown): error is TypeError {
 	return networkErrorCode(error.cause) !== undefined;
 }
 
+const responseBodyFailureCodes = new Set([
+	'UND_ERR_SOCKET',
+	'UND_ERR_RES_CONTENT_LENGTH_MISMATCH',
+	'ECONNRESET'
+]);
+
+/**
+Returns the error code of a response body that failed after its headers
+arrived: the connection closed or was reset, or the body had fewer bytes
+than its `Content-Length`. While the body is read, Node's fetch reports such
+a failure as a `TypeError` whose cause has the code. The function also finds
+that `TypeError` in the cause chain of an error that wraps it. It returns
+`undefined` for every other error, including a failure before the headers,
+an abort, and an error that the body's reader raises itself.
+*/
+export function responseBodyFailureCode(error: unknown): string | undefined {
+	const seen = new Set<unknown>();
+	let current: unknown = error;
+
+	while (current instanceof Error && !seen.has(current)) {
+		seen.add(current);
+
+		// undici's fetch uses this message only for a body that fails after the
+		// headers. A failure before the headers is `fetch failed`, with the
+		// same causes.
+		if (current instanceof TypeError && current.message === 'terminated') {
+			const code = errorCode(current.cause);
+
+			return code !== undefined && responseBodyFailureCodes.has(code)
+				? code
+				: undefined;
+		}
+
+		current = current.cause;
+	}
+
+	return undefined;
+}
+
+function errorCode(value: unknown): string | undefined {
+	return typeof value === 'object' &&
+		value !== null &&
+		'code' in value &&
+		typeof value.code === 'string'
+		? value.code
+		: undefined;
+}
+
 function networkErrorCode(value: unknown): string | undefined {
 	if (typeof value !== 'object' || value === null) {
 		return undefined;

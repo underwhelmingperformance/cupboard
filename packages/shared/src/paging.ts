@@ -7,7 +7,8 @@ import {
 	abortableSleep,
 	backoffDelayMs,
 	loggedUrl,
-	type ReplaySafety
+	type ReplaySafety,
+	responseBodyFailureCode
 } from './retry.ts';
 import {
 	attemptWithDeadline,
@@ -19,7 +20,8 @@ const logger = getLogger(['cupboard', 'probe']);
 
 /**
 The number of attempts, including the first, that {@link requestWithDeadline}
-makes at a replay-safe request before it reports a deadline expiry.
+makes at a replay-safe request before it reports a deadline expiry or a
+failed response body.
 */
 export const maxProbeAttempts = 3;
 
@@ -54,7 +56,7 @@ export interface DeadlineOptions {
 	/**
 	Whether the server can receive the request again without a different
 	effect. Only a replay-safe request is sent again after its deadline
-	expires.
+	expires or its response body fails.
 	*/
 	readonly replaySafety: ReplaySafety;
 	/**
@@ -65,9 +67,9 @@ export interface DeadlineOptions {
 	readonly deadlineMs?: number;
 }
 
-type ProbeOutcome =
-	| { readonly outcome: 'succeeded' }
+type ProbeFailure =
 	| { readonly outcome: 'timed out' }
+	| { readonly outcome: 'body failed'; readonly code: string }
 	| { readonly outcome: 'failed'; readonly errorName: string };
 
 interface ProbeObservation {
@@ -75,9 +77,15 @@ interface ProbeObservation {
 	disposition: 'succeeded' | 'recovered' | 'exhausted' | 'failed';
 }
 
-function failureOutcome(error: unknown, isExpiry: boolean): ProbeOutcome {
+function failureOutcome(error: unknown, isExpiry: boolean): ProbeFailure {
 	if (isExpiry) {
 		return { outcome: 'timed out' };
+	}
+
+	const code = responseBodyFailureCode(error);
+
+	if (code !== undefined) {
+		return { outcome: 'body failed', code };
 	}
 
 	return {
@@ -92,12 +100,15 @@ Runs `request` with a deadline, which defaults to {@link probeDeadlineMs}.
 request that uses it releases its connection. The attempt then rejects with
 a {@link ProbeTimeoutError} for the target.
 
-A replay-safe request starts again after its own deadline expires, up to
-{@link maxProbeAttempts} attempts in total, with a full-jitter backoff
-between them. A replay-unsafe request makes one attempt. Every other error
-propagates unchanged, including a `ProbeTimeoutError` that `request` raises
-itself, and an abort during the backoff rejects with the abort reason. Each
-attempt and each retry is logged at debug level.
+A replay-safe request starts again after its own deadline expires, or after
+the body of its response fails partway ({@link responseBodyFailureCode}), up
+to {@link maxProbeAttempts} attempts in total, with a full-jitter backoff
+between them. A body failure is found even when `request` reports it as the
+cause of its own error. A replay-unsafe request makes one attempt. Every
+other error propagates unchanged, including a `ProbeTimeoutError` that
+`request` raises itself and an error that `request` raises while it parses
+a complete body. An abort during the backoff rejects with the abort reason.
+Each attempt and each retry is logged at debug level.
 
 Put transport retries inside `request`. One deadline then covers each
 attempt and its transport retries.
@@ -159,31 +170,36 @@ async function requestAttempts<T>(
 
 			return result;
 		} catch (error) {
-			const isExpiry = expiry !== undefined && error === expiry;
+			const failure = failureOutcome(
+				error,
+				expiry !== undefined && error === expiry
+			);
 			logger.debug('probe attempt finished', () => ({
 				...options.target,
 				attempt,
-				...failureOutcome(error, isExpiry),
+				...failure,
 				elapsedMs: Date.now() - startedAt
 			}));
 
 			if (
-				!isExpiry ||
+				failure.outcome === 'failed' ||
 				options.signal?.aborted === true ||
 				attempt >= attempts
 			) {
-				observation.disposition = isExpiry ? 'exhausted' : 'failed';
+				observation.disposition =
+					failure.outcome === 'failed' ? 'failed' : 'exhausted';
 				throw error;
 			}
-		}
 
-		const delayMs = backoffDelayMs(attempt);
-		logger.debug('retrying probe after its deadline expired', {
-			...options.target,
-			nextAttempt: attempt + 1,
-			delayMs
-		});
-		await abortableSleep(delayMs, options.signal);
+			const delayMs = backoffDelayMs(attempt);
+			logger.debug(
+				failure.outcome === 'timed out'
+					? 'retrying probe after its deadline expired'
+					: 'retrying probe after its response body failed',
+				{ ...options.target, nextAttempt: attempt + 1, delayMs }
+			);
+			await abortableSleep(delayMs, options.signal);
+		}
 	}
 }
 
@@ -193,8 +209,9 @@ export interface ProbeFetchOptions {
 
 /**
 Sends a replay-safe read probe through {@link requestWithDeadline}, which
-applies one deadline to the request and the consumption of its response
-and sends the request again when the deadline expires. The abort that ends
+applies one deadline to the request and the consumption of its response.
+It sends the request again when the deadline expires or when the response
+body fails partway while `consume` reads it. The abort that ends
 a timed-out attempt closes its connection, so the next attempt does not
 wait on the same stalled connection. `init.signal` is the caller's signal
 for both the requests and the backoff.

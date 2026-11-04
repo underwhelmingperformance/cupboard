@@ -41,7 +41,7 @@ export interface CacheLister<Entry> {
 /**
 Requests the first page of the tenant's caches, or of the caches whose names
 start with `namePrefix`. Each page request has the probe deadline and is
-sent again when the deadline expires.
+sent again when the deadline expires or the response body fails.
 */
 export function cachePages<Entry>(
 	client: CacheLister<Entry>,

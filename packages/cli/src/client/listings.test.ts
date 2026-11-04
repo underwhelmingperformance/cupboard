@@ -2,10 +2,14 @@ import { collectProgressively } from '@cupboard/shared/collections';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { describe, expect, it, vi } from 'vitest';
 
+import {
+	destroyAfterHeaders,
+	loopbackServer
+} from '../../../../tests/support/loopback-server.ts';
 import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
 
 import { cachePages, listingLimits } from './listings.ts';
-import type { CallOptions } from './orpc.ts';
+import { type CallOptions, tenantRpc } from './orpc.ts';
 
 const maximumBackoffMs = 5000;
 
@@ -48,5 +52,43 @@ describe('cachePages', () => {
 			{ namePrefix: 'pr-', cursor: 'pr-1' },
 			{ namePrefix: 'pr-', cursor: 'pr-1' }
 		]);
+	});
+
+	it('sends a caches.list request again after its response body fails partway', async () => {
+		const server = await loopbackServer((_request, response) => {
+			if (server.requests.length === 1) {
+				destroyAfterHeaders()(response);
+				return;
+			}
+			response.setHeader('content-type', 'application/json');
+			response.end(JSON.stringify({ caches: [] }));
+		});
+		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+		try {
+			const rpc = tenantRpc(new URL(`${server.origin}/t/acme`), {
+				credential: 'token'
+			});
+			const caches = await collectProgressively(
+				await cachePages(rpc.caches, 'pr-'),
+				listingLimits('The test listing')
+			);
+			const listing = {
+				method: 'GET',
+				url: '/t/acme/caches?namePrefix=pr-',
+				authorization: 'Bearer token'
+			};
+
+			expect({
+				caches,
+				requests: server.requests.map((request) => ({
+					method: request.method,
+					url: request.url,
+					authorization: request.headers.authorization
+				}))
+			}).toStrictEqual({ caches: [], requests: [listing, listing] });
+		} finally {
+			random.mockRestore();
+			await server.close();
+		}
 	});
 });

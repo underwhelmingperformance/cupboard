@@ -42,6 +42,7 @@ export interface ClientDiagnostics {
 	readonly cancelledOperations: number;
 	readonly deadlineOperations: number;
 	readonly attemptDeadlines: number;
+	readonly attemptBodyFailures: number;
 	readonly httpAttemptDeadlines: number;
 	readonly httpAttemptCancellations: number;
 	readonly unclassifiedTransportFailures: number;
@@ -607,6 +608,11 @@ export function analyseClientLogs(
 			(record) =>
 				record.msg === 'probe attempt finished' &&
 				record.outcome === 'timed out'
+		).length,
+		attemptBodyFailures: collection.records.filter(
+			(record) =>
+				record.msg === 'probe attempt finished' &&
+				record.outcome === 'body failed'
 		).length,
 		httpAttemptDeadlines: failedAttempts.filter(
 			(record) => record.failureKind === 'deadline'

@@ -24,7 +24,7 @@ import {
 	readResponseBytes,
 	readResponseText
 } from '@cupboard/shared/response-body';
-import { loggedUrl } from '@cupboard/shared/retry';
+import { loggedUrl, responseBodyFailureCode } from '@cupboard/shared/retry';
 import { StatusCodes } from 'http-status-codes';
 
 import { throwIfAborted } from '../abort.ts';
@@ -314,8 +314,11 @@ async function discoveryRefusalText(
 			maximumBytes: 8192,
 			signal
 		});
-	} catch {
+	} catch (error) {
 		throwIfAborted(signal);
+		if (responseBodyFailureCode(error) !== undefined) {
+			throw error;
+		}
 		return 'The error response body could not be read within the discovery limit.';
 	}
 }

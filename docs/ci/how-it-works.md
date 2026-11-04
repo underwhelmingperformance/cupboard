@@ -246,6 +246,7 @@ skip the artifact.
   enabled. The log reports each probe attempt with its outcome and duration, and
   each retry with its delay. For a retry after a transient HTTP status, the log
   also shows the status and any `cf-ray` header. For a retry after a network
-  error, it shows the error code. The actions also pass `--debug` to each
-  `cupboard` command, if the installed release accepts it. Releases before
-  v0.0.36 do not.
+  error, it shows the error code. An attempt whose response body failed partway
+  has the outcome `body failed` and the error code. The actions also pass
+  `--debug` to each `cupboard` command, if the installed release accepts it.
+  Releases before v0.0.36 do not.

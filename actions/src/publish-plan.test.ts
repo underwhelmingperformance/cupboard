@@ -18,6 +18,10 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+	destroyAfterHeaders,
+	loopbackServer
+} from '../../tests/support/loopback-server.ts';
+import {
 	stalledResponse,
 	untilOnlyStalledRequestPending
 } from '../../tests/support/stalled-request.ts';
@@ -1417,6 +1421,59 @@ describe('availableCachePaths', () => {
 		expect({ available: available.values().toArray(), attempts }).toStrictEqual(
 			{ available: [firstPath], attempts: 2 }
 		);
+	});
+
+	it('sends an availability request again after its response body fails partway', async () => {
+		const server = await loopbackServer((_request, response) => {
+			if (server.requests.length === 1) {
+				destroyAfterHeaders()(response);
+				return;
+			}
+			response.setHeader('content-type', 'application/json');
+			response.end(
+				JSON.stringify({ missingStorePathHashes: [StorePath.hash(secondPath)] })
+			);
+		});
+		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+		try {
+			const available = await availableCachePaths({
+				baseUrl: new URL('https://cupboard.example/t/acme'),
+				cache: namedCache(),
+				paths: [firstPath, secondPath],
+				fetcher: (input, init) => {
+					const request = new Request(input, init);
+					const url = new URL(request.url);
+					return fetch(new Request(`${server.origin}${url.pathname}`, request));
+				}
+			});
+			const query = {
+				method: 'POST',
+				url: '/t/acme/cache/pr-1/api/v1/missing-paths',
+				contentType: 'application/json',
+				body: JSON.stringify({
+					storePathHashes: [
+						StorePath.hash(firstPath),
+						StorePath.hash(secondPath)
+					]
+				})
+			};
+
+			expect({
+				available,
+				requests: server.requests.map((request) => ({
+					method: request.method,
+					url: request.url,
+					contentType: request.headers['content-type'],
+					body: request.body
+				}))
+			}).toStrictEqual({
+				available: new Set([firstPath]),
+				requests: [query, query]
+			});
+		} finally {
+			random.mockRestore();
+			await server.close();
+		}
 	});
 
 	it('distinguishes malformed JSON from a schema-invalid response', async () => {

@@ -20,7 +20,11 @@ import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { lookupInPages } from '@cupboard/shared/paging';
 import { readResponseJson } from '@cupboard/shared/response-body';
-import { loggedUrl, retryingFetcher } from '@cupboard/shared/retry';
+import {
+	loggedUrl,
+	responseBodyFailureCode,
+	retryingFetcher
+} from '@cupboard/shared/retry';
 import { z } from 'zod';
 
 import {
@@ -785,6 +789,9 @@ async function queryMissingStorePathHashes(
 			maximumBytes: maximumAvailabilityResponseBytes
 		});
 	} catch (error) {
+		if (responseBodyFailureCode(error) !== undefined) {
+			throw error;
+		}
 		throw new CacheAvailabilityResponseMalformedError(
 			error instanceof SyntaxError ? error : new SyntaxError(String(error))
 		);

@@ -12,6 +12,10 @@ import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { getResponse, http, type HttpHandler, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import {
+	destroyAfterHeaders,
+	loopbackServer
+} from '../../../../tests/support/loopback-server.ts';
 import { untilOnlyStalledRequestPending } from '../../../../tests/support/stalled-request.ts';
 import { cliExitCode } from '../cli.ts';
 import { CupboardHttpError } from '../errors.ts';
@@ -284,6 +288,60 @@ describe('attestation discovery client', () => {
 			expect(cliExitCode(failure, 130)).toBe(expected);
 		}
 	);
+
+	it('sends a discovery page again after the body of its error response fails partway', async () => {
+		const server = await loopbackServer((request, response) => {
+			if (request.method === 'GET') {
+				response.writeHead(200, {
+					[cacheMetadataCapabilityHeader]: attestationInfoCapability
+				});
+				response.end('StoreDir: /nix/store\n');
+				return;
+			}
+			if (server.requests.length === 2) {
+				destroyAfterHeaders(413)(response);
+				return;
+			}
+			response.setHeader('content-type', 'application/json');
+			response.end(
+				JSON.stringify({
+					scopeVersion: 'current',
+					entries: [{ storePathHash: hash, status: 'missing' }]
+				})
+			);
+		});
+		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+		try {
+			const entries = await readAttestationInfo(
+				{ ...options, url: new URL(`${server.origin}/t/acme`) },
+				fetch
+			);
+			const page = {
+				method: 'POST',
+				url: '/t/acme/api/v1/attestation-info',
+				body: JSON.stringify({ storePathHashes: [hash] })
+			};
+
+			expect({
+				entries,
+				requests: server.requests.map((request) => ({
+					method: request.method,
+					url: request.url,
+					body: request.body
+				}))
+			}).toStrictEqual({
+				entries: [{ storePathHash: hash, status: 'missing' }],
+				requests: [
+					{ method: 'GET', url: '/t/acme/nix-cache-info', body: '' },
+					page,
+					page
+				]
+			});
+		} finally {
+			random.mockRestore();
+			await server.close();
+		}
+	});
 
 	it('classifies an oversized fallback narinfo as invalid service metadata', async () => {
 		capability('path-info-v1');
