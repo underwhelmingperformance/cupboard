@@ -40,9 +40,14 @@ import {
 	expect,
 	it,
 	type MockInstance,
+	onTestFinished,
 	vi
 } from 'vitest';
 
+import {
+	deliverAlarms,
+	ignoreAlarmDeliveries
+} from '../alarm-fence.test-support.ts';
 import { PushCredentialIssuer } from '../blob/push-credential.ts';
 import { resumeTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -754,6 +759,7 @@ it.each([-1, 0])(
 	'refuses recovery at deadline offset %i, stops claims and cleans unfinished ownership',
 	async (offset) => {
 		await resetTestServer();
+		ignoreAlarmsUntilTestFinishes();
 		const token = await initialise();
 		const metadata = uploadPathNegotiation(uploadMetadata({ fileSize: 1 }));
 		const response = await authorisedFetch('/uploads/plan', token, {
@@ -1047,6 +1053,65 @@ function probeEdgeReads(
 			}
 		});
 	});
+}
+
+// Every alarm expires up to 25 accepted publications whose recovery deadline has
+// passed, unless expiry is waiting to retry, and then runs at most one due
+// maintenance pass. Those passes include the verdict drain, which processes
+// exhausted uploads, and garbage collection, which removes due replacement
+// cleanups. A test needs this when it makes such work due and expects its own
+// pass or request to do it. Any await between making the work due and that
+// call's decision lets an alarm in: a round trip to the object, or a D1 read,
+// R2 read or queue send inside the call. The alarm's pass then takes the work
+// first.
+//
+// Call this after `resetTestServer` and before the test creates any upload or
+// publication. Configuring a new object arms no alarm, so no alarm handler can
+// be running yet.
+function ignoreAlarmsUntilTestFinishes(): void {
+	const id = currentServer().id;
+	ignoreAlarmDeliveries(id);
+	onTestFinished(() => {
+		deliverAlarms(id);
+	});
+}
+
+// Spies on both ways into publication expiry. A replay expires one operation
+// through `expireOperation`, and the alarm and claiming passes start an expiry
+// run through `expirePublications`. When a request expires an operation and no
+// run started, the request did the expiry.
+//
+// The spies are on the prototype, so they also record calls from other
+// objects in the isolate, whose alarms still run. `calls` counts only the
+// calls made by the current object's verification service.
+class ExpiryWatch {
+	private readonly operations = vi.spyOn(
+		VerificationService.prototype,
+		'expireOperation'
+	);
+	private readonly runs = vi.spyOn(
+		VerificationService.prototype,
+		'expirePublications'
+	);
+
+	calls() {
+		return runInDurableObject(currentServer(), (instance) => {
+			const service = verificationOf(instance);
+			const { calls, contexts } = this.operations.mock;
+			return Promise.resolve({
+				operations: calls
+					.filter((_, index) => contexts[index] === service)
+					.map(([, id]) => id),
+				runs: this.runs.mock.contexts.filter((context) => context === service)
+					.length
+			});
+		});
+	}
+
+	restore(): void {
+		this.operations.mockRestore();
+		this.runs.mockRestore();
+	}
 }
 
 function refusalFacts(frame: CommitSessionFrame) {
@@ -2561,9 +2626,12 @@ async function pathRowAndEdges(storePathHash: StorePathHash) {
 }
 
 describe('publication subscriptions to terminal operations', () => {
+	// Most of these tests make an accepted publication overdue and expect a
+	// replay or their own expiry run to expire it.
 	beforeEach(async () => {
 		vi.setSystemTime(vi.getRealSystemTime());
 		await resetTestServer();
+		ignoreAlarmsUntilTestFinishes();
 	});
 
 	it('refuses with generation-conflict a subscription to a completed operation whose cache was deleted', async () => {
@@ -2650,10 +2718,19 @@ describe('publication subscriptions to terminal operations', () => {
 					);
 				}
 			});
-			const answer = await subscribe(token, undefined, pushId, entry, op);
+			const watch = new ExpiryWatch();
+			let answer;
+			let expiry;
+			try {
+				answer = await subscribe(token, undefined, pushId, entry, op);
+				expiry = await watch.calls();
+			} finally {
+				watch.restore();
+			}
 			const { operations } = await snapshot();
 			expect({
 				answer,
+				expiry,
 				states: operations.map((operation) => operation.state)
 			}).toStrictEqual({
 				answer: {
@@ -2666,6 +2743,7 @@ describe('publication subscriptions to terminal operations', () => {
 					},
 					grace: {}
 				},
+				expiry: { operations: [entry.operationId], runs: 0 },
 				states: ['servable']
 			});
 		}
@@ -2704,6 +2782,7 @@ describe('publication subscriptions to terminal operations', () => {
 			undefined,
 			publicationSession
 		);
+		const watch = new ExpiryWatch();
 		try {
 			session.send({ op: 'subscribe-publication', pushId, entries: [entry] });
 			const first = session.nextFrame();
@@ -2718,6 +2797,7 @@ describe('publication subscriptions to terminal operations', () => {
 				calls: probe.calls,
 				during: during.operations.map((operation) => operation.state),
 				answer,
+				expiry: await watch.calls(),
 				after: after.operations.map((operation) => operation.state)
 			}).toStrictEqual({
 				stopped: 'stopped',
@@ -2733,9 +2813,11 @@ describe('publication subscriptions to terminal operations', () => {
 					},
 					grace: {}
 				},
+				expiry: { operations: [entry.operationId], runs: 0 },
 				after: ['servable']
 			});
 		} finally {
+			watch.restore();
 			await probe.pause.release();
 			for (const spy of spies) {
 				spy.mockRestore();
@@ -2789,6 +2871,7 @@ describe('publication subscriptions to terminal operations', () => {
 			undefined,
 			publicationSession
 		);
+		const watch = new ExpiryWatch();
 		try {
 			session.send({
 				op: 'subscribe-publication',
@@ -2810,6 +2893,7 @@ describe('publication subscriptions to terminal operations', () => {
 					pending: during.pending.length
 				},
 				answer,
+				expiry: await watch.calls(),
 				after: {
 					states: after.operations.map((operation) => operation.state),
 					isStaged: (await env.BLOBS.head(staged)) !== null
@@ -2825,9 +2909,11 @@ describe('publication subscriptions to terminal operations', () => {
 					status: StatusCodes.SERVICE_UNAVAILABLE,
 					hasMessage: true
 				},
+				expiry: { operations: [entry.operationId], runs: 0 },
 				after: { states: ['expired'], isStaged: false }
 			});
 		} finally {
+			watch.restore();
 			await probe.pause.release();
 			for (const spy of spies) {
 				spy.mockRestore();
@@ -2859,10 +2945,19 @@ describe('publication subscriptions to terminal operations', () => {
 				.where(eq(schema.publicationOperations.id, entry.operationId))
 				.run();
 		});
-		const answer = await subscribe(token, undefined, pushId, entry);
+		const watch = new ExpiryWatch();
+		let answer;
+		let expiry;
+		try {
+			answer = await subscribe(token, undefined, pushId, entry);
+			expiry = await watch.calls();
+		} finally {
+			watch.restore();
+		}
 		const after = await snapshot();
 		expect({
 			answer,
+			expiry,
 			states: after.operations.map((operation) => operation.state),
 			pending: after.pending.length
 		}).toStrictEqual({
@@ -2876,6 +2971,7 @@ describe('publication subscriptions to terminal operations', () => {
 				},
 				grace: {}
 			},
+			expiry: { operations: [entry.operationId], runs: 0 },
 			states: ['servable'],
 			pending: 0
 		});
@@ -3863,11 +3959,7 @@ describe('publication subscriptions to terminal operations', () => {
 		);
 		await deletePath(token, entry.metadata.storePathHash);
 		// The operation is accepted past its deadline when the entry arrives,
-		// and the replay's expiry pass completes it. The alarm's expiry pass
-		// does not run.
-		const alarmExpiry = vi
-			.spyOn(VerificationService.prototype, 'expirePublications')
-			.mockResolvedValue(undefined);
+		// and the replay's expiry pass completes it.
 		const expiry = await runInDurableObject(currentServer(), (instance) => {
 			const { db } = instance.context;
 			db.update(schema.publicationOperations)
@@ -3905,7 +3997,6 @@ describe('publication subscriptions to terminal operations', () => {
 			]);
 		} finally {
 			expiry.mockRestore();
-			alarmExpiry.mockRestore();
 			await closeSessionAndWait(session.socket);
 		}
 	});
@@ -4126,6 +4217,7 @@ describe('publication admission of an operation that changes state', () => {
 	])(
 		'answers from the current state when an operation $name during admission',
 		async ({ name, change, answer }) => {
+			ignoreAlarmsUntilTestFinishes();
 			const token = await initialise();
 			const { entry, path, pushId } = await completedPublication(
 				token,
@@ -4207,6 +4299,7 @@ describe('publication admission of an operation that changes state', () => {
 	});
 
 	it('answers a commit from the current state when its recovery deadline passes after admission', async () => {
+		ignoreAlarmsUntilTestFinishes();
 		const token = await initialise();
 		const { entry, path, pushId } = await completedPublication(
 			token,
@@ -5690,6 +5783,7 @@ describe('publication admission of an operation that changes state', () => {
 	])(
 		'removes the edge of a replacement that $fault leaves once the charge deadline passes',
 		async ({ isTimeout }) => {
+			ignoreAlarmsUntilTestFinishes();
 			const token = await initialise();
 			const { lost, nar, metadata } = await lostPathUpload(
 				token,
@@ -5762,8 +5856,17 @@ describe('publication admission of an operation that changes state', () => {
 				});
 				return pathRowAndEdges(metadata.storePathHash);
 			};
-			const beforeDue = await collectAt(5);
-			const collected = await collectAt(11);
+			const watch = new ExpiryWatch();
+			let beforeDue;
+			let collected;
+			let expiry;
+			try {
+				beforeDue = await collectAt(5);
+				collected = await collectAt(11);
+				expiry = await watch.calls();
+			} finally {
+				watch.restore();
+			}
 			const lostRow = {
 				generation: narInfoGenerationSchema.parse(0),
 				narHash: lost.narHash
@@ -5777,10 +5880,11 @@ describe('publication admission of an operation that changes state', () => {
 				edges: [lostRow, planned],
 				cleanups: [planned.generation]
 			};
-			expect({ orphaned, beforeDue, collected }).toStrictEqual({
+			expect({ orphaned, beforeDue, collected, expiry }).toStrictEqual({
 				orphaned: kept,
 				beforeDue: kept,
-				collected: { row: lostRow, edges: [lostRow], cleanups: [] }
+				collected: { row: lostRow, edges: [lostRow], cleanups: [] },
+				expiry: { operations: [], runs: 2 }
 			});
 		}
 	);
@@ -5791,6 +5895,7 @@ describe('publication admission of an operation that changes state', () => {
 	])(
 		'keeps the edge of a replacement whose charge completes $completion',
 		async ({ isLate }) => {
+			ignoreAlarmsUntilTestFinishes();
 			const token = await initialise();
 			const { lost, nar, metadata, committed } = await lostPathUpload(
 				token,
@@ -6629,6 +6734,7 @@ it("keeps another operation's reservation when an upload of the same path fails 
 
 it("keeps another operation's reservation when an exhausted upload of the same path fails", async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const nar = await verifiableNar('publication-shared-exhausted');
 	const path = uploadPathNegotiation(
@@ -6679,11 +6785,12 @@ it("keeps another operation's reservation when an exhausted upload of the same p
 				.set({ verdict: 'pending', settleExhaustion: 'attempt-limit' })
 				.where(eq(schema.pendingUploads.id, exhausted.operationId))
 				.run();
-			await asOneInvocation(() =>
+			const completed = await asOneInvocation(() =>
 				verificationOf(instance).processExhaustedUploads(rootLogger())
 			);
 			const store = new PublicationStore(instance.context);
 			return {
+				completed,
 				narInfos: db
 					.select({ storePathHash: schema.narInfos.storePathHash })
 					.from(schema.narInfos)
@@ -6694,6 +6801,7 @@ it("keeps another operation's reservation when an exhausted upload of the same p
 		}
 	);
 	expect(outcome).toStrictEqual({
+		completed: 1,
 		narInfos: [{ storePathHash: path.storePathHash }],
 		exhausted: 'failed',
 		live: 'accepted'
@@ -6703,6 +6811,7 @@ it("keeps another operation's reservation when an exhausted upload of the same p
 it('attaches the run root of an exhausted upload whose shared generation is charged before its narinfo object is published', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const nar = await verifiableNar('publication-shared-exhausted-charged');
 	const path = uploadPathNegotiation(
@@ -6774,10 +6883,11 @@ it('attaches the run root of an exhausted upload whose shared generation is char
 					})
 					.where(eq(schema.pendingUploads.id, exhausted.operationId))
 					.run();
-				await asOneInvocation(() =>
+				const completed = await asOneInvocation(() =>
 					verificationOf(instance).processExhaustedUploads(rootLogger())
 				);
 				return {
+					completed,
 					exhausted: new PublicationStore(instance.context).get(
 						exhausted.operationId
 					)?.state,
@@ -6794,6 +6904,7 @@ it('attaches the run root of an exhausted upload whose shared generation is char
 		await publication.release();
 		await recorded;
 		expect(outcome).toStrictEqual({
+			completed: 1,
 			exhausted: 'accepted',
 			targets: [
 				{ rootName: exhaustedRoot, storePathHash: path.storePathHash },
@@ -7575,6 +7686,7 @@ it('reads whether a reservation is committed outside the input gate when an uplo
 it('reclaims a shared reservation when both of its uploads are exhausted at the same time', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const rounds = [];
 	for (const round of ['1', '2', '3']) {
@@ -7632,17 +7744,20 @@ it('reclaims a shared reservation when both of its uploads are exhausted at the 
 				)
 			);
 			await cleanup.reached();
-			await runInDurableObject(currentServer(), (instance) =>
-				asOneInvocation(() =>
-					verificationOf(instance).processExhaustedUploads(rootLogger())
-				)
+			const secondCompleted = await runInDurableObject(
+				currentServer(),
+				(instance) =>
+					asOneInvocation(() =>
+						verificationOf(instance).processExhaustedUploads(rootLogger())
+					)
 			);
 			await cleanup.release();
-			await firstPass;
+			const completed = [await firstPass, secondCompleted];
 			rounds.push(
 				await runInDurableObject(currentServer(), (instance) => {
 					const store = new PublicationStore(instance.context);
 					return Promise.resolve({
+						completed,
 						narInfos: instance.context.db
 							.select({ storePathHash: schema.narInfos.storePathHash })
 							.from(schema.narInfos)
@@ -7664,6 +7779,7 @@ it('reclaims a shared reservation when both of its uploads are exhausted at the 
 		}
 	}
 	const concluded = {
+		completed: [1, 1],
 		narInfos: [],
 		pending: [],
 		states: ['failed', 'failed']
@@ -7746,6 +7862,7 @@ it.each([
 
 it('decides whether another operation committed a shared reservation outside the input gate', async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const nar = await verifiableNar('publication-shared-exhausted-gate');
 	const path = uploadPathNegotiation(
@@ -7819,7 +7936,7 @@ it('decides whether another operation committed a shared reservation outside the
 		// Another request reaches the object while the read waits.
 		const during = await snapshot();
 		await probe.pause.release();
-		await pass;
+		const completed = await pass;
 		const outcome = await runInDurableObject(currentServer(), (instance) => {
 			const store = new PublicationStore(instance.context);
 			return Promise.resolve({
@@ -7835,11 +7952,13 @@ it('decides whether another operation committed a shared reservation outside the
 			first,
 			calls: probe.calls,
 			during: during.operations.map((operation) => operation.state),
+			completed,
 			outcome
 		}).toStrictEqual({
 			first: 'stopped',
 			calls: [false],
 			during: ['accepted', 'accepted'],
+			completed: 1,
 			outcome: {
 				narInfos: [{ storePathHash: path.storePathHash }],
 				exhausted: 'failed',
@@ -7857,6 +7976,7 @@ it('decides whether another operation committed a shared reservation outside the
 it('reads the verdict of an exhausted upload whose reservation another operation committed outside the input gate', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const nar = await verifiableNar('publication-exhausted-verdict-gate');
 	const path = uploadPathNegotiation(
@@ -7889,25 +8009,12 @@ it('reads the verdict of an exhausted upload whose reservation another operation
 		10,
 		Number.MAX_SAFE_INTEGER
 	);
-	// The commit's inheritance work would arm an alarm whose pass could
-	// process the exhausted upload before the test's pass does.
-	const inheritance = await runInDurableObject(currentServer(), () =>
-		Promise.resolve(
-			vi
-				.spyOn(AttestationsService.prototype, 'queueInheritance')
-				.mockResolvedValue(undefined)
-		)
-	);
-	try {
-		await currentServer().recordVerifications(claim.owner, [
-			{
-				uploadId: committed.operationId,
-				verdict: { kind: 'verified', verification: { ok: true, ...blob } }
-			}
-		]);
-	} finally {
-		inheritance.mockRestore();
-	}
+	await currentServer().recordVerifications(claim.owner, [
+		{
+			uploadId: committed.operationId,
+			verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+		}
+	]);
 	const probe = new GateProbe();
 	const spies = await runInDurableObject(currentServer(), (instance) => {
 		instance.context.db
@@ -7941,7 +8048,7 @@ it('reads the verdict of an exhausted upload whose reservation another operation
 		// Another request reaches the object while the read waits.
 		const during = await snapshot();
 		await probe.pause.release();
-		await pass;
+		const completed = await pass;
 		const outcome = await runInDurableObject(currentServer(), (instance) => {
 			const store = new PublicationStore(instance.context);
 			return Promise.resolve({
@@ -7959,6 +8066,7 @@ it('reads the verdict of an exhausted upload whose reservation another operation
 			during: Object.fromEntries(
 				during.operations.map((operation) => [operation.id, operation.state])
 			),
+			completed,
 			outcome
 		}).toStrictEqual({
 			first: 'stopped',
@@ -7967,6 +8075,7 @@ it('reads the verdict of an exhausted upload whose reservation another operation
 				[exhausted.operationId]: 'accepted',
 				[committed.operationId]: 'servable'
 			},
+			completed: 1,
 			outcome: {
 				narInfos: [{ storePathHash: path.storePathHash }],
 				exhausted: 'accepted',
@@ -7984,6 +8093,7 @@ it('reads the verdict of an exhausted upload whose reservation another operation
 it('keeps an exhausted publication accepted when another upload of its path and NAR committed the shared reservation', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const nar = await verifiableNar('publication-exhausted-shared-commit');
 	const path = uploadPathNegotiation(
@@ -8016,23 +8126,12 @@ it('keeps an exhausted publication accepted when another upload of its path and 
 		10,
 		Number.MAX_SAFE_INTEGER
 	);
-	const inheritance = await runInDurableObject(currentServer(), () =>
-		Promise.resolve(
-			vi
-				.spyOn(AttestationsService.prototype, 'queueInheritance')
-				.mockResolvedValue(undefined)
-		)
-	);
-	try {
-		await currentServer().recordVerifications(claim.owner, [
-			{
-				uploadId: committed.operationId,
-				verdict: { kind: 'verified', verification: { ok: true, ...blob } }
-			}
-		]);
-	} finally {
-		inheritance.mockRestore();
-	}
+	await currentServer().recordVerifications(claim.owner, [
+		{
+			uploadId: committed.operationId,
+			verdict: { kind: 'verified', verification: { ok: true, ...blob } }
+		}
+	]);
 	await runInDurableObject(currentServer(), (instance) => {
 		instance.context.db
 			.update(schema.pendingUploads)
@@ -8059,11 +8158,12 @@ it('keeps an exhausted publication accepted when another upload of its path and 
 		});
 		subscribed = refusalFacts(await session.nextFrame());
 		state = await runInDurableObject(currentServer(), async (instance) => {
-			await asOneInvocation(() =>
+			const completed = await asOneInvocation(() =>
 				verificationOf(instance).processExhaustedUploads(rootLogger())
 			);
 			const store = new PublicationStore(instance.context);
 			return {
+				completed,
 				exhausted: store.get(exhausted.operationId)?.state,
 				pending: instance.context.db
 					.select({ id: schema.pendingUploads.id })
@@ -8090,7 +8190,7 @@ it('keeps an exhausted publication accepted when another upload of its path and 
 			status: 'absent',
 			grace: {}
 		},
-		state: { exhausted: 'accepted', pending: [] },
+		state: { completed: 1, exhausted: 'accepted', pending: [] },
 		resend: [
 			{ ev: 'publication-accepted', uploadId: exhausted.operationId },
 			{
@@ -8545,6 +8645,7 @@ it('removes the retention targets of a reservation that a reuse commit reclaims 
 
 it("keeps another operation's reservation when an operation without bytes expires", async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const nar = await verifiableNar('publication-shared-path');
 	const path = uploadPathNegotiation(
@@ -8677,6 +8778,7 @@ it("keeps another operation's reservation when an operation without bytes expire
 
 it('reclaims an expiring reservation when another upload for the path has a different NAR', async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const nars = [
 		await verifiableNar('publication-reserved-x'),
@@ -8908,6 +9010,7 @@ async function expiryRunRowsRead(backlog: number): Promise<{
 }> {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	await initialise();
 	return runInDurableObject(currentServer(), async (instance) => {
 		const deadline = new Date(Date.now() - 1000);
@@ -8938,10 +9041,12 @@ async function expiryRunRowsRead(backlog: number): Promise<{
 }
 
 describe('publication expiry failures', () => {
-	// Durable Object alarms use the real clock, so these tests run on it.
+	// Durable Object alarms use the real clock, so these tests run on it. Each
+	// test makes accepted publications overdue and runs expiry itself.
 	beforeEach(async () => {
 		vi.setSystemTime(vi.getRealSystemTime());
 		await resetTestServer();
+		ignoreAlarmsUntilTestFinishes();
 	});
 
 	it('expires the other operations and prunes when one operation fails', async () => {
@@ -9299,6 +9404,7 @@ it.each([
 
 it('leaves an exhausted publication accepted when cleanup loses its claim', async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const [entry] = await plannedEntries(token, '/uploads/plan', [
 		distinctPath('1')
@@ -9370,6 +9476,7 @@ it('leaves an exhausted publication accepted when cleanup loses its claim', asyn
 
 it("deletes an exhausted upload's staged object only after its operation is terminal, and tracks the key until the delete finishes", async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	const token = await initialise();
 	const [entry] = await plannedEntries(token, '/uploads/plan', [
 		distinctPath('1')
@@ -9786,6 +9893,7 @@ it('refuses a repair whose push expires before admission records it', async () =
 
 it('claims a live upload behind more than one window of expired uploads that expiry cannot remove', async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	await initialise();
 	await runInDurableObject(currentServer(), (instance) => {
 		const day = 24 * 60 * 60 * 1000;
@@ -9800,20 +9908,31 @@ it('claims a live upload behind more than one window of expired uploads that exp
 		insertCommittedUploads(instance, 1, 'live', new Date(Date.now() + day));
 		return Promise.resolve();
 	});
+	const watch = new ExpiryWatch();
 	const claimed: string[][] = [];
-	for (let pass = 0; pass < 2; pass += 1) {
-		const batch = await currentServer().claimVerificationBatch(
-			10,
-			1_000_000_000
-		);
-		claimed.push(batch.claims.map((claim) => claim.uploadId));
+	let expiry;
+	try {
+		for (let pass = 0; pass < 2; pass += 1) {
+			const batch = await currentServer().claimVerificationBatch(
+				10,
+				1_000_000_000
+			);
+			claimed.push(batch.claims.map((claim) => claim.uploadId));
+		}
+		expiry = await watch.calls();
+	} finally {
+		watch.restore();
 	}
-	expect(claimed).toStrictEqual([[], ['live-0']]);
+	expect({ claimed, expiry }).toStrictEqual({
+		claimed: [[], ['live-0']],
+		expiry: { operations: [], runs: 2 }
+	});
 });
 
 it('requests another verification pass when a claim passes a window of expired uploads', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	await initialise();
 	await runInDurableObject(currentServer(), (instance) => {
 		const day = 24 * 60 * 60 * 1000;
@@ -9915,6 +10034,7 @@ it('releases the leases of a claim whose request for the next pass fails', async
 it('stops requesting passes through expired uploads while expiry waits, until new work starts', async () => {
 	vi.setSystemTime(vi.getRealSystemTime());
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	await initialise();
 	const day = 24 * 60 * 60 * 1000;
 	await runInDurableObject(currentServer(), (instance) => {
@@ -9990,6 +10110,7 @@ it('stops requesting passes through expired uploads while expiry waits, until ne
 
 it('claims every live upload behind a backlog of expired uploads after one empty claim', async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	await initialise();
 	const outcome = await runInDurableObject(
 		currentServer(),
@@ -10030,6 +10151,7 @@ it('claims every live upload behind a backlog of expired uploads after one empty
 
 it('claims a fresh upload at once while the claim position is stored after it', async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	await initialise();
 	const claimed = await runInDurableObject(
 		currentServer(),
@@ -10207,6 +10329,7 @@ it('claims a fresh upload behind more than one window of reuse uploads', async (
 
 it('claims a live upload behind more than one window of expired uploads once claiming passes have run expiry', async () => {
 	await resetTestServer();
+	ignoreAlarmsUntilTestFinishes();
 	await initialise();
 	await runInDurableObject(currentServer(), (instance) => {
 		const day = 24 * 60 * 60 * 1000;
@@ -10249,13 +10372,32 @@ it('claims a live upload behind more than one window of expired uploads once cla
 		}
 		return Promise.resolve();
 	});
-	const claimed: string[][] = [];
-	for (let pass = 0; pass < 2; pass += 1) {
-		const batch = await currentServer().claimVerificationBatch(
-			10,
-			1_000_000_000
-		);
-		claimed.push(batch.claims.map((claim) => claim.uploadId));
+	const watch = new ExpiryWatch();
+	const passes: { claimed: string[]; accepted: number }[] = [];
+	let expiry;
+	try {
+		for (let pass = 0; pass < 2; pass += 1) {
+			const batch = await currentServer().claimVerificationBatch(
+				10,
+				1_000_000_000
+			);
+			const { operations } = await snapshot();
+			passes.push({
+				claimed: batch.claims.map((claim) => claim.uploadId),
+				accepted: operations.filter(
+					(operation) => operation.state === 'accepted'
+				).length
+			});
+		}
+		expiry = await watch.calls();
+	} finally {
+		watch.restore();
 	}
-	expect(claimed).toStrictEqual([['live-0'], []]);
+	expect({ passes, expiry }).toStrictEqual({
+		passes: [
+			{ claimed: ['live-0'], accepted: 45 },
+			{ claimed: [], accepted: 20 }
+		],
+		expiry: { operations: [], runs: 2 }
+	});
 });
