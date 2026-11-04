@@ -102,6 +102,7 @@ import {
 	UploadNotFoundError,
 	ZstdUnavailableError
 } from '../errors.ts';
+import { forbidStoring } from '../http/bounded-body.ts';
 import { hasAcceptedCapability } from '../http/capabilities.ts';
 import {
 	serverErrorHandler,
@@ -859,7 +860,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					);
 				}
 
-				context.res.headers.set('cache-control', 'no-store');
+				forbidStoring(context.res.headers);
 			}
 		);
 

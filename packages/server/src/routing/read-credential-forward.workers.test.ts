@@ -145,7 +145,7 @@ describe('read forwards to the cache-owning tenant Worker', () => {
 			body: forwardedBody,
 			forwarded: [
 				{
-					url: `${currentOrigin()}/t/${fixtureTenant}/${metadata.storePathHash}.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1`,
+					url: `${currentOrigin()}/t/${fixtureTenant}/${metadata.storePathHash}.narinfo?cache-key-version=4&cache-generation=1&cache-read-revision=1`,
 					headers: {
 						accept: 'text/x-nix-narinfo',
 						'x-request-id': response.headers.get('x-request-id')
@@ -197,7 +197,7 @@ describe('read forwards to the cache-owning tenant Worker', () => {
 		}).toStrictEqual({
 			status: StatusCodes.OK,
 			forwarded: [
-				`${currentOrigin()}/t/${fixtureTenant}/cache/builds/${current.storePathHash}.narinfo?cache-key-version=3&cache-generation=2&cache-read-revision=2`
+				`${currentOrigin()}/t/${fixtureTenant}/cache/builds/${current.storePathHash}.narinfo?cache-key-version=4&cache-generation=2&cache-read-revision=2`
 			]
 		});
 	});

@@ -1,6 +1,7 @@
 import { type Context } from 'hono';
 
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
+import { forbidStoring } from '../http/bounded-body.ts';
 
 import { canonicalCacheRequest } from './cache-request.ts';
 import { tenantServer } from './durable-object.ts';
@@ -69,7 +70,7 @@ the policy only to a copy.
 */
 export function withoutStoring(response: Response): Response {
 	const headers = new Headers(response.headers);
-	headers.set('cache-control', 'no-store');
+	forbidStoring(headers);
 
 	return new Response(response.body, {
 		status: response.status,

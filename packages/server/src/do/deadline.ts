@@ -90,6 +90,17 @@ export async function withDeadlineBudget<T>(
 }
 
 /**
+Runs `body` outside every deadline scope.
+
+Work that continues after a handler returns, such as a response body, must
+start its own scope here. The handler's scope stops its timer when the
+handler returns, and a scope nested inside it can never outlast it.
+*/
+export function withoutDeadline<T>(body: () => T): T {
+	return deadlineScope.exit(body);
+}
+
+/**
 Returns the signal for the current deadline scope. Callers use this signal
 as a control-flow boundary before state changes that follow awaited work.
 

@@ -18,12 +18,15 @@ import {
 	narBytes,
 	pushPath,
 	resetTestServer,
+	settledResponse,
 	uploadMetadata
 } from '../test-support.ts';
 
 import { canonicalCacheRequest } from './cache-request.ts';
 import { tenantReadFetch } from './tenant-read-handler.ts';
 import { fixtureTenant } from './tenant-routing.test-support.ts';
+
+const boundedNarInfoControl = `${narInfoCacheControl}, no-transform`;
 
 interface ReadOutcome {
 	readonly status: number;
@@ -32,8 +35,10 @@ interface ReadOutcome {
 
 async function tenantRead(request: Request): Promise<ReadOutcome> {
 	const ctx = createExecutionContext();
-	const response = await tenantReadFetch(request, env, ctx);
-	await waitOnExecutionContext(ctx);
+	const response = await settledResponse(
+		await tenantReadFetch(request, env, ctx),
+		ctx
+	);
 
 	return {
 		status: response.status,
@@ -119,7 +124,10 @@ describe('tenant Worker reads', () => {
 			versioned: await tenantRead(versioned),
 			unversioned: await tenantRead(new Request(unversioned))
 		}).toStrictEqual({
-			versioned: { status: StatusCodes.OK, cacheControl: narInfoCacheControl },
+			versioned: {
+				status: StatusCodes.OK,
+				cacheControl: boundedNarInfoControl
+			},
 			unversioned: { status: StatusCodes.NOT_FOUND, cacheControl: 'no-store' }
 		});
 	});
@@ -143,8 +151,8 @@ describe('tenant Worker reads', () => {
 			current: await tenantRead(current),
 			other: await tenantRead(new Request(other))
 		}).toStrictEqual({
-			current: { status: StatusCodes.OK, cacheControl: narInfoCacheControl },
-			other: { status: StatusCodes.OK, cacheControl: 'no-store' }
+			current: { status: StatusCodes.OK, cacheControl: boundedNarInfoControl },
+			other: { status: StatusCodes.OK, cacheControl: 'no-store, no-transform' }
 		});
 	});
 
@@ -162,8 +170,10 @@ describe('tenant Worker reads', () => {
 		const capture = startCapture();
 
 		try {
-			await tenantReadFetch(request, boundedWorkerEnv(env), ctx);
-			await waitOnExecutionContext(ctx);
+			await settledResponse(
+				await tenantReadFetch(request, boundedWorkerEnv(env), ctx),
+				ctx
+			);
 		} finally {
 			capture.stop();
 		}

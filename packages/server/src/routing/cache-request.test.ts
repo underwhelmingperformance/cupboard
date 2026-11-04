@@ -8,7 +8,11 @@ import {
 	secondCacheReadRevision
 } from '../db/cache-generation.ts';
 
-import { cacheRequestVersion, canonicalCacheRequest } from './cache-request.ts';
+import {
+	cacheRequestVersion,
+	canonicalCacheRequest,
+	hasCurrentCacheKeyVersion
+} from './cache-request.ts';
 
 const firstVersion: CacheLifecycleVersion = {
 	generation: firstCacheGeneration,
@@ -36,7 +40,7 @@ describe('canonicalCacheRequest', () => {
 			method: canonical.method,
 			ifNoneMatch: canonical.headers.get('if-none-match')
 		}).toStrictEqual({
-			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1',
+			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=4&cache-generation=1&cache-read-revision=1',
 			method: 'HEAD',
 			ifNoneMatch: '"abc"'
 		});
@@ -57,8 +61,8 @@ describe('canonicalCacheRequest', () => {
 		);
 
 		expect(requests.map((request) => request.url)).toStrictEqual([
-			'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1',
-			'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1'
+			'https://cache.example/t/acme/abc.narinfo?cache-key-version=4&cache-generation=1&cache-read-revision=1',
+			'https://cache.example/t/acme/abc.narinfo?cache-key-version=4&cache-generation=1&cache-read-revision=1'
 		]);
 	});
 
@@ -71,7 +75,7 @@ describe('canonicalCacheRequest', () => {
 				readRevision: secondCacheReadRevision
 			}).url
 		).toStrictEqual(
-			'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=2&cache-read-revision=2'
+			'https://cache.example/t/acme/abc.narinfo?cache-key-version=4&cache-generation=2&cache-read-revision=2'
 		);
 	});
 
@@ -96,7 +100,7 @@ describe('canonicalCacheRequest', () => {
 			method: canonical.method,
 			headers: headerSet(canonical)
 		}).toStrictEqual({
-			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=3&cache-generation=1&cache-read-revision=1',
+			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=4&cache-generation=1&cache-read-revision=1',
 			method: 'GET',
 			headers: {
 				accept: 'text/x-nix-narinfo',
@@ -104,6 +108,31 @@ describe('canonicalCacheRequest', () => {
 				'user-agent': 'Nix/2.24.9'
 			}
 		});
+	});
+});
+
+describe('cache key versions', () => {
+	// A narinfo key changed when narinfo bodies gained a deadline, so a fill that
+	// an earlier Worker left stalled cannot be joined. A NAR key did not.
+	it.each([
+		{ path: '/t/acme/abc.narinfo', version: '4' },
+		{ path: '/t/acme/cache/builds/abc.narinfo', version: '4' },
+		{ path: '/t/acme/abc%2Enarinfo', version: '4' },
+		{ path: '/t/acme/abc%2enar%69nfo', version: '4' },
+		{ path: '/t/acme/nar/abc.nar.zst', version: '3' }
+	])('keys $path with version $version', ({ path, version }) => {
+		const canonical = canonicalCacheRequest(
+			new Request(`https://cache.example${path}`),
+			firstVersion
+		);
+		const earlier = new URL(canonical.url);
+		earlier.searchParams.set('cache-key-version', String(Number(version) - 1));
+
+		expect({
+			version: new URL(canonical.url).searchParams.get('cache-key-version'),
+			isCurrent: hasCurrentCacheKeyVersion(canonical),
+			isEarlierCurrent: hasCurrentCacheKeyVersion(new Request(earlier))
+		}).toStrictEqual({ version, isCurrent: true, isEarlierCurrent: false });
 	});
 });
 

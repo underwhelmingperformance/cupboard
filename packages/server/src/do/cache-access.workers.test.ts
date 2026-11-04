@@ -250,15 +250,19 @@ describe('private cache access', () => {
 
 	it('requires a credential for every content route and marks every response no-store', async () => {
 		const published = await publishToPrivateCache();
+		// A response whose body is bounded also forbids transformation, so the
+		// edge keeps its declared length.
 		const routes: readonly {
 			name: string;
 			suffix: string;
 			init?: RequestInit;
+			isBounded?: boolean;
 		}[] = [
 			{ name: 'nix-cache-info', suffix: '/nix-cache-info' },
 			{
 				name: 'a narinfo',
-				suffix: `/${published.storePathHash}.narinfo`
+				suffix: `/${published.storePathHash}.narinfo`,
+				isBounded: true
 			},
 			{ name: 'a NAR', suffix: `/${published.narUrl}` },
 			{
@@ -300,7 +304,8 @@ describe('private cache access', () => {
 				challenge: 'Basic realm="cupboard"',
 				refusedControl: 'no-store',
 				status: StatusCodes.OK,
-				control: 'no-store'
+				control:
+					route.isBounded === true ? 'no-store, no-transform' : 'no-store'
 			}))
 		);
 
@@ -323,7 +328,7 @@ describe('private cache access', () => {
 		}).toStrictEqual({
 			refused: StatusCodes.UNAUTHORIZED,
 			status: StatusCodes.OK,
-			control: 'no-store',
+			control: 'no-store, no-transform',
 			body: ''
 		});
 	});

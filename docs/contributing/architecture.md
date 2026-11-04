@@ -608,6 +608,65 @@ When the control Worker relays a full NAR response from Workers Cache, it adds
 `Accept-Ranges: bytes` if the response lacks it. Responses stored by an earlier
 release lack the header and stay fresh for a year.
 
+#### Deadlines for small response bodies
+
+A narinfo read has a deadline of 20 seconds (`readRequestBudgetMs` in
+`policy/streaming.ts`). The control Worker starts one when its narinfo handler
+starts, for every narinfo read. For a public cache, that deadline bounds the D1
+calls in the control Worker's guard but not its call to the tenant Worker, which
+has no deadline. The narinfo handler in the tenant Worker starts a deadline of
+its own, and that deadline ends a stalled body. The handler's D1 reads, its R2
+`get()` and the response body share the deadline, so a `get()` that returns
+quickly leaves the body the rest. The deadline is ten seconds shorter than the
+CLI's 30-second attempt deadline. Workers Cache joins concurrent requests for
+one URL to a single fill, so a stalled fill must end before a client's retry can
+join it.
+
+The design accepts two limits. The body receives only what the reads before it
+left, so a D1 read or `get()` that is slow but finishes in time leaves the body
+little time, and a healthy narinfo can then end early. When less than a second
+would remain for the body (`minimumBodyBudgetMs`), the server does not start it
+and returns the retryable 503 of a timed-out read before it sends any headers.
+The ten-second margin also assumes a quick admission: each D1 call in admission
+may take up to 15 seconds, so a slow admission can still let a client's retry
+join a stalled fill.
+
+The body is piped natively into a `FixedLengthStream` (`http/bounded-body.ts`),
+so no JavaScript runs for each chunk. When the deadline passes, the server
+aborts the stream. The status and headers have already been sent, so the client
+receives a body shorter than its `Content-Length`. Workers Cache does not store
+a body that ended early, and the requests that it joined to the fill fail with
+it, so the next request starts a new fill. Nix retries a transfer that ends
+early, and so do the CLI's probes. `cupboard attest verify` reads a successful
+response body outside its retry loop, so a truncated body fails that command.
+
+The pipe is passed to `waitUntil`. A client that disconnects while bytes are
+flowing ends the pipe at its next write, but while the source is stalled the
+pipe notices nothing until its deadline. A scratch deployment showed that,
+without `waitUntil`, the runtime cancels the invocation at the disconnect, so
+the deadline and its record never happen. A HEAD response keeps the stored body
+unbounded, because Hono discards it.
+
+The server logs one warning, `response body deadline passed`, for each body that
+misses its deadline. Any other early end writes no record. After a native pipe
+fails, a probe in the test pool found both streams in the same state whichever
+side had failed, and the scratch deployment found that a client disconnect
+rejects the pipe with a generic `Network connection lost.` error. The server
+therefore does not tell a failed source from a disconnected client, and Workers
+Logs already show both, as an exception or a cancelled invocation.
+
+A bounded response declares its length in `Content-Length` and includes
+`no-transform` in `Cache-Control`. A client can detect a body that ended early
+only against the declared length, and Cloudflare drops `Content-Length` from a
+response that it compresses for the client.
+
+The server does not bound NAR bodies. Nix ends a transfer that receives no data
+for 300 seconds and retries it. When it has already received bytes, it resumes
+with `Range`, and the control Worker serves a range after byte 0 from R2, not
+through Workers Cache. A public NAR that stalls before its first byte is a known
+gap: Nix retries it with a plain GET, which can join the same stuck Workers
+Cache fill again, up to Nix's `download-attempts`.
+
 Public narinfo and NAR reads, and private reads authenticated by static
 credentials, do not wake the tenant's Durable Object. Token-authenticated
 private reads call the object once per HTTP request; the NAR stream stays on the
