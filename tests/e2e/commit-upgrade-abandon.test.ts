@@ -1,9 +1,15 @@
 import { createConnection } from 'node:net';
 
+import {
+	commitAcceptCapabilitiesHeader,
+	commitBatchCapability,
+	commitCapabilitiesHeader,
+	commitCreditCapability
+} from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
+import WebSocket from 'ws';
 
-import { CupboardClient } from '../../packages/cli/src/client/client.ts';
-import type { AdvertisedCapabilities } from '../../packages/cli/src/client/commit-socket.ts';
+import { parseCapabilities } from '../../packages/cli/src/client/commit-socket.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 
@@ -55,22 +61,30 @@ async function abandonCommitUpgrade(
 The credit the server advertised on a session's 101.
 */
 async function openingGrantOf(
-	client: CupboardClient,
+	server: CupboardTestServer,
 	bearer: string
 ): Promise<string | undefined> {
-	const negotiated = Promise.withResolvers<AdvertisedCapabilities>();
-	const session = await client.openCommitSession(bearer, {
-		onCapabilities: (capabilities) => {
-			negotiated.resolve(capabilities);
+	const url = new URL(server.tenantUrl);
+	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+	url.pathname = `${url.pathname}/commit`;
+	const header = Promise.withResolvers<string>();
+	const socket = new WebSocket(url, {
+		headers: {
+			authorization: `Bearer ${bearer}`,
+			[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability}`
 		}
 	});
+	socket.once('upgrade', (response) => {
+		const value = response.headers[commitCapabilitiesHeader];
+		header.resolve(Array.isArray(value) ? value.join(',') : (value ?? ''));
+	});
+	socket.on('error', header.reject);
 
 	try {
-		const advertised = await negotiated.promise;
-
-		return advertised.get('commit-credit')?.grant;
+		return parseCapabilities(await header.promise).get(commitCreditCapability)
+			?.grant;
 	} finally {
-		session.close();
+		socket.close();
 	}
 }
 
@@ -92,9 +106,6 @@ describe('a commit upgrade whose client leaves before the handshake', () => {
 
 			try {
 				const bearer = await server.ownerAdminToken();
-				const client = new CupboardClient(server.tenantUrl, fetch, {
-					kind: 'default'
-				});
 
 				await abandonCommitUpgrade(server, bearer);
 
@@ -102,7 +113,7 @@ describe('a commit upgrade whose client leaves before the handshake', () => {
 
 				expect({
 					abandoned: server.commitSessions.abandonedUpgrades,
-					grant: await openingGrantOf(client, bearer)
+					grant: await openingGrantOf(server, bearer)
 				}).toStrictEqual({
 					abandoned: 1,
 					// Half the budget, which is the whole of a session's opening

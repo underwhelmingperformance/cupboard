@@ -9,6 +9,7 @@ import {
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
 	type CommitSessionFrameInput,
+	publicationCapability,
 	publicationMaxFrameBytes,
 	type PushId,
 	pushIdSchema,
@@ -21,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cliExitCode } from '../cli.ts';
 import {
 	CommitCapacityTimeoutError,
+	CommitSocketCapabilityMismatchError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
 	PublicationRefusedError,
@@ -34,7 +36,6 @@ import {
 	FakeCommitSocket,
 	FakeUpgradeFailure
 } from './commit-socket.test-support.ts';
-import type { AdvertisedCapabilities } from './commit-socket.ts';
 import {
 	type CommitOutcome,
 	type CommitSessionTarget,
@@ -109,7 +110,6 @@ interface SessionTestOptions {
 	readonly keepaliveMs?: number;
 	readonly maxReconnects?: number;
 	readonly reconnectBackoffMs?: number;
-	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 	readonly onFailure?: (error: Error) => void;
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 	readonly pushId?: () => Promise<PushId>;
@@ -162,7 +162,6 @@ function openSessionOver(
 			keepaliveMs: options.keepaliveMs,
 			maxReconnects: options.maxReconnects,
 			reconnectBackoffMs: options.reconnectBackoffMs,
-			onCapabilities: options.onCapabilities,
 			onFailure: options.onFailure,
 			onWaiting: options.onWaiting,
 			pushId: options.pushId
@@ -1835,93 +1834,6 @@ describe('upload renewal', () => {
 			narHash,
 			status: 'committed'
 		});
-	});
-});
-
-describe('onCapabilities callback', () => {
-	beforeEach(() => {
-		vi.useFakeTimers();
-	});
-
-	afterEach(() => {
-		vi.useRealTimers();
-	});
-
-	it('calls onCapabilities with the parsed map on open', () => {
-		const socket = new FakeCommitSocket();
-		const calls: AdvertisedCapabilities[] = [];
-		const session = openSession(socket, {
-			onCapabilities: (caps) => {
-				calls.push(caps);
-			}
-		});
-
-		socket.emit('upgrade', {
-			headers: { 'x-cupboard-commit-capabilities': 'commit-batch;max=50' }
-		});
-		socket.emit('open');
-
-		expect(calls).toHaveLength(1);
-		expect([...(calls[0]?.entries() ?? [])]).toStrictEqual([
-			['commit-batch', { max: '50' }]
-		]);
-
-		session.close();
-	});
-
-	it('calls onCapabilities with an empty map when no header was sent', () => {
-		const socket = new FakeCommitSocket();
-		const calls: AdvertisedCapabilities[] = [];
-		const session = openSession(socket, {
-			onCapabilities: (caps) => {
-				calls.push(caps);
-			}
-		});
-
-		socket.emit('upgrade', { headers: {} });
-		socket.emit('open');
-
-		expect(calls).toHaveLength(1);
-		expect([...(calls[0]?.entries() ?? [])]).toStrictEqual([]);
-
-		session.close();
-	});
-
-	it('calls onCapabilities once per connection on reconnect', async () => {
-		const first = new FakeCommitSocket();
-		const second = new FakeCommitSocket();
-		const calls: AdvertisedCapabilities[] = [];
-		const session = openSessionOver([first, second], {
-			onCapabilities: (caps) => {
-				calls.push(caps);
-			}
-		});
-
-		advertiseBatch(first);
-		first.emit('open');
-
-		const commit = session.commit(target);
-		first.emit('close', 1006, '');
-		await vi.advanceTimersByTimeAsync(maxBackoffMs);
-
-		second.emit('upgrade', { headers: {} });
-		second.emit('open');
-		second.emit(
-			'message',
-			frame({
-				ev: 'settled',
-				uploadId,
-				response: { storePathHash, narHash, status: 'committed' }
-			})
-		);
-
-		await commit;
-
-		expect(calls).toHaveLength(2);
-		expect([...(calls[0]?.entries() ?? [])]).toStrictEqual([
-			['commit-batch', {}]
-		]);
-		expect([...(calls[1]?.entries() ?? [])]).toStrictEqual([]);
 	});
 });
 
@@ -4384,6 +4296,37 @@ describe('publication operations', () => {
 		}
 		await Promise.all(commits);
 		session.close();
+	});
+	it('fails a publication on a socket whose handshake lacks publication-v1', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const result = session.commit(publicationTarget);
+		socket.emit('upgrade', {
+			headers: {
+				'x-cupboard-commit-capabilities': commitCapabilitiesValue
+					.split(',')
+					.filter((token) => token !== publicationCapability)
+					.join(',')
+			}
+		});
+		socket.emit('open');
+		const error = await rejectedBy(result, CommitSocketCapabilityMismatchError);
+
+		expect({
+			error: {
+				name: error.name,
+				path: error.path,
+				capability: error.capability
+			},
+			sent: socket.sent
+		}).toStrictEqual({
+			error: {
+				name: 'CommitSocketCapabilityMismatchError',
+				path,
+				capability: publicationCapability
+			},
+			sent: []
+		});
 	});
 	it('resubscribes with complete metadata after durable acceptance and a lost result', async () => {
 		const first = new FakeCommitSocket();

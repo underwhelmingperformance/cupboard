@@ -45,10 +45,7 @@ import type { CommitSession } from '../client/commit-socket.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
 import { keepAliveFetch } from '../client/transport.ts';
-import {
-	CupboardHttpError,
-	UploadNegotiationMismatchError
-} from '../errors.ts';
+import { UploadNegotiationMismatchError } from '../errors.ts';
 
 import { credentialSession } from './credential-session.ts';
 import { type PushClient } from './push.ts';
@@ -250,50 +247,12 @@ export function pushClientFor(
 		'publication' | 'legacy'
 	> => {
 		await session.provider();
-		if (!hasCredentialPublication) {
-			rootLogger().debug('publication protocol selected', {
-				protocol: 'legacy',
-				hasCredentialCapability: false
-			});
-			return 'legacy';
-		}
-		const ready = Promise.withResolvers<boolean>();
-		const probe = await raw.openCommitSession(credential, {
-			onFailure: (error) => {
-				ready.reject(error);
-			},
-			onCapabilities: (capabilities) => {
-				ready.resolve(capabilities.has(publicationCapability));
-			}
+		const protocol = hasCredentialPublication ? 'publication' : 'legacy';
+		rootLogger().debug('publication protocol selected', {
+			protocol,
+			hasCredentialCapability: hasCredentialPublication
 		});
-		try {
-			const hasCapability = await requestWithDeadline(() => ready.promise, {
-				target: { procedure: 'publication capability' },
-				deadlineMs: probeDeadlineMs,
-				signal: options.signal,
-				replaySafety: 'replay-unsafe'
-			});
-			rootLogger().debug('publication protocol selected', {
-				protocol: hasCapability ? publicationCapability : 'legacy',
-				hasCredentialCapability: true,
-				hasSocketCapability: hasCapability
-			});
-			return hasCapability ? 'publication' : 'legacy';
-		} catch (error) {
-			if (
-				!(error instanceof CupboardHttpError) ||
-				error.status !== notFoundStatus
-			) {
-				throw error;
-			}
-			rootLogger().debug('publication protocol selected', {
-				protocol: 'legacy',
-				reason: 'commit-probe-not-found'
-			});
-			return 'legacy';
-		} finally {
-			probe.close();
-		}
+		return protocol;
 	};
 	const publicationProtocol = (): Promise<'publication' | 'legacy'> =>
 		(protocolSelection ??= selectPublicationProtocol());

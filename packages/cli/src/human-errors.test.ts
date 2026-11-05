@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { AuthorizationAccessDeniedError } from './auth/oidc-login.ts';
 import {
 	CliError,
+	CommitSocketCapabilityMismatchError,
 	CupboardHttpError,
 	InvalidCacheCredentialsError,
 	ReferenceSourceReadRefusedError,
@@ -141,6 +142,14 @@ describe('human error presentation', () => {
 			),
 			expected:
 				'The requested permissions could not be accepted. Review the job permissions and trust-rule restrictions. Use --debug for diagnostic information.'
+		},
+		{
+			error: new CommitSocketCapabilityMismatchError(
+				'/t/acme/commit',
+				'publication-v1'
+			),
+			expected:
+				'The upload credential advertised a publication capability that the commit socket did not. A proxy between the CLI and the deployment may remove the x-cupboard-commit-capabilities header from the WebSocket handshake, or the deployment may have changed during the push. Check that the header reaches the CLI, then run the push again.'
 		},
 		{
 			error: new ORPCError('UNRECOGNISED', {

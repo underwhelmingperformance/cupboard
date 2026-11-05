@@ -794,15 +794,24 @@ per-token revocation state.
 
 ### Pushing store paths
 
-Current clients select `publication-v1` only when both the credential response
-and the commit WebSocket advertise support. Credential issuance and
-`POST /uploads/plan` do not create a named cache. Planning validates the push
-ID, reads the authoritative cache lifecycle generation, and returns advisory
-`skip`, `commit` or `upload` decisions. Planning creates no pending uploads,
-roots or retention decisions, and does not repair publications or claim reusable
-blobs. An empty plan still returns the expected generation and no entries. A
-requested run root on an empty plan is neither created nor renewed. Explicit
-retention-root replacements with no targets continue through `setRoot`.
+Current clients select `publication-v1` when the credential response advertises
+it, and the legacy protocol otherwise. A client opens the commit WebSocket only
+when it has a path to commit, so a push opens none when the server confirms all
+of its paths. Every release that advertises `publication-v1` in the credential
+response also advertises it in the commit handshake. When the handshake does
+not, for example because a proxy removes `x-cupboard-commit-capabilities`, the
+client fails each publication on that socket with
+`CommitSocketCapabilityMismatchError` and does not switch protocols during the
+push.
+
+Credential issuance and `POST /uploads/plan` do not create a named cache.
+Planning validates the push ID, reads the authoritative cache lifecycle
+generation, and returns advisory `skip`, `commit` or `upload` decisions.
+Planning creates no pending uploads, roots or retention decisions, and does not
+repair publications or claim reusable blobs. An empty plan still returns the
+expected generation and no entries. A requested run root on an empty plan is
+neither created nor renewed. Explicit retention-root replacements with no
+targets continue through `setRoot`.
 
 Each plan includes a SHA-256 operation ID. The canonical UTF-8 JSON array has
 these fields, in order: protocol version `cupboard/publication/v1`, tenant,
@@ -1004,8 +1013,7 @@ tries again, and after three attempts it refuses the entry with
 `temporary-failure`.
 
 For both protocols, the client opens its publication session on the first commit
-or upload renewal. Capability probing uses a separate connection and completes
-before selecting the protocol.
+or upload renewal.
 
 The following walkthrough describes the compatibility protocol. Compression,
 verification and canonical promotion use the same machinery for both protocols.

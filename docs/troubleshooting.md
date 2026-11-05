@@ -110,6 +110,23 @@ Otherwise, `<name>` is a cache name if a cache with that name exists, and a path
 if not. To push to a new named cache, use the cache's URL instead. Pushing to
 the URL creates the cache.
 
+### "The upload credential advertised a publication capability that the commit socket did not."
+
+The deployment's upload credential response told the CLI to publish with
+`publication-v1`, but the WebSocket handshake for commits did not advertise it.
+The CLI does not change protocol partway through a push, so the paths that it
+could not commit fail, and paths committed earlier remain published.
+
+Every release that advertises the capability in one place advertises it in the
+other, so the two answers usually disagree for one of two reasons:
+
+- A proxy, firewall or TLS-inspecting gateway between the CLI and the deployment
+  removes the `x-cupboard-commit-capabilities` response header from the
+  WebSocket handshake. Allow the header through, or push from a network without
+  the proxy.
+- The deployment was upgraded or rolled back while the push ran. Run the push
+  again.
+
 ## CI publication
 
 Start by running `cupboard github check`. It tests your tenant's trust rules

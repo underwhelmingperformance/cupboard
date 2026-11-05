@@ -39,6 +39,7 @@ import { abortReason } from '../abort.ts';
 import {
 	CommitCapacityQueuedError,
 	CommitCapacityTimeoutError,
+	CommitSocketCapabilityMismatchError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
 	PublicationRefusedError,
@@ -157,7 +158,6 @@ export interface CommitSessionOptions {
 	readonly keepaliveMs?: number;
 	readonly maxReconnects?: number;
 	readonly reconnectBackoffMs?: number;
-	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 	/**
 	Reports a terminal failure, including a refused handshake.
 	*/
@@ -596,9 +596,9 @@ export function runCommitSession(
 		}
 		if (!hasPublication) {
 			failSession(
-				new CommitSocketProtocolError(
+				new CommitSocketCapabilityMismatchError(
 					options.path,
-					'The server no longer supports accepted publications. Retry with a capable server.'
+					publicationCapability
 				)
 			);
 			return;
@@ -1858,9 +1858,6 @@ export function runCommitSession(
 		declaredDemand = 0;
 		queuedTargets = [];
 		inFlightEntries.clear();
-		// Captured per connection, so `onCapabilities` reports the negotiation of
-		// the connection whose `open` fired.
-		let connectionCaps: AdvertisedCapabilities = new Map();
 		// Record the opening grant but do not count it as progress until the
 		// connection opens. A refused handshake must not reset the capacity wait.
 		let openingGrant = 0;
@@ -1883,7 +1880,7 @@ export function runCommitSession(
 
 			const raw = response.headers[commitCapabilitiesHeader];
 			const headerValue = Array.isArray(raw) ? raw.join(',') : (raw ?? '');
-			connectionCaps = parseCapabilities(headerValue);
+			const connectionCaps = parseCapabilities(headerValue);
 			hasPublication = connectionCaps.has(publicationCapability);
 			effectiveBatchSize = resolvedBatchSize(connectionCaps);
 			hasSubscribeIdentity = connectionCaps.has(subscribeIdentityCapability);
@@ -1921,7 +1918,6 @@ export function runCommitSession(
 			}
 
 			isOpened = true;
-			options.onCapabilities?.(connectionCaps);
 
 			// A positive opening grant is capacity progress. Reset the wait only after
 			// the socket opens, so a rejected handshake cannot count its advertised

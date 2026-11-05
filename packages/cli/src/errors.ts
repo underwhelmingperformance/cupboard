@@ -1197,6 +1197,23 @@ export class CommitSocketProtocolError extends CliError {
 	}
 }
 
+/**
+The upload credential advertised a capability that the commit socket's
+handshake does not. The client chose its protocol from the credential
+response, so it cannot continue on this socket.
+*/
+export class CommitSocketCapabilityMismatchError extends CliError {
+	constructor(
+		public readonly path: string,
+		public readonly capability: string
+	) {
+		super(
+			`The upload credential advertised ${capability}, but the commit socket at ${path} did not. A proxy between the CLI and the deployment may remove the x-cupboard-commit-capabilities header from the WebSocket handshake, or the deployment may have changed during the push. Check that the header reaches the CLI, then run the push again.`
+		);
+		this.name = 'CommitSocketCapabilityMismatchError';
+	}
+}
+
 export class TokenProviderError extends CliError {
 	constructor(cause: unknown) {
 		super('The token provider rejected with a value that is not an Error', {
