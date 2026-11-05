@@ -22,7 +22,6 @@ afterAll(stopTracing);
 describe('HTTP attempt observation', () => {
 	it('propagates the exact attempt span on failed and recovered requests', async () => {
 		const requests: { header: string | null; expected: string }[] = [];
-		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
 		const fetcher = retryingFetcher(
 			(_input, init) => {
 				const span = trace.getSpanContext(context.active());
@@ -40,24 +39,20 @@ describe('HTTP attempt observation', () => {
 					: Promise.resolve(new Response('ok'));
 			},
 			'replay-safe',
-			{ trustedOrigin: 'https://cache.example.test' }
+			{ trustedOrigin: 'https://cache.example.test', random: () => 0 }
 		);
-		try {
-			await fetcher('https://cache.example.test/read', { redirect: 'manual' });
-			const [first, second] = requests;
-			expect(requests).toStrictEqual([
-				{
-					header: first?.expected,
-					expected: first?.expected
-				},
-				{
-					header: second?.expected,
-					expected: second?.expected
-				}
-			]);
-		} finally {
-			random.mockRestore();
-		}
+		await fetcher('https://cache.example.test/read', { redirect: 'manual' });
+		const [first, second] = requests;
+		expect(requests).toStrictEqual([
+			{
+				header: first?.expected,
+				expected: first?.expected
+			},
+			{
+				header: second?.expected,
+				expected: second?.expected
+			}
+		]);
 	});
 
 	it('classifies probe deadlines separately from caller cancellation', async () => {
@@ -460,34 +455,29 @@ describe('HTTP attempt observation', () => {
 		'records the final retry disposition (%s)',
 		async (disposition, statuses) => {
 			const records = captureLogs();
-			const random = vi.spyOn(Math, 'random').mockReturnValue(0);
 			let attempts = 0;
 
-			try {
-				const fetcher = retryingFetcher(
-					() =>
-						Promise.resolve(
-							new Response(undefined, { status: statuses[attempts++] })
-						),
-					'replay-safe',
-					{ operation: 'probe' }
-				);
-				await fetcher('https://cupboard.example.test/api');
+			const fetcher = retryingFetcher(
+				() =>
+					Promise.resolve(
+						new Response(undefined, { status: statuses[attempts++] })
+					),
+				'replay-safe',
+				{ operation: 'probe', random: () => 0 }
+			);
+			await fetcher('https://cupboard.example.test/api');
 
-				expect(
-					records
-						.filter((record) => record.properties.disposition !== undefined)
-						.map((record) => ({
-							attempts: record.properties.attempts,
-							disposition: record.properties.disposition,
-							status: record.properties.status
-						}))
-				).toStrictEqual([
-					{ attempts: statuses.length, disposition, status: statuses.at(-1) }
-				]);
-			} finally {
-				random.mockRestore();
-			}
+			expect(
+				records
+					.filter((record) => record.properties.disposition !== undefined)
+					.map((record) => ({
+						attempts: record.properties.attempts,
+						disposition: record.properties.disposition,
+						status: record.properties.status
+					}))
+			).toStrictEqual([
+				{ attempts: statuses.length, disposition, status: statuses.at(-1) }
+			]);
 		}
 	);
 

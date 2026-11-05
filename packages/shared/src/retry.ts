@@ -1,6 +1,11 @@
 import { getLogger } from '@logtape/logtape';
 import { StatusCodes } from 'http-status-codes';
 
+import {
+	ExponentialBackoff,
+	type ExponentialBackoffPolicy,
+	type RandomSource
+} from './backoff.ts';
 import { discardResponseBody } from './cleanup.ts';
 import {
 	type FetchObservationOptions,
@@ -18,8 +23,26 @@ const logger = getLogger(['cupboard', 'fetch']);
 // and streams many blobs. Retry a small number of transient gateway and
 // connection failures so one failed request does not abort the entire push.
 export const maxTransientRetries = 4;
-const baseRetryDelayMs = 250;
 const maxRetryDelayMs = 5000;
+const transientRetryPolicy: ExponentialBackoffPolicy = {
+	baseMs: 250,
+	maximumMs: maxRetryDelayMs,
+	jitter: 'full'
+};
+
+/**
+Returns the backoff for transient failures, which the transport and probe
+retries use: full jitter below a ceiling that starts at 250 ms and doubles
+up to 5 s. Create one for each operation that retries, and pass `random`
+to make its delays predictable in a test.
+*/
+export function transientRetryBackoff(
+	random?: RandomSource
+): ExponentialBackoff {
+	return new ExponentialBackoff(transientRetryPolicy, random);
+}
+
+const defaultTransientRetryBackoff = transientRetryBackoff();
 
 // These statuses indicate a transient rate-limit, gateway, or overload
 // response. Deterministic failures, including invariant failures, quota
@@ -46,6 +69,11 @@ export interface RetryingFetcherOptions extends FetchObservationOptions {
 	not multiply.
 	*/
 	readonly retriesConnectionFailures?: boolean;
+	/**
+	The random source for the backoff between attempts. The default is
+	`Math.random`.
+	*/
+	readonly random?: RandomSource;
 }
 
 /**
@@ -73,8 +101,9 @@ export function retryingFetcher(
 	replaySafety: ReplaySafety,
 	options: RetryingFetcherOptions = {}
 ): typeof fetch {
-	const { retriesConnectionFailures = true, ...observation } = options;
+	const { retriesConnectionFailures = true, random, ...observation } = options;
 	const canRetryResponses = replaySafety === 'replay-safe';
+	const backoff = transientRetryBackoff(random);
 
 	const retrying: typeof fetch = async (input, init) => {
 		const signal =
@@ -126,7 +155,7 @@ export function retryingFetcher(
 				}
 
 				retries += 1;
-				const delayMs = backoffDelayMs(retries);
+				const delayMs = backoff.delayMs(retries);
 				logger.debug('retrying after a network error', () => ({
 					...request,
 					retry: retries,
@@ -143,7 +172,7 @@ export function retryingFetcher(
 				retries < maxTransientRetries
 			) {
 				retries += 1;
-				const delayMs = transientResponseDelayMs(response, retries);
+				const delayMs = transientResponseDelayMs(response, retries, backoff);
 				const cfRay = response.headers.get('cf-ray');
 				logger.debug('retrying after a transient response', {
 					...request,
@@ -198,35 +227,31 @@ export function loggedUrl(input: Parameters<typeof fetch>[0]): string {
 /**
 Returns the delay before the next attempt after a transient response. A
 `Retry-After` value in seconds or as an HTTP date supplies the delay,
-limited to the maximum backoff. A missing or invalid value uses
-{@link backoffDelayMs}.
+limited to the maximum backoff. A missing or invalid value uses `backoff`.
 */
-function transientResponseDelayMs(response: Response, attempt: number): number {
+function transientResponseDelayMs(
+	response: Response,
+	attempt: number,
+	backoff: ExponentialBackoff
+): number {
 	const retryAfter = retryAfterDelayMs(response.headers.get('retry-after'));
 
 	return retryAfter === undefined
-		? backoffDelayMs(attempt)
+		? backoff.delayMs(attempt)
 		: Math.min(retryAfter, maxRetryDelayMs);
 }
 
 /**
 Waits for the jittered backoff delay for this attempt. An abort signal ends
-the wait immediately.
+the wait immediately. `backoff` defaults to {@link transientRetryBackoff}
+with `Math.random`.
 */
 export async function backoffDelay(
 	attempt: number,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	backoff: ExponentialBackoff = defaultTransientRetryBackoff
 ): Promise<void> {
-	await abortableSleep(backoffDelayMs(attempt), signal);
-}
-
-/**
-Returns an exponentially increasing delay with full jitter for the given
-attempt, counted from 1: a random value from zero to the current ceiling.
-The delay does not exceed `maxRetryDelayMs`.
-*/
-export function backoffDelayMs(attempt: number): number {
-	return fullJitterDelayMs(attempt, baseRetryDelayMs, maxRetryDelayMs);
+	await abortableSleep(backoff.delayMs(attempt), signal);
 }
 
 /**
