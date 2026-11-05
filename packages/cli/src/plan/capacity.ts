@@ -73,6 +73,12 @@ export class StoreCapacityError extends CliError {
 
 export interface CapacityPreflightOptions {
 	readonly measurement: CapacityMeasurement;
+	/**
+	Whether the cohort builds, substitutes or copies any path into the store.
+	The headroom covers build scratch and outputs, so a cohort that realises
+	nothing is never refused.
+	*/
+	readonly realisesPaths: boolean;
 	readonly storePath: string;
 	readonly probe: StoreCapacityProbe;
 	readonly detected: DetectedCapacityOptions;
@@ -101,7 +107,10 @@ export async function checkStoreCapacity(
 	const { available, capacity } = await options.probe(options.storePath);
 	const headroom = effectiveHeadroom(headroomConfig, capacity);
 
-	if (options.measurement.narSize > available - headroom) {
+	if (
+		options.realisesPaths &&
+		options.measurement.narSize > available - headroom
+	) {
 		throw new StoreCapacityError(
 			options.measurement,
 			available,

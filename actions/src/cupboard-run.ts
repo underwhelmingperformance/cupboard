@@ -43,7 +43,8 @@ export type CacheCommand =
 	| readonly ['push']
 	| readonly ['attest', 'attach']
 	| readonly ['run']
-	| readonly ['build-push'];
+	| readonly ['build-push']
+	| readonly ['plan', 'cohort'];
 
 /**
 The long options listed by a command's `--help` output. Released CLIs support
@@ -220,6 +221,19 @@ export function assertEnvironmentCredentialSupport(version: string): void {
 	throw new EnvironmentCredentialVersionError(
 		minimumEnvironmentCredentialVersion,
 		version
+	);
+}
+
+/**
+Whether `version` is a cupboard release. A build from source reports its
+commit and a development build reports 0.0.0, so neither is a release.
+*/
+export function isReleaseVersion(version: string): boolean {
+	const release = semverParse(version);
+
+	return (
+		release !== null &&
+		!(release.major === 0 && release.minor === 0 && release.patch === 0)
 	);
 }
 

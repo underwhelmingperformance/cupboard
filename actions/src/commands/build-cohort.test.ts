@@ -4129,6 +4129,75 @@ describe('buildCohortAction', () => {
 		]);
 	});
 
+	it.each([
+		{
+			name: 'a plan that expected no build',
+			cohort: remotelyQueryableCohortJson({ mayBuild: false }),
+			completeTargets: true
+		},
+		{
+			name: 'a plan that may build',
+			cohort: remotelyQueryableCohortJson({ mayBuild: true }),
+			completeTargets: false
+		},
+		{
+			name: 'members that did not evaluate',
+			cohort: cohortJson({ mayBuild: false }),
+			completeTargets: false
+		}
+	])(
+		'tells the cohort planner that its targets are complete only for $name',
+		async ({ cohort, completeTargets }) => {
+			const calls: (readonly string[])[] = [];
+
+			await buildCohortAction(
+				{ ...baseOptions(), cohortJson: cohort },
+				environment,
+				{
+					runCupboard: (binaryPath, arguments_, passedEnvironment) => {
+						calls.push(arguments_);
+
+						return cupboardStub()(binaryPath, arguments_, passedEnvironment);
+					},
+					runNixBuild: () =>
+						Promise.resolve({
+							paths: [libraryBuiltPath],
+							status: 0,
+							copiedFrom: new Map()
+						}),
+					reporter: recordingReporter([])
+				}
+			);
+
+			expect(
+				calls.find((arguments_) => arguments_[1] === 'plan')
+			).toStrictEqual([
+				'--no-colour',
+				'plan',
+				'cohort',
+				'https://cache.example.test/t/acme',
+				'--targets-file',
+				path.join(
+					directory,
+					'cupboard-plan-cohort-targets-cohort-x86_64-linux-ubuntu-latest-remote-abc123.json'
+				),
+				'--plan-file',
+				path.join(
+					directory,
+					'cupboard-plan-cohort-cohort-x86_64-linux-ubuntu-latest-remote-abc123.json'
+				),
+				'--github-oidc',
+				'--build',
+				'missing',
+				'--substituter',
+				'leave',
+				'--publish',
+				'none',
+				...(completeTargets ? ['--complete-targets'] : [])
+			]);
+		}
+	);
+
 	it('builds only the installables in the plan build set', async () => {
 		const runNixBuild = vi.fn((installables: readonly string[]) =>
 			Promise.resolve({
@@ -4990,6 +5059,62 @@ describe('buildCohortAction', () => {
 		});
 	});
 
+	it.each([
+		{ name: 'expected no build', mayBuild: false, store: '', warnings: 1 },
+		{ name: 'may build', mayBuild: true, store: '', warnings: 0 },
+		{
+			name: 'expected no build for a remote store',
+			mayBuild: false,
+			store: 'ssh-ng://build@example.test',
+			warnings: 0
+		}
+	])(
+		'warns about the skipped cleanup on a store-capacity refusal only when the plan $name',
+		async ({ mayBuild, store, warnings }) => {
+			const refusalEvents: readonly ReporterResultEvent[] = [
+				{
+					kind: 'plan-cohort-refusal',
+					data: {
+						reason: 'store-capacity',
+						measured: { downloadSize: 5, narSize: 1000, unknownCount: 0 },
+						available: 100,
+						headroom: 20,
+						detected: {
+							cohortSplitPossible: false,
+							remoteStoreConfigured: false,
+							componentPublicationApplicable: false
+						}
+					}
+				}
+			];
+			const recorded: string[] = [];
+			let error: unknown;
+
+			try {
+				await buildCohortAction(
+					{ ...baseOptions(), cohortJson: cohortJson({ mayBuild }), store },
+					environment,
+					{
+						runCupboard: () =>
+							Promise.reject(
+								new CupboardReportedError(69, refusalEvents, undefined, true)
+							),
+						runNixBuild: () =>
+							Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() }),
+						reporter: recordingReporter(recorded)
+					}
+				);
+			} catch (error_: unknown) {
+				error = error_;
+			}
+
+			expect({
+				refused: error instanceof CohortPlanRefusedError,
+				warnings: recorded.length
+			}).toStrictEqual({ refused: true, warnings });
+		}
+	);
+
 	it('wraps a plan-cohort failure with no refusal event as a command error', async () => {
 		const runCupboardMock = vi.fn<typeof runCupboard>(() =>
 			Promise.reject(new CupboardReportedError(1, [], undefined, true))
@@ -5070,8 +5195,11 @@ describe('buildCohortAction', () => {
 });
 
 // Both queryable members have expected outputs for the re-probe tests.
-function predictableCohort(): string {
-	return cohortJson({ expectedPaths: [appPath, libraryBuiltPath, undefined] });
+function predictableCohort(overrides: Record<string, unknown> = {}): string {
+	return cohortJson({
+		expectedPaths: [appPath, libraryBuiltPath, undefined],
+		...overrides
+	});
 }
 
 function withdrawal(outcome: string): Record<string, unknown> {
@@ -5106,7 +5234,8 @@ describe('buildCohortAction availability confirmation', () => {
 	}
 
 	async function runConfirmedCohort(
-		reprobe: readonly ReporterResultEvent[] | Error
+		reprobe: readonly ReporterResultEvent[] | Error,
+		cohortOverrides: Record<string, unknown> = {}
 	): Promise<ConfirmedRun> {
 		const warnings: string[] = [];
 		const runCupboardMock = vi.fn<typeof runCupboard>(
@@ -5135,7 +5264,7 @@ describe('buildCohortAction availability confirmation', () => {
 		);
 		const options: BuildCohortOptions = {
 			...baseOptions(),
-			cohortJson: predictableCohort()
+			cohortJson: predictableCohort(cohortOverrides)
 		};
 
 		await buildCohortAction(options, environment, {
@@ -5297,6 +5426,40 @@ describe('buildCohortAction availability confirmation', () => {
 			warnings: 1
 		});
 	});
+
+	it.each([
+		{
+			name: 'expected no build',
+			cohortOverrides: { mayBuild: false },
+			warnings: 1
+		},
+		{ name: 'may build', cohortOverrides: { mayBuild: true }, warnings: 0 },
+		{ name: 'does not say', cohortOverrides: {}, warnings: 0 }
+	])(
+		'warns about a build only when the plan $name',
+		async ({ cohortOverrides, warnings }) => {
+			const run = await runConfirmedCohort(
+				planReprobeSuccess(),
+				cohortOverrides
+			);
+
+			expect({
+				built: run.built,
+				warnings: run.warnings.length
+			}).toStrictEqual({
+				built: [
+					[
+						[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
+						'',
+						'',
+						outLinkDirectory(directory),
+						undefined
+					]
+				],
+				warnings
+			});
+		}
+	);
 });
 
 describe('planReprobeInvocation', () => {

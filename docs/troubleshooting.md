@@ -218,6 +218,13 @@ free disk space for the build, or too many paths might be unavailable from any
 substituter. You can split the cohort into smaller ones, free disk space with
 `maximise-space`, or [build on other machines](./ci/building-elsewhere.md).
 
+With `maximise-space: true`, a cohort job does not free disk space when the plan
+found every target's output in a cache. If an output disappeared from that cache
+before the cohort job ran, the job warns that the plan expected no build. It
+then builds without the extra space, or refuses the cohort when the store has
+too little free space. Re-running only the failed job reuses the same plan, so
+re-run the whole workflow instead.
+
 ### A `main` run rebuilt something that a pull request had already built
 
 Each of these must be true. Check them in order:

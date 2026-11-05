@@ -774,11 +774,13 @@ describe('SSH credential isolation', () => {
 				...storeCredentials
 			},
 			// A cohort job takes them only when its own target group is remote.
+			// It frees disk space unless the plan says the cohort builds nothing.
 			cohortPrepare: {
 				'ssh-key': '${{ secrets.input_ssh_key }}',
 				'input-known-hosts': '${{ inputs.input-known-hosts }}',
 				'nix-config': '${{ inputs.nix-config }}',
-				'maximise-space': '${{ inputs.maximise-space }}',
+				'maximise-space':
+					"${{ inputs.maximise-space && toJSON(matrix.mayBuild) != 'false' }}",
 				remote: "${{ matrix.remote && inputs.store == '' }}",
 				builders:
 					"${{ matrix.remote && inputs.store == '' && inputs.builders || '' }}",
@@ -889,6 +891,7 @@ describe('cohort planning and publication', () => {
 					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
 				'enable-packing': '${{ inputs.enable-packing }}',
 				'pack-capacity': '${{ inputs.pack-capacity }}',
+				'maximise-space': '${{ inputs.maximise-space }}',
 				store: '${{ inputs.store }}',
 				builders: "${{ inputs.store == '' && inputs.builders || '' }}"
 			}

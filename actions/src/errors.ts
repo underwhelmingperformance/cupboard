@@ -1833,6 +1833,7 @@ export class CohortPlanRefusedError extends CodedError {
 	constructor(
 		public readonly cohortKey: string,
 		public readonly status: number | null,
+		public readonly reason: 'unknown-paths-ceiling' | 'store-capacity',
 		message: string
 	) {
 		super(message);

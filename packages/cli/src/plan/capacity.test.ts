@@ -39,6 +39,7 @@ describe('checkStoreCapacity', () => {
 
 		const result = await checkStoreCapacity({
 			measurement: measurement({ narSize: 1000 }),
+			realisesPaths: true,
 			storePath,
 			probe: probeOf(available, capacity),
 			detected: detected()
@@ -69,6 +70,7 @@ describe('checkStoreCapacity', () => {
 					downloadSize: 42,
 					unknownCount: 3
 				}),
+				realisesPaths: true,
 				storePath,
 				probe: probeOf(available, capacity),
 				detected: detected({ remoteStoreConfigured: true })
@@ -109,11 +111,28 @@ describe('checkStoreCapacity', () => {
 		await expect(
 			checkStoreCapacity({
 				measurement: measurement({ narSize: available - headroom }),
+				realisesPaths: true,
 				storePath,
 				probe: probeOf(available, capacity),
 				detected: detected()
 			})
 		).resolves.toStrictEqual({ available, capacity, headroom });
+	});
+
+	it('accepts a store below its headroom when the cohort realises no paths', async () => {
+		await expect(
+			checkStoreCapacity({
+				measurement: measurement({ narSize: 0, downloadSize: 0 }),
+				realisesPaths: false,
+				storePath,
+				probe: probeOf(100, 100),
+				detected: detected()
+			})
+		).resolves.toStrictEqual({
+			available: 100,
+			capacity: 100,
+			headroom: defaultHeadroomAbsoluteMinimum
+		});
 	});
 
 	it('uses the fractional headroom on a large store, where it dominates the absolute minimum', async () => {
@@ -125,6 +144,7 @@ describe('checkStoreCapacity', () => {
 
 		const result = await checkStoreCapacity({
 			measurement: measurement({ narSize: 1 }),
+			realisesPaths: true,
 			storePath,
 			probe: probeOf(available, capacity),
 			detected: detected()
@@ -143,6 +163,7 @@ describe('checkStoreCapacity', () => {
 
 		const result = await checkStoreCapacity({
 			measurement: measurement({ narSize: 1 }),
+			realisesPaths: true,
 			storePath,
 			probe: probeOf(available, capacity),
 			detected: detected()
@@ -155,6 +176,7 @@ describe('checkStoreCapacity', () => {
 	it('applies an overridden headroom instead of the defaults', async () => {
 		const result = await checkStoreCapacity({
 			measurement: measurement({ narSize: 10 }),
+			realisesPaths: true,
 			storePath,
 			probe: probeOf(10_000, 1000),
 			detected: detected(),
@@ -190,6 +212,7 @@ describe('checkStoreCapacity', () => {
 		try {
 			await checkStoreCapacity({
 				measurement: measurement({ narSize: available }),
+				realisesPaths: true,
 				storePath,
 				probe: probeOf(available, capacity),
 				detected: detectedOptions
