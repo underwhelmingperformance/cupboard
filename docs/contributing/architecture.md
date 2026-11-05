@@ -517,6 +517,24 @@ invocation. The Free allowance permits 51,200 paths per request; the Paid
 allowance permits the schema maximum. A caller can split a larger closure into
 separate requests.
 
+`POST /uploads/confirm` accepts 1,000 store-path hashes, but the tenant object
+checks only as many as its remaining calls allow. It reads the blob states from
+D1 once and keeps two calls for the maintenance reconcile after it. It checks
+the paths in request order, in groups. Each group makes two D1 calls. For each
+path, it heads the narinfo object and at most one NAR, and a repair of the
+narinfo object can take up to eight more calls. A group is as large as the
+remaining calls afford at that worst case of ten calls a path. It therefore
+always finishes, and the calls that it does not spend go to the next group.
+Because each group reads D1 again, a path that is recommitted while an earlier
+group runs is checked against its current row. The response answers the paths
+that the groups covered, as a prefix of the request. Without repairs, that is up
+to 425 paths on the Free plan and all 1,000 on the Paid plan. A page that needs
+many repairs takes about as many requests as its cost divided by the slice. When
+fewer than 15 calls remain, too few for one path at its worst case, the tenant
+object answers 503 with `Retry-After: 1`. The response advertises the limit for
+the whole slice in `x-cupboard-upload-max-paths`. The client sends the paths
+that an answer left out in its next request.
+
 Both Wrangler configurations leave `limits.subrequests` unset, so Cloudflare
 applies the account's plan limit. The allowance doesn't extend the tenant
 object's critical-section deadline.

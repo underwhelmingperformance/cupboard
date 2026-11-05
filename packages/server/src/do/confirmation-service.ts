@@ -3,6 +3,7 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import {
+	trailingEligibilitySubrequests,
 	uploadConfirmPresentMaxPathsFor,
 	type UploadConfirmPresentPath,
 	type UploadConfirmPresentRequest,
@@ -27,7 +28,6 @@ import { requireServedStorePaths } from '../policy/served-store.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
 import type { ServerContext } from './context.ts';
 import { confirmGraceBatch } from './grace-decision.ts';
-import { trailingEligibilitySubrequests } from './maintenance-eligibility-service.ts';
 import type { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import type { RetentionService } from './retention-service.ts';
 import type { RootsService } from './roots-service.ts';

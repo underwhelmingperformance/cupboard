@@ -1,6 +1,7 @@
 import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { trailingEligibilitySubrequests } from '@cupboard/protocol/upload';
 import {
 	and,
 	asc,
@@ -464,10 +465,8 @@ function maintenanceWakeWins(
 	return sql`${storedWake} is not ${passInProgress} and ((${fresherAndChanged}) or (${sooner}))`;
 }
 
-// Reconciliation can make one D1 call before an error. The fallback
-// invalidation requires another, so the body reserves two calls. A fresh
-// pass writes its mark before the body starts.
-export const trailingEligibilitySubrequests = 2;
+// The body reserves `trailingEligibilitySubrequests`. A fresh pass writes its
+// mark before the body starts.
 const leadingEligibilitySubrequests = 1;
 
 /**

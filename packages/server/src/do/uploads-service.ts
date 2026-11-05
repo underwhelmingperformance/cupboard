@@ -18,6 +18,9 @@ import {
 	type PublicationEntry,
 	type PushCredentialInput,
 	type PushId,
+	trailingEligibilitySubrequests,
+	uploadConfirmBlobStateSubrequests,
+	uploadConfirmMaxPathsFor,
 	type UploadConfirmResponse,
 	type UploadDecision,
 	type UploadGraceFact,
@@ -53,6 +56,7 @@ import {
 	PublicationRecoveryExpiredError,
 	PublicationStagingDeletePendingError,
 	TenantWritesStoppedError,
+	UploadConfirmSubrequestsExhaustedError,
 	UploadPageSplitRequiredError
 } from '../errors.ts';
 import {
@@ -93,7 +97,11 @@ import { type RetentionService } from './retention-service.ts';
 import { type ReuseAuthority } from './reuse-authority.ts';
 import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
 import { type RootsService } from './roots-service.ts';
-import { hasSubrequestsFor } from './subrequest-slice.ts';
+import {
+	hasSubrequestsFor,
+	subrequestsAvailable,
+	withHeldSubrequests
+} from './subrequest-slice.ts';
 import { commitMetadataFromPathAndBlob } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
@@ -1378,11 +1386,15 @@ export class UploadsService {
 	// Confirmation requires a committed reference, a present canonical NAR, and the
 	// same narinfo identity when grace is applied. If any condition fails, the path
 	// is reported as unconfirmed and receives no grace extension.
+	//
+	// The response answers a prefix of the request. It covers the paths that the
+	// remaining subrequests can probe and repair in the worst case, and the client
+	// sends the other paths in another request.
 	async confirmPaths(
 		cacheScope: CacheScope,
-		storePathHashes: readonly StorePathHash[]
+		requestedHashes: readonly StorePathHash[]
 	): Promise<UploadConfirmResponse> {
-		if (storePathHashes.length === 0) {
+		if (requestedHashes.length === 0) {
 			return { paths: [] };
 		}
 
@@ -1390,39 +1402,52 @@ export class UploadsService {
 
 		if (cache === undefined) {
 			return {
-				paths: storePathHashes.map((storePathHash) => ({
+				paths: requestedHashes.map((storePathHash) => ({
 					storePathHash,
 					confirmed: false
 				}))
 			};
 		}
 
+		const available = subrequestsAvailable();
+		const maxPaths = uploadConfirmMaxPathsFor(available);
+
+		if (maxPaths === 0) {
+			throw new UploadConfirmSubrequestsExhaustedError(available);
+		}
+
+		const probedHashes = requestedHashes.slice(0, maxPaths);
 		// Deduplicate the storage queries without removing duplicate response entries.
-		const uniqueHashes = [...new Set(storePathHashes)];
-		const existingByStorePathHash = this.existingNarInfos(cache, uniqueHashes);
-		const existingRows = existingByStorePathHash.values().toArray();
-		const [servable, backed] = await Promise.all([
-			this.narInfoObjects.servableStorePathHashes(cache, uniqueHashes),
-			this.uploadState.presentNarHashes(existingRows.map((row) => row.narHash))
-		]);
+		const uniqueHashes = [...new Set(probedHashes)];
+		const probe = await withHeldSubrequests(
+			uploadConfirmBlobStateSubrequests + trailingEligibilitySubrequests,
+			() => this.narInfoObjects.servableNarInfoPrefix(cache, uniqueHashes)
+		);
+		const backed = await this.uploadState.presentNarHashes(
+			probe.versions
+				.values()
+				.map((version) => version.narHash)
+				.toArray()
+		);
+		const answeredUnique = uniqueHashes.slice(0, probe.evaluated);
+		const evaluated = new Set(answeredUnique);
+		const firstUnanswered = probedHashes.findIndex(
+			(storePathHash) => !evaluated.has(storePathHash)
+		);
+		const answeredHashes =
+			firstUnanswered === -1
+				? probedHashes
+				: probedHashes.slice(0, firstUnanswered);
 		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
 
-		const confirmable = uniqueHashes.flatMap((storePathHash) => {
-			const existing = existingByStorePathHash.get(storePathHash);
+		const confirmable = answeredUnique.flatMap((storePathHash) => {
+			const version = probe.versions.get(storePathHash);
 
-			if (
-				existing === undefined ||
-				!servable.has(storePathHash) ||
-				!backed.has(existing.narHash)
-			) {
+			if (version === undefined || !backed.has(version.narHash)) {
 				return [];
 			}
 
-			return {
-				storePathHash: existing.storePathHash,
-				generation: existing.generation,
-				narHash: existing.narHash
-			};
+			return { storePathHash, ...version };
 		});
 		// The shared-fact reads allow a concurrent publication to replace a row.
 		// Re-check identity while applying grace and confirm only unchanged rows.
@@ -1438,7 +1463,7 @@ export class UploadsService {
 		});
 
 		return {
-			paths: storePathHashes.map((storePathHash) => {
+			paths: answeredHashes.map((storePathHash) => {
 				const fact = facts.get(storePathHash);
 
 				if (fact === undefined) {
