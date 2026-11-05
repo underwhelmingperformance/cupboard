@@ -44,6 +44,10 @@ import {
 const minimumErrorStatus: number = StatusCodes.BAD_REQUEST;
 const okStatus: number = StatusCodes.OK;
 
+const narInfoRoute = String.raw`/:name{[0-9a-z]+\.narinfo}`;
+const attestationInfoRoute = '/api/v1/attestation-info';
+const cacheMetadataRoute = '/api/v1/path-info';
+
 /**
 The Nix binary-cache routes relative to a selected cache. The worker mounts
 this sub-app at each cache prefix, and mount middleware sets the read scope.
@@ -52,6 +56,24 @@ Hono answers HEAD by re-dispatching the request to the GET handler with the
 body stripped, so a separate HEAD registration would never match.
 */
 export const readApp = buildReadApp();
+
+/**
+Starts the read deadline on `app` for the narinfo, `attestation-info` and
+`path-info` routes of {@link readApp} mounted at `mount`. Register it before
+admission so that admission's waits share the deadline; a deadline on the
+route inside `readApp` would start only after admission.
+*/
+export function routeReadDeadlines(
+	app: Hono<WorkerHonoEnv>,
+	mount: string
+): void {
+	app.on('GET', `${mount}${narInfoRoute}`, readDeadline);
+	app.on(
+		'POST',
+		[`${mount}${attestationInfoRoute}`, `${mount}${cacheMetadataRoute}`],
+		readDeadline
+	);
+}
 
 function buildReadApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
@@ -66,56 +88,52 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 		return tenantUncachedRead(context, true);
 	});
 
-	app.get(
-		String.raw`/:name{[0-9a-z]+\.narinfo}`,
-		readDeadline,
-		async (context) => {
-			const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
+	app.get(narInfoRoute, async (context) => {
+		const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
 
-			if (storePathHash === undefined) {
-				return notFoundResponse();
-			}
-
-			return withSpan(
-				'narinfo-read',
-				{
-					...upstreamTraceAttributes(context.req.raw.headers),
-					'cupboard.probe.requested_paths': 1
-				},
-				async (span) => {
-					try {
-						const denied = await guardContentRead(context);
-						const response: Response =
-							denied ??
-							(isCacheableRead(context)
-								? await cachedTenantRead(context)
-								: await serveNarInfo(
-										context.req.raw,
-										context.env,
-										context.get('tenant'),
-										context.get('readScope'),
-										storePathHash,
-										true,
-										keepAliveIn(context.executionCtx)
-									));
-						span.setAttribute('http.response.status_code', response.status);
-						span.setAttribute(
-							'cupboard.probe.outcome',
-							response.status === 404
-								? 'missing'
-								: response.ok
-									? 'found'
-									: 'refused'
-						);
-						return response;
-					} catch (error) {
-						span.setAttribute('cupboard.probe.outcome', 'error');
-						throw error;
-					}
-				}
-			);
+		if (storePathHash === undefined) {
+			return notFoundResponse();
 		}
-	);
+
+		return withSpan(
+			'narinfo-read',
+			{
+				...upstreamTraceAttributes(context.req.raw.headers),
+				'cupboard.probe.requested_paths': 1
+			},
+			async (span) => {
+				try {
+					const denied = await guardContentRead(context);
+					const response: Response =
+						denied ??
+						(isCacheableRead(context)
+							? await cachedTenantRead(context)
+							: await serveNarInfo(
+									context.req.raw,
+									context.env,
+									context.get('tenant'),
+									context.get('readScope'),
+									storePathHash,
+									true,
+									keepAliveIn(context.executionCtx)
+								));
+					span.setAttribute('http.response.status_code', response.status);
+					span.setAttribute(
+						'cupboard.probe.outcome',
+						response.status === 404
+							? 'missing'
+							: response.ok
+								? 'found'
+								: 'refused'
+					);
+					return response;
+				} catch (error) {
+					span.setAttribute('cupboard.probe.outcome', 'error');
+					throw error;
+				}
+			}
+		);
+	});
 
 	app.get('/nar/:name', async (context) => {
 		const nar = parseNarName(context.req.param('name'));
@@ -212,7 +230,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 		return tenantUncachedRead(context, true);
 	});
 
-	app.post('/api/v1/attestation-info', readDeadline, async (context) => {
+	app.post(attestationInfoRoute, async (context) => {
 		const denied = await guardRead(context);
 		return denied ?? answerAttestationInfo(context);
 	});
@@ -249,7 +267,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 		);
 	});
 
-	app.post('/api/v1/path-info', readDeadline, async (context) => {
+	app.post(cacheMetadataRoute, async (context) => {
 		const denied = await guardRead(context);
 		return denied ?? answerCacheMetadata(context);
 	});

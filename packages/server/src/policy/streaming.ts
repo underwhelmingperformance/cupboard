@@ -8,8 +8,9 @@ A stalled read must end before the client's own attempt deadline. Workers
 Cache joins concurrent requests for one URL to a single fill, so a client
 whose retry arrived while the fill was still running would wait for the same
 stalled fill. The margin covers the network between the client and the edge
-and a quick admission in the control Worker. A slow admission D1 call, which
-may take up to 15 seconds, can use more than the margin.
+and, for a public cache, a quick admission in the control Worker, which runs
+before the tenant Worker's deadline starts. A slow admission can use more than
+the margin.
 */
 export const readRequestBudgetMs = probeDeadlineMs - 10_000;
 

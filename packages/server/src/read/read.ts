@@ -32,6 +32,7 @@ import {
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
+import { boundedSubrequest, unboundedCapMs } from '../do/deadline.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { requireSubrequestsFor } from '../do/subrequest-slice.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
@@ -124,7 +125,12 @@ export async function guardScopedRead(
 	return authenticateRead(
 		request,
 		authentication.cacheVerifier ?? entry.readVerifier,
-		(token) => authentication.isTokenAuthorised(token, scope.scope)
+		(token) =>
+			boundedSubrequest(
+				() => authentication.isTokenAuthorised(token, scope.scope),
+				'tenant.authoriseCacheContentRead',
+				unboundedCapMs
+			)
 	);
 }
 

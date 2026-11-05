@@ -612,26 +612,39 @@ release lack the header and stay fresh for a year.
 
 A narinfo read, and the tenant object's read of an attestation list or bundle,
 has a deadline of 20 seconds (`readRequestBudgetMs` in `policy/streaming.ts`).
-The control Worker starts one when its narinfo handler starts, for every narinfo
-read. For a public cache, admission runs before that deadline starts, and the
-control Worker's call to the tenant Worker has no deadline. The narinfo handler
-in the tenant Worker starts a deadline of its own, and that deadline ends a
-stalled body. The tenant object starts one for GET requests for an attestation
-list or bundle; the attestation write procedures, which have the same path
-prefixes, keep their own budgets. The handler's D1 reads, its R2 `get()` and the
-response body share the deadline, so a `get()` that returns quickly leaves the
-body the rest. The deadline is ten seconds shorter than the CLI's 30-second
-attempt deadline. Workers Cache joins concurrent requests for one URL to a
-single fill, so a stalled fill must end before a client's retry can join it.
+The control Worker starts one for every narinfo read of a default or named cache
+before admission, so admission's waits share it: the Cache API, KV and D1 reads,
+a migration of the tenant's cache catalogue, and the check of a read token. When
+the deadline passes during admission, the read returns a retryable 503. For a
+public cache, the control Worker's call to the tenant Worker has no deadline.
+The narinfo handler in the tenant Worker starts a deadline of its own, and that
+deadline ends a stalled body. The tenant object starts one for GET requests for
+an attestation list or bundle; the attestation write procedures, which have the
+same path prefixes, keep their own budgets. The handler's D1 reads, its R2
+`get()` and the response body share the deadline, so a `get()` that returns
+quickly leaves the body the rest. The deadline is ten seconds shorter than the
+CLI's 30-second attempt deadline. Workers Cache joins concurrent requests for
+one URL to a single fill, so a stalled fill must end before a client's retry can
+join it.
 
 The design accepts two limits. The body receives only what the reads before it
 left, so a D1 read or `get()` that is slow but finishes in time leaves the body
 little time, and a healthy narinfo can then end early. When less than a second
 would remain for the body (`minimumBodyBudgetMs`), the server does not start it
 and returns the retryable 503 of a timed-out read before it sends any headers.
-The ten-second margin also assumes a quick admission: each D1 call in admission
-may take up to 15 seconds, so a slow admission can still let a client's retry
+For a public cache, the ten-second margin also assumes a quick admission. The
+tenant Worker's deadline starts only when the control Worker forwards the read,
+so an admission that is slow but finishes in time can still let a client's retry
 join a stalled fill.
+
+A migration of the tenant's cache catalogue during a read's admission must also
+finish within the read's deadline. When it does not, the read returns 503, but
+the migration continues in the tenant object. The object runs one migration at a
+time: `initialise` keeps the promise of the running migration, and a later call,
+such as the next read's, waits for that promise and does not start another. Each
+call migrates a bounded amount, and the object's alarm continues a migration
+that needs more. Until the migration finishes, reads of that tenant can
+return 503.
 
 The body is piped natively into a `FixedLengthStream` (`http/bounded-body.ts`),
 so no JavaScript runs for each chunk. When the deadline passes, the server
@@ -643,14 +656,15 @@ early, and so do the CLI's probes. `cupboard attest verify` reads a successful
 response body outside its retry loop, so a truncated body fails that command.
 
 The control Worker also starts the deadline for each `path-info` and
-`attestation-info` probe of a default or named cache. A probe parses the
-narinfos or attestation lists that it reads from R2, so it reads each body into
-memory, through the same bounded pipe. The probe's D1 reads, its `get()` calls
-and every body that it reads share the deadline. A body that misses the deadline
-fails the whole probe with a retryable 503. For a public cache, `path-info`
-reads each narinfo through Workers Cache, and the narinfo deadline in the tenant
-Worker bounds that body. The tenant object answers the `path-info` probe of a
-reuse view without a read deadline.
+`attestation-info` probe of a default or named cache, before admission as for a
+narinfo read. A probe parses the narinfos or attestation lists that it reads
+from R2, so it reads each body into memory, through the same bounded pipe. The
+probe's D1 reads, its `get()` calls and every body that it reads share the
+deadline. A body that misses the deadline fails the whole probe with a
+retryable 503. For a public cache, `path-info` reads each narinfo through
+Workers Cache, and the narinfo deadline in the tenant Worker bounds that body.
+The tenant object answers the `path-info` probe of a reuse view without a read
+deadline.
 
 The pipe is passed to `waitUntil`. A client that disconnects while bytes are
 flowing ends the pipe at its next write, but while the source is stalled the

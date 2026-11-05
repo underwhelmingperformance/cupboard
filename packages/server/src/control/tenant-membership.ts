@@ -17,6 +17,7 @@ import {
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
+import { boundedSubrequest, unboundedCapMs } from '../do/deadline.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { cacheCatalogueVersion } from '../migration/cache-access.ts';
 import {
@@ -117,9 +118,12 @@ async function lookupTenantMember(
 	slug: TenantId
 ): Promise<MemberLookup> {
 	try {
-		const value = await kv.get(tenantMemberKey(slug), {
-			cacheTtl: memberKeyCacheTtlSeconds
-		});
+		const value = await boundedSubrequest(
+			() =>
+				kv.get(tenantMemberKey(slug), { cacheTtl: memberKeyCacheTtlSeconds }),
+			'kv.get',
+			unboundedCapMs
+		);
 
 		return value === null ? 'absent' : 'present';
 	} catch {
@@ -153,16 +157,30 @@ async function loadMembershipFilter(
 	ctx: DeferredContext
 ): Promise<BinaryFuse8 | undefined> {
 	const cacheKey = filterCacheKey();
-	const cached = await caches.default.match(cacheKey);
+	const cached = await boundedSubrequest(
+		async () => {
+			const response = await caches.default.match(cacheKey);
+
+			return response === undefined
+				? undefined
+				: new Uint8Array(await response.arrayBuffer());
+		},
+		'cache.match',
+		unboundedCapMs
+	);
 
 	if (cached !== undefined) {
-		return deserialiseFilter(new Uint8Array(await cached.arrayBuffer()));
+		return deserialiseFilter(cached);
 	}
 
 	let bytes: ArrayBuffer | null;
 
 	try {
-		bytes = await env.TENANT_CACHE.get(filterKey, 'arrayBuffer');
+		bytes = await boundedSubrequest(
+			() => env.TENANT_CACHE.get(filterKey, 'arrayBuffer'),
+			'kv.get',
+			unboundedCapMs
+		);
 	} catch {
 		return undefined;
 	}
@@ -342,7 +360,11 @@ export async function readTenantEntry(
 
 	if (rows.tenant.cacheCatalogueVersion !== cacheCatalogueVersion) {
 		try {
-			await tenantServer(env, slug).migrateCacheCatalogue(slug);
+			await boundedSubrequest(
+				() => tenantServer(env, slug).migrateCacheCatalogue(slug),
+				'tenant.migrateCacheCatalogue',
+				unboundedCapMs
+			);
 		} catch (error) {
 			throw new TenantAdmissionUnavailableError(error);
 		}
