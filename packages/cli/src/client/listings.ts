@@ -1,4 +1,5 @@
 import { tenantContract } from '@cupboard/protocol/contract';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import {
 	type ProgressiveCollectionLimits,
 	type ProgressivePage
@@ -41,11 +42,14 @@ export interface CacheLister<Entry> {
 /**
 Requests the first page of the tenant's caches, or of the caches whose names
 start with `namePrefix`. Each page request has the probe deadline and is
-sent again when the deadline expires or the response body fails.
+sent again when the deadline expires or the response body fails. `random`
+is the random source for the backoff before a request is sent again, and
+defaults to `Math.random`.
 */
 export function cachePages<Entry>(
 	client: CacheLister<Entry>,
-	namePrefix?: string
+	namePrefix?: string,
+	random?: RandomSource
 ): Promise<ProgressivePage<Entry>> {
 	return cursorPages<Entry, string>(
 		async (cursor, signal) => {
@@ -59,6 +63,6 @@ export function cachePages<Entry>(
 
 			return { items: page.caches, next: page.cursor };
 		},
-		procedureDeadline('caches.list', tenantContract.caches.list)
+		procedureDeadline('caches.list', tenantContract.caches.list, { random })
 	);
 }

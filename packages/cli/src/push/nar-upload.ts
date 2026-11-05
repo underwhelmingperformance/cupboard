@@ -3,6 +3,7 @@ import { setTimeout as sleepFor } from 'node:timers/promises';
 
 import { rootLogger } from '@cupboard/logger';
 import type { CommitBlobDeclaration } from '@cupboard/protocol/upload';
+import { ExponentialBackoff } from '@cupboard/shared/backoff';
 
 import { abortable } from '../abort.ts';
 import { asyncChunks } from '../io/byte-stream.ts';
@@ -1157,11 +1158,14 @@ async function settled(operation: Promise<unknown>): Promise<void> {
 	}
 }
 
+const requestRetryBackoff = new ExponentialBackoff({
+	baseMs: 500,
+	jitter: 'half'
+});
+
 async function defaultBackoff(
 	attempt: number,
 	signal: AbortSignal
 ): Promise<void> {
-	const delayMs = 250 * 2 ** attempt;
-
-	await sleepFor(delayMs * (0.5 + Math.random() / 2), undefined, { signal });
+	await sleepFor(requestRetryBackoff.delayMs(attempt), undefined, { signal });
 }

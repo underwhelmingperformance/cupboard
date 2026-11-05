@@ -28,9 +28,13 @@ import {
 	type UploadId,
 	uploadRenewalCapability
 } from '@cupboard/protocol/upload';
+import {
+	ExponentialBackoff,
+	type RandomSource
+} from '@cupboard/shared/backoff';
 import { chunk } from '@cupboard/shared/collections';
 import { BoundedBodyCollector } from '@cupboard/shared/response-body';
-import { fullJitterDelayMs, retryAfterDelayMs } from '@cupboard/shared/retry';
+import { retryAfterDelayMs } from '@cupboard/shared/retry';
 import { context } from '@opentelemetry/api';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
@@ -158,6 +162,11 @@ export interface CommitSessionOptions {
 	readonly keepaliveMs?: number;
 	readonly maxReconnects?: number;
 	readonly reconnectBackoffMs?: number;
+	/**
+	The random source for the reconnect backoff. The default is
+	`Math.random`.
+	*/
+	readonly random?: RandomSource;
 	/**
 	Reports a terminal failure, including a refused handshake.
 	*/
@@ -289,7 +298,10 @@ const refusalDrainMs = 5000;
 const maximumRefusalBodyBytes = 64 * 1024;
 // How many times one entry is re-sent before its error is treated as terminal.
 const maxEntryRetries = 3;
-const entryRetryBaseMs = 500;
+const entryRetryBackoff = new ExponentialBackoff({
+	baseMs: 500,
+	jitter: 'none'
+});
 
 // Validate every recognised event against its complete frame schema. Unknown
 // event kinds are ignored so a newer server can add advisory frames.
@@ -495,7 +507,14 @@ export function runCommitSession(
 	const sessionContext = context.active();
 	const outstanding = new Map<UploadId, SessionEntry>();
 	const maxReconnects = options.maxReconnects ?? defaultMaxReconnects;
-	const backoffBase = options.reconnectBackoffMs ?? defaultReconnectBackoffMs;
+	const reconnectBackoff = new ExponentialBackoff(
+		{
+			baseMs: options.reconnectBackoffMs ?? defaultReconnectBackoffMs,
+			maximumMs: maxReconnectBackoffMs,
+			jitter: 'full'
+		},
+		options.random
+	);
 	const isCreditDeclared = isCommitCreditDeclared(credentials.initial.headers);
 
 	let socket: CommitSocket | undefined;
@@ -1410,7 +1429,7 @@ export function runCommitSession(
 				) {
 					entry.retryAttempts += 1;
 					const attempt = entry.retryAttempts;
-					const delay = entryRetryBaseMs * 2 ** (attempt - 1);
+					const delay = entryRetryBackoff.delayMs(attempt);
 
 					if (entry.retryTimer !== undefined) {
 						clearTimeout(entry.retryTimer);
@@ -1581,10 +1600,7 @@ export function runCommitSession(
 				reconnectTimer = undefined;
 				authoriseAndOpenConnection();
 			},
-			Math.max(
-				fullJitterDelayMs(reconnectAttempt, backoffBase, maxReconnectBackoffMs),
-				minimumDelayMs
-			)
+			Math.max(reconnectBackoff.delayMs(reconnectAttempt), minimumDelayMs)
 		);
 	};
 

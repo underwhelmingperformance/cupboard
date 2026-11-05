@@ -16,6 +16,7 @@ import {
 	uploadIdSchema,
 	uploadPathNegotiationSchema
 } from '@cupboard/protocol/upload';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -110,6 +111,7 @@ interface SessionTestOptions {
 	readonly keepaliveMs?: number;
 	readonly maxReconnects?: number;
 	readonly reconnectBackoffMs?: number;
+	readonly random?: RandomSource;
 	readonly onFailure?: (error: Error) => void;
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 	readonly pushId?: () => Promise<PushId>;
@@ -162,6 +164,7 @@ function openSessionOver(
 			keepaliveMs: options.keepaliveMs,
 			maxReconnects: options.maxReconnects,
 			reconnectBackoffMs: options.reconnectBackoffMs,
+			random: options.random,
 			onFailure: options.onFailure,
 			onWaiting: options.onWaiting,
 			pushId: options.pushId
@@ -2225,8 +2228,6 @@ describe('credit-paced commits', () => {
 	// last refusal as the timeout cause so the operator sees why no connection
 	// opened.
 	it('includes the last upgrade refusal in a capacity timeout', async () => {
-		vi.spyOn(Math, 'random').mockReturnValue(0);
-
 		const sockets = [
 			new FakeCommitSocket(),
 			new FakeCommitSocket(),
@@ -2235,7 +2236,8 @@ describe('credit-paced commits', () => {
 		const session = openSessionOver(sockets, {
 			headers: creditDeclaringHeaders,
 			timeoutSeconds: 10,
-			keepaliveMs: 600_000
+			keepaliveMs: 600_000,
+			random: () => 0
 		});
 		const commit = session.commit(target);
 		const expired = rejectedBy(commit, CommitCapacityTimeoutError);
@@ -3402,14 +3404,13 @@ describe('credit-paced commits', () => {
 	// The jitter is pinned to the midpoint of each step's ceiling: 500, 1000,
 	// 2000, 4000, then the 5000 cap.
 	it('backs off further on each free reconnect', async () => {
-		vi.spyOn(Math, 'random').mockReturnValue(0.5);
-
 		const dropped = Array.from({ length: 5 }, () => new FakeCommitSocket());
 		const last = new FakeCommitSocket();
 		const connectedAt: number[] = [];
 		const session = openSessionOver([...dropped, last], {
 			timeoutSeconds: 600,
 			keepaliveMs: 600_000,
+			random: () => 0.5,
 			connectedAt
 		});
 		void session.commit(target).catch(() => {
@@ -3432,8 +3433,6 @@ describe('credit-paced commits', () => {
 
 	// An entry frame resets the reconnect counter as well as restoring budget.
 	it('resets reconnect backoff after an entry receives a frame', async () => {
-		vi.spyOn(Math, 'random').mockReturnValue(0.5);
-
 		const unanswered = [new FakeCommitSocket(), new FakeCommitSocket()];
 		const answering = new FakeCommitSocket();
 		const last = new FakeCommitSocket();
@@ -3441,6 +3440,7 @@ describe('credit-paced commits', () => {
 		const session = openSessionOver([...unanswered, answering, last], {
 			timeoutSeconds: 600,
 			keepaliveMs: 600_000,
+			random: () => 0.5,
 			connectedAt
 		});
 		const sent = session.commit(targetFor('upload-1'));
@@ -3503,8 +3503,6 @@ describe('credit-paced commits', () => {
 		'waits $delayMs ms after an upgrade refusal naming $what',
 		async ({ asked, delayMs }) => {
 			vi.setSystemTime(Date.UTC(2026, 7, 22, 22, 0, 0));
-			vi.spyOn(Math, 'random').mockReturnValue(0.5);
-
 			const refused = new FakeCommitSocket();
 			const last = new FakeCommitSocket();
 			const connectedAt: number[] = [];
@@ -3512,6 +3510,7 @@ describe('credit-paced commits', () => {
 				headers: creditDeclaringHeaders,
 				timeoutSeconds: 600,
 				keepaliveMs: 600_000,
+				random: () => 0.5,
 				connectedAt
 			});
 			void session.commit(target).catch(() => {
@@ -3685,8 +3684,6 @@ describe('credit-paced commits', () => {
 		{ what: 'a truncated body', body: 'Commit sess' },
 		{ what: 'no body at all', body: undefined }
 	])('drops a refusal that never ends, given $what', async ({ body }) => {
-		vi.spyOn(Math, 'random').mockReturnValue(0.5);
-
 		const refused = new FakeCommitSocket();
 		const last = new FakeCommitSocket();
 		const connectedAt: number[] = [];
@@ -3694,6 +3691,7 @@ describe('credit-paced commits', () => {
 			headers: creditDeclaringHeaders,
 			timeoutSeconds: 600,
 			keepaliveMs: 600_000,
+			random: () => 0.5,
 			connectedAt
 		});
 		const commit = session.commit(target);

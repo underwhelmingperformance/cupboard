@@ -352,8 +352,6 @@ describe('runConfirm', () => {
 	it('sends a batch again after its deadline and reports it once', async () => {
 		const { ui, captured } = fakeCliUi();
 		const calls: string[][] = [];
-		// The backoff before the second attempt is then 125 milliseconds.
-		vi.spyOn(Math, 'random').mockReturnValue(0.5);
 
 		vi.useFakeTimers();
 		try {
@@ -377,14 +375,15 @@ describe('runConfirm', () => {
 								grace: {}
 							}))
 						});
-					})
+					}),
+					// The backoff before the second attempt is then 125 milliseconds.
+					random: () => 0.5
 				}
 			);
 			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
 			await pending;
 		} finally {
 			vi.useRealTimers();
-			vi.restoreAllMocks();
 		}
 
 		expect({ calls, results: captured.results }).toStrictEqual({

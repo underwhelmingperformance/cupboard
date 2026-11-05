@@ -23,6 +23,7 @@ import {
 	type ResultRow,
 	shouldShowDetails
 } from '@cupboard/reporter';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import { lookupInPages } from '@cupboard/shared/paging';
 import type { Command } from 'commander';
 
@@ -111,6 +112,11 @@ export interface ConfirmClient {
 	plan's limit.
 	*/
 	readonly maxPaths?: () => number;
+	/**
+	The random source for the backoff before a request is sent again. The
+	default is `Math.random`.
+	*/
+	readonly random?: RandomSource;
 }
 
 /**
@@ -249,7 +255,8 @@ export async function runConfirm(
 				concurrency: 1,
 				deadline: procedureDeadline(
 					'uploads.confirm',
-					tenantContract.uploads.confirm.inDefaultCache
+					tenantContract.uploads.confirm.inDefaultCache,
+					{ random: client.random }
 				),
 				request: async (batch, signal) => {
 					const response = await callInCache(

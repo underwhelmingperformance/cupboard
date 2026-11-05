@@ -16,6 +16,7 @@ import {
 	attestationListSchema
 } from '@cupboard/protocol/attestations';
 import { cacheMetadataCapabilityHeader } from '@cupboard/protocol/cache-metadata';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
@@ -46,6 +47,12 @@ export interface AttestationDiscoveryOptions {
 	readonly netrcFile?: string;
 	readonly signal?: AbortSignal;
 	readonly onProgress?: (completed: number) => void;
+	/**
+	The random source for the backoff before a read is sent again, after a
+	transport failure, an expired deadline or a failed response body. The
+	default is `Math.random`.
+	*/
+	readonly random?: RandomSource;
 }
 
 export class InvalidAttestationDiscoveryError extends CliError {
@@ -96,7 +103,8 @@ export async function readAttestationInfo(
 	};
 	const fetchRead = cacheReadFetcher(options.url, fetcher, {
 		netrcFile: options.netrcFile,
-		trustedOrigin: options.url.origin
+		trustedOrigin: options.url.origin,
+		random: options.random
 	});
 	const base = cacheUrl(options.url, options.cache);
 	const headers =
@@ -157,7 +165,8 @@ export async function readAttestationInfo(
 			async (response) => {
 				await refuseUnexpected(path, 'GET', response);
 				return consume(response);
-			}
+			},
+			{ random: options.random }
 		);
 	const capabilities = await read('nix-cache-info', async (response) => {
 		if (!response.ok) {
@@ -242,7 +251,8 @@ export async function readAttestationInfo(
 		deadline: {
 			target: { url: loggedUrl(target(pagePath)) },
 			replaySafety: 'replay-safe',
-			signal: options.signal
+			signal: options.signal,
+			random: options.random
 		},
 		request: async (remaining, signal) => {
 			const response = await fetchRead(target(pagePath), {
