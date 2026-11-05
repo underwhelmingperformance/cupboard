@@ -33,6 +33,7 @@ import {
 	narObjectKey,
 	type NarObjectName
 } from '../http/http.ts';
+import { passThrough } from '../http/stalled-body.test-support.ts';
 import { defaultCache, flakyD1, md5Etag, namedCache } from '../test-support.ts';
 
 import {
@@ -794,6 +795,129 @@ describe('private narinfo reference gate', () => {
 			status: StatusCodes.NOT_FOUND,
 			cacheControl: 'no-store'
 		});
+	});
+});
+
+/**
+A bucket whose reads return a body that never delivers a byte. Each key whose
+body a reader cancels is added to `cancelled`.
+*/
+function cancellationRecordingBlobs(bucket: R2Bucket): {
+	readonly blobs: R2Bucket;
+	readonly cancelled: readonly string[];
+} {
+	const cancelled: string[] = [];
+	const blobs = new Proxy(bucket, {
+		get(target, property) {
+			if (property !== 'get') {
+				return passThrough(target, property);
+			}
+
+			return async (key: string, options?: R2GetOptions) => {
+				const object = await target.get(key, options);
+
+				if (object === null || !('body' in object)) {
+					return object;
+				}
+
+				await object.body.cancel();
+				const body = new ReadableStream<Uint8Array>({
+					cancel: () => {
+						cancelled.push(key);
+					}
+				});
+
+				return new Proxy(object, {
+					get(stored, member) {
+						return member === 'body' ? body : passThrough(stored, member);
+					}
+				});
+			};
+		}
+	});
+
+	return { blobs, cancelled };
+}
+
+describe('an R2 body that a read does not send', () => {
+	const privateRead = {
+		scope: privateCache,
+		access: 'private',
+		generation: firstCacheGeneration
+	} as const;
+	const privateNarInfoKey = narInfoObjectKey(
+		tenant,
+		referencingPath,
+		privateCache
+	);
+	const utf8 = new TextEncoder();
+
+	it.each([
+		{
+			response: 'a 304 for a narinfo',
+			objectMetadata: currentObjectMetadata,
+			ifNoneMatch: () => md5Etag(utf8.encode('narinfo-bytes')),
+			status: StatusCodes.NOT_MODIFIED
+		},
+		{
+			response: 'a 404 for a narinfo of an earlier commit',
+			objectMetadata: {
+				...currentObjectMetadata,
+				generation: String(referencedGeneration - 1)
+			},
+			ifNoneMatch: () => Promise.resolve(undefined),
+			status: StatusCodes.NOT_FOUND
+		}
+	])(
+		'cancels the body of $response',
+		async ({ objectMetadata, ifNoneMatch, status }) => {
+			await seedPrivateNarInfoObject(objectMetadata);
+			const { blobs, cancelled } = cancellationRecordingBlobs(env.BLOBS);
+			const etag = await ifNoneMatch();
+
+			const response = await serveNarInfo(
+				new Request('https://cache.example/probe.narinfo', {
+					headers: etag === undefined ? {} : { 'if-none-match': etag }
+				}),
+				{ ...env, BLOBS: blobs },
+				tenant,
+				privateRead,
+				referencingPath,
+				true,
+				readsBodyItself
+			);
+
+			expect({ status: response.status, cancelled }).toStrictEqual({
+				status,
+				cancelled: [privateNarInfoKey]
+			});
+		}
+	);
+
+	it('cancels the body of a 304 for a NAR', async () => {
+		await seedOwnedNar();
+		const { blobs, cancelled } = cancellationRecordingBlobs(env.BLOBS);
+		const etag = await md5Etag(utf8.encode(narBytes));
+
+		try {
+			const response = await serveNar(
+				new Request('https://cache.example/nar/probe', {
+					headers: { 'if-none-match': etag }
+				}),
+				{ ...env, BLOBS: blobs },
+				tenant,
+				parsedNar(),
+				defaultPublicAuthority,
+				false
+			);
+
+			expect({ status: response.status, cancelled }).toStrictEqual({
+				status: StatusCodes.NOT_MODIFIED,
+				cancelled: [narObjectKey(narHash)]
+			});
+		} finally {
+			await env.BLOBS.delete(narObjectKey(narHash));
+		}
 	});
 });
 
