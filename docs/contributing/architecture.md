@@ -610,17 +610,19 @@ release lack the header and stay fresh for a year.
 
 #### Deadlines for small response bodies
 
-A narinfo read has a deadline of 20 seconds (`readRequestBudgetMs` in
-`policy/streaming.ts`). The control Worker starts one when its narinfo handler
-starts, for every narinfo read. For a public cache, that deadline bounds the D1
-calls in the control Worker's guard but not its call to the tenant Worker, which
-has no deadline. The narinfo handler in the tenant Worker starts a deadline of
-its own, and that deadline ends a stalled body. The handler's D1 reads, its R2
-`get()` and the response body share the deadline, so a `get()` that returns
-quickly leaves the body the rest. The deadline is ten seconds shorter than the
-CLI's 30-second attempt deadline. Workers Cache joins concurrent requests for
-one URL to a single fill, so a stalled fill must end before a client's retry can
-join it.
+A narinfo read, and the tenant object's read of an attestation list or bundle,
+has a deadline of 20 seconds (`readRequestBudgetMs` in `policy/streaming.ts`).
+The control Worker starts one when its narinfo handler starts, for every narinfo
+read. For a public cache, admission runs before that deadline starts, and the
+control Worker's call to the tenant Worker has no deadline. The narinfo handler
+in the tenant Worker starts a deadline of its own, and that deadline ends a
+stalled body. The tenant object starts one for GET requests for an attestation
+list or bundle; the attestation write procedures, which have the same path
+prefixes, keep their own budgets. The handler's D1 reads, its R2 `get()` and the
+response body share the deadline, so a `get()` that returns quickly leaves the
+body the rest. The deadline is ten seconds shorter than the CLI's 30-second
+attempt deadline. Workers Cache joins concurrent requests for one URL to a
+single fill, so a stalled fill must end before a client's retry can join it.
 
 The design accepts two limits. The body receives only what the reads before it
 left, so a D1 read or `get()` that is slow but finishes in time leaves the body
@@ -644,8 +646,9 @@ The pipe is passed to `waitUntil`. A client that disconnects while bytes are
 flowing ends the pipe at its next write, but while the source is stalled the
 pipe notices nothing until its deadline. A scratch deployment showed that,
 without `waitUntil`, the runtime cancels the invocation at the disconnect, so
-the deadline and its record never happen. A HEAD response keeps the stored body
-unbounded, because Hono discards it.
+the deadline and its record never happen. The tenant object also passes its
+pipes to `waitUntil`, which has no effect in a Durable Object. A HEAD response
+keeps the stored body unbounded, because Hono discards it.
 
 The server logs one warning, `response body deadline passed`, for each body that
 misses its deadline. Any other early end writes no record. After a native pipe

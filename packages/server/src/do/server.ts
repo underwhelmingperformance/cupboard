@@ -120,6 +120,7 @@ import {
 	verificationBatchSize
 } from '../http/http.ts';
 import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
+import { readDeadline } from '../http/read-deadline.ts';
 import {
 	isCacheCatalogueComplete,
 	isLocalCacheCatalogueComplete,
@@ -710,6 +711,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			});
 			await next();
 		});
+
+		// The attestation write procedures share these prefixes and must not run
+		// under a read's deadline. Hono also routes HEAD to a GET registration.
+		for (const path of [
+			'/attestations/*',
+			'/cache/:cacheName/attestations/*',
+			'/attestation-bundles/*',
+			'/cache/:cacheName/attestation-bundles/*'
+		]) {
+			this.app.get(path, readDeadline);
+		}
 
 		// Contract routes must run before the routes that handle raw
 		// Request/Response, because the oRPC handler signals an unmatched request

@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import {
 	CacheInfo,
 	servedStoreDirectory
@@ -24,10 +25,15 @@ import {
 	tenantReadCredentialSchema
 } from '@cupboard/protocol/tenants';
 import { uploadNegotiateResponseSchema } from '@cupboard/protocol/upload';
+import {
+	createExecutionContext,
+	runInDurableObject,
+	waitOnExecutionContext
+} from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
@@ -37,12 +43,26 @@ import {
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import {
+	drain,
+	passThrough,
+	recordKeptPromises,
+	type Settlement,
+	stallingBlobs,
+	streamRecords
+} from '../http/stalled-body.test-support.ts';
+import {
+	minimumBodyBudgetMs,
+	readRequestBudgetMs
+} from '../policy/streaming.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedWorkerFetch,
 	cacheWriteGrants,
 	commitUploadViaWorker,
+	currentOrigin,
 	expectSingleUploadDecision,
+	fixtureWorkerServer,
 	handlerFetch,
 	hexBytes,
 	initialiseViaWorker,
@@ -62,6 +82,10 @@ import {
 	uploadMetadata,
 	uploadPathNegotiation
 } from '../test-support.ts';
+import worker from '../worker.ts';
+
+import { type RuntimeEnv } from './context.ts';
+import { remainingDeadlineMs } from './deadline.ts';
 
 const localName = cacheNameSchema.parse('builds');
 const sibling = cacheNameSchema.parse('guides');
@@ -242,6 +266,313 @@ async function attachBundle(
 	return digest;
 }
 
+// The stalled body is released, in real time, well after the tenant object's
+// read deadline, so only the deadline can end it first.
+const stallReleaseMs = readRequestBudgetMs + 10_000;
+const sentBytes = 4;
+
+// The stalled object's `get()` takes this long, on the test's fake clock, so
+// the body receives what remains of the read's deadline.
+const readDelayMs = 5000;
+
+// The tenant object's bindings while a test replaces its R2 bucket.
+const replacedEnv: { original?: RuntimeEnv } = {};
+
+/**
+Runs `body` while the tenant object reads R2 through the bucket that `wrap`
+returns for its own bucket.
+*/
+async function withObjectBlobs<T>(
+	wrap: (blobs: R2Bucket) => R2Bucket,
+	body: () => Promise<T>
+): Promise<T> {
+	await runInDurableObject(fixtureWorkerServer(), (instance) => {
+		const original = instance.context.env;
+		replacedEnv.original = original;
+		instance.context.env = { ...original, BLOBS: wrap(original.BLOBS) };
+	});
+
+	try {
+		return await body();
+	} finally {
+		await runInDurableObject(fixtureWorkerServer(), (instance) => {
+			if (replacedEnv.original !== undefined) {
+				instance.context.env = replacedEnv.original;
+			}
+		});
+	}
+}
+
+/**
+A bucket whose reads of objects that `isSlow` selects move the fake clock on
+by `delayMs` before they return. Moving the clock runs no timer, because a
+timer that another context created cannot run in the tenant object.
+*/
+function slowBlobs(
+	blobs: R2Bucket,
+	isSlow: (key: string) => boolean,
+	delayMs: number
+): R2Bucket {
+	return new Proxy(blobs, {
+		get(target, property) {
+			if (property !== 'get') {
+				return passThrough(target, property);
+			}
+
+			return (key: string, options?: R2GetOptions) => {
+				if (isSlow(key)) {
+					vi.setSystemTime(Date.now() + delayMs);
+				}
+
+				return target.get(key, options);
+			};
+		}
+	});
+}
+
+/**
+A bucket whose reads of objects that `isStalled` selects take
+{@link readDelayMs} on the fake clock and then return a body that stalls.
+*/
+function slowStalledBlobs(
+	blobs: R2Bucket,
+	isStalled: (key: string) => boolean
+): R2Bucket {
+	const stalling = stallingBlobs(
+		blobs,
+		(key) => (isStalled(key) ? sentBytes : undefined),
+		stallReleaseMs
+	);
+
+	return slowBlobs(stalling, isStalled, readDelayMs);
+}
+
+function privateRead(path: string): Request {
+	return new Request<unknown, IncomingRequestCfProperties>(
+		new URL(`/t/${fixtureTenant}${path}`, currentOrigin()),
+		{ headers: withCredential().headers }
+	);
+}
+
+/**
+Runs the tenant object's timers for `durationMs`. The body's deadline timer
+belongs to the tenant object, so it runs there.
+*/
+async function runObjectTimersFor(durationMs: number): Promise<void> {
+	await runInDurableObject(fixtureWorkerServer(), () =>
+		vi.advanceTimersByTimeAsync(durationMs)
+	);
+}
+
+/**
+Reads `path` from the private cache, then runs the tenant object's timers for
+a whole read deadline while the body drains. The settlements are those of the
+promises that the tenant object passed to `waitUntil`, just before the body's
+deadline and after the body ended.
+*/
+async function readPastDeadline(path: string): Promise<{
+	response: Response;
+	bytes: number;
+	keptBeforeDeadline: readonly Settlement[];
+	keptAfterDeadline: readonly Settlement[];
+}> {
+	const kept = await runInDurableObject(fixtureWorkerServer(), (instance) =>
+		recordKeptPromises(instance.context.ctx)
+	);
+
+	try {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(privateRead(path), env, ctx);
+		const draining = drain(response.body);
+		const bodyBudgetMs = readRequestBudgetMs - readDelayMs;
+		await runObjectTimersFor(bodyBudgetMs - 1);
+		const keptBeforeDeadline = kept.settlements();
+		await runObjectTimersFor(readDelayMs + 1);
+		const { bytes } = await draining;
+		await waitOnExecutionContext(ctx);
+
+		return {
+			response,
+			bytes,
+			keptBeforeDeadline,
+			keptAfterDeadline: kept.settlements()
+		};
+	} finally {
+		kept.stop();
+	}
+}
+
+/**
+A bucket that records what remains of the current deadline at each call.
+*/
+function deadlineRecordingBlobs(
+	blobs: R2Bucket,
+	remaining: (number | undefined)[]
+): R2Bucket {
+	return new Proxy(blobs, {
+		get(target, property) {
+			const value = passThrough(target, property);
+
+			if (typeof value !== 'function') {
+				return value;
+			}
+
+			return (...parameters: unknown[]): unknown => {
+				remaining.push(remainingDeadlineMs());
+
+				return Reflect.apply(value, target, parameters);
+			};
+		}
+	});
+}
+
+const attestationReads = [
+	{
+		name: 'an attestation list',
+		suffix: (published: PublishedPath) =>
+			`/attestations/${published.storePathHash}`,
+		isServedObject: (key: string) => key.includes('/attestations/'),
+		operation: 'attestation-list.body'
+	},
+	{
+		name: 'an attestation bundle',
+		suffix: (published: PublishedPath) =>
+			`/attestation-bundles/${published.bundleDigest}`,
+		isServedObject: (key: string) => key.startsWith('cas/'),
+		operation: 'attestation-bundle.body'
+	}
+];
+
+describe("the tenant object's read deadline", () => {
+	beforeEach(async () => {
+		await resetTestServer();
+		await recordTransition('cache-identity', 'complete');
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it.each(attestationReads)(
+		'ends $name at what remains of the read deadline',
+		async ({ suffix, isServedObject, operation }) => {
+			const published = await publishToPrivateCache();
+			const capture = startCapture();
+			vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+
+			try {
+				const outcome = await withObjectBlobs(
+					(blobs) => slowStalledBlobs(blobs, isServedObject),
+					() => readPastDeadline(`${cachePrefix}${suffix(published)}`)
+				);
+
+				expect({
+					status: outcome.response.status,
+					cacheControl: outcome.response.headers.get('cache-control'),
+					bytes: outcome.bytes,
+					keptBeforeDeadline: outcome.keptBeforeDeadline,
+					keptAfterDeadline: outcome.keptAfterDeadline,
+					records: streamRecords(capture.logs, [
+						'requestId',
+						'objectKey',
+						'length'
+					])
+				}).toStrictEqual({
+					status: StatusCodes.OK,
+					cacheControl: 'no-store, no-transform',
+					bytes: sentBytes,
+					keptBeforeDeadline: ['pending'],
+					keptAfterDeadline: ['settled'],
+					records: [
+						{
+							level: 'warning',
+							category: ['cupboard', 'storage', 'stream'],
+							message: 'response body deadline passed',
+							properties: {
+								requestId: 'string',
+								operation,
+								objectKey: 'string',
+								length: 'number',
+								// The read's deadline less the time that its `get()` took.
+								deadlineMs: readRequestBudgetMs - readDelayMs
+							}
+						}
+					]
+				});
+			} finally {
+				capture.stop();
+			}
+		}
+	);
+
+	it.each(attestationReads)(
+		'refuses $name when its reads leave the body too little time',
+		async ({ suffix, isServedObject }) => {
+			const published = await publishToPrivateCache();
+			const capture = startCapture();
+			vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+
+			try {
+				const response = await withObjectBlobs(
+					(blobs) =>
+						slowBlobs(
+							blobs,
+							isServedObject,
+							readRequestBudgetMs - minimumBodyBudgetMs / 2
+						),
+					async () => {
+						const ctx = createExecutionContext();
+						const refused = await worker.fetch(
+							privateRead(`${cachePrefix}${suffix(published)}`),
+							env,
+							ctx
+						);
+						await drain(refused.body);
+						await waitOnExecutionContext(ctx);
+
+						return refused;
+					}
+				);
+
+				expect({
+					status: response.status,
+					retryAfter: response.headers.get('retry-after'),
+					cacheControl: response.headers.get('cache-control'),
+					records: streamRecords(capture.logs, ['requestId'])
+				}).toStrictEqual({
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					retryAfter: '5',
+					cacheControl: 'no-store',
+					records: []
+				});
+			} finally {
+				capture.stop();
+			}
+		}
+	);
+
+	it('runs the attestation write procedures outside the read deadline', async () => {
+		const token = await initialiseViaWorker();
+		const metadata = uploadMetadata({ fileSize: 1234 });
+		await putNamedCache(token, localName, 'private');
+		await pushPathToTenant(tenant, token, metadata, undefined, privateCache);
+		const remaining: (number | undefined)[] = [];
+		// A frozen clock makes each remaining budget exact.
+		vi.useFakeTimers({ toFake: ['Date'] });
+
+		await withObjectBlobs(
+			(blobs) => deadlineRecordingBlobs(blobs, remaining),
+			() => attachBundle(token, metadata.storePathHash)
+		);
+
+		expect({
+			hasStorageCalls: remaining.length > 0,
+			isUnderReadDeadline: remaining.some(
+				(budget) => budget !== undefined && budget <= readRequestBudgetMs
+			)
+		}).toStrictEqual({ hasStorageCalls: true, isUnderReadDeadline: false });
+	});
+});
+
 describe('private cache access', () => {
 	beforeEach(async () => {
 		await resetTestServer();
@@ -267,11 +598,13 @@ describe('private cache access', () => {
 			{ name: 'a NAR', suffix: `/${published.narUrl}` },
 			{
 				name: 'an attestation list',
-				suffix: `/attestations/${published.storePathHash}`
+				suffix: `/attestations/${published.storePathHash}`,
+				isBounded: true
 			},
 			{
 				name: 'an attestation bundle',
-				suffix: `/attestation-bundles/${published.bundleDigest}`
+				suffix: `/attestation-bundles/${published.bundleDigest}`,
+				isBounded: true
 			},
 			{
 				name: 'a cache-availability report',
