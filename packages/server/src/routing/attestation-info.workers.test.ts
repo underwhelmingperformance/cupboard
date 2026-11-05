@@ -1,11 +1,13 @@
 import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import {
+	attestationInfoErrorSchema,
 	attestationInfoMaxListBytes,
 	attestationInfoResponseSchema
 } from '@cupboard/protocol/attestations';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -241,6 +243,60 @@ describe('attestation discovery', () => {
 						: 'The cache returned an invalid attestation list.',
 				storePathHash: path.storePathHash
 			}
+		});
+	});
+
+	it('refuses an oversized list whose source has already failed', async () => {
+		const path = await committedPath('discovery-failed-source', defaultCache());
+		await env.BLOBS.put(
+			attestationListObjectKey(
+				fixtureTenant,
+				storePathHashSchema.parse(path.storePathHash),
+				defaultCache()
+			),
+			' '.repeat(attestationInfoMaxListBytes + 1)
+		);
+		const failed = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.error(new Error('source failed'));
+			}
+		});
+		const bucket = new Proxy(env.BLOBS, {
+			get(target, key, receiver): unknown {
+				if (key === 'get') {
+					return async (objectKey: string) => {
+						const object = await target.get(objectKey);
+						if (object === null) {
+							return object;
+						}
+						await object.body.cancel();
+						return new Proxy(object, {
+							get(stored, member): unknown {
+								if (member === 'body') {
+									return failed;
+								}
+								const value: unknown = Reflect.get(stored, member, stored);
+								return typeof value === 'function' ? value.bind(stored) : value;
+							}
+						});
+					};
+				}
+				const value: unknown = Reflect.get(target, key, receiver);
+				return typeof value === 'function' ? value.bind(target) : value;
+			}
+		});
+		const response = await readFetch(
+			'/api/v1/attestation-info',
+			probe([path.storePathHash]),
+			{ BLOBS: bucket }
+		);
+		const { code, storePathHash } = attestationInfoErrorSchema.parse(
+			await response.json()
+		);
+		expect({ status: response.status, code, storePathHash }).toStrictEqual({
+			status: StatusCodes.REQUEST_TOO_LONG,
+			code: 'list-too-large',
+			storePathHash: path.storePathHash
 		});
 	});
 

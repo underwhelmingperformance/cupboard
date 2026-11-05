@@ -24,6 +24,7 @@ import {
 	MetadataScopeChangedError,
 	SharedFactsUnavailableError
 } from '../errors.ts';
+import { keepAliveIn } from '../http/bounded-body.ts';
 import { internalCorrelationHeaders } from '../observability/request-context.ts';
 import { withSpan } from '../observability/span.ts';
 import { upstreamTraceAttributes } from '../observability/trace-context.ts';
@@ -209,7 +210,8 @@ export async function answerCacheMetadata(
 								drizzleD1(context.env.CUPBOARD_DB, { schema: d1Schema }),
 								context.get('tenant'),
 								context.get('readScope'),
-								paths
+								paths,
+								keepAliveIn(context.executionCtx)
 							);
 				const response = await cacheMetadataPageResponse(
 					version,

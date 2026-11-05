@@ -12,7 +12,6 @@ import {
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
-	readResponseBytes,
 	readResponseText,
 	RemoteBodyTooLargeError
 } from '@cupboard/shared/response-body';
@@ -26,8 +25,14 @@ import {
 	MalformedRequestBodyError,
 	SharedFactsUnavailableError
 } from '../errors.ts';
+import {
+	boundedBody,
+	cancelUnread,
+	keepAliveIn
+} from '../http/bounded-body.ts';
 import { attestationListObjectKey } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
+import { remainingReadBudgetMs } from '../http/read-deadline.ts';
 import { isListOfCommittedGeneration } from '../read/attestation-generation.ts';
 import { authorisedNarInfoVersions } from '../read/read.ts';
 
@@ -94,16 +99,15 @@ async function* entriesFor(
 				if (version === undefined) {
 					return { storePathHash: hash, status: 'missing' };
 				}
+				const key = attestationListObjectKey(
+					tenant,
+					hash,
+					scope.scope,
+					version.cacheGeneration
+				);
 				let object: R2ObjectBody | null;
 				try {
-					object = await context.env.BLOBS.get(
-						attestationListObjectKey(
-							tenant,
-							hash,
-							scope.scope,
-							version.cacheGeneration
-						)
-					);
+					object = await context.env.BLOBS.get(key);
 				} catch (error) {
 					throw new SharedFactsUnavailableError(error);
 				}
@@ -119,20 +123,26 @@ async function* entriesFor(
 					await object.body.cancel();
 					return { ...found, attestations: [] };
 				}
-				let bytes: Uint8Array;
+				if (object.size > attestationInfoMaxListBytes) {
+					await cancelUnread(object.body);
+					throw new AttestationInfoHttpError(
+						'list-too-large',
+						'The attestation list exceeds 1 MiB.',
+						hash
+					);
+				}
+				let bytes: ArrayBuffer;
 				try {
-					bytes = await readResponseBytes(new Response(object.body), {
-						description: 'Attestation list',
-						maximumBytes: attestationInfoMaxListBytes
-					});
+					bytes = await new Response(
+						boundedBody(
+							object.body,
+							object.size,
+							remainingReadBudgetMs(),
+							{ operation: 'attestation-info.body', objectKey: key },
+							keepAliveIn(context.executionCtx)
+						)
+					).arrayBuffer();
 				} catch (error) {
-					if (error instanceof RemoteBodyTooLargeError) {
-						throw new AttestationInfoHttpError(
-							'list-too-large',
-							'The attestation list exceeds 1 MiB.',
-							hash
-						);
-					}
 					throw new SharedFactsUnavailableError(error);
 				}
 				let value: unknown;
