@@ -418,10 +418,6 @@ async function stalledAdmissionResponse(
 		);
 		await reached.promise;
 		await vi.advanceTimersByTimeAsync(readRequestBudgetMs);
-		// After a KV read fails, admission reads D1, and the deadline refuses the
-		// read. Admission retries a refused D1 read once, after a delay on the
-		// same timers.
-		await vi.runAllTimersAsync();
 		const response = await responding;
 
 		return {

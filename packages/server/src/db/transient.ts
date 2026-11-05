@@ -1,14 +1,24 @@
+import { remainingDeadlineMs } from '../do/deadline.ts';
+
 const readRetryDelayMs = 100;
 
 /**
 Retries an authoritative request-path D1 read once after 100 milliseconds.
 If the second attempt fails, the function propagates the error so the route
-can return its typed retryable response.
+can return its typed retryable response. A read is not retried when the
+enclosing deadline ends before the retry delay does, because the deadline
+would refuse the second attempt.
 */
 export async function readWithOneRetry<T>(read: () => Promise<T>): Promise<T> {
 	try {
 		return await read();
-	} catch {
+	} catch (error) {
+		const remainingMs = remainingDeadlineMs();
+
+		if (remainingMs !== undefined && remainingMs <= readRetryDelayMs) {
+			throw error;
+		}
+
 		await new Promise((resolve) => setTimeout(resolve, readRetryDelayMs));
 
 		return read();
