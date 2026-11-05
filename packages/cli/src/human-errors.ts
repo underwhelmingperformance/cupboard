@@ -459,7 +459,7 @@ function publicationError(error: unknown): string | undefined {
 	}
 
 	if (error instanceof errors.ConfirmIncompleteError) {
-		return `${String(error.confirmedBatches)} of ${String(error.totalBatches)} groups of paths had their retention extended before the command failed. Completed extensions remain in effect. ${formatHumanError(error.cause)}`;
+		return `${String(error.checkedPaths)} of ${String(error.totalPaths)} paths were checked before the command failed. The retention deadlines reported for those paths remain in effect. ${formatHumanError(error.cause)}`;
 	}
 
 	if (error instanceof errors.ReferenceUploadRequiredError) {
