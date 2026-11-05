@@ -22,6 +22,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { accessJwtClockToleranceSeconds } from '../auth/auth.ts';
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -55,6 +56,10 @@ const cacheReader = tenantReadCredentialSchema.parse({
 });
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const sources: readonly Source[] = ['default', 'named', 'reuse'];
+
+// `issueWorkerSignedToken` issues a token for ten minutes.
+const tokenLifetimeMs = 600_000;
+const expiredBeforeReadMs = 15_000;
 const stringMatcher: unknown = expect.any(String);
 
 async function retireSigningKey(
@@ -324,15 +329,28 @@ describe('buffered metadata authority', () => {
 				source,
 				`authority-token-${source}-${change}`
 			);
-			const token = await issueWorkerSignedToken([
-				source === 'reuse'
-					? {
-							type: 'cupboard_view',
-							view: reuseViewNameSchema.parse('reuse'),
-							actions: ['view:content-read']
-						}
-					: { type: 'cupboard_cache', cache, actions: ['cache:content-read'] }
-			]);
+			// The read deadline ends a probe long before a fresh token expires. The
+			// expiring token has therefore passed its expiry when the read starts,
+			// but it is still inside the clock tolerance. Moving the clock past the
+			// tolerance then takes less than the read's deadline.
+			const issuedAt = new Date(
+				change === 'expire'
+					? Date.now() - tokenLifetimeMs - expiredBeforeReadMs
+					: Date.now()
+			);
+			const token = await issueWorkerSignedToken(
+				[
+					source === 'reuse'
+						? {
+								type: 'cupboard_view',
+								view: reuseViewNameSchema.parse('reuse'),
+								actions: ['view:content-read']
+							}
+						: { type: 'cupboard_cache', cache, actions: ['cache:content-read'] }
+				],
+				undefined,
+				issuedAt
+			);
 			const admin = await initialiseViaWorker();
 			const keys = await authorisedWorkerFetch('/keys/auth', admin);
 			const original = authKeyListResponseSchema
@@ -345,7 +363,12 @@ describe('buffered metadata authority', () => {
 				method: 'POST'
 			});
 			expect(rotated.status).toBe(StatusCodes.OK);
-			const expiresAfter = new Date(Date.now() + 15 * 60 * 1000);
+			const expiresAfter = new Date(
+				Date.now() +
+					accessJwtClockToleranceSeconds * 1000 -
+					expiredBeforeReadMs +
+					1000
+			);
 			await expectRefusal(
 				await readDuringMutation(
 					source,

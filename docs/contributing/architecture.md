@@ -642,6 +642,16 @@ it, so the next request starts a new fill. Nix retries a transfer that ends
 early, and so do the CLI's probes. `cupboard attest verify` reads a successful
 response body outside its retry loop, so a truncated body fails that command.
 
+The control Worker also starts the deadline for each `path-info` and
+`attestation-info` probe of a default or named cache. A probe parses the
+narinfos or attestation lists that it reads from R2, so it reads each body into
+memory, through the same bounded pipe. The probe's D1 reads, its `get()` calls
+and every body that it reads share the deadline. A body that misses the deadline
+fails the whole probe with a retryable 503. For a public cache, `path-info`
+reads each narinfo through Workers Cache, and the narinfo deadline in the tenant
+Worker bounds that body. The tenant object answers the `path-info` probe of a
+reuse view without a read deadline.
+
 The pipe is passed to `waitUntil`. A client that disconnects while bytes are
 flowing ends the pipe at its next write, but while the source is stalled the
 pipe notices nothing until its deadline. A scratch deployment showed that,

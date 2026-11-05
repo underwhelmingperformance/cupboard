@@ -212,7 +212,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 		return tenantUncachedRead(context, true);
 	});
 
-	app.post('/api/v1/attestation-info', async (context) => {
+	app.post('/api/v1/attestation-info', readDeadline, async (context) => {
 		const denied = await guardRead(context);
 		return denied ?? answerAttestationInfo(context);
 	});
@@ -249,7 +249,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 		);
 	});
 
-	app.post('/api/v1/path-info', async (context) => {
+	app.post('/api/v1/path-info', readDeadline, async (context) => {
 		const denied = await guardRead(context);
 		return denied ?? answerCacheMetadata(context);
 	});

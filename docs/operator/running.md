@@ -307,6 +307,15 @@ invocation. The server writes no record for any other early end of a body, such
 as a client that disconnects. A read whose earlier steps leave its body less
 than a second returns 503 with `Retry-After` before the body starts.
 
+The `path-info` and `attestation-info` probes of a default or named cache have
+the same 20-second deadline, which covers every narinfo or attestation list that
+the probe reads from R2. When one of those bodies misses the deadline, the same
+warning records it, and the probe returns 503 with `Retry-After`. For a public
+cache, `path-info` reads each narinfo through Workers Cache from the tenant
+Worker, and the narinfo deadline in the tenant Worker covers that body. The
+tenant object answers the `path-info` probe of a reuse view without a read
+deadline.
+
 The native binding has no abort option for `get`. A timed-out operation can
 continue after the server returns 503. The server observes late rejection and
 cancels a late unused body once, best-effort within the invocation's lifetime.

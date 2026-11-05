@@ -19,7 +19,9 @@ import {
 	MetadataNarInfoTooLargeError,
 	SharedFactsUnavailableError
 } from '../errors.ts';
-import { narInfoObjectKey } from '../http/http.ts';
+import { boundedBody, type KeepAlive } from '../http/bounded-body.ts';
+import { narInfoObjectKey, type R2ObjectKey } from '../http/http.ts';
+import { remainingReadBudgetMs } from '../http/read-deadline.ts';
 
 import { authorisedNarInfoVersions, type ReadScope } from './read.ts';
 
@@ -76,7 +78,9 @@ async function sharedRead<T>(read: () => Promise<T>): Promise<T> {
 
 async function boundedNarInfoText(
 	object: R2ObjectBody,
-	storePath: StorePathString
+	key: R2ObjectKey,
+	storePath: StorePathString,
+	keepAlive: KeepAlive
 ): Promise<string> {
 	if (object.size > cacheMetadataMaxNarInfoBytes) {
 		await sharedRead(() => object.body.cancel());
@@ -86,64 +90,40 @@ async function boundedNarInfoText(
 		);
 	}
 
-	const reader = object.body.getReader();
-	const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
-	const parts: string[] = [];
-	let bytes = 0;
+	const bytes = await sharedRead(async () =>
+		new Response(
+			boundedBody(
+				object.body,
+				object.size,
+				remainingReadBudgetMs(),
+				{ operation: 'path-info.body', objectKey: key },
+				keepAlive
+			)
+		).arrayBuffer()
+	);
 
 	try {
-		for (;;) {
-			const result = await sharedRead(() => reader.read());
-
-			if (result.done) {
-				parts.push(decoder.decode());
-				return parts.join('');
-			}
-
-			const value: unknown = result.value;
-
-			if (!(value instanceof Uint8Array)) {
-				throw new TypeError('The R2 narinfo body returned a non-byte chunk');
-			}
-
-			bytes += value.byteLength;
-
-			if (bytes > cacheMetadataMaxNarInfoBytes) {
-				await sharedRead(() => reader.cancel());
-				throw new MetadataNarInfoTooLargeError(
-					storePath,
-					cacheMetadataMaxNarInfoBytes
-				);
-			}
-
-			parts.push(decoder.decode(value, { stream: true }));
-		}
+		return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(
+			bytes
+		);
 	} catch (error) {
-		if (
-			error instanceof SharedFactsUnavailableError ||
-			error instanceof MetadataNarInfoTooLargeError
-		) {
-			throw error;
-		}
-
-		await sharedRead(() => reader.cancel());
 		throw new MetadataNarInfoInvalidError(storePath, error);
-	} finally {
-		reader.releaseLock();
 	}
 }
 
 /**
 Reads the current committed narinfos in request order. Each group reads at
 most six bounded R2 bodies before yielding its entries, so a caller can stop
-after a response prefix without retaining every requested narinfo.
+after a response prefix without retaining every requested narinfo. Each body
+ends at the current read's deadline.
 */
 export async function* readCacheMetadata(
 	blobs: R2Bucket,
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	cache: ReadScope,
-	storePaths: readonly StorePathString[]
+	storePaths: readonly StorePathString[],
+	keepAlive: KeepAlive
 ): AsyncGenerator<CacheMetadataEntry> {
 	const versions = await authorisedNarInfoVersions(
 		database,
@@ -161,9 +141,8 @@ export async function* readCacheMetadata(
 			return { storePath, status: 'missing' };
 		}
 
-		const object = await sharedRead(() =>
-			blobs.get(narInfoObjectKey(tenant, hash, cache.scope, cache.generation))
-		);
+		const key = narInfoObjectKey(tenant, hash, cache.scope, cache.generation);
+		const object = await sharedRead(() => blobs.get(key));
 
 		if (object === null) {
 			return { storePath, status: 'missing' };
@@ -174,7 +153,7 @@ export async function* readCacheMetadata(
 			return { storePath, status: 'missing' };
 		}
 
-		const text = await boundedNarInfoText(object, storePath);
+		const text = await boundedNarInfoText(object, key, storePath, keepAlive);
 		let narInfo: NarInfo;
 
 		try {
