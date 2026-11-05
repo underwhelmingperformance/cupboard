@@ -1434,12 +1434,12 @@ describe('availableCachePaths', () => {
 				JSON.stringify({ missingStorePathHashes: [StorePath.hash(secondPath)] })
 			);
 		});
-		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
 		try {
 			const available = await availableCachePaths({
 				baseUrl: new URL('https://cupboard.example/t/acme'),
 				cache: namedCache(),
 				paths: [firstPath, secondPath],
+				random: () => 0,
 				fetcher: (input, init) => {
 					const request = new Request(input, init);
 					const url = new URL(request.url);
@@ -1471,7 +1471,6 @@ describe('availableCachePaths', () => {
 				requests: [query, query]
 			});
 		} finally {
-			random.mockRestore();
 			await server.close();
 		}
 	});
