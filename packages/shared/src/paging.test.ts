@@ -581,7 +581,6 @@ describe('response body failures', () => {
 		'sends a replay-safe probe again when the server $name',
 		async ({ code, misbehave }) => {
 			const records = captureLogs();
-			const random = vi.spyOn(Math, 'random').mockReturnValue(0);
 			const server = await probeServer(1, misbehave);
 			try {
 				const body = await fetchWithProbeRetries(
@@ -591,7 +590,8 @@ describe('response body failures', () => {
 					(response) => {
 						server.headersReceived();
 						return response.text();
-					}
+					},
+					{ random: () => 0 }
 				);
 				const probe: Record<string, unknown> = {
 					url: server.url,
@@ -630,14 +630,12 @@ describe('response body failures', () => {
 					]
 				});
 			} finally {
-				random.mockRestore();
 				await server.close();
 			}
 		}
 	);
 
 	it('sends a probe again when consume reports the body failure as the cause of its own error', async () => {
-		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
 		const server = await probeServer(1, destroyAfterHeaders());
 		try {
 			const body = await fetchWithProbeRetries(
@@ -650,7 +648,8 @@ describe('response body failures', () => {
 					} catch (error) {
 						throw new Error('The response is invalid', { cause: error });
 					}
-				}
+				},
+				{ random: () => 0 }
 			);
 
 			expect({ body, requests: server.requests() }).toStrictEqual({
@@ -658,7 +657,6 @@ describe('response body failures', () => {
 				requests: 2
 			});
 		} finally {
-			random.mockRestore();
 			await server.close();
 		}
 	});
@@ -746,7 +744,6 @@ describe('response body failures', () => {
 		'makes $attempts attempts at a $replaySafety request whose body always fails',
 		async ({ replaySafety, attempts }) => {
 			const records = captureLogs();
-			const random = vi.spyOn(Math, 'random').mockReturnValue(0);
 			const server = await probeServer(Infinity, destroyAfterHeaders());
 			try {
 				const failure = await rejectionOf(
@@ -755,7 +752,7 @@ describe('response body failures', () => {
 							const response = await fetch(server.url, { signal });
 							return response.text();
 						},
-						{ target: { url: server.url }, replaySafety }
+						{ target: { url: server.url }, replaySafety, random: () => 0 }
 					)
 				);
 
@@ -774,7 +771,6 @@ describe('response body failures', () => {
 					logical: [{ attempts, disposition: 'exhausted' }]
 				});
 			} finally {
-				random.mockRestore();
 				await server.close();
 			}
 		}
@@ -1065,7 +1061,6 @@ describe('lookupPage', () => {
 describe('probe debug logs', () => {
 	it('records each attempt and the deadline retry without credentials or a query', async () => {
 		const records = captureLogs();
-		const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
 		let requests = 0;
 		const fetcher: typeof fetch = (_input, init) => {
 			requests += 1;
@@ -1080,14 +1075,14 @@ describe('probe debug logs', () => {
 				fetcher,
 				'https://reader:secret@cache.test/api/v1/path-info?token=secret',
 				{ method: 'POST', body: 'paths' },
-				(response) => response.text()
+				(response) => response.text(),
+				{ random: () => 0.5 }
 			);
 			const settled = expect(pending).resolves.toBe('response body');
 			await vi.advanceTimersByTimeAsync(probeDeadlineMs + maximumBackoffMs);
 			await settled;
 		} finally {
 			vi.useRealTimers();
-			random.mockRestore();
 		}
 
 		const probe = {

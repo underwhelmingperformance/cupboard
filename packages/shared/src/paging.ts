@@ -1,14 +1,15 @@
 import { getLogger, withContext } from '@logtape/logtape';
 
+import { type RandomSource } from './backoff.ts';
 import { chunk, type ProgressivePage } from './collections.ts';
 import { mapWithConcurrency } from './concurrency.ts';
 import { CodedError } from './errors.ts';
 import {
 	abortableSleep,
-	backoffDelayMs,
 	loggedUrl,
 	type ReplaySafety,
-	responseBodyFailureCode
+	responseBodyFailureCode,
+	transientRetryBackoff
 } from './retry.ts';
 import {
 	attemptWithDeadline,
@@ -65,6 +66,11 @@ export interface DeadlineOptions {
 	*/
 	readonly signal?: AbortSignal | undefined;
 	readonly deadlineMs?: number;
+	/**
+	The random source for the backoff between attempts. The default is
+	`Math.random`.
+	*/
+	readonly random?: RandomSource | undefined;
 }
 
 type ProbeFailure =
@@ -146,6 +152,7 @@ async function requestAttempts<T>(
 ): Promise<T> {
 	const attempts =
 		options.replaySafety === 'replay-safe' ? maxProbeAttempts : 1;
+	const backoff = transientRetryBackoff(options.random);
 
 	for (let attempt = 1; ; attempt += 1) {
 		options.signal?.throwIfAborted();
@@ -191,7 +198,7 @@ async function requestAttempts<T>(
 				throw error;
 			}
 
-			const delayMs = backoffDelayMs(attempt);
+			const delayMs = backoff.delayMs(attempt);
 			logger.debug(
 				failure.outcome === 'timed out'
 					? 'retrying probe after its deadline expired'
@@ -205,6 +212,7 @@ async function requestAttempts<T>(
 
 export interface ProbeFetchOptions {
 	readonly deadlineMs?: number;
+	readonly random?: RandomSource | undefined;
 }
 
 /**
@@ -229,6 +237,7 @@ export async function fetchWithProbeRetries<Result>(
 			target: { url: loggedUrl(url) },
 			replaySafety: 'replay-safe',
 			signal: init?.signal ?? undefined,
+			random: options.random,
 			...(options.deadlineMs !== undefined && {
 				deadlineMs: options.deadlineMs
 			})

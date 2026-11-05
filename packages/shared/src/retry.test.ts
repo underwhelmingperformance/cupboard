@@ -8,17 +8,21 @@ import {
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
+import { type RandomSource } from './backoff.ts';
 import { captureLogs } from './log-capture.test-support.ts';
 import {
 	backoffDelay,
-	fullJitterDelayMs,
 	isTransientResponse,
 	reachableFetcher,
-	retryingFetcher as makeRetryingFetcher
+	retryingFetcher as makeRetryingFetcher,
+	transientRetryBackoff
 } from './retry.ts';
 
-function retryingFetcher(fetcher: typeof fetch): typeof fetch {
-	return makeRetryingFetcher(fetcher, 'replay-safe');
+function retryingFetcher(
+	fetcher: typeof fetch,
+	random?: RandomSource
+): typeof fetch {
+	return makeRetryingFetcher(fetcher, 'replay-safe', { random });
 }
 
 function networkFailure(): TypeError {
@@ -94,7 +98,7 @@ describe('isTransientResponse', () => {
 	});
 });
 
-describe('fullJitterDelayMs', () => {
+describe('transientRetryBackoff', () => {
 	it.each([
 		{ attempt: 1, random: 0, expected: 0 },
 		{ attempt: 1, random: 0.5, expected: 125 },
@@ -105,9 +109,9 @@ describe('fullJitterDelayMs', () => {
 	])(
 		'scales attempt $attempt with random $random to $expected',
 		({ attempt, random, expected }) => {
-			vi.spyOn(Math, 'random').mockReturnValue(random);
-
-			expect(fullJitterDelayMs(attempt, 250, 5000)).toBe(expected);
+			expect(transientRetryBackoff(() => random).delayMs(attempt)).toBe(
+				expected
+			);
 		}
 	);
 });
@@ -115,10 +119,13 @@ describe('fullJitterDelayMs', () => {
 describe('backoffDelay', () => {
 	it('uses full jitter from zero to the exponential ceiling', async () => {
 		vi.useFakeTimers();
-		vi.spyOn(Math, 'random').mockReturnValue(0);
 
 		try {
-			const pending = backoffDelay(1);
+			const pending = backoffDelay(
+				1,
+				undefined,
+				transientRetryBackoff(() => 0)
+			);
 			await vi.advanceTimersByTimeAsync(0);
 
 			await expect(pending).resolves.toBeUndefined();
@@ -382,7 +389,6 @@ describe('retryingFetcher', () => {
 
 	it('treats a decimal Retry-After as invalid', async () => {
 		vi.useFakeTimers();
-		vi.spyOn(Math, 'random').mockReturnValue(0.999);
 
 		try {
 			const { fetcher, attempts } = scriptedFetcher([
@@ -393,7 +399,7 @@ describe('retryingFetcher', () => {
 					}),
 				ok
 			]);
-			const pending = retryingFetcher(fetcher)('https://x.test');
+			const pending = retryingFetcher(fetcher, () => 0.999)('https://x.test');
 
 			await vi.advanceTimersByTimeAsync(250);
 			await pending;
@@ -865,7 +871,6 @@ describe('reachableFetcher', () => {
 describe('retryingFetcher debug logs', () => {
 	it('records each transport retry with its status or error code, ray and delay', async () => {
 		const records = captureLogs();
-		const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
 		const { fetcher } = scriptedFetcher([
 			() =>
 				new Response('', {
@@ -880,7 +885,7 @@ describe('retryingFetcher debug logs', () => {
 
 		vi.useFakeTimers();
 		try {
-			const pending = retryingFetcher(fetcher)(
+			const pending = retryingFetcher(fetcher, () => 0.5)(
 				'https://reader:secret@cache.test/api/v1/path-info?token=secret',
 				{ method: 'POST', body: 'paths' }
 			);
@@ -889,7 +894,6 @@ describe('retryingFetcher debug logs', () => {
 			await settled;
 		} finally {
 			vi.useRealTimers();
-			random.mockRestore();
 		}
 
 		const request = {

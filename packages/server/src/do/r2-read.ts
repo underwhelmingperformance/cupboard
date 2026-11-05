@@ -1,5 +1,5 @@
 import { getLogger, withContext } from '@cupboard/logger';
-import { abortableSleep, backoffDelayMs } from '@cupboard/shared/retry';
+import { abortableSleep, transientRetryBackoff } from '@cupboard/shared/retry';
 
 import { R2ReadUnavailableError, SubrequestTimeoutError } from '../errors.ts';
 import type { withSpan } from '../observability/span.ts';
@@ -60,6 +60,7 @@ export function getR2Object(
 ): Promise<R2ReadResult> {
 	const storageOperationId = crypto.randomUUID();
 	const objectKey = key.slice(0, 1024);
+	const backoff = transientRetryBackoff();
 	return withContext({ storageOperationId, objectKey, phase: 'get' }, () => {
 		const run = async (span?: Span): Promise<R2ReadResult> => {
 			const started = performance.now();
@@ -89,7 +90,7 @@ export function getR2Object(
 						if (attempts >= maximumAttempts) {
 							throw new R2ReadUnavailableError(error);
 						}
-						const delayMs = backoffDelayMs(attempts);
+						const delayMs = backoff.delayMs(attempts);
 						logger.debug('R2 get retrying', {
 							attempt: attempts,
 							code,
