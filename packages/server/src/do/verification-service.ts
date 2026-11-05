@@ -2839,7 +2839,11 @@ export class VerificationService {
 		} else if (retryAt !== undefined) {
 			await storage.delete(publicationExpiryRetryKey);
 		}
-		await store.armRecoveryAlarm(isStalled ? retryAfter : Date.now());
+		// Arm from the run's start time, not the current time. Records that became
+		// prunable during the run then wait for their window. With the current time,
+		// a dense burst would make more records due during every run, and each run
+		// would arm the next one immediately.
+		await store.armRecoveryAlarm(isStalled ? retryAfter : Date.parse(now));
 	}
 
 	private async probeRow(
