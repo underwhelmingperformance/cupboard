@@ -1,4 +1,7 @@
-import { storePathHashSchema } from '@cupboard/nix-store/scalars';
+import {
+	narInfoGenerationSchema,
+	storePathHashSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	attestationInfoErrorSchema,
 	attestationInfoMaxListBytes,
@@ -144,7 +147,7 @@ describe('attestation discovery', () => {
 
 	it.each([
 		[undefined, 'public', descriptors],
-		['0', 'public', []],
+		['other', 'public', []],
 		[undefined, 'private', []],
 		['current', 'private', descriptors]
 	] as const)(
@@ -165,10 +168,14 @@ describe('attestation discovery', () => {
 				defaultCache(),
 				[hash]
 			);
-			const recorded =
-				generation === 'current'
-					? String(versions.get(hash)?.generation)
-					: generation;
+			const current = narInfoGenerationSchema.parse(
+				versions.get(hash)?.generation
+			);
+			const recorded = {
+				current: String(current),
+				other: String(current + 1),
+				none: undefined
+			}[generation ?? 'none'];
 			await env.BLOBS.put(
 				attestationListObjectKey(fixtureTenant, hash, defaultCache()),
 				JSON.stringify({ attestations: descriptors }),
