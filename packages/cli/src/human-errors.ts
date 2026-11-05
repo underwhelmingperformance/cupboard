@@ -393,6 +393,10 @@ function publicationError(error: unknown): string | undefined {
 		return 'Publication could not continue because the server is busy. Previously completed paths remain published. Retry the push later.';
 	}
 
+	if (error instanceof errors.CommitSocketCapabilityMismatchError) {
+		return 'The upload credential advertised a publication capability that the commit socket did not. A proxy between the CLI and the deployment may remove the x-cupboard-commit-capabilities header from the WebSocket handshake, or the deployment may have changed during the push. Check that the header reaches the CLI, then run the push again.';
+	}
+
 	if (
 		error instanceof errors.CommitSocketProtocolError ||
 		error instanceof errors.UnexpectedUploadDecisionError ||

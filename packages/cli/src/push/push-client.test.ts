@@ -21,7 +21,6 @@ import { z } from 'zod';
 import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
 import { CupboardClient } from '../client/client.ts';
 import { translateRpcError } from '../client/rpc-errors.ts';
-import { CupboardHttpError } from '../errors.ts';
 import { errorExitCode } from '../exit-code.ts';
 
 import { pushClientFor } from './push-client.ts';
@@ -586,28 +585,11 @@ import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { attestationBundleNegotiateRequestSchema } from '@cupboard/protocol/attestations';
 
 it.each([
-	{
-		credentialCapability: true,
-		socketCapability: true,
-		expected: '/uploads/plan'
-	},
-	{ credentialCapability: true, socketCapability: false, expected: '/uploads' },
-	{
-		credentialCapability: true,
-		socketCapability: false,
-		socketRefused: true,
-		expected: '/uploads'
-	},
-	{ credentialCapability: false, socketCapability: true, expected: '/uploads' },
-	{ credentialCapability: false, socketCapability: false, expected: '/uploads' }
+	{ credentialCapability: true, expected: '/uploads/plan' },
+	{ credentialCapability: false, expected: '/uploads' }
 ])(
-	'selects $expected with credential=$credentialCapability, socket=$socketCapability and refused=$socketRefused',
-	async ({
-		credentialCapability,
-		socketCapability,
-		socketRefused,
-		expected
-	}) => {
+	'selects $expected from the credential response with credential=$credentialCapability',
+	async ({ credentialCapability, expected }) => {
 		const operationId = 'a'.repeat(64);
 		const metadata = uploadPathNegotiationSchema.parse({
 			storePathHash: '0'.repeat(32),
@@ -619,20 +601,7 @@ it.each([
 		const paths: string[] = [];
 		const open = vi
 			.spyOn(CupboardClient.prototype, 'openCommitSession')
-			.mockImplementation((_credential, options) => {
-				if (socketRefused === true) {
-					options?.onFailure?.(
-						new CupboardHttpError(
-							'GET',
-							'/cache/new/commit',
-							404,
-							'Cache not found'
-						)
-					);
-				}
-				options?.onCapabilities?.(
-					new Map(socketCapability ? [[publicationCapability, {}]] : [])
-				);
+			.mockImplementation(() => {
 				return Promise.resolve({
 					commit: () => Promise.reject(new Error('No commit expected')),
 					close: vi.fn()
@@ -712,9 +681,9 @@ it.each([
 				original: expected === '/uploads/plan' ? operationId : undefined,
 				clone: expected === '/uploads/plan' ? operationId : undefined
 			});
-			const onCapabilities = vi.fn();
+			const onWaiting = vi.fn();
 			const opensBefore = open.mock.calls.length;
-			const session = await client.openCommitSession?.({ onCapabilities });
+			const session = await client.openCommitSession?.({ onWaiting });
 			if (session === undefined) {
 				throw new Error('Expected a commit session');
 			}
@@ -728,8 +697,8 @@ it.each([
 			).rejects.toThrow('No commit expected');
 			expect({
 				opens: open.mock.calls.length,
-				callback: open.mock.lastCall?.[1]?.onCapabilities
-			}).toStrictEqual({ opens: opensBefore + 1, callback: onCapabilities });
+				callback: open.mock.lastCall?.[1]?.onWaiting
+			}).toStrictEqual({ opens: opensBefore + 1, callback: onWaiting });
 			session.close();
 		} finally {
 			open.mockRestore();
@@ -738,14 +707,13 @@ it.each([
 );
 
 it.each([false, true])(
-	'keeps an empty publication plan read-only with root=%s',
+	'keeps an empty publication plan read-only without a commit socket with root=%s',
 	async (hasRoot) => {
 		const commit = vi.fn(() => Promise.reject(new Error('No commit expected')));
 		const close = vi.fn();
 		const open = vi
 			.spyOn(CupboardClient.prototype, 'openCommitSession')
-			.mockImplementation((_credential, options) => {
-				options?.onCapabilities?.(new Map([[publicationCapability, {}]]));
+			.mockImplementation(() => {
 				return Promise.resolve({ commit, close });
 			});
 		const requests: { path: string; body: unknown }[] = [];
@@ -808,9 +776,9 @@ it.each([false, true])(
 						}
 					}
 				],
-				opens: 1,
+				opens: 0,
 				commits: [],
-				closes: [[]]
+				closes: []
 			});
 		} finally {
 			open.mockRestore();
@@ -854,8 +822,7 @@ it.each([
 		};
 		const open = vi
 			.spyOn(CupboardClient.prototype, 'openCommitSession')
-			.mockImplementation((_credential, options) => {
-				options?.onCapabilities?.(new Map([[publicationCapability, {}]]));
+			.mockImplementation(() => {
 				return Promise.resolve({
 					commit: () => Promise.reject(new Error('No commit expected')),
 					close: vi.fn()
@@ -1001,8 +968,7 @@ it.each([
 		);
 		const open = vi
 			.spyOn(CupboardClient.prototype, 'openCommitSession')
-			.mockImplementation((_credential, options) => {
-				options?.onCapabilities?.(new Map([[publicationCapability, {}]]));
+			.mockImplementation(() => {
 				return Promise.resolve({
 					commit: () => Promise.reject(new Error('No commit expected')),
 					close: vi.fn()

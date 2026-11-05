@@ -59,7 +59,6 @@ import {
 } from '../errors.ts';
 
 import {
-	type AdvertisedCapabilities,
 	type CommitOutcome,
 	type CommitSession,
 	type CommitSocketConnect,
@@ -192,7 +191,6 @@ export class CupboardClient {
 				path,
 				timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
 				signal: this.signal,
-				onCapabilities: options.onCapabilities,
 				onFailure: options.onFailure,
 				onWaiting: options.onWaiting,
 				pushId: options.pushId
@@ -518,7 +516,6 @@ export interface CommitOptions {
 	session as a whole waits for the server to grant commit capacity.
 	*/
 	readonly timeoutSeconds?: number;
-	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 	/**
 	Reports a terminal failure, including a refused handshake.
 	*/
