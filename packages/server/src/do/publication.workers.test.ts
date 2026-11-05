@@ -15,6 +15,7 @@ import {
 	commitBatchMaxEntries,
 	commitCapabilitiesValueWithCredit,
 	type CommitSessionFrame,
+	type CommitSessionRequestInput,
 	publicationCapability,
 	type PublicationEntry,
 	publicationRefusalReasonsCapability,
@@ -2417,6 +2418,18 @@ async function reusablePublication(token: string, label: string) {
 	};
 }
 
+function identityOf(entry: PublicationEntry) {
+	return {
+		uploadId: entry.operationId,
+		storePathHash: entry.metadata.storePathHash,
+		narHash: entry.metadata.narHash
+	};
+}
+
+function deferredFrame(entry: PublicationEntry) {
+	return { ev: 'deferred', ...identityOf(entry), grace: {} };
+}
+
 // Publishes a reusable path, and makes the commit fail after it publishes the
 // narinfo object. The operation stays accepted and its pending row stays
 // `committing`.
@@ -2686,6 +2699,211 @@ describe('publication commits that stop after they start', () => {
 			operations: [{ id: entry.operationId, state: 'servable' }]
 		});
 	});
+
+	it.each([
+		{
+			op: 'subscribe-publication',
+			request: (entry: PublicationEntry): CommitSessionRequestInput => ({
+				op: 'subscribe-publication',
+				pushId: testPushId,
+				entries: [entry]
+			}),
+			resumed: (entry: PublicationEntry) => [deferredFrame(entry)]
+		},
+		{
+			op: 'publish-batch',
+			request: (entry: PublicationEntry): CommitSessionRequestInput => ({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			}),
+			resumed: (entry: PublicationEntry) => [
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				deferredFrame(entry)
+			]
+		},
+		{
+			op: 'subscribe',
+			request: (entry: PublicationEntry): CommitSessionRequestInput => ({
+				op: 'subscribe',
+				uploadIds: [entry.operationId]
+			}),
+			resumed: (entry: PublicationEntry) => [deferredFrame(entry)]
+		},
+		{
+			op: 'subscribe-identity',
+			request: (entry: PublicationEntry): CommitSessionRequestInput => ({
+				op: 'subscribe-identity',
+				entries: [identityOf(entry)]
+			}),
+			resumed: (entry: PublicationEntry) => [deferredFrame(entry)]
+		}
+	])(
+		'requests verification and completes the operation when $op resumes it',
+		async ({ op, request, resumed }) => {
+			const token = await initialise();
+			const { entry, frames: stopped } = await stoppedReuseCommit(
+				token,
+				`publication-stopped-${op}`
+			);
+			const sent = await collectVerificationPasses();
+			const session = await openCommitSession(
+				token,
+				undefined,
+				publicationSession
+			);
+			const frames: unknown[] = [];
+			try {
+				session.send(request(entry));
+				while (frames.length < resumed(entry).length) {
+					frames.push(await session.nextFrame());
+				}
+				// Run the queue pass for the message that the resumption sent.
+				await verifyCurrentTenant();
+				frames.push(await session.nextFrame());
+			} finally {
+				await closeSessionAndWait(session.socket);
+			}
+			const after = await snapshot();
+			expect({
+				stopped,
+				frames,
+				sent,
+				pending: after.pending,
+				operations: after.operations.map(({ id, state }) => ({ id, state }))
+			}).toStrictEqual({
+				stopped: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{
+						ev: 'error',
+						uploadId: entry.operationId,
+						status: StatusCodes.INTERNAL_SERVER_ERROR,
+						message: 'internal error'
+					}
+				],
+				frames: [
+					...resumed(entry),
+					{
+						ev: 'verdict',
+						uploadId: entry.operationId,
+						status: 'servable',
+						grace: {}
+					}
+				],
+				sent: [{ kind: 'tenant-verify', tenant: fixtureTenant }],
+				pending: [],
+				operations: [{ id: entry.operationId, state: 'servable' }]
+			});
+		}
+	);
+
+	it.each([
+		{
+			op: 'subscribe',
+			request: (entry: PublicationEntry): CommitSessionRequestInput => ({
+				op: 'subscribe',
+				uploadIds: [entry.operationId]
+			})
+		},
+		{
+			op: 'subscribe-identity',
+			request: (entry: PublicationEntry): CommitSessionRequestInput => ({
+				op: 'subscribe-identity',
+				entries: [identityOf(entry)]
+			})
+		}
+	])(
+		'requests no verification when $op resumes an upload that needs its bytes',
+		async ({ request }) => {
+			const token = await initialise();
+			const [entry] = await plannedEntries(token, '/uploads/plan', [
+				distinctPath('n')
+			]);
+			if (entry === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			const admitted = await admit(token, testPushId, entry);
+			const sent = await collectVerificationPasses();
+			const session = await openCommitSession(
+				token,
+				undefined,
+				publicationSession
+			);
+			let frame;
+			try {
+				session.send(request(entry));
+				frame = await session.nextFrame();
+			} finally {
+				await closeSessionAndWait(session.socket);
+			}
+			expect({ admitted, frame, sent }).toStrictEqual({
+				admitted: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{ ev: 'upload-required', uploadId: entry.operationId }
+				],
+				frame: deferredFrame(entry),
+				sent: []
+			});
+		}
+	);
+
+	it.each(['subscribe-publication', 'publish-batch'] as const)(
+		'completes a commit that a reset stopped when %s resumes it',
+		async (op) => {
+			ignoreAlarmsUntilTestFinishes();
+			const token = await initialise();
+			const stopped = await pausedReuseCommit(token, `publication-reset-${op}`);
+			const { entry } = stopped;
+			await resetObject(stopped.session);
+			const sent = await collectVerificationPasses();
+			const session = await openCommitSession(
+				token,
+				undefined,
+				publicationSession
+			);
+			const frames: unknown[] = [];
+			try {
+				session.send({ op, pushId: testPushId, entries: [entry] });
+				frames.push(refusalFacts(await session.nextFrame()));
+				if (op === 'publish-batch') {
+					frames.push(refusalFacts(await session.nextFrame()));
+				}
+				await verifyCurrentTenant();
+				frames.push(await session.nextFrame());
+			} finally {
+				await closeSessionAndWait(session.socket);
+			}
+			const after = await snapshot();
+			expect({
+				frames,
+				sent,
+				pending: after.pending,
+				operations: after.operations.map(({ id, state }) => ({ id, state }))
+			}).toStrictEqual({
+				frames: [
+					...(op === 'publish-batch'
+						? [{ ev: 'publication-accepted', uploadId: entry.operationId }]
+						: []),
+					{
+						ev: 'deferred',
+						uploadId: entry.operationId,
+						storePathHash: entry.metadata.storePathHash,
+						narHash: entry.metadata.narHash,
+						grace: {}
+					},
+					{
+						ev: 'verdict',
+						uploadId: entry.operationId,
+						status: 'servable',
+						grace: {}
+					}
+				],
+				sent: [{ kind: 'tenant-verify', tenant: fixtureTenant }],
+				pending: [],
+				operations: [{ id: entry.operationId, state: 'servable' }]
+			});
+		}
+	);
 });
 
 // Publishes a reusable path. The commit publishes the narinfo object and then
