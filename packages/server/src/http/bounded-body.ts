@@ -118,7 +118,11 @@ async function pipeBody(
 	}
 }
 
-async function cancelUnread(body: ReadableStream): Promise<void> {
+/**
+Cancels a body that the response will not send, so its source stops
+delivering bytes. Resolves even when the source has already failed.
+*/
+export async function cancelUnread(body: ReadableStream): Promise<void> {
 	try {
 		await body.cancel();
 	} catch {

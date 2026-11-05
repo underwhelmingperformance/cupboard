@@ -38,6 +38,7 @@ import { SharedFactsUnavailableError } from '../errors.ts';
 import {
 	boundedBody,
 	boundedBodyHeaders,
+	cancelUnread,
 	forbidStoring,
 	type KeepAlive
 } from '../http/bounded-body.ts';
@@ -623,12 +624,12 @@ async function serveR2(
 	);
 }
 
-function r2Response(
+async function r2Response(
 	request: Request,
 	object: R2Object | R2ObjectBody | null,
 	representation: R2Representation,
 	isPublicCache: boolean
-): Response {
+): Promise<Response> {
 	if (object === null) {
 		return isPublicCache ? notFoundResponse() : uncachedNotFoundResponse();
 	}
@@ -637,12 +638,16 @@ function r2Response(
 		representation.isServable !== undefined &&
 		!representation.isServable(object)
 	) {
+		await cancelUnsentBody(object);
+
 		return uncachedNotFoundResponse();
 	}
 
 	const headers = privatise(representation.headersFor(object), isPublicCache);
 
 	if (isNotModified(request, headers)) {
+		await cancelUnsentBody(object);
+
 		return notModified(headers);
 	}
 
@@ -657,6 +662,14 @@ function r2Response(
 	}
 
 	return new Response(representation.bodyFor(object), { headers });
+}
+
+async function cancelUnsentBody(
+	object: R2Object | R2ObjectBody
+): Promise<void> {
+	if ('body' in object) {
+		await cancelUnread(object.body);
+	}
 }
 
 /**
