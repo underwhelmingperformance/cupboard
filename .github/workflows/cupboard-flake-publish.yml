@@ -151,12 +151,13 @@ on:
           such as language toolchains, the Android and .NET SDKs and Docker
           images on Linux, and Xcode on macOS. A cohort job skips this when
           `build` is `missing` and the plan found the output of every target in
-          the destination cache. A target that selects several outputs always
-          counts as needing a build. A cohort job never skips this when
-          `publish` is `closure` or `none`, or when the workflow builds cupboard
-          from source or installs a release whose `plan cohort` does not accept
-          `--complete-targets`. The software is not restored, so only use this
-          on ephemeral GitHub-hosted runners.
+          the destination cache or, when `publish` is `built`, the reference
+          source. A target that selects several outputs always counts as needing
+          a build. A cohort job never skips this when `publish` is `closure` or
+          `none`, or when the workflow builds cupboard from source or installs a
+          release whose `plan cohort` does not accept `--complete-targets`. The
+          software is not restored, so only use this on ephemeral GitHub-hosted
+          runners.
         required: false
         default: false
         type: boolean

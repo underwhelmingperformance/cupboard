@@ -90,6 +90,7 @@ import {
 } from '../options.ts';
 import { packCohorts } from '../packing.ts';
 import {
+	checkReferenceForCohorts,
 	isPublishingByReference,
 	type PlanReferenceOutcome,
 	publishReferenceTargets
@@ -297,8 +298,9 @@ export interface PlanInputs {
 	readonly enablePacking: boolean;
 	readonly packCapacity: number;
 	/**
-	Whether cohort jobs free disk space when they may build. Without it, no
-	cohort is told that it can skip the cleanup.
+	Whether cohort jobs free disk space when they may build. Without it, every
+	cohort keeps `mayBuild` true, and the plan does not ask which outputs the
+	reference source serves.
 	*/
 	readonly maximiseSpace: boolean;
 	readonly store: string;
@@ -712,14 +714,17 @@ export async function planAction(
 		);
 	}
 
-	const { plan, evaluations, referencePublications, servedPaths } =
+	const { plan, evaluations, referencePublications, availability } =
 		inputs.optimise
 			? await optimisedPlan(inputs, reporter, dependencies)
 			: {
 					plan: unoptimisedPlan(inputs.targets),
 					evaluations: [],
 					referencePublications: [],
-					servedPaths: new Set<StorePathString>()
+					availability: {
+						servedPaths: new Set<StorePathString>(),
+						referenceTargets: new Set<string>()
+					}
 				};
 	// Only an optimised plan has the evaluated graph that the pre-filter needs.
 	// An unoptimised plan must keep every cohort in the matrix.
@@ -756,7 +761,14 @@ export async function planAction(
 		cohortDecisions,
 		referencePublications,
 		evaluations,
-		await cohortSkippablePaths(inputs, servedPaths, dependencies),
+		{
+			...availability,
+			servedPaths: await cohortSkippablePaths(
+				inputs,
+				availability.servedPaths,
+				dependencies
+			)
+		},
 		dependencies.createArtifactName?.() ??
 			`cupboard-publish-plan-${randomUUID()}`,
 		dependencies.measurer ??
@@ -808,7 +820,7 @@ async function optimisedPlan(
 	readonly plan: PublishPlan;
 	readonly evaluations: readonly TargetEvaluation[];
 	readonly referencePublications: readonly PlanReferenceOutcome[];
-	readonly servedPaths: ReadonlySet<StorePathString>;
+	readonly availability: CohortAvailability;
 }> {
 	const { evaluations, unevaluated } = await evaluateTargets(
 		inputs.targets,
@@ -827,11 +839,28 @@ async function optimisedPlan(
 		);
 	}
 
-	const { retainedRoots, servedPaths } = await checkDestination(
+	const destinationPaths = await destinationServedPaths(
 		inputs,
 		evaluations,
 		dependencies
 	);
+	// The reference check depends only on the destination's answer, so it runs
+	// while the plan sets the roots of the targets that the destination serves.
+	const [retainedRoots, referenceCheck] = await Promise.all([
+		ensureAvailableTargets(
+			inputs,
+			evaluations,
+			destinationPaths,
+			dependencies.runner,
+			dependencies.signal
+		),
+		checkReferenceForCohorts(inputs, evaluations, destinationPaths, {
+			...(dependencies.fetcher !== undefined && {
+				fetcher: dependencies.fetcher
+			}),
+			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		})
+	]);
 	const referencePublications = await publishReferenceTargets(
 		inputs,
 		evaluations.filter(
@@ -851,6 +880,11 @@ async function optimisedPlan(
 				`Plan-job reference publication for ${outcome.attr} failed: ${outcome.reason ?? 'unknown failure'}. The cohort will handle the target.`
 			);
 		}
+	}
+	if (referenceCheck.status === 'failed') {
+		reporter.warn(
+			`The plan could not check which target outputs the reference source serves: ${referenceCheck.reason}. Cohorts with targets that the destination does not serve free disk space. Each cohort job still checks the reference source itself.`
+		);
 	}
 	const publishedRoots = new Set(
 		referencePublications
@@ -890,25 +924,66 @@ async function optimisedPlan(
 				)
 		),
 		referencePublications,
-		servedPaths
+		availability: cohortAvailability(
+			evaluations.filter(
+				(evaluation) => !retainedRoots.has(evaluation.target.rootSuffix)
+			),
+			destinationPaths,
+			referenceCheck.status === 'checked'
+				? referenceCheck.servedPaths
+				: new Set()
+		)
 	};
 }
 
-interface DestinationCheck {
-	readonly retainedRoots: Set<string>;
+/**
+What the plan job found in the destination cache and the reference source,
+for computing `mayBuild` and the plan summary. A cohort job probes the same
+caches. With `build: missing`, it leaves a single-output target out of its
+build set when either cache serves the target's output, and it publishes a
+target from the reference source by reference.
+*/
+interface CohortAvailability {
+	/**
+	Expected paths that the destination or the reference source serves.
+	*/
 	readonly servedPaths: ReadonlySet<StorePathString>;
+	/**
+	Identity keys of the targets that the cohort job publishes by reference from
+	the reference source.
+	*/
+	readonly referenceTargets: ReadonlySet<string>;
 }
 
-async function checkDestination(
+function cohortAvailability(
+	unretained: readonly TargetEvaluation[],
+	destinationPaths: ReadonlySet<StorePathString>,
+	referencePaths: ReadonlySet<StorePathString>
+): CohortAvailability {
+	const referenceTargets = unretained.filter((evaluation) => {
+		const expectedPath = expectedPathFor(evaluation.target, evaluation);
+
+		return expectedPath !== undefined && referencePaths.has(expectedPath);
+	});
+
+	return {
+		servedPaths: destinationPaths.union(referencePaths),
+		referenceTargets: new Set(
+			referenceTargets.map((evaluation) => targetIdentityKey(evaluation.target))
+		)
+	};
+}
+
+async function destinationServedPaths(
 	inputs: PlanInputs,
 	evaluations: readonly TargetEvaluation[],
 	dependencies: PlanDependencies
-): Promise<DestinationCheck> {
+): Promise<ReadonlySet<StorePathString>> {
 	if (
 		inputs.build === 'rebuild' ||
 		(inputs.publish !== 'outputs' && inputs.publish !== 'built')
 	) {
-		return { retainedRoots: new Set<string>(), servedPaths: new Set() };
+		return new Set();
 	}
 
 	const credentials =
@@ -919,22 +994,14 @@ async function checkDestination(
 				};
 	const fetcher =
 		dependencies.fetcher === undefined ? {} : { fetcher: dependencies.fetcher };
-	const availablePaths = await availableCachePaths({
+
+	return availableCachePaths({
 		baseUrl: inputs.url,
 		cache: inputs.cache,
 		paths: cacheProbePaths(evaluations),
 		...credentials,
 		...fetcher
 	});
-	const retainedRoots = await ensureAvailableTargets(
-		inputs,
-		evaluations,
-		availablePaths,
-		dependencies.runner,
-		dependencies.signal
-	);
-
-	return { retainedRoots, servedPaths: availablePaths };
 }
 
 export function validateRemoteOutputPredictability(
@@ -980,7 +1047,7 @@ async function writePlan(
 	cohortDecisions: readonly CohortPreFilterDecision[],
 	referencePublications: readonly PlanReferenceOutcome[],
 	evaluations: readonly TargetEvaluation[],
-	servedPaths: ReadonlySet<StorePathString>,
+	availability: CohortAvailability,
 	artifactName: string,
 	measurer: NonNullable<PlanDependencies['measurer']>
 ): Promise<void> {
@@ -1020,7 +1087,7 @@ async function writePlan(
 		inputs,
 		packedCohorts,
 		evaluations,
-		servedPaths
+		availability.servedPaths
 	);
 	await setOutput(
 		environment,
@@ -1036,7 +1103,8 @@ async function writePlan(
 			plan.retained,
 			packedCohorts,
 			plan.cohorts.filter((cohort) => prunedKeys.has(cohort.key)),
-			referencePublications
+			referencePublications,
+			availability.referenceTargets
 		)
 	);
 }
@@ -1048,7 +1116,7 @@ interface PlannedTargetSummary {
 	readonly runner: string;
 	readonly builder: string;
 	readonly bestEffort: boolean;
-	readonly decision: 'retained' | 'cohort' | 'reference';
+	readonly decision: 'retained' | 'cohort' | 'cohort-reference' | 'reference';
 }
 
 const planDecisionText: Readonly<
@@ -1056,7 +1124,8 @@ const planDecisionText: Readonly<
 > = {
 	reference: 'Published by reference in the plan job',
 	retained: 'Retained without building',
-	cohort: 'Checked by the cohort'
+	cohort: 'Checked by the cohort',
+	'cohort-reference': 'Published by reference in the cohort'
 };
 
 function planSummary(
@@ -1064,13 +1133,14 @@ function planSummary(
 	retained: readonly PublishTarget[],
 	jobCohorts: readonly Cohort[],
 	prunedCohorts: readonly Cohort[],
-	referencePublications: readonly PlanReferenceOutcome[]
+	referencePublications: readonly PlanReferenceOutcome[],
+	referenceTargets: ReadonlySet<string>
 ): ResultPayload<readonly PlannedTargetSummary[]> {
 	const retainedRoots = new Set(retained.map((target) => target.rootSuffix));
 	const summarise = (
 		job: string,
 		target: PublishTarget,
-		isRetained: boolean
+		decision: PlannedTargetSummary['decision']
 	): PlannedTargetSummary => ({
 		job,
 		attr: target.attr,
@@ -1078,20 +1148,27 @@ function planSummary(
 		runner: target.os,
 		builder: builderDescription(cohortBuildLocation(target, inputs)),
 		bestEffort: target.bestEffort,
-		decision: isRetained ? 'retained' : 'cohort'
+		decision
 	});
+	const cohortDecision = (
+		target: PublishTarget
+	): PlannedTargetSummary['decision'] => {
+		if (retainedRoots.has(target.rootSuffix)) {
+			return 'retained';
+		}
+
+		return referenceTargets.has(targetIdentityKey(target))
+			? 'cohort-reference'
+			: 'cohort';
+	};
 	const targets = [
 		...jobCohorts.flatMap((cohort) =>
 			cohort.targets.map((target) =>
-				summarise(
-					cohortName(inputs, cohort),
-					target,
-					retainedRoots.has(target.rootSuffix)
-				)
+				summarise(cohortName(inputs, cohort), target, cohortDecision(target))
 			)
 		),
 		...prunedCohorts.flatMap((cohort) =>
-			cohort.targets.map((target) => summarise('None', target, true))
+			cohort.targets.map((target) => summarise('None', target, 'retained'))
 		),
 		...retained
 			.filter((target) =>
@@ -1101,10 +1178,7 @@ function planSummary(
 						outcome.root === joinRoot(inputs.rootPrefix, target.rootSuffix)
 				)
 			)
-			.map((target): PlannedTargetSummary => ({
-				...summarise('None', target, true),
-				decision: 'reference'
-			}))
+			.map((target) => summarise('None', target, 'reference'))
 	];
 
 	return {
@@ -1731,7 +1805,7 @@ function queryInstallableFor(
 function expectedPathFor(
 	target: PublishTarget,
 	evaluation: TargetEvaluation | undefined
-): string | undefined {
+): StorePathString | undefined {
 	if (
 		target.outputs.length !== 1 ||
 		evaluation?.targetPaths.length !== target.outputs.length

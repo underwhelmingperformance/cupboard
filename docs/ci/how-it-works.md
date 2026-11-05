@@ -99,6 +99,28 @@ receipt and summary record the publications; a cohort with no remaining targets
 does not start. Each remaining cohort keeps its independent drift check and
 calculates its own build set.
 
+With `build: missing` and `publish: built`, the plan job publishes nothing from
+the reference source. The cohort job publishes those targets by reference,
+together with their dependency outputs. With `maximise-space: true`, the plan
+job also probes the reference source for single-output targets that the
+destination cache does not serve, and its summary marks each available target as
+"Published by reference in the cohort". If the probe fails, the plan job prints
+a warning, and the cohorts of those targets free disk space. Each cohort job
+checks the reference source itself either way.
+
+The plan also tells each cohort job whether it may build. With `build: missing`,
+a cohort job builds no target when every target selects one output and the
+destination cache or the reference source serves that output. With
+`maximise-space: true`, such a cohort job skips freeing disk space. It frees
+disk space as usual with `publish: closure` or `publish: none`, where the plan
+probes neither cache, and when the workflow builds cupboard from source or
+installs a release whose `plan cohort` does not accept `--complete-targets`. A
+cohort job that skips the step still evaluates its targets. The cohort job also
+checks availability itself. If a path disappears between the two jobs, the
+cohort job warns, then builds the path without the extra disk space or refuses
+the cohort when the store has too little free space. Re-running only that job
+reuses the same plan, so re-run the whole workflow.
+
 If you turn on `enable-packing`, the plan works differently. It measures the
 size of each target's closure, and packs small unlabelled cohorts into as few
 jobs as will fit within `pack-capacity` bytes of disk.
@@ -228,10 +250,11 @@ skip the artifact.
 - The run's summary page has a section for each job. The configure job lists the
   publication settings and the `nix.conf` lines for reading the destination
   cache. The plan job lists every target with its cohort job, runner and
-  builder, and says whether the plan retained the target without building it.
-  Each cohort job lists its targets with their outcome, the number of paths and
-  bytes uploaded by the pushes that set their roots, and when their roots
-  expire.
+  builder. It says whether the plan retained the target without building it,
+  published it by reference, or left it for its cohort job to publish by
+  reference. Each cohort job lists its targets with their outcome, the number of
+  paths and bytes uploaded by the pushes that set their roots, and when their
+  roots expire.
 - Each cohort job's name gives its system, where it builds and its number of
   targets, such as `x86_64-linux on ubuntu-latest (2 targets)`. A cohort with
   one target gives the target's root suffix in place of the system and the
