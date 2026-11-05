@@ -270,12 +270,12 @@ describe('attestation attach and reads', () => {
 				status: 'attached'
 			},
 			listStatus: StatusCodes.OK,
-			listControl: 'no-store',
+			listControl: 'no-store, no-transform',
 			listBody: {
 				attestations: [{ digest, predicateType, size: bundle.byteLength }]
 			},
 			bundleStatus: StatusCodes.OK,
-			bundleControl: 'no-store',
+			bundleControl: 'no-store, no-transform',
 			bundleBytes: [...bundle]
 		});
 	});
@@ -4244,10 +4244,10 @@ describe('attestation attach and reads', () => {
 		}).toStrictEqual({
 			listDenied: StatusCodes.UNAUTHORIZED,
 			list: StatusCodes.OK,
-			listControl: 'no-store',
+			listControl: 'no-store, no-transform',
 			bundleDenied: StatusCodes.UNAUTHORIZED,
 			bundle: StatusCodes.OK,
-			bundleControl: 'no-store'
+			bundleControl: 'no-store, no-transform'
 		});
 	});
 

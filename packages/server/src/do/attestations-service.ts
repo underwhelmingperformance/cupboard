@@ -82,6 +82,11 @@ import {
 	UploadedObjectNotFoundError
 } from '../errors.ts';
 import {
+	boundedBody,
+	boundedBodyHeaders,
+	keepAliveIn
+} from '../http/bounded-body.ts';
+import {
 	attestationListObjectKey,
 	attestationStagingObjectKey,
 	casObjectKey,
@@ -93,6 +98,7 @@ import {
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
+import { remainingReadBudgetMs } from '../http/read-deadline.ts';
 import {
 	type EligibleRetryClock,
 	type RetryExhaustion,
@@ -232,6 +238,16 @@ export interface InheritanceRequest {
 }
 
 import { CacheClosureService } from './cache-closure-service.ts';
+
+/**
+How an attestation list or bundle is served: its media type, its cache
+policy, and the operation in the record of a truncated body.
+*/
+interface ServedTenantObject {
+	readonly contentType: string;
+	readonly cacheControl: string;
+	readonly operation: string;
+}
 
 export class AttestationsService {
 	constructor(
@@ -608,8 +624,7 @@ export class AttestationsService {
 	private async serveTenantObject(
 		request: Request,
 		key: string,
-		contentType: string,
-		cacheControl = 'no-store',
+		served: ServedTenantObject,
 		isServable?: (object: R2Object) => boolean
 	): Promise<Response> {
 		const object = await this.context.env.BLOBS.get(key);
@@ -622,12 +637,14 @@ export class AttestationsService {
 			return uncachedNotFoundResponse();
 		}
 
-		const headers = new Headers({
-			'cache-control': cacheControl,
-			'content-type': contentType,
-			etag: objectEtag(object)
-		});
-		headers.set('content-length', String(object.size));
+		const headers = boundedBodyHeaders(
+			new Headers({
+				'cache-control': served.cacheControl,
+				'content-type': served.contentType,
+				etag: objectEtag(object)
+			}),
+			object.size
+		);
 
 		if (isNotModified(request, headers)) {
 			return new Response(undefined, {
@@ -636,9 +653,20 @@ export class AttestationsService {
 			});
 		}
 
-		return new Response(request.method === 'HEAD' ? undefined : object.body, {
-			headers
-		});
+		if (request.method === 'HEAD') {
+			return new Response(undefined, { headers });
+		}
+
+		return new Response(
+			boundedBody(
+				object.body,
+				object.size,
+				remainingReadBudgetMs(),
+				{ operation: served.operation, objectKey: key },
+				keepAliveIn(this.context.ctx)
+			),
+			{ headers }
+		);
 	}
 
 	private async filedReferenceKeys(
@@ -2386,8 +2414,11 @@ export class AttestationsService {
 		return this.serveTenantObject(
 			request,
 			this.listKey(cache, storePathHash),
-			'application/json; charset=utf-8',
-			'no-store',
+			{
+				contentType: 'application/json; charset=utf-8',
+				cacheControl: 'no-store',
+				operation: 'attestation-list.body'
+			},
 			(object) => isListOfCommittedGeneration(object, cache, committed)
 		);
 	}
@@ -2413,12 +2444,11 @@ export class AttestationsService {
 			return uncachedNotFoundResponse();
 		}
 
-		return this.serveTenantObject(
-			request,
-			casObjectKey(digest, incarnation),
-			'application/vnd.dev.sigstore.bundle+json',
-			'public, max-age=31536000, immutable'
-		);
+		return this.serveTenantObject(request, casObjectKey(digest, incarnation), {
+			contentType: 'application/vnd.dev.sigstore.bundle+json',
+			cacheControl: 'public, max-age=31536000, immutable',
+			operation: 'attestation-bundle.body'
+		});
 	}
 
 	/**
