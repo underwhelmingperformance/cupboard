@@ -553,8 +553,9 @@ to 425 paths on the Free plan and all 1,000 on the Paid plan. A page that needs
 many repairs takes about as many requests as its cost divided by the slice. When
 fewer than 15 calls remain, too few for one path at its worst case, the tenant
 object answers 503 with `Retry-After: 1`. The response advertises the limit for
-the whole slice in `x-cupboard-upload-max-paths`. The client sends the paths
-that an answer left out in its next request.
+the whole slice in `x-cupboard-upload-max-paths`. `cupboard confirm` starts with
+425-path requests, then uses the advertised limit, and sends the paths that an
+answer left out in its next request.
 
 Both Wrangler configurations leave `limits.subrequests` unset, so Cloudflare
 applies the account's plan limit. The allowance doesn't extend the tenant

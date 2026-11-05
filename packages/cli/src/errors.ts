@@ -1167,21 +1167,21 @@ export class PathsNotConfirmedError extends CliError {
 }
 
 /**
-A confirm closure larger than one request is split into sequential batches,
-and a later request failed. Each batch that succeeded has already extended
-the retention deadlines of its paths on the server. The counts show how many
-batches completed.
+A confirm request failed after the server had checked some of the paths.
+`checkedPaths` counts the paths that earlier answers covered, out of
+`totalPaths`. Each checked path that the server confirmed already has its
+extended retention deadline.
 */
 export class ConfirmIncompleteError extends CliCausedError {
 	constructor(
-		public readonly confirmedBatches: number,
-		public readonly totalBatches: number,
+		public readonly checkedPaths: number,
+		public readonly totalPaths: number,
 		public override readonly cause: unknown
 	) {
 		super(
-			`${String(confirmedBatches)} of ${String(totalBatches)} confirm ` +
-				`request(s) succeeded before one failed; paths reported confirmed ` +
-				`are already extended`
+			`${String(checkedPaths)} of ${String(totalPaths)} paths were checked ` +
+				`before a confirm request failed; paths reported confirmed are ` +
+				`already extended`
 		);
 		this.name = 'ConfirmIncompleteError';
 	}

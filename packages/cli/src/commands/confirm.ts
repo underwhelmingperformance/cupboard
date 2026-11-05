@@ -8,8 +8,13 @@ import {
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { tenantContract } from '@cupboard/protocol/contract';
 import {
+	subrequestSafetyReserve,
+	workersInvocationAllowances
+} from '@cupboard/protocol/platform';
+import {
 	type UploadConfirmedPath,
 	uploadConfirmMaxPaths,
+	uploadConfirmMaxPathsFor,
 	type UploadConfirmResponse
 } from '@cupboard/protocol/upload';
 import {
@@ -27,6 +32,7 @@ import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import { resolveAuthorisedCachePositionals } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { advertisedMaxPaths } from '../client/advertised-limit.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import { CupboardClient } from '../client/client.ts';
 import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
@@ -99,7 +105,21 @@ export interface ConfirmClient {
 		},
 		UploadConfirmResponse
 	>;
+	/**
+	Returns the largest number of paths to send in one request. The server
+	advertises this number. Without this function, the client uses the Free
+	plan's limit.
+	*/
+	readonly maxPaths?: () => number;
 }
+
+/**
+The most paths in one confirm request until the server advertises its limit:
+the limit of a Workers Free invocation.
+*/
+export const confirmDefaultMaxPaths = uploadConfirmMaxPathsFor(
+	workersInvocationAllowances.free.subrequests - subrequestSafetyReserve
+);
 
 interface ConfirmCommandDependencies {
 	/**
@@ -179,16 +199,26 @@ export function registerConfirmCommand(
 					signal: programOptions.signal
 				}
 			);
+			let maxPaths = confirmDefaultMaxPaths;
 			const rpc = tenantRpc(resolved.target.tenantUrl, {
 				credential: resolved.credential,
-				signal: programOptions.signal
+				signal: programOptions.signal,
+				fetcher: async (input, init) => {
+					const response = await fetch(input, init);
+					if (response.ok) {
+						maxPaths =
+							advertisedMaxPaths(response, uploadConfirmMaxPaths) ?? maxPaths;
+					}
+
+					return response;
+				}
 			});
 
 			await runConfirm(
 				resolved.target.cache,
 				[...resolved.payload, ...filePaths].map((storePath) => storePath.value),
 				reporter,
-				rpc.uploads
+				{ confirm: rpc.uploads.confirm, maxPaths: () => maxPaths }
 			);
 		});
 }
@@ -205,19 +235,17 @@ export async function runConfirm(
 	const storePathsByHash = new Map<StorePathHash, string>(
 		storePaths.map((storePath) => [StorePath.hash(storePath), storePath])
 	);
-	// The server caps each request, so submit larger sets in order. Report the
-	// completed batches even if a later request fails because their confirmation
-	// results are already durable.
+	// The server answers a prefix of each request when its subrequests cannot
+	// cover the whole request, so send the paths in order. Report the answered
+	// paths even if a later request fails because their confirmation results are
+	// already durable.
 	const paths: UploadConfirmResponse['paths'] = [];
-	const totalBatches = Math.ceil(
-		storePathHashes.length / uploadConfirmMaxPaths
-	);
-	let confirmedBatches = 0;
 
 	try {
 		await reporter.phase('Confirming published paths', () =>
 			lookupInPages(storePathHashes, {
-				pageSize: uploadConfirmMaxPaths,
+				pageSize: Math.max(1, storePathHashes.length),
+				requestSize: client.maxPaths ?? (() => confirmDefaultMaxPaths),
 				concurrency: 1,
 				deadline: procedureDeadline(
 					'uploads.confirm',
@@ -235,7 +263,6 @@ export async function runConfirm(
 					// signal. Discard that answer.
 					signal.throwIfAborted();
 					paths.push(...response.paths);
-					confirmedBatches += 1;
 
 					return response.paths;
 				}
@@ -253,8 +280,8 @@ export async function runConfirm(
 		}
 
 		throw new ConfirmIncompleteError(
-			confirmedBatches,
-			totalBatches,
+			paths.length,
+			storePathHashes.length,
 			translateRpcError(error, { keepAuthCause: true })
 		);
 	}

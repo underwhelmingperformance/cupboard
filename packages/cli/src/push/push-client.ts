@@ -24,8 +24,7 @@ import {
 	type UploadId,
 	uploadNegotiateMaxPaths,
 	uploadPathNegotiationSchema,
-	uploadRequestLimitErrorCode,
-	uploadRequestMaxPathsHeader
+	uploadRequestLimitErrorCode
 } from '@cupboard/protocol/upload';
 import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
 import {
@@ -38,6 +37,7 @@ import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 
+import { advertisedMaxPaths } from '../client/advertised-limit.ts';
 import { callInCache } from '../client/cache-scoped.ts';
 import type { CommitTarget } from '../client/client.ts';
 import { CupboardClient } from '../client/client.ts';
@@ -115,11 +115,10 @@ export function pushClientFor(
 						(capability) => capability.trim() === uploadGraceFactsCapability
 					) ?? false;
 
-			const advertised = Number(
-				response.headers.get(uploadRequestMaxPathsHeader)
-			);
-			if (response.ok && Number.isSafeInteger(advertised) && advertised > 0) {
-				advertisedPageSize = Math.min(advertised, uploadNegotiateMaxPaths);
+			if (response.ok) {
+				advertisedPageSize =
+					advertisedMaxPaths(response, uploadNegotiateMaxPaths) ??
+					advertisedPageSize;
 			}
 
 			return response;
@@ -170,18 +169,10 @@ export function pushClientFor(
 				hasCredentialPublication = echoed.has(publicationCapability);
 				hasCredentialConfirmation = echoed.has(confirmPresentCapability);
 			}
-			const advertised = Number(
-				response.headers.get(uploadRequestMaxPathsHeader)
-			);
-			if (
-				request.url.endsWith('/uploads/confirm-present') &&
-				Number.isSafeInteger(advertised) &&
-				advertised > 0
-			) {
-				confirmationPageSize = Math.min(
-					advertised,
-					uploadConfirmPresentMaxPaths
-				);
+			if (request.url.endsWith('/uploads/confirm-present')) {
+				confirmationPageSize =
+					advertisedMaxPaths(response, uploadConfirmPresentMaxPaths) ??
+					confirmationPageSize;
 			}
 			return response;
 		}

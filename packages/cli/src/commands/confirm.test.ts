@@ -13,7 +13,8 @@ import {
 	type UploadConfirmedPathInput,
 	uploadConfirmMaxPaths,
 	type UploadConfirmResponse,
-	uploadConfirmResponseSchema
+	uploadConfirmResponseSchema,
+	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import type { ResultRow } from '@cupboard/reporter';
 import { maxTransientRetries } from '@cupboard/shared/retry';
@@ -22,6 +23,7 @@ import { Command } from 'commander';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import { z } from 'zod';
 
 import { cliExitCode } from '../cli.ts';
 import { recordingCacheScopedClient } from '../client/cache-scoped.test-support.ts';
@@ -37,6 +39,7 @@ import {
 
 import {
 	type ConfirmClient,
+	confirmDefaultMaxPaths,
 	registerConfirmCommand,
 	runConfirm
 } from './confirm.ts';
@@ -236,7 +239,7 @@ describe('runConfirm', () => {
 		{ kind: 'session', rejection: new SessionRejectedError(), exitCode: 77 },
 		{ kind: 'scope', rejection: new ScopeForbiddenError(), exitCode: 77 }
 	])(
-		'reports completed batches and preserves a $kind failure status',
+		'reports the paths checked before a $kind failure and preserves its status',
 		async ({ rejection, exitCode }) => {
 			const { ui, captured } = fakeCliUi();
 			const storePaths = Array.from(
@@ -274,14 +277,14 @@ describe('runConfirm', () => {
 
 			expectConfirmIncomplete(error);
 			expect({
-				confirmedBatches: error.confirmedBatches,
-				totalBatches: error.totalBatches,
+				checkedPaths: error.checkedPaths,
+				totalPaths: error.totalPaths,
 				cause: error.cause,
 				exitCode: cliExitCode(error, 130),
 				results: captured.results
 			}).toStrictEqual({
-				confirmedBatches: 1,
-				totalBatches: 2,
+				checkedPaths: confirmDefaultMaxPaths,
+				totalPaths: uploadConfirmMaxPaths + 2,
 				cause: rejection,
 				exitCode,
 				results: [
@@ -290,7 +293,7 @@ describe('runConfirm', () => {
 						title: 'Published paths',
 						data: {
 							paths: storePaths
-								.slice(0, uploadConfirmMaxPaths)
+								.slice(0, confirmDefaultMaxPaths)
 								.map((storePath) => ({
 									storePathHash: StorePath.hash(storePath),
 									confirmed: true,
@@ -298,7 +301,7 @@ describe('runConfirm', () => {
 								}))
 						},
 						rows: storePaths
-							.slice(0, uploadConfirmMaxPaths)
+							.slice(0, confirmDefaultMaxPaths)
 							.map((storePath) => ({
 								label: StorePath.basename(storePath),
 								value: 'available; no retention grace period'
@@ -341,7 +344,7 @@ describe('runConfirm', () => {
 
 		await expect(pending).rejects.toBe(abort);
 		expect(captured.results).toHaveLength(1);
-		expect(captured.results[0]?.rows).toHaveLength(uploadConfirmMaxPaths);
+		expect(captured.results[0]?.rows).toHaveLength(confirmDefaultMaxPaths);
 	});
 
 	// The first attempt ignores its signal and answers just after its deadline,
@@ -414,10 +417,9 @@ describe('runConfirm', () => {
 		});
 	});
 
-	// The server bounds one confirm request, so a closure past the bound goes
-	// out as sequential requests and comes back as one report in request
-	// order.
-	it('splits a closure above the request bound and merges the report', async () => {
+	// Without an advertised limit, the client sends pages of the Free plan's
+	// limit and reports their answers as one result in request order.
+	it("splits a closure into pages of the Free plan's limit and merges the report", async () => {
 		const { ui, captured } = fakeCliUi();
 		const storePaths = Array.from(
 			{ length: uploadConfirmMaxPaths + 2 },
@@ -448,7 +450,7 @@ describe('runConfirm', () => {
 			firstCallLeadsWith: calls[0]?.[0],
 			reportedRows: captured.results[0]?.rows.length
 		}).toStrictEqual({
-			calls: [uploadConfirmMaxPaths, 2],
+			calls: [425, 425, 152],
 			firstCallLeadsWith: hashes[0],
 			reportedRows: uploadConfirmMaxPaths + 2
 		});
@@ -471,12 +473,12 @@ describe('confirm command', () => {
 				path.join(tmpdir(), 'cupboard-confirm-partial-')
 			);
 			const storePaths = Array.from(
-				{ length: uploadConfirmMaxPaths + 1 },
+				{ length: confirmDefaultMaxPaths + 1 },
 				(_, index) =>
 					`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
 			);
 			const confirmed = storePaths
-				.slice(0, uploadConfirmMaxPaths)
+				.slice(0, confirmDefaultMaxPaths)
 				.map((storePath) => ({
 					storePathHash: StorePath.hash(storePath),
 					confirmed: true,
@@ -782,6 +784,88 @@ describe('confirm command', () => {
 					}
 				],
 				results: `${JSON.stringify({ kind: 'confirm-paths', data: { paths: hashes.map((storePathHash) => ({ storePathHash, confirmed: true, grace: {} })) } })}\n`
+			});
+		} finally {
+			server.close();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	// The first answer covers only a prefix of its request and advertises a
+	// larger limit. The client sends the rest of the paths in pages of that
+	// limit.
+	it('follows the advertised limit and sends the paths that a short answer left out', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-confirm-advertised-')
+		);
+		const storePaths = Array.from(
+			{ length: uploadConfirmMaxPaths },
+			(_, index) =>
+				`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+		);
+		const requested: number[] = [];
+		const token: TokenProvider = {
+			get: () => Promise.resolve('test-token'),
+			refresh: () => Promise.resolve('test-token')
+		};
+		const server = setupServer(
+			http.post('*', async ({ request }) => {
+				const body = z
+					.object({ storePathHashes: z.array(z.string()) })
+					.parse(await request.json());
+				requested.push(body.storePathHashes.length);
+				const answered =
+					requested.length === 1
+						? body.storePathHashes.slice(0, 100)
+						: body.storePathHashes;
+
+				return HttpResponse.json(
+					{
+						paths: answered.map((storePathHash) => ({
+							storePathHash,
+							confirmed: true,
+							grace: {}
+						}))
+					},
+					{ headers: { [uploadRequestMaxPathsHeader]: '600' } }
+				);
+			})
+		);
+		const resultFile = path.join(directory, 'results.jsonl');
+		const program = new Command().exitOverride().option('--result-file <path>');
+		registerConfirmCommand(
+			program,
+			{},
+			{ authenticate: () => Promise.resolve(token) }
+		);
+		server.listen({ onUnhandledFrame: 'error' });
+		try {
+			await program.parseAsync(
+				[
+					'--result-file',
+					resultFile,
+					'confirm',
+					'https://cupboard.example.workers.dev/t/acme',
+					...storePaths
+				],
+				{ from: 'user' }
+			);
+
+			expect({
+				requested,
+				results: await readFile(resultFile, 'utf8')
+			}).toStrictEqual({
+				requested: [confirmDefaultMaxPaths, 600, 300],
+				results: `${JSON.stringify({
+					kind: 'confirm-paths',
+					data: {
+						paths: storePaths.map((storePath) => ({
+							storePathHash: StorePath.hash(storePath),
+							confirmed: true,
+							grace: {}
+						}))
+					}
+				})}\n`
 			});
 		} finally {
 			server.close();
