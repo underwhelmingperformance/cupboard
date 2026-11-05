@@ -49,7 +49,8 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	StoredOidcTrustInvalidError,
-	TenantNotConfiguredError
+	TenantNotConfiguredError,
+	WorkersCachePurgeError
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
 import type { withSpan } from '../observability/span.ts';
@@ -283,10 +284,11 @@ export class ServerContext {
 	/**
 	Purges every supplied cache tag, in as many requests as the platform limit
 	requires. A caller passes the tags it has and does not size its list.
+	Rejects with `WorkersCachePurgeError` when the Cache API refuses a request.
 	*/
 	async purgeCacheTags(tags: readonly string[]): Promise<void> {
 		interface CachePurgeEntrypoint {
-			purgeTags(tags: string[]): Promise<void>;
+			purgeTags(tags: string[]): Promise<CachePurgeResult>;
 		}
 
 		const { CachedTenantReads: entrypoint } = this.ctx.exports as unknown as {
@@ -294,7 +296,13 @@ export class ServerContext {
 		};
 
 		for (const batch of chunk(tags, tagsPerPurgeRequest)) {
-			await boundedSubrequest(() => entrypoint.purgeTags(batch), 'cache.purge');
+			await boundedSubrequest(async () => {
+				const result = await entrypoint.purgeTags(batch);
+
+				if (!result.success) {
+					throw new WorkersCachePurgeError(result.errors);
+				}
+			}, 'cache.purge');
 		}
 	}
 

@@ -1017,6 +1017,54 @@ export async function withoutAlarmArming<T>(
 }
 
 /**
+An in-memory replacement for a Durable Object's alarm, from
+{@link fakeAlarm}.
+*/
+export interface FakeAlarm {
+	/**
+	The time that the object last armed, or `Infinity` when no alarm is armed.
+	An alarm at `Infinity` is later than any time that the object asks for, so
+	`armAlarmNoLaterThan` treats it as no alarm.
+	*/
+	scheduled(): number;
+	clear(): void;
+	restore(): void;
+}
+
+/**
+Replaces `getAlarm` and `setAlarm` on `storage` with an in-memory alarm that
+is never delivered.
+
+Workerd moves an alarm armed before the real time to the real time, and the
+test clock is fixed in the past, so the real `getAlarm` cannot report the
+time that the object asked for. Call `restore` in a `finally` block.
+*/
+export function fakeAlarm(storage: DurableObjectStorage): FakeAlarm {
+	let scheduled = Infinity;
+	const getAlarm = vi
+		.spyOn(storage, 'getAlarm')
+		.mockImplementation(() => Promise.resolve(scheduled));
+	const setAlarm = vi
+		.spyOn(storage, 'setAlarm')
+		.mockImplementation((scheduledTime) => {
+			scheduled = new Date(scheduledTime).getTime();
+
+			return Promise.resolve();
+		});
+
+	return {
+		scheduled: () => scheduled,
+		clear: () => {
+			scheduled = Infinity;
+		},
+		restore: () => {
+			getAlarm.mockRestore();
+			setAlarm.mockRestore();
+		}
+	};
+}
+
+/**
 Drives a capped maintenance drain to completion: runs `step` until `isDone`
 returns true, at most `maxSteps` times. A capped pass advances only when an
 alarm or an explicit resume call runs it again, so a test watching one

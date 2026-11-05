@@ -982,7 +982,9 @@ export const cachePurgeContinuations = sqliteTable(
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
 		lastAttemptAt: text('last_attempt_at').$type<IsoTimestamp>(),
-		lastError: text('last_error')
+		lastError: text('last_error'),
+		nextAttemptAt: text('next_attempt_at').$type<IsoTimestamp>(),
+		failedAttempts: integer('failed_attempts').notNull().default(0)
 	},
 	(table) => [
 		index('cache_purge_kind_created_at_idx').on(table.kind, table.createdAt)

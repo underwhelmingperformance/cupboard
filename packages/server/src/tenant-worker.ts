@@ -3,10 +3,7 @@ import { StatusCodes } from 'http-status-codes';
 
 import { boundedWorkerEnv } from './do/bounded-io.ts';
 import { withSubrequestSlice } from './do/subrequest-slice.ts';
-import {
-	WorkersCachePurgeError,
-	WorkersCacheUnavailableError
-} from './errors.ts';
+import { WorkersCacheUnavailableError } from './errors.ts';
 import { withInternalRequest } from './observability/request-context.ts';
 import { withSpan } from './observability/span.ts';
 import { subrequestsPerInvocation } from './policy/subrequests.ts';
@@ -60,23 +57,20 @@ export class CachedTenantReads extends WorkerEntrypoint<TenantEnv> {
 	}
 
 	/**
-	Purges every supplied cache tag and rejects unless the Cache API confirms
-	the operation.
+	Purges every supplied cache tag and returns the Cache API's result. The
+	caller checks `success`. A refusal is returned rather than thrown because
+	the error's class and `codes` would not survive the RPC call.
 	*/
-	async purgeTags(tags: string[]): Promise<void> {
+	async purgeTags(tags: string[]): Promise<CachePurgeResult> {
 		if (this.ctx.cache === undefined) {
 			throw new WorkersCacheUnavailableError();
 		}
 
 		const result = await this.ctx.cache.purge({ tags });
 
-		if (result.success) {
-			return;
-		}
-
-		const details = result.errors
-			.map((error) => `${String(error.code)}: ${error.message}`)
-			.join('; ');
-		throw new WorkersCachePurgeError(details);
+		return {
+			success: result.success,
+			errors: result.errors.map(({ code, message }) => ({ code, message }))
+		};
 	}
 }

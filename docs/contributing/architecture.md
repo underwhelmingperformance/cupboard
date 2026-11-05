@@ -564,6 +564,41 @@ object's critical-section deadline.
 [Workers limits]: https://developers.cloudflare.com/workers/platform/limits/
 [D1 limits]: https://developers.cloudflare.com/d1/platform/limits/
 
+### Cache purges
+
+When a change makes a cached public response wrong, the tenant object queues a
+purge of the response's cache tags in its `cache_purge_continuation` table. Each
+alarm sends the oldest queued row through `CachedTenantReads.purgeTags`, which
+returns the Cache API's result. A row is dropped when the responses that it
+covers have expired, one hour after it was queued for narinfos and one year for
+NARs. A signing-key rotation queues its own rows, and the backfill maintenance
+pass purges them. Those rows remain until their purge succeeds.
+
+Workers Cache applies the Free plan's [purge rate limit] on every plan: a token
+bucket for the whole account that refills at 5 requests a minute and has a
+capacity of 25. A rate-limit refusal (error 1134 or 971) on the queue or the
+backfill therefore delays both. The object records one wait under the storage
+key `cache-purge:rate-limit`, with the number of consecutive refusals, and
+neither the queue nor the backfill sends a purge before that time, even when
+other work wakes the object. The alarm is armed for it. A success on either path
+clears the wait, and so does the expiry of the last queued row. A refusal more
+than 5 minutes after the previous wait ended starts a new count. Any other
+failure delays only the row that failed: the row records its own retry time in
+`next_attempt_at` and its consecutive failures in `failed_attempts`.
+
+A wait starts at 60 seconds after a rate-limit refusal and at 12 seconds after
+any other failure. It doubles with each further failure of the same kind, up to
+5 minutes, and a random jitter shortens it by up to half. The backfill runs as a
+maintenance pass, and a failed pass reports a stall, so the scheduler does not
+run it again for 30 seconds. The backfill therefore retries no sooner than 30
+seconds after a failure. A queued row that expires while it waits passes its
+retry time and failure count to the next row, so the expiry does not cause an
+immediate purge (`do/cache-purge-backoff.ts`, `do/cache-purge-queue-service.ts`
+and `do/cache-purge-retry.ts`).
+
+[purge rate limit]:
+  https://developers.cloudflare.com/workers/cache/limitations/#purge-rate-limits
+
 ## How requests flow
 
 ### Reading a narinfo or a NAR

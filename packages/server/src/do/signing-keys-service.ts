@@ -52,7 +52,13 @@ import {
 	type TextBody
 } from '../http/http.ts';
 
-import { armAlarmNoLaterThan, noProgressRetryMs } from './alarm.ts';
+import {
+	armAlarmNoLaterThan,
+	type MaintenanceProgress,
+	noProgressRetryMs
+} from './alarm.ts';
+import { CachePurgeBackoff } from './cache-purge-backoff.ts';
+import { CachePurgeRetryPolicy } from './cache-purge-retry.ts';
 import { type ServerContext } from './context.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
@@ -121,11 +127,19 @@ function errorMessage(error: unknown): string {
 export class SigningKeysService {
 	private keysPromise: Promise<readonly SigningKey[]> | undefined;
 	private publicKeyBody: TextBody | undefined;
+	private readonly purgeBackoff: CachePurgeBackoff;
 
 	constructor(
 		private readonly context: ServerContext,
-		private readonly narInfoObjects: NarInfoObjectsService
-	) {}
+		private readonly narInfoObjects: NarInfoObjectsService,
+		purgeRetryPolicy: CachePurgeRetryPolicy = new CachePurgeRetryPolicy()
+	) {
+		this.purgeBackoff = new CachePurgeBackoff(
+			context.ctx.storage,
+			context.db,
+			purgeRetryPolicy
+		);
+	}
 
 	private loadedKeys(): Promise<readonly SigningKey[]> {
 		this.keysPromise ??= this.loadOrCreateKeysTracked();
@@ -703,7 +717,11 @@ export class SigningKeysService {
 
 			if (remaining.length > 0) {
 				tx.update(schema.cachePurgeContinuations)
-					.set({ entriesJson: JSON.stringify(remaining) })
+					.set({
+						entriesJson: JSON.stringify(remaining),
+						nextAttemptAt: sql`null`,
+						failedAttempts: 0
+					})
 					.where(eq(schema.cachePurgeContinuations.id, continuation.id))
 					.run();
 
@@ -725,20 +743,25 @@ export class SigningKeysService {
 
 	If publication or cache-tag purging fails, the pass removes none of the
 	selected entries from the continuation. A later pass retries the same
-	leading page and may publish the same objects again.
+	leading page and may publish the same objects again. After a purge failure,
+	{@link CachePurgeBackoff} decides the earliest time for the next attempt,
+	and the pass reports `waiting` until then without publishing.
 	*/
 	private async processContinuation(): Promise<
-		'none' | 'settled' | 'partial' | 'retrying'
+		'none' | 'settled' | 'partial' | 'retrying' | 'waiting'
 	> {
-		const continuation = this.context.db
-			.select()
-			.from(schema.cachePurgeContinuations)
-			.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
-			.orderBy(schema.cachePurgeContinuations.createdAt)
-			.get();
+		const continuation = this.headBackfillContinuation();
 
 		if (continuation === undefined) {
 			return 'none';
+		}
+
+		const dueAt = await this.purgeBackoff.dueAt(continuation, Date.now());
+
+		if (dueAt > Date.now()) {
+			await armAlarmNoLaterThan(this.context.ctx.storage, dueAt);
+
+			return 'waiting';
 		}
 
 		const queued = purgeEntriesSchema.parse(
@@ -780,14 +803,25 @@ export class SigningKeysService {
 
 		try {
 			await this.context.purgeCacheTags(entries.map((entry) => entry.tag));
+			await this.purgeBackoff.recordSuccess();
 			this.settleContinuation(continuation, entries, remaining, now);
 
 			return remaining.length > 0 ? 'partial' : 'settled';
 		} catch (error) {
+			const failedAt = Date.now();
+			const retry = await this.purgeBackoff.recordFailure(
+				error,
+				continuation,
+				failedAt
+			);
 			const message = errorMessage(error);
 			this.context.db
 				.update(schema.cachePurgeContinuations)
-				.set({ lastAttemptAt: now, lastError: message })
+				.set({
+					lastAttemptAt: isoTimestamp(new Date(failedAt)),
+					lastError: message,
+					...retry
+				})
 				.where(eq(schema.cachePurgeContinuations.id, continuation.id))
 				.run();
 
@@ -802,10 +836,20 @@ export class SigningKeysService {
 
 			await armAlarmNoLaterThan(
 				this.context.ctx.storage,
-				Date.now() + noProgressRetryMs
+				await this.purgeBackoff.dueAt(retry, failedAt)
 			);
 			return 'retrying';
 		}
+	}
+
+	private headBackfillContinuation():
+		typeof schema.cachePurgeContinuations.$inferSelect | undefined {
+		return this.context.db
+			.select()
+			.from(schema.cachePurgeContinuations)
+			.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
+			.orderBy(schema.cachePurgeContinuations.createdAt)
+			.get();
 	}
 
 	private markRetrying(
@@ -1095,22 +1139,26 @@ export class SigningKeysService {
 	}
 
 	/**
-	Whether a re-signing backfill or one of its queued cache-tag purges
-	remains outstanding.
+	Returns when the re-signing backfill next has work: `now` while a backfill
+	or one of its queued cache-tag purges is outstanding, the purge's retry time
+	until that time passes, or `undefined` when nothing remains.
 
 	The alarm calls this before running the backfill. Both queries use the
 	Durable Object's local SQLite database.
 	*/
-	hasBackfillWork(): boolean {
+	async backfillWorkAt(now: number): Promise<number | undefined> {
 		const continuation = this.context.db
-			.select({ id: schema.cachePurgeContinuations.id })
+			.select({
+				nextAttemptAt: schema.cachePurgeContinuations.nextAttemptAt,
+				failedAttempts: schema.cachePurgeContinuations.failedAttempts
+			})
 			.from(schema.cachePurgeContinuations)
 			.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
-			.limit(1)
+			.orderBy(schema.cachePurgeContinuations.createdAt)
 			.get();
 
 		if (continuation !== undefined) {
-			return true;
+			return this.purgeBackoff.dueAt(continuation, now);
 		}
 
 		const backfill = this.context.db
@@ -1120,14 +1168,14 @@ export class SigningKeysService {
 			.limit(1)
 			.get();
 
-		return backfill !== undefined;
+		return backfill === undefined ? undefined : now;
 	}
 
-	async runBackfillOnce(): Promise<void> {
+	async runBackfillOnce(): Promise<MaintenanceProgress> {
 		const purge = await this.processContinuation();
 
-		if (purge === 'retrying') {
-			return;
+		if (purge === 'retrying' || purge === 'waiting') {
+			return 'stalled';
 		}
 
 		// Staging another batch while entries are still queued would grow the
@@ -1135,7 +1183,7 @@ export class SigningKeysService {
 		if (purge === 'partial') {
 			await this.context.ctx.storage.setAlarm(Date.now());
 
-			return;
+			return 'progressed';
 		}
 
 		const row = this.context.db
@@ -1146,7 +1194,7 @@ export class SigningKeysService {
 			.get();
 
 		if (row === undefined || this.completeIfDrained(row)) {
-			return;
+			return 'progressed';
 		}
 
 		try {
@@ -1158,9 +1206,11 @@ export class SigningKeysService {
 				this.context.ctx.storage,
 				Date.now() + noProgressRetryMs
 			);
-			return;
+			return 'stalled';
 		}
 
 		await this.context.ctx.storage.setAlarm(Date.now());
+
+		return 'progressed';
 	}
 }

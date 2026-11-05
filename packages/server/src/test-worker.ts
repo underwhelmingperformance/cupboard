@@ -56,7 +56,7 @@ export class CachedTenantReads extends ProductionCachedTenantReads {
 	/**
 	Treats a purge as delivered because Miniflare does not implement `ctx.cache`.
 	*/
-	override purgeTags(_tags: string[]): Promise<void> {
-		return Promise.resolve();
+	override purgeTags(_tags: string[]): Promise<CachePurgeResult> {
+		return Promise.resolve({ success: true, errors: [] });
 	}
 }
