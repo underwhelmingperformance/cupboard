@@ -6,7 +6,9 @@ import {
 	clearAbandonedAlarms,
 	currentServer,
 	finishTestServerLifecycle,
+	fixtureWorkerServer,
 	resetTestServer,
+	takeStalledMaintenancePasses,
 	useTestServer
 } from './test-support.ts';
 
@@ -40,6 +42,24 @@ describe('test alarm cleanup', () => {
 			);
 		});
 		await useTestServer('stalled-pass-cleanup-replacement');
+		await expect(finishTestServerLifecycle()).resolves.toStrictEqual([
+			{ pass: 'reconcile', waitMs: 1000 }
+		]);
+	});
+
+	it("reports a stalled pass on the fixture tenant's object after a later reset", async () => {
+		await takeStalledMaintenancePasses();
+		await resetTestServer();
+		await runInDurableObject(
+			fixtureWorkerServer(),
+			async (_instance, state) => {
+				await state.storage.put(
+					maintenanceRetryKey('reconcile'),
+					Date.now() + 1000
+				);
+			}
+		);
+
 		await expect(finishTestServerLifecycle()).resolves.toStrictEqual([
 			{ pass: 'reconcile', waitMs: 1000 }
 		]);

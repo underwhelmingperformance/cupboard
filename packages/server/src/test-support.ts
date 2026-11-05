@@ -291,6 +291,18 @@ export interface GcResult {
 Points the harness at a fresh, isolated Durable Object so each test starts
 from empty state, and configures it as the fixture tenant. The origin and the
 DO name share the same counter so the URL and the stub agree.
+
+The Worker routes every fixture-tenant request to one Durable Object,
+{@link fixtureWorkerServer}, and the pool keeps that object's storage between
+tests. The object copies facts from D1, such as each cache's generation. The
+shared setup clears D1 before every test, so state left in the object can
+contradict D1. This function aborts the object, purges its storage and then
+configures it. The abort discards the object's in-memory state and stops an
+alarm handler that an earlier test left running. The runtime retries an
+alarm handler that an abort interrupts, so the purge must come after the
+abort. The purge then deletes the retry and any data that the handler
+wrote. This function does not clear D1. After a second call in the same
+test, D1 still has the rows that the test wrote before that call.
 */
 export async function resetTestServer(): Promise<void> {
 	const serverName = `test-${testRunId}-${String(harness.nextTestServerId)}`;
@@ -312,7 +324,34 @@ export async function resetTestServer(): Promise<void> {
 		.run();
 	await provisionFixtureTenant();
 	await configureFixtureTenant(harness.server);
+	await abortFixtureWorkerServer();
+	await fixtureWorkerServer().purgeStorage();
 	await configureFixtureTenant(fixtureWorkerServer());
+}
+
+/**
+Resets the fixture tenant's object so that its next request runs in a new
+instance. `evictDurableObject` and `abortAllDurableObjects` are unsuitable
+here. Eviction waits for the object's in-flight requests to drain, which can
+take longer than a test hook may run. Aborting every object breaks every stub
+created before the abort, including the stubs in a second copy of this module
+that `vi.resetModules()` creates. `abort()` resets only this object, at once,
+and rejects the call that made it with an error that has `durableObjectReset`
+set.
+*/
+async function abortFixtureWorkerServer(): Promise<void> {
+	try {
+		await runInDurableObject(fixtureWorkerServer(), (_instance, state) => {
+			state.abort('test server reset');
+		});
+	} catch (error) {
+		if (
+			!(error instanceof Error) ||
+			Reflect.get(error, 'durableObjectReset') !== true
+		) {
+			throw error;
+		}
+	}
 }
 
 /**
@@ -320,7 +359,8 @@ Resets in-memory Durable Objects and refreshes the harness's stubs while
 preserving persisted storage.
 */
 export async function restartTestServers(): Promise<void> {
-	const serverIds = testServersUsed().map((stub) => stub.id);
+	harness.serversUsed.add(harness.server);
+	const serverIds = [...harness.serversUsed].map((stub) => stub.id);
 	const currentId = harness.server.id;
 	await abortAllDurableObjects();
 
@@ -875,11 +915,18 @@ export async function takeStalledMaintenancePasses(): Promise<
 	return stalledMaintenancePassesFor(testServersUsed());
 }
 
+// `resetTestServer` aborts the fixture tenant's object, and a stub from before
+// the abort no longer reaches it. Every call therefore creates a new stub for
+// that object and leaves out the earlier ones, including any that
+// `useTestServer` added.
 function testServersUsed(): readonly DurableObjectStub<CupboardServer>[] {
+	const fixture = fixtureWorkerServer();
 	harness.serversUsed.add(harness.server);
-	harness.serversUsed.add(fixtureWorkerServer());
 
-	return [...harness.serversUsed];
+	return [
+		...[...harness.serversUsed].filter((stub) => !stub.id.equals(fixture.id)),
+		fixture
+	];
 }
 
 async function stalledMaintenancePassesFor(

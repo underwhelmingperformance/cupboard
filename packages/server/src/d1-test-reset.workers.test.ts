@@ -1,13 +1,21 @@
+import { cacheListResponseSchema } from '@cupboard/protocol/caches';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { getTableName, is } from 'drizzle-orm';
 import { SQLiteTable } from 'drizzle-orm/sqlite-core';
+import { StatusCodes } from 'http-status-codes';
 import { expect, it, vi } from 'vitest';
 
 import { testControlDatabase } from './control-database.test-support.ts';
 import { resetControlD1TestState, resetD1TestState } from './d1-test-reset.ts';
 import * as schema from './db/d1-schema.ts';
-import { currentServer, resetTestServer } from './test-support.ts';
+import {
+	authorisedWorkerFetch,
+	currentServer,
+	initialiseViaWorker,
+	recordTransition,
+	resetTestServer
+} from './test-support.ts';
 
 it('clears shared D1 facts and restores the completed transition in one batch', async () => {
 	await env.CUPBOARD_DB.batch([
@@ -155,5 +163,44 @@ it('resets the isolated control database without changing shared state or exposi
 		targetNonces: [],
 		sharedAdmin: [{ issuer: 'legacy-issuer' }],
 		tenantBindings: { controlDatabase: false, controlDatabaseService: false }
+	});
+});
+
+it("empties the Worker's fixture-tenant object at each reset", async () => {
+	await resetTestServer();
+	await recordTransition('cache-identity', 'complete');
+	const created = await authorisedWorkerFetch(
+		'/caches/builds',
+		await initialiseViaWorker(),
+		{
+			body: JSON.stringify({ access: 'public', priority: 40 }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		}
+	);
+
+	await resetD1TestState(env.CUPBOARD_DB);
+	await resetTestServer();
+	const listed = await authorisedWorkerFetch(
+		'/caches',
+		await initialiseViaWorker()
+	);
+
+	expect({
+		created: created.status,
+		caches: cacheListResponseSchema.parse(await listed.json()).caches
+	}).toStrictEqual({
+		created: StatusCodes.OK,
+		caches: [
+			{
+				scope: { kind: 'default' },
+				access: 'public',
+				priority: 40,
+				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				graceManaged: false
+			}
+		]
 	});
 });

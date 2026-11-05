@@ -222,7 +222,6 @@ describe('attestation attach and reads', () => {
 
 	beforeEach(async () => {
 		vi.useRealTimers();
-		await emptyFixtureServer();
 		await resetTestServer();
 		await clearBlobStorage();
 	});
@@ -4767,17 +4766,6 @@ function attestationsFor(context: ServerContext): AttestationsService {
 		new AttestationCasService(context),
 		new NarInfoObjectsService(context)
 	);
-}
-
-// Empties the fixture tenant's Durable Object and resets its instance, so a
-// test starts without the queue entries, caches and maintenance state that
-// earlier tests left in it.
-async function emptyFixtureServer(): Promise<void> {
-	await runInDurableObject(fixtureWorkerServer(), async (instance, state) => {
-		await instance.purgeStorage();
-		await state.storage.deleteAlarm();
-	});
-	await restartTestServers();
 }
 
 function testWorkerServer(instance: CupboardServer): TestCupboardServer {
