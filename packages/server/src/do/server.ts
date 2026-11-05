@@ -283,7 +283,10 @@ import {
 import { TokenExchangeService } from './token-exchange-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { UploadRetrySchedule } from './upload-retry-schedule.ts';
-import { UploadStateService } from './upload-state-service.ts';
+import {
+	isAwaitingVerdict,
+	UploadStateService
+} from './upload-state-service.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
 	type CanonicalWriteReservation,
@@ -1487,7 +1490,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		if (request.op === 'subscribe-publication') {
 			// Subscriptions spend no credit, so the tenant-wide semaphore is the only
 			// bound on the D1 and R2 reads that replay makes.
-			await Promise.all(
+			const answers = await Promise.all(
 				request.entries.map(async (entry) => {
 					await this.commitEntrySemaphore.acquire();
 					try {
@@ -1505,11 +1508,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						if (next === 'admit') {
 							await this.runSubscribedPublication(command);
 						}
+						return next;
 					} finally {
 						this.commitEntrySemaphore.release();
 					}
 				})
 			);
+			if (answers.includes('deferred')) {
+				await this.requestReplayedVerification();
+			}
 			return;
 		}
 		await Promise.all(
@@ -1739,7 +1746,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// expiry pass confirms and the run root that it attaches.
 	private async replayPublication(
 		command: PublicationReplay
-	): Promise<'admit' | undefined> {
+	): Promise<'admit' | 'deferred' | undefined> {
 		const { socket, attachment, pushId, entry, grants, operationKind } =
 			command;
 		try {
@@ -1957,7 +1964,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		readonly state: PublicationReplayState;
 		readonly facts: PublicationReplayFacts;
 		readonly operationKind: 'publish' | 'subscribe';
-	}): 'admit' | undefined {
+	}): 'admit' | 'deferred' | undefined {
 		const { socket, attachment, entry, state, facts } = answer;
 		const { operation } = state;
 		const id = entry.operationId;
@@ -2039,8 +2046,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		if (pending?.verdict === undefined || pending.verdict === null) {
 			return needsWork(answer);
 		}
-		this.replaySubscribedRow(socket, cache, attachment.sessionId, id, pending);
-		return undefined;
+		return this.replaySubscribedRow(
+			socket,
+			cache,
+			attachment.sessionId,
+			id,
+			pending
+		);
 	}
 
 	// Fail only the affected upload and keep the session open for other entries.
@@ -2260,14 +2272,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Enforce cache isolation and attach the current session before replaying the
 	// row's durable state. Both subscription forms use this path while the row
-	// still exists.
+	// still exists. Returns `deferred` when it sent that frame for an upload
+	// that waits for a verdict; the caller must then call
+	// `requestReplayedVerification`.
 	private replaySubscribedRow(
 		socket: WebSocket,
 		cache: ResolvedCache,
 		sessionId: SessionId,
 		uploadId: UploadId,
 		row: typeof schema.pendingUploads.$inferSelect
-	): void {
+	): 'deferred' | undefined {
 		if (row.cacheId !== cache.id) {
 			sendCommitSessionFrame(socket, {
 				ev: 'error',
@@ -2275,7 +2289,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				status: StatusCodes.NOT_FOUND,
 				message: 'unknown upload'
 			});
-			return;
+			return undefined;
 		}
 
 		this.uploadState.attachSession(uploadId, sessionId);
@@ -2298,7 +2312,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					grace: capturedGraceFact(graceDecision)
 				})
 			});
-			return;
+			return isAwaitingVerdict(row) ? 'deferred' : undefined;
 		}
 
 		sendCommitSessionFrame(socket, {
@@ -2317,17 +2331,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						: {}
 			})
 		});
+		return undefined;
+	}
+
+	// A pending row can belong to a commit that stopped before it requested
+	// verification, for example because the runtime reset the object. A message
+	// whose replay sent `deferred` requests verification once, after every frame
+	// of the message, so the client that waits for a verdict receives one.
+	private async requestReplayedVerification(): Promise<void> {
+		await this.commitPipeline.requestVerification(
+			rootLogger(),
+			this.context.requireTenant()
+		);
 	}
 
 	// A missing row maps to `servable` for the legacy ID-only subscription because
 	// no path identity remains to distinguish a committed upload from a reaped
 	// one. Identity-aware clients use `subscribe-identity`.
-	private replaySubscribe(
+	private async replaySubscribe(
 		socket: WebSocket,
 		cache: ResolvedCache,
 		sessionId: SessionId,
 		uploadIds: readonly UploadId[]
-	): void {
+	): Promise<void> {
+		let hasDeferred = false;
 		for (const uploadId of uploadIds) {
 			const row = this.context.db
 				.select()
@@ -2344,7 +2371,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				continue;
 			}
 
-			this.replaySubscribedRow(socket, cache, sessionId, uploadId, row);
+			if (
+				this.replaySubscribedRow(socket, cache, sessionId, uploadId, row) ===
+				'deferred'
+			) {
+				hasDeferred = true;
+			}
+		}
+
+		if (hasDeferred) {
+			await this.requestReplayedVerification();
 		}
 	}
 
@@ -2357,6 +2393,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		sessionId: SessionId,
 		entries: readonly CommitBatchEntry[]
 	): Promise<void> {
+		let hasDeferred = false;
 		for (const entry of entries) {
 			const { uploadId } = entry;
 			const row = this.context.db
@@ -2370,7 +2407,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				continue;
 			}
 
-			this.replaySubscribedRow(socket, cache, sessionId, uploadId, row);
+			if (
+				this.replaySubscribedRow(socket, cache, sessionId, uploadId, row) ===
+				'deferred'
+			) {
+				hasDeferred = true;
+			}
+		}
+
+		if (hasDeferred) {
+			await this.requestReplayedVerification();
 		}
 	}
 
@@ -4082,7 +4128,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 
-		this.replaySubscribe(socket, cache, sessionId, request.uploadIds);
+		await this.replaySubscribe(socket, cache, sessionId, request.uploadIds);
 	}
 
 	private async closeCommitSocket(socket: WebSocket): Promise<void> {

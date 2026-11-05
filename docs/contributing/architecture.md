@@ -940,7 +940,8 @@ work goes through admission and never receives `resend`.
   fails, the entry is refused with `temporary-failure`.
 - An accepted operation whose commit has started receives `deferred`, or the
   verdict that verification recorded. One whose commit has not started needs
-  work.
+  work. A `deferred` answer also requests verification, so an operation whose
+  commit stopped before it requested verification still receives its verdict.
 
 A replay reads the operation record, the pending row, the cache and the path's
 local narinfo row after the D1 and R2 reads that its answer needs. If any of
