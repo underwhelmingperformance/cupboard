@@ -23,6 +23,7 @@
 		"vitest": "catalog:"
 	},
 	"exports": {
+		"./backoff": "./src/backoff.ts",
 		"./child-process": "./src/child-process.ts",
 		"./cleanup": "./src/cleanup.ts",
 		"./collections": "./src/collections.ts",
