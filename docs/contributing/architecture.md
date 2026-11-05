@@ -473,6 +473,27 @@ These are the jobs that the cron trigger adds:
 A tenant's Durable Object can also add a job. When a commit leaves bytes waiting
 to be verified, the object adds a `tenant-verify` job.
 
+The object also stores a backstop deadline whenever it requests verification: 60
+seconds ahead, or an earlier deadline that is already stored and still in the
+future. When the deadline passes and uploads still wait for verification, the
+object's alarm completes the ones that need no decoding and adds another
+`tenant-verify` job. If an upload becomes claimable only later, because of a
+retry time or an unexpired claim, the alarm moves the deadline to the earliest
+such time. Otherwise it deletes the deadline. Uploads whose commits are running
+do not count, so the deadline can be deleted while such an upload waits; its
+commit requests verification when it defers and sets the deadline when it fails.
+
+The object records in memory which uploads have a commit running in it, and no
+verification pass claims those uploads. A reset or move of the object discards
+the record together with the commits. When the runtime cuts a commit off,
+verification can therefore claim its upload at once. A commit that defers stops
+excluding its upload before it requests verification. When a new instance starts
+with uploads marked `committing` and no backstop deadline stored, it stores a
+deadline for the time when the first claimable upload becomes ready, and the
+alarm then requests verification. When no upload is claimable, it stores no
+deadline. When a commit fails and leaves its upload waiting for a verdict, the
+commit sets the backstop deadline.
+
 The control Worker consumes the queue one message at a time, with up to four
 consumers running at once. A message that fails is retried after 60 seconds, up
 to three times. After the third retry, it goes to the dead-letter queue,

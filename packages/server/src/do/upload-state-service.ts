@@ -18,6 +18,7 @@ import {
 	inArray,
 	isNotNull,
 	isNull,
+	notInArray,
 	or,
 	sql
 } from 'drizzle-orm';
@@ -45,7 +46,7 @@ import {
 	presentNarObjects
 } from './bulk.ts';
 import { type ServerContext } from './context.ts';
-import { jsonValueLists } from './json-list.ts';
+import { jsonValueList, jsonValueLists } from './json-list.ts';
 import {
 	concludePromotion,
 	parsePromotionRecord,
@@ -82,6 +83,14 @@ const maxStorageKeysPerGet = 128;
 
 function missingCanonicalNarKey(narHash: NixSha256HashString): string {
 	return `${missingCanonicalNarPrefix}${narHash}`;
+}
+
+// Terminal rows remain authoritative during their observation window.
+// Overlapping verification passes must not reopen them.
+export function isAwaitingVerdict(
+	row: Pick<typeof schema.pendingUploads.$inferSelect, 'verdict'>
+): boolean {
+	return row.verdict === 'pending' || row.verdict === 'committing';
 }
 
 // What clearing an upload with an `absent` outcome does to its publication
@@ -660,6 +669,22 @@ export class UploadStateService {
 			.set({ commitReleased: true })
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
+	}
+
+	// Whether an upload outside `excluded` is marked `committing`. Reads at most
+	// one entry of `pending_upload_verdict_idx` beyond the excluded uploads.
+	hasCommittingUploads(excluded: readonly UploadId[]): boolean {
+		const notExcluded =
+			excluded.length === 0
+				? undefined
+				: notInArray(schema.pendingUploads.id, jsonValueList(excluded));
+		const first = this.context.db
+			.select({ id: schema.pendingUploads.id })
+			.from(schema.pendingUploads)
+			.where(and(eq(schema.pendingUploads.verdict, 'committing'), notExcluded))
+			.limit(1)
+			.get();
+		return first !== undefined;
 	}
 
 	// Set this marker before reservation or promotion. After a crash, verification

@@ -2719,6 +2719,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.oidcTrust.seedOwnerRule();
 		await this.uploadState.migratePendingNarRefreshMarkers();
 		await this.localSchemaRun.complete(tenant);
+		await this.commitPipeline.armRecoveryBackstop();
 	}
 
 	// Resolve the chain marker even when a pass fails. The failure reaches its own
@@ -3122,7 +3123,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// queue again. Fresh NAR decoding must stay off the Durable Object.
 	// {@link armVerifyBackstopAlarm} handles a deadline that has not arrived.
 	private async resumeVerifyBackstop(backstopLogger: Logger): Promise<void> {
-		const dueAt = new UploadRetrySchedule(this.context).freshAt();
+		const dueAt = new UploadRetrySchedule(this.context).freshAt(
+			this.commitPipeline.runningUploads()
+		);
 		if (dueAt === undefined) {
 			await this.ctx.storage.delete(verifyBackstopKey);
 			return;
@@ -3221,7 +3224,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async armUploadRetries(): Promise<void> {
 		const schedule = new UploadRetrySchedule(this.context);
-		const freshAt = schedule.freshAt();
+		const freshAt = schedule.freshAt(this.commitPipeline.runningUploads());
 		if (freshAt === undefined) {
 			await this.ctx.storage.delete(verifyBackstopKey);
 		}
@@ -3231,7 +3234,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await this.ctx.storage.put(verifyBackstopKey, dueAt);
 			await armAlarmNoLaterThan(this.ctx.storage, dueAt);
 		}
-		const recordedAt = schedule.recordedAt();
+		const recordedAt = schedule.recordedAt(
+			this.commitPipeline.runningUploads()
+		);
 		if (recordedAt !== undefined) {
 			await armAlarmNoLaterThan(this.ctx.storage, recordedAt);
 		}

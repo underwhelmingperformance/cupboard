@@ -116,7 +116,11 @@ import {
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { affordableSubrequestOperations } from './subrequest-slice.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
-import { type UploadStateService } from './upload-state-service.ts';
+import { UploadRetrySchedule } from './upload-retry-schedule.ts';
+import {
+	isAwaitingVerdict,
+	type UploadStateService
+} from './upload-state-service.ts';
 
 // Keep this shorter than `verifyBackstopDelayMs`. When the alarm backstop
 // fires, the previous queue request must be stale so the alarm can send again.
@@ -408,6 +412,10 @@ export class CommitPipelineService {
 	private materialiseDrain: Promise<void> | undefined;
 	private readonly reservationCharges = new ReservationCharges();
 
+	// Counts the commits of each upload that are running in this instance. A
+	// client can resend a commit while the first one still runs.
+	private readonly runningCommits = new Map<UploadId, number>();
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly signingKeysService: SigningKeysService,
@@ -565,7 +573,6 @@ export class CommitPipelineService {
 
 		if (outcome.kind === 'deferred') {
 			this.uploadState.markUploadPending(uploadId);
-			await this.requestVerification(logger, this.context.requireTenant());
 
 			return {
 				kind: 'deferred',
@@ -650,12 +657,7 @@ export class CommitPipelineService {
 				})
 			);
 			if (release === 'stale-read') {
-				return this.deferToVerification(
-					logger,
-					uploadId,
-					metadata,
-					graceDecision
-				);
+				return this.deferToVerification(uploadId, metadata, graceDecision);
 			}
 			await this.uploadState.clearPendingUpload(uploadId, {
 				logger,
@@ -711,12 +713,7 @@ export class CommitPipelineService {
 		});
 
 		if (confirmed === 'stale-read') {
-			return this.deferToVerification(
-				logger,
-				uploadId,
-				metadata,
-				graceDecision
-			);
+			return this.deferToVerification(uploadId, metadata, graceDecision);
 		}
 
 		if (confirmed !== undefined) {
@@ -853,14 +850,12 @@ export class CommitPipelineService {
 	// A release read can go stale when a commit of the reservation is charged
 	// after it. The upload keeps its pending row, and verification decides its
 	// outcome with a new read.
-	private async deferToVerification(
-		logger: Logger,
+	private deferToVerification(
 		uploadId: UploadId,
 		metadata: UploadPathNegotiation,
 		graceDecision: GraceDecision | undefined
-	): Promise<CommitOutcome> {
+	): CommitOutcome {
 		this.uploadState.markUploadPending(uploadId);
-		await this.requestVerification(logger, this.context.requireTenant());
 		return {
 			kind: 'deferred',
 			storePathHash: metadata.storePathHash,
@@ -2015,6 +2010,56 @@ export class CommitPipelineService {
 		}
 	}
 
+	// Lists the upload in `runningUploads` while `body` runs.
+	private async whileRunning(
+		logger: Logger,
+		uploadId: UploadId,
+		body: () => Promise<CommitOutcome>
+	): Promise<CommitOutcome> {
+		this.runningCommits.set(
+			uploadId,
+			(this.runningCommits.get(uploadId) ?? 0) + 1
+		);
+		try {
+			return await body();
+		} catch (error) {
+			await this.armBackstopAfterFailure(logger, uploadId);
+			throw error;
+		} finally {
+			const remaining = (this.runningCommits.get(uploadId) ?? 1) - 1;
+			if (remaining === 0) {
+				this.runningCommits.delete(uploadId);
+			} else {
+				this.runningCommits.set(uploadId, remaining);
+			}
+		}
+	}
+
+	// A failed commit can leave its row waiting for a verdict with no queue
+	// request for it. The caller rethrows the commit's own error, so a failure
+	// here is logged and not thrown.
+	private async armBackstopAfterFailure(
+		logger: Logger,
+		uploadId: UploadId
+	): Promise<void> {
+		try {
+			const row = this.context.db
+				.select({ verdict: schema.pendingUploads.verdict })
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.get();
+			if (row === undefined || !isAwaitingVerdict(row)) {
+				return;
+			}
+			await this.armVerifyBackstop(Date.now());
+		} catch (error) {
+			logger.warn('verification backstop not armed after a failed commit', {
+				uploadId,
+				error
+			});
+		}
+	}
+
 	/**
 	Reads tenant-wide account facts once for a commit batch. The charge batch
 	still makes the authoritative status and quota decision for each entry.
@@ -2084,8 +2129,6 @@ export class CommitPipelineService {
 			// and while the winner has lost its NAR. Verification resolves both
 			// contenders, and it replaces a winner whose NAR is missing.
 			if (winner === undefined || !(await this.isServed(cache, winner))) {
-				await this.requestVerification(logger, this.context.requireTenant());
-
 				return {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
@@ -2142,7 +2185,6 @@ export class CommitPipelineService {
 
 		// Preserve the pending row and its retention decision after repeated
 		// generation changes. Verification can arbitrate after the churn subsides.
-		await this.requestVerification(logger, this.context.requireTenant());
 
 		return {
 			kind: 'deferred',
@@ -2152,6 +2194,43 @@ export class CommitPipelineService {
 				grace: capturedGraceFact(graceDecision)
 			})
 		};
+	}
+
+	/**
+	Lists the uploads whose commits are running in this instance. Verification
+	must not claim their rows. A reset or move of the object discards this list
+	together with the commits that were running, so a `committing` row that is
+	not listed has no running commit and verification may claim it at once.
+	*/
+	runningUploads(): readonly UploadId[] {
+		return this.runningCommits.keys().toArray();
+	}
+
+	/**
+	Arms the backstop when a new instance starts with uploads marked
+	`committing` and no backstop deadline is stored. Such an upload belongs to a
+	commit that a reset or move of the object cut off, or waits for a verdict
+	that a queue message lost with the old instance would have produced. The
+	deadline is when the first claimable upload becomes ready, and the alarm's
+	backstop pass then requests verification. The backstop pass deletes a
+	deadline that no claimable upload needs, so none is stored then. This uses
+	only local storage, so it cannot delay initialisation on a queue send.
+	*/
+	async armRecoveryBackstop(): Promise<void> {
+		const running = this.runningUploads();
+		if (!this.uploadState.hasCommittingUploads(running)) {
+			return;
+		}
+		const storage = this.context.ctx.storage;
+		if ((await storage.get<number>(verifyBackstopKey)) !== undefined) {
+			return;
+		}
+		const dueAt = new UploadRetrySchedule(this.context).freshAt(running);
+		if (dueAt === undefined) {
+			return;
+		}
+		await storage.put(verifyBackstopKey, dueAt);
+		await armAlarmNoLaterThan(storage, dueAt);
 	}
 
 	// Clear the guard before the pass takes its snapshot. A row deferred after
@@ -2457,64 +2536,74 @@ export class CommitPipelineService {
 			throw new QuotaExceededError(tenant);
 		}
 
-		// Store the saga marker before any reservation or handoff. After a crash,
-		// verification can distinguish this work from an upload still receiving
-		// bytes and resume it.
-		this.uploadState.markUploadCommitting(uploadId);
+		const outcome = await this.whileRunning(logger, uploadId, async () => {
+			// Store the saga marker before any reservation or handoff. After a
+			// crash, verification can distinguish this work from an upload still
+			// receiving bytes and resume it.
+			this.uploadState.markUploadCommitting(uploadId);
 
-		// The initiating session receives the returned commit result. Exclude it
-		// from waiter notification so a verdict frame cannot arrive first.
-		const committingRow = this.context.db
-			.select({ sessionId: schema.pendingUploads.sessionId })
-			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.get();
-		const committingSessionId = committingRow?.sessionId;
+			// The initiating session receives the returned commit result.
+			// Exclude it from waiter notification so a verdict frame cannot
+			// arrive first.
+			const committingRow = this.context.db
+				.select({ sessionId: schema.pendingUploads.sessionId })
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.get();
+			const committingSessionId = committingRow?.sessionId;
 
-		// Canonical bytes passed verification when they entered the CAS, so reuse
-		// does not decode them again.
-		if (pending.r2Key === canonicalKey) {
-			return this.commitReusedBlob(
-				logger,
-				cache,
-				uploadId,
-				metadata,
-				pending.retentionEpoch,
-				graceDecision,
-				pending.attachRootName ?? undefined,
-				probe,
-				committingSessionId,
-				advisory?.prefetched !== undefined
-			);
+			// Canonical bytes passed verification when they entered the CAS, so
+			// reuse does not decode them again.
+			if (pending.r2Key === canonicalKey) {
+				return this.commitReusedBlob(
+					logger,
+					cache,
+					uploadId,
+					metadata,
+					pending.retentionEpoch,
+					graceDecision,
+					pending.attachRootName ?? undefined,
+					probe,
+					committingSessionId,
+					advisory?.prefetched !== undefined
+				);
+			}
+
+			// Fresh bytes cannot be served before verification. Reject a NAR
+			// above the verifier's hard limit; defer every other fresh upload to
+			// the same queue.
+			if (metadata.narSize > verifiableMaxBytes) {
+				await this.uploadState.clearPendingUploadAndStaging(
+					uploadId,
+					pending.r2Key,
+					metadata.narHash,
+					{ logger, outcome: 'absent' }
+				);
+
+				throw new NarTooLargeError(metadata.narSize, verifiableMaxBytes);
+			}
+
+			// Reserve the row before verification so a root can retain it during
+			// the verification window. The verification pass repeats this
+			// idempotently.
+			await this.reserveNarInfoRow(cache, metadata, pending.retentionEpoch);
+
+			return {
+				kind: 'deferred',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				...(graceDecision?.reportsGrace === true && {
+					grace: capturedGraceFact(graceDecision)
+				})
+			};
+		});
+
+		// Request verification only once the commit has stopped running. A pass
+		// that the request starts earlier would skip the upload.
+		if (outcome.kind === 'deferred') {
+			await this.requestVerification(logger, tenant);
 		}
-
-		// Fresh bytes cannot be served before verification. Reject a NAR above the
-		// verifier's hard limit; defer every other fresh upload to the same queue.
-		if (metadata.narSize > verifiableMaxBytes) {
-			await this.uploadState.clearPendingUploadAndStaging(
-				uploadId,
-				pending.r2Key,
-				metadata.narHash,
-				{ logger, outcome: 'absent' }
-			);
-
-			throw new NarTooLargeError(metadata.narSize, verifiableMaxBytes);
-		}
-
-		// Reserve the row before verification so a root can retain it during the
-		// verification window. The verification pass repeats this idempotently.
-		await this.reserveNarInfoRow(cache, metadata, pending.retentionEpoch);
-
-		await this.requestVerification(logger, tenant);
-
-		return {
-			kind: 'deferred',
-			storePathHash: metadata.storePathHash,
-			narHash: metadata.narHash,
-			...(graceDecision?.reportsGrace === true && {
-				grace: capturedGraceFact(graceDecision)
-			})
-		};
+		return outcome;
 	}
 
 	/**
