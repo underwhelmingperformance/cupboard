@@ -1,5 +1,6 @@
 import { controlContract, tenantContract } from '@cupboard/protocol/contract';
 import { type AuthzMeta } from '@cupboard/protocol/contract';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
 import { type DeadlineOptions } from '@cupboard/shared/paging';
 import {
@@ -42,6 +43,11 @@ export interface TenantRpcOptions {
 	readonly credential?: AccessCredential;
 	readonly signal?: AbortSignal;
 	readonly fetcher?: typeof fetch;
+	/**
+	The random source for the backoff between transport retries. The default
+	is `Math.random`.
+	*/
+	readonly random?: RandomSource;
 }
 
 const unauthorizedStatusCode: number = StatusCodes.UNAUTHORIZED;
@@ -96,7 +102,7 @@ function derivedClient<C extends AnyContractRouter>(
 	url: URL,
 	options: TenantRpcOptions
 ): JsonifiedClient<ContractRouterClient<C>> {
-	const { credential, signal, fetcher = keepAliveFetch } = options;
+	const { credential, signal, fetcher = keepAliveFetch, random } = options;
 	const link = new OpenAPILink<RpcContext>(contract, {
 		url,
 		interceptors: [
@@ -136,7 +142,8 @@ function derivedClient<C extends AnyContractRouter>(
 			const transport = reachableFetcher(
 				retryingFetcher(fetcher, replaySafety, {
 					operation: path.join('.'),
-					trustedOrigin: url.origin
+					trustedOrigin: url.origin,
+					random
 				})
 			);
 
@@ -197,7 +204,7 @@ sent again after it misses its deadline or its response body fails.
 export function procedureDeadline(
 	name: string,
 	procedure: { readonly '~orpc': { readonly meta: AuthzMeta } },
-	options: Pick<DeadlineOptions, 'signal' | 'deadlineMs'> = {}
+	options: Pick<DeadlineOptions, 'signal' | 'deadlineMs' | 'random'> = {}
 ): DeadlineOptions {
 	return {
 		target: { procedure: name },

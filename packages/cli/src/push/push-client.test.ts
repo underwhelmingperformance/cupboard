@@ -480,13 +480,13 @@ describe('pushClientFor', () => {
 	// acknowledgement after the retry's headers, while the retry's body is
 	// still arriving.
 	it('reports the grace-facts acknowledgement of the attempt that it uses', async () => {
-		vi.spyOn(Math, 'random').mockReturnValue(0.5);
 		let requests = 0;
 		const client = pushClientFor(
 			new URL('https://cupboard.test/t/acme'),
 			'token',
 			{
 				cache: { kind: 'default' },
+				random: () => 0.5,
 				fetcher: async () => {
 					requests += 1;
 					if (requests === 1) {
@@ -522,7 +522,6 @@ describe('pushClientFor', () => {
 			});
 		} finally {
 			vi.useRealTimers();
-			vi.restoreAllMocks();
 		}
 	});
 

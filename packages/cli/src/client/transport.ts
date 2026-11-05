@@ -3,6 +3,7 @@ import { setImmediate } from 'node:timers/promises';
 import { withReadAuthentication } from '@cupboard/nix';
 import { InvalidCacheUrlBaseError } from '@cupboard/nix-store/errors';
 import { isHttpsOrLoopbackHttp, parseBaseUrl } from '@cupboard/nix-store/url';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import {
 	reachableFetcher as sharedReachableFetcher,
 	type ReplaySafety,
@@ -34,21 +35,24 @@ export const keepAliveFetch: typeof fetch = async (input, init) => {
 Retries rejected fetches and transient status responses with backoff. After
 the retry budget is exhausted, a rejected `TypeError` becomes an
 {@link UnreachableHostError} for the requested host. Other errors pass through
-unchanged.
+unchanged. `random` is the random source for the backoff, and defaults to
+`Math.random`.
 */
 export function resilientFetcher(
 	replaySafety: ReplaySafety,
 	fetcher: typeof fetch = keepAliveFetch,
-	trustedOrigin?: string
+	trustedOrigin?: string,
+	random?: RandomSource
 ): typeof fetch {
 	return reachableFetcher(
-		retryingFetcher(fetcher, replaySafety, { trustedOrigin })
+		retryingFetcher(fetcher, replaySafety, { trustedOrigin, random })
 	);
 }
 
 interface CacheReadOptions {
 	readonly netrcFile?: string;
 	readonly trustedOrigin?: string;
+	readonly random?: RandomSource;
 }
 
 export function cacheReadFetcher(
@@ -62,7 +66,12 @@ export function cacheReadFetcher(
 	});
 
 	return fetcher === undefined
-		? resilientFetcher('replay-safe', authenticated, options.trustedOrigin)
+		? resilientFetcher(
+				'replay-safe',
+				authenticated,
+				options.trustedOrigin,
+				options.random
+			)
 		: authenticated;
 }
 

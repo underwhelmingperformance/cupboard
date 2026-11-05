@@ -607,6 +607,41 @@ describe('tenantRpc', () => {
 		}
 	});
 
+	// With the random source at 0.5, the full-jitter backoff before the first
+	// retry is half of its 250 ms ceiling.
+	it('waits the backoff from its random source before a retry', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const { fetcher, captured } = capturingFetcher([
+				badGateway,
+				() => Response.json({ caches: [] })
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher,
+				random: () => 0.5
+			});
+
+			const pending = rpc.caches.list();
+			await vi.advanceTimersByTimeAsync(124);
+			const beforeBackoff = captured.length;
+			await vi.advanceTimersByTimeAsync(1);
+
+			expect({
+				beforeBackoff,
+				listed: await pending,
+				attempts: captured.length
+			}).toStrictEqual({
+				beforeBackoff: 1,
+				listed: { caches: [] },
+				attempts: 2
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('does not replay a signing-key rotation after a gateway failure', async () => {
 		const { fetcher, captured } = capturingFetcher([
 			badGateway,

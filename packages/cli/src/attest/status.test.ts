@@ -310,10 +310,13 @@ describe('attestation discovery client', () => {
 				})
 			);
 		});
-		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
 		try {
 			const entries = await readAttestationInfo(
-				{ ...options, url: new URL(`${server.origin}/t/acme`) },
+				{
+					...options,
+					url: new URL(`${server.origin}/t/acme`),
+					random: () => 0
+				},
 				fetch
 			);
 			const page = {
@@ -338,7 +341,6 @@ describe('attestation discovery client', () => {
 				]
 			});
 		} finally {
-			random.mockRestore();
 			await server.close();
 		}
 	});

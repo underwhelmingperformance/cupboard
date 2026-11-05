@@ -26,6 +26,7 @@ import {
 	uploadPathNegotiationSchema,
 	uploadRequestLimitErrorCode
 } from '@cupboard/protocol/upload';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
 import {
 	type DeadlineOptions,
@@ -73,6 +74,12 @@ export interface PushClientOptions {
 	readonly cache: CacheScope;
 	readonly signal?: AbortSignal;
 	readonly fetcher?: typeof fetch;
+	/**
+	The random source for the backoff before an admin request is sent again,
+	after a transport failure, after its deadline expires or after its
+	response body fails. The default is `Math.random`.
+	*/
+	readonly random?: RandomSource;
 }
 
 /**
@@ -122,7 +129,12 @@ export function pushClientFor(
 			return response;
 		};
 		const result = await call(
-			tenantRpc(url, { credential, signal: options.signal, fetcher })
+			tenantRpc(url, {
+				credential,
+				signal: options.signal,
+				fetcher,
+				random: options.random
+			})
 		);
 
 		// An attempt can answer after its deadline has aborted its signal.
@@ -149,6 +161,7 @@ export function pushClientFor(
 	const rpc = tenantRpc(url, {
 		credential,
 		signal: options.signal,
+		random: options.random,
 		fetcher: async (input, init) => {
 			const request = new Request(input, init);
 			const headers = new Headers(request.headers);
@@ -203,12 +216,16 @@ export function pushClientFor(
 	const negotiationDeadline = procedureDeadline(
 		'uploads.negotiate',
 		tenantContract.uploads.negotiate.inDefaultCache,
-		{ signal: options.signal, deadlineMs: negotiationPageDeadlineMs }
+		{
+			signal: options.signal,
+			deadlineMs: negotiationPageDeadlineMs,
+			random: options.random
+		}
 	);
 	const previewDeadline = procedureDeadline(
 		'uploads.preview',
 		tenantContract.uploads.preview.inDefaultCache,
-		{ signal: options.signal }
+		{ signal: options.signal, random: options.random }
 	);
 	// Sends the paths in pages of at most `pageSize`, which a response can
 	// change. A request without paths still reaches the server for capability
@@ -260,7 +277,7 @@ export function pushClientFor(
 	const planDeadline = procedureDeadline(
 		'uploads.plan',
 		tenantContract.uploads.plan.inDefaultCache,
-		{ signal: options.signal }
+		{ signal: options.signal, random: options.random }
 	);
 	const plan = async (body: Parameters<PushClient['negotiate']>[0]) => {
 		const pushId = await session.pushId();
@@ -332,7 +349,7 @@ export function pushClientFor(
 	const confirmationDeadline = procedureDeadline(
 		'uploads.confirmPresent',
 		tenantContract.uploads.confirmPresent.inDefaultCache,
-		{ signal: options.signal }
+		{ signal: options.signal, random: options.random }
 	);
 	const confirmEntries = async (
 		planned: readonly PublicationEntry[]

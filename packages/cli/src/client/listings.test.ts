@@ -63,13 +63,12 @@ describe('cachePages', () => {
 			response.setHeader('content-type', 'application/json');
 			response.end(JSON.stringify({ caches: [] }));
 		});
-		const random = vi.spyOn(Math, 'random').mockReturnValue(0);
 		try {
 			const rpc = tenantRpc(new URL(`${server.origin}/t/acme`), {
 				credential: 'token'
 			});
 			const caches = await collectProgressively(
-				await cachePages(rpc.caches, 'pr-'),
+				await cachePages(rpc.caches, 'pr-', () => 0),
 				listingLimits('The test listing')
 			);
 			const listing = {
@@ -87,7 +86,6 @@ describe('cachePages', () => {
 				}))
 			}).toStrictEqual({ caches: [], requests: [listing, listing] });
 		} finally {
-			random.mockRestore();
 			await server.close();
 		}
 	});

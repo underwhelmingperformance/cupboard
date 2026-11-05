@@ -255,21 +255,6 @@ export async function backoffDelay(
 }
 
 /**
-Returns a delay with full jitter for the given attempt, counted from 1: a
-random value from zero to a ceiling. The ceiling starts at `baseMs` and
-doubles with each attempt, up to `maximumMs`.
-*/
-export function fullJitterDelayMs(
-	attempt: number,
-	baseMs: number,
-	maximumMs: number
-): number {
-	const ceiling = Math.min(baseMs * 2 ** (attempt - 1), maximumMs);
-
-	return Math.random() * ceiling;
-}
-
-/**
 Parses a `Retry-After` delay in milliseconds from delay-seconds or an HTTP date.
 */
 export function retryAfterDelayMs(
