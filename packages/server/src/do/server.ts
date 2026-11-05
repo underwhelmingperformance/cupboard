@@ -185,6 +185,7 @@ import { maxOutgoingConnections } from './bulk.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CacheListingProjection } from './cache-listing-projection.ts';
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
+import { CachePurgeRetryPolicy } from './cache-purge-retry.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
 import {
 	CommitCreditService,
@@ -542,6 +543,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly deletionQueue: DeletionQueueService;
 	private readonly reconcileQueue: ReconcileQueueService;
 	private readonly signingKeys: SigningKeysService;
+	private readonly cachePurgeRetry = new CachePurgeRetryPolicy();
 	private readonly stats: StatsService;
 	private readonly tenantIdentity: TenantIdentityService;
 	private readonly oidcTrust: OidcTrustService;
@@ -597,7 +599,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.reconcileQueue = new ReconcileQueueService(this.context);
 		this.signingKeys = new SigningKeysService(
 			this.context,
-			this.narInfoObjects
+			this.narInfoObjects,
+			this.cachePurgeRetry
 		);
 		this.stats = new StatsService(this.context);
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
@@ -3389,14 +3392,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'signing-key-backfill',
-				workAt: readyWhen(() =>
-					Promise.resolve(this.signingKeys.hasBackfillWork())
-				),
-				run: async () => {
-					await this.signingKeys.runBackfillOnce();
-
-					return 'progressed';
-				}
+				workAt: (now) => this.signingKeys.backfillWorkAt(now),
+				run: () => this.signingKeys.runBackfillOnce()
 			},
 			{
 				key: 'garbage-collection',
@@ -4152,7 +4149,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await new CommitReuseGrantsService(this.ctx.storage).cleanupExpired(now);
 		await this.armCommitSocketClose();
 		await this.armVerifyBackstopAlarm();
-		await new CachePurgeQueueService(this.context).runOnce();
+		await new CachePurgeQueueService(
+			this.context,
+			this.cachePurgeRetry
+		).runOnce();
 		await this.runOneMaintenancePass(logger);
 	}
 

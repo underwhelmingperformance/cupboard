@@ -621,10 +621,22 @@ export class WorkersCacheUnavailableError extends Error {
 	}
 }
 
+/**
+A purge that the Cache API refused. The tenant object constructs it from the
+result that `CachedTenantReads.purgeTags` returns, so `codes` remains
+available after the RPC call.
+*/
 export class WorkersCachePurgeError extends Error {
-	constructor(public readonly details: string) {
-		super(`Workers Cache purge failed: ${details}`);
+	readonly codes: readonly number[];
+
+	constructor(errors: readonly CachePurgeError[]) {
+		super(
+			`Workers Cache purge failed: ${errors
+				.map((error) => `${String(error.code)}: ${error.message}`)
+				.join('; ')}`
+		);
 		this.name = 'WorkersCachePurgeError';
+		this.codes = errors.map((error) => error.code);
 	}
 }
 

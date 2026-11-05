@@ -16,11 +16,18 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type MockInstance,
+	vi
+} from 'vitest';
 import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
-import { SubrequestTimeoutError } from '../errors.ts';
+import { SubrequestTimeoutError, WorkersCachePurgeError } from '../errors.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -30,6 +37,8 @@ import {
 	cacheWriteGrants,
 	currentServer,
 	deployedSubrequestAllowance,
+	type FakeAlarm,
+	fakeAlarm,
 	fetchNarInfo,
 	fetchPath,
 	isNarInfoSignatureValid,
@@ -38,16 +47,26 @@ import {
 	pushPath,
 	resetTestServer,
 	resolvedCache,
+	syntheticStorePathHash,
 	uploadMetadata,
 	withoutAlarmArming
 } from '../test-support.ts';
 
+import { maintenanceRetryKey, noProgressRetryMs } from './alarm.ts';
+import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
+import { CachePurgeRetryPolicy } from './cache-purge-retry.ts';
+import type { ServerContext } from './context.ts';
 import { withDeadlineBudget } from './deadline.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import type { CupboardServer } from './server.ts';
 import {
 	backfillEntriesPerPass,
 	SigningKeysService
 } from './signing-keys-service.ts';
+
+// The jitter source returns the midpoint, so each purge retry waits three
+// quarters of its exponential delay.
+const retryPolicy = new CachePurgeRetryPolicy(() => 0.5);
 
 // Store-path hashes are nix-base32, which omits `e`, `o`, `t` and `u`.
 function nixBase32Pair(index: number): string {
@@ -57,6 +76,81 @@ function nixBase32Pair(index: number): string {
 		alphabet.charAt(Math.floor(index / alphabet.length)) +
 		alphabet.charAt(index % alphabet.length)
 	);
+}
+
+function rateLimitedPurge(): WorkersCachePurgeError {
+	return new WorkersCachePurgeError([
+		{ code: 1134, message: 'Unable to purge, rate limit reached.' }
+	]);
+}
+
+interface StagedBackfill {
+	readonly instance: CupboardServer;
+	readonly storage: DurableObjectStorage;
+	readonly context: ServerContext;
+	readonly signingKeys: SigningKeysService;
+	readonly alarm: FakeAlarm;
+	readonly purge: MockInstance<ServerContext['purgeCacheTags']>;
+	readonly publish: MockInstance<NarInfoObjectsService['publishNarInfoObject']>;
+}
+
+// Pushes one path, rotates the signing key and stages the backfill, so the
+// next backfill pass publishes the page and purges its tags. `body` runs in
+// the tenant object with the purge and publication spied on and the alarm
+// faked.
+async function withStagedBackfill<T>(
+	hashCharacter: string,
+	body: (staged: StagedBackfill) => Promise<T>
+): Promise<T> {
+	const init = await bootstrap();
+	const path = uploadMetadata({
+		fileSize: narBytes.byteLength,
+		storePathHash: hashCharacter.repeat(32),
+		name: 'staged-backfill'
+	});
+	await withoutAlarmArming(() => pushPath(init.token, path));
+
+	return runInDurableObject(currentServer(), async (instance, state) => {
+		const narInfoObjects = new NarInfoObjectsService(instance.context);
+		const signingKeys = new SigningKeysService(
+			instance.context,
+			narInfoObjects,
+			retryPolicy
+		);
+		const alarm = fakeAlarm(state.storage);
+
+		try {
+			await signingKeys.rotateKey();
+			await asOneInvocation(() => signingKeys.runBackfillOnce());
+			alarm.clear();
+			const purge = vi.spyOn(instance.context, 'purgeCacheTags');
+			const publish = vi.spyOn(narInfoObjects, 'publishNarInfoObject');
+
+			try {
+				return await body({
+					instance,
+					storage: state.storage,
+					context: instance.context,
+					signingKeys,
+					alarm,
+					purge,
+					publish
+				});
+			} finally {
+				purge.mockRestore();
+				publish.mockRestore();
+			}
+		} finally {
+			alarm.restore();
+		}
+	});
+}
+
+// A backfill pass that cannot stage reports a stall, and the scheduler records
+// a retry deadline for it. Runs the alarm after that deadline.
+async function alarmAfterBackfillRetry(): Promise<void> {
+	vi.setSystemTime(Date.now() + noProgressRetryMs);
+	await runInDurableObject(currentServer(), (instance) => instance.alarm());
 }
 
 async function drainKeyBackfill(): Promise<void> {
@@ -346,6 +440,9 @@ describe('signing key rotation', () => {
 		const aborted = await abort(init.token, rotation.body.rotated.key.id);
 		const listedResponse = await authorisedFetch('/keys', init.token);
 		const listed = keyListResponseSchema.parse(await listedResponse.json());
+		// The abort removed the backfill, so the alarm after the stalled pass's
+		// retry deadline finds no backfill to run.
+		await alarmAfterBackfillRetry();
 
 		expect({
 			status: aborted.status,
@@ -358,6 +455,51 @@ describe('signing key rotation', () => {
 		});
 	});
 
+	it('reports a stall when the backfill cannot be staged', async () => {
+		const init = await bootstrap();
+		const before = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'h'.repeat(32),
+			name: 'stage-failure'
+		});
+		await withoutAlarmArming(() => pushPath(init.token, before));
+		const failedAt = Date.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				instance.context.db
+					.update(schema.narInfos)
+					.set({ referencesJson: '{' })
+					.where(eq(schema.narInfos.storePathHash, before.storePathHash))
+					.run();
+				const signingKeys = new SigningKeysService(
+					instance.context,
+					new NarInfoObjectsService(instance.context),
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+
+				try {
+					await signingKeys.rotateKey();
+					alarm.clear();
+					const outcome = await asOneInvocation(() =>
+						signingKeys.runBackfillOnce()
+					);
+
+					return { outcome, alarm: alarm.scheduled() };
+				} finally {
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			outcome: 'stalled',
+			alarm: failedAt + noProgressRetryMs
+		});
+	});
+
 	it('re-arms unfinished work when status is queried', async () => {
 		const init = await bootstrap();
 		const before = uploadMetadata({
@@ -366,13 +508,15 @@ describe('signing key rotation', () => {
 			name: 'alarm-before'
 		});
 		await pushPath(init.token, before);
-		await runInDurableObject(currentServer(), (instance) => {
-			instance.context.db
-				.update(schema.narInfos)
-				.set({ referencesJson: '{' })
-				.where(eq(schema.narInfos.storePathHash, before.storePathHash))
-				.run();
-		});
+		const setReferences = (referencesJson: string) =>
+			runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.update(schema.narInfos)
+					.set({ referencesJson })
+					.where(eq(schema.narInfos.storePathHash, before.storePathHash))
+					.run();
+			});
+		await setReferences('{');
 		const rotation = await rotate(init.token);
 
 		const alarm = await runInDurableObject(
@@ -396,6 +540,12 @@ describe('signing key rotation', () => {
 			rotation: StatusCodes.OK,
 			alarmArmed: true
 		});
+
+		// The alarm's backfill pass stalled on the corrupt references. Repair
+		// them and run the alarm after the pass's retry deadline, so the pass can
+		// stage the backfill.
+		await setReferences('[]');
+		await alarmAfterBackfillRetry();
 	});
 
 	it('keeps an expired batch pending until its cache purge succeeds', async () => {
@@ -429,7 +579,8 @@ describe('signing key rotation', () => {
 					});
 				const service = new SigningKeysService(
 					instance.context,
-					new NarInfoObjectsService(instance.context)
+					new NarInfoObjectsService(instance.context),
+					retryPolicy
 				);
 
 				try {
@@ -504,7 +655,206 @@ describe('signing key rotation', () => {
 				}
 			},
 			purgeCalls: [[[`narinfo:v1:default:${before.storePathHash}`]]],
-			retryAlarmAt: Date.now() + 30_000
+			retryAlarmAt: Date.now() + 9000
+		});
+	});
+
+	// The second pass simulates an alarm caused by other work. It must neither
+	// publish the page nor purge its tags again before the retry time.
+	it.each([
+		{
+			failure: 'a rate-limit refusal',
+			error: rateLimitedPurge(),
+			row: { nextAttemptAt: undefined, failedAttempts: 0 },
+			delayMs: 45_000
+		},
+		{
+			failure: 'a timeout',
+			error: new SubrequestTimeoutError('cache.purge'),
+			row: { nextAttemptAt: 9000, failedAttempts: 1 },
+			delayMs: 9000
+		}
+	])(
+		'waits for the retry time after a backfill purge fails with $failure',
+		async ({ error, row, delayMs }) => {
+			const failedAt = Date.now();
+
+			const result = await withStagedBackfill(
+				'm',
+				async ({ context, signingKeys, alarm, purge, publish }) => {
+					purge.mockRejectedValue(error);
+					const outcomes = [
+						await asOneInvocation(() => signingKeys.runBackfillOnce()),
+						await asOneInvocation(() => signingKeys.runBackfillOnce())
+					];
+
+					return {
+						outcomes,
+						purgeCalls: purge.mock.calls.length,
+						publications: publish.mock.calls.length,
+						continuations: context.db
+							.select()
+							.from(schema.cachePurgeContinuations)
+							.all()
+							.map((continuation) => ({
+								kind: continuation.kind,
+								lastAttemptAt: continuation.lastAttemptAt,
+								nextAttemptAt: continuation.nextAttemptAt ?? undefined,
+								failedAttempts: continuation.failedAttempts
+							})),
+						workAt: await signingKeys.backfillWorkAt(Date.now()),
+						alarm: alarm.scheduled()
+					};
+				}
+			);
+
+			expect(result).toStrictEqual({
+				outcomes: ['stalled', 'stalled'],
+				purgeCalls: 1,
+				publications: 1,
+				continuations: [
+					{
+						kind: 'backfill',
+						lastAttemptAt: isoTimestamp(new Date(failedAt)),
+						nextAttemptAt:
+							row.nextAttemptAt === undefined
+								? undefined
+								: isoTimestamp(new Date(failedAt + row.nextAttemptAt)),
+						failedAttempts: row.failedAttempts
+					}
+				],
+				workAt: failedAt + delayMs,
+				alarm: failedAt + delayMs
+			});
+		}
+	);
+
+	// The scheduler asks the pass when it next has work. While the purge waits,
+	// the alarm runs no backfill and arms no alarm for it before the retry time.
+	it('leaves a waiting backfill out of the alarm', async () => {
+		const retryAt = Date.now() + 45_000;
+
+		const result = await withStagedBackfill(
+			's',
+			async ({ instance, storage, signingKeys, alarm, purge, publish }) => {
+				purge.mockRejectedValueOnce(rateLimitedPurge());
+				await asOneInvocation(() => signingKeys.runBackfillOnce());
+				const beforeAlarm = {
+					purgeCalls: purge.mock.calls.length,
+					publications: publish.mock.calls.length
+				};
+				alarm.clear();
+				await instance.alarm();
+
+				return {
+					beforeAlarm,
+					afterAlarm: {
+						purgeCalls: purge.mock.calls.length,
+						publications: publish.mock.calls.length,
+						backfillRetry: await storage.get(
+							maintenanceRetryKey('signing-key-backfill')
+						),
+						alarm: alarm.scheduled()
+					}
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			beforeAlarm: { purgeCalls: 1, publications: 1 },
+			afterAlarm: {
+				purgeCalls: 1,
+				publications: 1,
+				backfillRetry: undefined,
+				alarm: retryAt
+			}
+		});
+	});
+
+	// Cloudflare's purge rate limit applies to the whole account, so a refusal
+	// on one path must also delay the other.
+	it('delays the backfill purge after the queue is rate limited', async () => {
+		const retryAt = Date.now() + 45_000;
+
+		const result = await withStagedBackfill(
+			'n',
+			async ({ context, signingKeys, alarm, purge, publish }) => {
+				const queue = new CachePurgeQueueService(context, retryPolicy);
+				await queue.enqueueNarInfos(resolvedCache(context), [
+					syntheticStorePathHash(1)
+				]);
+				purge.mockRejectedValueOnce(rateLimitedPurge());
+				await queue.runOnce();
+				alarm.clear();
+				const waiting = await asOneInvocation(() =>
+					signingKeys.runBackfillOnce()
+				);
+				const whileWaiting = {
+					outcome: waiting,
+					purgeCalls: purge.mock.calls.length,
+					publications: publish.mock.calls.length,
+					workAt: await signingKeys.backfillWorkAt(Date.now()),
+					alarm: alarm.scheduled()
+				};
+				vi.setSystemTime(retryAt);
+				purge.mockResolvedValue(undefined);
+				const due = await asOneInvocation(() => signingKeys.runBackfillOnce());
+
+				return {
+					whileWaiting,
+					afterWaiting: {
+						outcome: due,
+						purgeCalls: purge.mock.calls.length,
+						publications: publish.mock.calls.length
+					}
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			whileWaiting: {
+				outcome: 'stalled',
+				purgeCalls: 1,
+				publications: 0,
+				workAt: retryAt,
+				alarm: retryAt
+			},
+			afterWaiting: { outcome: 'progressed', purgeCalls: 2, publications: 1 }
+		});
+	});
+
+	it('delays the queued purge after the backfill is rate limited', async () => {
+		const retryAt = Date.now() + 45_000;
+
+		const result = await withStagedBackfill(
+			'q',
+			async ({ context, signingKeys, alarm, purge }) => {
+				const queue = new CachePurgeQueueService(context, retryPolicy);
+				purge.mockRejectedValueOnce(rateLimitedPurge());
+				await asOneInvocation(() => signingKeys.runBackfillOnce());
+				await queue.enqueueNarInfos(resolvedCache(context), [
+					syntheticStorePathHash(2)
+				]);
+				alarm.clear();
+				await queue.runOnce();
+				const whileWaiting = {
+					purgeCalls: purge.mock.calls.length,
+					alarm: alarm.scheduled()
+				};
+				vi.setSystemTime(retryAt);
+				purge.mockResolvedValue(undefined);
+				await queue.runOnce();
+
+				return {
+					whileWaiting,
+					afterWaiting: { purgeCalls: purge.mock.calls.length }
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			whileWaiting: { purgeCalls: 1, alarm: retryAt },
+			afterWaiting: { purgeCalls: 2 }
 		});
 	});
 

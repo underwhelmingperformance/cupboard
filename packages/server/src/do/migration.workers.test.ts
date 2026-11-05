@@ -2465,6 +2465,33 @@ describe('migrations', () => {
 		expect(result).toStrictEqual([{ id: 'started', commit_released: 0 }]);
 	});
 
+	it('makes a queued purge due with no failures at 0082', async () => {
+		const insertContinuation =
+			"INSERT INTO cache_purge_continuation (id, kind, entries_json, created_at, expires_at, last_attempt_at, last_error) VALUES ('queued', 'mutation', '[\"narinfo-tag\"]', '2026-01-01T00:00:00.000Z', '2026-01-01T01:00:00.000Z', '2026-01-01T00:00:30.000Z', 'failed')";
+		const selectRetryState =
+			'SELECT id, last_attempt_at, next_attempt_at IS NULL AS retry_unscheduled, failed_attempts FROM cache_purge_continuation';
+
+		const result = await runInDurableObject(
+			testServerFor('migration-cache-purge-retry'),
+			async (_instance, state) => {
+				await migrateThrough(state, 81);
+				state.storage.sql.exec(insertContinuation);
+				await migrateThrough(state, 82);
+
+				return state.storage.sql.exec(selectRetryState).toArray();
+			}
+		);
+
+		expect(result).toStrictEqual([
+			{
+				id: 'queued',
+				last_attempt_at: '2026-01-01T00:00:30.000Z',
+				retry_unscheduled: 1,
+				failed_attempts: 0
+			}
+		]);
+	});
+
 	it('leaves the blob declaration, commit time and promotion record null for a pending upload created before 0075', async () => {
 		const insertUndeclaredPendingUpload =
 			"INSERT INTO pending_upload (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES ('u1', 0, 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', 'committing')";
