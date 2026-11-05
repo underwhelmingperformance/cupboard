@@ -50,15 +50,15 @@ See [Reuse views](../ci/reuse-views.md).
 
 See [Pushing store paths](../admin/pushing.md).
 
-| Limit                                                 | Value                                                   |
-| ----------------------------------------------------- | ------------------------------------------------------- |
-| Uploads that the CLI runs at once                     | 6 by default. Change it with `--upload-concurrency`.    |
-| Time a negotiated upload is kept before its commit    | 15 minutes, renewed while the CLI sends its bytes.      |
-| Latest expiry of a renewed upload                     | 6 hours after negotiation                               |
-| Time the CLI waits for the tenant to accept an upload | 10 minutes by default. Change it with `--wait-timeout`. |
-| Time the CLI waits for the tenant to verify an upload | 10 minutes by default. Change it with `--wait-timeout`. |
-| Paths in one `confirm` request                        | 1,000. The CLI splits larger sets.                      |
-| Commit sessions open at once for one tenant           | 256                                                     |
+| Limit                                                 | Value                                                                                                                                                              |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Uploads that the CLI runs at once                     | 6 by default. Change it with `--upload-concurrency`.                                                                                                               |
+| Time a negotiated upload is kept before its commit    | 15 minutes, renewed while the CLI sends its bytes.                                                                                                                 |
+| Latest expiry of a renewed upload                     | 6 hours after negotiation                                                                                                                                          |
+| Time the CLI waits for the tenant to accept an upload | 10 minutes by default. Change it with `--wait-timeout`.                                                                                                            |
+| Time the CLI waits for the tenant to verify an upload | 10 minutes by default. Change it with `--wait-timeout`.                                                                                                            |
+| Paths in one `confirm` request                        | 1,000. The tenant checks at most 425 of them on Workers Free, and fewer on either plan when narinfo objects need repair. The CLI sends the rest in later requests. |
+| Commit sessions open at once for one tenant           | 256                                                                                                                                                                |
 
 ## Tokens and sessions
 

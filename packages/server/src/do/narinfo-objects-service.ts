@@ -9,6 +9,10 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import {
+	narInfoProbeGroupSize,
+	narInfoRepairSubrequests
+} from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, inArray } from 'drizzle-orm';
 
@@ -48,15 +52,12 @@ import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
-import { affordableSubrequestOperations } from './subrequest-slice.ts';
+import {
+	affordableSubrequestOperations,
+	subrequestsAvailable
+} from './subrequest-slice.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
-
-// The most binding calls that repairing one path's narinfo object can make:
-// the blob-state read, a second read when the row's signatures changed, the
-// write, the fence's blob-state read, reference read, third read and rewrite,
-// and the head that checks the result.
-const narInfoRepairSubrequests = 8;
 
 function effectiveSignatureGeneration(row: NarInfoRow): SigningKeyGeneration {
 	return row.pendingSignatureGeneration ?? row.signatureGeneration;
@@ -66,6 +67,15 @@ interface CommittedReferenceEdge {
 	readonly storePathHash: StorePathHash;
 	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
+}
+
+interface ServableNarInfoPrefix {
+	readonly versions: ReadonlyMap<StorePathHash, NarInfoReferenceVersion>;
+	/**
+	The number of leading paths of the deduplicated request that the probe
+	evaluated.
+	*/
+	readonly evaluated: number;
 }
 
 type NarInfoBlobFields = Pick<
@@ -366,6 +376,15 @@ export class NarInfoObjectsService {
 
 		this.context.narInfoDemotions.record(cache.id, storePathHash);
 		await this.deleteNarInfoObject(cache, storePathHash);
+	}
+
+	private committedRows(
+		edges: readonly CommittedReferenceEdge[],
+		rows: readonly NarInfoRow[]
+	): NarInfoRow[] {
+		const committed = this.committedReferencesFrom(edges, rows);
+
+		return rows.filter((row) => committed.has(row.storePathHash));
 	}
 
 	private async repairNarInfoObjects(
@@ -877,6 +896,102 @@ export class NarInfoObjectsService {
 		await this.purgeReplacedNarUrls(cache, rewritten);
 
 		return servable;
+	}
+
+	/**
+	Applies the checks of `servableNarInfoVersions` to the paths in request
+	order, and stops at the first path that the subrequest slice cannot afford
+	at its worst case: its two heads and a narinfo repair. Every path that the
+	probe evaluates gets the repair that it needs, so the cost of a page
+	decides how many requests confirm it.
+
+	The probe checks the paths in groups, in the same order as
+	`servableNarInfoVersions`: the narinfo heads, then the rows, the D1 edges
+	and NAR incarnations, and the NAR heads. Each group reads D1 again, so a
+	path that is recommitted or whose NAR moves while an earlier group runs is
+	checked against its current state. Each group is as large as the remaining
+	calls allow at the worst case, so it always finishes, and the calls that a
+	group does not spend go to the next group.
+	*/
+	async servableNarInfoPrefix(
+		cache: ResolvedCache,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<ServableNarInfoPrefix> {
+		const hashes = [...new Set(storePathHashes)];
+		const servable = new Map<StorePathHash, NarInfoReferenceVersion>();
+		let evaluated = 0;
+
+		while (evaluated < hashes.length) {
+			const group = hashes.slice(
+				evaluated,
+				evaluated + narInfoProbeGroupSize(subrequestsAvailable())
+			);
+
+			if (group.length === 0) {
+				break;
+			}
+
+			const present = await this.existingNarInfoObjects(cache, group);
+			const groupRows = this.narInfoRowsFor(cache, group);
+			const committedRows = this.committedRows(
+				await this.committedReferenceEdges(
+					cache,
+					groupRows.map((row) => row.storePathHash)
+				),
+				groupRows
+			);
+			const objects = await recordedNarObjects(
+				this.context.d1,
+				committedRows.map((row) => row.narHash)
+			);
+			const backed = await presentNarObjects(this.context.env.BLOBS, objects);
+			const currentNarUrls = new Map(
+				objects.map((object) => [
+					object.narHash,
+					narObjectKey(object.narHash, object.incarnation)
+				])
+			);
+			const isCurrentVersion = (
+				row: NarInfoRow,
+				metadata: NarInfoObjectMetadata | undefined
+			): boolean =>
+				isMetadataOfCommit(metadata, row) &&
+				metadata?.narUrl === currentNarUrls.get(row.narHash);
+			const rows = committedRows.filter((row) => backed.has(row.narHash));
+			const unrepaired = rows.filter(
+				(row) => !isCurrentVersion(row, present.get(row.storePathHash))
+			);
+			await this.repairNarInfoObjects(cache, unrepaired);
+			const repaired = await this.existingNarInfoObjects(
+				cache,
+				unrepaired.map((row) => row.storePathHash)
+			);
+			const rewritten: StorePathHash[] = [];
+
+			for (const row of rows) {
+				const metadata =
+					repaired.get(row.storePathHash) ?? present.get(row.storePathHash);
+				if (!isCurrentVersion(row, metadata)) {
+					continue;
+				}
+
+				servable.set(row.storePathHash, {
+					generation: row.generation,
+					narHash: row.narHash
+				});
+				if (repaired.has(row.storePathHash)) {
+					rewritten.push(row.storePathHash);
+				}
+			}
+
+			// Queue each group's purges before the next group starts, so a failure in
+			// a later group cannot drop them. A retry finds the repaired objects
+			// current and does not queue their purges again.
+			await this.purgeReplacedNarUrls(cache, rewritten);
+			evaluated += group.length;
+		}
+
+		return { versions: servable, evaluated };
 	}
 
 	/**

@@ -244,6 +244,23 @@ export class UploadRequestLimitExceededError extends ServerHttpError {
 	}
 }
 
+/**
+The invocation spent so many subrequests before a confirmation started that
+the remaining calls cannot evaluate even one path. A later request runs in a
+fresh invocation, so clients retry the 503.
+*/
+export class UploadConfirmSubrequestsExhaustedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor(readonly available: number) {
+		super(
+			`Only ${String(available)} subrequests remain, which is too few to confirm a path. Retry the request.`
+		);
+		this.name = 'UploadConfirmSubrequestsExhaustedError';
+	}
+}
+
 export class ObjectIncarnationReservationContendedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;

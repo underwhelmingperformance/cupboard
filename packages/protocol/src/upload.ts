@@ -248,9 +248,75 @@ export type UploadPreviewResponse = z.output<
 >;
 
 // Confirmation accepts at most 1,000 store-path hashes. The server deduplicates
-// its storage work but returns one result for every input entry. The CLI splits
-// larger closures into sequential requests.
+// its storage work and returns one result for each entry that it answers. The
+// CLI splits larger closures into sequential requests.
 export const uploadConfirmMaxPaths = 1000;
+
+// The most binding calls that the server makes to repair one path's narinfo
+// object: the blob-state read, a second read when the row's signatures changed,
+// the write, the fence's blob-state read, reference read, third read and
+// rewrite, and the head that checks the result. The server budgets each repair
+// at this cost, and both confirmation limits below allow for it.
+export const narInfoRepairSubrequests = 8;
+
+// The most binding calls that checking one path's servability makes before any
+// repair: a head of its narinfo object and a head of its NAR.
+const narInfoProbeSubrequests = 2;
+
+// The D1 calls that checking one group of paths makes: one batch for the
+// committed edges and one for the NAR incarnations.
+const narInfoProbeD1Subrequests = 2;
+
+// The calls that the server sets aside after a mutation for its maintenance
+// reconcile. Reconciliation can make one D1 call before an error, and the
+// fallback invalidation makes another.
+export const trailingEligibilitySubrequests = 2;
+
+// The D1 call that reads the confirmed paths' blob states after the probe.
+export const uploadConfirmBlobStateSubrequests = 1;
+
+/**
+The number of paths in the next group of a confirmation's probe when
+`available` calls remain. The group's D1 calls come first, and the rest of the
+calls cover each path at its worst case of two heads and a narinfo repair.
+*/
+export function narInfoProbeGroupSize(available: number): number {
+	return Math.max(
+		0,
+		Math.floor(
+			(available - narInfoProbeD1Subrequests) /
+				(narInfoProbeSubrequests + narInfoRepairSubrequests)
+		)
+	);
+}
+
+/**
+The most paths that one confirmation probes within `subrequests` binding
+calls when no path needs a narinfo repair, up to `uploadConfirmMaxPaths`. Like
+the server, it sizes each group of the probe with `narInfoProbeGroupSize`. It
+counts the D1 calls of every group and two heads for each path. The server
+advertises this limit for the dispatch's whole slice. The Free plan's
+allowance, less its reserve, fits 425 paths. Repairs shorten the answer.
+*/
+export function uploadConfirmMaxPathsFor(subrequests: number): number {
+	let available =
+		subrequests -
+		uploadConfirmBlobStateSubrequests -
+		trailingEligibilitySubrequests;
+	let paths = 0;
+
+	while (paths < uploadConfirmMaxPaths) {
+		const group = narInfoProbeGroupSize(available);
+		if (group === 0) {
+			break;
+		}
+
+		paths += group;
+		available -= narInfoProbeD1Subrequests + group * narInfoProbeSubrequests;
+	}
+
+	return Math.min(paths, uploadConfirmMaxPaths);
+}
 
 export const uploadConfirmRequestSchema = z.strictObject({
 	storePathHashes: z.array(storePathHashSchema).max(uploadConfirmMaxPaths)
@@ -267,6 +333,9 @@ export const uploadConfirmedPathSchema = z.strictObject({
 });
 export type UploadConfirmedPath = z.output<typeof uploadConfirmedPathSchema>;
 
+// The entries answer a prefix of the request, in request order. The server
+// stops early when its subrequests cannot cover the rest of the request, and
+// the client sends the remaining hashes in another request.
 export const uploadConfirmResponseSchema = z.strictObject({
 	paths: z.array(uploadConfirmedPathSchema)
 });
@@ -277,13 +346,14 @@ export type UploadConfirmResponse = z.output<
 export const uploadConfirmPresentMaxPaths = 200;
 
 // Without repairs, the confirmation itself makes at most three D1 calls. After
-// a confirmation that wrote rows or failed, the maintenance reconcile makes one
-// more, or two when the reconcile fails. Each path costs two R2 heads, and
-// repairing its narinfo object costs up to eight more calls. The limit allows
-// six calls for each path out of the dispatch's whole slice. The server repairs
-// only the paths that its remaining subrequests can afford, so calls made
-// before the confirmation, such as a cold start's initialisation, reduce the
-// repairs and leave the limit unchanged.
+// a confirmation that wrote rows or failed, the maintenance reconcile makes up
+// to `trailingEligibilitySubrequests` more. Each path costs
+// `narInfoProbeSubrequests` R2 heads, and repairing its narinfo object costs up
+// to `narInfoRepairSubrequests` more calls. The limit allows six calls for each
+// path out of the dispatch's whole slice. The server repairs only the paths
+// that its remaining subrequests can afford, so calls made before the
+// confirmation, such as a cold start's initialisation, reduce the repairs and
+// leave the limit unchanged.
 const uploadConfirmPresentFixedSubrequests = 3;
 const uploadConfirmPresentSubrequestsPerPath = 6;
 

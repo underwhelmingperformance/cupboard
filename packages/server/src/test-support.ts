@@ -92,6 +92,7 @@ import {
 	uploadStatusResponseSchema
 } from '@cupboard/protocol/upload';
 import { withCleanup } from '@cupboard/shared/cleanup';
+import { chunk } from '@cupboard/shared/collections';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { withDeadline } from '@cupboard/shared/timeout';
 import {
@@ -2974,6 +2975,51 @@ export async function pushPath(
 	}
 
 	await commitUpload(token, decision.uploadId, cache);
+}
+
+/**
+Publishes `paths`, which must share one NAR, faster than pushing each one.
+The first path uploads the NAR, and the others commit against it in one
+commit session, 100 at a time.
+*/
+export async function pushSharedNarPaths(
+	token: string,
+	paths: readonly UploadPathMetadata[]
+): Promise<void> {
+	const [first, ...rest] = paths;
+	if (first === undefined) {
+		return;
+	}
+	await pushPath(token, first);
+	if (rest.length === 0) {
+		return;
+	}
+
+	const session = await openCommitSession(token);
+	try {
+		for (const page of chunk(rest, 100)) {
+			const { uploads } = await negotiateUploads(token, page);
+			const commits = [];
+			for (const decision of uploads) {
+				if (decision.action === 'commit') {
+					commits.push({
+						uploadId: decision.uploadId,
+						storePathHash: decision.storePathHash,
+						narHash: decision.narHash
+					});
+				}
+			}
+			session.send({ op: 'commit-batch', commits });
+			const frames = [];
+			for (const _commit of commits) {
+				const frame = await session.nextFrame();
+				frames.push(frame.ev);
+			}
+			expect(frames).toStrictEqual(page.map(() => 'settled'));
+		}
+	} finally {
+		await closeSessionAndWait(session.socket);
+	}
 }
 
 export async function pushPathToTenant(

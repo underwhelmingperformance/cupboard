@@ -50,6 +50,7 @@ import {
 	sessionIdSchema,
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
+	uploadConfirmMaxPathsFor,
 	uploadConfirmPresentMaxPathsFor,
 	uploadGraceFactsCapability,
 	type UploadId,
@@ -784,6 +785,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					const maxPaths = uploadConfirmPresentMaxPathsFor(
 						subrequestSliceBudget()
 					);
+					response.headers.set(uploadRequestMaxPathsHeader, String(maxPaths));
+				}
+
+				if (pathname.endsWith('/uploads/confirm')) {
+					const maxPaths = uploadConfirmMaxPathsFor(subrequestSliceBudget());
 					response.headers.set(uploadRequestMaxPathsHeader, String(maxPaths));
 				}
 

@@ -26,7 +26,6 @@ import {
 	uploadPlanResponseSchema,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
-import { chunk } from '@cupboard/shared/collections';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
@@ -58,10 +57,10 @@ import {
 	issueServerSignedToken,
 	listRootTargets,
 	narBytes,
-	negotiateUploads,
 	nixSha256Hash,
 	openCommitSession,
 	pushPath,
+	pushSharedNarPaths,
 	removeRoot,
 	resetTestServer,
 	resolvedCache,
@@ -170,39 +169,7 @@ async function setDefaultCacheGrace(): Promise<void> {
 async function servedPaths(count: number): Promise<UploadPathMetadata[]> {
 	const token = await initialise();
 	const paths = Array.from({ length: count }, (_, index) => presentPath(index));
-	const [first, ...rest] = paths;
-	if (first !== undefined) {
-		await pushPath(token, first);
-	}
-	if (rest.length === 0) {
-		return paths;
-	}
-
-	const session = await openCommitSession(token);
-	try {
-		for (const page of chunk(rest, 100)) {
-			const { uploads } = await negotiateUploads(token, page);
-			const commits = [];
-			for (const decision of uploads) {
-				if (decision.action === 'commit') {
-					commits.push({
-						uploadId: decision.uploadId,
-						storePathHash: decision.storePathHash,
-						narHash: decision.narHash
-					});
-				}
-			}
-			session.send({ op: 'commit-batch', commits });
-			const frames = [];
-			for (const _commit of commits) {
-				const frame = await session.nextFrame();
-				frames.push(frame.ev);
-			}
-			expect(frames).toStrictEqual(page.map(() => 'settled'));
-		}
-	} finally {
-		await closeSessionAndWait(session.socket);
-	}
+	await pushSharedNarPaths(token, paths);
 
 	return paths;
 }

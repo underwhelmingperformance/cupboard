@@ -5,6 +5,7 @@ import {
 	graceSecondsSchema,
 	narInfoGenerationSchema,
 	rootNameSchema,
+	type StorePathHash,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -12,6 +13,7 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { rootRetentionRequestSchema } from '@cupboard/protocol/retention';
 import {
 	type IsoTimestamp,
@@ -27,7 +29,9 @@ import {
 	type UploadConfirmResponseInput,
 	uploadConfirmResponseSchema,
 	uploadGraceFactsCapability,
-	uploadNegotiateResponseSchema
+	uploadNegotiateResponseSchema,
+	type UploadPathMetadata,
+	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -35,11 +39,13 @@ import { and, eq, isNull, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { UploadConfirmSubrequestsExhaustedError } from '../errors.ts';
 import {
 	narInfoObjectKey,
 	narObjectKey,
@@ -57,6 +63,7 @@ import {
 	clearBlobStorage,
 	commitUpload,
 	currentNarObjectKey,
+	currentOrigin,
 	currentServer,
 	currentServerTenant,
 	defaultCache,
@@ -75,19 +82,22 @@ import {
 	openCommitSession,
 	pendingUploadVerdict,
 	pushPath,
+	pushSharedNarPaths,
 	putNarBytes,
 	removeRoot,
 	resetTestServer,
 	resolvedCache,
 	setRoot,
 	singleDecision,
+	syntheticStorePathHash,
 	testPushId,
 	underOneUnitOfWork,
 	uploadMetadata,
 	uploadPathNegotiation,
 	useTestServer,
 	verifiableNar,
-	verifyCurrentTenant
+	verifyCurrentTenant,
+	withDeployedSubrequestAllowance
 } from '../test-support.ts';
 
 import { AttestationCasService } from './attestation-cas-service.ts';
@@ -117,6 +127,7 @@ import { ReuseAuthority } from './reuse-authority.ts';
 import { RootsService } from './roots-service.ts';
 import { gcContinuationKey } from './server.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
+import { withSubrequestSlice } from './subrequest-slice.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService } from './uploads-service.ts';
 import { VerificationService } from './verification-service.ts';
@@ -3038,7 +3049,75 @@ async function confirmPaths(
 	};
 }
 
+function confirmRequest(
+	token: string,
+	storePathHashes: readonly string[]
+): Request {
+	return new Request(new URL('/uploads/confirm', currentOrigin()), {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ storePathHashes })
+	});
+}
+
+// Publishes `count` paths, each with its own NAR.
+async function pushOwnNarPaths(
+	token: string,
+	count: number
+): Promise<UploadPathMetadata[]> {
+	const paths: UploadPathMetadata[] = [];
+	for (let index = 0; index < count; index += 1) {
+		const nar = await verifiableNar(`repair-${String(index)}`);
+		const path = uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			fileHash: nar.fileHash,
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			storePathHash: syntheticStorePathHash(index),
+			name: `repair-${String(index)}`
+		});
+		await pushPath(token, path, defaultCache(), nar);
+		paths.push(path);
+	}
+	return paths;
+}
+
+// Moves a committed path's row and its D1 edge to the next generation, as a
+// recommit of the same NAR does.
+async function recommit(
+	context: ServerContext,
+	storePathHash: StorePathHash
+): Promise<void> {
+	const cache = resolvedCache(context);
+	const tenant = context.requireTenant();
+	context.db
+		.update(schema.narInfos)
+		.set({ generation: sql`${schema.narInfos.generation} + 1` })
+		.where(
+			and(
+				eq(schema.narInfos.cacheId, cache.id),
+				eq(schema.narInfos.storePathHash, storePathHash)
+			)
+		)
+		.run();
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.update(d1Schema.blobReference)
+		.set({ generation: sql`${d1Schema.blobReference.generation} + 1` })
+		.where(
+			and(
+				eq(d1Schema.blobReference.tenant, tenant),
+				eq(d1Schema.blobReference.storePathHash, storePathHash)
+			)
+		)
+		.run();
+}
+
 class ForcedRollbackError extends Error {}
+
+class GroupFailedError extends Error {}
 
 describe('grace transition atomicity', () => {
 	beforeEach(resetTestServer);
@@ -3696,6 +3775,491 @@ describe('confirming an unretained publication', () => {
 			matched: uploadConfirmMaxPaths,
 			transactionCount: 1,
 			deadlines: uploadConfirmMaxPaths
+		});
+	});
+
+	it.each([
+		{
+			plan: 'Free',
+			subrequests: workersInvocationAllowances.free.subrequests,
+			advertised: '425'
+		},
+		{
+			plan: 'Paid',
+			subrequests: workersInvocationAllowances.paid.subrequests,
+			advertised: '1000'
+		}
+	])(
+		'advertises $advertised paths for one request on the $plan plan',
+		async ({ subrequests, advertised }) => {
+			await useTestServer('confirm-advertises');
+			const { token } = await bootstrap();
+
+			const answer = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const request = confirmRequest(token, [repeated('a')]);
+					const response = await withDeployedSubrequestAllowance(
+						instance.context,
+						subrequests,
+						() => instance.fetch(request)
+					);
+					await response.body?.cancel();
+
+					return {
+						status: response.status,
+						advertised: response.headers.get(uploadRequestMaxPathsHeader)
+					};
+				}
+			);
+
+			expect(answer).toStrictEqual({ status: StatusCodes.OK, advertised });
+		}
+	);
+
+	// The test Worker has the Free plan's allowance. Each request after the first
+	// sends the hashes that the previous answers did not cover.
+	it('confirms a full page on the Free plan in requests that fit the slice', async () => {
+		await useTestServer('confirm-free-page');
+		const { token } = await bootstrap();
+		await setDefaultCacheGrace(dayGraceSeconds);
+		const first = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'first'
+		});
+		const last = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('z'),
+			name: 'last'
+		});
+		await pushPath(token, first);
+		await pushPath(token, last);
+		const served = new Set([first.storePathHash, last.storePathHash]);
+		const hashes = [
+			first.storePathHash,
+			...Array.from({ length: uploadConfirmMaxPaths - 2 }, (_, index) =>
+				syntheticStorePathHash(index)
+			),
+			last.storePathHash
+		];
+
+		const requests: unknown[] = [];
+		const answered: UploadConfirmResponseInput['paths'] = [];
+		for (
+			let attempt = 0;
+			attempt < 4 && answered.length < hashes.length;
+			attempt += 1
+		) {
+			const response = await authorisedFetch('/uploads/confirm', token, {
+				body: JSON.stringify({
+					storePathHashes: hashes.slice(answered.length)
+				}),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+			const body = uploadConfirmResponseSchema.safeParse(await response.json());
+			requests.push({
+				status: response.status,
+				advertised: response.headers.get(uploadRequestMaxPathsHeader),
+				answered: body.data?.paths.length
+			});
+			if (!body.success) {
+				break;
+			}
+			answered.push(...body.data.paths);
+		}
+
+		expect({ requests, answered }).toStrictEqual({
+			requests: [425, 425, 150].map((count) => ({
+				status: StatusCodes.OK,
+				advertised: '425',
+				answered: count
+			})),
+			answered: hashes.map((storePathHash) =>
+				served.has(storePathHash)
+					? {
+							storePathHash,
+							confirmed: true,
+							grace: { retainUntil: dayAfterStart }
+						}
+					: { storePathHash, confirmed: false }
+			)
+		});
+	});
+
+	// Each path has its own NAR and a lost narinfo object, so each needs a
+	// repair. The confirmation probes paths in groups that the remaining calls
+	// can afford at ten calls a path, two heads and a worst-case repair, after
+	// the group's two D1 calls. Three of the 49 calls are set aside for the
+	// blob-state read and maintenance, so the groups have four paths, then one,
+	// then one. A repair actually makes four calls, so each path costs six.
+	it('answers the paths that the slice can probe and repair in the worst case', async () => {
+		await useTestServer('confirm-repair-budget');
+		const { token } = await bootstrap();
+		await setDefaultCacheGrace(dayGraceSeconds);
+		const paths = await pushOwnNarPaths(token, 10);
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const narInfoObjects = new NarInfoObjectsService(instance.context);
+				const cache = resolvedCache(instance.context);
+				for (const path of paths) {
+					await env.BLOBS.delete(
+						narInfoObjects.objectKey(cache, path.storePathHash)
+					);
+				}
+				const response = await withSubrequestSlice(
+					() =>
+						uploadsServiceFor(instance.context).confirmPaths(
+							defaultCache(),
+							paths.map((path) => storePathHashSchema.parse(path.storePathHash))
+						),
+					{ subrequests: 49, reserve: 0 }
+				);
+				const objects = await Promise.all(
+					paths.map(
+						async (path) =>
+							(await env.BLOBS.head(
+								narInfoObjects.objectKey(cache, path.storePathHash)
+							)) !== null
+					)
+				);
+
+				return { response, objects };
+			}
+		);
+
+		const repaired = 6;
+		expect(result).toStrictEqual({
+			response: {
+				paths: paths.slice(0, repaired).map((path) => ({
+					storePathHash: path.storePathHash,
+					confirmed: true,
+					grace: { retainUntil: dayAfterStart }
+				}))
+			},
+			objects: paths.map((_path, index) => index < repaired)
+		});
+	});
+
+	// The paths share one NAR, and every narinfo object is lost, so each path
+	// costs about five calls: a head and a repair of four calls. The 200 paths
+	// cost about 1,000 calls. The Free plan's 900 usable calls therefore need
+	// two requests, and the Paid plan's 9,900 need one.
+	it.each([
+		{
+			plan: 'Free',
+			subrequests: workersInvocationAllowances.free.subrequests,
+			answers: [174, 26]
+		},
+		{
+			plan: 'Paid',
+			subrequests: workersInvocationAllowances.paid.subrequests,
+			answers: [200]
+		}
+	])(
+		'confirms a page that needs a repair for every path in requests that cover its cost on the $plan plan',
+		async ({ plan, subrequests, answers }) => {
+			await useTestServer(`confirm-repair-page-${plan.toLowerCase()}`);
+			const { token } = await bootstrap();
+			await setDefaultCacheGrace(dayGraceSeconds);
+			const paths = Array.from({ length: 200 }, (_, index) =>
+				uploadMetadata({
+					fileSize: narBytes.byteLength,
+					storePathHash: syntheticStorePathHash(index),
+					name: `repair-${String(index)}`
+				})
+			);
+			await pushSharedNarPaths(token, paths);
+			const hashes = paths.map((path) =>
+				storePathHashSchema.parse(path.storePathHash)
+			);
+
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const narInfoObjects = new NarInfoObjectsService(instance.context);
+					const cache = resolvedCache(instance.context);
+					const keys = hashes.map((hash) =>
+						narInfoObjects.objectKey(cache, hash)
+					);
+					await env.BLOBS.delete(keys);
+					const answered: number[] = [];
+					const confirmed: UploadConfirmResponseInput['paths'] = [];
+					for (
+						let attempt = 0;
+						attempt < 10 && confirmed.length < hashes.length;
+						attempt += 1
+					) {
+						const request = confirmRequest(
+							token,
+							hashes.slice(confirmed.length)
+						);
+						const response = await withDeployedSubrequestAllowance(
+							instance.context,
+							subrequests,
+							() => instance.fetch(request)
+						);
+						const body = uploadConfirmResponseSchema.parse(
+							await response.json()
+						);
+						answered.push(body.paths.length);
+						confirmed.push(...body.paths);
+					}
+
+					return { answered, confirmed };
+				}
+			);
+
+			expect(result).toStrictEqual({
+				answered: answers,
+				confirmed: hashes.map((storePathHash) => ({
+					storePathHash,
+					confirmed: true,
+					grace: { retainUntil: dayAfterStart }
+				}))
+			});
+		}
+	);
+
+	// A slice of 80 calls checks the ten paths in two groups, seven and then
+	// three. The eighth path is recommitted just after the probe first reads D1
+	// edges, so its row and edge both move to a later generation before the
+	// second group checks it.
+	// Paths with their own NARs and current narinfo objects cost two heads each,
+	// and each group of the probe makes two D1 calls. An allowance of 200 calls
+	// leaves 100 after the reserve.
+	it('answers as many committed paths with their own NARs as it advertises', async () => {
+		await useTestServer('confirm-own-nar-page');
+		const { token } = await bootstrap();
+		await setDefaultCacheGrace(dayGraceSeconds);
+		const paths = await pushOwnNarPaths(token, 50);
+		const hashes = paths.map((path) =>
+			storePathHashSchema.parse(path.storePathHash)
+		);
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const requests: unknown[] = [];
+				const confirmed: UploadConfirmResponseInput['paths'] = [];
+				for (
+					let attempt = 0;
+					attempt < 5 && confirmed.length < hashes.length;
+					attempt += 1
+				) {
+					const request = confirmRequest(token, hashes.slice(confirmed.length));
+					const response = await withDeployedSubrequestAllowance(
+						instance.context,
+						200,
+						() => instance.fetch(request)
+					);
+					const body = uploadConfirmResponseSchema.parse(await response.json());
+					requests.push({
+						answered: body.paths.length,
+						advertised: response.headers.get(uploadRequestMaxPathsHeader)
+					});
+					confirmed.push(...body.paths);
+				}
+
+				return { requests, confirmed };
+			}
+		);
+
+		expect(result).toStrictEqual({
+			requests: [
+				{ answered: 34, advertised: '34' },
+				{ answered: 16, advertised: '34' }
+			],
+			confirmed: hashes.map((storePathHash) => ({
+				storePathHash,
+				confirmed: true,
+				grace: { retainUntil: dayAfterStart }
+			}))
+		});
+	});
+
+	// A slice of 49 calls repairs the first four paths in the first group. The
+	// second group then fails.
+	it('queues the purges of earlier groups when a later group fails', async () => {
+		await useTestServer('confirm-purge-before-failure');
+		const { token } = await bootstrap();
+		const paths = await pushOwnNarPaths(token, 10);
+		const hashes = paths.map((path) =>
+			storePathHashSchema.parse(path.storePathHash)
+		);
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const narInfoObjects = new NarInfoObjectsService(instance.context);
+				const cache = resolvedCache(instance.context);
+				const keys = hashes.map((hash) =>
+					narInfoObjects.objectKey(cache, hash)
+				);
+				await env.BLOBS.delete(keys);
+				const purge = vi.spyOn(
+					NarInfoObjectsService.prototype,
+					'purgeReplacedNarUrls'
+				);
+				const edges = vi.spyOn(
+					NarInfoObjectsService.prototype,
+					'committedReferenceEdges'
+				);
+				edges.mockImplementationOnce(async function (
+					this: NarInfoObjectsService,
+					...arguments_
+				) {
+					edges.mockRestore();
+					const firstGroup = await this.committedReferenceEdges(...arguments_);
+					vi.spyOn(
+						NarInfoObjectsService.prototype,
+						'committedReferenceEdges'
+					).mockRejectedValueOnce(new GroupFailedError());
+					return firstGroup;
+				});
+
+				let failure: unknown;
+				try {
+					await withSubrequestSlice(
+						() =>
+							uploadsServiceFor(instance.context).confirmPaths(
+								defaultCache(),
+								hashes
+							),
+						{ subrequests: 49, reserve: 0 }
+					);
+				} catch (error) {
+					failure = error;
+				}
+
+				return {
+					failed: failure instanceof GroupFailedError,
+					purged: purge.mock.calls.map(([, storePathHashes]) => storePathHashes)
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			failed: true,
+			purged: [hashes.slice(0, 4)]
+		});
+	});
+
+	it('confirms a path that is recommitted between two groups of the probe', async () => {
+		await useTestServer('confirm-recommit-between-groups');
+		const { token } = await bootstrap();
+		await setDefaultCacheGrace(dayGraceSeconds);
+		const paths = await pushOwnNarPaths(token, 10);
+		const recommitted = storePathHashSchema.parse(paths[7]?.storePathHash);
+
+		const response = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const spy = vi.spyOn(
+					NarInfoObjectsService.prototype,
+					'committedReferenceEdges'
+				);
+				spy.mockImplementationOnce(async function (
+					this: NarInfoObjectsService,
+					...arguments_
+				) {
+					spy.mockRestore();
+					const edges = await this.committedReferenceEdges(...arguments_);
+					await recommit(instance.context, recommitted);
+					return edges;
+				});
+
+				return withSubrequestSlice(
+					() =>
+						uploadsServiceFor(instance.context).confirmPaths(
+							defaultCache(),
+							paths.map((path) => storePathHashSchema.parse(path.storePathHash))
+						),
+					{ subrequests: 80, reserve: 0 }
+				);
+			}
+		);
+
+		expect(response).toStrictEqual({
+			paths: paths.map((path) => ({
+				storePathHash: path.storePathHash,
+				confirmed: true,
+				grace: { retainUntil: dayAfterStart }
+			}))
+		});
+	});
+
+	it('answers a refusal for too few remaining calls with a retryable 503', async () => {
+		await useTestServer('confirm-exhausted-http');
+		const { token } = await bootstrap();
+
+		const answer = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const request = confirmRequest(token, [repeated('a')]);
+				// The slice keeps 100 calls in reserve, so 14 remain for the request.
+				const response = await withDeployedSubrequestAllowance(
+					instance.context,
+					114,
+					() => instance.fetch(request)
+				);
+				const body = z
+					.object({ code: z.string() })
+					.parse(await response.json());
+
+				return {
+					status: response.status,
+					retryAfter: response.headers.get('retry-after'),
+					code: body.code
+				};
+			}
+		);
+
+		expect(answer).toStrictEqual({
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			retryAfter: '1',
+			code: 'SERVICE_UNAVAILABLE'
+		});
+	});
+
+	it('refuses a confirmation when the remaining calls cannot evaluate one path', async () => {
+		await useTestServer('confirm-exhausted');
+		await bootstrap();
+
+		const refused = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				try {
+					await withSubrequestSlice(
+						() =>
+							uploadsServiceFor(instance.context).confirmPaths(defaultCache(), [
+								storePathHashSchema.parse(repeated('a'))
+							]),
+						{ subrequests: 14, reserve: 0 }
+					);
+					return 'answered';
+				} catch (error) {
+					if (!(error instanceof UploadConfirmSubrequestsExhaustedError)) {
+						throw error;
+					}
+					return {
+						name: error.name,
+						status: error.status,
+						retryAfterSeconds: error.retryAfterSeconds,
+						available: error.available
+					};
+				}
+			}
+		);
+
+		expect(refused).toStrictEqual({
+			name: 'UploadConfirmSubrequestsExhaustedError',
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			retryAfterSeconds: 1,
+			available: 14
 		});
 	});
 
