@@ -236,7 +236,8 @@ const cohortMatrixEntrySchema = z
 		system: z.string().min(1),
 		os: z.string().min(1),
 		remote: z.boolean(),
-		runsOn: z.string().min(1)
+		runsOn: z.string().min(1),
+		mayBuild: z.boolean().optional()
 	})
 	.superRefine((entry, ctx) => {
 		const memberFields = [
@@ -896,6 +897,21 @@ async function requireFailOnDivergenceSupport(
 	}
 }
 
+// A remote store builds on its own disk, so the runner's cleanup does not
+// affect it.
+function warnAboutSkippedCleanup(
+	inputs: Pick<BuildCohortInputs, 'cohort' | 'store'>,
+	reporter: Reporter
+): void {
+	if (inputs.cohort.mayBuild !== false || inputs.store !== '') {
+		return;
+	}
+
+	reporter.warn(
+		'The plan expected this cohort to build nothing, so the job did not free disk space, but the cohort now needs a build. If it runs out of disk space, re-run the whole workflow so that the plan checks the caches again. Re-running only this job reuses the same plan.'
+	);
+}
+
 function cachedClosureSources(
 	inputs: BuildCohortInputs,
 	partition: PartitionData | undefined
@@ -1047,17 +1063,28 @@ export async function buildCohortAction(
 			execution.kind === 'remote'
 				? execution.preparation.graph
 				: execution.graph;
+		const planQueryableMembers = async (): Promise<PlanCohortResultData> => {
+			try {
+				return await planCohort(
+					inputs,
+					queryable,
+					environment,
+					runCupboard,
+					cupboardRunDependencies,
+					plannedGraph
+				);
+			} catch (error) {
+				if (
+					error instanceof CohortPlanRefusedError &&
+					error.reason === 'store-capacity'
+				) {
+					warnAboutSkippedCleanup(inputs, reporter);
+				}
+				throw error;
+			}
+		};
 		const result =
-			queryable.length === 0
-				? undefined
-				: await planCohort(
-						inputs,
-						queryable,
-						environment,
-						runCupboard,
-						cupboardRunDependencies,
-						plannedGraph
-					);
+			queryable.length === 0 ? undefined : await planQueryableMembers();
 
 		// Recheck build-set outputs immediately before realisation. Remove any target
 		// that has become available in the destination or reuse view since planning.
@@ -1107,6 +1134,9 @@ export async function buildCohortAction(
 				...unqueryable.map((member) => member.installable)
 			])
 		];
+		if (buildInstallables.length > 0) {
+			warnAboutSkippedCleanup(inputs, reporter);
+		}
 		const remoteTargets = [
 			...new Set(
 				(partition?.buildSet ?? []).map((target) =>
@@ -3631,6 +3661,12 @@ async function planCohort(
 		inputs.substituter,
 		'--publish',
 		inputs.publish,
+		// A plan sets mayBuild to false only after it has checked that this
+		// cupboard release accepts the option. Other releases reject it.
+		...(inputs.cohort.mayBuild === false &&
+		queryable.length === inputs.cohort.attrs.length
+			? ['--complete-targets']
+			: []),
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...referenceProbeArguments(inputs),
 		...view.arguments,
@@ -3659,6 +3695,7 @@ async function planCohort(
 				throw new CohortPlanRefusedError(
 					inputs.cohort.key,
 					error.status,
+					refusal.reason,
 					describeRefusal(refusal)
 				);
 			}

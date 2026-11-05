@@ -86,6 +86,11 @@ const secondTarget = {
 	rootSuffix: 'x86_64-linux/app-b'
 };
 
+// A released cupboard whose `plan cohort` accepts `--complete-targets`.
+const releasedCupboard = (): Promise<string> => Promise.resolve('v0.0.52');
+const completeTargetsOption = (): Promise<ReadonlySet<string>> =>
+	Promise.resolve(new Set(['--complete-targets']));
+
 const cohortToleranceEntrySchema = z.object({
 	attrs: z.array(z.string()),
 	bestEffort: z.boolean()
@@ -362,7 +367,7 @@ describe('planAction', () => {
 				`plan-file=${path.join(directory, 'cupboard-publish-plan.json')}\n` +
 				'plan-artifact-name=cupboard-publish-plan-test\n' +
 				'target-matrix={"include":[{"attr":".#packages.x86_64-linux.app","system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"rootSuffix":"x86_64-linux/app","outputs":["out"],"root":"github:owner/repo/main/x86_64-linux/app","runsOn":"ubuntu-latest"}]}\n' +
-				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","name":"x86_64-linux/app on remote builders","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"queryInstallables":[null],"expectedPaths":[null],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n' +
+				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","name":"x86_64-linux/app on remote builders","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"queryInstallables":[null],"expectedPaths":[null],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"],"mayBuild":true}]}\n' +
 				'cohort-count=1\n' +
 				'retained-count=0\n' +
 				'target-count=1\n'
@@ -1181,6 +1186,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		temporaryDirectory: tmpdir(),
 		enablePacking: false,
 		packCapacity: 0,
+		maximiseSpace: false,
 		store: '',
 		builders: '',
 		build: 'missing',
@@ -2029,11 +2035,309 @@ describe('cohort-matrix output', () => {
 				`"queryInstallables":["${targetRootDrvPath}^out"],` +
 				`"expectedPaths":["${appStorePath}"],` +
 				'"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"runsOn":"ubuntu-latest",' +
-				'"roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n'
+				'"roots":["github:owner/repo/main/x86_64-linux/app"],"mayBuild":true}]}\n'
 		);
 		expect(outputs).toContain('cohort-count=1\n');
 	});
+
+	it('sets mayBuild to false only for a cohort whose outputs the destination serves', async () => {
+		const cachedPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+		const missingPath = storePath(`/nix/store/${'2'.repeat(32)}-app-b`);
+		const sharedCachedPath = storePath(`/nix/store/${'4'.repeat(32)}-app-c`);
+		const missingTarget = { ...secondTarget, cohort: 'shared' };
+		const sharedCachedTarget = {
+			...target,
+			attr: '.#packages.x86_64-linux.app-c',
+			rootDrvPath: storePath(`/nix/store/${'4'.repeat(32)}-app-c.drv`),
+			rootSuffix: 'x86_64-linux/app-c',
+			cohort: 'shared'
+		};
+
+		const planned = await plannedCohorts(
+			{
+				publish: 'built',
+				targets: JSON.stringify([target, missingTarget, sharedCachedTarget])
+			},
+			{
+				[target.rootDrvPath]: {
+					env: { out: cachedPath },
+					inputs: { drvs: {} },
+					outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+				},
+				[missingTarget.rootDrvPath]: {
+					env: { out: missingPath },
+					inputs: { drvs: {} },
+					outputs: { out: { path: `${'2'.repeat(32)}-app-b` } }
+				},
+				[sharedCachedTarget.rootDrvPath]: {
+					env: { out: sharedCachedPath },
+					inputs: { drvs: {} },
+					outputs: { out: { path: `${'4'.repeat(32)}-app-c` } }
+				}
+			},
+			{
+				fetcher: () =>
+					Promise.resolve(
+						Response.json({ missingStorePathHashes: ['2'.repeat(32)] })
+					),
+				runner: preFilterRunner({
+					ensureRetainedRoots: new Set([
+						'github:owner/repo/main/x86_64-linux/app',
+						'github:owner/repo/main/x86_64-linux/app-c'
+					])
+				})
+			}
+		);
+
+		expect(planned.matrix).toStrictEqual({
+			include: [
+				{
+					key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+					name: 'x86_64-linux/app on remote builders',
+					attrs: [target.attr],
+					installables: [`${target.attr}^out`],
+					queryInstallables: [`${target.rootDrvPath}^out`],
+					expectedPaths: [cachedPath],
+					...cohortMatrixCommon,
+					roots: ['github:owner/repo/main/x86_64-linux/app'],
+					mayBuild: false
+				},
+				{
+					key: 'cohort-x86_64-linux-ubuntu-latest-remote-c89c3e6e58188252',
+					name: 'x86_64-linux on remote builders (2 targets)',
+					attrs: [missingTarget.attr, sharedCachedTarget.attr],
+					installables: [
+						`${missingTarget.attr}^out`,
+						`${sharedCachedTarget.attr}^out`
+					],
+					queryInstallables: [
+						`${missingTarget.rootDrvPath}^out`,
+						`${sharedCachedTarget.rootDrvPath}^out`
+					],
+					expectedPaths: [missingPath, sharedCachedPath],
+					...cohortMatrixCommon,
+					roots: [
+						'github:owner/repo/main/x86_64-linux/app-b',
+						'github:owner/repo/main/x86_64-linux/app-c'
+					],
+					mayBuild: true
+				}
+			]
+		});
+	});
+
+	it('keeps mayBuild for a retained target with several outputs', async () => {
+		const outPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+		const developmentPath = storePath(`/nix/store/${'2'.repeat(32)}-app-dev`);
+
+		const planned = await plannedCohorts(
+			{
+				publish: 'built',
+				targets: JSON.stringify([{ ...target, outputs: ['out', 'dev'] }])
+			},
+			{
+				[target.rootDrvPath]: {
+					env: { out: outPath, dev: developmentPath },
+					inputs: { drvs: {} },
+					outputs: {
+						out: { path: `${'1'.repeat(32)}-app` },
+						dev: { path: `${'2'.repeat(32)}-app-dev` }
+					}
+				}
+			},
+			{
+				fetcher: alwaysAvailableFetcher,
+				runner: preFilterRunner({
+					ensureRetainedRoots: new Set([
+						'github:owner/repo/main/x86_64-linux/app'
+					])
+				})
+			}
+		);
+
+		expect(planned.matrix).toStrictEqual({
+			include: [
+				{
+					key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+					name: 'x86_64-linux/app on remote builders',
+					attrs: [target.attr],
+					installables: [`${target.attr}^out,dev`],
+					queryInstallables: [`${target.rootDrvPath}^out,dev`],
+					expectedPaths: [missingExpectedPath],
+					...cohortMatrixCommon,
+					roots: ['github:owner/repo/main/x86_64-linux/app'],
+					mayBuild: true
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			name: 'cupboard is a release with --complete-targets',
+			maximiseSpace: 'true',
+			version: 'v0.0.52',
+			options: ['--complete-targets'],
+			mayBuild: false,
+			inspections: { versions: 1, helps: 1 }
+		},
+		{
+			name: 'cupboard is a release without --complete-targets',
+			maximiseSpace: 'true',
+			version: 'v0.0.52',
+			options: [],
+			mayBuild: true,
+			inspections: { versions: 1, helps: 1 }
+		},
+		{
+			name: 'cupboard is built from source',
+			maximiseSpace: 'true',
+			version: '5fd164a',
+			options: ['--complete-targets'],
+			mayBuild: true,
+			inspections: { versions: 1, helps: 0 }
+		},
+		{
+			name: 'cupboard is a development build',
+			maximiseSpace: 'true',
+			version: '0.0.0',
+			options: ['--complete-targets'],
+			mayBuild: true,
+			inspections: { versions: 1, helps: 0 }
+		},
+		{
+			name: 'the cohorts do not free disk space',
+			maximiseSpace: 'false',
+			version: 'v0.0.52',
+			options: ['--complete-targets'],
+			mayBuild: true,
+			inspections: { versions: 0, helps: 0 }
+		}
+	])(
+		'keeps mayBuild for a served cohort when $name',
+		async ({ maximiseSpace, version, options, mayBuild, inspections }) => {
+			const cachedPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+			const inspectVersion = vi.fn(() => Promise.resolve(version));
+			const inspectCommandOptions = vi.fn(() =>
+				Promise.resolve(new Set(options))
+			);
+
+			const planned = await plannedCohorts(
+				{ publish: 'built', maximiseSpace },
+				{
+					[target.rootDrvPath]: {
+						env: { out: cachedPath },
+						inputs: { drvs: {} },
+						outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+					}
+				},
+				{
+					fetcher: alwaysAvailableFetcher,
+					runner: preFilterRunner({
+						ensureRetainedRoots: new Set([
+							'github:owner/repo/main/x86_64-linux/app'
+						])
+					}),
+					inspectVersion,
+					inspectCommandOptions
+				}
+			);
+
+			expect({
+				matrix: planned.matrix,
+				inspections: {
+					versions: inspectVersion.mock.calls.length,
+					helps: inspectCommandOptions.mock.calls.length
+				}
+			}).toStrictEqual({
+				inspections,
+				matrix: {
+					include: [
+						{
+							key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+							name: 'x86_64-linux/app on remote builders',
+							attrs: [target.attr],
+							installables: [`${target.attr}^out`],
+							queryInstallables: [`${target.rootDrvPath}^out`],
+							expectedPaths: [cachedPath],
+							...cohortMatrixCommon,
+							roots: ['github:owner/repo/main/x86_64-linux/app'],
+							mayBuild
+						}
+					]
+				}
+			});
+		}
+	);
 });
+
+const cohortMatrixCommon = {
+	system: 'x86_64-linux',
+	os: 'ubuntu-latest',
+	remote: true,
+	bestEffort: false,
+	runsOn: 'ubuntu-latest'
+};
+
+// The cohort matrix records a target without an expected path as JSON null.
+const missingExpectedPath: unknown = JSON.parse('null');
+
+async function plannedCohorts(
+	options: Partial<PlanOptions>,
+	derivations: Readonly<Record<string, unknown>>,
+	dependencies: {
+		readonly fetcher: typeof fetch;
+		readonly runner: EnsureRunner;
+		readonly inspectVersion?: () => Promise<string>;
+		readonly inspectCommandOptions?: () => Promise<ReadonlySet<string>>;
+	}
+): Promise<{
+	readonly matrix: unknown;
+	readonly summary: unknown;
+	readonly warnings: readonly string[];
+}> {
+	const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+	const output = path.join(planDirectory, 'output');
+	const warnings: string[] = [];
+	const results: ResultPayload[] = [];
+
+	await planAction(
+		{ ...baseOptions, optimise: 'true', maximiseSpace: 'true', ...options },
+		{
+			GITHUB_RUN_ID: '12345',
+			RUNNER_TEMP: planDirectory,
+			GITHUB_OUTPUT: output
+		},
+		{
+			...warningReporter(warnings),
+			result: (payload: ResultPayload) => {
+				results.push(payload);
+			}
+		},
+		{
+			evaluator: () =>
+				Promise.resolve({ stdout: JSON.stringify({ derivations }) }),
+			storeDirectory: storeDirectorySchema.parse('/nix/store'),
+			inspectVersion: releasedCupboard,
+			inspectCommandOptions: completeTargetsOption,
+			...dependencies
+		}
+	);
+
+	const outputs = await readFile(output, 'utf8');
+	const matrixLine = outputs
+		.split('\n')
+		.find((line) => line.startsWith('cohort-matrix='));
+	const matrix: unknown = JSON.parse(
+		matrixLine?.slice('cohort-matrix='.length) ?? '{}'
+	);
+
+	return {
+		matrix,
+		summary: results.find((result) => result.kind === 'publication-plan')?.data,
+		warnings
+	};
+}
 
 describe('cohort packing', () => {
 	const appAStorePath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
@@ -2912,7 +3216,8 @@ it.each([
 								remote: true,
 								bestEffort: false,
 								runsOn: 'ubuntu-latest',
-								roots: ['github:owner/repo/main/app/dev']
+								roots: ['github:owner/repo/main/app/dev'],
+								mayBuild: true
 							}
 						]
 					: []
@@ -3071,7 +3376,8 @@ it.each(['outputs', 'built'] as const)(
 									remote: true,
 									bestEffort: false,
 									runsOn: 'ubuntu-latest',
-									roots: ['github:owner/repo/main/x86_64-linux/app']
+									roots: ['github:owner/repo/main/x86_64-linux/app'],
+									mayBuild: true
 								}
 							]
 			},
@@ -3284,7 +3590,8 @@ it('keeps duplicate-attribute output paths when reference publication is unavail
 				roots: [
 					'github:owner/repo/main/app/out',
 					'github:owner/repo/main/app/dev'
-				]
+				],
+				mayBuild: true
 			}
 		]
 	});

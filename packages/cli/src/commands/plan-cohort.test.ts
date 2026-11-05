@@ -1080,6 +1080,78 @@ describe('runPlanCohort', () => {
 		}
 	});
 
+	it('refuses a cohort below its headroom when the targets file may omit cohort members', async () => {
+		const smallStore = dependencies({
+			rootClient: recordingRootClient(buildRequired([])),
+			destinationServed: () => Promise.resolve(new Set([appPath])),
+			capacityProbe: () => Promise.resolve({ available: 100, capacity: 100 })
+		});
+
+		const planned = runPlanCohort(
+			runOptions({ targets: [target()] }),
+			reporter([]),
+			smallStore
+		);
+
+		await expect(planned).rejects.toBeInstanceOf(StoreCapacityError);
+	});
+
+	it('does not refuse a cohort that realises nothing when the store is below its headroom', async () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		const planFile = path.join(directory, 'plan.json');
+		const otherTarget = target({
+			attr: 'packages.x86_64-linux.other',
+			installable: otherPath,
+			expectedPath: otherPath
+		});
+		const smallStore = dependencies({
+			rootClient: recordingRootClient(buildRequired([])),
+			destinationServed: () => Promise.resolve(new Set([appPath])),
+			viewServed: () => Promise.resolve(new Set([otherPath])),
+			capacityProbe: () => Promise.resolve({ available: 100, capacity: 100 })
+		});
+
+		try {
+			await runPlanCohort(
+				runOptions({
+					targets: [target(), otherTarget],
+					planFile,
+					completeTargets: true
+				}),
+				reporter([]),
+				smallStore
+			);
+
+			expect(JSON.parse(await readFile(planFile, 'utf8'))).toStrictEqual({
+				partition: {
+					attachOnly: [appPath],
+					publishByReference: [otherPath],
+					leftUpstream: [],
+					leftUpstreamRejections: [],
+					buildSet: [],
+					dependencyBuilds: [],
+					dependencyCopies: [],
+					rebuildSet: [],
+					closureTargets: [],
+					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
+					downloadSize: 0,
+					narSize: 0,
+					unknownCount: 0,
+					alreadyValid: [],
+					unreachableSubstituters: [],
+					ceiling: { value: 0, source: 'configured' }
+				},
+				capacity: {
+					available: 100,
+					capacity: 100,
+					headroom: defaultHeadroomAbsoluteMinimum
+				}
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it('records forced rebuild installables in the cohort plan', async () => {
 		const payloads: ResultPayload[] = [];
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));

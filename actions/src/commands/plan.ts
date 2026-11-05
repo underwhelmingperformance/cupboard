@@ -47,7 +47,9 @@ import {
 } from '../build-location.ts';
 import {
 	cupboardDebugArguments,
+	inspectCommandOptions,
 	inspectCupboardVersion,
+	isReleaseVersion,
 	requireEnvironmentCredentialSupport,
 	resolveReadCredential
 } from '../cupboard-run.ts';
@@ -267,6 +269,7 @@ export interface PlanOptions {
 	readonly optimise?: string;
 	readonly enablePacking?: string;
 	readonly packCapacity?: string;
+	readonly maximiseSpace?: string;
 	readonly store?: string;
 	readonly builders?: string;
 	readonly build?: string;
@@ -293,6 +296,11 @@ export interface PlanInputs {
 	readonly temporaryDirectory: string;
 	readonly enablePacking: boolean;
 	readonly packCapacity: number;
+	/**
+	Whether cohort jobs free disk space when they may build. Without it, no
+	cohort is told that it can skip the cleanup.
+	*/
+	readonly maximiseSpace: boolean;
 	readonly store: string;
 	/**
 	The Nix `builders` specification that remote cohorts use. The plan reads
@@ -320,6 +328,7 @@ export interface PlanDependencies {
 	readonly fetcher?: typeof fetch;
 	readonly runner?: EnsureRunner;
 	readonly inspectVersion?: typeof inspectCupboardVersion;
+	readonly inspectCommandOptions?: typeof inspectCommandOptions;
 	readonly signal?: AbortSignal;
 	readonly createArtifactName?: () => string;
 	/**
@@ -384,6 +393,10 @@ export function registerPlanCommand(
 		.option(
 			'--pack-capacity <bytes>',
 			'available disk capacity, in bytes, for measured cohort packing'
+		)
+		.option(
+			'--maximise-space <value>',
+			'whether cohort jobs free disk space when they may build: true or false'
 		)
 		.option(
 			'--store <uri>',
@@ -538,6 +551,7 @@ export function resolvePlanInputs(
 			path.join(temporaryDirectory, 'cupboard-publish-plan.json'),
 		enablePacking: isPackingEnabled,
 		packCapacity: resolvePackCapacity(isPackingEnabled, options.packCapacity),
+		maximiseSpace: isEnabled('maximise-space', options.maximiseSpace, false),
 		store: provided(options.store) ?? '',
 		builders: provided(options.builders) ?? '',
 		build: providedChoice(
@@ -698,13 +712,15 @@ export async function planAction(
 		);
 	}
 
-	const { plan, evaluations, referencePublications } = inputs.optimise
-		? await optimisedPlan(inputs, reporter, dependencies)
-		: {
-				plan: unoptimisedPlan(inputs.targets),
-				evaluations: [],
-				referencePublications: []
-			};
+	const { plan, evaluations, referencePublications, servedPaths } =
+		inputs.optimise
+			? await optimisedPlan(inputs, reporter, dependencies)
+			: {
+					plan: unoptimisedPlan(inputs.targets),
+					evaluations: [],
+					referencePublications: [],
+					servedPaths: new Set<StorePathString>()
+				};
 	// Only an optimised plan has the evaluated graph that the pre-filter needs.
 	// An unoptimised plan must keep every cohort in the matrix.
 	let cohortDecisions: readonly CohortPreFilterDecision[];
@@ -740,6 +756,7 @@ export async function planAction(
 		cohortDecisions,
 		referencePublications,
 		evaluations,
+		await cohortSkippablePaths(inputs, servedPaths, dependencies),
 		dependencies.createArtifactName?.() ??
 			`cupboard-publish-plan-${randomUUID()}`,
 		dependencies.measurer ??
@@ -752,6 +769,37 @@ export async function planAction(
 	);
 }
 
+// Without `maximise-space`, cohort jobs never free disk space, so the plan keeps
+// `mayBuild` true and does not inspect cupboard. Every cohort job installs the
+// same cupboard as the plan job. A build from source compiles cupboard in each
+// cohort job, and a release without `plan cohort --complete-targets` refuses a
+// store below its headroom. A cohort that skipped the cleanup could then run
+// out of space or be refused, so `mayBuild` stays true in both cases.
+async function cohortSkippablePaths(
+	inputs: PlanInputs,
+	servedPaths: ReadonlySet<StorePathString>,
+	dependencies: PlanDependencies
+): Promise<ReadonlySet<StorePathString>> {
+	if (!inputs.maximiseSpace || servedPaths.size === 0) {
+		return new Set();
+	}
+
+	const version = await (dependencies.inspectVersion ?? inspectCupboardVersion)(
+		inputs.cupboardPath,
+		dependencies.signal
+	);
+
+	if (!isReleaseVersion(version)) {
+		return new Set();
+	}
+
+	const options = await (
+		dependencies.inspectCommandOptions ?? inspectCommandOptions
+	)(inputs.cupboardPath, ['plan', 'cohort'], dependencies.signal);
+
+	return options.has('--complete-targets') ? servedPaths : new Set();
+}
+
 async function optimisedPlan(
 	inputs: PlanInputs,
 	reporter: Reporter,
@@ -760,6 +808,7 @@ async function optimisedPlan(
 	readonly plan: PublishPlan;
 	readonly evaluations: readonly TargetEvaluation[];
 	readonly referencePublications: readonly PlanReferenceOutcome[];
+	readonly servedPaths: ReadonlySet<StorePathString>;
 }> {
 	const { evaluations, unevaluated } = await evaluateTargets(
 		inputs.targets,
@@ -778,7 +827,7 @@ async function optimisedPlan(
 		);
 	}
 
-	const retainedRoots = await retainedRootsFor(
+	const { retainedRoots, servedPaths } = await checkDestination(
 		inputs,
 		evaluations,
 		dependencies
@@ -840,20 +889,26 @@ async function optimisedPlan(
 					joinRoot(inputs.rootPrefix, evaluation.target.rootSuffix)
 				)
 		),
-		referencePublications
+		referencePublications,
+		servedPaths
 	};
 }
 
-async function retainedRootsFor(
+interface DestinationCheck {
+	readonly retainedRoots: Set<string>;
+	readonly servedPaths: ReadonlySet<StorePathString>;
+}
+
+async function checkDestination(
 	inputs: PlanInputs,
 	evaluations: readonly TargetEvaluation[],
 	dependencies: PlanDependencies
-): Promise<Set<string>> {
+): Promise<DestinationCheck> {
 	if (
 		inputs.build === 'rebuild' ||
 		(inputs.publish !== 'outputs' && inputs.publish !== 'built')
 	) {
-		return new Set<string>();
+		return { retainedRoots: new Set<string>(), servedPaths: new Set() };
 	}
 
 	const credentials =
@@ -871,13 +926,15 @@ async function retainedRootsFor(
 		...credentials,
 		...fetcher
 	});
-	return ensureAvailableTargets(
+	const retainedRoots = await ensureAvailableTargets(
 		inputs,
 		evaluations,
 		availablePaths,
 		dependencies.runner,
 		dependencies.signal
 	);
+
+	return { retainedRoots, servedPaths: availablePaths };
 }
 
 export function validateRemoteOutputPredictability(
@@ -923,6 +980,7 @@ async function writePlan(
 	cohortDecisions: readonly CohortPreFilterDecision[],
 	referencePublications: readonly PlanReferenceOutcome[],
 	evaluations: readonly TargetEvaluation[],
+	servedPaths: ReadonlySet<StorePathString>,
 	artifactName: string,
 	measurer: NonNullable<PlanDependencies['measurer']>
 ): Promise<void> {
@@ -958,7 +1016,12 @@ async function writePlan(
 		evaluations,
 		measurer
 	);
-	const cohortEntries = cohortMatrix(inputs, packedCohorts, evaluations);
+	const cohortEntries = cohortMatrix(
+		inputs,
+		packedCohorts,
+		evaluations,
+		servedPaths
+	);
 	await setOutput(
 		environment,
 		'cohort-matrix',
@@ -1416,10 +1479,17 @@ function targetMatrix(
 // `queryInstallables` uses derived paths from evaluation. `expectedPaths` has a
 // value only for a target with one predictable output. A missing value in
 // either list tells the build job to keep the target in its build set.
+//
+// The build job leaves a target out of its build set when `build` is `missing`
+// and a probed cache serves the target's expected path. `servedPaths` lists the
+// paths that the plan found in those caches. `mayBuild` is false only when every
+// target of the cohort has its expected path in `servedPaths`, and the flake
+// publish workflow then skips freeing disk space in the job.
 function cohortMatrix(
 	inputs: PlanInputs,
 	cohorts: readonly Cohort[],
-	evaluations: readonly TargetEvaluation[]
+	evaluations: readonly TargetEvaluation[],
+	servedPaths: ReadonlySet<string>
 ): readonly object[] {
 	const evaluationByTarget = new Map(
 		evaluations.map((evaluation) => [
@@ -1428,29 +1498,39 @@ function cohortMatrix(
 		])
 	);
 
-	return cohorts.map((cohort) => ({
-		key: cohort.key,
-		name: cohortName(inputs, cohort),
-		attrs: cohort.targets.map((target) => target.attr),
-		installables: cohort.installables,
-		queryInstallables: cohort.targets.map((target) =>
-			queryInstallableFor(
-				target,
-				evaluationByTarget.get(targetIdentityKey(target))
-			)
-		),
-		expectedPaths: cohort.targets.map((target) =>
+	return cohorts.map((cohort) => {
+		const expectedPaths = cohort.targets.map((target) =>
 			expectedPathFor(target, evaluationByTarget.get(targetIdentityKey(target)))
-		),
-		system: cohort.system,
-		os: cohort.os,
-		remote: cohort.remote,
-		bestEffort: isBestEffortCohort(cohort.targets),
-		runsOn: cohort.os,
-		roots: cohort.targets.map((target) =>
-			joinRoot(inputs.rootPrefix, target.rootSuffix)
-		)
-	}));
+		);
+
+		return {
+			key: cohort.key,
+			name: cohortName(inputs, cohort),
+			attrs: cohort.targets.map((target) => target.attr),
+			installables: cohort.installables,
+			queryInstallables: cohort.targets.map((target) =>
+				queryInstallableFor(
+					target,
+					evaluationByTarget.get(targetIdentityKey(target))
+				)
+			),
+			expectedPaths,
+			system: cohort.system,
+			os: cohort.os,
+			remote: cohort.remote,
+			bestEffort: isBestEffortCohort(cohort.targets),
+			runsOn: cohort.os,
+			roots: cohort.targets.map((target) =>
+				joinRoot(inputs.rootPrefix, target.rootSuffix)
+			),
+			mayBuild:
+				inputs.build !== 'missing' ||
+				expectedPaths.some(
+					(expectedPath) =>
+						expectedPath === undefined || !servedPaths.has(expectedPath)
+				)
+		};
+	});
 }
 
 async function packedCohortsFor(

@@ -101,6 +101,13 @@ inputs:
       Disk space in bytes that each packed job can use. Required when
       enable-packing is true.
     required: false
+  maximise-space:
+    description:
+      Whether the cohort jobs free disk space when they may build. When false,
+      every cohort job keeps mayBuild true, and the plan does not inspect the
+      cupboard version.
+    required: false
+    default: 'false'
   store:
     description:
       ssh-ng:// URI of the remote store that the cohort jobs build in. Packing
@@ -219,6 +226,7 @@ runs:
         OPTIMISE: ${{ inputs.optimise }}
         ENABLE_PACKING: ${{ inputs.enable-packing }}
         PACK_CAPACITY: ${{ inputs.pack-capacity }}
+        MAXIMISE_SPACE: ${{ inputs.maximise-space }}
         STORE: ${{ inputs.store }}
         BUILDERS: ${{ inputs.builders }}
         BUILD: ${{ inputs.build }}
@@ -240,6 +248,7 @@ runs:
           --plan-file "$PLAN_FILE"
           --optimise "$OPTIMISE"
           --enable-packing "$ENABLE_PACKING"
+          --maximise-space "$MAXIMISE_SPACE"
           --store "$STORE"
           --builders "$BUILDERS")
         args+=(--build "$BUILD" --substituter "$SUBSTITUTER" --publish "$PUBLISH")

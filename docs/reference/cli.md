@@ -2568,6 +2568,7 @@ Options:
   --unknown-ceiling-untrusted-fallback <count>  the same maximum when the store refuses to check them again (default: 5)
   --headroom-absolute-minimum <bytes>           minimum free space to leave in the store, in bytes
   --headroom-fraction <fraction>                free space to leave in the store, as a fraction of the store's capacity
+  --complete-targets                            the targets file lists every cohort member, so a cohort that realises no paths passes the capacity check
   --cohort-split-possible                       record in the plan that this cohort could still be split into smaller build and publish attempts
   --remote-store-configured                     record in the plan that the workflow uses a remote store
   --component-publication-applicable            record in the plan that component publication applies to this cohort

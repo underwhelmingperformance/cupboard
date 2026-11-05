@@ -194,6 +194,7 @@ export interface PlanCohortOptions extends PlanProbeOptions {
 	readonly headroomAbsoluteMinimum?: number;
 	readonly headroomFraction?: number;
 	readonly cohortSplitPossible?: boolean;
+	readonly completeTargets?: boolean;
 	readonly remoteStoreConfigured?: boolean;
 	readonly componentPublicationApplicable?: boolean;
 }
@@ -280,6 +281,12 @@ export interface PlanCohortRunOptions {
 	readonly ceiling: AvailabilityCeilingConfig;
 	readonly detected: DetectedCapacityOptions;
 	readonly headroom?: Partial<HeadroomConfig>;
+	/**
+	Whether the targets file lists every member of the cohort. Only then can the
+	plan tell that the cohort realises no paths, so only then does the capacity
+	preflight accept a store below its headroom.
+	*/
+	readonly completeTargets?: boolean;
 }
 
 // An unreadable key file is ordinary on a machine whose keys belong to another
@@ -404,6 +411,10 @@ export function registerPlanCommands(
 			parseFraction
 		)
 		.option(
+			'--complete-targets',
+			'the targets file lists every cohort member, so a cohort that realises no paths passes the capacity check'
+		)
+		.option(
 			'--cohort-split-possible',
 			'record in the plan that this cohort could still be split into smaller build and publish attempts'
 		)
@@ -521,6 +532,7 @@ export function registerPlanCommands(
 								options.unknownCeilingUntrustedFallback ??
 								defaultUnknownCeilingUntrustedFallback
 						},
+						completeTargets: options.completeTargets === true,
 						detected: {
 							cohortSplitPossible: options.cohortSplitPossible === true,
 							remoteStoreConfigured: options.remoteStoreConfigured === true,
@@ -786,6 +798,19 @@ export async function runPlanCohort(
 	});
 }
 
+function doesRealisePaths(partition: AvailabilityPartition): boolean {
+	return (
+		partition.buildSet.length > 0 ||
+		partition.dependencyBuilds.length > 0 ||
+		partition.dependencyCopies.length > 0 ||
+		partition.closureTargets.length > 0 ||
+		partition.counts.willBuild > 0 ||
+		partition.counts.willSubstitute > 0 ||
+		partition.unknownCount > 0 ||
+		partition.narSize > 0
+	);
+}
+
 async function checkLocalCapacity(
 	options: PlanCohortRunOptions,
 	partition: AvailabilityPartition,
@@ -800,6 +825,8 @@ async function checkLocalCapacity(
 					narSize: partition.narSize,
 					unknownCount: partition.unknownCount
 				},
+				realisesPaths:
+					options.completeTargets !== true || doesRealisePaths(partition),
 				storePath: options.storePath,
 				probe: dependencies.capacityProbe,
 				detected: options.detected,
