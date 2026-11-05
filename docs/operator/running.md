@@ -316,6 +316,12 @@ Worker, and the narinfo deadline in the tenant Worker covers that body. The
 tenant object answers the `path-info` probe of a reuse view without a read
 deadline.
 
+In the control Worker, the deadline of a narinfo read or a probe of a default or
+named cache starts before admission and also covers it: the membership filter
+and marker reads from the Cache API and KV, the D1 reads, a migration of the
+tenant's cache catalogue and the check of a read token. Admission that is still
+waiting when the deadline passes returns 503 with `Retry-After`.
+
 The native binding has no abort option for `get`. A timed-out operation can
 continue after the server returns 503. The server observes late rejection and
 cancels a late unused body once, best-effort within the invocation's lifetime.

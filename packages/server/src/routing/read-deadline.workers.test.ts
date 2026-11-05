@@ -1,9 +1,13 @@
 import { startCapture } from '@cupboard/logger/testing';
 import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import { env } from 'cloudflare:workers';
+import { eq, sql } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { tenantMemberKey } from '../control/tenant-member-key.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import { committedPath } from '../do/reuse-view-read.test-support.ts';
 import { attestationListObjectKey, narInfoObjectKey } from '../http/http.ts';
 import {
@@ -198,6 +202,284 @@ describe('a read probe whose R2 body stalls', () => {
 			} finally {
 				capture.stop();
 			}
+		}
+	);
+});
+
+const unpublishedHash = '0'.repeat(32);
+
+/**
+A binding call that never returns. `reached` runs when the call starts.
+*/
+function stalledCall(reached: () => void): Promise<never> {
+	reached();
+
+	return Promise.race([]);
+}
+
+/**
+A tenant object namespace whose stubs stall every call of `method`.
+*/
+function stallingTenantObjects(
+	method: 'authoriseCacheContentRead' | 'migrateCacheCatalogue',
+	reached: () => void
+): DurableObjectNamespace {
+	return new Proxy(env.CUPBOARD_DO, {
+		get(target, property) {
+			if (property !== 'get') {
+				return passThrough(target, property);
+			}
+
+			return (id: DurableObjectId) =>
+				new Proxy(target.get(id), {
+					get(stub, member) {
+						return member === method
+							? () => stalledCall(reached)
+							: passThrough(stub, member);
+					}
+				});
+		}
+	});
+}
+
+/**
+A KV namespace whose reads of `key` stall.
+*/
+function stallingKv(key: string, reached: () => void): KVNamespace {
+	return new Proxy(env.TENANT_CACHE, {
+		get(target, property) {
+			const value = passThrough(target, property);
+
+			if (property !== 'get' || typeof value !== 'function') {
+				return value;
+			}
+
+			return (read: string, ...options: unknown[]): unknown =>
+				read === key
+					? stalledCall(reached)
+					: Reflect.apply(value, undefined, [read, ...options]);
+		}
+	});
+}
+
+interface StalledAdmission {
+	readonly bindings: Partial<Env>;
+	readonly restore: () => void;
+}
+
+interface AdmissionStall {
+	readonly wait: string;
+	readonly authorization: string;
+	readonly stall: (reached: () => void) => Promise<StalledAdmission>;
+}
+
+function nothingToRestore(): void {
+	// A stall that replaces only bindings leaves nothing behind.
+}
+
+const markerStall: AdmissionStall = {
+	wait: 'the KV read of the membership marker',
+	authorization: credentials,
+	stall: (reached) =>
+		Promise.resolve({
+			bindings: {
+				TENANT_CACHE: stallingKv(tenantMemberKey(fixtureTenant), reached)
+			},
+			restore: nothingToRestore
+		})
+};
+
+const admissionStalls: readonly AdmissionStall[] = [
+	{
+		wait: 'the Cache API read of the membership filter',
+		authorization: credentials,
+		stall: (reached) => {
+			const match = vi
+				.spyOn(caches.default, 'match')
+				.mockImplementation(() => stalledCall(reached));
+
+			return Promise.resolve({
+				bindings: {},
+				restore: () => {
+					match.mockRestore();
+				}
+			});
+		}
+	},
+	{
+		wait: 'the KV read of the membership filter',
+		authorization: credentials,
+		stall: (reached) => {
+			const match = vi
+				.spyOn(caches.default, 'match')
+				.mockResolvedValue(undefined);
+
+			return Promise.resolve({
+				bindings: { TENANT_CACHE: stallingKv('tenant-filter', reached) },
+				restore: () => {
+					match.mockRestore();
+				}
+			});
+		}
+	},
+	markerStall,
+	{
+		wait: 'the read-token check',
+		authorization: 'Bearer token',
+		stall: (reached) =>
+			Promise.resolve({
+				bindings: {
+					CUPBOARD_DO: stallingTenantObjects(
+						'authoriseCacheContentRead',
+						reached
+					)
+				},
+				restore: nothingToRestore
+			})
+	},
+	{
+		wait: 'the cache catalogue migration',
+		authorization: credentials,
+		stall: async (reached) => {
+			await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+				.update(d1Schema.tenant)
+				.set({ cacheCatalogueVersion: sql`null` })
+				.where(eq(d1Schema.tenant.id, fixtureTenant));
+
+			return {
+				bindings: {
+					CUPBOARD_DO: stallingTenantObjects('migrateCacheCatalogue', reached)
+				},
+				restore: nothingToRestore
+			};
+		}
+	}
+];
+
+interface BoundedRead {
+	readonly name: string;
+	readonly path: string;
+	readonly init: (authorization: string) => RequestInit;
+}
+
+const narInfoRead: BoundedRead = {
+	name: 'a narinfo read',
+	path: `/${unpublishedHash}.narinfo`,
+	init: (authorization) => ({ headers: { authorization } })
+};
+
+const boundedReads: readonly BoundedRead[] = [
+	narInfoRead,
+	{
+		name: 'the path-info probe',
+		path: '/api/v1/path-info',
+		init: (authorization) => ({
+			method: 'POST',
+			headers: { 'content-type': 'application/json', authorization },
+			body: JSON.stringify({
+				storePaths: [`/nix/store/${unpublishedHash}-unpublished`]
+			})
+		})
+	},
+	{
+		name: 'the attestation-info probe',
+		path: '/api/v1/attestation-info',
+		init: (authorization) => ({
+			method: 'POST',
+			headers: { 'content-type': 'application/json', authorization },
+			body: JSON.stringify({ storePathHashes: [unpublishedHash] })
+		})
+	}
+];
+
+// The deadline must start before admission at every mount of the read routes.
+const cachePrefixes = [
+	{ cache: 'the default cache', prefix: '' },
+	{ cache: 'a named cache', prefix: '/cache/builds' }
+] as const;
+
+async function stalledAdmissionResponse(
+	read: BoundedRead,
+	admission: AdmissionStall,
+	prefix: string
+): Promise<unknown> {
+	const reached = Promise.withResolvers<undefined>();
+	const { bindings, restore } = await admission.stall(() => {
+		reached.resolve(undefined);
+	});
+	const capture = startCapture();
+	vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+
+	try {
+		const responding = readFetch(
+			`${prefix}${read.path}`,
+			read.init(admission.authorization),
+			bindings
+		);
+		await reached.promise;
+		await vi.advanceTimersByTimeAsync(readRequestBudgetMs);
+		// After a KV read fails, admission reads D1, and the deadline refuses the
+		// read. Admission retries a refused D1 read once, after a delay on the
+		// same timers.
+		await vi.runAllTimersAsync();
+		const response = await responding;
+
+		return {
+			status: response.status,
+			retryAfter: response.headers.get('retry-after'),
+			cacheControl: response.headers.get('cache-control'),
+			records: streamRecords(capture.logs, variableFields)
+		};
+	} finally {
+		restore();
+		capture.stop();
+	}
+}
+
+const refusedAtDeadline = {
+	status: StatusCodes.SERVICE_UNAVAILABLE,
+	retryAfter: '5',
+	cacheControl: 'no-store',
+	records: []
+};
+
+describe('a read whose admission stalls', () => {
+	beforeEach(async () => {
+		await resetTestServer();
+		await recordTransition('cache-identity', 'complete');
+		await initialiseViaWorker();
+		await provisionFixtureTenant({
+			read: reader,
+			defaultCacheAccess: 'private'
+		});
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it.each(
+		admissionStalls.flatMap((admission) =>
+			cachePrefixes.map((cache) => ({ ...admission, ...cache }))
+		)
+	)(
+		'refuses a narinfo read from $cache retryably when $wait stalls past the read deadline',
+		async ({ prefix, ...admission }) => {
+			expect(
+				await stalledAdmissionResponse(narInfoRead, admission, prefix)
+			).toStrictEqual(refusedAtDeadline);
+		}
+	);
+
+	it.each(
+		boundedReads.flatMap((read) =>
+			cachePrefixes.map((cache) => ({ read, ...cache }))
+		)
+	)(
+		'starts the deadline of $read.name for $cache before admission',
+		async ({ read, prefix }) => {
+			expect(
+				await stalledAdmissionResponse(read, markerStall, prefix)
+			).toStrictEqual(refusedAtDeadline);
 		}
 	);
 });

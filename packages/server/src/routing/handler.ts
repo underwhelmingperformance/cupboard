@@ -72,7 +72,7 @@ import {
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
-import { readApp } from './read-app.ts';
+import { readApp, routeReadDeadlines } from './read-app.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
 import {
 	innerRequest,
@@ -97,6 +97,8 @@ const cacheMetadataPathPattern =
 	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/path-info$/u;
 
 const strictTransportSecurity = 'max-age=31536000';
+
+const readAppMounts = ['/t/:tenant', '/t/:tenant/cache/:cacheName'] as const;
 
 const httpsOnly = createMiddleware<WorkerHonoEnv>(async (context, next) => {
 	if (new URL(context.req.url).protocol !== 'https:') {
@@ -224,6 +226,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		}
 	);
 
+	for (const mount of readAppMounts) {
+		routeReadDeadlines(app, mount);
+	}
+
 	// The membership filter and KV marker reject unknown tenant slugs before a
 	// request can create a Durable Object. Every remaining request reads the
 	// authoritative D1 row, so a status change applies to reads and writes without
@@ -314,8 +320,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		)
 	);
 
-	app.route('/t/:tenant', readApp);
-	app.route('/t/:tenant/cache/:cacheName', readApp);
+	for (const mount of readAppMounts) {
+		app.route(mount, readApp);
+	}
 
 	// Require the literal spelling of the namespace and view name, as for cache
 	// routes.
