@@ -32,7 +32,7 @@ import {
 	type BearerAttempt,
 	bearerAttempt
 } from './credentials.ts';
-import { reachableFetcher } from './transport.ts';
+import { keepAliveFetch, reachableFetcher } from './transport.ts';
 
 export type TenantRpc = JsonifiedClient<
 	ContractRouterClient<typeof tenantContract>
@@ -96,7 +96,7 @@ function derivedClient<C extends AnyContractRouter>(
 	url: URL,
 	options: TenantRpcOptions
 ): JsonifiedClient<ContractRouterClient<C>> {
-	const { credential, signal, fetcher = fetch } = options;
+	const { credential, signal, fetcher = keepAliveFetch } = options;
 	const link = new OpenAPILink<RpcContext>(contract, {
 		url,
 		interceptors: [

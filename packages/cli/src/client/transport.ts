@@ -1,3 +1,5 @@
+import { setImmediate } from 'node:timers/promises';
+
 import { withReadAuthentication } from '@cupboard/nix';
 import { InvalidCacheUrlBaseError } from '@cupboard/nix-store/errors';
 import { isHttpsOrLoopbackHttp, parseBaseUrl } from '@cupboard/nix-store/url';
@@ -15,6 +17,20 @@ import {
 } from '../errors.ts';
 
 /**
+Calls the global `fetch` after the event loop has run its pending
+`setImmediate` callbacks. When a response ends, undici returns its keep-alive
+connection to the pool in a `setImmediate` callback. A request sent before that
+callback finds the connection busy and opens another one, so without this wait
+a request that directly follows another to the same origin opens a second
+connection.
+*/
+export const keepAliveFetch: typeof fetch = async (input, init) => {
+	await setImmediate();
+
+	return fetch(input, init);
+};
+
+/**
 Retries rejected fetches and transient status responses with backoff. After
 the retry budget is exhausted, a rejected `TypeError` becomes an
 {@link UnreachableHostError} for the requested host. Other errors pass through
@@ -22,7 +38,7 @@ unchanged.
 */
 export function resilientFetcher(
 	replaySafety: ReplaySafety,
-	fetcher: typeof fetch = fetch,
+	fetcher: typeof fetch = keepAliveFetch,
 	trustedOrigin?: string
 ): typeof fetch {
 	return reachableFetcher(
@@ -40,7 +56,7 @@ export function cacheReadFetcher(
 	fetcher?: typeof fetch,
 	options: CacheReadOptions = {}
 ): typeof fetch {
-	const authenticated = withReadAuthentication(fetcher ?? fetch, {
+	const authenticated = withReadAuthentication(fetcher ?? keepAliveFetch, {
 		tenantUrl,
 		netrcFile: options.netrcFile
 	});

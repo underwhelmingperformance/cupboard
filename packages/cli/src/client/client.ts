@@ -67,7 +67,11 @@ import {
 	runCommitSession
 } from './commit-socket.ts';
 import { type AccessCredential, bearerAttempt } from './credentials.ts';
-import { reachableFetcher, resilientFetcher } from './transport.ts';
+import {
+	keepAliveFetch,
+	reachableFetcher,
+	resilientFetcher
+} from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
 
@@ -78,7 +82,7 @@ export class CupboardClient {
 	static fromUrl(value: URL, options: CupboardClientOptions): CupboardClient {
 		return new CupboardClient(
 			new URL(value),
-			fetch,
+			keepAliveFetch,
 			options.cache,
 			options.signal
 		);
@@ -92,7 +96,7 @@ export class CupboardClient {
 
 	constructor(
 		public readonly baseUrl: URL,
-		public readonly fetcher: typeof fetch = fetch,
+		public readonly fetcher: typeof fetch = keepAliveFetch,
 		// Keep the cache scope separate from `baseUrl`. Resolving an absolute
 		// route can discard the base path, including a tenant prefix.
 		public readonly cache: CacheScope,

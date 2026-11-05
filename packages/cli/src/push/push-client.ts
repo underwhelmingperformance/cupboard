@@ -44,6 +44,7 @@ import { CupboardClient } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
+import { keepAliveFetch } from '../client/transport.ts';
 import {
 	CupboardHttpError,
 	UploadNegotiationMismatchError
@@ -88,7 +89,7 @@ export function pushClientFor(
 	options: PushClientOptions
 ): PushClient {
 	const cache = options.cache;
-	const baseFetcher = options.fetcher ?? fetch;
+	const baseFetcher = options.fetcher ?? keepAliveFetch;
 	let pageSize = negotiationPageSize;
 	// Each attempt gets its own client, so a concurrent call or an attempt that
 	// missed its deadline cannot overwrite the capabilities of the answer that
@@ -179,7 +180,7 @@ export function pushClientFor(
 	});
 	const raw = new CupboardClient(
 		new URL(url),
-		options.fetcher ?? fetch,
+		baseFetcher,
 		cache,
 		options.signal
 	);
@@ -568,7 +569,7 @@ export function pushClientFor(
 		tenantServes: async () => {
 			const target = new URL(url);
 			target.pathname = `${target.pathname.replace(/\/+$/u, '')}/nix-cache-info`;
-			const response = await (options.fetcher ?? fetch)(target, {
+			const response = await baseFetcher(target, {
 				signal: options.signal
 			});
 			await discardResponseBody(response);
