@@ -22,6 +22,12 @@ the token, only once and only within five minutes. The tenant refuses a sign-in
 token that isn't bound to its URL. The CLI exchanges the token for a session
 straight away. It doesn't keep the token or the Cloudflare sign-in.
 
+If the CLI can't connect to the identity provider (Cloudflare, or the issuer
+that `--oidc-issuer` selects) or to the tenant to exchange the sign-in, it
+retries the request automatically. The authorisation code and the ID token each
+work only once, but the failed request never reached the server, so the retry
+can still use them.
+
 Signing in only works if the tenant trusts your identity. That means you're
 either the tenant's owner, or an administrator has
 [added you](./access.md#adding-an-administrator). If you haven't been added yet,
@@ -147,12 +153,15 @@ for retry recovery. Bounded maintenance clears that ciphertext after the grace
 window; ciphertext can remain until the relevant maintenance pass runs, but
 expired ciphertext cannot recover a response.
 
+The CLI retries a refresh request automatically only when it could not connect
+to the server. The request never reached the server, so the automatic retry
+cannot revoke the refresh-token family.
+
 If a refresh response is lost, retry the command within one minute. The CLI
 keeps the consumed refresh token until it receives a response. The server then
 returns the same successor refresh token and issues a new access token after
-checking the current trust rules. The CLI does not automatically retry a failed
-refresh request. A later retry revokes that refresh-token family, and you have
-to sign in again.
+checking the current trust rules. A later retry revokes that refresh-token
+family, and you have to sign in again.
 
 A deployment session renews in the same way, and each renewal checks the
 deployment's control-plane trust rules. Neither a tenant nor the control plane

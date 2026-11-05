@@ -38,6 +38,16 @@ export function isTransientResponse(response: Response): boolean {
 
 export type ReplaySafety = 'replay-safe' | 'replay-unsafe';
 
+export interface RetryingFetcherOptions extends FetchObservationOptions {
+	/**
+	Whether a `replay-unsafe` request is retried after its connection could
+	not be established. Defaults to true. A caller that already retries the
+	whole operation sets it to false, so that the two layers of retries do
+	not multiply.
+	*/
+	readonly retriesConnectionFailures?: boolean;
+}
+
 /**
 For a `replay-safe` request, retries a fetch that rejects with a network
 error ({@link isFetchNetworkError}) and each {@link isTransientResponse}
@@ -45,7 +55,15 @@ status, with at most {@link maxTransientRetries} additional attempts. Other
 rejections and other responses return immediately. A `Retry-After` value in
 seconds or as an HTTP date supplies the delay, up to the maximum backoff. A
 missing or invalid value uses the normal backoff. An abort signal ends the
-wait immediately. A `replay-unsafe` request makes a single attempt.
+wait immediately.
+
+A `replay-unsafe` request is retried with the same limit and backoff only
+when its redirect mode is `manual` or `error` and the connection could not
+be established. The server then cannot have received any part of the
+request. When fetch follows redirects, the failed connection can belong to
+a redirect target after the server completed the original request, so a
+request that follows redirects is not retried. Every other rejection and
+every response of a `replay-unsafe` request returns after one attempt.
 
 The function clones a `Request` before each attempt. Callers that send a body
 must therefore supply reusable bytes rather than a one-shot stream.
@@ -53,24 +71,25 @@ must therefore supply reusable bytes rather than a one-shot stream.
 export function retryingFetcher(
 	fetcher: typeof fetch,
 	replaySafety: ReplaySafety,
-	observation: FetchObservationOptions = {}
+	options: RetryingFetcherOptions = {}
 ): typeof fetch {
+	const { retriesConnectionFailures = true, ...observation } = options;
+	const canRetryResponses = replaySafety === 'replay-safe';
+
 	const retrying: typeof fetch = async (input, init) => {
 		const signal =
 			init?.signal === null
 				? undefined
 				: (init?.signal ??
 					(input instanceof Request ? input.signal : undefined));
-
-		if (replaySafety === 'replay-unsafe') {
-			signal?.throwIfAborted();
-
-			return observeFetchAttempt(fetcher, input, init, {
-				...observation,
-				attempt: 1,
-				replaySafety
-			});
-		}
+		const redirect =
+			init?.redirect ?? (input instanceof Request ? input.redirect : 'follow');
+		const isRetryableRejection = (error: unknown): error is TypeError =>
+			replaySafety === 'replay-safe'
+				? isFetchNetworkError(error)
+				: retriesConnectionFailures &&
+					redirect !== 'follow' &&
+					isConnectionSetupFailure(error);
 
 		const request = {
 			method: init?.method ?? (input instanceof Request ? input.method : 'GET'),
@@ -93,13 +112,13 @@ export function retryingFetcher(
 			} catch (error) {
 				if (
 					signal?.aborted === true ||
-					!isFetchNetworkError(error) ||
+					!isRetryableRejection(error) ||
 					retries >= maxTransientRetries
 				) {
 					recordFetchOutcome(
 						signal?.aborted === true
 							? 'cancelled'
-							: isFetchNetworkError(error) && retries >= maxTransientRetries
+							: isRetryableRejection(error) && retries >= maxTransientRetries
 								? 'exhausted'
 								: 'failed'
 					);
@@ -118,7 +137,11 @@ export function retryingFetcher(
 				continue;
 			}
 
-			if (isTransientResponse(response) && retries < maxTransientRetries) {
+			if (
+				canRetryResponses &&
+				isTransientResponse(response) &&
+				retries < maxTransientRetries
+			) {
 				retries += 1;
 				const delayMs = transientResponseDelayMs(response, retries);
 				const cfRay = response.headers.get('cf-ray');
@@ -135,7 +158,9 @@ export function retryingFetcher(
 			}
 
 			recordFetchOutcome(
-				isTransientResponse(response) && retries >= maxTransientRetries
+				canRetryResponses &&
+					isTransientResponse(response) &&
+					retries >= maxTransientRetries
 					? 'exhausted'
 					: retries > 0 && response.status < firstErrorStatus
 						? 'recovered'
@@ -302,6 +327,53 @@ export function isFetchNetworkError(error: unknown): error is TypeError {
 	return networkErrorCode(error.cause) !== undefined;
 }
 
+const connectFailureCodes = new Set([
+	'ECONNREFUSED',
+	'ENETUNREACH',
+	'EHOSTUNREACH',
+	'ETIMEDOUT'
+]);
+const lookupFailureCodes = new Set(['ENOTFOUND', 'EAI_AGAIN']);
+
+/**
+Whether Node's fetch failed before it had a connection to send the request
+on: the DNS lookup failed, or every connection attempt failed or timed out.
+*/
+function isConnectionSetupFailure(error: unknown): error is TypeError {
+	return error instanceof TypeError && isConnectionSetupCause(error.cause);
+}
+
+function isConnectionSetupCause(cause: unknown): boolean {
+	if (cause instanceof AggregateError) {
+		return (
+			cause.errors.length > 0 &&
+			cause.errors.every((entry) => isConnectionSetupCause(entry))
+		);
+	}
+
+	const code = errorCode(cause);
+
+	if (code === undefined) {
+		return false;
+	}
+
+	// undici raises this code only from its connector, which completes before
+	// undici writes any part of the request.
+	if (code === 'UND_ERR_CONNECT_TIMEOUT') {
+		return true;
+	}
+
+	// An established socket can report the same codes, for example
+	// EHOSTUNREACH or ETIMEDOUT from a read after the request was sent. The
+	// syscall distinguishes a failure of the connection itself.
+	const syscall = errorSyscall(cause);
+
+	return (
+		(syscall === 'connect' && connectFailureCodes.has(code)) ||
+		(syscall === 'getaddrinfo' && lookupFailureCodes.has(code))
+	);
+}
+
 const responseBodyFailureCodes = new Set([
 	'UND_ERR_SOCKET',
 	'UND_ERR_RES_CONTENT_LENGTH_MISMATCH',
@@ -347,6 +419,15 @@ function errorCode(value: unknown): string | undefined {
 		'code' in value &&
 		typeof value.code === 'string'
 		? value.code
+		: undefined;
+}
+
+function errorSyscall(value: unknown): string | undefined {
+	return typeof value === 'object' &&
+		value !== null &&
+		'syscall' in value &&
+		typeof value.syscall === 'string'
+		? value.syscall
 		: undefined;
 }
 

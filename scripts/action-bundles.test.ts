@@ -6,9 +6,27 @@ import { promisify } from 'node:util';
 
 import { expect, it } from 'vitest';
 
-import { renderActionBundle } from './action-bundles.ts';
+import { actionBundleSources, renderActionBundle } from './action-bundles.ts';
 
 const execute = promisify(execFile);
+
+const repositoryRoot = path.resolve(import.meta.dirname, '..');
+
+it.each(
+	[
+		...actionBundleSources,
+		path.join(repositoryRoot, 'actions/src/main.ts')
+	].map((source) => path.relative(repositoryRoot, source))
+)('%s configures connection attempts at start-up', async (source) => {
+	const contents = await readFile(path.join(repositoryRoot, source), 'utf8');
+
+	expect({
+		imports: contents.includes(
+			"import { configureConnectionAttempts } from '@cupboard/shared/connection-attempts';"
+		),
+		calls: /^configureConnectionAttempts\(\);$/mu.test(contents)
+	}).toStrictEqual({ imports: true, calls: true });
+});
 
 it('bundles TypeScript dependencies reproducibly without runtime installation', async () => {
 	const directory = await mkdtemp(

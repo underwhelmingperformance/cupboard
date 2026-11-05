@@ -1,4 +1,5 @@
 import { exportVariable, saveState, setFailed } from '@actions/core';
+import { configureConnectionAttempts } from '@cupboard/shared/connection-attempts';
 import { formatErrorWithCauses } from '@cupboard/shared/errors';
 import { initialiseTracing } from '@cupboard/shared/node-tracing';
 
@@ -15,6 +16,7 @@ async function main(): Promise<void> {
 	exportVariable('NIX_CONFIG', hook.nixConfig);
 }
 
+configureConnectionAttempts();
 initialiseTracing();
 
 void withActionLogging(

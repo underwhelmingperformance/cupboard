@@ -43,8 +43,10 @@ export const hookHelperSourcePath =
 export const hookHelperBinaryName = 'cupboard-hook-relay';
 
 export const binaryCliEntrySource = [
+	"import { configureConnectionAttempts } from '@cupboard/shared/connection-attempts';",
 	"import { initialiseTracing } from '@cupboard/shared/node-tracing';",
 	"import { runCli } from './packages/cli/src/run.ts';",
+	'configureConnectionAttempts();',
 	'initialiseTracing();',
 	'void (async () => {',
 	'\tprocess.exitCode = await runCli();',

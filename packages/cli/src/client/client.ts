@@ -42,6 +42,7 @@ import {
 	readResponseJson,
 	readResponseText
 } from '@cupboard/shared/response-body';
+import { retryingFetcher } from '@cupboard/shared/retry';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
 
@@ -66,7 +67,7 @@ import {
 	runCommitSession
 } from './commit-socket.ts';
 import { type AccessCredential, bearerAttempt } from './credentials.ts';
-import { resilientFetcher } from './transport.ts';
+import { reachableFetcher, resilientFetcher } from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
 
@@ -87,6 +88,8 @@ export class CupboardClient {
 
 	private readonly replayUnsafeFetcher: typeof fetch;
 
+	private readonly signupFetcher: typeof fetch;
+
 	constructor(
 		public readonly baseUrl: URL,
 		public readonly fetcher: typeof fetch = fetch,
@@ -105,6 +108,15 @@ export class CupboardClient {
 			'replay-unsafe',
 			fetcher,
 			baseUrl.origin
+		);
+		// The claim in `cupboard init` retries `/signup` 30 times. Retrying each of
+		// those calls again here would multiply the time to report an unreachable
+		// deployment.
+		this.signupFetcher = reachableFetcher(
+			retryingFetcher(fetcher, 'replay-unsafe', {
+				trustedOrigin: baseUrl.origin,
+				retriesConnectionFailures: false
+			})
 		);
 	}
 
@@ -360,7 +372,7 @@ export class CupboardClient {
 			}),
 			...bindingFormFields(binding)
 		});
-		const response = await this.replayUnsafeFetcher(url, {
+		const response = await this.signupFetcher(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: body.toString(),

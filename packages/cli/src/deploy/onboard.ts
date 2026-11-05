@@ -1011,6 +1011,12 @@ release may still come from the version without the secret. The deploy
 therefore allows eight such 403s before the claim counts as failed. The
 attempts are four seconds apart, so the eighth arrives about 30 seconds
 after the first.
+
+A deployment that cannot be reached is also retried for all of the claim's
+attempts. The client makes one connection attempt for each `/signup` call,
+and undici gives up on a connection after 10 seconds. With the default 30
+attempts, a deployment whose packets are dropped is therefore reported as
+unreachable after about seven minutes.
 */
 async function claimDeployment(dependencies: {
 	readonly ui: DeployUi;

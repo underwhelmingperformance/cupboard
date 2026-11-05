@@ -97,7 +97,7 @@ describe('checkR2Credentials', () => {
 		expect(cancelled).toHaveBeenCalledOnce();
 	});
 
-	it('begins then aborts a multipart upload against the bucket', async () => {
+	it('begins then aborts a multipart upload against the bucket without following redirects', async () => {
 		const { fetcher, requests } = respondingWith(initiateBody);
 
 		await checkR2Credentials(options, fetcher);
@@ -106,6 +106,7 @@ describe('checkR2Credentials', () => {
 			requests.map((request) => ({
 				method: request.method,
 				url: request.url,
+				redirect: request.redirect,
 				signed: request.headers
 					.get('authorization')
 					?.startsWith('AWS4-HMAC-SHA256 Credential=')
@@ -114,11 +115,13 @@ describe('checkR2Credentials', () => {
 			{
 				method: 'POST',
 				url: 'https://acc-hex.r2.cloudflarestorage.com/cupboard-blobs/.cupboard-credential-probe?uploads',
+				redirect: 'manual',
 				signed: true
 			},
 			{
 				method: 'DELETE',
 				url: 'https://acc-hex.r2.cloudflarestorage.com/cupboard-blobs/.cupboard-credential-probe?uploadId=UP-1',
+				redirect: 'manual',
 				signed: true
 			}
 		]);

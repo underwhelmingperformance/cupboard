@@ -491,6 +491,96 @@ describe('HTTP attempt observation', () => {
 		}
 	);
 
+	it('records a replay-unsafe request that recovers after a connect timeout', async () => {
+		const records = captureLogs();
+		const connectTimeout = Object.assign(new Error('Connect Timeout Error'), {
+			code: 'UND_ERR_CONNECT_TIMEOUT'
+		});
+		const failure = new TypeError('fetch failed', { cause: connectTimeout });
+		let attempts = 0;
+		const fetcher = retryingFetcher(
+			() => {
+				attempts += 1;
+
+				return attempts === 1
+					? Promise.reject(failure)
+					: Promise.resolve(new Response('ok'));
+			},
+			'replay-unsafe',
+			{ operation: 'token' }
+		);
+
+		vi.useFakeTimers();
+		try {
+			const pending = fetcher('https://cupboard.example.test/token', {
+				method: 'POST',
+				body: 'form',
+				redirect: 'manual'
+			});
+			const settled = expect(pending).resolves.toBeInstanceOf(Response);
+			await vi.advanceTimersByTimeAsync(10_000);
+			await settled;
+		} finally {
+			vi.useRealTimers();
+		}
+
+		const request = {
+			method: 'POST',
+			url: 'https://cupboard.example.test/token'
+		};
+		const duration: unknown = expect.any(Number);
+		expect(
+			records.filter((record) =>
+				[
+					'HTTP attempt failed',
+					'retrying after a network error',
+					'HTTP operation completed'
+				].includes(record.message)
+			)
+		).toStrictEqual([
+			{
+				level: 'debug',
+				category: ['cupboard', 'http'],
+				message: 'HTTP attempt failed',
+				properties: {
+					operation: 'token',
+					...request,
+					attempt: 1,
+					replaySafety: 'replay-unsafe',
+					failureKind: 'transport',
+					elapsedMs: duration,
+					error: failure
+				}
+			},
+			{
+				level: 'debug',
+				category: ['cupboard', 'fetch'],
+				message: 'retrying after a network error',
+				properties: {
+					...request,
+					retry: 1,
+					code: 'UND_ERR_CONNECT_TIMEOUT',
+					delayMs: duration
+				}
+			},
+			{
+				level: 'trace',
+				category: ['cupboard', 'http'],
+				message: 'HTTP operation completed',
+				properties: {
+					operation: 'token',
+					attempts: 2,
+					disposition: 'recovered',
+					replaySafety: 'replay-unsafe',
+					status: StatusCodes.OK,
+					requestId: undefined,
+					cfRay: undefined,
+					elapsedMs: duration
+				}
+			}
+		]);
+	});
+
 	it('distinguishes a failed body from successful response headers', async () => {
 		const records = captureLogs();
 		const failure = new Error('connection reset during the body');

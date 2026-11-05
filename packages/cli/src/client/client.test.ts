@@ -32,7 +32,8 @@ import {
 	InvalidCacheNameError,
 	MalformedResponseError,
 	QuotaExceededError,
-	ResponseSchemaMismatchError
+	ResponseSchemaMismatchError,
+	UnreachableHostError
 } from '../errors.ts';
 import { RedirectingOrigin } from '../redirecting-origin.test-support.ts';
 
@@ -440,6 +441,41 @@ describe('CupboardClient.signup', () => {
 			path: '/signup',
 			status: 409
 		});
+	});
+
+	it('makes one attempt when the connection fails, because the claim retries it', async () => {
+		let attempts = 0;
+		const refused = Object.assign(new Error('connect ECONNREFUSED'), {
+			code: 'ECONNREFUSED',
+			syscall: 'connect'
+		});
+		const client = new CupboardClient(
+			new URL('https://cupboard.test'),
+			() => {
+				attempts += 1;
+
+				return Promise.reject(
+					new TypeError('fetch failed', { cause: refused })
+				);
+			},
+			{ kind: 'default' }
+		);
+
+		vi.useFakeTimers();
+		try {
+			const pending = rejectedBy(() =>
+				client.signup({ subject_token: 'subject.jwt' })
+			);
+			await vi.advanceTimersByTimeAsync(60_000);
+			const error = await pending;
+
+			expect({
+				unreachable: error instanceof UnreachableHostError,
+				attempts
+			}).toStrictEqual({ unreachable: true, attempts: 1 });
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('rejects an oversized signup response before parsing it', async () => {

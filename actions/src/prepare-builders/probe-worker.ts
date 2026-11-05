@@ -2,7 +2,11 @@ import { constants } from 'node:fs';
 import { access, appendFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { configureConnectionAttempts } from '@cupboard/shared/connection-attempts';
+
 import { requireEnvironment } from '../inputs.ts';
+
+configureConnectionAttempts();
 
 async function main(): Promise<void> {
 	const result = process.argv[2];
