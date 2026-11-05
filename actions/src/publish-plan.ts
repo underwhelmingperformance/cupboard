@@ -16,6 +16,7 @@ import {
 	cacheAvailabilityMaxPaths,
 	cacheAvailabilityResponseSchema
 } from '@cupboard/protocol/cache-availability';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { lookupInPages } from '@cupboard/shared/paging';
@@ -686,6 +687,11 @@ interface ProbeOptions {
 	readonly paths: readonly StorePathString[];
 	readonly credentials?: BasicCredential;
 	readonly fetcher?: typeof fetch;
+	/**
+	The random source for the backoff between attempts. The default is
+	`Math.random`.
+	*/
+	readonly random?: RandomSource;
 }
 
 export function availableCachePaths(
@@ -721,7 +727,7 @@ async function availablePathsAt(
 			tenantUrl: options.baseUrl
 		}),
 		'replay-safe',
-		{ trustedOrigin: new URL(options.baseUrl).origin }
+		{ trustedOrigin: new URL(options.baseUrl).origin, random: options.random }
 	);
 	const headers = {
 		'content-type': 'application/json',
@@ -736,7 +742,8 @@ async function availablePathsAt(
 		finishFirstPage: true,
 		deadline: {
 			target: { url: loggedUrl(target) },
-			replaySafety: 'replay-safe'
+			replaySafety: 'replay-safe',
+			random: options.random
 		},
 		request: async (batch, signal) => {
 			const missing = new Set(
