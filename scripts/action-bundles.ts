@@ -13,6 +13,20 @@ const actions = [
 	{ name: 'prepare-builders', entrypoints: ['main', 'post', 'probe-worker'] }
 ] as const;
 
+function actionSourcePath(name: string, entrypoint: string): string {
+	return path.join(repositoryRoot, 'actions', 'src', name, `${entrypoint}.ts`);
+}
+
+/**
+The TypeScript entrypoint of every bundled action, as absolute paths.
+*/
+export const actionBundleSources: readonly string[] = actions.flatMap(
+	(action) =>
+		action.entrypoints.map((entrypoint) =>
+			actionSourcePath(action.name, entrypoint)
+		)
+);
+
 class ActionBundleGenerationError extends CodedError {
 	constructor(sourcePath: string) {
 		super(`No action bundle was generated for ${sourcePath}.`);
@@ -59,13 +73,7 @@ export async function renderActionBundle(sourcePath: string): Promise<string> {
 async function updateActionBundles(shouldCheck: boolean): Promise<void> {
 	for (const action of actions) {
 		for (const entrypoint of action.entrypoints) {
-			const sourcePath = path.join(
-				repositoryRoot,
-				'actions',
-				'src',
-				action.name,
-				`${entrypoint}.ts`
-			);
+			const sourcePath = actionSourcePath(action.name, entrypoint);
 			const outputPath = path.join(
 				repositoryRoot,
 				'actions',

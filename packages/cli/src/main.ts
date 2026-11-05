@@ -1,10 +1,12 @@
 #!/usr/bin/env -S node --experimental-transform-types --disable-warning=ExperimentalWarning
+import { configureConnectionAttempts } from '@cupboard/shared/connection-attempts';
 import { initialiseTracing } from '@cupboard/shared/node-tracing';
 
 import { configureCompressionThreadPool } from './push/thread-pool.ts';
 import { runCli } from './run.ts';
 
 configureCompressionThreadPool();
+configureConnectionAttempts();
 initialiseTracing();
 
 const exitCode = await runCli();

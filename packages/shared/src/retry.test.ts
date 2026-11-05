@@ -1,3 +1,10 @@
+import { once } from 'node:events';
+import { createServer, type Server } from 'node:http';
+import {
+	createServer as createNetServer,
+	type Server as NetServer
+} from 'node:net';
+
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -485,6 +492,320 @@ describe('retryingFetcher', () => {
 			status: StatusCodes.OK,
 			attempts: 1
 		});
+	});
+});
+
+function systemError(code: string, syscall: string): Error {
+	return Object.assign(new Error(`${syscall} ${code}`), { code, syscall });
+}
+
+// Node's error when every address of a host failed or timed out.
+function everyAddressFailed(...errors: readonly Error[]): AggregateError {
+	return new AggregateError(errors, 'every address failed');
+}
+
+// The shape of undici's `ConnectTimeoutError` for a host with IPv4 and IPv6
+// addresses on a machine without IPv6.
+class ConnectTimeoutError extends Error {
+	readonly code = 'UND_ERR_CONNECT_TIMEOUT';
+
+	constructor() {
+		const timedOut = systemError('ETIMEDOUT', 'connect');
+		const unreachable = systemError('ENETUNREACH', 'connect');
+
+		super('Connect Timeout Error', {
+			cause: everyAddressFailed(timedOut, unreachable)
+		});
+		this.name = 'ConnectTimeoutError';
+	}
+}
+
+function fetchFailure(cause: unknown): TypeError {
+	return new TypeError('fetch failed', { cause });
+}
+
+function rejection(error: Error): () => Promise<Response> {
+	return () => Promise.reject(error);
+}
+
+function causeCode(error: unknown): unknown {
+	if (!(error instanceof Error) || !(error.cause instanceof Error)) {
+		return undefined;
+	}
+
+	return 'code' in error.cause ? error.cause.code : undefined;
+}
+
+async function listening(server: Server | NetServer): Promise<string> {
+	server.listen(0, '127.0.0.1');
+	await once(server, 'listening');
+	const address = server.address();
+
+	if (address === null || typeof address === 'string') {
+		throw new TypeError('Expected a TCP address');
+	}
+
+	return `http://127.0.0.1:${String(address.port)}`;
+}
+
+async function closed(server: Server | NetServer): Promise<void> {
+	server.close();
+	await once(server, 'close');
+}
+
+describe('retryingFetcher for a replay-unsafe request', () => {
+	it.each([
+		{
+			failure: 'a connect timeout',
+			error: () => fetchFailure(new ConnectTimeoutError())
+		},
+		{
+			failure: 'a refused connection',
+			error: () => fetchFailure(systemError('ECONNREFUSED', 'connect'))
+		},
+		{
+			failure: 'an unreachable network',
+			error: () => fetchFailure(systemError('ENETUNREACH', 'connect'))
+		},
+		{
+			failure: 'an unreachable host',
+			error: () => fetchFailure(systemError('EHOSTUNREACH', 'connect'))
+		},
+		{
+			failure: 'every address failing',
+			error: () =>
+				fetchFailure(
+					everyAddressFailed(
+						systemError('ETIMEDOUT', 'connect'),
+						systemError('ENETUNREACH', 'connect')
+					)
+				)
+		},
+		{
+			failure: 'a missing DNS name',
+			error: () => fetchFailure(systemError('ENOTFOUND', 'getaddrinfo'))
+		},
+		{
+			failure: 'a temporary DNS failure',
+			error: () => fetchFailure(systemError('EAI_AGAIN', 'getaddrinfo'))
+		}
+	])(
+		'retries after $failure and returns the eventual success',
+		async ({ error }) => {
+			vi.useFakeTimers();
+
+			try {
+				const { fetcher, attempts, bodies } = scriptedFetcher([
+					rejection(error()),
+					ok
+				]);
+
+				const pending = makeRetryingFetcher(
+					fetcher,
+					'replay-unsafe'
+				)(
+					new Request('https://x.test/token', {
+						method: 'POST',
+						body: 'payload',
+						redirect: 'manual'
+					})
+				);
+				await vi.advanceTimersByTimeAsync(60_000);
+				const response = await pending;
+
+				expect({
+					status: response.status,
+					attempts: attempts(),
+					bodies
+				}).toStrictEqual({
+					status: StatusCodes.OK,
+					attempts: 2,
+					bodies: ['payload', 'payload']
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
+
+	// With redirects followed, the connection failure can come from the redirect
+	// target after the server completed the original request, for example a POST
+	// that returned 303.
+	it.each([
+		{
+			redirect: 'followed by default',
+			request: () => new Request('https://x.test/token', { method: 'POST' }),
+			init: undefined,
+			attempts: 1
+		},
+		{
+			redirect: 'followed by default with an init',
+			request: () => 'https://x.test/token',
+			init: { method: 'POST' },
+			attempts: 1
+		},
+		{
+			redirect: 'followed explicitly',
+			request: () => 'https://x.test/token',
+			init: { method: 'POST', redirect: 'follow' },
+			attempts: 1
+		},
+		{
+			redirect: 'refused',
+			request: () => 'https://x.test/token',
+			init: { method: 'POST', redirect: 'error' },
+			attempts: 2
+		},
+		{
+			redirect: 'returned on the Request',
+			request: () =>
+				new Request('https://x.test/token', {
+					method: 'POST',
+					redirect: 'manual'
+				}),
+			init: undefined,
+			attempts: 2
+		}
+	] satisfies {
+		redirect: string;
+		request: () => Request | string;
+		init: RequestInit | undefined;
+		attempts: number;
+	}[])(
+		'retries a connection failure only when redirects are not followed: $redirect',
+		async ({ request, init, attempts: expectedAttempts }) => {
+			vi.useFakeTimers();
+
+			try {
+				const failure = fetchFailure(systemError('ECONNREFUSED', 'connect'));
+				const { fetcher, attempts } = scriptedFetcher([rejection(failure), ok]);
+
+				const pending = rejectedBy(() =>
+					makeRetryingFetcher(fetcher, 'replay-unsafe')(request(), init)
+				);
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect({
+					error: await pending,
+					attempts: attempts()
+				}).toStrictEqual({
+					error: expectedAttempts === 1 ? failure : undefined,
+					attempts: expectedAttempts
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
+
+	it.each([
+		{ failure: 'a reset', cause: systemError('ECONNRESET', 'read') },
+		{ failure: 'a closed socket', cause: { code: 'UND_ERR_SOCKET' } },
+		{
+			failure: 'an unreachable host after connecting',
+			cause: systemError('EHOSTUNREACH', 'read')
+		},
+		{
+			failure: 'a timeout after connecting',
+			cause: systemError('ETIMEDOUT', 'read')
+		},
+		{
+			failure: 'a mix of connect and socket failures',
+			cause: everyAddressFailed(
+				systemError('ECONNREFUSED', 'connect'),
+				systemError('ECONNRESET', 'read')
+			)
+		}
+	])('makes one attempt after $failure', async ({ cause }) => {
+		const failure = fetchFailure(cause);
+		const { fetcher, attempts } = scriptedFetcher([rejection(failure), ok]);
+
+		const error = await rejectedBy(() =>
+			makeRetryingFetcher(fetcher, 'replay-unsafe')('https://x.test/token', {
+				method: 'POST',
+				body: 'payload',
+				redirect: 'manual'
+			})
+		);
+
+		expect({ error, attempts: attempts() }).toStrictEqual({
+			error: failure,
+			attempts: 1
+		});
+	});
+
+	it.each([
+		{
+			failure: 'the server closes the connection',
+			server: () =>
+				createServer((request) => {
+					request.socket.destroy();
+				}),
+			code: 'UND_ERR_SOCKET'
+		},
+		{
+			failure: 'the server resets the connection',
+			server: () =>
+				createNetServer((socket) => {
+					socket.once('data', () => {
+						socket.resetAndDestroy();
+					});
+				}),
+			code: 'ECONNRESET'
+		}
+	])(
+		'does not resend a request after $failure',
+		async ({ server: makeServer, code }) => {
+			let requests = 0;
+			const server = makeServer();
+			server.on('connection', () => {
+				requests += 1;
+			});
+			const origin = await listening(server);
+
+			try {
+				const error = await rejectedBy(() =>
+					makeRetryingFetcher(fetch, 'replay-unsafe')(`${origin}/token`, {
+						method: 'POST',
+						body: 'payload',
+						redirect: 'manual'
+					})
+				);
+
+				expect({ requests, code: causeCode(error) }).toStrictEqual({
+					requests: 1,
+					code
+				});
+			} finally {
+				await closed(server);
+			}
+		}
+	);
+
+	it('gives up after the retry budget when the connection keeps failing', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const failure = fetchFailure(new ConnectTimeoutError());
+			const { fetcher, attempts } = scriptedFetcher(
+				Array.from({ length: 6 }, () => rejection(failure))
+			);
+
+			const pending = rejectedBy(() =>
+				makeRetryingFetcher(fetcher, 'replay-unsafe')('https://x.test/token', {
+					method: 'POST',
+					redirect: 'manual'
+				})
+			);
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			expect({ error: await pending, attempts: attempts() }).toStrictEqual({
+				error: failure,
+				attempts: 5
+			});
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

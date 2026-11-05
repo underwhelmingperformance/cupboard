@@ -1,4 +1,5 @@
 import { getState, setFailed } from '@actions/core';
+import { configureConnectionAttempts } from '@cupboard/shared/connection-attempts';
 import { formatErrorWithCauses } from '@cupboard/shared/errors';
 import { initialiseTracing } from '@cupboard/shared/node-tracing';
 
@@ -14,6 +15,7 @@ async function post(): Promise<void> {
 	}
 }
 
+configureConnectionAttempts();
 initialiseTracing();
 
 async function finalise(): Promise<void> {

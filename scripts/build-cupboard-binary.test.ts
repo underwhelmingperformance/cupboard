@@ -18,7 +18,7 @@ import {
 } from './build-cupboard-binary.ts';
 
 describe('binaryCliEntrySource', () => {
-	it('initialises a real trace context before the packaged CLI runs', async () => {
+	it('initialises tracing and connection attempts before the packaged CLI runs', async () => {
 		const bundled = await build({
 			stdin: {
 				contents: binaryCliEntrySource,
@@ -38,10 +38,14 @@ describe('binaryCliEntrySource', () => {
 							{ filter: new RegExp(/packages\/cli\/src\/run\.ts$/u.source) },
 							() => ({
 								contents: [
+									"import { getDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';",
 									"import { trace } from '@opentelemetry/api';",
 									'export async function runCli() {',
 									"const span = trace.getTracer('binary-test').startSpan('command');",
-									'console.log(JSON.stringify(span.spanContext()));',
+									'console.log(JSON.stringify({',
+									'...span.spanContext(),',
+									'attemptTimeoutMs: getDefaultAutoSelectFamilyAttemptTimeout()',
+									'}));',
 									'span.end();',
 									'return 0;',
 									'}'
@@ -72,7 +76,8 @@ describe('binaryCliEntrySource', () => {
 		expect(context).toStrictEqual({
 			traceId,
 			spanId,
-			traceFlags: 1
+			traceFlags: 1,
+			attemptTimeoutMs: 2500
 		});
 	});
 });

@@ -220,10 +220,11 @@ objects in that bucket.
 ### Checking and keeping the key
 
 Before deploying, `init` checks that the key works by starting an upload and
-then aborting it. If `init` created the key, Cloudflare can take a little while
-to make it available, so `init` tries the check up to 12 times, five seconds
-apart. If you entered the key, and the check fails, `init` lets you re-enter the
-key, deploy anyway, or cancel.
+then aborting it. A check request that can't connect to R2 is retried
+automatically, because R2 never received it. If `init` created the key,
+Cloudflare can take a little while to make it available, so `init` tries the
+check up to 12 times, five seconds apart. If you entered the key, and the check
+fails, `init` lets you re-enter the key, deploy anyway, or cancel.
 
 Later deploys keep the key that the deployment already has. They only change it
 if the environment supplies a new one, you rename the bucket, or you choose to
@@ -434,7 +435,9 @@ is never saved. `--oidc-issuer` and `--client-id` select another OIDC issuer and
 OAuth client, with the same defaults as `cupboard login`. `--headless` prints
 the sign-in URL and accepts the redirect URL that you paste, as described in
 [Signing in without a browser][headless-sign-in]. The Cloudflare sign-in for the
-account can still open a browser.
+account can still open a browser. If the CLI can't connect to the issuer to
+finish either sign-in, or to Cloudflare to renew the account sign-in, it retries
+the token request automatically, because the request never reached the server.
 
 [headless-sign-in]: ../admin/signing-in.md#signing-in-without-a-browser
 
@@ -489,6 +492,9 @@ tenant and caches that session too, so later commands for the tenant don't open
 a browser. If that exchange fails, `init` prints a warning with the
 `cupboard login` command to run.
 
+If the CLI can't connect to the deployment for `/signup`, the deployment never
+received the request, so the retry isn't refused.
+
 If the connection fails after `/signup` accepted the claim, the retry is refused
 because the deployment has already accepted that ID token. `init` then signs you
 in again and repeats the claim. The deployment returns a session for the admin
@@ -498,11 +504,12 @@ If the claim succeeds but the admin token can't be cached, `init` stops and says
 that the claim succeeded. Run the `cupboard login` command that it prints, then
 run `cupboard init` again to finish.
 
-`init` retries `/signup` while it returns 404, 408, 429, 502, 503 or 504, up to
-30 times, four seconds apart. It also retries a 403 for about 30 seconds after
-the new Workers start serving, because the version of the control Worker without
-the claim secret can keep answering until the new version serves. If the claim
-still fails, see
+`init` retries `/signup` while it can't reach the deployment or the deployment
+returns 404, 408, 429, 502, 503 or 504, up to 30 times, four seconds apart. A
+deployment that can't be reached at all is therefore reported after about seven
+minutes. It also retries a 403 for about 30 seconds after the new Workers start
+serving, because the version of the control Worker without the claim secret can
+keep answering until the new version serves. If the claim still fails, see
 ["The admin claim failed"](../troubleshooting.md#the-admin-claim-failed).
 
 `/signup` accepts the claim secret from anyone for as long as it's set. `init`

@@ -160,7 +160,13 @@ export async function checkR2Credentials(
 		const signed = await client.sign(`${objectUrl}?uploads`, {
 			method: 'POST'
 		});
-		begun = await fetcher(signed, { signal: options.signal });
+		// The signature covers the host, so a redirect target would refuse the
+		// request. Not following redirects also lets the fetcher retry a request
+		// whose connection was never established.
+		begun = await fetcher(signed, {
+			signal: options.signal,
+			redirect: 'manual'
+		});
 	} catch (error) {
 		throwIfAborted(options.signal);
 
@@ -203,7 +209,10 @@ export async function checkR2Credentials(
 	);
 
 	try {
-		const cleaned = await fetcher(signed, { signal: options.signal });
+		const cleaned = await fetcher(signed, {
+			signal: options.signal,
+			redirect: 'manual'
+		});
 		await discardResponseBody(cleaned);
 	} catch {
 		throwIfAborted(options.signal);
