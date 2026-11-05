@@ -15,6 +15,11 @@ import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
 const maxTerminalPublicationsPrunedPerRun = 1000;
 
+// A terminal record becomes prunable 15 minutes after both its push and its
+// recovery window expire. It can wait up to this much longer, so one alarm
+// prunes every record that became prunable in the same window.
+const pruneWakeWindowMs = 5 * 60 * 1000;
+
 const terminalPublicationStates = ['servable', 'failed', 'expired'] as const;
 
 // The verdict that a live session received when the operation failed. A failed
@@ -40,6 +45,14 @@ export function publicationFailure(
 			? undefined
 			: publicationFailureSchema.safeParse(JSON.parse(resultJson)).data;
 	return parsed?.verdict ?? 'absent';
+}
+
+function pruneWakeTime(pruneAfter: number, notBefore: number): number {
+	if (pruneAfter <= notBefore) {
+		return pruneAfter;
+	}
+
+	return Math.ceil(pruneAfter / pruneWakeWindowMs) * pruneWakeWindowMs;
 }
 
 export class PublicationStore {
@@ -160,8 +173,10 @@ export class PublicationStore {
 
 	// Wake for the next recovery deadline or the next terminal record to prune.
 	// A pass that reached its prune limit leaves records that are already due,
-	// so the alarm then fires at `notBefore` and the next pass continues.
-	async armRecoveryAlarm(notBefore = Date.now()): Promise<void> {
+	// so the alarm then fires at `notBefore` and the next pass continues. A
+	// record that becomes due after `notBefore` is pruned at the next multiple
+	// of `pruneWakeWindowMs`. Recovery deadlines are armed exactly.
+	async armRecoveryAlarm(notBefore: number): Promise<void> {
 		const deadline = this.context.db
 			.select({ at: schema.publicationOperations.recoveryDeadline })
 			.from(schema.publicationOperations)
@@ -178,9 +193,12 @@ export class PublicationStore {
 				.limit(1)
 				.get()
 		);
-		const times = [deadline, ...pruneTimes]
-			.filter((next) => next !== undefined)
-			.map((next) => Date.parse(next.at));
+		const times = [
+			...(deadline === undefined ? [] : [Date.parse(deadline.at)]),
+			...pruneTimes
+				.filter((next) => next !== undefined)
+				.map((next) => pruneWakeTime(Date.parse(next.at), notBefore))
+		];
 		if (times.length === 0) {
 			return;
 		}

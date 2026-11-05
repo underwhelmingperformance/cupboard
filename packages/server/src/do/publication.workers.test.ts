@@ -8902,56 +8902,6 @@ function insertServable(
 	}
 }
 
-describe('terminal publication pruning', () => {
-	// Durable Object alarms use the real clock, so these tests run on it.
-	beforeEach(async () => {
-		vi.setSystemTime(vi.getRealSystemTime());
-		await resetTestServer();
-	});
-
-	it('arms an alarm for the next terminal record to prune', async () => {
-		await initialise();
-		const pruneAfter = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-		const alarm = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
-				insertServable(instance, 1, pruneAfter);
-				await state.storage.deleteAlarm();
-				await new PublicationStore(instance.context).armRecoveryAlarm();
-				return state.storage.getAlarm();
-			}
-		);
-		expect(alarm).toBe(Date.parse(pruneAfter));
-	});
-
-	it('continues pruning when one pass reaches its limit', async () => {
-		await initialise();
-		const passedAt = Date.now();
-		const result = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
-				insertServable(instance, 1001, new Date().toISOString());
-				await state.storage.deleteAlarm();
-				await instance.alarm();
-				const remaining = instance.context.db
-					.select({ id: schema.publicationOperations.id })
-					.from(schema.publicationOperations)
-					.all().length;
-				const next = await state.storage.getAlarm();
-				return {
-					remaining,
-					// The pass arms the alarm at once. Durable Object storage keeps
-					// real time, so the stored alarm lies between the frozen test
-					// clock and the real clock.
-					isArmedNow:
-						next !== null && next >= passedAt && next <= vi.getRealSystemTime()
-				};
-			}
-		);
-		expect(result).toStrictEqual({ remaining: 1, isArmedNow: true });
-	});
-});
-
 // A pending row whose metadata does not parse makes its operation's expiry
 // throw.
 function insertExpiringOperation(

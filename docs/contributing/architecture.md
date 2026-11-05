@@ -825,9 +825,12 @@ later upload to restore or replace. Expiry releases the reservation of an
 unfinished operation through recoverable cleanup, unless another started commit
 shares it. Successful publications use ordinary canonical-object retention.
 Terminal operation records are pruned after the later of push expiry and
-recovery expiry, plus 15 minutes. A completed replay in `publish-batch` rechecks
-availability; repair requires the original lease and recovery window. Otherwise
-the client must start a fresh push.
+recovery expiry, plus 15 minutes. The alarm wakes for them at the next multiple
+of five minutes, so the records that become prunable in one five-minute window
+share one wake. A run prunes at most 1,000 records; when more are due, the next
+run starts at once. The alarm wakes at recovery deadlines exactly. A completed
+replay in `publish-batch` rechecks availability; repair requires the original
+lease and recovery window. Otherwise the client must start a fresh push.
 
 Reconnects resend complete unacknowledged entries and use
 `subscribe-publication` for acknowledged operations. Capability loss after an
