@@ -13,6 +13,7 @@ import { parseReporterResults } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { formatErrorWithCauses } from '@cupboard/shared/errors';
 import { type ReadUser } from '@cupboard/shared/http';
+import { StatusCodes } from 'http-status-codes';
 
 import { type EnsureRunner, type PlanInputs } from './commands/plan.ts';
 import { readCredentialInvocation } from './cupboard-run.ts';
@@ -26,6 +27,8 @@ import {
 	type TargetEvaluation
 } from './publish-plan.ts';
 import { cacheUrlFor } from './substituters.ts';
+
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 export interface ReferencePlanInputs extends PlanInputs {
 	readonly referenceSource: string;
@@ -98,34 +101,18 @@ export async function publishReferenceTargets(
 
 	let available: ReadonlySet<StorePathString>;
 	try {
-		const source = parseTenantCacheUrl(new URL(inputs.referenceSource));
-		available = await availableCachePaths({
-			baseUrl: source.tenantUrl,
-			cache: source.cache,
-			paths: eligible.flatMap((group) =>
+		available = await referenceAvailablePaths(
+			inputs,
+			eligible.flatMap((group) =>
 				group.flatMap((evaluation) => evaluation.targetPaths)
 			),
-			...(inputs.fallbackReadUser !== '' && {
-				credentials: {
-					user: inputs.fallbackReadUser,
-					password: inputs.fallbackReadPassword
-				}
-			}),
-			...(dependencies.fetcher !== undefined && {
-				fetcher: dependencies.fetcher
-			})
-		});
+			dependencies
+		);
 	} catch (error) {
 		dependencies.signal?.throwIfAborted();
-		if (
-			!(error instanceof CacheAvailabilityQueryError) ||
-			error.status !== 404
-		) {
-			return eligible.flatMap((group) =>
-				outcomes(inputs, group, 'failed', error)
-			);
-		}
-		available = new Set();
+		return eligible.flatMap((group) =>
+			outcomes(inputs, group, 'failed', error)
+		);
 	}
 
 	const results = await mapWithConcurrency(eligible, 8, async (group) => {
@@ -154,6 +141,109 @@ export async function publishReferenceTargets(
 		}
 	});
 	return results.flat();
+}
+
+/**
+Whether the plan asks the reference source which target outputs it serves so
+that cohort jobs can skip freeing disk space. The cohort job publishes those
+targets by reference together with their dependency outputs, so the plan
+publishes nothing itself. Without `maximise-space`, the answer cannot change
+what a cohort job does, so the plan does not ask.
+*/
+function isCheckingReferenceForCohorts(
+	inputs: Pick<
+		ReferencePlanInputs,
+		'referenceSource' | 'build' | 'publish' | 'maximiseSpace'
+	>
+): boolean {
+	return (
+		inputs.maximiseSpace &&
+		inputs.referenceSource !== '' &&
+		inputs.build === 'missing' &&
+		inputs.publish === 'built'
+	);
+}
+
+type ReferenceCohortCheck =
+	| {
+			readonly status: 'checked';
+			readonly servedPaths: ReadonlySet<StorePathString>;
+	  }
+	| { readonly status: 'failed'; readonly reason: string };
+
+/**
+Asks the reference source about the outputs of targets that the destination
+does not serve. A cohort job compares only the expected path of a target with
+one output with the reference source, so the check covers only those targets.
+It sends no request when no such target remains.
+*/
+export async function checkReferenceForCohorts(
+	inputs: ReferencePlanInputs,
+	evaluations: readonly TargetEvaluation[],
+	destinationPaths: ReadonlySet<StorePathString>,
+	dependencies: Omit<ReferencePlanDependencies, 'runner'>
+): Promise<ReferenceCohortCheck> {
+	if (!isCheckingReferenceForCohorts(inputs)) {
+		return { status: 'checked', servedPaths: new Set() };
+	}
+
+	const paths = evaluations
+		.filter(
+			(evaluation) =>
+				evaluation.target.outputs.length === 1 &&
+				evaluation.targetPaths.length === 1
+		)
+		.flatMap((evaluation) => evaluation.targetPaths)
+		.filter((storePath) => !destinationPaths.has(storePath));
+
+	if (paths.length === 0) {
+		return { status: 'checked', servedPaths: new Set() };
+	}
+
+	try {
+		return {
+			status: 'checked',
+			servedPaths: await referenceAvailablePaths(inputs, paths, dependencies)
+		};
+	} catch (error) {
+		dependencies.signal?.throwIfAborted();
+		return { status: 'failed', reason: formatErrorWithCauses(error) };
+	}
+}
+
+// A reference cache that does not exist yet serves nothing, so a 404 is an
+// empty answer. Any other failure leaves availability unknown.
+async function referenceAvailablePaths(
+	inputs: ReferencePlanInputs,
+	paths: readonly StorePathString[],
+	dependencies: Omit<ReferencePlanDependencies, 'runner'>
+): Promise<ReadonlySet<StorePathString>> {
+	const source = parseTenantCacheUrl(new URL(inputs.referenceSource));
+
+	try {
+		return await availableCachePaths({
+			baseUrl: source.tenantUrl,
+			cache: source.cache,
+			paths,
+			...(inputs.fallbackReadUser !== '' && {
+				credentials: {
+					user: inputs.fallbackReadUser,
+					password: inputs.fallbackReadPassword
+				}
+			}),
+			...(dependencies.fetcher !== undefined && {
+				fetcher: dependencies.fetcher
+			})
+		});
+	} catch (error) {
+		if (
+			error instanceof CacheAvailabilityQueryError &&
+			error.status === notFoundStatus
+		) {
+			return new Set();
+		}
+		throw error;
+	}
 }
 
 function outcomes(

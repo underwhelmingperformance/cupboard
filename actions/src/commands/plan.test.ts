@@ -10,6 +10,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { type Reporter, type ResultPayload } from '@cupboard/reporter';
+import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -2269,6 +2270,313 @@ describe('cohort-matrix output', () => {
 			});
 		}
 	);
+
+	it.each([
+		{
+			name: 'serves the output',
+			referenceResponse: () =>
+				Response.json({ missingStorePathHashes: ['2'.repeat(32)] }),
+			mayBuild: false,
+			decision: 'cohort-reference',
+			warningCount: 0
+		},
+		{
+			name: 'does not exist',
+			referenceResponse: () =>
+				new Response('not found', { status: StatusCodes.NOT_FOUND }),
+			mayBuild: true,
+			decision: 'cohort',
+			warningCount: 0
+		},
+		{
+			name: 'refuses the read',
+			referenceResponse: () =>
+				new Response('forbidden', { status: StatusCodes.FORBIDDEN }),
+			mayBuild: true,
+			decision: 'cohort',
+			warningCount: 1
+		}
+	])(
+		'with publish=built, uses the reference source when it $name',
+		async ({ referenceResponse, mayBuild, decision, warningCount }) => {
+			const referencePath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+			const developmentPath = storePath(`/nix/store/${'5'.repeat(32)}-app-dev`);
+			const missingPath = storePath(`/nix/store/${'2'.repeat(32)}-app-b`);
+			const destinationPath = storePath(`/nix/store/${'4'.repeat(32)}-app-c`);
+			// This target shares `referencePath` but selects two outputs, so its
+			// cohort has no expected path for it and builds it.
+			const allOutputsTarget = {
+				...target,
+				attr: '.#packages.x86_64-linux.app-all',
+				rootSuffix: 'x86_64-linux/app-all',
+				outputs: ['out', 'dev']
+			};
+			// The destination serves this target's output, although its root is
+			// not retained, so the reference source is not asked about it.
+			const destinationTarget = {
+				...target,
+				attr: '.#packages.x86_64-linux.app-c',
+				rootDrvPath: storePath(`/nix/store/${'4'.repeat(32)}-app-c.drv`),
+				rootSuffix: 'x86_64-linux/app-c'
+			};
+			const referenceRequests: unknown[] = [];
+
+			const planned = await plannedCohorts(
+				{
+					publish: 'built',
+					referenceSource: 'https://cupboard.example/t/acme/cache/pr-1',
+					maximiseSpace: 'true',
+					targets: JSON.stringify([
+						target,
+						secondTarget,
+						allOutputsTarget,
+						destinationTarget
+					])
+				},
+				{
+					[target.rootDrvPath]: {
+						env: { out: referencePath, dev: developmentPath },
+						inputs: { drvs: {} },
+						outputs: {
+							out: { path: `${'1'.repeat(32)}-app` },
+							dev: { path: `${'5'.repeat(32)}-app-dev` }
+						}
+					},
+					[secondTarget.rootDrvPath]: {
+						env: { out: missingPath },
+						inputs: { drvs: {} },
+						outputs: { out: { path: `${'2'.repeat(32)}-app-b` } }
+					},
+					[destinationTarget.rootDrvPath]: {
+						env: { out: destinationPath },
+						inputs: { drvs: {} },
+						outputs: { out: { path: `${'4'.repeat(32)}-app-c` } }
+					}
+				},
+				{
+					fetcher: (input, init) => {
+						const url = input instanceof Request ? input.url : String(input);
+
+						if (!url.includes('/cache/pr-1/')) {
+							return Promise.resolve(
+								Response.json({
+									missingStorePathHashes: [
+										'1'.repeat(32),
+										'2'.repeat(32),
+										'5'.repeat(32)
+									]
+								})
+							);
+						}
+
+						referenceRequests.push(
+							JSON.parse(typeof init?.body === 'string' ? init.body : '{}')
+						);
+						return Promise.resolve(referenceResponse());
+					},
+					runner: preFilterRunner({})
+				}
+			);
+			const summaryCommon = {
+				system: 'x86_64-linux',
+				runner: 'ubuntu-latest',
+				builder: 'remote builders',
+				bestEffort: false
+			};
+
+			expect({
+				matrix: planned.matrix,
+				summary: planned.summary,
+				warningCount: planned.warnings.length,
+				referenceRequests
+			}).toStrictEqual({
+				matrix: {
+					include: [
+						{
+							key: 'cohort-x86_64-linux-ubuntu-latest-remote-4e8ff7447a64d438',
+							name: 'x86_64-linux/app-all on remote builders',
+							attrs: [allOutputsTarget.attr],
+							installables: [`${allOutputsTarget.attr}^out,dev`],
+							queryInstallables: [`${target.rootDrvPath}^out,dev`],
+							expectedPaths: [missingExpectedPath],
+							...cohortMatrixCommon,
+							roots: ['github:owner/repo/main/x86_64-linux/app-all'],
+							mayBuild: true
+						},
+						{
+							key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+							name: 'x86_64-linux/app on remote builders',
+							attrs: [target.attr],
+							installables: [`${target.attr}^out`],
+							queryInstallables: [`${target.rootDrvPath}^out`],
+							expectedPaths: [referencePath],
+							...cohortMatrixCommon,
+							roots: ['github:owner/repo/main/x86_64-linux/app'],
+							mayBuild
+						},
+						{
+							key: 'cohort-x86_64-linux-ubuntu-latest-remote-9c16529494b65bfc',
+							name: 'x86_64-linux/app-c on remote builders',
+							attrs: [destinationTarget.attr],
+							installables: [`${destinationTarget.attr}^out`],
+							queryInstallables: [`${destinationTarget.rootDrvPath}^out`],
+							expectedPaths: [destinationPath],
+							...cohortMatrixCommon,
+							roots: ['github:owner/repo/main/x86_64-linux/app-c'],
+							mayBuild: false
+						},
+						{
+							key: 'cohort-x86_64-linux-ubuntu-latest-remote-d7949960f4a27d8d',
+							name: 'x86_64-linux/app-b on remote builders',
+							attrs: [secondTarget.attr],
+							installables: [`${secondTarget.attr}^out`],
+							queryInstallables: [`${secondTarget.rootDrvPath}^out`],
+							expectedPaths: [missingPath],
+							...cohortMatrixCommon,
+							roots: ['github:owner/repo/main/x86_64-linux/app-b'],
+							mayBuild: true
+						}
+					]
+				},
+				summary: [
+					{
+						...summaryCommon,
+						job: 'x86_64-linux/app-all on remote builders',
+						attr: allOutputsTarget.attr,
+						decision: 'cohort'
+					},
+					{
+						...summaryCommon,
+						job: 'x86_64-linux/app on remote builders',
+						attr: target.attr,
+						decision
+					},
+					{
+						...summaryCommon,
+						job: 'x86_64-linux/app-c on remote builders',
+						attr: destinationTarget.attr,
+						decision: 'cohort'
+					},
+					{
+						...summaryCommon,
+						job: 'x86_64-linux/app-b on remote builders',
+						attr: secondTarget.attr,
+						decision: 'cohort'
+					}
+				],
+				warningCount,
+				referenceRequests: [
+					{ storePathHashes: ['1'.repeat(32), '2'.repeat(32)] }
+				]
+			});
+		}
+	);
+
+	it('with publish=built, does not ask the reference source when the cohorts keep their preinstalled software', async () => {
+		const missingPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+		const requestedUrls: string[] = [];
+
+		const planned = await plannedCohorts(
+			{
+				publish: 'built',
+				referenceSource: 'https://cupboard.example/t/acme/cache/pr-1',
+				maximiseSpace: 'false'
+			},
+			{
+				[target.rootDrvPath]: {
+					env: { out: missingPath },
+					inputs: { drvs: {} },
+					outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+				}
+			},
+			{
+				fetcher: (input) => {
+					requestedUrls.push(
+						input instanceof Request ? input.url : String(input)
+					);
+					return Promise.resolve(
+						Response.json({ missingStorePathHashes: ['1'.repeat(32)] })
+					);
+				},
+				runner: preFilterRunner({})
+			}
+		);
+
+		expect({
+			matrix: planned.matrix,
+			warnings: planned.warnings,
+			requestedUrls
+		}).toStrictEqual({
+			matrix: {
+				include: [
+					{
+						key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+						name: 'x86_64-linux/app on remote builders',
+						attrs: [target.attr],
+						installables: [`${target.attr}^out`],
+						queryInstallables: [`${target.rootDrvPath}^out`],
+						expectedPaths: [missingPath],
+						...cohortMatrixCommon,
+						roots: ['github:owner/repo/main/x86_64-linux/app'],
+						mayBuild: true
+					}
+				]
+			},
+			warnings: [],
+			requestedUrls: ['https://cupboard.example/t/acme/api/v1/missing-paths']
+		});
+	});
+
+	it('with publish=built, does not ask the reference source when the destination serves every target', async () => {
+		const destinationPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+		const requestedUrls: string[] = [];
+
+		const planned = await plannedCohorts(
+			{
+				publish: 'built',
+				referenceSource: 'https://cupboard.example/t/acme/cache/pr-1',
+				maximiseSpace: 'true'
+			},
+			{
+				[target.rootDrvPath]: {
+					env: { out: destinationPath },
+					inputs: { drvs: {} },
+					outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+				}
+			},
+			{
+				fetcher: (input) => {
+					requestedUrls.push(
+						input instanceof Request ? input.url : String(input)
+					);
+					return Promise.resolve(Response.json({ missingStorePathHashes: [] }));
+				},
+				runner: preFilterRunner({})
+			}
+		);
+
+		expect({
+			matrix: planned.matrix,
+			requestedUrls
+		}).toStrictEqual({
+			matrix: {
+				include: [
+					{
+						key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+						name: 'x86_64-linux/app on remote builders',
+						attrs: [target.attr],
+						installables: [`${target.attr}^out`],
+						queryInstallables: [`${target.rootDrvPath}^out`],
+						expectedPaths: [destinationPath],
+						...cohortMatrixCommon,
+						roots: ['github:owner/repo/main/x86_64-linux/app'],
+						mayBuild: false
+					}
+				]
+			},
+			requestedUrls: ['https://cupboard.example/t/acme/api/v1/missing-paths']
+		});
+	});
 });
 
 const cohortMatrixCommon = {
@@ -3309,12 +3617,15 @@ it.each(['outputs', 'built'] as const)(
 				cache: 'pr-cache',
 				optimise: 'true',
 				publish,
-				referenceSource: 'https://cupboard.example/t/acme'
+				referenceSource: 'https://cupboard.example/t/acme',
+				maximiseSpace: 'true'
 			},
 			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output },
 			warningReporter([]),
 			{
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				inspectVersion: releasedCupboard,
+				inspectCommandOptions: completeTargetsOption,
 				runner,
 				evaluator: () =>
 					Promise.resolve({
@@ -3377,7 +3688,7 @@ it.each(['outputs', 'built'] as const)(
 									bestEffort: false,
 									runsOn: 'ubuntu-latest',
 									roots: ['github:owner/repo/main/x86_64-linux/app'],
-									mayBuild: true
+									mayBuild: false
 								}
 							]
 			},

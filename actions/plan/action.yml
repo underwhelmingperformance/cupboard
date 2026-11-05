@@ -104,8 +104,8 @@ inputs:
   maximise-space:
     description:
       Whether the cohort jobs free disk space when they may build. When false,
-      every cohort job keeps mayBuild true, and the plan does not inspect the
-      cupboard version.
+      every cohort job keeps mayBuild true, the plan does not inspect cupboard,
+      and the plan does not ask which outputs the reference source serves.
     required: false
     default: 'false'
   store:

@@ -546,13 +546,13 @@ configuration:
   before building, such as Xcode on macOS and language toolchains on Linux. This
   can't be undone, so only use it on ephemeral GitHub-hosted runners. With
   `build: missing`, a cohort job skips this step when the plan found the output
-  of every target in the destination cache. A target that selects several
-  outputs always counts as needing a build. A cohort job never skips this step
-  with `publish: closure` or `publish: none`, or when the workflow builds
-  cupboard from source or installs a release whose `plan cohort` does not accept
-  `--complete-targets`. A cohort job that skips the step still evaluates its
-  targets, so a flake that imports from a derivation can still build or download
-  paths during that evaluation.
+  of every target in the destination cache or, under `publish: built`, the
+  reference source. A target that selects several outputs always counts as
+  needing a build. A cohort job never skips this step with `publish: closure` or
+  `publish: none`, or when the workflow builds cupboard from source or installs
+  a release whose `plan cohort` does not accept `--complete-targets`. A cohort
+  job that skips the step still evaluates its targets, so a flake that imports
+  from a derivation can still build or download paths during that evaluation.
 - `enable-packing: true` packs small single-target cohorts into as few jobs as
   fit within `pack-capacity` bytes of disk. It uses measured closure sizes. If
   the measurement fails, the manifest's cohorts are used as they are.
