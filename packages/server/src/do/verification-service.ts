@@ -36,6 +36,7 @@ import {
 	isNull,
 	lte,
 	ne,
+	notInArray,
 	or,
 	type SQL,
 	sql
@@ -129,7 +130,10 @@ import {
 	parseStoredUploadPathMetadata
 } from './upload-metadata.ts';
 import { UploadRetrySchedule } from './upload-retry-schedule.ts';
-import { type UploadStateService } from './upload-state-service.ts';
+import {
+	isAwaitingVerdict,
+	type UploadStateService
+} from './upload-state-service.ts';
 import {
 	raceVerificationOperation,
 	withRenewedVerificationClaim
@@ -921,14 +925,6 @@ type FinaliseCommittedResult = 'continue' | 'applied' | 'ignored';
 type PromotionResult = 'ready' | 'applied' | 'ignored';
 type MaterialiseVerifiedResult = 'applied' | 'deferred' | 'ignored';
 
-// Terminal rows remain authoritative during their observation window.
-// Overlapping verification passes must not reopen them.
-function isAwaitingVerdict(
-	row: typeof schema.pendingUploads.$inferSelect
-): boolean {
-	return row.verdict === 'pending' || row.verdict === 'committing';
-}
-
 function claimableReadyAt() {
 	return sql<string>`MAX(COALESCE(${schema.pendingUploads.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${schema.pendingUploads.claimedAt}, '+360 seconds'), ''))`;
 }
@@ -940,13 +936,23 @@ function claimableReadyAt() {
 // expires. Sending the row to the queue consumer again would repeat the NAR
 // decode. A client re-drive revokes the claim, which invalidates the recorded
 // verdict and makes the row claimable again.
-function claimableFilter(now: Date) {
+//
+// A row whose commit is running in this instance is never claimable; see
+// `CommitPipelineService.runningUploads`.
+function claimableFilter(now: Date, running: readonly UploadId[]) {
 	const nowIso = isoTimestamp(now);
 
 	return and(
 		sql`(${schema.pendingUploads.verdict} = 'pending' OR ${schema.pendingUploads.verdict} = 'committing') AND (${schema.pendingUploads.recordedVerdictJson} IS NULL OR ${schema.pendingUploads.claimOwner} IS NULL) AND ${schema.pendingUploads.settleExhaustion} IS NULL`,
-		lte(claimableReadyAt(), nowIso)
+		lte(claimableReadyAt(), nowIso),
+		notRunning(running)
 	);
+}
+
+function notRunning(running: readonly UploadId[]): SQL | undefined {
+	return running.length === 0
+		? undefined
+		: notInArray(schema.pendingUploads.id, jsonValueList(running));
 }
 
 // Selects up to `size` claimable rows after `after`, in readiness order.
@@ -956,19 +962,21 @@ function claimableFilter(now: Date) {
 function claimableWindowRows(
 	now: Date,
 	after: ReadinessCursor | undefined,
-	size: number
+	size: number,
+	running: readonly UploadId[]
 ): SQL {
 	const columns = sql`${schema.pendingUploads.id} AS id, ${claimableReadyAt()} AS ready_at`;
 	const source = sql`${schema.pendingUploads} INDEXED BY pending_upload_fresh_ready_idx`;
+	const claimable = claimableFilter(now, running);
 	if (after === undefined) {
 		return sql`SELECT ${columns} FROM ${source}
-			WHERE ${claimableFilter(now)} ORDER BY ${claimableReadyAt()}, ${schema.pendingUploads.id} LIMIT ${size}`;
+			WHERE ${claimable} ORDER BY ${claimableReadyAt()}, ${schema.pendingUploads.id} LIMIT ${size}`;
 	}
 	const sameReadiness = sql`SELECT ${columns} FROM ${source}
-		WHERE ${claimableFilter(now)} AND ${claimableReadyAt()} = ${after.readyAt} AND ${schema.pendingUploads.id} > ${after.id}
+		WHERE ${claimable} AND ${claimableReadyAt()} = ${after.readyAt} AND ${schema.pendingUploads.id} > ${after.id}
 		ORDER BY ${schema.pendingUploads.id} LIMIT ${size}`;
 	const laterReadiness = sql`SELECT ${columns} FROM ${source}
-		WHERE ${claimableFilter(now)} AND ${claimableReadyAt()} > ${after.readyAt}
+		WHERE ${claimable} AND ${claimableReadyAt()} > ${after.readyAt}
 		ORDER BY ${claimableReadyAt()}, ${schema.pendingUploads.id} LIMIT ${size}`;
 	return sql`SELECT id, ready_at FROM (SELECT * FROM (${sameReadiness}) UNION ALL SELECT * FROM (${laterReadiness}))
 		ORDER BY ready_at, id LIMIT ${size}`;
@@ -3185,7 +3193,12 @@ export class VerificationService {
 	// it.
 	private claimableWindow(page: ClaimablePage): ClaimableWindow {
 		const size = page.limit + (page.margin ?? claimWindowMargin);
-		const window = claimableWindowRows(page.now, page.after, size);
+		const window = claimableWindowRows(
+			page.now,
+			page.after,
+			size,
+			this.commitPipeline.runningUploads()
+		);
 		const matches =
 			and(
 				sql`(${schema.pendingUploads.recoveryDeadline} IS NULL OR ${schema.pendingUploads.recoveryDeadline} > ${isoTimestamp(page.now)})`,
@@ -3882,7 +3895,8 @@ export class VerificationService {
 			),
 			isNull(schema.pendingUploads.settleExhaustion),
 			lte(readyAt, now),
-			awaitingFilter
+			awaitingFilter,
+			notRunning(this.commitPipeline.runningUploads())
 		);
 		const current = this.context.db
 			.select()
@@ -3912,6 +3926,7 @@ export class VerificationService {
 			isNotNull(schema.pendingUploads.recordedVerdictJson),
 			isNull(schema.pendingUploads.settleExhaustion),
 			lte(readyAt, now),
+			notRunning(this.commitPipeline.runningUploads()),
 			after === undefined
 				? undefined
 				: sql`(${readyAt}, ${schema.pendingUploads.id}) > (${after.readyAt}, ${after.id})`,
@@ -4610,7 +4625,7 @@ export class VerificationService {
 	// keeps failing for that operation.
 	hasPendingUploads(): boolean {
 		const first = sql`(SELECT ${schema.pendingUploads.id} FROM ${schema.pendingUploads} INDEXED BY pending_upload_fresh_ready_idx
-			WHERE ${claimableFilter(new Date())} LIMIT 1)`;
+			WHERE ${claimableFilter(new Date(), this.commitPipeline.runningUploads())} LIMIT 1)`;
 		return (
 			this.context.db
 				.select({ id: schema.pendingUploads.id })
@@ -4916,11 +4931,18 @@ export class VerificationService {
 		const claimedAt = isoTimestamp(new Date(now));
 		const exhausted = isNotNull(schema.pendingUploads.settleExhaustion);
 		const readyAt = sql`MAX(COALESCE(${schema.pendingUploads.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${schema.pendingUploads.claimedAt}, '+360 seconds'), ''))`;
-		const eligible = and(exhausted, lte(readyAt, claimedAt));
+		// A commit can start while an earlier row's work awaits, so each claim
+		// reads the running commits again.
+		const eligible = () =>
+			and(
+				exhausted,
+				lte(readyAt, claimedAt),
+				notRunning(this.commitPipeline.runningUploads())
+			);
 		const rows = this.context.db
 			.select()
 			.from(schema.pendingUploads)
-			.where(eligible)
+			.where(eligible())
 
 			.orderBy(asc(readyAt), asc(schema.pendingUploads.id))
 			.limit(limit)
@@ -4937,7 +4959,7 @@ export class VerificationService {
 		let completed = 0;
 		for (const row of rows) {
 			signal?.throwIfAborted();
-			const filter = and(eq(schema.pendingUploads.id, row.id), eligible);
+			const filter = and(eq(schema.pendingUploads.id, row.id), eligible());
 			const pending = this.context.db
 				.update(schema.pendingUploads)
 				.set({ claimOwner: owner, claimedAt, commitReleased: false })
@@ -5005,9 +5027,10 @@ export class VerificationService {
 	pass in this object is applying, for as long as that pass runs.
 	*/
 	recordedVerdictDueAt(): number | undefined {
-		return new UploadRetrySchedule(this.context).recordedAt(
-			this.applyingRecordedVerdicts.values().toArray()
-		);
+		return new UploadRetrySchedule(this.context).recordedAt([
+			...this.applyingRecordedVerdicts.values(),
+			...this.commitPipeline.runningUploads()
+		]);
 	}
 
 	/**

@@ -78,6 +78,7 @@ import {
 	putNarBytes,
 	recordClaimedVerification,
 	resetTestServer,
+	restartTestServers,
 	suspendTenant,
 	testPushId,
 	testPushIdFor,
@@ -88,9 +89,14 @@ import {
 	verificationOf,
 	verifyCurrentTenant
 } from '../test-support.ts';
+import { CupboardServer as TestCupboardServer } from '../test-worker.ts';
 
 import { AttestationsService } from './attestations-service.ts';
-import { CommitPipelineService } from './commit-pipeline-service.ts';
+import {
+	CommitPipelineService,
+	verifyBackstopDelayMs,
+	verifyBackstopKey
+} from './commit-pipeline-service.ts';
 import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -2376,6 +2382,426 @@ describe('publication subscriptions', () => {
 		}
 	});
 });
+
+class CommitStoppedFault extends Error {}
+
+// Commits a path with a new NAR and plans a second path with the same NAR, which
+// the cache can reuse. The seeding commit's backstop deadline is removed, as if
+// it had run out, so a test sees only the deadlines that the code under test
+// stores.
+async function reusablePublication(token: string, label: string) {
+	const nar = await verifiableNar(label);
+	const fields = {
+		fileSize: nar.narBytes.byteLength,
+		fileHash: nar.fileHash,
+		narHash: nar.narHash,
+		narSize: nar.narSize
+	};
+	await commitPath(
+		token,
+		uploadMetadata({ ...fields, storePathHash: '2'.repeat(32) }),
+		nar
+	);
+	const [planned] = await plannedEntries(token, '/uploads/plan', [
+		uploadPathNegotiation(uploadMetadata(fields))
+	]);
+	if (planned === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	await runInDurableObject(currentServer(), (_instance, state) =>
+		state.storage.delete(verifyBackstopKey)
+	);
+	return {
+		...planned,
+		blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+	};
+}
+
+// Publishes a reusable path, and makes the commit fail after it publishes the
+// narinfo object. The operation stays accepted and its pending row stays
+// `committing`.
+async function stoppedReuseCommit(token: string, label: string) {
+	const entry = await reusablePublication(token, label);
+	const inheritance = await runInDurableObject(currentServer(), () =>
+		Promise.resolve(
+			vi
+				.spyOn(AttestationsService.prototype, 'queueInheritance')
+				.mockRejectedValueOnce(new CommitStoppedFault())
+		)
+	);
+	let frames;
+	try {
+		frames = await admit(token, testPushId, entry);
+	} finally {
+		inheritance.mockRestore();
+	}
+	return { entry, frames };
+}
+
+describe('publication commits that stop after they start', () => {
+	beforeEach(async () => {
+		// The charge compares the recovery deadline with D1's clock.
+		vi.setSystemTime(vi.getRealSystemTime());
+		await resetTestServer();
+	});
+
+	it.each([
+		{ when: 'a queue pass runs', isQueuePassRun: true },
+		{ when: 'the queue message is lost', isQueuePassRun: false }
+	])(
+		'leaves the row of a running commit to that commit when $when',
+		async ({ isQueuePassRun }) => {
+			ignoreAlarmsUntilTestFinishes();
+			const token = await initialise();
+			const running = await pausedReuseCommit(
+				token,
+				`publication-running-${String(isQueuePassRun)}`
+			);
+			const { entry } = running;
+			const sent = await collectVerificationPasses();
+			let frames;
+			let during;
+			try {
+				// A deferral of another upload requests verification and arms the
+				// backstop while the commit runs.
+				await currentServer().requestVerificationPass();
+				if (isQueuePassRun) {
+					await verifyCurrentTenant();
+					await currentServer().runVerification();
+				}
+				vi.setSystemTime(Date.now() + verifyBackstopDelayMs);
+				await runAlarmPasses();
+				during = {
+					row: await claimState(entry.operationId),
+					backstop: await backstopDeadline()
+				};
+				await running.pause.release();
+				frames = [running.accepted, await running.session.nextFrame()];
+			} finally {
+				await closeSessionAndWait(running.session.socket);
+			}
+			const after = await snapshot();
+			expect({
+				during,
+				sent,
+				frames,
+				pending: after.pending,
+				operations: after.operations.map(({ id, state }) => ({ id, state }))
+			}).toStrictEqual({
+				during: {
+					row: { verdict: 'committing', isClaimed: false },
+					backstop: undefined
+				},
+				sent: [{ kind: 'tenant-verify', tenant: fixtureTenant }],
+				frames: [
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					{
+						ev: 'settled',
+						uploadId: entry.operationId,
+						response: {
+							storePathHash: entry.metadata.storePathHash,
+							narHash: entry.metadata.narHash,
+							status: 'committed'
+						},
+						grace: {}
+					}
+				],
+				pending: [],
+				operations: [{ id: entry.operationId, state: 'servable' }]
+			});
+		}
+	);
+
+	it('lets verification claim a deferred upload while the commit sends its request', async () => {
+		ignoreAlarmsUntilTestFinishes();
+		const token = await initialise();
+		const nar = await verifiableNar('publication-handoff');
+		const [planned] = await plannedEntries(token, '/uploads/plan', [
+			uploadPathNegotiation(
+				uploadMetadata({
+					fileSize: nar.narBytes.byteLength,
+					fileHash: nar.fileHash,
+					narHash: nar.narHash,
+					narSize: nar.narSize
+				})
+			)
+		]);
+		if (planned === undefined) {
+			throw new Error('Expected a planned entry');
+		}
+		const entry = {
+			...planned,
+			blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+		};
+		await putNarBytes(
+			publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+			nar
+		);
+		const pause = new DurableObjectPause();
+		const sent: unknown[] = [];
+		const metrics = { backlogCount: 0, backlogBytes: 0 };
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.env = {
+				...instance.context.env,
+				MAINTENANCE_QUEUE: {
+					send: async (message: unknown) => {
+						sent.push(message);
+						await pause.stop();
+						return { metadata: { metrics } };
+					},
+					sendBatch: () => Promise.resolve({ metadata: { metrics } }),
+					metrics: () => Promise.resolve(metrics)
+				}
+			};
+			return Promise.resolve();
+		});
+		const session = await openCommitSession(
+			token,
+			undefined,
+			publicationSession
+		);
+		let frames;
+		let claimed;
+		try {
+			session.send({
+				op: 'publish-batch',
+				pushId: testPushId,
+				entries: [entry]
+			});
+			const accepted = await session.nextFrame();
+			await pause.reached();
+			// The queue delivers the message before the commit's send returns.
+			claimed = await currentServer().claimVerificationBatch(
+				10,
+				Number.MAX_SAFE_INTEGER
+			);
+			await pause.release();
+			frames = [accepted, await session.nextFrame()];
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+		expect({
+			frames,
+			sent,
+			claimed: claimed.claims.map((claim) => claim.uploadId)
+		}).toStrictEqual({
+			frames: [
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'deferred',
+					uploadId: entry.operationId,
+					storePathHash: entry.metadata.storePathHash,
+					narHash: entry.metadata.narHash,
+					grace: {}
+				}
+			],
+			sent: [{ kind: 'tenant-verify', tenant: fixtureTenant }],
+			claimed: [entry.operationId]
+		});
+	});
+
+	it('arms the backstop when a commit fails and leaves its upload waiting', async () => {
+		const token = await initialise();
+		const failedAt = Date.now();
+		const { entry, frames } = await stoppedReuseCommit(
+			token,
+			'publication-failed-backstop'
+		);
+		expect({
+			frames,
+			row: await claimState(entry.operationId),
+			backstop: await backstopDeadline()
+		}).toStrictEqual({
+			frames: [
+				{ ev: 'publication-accepted', uploadId: entry.operationId },
+				{
+					ev: 'error',
+					uploadId: entry.operationId,
+					status: StatusCodes.INTERNAL_SERVER_ERROR,
+					message: 'internal error'
+				}
+			],
+			row: { verdict: 'committing', isClaimed: false },
+			backstop: failedAt + verifyBackstopDelayMs
+		});
+	});
+
+	it('leaves a running commit out of the recovery check at start-up', async () => {
+		ignoreAlarmsUntilTestFinishes();
+		const token = await initialise();
+		const pipelines = await pipelinesOfNextCommit();
+		const running = await pausedReuseCommit(token, 'publication-running-start');
+		let backstop;
+		try {
+			// The WebSocket handlers do not await initialisation, so the start-up
+			// check can run while a commit runs.
+			await runInDurableObject(currentServer(), () =>
+				onlyPipeline(pipelines).armRecoveryBackstop()
+			);
+			backstop = await backstopDeadline();
+			await running.pause.release();
+			await running.session.nextFrame();
+		} finally {
+			await closeSessionAndWait(running.session.socket);
+		}
+		expect(backstop).toBeUndefined();
+	});
+
+	it('arms no recovery backstop for an upload that verification cannot claim', async () => {
+		const token = await initialise();
+		const pipelines = await pipelinesOfNextCommit();
+		const { entry } = await stoppedReuseCommit(
+			token,
+			'publication-exhausted-start'
+		);
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			await state.storage.delete(verifyBackstopKey);
+			instance.context.db
+				.update(schema.pendingUploads)
+				.set({ settleExhaustion: 'attempt-limit' })
+				.where(eq(schema.pendingUploads.id, entry.operationId))
+				.run();
+			await onlyPipeline(pipelines).armRecoveryBackstop();
+		});
+		expect(await backstopDeadline()).toBeUndefined();
+	});
+
+	it('completes a commit that a reset stopped when the object starts again', async () => {
+		ignoreAlarmsUntilTestFinishes();
+		const token = await initialise();
+		const stopped = await pausedReuseCommit(token, 'publication-reset-start');
+		const { entry } = stopped;
+		await resetObject(stopped.session);
+		const sent = await collectVerificationPasses();
+		// The next alarm starts the new instance.
+		await runAlarmPasses();
+		const after = await snapshot();
+		expect({
+			sent,
+			pending: after.pending,
+			operations: after.operations.map(({ id, state }) => ({ id, state }))
+		}).toStrictEqual({
+			sent: [{ kind: 'tenant-verify', tenant: fixtureTenant }],
+			pending: [],
+			operations: [{ id: entry.operationId, state: 'servable' }]
+		});
+	});
+});
+
+// Publishes a reusable path. The commit publishes the narinfo object and then
+// waits before it queues attestation inheritance, until the test releases
+// `pause`.
+async function pausedReuseCommit(token: string, label: string) {
+	const entry = await reusablePublication(token, label);
+	const pause = new DurableObjectPause();
+	await runInDurableObject(currentServer(), () => {
+		const spy = vi.spyOn(AttestationsService.prototype, 'queueInheritance');
+		spy.mockImplementationOnce(async function (
+			this: AttestationsService,
+			...arguments_
+		) {
+			spy.mockRestore();
+			await pause.stop();
+			return this.queueInheritance(...arguments_);
+		});
+		return Promise.resolve();
+	});
+	const session = await openCommitSession(token, undefined, publicationSession);
+	session.send({ op: 'publish-batch', pushId: testPushId, entries: [entry] });
+	const accepted = await session.nextFrame();
+	await pause.reached();
+	return { entry, session, pause, accepted };
+}
+
+// Resets the object, as the runtime does when it moves the object to another
+// machine. The commit that was running in it stops without finishing.
+async function resetObject(session: CommitConversation) {
+	await restartTestServers();
+	await closeSessionAndWait(session.socket);
+}
+
+// Reads the verdict and claim fields of the pending row.
+async function claimState(uploadId: UploadId) {
+	const row = await runInDurableObject(currentServer(), (instance) =>
+		Promise.resolve(
+			instance.context.db
+				.select({
+					verdict: schema.pendingUploads.verdict,
+					claimOwner: schema.pendingUploads.claimOwner,
+					claimedAt: schema.pendingUploads.claimedAt
+				})
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.get()
+		)
+	);
+	return (
+		row && {
+			verdict: row.verdict,
+			isClaimed: row.claimOwner !== null || row.claimedAt !== null
+		}
+	);
+}
+
+function runAlarmPass() {
+	return runInDurableObject(currentServer(), (instance) => {
+		if (!(instance instanceof TestCupboardServer)) {
+			throw new TypeError('The object must run the test worker class.');
+		}
+		return instance.runAlarmPass();
+	});
+}
+
+// Each alarm runs at most one due maintenance pass. Run alarms, as workerd
+// would deliver them, until no alarm is due. The date is fixed, so a pass that
+// waits for time to pass stays due; the attempt bound covers every pass with
+// room to spare.
+async function runAlarmPasses() {
+	for (let attempt = 0; attempt < 30; attempt += 1) {
+		await runAlarmPass();
+		const alarm = await runInDurableObject(
+			currentServer(),
+			(_instance, state) => state.storage.getAlarm()
+		);
+		if (alarm === null || alarm > Date.now()) {
+			return;
+		}
+	}
+}
+
+function backstopDeadline() {
+	return runInDurableObject(currentServer(), (_instance, state) =>
+		state.storage.get<number>(verifyBackstopKey)
+	);
+}
+
+// Collects the object's own commit pipeline when the next commit starts.
+async function pipelinesOfNextCommit(): Promise<CommitPipelineService[]> {
+	const pipelines: CommitPipelineService[] = [];
+	await runInDurableObject(currentServer(), () => {
+		const spy = vi.spyOn(CommitPipelineService.prototype, 'commit');
+		spy.mockImplementationOnce(function (
+			this: CommitPipelineService,
+			...arguments_
+		) {
+			spy.mockRestore();
+			pipelines.push(this);
+			return this.commit(...arguments_);
+		});
+		return Promise.resolve();
+	});
+	return pipelines;
+}
+
+function onlyPipeline(
+	pipelines: readonly CommitPipelineService[]
+): CommitPipelineService {
+	const [pipeline] = pipelines;
+	if (pipeline === undefined) {
+		throw new Error('Expected a commit to start');
+	}
+	return pipeline;
+}
 
 // With `isConfirmationPending`, verification has committed the generation, but
 // the operation is still accepted and its pending row remains, as when the

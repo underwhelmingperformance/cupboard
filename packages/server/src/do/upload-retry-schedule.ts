@@ -22,7 +22,7 @@ export class UploadRetrySchedule {
 				? sql`SELECT ${readyAt} AS readyAt FROM pending_upload INDEXED BY pending_upload_recorded_ready_idx
 				WHERE (recorded_verdict_json IS NOT NULL OR settle_exhaustion IS NOT NULL)${excludedIds(excluded)} ORDER BY ${readyAt}, id LIMIT 1`
 				: sql`SELECT ${readyAt} AS readyAt FROM pending_upload INDEXED BY pending_upload_fresh_ready_idx
-				WHERE (verdict = 'pending' OR verdict = 'committing') AND (recorded_verdict_json IS NULL OR claim_owner IS NULL) AND settle_exhaustion IS NULL
+				WHERE (verdict = 'pending' OR verdict = 'committing') AND (recorded_verdict_json IS NULL OR claim_owner IS NULL) AND settle_exhaustion IS NULL${excludedIds(excluded)}
 				ORDER BY ${readyAt}, id LIMIT 1`
 		)[0];
 
@@ -41,17 +41,21 @@ export class UploadRetrySchedule {
 		return pending.length === 0 ? undefined : Math.min(...pending);
 	}
 
-	freshAt(): number | undefined {
+	/**
+	When the earliest upload that awaits a fresh verification pass becomes
+	ready, ignoring the uploads in `excluded`.
+	*/
+	freshAt(excluded: readonly UploadId[]): number | undefined {
 		return new RetryClockService(this.context).isBlocked()
 			? undefined
-			: this.firstAt('fresh');
+			: this.firstAt('fresh', excluded);
 	}
 
 	/**
 	When the earliest recorded verdict or exhausted upload becomes ready,
 	ignoring the uploads in `excluded`.
 	*/
-	recordedAt(excluded: readonly UploadId[] = []): number | undefined {
+	recordedAt(excluded: readonly UploadId[]): number | undefined {
 		return new RetryClockService(this.context).isBlocked()
 			? undefined
 			: this.firstAt('recorded', excluded);
