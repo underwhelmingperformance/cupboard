@@ -19,6 +19,7 @@ import {
 	type CacheMetadataResponse,
 	cacheMetadataResponseSchema
 } from '@cupboard/protocol/cache-metadata';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
@@ -62,6 +63,22 @@ export interface CachedClosureProgress {
 	readonly mode: 'bulk' | 'legacy';
 	readonly checked: number;
 	readonly found: number;
+}
+
+export interface CachedClosureReaderOptions {
+	readonly signal?: AbortSignal | undefined;
+	readonly onProgress?: (progress: CachedClosureProgress) => void;
+	/**
+	The random source for the backoff before a probe is sent again. The
+	default is `Math.random`.
+	*/
+	readonly random?: RandomSource;
+}
+
+interface SourceOfferOptions {
+	readonly signal?: AbortSignal | undefined;
+	readonly shouldDiscoverCapability?: boolean;
+	readonly random?: RandomSource | undefined;
 }
 
 export class CachedClosureSourceUnavailableError extends Error {
@@ -206,9 +223,9 @@ async function sourceOffer(
 	source: CachedClosureSource,
 	storePath: StorePathString,
 	fetcher: typeof fetch,
-	signal?: AbortSignal,
-	shouldDiscoverCapability = false
+	options: SourceOfferOptions = {}
 ): Promise<{ readonly bulk: boolean; readonly offer?: CachedClosureOffer }> {
+	const { signal, shouldDiscoverCapability = false, random } = options;
 	const url = `${canonicalHref(source.url)}/${StorePath.hash(storePath)}.narinfo`;
 	const document = await fetchWithProbeRetries(
 		fetcher,
@@ -252,7 +269,8 @@ async function sourceOffer(
 					maximumBytes: cacheMetadataMaxNarInfoBytes
 				})
 			};
-		}
+		},
+		{ random }
 	);
 	return {
 		bulk: document.bulk,
@@ -305,24 +323,29 @@ async function readMetadataJson(
 export class CachedClosureReader {
 	#mode: 'bulk' | 'legacy' | undefined;
 	#scopeVersion: string | undefined;
+	readonly #random: RandomSource | undefined;
+
+	readonly signal: AbortSignal | undefined;
+	readonly onProgress: ((progress: CachedClosureProgress) => void) | undefined;
 
 	constructor(
 		readonly source: CachedClosureSource,
 		readonly fetcher: typeof fetch,
-		readonly signal?: AbortSignal,
-		readonly onProgress?: (progress: CachedClosureProgress) => void
-	) {}
+		options: CachedClosureReaderOptions = {}
+	) {
+		this.signal = options.signal;
+		this.onProgress = options.onProgress;
+		this.#random = options.random;
+	}
 
 	async #legacy(
 		paths: readonly StorePathString[]
 	): Promise<readonly (CachedClosureOffer | undefined)[]> {
 		return mapWithConcurrency(paths, narInfoConcurrency, async (storePath) => {
-			const result = await sourceOffer(
-				this.source,
-				storePath,
-				this.fetcher,
-				this.signal
-			);
+			const result = await sourceOffer(this.source, storePath, this.fetcher, {
+				signal: this.signal,
+				random: this.#random
+			});
 			this.onProgress?.({
 				mode: 'legacy',
 				checked: 1,
@@ -535,13 +558,11 @@ export class CachedClosureReader {
 			return [];
 		}
 		if (this.#mode === undefined) {
-			const discovery = await sourceOffer(
-				this.source,
-				first,
-				this.fetcher,
-				this.signal,
-				true
-			);
+			const discovery = await sourceOffer(this.source, first, this.fetcher, {
+				signal: this.signal,
+				shouldDiscoverCapability: true,
+				random: this.#random
+			});
 			this.#mode = discovery.bulk ? 'bulk' : 'legacy';
 			if (!discovery.bulk) {
 				this.onProgress?.({
@@ -562,7 +583,8 @@ export class CachedClosureReader {
 			deadline: {
 				target: { url: loggedUrl(this.#pathInfoUrl()) },
 				replaySafety: 'replay-safe',
-				signal: this.signal
+				signal: this.signal,
+				random: this.#random
 			},
 			isPageTooLarge: (error) =>
 				error instanceof CachedClosureMetadataBudgetError,

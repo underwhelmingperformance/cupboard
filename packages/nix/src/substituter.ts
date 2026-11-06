@@ -15,6 +15,10 @@ import {
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
+	ExponentialBackoff,
+	type RandomSource
+} from '@cupboard/shared/backoff';
+import {
 	discardResponseBody,
 	withCleanup,
 	withCleanupSync
@@ -744,12 +748,13 @@ async function fetchDocument(
 ): Promise<DocumentOutcome> {
 	const fetcher = dependencies.fetch ?? undiciFetch;
 	const settings = transferSettings(dependencies);
+	const backoff = new TransferBackoff(settings, dependencies.spread);
 	let failure: SubstituterUnreachableError | undefined;
 
 	for (let attempt = 0; attempt < settings.attempts; attempt += 1) {
 		if (
 			attempt > 0 &&
-			!(await shouldWaitToRetry(attempt, failure, dependencies))
+			!(await shouldWaitToRetry(attempt, failure, backoff, dependencies))
 		) {
 			break;
 		}
@@ -856,14 +861,13 @@ maximum wait.
 async function shouldWaitToRetry(
 	attempt: number,
 	failure: SubstituterUnreachableError | undefined,
+	backoff: TransferBackoff,
 	dependencies: SubstituterEnvironment
 ): Promise<boolean> {
-	const wait = retryDelayMs(
+	const wait = backoff.delayMs(
 		attempt,
 		failure?.retryAfterMs,
-		rateLimitedStatuses.has(failure?.status ?? 0),
-		transferSettings(dependencies),
-		dependencies.spread ?? Math.random
+		rateLimitedStatuses.has(failure?.status ?? 0)
 	);
 
 	if (wait === undefined) {
@@ -877,8 +881,7 @@ async function shouldWaitToRetry(
 }
 
 /**
-Computes the delay before the next transfer attempt. Returns `undefined` when
-`Retry-After` exceeds {@link maxRetryWaitMs}.
+The delays between transfer attempts, from Nix's file-transfer settings.
 
 The backoff doubles with each attempt up to `filetransfer-retry-max-delay`,
 and `Retry-After` is a hard minimum that the ceiling does not cap. With
@@ -888,30 +891,58 @@ backoff.
 `maxRetryWaitMs` applies only to `Retry-After`; it does not cap the configured
 backoff.
 */
-function retryDelayMs(
-	attempt: number,
-	retryAfterMs: number | undefined,
-	isRateLimited: boolean,
-	settings: NixFileTransferSettings,
-	spread: () => number
-): number | undefined {
-	const minimumDelayMs = retryAfterMs ?? 0;
+class TransferBackoff {
+	readonly #backoff: ExponentialBackoff;
+	readonly #rateLimitedBackoff: ExponentialBackoff;
+	readonly #hasJitter: boolean;
 
-	if (minimumDelayMs > maxRetryWaitMs) {
-		return;
+	constructor(
+		settings: NixFileTransferSettings,
+		spread: RandomSource | undefined
+	) {
+		const jitter = settings.retryJitter ? 'full' : 'none';
+
+		this.#backoff = new ExponentialBackoff(
+			{
+				baseMs: settings.retryDelayMs,
+				maximumMs: settings.maxRetryDelayMs,
+				jitter
+			},
+			spread
+		);
+		this.#rateLimitedBackoff = new ExponentialBackoff(
+			{
+				baseMs: settings.rateLimitedRetryDelayMs,
+				maximumMs: settings.maxRetryDelayMs,
+				jitter
+			},
+			spread
+		);
+		this.#hasJitter = settings.retryJitter;
 	}
 
-	const base = isRateLimited
-		? settings.rateLimitedRetryDelayMs
-		: settings.retryDelayMs;
-	const backoff = Math.min(
-		base * 2 ** Math.min(attempt - 1, 31),
-		settings.maxRetryDelayMs
-	);
+	/**
+	Returns the delay before the next transfer attempt, or `undefined` when
+	`Retry-After` exceeds {@link maxRetryWaitMs}.
+	*/
+	delayMs(
+		attempt: number,
+		retryAfterMs: number | undefined,
+		isRateLimited: boolean
+	): number | undefined {
+		const minimumDelayMs = retryAfterMs ?? 0;
 
-	return settings.retryJitter
-		? minimumDelayMs + Math.round(spread() * backoff)
-		: Math.max(minimumDelayMs, backoff);
+		if (minimumDelayMs > maxRetryWaitMs) {
+			return;
+		}
+
+		const backoff = isRateLimited ? this.#rateLimitedBackoff : this.#backoff;
+		const delayMs = backoff.delayMs(attempt);
+
+		return this.#hasJitter
+			? minimumDelayMs + Math.round(delayMs)
+			: Math.max(minimumDelayMs, delayMs);
+	}
 }
 
 /**
