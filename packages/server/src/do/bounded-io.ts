@@ -1,3 +1,5 @@
+import { type RandomSource } from '@cupboard/shared/backoff';
+
 import { UnboundableIoError } from '../errors.ts';
 import type { withSpan } from '../observability/span.ts';
 
@@ -169,11 +171,14 @@ export function boundedWorkerEnv<
 /**
 Wraps an {@link R2Bucket} with storage deadlines. Reads bound the wait for
 `get()` to return, retry transient rejections and clean up late bodies.
-Uploads use only the enclosing critical-section deadline.
+Uploads use only the enclosing critical-section deadline. `random` is the
+random source for the backoff between read retries, and defaults to
+`Math.random`.
 */
 export function boundedBlobs(
 	bucket: R2Bucket,
-	observeRead?: typeof withSpan
+	observeRead?: typeof withSpan,
+	random?: RandomSource
 ): R2Bucket {
 	return new Proxy(bucket, {
 		get(target, property) {
@@ -191,7 +196,8 @@ export function boundedBlobs(
 								return call;
 							},
 							key,
-							observeRead
+							observeRead,
+							random
 						);
 				}
 				case 'put': {
