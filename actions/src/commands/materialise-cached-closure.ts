@@ -215,11 +215,9 @@ async function resolveReferenceClosure(
 			for (const [source, entries] of groups) {
 				let reader = readers.get(source);
 				if (reader === undefined) {
-					reader = new CachedClosureReader(
-						source,
-						fetcherFor(source),
-						options.signal
-					);
+					reader = new CachedClosureReader(source, fetcherFor(source), {
+						signal: options.signal
+					});
 					readers.set(source, reader);
 				}
 				const offers = await reader.offers(

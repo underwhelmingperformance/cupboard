@@ -244,12 +244,14 @@ async function discoverDependencyReferences(
 		const reader = new CachedClosureReader(
 			source,
 			retryingFetcher(observedFetch, 'replay-safe'),
-			options.signal,
-			(progress) => {
-				mode = progress.mode;
-				checked += progress.checked;
-				found += progress.found;
-				report();
+			{
+				signal: options.signal,
+				onProgress: (progress) => {
+					mode = progress.mode;
+					checked += progress.checked;
+					found += progress.found;
+					report();
+				}
 			}
 		);
 		report();

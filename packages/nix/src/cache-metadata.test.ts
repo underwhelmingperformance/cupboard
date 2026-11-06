@@ -3,7 +3,7 @@ import {
 	cacheMetadataCapability,
 	cacheMetadataCapabilityHeader
 } from '@cupboard/protocol/cache-metadata';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
 	destroyAfterHeaders,
@@ -45,11 +45,11 @@ describe('CachedClosureReader', () => {
 					})
 				);
 			});
-			const random = vi.spyOn(Math, 'random').mockReturnValue(0);
 			try {
 				const reader = new CachedClosureReader(
 					{ url: new URL(`${server.origin}/t/acme`), paths: [storePath] },
-					fetch
+					fetch,
+					{ random: () => 0 }
 				);
 
 				const offers = await reader.offers([storePath]);
@@ -85,7 +85,6 @@ describe('CachedClosureReader', () => {
 					]
 				});
 			} finally {
-				random.mockRestore();
 				await server.close();
 			}
 		}
