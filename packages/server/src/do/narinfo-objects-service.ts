@@ -1,5 +1,5 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
-import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { narFingerprint, NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NarInfoGeneration,
 	type NixSha256HashString,
@@ -22,10 +22,12 @@ import {
 	type NarInfoReferenceVersion,
 	readNarInfoProjection
 } from '../blob/narinfo-object-metadata.ts';
+import { sha256Hex } from '../crypto/crypto.ts';
 import { cacheIdentityCondition, type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
+	PublicationConflictError,
 	StoredReferencesInvalidError,
 	StoredSignaturesInvalidError
 } from '../errors.ts';
@@ -55,6 +57,31 @@ import {
 import { storedSignaturesSchema } from './signing-keys.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
+
+class CorruptNarInfoProjectionError extends PublicationConflictError {
+	constructor(readonly storePath: NarInfoRow['storePath']) {
+		super(
+			`The current narinfo projection disagrees with the accepted fingerprint for ${storePath}`,
+			'invalid-publication'
+		);
+		this.name = 'CorruptNarInfoProjectionError';
+	}
+}
+
+async function acceptedFingerprintDigest(row: NarInfoRow): Promise<string> {
+	return sha256Hex(
+		narFingerprint(
+			new StorePath(row.storePath),
+			row.narHash,
+			row.narSize,
+			parseStored(
+				storedReferencesSchema,
+				row.referencesJson,
+				(cause) => new StoredReferencesInvalidError(row.storePathHash, cause)
+			)
+		)
+	);
+}
 
 function effectiveSignatureGeneration(row: NarInfoRow): SigningKeyGeneration {
 	return row.pendingSignatureGeneration ?? row.signatureGeneration;
@@ -782,7 +809,7 @@ export class NarInfoObjectsService {
 	}
 
 	// A version is servable only when its live row, exact D1 edge, canonical NAR,
-	// and generation- and full-path-matched narinfo body are all present. The object
+	// and canonical-fingerprint-matched narinfo body are all present. The object
 	// records the URL of the NAR's current incarnation. The R2 probes precede the
 	// row snapshot so a concurrent recommit takes the repair path. Callers that
 	// complete work from this result must revalidate the returned generation.
@@ -803,6 +830,16 @@ export class NarInfoObjectsService {
 		const committedRows = rows.filter((row) =>
 			committed.has(row.storePathHash)
 		);
+		// Hash before the canonical availability probes, keeping their original
+		// ordering and the caller's final accepted-version/availability fences.
+		const acceptedDigests = new Map(
+			await mapWithConcurrency(
+				committedRows,
+				maxOutgoingConnections,
+				async (row) =>
+					[row.storePathHash, await acceptedFingerprintDigest(row)] as const
+			)
+		);
 		const objects = await recordedNarObjects(
 			this.context.d1,
 			committedRows.map((row) => row.narHash)
@@ -818,10 +855,22 @@ export class NarInfoObjectsService {
 		const isCurrentVersion = (
 			row: NarInfoRow,
 			projection: NarInfoProjection | undefined
-		): boolean =>
-			isMetadataOfCommit(projection?.metadata, row) &&
-			projection?.storePath === row.storePath &&
-			projection.metadata?.narUrl === currentNarUrls.get(row.narHash);
+		): boolean => {
+			if (
+				!isMetadataOfCommit(projection?.metadata, row) ||
+				projection?.storePath !== row.storePath
+			) {
+				return false;
+			}
+			// A current commit's fingerprint must match even when its NAR URL is
+			// stale or unavailable. URL repair cannot legitimise corrupt content.
+			if (
+				projection.fingerprintDigest !== acceptedDigests.get(row.storePathHash)
+			) {
+				throw new CorruptNarInfoProjectionError(row.storePath);
+			}
+			return projection.metadata?.narUrl === currentNarUrls.get(row.narHash);
+		};
 		const hasCurrentObject = (row: NarInfoRow): boolean =>
 			isCurrentVersion(row, present.get(row.storePathHash));
 

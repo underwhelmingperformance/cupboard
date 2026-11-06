@@ -2,6 +2,8 @@ import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { cacheMetadataMaxNarInfoBytes } from '@cupboard/protocol/cache-metadata';
 import { describe, expect, it, vi } from 'vitest';
 
+import { sha256Hex } from '../crypto/crypto.ts';
+
 import {
 	narInfoProjectionMaxBytes,
 	readNarInfoProjection
@@ -41,10 +43,42 @@ function projection(text = narInfo.render()) {
 }
 
 describe('readNarInfoProjection', () => {
+	it.each(['/nix/store', '/custom/store'])(
+		'uses Nix canonical reference ordering and the actual store directory %s',
+		async (directory) => {
+			const original = NarInfo.fromFields({
+				...narInfo.toFields(),
+				storePath: `${directory}/${narInfo.storePath.basename}`,
+				references: [
+					'22222222222222222222222222222222-second',
+					'11111111111111111111111111111111-first'
+				]
+			});
+			const reordered = NarInfo.fromFields({
+				...original.toFields(),
+				references: original.references.toReversed()
+			});
+			const expected = {
+				metadata,
+				storePath: original.storePath.value,
+				fingerprintDigest: await sha256Hex(original.fingerprint())
+			};
+			const originalObject = projection(original.render());
+			const reorderedObject = projection(reordered.render());
+			expect(await readNarInfoProjection(originalObject)).toStrictEqual(
+				expected
+			);
+			expect(await readNarInfoProjection(reorderedObject)).toStrictEqual(
+				expected
+			);
+		}
+	);
+
 	it('binds metadata to the actual full path and NAR body without requiring a new metadata field', async () => {
 		expect(await readNarInfoProjection(projection())).toStrictEqual({
 			metadata,
-			storePath: narInfo.storePath.value
+			storePath: narInfo.storePath.value,
+			fingerprintDigest: await sha256Hex(narInfo.fingerprint())
 		});
 	});
 
@@ -53,7 +87,8 @@ describe('readNarInfoProjection', () => {
 			await readNarInfoProjection({ ...projection(), customMetadata: {} })
 		).toStrictEqual({
 			metadata: undefined,
-			storePath: narInfo.storePath.value
+			storePath: narInfo.storePath.value,
+			fingerprintDigest: await sha256Hex(narInfo.fingerprint())
 		});
 	});
 
@@ -110,7 +145,8 @@ describe('readNarInfoProjection', () => {
 			);
 			expect(await readNarInfoProjection(projection(text))).toStrictEqual({
 				metadata,
-				storePath: narInfo.storePath.value
+				storePath: narInfo.storePath.value,
+				fingerprintDigest: await sha256Hex(NarInfo.parse(text).fingerprint())
 			});
 		}
 	);
@@ -148,7 +184,8 @@ describe('readNarInfoProjection', () => {
 		}).render();
 		expect(await readNarInfoProjection(projection(text))).toStrictEqual({
 			metadata,
-			storePath: narInfo.storePath.value
+			storePath: narInfo.storePath.value,
+			fingerprintDigest: await sha256Hex(narInfo.fingerprint())
 		});
 	});
 
@@ -174,7 +211,8 @@ describe('readNarInfoProjection', () => {
 			}
 			expect(await readNarInfoProjection(object)).toStrictEqual({
 				metadata,
-				storePath: narInfo.storePath.value
+				storePath: narInfo.storePath.value,
+				fingerprintDigest: await sha256Hex(narInfo.fingerprint())
 			});
 		}
 	);

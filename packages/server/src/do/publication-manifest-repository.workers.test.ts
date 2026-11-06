@@ -51,13 +51,19 @@ import {
 } from './reuse-view-read.test-support.ts';
 
 const counter = { value: 0 };
-async function fixture(access: 'public' | 'private' = 'public') {
+async function fixture(
+	access: 'public' | 'private' = 'public',
+	references?: string[]
+) {
 	counter.value += 1;
 	const destination = namedCache(
 		`bootstrap-destination-${String(counter.value)}`
 	);
 	const source = namedCache(`bootstrap-source-${String(counter.value)}`);
-	await committedPath(`bootstrap-${String(counter.value)}`, source, { access });
+	await committedPath(`bootstrap-${String(counter.value)}`, source, {
+		access,
+		references
+	});
 	const grants = authorizationDetailsSchema.parse([
 		{ type: 'cupboard_cache', cache: destination, actions: ['upload:commit'] },
 		{ type: 'cupboard_cache', cache: source, actions: ['cache:content-read'] }
@@ -1066,9 +1072,18 @@ describe('PublicationManifestRepository bootstrap lookup', () => {
 		'preserves the whole outcome for usable sibling $change during $gap for $sourceConstraint',
 		async ({ gap, change, sourceConstraint }) =>
 			withoutAlarmArming(async () => {
-				const f = await fixture();
+				const references =
+					change === 'references-order'
+						? [
+								'00000000000000000000000000000000-reference',
+								'11111111111111111111111111111111-first'
+							]
+						: undefined;
+				const f = await fixture('public', references);
 				const other = namedCache(`semantic-sibling-${String(counter.value)}`);
-				await committedPath(`bootstrap-${String(counter.value)}`, other);
+				await committedPath(`bootstrap-${String(counter.value)}`, other, {
+					references
+				});
 				const view = reuseViewNameSchema.parse(
 					`semantic-${String(counter.value)}`
 				);
@@ -1097,23 +1112,6 @@ describe('PublicationManifestRepository bootstrap lookup', () => {
 							name: 'later'
 						}
 					);
-				}
-				if (change === 'references-order') {
-					await runInDurableObject(fixtureWorkerServer(), (instance) => {
-						for (const scope of [f.source, other]) {
-							const cache = instance.context.cacheRepository.require(scope);
-							instance.context.db
-								.update(schema.narInfos)
-								.set({
-									referencesJson: JSON.stringify([
-										'00000000000000000000000000000000-reference',
-										f.result.storePath.split('/').at(-1)
-									])
-								})
-								.where(eq(schema.narInfos.cacheId, cache.id))
-								.run();
-						}
-					});
 				}
 				const before = await lookupState();
 				const expected = {

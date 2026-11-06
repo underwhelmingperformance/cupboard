@@ -8,6 +8,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 
+import { sha256Hex } from '../crypto/crypto.ts';
 import { narObjectKeyPrefix, narObjectKeySuffix } from '../http/http.ts';
 
 // Cloudflare limits the entire SQLite row, not just each text value, to 2 MB:
@@ -151,10 +152,12 @@ export function isNarInfoObjectVersion(
 
 /**
 Metadata whose path and NAR identity have been checked against the R2 body.
+Fingerprint-bearing content is retained only as a fixed-size canonical digest.
 */
 export interface NarInfoProjection {
 	readonly metadata: NarInfoObjectMetadata | undefined;
 	readonly storePath: StorePathString;
+	readonly fingerprintDigest: string;
 }
 
 /**
@@ -221,6 +224,7 @@ export async function readNarInfoProjection(
 	}
 	return {
 		metadata,
-		storePath: storePathSchema.parse(narInfo.storePath.value)
+		storePath: storePathSchema.parse(narInfo.storePath.value),
+		fingerprintDigest: await sha256Hex(narInfo.fingerprint())
 	};
 }

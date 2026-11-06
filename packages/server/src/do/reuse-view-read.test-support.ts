@@ -83,6 +83,7 @@ export async function committedPath(
 	fields: {
 		readonly storePathHash?: string;
 		readonly name?: string;
+		readonly references?: string[];
 		readonly access?: CacheAccessMode;
 	} = {}
 ): Promise<{

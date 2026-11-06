@@ -1,3 +1,4 @@
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheGenerationSchema,
 	cacheNameSchema,
@@ -33,13 +34,14 @@ import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	InvalidPushIdError,
 	PublicationRecoveryExpiredError
 } from '../errors.ts';
-import { narInfoObjectKey } from '../http/http.ts';
+import { narInfoObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -54,6 +56,7 @@ import {
 	currentServer,
 	defaultCache,
 	initialise,
+	isNarInfoSignatureValid,
 	issueServerSignedToken,
 	namedCache,
 	nixSha256Hash,
@@ -164,7 +167,35 @@ async function state() {
 			.select()
 			.from(d1Schema.blobReference)
 			.all(),
-		usage: await instance.context.d1.select().from(d1Schema.tenantUsage).all()
+		usage: await instance.context.d1.select().from(d1Schema.tenantUsage).all(),
+		associations: instance.context.db
+			.select()
+			.from(schema.resultPublications)
+			.all(),
+		proofs: instance.context.db
+			.select()
+			.from(schema.resultPublicationMembers)
+			.all(),
+		manifests: instance.context.db
+			.select()
+			.from(schema.publicationManifests)
+			.all(),
+		members: instance.context.db
+			.select()
+			.from(schema.publicationManifestMembers)
+			.all(),
+		cardinalities: instance.context.db
+			.select()
+			.from(schema.publicationManifestCardinalities)
+			.all(),
+		operations: instance.context.db
+			.select()
+			.from(schema.publicationManifestOperations)
+			.all(),
+		pages: instance.context.db
+			.select()
+			.from(schema.publicationManifestOperationPages)
+			.all()
 	}));
 }
 
@@ -534,6 +565,390 @@ describe('confirmation authority and transport', () => {
 });
 
 describe('confirmation availability and local-only race rechecks', () => {
+	it('confirms a genuinely signed publication after canonical reference reordering without rewriting its bytes', async () => {
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const path = uploadMetadata({
+				fileSize: 1,
+				references: [
+					...metadata.references,
+					'22222222222222222222222222222222-second'
+				]
+			});
+			await commitPath(token, path);
+			await configureGrace(3600);
+			const before = await state();
+			const row = before.paths[0];
+			const key = narInfoObjectKey(
+				fixtureTenant,
+				path.storePathHash,
+				defaultCache()
+			);
+			const published = await env.BLOBS.get(key);
+			if (published === null || row === undefined) {
+				throw new Error('Missing real publication');
+			}
+			const original = NarInfo.parse(await published.text());
+			const reordered = NarInfo.fromFields({
+				...original.toFields(),
+				references: original.references.toReversed()
+			});
+			expect(reordered.fingerprint()).toBe(original.fingerprint());
+			expect(reordered.references).not.toStrictEqual(original.references);
+			const text = reordered.render();
+			await env.BLOBS.put(key, text, {
+				customMetadata: published.customMetadata,
+				httpMetadata: published.httpMetadata
+			});
+			const request = body({ paths: [uploadPathNegotiation(path)] });
+			expect(await confirm(request)).toStrictEqual({
+				paths: [
+					{
+						storePathHash: path.storePathHash,
+						status: 'confirmed',
+						generation: row.generation,
+						narHash: row.narHash,
+						grace: { retainUntil: '2026-01-01T01:00:00.000Z' }
+					}
+				]
+			});
+			const unchanged = await env.BLOBS.get(key);
+			expect({
+				text: await unchanged?.text(),
+				metadata: unchanged?.customMetadata,
+				httpMetadata: unchanged?.httpMetadata
+			}).toStrictEqual({
+				text,
+				metadata: published.customMetadata,
+				httpMetadata: published.httpMetadata
+			});
+		});
+	});
+
+	it.each(['body', 'accepted-row'] as const)(
+		'fences a local mutation during the %s fingerprint hash await',
+		async (phase) => {
+			await withoutAlarmArming(async () => {
+				const token = await initialise();
+				await commitPath(token, metadata);
+				await configureGrace(3600);
+				await runInDurableObject(currentServer(), async (instance) => {
+					const original = crypto.subtle.digest.bind(crypto.subtle);
+					let fingerprints = 0;
+					const hashing = vi
+						.spyOn(crypto.subtle, 'digest')
+						.mockImplementation(async (algorithm, bytes) => {
+							const digest = await original(algorithm, bytes);
+							if (new TextDecoder().decode(bytes).startsWith('1;')) {
+								fingerprints += 1;
+								if (fingerprints === (phase === 'body' ? 1 : 2)) {
+									instance.context.db
+										.update(schema.narInfos)
+										.set({ generation: narInfoGenerationSchema.parse(999) })
+										.run();
+								}
+							}
+							return digest;
+						});
+					try {
+						expect(
+							await service(instance.context).confirmPresent(
+								defaultCache(),
+								body({ attachRoot: runRoot })
+							)
+						).toStrictEqual({
+							paths: [
+								{
+									storePathHash: metadata.storePathHash,
+									status: 'needs-publication'
+								}
+							]
+						});
+						expect(fingerprints).toBe(phase === 'body' ? 1 : 2);
+					} finally {
+						hashing.mockRestore();
+					}
+				});
+				const after = await state();
+				expect({
+					grace: after.grace,
+					roots: after.roots,
+					targets: after.targets,
+					proofs: after.proofs,
+					associations: after.associations
+				}).toStrictEqual({
+					grace: [],
+					roots: [],
+					targets: [],
+					proofs: [],
+					associations: []
+				});
+			});
+		}
+	);
+
+	it.each(['narSize', 'references'] as const)(
+		'refuses current signed fingerprint corruption in %s without confirmation or retention',
+		async (change) => {
+			await withoutAlarmArming(async () => {
+				const token = await initialise();
+				await commitPath(token, metadata);
+				await configureGrace(3600);
+				const before = await state();
+				const row = before.paths[0];
+				const key = narInfoObjectKey(
+					fixtureTenant,
+					metadata.storePathHash,
+					defaultCache()
+				);
+				const published = await env.BLOBS.get(key);
+				if (published === null || row === undefined) {
+					throw new Error('Missing real publication');
+				}
+				const original = NarInfo.parse(await published.text());
+				const publicKey = await runInDurableObject(
+					currentServer(),
+					(instance) =>
+						instance.context.db.select().from(schema.signingKeys).get()
+							?.publicKey
+				);
+				if (publicKey === undefined) {
+					throw new Error('Missing signing key');
+				}
+				expect(await isNarInfoSignatureValid(original, publicKey)).toBe(true);
+				expect(original.toFields()).toStrictEqual({
+					...original.toFields(),
+					storePath: row.storePath,
+					narHash: row.narHash,
+					narSize: row.narSize,
+					references: JSON.parse(row.referencesJson) as unknown,
+					sigs: JSON.parse(row.sigsJson) as unknown
+				});
+				expect(published.customMetadata).toStrictEqual({
+					generation: String(row.generation),
+					narHash: row.narHash,
+					narUrl: original.url,
+					signatureGeneration: String(
+						row.pendingSignatureGeneration ?? row.signatureGeneration
+					)
+				});
+				const changed = NarInfo.fromFields({
+					...original.toFields(),
+					...(change === 'narSize'
+						? { narSize: original.narSize + 1 }
+						: { references: ['22222222222222222222222222222222-changed'] })
+				});
+				expect(await isNarInfoSignatureValid(changed, publicKey)).toBe(false);
+				expect(changed.sigs).toStrictEqual(original.sigs);
+				const text = changed.render();
+				await env.BLOBS.put(key, text, {
+					customMetadata: published.customMetadata,
+					httpMetadata: published.httpMetadata
+				});
+				await expect(
+					confirm(body({ attachRoot: runRoot }))
+				).rejects.toMatchObject({
+					name: 'CorruptNarInfoProjectionError',
+					status: 409,
+					reason: 'invalid-publication'
+				});
+				expect(await state()).toStrictEqual(before);
+				const unchanged = await env.BLOBS.get(key);
+				expect({
+					text: await unchanged?.text(),
+					metadata: unchanged?.customMetadata,
+					httpMetadata: unchanged?.httpMetadata
+				}).toStrictEqual({
+					text,
+					metadata: published.customMetadata,
+					httpMetadata: published.httpMetadata
+				});
+			});
+		}
+	);
+
+	it.each([
+		{ change: 'narSize', canonical: 'recovered' },
+		{ change: 'references', canonical: 'recovered' },
+		{ change: 'narSize', canonical: 'missing-state' },
+		{ change: 'references', canonical: 'missing-state' },
+		{ change: 'healthy', canonical: 'recovered' }
+	] as const)(
+		'checks $change fingerprint before stale-incarnation repair with $canonical canonical state',
+		async ({ change, canonical }) => {
+			await withoutAlarmArming(async () => {
+				const token = await initialise();
+				const nar = await verifiableNar(
+					`stale-fingerprint-${change}-${canonical}`
+				);
+				const path = uploadMetadata({
+					fileSize: nar.narBytes.byteLength,
+					fileHash: nar.fileHash,
+					narHash: nar.narHash,
+					narSize: nar.narSize
+				});
+				await commitPath(token, path, nar);
+				await configureGrace(3600);
+				const key = narInfoObjectKey(
+					fixtureTenant,
+					path.storePathHash,
+					defaultCache()
+				);
+				const published = await env.BLOBS.get(key);
+				const accepted = await state();
+				const row = accepted.paths[0];
+				if (published === null || row === undefined) {
+					throw new Error('Missing verified stale-incarnation fixture');
+				}
+				const originalText = await published.text();
+				const original = NarInfo.parse(originalText);
+				const publicKey = await runInDurableObject(
+					currentServer(),
+					(instance) =>
+						instance.context.db.select().from(schema.signingKeys).get()
+							?.publicKey
+				);
+				if (publicKey === undefined) {
+					throw new Error('Missing publication signing key');
+				}
+				expect(await isNarInfoSignatureValid(original, publicKey)).toBe(true);
+				expect(original.toFields()).toStrictEqual({
+					...original.toFields(),
+					storePath: row.storePath,
+					narHash: row.narHash,
+					narSize: row.narSize,
+					references: JSON.parse(row.referencesJson) as unknown,
+					sigs: JSON.parse(row.sigsJson) as unknown
+				});
+				expect(published.customMetadata).toStrictEqual({
+					generation: String(row.generation),
+					narHash: row.narHash,
+					narUrl: original.url,
+					signatureGeneration: String(
+						row.pendingSignatureGeneration ?? row.signatureGeneration
+					)
+				});
+				const oldNarKey = await currentNarObjectKey(path.narHash);
+				expect(original.url).toBe(oldNarKey);
+				await env.BLOBS.delete(oldNarKey);
+				const stagingKey = r2ObjectKeySchema.parse(
+					'staging/recover-fingerprint/upload'
+				);
+				await env.BLOBS.put(stagingKey, nar.narBytes);
+				await runInDurableObject(currentServer(), (instance) =>
+					promoteVerifiedBlob(
+						instance.context.d1,
+						instance.context.env.BLOBS,
+						stagingKey,
+						{ narHash: path.narHash, narSize: path.narSize },
+						{ fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+					)
+				);
+				const currentKey = await currentNarObjectKey(path.narHash);
+				expect(currentKey).not.toBe(oldNarKey);
+				if (canonical === 'missing-state') {
+					await runInDurableObject(currentServer(), (instance) =>
+						instance.context.d1
+							.delete(d1Schema.blobState)
+							.where(eq(d1Schema.blobState.narHash, path.narHash))
+							.run()
+					);
+				}
+				const changed = NarInfo.fromFields({
+					...original.toFields(),
+					...(change === 'narSize'
+						? { narSize: original.narSize + 1 }
+						: change === 'references'
+							? { references: ['22222222222222222222222222222222-changed'] }
+							: {})
+				});
+				expect(changed.sigs).toStrictEqual(original.sigs);
+				expect(await isNarInfoSignatureValid(changed, publicKey)).toBe(
+					change === 'healthy'
+				);
+				const text = changed.render();
+				await env.BLOBS.put(key, text, {
+					customMetadata: published.customMetadata,
+					httpMetadata: published.httpMetadata
+				});
+				const canonicalState = () =>
+					runInDurableObject(currentServer(), async (instance) => ({
+						blobs: await instance.context.d1
+							.select()
+							.from(d1Schema.blobState)
+							.all(),
+						incarnations: await instance.context.d1
+							.select()
+							.from(d1Schema.objectIncarnation)
+							.all()
+					}));
+				const before = {
+					durable: await state(),
+					canonical: await canonicalState()
+				};
+				const request = body({
+					paths: [uploadPathNegotiation(path)],
+					attachRoot: runRoot
+				});
+				if (change === 'healthy') {
+					expect(await confirm(request)).toStrictEqual({
+						paths: [
+							{
+								storePathHash: path.storePathHash,
+								status: 'confirmed',
+								generation: row.generation,
+								narHash: row.narHash,
+								grace: { retainUntil: '2026-01-01T01:00:00.000Z' }
+							}
+						]
+					});
+					const repaired = await env.BLOBS.get(key);
+					const expectedText = NarInfo.fromFields({
+						...original.toFields(),
+						url: currentKey
+					}).render();
+					expect({
+						text: await repaired?.text(),
+						metadata: repaired?.customMetadata,
+						httpMetadata: repaired?.httpMetadata
+					}).toStrictEqual({
+						text: expectedText,
+						metadata: { ...published.customMetadata, narUrl: currentKey },
+						httpMetadata: published.httpMetadata
+					});
+					const after = await state();
+					expect(after.paths).toStrictEqual(before.durable.paths);
+				} else {
+					await expect(confirm(request)).rejects.toMatchObject({
+						name: 'CorruptNarInfoProjectionError',
+						status: 409,
+						reason: 'invalid-publication'
+					});
+					expect({
+						durable: await state(),
+						canonical: await canonicalState()
+					}).toStrictEqual(before);
+					const unchanged = await env.BLOBS.get(key);
+					expect({
+						text: await unchanged?.text(),
+						metadata: unchanged?.customMetadata,
+						httpMetadata: unchanged?.httpMetadata
+					}).toStrictEqual({
+						text,
+						metadata: published.customMetadata,
+						httpMetadata: published.httpMetadata
+					});
+				}
+				const canonicalObject = await env.BLOBS.get(currentKey);
+				expect(
+					canonicalObject === null
+						? undefined
+						: new Uint8Array(await canonicalObject.arrayBuffer())
+				).toStrictEqual(nar.narBytes);
+			});
+		}
+	);
+
 	it.each(['unreadable', 'revoked'])(
 		'refuses a %s reference even with intact canonical bytes and metadata',
 		async (kind) => {

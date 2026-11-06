@@ -1,3 +1,4 @@
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type CacheScope,
 	narInfoGenerationSchema,
@@ -40,6 +41,7 @@ import {
 	currentNarObjectKey,
 	fixtureWorkerServer,
 	initialiseViaWorker,
+	isNarInfoSignatureValid,
 	namedCache,
 	resetTestServer,
 	restartTestServers,
@@ -884,6 +886,130 @@ async function localPage(f: Fixture, request: PublicationCapturePageRequest) {
 
 describe('PublicationManifestCaptureService candidate proof and finalisation', () => {
 	beforeEach(resetTestServer);
+	it.each(['narSize', 'references'] as const)(
+		'refuses a current signed %s mismatch before staging a capture proof',
+		async (change) => {
+			await withoutAlarmArming(async () => {
+				const f = await fixture();
+				const operation = await staging(f);
+				const accepted = await runInDurableObject(
+					fixtureWorkerServer(),
+					(instance) => {
+						const cache = instance.context.cacheRepository.require(f.scope);
+						return {
+							key: new NarInfoObjectsService(instance.context).objectKey(
+								cache,
+								StorePath.hash(f.result.storePath)
+							),
+							row: instance.context.db
+								.select()
+								.from(schema.narInfos)
+								.where(eq(schema.narInfos.cacheId, cache.id))
+								.get(),
+							signingKey: instance.context.db
+								.select()
+								.from(schema.signingKeys)
+								.get()
+						};
+					}
+				);
+				const published = await env.BLOBS.get(accepted.key);
+				if (
+					published === null ||
+					accepted.row === undefined ||
+					accepted.signingKey === undefined
+				) {
+					throw new Error('Missing real publication');
+				}
+				const original = NarInfo.parse(await published.text());
+				expect(
+					await isNarInfoSignatureValid(original, accepted.signingKey.publicKey)
+				).toBe(true);
+				expect(original.toFields()).toStrictEqual({
+					...original.toFields(),
+					storePath: accepted.row.storePath,
+					narHash: accepted.row.narHash,
+					narSize: accepted.row.narSize,
+					references: JSON.parse(accepted.row.referencesJson) as unknown,
+					sigs: JSON.parse(accepted.row.sigsJson) as unknown
+				});
+				expect(published.customMetadata).toStrictEqual({
+					generation: String(accepted.row.generation),
+					narHash: accepted.row.narHash,
+					narUrl: original.url,
+					signatureGeneration: String(
+						accepted.row.pendingSignatureGeneration ??
+							accepted.row.signatureGeneration
+					)
+				});
+				const changed = NarInfo.fromFields({
+					...original.toFields(),
+					...(change === 'narSize'
+						? { narSize: original.narSize + 1 }
+						: { references: ['22222222222222222222222222222222-changed'] })
+				});
+				expect(changed.sigs).toStrictEqual(original.sigs);
+				expect(
+					await isNarInfoSignatureValid(changed, accepted.signingKey.publicKey)
+				).toBe(false);
+				const text = changed.render();
+				await env.BLOBS.put(accepted.key, text, {
+					customMetadata: published.customMetadata,
+					httpMetadata: published.httpMetadata
+				});
+				const state = () =>
+					runInDurableObject(fixtureWorkerServer(), async (instance) => {
+						const { db, d1 } = instance.context;
+						return {
+							paths: db.select().from(schema.narInfos).all(),
+							grace: db.select().from(schema.retentionGrace).all(),
+							roots: db.select().from(schema.retentionRoots).all(),
+							targets: db.select().from(schema.retentionRootTargets).all(),
+							receipts: db.select().from(schema.confirmationReceipts).all(),
+							proofs: db.select().from(schema.resultPublicationMembers).all(),
+							manifests: db.select().from(schema.publicationManifests).all(),
+							members: db
+								.select()
+								.from(schema.publicationManifestMembers)
+								.all(),
+							cardinalities: db
+								.select()
+								.from(schema.publicationManifestCardinalities)
+								.all(),
+							edges: await d1.select().from(d1Schema.blobReference).all(),
+							usage: await d1.select().from(d1Schema.tenantUsage).all()
+						};
+					});
+				const before = { capture: await counts(f), state: await state() };
+				await expect(
+					page(f, {
+						operationId: operation.operationId,
+						page: 0,
+						members: [f.request.result]
+					})
+				).rejects.toMatchObject({
+					name: 'CorruptNarInfoProjectionError',
+					status: 409,
+					reason: 'invalid-publication'
+				});
+				expect({
+					capture: await counts(f),
+					state: await state()
+				}).toStrictEqual(before);
+				const unchanged = await env.BLOBS.get(accepted.key);
+				expect({
+					text: await unchanged?.text(),
+					metadata: unchanged?.customMetadata,
+					httpMetadata: unchanged?.httpMetadata
+				}).toStrictEqual({
+					text,
+					metadata: published.customMetadata,
+					httpMetadata: published.httpMetadata
+				});
+			}, fixtureWorkerServer());
+		}
+	);
+
 	it('cannot finalise a fresh capture for a physically renamed row with an unchanged served narinfo', async () => {
 		await withoutAlarmArming(async () => {
 			const f = await fixture();

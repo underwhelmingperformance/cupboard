@@ -79,6 +79,7 @@ import {
 	deletePath,
 	garbageCollectionOf,
 	initialise,
+	isNarInfoSignatureValid,
 	namedCache,
 	nixSha256Hash,
 	openCommitSession,
@@ -2584,6 +2585,264 @@ describe('publication subscriptions to terminal operations', () => {
 		vi.setSystemTime(vi.getRealSystemTime());
 		await resetTestServer();
 	});
+
+	it.each(['narSize', 'references'] as const)(
+		'refuses signed %s corruption over the publication wire and resumes the identical accepted operation after original-byte restoration',
+		async (change) => {
+			const token = await initialise();
+			const { path } = await completedPublication(
+				token,
+				`wire-fingerprint-${change}`
+			);
+			await withoutAlarmArming(async () => {
+				const admittedAt = Date.now();
+				vi.setSystemTime(admittedAt);
+				await runInDurableObject(currentServer(), (instance) => {
+					instance.context.db
+						.update(schema.cacheIdentities)
+						.set({ graceSeconds: graceSecondsSchema.parse(3600) })
+						.run();
+				});
+				const [entry] = await plannedEntries(token, '/uploads/plan', [path], {
+					name: rootNameSchema.parse('fingerprint-run'),
+					retention: { kind: 'inherit' }
+				});
+				if (entry === undefined) {
+					throw new Error('Missing planned original operation');
+				}
+				const publish = async () => {
+					const session = await openCommitSession(
+						token,
+						undefined,
+						publicationSession
+					);
+					try {
+						session.send({
+							op: 'publish-batch',
+							pushId: testPushId,
+							entries: [entry]
+						});
+						const first = await session.nextFrame();
+						const frames =
+							first.ev === 'publication-accepted'
+								? [first, await session.nextFrame()]
+								: [first];
+						await expectNoFurtherFrame(session, testPushId, entry);
+						return frames;
+					} finally {
+						await closeSessionAndWait(session.socket);
+					}
+				};
+				// Recovery requires real admission; interrupt only the subsequent commit.
+				const interrupted = vi
+					.spyOn(CommitPipelineService.prototype, 'commit')
+					.mockRejectedValueOnce(
+						new Error('test interruption after ordinary admission')
+					);
+				try {
+					expect(await publish()).toStrictEqual([
+						{ ev: 'publication-accepted', uploadId: entry.operationId },
+						{
+							ev: 'error',
+							uploadId: entry.operationId,
+							status: 500,
+							message: 'internal error'
+						}
+					]);
+				} finally {
+					interrupted.mockRestore();
+				}
+				const state = () =>
+					runInDurableObject(currentServer(), async (instance) => {
+						const { db, d1 } = instance.context;
+						return {
+							caches: db.select().from(schema.cacheIdentities).all(),
+							paths: db.select().from(schema.narInfos).all(),
+							pending: db.select().from(schema.pendingUploads).all(),
+							operations: db.select().from(schema.publicationOperations).all(),
+							roots: db.select().from(schema.retentionRoots).all(),
+							targets: db.select().from(schema.retentionRootTargets).all(),
+							grace: db.select().from(schema.retentionGrace).all(),
+							receipts: db.select().from(schema.confirmationReceipts).all(),
+							proofs: db.select().from(schema.resultPublicationMembers).all(),
+							associations: db.select().from(schema.resultPublications).all(),
+							manifests: db.select().from(schema.publicationManifests).all(),
+							members: db
+								.select()
+								.from(schema.publicationManifestMembers)
+								.all(),
+							cardinalities: db
+								.select()
+								.from(schema.publicationManifestCardinalities)
+								.all(),
+							keys: db.select().from(schema.signingKeys).all(),
+							edges: await d1.select().from(d1Schema.blobReference).all(),
+							usage: await d1.select().from(d1Schema.tenantUsage).all(),
+							ownership: await d1.select().from(d1Schema.tenantBlob).all()
+						};
+					});
+				const before = await state();
+				const accepted = before.operations.find(
+					(operation) => operation.id === entry.operationId
+				);
+				const row = before.paths.find(
+					(candidate) => candidate.storePathHash === path.storePathHash
+				);
+				const signingKey = before.keys[0];
+				if (
+					accepted === undefined ||
+					row === undefined ||
+					signingKey === undefined
+				) {
+					throw new Error(
+						'Missing genuinely accepted operation or publication'
+					);
+				}
+				expect(accepted).toStrictEqual({ ...accepted, state: 'accepted' });
+				expect(accepted.resultJson).toBeNull();
+				expect(accepted.graceDeadline).toBeNull();
+				expect(before.grace).toStrictEqual([]);
+				expect(before.targets).toStrictEqual([]);
+				const key = await runInDurableObject(currentServer(), (instance) =>
+					new NarInfoObjectsService(instance.context).objectKey(
+						instance.context.cacheRepository.require(defaultCache()),
+						path.storePathHash
+					)
+				);
+				const object = await env.BLOBS.get(key);
+				if (object === null) {
+					throw new Error('Missing original published narinfo');
+				}
+				const originalText = await object.text();
+				const original = NarInfo.parse(originalText);
+				expect(
+					await isNarInfoSignatureValid(original, signingKey.publicKey)
+				).toBe(true);
+				expect(original.toFields()).toStrictEqual({
+					...original.toFields(),
+					storePath: row.storePath,
+					narHash: row.narHash,
+					narSize: row.narSize,
+					references: JSON.parse(row.referencesJson) as unknown,
+					sigs: JSON.parse(row.sigsJson) as unknown
+				});
+				expect(object.customMetadata).toStrictEqual({
+					generation: String(row.generation),
+					narHash: row.narHash,
+					narUrl: original.url,
+					signatureGeneration: String(
+						row.pendingSignatureGeneration ?? row.signatureGeneration
+					)
+				});
+				const changed = NarInfo.fromFields({
+					...original.toFields(),
+					...(change === 'narSize'
+						? { narSize: original.narSize + 1 }
+						: { references: ['22222222222222222222222222222222-changed'] })
+				});
+				expect(changed.sigs).toStrictEqual(original.sigs);
+				expect(
+					await isNarInfoSignatureValid(changed, signingKey.publicKey)
+				).toBe(false);
+				const corruptText = changed.render();
+				await env.BLOBS.put(key, corruptText, {
+					customMetadata: object.customMetadata,
+					httpMetadata: object.httpMetadata
+				});
+				expect(await publish()).toStrictEqual([
+					{
+						ev: 'publication-refused',
+						uploadId: entry.operationId,
+						reason: 'invalid-publication',
+						status: 409,
+						message: `The current narinfo projection disagrees with the accepted fingerprint for ${path.storePath}`
+					}
+				]);
+				expect(await state()).toStrictEqual(before);
+				const refusedObject = await env.BLOBS.get(key);
+				expect({
+					text: await refusedObject?.text(),
+					metadata: refusedObject?.customMetadata,
+					httpMetadata: refusedObject?.httpMetadata
+				}).toStrictEqual({
+					text: corruptText,
+					metadata: object.customMetadata,
+					httpMetadata: object.httpMetadata
+				});
+				await env.BLOBS.put(key, originalText, {
+					customMetadata: object.customMetadata,
+					httpMetadata: object.httpMetadata
+				});
+				vi.setSystemTime(admittedAt + 60_000);
+				const retainUntil = new Date(admittedAt + 3_660_000).toISOString();
+				const settled = {
+					ev: 'settled',
+					uploadId: entry.operationId,
+					response: {
+						storePathHash: path.storePathHash,
+						narHash: path.narHash,
+						status: 'already-present'
+					},
+					grace: { retainUntil }
+				};
+				expect(await publish()).toStrictEqual([
+					{ ev: 'publication-accepted', uploadId: entry.operationId },
+					settled
+				]);
+				const completed = await state();
+				expect(completed).toStrictEqual({
+					...before,
+					caches: before.caches.map((cache) => ({
+						...cache,
+						graceManaged: true
+					})),
+					pending: [],
+					operations: before.operations.map((operation) =>
+						operation.id === entry.operationId
+							? {
+									...accepted,
+									state: 'servable',
+									graceDeadline: retainUntil,
+									resultJson: JSON.stringify({
+										storePathHash: row.storePathHash,
+										narHash: row.narHash,
+										generation: row.generation
+									})
+								}
+							: operation
+					),
+					grace: [
+						{
+							cacheId: row.cacheId,
+							storePathHash: row.storePathHash,
+							retainUntil
+						}
+					],
+					targets: [
+						{
+							cacheId: row.cacheId,
+							rootName: entry.attachRoot?.name,
+							storePathHash: row.storePathHash,
+							storePath: row.storePath
+						}
+					]
+				});
+				vi.setSystemTime(admittedAt + 120_000);
+				expect(await publish()).toStrictEqual([settled]);
+				expect(await state()).toStrictEqual(completed);
+				const restored = await env.BLOBS.get(key);
+				expect({
+					text: await restored?.text(),
+					metadata: restored?.customMetadata,
+					httpMetadata: restored?.httpMetadata
+				}).toStrictEqual({
+					text: originalText,
+					metadata: object.customMetadata,
+					httpMetadata: object.httpMetadata
+				});
+			});
+		}
+	);
 
 	it('refuses with generation-conflict a subscription to a completed operation whose cache was deleted', async () => {
 		const token = await initialise();

@@ -1,3 +1,4 @@
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheGenerationSchema,
 	narInfoGenerationSchema
@@ -11,10 +12,12 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	fixtureWorkerServer,
 	initialiseViaWorker,
+	isNarInfoSignatureValid,
 	namedCache,
 	putWorkerTestCache,
 	resetTestServer
@@ -120,7 +123,7 @@ describe('PublicationManifestAuthority', () => {
 			});
 		}
 	);
-	it.each(['malformed', 'narHash', 'narUrl'] as const)(
+	it.each(['malformed', 'narHash', 'narUrl', 'narSize', 'references'] as const)(
 		'never proves a served projection with a %s body despite current commit metadata',
 		async (change) => {
 			const result = await fixture();
@@ -139,30 +142,144 @@ describe('PublicationManifestAuthority', () => {
 				throw new Error('Missing published projection');
 			}
 			const original = await object.text();
+			const parsed = NarInfo.parse(original);
+			const accepted = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) => ({
+					row: instance.context.db
+						.select()
+						.from(schema.narInfos)
+						.where(
+							eq(
+								schema.narInfos.cacheId,
+								instance.context.cacheRepository.require(source.cache).id
+							)
+						)
+						.get(),
+					key: instance.context.db.select().from(schema.signingKeys).get()
+				})
+			);
+			if (accepted.row === undefined || accepted.key === undefined) {
+				throw new Error('Missing accepted publication or signing key');
+			}
+			expect({
+				storePath: parsed.storePath.value,
+				narHash: parsed.narHash.toString(),
+				narSize: parsed.narSize,
+				references: parsed.references,
+				sigs: parsed.sigs
+			}).toStrictEqual({
+				storePath: result.storePath,
+				narHash: result.narHash,
+				narSize: accepted.row.narSize,
+				references: JSON.parse(accepted.row.referencesJson) as unknown,
+				sigs: JSON.parse(accepted.row.sigsJson) as unknown
+			});
+			expect(object.customMetadata).toStrictEqual({
+				generation: String(result.generation),
+				narHash: result.narHash,
+				narUrl: parsed.url,
+				signatureGeneration: String(
+					accepted.row.pendingSignatureGeneration ??
+						accepted.row.signatureGeneration
+				)
+			});
+			expect(
+				await isNarInfoSignatureValid(parsed, accepted.key.publicKey)
+			).toBe(true);
 			const text =
 				change === 'malformed'
 					? 'not a narinfo'
-					: change === 'narUrl'
+					: change === 'narSize'
 						? original.replace(
-								/^URL:.*$/mu,
-								'URL: nar/not-the-canonical-object.nar.zst'
+								/^NarSize:.*$/mu,
+								() => `NarSize: ${String(parsed.narSize + 1)}`
 							)
-						: original.replace(
-								/^NarHash:.*$/mu,
-								'NarHash: sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk'
-							);
-			await env.BLOBS.put(key, text, { customMetadata: object.customMetadata });
+						: change === 'references'
+							? original.replace(
+									/^References:.*$/mu,
+									'References: 22222222222222222222222222222222-changed'
+								)
+							: change === 'narUrl'
+								? original.replace(
+										/^URL:.*$/mu,
+										'URL: nar/not-the-canonical-object.nar.zst'
+									)
+								: original.replace(
+										/^NarHash:.*$/mu,
+										'NarHash: sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk'
+									);
+			if (change === 'narSize' || change === 'references') {
+				const changed = NarInfo.parse(text);
+				expect(changed.toFields()).toStrictEqual({
+					...parsed.toFields(),
+					...(change === 'narSize'
+						? { narSize: parsed.narSize + 1 }
+						: { references: ['22222222222222222222222222222222-changed'] })
+				});
+				expect(
+					await isNarInfoSignatureValid(changed, accepted.key.publicKey)
+				).toBe(false);
+			}
+			await env.BLOBS.put(key, text, {
+				customMetadata: object.customMetadata,
+				httpMetadata: object.httpMetadata
+			});
 			await runInDurableObject(fixtureWorkerServer(), async (instance) => {
-				const before = instance.context.db.select().from(schema.narInfos).all();
+				const state = async () => {
+					const { db, d1 } = instance.context;
+					return {
+						paths: db.select().from(schema.narInfos).all(),
+						grace: db.select().from(schema.retentionGrace).all(),
+						roots: db.select().from(schema.retentionRoots).all(),
+						targets: db.select().from(schema.retentionRootTargets).all(),
+						receipts: db.select().from(schema.confirmationReceipts).all(),
+						operations: db
+							.select()
+							.from(schema.publicationManifestOperations)
+							.all(),
+						pages: db
+							.select()
+							.from(schema.publicationManifestOperationPages)
+							.all(),
+						associations: db.select().from(schema.resultPublications).all(),
+						proofs: db.select().from(schema.resultPublicationMembers).all(),
+						manifests: db.select().from(schema.publicationManifests).all(),
+						members: db.select().from(schema.publicationManifestMembers).all(),
+						cardinalities: db
+							.select()
+							.from(schema.publicationManifestCardinalities)
+							.all(),
+						edges: await d1.select().from(d1Schema.blobReference).all(),
+						usage: await d1.select().from(d1Schema.tenantUsage).all()
+					};
+				};
+				const before = await state();
 				const authority = new PublicationManifestAuthority(instance.context);
 				const snapshot = authority.resolveExact(destination, noRead, result);
-				await expect(authority.requireServable(snapshot)).rejects.toThrow();
-				expect(
-					instance.context.db.select().from(schema.narInfos).all()
-				).toStrictEqual(before);
+				if (change === 'narSize' || change === 'references') {
+					await expect(
+						authority.requireServable(snapshot)
+					).rejects.toMatchObject({
+						name: 'CorruptNarInfoProjectionError',
+						status: 409,
+						reason: 'invalid-publication'
+					});
+				} else {
+					await expect(authority.requireServable(snapshot)).rejects.toThrow();
+				}
+				expect(await state()).toStrictEqual(before);
 			});
 			const unchanged = await env.BLOBS.get(key);
-			expect(await unchanged?.text()).toBe(text);
+			expect({
+				text: await unchanged?.text(),
+				metadata: unchanged?.customMetadata,
+				httpMetadata: unchanged?.httpMetadata
+			}).toStrictEqual({
+				text,
+				metadata: object.customMetadata,
+				httpMetadata: object.httpMetadata
+			});
 		}
 	);
 

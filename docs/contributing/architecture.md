@@ -1209,24 +1209,31 @@ original usable candidates from semantic arbitration. A sibling that becomes
 backed later cannot replace that selection. Final revalidation checks all
 original usable candidates.
 
+An exact-version servability probe compares the served Nix fingerprint with the
+accepted full path, NAR hash, NAR size and canonical references. When commit
+metadata and the full path match but the fingerprint differs, the probe returns
+an `invalid-publication` conflict (409), even if the NAR URL is stale or
+canonical NAR availability is missing. The refusal does not rewrite the
+projection or add retention. After the original bytes are restored, the same
+operation can resume.
+
 A healthy complete destination association avoids member enumeration, per-member
 publication and NAR transfer. Materialising another set proves already-servable
-exact destination versions without ordinary publication. Missing or unhealthy
-members use the ordinary publication coordinator, including its quota,
-verification, recovery and accepted-version checks. Durable admission records
-pin the full request, ordinary push identity and original deadline before
-destination registration. For a destination that was absent at pinning, ordinary
-acceptance binds the admission to the actual cache identity in the pending-work
-transaction. Verification uses that binding to protect completed ordinary work
-until manifest materialisation finishes or expires. Immutable ordinal mappings
-preserve each member's ordinary publication identity across a reset. Each
-ordinary operation also persists its manifest origin and immutable declaration.
-Commit and verification reject a different full path or NAR before retention or
-replacement writes. The ordinary record remains while work is accepted, even
-after parent receipt pruning; normal terminal cleanup reclaims the record.
-Capture and ensure recover for at most 24 hours. Status only observes; a
-foreground caller advances pending work by resubmitting its immutable request
-with current authority.
+exact destination versions without ordinary publication. Missing members use the
+ordinary publication coordinator, including its quota, verification, recovery
+and accepted-version checks. Durable admission records pin the full request,
+ordinary push identity and original deadline before destination registration.
+For a destination that was absent at pinning, ordinary acceptance binds the
+admission to the actual cache identity in the pending-work transaction.
+Verification uses that binding to protect completed ordinary work until manifest
+materialisation finishes or expires. Immutable ordinal mappings preserve each
+member's ordinary publication identity across a reset. Each ordinary operation
+also persists its manifest origin and immutable declaration. Commit and
+verification reject a different full path or NAR before retention or replacement
+writes. The ordinary record remains while work is accepted, even after parent
+receipt pruning; normal terminal cleanup reclaims the record. Capture and ensure
+recover for at most 24 hours. Status only observes; a foreground caller advances
+pending work by resubmitting its immutable request with current authority.
 
 New ensure request IDs encode their creation time in UUIDv7. An unknown ensure
 request must be less than 24 hours old and no more than five minutes in the
