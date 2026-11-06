@@ -1,3 +1,8 @@
+import {
+	ExponentialBackoff,
+	type RandomSource
+} from '@cupboard/shared/backoff';
+
 import { WorkersCachePurgeError } from '../errors.ts';
 
 // Workers Cache applies the Free plan's purge limits on every plan: a token
@@ -15,7 +20,6 @@ const rateLimitedCodes: ReadonlySet<number> = new Set([1134, 971]);
 const rateLimitedBaseMs = 60_000;
 // The bucket refills one token in this time.
 const transientBaseMs = 12_000;
-const backoffFactor = 2;
 /**
 The longest wait before a failed purge is sent again. An empty bucket is full
 again after this time.
@@ -31,11 +35,31 @@ failure. The jitter spreads the retries of tenant objects that failed at the
 same time.
 */
 export class CachePurgeRetryPolicy {
+	readonly #rateLimitedBackoff: ExponentialBackoff;
+	readonly #transientBackoff: ExponentialBackoff;
+
 	/**
 	@param random Returns a number in [0, 1). The wait is between half and all
-	of the exponential delay.
+	of the exponential delay. The default is `Math.random`.
 	*/
-	constructor(private readonly random: () => number = Math.random) {}
+	constructor(random?: RandomSource) {
+		this.#rateLimitedBackoff = new ExponentialBackoff(
+			{
+				baseMs: rateLimitedBaseMs,
+				maximumMs: cachePurgeBackoffCapMs,
+				jitter: 'half'
+			},
+			random
+		);
+		this.#transientBackoff = new ExponentialBackoff(
+			{
+				baseMs: transientBaseMs,
+				maximumMs: cachePurgeBackoffCapMs,
+				jitter: 'half'
+			},
+			random
+		);
+	}
 
 	/**
 	Returns the earliest time, in milliseconds since the epoch, for the next
@@ -47,15 +71,11 @@ export class CachePurgeRetryPolicy {
 		failedAttempts: number,
 		failedAt: number
 	): number {
-		const base = isRateLimitedPurgeFailure(error)
-			? rateLimitedBaseMs
-			: transientBaseMs;
-		const ceiling = Math.min(
-			cachePurgeBackoffCapMs,
-			base * backoffFactor ** (failedAttempts - 1)
-		);
+		const backoff = isRateLimitedPurgeFailure(error)
+			? this.#rateLimitedBackoff
+			: this.#transientBackoff;
 
-		return failedAt + Math.round((ceiling / 2) * (1 + this.random()));
+		return failedAt + Math.round(backoff.delayMs(failedAttempts));
 	}
 }
 

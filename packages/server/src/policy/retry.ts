@@ -1,4 +1,5 @@
 import { type TenantStatus } from '@cupboard/protocol/tenants';
+import { ExponentialBackoff } from '@cupboard/shared/backoff';
 
 export type RetryPhase = 'verification' | 'inheritance';
 export type RetryExhaustion = 'attempt-limit' | 'eligible-age-limit';
@@ -26,6 +27,19 @@ export type RetryDecision =
 			readonly reason: RetryExhaustion;
 	  };
 
+const backoffByPhase: Readonly<Record<RetryPhase, ExponentialBackoff>> = {
+	verification: new ExponentialBackoff({
+		baseMs: 30_000,
+		maximumMs: 10 * 60_000,
+		jitter: 'none'
+	}),
+	inheritance: new ExponentialBackoff({
+		baseMs: 60_000,
+		maximumMs: 60 * 60_000,
+		jitter: 'none'
+	})
+};
+
 export class RetryPolicy {
 	constructor(private readonly phase: RetryPhase) {}
 
@@ -42,12 +56,7 @@ export class RetryPolicy {
 	}
 
 	delayAfterFailure(failures: number): number {
-		const initialDelayMs = this.phase === 'verification' ? 30_000 : 60_000;
-		const maxDelayMs = (this.phase === 'verification' ? 10 : 60) * 60_000;
-		return Math.min(
-			initialDelayMs * 2 ** Math.min(failures - 1, 6),
-			maxDelayMs
-		);
+		return backoffByPhase[this.phase].delayMs(failures);
 	}
 
 	afterFailure(budget: RetryBudget): RetryDecision {

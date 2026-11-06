@@ -243,7 +243,6 @@ describe('bounded Worker environment', () => {
 	it.each([50, 15_000])(
 		'shares the %s ms get budget across retries and backoff',
 		async (budgetMs) => {
-			const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
 			const first = Promise.withResolvers<R2ObjectBody | null>();
 			const get = vi
 				.spyOn(env.BLOBS, 'get')
@@ -252,7 +251,7 @@ describe('bounded Worker environment', () => {
 			vi.useFakeTimers();
 			try {
 				const pending = withDeadlineBudget(budgetMs, () =>
-					boundedBlobs(env.BLOBS).get('key')
+					boundedBlobs(env.BLOBS, undefined, () => 0.5).get('key')
 				);
 				const rejected = expect(pending).rejects.toMatchObject({
 					name: 'SubrequestTimeoutError',
@@ -268,7 +267,6 @@ describe('bounded Worker environment', () => {
 					timers: vi.getTimerCount()
 				}).toStrictEqual({ calls: [['key', undefined]], timers: 0 });
 			} finally {
-				random.mockRestore();
 				get.mockRestore();
 				vi.useRealTimers();
 			}
