@@ -262,6 +262,42 @@ function stallingKv(key: string, reached: () => void): KVNamespace {
 	});
 }
 
+/**
+A KV namespace whose reads of `key` return after `delayMs` of the clock.
+`reached` runs when such a read starts.
+*/
+function delayingKv(
+	key: string,
+	delayMs: number,
+	reached: () => void
+): KVNamespace {
+	return new Proxy(env.TENANT_CACHE, {
+		get(target, property) {
+			const value = passThrough(target, property);
+
+			if (property !== 'get' || typeof value !== 'function') {
+				return value;
+			}
+
+			return async (read: string, ...options: unknown[]): Promise<unknown> => {
+				if (read === key) {
+					reached();
+					await new Promise((resolve) => {
+						setTimeout(resolve, delayMs);
+					});
+				}
+
+				const result: unknown = await Reflect.apply(value, undefined, [
+					read,
+					...options
+				]);
+
+				return result;
+			};
+		}
+	});
+}
+
 interface StalledAdmission {
 	readonly bindings: Partial<Env>;
 	readonly restore: () => void;
@@ -287,6 +323,36 @@ const markerStall: AdmissionStall = {
 			},
 			restore: nothingToRestore
 		})
+};
+
+const tokenCheckStall: AdmissionStall = {
+	wait: 'the read-token check',
+	authorization: 'Bearer token',
+	stall: (reached) =>
+		Promise.resolve({
+			bindings: {
+				CUPBOARD_DO: stallingTenantObjects('authoriseCacheContentRead', reached)
+			},
+			restore: nothingToRestore
+		})
+};
+
+const migrationStall: AdmissionStall = {
+	wait: 'the cache catalogue migration',
+	authorization: credentials,
+	stall: async (reached) => {
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.update(d1Schema.tenant)
+			.set({ cacheCatalogueVersion: sql`null` })
+			.where(eq(d1Schema.tenant.id, fixtureTenant));
+
+		return {
+			bindings: {
+				CUPBOARD_DO: stallingTenantObjects('migrateCacheCatalogue', reached)
+			},
+			restore: nothingToRestore
+		};
+	}
 };
 
 const admissionStalls: readonly AdmissionStall[] = [
@@ -323,52 +389,36 @@ const admissionStalls: readonly AdmissionStall[] = [
 		}
 	},
 	markerStall,
-	{
-		wait: 'the read-token check',
-		authorization: 'Bearer token',
-		stall: (reached) =>
-			Promise.resolve({
-				bindings: {
-					CUPBOARD_DO: stallingTenantObjects(
-						'authoriseCacheContentRead',
-						reached
-					)
-				},
-				restore: nothingToRestore
-			})
-	},
-	{
-		wait: 'the cache catalogue migration',
-		authorization: credentials,
-		stall: async (reached) => {
-			await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-				.update(d1Schema.tenant)
-				.set({ cacheCatalogueVersion: sql`null` })
-				.where(eq(d1Schema.tenant.id, fixtureTenant));
-
-			return {
-				bindings: {
-					CUPBOARD_DO: stallingTenantObjects('migrateCacheCatalogue', reached)
-				},
-				restore: nothingToRestore
-			};
-		}
-	}
+	tokenCheckStall,
+	migrationStall
 ];
 
-interface BoundedRead {
+interface BoundedRequest {
 	readonly name: string;
 	readonly path: string;
 	readonly init: (authorization: string) => RequestInit;
 }
 
-const narInfoRead: BoundedRead = {
+const narInfoRead: BoundedRequest = {
 	name: 'a narinfo read',
 	path: `/${unpublishedHash}.narinfo`,
 	init: (authorization) => ({ headers: { authorization } })
 };
 
-const boundedReads: readonly BoundedRead[] = [
+const attestationReads: readonly BoundedRequest[] = [
+	{
+		name: 'an attestation list read',
+		path: `/attestations/${unpublishedHash}`,
+		init: (authorization) => ({ headers: { authorization } })
+	},
+	{
+		name: 'an attestation bundle read',
+		path: `/attestation-bundles/${'0'.repeat(64)}`,
+		init: (authorization) => ({ headers: { authorization } })
+	}
+];
+
+const boundedReads: readonly BoundedRequest[] = [
 	narInfoRead,
 	{
 		name: 'the path-info probe',
@@ -389,7 +439,107 @@ const boundedReads: readonly BoundedRead[] = [
 			headers: { 'content-type': 'application/json', authorization },
 			body: JSON.stringify({ storePathHashes: [unpublishedHash] })
 		})
+	},
+	...attestationReads
+];
+
+// A reuse view is addressed below the tenant, never below a cache. Admission
+// runs before the tenant object resolves the view, so the view need not exist.
+const reuseViewReads: readonly BoundedRequest[] = [
+	{
+		name: 'the nix-cache-info of a reuse view',
+		path: '/reuse/builds/nix-cache-info',
+		init: (authorization) => ({ headers: { authorization } })
+	},
+	{
+		name: 'a narinfo read from a reuse view',
+		path: `/reuse/builds/${unpublishedHash}.narinfo`,
+		init: (authorization) => ({ headers: { authorization } })
+	},
+	{
+		name: 'a NAR read from a reuse view',
+		path: `/reuse/builds/nar/${unpublishedHash}.nar.zst`,
+		init: (authorization) => ({ headers: { authorization } })
+	},
+	{
+		name: 'the missing-paths probe of a reuse view',
+		path: '/reuse/builds/api/v1/missing-paths',
+		init: (authorization) => ({
+			method: 'POST',
+			headers: { 'content-type': 'application/json', authorization },
+			body: JSON.stringify({ storePathHashes: [unpublishedHash] })
+		})
+	},
+	{
+		name: 'the path-info probe of a reuse view',
+		path: '/reuse/builds/api/v1/path-info',
+		init: (authorization) => ({
+			method: 'POST',
+			headers: { 'content-type': 'application/json', authorization },
+			body: JSON.stringify({
+				storePaths: [`/nix/store/${unpublishedHash}-unpublished`]
+			})
+		})
 	}
+];
+
+// Reads of a private cache that check a read token and have no read deadline
+// of their own.
+const tokenCheckedReads: readonly BoundedRequest[] = [
+	{
+		name: 'the nix-cache-info of a cache',
+		path: '/nix-cache-info',
+		init: (authorization) => ({ headers: { authorization } })
+	},
+	{
+		name: 'a NAR read',
+		path: `/nar/sha256:${'0'.repeat(52)}.nar.zst`,
+		init: (authorization) => ({ headers: { authorization } })
+	},
+	{
+		name: 'the missing-paths probe',
+		path: '/api/v1/missing-paths',
+		init: (authorization) => ({
+			method: 'POST',
+			headers: { 'content-type': 'application/json', authorization },
+			body: JSON.stringify({ storePathHashes: [unpublishedHash] })
+		})
+	}
+];
+
+// Requests that check no read token and have no read deadline. Every request
+// below the tenant is admitted, so admission still has a deadline.
+const uncheckedRequests: readonly BoundedRequest[] = [
+	{
+		name: 'the public key',
+		path: '/pubkey',
+		init: (authorization) => ({ headers: { authorization } })
+	},
+	{
+		name: 'the JWKS document',
+		path: '/.well-known/jwks.json',
+		init: (authorization) => ({ headers: { authorization } })
+	},
+	{
+		name: 'an upload negotiation',
+		path: '/uploads',
+		init: (authorization) => ({
+			method: 'POST',
+			headers: { 'content-type': 'application/json', authorization },
+			body: JSON.stringify({ paths: [] })
+		})
+	}
+];
+
+// The admission of these requests calls the tenant object.
+const tenantObjectStalls = [
+	...[...attestationReads, ...tokenCheckedReads].flatMap((read) =>
+		[tokenCheckStall, migrationStall].map((admission) => ({ read, admission }))
+	),
+	...[...reuseViewReads, ...uncheckedRequests].map((read) => ({
+		read,
+		admission: migrationStall
+	}))
 ];
 
 // The deadline must start before admission at every mount of the read routes.
@@ -399,7 +549,7 @@ const cachePrefixes = [
 ] as const;
 
 async function stalledAdmissionResponse(
-	read: BoundedRead,
+	read: BoundedRequest,
 	admission: AdmissionStall,
 	prefix: string
 ): Promise<unknown> {
@@ -418,18 +568,61 @@ async function stalledAdmissionResponse(
 		);
 		await reached.promise;
 		await vi.advanceTimersByTimeAsync(readRequestBudgetMs);
-		const response = await responding;
 
-		return {
-			status: response.status,
-			retryAfter: response.headers.get('retry-after'),
-			cacheControl: response.headers.get('cache-control'),
-			records: streamRecords(capture.logs, variableFields)
-		};
+		return refusalFacts(await responding, capture.logs);
 	} finally {
 		restore();
 		capture.stop();
 	}
+}
+
+const slowAdmissionMs = 10_000;
+
+/**
+The response to `read` when admission spends {@link slowAdmissionMs} on the
+marker read and the check of the read token then stalls. The clock advances
+only as far as the end of one read budget from the start of admission.
+*/
+async function slowAdmissionResponse(read: BoundedRequest): Promise<unknown> {
+	const markerReached = Promise.withResolvers<undefined>();
+	const tokenCheckReached = Promise.withResolvers<undefined>();
+	const capture = startCapture();
+	vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+
+	try {
+		const responding = readFetch(read.path, read.init('Bearer token'), {
+			TENANT_CACHE: delayingKv(
+				tenantMemberKey(fixtureTenant),
+				slowAdmissionMs,
+				() => {
+					markerReached.resolve(undefined);
+				}
+			),
+			CUPBOARD_DO: stallingTenantObjects('authoriseCacheContentRead', () => {
+				tokenCheckReached.resolve(undefined);
+			})
+		});
+		await markerReached.promise;
+		await vi.advanceTimersByTimeAsync(slowAdmissionMs);
+		await tokenCheckReached.promise;
+		await vi.advanceTimersByTimeAsync(readRequestBudgetMs - slowAdmissionMs);
+
+		return refusalFacts(await responding, capture.logs);
+	} finally {
+		capture.stop();
+	}
+}
+
+function refusalFacts(
+	response: Response,
+	logs: Parameters<typeof streamRecords>[0]
+): unknown {
+	return {
+		status: response.status,
+		retryAfter: response.headers.get('retry-after'),
+		cacheControl: response.headers.get('cache-control'),
+		records: streamRecords(logs, variableFields)
+	};
 }
 
 const refusedAtDeadline = {
@@ -476,6 +669,24 @@ describe('a read whose admission stalls', () => {
 			expect(
 				await stalledAdmissionResponse(read, markerStall, prefix)
 			).toStrictEqual(refusedAtDeadline);
+		}
+	);
+
+	it.each(tenantObjectStalls)(
+		'refuses $read.name retryably when $admission.wait stalls past the read deadline',
+		async ({ read, admission }) => {
+			expect(await stalledAdmissionResponse(read, admission, '')).toStrictEqual(
+				refusedAtDeadline
+			);
+		}
+	);
+
+	it.each([...attestationReads, ...tokenCheckedReads])(
+		'refuses $name retryably one read budget after admission starts when the token check stalls',
+		async (read) => {
+			expect(await slowAdmissionResponse(read)).toStrictEqual(
+				refusedAtDeadline
+			);
 		}
 	);
 });

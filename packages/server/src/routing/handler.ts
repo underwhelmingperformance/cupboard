@@ -27,6 +27,7 @@ import { controlApp } from '../control/control-app.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
+import { SharedDeadline } from '../do/deadline.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
 import { withOperationCost } from '../do/operation-cost.ts';
 import {
@@ -56,6 +57,7 @@ import {
 import { withPublicRequest } from '../observability/request-context.ts';
 import { withSpan } from '../observability/span.ts';
 import { canUseLoopbackHttp } from '../oidc/issuer-policy.ts';
+import { readRequestBudgetMs } from '../policy/streaming.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import { uploadRequestSubrequestsFor } from '../policy/upload-pages.ts';
 import { parseCacheMetadataRequest } from '../read/metadata-page.ts';
@@ -249,11 +251,13 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		// batch, before any route runs.
 		const namedCache = parseNamedCachePath(route.rest);
 		const cacheScope: CacheScope = namedCache?.scope ?? { kind: 'default' };
+		const admissionDeadline = new SharedDeadline(readRequestBudgetMs);
 		const admission = await admitTenant(
 			context.env,
 			context.executionCtx,
 			route.tenant,
-			cacheScope
+			cacheScope,
+			admissionDeadline
 		);
 
 		if (admission === undefined) {
@@ -270,6 +274,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		}
 
 		context.set('tenant', route.tenant);
+		context.set('admissionDeadline', admissionDeadline);
 		context.set('tenantEntry', entry);
 		context.set('tenantEntryFresh', fresh);
 		context.set('tenantRest', route.rest);

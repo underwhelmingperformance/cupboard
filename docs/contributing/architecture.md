@@ -765,6 +765,20 @@ A bounded response declares its length in `Content-Length` and includes
 only against the declared length, and Cloudflare drops `Content-Length` from a
 response that it compresses for the client.
 
+Requests below a tenant URL without a read deadline, such as NAR reads, reads of
+an attestation list or bundle, requests to a reuse view and writes, still have a
+deadline for admission. The admission middleware starts a budget of 20 seconds
+(`readRequestBudgetMs`), and admission (`admitTenant` in
+`control/tenant-membership.ts`) runs within it. A read of a private cache then
+checks its credential within what admission left of the same budget, so
+admission and the check of a read token together end before the CLI's 30-second
+attempt. When the budget runs out, the request returns a retryable 503. The
+budget bounds only these two steps. The route's work after them, such as a NAR
+body, a write or the call that forwards a request to the tenant object, does not
+observe it. The tenant object's own deadline for an attestation list or bundle
+starts only when the request arrives, so an admission that is slow but finishes
+in time delays the end of a stalled body.
+
 The server does not bound NAR bodies. Nix ends a transfer that receives no data
 for 300 seconds and retries it. When it has already received bytes, it resumes
 with `Range`, and the control Worker serves a range after byte 0 from R2, not

@@ -6,6 +6,7 @@ import {
 	type TenantReadVerifier
 } from '../control/tenant-membership.ts';
 import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
+import { type SharedDeadline } from '../do/deadline.ts';
 import { type ReadScope } from '../read/read.ts';
 
 /**
@@ -20,6 +21,9 @@ export interface WorkerHonoEnv {
 	Variables: {
 		logger: Logger;
 		tenant: TenantId;
+		// The budget that admission started. The check of a read token runs within
+		// what admission left of it.
+		admissionDeadline: SharedDeadline;
 		tenantEntry: TenantEntry;
 		// Whether `tenantEntry` was read fresh from D1 this request; a write trusts
 		// its status only then, and otherwise reconfirms against D1.
