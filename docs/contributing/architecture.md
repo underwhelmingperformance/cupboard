@@ -1030,9 +1030,9 @@ The requests are under the tenant URL.
    only under `staging/<pushId>/`. It can't read or list objects. It lasts at
    most six hours, and never longer than the CLI's access token.
 
-2. The CLI opens the commit WebSocket with `GET /commit`. This is a hibernatable
-   socket on the tenant's object. The server sends credit frames to control how
-   fast the CLI can send commits.
+2. The CLI connects its commit session with `GET /commit` when the session first
+   needs it. This is a hibernatable socket on the tenant's object. The server
+   sends credit frames to control how fast the CLI can send commits.
 
 3. The CLI asks what to upload by calling `POST /uploads` with the store path,
    NAR hash, NAR size and references of each path. The control Worker first
