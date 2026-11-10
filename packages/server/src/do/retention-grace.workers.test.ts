@@ -135,9 +135,10 @@ import { VerificationService } from './verification-service.ts';
 const repeated = (character: string): string => character.repeat(32);
 const tenantWideContinuation = { scope: 'tenant' };
 
-function pipelineFor(context: ServerContext): CommitPipelineService {
-	const narInfoObjects = new NarInfoObjectsService(context);
-
+function pipelineFor(
+	context: ServerContext,
+	narInfoObjects = new NarInfoObjectsService(context)
+): CommitPipelineService {
 	return new CommitPipelineService(
 		context,
 		new SigningKeysService(context, narInfoObjects),
@@ -153,8 +154,10 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 	);
 }
 
-function uploadsServiceFor(context: ServerContext): UploadsService {
-	const narInfoObjects = new NarInfoObjectsService(context);
+function uploadsServiceFor(
+	context: ServerContext,
+	narInfoObjects = new NarInfoObjectsService(context)
+): UploadsService {
 	const attestationCas = new AttestationCasService(context);
 	const registration = new CacheRegistrationService(context);
 	const attestations = new AttestationsService(
@@ -2104,7 +2107,192 @@ describe('retention grace at publication', () => {
 			deadlines: []
 		});
 	});
+
+	it('verifies its own bytes when demotion removes the present path during the probe', async () => {
+		await useTestServer('commit-demoted-present');
+		const { token } = await bootstrap();
+		await setDefaultCacheGrace(3600);
+
+		const nar = await verifiableNar('commit-demoted-present');
+		const metadata = uploadMetadata({
+			storePathHash: repeated('5'),
+			name: 'demoted',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		const winner = plannedUploadDecision(
+			await negotiateUploads(token, [metadata], defaultCache(), true)
+		);
+		const loser = plannedUploadDecision(
+			await negotiateUploads(token, [metadata], defaultCache(), true)
+		);
+		await putNarBytes(winner.r2Key, nar);
+		await commitUpload(token, uploadIdSchema.parse(winner.uploadId));
+		await putNarBytes(loser.r2Key, nar);
+
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const cache = resolvedCache(instance.context);
+
+				return drivenDirectly(
+					pipelineFor(
+						instance.context,
+						demotedAfterProbe(instance.context, metadata)
+					)
+				).commit(
+					rootLogger(),
+					cache,
+					uploadIdSchema.parse(loser.uploadId),
+					new ReuseAuthority({
+						destination: cache.scope,
+						grants: adminGrants(),
+						views: []
+					})
+				);
+			}
+		);
+
+		const deferred = {
+			verdict: await pendingUploadVerdict(loser.uploadId),
+			isNarInfoObjectPresent: await isNarInfoObjectPresent(
+				metadata.storePathHash
+			)
+		};
+		await verifyCurrentTenant();
+
+		expect({
+			outcome,
+			deferred,
+			verified: {
+				verdict: await pendingUploadVerdict(loser.uploadId),
+				isNarInfoObjectPresent: await isNarInfoObjectPresent(
+					metadata.storePathHash
+				)
+			}
+		}).toStrictEqual({
+			outcome: {
+				kind: 'deferred',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				grace: { graceSeconds: 3600 }
+			},
+			deferred: { verdict: 'committing', isNarInfoObjectPresent: false },
+			verified: { verdict: undefined, isNarInfoObjectPresent: true }
+		});
+	});
+
+	it('defers a concession to a winner that demotion removes during the probe', async () => {
+		await useTestServer('concede-demoted-winner');
+		const { token } = await bootstrap();
+
+		const nar = await verifiableNar('concede-demoted-winner');
+		const metadata = uploadMetadata({
+			storePathHash: repeated('7'),
+			name: 'demoted',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPath(token, metadata, defaultCache(), nar);
+		const stagingKey = await currentNarObjectKey(metadata.narHash);
+
+		const outcome = await runInDurableObject(currentServer(), (instance) =>
+			pipelineFor(
+				instance.context,
+				demotedAfterProbe(instance.context, metadata)
+			).concedeToWinner(
+				rootLogger(),
+				resolvedCache(instance.context),
+				uploadIdSchema.parse('loser-upload'),
+				uploadPathNegotiation(metadata),
+				stagingKey,
+				{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(3600) }
+			)
+		);
+
+		expect({
+			outcome,
+			graceManaged: await hasGraceManagedMarker(defaultCache()),
+			deadlines: await graceDeadlineRows(defaultCache())
+		}).toStrictEqual({
+			outcome: {
+				kind: 'deferred',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				grace: { graceSeconds: 3600 }
+			},
+			graceManaged: false,
+			deadlines: []
+		});
+	});
 });
+
+// Delete the path's NAR and demote its narinfo object after the first
+// servability probe returns, as the `blob-demote` scan does when it finds the
+// NAR missing. Demotion leaves the path's row unchanged.
+async function demote(
+	context: ServerContext,
+	narInfoObjects: NarInfoObjectsService,
+	path: UploadPathMetadata
+): Promise<void> {
+	await env.BLOBS.delete(await currentNarObjectKey(path.narHash));
+	await narInfoObjects.demoteUnbacked(
+		resolvedCache(context),
+		storePathHashSchema.parse(path.storePathHash),
+		path.narHash
+	);
+}
+
+function demotedAfterProbe(
+	context: ServerContext,
+	path: UploadPathMetadata
+): NarInfoObjectsService {
+	const narInfoObjects = new NarInfoObjectsService(context);
+	const probe = narInfoObjects.servableNarInfoVersions.bind(narInfoObjects);
+	vi.spyOn(narInfoObjects, 'servableNarInfoVersions').mockImplementationOnce(
+		async (cache, hashes, options) => {
+			const versions = await probe(cache, hashes, options);
+			await demote(context, narInfoObjects, path);
+			return versions;
+		}
+	);
+
+	return narInfoObjects;
+}
+
+function demotedAfterPrefixProbe(
+	context: ServerContext,
+	path: UploadPathMetadata
+): NarInfoObjectsService {
+	const narInfoObjects = new NarInfoObjectsService(context);
+	const probe = narInfoObjects.servableNarInfoPrefix.bind(narInfoObjects);
+	vi.spyOn(narInfoObjects, 'servableNarInfoPrefix').mockImplementationOnce(
+		async (cache, hashes) => {
+			const versions = await probe(cache, hashes);
+			await demote(context, narInfoObjects, path);
+			return versions;
+		}
+	);
+
+	return narInfoObjects;
+}
+
+async function isNarInfoObjectPresent(storePathHash: string): Promise<boolean> {
+	return runInDurableObject(currentServer(), async (instance) => {
+		const key = new NarInfoObjectsService(instance.context).objectKey(
+			resolvedCache(instance.context),
+			storePathHashSchema.parse(storePathHash)
+		);
+
+		return (await env.BLOBS.head(key)) !== null;
+	});
+}
 
 // Run the tap before each R2 head so tests can place a mutation inside an await.
 function headTappingBucket(inner: R2Bucket, onHead: () => void): R2Bucket {
@@ -3643,6 +3831,40 @@ describe('confirming an unretained publication', () => {
 
 				return uploadsServiceFor(context).confirmPaths(defaultCache(), [hash]);
 			}
+		);
+
+		expect({
+			paths: response.paths,
+			deadlines: await graceDeadlineRows(defaultCache())
+		}).toStrictEqual({
+			paths: [{ storePathHash: path.storePathHash, confirmed: false }],
+			deadlines: [
+				{ storePathHash: path.storePathHash, retainUntil: dayAfterStart }
+			]
+		});
+	});
+
+	it('confirms false when demotion removes the path during the probe', async () => {
+		await useTestServer('confirm-demoted');
+		const { token } = await bootstrap();
+		await setDefaultCacheGrace(dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('q'),
+			name: 'demoted'
+		});
+
+		await pushPath(token, path);
+		vi.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
+
+		const response = await runInDurableObject(currentServer(), (instance) =>
+			uploadsServiceFor(
+				instance.context,
+				demotedAfterPrefixProbe(instance.context, path)
+			).confirmPaths(defaultCache(), [
+				storePathHashSchema.parse(path.storePathHash)
+			])
 		);
 
 		expect({

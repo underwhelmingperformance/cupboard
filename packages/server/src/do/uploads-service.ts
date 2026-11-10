@@ -1419,48 +1419,72 @@ export class UploadsService {
 		const probedHashes = requestedHashes.slice(0, maxPaths);
 		// Deduplicate the storage queries without removing duplicate response entries.
 		const uniqueHashes = [...new Set(probedHashes)];
-		const probe = await withHeldSubrequests(
-			uploadConfirmBlobStateSubrequests + trailingEligibilitySubrequests,
-			() => this.narInfoObjects.servableNarInfoPrefix(cache, uniqueHashes)
-		);
-		const backed = await this.uploadState.presentNarHashes(
-			probe.versions
-				.values()
-				.map((version) => version.narHash)
-				.toArray()
-		);
-		const answeredUnique = uniqueHashes.slice(0, probe.evaluated);
-		const evaluated = new Set(answeredUnique);
-		const firstUnanswered = probedHashes.findIndex(
-			(storePathHash) => !evaluated.has(storePathHash)
-		);
-		const answeredHashes =
-			firstUnanswered === -1
-				? probedHashes
-				: probedHashes.slice(0, firstUnanswered);
-		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
+		const { answeredHashes, facts } =
+			await this.context.narInfoDemotions.watching(
+				cache.id,
+				uniqueHashes,
+				async (demotions) => {
+					const probe = await withHeldSubrequests(
+						uploadConfirmBlobStateSubrequests + trailingEligibilitySubrequests,
+						() => this.narInfoObjects.servableNarInfoPrefix(cache, uniqueHashes)
+					);
+					const backed = await this.uploadState.presentNarHashes(
+						probe.versions
+							.values()
+							.map((version) => version.narHash)
+							.toArray()
+					);
+					const answeredUnique = uniqueHashes.slice(0, probe.evaluated);
+					const evaluated = new Set(answeredUnique);
+					const firstUnanswered = probedHashes.findIndex(
+						(storePathHash) => !evaluated.has(storePathHash)
+					);
+					const resolvedGraceSeconds =
+						this.retention.resolveGraceSeconds(cache);
 
-		const confirmable = answeredUnique.flatMap((storePathHash) => {
-			const version = probe.versions.get(storePathHash);
+					const confirmable = answeredUnique.flatMap((storePathHash) => {
+						const version = probe.versions.get(storePathHash);
 
-			if (version === undefined || !backed.has(version.narHash)) {
-				return [];
-			}
+						if (version === undefined || !backed.has(version.narHash)) {
+							return [];
+						}
 
-			return { storePathHash, ...version };
-		});
-		// The shared-fact reads allow a concurrent publication to replace a row.
-		// Re-check identity while applying grace and confirm only unchanged rows.
-		const facts = await this.context.criticalSection(() => {
-			new CacheClosureService(this.context).assertWritable(cache);
-			return Promise.resolve(
-				confirmGraceBatch(this.context, this.retention, cache, confirmable, {
-					reportsGrace: true,
-					graceSeconds: resolvedGraceSeconds,
-					retentionEpoch: new CacheClosureService(this.context).epoch(cache)
-				})
+						return { storePathHash, ...version };
+					});
+					// The shared-fact reads allow a concurrent publication to replace a
+					// row. Re-check identity while applying grace and confirm only
+					// unchanged rows. Skip a path when demotion deleted its narinfo
+					// object during the probe.
+					const confirmed = await this.context.criticalSection(() => {
+						new CacheClosureService(this.context).assertWritable(cache);
+						return Promise.resolve(
+							confirmGraceBatch(
+								this.context,
+								this.retention,
+								cache,
+								confirmable.filter(
+									({ storePathHash }) => !demotions.wasDemoted(storePathHash)
+								),
+								{
+									reportsGrace: true,
+									graceSeconds: resolvedGraceSeconds,
+									retentionEpoch: new CacheClosureService(this.context).epoch(
+										cache
+									)
+								}
+							)
+						);
+					});
+
+					return {
+						answeredHashes:
+							firstUnanswered === -1
+								? probedHashes
+								: probedHashes.slice(0, firstUnanswered),
+						facts: confirmed
+					};
+				}
 			);
-		});
 
 		return {
 			paths: answeredHashes.map((storePathHash) => {

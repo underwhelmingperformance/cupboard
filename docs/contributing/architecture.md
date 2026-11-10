@@ -547,15 +547,18 @@ narinfo object can take up to eight more calls. A group is as large as the
 remaining calls afford at that worst case of ten calls a path. It therefore
 always finishes, and the calls that it does not spend go to the next group.
 Because each group reads D1 again, a path that is recommitted while an earlier
-group runs is checked against its current row. The response answers the paths
-that the groups covered, as a prefix of the request. Without repairs, that is up
-to 425 paths on the Free plan and all 1,000 on the Paid plan. A page that needs
-many repairs takes about as many requests as its cost divided by the slice. When
-fewer than 15 calls remain, too few for one path at its worst case, the tenant
-object answers 503 with `Retry-After: 1`. The response advertises the limit for
-the whole slice in `x-cupboard-upload-max-paths`. `cupboard confirm` starts with
-425-path requests, then uses the advertised limit, and sends the paths that an
-answer left out in its next request.
+group runs is checked against its current row. When demotion deletes a path's
+narinfo object while the tenant object checks the path, the path is not
+confirmed. The tenant object detects the deletion with the in-memory record
+described below for `POST /uploads/confirm-present`. The response answers the
+paths that the groups covered, as a prefix of the request. Without repairs, that
+is up to 425 paths on the Free plan and all 1,000 on the Paid plan. A page that
+needs many repairs takes about as many requests as its cost divided by the
+slice. When fewer than 15 calls remain, too few for one path at its worst case,
+the tenant object answers 503 with `Retry-After: 1`. The response advertises the
+limit for the whole slice in `x-cupboard-upload-max-paths`. `cupboard confirm`
+starts with 425-path requests, then uses the advertised limit, and sends the
+paths that an answer left out in its next request.
 
 Both Wrangler configurations leave `limits.subrequests` unset, so Cloudflare
 applies the account's plan limit. The allowance doesn't extend the tenant
@@ -918,6 +921,18 @@ plus grace, rounded up to a whole hour; legacy skips leave its deadline
 unchanged. Completed operations retain their resulting path identity after
 pending cleanup.
 
+A commit can find its path already committed by another upload, or lose the
+reservation to another upload of the same path. Outside the critical section, it
+then checks that the cache serves the other upload's generation, and applies its
+own grace decision to that generation. The grace write compares only the row's
+generation and NAR hash, and demotion deletes the narinfo object without
+changing the row. The commit therefore also watches the path with the in-memory
+demotion record that `POST /uploads/confirm-present` uses. When demotion deletes
+the path's narinfo object during the check, a commit that found the path
+committed goes on with its own bytes and defers to verification, which restores
+the NAR. A commit that lost the reservation leaves its upload for verification.
+Neither reports the path as `already-present`.
+
 Unfinished recovery stops 24 hours after first acceptance. Push expiry does not
 cancel accepted work, but prevents new operations and new transfers. Claims,
 verification requests and the D1 publication fence enforce the recovery
@@ -929,16 +944,19 @@ grace and run root, whether or not another started commit shares the
 reservation. A failed publish leaves the operation accepted for the next expiry
 run. An operation whose charged path cannot be served, for example because its
 NAR is gone, expires with the verdict `absent`, and the path keeps its row for a
-later upload to restore or replace. Expiry releases the reservation of an
-unfinished operation through recoverable cleanup, unless another started commit
-shares it. Successful publications use ordinary canonical-object retention.
-Terminal operation records are pruned after the later of push expiry and
-recovery expiry, plus 15 minutes. The alarm wakes for them at the next multiple
-of five minutes, so the records that become prunable in one five-minute window
-share one wake. A run prunes at most 1,000 records; when more are due, the next
-run starts at once. The alarm wakes at recovery deadlines exactly. A completed
-replay in `publish-batch` rechecks availability; repair requires the original
-lease and recovery window. Otherwise the client must start a fresh push.
+later upload to restore or replace. Expiry checks servability before its gate
+and watches the path with the in-memory demotion record until the gate decides.
+An operation also expires as `absent` when demotion deletes its narinfo object
+in between. Expiry releases the reservation of an unfinished operation through
+recoverable cleanup, unless another started commit shares it. Successful
+publications use ordinary canonical-object retention. Terminal operation records
+are pruned after the later of push expiry and recovery expiry, plus 15 minutes.
+The alarm wakes for them at the next multiple of five minutes, so the records
+that become prunable in one five-minute window share one wake. A run prunes at
+most 1,000 records; when more are due, the next run starts at once. The alarm
+wakes at recovery deadlines exactly. A completed replay in `publish-batch`
+rechecks availability; repair requires the original lease and recovery window.
+Otherwise the client must start a fresh push.
 
 Reconnects resend complete unacknowledged entries and use
 `subscribe-publication` for acknowledged operations. Capability loss after an

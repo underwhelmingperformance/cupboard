@@ -2583,47 +2583,70 @@ export class VerificationService {
 			if (observed.operation?.state !== 'accepted') {
 				return;
 			}
-			const commit = await this.expiryCommit(observed);
-			const expire = async () => {
-				const outcome = await this.context.criticalSection(() =>
-					this.expireObserved(logger, store, observed, commit)
-				);
-				if (outcome.kind !== 'cleared') {
-					return outcome;
-				}
-				// The gate recorded the outcome, so the session receives its verdict,
-				// and the operation counts as expired, even when the cleanup after the
-				// gate fails. Orphan staging collection deletes a staged object that
-				// the cleanup leaves.
-				this.notifyWaiters(outcome.cleared, outcome.verdict);
-				try {
-					await this.uploadState.concludeClearedUpload(outcome.cleared, {
-						logger,
-						outcome: outcome.verdict
-					});
-					if (outcome.verdict === 'absent') {
-						await this.uploadState.clearDeliveredNarRefresh(outcome.cleared.id);
-						await this.deleteStagingObject(outcome.cleared);
+			const outcome = await this.watchingExpiry(observed, async (isDemoted) => {
+				const commit = await this.expiryCommit(observed);
+				const expire = async () => {
+					const expired = await this.context.criticalSection(() =>
+						this.expireObserved(logger, store, observed, commit, isDemoted)
+					);
+					if (expired.kind !== 'cleared') {
+						return expired;
 					}
-				} catch (error) {
-					logger.warn('publication expiry cleanup failed', {
-						operationId: outcome.cleared.id,
-						error
-					});
-				}
-				return outcome;
-			};
-			const { pending } = observed;
-			const outcome =
-				pending === undefined || pending.r2Key === narObjectKey(pending.narHash)
-					? await expire()
-					: await this.context.stagingDeletes.around(pending.r2Key, expire);
+					// The gate recorded the outcome, so the session receives its
+					// verdict, and the operation counts as expired, even when the
+					// cleanup after the gate fails. Orphan staging collection deletes a
+					// staged object that the cleanup leaves.
+					this.notifyWaiters(expired.cleared, expired.verdict);
+					try {
+						await this.uploadState.concludeClearedUpload(expired.cleared, {
+							logger,
+							outcome: expired.verdict
+						});
+						if (expired.verdict === 'absent') {
+							await this.uploadState.clearDeliveredNarRefresh(
+								expired.cleared.id
+							);
+							await this.deleteStagingObject(expired.cleared);
+						}
+					} catch (error) {
+						logger.warn('publication expiry cleanup failed', {
+							operationId: expired.cleared.id,
+							error
+						});
+					}
+					return expired;
+				};
+				const { pending } = observed;
+				return pending === undefined ||
+					pending.r2Key === narObjectKey(pending.narHash)
+					? expire()
+					: this.context.stagingDeletes.around(pending.r2Key, expire);
+			});
 			if (outcome.kind === 'changed') {
 				continue;
 			}
 			return;
 		}
 		throw new PublicationStateChangedError();
+	}
+
+	// Demotion deletes a narinfo object without changing the path's row, so the
+	// state key that the gate compares cannot detect it. Watch the path from the
+	// commit read until the gate decides the outcome.
+	private async watchingExpiry<T>(
+		observed: ExpiryState,
+		run: (isDemoted: () => boolean) => Promise<T>
+	): Promise<T> {
+		const { cache, metadata } = observed;
+		if (cache === undefined || metadata === undefined) {
+			return run(() => false);
+		}
+
+		return this.context.narInfoDemotions.watching(
+			cache.id,
+			[metadata.storePathHash],
+			(demotions) => run(() => demotions.wasDemoted(metadata.storePathHash))
+		);
 	}
 
 	// A verification charges the commit in D1 before it publishes the narinfo
@@ -2672,7 +2695,8 @@ export class VerificationService {
 		logger: Logger,
 		store: PublicationStore,
 		observed: ExpiryState,
-		commit: ExpiryCommit
+		commit: ExpiryCommit,
+		isDemoted: () => boolean
 	): Promise<ExpiryOutcome> {
 		const id = observed.operation?.id;
 		if (id === undefined) {
@@ -2697,7 +2721,8 @@ export class VerificationService {
 		if (
 			cache !== undefined &&
 			row !== undefined &&
-			commit.kind === 'servable'
+			commit.kind === 'servable' &&
+			!isDemoted()
 		) {
 			return this.completeExpiring(logger, pending, metadata, cache, row);
 		}

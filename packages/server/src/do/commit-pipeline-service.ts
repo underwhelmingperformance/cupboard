@@ -89,6 +89,7 @@ import {
 } from './context.ts';
 import {
 	capturedGraceFact,
+	type ConfirmedGrace,
 	confirmGrace,
 	type GraceDecision,
 	parseStoredGraceDecision,
@@ -866,18 +867,43 @@ export class CommitPipelineService {
 		};
 	}
 
-	// Whether Nix can fetch the committed row. The availability read repairs a
-	// missing narinfo object when the row's NAR is present.
-	private async isServed(
+	// Confirms grace for a committed row when Nix can fetch it, and returns
+	// undefined when Nix cannot. The availability read repairs a missing narinfo
+	// object when the row's NAR is present. Demotion can delete the object during
+	// that read without changing the row, so the path is watched for demotion
+	// until grace is confirmed.
+	private async confirmServedGrace(
 		cache: ResolvedCache,
-		row: typeof schema.narInfos.$inferSelect
-	): Promise<boolean> {
-		const versions = await this.narInfoObjects.servableNarInfoVersions(cache, [
-			row.storePathHash
-		]);
-		const served = versions.get(row.storePathHash);
-		return (
-			served?.generation === row.generation && served.narHash === row.narHash
+		row: typeof schema.narInfos.$inferSelect,
+		graceDecision: GraceDecision | undefined
+	): Promise<ConfirmedGrace | undefined> {
+		return this.context.narInfoDemotions.watching(
+			cache.id,
+			[row.storePathHash],
+			async (demotions) => {
+				const versions = await this.narInfoObjects.servableNarInfoVersions(
+					cache,
+					[row.storePathHash]
+				);
+				const served = versions.get(row.storePathHash);
+				if (
+					served?.generation !== row.generation ||
+					served.narHash !== row.narHash ||
+					demotions.wasDemoted(row.storePathHash)
+				) {
+					return;
+				}
+
+				return confirmGrace(
+					this.context,
+					this.retention,
+					cache,
+					row.storePathHash,
+					row.generation,
+					row.narHash,
+					graceDecision
+				);
+			}
 		);
 	}
 
@@ -2125,10 +2151,17 @@ export class CommitPipelineService {
 				metadata.storePathHash
 			);
 
+			// Apply this upload's retention decision to the winner before deleting
+			// the pending row that stores the decision.
+			const confirmed =
+				winner === undefined
+					? undefined
+					: await this.confirmServedGrace(cache, winner, graceDecision);
+
 			// Keep the pending upload while the winning saga has no committed edge,
 			// and while the winner has lost its NAR. Verification resolves both
 			// contenders, and it replaces a winner whose NAR is missing.
-			if (winner === undefined || !(await this.isServed(cache, winner))) {
+			if (winner === undefined || confirmed === undefined) {
 				return {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
@@ -2138,18 +2171,6 @@ export class CommitPipelineService {
 					})
 				};
 			}
-
-			// Apply this upload's retention decision to the winner before deleting
-			// the pending row that stores the decision.
-			const confirmed = confirmGrace(
-				this.context,
-				this.retention,
-				cache,
-				winner.storePathHash,
-				winner.generation,
-				winner.narHash,
-				graceDecision
-			);
 
 			// The winner can change while its object is repaired. Confirm its
 			// generation before applying retention or reporting success.
@@ -2398,19 +2419,12 @@ export class CommitPipelineService {
 				cache,
 				existingNarInfo
 			);
-			if (isCommitted && (await this.isServed(cache, existingNarInfo))) {
-				// Apply this upload's retention decision to the winner before
-				// deleting the pending row that stores the decision.
-				const confirmed = confirmGrace(
-					this.context,
-					this.retention,
-					cache,
-					existingNarInfo.storePathHash,
-					existingNarInfo.generation,
-					existingNarInfo.narHash,
-					graceDecision
-				);
-
+			// Apply this upload's retention decision to the winner before deleting
+			// the pending row that stores the decision.
+			const confirmed = isCommitted
+				? await this.confirmServedGrace(cache, existingNarInfo, graceDecision)
+				: undefined;
+			if (confirmed !== undefined) {
 				// The row can change during the reference check and object repair. If
 				// its identity moved, keep the decision for verification to apply to
 				// the current winner.
