@@ -502,11 +502,16 @@ describe('managed cache retirement', () => {
 			capture.stop();
 		}
 
-		const lines = capture.logs.filter(
-			(entry) =>
-				entry.message === 'method finished' &&
-				entry.properties.method === 'managed-retirement'
-		);
+		const lines = capture.logs
+			.filter(
+				(entry) =>
+					entry.message === 'method finished' &&
+					entry.properties.method === 'managed-retirement'
+			)
+			.map(({ properties: { durationMs, ...properties }, ...entry }) => ({
+				...entry,
+				properties: { ...properties, durationMs: typeof durationMs }
+			}));
 
 		expect(lines).toStrictEqual([
 			{
@@ -515,6 +520,7 @@ describe('managed cache retirement', () => {
 				message: 'method finished',
 				properties: {
 					method: 'managed-retirement',
+					durationMs: 'number',
 					...noCost,
 					rowsRead: 18,
 					rowsWritten: 4,
