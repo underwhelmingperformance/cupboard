@@ -181,6 +181,71 @@ describe('root ensure hardening', () => {
 		});
 	});
 
+	it('returns build-required when demotion removes a target between the ensure probe and the gate', async () => {
+		const token = await initialise();
+		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
+		await commitPath(token, committed);
+		const narKey = await currentNarObjectKey(committed.narHash);
+		const storePathHash = storePathHashSchema.parse(committed.storePathHash);
+
+		const ensured = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const { context } = instance;
+				const narInfoObjects = new NarInfoObjectsService(context);
+				const probe =
+					narInfoObjects.servableStorePathHashes.bind(narInfoObjects);
+				vi.spyOn(
+					narInfoObjects,
+					'servableStorePathHashes'
+				).mockImplementationOnce(async (cache, hashes) => {
+					const served = await probe(cache, hashes);
+					await env.BLOBS.delete(narKey);
+					await narInfoObjects.demoteUnbacked(
+						cache,
+						storePathHash,
+						committed.narHash
+					);
+					return served;
+				});
+				const roots = new RootsService(
+					context,
+					new CacheRegistrationService(context),
+					new RetentionService(context),
+					narInfoObjects
+				);
+				const response = await roots.ensureRoot(
+					defaultCache(),
+					rootName,
+					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
+				);
+
+				return {
+					response,
+					roots: context.db
+						.select({ name: schema.retentionRoots.name })
+						.from(schema.retentionRoots)
+						.all(),
+					targets: context.db
+						.select({
+							storePathHash: schema.retentionRootTargets.storePathHash
+						})
+						.from(schema.retentionRootTargets)
+						.all()
+				};
+			}
+		);
+
+		expect(ensured).toStrictEqual({
+			response: {
+				status: 'build-required',
+				unavailable: [committed.storePath]
+			},
+			roots: [],
+			targets: []
+		});
+	});
+
 	// A crash can leave the narinfo object and `blob_state` row after the
 	// canonical NAR disappears. The root is not retained because substitution
 	// would return 404 for the NAR.
