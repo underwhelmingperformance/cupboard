@@ -1930,6 +1930,148 @@ describe('publication subscriptions', () => {
 		}
 	});
 
+	// Each step wraps one servability check of the replay, in order. A `hidden`
+	// step removes the canonical NAR before its check, so the check finds the
+	// path unservable and the replay goes on. The NAR stays missing until the
+	// next step, so the replay cannot reuse it. A `demoted` step restores the
+	// NAR, finds the path served, and then deletes the NAR and lets demotion
+	// delete the narinfo object before the replay uses the result.
+	it.each<{
+		readonly check: string;
+		readonly steps: readonly ('hidden' | 'demoted')[];
+	}>([
+		{ check: 'the first check', steps: ['demoted'] },
+		{ check: 'the repair check', steps: ['hidden', 'demoted'] },
+		{
+			check: 'the check after the gate',
+			steps: ['hidden', 'hidden', 'demoted']
+		}
+	])(
+		'asks for a resend when demotion removes a completed publication after $check',
+		async ({ steps }) => {
+			vi.setSystemTime(vi.getRealSystemTime());
+			const token = await initialise();
+			const nar = await verifiableNar('publication-replay-demoted');
+			const path = uploadPathNegotiation(
+				uploadMetadata({
+					fileSize: nar.narBytes.byteLength,
+					fileHash: nar.fileHash,
+					narHash: nar.narHash,
+					narSize: nar.narSize
+				})
+			);
+			const [planned] = await plannedEntries(token, '/uploads/plan', [path]);
+			if (planned === undefined) {
+				throw new Error('Expected a planned entry');
+			}
+			const entry = {
+				...planned,
+				blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+			};
+			await putNarBytes(
+				publicationStagingKey(fixtureTenant, testPushId, entry.operationId),
+				nar
+			);
+			const first = await openCommitSession(
+				token,
+				undefined,
+				publicationSession
+			);
+			try {
+				first.send({
+					op: 'publish-batch',
+					pushId: testPushId,
+					entries: [entry]
+				});
+				await first.nextFrame();
+				await first.nextFrame();
+			} finally {
+				await closeSessionAndWait(first.socket);
+			}
+			await commitUpload(token, entry.operationId);
+			const narKey = await currentNarObjectKey(path.narHash);
+			const storePathHash = storePathHashSchema.parse(path.storePathHash);
+
+			const original = await env.BLOBS.get(narKey);
+			if (original === null) {
+				throw new Error('Expected the canonical NAR');
+			}
+			const narObject = {
+				bytes: await original.arrayBuffer(),
+				options: {
+					httpMetadata: original.httpMetadata,
+					customMetadata: original.customMetadata
+				}
+			};
+			const checks = vi.spyOn(
+				NarInfoObjectsService.prototype,
+				'servableStorePathHashes'
+			);
+			for (const step of steps) {
+				checks.mockImplementationOnce(async function (
+					this: NarInfoObjectsService,
+					cache,
+					hashes
+				) {
+					// Calling the spied method here would run the next step, so check
+					// through the method that it wraps.
+					const check = async (): Promise<ReadonlySet<StorePathHash>> => {
+						const versions = await this.servableNarInfoVersions(cache, hashes);
+						return new Set(versions.keys());
+					};
+					if (step === 'hidden') {
+						await env.BLOBS.delete(narKey);
+						return check();
+					}
+					await env.BLOBS.put(narKey, narObject.bytes, narObject.options);
+					const served = await check();
+					await env.BLOBS.delete(narKey);
+					await this.demoteUnbacked(cache, storePathHash, path.narHash);
+					return served;
+				});
+			}
+			// A commit that admission starts without bytes also ends in
+			// `upload-required`, so record what admission decided.
+			const admitted: string[] = [];
+			const admissions = vi
+				.spyOn(UploadsService.prototype, 'admitPublication')
+				.mockImplementationOnce(async function (
+					this: UploadsService,
+					...admissionArguments
+				) {
+					const admission = await this.admitPublication(...admissionArguments);
+					admitted.push(admission.kind);
+					return admission;
+				});
+			const replay = await openCommitSession(
+				token,
+				undefined,
+				publicationSession
+			);
+			try {
+				replay.send({
+					op: 'publish-batch',
+					pushId: testPushId,
+					entries: [entry]
+				});
+				// A replay that is answered as served sends only its `settled` frame.
+				expect(await replay.nextFrame()).toStrictEqual({
+					ev: 'publication-accepted',
+					uploadId: entry.operationId
+				});
+				expect(await replay.nextFrame()).toStrictEqual({
+					ev: 'upload-required',
+					uploadId: entry.operationId
+				});
+				expect(admitted).toStrictEqual(['needs-upload']);
+			} finally {
+				checks.mockRestore();
+				admissions.mockRestore();
+				await closeSessionAndWait(replay.socket);
+			}
+		}
+	);
+
 	it('refuses a subscription with push-expired when an expired push has no operation record', async () => {
 		const token = await initialise();
 		const expiresAt = Math.floor(Date.now() / 1000) + 60;

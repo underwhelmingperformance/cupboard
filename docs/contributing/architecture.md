@@ -956,7 +956,11 @@ that become prunable in one five-minute window share one wake. A run prunes at
 most 1,000 records; when more are due, the next run starts at once. The alarm
 wakes at recovery deadlines exactly. A completed replay in `publish-batch`
 rechecks availability; repair requires the original lease and recovery window.
-Otherwise the client must start a fresh push.
+Otherwise the client must start a fresh push. The replay watches the path with
+the in-memory demotion record from its first availability check until admission
+decides whether it needs bytes. When demotion deletes the path's narinfo object
+in that time, the replay treats the path as not served and asks for its bytes
+again.
 
 Reconnects resend complete unacknowledged entries and use
 `subscribe-publication` for acknowledged operations. Capability loss after an

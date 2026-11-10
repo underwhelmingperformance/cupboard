@@ -708,306 +708,334 @@ export class UploadsService {
 				'generation-conflict'
 			);
 		}
-		let pathRow = this.pathRowKey(cache, entry);
-		const present = await this.narInfoObjects.servableStorePathHashes(cache, [
-			entry.metadata.storePathHash
-		]);
-		// The record was read before the availability check, so the replay
-		// answers a completed operation from the record as it is now.
-		if (
-			original?.state === 'servable' &&
-			present.has(entry.metadata.storePathHash)
-		) {
-			return { cache, kind: 'concluded' };
-		}
-		operations.assertLive(entry.operationId);
-		const reusable = await this.uploadState.peekReusableBlobs(
-			[entry.metadata.narHash],
-			this.reuseAuthority(scope, grants)
-		);
-		const backed = await this.uploadState.presentCanonicalNars([
-			entry.metadata.narHash
-		]);
-		const blob = backed.has(entry.metadata.narHash)
-			? reusable.get(entry.metadata.narHash)
-			: undefined;
-		if (original !== undefined && blob === undefined) {
-			await this.clearMissingReuse(cache, entry);
-		}
+		// Demotion deletes a narinfo object without changing the path's row, so
+		// the row checks below cannot detect it. Watch the path until admission
+		// has decided whether the path is served and whether bytes are needed.
+		return this.context.narInfoDemotions.watching(
+			cache.id,
+			[entry.metadata.storePathHash],
+			async (demotions) => {
+				let pathRow = this.pathRowKey(cache, entry);
+				const present = await this.narInfoObjects.servableStorePathHashes(
+					cache,
+					[entry.metadata.storePathHash]
+				);
+				const isDemoted = (): boolean =>
+					demotions.wasDemoted(entry.metadata.storePathHash);
+				// The record was read before the availability check, so the replay
+				// answers a completed operation from the record as it is now.
+				if (
+					original?.state === 'servable' &&
+					present.has(entry.metadata.storePathHash) &&
+					!isDemoted()
+				) {
+					return { cache, kind: 'concluded' };
+				}
+				operations.assertLive(entry.operationId);
+				const reusable = await this.uploadState.peekReusableBlobs(
+					[entry.metadata.narHash],
+					this.reuseAuthority(scope, grants)
+				);
+				const backed = await this.uploadState.presentCanonicalNars([
+					entry.metadata.narHash
+				]);
+				const blob = backed.has(entry.metadata.narHash)
+					? reusable.get(entry.metadata.narHash)
+					: undefined;
+				if (original !== undefined && blob === undefined) {
+					await this.clearMissingReuse(cache, entry);
+				}
 
-		const pushExpiry = pushIdExpiresAtSeconds(pushId);
-		if (pushExpiry === undefined) {
-			throw new InvalidPushIdError();
-		}
-		const now = new Date();
-		// The record can become completed after the first read. Verify the push ID
-		// for every entry, so the gate can refuse a repair whose push ID did not
-		// verify.
-		const isPushVerified = await this.context.pushCredentials().verify(pushId);
-		const deadline =
-			original?.recoveryDeadline ??
-			new Date(now.getTime() + publicationRecoveryMs).toISOString();
-		const pruneAfter = new Date(
-			Math.max(pushExpiry * 1000, Date.parse(deadline)) +
-				publicationCleanupMarginMs
-		).toISOString();
-		const staged = r2ObjectKeySchema.parse(
-			publicationStagingKey(tenant, pushId, entry.operationId)
-		);
-		// Wait before entering the gate, which would otherwise stay closed to
-		// every other request for as long as the R2 delete takes.
-		if (blob === undefined) {
-			await this.context.stagingDeletes.finished(staged);
-		}
-		// The gate checks only local state, so whether a completed operation's
-		// path is served is read before it.
-		const observed = this.admissionKey(cache, entry);
-		const repairable =
-			operations.get(entry.operationId)?.state === 'servable'
-				? await this.narInfoObjects.servableStorePathHashes(cache, [
+				const pushExpiry = pushIdExpiresAtSeconds(pushId);
+				if (pushExpiry === undefined) {
+					throw new InvalidPushIdError();
+				}
+				const now = new Date();
+				// The record can become completed after the first read. Verify the push ID
+				// for every entry, so the gate can refuse a repair whose push ID did not
+				// verify.
+				const isPushVerified = await this.context
+					.pushCredentials()
+					.verify(pushId);
+				const deadline =
+					original?.recoveryDeadline ??
+					new Date(now.getTime() + publicationRecoveryMs).toISOString();
+				const pruneAfter = new Date(
+					Math.max(pushExpiry * 1000, Date.parse(deadline)) +
+						publicationCleanupMarginMs
+				).toISOString();
+				const staged = r2ObjectKeySchema.parse(
+					publicationStagingKey(tenant, pushId, entry.operationId)
+				);
+				// Wait before entering the gate, which would otherwise stay closed to
+				// every other request for as long as the R2 delete takes.
+				if (blob === undefined) {
+					await this.context.stagingDeletes.finished(staged);
+				}
+				// The gate checks only local state, so whether a completed operation's
+				// path is served is read before it.
+				const observed = this.admissionKey(cache, entry);
+				const repairable =
+					operations.get(entry.operationId)?.state === 'servable'
+						? await this.narInfoObjects.servableStorePathHashes(cache, [
+								entry.metadata.storePathHash
+							])
+						: new Set<StorePathHash>();
+				await this.context.criticalSection(() => {
+					this.requireCurrentCache(cache, true);
+					if (operations.get(entry.operationId)?.state === 'servable') {
+						if (this.admissionKey(cache, entry) !== observed) {
+							throw new PublicationPathChangedError();
+						}
+						if (repairable.has(entry.metadata.storePathHash) && !isDemoted()) {
+							return Promise.resolve();
+						}
+					}
+					if (Date.now() >= Date.parse(deadline)) {
+						throw new PublicationRecoveryExpiredError();
+					}
+					this.context.db.transaction((tx) => {
+						const current = operations.get(entry.operationId);
+						if (current?.state === 'failed') {
+							throw new PublicationConflictError(
+								'The publication failed. Start a fresh push.'
+							);
+						}
+						if (current?.state === 'expired') {
+							throw new PublicationRecoveryExpiredError();
+						}
+						// Orphan staging collection deletes a staging object outside the
+						// gate once its push expires, so a repair must not start tracking
+						// the object after the push expires.
+						if (
+							current?.state === 'servable' &&
+							(!isPushVerified || Date.now() >= pushExpiry * 1000)
+						) {
+							throw new PublicationPushExpiredError();
+						}
+						const declared =
+							entry.blob === undefined ? undefined : JSON.stringify(entry.blob);
+						if (
+							declared !== undefined &&
+							current?.blobJson !== null &&
+							current?.blobJson !== undefined &&
+							current.blobJson !== declared
+						) {
+							throw new PublicationConflictError(
+								'The compressed declaration changed.',
+								'declaration-changed'
+							);
+						}
+						const graceSeconds = this.retention.resolveGraceSeconds(cache);
+						const graceDecision: GraceDecision = {
+							reportsGrace: true,
+							graceSeconds,
+							retentionEpoch: new CacheClosureService(this.context).epoch(
+								cache
+							),
+							publicationId: entry.operationId,
+							recoveryDeadline: isoTimestamp(new Date(deadline))
+						};
+						const graceJson =
+							current?.graceDecisionJson ??
+							serialiseGraceDecision(graceDecision);
+						if (current === undefined) {
+							if (Date.now() >= pushExpiry * 1000) {
+								throw new InvalidPushIdError();
+							}
+							tx.insert(schema.publicationOperations)
+								.values({
+									id: entry.operationId,
+									cacheId: cache.id,
+									cacheGeneration: cache.generation,
+									pushId,
+									canonicalJson: identity.canonical,
+									acceptedAt: now.toISOString(),
+									pushExpiresAt: new Date(pushExpiry * 1000).toISOString(),
+									recoveryDeadline: deadline,
+									pruneAfter,
+									blobJson: declared,
+									graceDecisionJson: graceJson
+								})
+								.run();
+							if (entry.attachRoot !== undefined) {
+								this.roots.bindRunRoot(
+									cache,
+									entry.attachRoot.name,
+									entry.attachRoot.retention,
+									tx
+								);
+							}
+						} else if (declared !== undefined && current.blobJson === null) {
+							tx.update(schema.publicationOperations)
+								.set({ blobJson: declared })
+								.where(eq(schema.publicationOperations.id, entry.operationId))
+								.run();
+						}
+						const savedBlob =
+							current?.blobJson === null || current?.blobJson === undefined
+								? entry.blob
+								: commitBlobDeclarationSchema.parse(
+										JSON.parse(current.blobJson)
+									);
+						const pending = tx
+							.select()
+							.from(schema.pendingUploads)
+							.where(eq(schema.pendingUploads.id, entry.operationId))
+							.get();
+						if (pending !== undefined) {
+							if (
+								savedBlob !== undefined &&
+								pending.declaredFileHash === null
+							) {
+								tx.update(schema.pendingUploads)
+									.set({
+										declaredFileHash: savedBlob.fileHash,
+										declaredFileSize: savedBlob.fileSize
+									})
+									.where(eq(schema.pendingUploads.id, entry.operationId))
+									.run();
+							}
+							return;
+						}
+						// A pass that cleared this operation's pending row can still be
+						// deleting its staged object, which would remove the bytes that this
+						// admission tracks again.
+						if (blob === undefined && this.context.stagingDeletes.has(staged)) {
+							throw new PublicationStagingDeletePendingError();
+						}
+						const captured = parseStoredGraceDecision(graceJson);
+						tx.update(schema.publicationOperations)
+							.set({ state: 'accepted' })
+							.where(eq(schema.publicationOperations.id, entry.operationId))
+							.run();
+						tx.insert(schema.pendingUploads)
+							.values({
+								id: entry.operationId,
+								cacheId: cache.id,
+								acceptedSequence: new WorkSequenceService(tx).allocate(),
+								acceptedExpiresAt: isoTimestamp(new Date(deadline)),
+								narHash: entry.metadata.narHash,
+								r2Key:
+									blob === undefined
+										? staged
+										: narObjectKey(entry.metadata.narHash),
+								metadataJson: JSON.stringify(
+									blob === undefined
+										? entry.metadata
+										: commitMetadataFromPathAndBlob(
+												{ ...entry.metadata, narSize: blob.narSize },
+												blob
+											)
+								),
+								createdAt: isoTimestamp(now),
+								expiresAt: isoTimestamp(new Date(deadline)),
+								recoveryDeadline: deadline,
+								declaredFileHash: savedBlob?.fileHash,
+								declaredFileSize: savedBlob?.fileSize,
+								graceDecisionJson: graceJson,
+								retentionEpoch: captured?.retentionEpoch,
+								attachRootName: entry.attachRoot?.name
+							})
+							.onConflictDoNothing()
+							.run();
+					});
+					return Promise.resolve();
+				});
+				await armAlarmNoLaterThan(
+					this.context.ctx.storage,
+					Date.parse(deadline)
+				);
+				if (blob !== undefined) {
+					await this.uploadState.clearReaperTimers([entry.metadata.narHash]);
+				}
+				let isServed =
+					present.has(entry.metadata.storePathHash) && !isDemoted();
+				// A committed path that is not served may have lost its NAR. Admission
+				// keeps the path's row and asks for the bytes, and verification of the
+				// bytes restores the NAR or replaces the row. The reference is read before
+				// availability, so a reservation that another upload commits between the
+				// two reads counts as uncommitted.
+				let wasCommitted = false;
+				if (!isServed) {
+					const checked = this.pathRowKey(cache, entry);
+					const existing = this.existingNarInfos(cache, [
 						entry.metadata.storePathHash
-					])
-				: new Set<StorePathHash>();
-		await this.context.criticalSection(() => {
-			this.requireCurrentCache(cache, true);
-			if (operations.get(entry.operationId)?.state === 'servable') {
-				if (this.admissionKey(cache, entry) !== observed) {
+					]).get(entry.metadata.storePathHash);
+					wasCommitted =
+						existing !== undefined &&
+						(await this.narInfoObjects.hasCommittedReference(cache, existing));
+					const available = await this.narInfoObjects.servableStorePathHashes(
+						cache,
+						[entry.metadata.storePathHash]
+					);
+					isServed =
+						available.has(entry.metadata.storePathHash) && !isDemoted();
+					await this.context.criticalSection(() => {
+						this.requireCurrentCache(cache, true);
+						operations.assertLive(entry.operationId);
+						if (this.pathRowKey(cache, entry) !== checked) {
+							throw new PublicationPathChangedError();
+						}
+						pathRow = checked;
+						return Promise.resolve();
+					});
+				}
+
+				const stagedKey = () =>
+					this.context.db
+						.select({ r2Key: schema.pendingUploads.r2Key })
+						.from(schema.pendingUploads)
+						.where(eq(schema.pendingUploads.id, entry.operationId))
+						.get()?.r2Key;
+				const isStagedMissing =
+					!isServed &&
+					stagedKey() === staged &&
+					(await this.context.env.BLOBS.head(staged)) === null;
+				// Another operation's verification commits a reservation without changing
+				// the path's narinfo row, so read the reservation's D1 edge before asking
+				// for bytes.
+				const reservation = isStagedMissing
+					? this.existingNarInfos(cache, [entry.metadata.storePathHash]).get(
+							entry.metadata.storePathHash
+						)
+					: undefined;
+				const isReservationCommitted =
+					reservation !== undefined &&
+					(await this.narInfoObjects.hasCommittedReference(cache, reservation));
+				// Read the operation and its pending row after checking the staged object.
+				// Verification can complete the operation and delete the object while the
+				// R2 check waits.
+				const stored = operations.get(entry.operationId);
+				if (
+					stored !== undefined &&
+					(stored.state !== 'accepted' ||
+						Date.parse(stored.recoveryDeadline) <= Date.now())
+				) {
+					return { cache, kind: 'concluded' };
+				}
+				// The last availability check decided whether the path is served. A commit
+				// or deletion of the path since then changes its narinfo row or commits its
+				// reservation, so admission runs again and checks the path again.
+				if (
+					(isReservationCommitted && !wasCommitted) ||
+					this.pathRowKey(cache, entry) !== pathRow
+				) {
 					throw new PublicationPathChangedError();
 				}
-				if (repairable.has(entry.metadata.storePathHash)) {
-					return Promise.resolve();
-				}
-			}
-			if (Date.now() >= Date.parse(deadline)) {
-				throw new PublicationRecoveryExpiredError();
-			}
-			this.context.db.transaction((tx) => {
-				const current = operations.get(entry.operationId);
-				if (current?.state === 'failed') {
-					throw new PublicationConflictError(
-						'The publication failed. Start a fresh push.'
-					);
-				}
-				if (current?.state === 'expired') {
-					throw new PublicationRecoveryExpiredError();
-				}
-				// Orphan staging collection deletes a staging object outside the
-				// gate once its push expires, so a repair must not start tracking
-				// the object after the push expires.
-				if (
-					current?.state === 'servable' &&
-					(!isPushVerified || Date.now() >= pushExpiry * 1000)
-				) {
+				const requiresUpload = isStagedMissing && stagedKey() === staged;
+				if (requiresUpload && Date.now() >= pushExpiry * 1000) {
 					throw new PublicationPushExpiredError();
 				}
-				const declared =
-					entry.blob === undefined ? undefined : JSON.stringify(entry.blob);
-				if (
-					declared !== undefined &&
-					current?.blobJson !== null &&
-					current?.blobJson !== undefined &&
-					current.blobJson !== declared
-				) {
-					throw new PublicationConflictError(
-						'The compressed declaration changed.',
-						'declaration-changed'
-					);
-				}
-				const graceSeconds = this.retention.resolveGraceSeconds(cache);
-				const graceDecision: GraceDecision = {
-					reportsGrace: true,
-					graceSeconds,
-					retentionEpoch: new CacheClosureService(this.context).epoch(cache),
-					publicationId: entry.operationId,
-					recoveryDeadline: isoTimestamp(new Date(deadline))
-				};
-				const graceJson =
-					current?.graceDecisionJson ?? serialiseGraceDecision(graceDecision);
-				if (current === undefined) {
-					if (Date.now() >= pushExpiry * 1000) {
-						throw new InvalidPushIdError();
-					}
-					tx.insert(schema.publicationOperations)
-						.values({
-							id: entry.operationId,
-							cacheId: cache.id,
-							cacheGeneration: cache.generation,
-							pushId,
-							canonicalJson: identity.canonical,
-							acceptedAt: now.toISOString(),
-							pushExpiresAt: new Date(pushExpiry * 1000).toISOString(),
-							recoveryDeadline: deadline,
-							pruneAfter,
-							blobJson: declared,
-							graceDecisionJson: graceJson
-						})
-						.run();
-					if (entry.attachRoot !== undefined) {
-						this.roots.bindRunRoot(
-							cache,
-							entry.attachRoot.name,
-							entry.attachRoot.retention,
-							tx
-						);
-					}
-				} else if (declared !== undefined && current.blobJson === null) {
-					tx.update(schema.publicationOperations)
-						.set({ blobJson: declared })
-						.where(eq(schema.publicationOperations.id, entry.operationId))
-						.run();
-				}
-				const savedBlob =
-					current?.blobJson === null || current?.blobJson === undefined
-						? entry.blob
-						: commitBlobDeclarationSchema.parse(JSON.parse(current.blobJson));
-				const pending = tx
-					.select()
-					.from(schema.pendingUploads)
-					.where(eq(schema.pendingUploads.id, entry.operationId))
-					.get();
-				if (pending !== undefined) {
-					if (savedBlob !== undefined && pending.declaredFileHash === null) {
-						tx.update(schema.pendingUploads)
-							.set({
-								declaredFileHash: savedBlob.fileHash,
-								declaredFileSize: savedBlob.fileSize
-							})
-							.where(eq(schema.pendingUploads.id, entry.operationId))
-							.run();
-					}
-					return;
-				}
-				// A pass that cleared this operation's pending row can still be
-				// deleting its staged object, which would remove the bytes that this
-				// admission tracks again.
-				if (blob === undefined && this.context.stagingDeletes.has(staged)) {
-					throw new PublicationStagingDeletePendingError();
-				}
-				const captured = parseStoredGraceDecision(graceJson);
-				tx.update(schema.publicationOperations)
-					.set({ state: 'accepted' })
-					.where(eq(schema.publicationOperations.id, entry.operationId))
-					.run();
-				tx.insert(schema.pendingUploads)
-					.values({
-						id: entry.operationId,
-						cacheId: cache.id,
-						acceptedSequence: new WorkSequenceService(tx).allocate(),
-						acceptedExpiresAt: isoTimestamp(new Date(deadline)),
-						narHash: entry.metadata.narHash,
-						r2Key:
-							blob === undefined
-								? staged
-								: narObjectKey(entry.metadata.narHash),
-						metadataJson: JSON.stringify(
-							blob === undefined
-								? entry.metadata
-								: commitMetadataFromPathAndBlob(
-										{ ...entry.metadata, narSize: blob.narSize },
-										blob
-									)
-						),
-						createdAt: isoTimestamp(now),
-						expiresAt: isoTimestamp(new Date(deadline)),
-						recoveryDeadline: deadline,
-						declaredFileHash: savedBlob?.fileHash,
-						declaredFileSize: savedBlob?.fileSize,
-						graceDecisionJson: graceJson,
-						retentionEpoch: captured?.retentionEpoch,
-						attachRootName: entry.attachRoot?.name
-					})
-					.onConflictDoNothing()
-					.run();
-			});
-			return Promise.resolve();
-		});
-		await armAlarmNoLaterThan(this.context.ctx.storage, Date.parse(deadline));
-		if (blob !== undefined) {
-			await this.uploadState.clearReaperTimers([entry.metadata.narHash]);
-		}
-		let isServed = present.has(entry.metadata.storePathHash);
-		// A committed path that is not served may have lost its NAR. Admission
-		// keeps the path's row and asks for the bytes, and verification of the
-		// bytes restores the NAR or replaces the row. The reference is read before
-		// availability, so a reservation that another upload commits between the
-		// two reads counts as uncommitted.
-		let wasCommitted = false;
-		if (!isServed) {
-			const checked = this.pathRowKey(cache, entry);
-			const existing = this.existingNarInfos(cache, [
-				entry.metadata.storePathHash
-			]).get(entry.metadata.storePathHash);
-			wasCommitted =
-				existing !== undefined &&
-				(await this.narInfoObjects.hasCommittedReference(cache, existing));
-			const available = await this.narInfoObjects.servableStorePathHashes(
-				cache,
-				[entry.metadata.storePathHash]
-			);
-			isServed = available.has(entry.metadata.storePathHash);
-			await this.context.criticalSection(() => {
-				this.requireCurrentCache(cache, true);
-				operations.assertLive(entry.operationId);
-				if (this.pathRowKey(cache, entry) !== checked) {
-					throw new PublicationPathChangedError();
-				}
-				pathRow = checked;
-				return Promise.resolve();
-			});
-		}
-
-		const stagedKey = () =>
-			this.context.db
-				.select({ r2Key: schema.pendingUploads.r2Key })
-				.from(schema.pendingUploads)
-				.where(eq(schema.pendingUploads.id, entry.operationId))
-				.get()?.r2Key;
-		const isStagedMissing =
-			!isServed &&
-			stagedKey() === staged &&
-			(await this.context.env.BLOBS.head(staged)) === null;
-		// Another operation's verification commits a reservation without changing
-		// the path's narinfo row, so read the reservation's D1 edge before asking
-		// for bytes.
-		const reservation = isStagedMissing
-			? this.existingNarInfos(cache, [entry.metadata.storePathHash]).get(
-					entry.metadata.storePathHash
-				)
-			: undefined;
-		const isReservationCommitted =
-			reservation !== undefined &&
-			(await this.narInfoObjects.hasCommittedReference(cache, reservation));
-		// Read the operation and its pending row after checking the staged object.
-		// Verification can complete the operation and delete the object while the
-		// R2 check waits.
-		const stored = operations.get(entry.operationId);
-		if (
-			stored !== undefined &&
-			(stored.state !== 'accepted' ||
-				Date.parse(stored.recoveryDeadline) <= Date.now())
-		) {
-			return { cache, kind: 'concluded' };
-		}
-		// The last availability check decided whether the path is served. A commit
-		// or deletion of the path since then changes its narinfo row or commits its
-		// reservation, so admission runs again and checks the path again.
-		if (
-			(isReservationCommitted && !wasCommitted) ||
-			this.pathRowKey(cache, entry) !== pathRow
-		) {
-			throw new PublicationPathChangedError();
-		}
-		const requiresUpload = isStagedMissing && stagedKey() === staged;
-		if (requiresUpload && Date.now() >= pushExpiry * 1000) {
-			throw new PublicationPushExpiredError();
-		}
-		rootLogger().debug('publication accepted', {
-			operationId: entry.operationId,
-			isReplay: original !== undefined,
-			recoveryDeadline: stored?.recoveryDeadline,
-			requiresUpload
-		});
-		return { cache, kind: requiresUpload ? 'needs-upload' : 'pending' };
+				rootLogger().debug('publication accepted', {
+					operationId: entry.operationId,
+					isReplay: original !== undefined,
+					recoveryDeadline: stored?.recoveryDeadline,
+					requiresUpload
+				});
+				return { cache, kind: requiresUpload ? 'needs-upload' : 'pending' };
+			}
+		);
 	}
 
 	/**
