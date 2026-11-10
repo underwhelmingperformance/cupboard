@@ -5,6 +5,7 @@ import type {
 	AuthConfigStorage,
 	UserAuthConfig
 } from '@cloudflare/workers-auth';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { fetchWithBoundedResponseBodies } from '@cupboard/shared/response-body';
 import Cloudflare from 'cloudflare';
 
@@ -268,7 +269,7 @@ Creates the Cloudflare SDK client with retries disabled and bounded responses.
 */
 export function createCloudflareClient(
 	apiToken: string,
-	fetcher: typeof fetch = fetch,
+	fetcher: typeof fetch = keepAliveFetch,
 	limits: CloudflareResponseLimits = cloudflareResponseLimits,
 	signal?: AbortSignal
 ): Cloudflare {
@@ -326,13 +327,13 @@ export async function resolveCloudflare(
 	const clientWithSignal = (signal: AbortSignal): Cloudflare =>
 		createCloudflareClient(
 			credential.token,
-			fetch,
+			keepAliveFetch,
 			cloudflareResponseLimits,
 			signal
 		);
 	const client = createCloudflareClient(
 		credential.token,
-		fetch,
+		keepAliveFetch,
 		cloudflareResponseLimits,
 		chain.signal
 	);

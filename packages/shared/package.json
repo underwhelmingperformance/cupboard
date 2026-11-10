@@ -34,6 +34,7 @@
 		"./http": "./src/http.ts",
 		"./http-fields": "./src/http-fields.ts",
 		"./in-toto": "./src/in-toto.ts",
+		"./keep-alive-fetch": "./src/keep-alive-fetch.ts",
 		"./limits": "./src/limits.ts",
 		"./node-tracing": "./src/node-tracing.ts",
 		"./octokit": "./src/octokit.ts",

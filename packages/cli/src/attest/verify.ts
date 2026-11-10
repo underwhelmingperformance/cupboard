@@ -14,6 +14,7 @@ import { canonicalHref } from '@cupboard/nix-store/url';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import {
 	readResponseBytes,
 	readResponseJson,
@@ -154,7 +155,7 @@ export async function verifyRemoteAttestations(
 	validateRemoteTrustOptions(options);
 	const fetcher =
 		dependencies.fetch ??
-		resilientFetcher('replay-safe', fetch, options.url.origin);
+		resilientFetcher('replay-safe', keepAliveFetch, options.url.origin);
 	const readFetcher = cacheReadFetcher(options.url, dependencies.fetch, {
 		trustedOrigin: options.url.origin
 	});

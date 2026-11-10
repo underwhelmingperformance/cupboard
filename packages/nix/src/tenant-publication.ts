@@ -1,5 +1,6 @@
 import type { StorePathString } from '@cupboard/nix-store/scalars';
 import { canonicalHref, parseBaseUrl } from '@cupboard/nix-store/url';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import {
 	context,
@@ -170,7 +171,7 @@ async function discoverDependencyReferences(
 				inFlight,
 				elapsedMs: Date.now() - startedAt
 			});
-		const fetcher = withReadAuthentication(options.fetch ?? fetch, {
+		const fetcher = withReadAuthentication(options.fetch ?? keepAliveFetch, {
 			tenantUrl: source.url
 		});
 		const shouldPropagate =

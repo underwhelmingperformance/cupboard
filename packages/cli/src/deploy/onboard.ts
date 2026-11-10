@@ -29,6 +29,7 @@ import {
 	type TenantReadCredential,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 
@@ -605,7 +606,7 @@ async function resolveDeploymentUrl(
 function onboardClientFor(
 	url: string,
 	signal?: AbortSignal,
-	fetcher: typeof fetch = fetch
+	fetcher: typeof fetch = keepAliveFetch
 ): OnboardClient {
 	const parsed = parseWorkerUrl(url);
 	const raw = new CupboardClient(parsed, fetcher, { kind: 'default' }, signal);

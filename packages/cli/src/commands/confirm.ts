@@ -24,6 +24,7 @@ import {
 	shouldShowDetails
 } from '@cupboard/reporter';
 import { type RandomSource } from '@cupboard/shared/backoff';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { lookupInPages } from '@cupboard/shared/paging';
 import type { Command } from 'commander';
 
@@ -210,7 +211,7 @@ export function registerConfirmCommand(
 				credential: resolved.credential,
 				signal: programOptions.signal,
 				fetcher: async (input, init) => {
-					const response = await fetch(input, init);
+					const response = await keepAliveFetch(input, init);
 					if (response.ok) {
 						maxPaths =
 							advertisedMaxPaths(response, uploadConfirmMaxPaths) ?? maxPaths;

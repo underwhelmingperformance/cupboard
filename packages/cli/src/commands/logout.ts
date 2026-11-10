@@ -1,5 +1,6 @@
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type { Reporter, ResultRow } from '@cupboard/reporter';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -212,7 +213,7 @@ async function revokeSession(
 			removed.target,
 			removed.session.refreshToken,
 			dependencies.fetcher ??
-				resilientFetcher('replay-safe', fetch, removed.target.origin),
+				resilientFetcher('replay-safe', keepAliveFetch, removed.target.origin),
 			dependencies.signal
 		)
 	};
