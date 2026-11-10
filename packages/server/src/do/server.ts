@@ -3528,8 +3528,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 
 			await this.ctx.storage.put(maintenancePassCursorKey, pass.key);
+			// Deployed Workers advance `Date.now()` only at I/O, so `durationMs`
+			// measures the time across the pass's I/O waits and excludes
+			// synchronous execution. A pass without I/O reports 0.
+			const startedAt = Date.now();
 			const progress = await withOperationCost(pass.key, pass.run, (cost) => {
-				logMethodFinished(rootLogger().with({ method: pass.key }), cost);
+				logMethodFinished(
+					rootLogger().with({
+						method: pass.key,
+						durationMs: Date.now() - startedAt
+					}),
+					cost
+				);
 			});
 			await this.recordMaintenanceProgress(pass.key, progress);
 			break;
