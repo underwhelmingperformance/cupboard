@@ -40,6 +40,7 @@ import {
 } from './context.ts';
 import { hourlyDeadline } from './hourly-deadline.ts';
 import { jsonRowLists } from './json-list.ts';
+import { type NarInfoDemotionWatch } from './narinfo-demotion-watches.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 
@@ -56,12 +57,30 @@ interface TargetIdentity {
 	readonly narHash: NixSha256HashString;
 }
 
+// The targets that `ensureRoot` found servable before its gate, and the
+// watch that records which of them demotion has removed since.
+interface ExpectedTargets {
+	readonly identities: ReadonlyMap<StorePathHash, TargetIdentity>;
+	readonly demotions: NarInfoDemotionWatch;
+}
+
 type RootWrite =
 	| {
 			readonly kind: 'rejected';
 			readonly unavailable: readonly StorePathString[];
 	  }
 	| { readonly kind: 'written'; readonly stored: StoredRoot };
+
+type EnsureCheck =
+	| {
+			readonly kind: 'unavailable';
+			readonly unavailable: readonly StorePathString[];
+	  }
+	| {
+			readonly kind: 'checked';
+			readonly identities: ReadonlyMap<StorePathHash, TargetIdentity>;
+			readonly write: RootWrite;
+	  };
 
 function rootExpiry(
 	retention: CacheRootRetention,
@@ -294,7 +313,7 @@ export class RootsService {
 			storePathHash: StorePathHash;
 			storePath: StorePathString;
 		}[],
-		expected: ReadonlyMap<StorePathHash, TargetIdentity>
+		expected: ExpectedTargets
 	): readonly StorePathString[] {
 		const current = new Map(
 			this.narInfoObjects
@@ -307,13 +326,14 @@ export class RootsService {
 
 		return targets
 			.filter((target) => {
-				const expectedIdentity = expected.get(target.storePathHash);
+				const expectedIdentity = expected.identities.get(target.storePathHash);
 				const currentRow = current.get(target.storePathHash);
 
 				return (
 					expectedIdentity === undefined ||
 					currentRow?.generation !== expectedIdentity.generation ||
-					currentRow.narHash !== expectedIdentity.narHash
+					currentRow.narHash !== expectedIdentity.narHash ||
+					expected.demotions.wasDemoted(target.storePathHash)
 				);
 			})
 			.map((target) => target.storePath);
@@ -368,19 +388,15 @@ export class RootsService {
 	private async gatedRootWrite(
 		cache: ResolvedCache,
 		requested: RootSetCommand,
-		expectedIdentities?: ReadonlyMap<StorePathHash, TargetIdentity>
+		expected?: ExpectedTargets
 	): Promise<RootWrite> {
 		return this.context.criticalSection((): Promise<RootWrite> => {
 			const absent =
-				expectedIdentities === undefined
+				expected === undefined
 					? requested.targets
 							.filter((target) => !this.rowPresent(cache, target.storePathHash))
 							.map((target) => target.storePath)
-					: this.mismatchedTargets(
-							cache,
-							requested.targets,
-							expectedIdentities
-						);
+					: this.mismatchedTargets(cache, requested.targets, expected);
 
 			if (absent.length > 0) {
 				return Promise.resolve({ kind: 'rejected', unavailable: absent });
@@ -509,19 +525,38 @@ export class RootsService {
 	): Promise<RootEnsureResponse> {
 		const cache = await this.registration.forWrite(cacheScope);
 		const requested = this.buildRootSetCommand(rootName, body);
-		const identities = await this.servableTargetIdentities(
-			cache,
-			requested.targets
-		);
-		const unavailable = requested.targets
-			.filter((target) => !identities.has(target.storePathHash))
-			.map((target) => target.storePath);
+		const checked = await this.context.narInfoDemotions.watching(
+			cache.id,
+			requested.targets.map((target) => target.storePathHash),
+			async (demotions): Promise<EnsureCheck> => {
+				const identities = await this.servableTargetIdentities(
+					cache,
+					requested.targets
+				);
+				const unavailable = requested.targets
+					.filter((target) => !identities.has(target.storePathHash))
+					.map((target) => target.storePath);
 
-		if (unavailable.length > 0) {
-			return { status: 'build-required', unavailable };
+				if (unavailable.length > 0) {
+					return { kind: 'unavailable', unavailable };
+				}
+
+				const write = await this.gatedRootWrite(cache, requested, {
+					identities,
+					demotions
+				});
+				return { kind: 'checked', identities, write };
+			}
+		);
+
+		if (checked.kind === 'unavailable') {
+			return {
+				status: 'build-required',
+				unavailable: [...checked.unavailable]
+			};
 		}
 
-		const write = await this.gatedRootWrite(cache, requested, identities);
+		const { identities, write } = checked;
 
 		if (write.kind === 'rejected') {
 			return {
