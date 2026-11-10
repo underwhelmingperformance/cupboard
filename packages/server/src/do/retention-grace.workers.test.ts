@@ -2414,7 +2414,6 @@ function plannedUploadDecision(
 describe('retention grace facts reported to clients', () => {
 	beforeEach(async () => {
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	const dayGraceSeconds = graceSecondsSchema.parse(86_400);

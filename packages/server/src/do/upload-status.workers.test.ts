@@ -7,7 +7,6 @@ import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-	clearBlobStorage,
 	expectSingleUploadDecision,
 	initialise,
 	markUploadPendingVerification,
@@ -54,7 +53,6 @@ describe('deferred upload status', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('reports pending during verification and absent after materialisation', async () => {

@@ -23,11 +23,7 @@ import {
 	type R2ObjectKey,
 	r2ObjectKeySchema
 } from '../http/http.ts';
-import {
-	clearBlobStorage,
-	nixSha256Hash,
-	resetTestServer
-} from '../test-support.ts';
+import { nixSha256Hash, resetTestServer } from '../test-support.ts';
 
 import {
 	ConnectionLimitedBucket,
@@ -1952,7 +1948,6 @@ describe('verifyAndWriteStoredNar', () => {
 	beforeEach(async () => {
 		buffers = new NarReadBufferPool();
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	const stagingKey = r2ObjectKeySchema.parse('staging/verify-and-write-test');

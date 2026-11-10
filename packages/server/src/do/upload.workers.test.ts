@@ -52,7 +52,6 @@ import {
 	authorisedFetch,
 	bootstrap,
 	cacheWriteGrants,
-	clearBlobStorage,
 	commitPath,
 	commitSharedPath,
 	CommitSocketError,
@@ -262,8 +261,6 @@ describe('upload flow', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		await resetTestServer();
-
-		await clearBlobStorage();
 	});
 
 	afterEach(() => {

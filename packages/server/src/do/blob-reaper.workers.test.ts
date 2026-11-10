@@ -16,7 +16,6 @@ import {
 	blobStateNarHashes,
 	cacheWriteGrants,
 	casObjectRows,
-	clearBlobStorage,
 	commitPath,
 	CommitSocketError,
 	commitUploadRejection,
@@ -145,8 +144,6 @@ describe('blob reaper', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-
-		await clearBlobStorage();
 	});
 
 	it('arms an unreferenced blob and collects it only after the grace', async () => {

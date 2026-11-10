@@ -14,7 +14,6 @@ import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
-	clearBlobStorage,
 	commitUpload,
 	currentServer,
 	defaultCache,
@@ -91,7 +90,6 @@ describe('root activation gating', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('refuses to root a target with no committed narinfo row', async () => {

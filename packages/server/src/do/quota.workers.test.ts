@@ -23,7 +23,6 @@ import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	blobReferenceRows,
-	clearBlobStorage,
 	commitPath,
 	commitSharedPath,
 	CommitSocketError,
@@ -96,8 +95,6 @@ describe('per-tenant quota', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-
-		await clearBlobStorage();
 	});
 
 	it('charges each NAR hash once and counts each narinfo reference', async () => {
@@ -687,7 +684,6 @@ async function probeWindowState(storePathHash: StorePathHash): Promise<{
 describe('the probe-to-charge window', () => {
 	beforeEach(async () => {
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	const releaseKey = 'test/probe-window-release';

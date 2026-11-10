@@ -32,7 +32,6 @@ import {
 	blobReferenceRows,
 	blobStateNarHashes,
 	cacheWriteGrants,
-	clearBlobStorage,
 	currentNarObjectKey,
 	defaultCache,
 	issueTokenForTenant,
@@ -152,8 +151,6 @@ describe('offboarding drain', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-
-		await clearBlobStorage();
 	});
 
 	it('drains a tenant to a scrubbed tombstone and frees its shared blob', async () => {

@@ -301,8 +301,11 @@ configures it. The abort discards the object's in-memory state and stops an
 alarm handler that an earlier test left running. The runtime retries an
 alarm handler that an abort interrupts, so the purge must come after the
 abort. The purge then deletes the retry and any data that the handler
-wrote. This function does not clear D1. After a second call in the same
-test, D1 still has the rows that the test wrote before that call.
+wrote.
+
+This function also deletes every object in R2, after it has reset the
+fixture tenant's object. It does not clear D1. After a second call in the
+same test, D1 still has the rows that the test wrote before that call.
 */
 export async function resetTestServer(): Promise<void> {
 	const serverName = `test-${testRunId}-${String(harness.nextTestServerId)}`;
@@ -327,6 +330,7 @@ export async function resetTestServer(): Promise<void> {
 	await abortFixtureWorkerServer();
 	await fixtureWorkerServer().purgeStorage();
 	await configureFixtureTenant(fixtureWorkerServer());
+	await clearBlobStorage();
 }
 
 /**
@@ -1961,11 +1965,20 @@ export async function authorisedWorkerFetch(
 	});
 }
 
+/**
+Deletes every object in the R2 bucket. A listing returns at most 1,000
+objects, so this function lists and deletes until a listing is empty.
+*/
 export async function clearBlobStorage(): Promise<void> {
-	const listed = await env.BLOBS.list();
-	const keys = listed.objects.map((object) => object.key);
+	for (;;) {
+		const { objects } = await env.BLOBS.list();
 
-	await env.BLOBS.delete(keys);
+		if (objects.length === 0) {
+			return;
+		}
+
+		await env.BLOBS.delete(objects.map((object) => object.key));
+	}
 }
 
 /**

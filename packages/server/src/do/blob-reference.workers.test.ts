@@ -6,7 +6,6 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	blobReferenceRows,
 	blobStateNarHashes,
-	clearBlobStorage,
 	commitPath,
 	commitSharedPath,
 	deletePath,
@@ -32,8 +31,6 @@ describe('blob_ref_storage / tenant_blob reference edges', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		await resetTestServer();
-
-		await clearBlobStorage();
 	});
 
 	it('tells a tenant to upload a hash it has no presence edge for, though the shared blob exists', async () => {

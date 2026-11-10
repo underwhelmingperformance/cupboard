@@ -11,6 +11,7 @@ import { resetControlD1TestState, resetD1TestState } from './d1-test-reset.ts';
 import * as schema from './db/d1-schema.ts';
 import {
 	authorisedWorkerFetch,
+	clearBlobStorage,
 	currentServer,
 	initialiseViaWorker,
 	recordTransition,
@@ -203,4 +204,34 @@ it("empties the Worker's fixture-tenant object at each reset", async () => {
 			}
 		]
 	});
+});
+
+const blobKeys = async (): Promise<string[]> => {
+	const { objects } = await env.BLOBS.list();
+
+	return objects.map((object) => object.key);
+};
+
+it("empties the Worker's R2 bucket at each reset", async () => {
+	await env.BLOBS.put('t/earlier-test/object', 'bytes');
+	const before = await blobKeys();
+
+	await resetTestServer();
+
+	expect({ before, after: await blobKeys() }).toStrictEqual({
+		before: ['t/earlier-test/object'],
+		after: []
+	});
+});
+
+it('deletes every object when R2 lists more than one page', async () => {
+	const keys = Array.from(
+		{ length: 1001 },
+		(_, index) => `t/earlier-test/${String(index)}`
+	);
+	await Promise.all(keys.map((key) => env.BLOBS.put(key, 'bytes')));
+
+	await clearBlobStorage();
+
+	expect(await blobKeys()).toStrictEqual([]);
 });

@@ -14,7 +14,6 @@ import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import {
 	blobStateNarHashes,
 	cacheWriteGrants,
-	clearBlobStorage,
 	currentNarObjectKey,
 	issueTokenForTenant,
 	provisionNamedTenant,
@@ -101,7 +100,6 @@ describe('reaper demote routing failure', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('keeps global blob state when its only tenant demotion fails', async () => {

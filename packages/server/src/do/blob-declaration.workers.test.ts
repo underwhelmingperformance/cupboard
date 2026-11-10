@@ -38,7 +38,6 @@ import {
 import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
-	clearBlobStorage,
 	currentServer,
 	currentServerTenant,
 	expectSingleUploadDecision,
@@ -448,7 +447,6 @@ describe('canonical writes during verification', () => {
 		vi.useFakeTimers({ toFake: ['Date'] });
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('reserves the next incarnation for the claim owner', async () => {

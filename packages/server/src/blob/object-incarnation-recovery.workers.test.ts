@@ -23,7 +23,6 @@ import {
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import { runBlobReaper as runBlobReaperPhase } from '../routing/scheduled.ts';
 import {
-	clearBlobStorage,
 	resetTestServer,
 	runBlobReaperToCompletion as runBlobReaper,
 	runCasReaperToCompletion as runCasReaper,
@@ -103,7 +102,6 @@ describe('abandoned object version recovery', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('does not delete a live object with a stray deletion marker', async () => {

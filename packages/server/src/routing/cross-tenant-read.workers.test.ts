@@ -8,7 +8,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	bootstrap,
 	cacheWriteGrants,
-	clearBlobStorage,
 	currentNarObjectKey,
 	defaultCache,
 	handlerFetch,
@@ -38,7 +37,6 @@ describe('cross-tenant NAR read isolation', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('serves a NAR to its owner but 404s a tenant that does not reference it', async () => {

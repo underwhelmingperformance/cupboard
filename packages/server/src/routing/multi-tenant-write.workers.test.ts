@@ -11,7 +11,6 @@ import {
 	blobReferenceRows,
 	blobStateNarHashes,
 	cacheWriteGrants,
-	clearBlobStorage,
 	expectStats,
 	expectStatsForTenant,
 	handlerFetch,
@@ -91,7 +90,6 @@ describe('multi-tenant writes', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	// A delivered alarm can outlive a storage purge. Keep each test on a distinct
