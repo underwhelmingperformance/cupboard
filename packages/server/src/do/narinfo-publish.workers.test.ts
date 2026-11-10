@@ -7,10 +7,12 @@ import {
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { StatusCodes } from 'http-status-codes';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { CacheId } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
+import { SubrequestTimeoutError } from '../errors.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -18,13 +20,23 @@ import {
 	currentNarObjectKey,
 	currentServer,
 	defaultCache,
+	expectSingleCommitDecision,
 	initialise,
+	negotiateUploads,
+	openCommitSession,
+	pendingUploadVerdict,
 	resetTestServer,
 	resolvedCache,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
+import {
+	criticalSectionBudgetMs,
+	perCallCapMs,
+	withDeadlineBudget
+} from './deadline.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 
@@ -370,5 +382,239 @@ describe('narinfo publication after a concurrent row change', () => {
 			body: await repaired?.text(),
 			narUrl: repaired?.customMetadata?.narUrl
 		}).toStrictEqual({ body: current, narUrl: currentUrl });
+	});
+});
+
+/**
+Replaces the native R2 put of `key` with one that does not return until the
+test fails it or lets it write. `reached` resolves when the put starts, and
+`landed` resolves when a put that the test let through has written.
+*/
+function heldPutOf(key: string): {
+	readonly reached: Promise<undefined>;
+	readonly landed: Promise<undefined>;
+	fail(): void;
+	land(): void;
+	restore(): void;
+} {
+	const reached = Promise.withResolvers<undefined>();
+	const held = Promise.withResolvers<undefined>();
+	const landed = Promise.withResolvers<undefined>();
+	const original = env.BLOBS.put.bind(env.BLOBS);
+	const put = vi
+		.spyOn(env.BLOBS, 'put')
+		.mockImplementation(async (written, value, options) => {
+			if (written !== key) {
+				return original(written, value, options);
+			}
+
+			reached.resolve(undefined);
+			await held.promise;
+			const object = await original(written, value, options);
+			landed.resolve(undefined);
+
+			return object;
+		});
+
+	return {
+		reached: reached.promise,
+		landed: landed.promise,
+		fail: () => {
+			held.reject(new Error('put: internal error (10001)'));
+		},
+		land: () => {
+			held.resolve(undefined);
+		},
+		restore: () => {
+			put.mockRestore();
+		}
+	};
+}
+
+describe('narinfo publication whose R2 put does not return', () => {
+	beforeEach(resetTestServer);
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('refuses the commit retryably at the storage deadline and leaves the upload for verification', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('stalled-publish');
+		const blob = {
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		};
+		await commitPath(
+			token,
+			uploadMetadata({ name: 'first', storePathHash: 'a'.repeat(32), ...blob }),
+			nar
+		);
+		const reused = uploadMetadata({
+			name: 'reused',
+			storePathHash: 'b'.repeat(32),
+			...blob
+		});
+		const { uploadId } = expectSingleCommitDecision(
+			await negotiateUploads(token, [reused]),
+			reused
+		);
+		const put = heldPutOf(
+			narInfoObjectKey(
+				fixtureTenant,
+				storePathHashSchema.parse(reused.storePathHash),
+				cacheScope
+			)
+		);
+		const afterTimeout = await (async () => {
+			const session = await openCommitSession(token);
+			vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+
+			try {
+				session.send({
+					op: 'commit-batch',
+					commits: [
+						{
+							uploadId,
+							storePathHash: reused.storePathHash,
+							narHash: reused.narHash
+						}
+					]
+				});
+				// A promise continues in the I/O context that resolves it. The object
+				// resolves `reached` and owns the put's timer, so wait and advance
+				// the clock inside the object.
+				await runInDurableObject(currentServer(), async () => {
+					await put.reached;
+					await vi.advanceTimersByTimeAsync(perCallCapMs);
+				});
+				const refusal = await session.nextFrame();
+
+				return {
+					refusal:
+						refusal.ev === 'error'
+							? {
+									ev: refusal.ev,
+									uploadId: refusal.uploadId,
+									status: refusal.status
+								}
+							: refusal,
+					verdict: await pendingUploadVerdict(uploadId),
+					published: await narInfoObjectText(reused.storePathHash)
+				};
+			} finally {
+				session.socket.close();
+				await runInDurableObject(currentServer(), () => {
+					put.fail();
+				});
+				put.restore();
+				vi.useRealTimers();
+			}
+		})();
+
+		await verifyCurrentTenant();
+
+		expect({
+			afterTimeout,
+			verdict: await pendingUploadVerdict(uploadId),
+			isPublished: (await narInfoObjectText(reused.storePathHash)) !== undefined
+		}).toStrictEqual({
+			afterTimeout: {
+				refusal: {
+					ev: 'error',
+					uploadId,
+					status: StatusCodes.SERVICE_UNAVAILABLE
+				},
+				verdict: 'committing',
+				published: undefined
+			},
+			verdict: undefined,
+			isPublished: true
+		});
+	});
+
+	it('keeps a delete behind a put abandoned inside a longer deadline scope', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('abandoned-publish');
+		const metadata = uploadMetadata({
+			name: 'abandoned',
+			storePathHash: 'c'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		await commitPath(token, metadata, nar);
+		const row = await committedRow(metadata.storePathHash);
+		const put = heldPutOf(
+			narInfoObjectKey(fixtureTenant, row.storePathHash, cacheScope)
+		);
+
+		try {
+			const failure = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const cache = resolvedCache(instance.context, cacheScope);
+					const service = new NarInfoObjectsService(instance.context);
+					const narInfo = await service.narInfoFromRow(row);
+
+					if (narInfo === undefined) {
+						return 'no narinfo for the committed row';
+					}
+
+					vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+					// The scope is as long as a critical section's budget, so the put
+					// times out while the scope still has time left. The test opens the
+					// scope without `blockConcurrencyWhile`: the input gate defers the
+					// real timer events that advancing the fake clock waits for.
+					const publishing = (async (): Promise<unknown> => {
+						try {
+							await withDeadlineBudget(criticalSectionBudgetMs, () =>
+								service.putNarInfoObject(
+									cache,
+									row.storePathHash,
+									{
+										generation: row.generation,
+										narHash: row.narHash,
+										narUrl: narInfo.url,
+										signatureGeneration:
+											row.pendingSignatureGeneration ?? row.signatureGeneration
+									},
+									narInfo
+								)
+							);
+
+							return 'published';
+						} catch (error) {
+							return error instanceof SubrequestTimeoutError
+								? error.subrequest
+								: error;
+						}
+					})();
+					await put.reached;
+					await vi.advanceTimersByTimeAsync(criticalSectionBudgetMs);
+					const outcome = await publishing;
+					const deleting = service.deleteNarInfoObject(
+						cache,
+						row.storePathHash
+					);
+					put.land();
+					await Promise.all([deleting, put.landed]);
+
+					return outcome;
+				}
+			);
+
+			expect({
+				failure,
+				object: await narInfoObjectText(metadata.storePathHash)
+			}).toStrictEqual({ failure: 'r2.put', object: undefined });
+		} finally {
+			await runInDurableObject(currentServer(), () => {
+				put.fail();
+			});
+			put.restore();
+		}
 	});
 });

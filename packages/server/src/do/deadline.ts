@@ -10,7 +10,7 @@ import { SubrequestTimeoutError } from '../errors.ts';
 // so a stalled subrequest returns a retryable error before the reset.
 export const criticalSectionBudgetMs = 25_000;
 
-const perCallCapMs = 15_000;
+export const perCallCapMs = 15_000;
 
 interface DeadlineScope {
 	readonly deadline: number;
