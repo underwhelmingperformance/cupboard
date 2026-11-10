@@ -28,6 +28,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { type RandomSource } from '@cupboard/shared/backoff';
 import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import {
 	type DeadlineOptions,
 	lookupInPages,
@@ -45,7 +46,6 @@ import { CupboardClient } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
-import { keepAliveFetch } from '../client/transport.ts';
 import { UploadNegotiationMismatchError } from '../errors.ts';
 
 import { credentialSession } from './credential-session.ts';

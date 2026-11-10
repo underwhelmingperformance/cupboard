@@ -2,6 +2,7 @@ import { controlContract, tenantContract } from '@cupboard/protocol/contract';
 import { type AuthzMeta } from '@cupboard/protocol/contract';
 import { type RandomSource } from '@cupboard/shared/backoff';
 import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { type DeadlineOptions } from '@cupboard/shared/paging';
 import {
 	BoundedBodyCollector,
@@ -33,7 +34,7 @@ import {
 	type BearerAttempt,
 	bearerAttempt
 } from './credentials.ts';
-import { keepAliveFetch, reachableFetcher } from './transport.ts';
+import { reachableFetcher } from './transport.ts';
 
 export type TenantRpc = JsonifiedClient<
 	ContractRouterClient<typeof tenantContract>

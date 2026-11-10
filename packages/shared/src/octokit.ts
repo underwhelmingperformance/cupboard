@@ -8,6 +8,7 @@ import {
 	findProgressively,
 	type ProgressivePage
 } from './collections.ts';
+import { keepAliveFetch } from './keep-alive-fetch.ts';
 import { fetchWithBufferedBoundedResponseBodies } from './response-body.ts';
 import { type ReplaySafety } from './retry.ts';
 
@@ -74,7 +75,7 @@ caching or stubbed `fetch`.
 export function createOctokitClient(
 	options: OctokitClientOptions = {}
 ): InstanceType<typeof OctokitClient> {
-	const fetcher = options.request?.fetch ?? globalThis.fetch;
+	const fetcher = options.request?.fetch ?? keepAliveFetch;
 	const request = {
 		...options.request,
 		fetch: fetchWithBufferedBoundedResponseBodies(fetcher, {

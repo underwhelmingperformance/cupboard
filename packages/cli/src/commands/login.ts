@@ -5,6 +5,7 @@ import {
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import { shouldShowDetails } from '@cupboard/reporter';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { type Command, Option } from 'commander';
 
 import {
@@ -176,7 +177,7 @@ export function identitySignIn(
 	const { signal } = dependencies;
 	const fetcher = resilientFetcher(
 		'replay-unsafe',
-		dependencies.fetcher ?? fetch
+		dependencies.fetcher ?? keepAliveFetch
 	);
 	const scope = loginScopeForClient(options.clientId);
 	const prompt = authorizationPrompt(options, dependencies);

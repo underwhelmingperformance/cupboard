@@ -18,6 +18,7 @@ import {
 } from '@cupboard/protocol/cache-availability';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { lookupInPages } from '@cupboard/shared/paging';
 import { readResponseJson } from '@cupboard/shared/response-body';
 import { loggedUrl } from '@cupboard/shared/retry';
@@ -56,7 +57,7 @@ export function destinationServedPaths(
 		cacheUrl(options.baseUrl, options.cache),
 		{
 			...options,
-			fetcher: withReadAuthentication(options.fetcher ?? fetch, {
+			fetcher: withReadAuthentication(options.fetcher ?? keepAliveFetch, {
 				tenantUrl: options.baseUrl
 			})
 		},
@@ -79,7 +80,7 @@ export async function viewServedPaths(
 			reuseViewUrl(options.baseUrl, options.view.trim()),
 			{
 				...options,
-				fetcher: withReadAuthentication(options.fetcher ?? fetch, {
+				fetcher: withReadAuthentication(options.fetcher ?? keepAliveFetch, {
 					tenantUrl: options.baseUrl
 				})
 			},
@@ -216,7 +217,7 @@ async function availablePathsAt(
 	}
 
 	const hashes = pathsByHash.keys().toArray();
-	const fetcher = options.fetcher ?? fetch;
+	const fetcher = options.fetcher ?? keepAliveFetch;
 	const headers = {
 		'content-type': 'application/json',
 		...(options.credentials !== undefined &&

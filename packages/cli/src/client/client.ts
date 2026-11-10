@@ -38,6 +38,7 @@ import {
 	type PushId,
 	type UploadId
 } from '@cupboard/protocol/upload';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import {
 	readResponseJson,
 	readResponseText
@@ -66,11 +67,7 @@ import {
 	runCommitSession
 } from './commit-socket.ts';
 import { type AccessCredential, bearerAttempt } from './credentials.ts';
-import {
-	keepAliveFetch,
-	reachableFetcher,
-	resilientFetcher
-} from './transport.ts';
+import { reachableFetcher, resilientFetcher } from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
 

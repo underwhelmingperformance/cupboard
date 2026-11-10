@@ -1,9 +1,8 @@
-import { setImmediate } from 'node:timers/promises';
-
 import { withReadAuthentication } from '@cupboard/nix';
 import { InvalidCacheUrlBaseError } from '@cupboard/nix-store/errors';
 import { isHttpsOrLoopbackHttp, parseBaseUrl } from '@cupboard/nix-store/url';
 import { type RandomSource } from '@cupboard/shared/backoff';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import {
 	reachableFetcher as sharedReachableFetcher,
 	type ReplaySafety,
@@ -16,20 +15,6 @@ import {
 	InvalidWorkerUrlError,
 	UnreachableHostError
 } from '../errors.ts';
-
-/**
-Calls the global `fetch` after the event loop has run its pending
-`setImmediate` callbacks. When a response ends, undici returns its keep-alive
-connection to the pool in a `setImmediate` callback. A request sent before that
-callback finds the connection busy and opens another one, so without this wait
-a request that directly follows another to the same origin opens a second
-connection.
-*/
-export const keepAliveFetch: typeof fetch = async (input, init) => {
-	await setImmediate();
-
-	return fetch(input, init);
-};
 
 /**
 Retries rejected fetches and transient status responses with backoff. After
