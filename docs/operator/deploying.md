@@ -324,8 +324,14 @@ works on workers.dev and on a custom domain.
 Machines that share one public address share one budget. For example,
 self-hosted CI runners behind one NAT address share the 120 requests a minute to
 a tenant URL. Each `cupboard` command that signs in with GitHub OIDC sends one
-token request, and a publishing job runs several such commands, so many jobs
-that start in the same minute can receive status 429.
+token request. After a network failure or a 502, 503 or 504 response, the
+command repeats the request up to four more times with a backoff, and each
+attempt counts against the budget. During an outage that returns one of those
+statuses, each command can therefore send five requests. The retries are bounded
+and back off, and they add at most about 20 seconds of waiting. The command does
+not repeat a request that receives status 429, because `Retry-After: 60` asks
+for a longer wait than the backoff allows. A publishing job runs several such
+commands, so many jobs that start in the same minute can receive status 429.
 
 The Worker counts the requests with the Workers rate-limiting binding
 `TOKEN_RATE_LIMITER` and the namespace ID `28726273`. Every Worker in the

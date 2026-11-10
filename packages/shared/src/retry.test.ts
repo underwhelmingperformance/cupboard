@@ -285,6 +285,39 @@ describe('retryingFetcher', () => {
 		});
 	});
 
+	it.each([
+		{ code: StatusCodes.TOO_MANY_REQUESTS, attempts: 1 },
+		{ code: StatusCodes.SERVICE_UNAVAILABLE, attempts: 2 }
+	])(
+		'makes $attempts attempts after a $code when the caller opts out of retrying a 429',
+		async ({ code, attempts }) => {
+			vi.useFakeTimers();
+
+			try {
+				const { fetcher, attempts: attempted } = scriptedFetcher([
+					status(code),
+					ok
+				]);
+
+				const pending = makeRetryingFetcher(fetcher, 'replay-safe', {
+					retriesRateLimits: false
+				})('https://x.test');
+				await vi.advanceTimersByTimeAsync(60_000);
+				const response = await pending;
+
+				expect({
+					status: response.status,
+					attempts: attempted()
+				}).toStrictEqual({
+					status: attempts === 1 ? code : StatusCodes.OK,
+					attempts
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
+
 	it('returns the last transient response once the retry budget is spent', async () => {
 		vi.useFakeTimers();
 

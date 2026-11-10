@@ -16,6 +16,7 @@ import {
 import { parseHttpDate } from './http-fields.ts';
 
 const firstErrorStatus: number = StatusCodes.BAD_REQUEST;
+const rateLimitStatus: number = StatusCodes.TOO_MANY_REQUESTS;
 
 const logger = getLogger(['cupboard', 'fetch']);
 
@@ -70,6 +71,13 @@ export interface RetryingFetcherOptions extends FetchObservationOptions {
 	*/
 	readonly retriesConnectionFailures?: boolean;
 	/**
+	Whether a `replay-safe` request is retried after a 429 response. Defaults
+	to true. A caller sets it to false when the server's `Retry-After` is far
+	longer than the retry window, so that each retry only spends rate-limit
+	budget again.
+	*/
+	readonly retriesRateLimits?: boolean;
+	/**
 	The random source for the backoff between attempts. The default is
 	`Math.random`.
 	*/
@@ -80,10 +88,10 @@ export interface RetryingFetcherOptions extends FetchObservationOptions {
 For a `replay-safe` request, retries a fetch that rejects with a network
 error ({@link isFetchNetworkError}) and each {@link isTransientResponse}
 status, with at most {@link maxTransientRetries} additional attempts. Other
-rejections and other responses return immediately. A `Retry-After` value in
-seconds or as an HTTP date supplies the delay, up to the maximum backoff. A
-missing or invalid value uses the normal backoff. An abort signal ends the
-wait immediately.
+rejections and other responses return immediately, and so does a 429 when
+`retriesRateLimits` is false. A `Retry-After` value in seconds or as an HTTP
+date supplies the delay, up to the maximum backoff. A missing or invalid
+value uses the normal backoff. An abort signal ends the wait immediately.
 
 A `replay-unsafe` request is retried with the same limit and backoff only
 when its redirect mode is `manual` or `error` and the connection could not
@@ -101,8 +109,16 @@ export function retryingFetcher(
 	replaySafety: ReplaySafety,
 	options: RetryingFetcherOptions = {}
 ): typeof fetch {
-	const { retriesConnectionFailures = true, random, ...observation } = options;
-	const canRetryResponses = replaySafety === 'replay-safe';
+	const {
+		retriesConnectionFailures = true,
+		retriesRateLimits = true,
+		random,
+		...observation
+	} = options;
+	const isRetryableResponse = (response: Response): boolean =>
+		replaySafety === 'replay-safe' &&
+		isTransientResponse(response) &&
+		(retriesRateLimits || response.status !== rateLimitStatus);
 	const backoff = transientRetryBackoff(random);
 
 	const retrying: typeof fetch = async (input, init) => {
@@ -166,11 +182,7 @@ export function retryingFetcher(
 				continue;
 			}
 
-			if (
-				canRetryResponses &&
-				isTransientResponse(response) &&
-				retries < maxTransientRetries
-			) {
+			if (isRetryableResponse(response) && retries < maxTransientRetries) {
 				retries += 1;
 				const delayMs = transientResponseDelayMs(response, retries, backoff);
 				const cfRay = response.headers.get('cf-ray');
@@ -187,9 +199,7 @@ export function retryingFetcher(
 			}
 
 			recordFetchOutcome(
-				canRetryResponses &&
-					isTransientResponse(response) &&
-					retries >= maxTransientRetries
+				isRetryableResponse(response) && retries >= maxTransientRetries
 					? 'exhausted'
 					: retries > 0 && response.status < firstErrorStatus
 						? 'recovered'

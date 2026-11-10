@@ -261,7 +261,9 @@ function scriptedClient(attempts: (() => Response | Promise<Response>)[]): {
 			return Promise.resolve(next());
 		},
 		{ kind: 'default' },
-		undefined
+		undefined,
+		undefined,
+		() => 0
 	);
 
 	return { client, attempted: () => attempted };
@@ -273,50 +275,192 @@ const exchange = (client: CupboardClient) =>
 		'urn:ietf:params:oauth:token-type:id_token'
 	);
 
-const marked = (status: number) => () =>
-	new Response('Temporarily unavailable\n', {
-		status,
-		headers: { 'retry-after': '5' }
-	});
-const bare = (status: number) => () => new Response('', { status });
+const boundExchange = (client: CupboardClient) =>
+	client.tokenExchange(
+		'subject.jwt',
+		'urn:ietf:params:oauth:token-type:id_token',
+		undefined,
+		{
+			seed: 'seed-1',
+			targets: [canonicalTarget(new URL('https://cupboard.test'))]
+		}
+	);
+
+type Outcome =
+	| { readonly kind: 'resolved'; readonly value: unknown }
+	| { readonly kind: 'rejected'; readonly error: unknown };
+
+async function outcomeOf(run: () => Promise<unknown>): Promise<Outcome> {
+	try {
+		return { kind: 'resolved', value: await run() };
+	} catch (error) {
+		return { kind: 'rejected', error };
+	}
+}
+
+function summarised(outcome: Outcome) {
+	if (outcome.kind === 'resolved') {
+		return outcome;
+	}
+
+	return {
+		kind: outcome.kind,
+		name: outcome.error instanceof Error ? outcome.error.constructor.name : '',
+		status:
+			outcome.error instanceof CupboardHttpError
+				? outcome.error.status
+				: undefined
+	};
+}
+
+const readAccessResponse = {
+	...tokenResponse,
+	authorization_details: [],
+	read_resources: [
+		{
+			type: 'cupboard_cache',
+			cache: { kind: 'default' },
+			mode: 'content',
+			state: { kind: 'existing', access: 'private', priority: 40 }
+		}
+	]
+};
+
+// Each request shape, with whether the server records nothing when it handles
+// the request and the client may therefore repeat it.
+const requestShapes = [
+	{
+		label: 'an exchange',
+		request: exchange,
+		response: tokenResponse,
+		isReplaySafe: true
+	},
+	{
+		label: 'an exchange with authorization details',
+		request: (client: CupboardClient) =>
+			client.tokenExchange(
+				'subject.jwt',
+				'urn:ietf:params:oauth:token-type:id_token',
+				[{ type: 'cupboard_wildcard' }]
+			),
+		response: tokenResponse,
+		isReplaySafe: true
+	},
+	{
+		label: 'an attenuation',
+		request: (client: CupboardClient) =>
+			client.tokenExchangeAttenuate('issued.jwt', [
+				{ type: 'cupboard_wildcard' }
+			]),
+		response: tokenResponse,
+		isReplaySafe: true
+	},
+	{
+		label: 'a read access request',
+		request: (client: CupboardClient) =>
+			client.acquireReadAccess('subject.jwt', [
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'default' },
+					mode: 'content'
+				}
+			]),
+		response: readAccessResponse,
+		isReplaySafe: true
+	},
+	{
+		label: 'a bound exchange',
+		request: boundExchange,
+		response: tokenResponse,
+		isReplaySafe: false
+	},
+	{
+		label: 'a refresh',
+		request: (client: CupboardClient) => client.tokenRefresh('refresh-1'),
+		response: tokenResponse,
+		isReplaySafe: false
+	}
+];
 
 describe('CupboardClient token replay', () => {
-	it.each([
-		{
-			label: 'a 503 carrying Retry-After',
-			failure: marked(StatusCodes.SERVICE_UNAVAILABLE)
-		},
-		{ label: 'a bare 503', failure: bare(StatusCodes.SERVICE_UNAVAILABLE) },
-		{ label: 'a 502', failure: bare(StatusCodes.BAD_GATEWAY) },
-		{ label: 'a 504', failure: bare(StatusCodes.GATEWAY_TIMEOUT) },
-		{ label: 'a 429', failure: bare(StatusCodes.TOO_MANY_REQUESTS) }
-	])('does not replay a token exchange after $label', async ({ failure }) => {
-		const { client, attempted } = scriptedClient([
-			failure,
-			() => Response.json(tokenResponse)
-		]);
+	it.each(
+		requestShapes.map((shape) => ({
+			...shape,
+			attempts: shape.isReplaySafe ? 2 : 1
+		}))
+	)(
+		'makes $attempts attempts after a network fault on $label',
+		async ({ request, response, attempts }) => {
+			const { client, attempted } = scriptedClient([
+				() =>
+					Promise.reject(
+						new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } })
+					),
+				() => Response.json(response)
+			]);
 
-		const error = await rejectedBy(() => exchange(client));
+			const outcome = await outcomeOf(() => request(client));
 
-		expectCupboardHttpError(error);
-		expect({ attempts: attempted(), status: error.status }).toStrictEqual({
-			attempts: 1,
-			status: failure().status
-		});
-	});
+			expect({
+				attempts: attempted(),
+				outcome: summarised(outcome)
+			}).toStrictEqual({
+				attempts,
+				outcome:
+					attempts === 2
+						? { kind: 'resolved', value: response }
+						: {
+								kind: 'rejected',
+								name: 'UnreachableHostError',
+								status: undefined
+							}
+			});
+		}
+	);
 
-	it('does not replay a token exchange after a network fault', async () => {
-		const failure = new TypeError('fetch failed', {
-			cause: { code: 'ECONNRESET' }
-		});
-		const { client, attempted } = scriptedClient([
-			() => Promise.reject(failure),
-			() => Response.json(tokenResponse)
-		]);
+	it.each(
+		requestShapes.flatMap((shape) =>
+			[
+				StatusCodes.BAD_GATEWAY,
+				StatusCodes.SERVICE_UNAVAILABLE,
+				StatusCodes.GATEWAY_TIMEOUT,
+				StatusCodes.TOO_MANY_REQUESTS
+			].map((status) => ({
+				...shape,
+				status,
+				attempts:
+					shape.isReplaySafe && status !== StatusCodes.TOO_MANY_REQUESTS ? 2 : 1
+			}))
+		)
+	)(
+		'makes $attempts attempts after a $status on $label',
+		async ({ request, response, status, attempts }) => {
+			const { client, attempted } = scriptedClient([
+				() =>
+					new Response('', {
+						status,
+						headers:
+							status === StatusCodes.TOO_MANY_REQUESTS
+								? { 'retry-after': '60' }
+								: {}
+					}),
+				() => Response.json(response)
+			]);
 
-		await expect(exchange(client)).rejects.toMatchObject({ cause: failure });
-		expect(attempted()).toBe(1);
-	});
+			const outcome = await outcomeOf(() => request(client));
+
+			expect({
+				attempts: attempted(),
+				outcome: summarised(outcome)
+			}).toStrictEqual({
+				attempts,
+				outcome:
+					attempts === 2
+						? { kind: 'resolved', value: response }
+						: { kind: 'rejected', name: 'CupboardHttpError', status }
+			});
+		}
+	);
 
 	it.each([
 		{ label: 'a 500 invariant', status: StatusCodes.INTERNAL_SERVER_ERROR },

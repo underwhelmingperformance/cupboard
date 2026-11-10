@@ -34,6 +34,27 @@ export function resilientFetcher(
 	);
 }
 
+/**
+Retries like a `replay-safe` {@link resilientFetcher}, except that it returns
+a 429 response at once. The token endpoint's rate limiter sends
+`Retry-After: 60`, but a retry waits at most five seconds and spends
+rate-limit budget again, which would prolong the lockout of every client that
+shares the address.
+*/
+export function tokenEndpointFetcher(
+	fetcher: typeof fetch,
+	trustedOrigin?: string,
+	random?: RandomSource
+): typeof fetch {
+	return reachableFetcher(
+		retryingFetcher(fetcher, 'replay-safe', {
+			trustedOrigin,
+			random,
+			retriesRateLimits: false
+		})
+	);
+}
+
 interface CacheReadOptions {
 	readonly netrcFile?: string;
 	readonly trustedOrigin?: string;

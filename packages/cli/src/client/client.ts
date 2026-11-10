@@ -38,12 +38,13 @@ import {
 	type PushId,
 	type UploadId
 } from '@cupboard/protocol/upload';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import {
 	readResponseJson,
 	readResponseText
 } from '@cupboard/shared/response-body';
-import { retryingFetcher } from '@cupboard/shared/retry';
+import { type ReplaySafety, retryingFetcher } from '@cupboard/shared/retry';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
 
@@ -67,7 +68,11 @@ import {
 	runCommitSession
 } from './commit-socket.ts';
 import { type AccessCredential, bearerAttempt } from './credentials.ts';
-import { reachableFetcher, resilientFetcher } from './transport.ts';
+import {
+	reachableFetcher,
+	resilientFetcher,
+	tokenEndpointFetcher
+} from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
 
@@ -86,6 +91,8 @@ export class CupboardClient {
 
 	private readonly replaySafeFetcher: typeof fetch;
 
+	private readonly replaySafeTokenFetcher: typeof fetch;
+
 	private readonly replayUnsafeFetcher: typeof fetch;
 
 	private readonly signupFetcher: typeof fetch;
@@ -97,17 +104,25 @@ export class CupboardClient {
 		// route can discard the base path, including a tenant prefix.
 		public readonly cache: CacheScope,
 		public readonly signal?: AbortSignal,
-		private readonly connectSocket: CommitSocketConnect = connectCommitSocket
+		private readonly connectSocket: CommitSocketConnect = connectCommitSocket,
+		random?: RandomSource
 	) {
 		this.replaySafeFetcher = resilientFetcher(
 			'replay-safe',
 			fetcher,
-			baseUrl.origin
+			baseUrl.origin,
+			random
+		);
+		this.replaySafeTokenFetcher = tokenEndpointFetcher(
+			fetcher,
+			baseUrl.origin,
+			random
 		);
 		this.replayUnsafeFetcher = resilientFetcher(
 			'replay-unsafe',
 			fetcher,
-			baseUrl.origin
+			baseUrl.origin,
+			random
 		);
 		// The claim in `cupboard init` retries `/signup` 30 times. Retrying each of
 		// those calls again here would multiply the time to report an unreachable
@@ -115,7 +130,8 @@ export class CupboardClient {
 		this.signupFetcher = reachableFetcher(
 			retryingFetcher(fetcher, 'replay-unsafe', {
 				trustedOrigin: baseUrl.origin,
-				retriesConnectionFailures: false
+				retriesConnectionFailures: false,
+				random
 			})
 		);
 	}
@@ -209,14 +225,23 @@ export class CupboardClient {
 		return { initial: await authorise(), authorise };
 	}
 
+	// Each caller states whether repeating the request changes what the server
+	// has stored, such as a consumed nonce or a refresh family. Only a request
+	// whose repeat leaves the server state as a single request would is
+	// `replay-safe`.
 	private async postTokenForm(
-		form: Readonly<Record<string, string>>
+		form: Readonly<Record<string, string>>,
+		replaySafety: ReplaySafety
 	): Promise<Response> {
 		throwIfAborted(this.signal);
 
 		const url = this.resolve('/token');
 		const body = new URLSearchParams(form).toString();
-		const response = await this.replayUnsafeFetcher(url, {
+		const fetcher =
+			replaySafety === 'replay-safe'
+				? this.replaySafeTokenFetcher
+				: this.replayUnsafeFetcher;
+		const response = await fetcher(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body,
@@ -405,12 +430,15 @@ export class CupboardClient {
 	): Promise<ReadAccessResponse> {
 		const intent = readResourcesSchema.parse(resources);
 
-		const response = await this.postTokenForm({
-			grant_type: readAccessGrantType,
-			subject_token: subjectToken,
-			subject_token_type: subjectTokenTypeIdToken,
-			read_resources: JSON.stringify(intent)
-		});
+		const response = await this.postTokenForm(
+			{
+				grant_type: readAccessGrantType,
+				subject_token: subjectToken,
+				subject_token_type: subjectTokenTypeIdToken,
+				read_resources: JSON.stringify(intent)
+			},
+			'replay-safe'
+		);
 
 		return this.parseJson(
 			'/token',
@@ -430,6 +458,9 @@ export class CupboardClient {
 	/**
 	Exchanges an external identity for the requested authority at the OAuth
 	endpoint. `binding` is the seed and targets of a nonce-bound ID token.
+	The server records the nonce of a bound token and refuses a second use of
+	it, so a bound exchange is sent once. An exchange without `binding` is
+	repeated after a network failure or a transient status other than 429.
 	*/
 	async tokenExchange(
 		subjectToken: string,
@@ -437,15 +468,18 @@ export class CupboardClient {
 		authorizationDetails?: AuthorizationDetails,
 		binding?: SubjectTokenBinding
 	): Promise<TokenResponse> {
-		const response = await this.postTokenForm({
-			grant_type: tokenExchangeGrantType,
-			subject_token: subjectToken,
-			subject_token_type: subjectTokenType,
-			...(authorizationDetails !== undefined && {
-				authorization_details: JSON.stringify(authorizationDetails)
-			}),
-			...bindingFormFields(binding)
-		});
+		const response = await this.postTokenForm(
+			{
+				grant_type: tokenExchangeGrantType,
+				subject_token: subjectToken,
+				subject_token_type: subjectTokenType,
+				...(authorizationDetails !== undefined && {
+					authorization_details: JSON.stringify(authorizationDetails)
+				}),
+				...bindingFormFields(binding)
+			},
+			binding === undefined ? 'replay-safe' : 'replay-unsafe'
+		);
 
 		return this.parseJson('/token', tokenResponseSchema, response);
 	}
@@ -474,10 +508,13 @@ export class CupboardClient {
 	Callers must persist each successful response.
 	*/
 	async tokenRefresh(refreshToken: string): Promise<TokenResponse> {
-		const response = await this.postTokenForm({
-			grant_type: refreshTokenGrantType,
-			refresh_token: refreshToken
-		});
+		const response = await this.postTokenForm(
+			{
+				grant_type: refreshTokenGrantType,
+				refresh_token: refreshToken
+			},
+			'replay-unsafe'
+		);
 
 		return this.parseJson('/token', tokenResponseSchema, response);
 	}

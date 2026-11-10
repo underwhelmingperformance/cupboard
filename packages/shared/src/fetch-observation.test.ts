@@ -441,6 +441,7 @@ describe('HTTP attempt observation', () => {
 
 	it.each([
 		['recovered', [StatusCodes.SERVICE_UNAVAILABLE, StatusCodes.OK]],
+		['returned', [StatusCodes.TOO_MANY_REQUESTS]],
 		[
 			'exhausted',
 			[
@@ -463,7 +464,11 @@ describe('HTTP attempt observation', () => {
 						new Response(undefined, { status: statuses[attempts++] })
 					),
 				'replay-safe',
-				{ operation: 'probe', random: () => 0 }
+				{
+					operation: 'probe',
+					random: () => 0,
+					retriesRateLimits: false
+				}
 			);
 			await fetcher('https://cupboard.example.test/api');
 
