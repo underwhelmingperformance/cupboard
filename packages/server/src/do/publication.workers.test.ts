@@ -3673,6 +3673,76 @@ describe('publication subscriptions to terminal operations', () => {
 		});
 	});
 
+	it('expires an operation whose path demotion removes after expiry checks it', async () => {
+		const token = await initialise();
+		const { entry, path } = await completedPublication(
+			token,
+			'publication-expiry-demoted',
+			{ isConfirmationPending: true }
+		);
+		const narObjectKey = await currentNarObjectKey(path.narHash);
+		const demotion = vi
+			.spyOn(NarInfoObjectsService.prototype, 'servableNarInfoVersions')
+			.mockImplementationOnce(async function (
+				this: NarInfoObjectsService,
+				cache,
+				hashes,
+				options
+			) {
+				// Vitest removes a once implementation before calling it, so this call
+				// runs the real probe.
+				const versions = await this.servableNarInfoVersions(
+					cache,
+					hashes,
+					options
+				);
+				await env.BLOBS.delete(narObjectKey);
+				await this.demoteUnbacked(cache, path.storePathHash, path.narHash);
+				return versions;
+			});
+		const expired = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				instance.context.db
+					.update(schema.publicationOperations)
+					.set({ recoveryDeadline: new Date(Date.now() - 1).toISOString() })
+					.where(eq(schema.publicationOperations.id, entry.operationId))
+					.run();
+				try {
+					await asOneInvocation(() =>
+						verificationOf(instance).expirePublications(rootLogger())
+					);
+				} finally {
+					demotion.mockRestore();
+				}
+				const cache = instance.context.cacheRepository.require(defaultCache());
+				return {
+					state: new PublicationStore(instance.context).get(entry.operationId)
+						?.state,
+					narInfos: instance.context.db
+						.select({
+							storePathHash: schema.narInfos.storePathHash,
+							generation: schema.narInfos.generation
+						})
+						.from(schema.narInfos)
+						.all(),
+					isNarInfoObjectPresent:
+						(await env.BLOBS.head(
+							new NarInfoObjectsService(instance.context).objectKey(
+								cache,
+								path.storePathHash
+							)
+						)) !== null
+				};
+			}
+		);
+		expect(expired).toStrictEqual({
+			state: 'expired',
+			narInfos: [{ storePathHash: path.storePathHash, generation: 0 }],
+			isNarInfoObjectPresent: false
+		});
+	});
+
 	it('completes an expiring operation whose narinfo object is being published', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('publication-expiry-publishing');
