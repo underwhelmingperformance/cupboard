@@ -125,14 +125,19 @@ describe('lookupRepository', () => {
 		vi.stubEnv('GH_TOKEN', '');
 		vi.stubEnv('GITHUB_TOKEN', '');
 		server.listen({ onUnhandledFrame: 'error' });
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 
 		try {
-			const original = await lookupRepository('iainlane/cupboard');
+			const original = await settleWithTimers(
+				lookupRepository('iainlane/cupboard')
+			);
 			ownerId = 999;
-			const cached = await lookupRepository('iainlane/cupboard');
-			const current = await lookupRepository('iainlane/cupboard', {
-				shouldRevalidate: true
-			});
+			const cached = await settleWithTimers(
+				lookupRepository('iainlane/cupboard')
+			);
+			const current = await settleWithTimers(
+				lookupRepository('iainlane/cupboard', { shouldRevalidate: true })
+			);
 
 			expect({ original, cached, current, requests }).toStrictEqual({
 				original: {
@@ -156,6 +161,7 @@ describe('lookupRepository', () => {
 				requests: 2
 			});
 		} finally {
+			vi.useRealTimers();
 			server.close();
 			await rm(directory, { recursive: true, force: true });
 		}
@@ -377,24 +383,37 @@ describe('lookupRepository', () => {
 	});
 });
 
-async function requestFailure(pending: Promise<unknown>): Promise<unknown> {
-	let failure: unknown;
-	const completionState = { isComplete: false };
+type Settlement<T> = { readonly value: T } | { readonly failure: unknown };
+
+async function settleWithTimers<T>(pending: Promise<T>): Promise<T> {
+	const completionState: { settlement?: Settlement<T> } = {};
 	const completion = (async () => {
 		try {
-			await pending;
+			completionState.settlement = { value: await pending };
 		} catch (error) {
-			failure = error;
-		} finally {
-			completionState.isComplete = true;
+			completionState.settlement = { failure: error };
 		}
 	})();
-	while (!completionState.isComplete) {
+	while (completionState.settlement === undefined) {
 		await vi.advanceTimersByTimeAsync(250);
 		await new Promise<void>((resolve) => scheduleIo(resolve));
 	}
 	await completion;
-	return failure;
+	if ('failure' in completionState.settlement) {
+		throw completionState.settlement.failure;
+	}
+
+	return completionState.settlement.value;
+}
+
+async function requestFailure(pending: Promise<unknown>): Promise<unknown> {
+	try {
+		await settleWithTimers(pending);
+	} catch (error) {
+		return error;
+	}
+
+	return undefined;
 }
 
 const temporaryRequestCallers = [
