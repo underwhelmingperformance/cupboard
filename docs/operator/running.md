@@ -319,8 +319,11 @@ deadline.
 In the control Worker, the deadline of a narinfo read or a probe of a default or
 named cache starts before admission and also covers it: the membership filter
 and marker reads from the Cache API and KV, the D1 reads, a migration of the
-tenant's cache catalogue and the check of a read token. Admission that is still
-waiting when the deadline passes returns 503 with `Retry-After`.
+tenant's cache catalogue and the check of a read token. For every other request
+below a tenant URL, including writes, admission and the check of a read token
+share a budget of 20 seconds, which does not cover the route's work after them.
+Admission that is still waiting when its deadline passes returns 503 with
+`Retry-After`.
 
 The native binding has no abort option for `get`. A timed-out operation can
 continue after the server returns 503. The server observes late rejection and

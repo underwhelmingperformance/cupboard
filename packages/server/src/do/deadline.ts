@@ -90,6 +90,27 @@ export async function withDeadlineBudget<T>(
 }
 
 /**
+A deadline fixed when it is created. Each call of {@link run} gets only what
+remains of it, so steps that run apart, with other work between them, share
+one budget.
+*/
+export class SharedDeadline {
+	private readonly deadline: number;
+
+	constructor(budgetMs: number) {
+		this.deadline = Date.now() + budgetMs;
+	}
+
+	/**
+	Runs `body` within what remains of this deadline, or within an enclosing
+	deadline that ends sooner.
+	*/
+	run<T>(body: () => Promise<T>, subrequest?: string): Promise<T> {
+		return withDeadlineBudget(this.deadline - Date.now(), body, subrequest);
+	}
+}
+
+/**
 Runs `body` outside every deadline scope.
 
 Work that continues after a handler returns, such as a response body, must

@@ -17,9 +17,14 @@ import {
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
-import { boundedSubrequest, unboundedCapMs } from '../do/deadline.ts';
+import {
+	boundedSubrequest,
+	SharedDeadline,
+	unboundedCapMs
+} from '../do/deadline.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { cacheCatalogueVersion } from '../migration/cache-access.ts';
+import { readRequestBudgetMs } from '../policy/streaming.ts';
 import {
 	type ReadPasswordHash,
 	type ReadPasswordSalt
@@ -398,12 +403,31 @@ slugs, while a cache fault falls through to the authoritative D1 read.
 Pass the cache the request addresses. Admission resolves that cache's access,
 lifecycle version, deletion state and cache-specific verifier before routing
 can authenticate the request or consult Workers Cache.
+
+Admission runs within `deadline`, or within an enclosing deadline that ends
+sooner. The scope ends when admission returns, so it does not bound the
+request's response or the work after admission. Pass the deadline that a
+later step of the same request, such as the check of a read token, also
+runs within, so that the two steps share one budget.
 */
-export async function admitTenant(
+export function admitTenant(
 	env: Env,
 	ctx: DeferredContext,
 	slug: TenantId,
-	cache: CacheScope = defaultCacheScope
+	cache: CacheScope = defaultCacheScope,
+	deadline = new SharedDeadline(readRequestBudgetMs)
+): Promise<TenantAdmission | undefined> {
+	return deadline.run(
+		() => admitWithinDeadline(env, ctx, slug, cache),
+		'tenant.admission'
+	);
+}
+
+async function admitWithinDeadline(
+	env: Env,
+	ctx: DeferredContext,
+	slug: TenantId,
+	cache: CacheScope
 ): Promise<TenantAdmission | undefined> {
 	const filter = await loadMembershipFilter(env, ctx);
 

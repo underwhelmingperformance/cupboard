@@ -275,21 +275,31 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 	return app;
 }
 
+// Authentication runs within what admission left of its budget, so admission
+// and the check of a read token together end before the client's attempt does.
 function guardRead(
 	context: Context<WorkerHonoEnv>
 ): Promise<Response | undefined> {
-	return guardScopedRead(
-		context.req.raw,
-		context.get('tenantEntry'),
-		context.get('readScope'),
-		{
-			cacheVerifier: context.get('cacheVerifier'),
-			isTokenAuthorised: (token, cache) =>
-				tenantServer(
-					context.env,
-					context.get('tenant')
-				).authoriseCacheContentRead(token, cache, context.get('isCacheDeleted'))
-		}
+	return context.get('admissionDeadline').run(
+		() =>
+			guardScopedRead(
+				context.req.raw,
+				context.get('tenantEntry'),
+				context.get('readScope'),
+				{
+					cacheVerifier: context.get('cacheVerifier'),
+					isTokenAuthorised: (token, cache) =>
+						tenantServer(
+							context.env,
+							context.get('tenant')
+						).authoriseCacheContentRead(
+							token,
+							cache,
+							context.get('isCacheDeleted')
+						)
+				}
+			),
+		'read.authentication'
 	);
 }
 
