@@ -1369,6 +1369,23 @@ The requests are under the tenant URL.
    signed narinfo to R2, and sends the result to the CLI over the waiting
    WebSocket.
 
+   A commit and a verification pass publish a narinfo in the same way, and the
+   publications of one path run one after another. The R2 put of the narinfo
+   runs outside a critical section and has a deadline of 15 seconds, the cap
+   that the bounded bindings apply to every other storage call (`perCallCapMs`
+   in `do/deadline.ts`). The bucket's puts have no cap of their own, because a
+   NAR upload can take minutes. When the put misses its deadline, the
+   publication fails with a retryable error and the upload keeps waiting for its
+   verdict. A commit answers with a 503 error frame, which the CLI retries, and
+   sets the verification backstop, so a retry or a later verification pass
+   publishes the path. The next write or delete of the same narinfo object first
+   waits for the abandoned native put to finish. When it has not finished within
+   15 seconds, that write is refused with a retryable error, so a late put
+   cannot land after a newer write or a delete. The tenant object keeps this
+   record in memory, so the guarantee applies only while the instance that
+   issued the put is alive. After a reset, verification and reconciliation
+   repair the object.
+
    Each write for an entry of the charge batch requires that `blob_state` still
    records the incarnation that the commit pipeline probed, and that the
    `object_incarnation` row, if one exists, records that incarnation as live.

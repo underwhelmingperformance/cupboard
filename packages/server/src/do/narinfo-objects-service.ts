@@ -50,6 +50,7 @@ import {
 } from './bulk.ts';
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { type ServerContext } from './context.ts';
+import { perCallCapMs, withDeadlineBudget } from './deadline.ts';
 import { jsonValueLists } from './json-list.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 import {
@@ -1086,14 +1087,22 @@ export class NarInfoObjectsService {
 	): Promise<void> {
 		const key = this.objectKey(cache, storePathHash);
 
+		// Cap the put with a deadline scope, not a second `boundedSubrequest`. The
+		// bucket's own bounded call must time out, because only its abandoned
+		// signal follows the native put, and `objectWrites` waits for that put.
 		await this.context.objectWrites.write([key], () =>
-			this.context.env.BLOBS.put(key, narInfo.render(), {
-				customMetadata: narInfoObjectMetadata(version),
-				httpMetadata: {
-					contentType: 'text/x-nix-narinfo; charset=utf-8',
-					cacheControl: narInfoCacheControl
-				}
-			})
+			withDeadlineBudget(
+				perCallCapMs,
+				() =>
+					this.context.env.BLOBS.put(key, narInfo.render(), {
+						customMetadata: narInfoObjectMetadata(version),
+						httpMetadata: {
+							contentType: 'text/x-nix-narinfo; charset=utf-8',
+							cacheControl: narInfoCacheControl
+						}
+					}),
+				'r2.put'
+			)
 		);
 	}
 
