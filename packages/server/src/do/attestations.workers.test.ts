@@ -79,7 +79,6 @@ import {
 	cacheWriteGrants,
 	casObjectRows,
 	casObjectVersionChanges,
-	clearBlobStorage,
 	commitSessionFromResponse,
 	commitUploadViaWorker,
 	currentCasObjectKey,
@@ -223,7 +222,6 @@ describe('attestation attach and reads', () => {
 	beforeEach(async () => {
 		vi.useRealTimers();
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	afterEach(() => {

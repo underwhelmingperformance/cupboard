@@ -32,7 +32,6 @@ import {
 	attestationReferenceRows,
 	authorisedFetch,
 	casObjectRows,
-	clearBlobStorage,
 	commitPath,
 	currentCasObjectKey,
 	currentServer,
@@ -134,7 +133,6 @@ describe('attestation CAS lifecycle', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it.each(['suspended', 'offboarding', 'missing-usage'])(

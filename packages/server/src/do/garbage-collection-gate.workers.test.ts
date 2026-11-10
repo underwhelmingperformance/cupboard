@@ -11,7 +11,6 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	blobReferenceRows,
 	bootstrap,
-	clearBlobStorage,
 	currentNarObjectKey,
 	currentServer,
 	defaultCache,
@@ -74,7 +73,6 @@ interface GateEntry {
 describe('garbage collection critical section', () => {
 	beforeEach(async () => {
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('enters the critical section once, for the narinfo-deletion flush', async () => {

@@ -23,7 +23,6 @@ import {
 	blobReferenceRows,
 	blobStateNarHashes,
 	cacheWriteGrants,
-	clearBlobStorage,
 	currentNarObjectKey,
 	handlerFetch,
 	issueTokenForTenant,
@@ -127,8 +126,6 @@ describe('missing blob demotion', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
-
-		await clearBlobStorage();
 	});
 
 	it('does not queue a global refresh for the first upload of a NAR', async () => {

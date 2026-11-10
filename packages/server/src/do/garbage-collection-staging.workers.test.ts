@@ -10,7 +10,6 @@ import { pendingAttestations, pendingUploads } from '../db/schema.ts';
 import { stagingObjectKey } from '../http/http.ts';
 import {
 	asOneInvocation,
-	clearBlobStorage,
 	currentServer,
 	initialise,
 	resetTestServer,
@@ -86,7 +85,6 @@ function stagingDeleteFailingBucket(
 describe('garbage collection best-effort staging deletes', () => {
 	beforeEach(async () => {
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('reports the expired upload and still deletes orphan staging when one R2 delete fails', async () => {

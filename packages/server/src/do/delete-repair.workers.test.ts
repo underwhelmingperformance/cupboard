@@ -9,7 +9,6 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	blobReferenceRows,
 	blobStateNarHashes,
-	clearBlobStorage,
 	commitPath,
 	commitUpload,
 	currentNarObjectKey,
@@ -37,8 +36,6 @@ describe('delete marker replay', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		await resetTestServer();
-
-		await clearBlobStorage();
 	});
 
 	it('finishes deletion after row removal when the edge and object remain', async () => {
@@ -234,7 +231,6 @@ describe('explicit deletion', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('stops serving a path while another upload of the same NAR is pending', async () => {

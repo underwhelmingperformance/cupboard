@@ -14,7 +14,6 @@ import * as schema from '../db/schema.ts';
 import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
-	clearBlobStorage,
 	commitPath,
 	currentServer,
 	defaultCache,
@@ -37,7 +36,6 @@ import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 describe('servability after a committed-edge snapshot becomes stale', () => {
 	beforeEach(async () => {
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('heals a missing narinfo object after a recommit makes the edge snapshot stale', async () => {

@@ -27,7 +27,6 @@ import {
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,
-	clearBlobStorage,
 	currentServer,
 	garbageCollectionOf,
 	initialise,
@@ -164,7 +163,6 @@ function recordingOnePerPage(target: R2Bucket, pass: ListingPass): R2Bucket {
 describe('orphan staging reconciliation', () => {
 	beforeEach(async () => {
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it('protects new staging with an authentic push lease and reclaims expired or forged leases', async () => {

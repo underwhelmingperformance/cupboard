@@ -17,7 +17,6 @@ import {
 } from '../errors.ts';
 import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import {
-	clearBlobStorage,
 	resetTestServer,
 	verifiableNar,
 	verifiableNarStored
@@ -33,7 +32,6 @@ import {
 describe('promoteVerifiedBlob', () => {
 	beforeEach(async () => {
 		await resetTestServer();
-		await clearBlobStorage();
 	});
 
 	it.each([
