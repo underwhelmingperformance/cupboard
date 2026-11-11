@@ -1,4 +1,4 @@
-import { retry } from '@octokit/plugin-retry';
+import { retry, type RetryOptions } from '@octokit/plugin-retry';
 import { throttling } from '@octokit/plugin-throttling';
 import { Octokit } from '@octokit/rest';
 import { StatusCodes } from 'http-status-codes';
@@ -32,6 +32,10 @@ const doNotRetryStatuses = [
 	StatusCodes.UNAVAILABLE_FOR_LEGAL_REASONS
 ];
 
+// The retry plugin waits n squared times this many milliseconds before retry
+// number n, which is 1 s, 4 s and 9 s for three retries.
+const defaultRetryBaseDelayMs = 1000;
+
 export const githubReplaySafeRequest = { retries: 3 } as const;
 
 interface OctokitRequestOptions {
@@ -63,6 +67,23 @@ export interface OctokitClientOptions {
 	readonly baseUrl?: string;
 	readonly request?: OctokitRequestOptions;
 	readonly replaySafety?: ReplaySafety;
+	readonly retryBaseDelayMs?: number;
+}
+
+/**
+The options that {@link createOctokitClient} gives the retry plugin.
+*/
+export function retryOptions(
+	options: Pick<OctokitClientOptions, 'replaySafety' | 'retryBaseDelayMs'>
+): RetryOptions {
+	return {
+		retryAfterBaseValue: options.retryBaseDelayMs ?? defaultRetryBaseDelayMs,
+		doNotRetry: doNotRetryStatuses,
+		retries:
+			options.replaySafety === 'replay-safe'
+				? githubReplaySafeRequest.retries
+				: 0
+	};
 }
 
 /**
@@ -71,6 +92,10 @@ throttling plugin fails fast on rate limits and the retry plugin handles
 transient failures. Pass `auth` to authenticate, `baseUrl` to target a
 GitHub Enterprise host, and `request` to supply transport options such as a
 caching or stubbed `fetch`.
+
+Before retry number n, the retry plugin waits n squared times
+`retryBaseDelayMs`. With the default of 1000, the waits are 1 s, 4 s and
+9 s. Tests pass `0` to retry without waiting.
 */
 export function createOctokitClient(
 	options: OctokitClientOptions = {}
@@ -92,13 +117,7 @@ export function createOctokitClient(
 			onRateLimit: () => false,
 			onSecondaryRateLimit: () => false
 		},
-		retry: {
-			doNotRetry: doNotRetryStatuses,
-			retries:
-				options.replaySafety === 'replay-safe'
-					? githubReplaySafeRequest.retries
-					: 0
-		}
+		retry: retryOptions(options)
 	});
 
 	if (options.apiVersion !== undefined) {
