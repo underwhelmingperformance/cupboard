@@ -26,6 +26,8 @@ import { jsonValueList } from './json-list.ts';
 // `signing-keys-service.ts`. A row is never written empty.
 const tagsSchema = z.array(z.string()).min(1);
 
+const purgeableCacheToken: unique symbol = Symbol('PurgeableCache');
+
 // The most rows that the query for one request returns after its first row,
 // so a run reads a bounded number of rows however long the queue is.
 const rowsMergedAfterHead = tagsPerPurgeRequest;
@@ -47,6 +49,12 @@ export class CachePurgeQueueService {
 		);
 	}
 
+	private checked(
+		cache: ResolvedCache | PurgeableCache
+	): PurgeableCache | undefined {
+		return cache instanceof PurgeableCache ? cache : this.purgeableCache(cache);
+	}
+
 	// A queued purge is abandoned once the response it invalidates has expired
 	// on its own, so each kind of tag carries the lifetime of the responses it
 	// covers.
@@ -54,10 +62,6 @@ export class CachePurgeQueueService {
 		tags: readonly string[],
 		ttlSeconds: number
 	): Promise<void> {
-		if (tags.length === 0) {
-			return;
-		}
-
 		const createdAt = isoTimestamp(new Date());
 		const expiresAt = isoTimestamp(new Date(Date.now() + ttlSeconds * 1000));
 
@@ -176,21 +180,46 @@ export class CachePurgeQueueService {
 	}
 
 	/**
-	Queues exact narinfo invalidations and schedules the first attempt.
+	Returns `cache` as a {@link PurgeableCache} when Workers Cache can contain
+	its responses, so that a purge of its tags can invalidate something, and
+	undefined otherwise. Workers Cache stores no response of a private cache.
+	Reads the access from storage, not from `cache`: the caller's copy can
+	predate a change to public, and skipping a purge would then leave a stale
+	public response.
+	*/
+	purgeableCache(cache: ResolvedCache): PurgeableCache | undefined {
+		const stored = this.context.cacheRepository.resolvedForId(cache.id);
+
+		return stored.access === 'private'
+			? undefined
+			: new PurgeableCache(purgeableCacheToken, stored);
+	}
+
+	/**
+	Queues exact narinfo invalidations and schedules the first attempt. Queues
+	nothing while the cache is private, because Workers Cache stores no private
+	response.
 	*/
 	async enqueueNarInfos(
-		cache: ResolvedCache,
+		cache: ResolvedCache | PurgeableCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<void> {
 		if (storePathHashes.length === 0) {
 			return;
 		}
 
+		const purgeable = this.checked(cache);
+
+		if (purgeable === undefined) {
+			return;
+		}
+
 		const tenant = this.context.requireTenant();
+		const { scope } = purgeable.cache;
 
 		await this.enqueueTags(
 			storePathHashes.map((storePathHash) =>
-				narInfoCacheTag(tenant, cache.scope, storePathHash)
+				narInfoCacheTag(tenant, scope, storePathHash)
 			),
 			narInfoCacheTtlSeconds
 		);
@@ -200,21 +229,28 @@ export class CachePurgeQueueService {
 	Queues the invalidation of this cache's responses for the NAR hashes and
 	schedules the first attempt. Call this once the cache stops referencing a
 	hash, so Workers Cache cannot serve a response after the exact reference
-	check would refuse the read.
+	check would refuse the read. Queues nothing while the cache is private.
 	*/
 	async enqueueNars(
-		cache: ResolvedCache,
+		cache: ResolvedCache | PurgeableCache,
 		narHashes: readonly NixSha256HashString[]
 	): Promise<void> {
 		if (narHashes.length === 0) {
 			return;
 		}
 
+		const purgeable = this.checked(cache);
+
+		if (purgeable === undefined) {
+			return;
+		}
+
 		const tenant = this.context.requireTenant();
+		const { scope } = purgeable.cache;
 
 		await this.enqueueTags(
 			narHashes.flatMap((narHash) => [
-				narCacheTag(tenant, cache.scope, narHash),
+				narCacheTag(tenant, scope, narHash),
 				legacyNarCacheTag(tenant, narHash)
 			]),
 			narCacheTtlSeconds
@@ -301,6 +337,19 @@ export class CachePurgeQueueService {
 
 type CachePurgeContinuation =
 	typeof schema.cachePurgeContinuations.$inferSelect;
+
+/**
+A cache that {@link CachePurgeQueueService.purgeableCache} found not to be
+private. The enqueue methods take it in place of a `ResolvedCache` and do not
+read the access again. The constructor requires a value private to this
+module, so no other code can create one.
+*/
+export class PurgeableCache {
+	constructor(
+		_token: typeof purgeableCacheToken,
+		readonly cache: ResolvedCache
+	) {}
+}
 
 // One purge request: the distinct tags of the queued rows, and the IDs of
 // those rows.

@@ -659,7 +659,7 @@ export class DeletionQueueService {
 			)
 		);
 
-		if (!hasExactReference && cache.access === 'public') {
+		if (!hasExactReference) {
 			await this.cachePurges.enqueueNars(cache, [narHash]);
 		}
 
@@ -699,13 +699,20 @@ export class DeletionQueueService {
 		]);
 	}
 
-	// Queues a cache-tag purge for each hash this public cache no longer
-	// references.
+	// Queues a cache-tag purge for each hash that this cache no longer
+	// references. The early return for a private cache also skips the D1
+	// reference query.
 	private async purgeRetiredNars(
 		cache: ResolvedCache,
 		narHashes: readonly NixSha256HashString[]
 	): Promise<void> {
-		if (cache.access === 'private' || narHashes.length === 0) {
+		if (narHashes.length === 0) {
+			return;
+		}
+
+		const purgeable = this.cachePurges.purgeableCache(cache);
+
+		if (purgeable === undefined) {
 			return;
 		}
 
@@ -726,7 +733,7 @@ export class DeletionQueueService {
 		}
 
 		await this.cachePurges.enqueueNars(
-			cache,
+			purgeable,
 			narHashes.filter((narHash) => !stillReferenced.has(narHash))
 		);
 	}

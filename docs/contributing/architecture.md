@@ -592,6 +592,16 @@ have expired, one hour after it was queued for narinfos and one year for NARs. A
 signing-key rotation queues its own rows, and the backfill maintenance pass
 purges them. Those rows remain until their purge succeeds.
 
+A change to a private cache queues no purge. The control Worker serves private
+reads itself with `Cache-Control: no-store`, so Workers Cache stores none of
+them. The queue reads the cache's access from the tenant object's storage when
+it queues the tags, not from the caller's copy of the cache, which can be older
+than a change of access. Rows queued while the cache was public remain queued
+after it becomes private, and the queue still sends them. The responses that
+Workers Cache stored while the cache was public can't be served after the change
+in any case: the cache's read revision is part of the Workers Cache key, and
+every change of access advances it.
+
 Workers Cache applies the Free plan's [purge rate limit] on every plan: a token
 bucket for the whole account that refills at 5 requests a minute and has a
 capacity of 25. A rate-limit refusal (error 1134 or 971) on the queue or the

@@ -1005,10 +1005,6 @@ export class NarInfoObjectsService {
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<void> {
-		if (cache.access !== 'public') {
-			return;
-		}
-
 		await this.cachePurges.enqueueNarInfos(cache, storePathHashes);
 	}
 
