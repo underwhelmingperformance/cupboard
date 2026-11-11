@@ -346,7 +346,8 @@ export class CacheAdminService {
 			.select({
 				storePathHash: schema.narInfoDeletions.storePathHash,
 				generation: schema.narInfoDeletions.generation,
-				narHash: schema.narInfoDeletions.narHash
+				narHash: schema.narInfoDeletions.narHash,
+				explicit: schema.narInfoDeletions.explicit
 			})
 			.from(schema.narInfoDeletions)
 			.where(eq(schema.narInfoDeletions.cacheId, cache.id))

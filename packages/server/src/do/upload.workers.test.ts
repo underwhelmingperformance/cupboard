@@ -3971,9 +3971,11 @@ describe('upload flow', () => {
 		const purge = await runInDurableObject(currentServer(), (instance) =>
 			vi.spyOn(instance.context, 'purgeCacheTags').mockResolvedValue(undefined)
 		);
-		// Each pass sends the distinct tags of as many queued rows as fit in one
-		// request. Run more passes than the deletions need so the queue is empty
-		// however the rows were split.
+		// Each pass sends the distinct tags of as many queued rows of one priority
+		// as fit in one request. Run more passes than the deletions need so the
+		// queue is empty however the rows were split. The second deletion queues
+		// the NAR's tags twice, urgent for the read revocation and routine for the
+		// retired reference, so they go out in two requests.
 		const drainQueuedPurges = async (): Promise<string[]> => {
 			for (let pass = 0; pass < 4; pass += 1) {
 				await runInDurableObject(currentServer(), (instance) =>
@@ -4004,6 +4006,8 @@ describe('upload flow', () => {
 				].toSorted(byCodeUnit),
 				afterSecond: [
 					narCacheTag(fixtureTenant, defaultCache(), second.narHash),
+					narCacheTag(fixtureTenant, defaultCache(), second.narHash),
+					legacyNarCacheTag(fixtureTenant, second.narHash),
 					legacyNarCacheTag(fixtureTenant, second.narHash),
 					narInfoCacheTag(fixtureTenant, defaultCache(), second.storePathHash)
 				].toSorted(byCodeUnit)

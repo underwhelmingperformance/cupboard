@@ -28,9 +28,30 @@ const tagsSchema = z.array(z.string()).min(1);
 
 const purgeableCacheToken: unique symbol = Symbol('PurgeableCache');
 
-// The most rows that the query for one request returns after its first row,
-// so a run reads a bounded number of rows however long the queue is.
+/**
+How soon the queue sends a purge. The queue sends every queued `urgent`
+purge before any `routine` one, and the oldest first within each priority.
+Use `urgent` for a change that a user requested and expects to see at once,
+such as an explicit deletion or a read revocation.
+*/
+export type CachePurgePriority = 'urgent' | 'routine';
+
+// The values of the `priority` column. Ascending order is sending order, so
+// the queue reads both priorities through one index.
+const priorityValues: Readonly<Record<CachePurgePriority, number>> = {
+	urgent: 0,
+	routine: 1
+};
+
+// The most rows that the query for one request returns after its first row.
+// The query also reads past the rows with a recorded failure count that it
+// skips, so a run reads these rows as well.
 const rowsMergedAfterHead = tagsPerPurgeRequest;
+
+const sendingOrder = [
+	schema.cachePurgeContinuations.priority,
+	schema.cachePurgeContinuations.createdAt
+];
 
 /**
 Persists cache-tag purges so failed requests can be retried.
@@ -60,7 +81,8 @@ export class CachePurgeQueueService {
 	// covers.
 	private async enqueueTags(
 		tags: readonly string[],
-		ttlSeconds: number
+		ttlSeconds: number,
+		priority: CachePurgePriority
 	): Promise<void> {
 		const createdAt = isoTimestamp(new Date());
 		const expiresAt = isoTimestamp(new Date(Date.now() + ttlSeconds * 1000));
@@ -73,7 +95,8 @@ export class CachePurgeQueueService {
 						kind: 'mutation',
 						entriesJson: JSON.stringify(batch),
 						createdAt,
-						expiresAt
+						expiresAt,
+						priority: priorityValues[priority]
 					})
 					.run();
 			}
@@ -87,7 +110,7 @@ export class CachePurgeQueueService {
 			.select()
 			.from(schema.cachePurgeContinuations)
 			.where(eq(schema.cachePurgeContinuations.kind, 'mutation'))
-			.orderBy(schema.cachePurgeContinuations.createdAt)
+			.orderBy(...sendingOrder)
 			.get();
 	}
 
@@ -95,24 +118,40 @@ export class CachePurgeQueueService {
 	// as their distinct tags fit in one request. A row whose tags are already
 	// in the request adds none and joins even a full request, so the tag limit
 	// does not bound the rows; `rowsMergedAfterHead` does.
+	//
+	// Only the head of a failed request records the failure, and a row's
+	// failure could be specific to that row. A request therefore never mixes a
+	// row that could fail it with a head that the failure would delay:
+	//
+	// - A row with a recorded failure count, including a count that it took
+	//   over from an expired row, joins no other row's request.
+	// - A head with a recorded failure count is sent alone, so a row that
+	//   joined it cannot keep its retries failing.
+	// - Only rows of the head's priority join it, so a routine row cannot back
+	//   off an urgent head.
 	private nextRequest(head: CachePurgeContinuation): CachePurgeRequest {
 		const ids = [head.id];
 		let tags = new Set(
 			tagsSchema.parse(JSON.parse(head.entriesJson) as unknown)
 		);
+
+		if (head.failedAttempts > 0) {
+			return { ids, tags: [...tags] };
+		}
+
+		const table = schema.cachePurgeContinuations;
 		const rows = this.context.db
-			.select({
-				id: schema.cachePurgeContinuations.id,
-				entriesJson: schema.cachePurgeContinuations.entriesJson
-			})
-			.from(schema.cachePurgeContinuations)
+			.select({ id: table.id, entriesJson: table.entriesJson })
+			.from(table)
 			.where(
 				and(
-					eq(schema.cachePurgeContinuations.kind, 'mutation'),
-					ne(schema.cachePurgeContinuations.id, head.id)
+					eq(table.kind, 'mutation'),
+					eq(table.priority, head.priority),
+					ne(table.id, head.id),
+					eq(table.failedAttempts, 0)
 				)
 			)
-			.orderBy(schema.cachePurgeContinuations.createdAt)
+			.orderBy(...sendingOrder)
 			.limit(rowsMergedAfterHead)
 			.all();
 
@@ -150,7 +189,7 @@ export class CachePurgeQueueService {
 				.select({ id: schema.cachePurgeContinuations.id })
 				.from(schema.cachePurgeContinuations)
 				.where(eq(schema.cachePurgeContinuations.kind, 'mutation'))
-				.orderBy(schema.cachePurgeContinuations.createdAt)
+				.orderBy(...sendingOrder)
 				.get();
 
 			if (next === undefined) {
@@ -202,7 +241,8 @@ export class CachePurgeQueueService {
 	*/
 	async enqueueNarInfos(
 		cache: ResolvedCache | PurgeableCache,
-		storePathHashes: readonly StorePathHash[]
+		storePathHashes: readonly StorePathHash[],
+		priority: CachePurgePriority = 'routine'
 	): Promise<void> {
 		if (storePathHashes.length === 0) {
 			return;
@@ -221,7 +261,8 @@ export class CachePurgeQueueService {
 			storePathHashes.map((storePathHash) =>
 				narInfoCacheTag(tenant, scope, storePathHash)
 			),
-			narInfoCacheTtlSeconds
+			narInfoCacheTtlSeconds,
+			priority
 		);
 	}
 
@@ -233,7 +274,8 @@ export class CachePurgeQueueService {
 	*/
 	async enqueueNars(
 		cache: ResolvedCache | PurgeableCache,
-		narHashes: readonly NixSha256HashString[]
+		narHashes: readonly NixSha256HashString[],
+		priority: CachePurgePriority = 'routine'
 	): Promise<void> {
 		if (narHashes.length === 0) {
 			return;
@@ -253,17 +295,19 @@ export class CachePurgeQueueService {
 				narCacheTag(tenant, scope, narHash),
 				legacyNarCacheTag(tenant, narHash)
 			]),
-			narCacheTtlSeconds
+			narCacheTtlSeconds,
+			priority
 		);
 	}
 
 	/**
-	Sends one purge request for the oldest queued rows, with as many rows as
-	fit in the platform's tag limit, and deletes those rows when the request
-	succeeds. Rows queued while the request is in flight remain queued. A
-	failed purge remains queued until its TTL expires. After a failure,
-	{@link CachePurgeBackoff} decides the earliest time for the next attempt,
-	and the queue sends nothing before that time. The alarm is armed for it.
+	Sends one purge request for the first queued rows in sending order (see
+	{@link CachePurgePriority}), with as many rows as fit in the platform's tag
+	limit, and deletes those rows when the request succeeds. Rows queued while
+	the request is in flight remain queued. A failed purge remains queued until
+	its TTL expires. After a failure, {@link CachePurgeBackoff} decides the
+	earliest time for the next attempt, and the queue sends nothing before that
+	time. The alarm is armed for it.
 	*/
 	async runOnce(): Promise<void> {
 		const continuation = this.head();

@@ -82,6 +82,7 @@ import m0079 from './0079_publication_operation_deadline_id.sql';
 import m0080 from './0080_replacement_charge_cleanup.sql';
 import m0081 from './0081_pending_upload_commit_released.sql';
 import m0082 from './0082_cache_purge_retry.sql';
+import m0083 from './0083_cache_purge_priority.sql';
 
 export default {
 	journal,
@@ -168,6 +169,7 @@ export default {
 		m0079,
 		m0080,
 		m0081,
-		m0082
+		m0082,
+		m0083
 	}
 };
