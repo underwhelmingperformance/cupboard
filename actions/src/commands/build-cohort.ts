@@ -50,10 +50,19 @@ import {
 	unknownPathsCeilingRefusalSchema
 } from '@cupboard/protocol/plan';
 import {
+	type CohortRootInput,
+	cohortRootsDocumentSchema,
+	cohortRootsVersion,
+	type DocumentVersions
+} from '@cupboard/protocol/publish-plan';
+import {
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
-import type { RootSummary } from '@cupboard/protocol/retention';
+import {
+	rootSetMaxTargets,
+	type RootSummary
+} from '@cupboard/protocol/retention';
 import {
 	type ReferencePublicationManifestInput,
 	referencePublicationManifestSchema
@@ -94,6 +103,7 @@ import {
 	type CupboardRunDependencies,
 	inspectCommandOptions,
 	inspectCupboardVersion,
+	inspectDocumentVersions,
 	readCredentialInvocation,
 	requireEnvironmentCredentialSupport,
 	resolveReadCredential,
@@ -134,6 +144,7 @@ import {
 	MissingInputError,
 	PlannedTargetNotDerivationError,
 	PlannedTargetSourceMissingError,
+	PublishRootTargetLimitError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	RemoteBuildOutputPathUnknownError,
@@ -877,6 +888,7 @@ export interface BuildCohortDependencies {
 	readonly inspectVersion?: typeof inspectCupboardVersion;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
 	readonly inspectCommandOptions?: typeof inspectCommandOptions;
+	readonly inspectDocumentVersions?: typeof inspectDocumentVersions;
 	/**
 	Waits for the disk cleanup that the prepare action started. Called before
 	the capacity check and the build when the prepare action started a cleanup.
@@ -1294,7 +1306,10 @@ export async function buildCohortAction(
 			reporter,
 			duration: () => now() - startedAt,
 			buildUploads,
-			diverged
+			diverged,
+			inspectDocumentVersions:
+				dependencies.inspectDocumentVersions ?? inspectDocumentVersions,
+			signal: dependencies.signal
 		};
 
 		if (execution.kind === 'remote') {
@@ -1977,6 +1992,8 @@ interface SettleCohortBuildContext {
 	readonly duration: () => number;
 	readonly buildUploads: UploadTally | undefined;
 	readonly diverged: readonly DivergedPath[];
+	readonly inspectDocumentVersions: typeof inspectDocumentVersions;
+	readonly signal: AbortSignal | undefined;
 }
 
 // Complete every operation that reads realised paths before returning. Remote
@@ -2322,33 +2339,89 @@ async function settleCohortBuild(
 		);
 	}
 
-	let publication: CohortPublication = {
-		receiptFiles: [],
-		rootUploads: new Map(),
-		updatedRoots: new Set(),
-		rootRetention: new Map()
-	};
-	if (inputs.push) {
-		publication = await publishCohort({
+	// The summary reports the roots that the pushes set, so a failed push
+	// still writes it before the job fails.
+	const reportSummary = (publication: CohortPublication): void => {
+		const uploadsBeforeRoots = addUploads(
+			buildUploads,
+			publication.otherUploads
+		);
+		const owners = targetPathOwners(members, { resultBuilds, localBuilds });
+		const assignedUploads = attributedUploads(buildUploads, owners);
+		const rootUploads = new Map(publication.rootUploads);
+		for (const [root, uploads] of assignedUploads) {
+			const total = addUploads(rootUploads.get(root), uploads);
+			if (total !== undefined) {
+				rootUploads.set(root, total);
+			}
+		}
+		const roots = cohortRootSummaries({
 			inputs,
-			collectReceipts:
-				(partition?.closureTargets.length ?? 0) > 0 ||
-				referencePaths.length > 0,
 			members,
-			paths: { targetPaths, intermediatePaths, referencePaths },
-			attachOnlyPaths: partition?.attachOnly ?? [],
-			closureReferences,
-			copiedFromFile,
-			leftUpstreamPaths: leftUpstream,
-			environment,
-			runCupboard,
-			cupboardRunDependencies,
-			reporter,
-			resultBuilds,
-			localBuilds,
-			incompleteRoots
+			owners,
+			paths: {
+				attachOnly: new Set(partition?.attachOnly),
+				reference: new Set(referencePaths),
+				leftUpstream: new Set(leftUpstream),
+				known: [...targetPaths, ...referencePaths, ...leftUpstream]
+			},
+			incompleteRoots,
+			publication: { ...publication, rootUploads },
+			origins: new Map(
+				streamedReceipt?.subjects.map((subject) => [
+					subject.storePath,
+					subject.origin
+				])
+			)
 		});
+
+		context.reporter.result(
+			cohortSummaryResult({
+				durationMs: context.duration(),
+				...(uploadsBeforeRoots !== undefined && {
+					buildUploads: uploadsBeforeRoots
+				}),
+				...(diverged.length > 0 && { diverged }),
+				roots
+			})
+		);
+	};
+
+	const record = new CohortPublicationRecord();
+
+	if (inputs.push) {
+		try {
+			await publishCohort(
+				{
+					inputs,
+					collectReceipts:
+						(partition?.closureTargets.length ?? 0) > 0 ||
+						referencePaths.length > 0,
+					members,
+					paths: { targetPaths, intermediatePaths, referencePaths },
+					attachOnlyPaths: partition?.attachOnly ?? [],
+					closureReferences,
+					copiedFromFile,
+					leftUpstreamPaths: leftUpstream,
+					environment,
+					runCupboard,
+					cupboardRunDependencies,
+					reporter,
+					resultBuilds,
+					localBuilds,
+					incompleteRoots,
+					inspectDocumentVersions: context.inspectDocumentVersions,
+					signal: context.signal
+				},
+				record
+			);
+		} catch (error) {
+			reportSummary(record.snapshot());
+			throw error;
+		}
 	}
+
+	const publication = record.snapshot();
 	await mergeCohortReceipts(
 		inputs.receiptFile,
 		isStreamed || isReconciled || terminalFailure !== undefined,
@@ -2378,46 +2451,7 @@ async function settleCohortBuild(
 	await setOutput(environment, 'counts-file', inputs.countsFile);
 	await setOutput(environment, 'receipt-file', receiptFile);
 
-	const uploadsBeforeRoots = addUploads(buildUploads, publication.otherUploads);
-	const owners = targetPathOwners(members, { resultBuilds, localBuilds });
-	const assignedUploads = attributedUploads(buildUploads, owners);
-	const rootUploads = new Map(publication.rootUploads);
-	for (const [root, uploads] of assignedUploads) {
-		const total = addUploads(rootUploads.get(root), uploads);
-		if (total !== undefined) {
-			rootUploads.set(root, total);
-		}
-	}
-	const roots = cohortRootSummaries({
-		inputs,
-		members,
-		owners,
-		paths: {
-			attachOnly: new Set(partition?.attachOnly),
-			reference: new Set(referencePaths),
-			leftUpstream: new Set(leftUpstream),
-			known: [...targetPaths, ...referencePaths, ...leftUpstream]
-		},
-		incompleteRoots,
-		publication: { ...publication, rootUploads },
-		origins: new Map(
-			streamedReceipt?.subjects.map((subject) => [
-				subject.storePath,
-				subject.origin
-			])
-		)
-	});
-
-	context.reporter.result(
-		cohortSummaryResult({
-			durationMs: context.duration(),
-			...(uploadsBeforeRoots !== undefined && {
-				buildUploads: uploadsBeforeRoots
-			}),
-			...(diverged.length > 0 && { diverged }),
-			roots
-		})
-	);
+	reportSummary(publication);
 }
 
 interface CohortRootSummaryInputs {
@@ -2846,6 +2880,11 @@ interface CohortPushExtras {
 	readonly receiptFile?: string;
 	readonly referenceReceiptFile?: string;
 	readonly copiedFromFile?: string;
+	/**
+	A cohort roots document for `--roots-file`, which sets the roots of several
+	groups in place of the group's `--root`.
+	*/
+	readonly rootsFile?: string;
 }
 
 /**
@@ -2897,6 +2936,13 @@ export function cohortPushInvocation(
 					'reference-source'
 				);
 
+	const isRetained = group.complete || extras.rootsFile !== undefined;
+	const retention =
+		extras.rootsFile === undefined
+			? group.complete
+				? ['--root', group.root]
+				: ['--no-retain']
+			: ['--roots-file', extras.rootsFile];
 	const arguments_ = [
 		'--no-colour',
 		'push',
@@ -2905,15 +2951,15 @@ export function cohortPushInvocation(
 			? group.paths
 			: ['--paths-file', extras.pathsFile]),
 		'--github-oidc',
-		...(group.complete ? ['--root', group.root] : ['--no-retain']),
+		...retention,
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(inputs.store === '' &&
 		(extras.receiptFile === undefined || extras.receiptFile === '')
 			? []
 			: ['--store', inputs.store || 'auto']),
 		...(inputs.publish === 'closure' ? ['--closure'] : []),
-		...(inputs.ttl !== '' && group.complete ? ['--ttl', inputs.ttl] : []),
-		...(inputs.permanent && group.complete ? ['--permanent'] : []),
+		...(isRetained && inputs.ttl !== '' ? ['--ttl', inputs.ttl] : []),
+		...(isRetained && inputs.permanent ? ['--permanent'] : []),
 		...(extras.intermediatePathsFile === ''
 			? []
 			: ['--intermediate-paths-file', extras.intermediatePathsFile]),
@@ -2993,6 +3039,8 @@ interface PublishCohortOptions {
 	readonly resultBuilds: readonly NixBuildResult[];
 	readonly localBuilds: readonly CohortOwnedBuild[];
 	readonly incompleteRoots: ReadonlySet<string>;
+	readonly inspectDocumentVersions: typeof inspectDocumentVersions;
+	readonly signal: AbortSignal | undefined;
 }
 
 async function writeReferenceManifest(
@@ -3070,9 +3118,581 @@ interface CohortPublication {
 	readonly otherUploads?: UploadTally;
 }
 
-async function publishCohort(
+type CohortPushKind = 'closure' | 'manifest' | 'main' | 'reuse' | 'destination';
+
+type CohortPushReceipt = 'none' | 'full' | 'reference';
+
+interface PlannedPushContents {
+	readonly localPaths: readonly string[];
+	readonly hasIntermediates: boolean;
+	readonly referencePaths: readonly string[];
+	readonly referenceSource: string;
+	readonly manifest: ReferencePublicationManifestInput['paths'];
+	readonly receipt: CohortPushReceipt;
+	readonly sources: ReadonlyMap<string, string>;
+}
+
+/**
+One `cupboard push` that the cohort needs: for a root group, or for the
+intermediate references of a cached closure. The kind decides where the push
+reads its references: `main` and `reuse` read reference paths from the reuse
+view or reference source, `destination` reads them from the destination, and
+`manifest` and `closure` read the source of each entry from its reference
+manifest.
+*/
+export type PlannedCohortPush = PlannedPushContents &
+	(
+		| {
+				readonly kind: 'closure';
+				readonly index?: undefined;
+				readonly group?: undefined;
+		  }
+		| {
+				readonly kind: Exclude<CohortPushKind, 'closure'>;
+				readonly index: number;
+				readonly group: CohortRootGroup;
+		  }
+	);
+
+const cohortPushKindOrder: readonly CohortPushKind[] = [
+	'closure',
+	'manifest',
+	'main',
+	'reuse',
+	'destination'
+];
+
+/**
+Lists the pushes that publish a cohort, in the order in which they run. Each
+root group needs one push, or two when its attach-only targets are published
+from the destination after its reused targets are published from the reuse
+view.
+*/
+function plannedCohortPushes(
+	options: PublishCohortOptions,
+	groups: readonly CohortRootGroup[],
+	allTargetPaths: readonly string[]
+): readonly PlannedCohortPush[] {
+	const { inputs } = options;
+	const referenceSource = cohortReferenceSource(inputs);
+	const destinationSource = canonicalHref(
+		cacheUrlFor(inputs.url, inputs.cache)
+	);
+	const attachOnly = new Set(options.attachOnlyPaths);
+	const hasIntermediates = options.paths.intermediatePaths.length > 0;
+	const receiptFor = (
+		localPaths: readonly string[],
+		hasReferences: boolean,
+		hasGroupIntermediates: boolean
+	): CohortPushReceipt => {
+		if (!options.collectReceipts) {
+			return 'none';
+		}
+
+		const hasFullReceipt =
+			(inputs.store === '' && inputs.publish === 'closure') ||
+			(hasReferences && (localPaths.length > 0 || hasGroupIntermediates));
+
+		if (hasFullReceipt) {
+			return 'full';
+		}
+
+		return hasReferences ? 'reference' : 'none';
+	};
+	const requireReferenceSource = (): void => {
+		if (referenceSource === '') {
+			throw new ReuseViewRequiredError();
+		}
+	};
+	const selected = new Set(allTargetPaths);
+	const prepared = new Map<string, { source: string; narinfo: string }>();
+	const referenceIntermediates: ReferencePublicationManifestInput['paths'] = [];
+	for (const [source, references] of options.closureReferences) {
+		for (const reference of references) {
+			prepared.set(reference.storePath, { source, narinfo: reference.narinfo });
+			if (!selected.has(reference.storePath)) {
+				referenceIntermediates.push({
+					...reference,
+					source,
+					kind: 'intermediate'
+				});
+			}
+		}
+	}
+	const pushes: PlannedCohortPush[] = [];
+
+	if (referenceIntermediates.length > 0) {
+		pushes.push({
+			kind: 'closure',
+			localPaths: [],
+			hasIntermediates: false,
+			referencePaths: [],
+			referenceSource: '',
+			manifest: referenceIntermediates,
+			receipt: 'reference',
+			sources: manifestSources(referenceIntermediates)
+		});
+	}
+
+	for (const [index, group] of groups.entries()) {
+		const isFirstGroupWithIntermediates = index === 0 && hasIntermediates;
+		const cachedTargets = group.paths.flatMap((storePath) => {
+			const reference = prepared.get(storePath);
+			return reference === undefined
+				? []
+				: { storePath, kind: 'target' as const, ...reference };
+		});
+
+		if (cachedTargets.length > 0) {
+			const cached = new Set(cachedTargets.map((entry) => entry.storePath));
+			pushes.push({
+				kind: 'manifest',
+				index,
+				group,
+				localPaths: group.paths.filter((storePath) => !cached.has(storePath)),
+				hasIntermediates: isFirstGroupWithIntermediates,
+				referencePaths: [],
+				referenceSource: '',
+				manifest: cachedTargets,
+				receipt: 'full',
+				sources: manifestSources(cachedTargets)
+			});
+			continue;
+		}
+
+		if (group.paths.every((targetPath) => !attachOnly.has(targetPath))) {
+			if (group.referencePaths.length > 0) {
+				requireReferenceSource();
+			}
+
+			const localPaths = group.paths.filter(
+				(storePath) => !group.referencePaths.includes(storePath)
+			);
+			pushes.push({
+				kind: 'main',
+				index,
+				group,
+				localPaths,
+				hasIntermediates: isFirstGroupWithIntermediates,
+				referencePaths: group.referencePaths,
+				referenceSource:
+					group.referencePaths.length === 0 ? '' : referenceSource,
+				manifest: [],
+				receipt: receiptFor(
+					localPaths,
+					group.referencePaths.length > 0,
+					isFirstGroupWithIntermediates
+				),
+				sources: sourcesOf(group.referencePaths, referenceSource)
+			});
+			continue;
+		}
+
+		if (group.referencePaths.length > 0) {
+			requireReferenceSource();
+			pushes.push({
+				kind: 'reuse',
+				index,
+				group: { ...group, complete: false },
+				localPaths: [],
+				hasIntermediates: false,
+				referencePaths: group.referencePaths,
+				referenceSource,
+				manifest: [],
+				receipt: receiptFor([], true, false),
+				sources: sourcesOf(group.referencePaths, referenceSource)
+			});
+		}
+
+		const destinationPaths = group.paths.filter(
+			(targetPath) =>
+				attachOnly.has(targetPath) || group.referencePaths.includes(targetPath)
+		);
+		const localPaths = group.paths.filter(
+			(targetPath) => !destinationPaths.includes(targetPath)
+		);
+		pushes.push({
+			kind: 'destination',
+			index,
+			group,
+			localPaths,
+			hasIntermediates: isFirstGroupWithIntermediates,
+			referencePaths: destinationPaths,
+			referenceSource: destinationPaths.length === 0 ? '' : destinationSource,
+			manifest: [],
+			receipt: receiptFor(
+				localPaths,
+				destinationPaths.length > 0,
+				isFirstGroupWithIntermediates
+			),
+			sources: sourcesOf(destinationPaths, destinationSource)
+		});
+	}
+
+	return pushes;
+}
+
+interface CohortPushFiles {
+	readonly pathsFile: string;
+	readonly referencePathsFile: string;
+	readonly manifestFile: string;
+	readonly receiptFile: string;
+}
+
+type CohortPushInvocation = CupboardInvocation & {
+	readonly receiptFiles: readonly string[];
+};
+
+interface CohortPushSettings {
+	readonly receipt: CohortPushReceipt;
+	readonly referenceSource: string;
+	readonly rootsFile?: string;
+}
+
+// Writes the files of one push and builds its arguments. `group` is the group
+// that `cohortPushInvocation` reads its root from; `settings.rootsFile`
+// replaces it.
+async function cohortPushFor(
+	options: PublishCohortOptions,
+	pushes: readonly PlannedCohortPush[],
+	files: CohortPushFiles,
+	group: CohortRootGroup,
+	settings: CohortPushSettings
+): Promise<CohortPushInvocation> {
+	const { inputs } = options;
+	const { receipt, referenceSource, rootsFile } = settings;
+	const localPaths = [...new Set(pushes.flatMap((entry) => entry.localPaths))];
+	const referencePaths = [
+		...new Set(pushes.flatMap((entry) => entry.referencePaths))
+	];
+	// Root groups that own the same path each list it, and a reference manifest
+	// must list every path once.
+	const manifest = new Map(
+		pushes
+			.flatMap((entry) => entry.manifest)
+			.map((entry) => [entry.storePath, entry] as const)
+	)
+		.values()
+		.toArray();
+	if (localPaths.length > 0) {
+		await writeFile(files.pathsFile, linesOf(localPaths));
+	}
+
+	if (referencePaths.length > 0) {
+		await writeFile(files.referencePathsFile, linesOf(referencePaths));
+	}
+
+	if (manifest.length > 0) {
+		await writeReferenceManifest(files.manifestFile, manifest);
+	}
+
+	const invocation = cohortPushInvocation(
+		inputs,
+		{ ...group, paths: localPaths },
+		{
+			...(localPaths.length > 0 && { pathsFile: files.pathsFile }),
+			intermediatePathsFile: pushes.some((entry) => entry.hasIntermediates)
+				? inputs.intermediatePathsFile
+				: '',
+			referencePathsFile:
+				referencePaths.length === 0 ? '' : files.referencePathsFile,
+			referenceSource: referencePaths.length === 0 ? '' : referenceSource,
+			...(manifest.length > 0 && { referenceManifestFile: files.manifestFile }),
+			...(receipt === 'full' && {
+				receiptFile: files.receiptFile,
+				copiedFromFile: options.copiedFromFile
+			}),
+			...(receipt === 'reference' && {
+				referenceReceiptFile: files.receiptFile
+			}),
+			...(rootsFile !== undefined && { rootsFile })
+		}
+	);
+
+	return {
+		...invocation,
+		receiptFiles: receipt === 'none' ? [] : [files.receiptFile]
+	};
+}
+
+const noRootGroup: CohortRootGroup = {
+	root: '',
+	paths: [],
+	referencePaths: [],
+	complete: false
+};
+
+// A cupboard without the cohort roots document runs one push for each planned
+// push.
+function separatePushInvocation(
+	options: PublishCohortOptions,
+	entry: PlannedCohortPush
+): Promise<CohortPushInvocation> {
+	const { inputs } = options;
+	const settings = {
+		receipt: entry.receipt,
+		referenceSource: entry.referenceSource
+	};
+
+	if (entry.kind === 'closure') {
+		return cohortPushFor(
+			options,
+			[entry],
+			{
+				pathsFile: '',
+				referencePathsFile: '',
+				manifestFile: `${inputs.referencePathsFile}.closure.json`,
+				receiptFile: `${inputs.receiptFile}.closure`
+			},
+			noRootGroup,
+			settings
+		);
+	}
+
+	const index = String(entry.index);
+
+	return cohortPushFor(
+		options,
+		[entry],
+		{
+			pathsFile: `${inputs.targetPathsFile}.${index}`,
+			referencePathsFile:
+				entry.kind === 'main'
+					? `${inputs.referencePathsFile}.${index}`
+					: `${inputs.referencePathsFile}.${entry.kind}.${index}`,
+			manifestFile: `${inputs.referencePathsFile}.${index}.json`,
+			receiptFile: `${inputs.receiptFile}.${index}.${entry.kind}`
+		},
+		entry.group,
+		settings
+	);
+}
+
+interface MergedCohortPush {
+	readonly kind: CohortPushKind;
+	readonly receipt: CohortPushReceipt;
+	readonly referenceSource: string;
+	readonly pushes: readonly PlannedCohortPush[];
+}
+
+/**
+Merges the planned pushes of one kind that read their references from the
+same source and record the same kind of receipt. The source and the receipt
+kind decide the push's read credential and receipt option. The merged push
+publishes the union of their paths and records the union of their receipts,
+and its roots file sets each group's root to the same targets as the group's
+own push. The kinds run in the order of the planned pushes, so every reused
+path reaches the destination before a destination push publishes it.
+*/
+export function mergedCohortPushes(
+	planned: readonly PlannedCohortPush[]
+): readonly MergedCohortPush[] {
+	const merged = new Map<string, MergedCohortPush>();
+
+	for (const kind of cohortPushKindOrder) {
+		for (const entry of planned) {
+			if (entry.kind !== kind) {
+				continue;
+			}
+
+			const key = JSON.stringify([kind, entry.receipt, entry.referenceSource]);
+			const existing = merged.get(key);
+
+			merged.set(key, {
+				kind,
+				receipt: entry.receipt,
+				referenceSource: entry.referenceSource,
+				pushes: [...(existing?.pushes ?? []), entry]
+			});
+		}
+	}
+
+	return merged.values().toArray();
+}
+
+// Two merged pushes can have the same kind and receipt kind, so the files of
+// each merged push include its position in the list.
+async function mergedPushInvocation(
+	options: PublishCohortOptions,
+	merged: MergedCohortPush,
+	position: number
+): Promise<CohortPushInvocation> {
+	const { inputs } = options;
+	const name = `${String(position)}.${merged.kind}.${merged.receipt}`;
+	const roots = mergedRoots(merged);
+	const rootsFile =
+		roots.length === 0
+			? undefined
+			: `${inputs.targetPathsFile}.${name}.roots.json`;
+
+	if (rootsFile !== undefined) {
+		const document = cohortRootsDocumentSchema.parse({
+			version: cohortRootsVersion,
+			roots
+		});
+		await writeFile(rootsFile, `${JSON.stringify(document)}\n`);
+	}
+
+	return cohortPushFor(
+		options,
+		merged.pushes,
+		{
+			pathsFile: `${inputs.targetPathsFile}.${name}`,
+			referencePathsFile: `${inputs.referencePathsFile}.${name}`,
+			manifestFile: `${inputs.referencePathsFile}.${name}.json`,
+			receiptFile: `${inputs.receiptFile}.${name}`
+		},
+		noRootGroup,
+		{
+			receipt: merged.receipt,
+			referenceSource: merged.referenceSource,
+			...(rootsFile !== undefined && { rootsFile })
+		}
+	);
+}
+
+/**
+Refuses a root whose roots document entry would have more targets than one
+root update accepts, before any merged push runs. Separate pushes refuse the
+same root when its own push sets it.
+*/
+export function assertRootTargetLimits(
+	merged: readonly MergedCohortPush[]
+): void {
+	for (const push of merged) {
+		for (const root of mergedRoots(push)) {
+			if (root.action === 'set' && root.targets.length > rootSetMaxTargets) {
+				throw new PublishRootTargetLimitError(
+					root.name,
+					root.targets.length,
+					rootSetMaxTargets
+				);
+			}
+		}
+	}
+}
+
+// A reuse push only stages reused paths for a later destination push, and the
+// closure push publishes intermediates, so neither sets a root.
+function mergedRoots(merged: MergedCohortPush): readonly CohortRootInput[] {
+	if (merged.kind === 'closure' || merged.kind === 'reuse') {
+		return [];
+	}
+
+	return merged.pushes
+		.map((entry) => entry.group)
+		.filter((group) => group !== undefined)
+		.map((group): CohortRootInput =>
+			group.complete
+				? {
+						action: 'set',
+						name: group.root,
+						targets: [...new Set(group.paths)]
+					}
+				: { action: 'unchanged', name: group.root }
+		);
+}
+
+/**
+Whether the installed cupboard reads the cohort roots version that this action
+writes. `resolve-cupboard` can select any release: an older release has no
+`push --roots-file`, or reads another version, and gets one push per root
+group, which every release accepts. A cupboard that cannot report its document
+versions is treated the same way. The job log records why the cohort uses
+separate pushes.
+*/
+async function canSetRootsInOnePush(
 	options: PublishCohortOptions
-): Promise<CohortPublication> {
+): Promise<boolean> {
+	let versions: DocumentVersions;
+
+	try {
+		versions = await options.inspectDocumentVersions(
+			options.inputs.cupboardPath,
+			options.signal
+		);
+	} catch (error) {
+		options.signal?.throwIfAborted();
+		options.reporter.info(
+			`Publishing each root group separately, because cupboard could not report the document versions that it reads: ${error instanceof Error ? error.message : String(error)}`
+		);
+
+		return false;
+	}
+
+	if (versions.cohortRoots !== cohortRootsVersion) {
+		options.reporter.info(
+			`Publishing each root group separately, because cupboard reads cohort roots version ${String(versions.cohortRoots ?? 'none')}, not ${String(cohortRootsVersion)}.`
+		);
+
+		return false;
+	}
+
+	return true;
+}
+
+/**
+What the cohort's pushes have published so far. The job writes its summary
+from this record, so a failed push still reports the roots that earlier
+pushes, or the failed push itself, had set.
+*/
+class CohortPublicationRecord {
+	readonly #receiptFiles: string[] = [];
+	readonly #rootUploads = new Map<string, UploadTally>();
+	readonly #rootRetention = new Map<string, RootSummary>();
+	readonly #updatedRoots = new Set<string>();
+	#otherUploads: UploadTally | undefined;
+
+	addReceiptFiles(files: readonly string[]): void {
+		this.#receiptFiles.push(...files);
+	}
+
+	addRootUploads(root: string, uploads: UploadTally | undefined): void {
+		const recorded = addUploads(this.#rootUploads.get(root), uploads);
+
+		if (recorded !== undefined) {
+			this.#rootUploads.set(root, recorded);
+		}
+	}
+
+	addOtherUploads(uploads: UploadTally | undefined): void {
+		this.#otherUploads = addUploads(this.#otherUploads, uploads);
+	}
+
+	recordRoots(
+		roots: readonly RootSummary[],
+		options: { readonly updated: boolean }
+	): void {
+		for (const root of roots) {
+			this.#rootRetention.set(root.name, root);
+
+			if (options.updated) {
+				this.#updatedRoots.add(root.name);
+			}
+		}
+	}
+
+	markUpdated(root: string): void {
+		this.#updatedRoots.add(root);
+	}
+
+	snapshot(): CohortPublication {
+		return {
+			receiptFiles: [...this.#receiptFiles],
+			rootUploads: new Map(this.#rootUploads),
+			rootRetention: new Map(this.#rootRetention),
+			updatedRoots: new Set(this.#updatedRoots),
+			...(this.#otherUploads !== undefined && {
+				otherUploads: this.#otherUploads
+			})
+		};
+	}
+}
+
+async function publishCohort(
+	options: PublishCohortOptions,
+	record: CohortPublicationRecord
+): Promise<void> {
 	const {
 		inputs,
 		members,
@@ -3094,35 +3714,14 @@ async function publishCohort(
 		leftUpstreamPaths,
 		incompleteRoots
 	});
-	const referenceSource = cohortReferenceSource(inputs);
-	const destinationSource = canonicalHref(
-		cacheUrlFor(inputs.url, inputs.cache)
-	);
-	const attachOnly = new Set(options.attachOnlyPaths);
-	const targetPathsFile = async (
-		index: number,
-		localPaths: readonly string[]
-	): Promise<Pick<CohortPushExtras, 'pathsFile'>> => {
-		if (localPaths.length === 0) {
-			return {};
-		}
-
-		const pathsFile = `${inputs.targetPathsFile}.${String(index)}`;
-		await writeFile(pathsFile, linesOf(localPaths));
-		return { pathsFile };
-	};
-	const hasIntermediates = paths.intermediatePaths.length > 0;
-	const receiptFiles: string[] = [];
-	const rootUploads = new Map<string, UploadTally>();
-	const updatedRoots = new Set<string>();
-	const rootRetention = new Map<string, RootSummary>();
-	let otherUploads: UploadTally | undefined;
+	const planned = plannedCohortPushes(options, groups, allTargetPaths);
 	const push = async (
-		group: CohortRootGroup | undefined,
-		invocation: CupboardInvocation,
-		sources: ReadonlyMap<string, string>
+		pushes: readonly PlannedCohortPush[],
+		invocation: CohortPushInvocation
 	): Promise<void> => {
 		let results: readonly ReporterResultEvent[];
+
+		record.addReceiptFiles(invocation.receiptFiles);
 
 		try {
 			results = await runCupboard(
@@ -3132,263 +3731,72 @@ async function publishCohort(
 				cupboardRunDependencies
 			);
 		} catch (error) {
-			reportReferenceUploads(reporter, error, members, sources);
+			// When the cache refuses one root of a batch, it still sets the others.
+			// The push reports those roots before it fails.
+			if (error instanceof CupboardReportedError) {
+				record.recordRoots(recordedRoots(error.results), { updated: true });
+				recordUploads(pushes, uploadTally(error.results));
+			}
+
+			reportReferenceUploads(
+				reporter,
+				error,
+				members,
+				new Map(pushes.flatMap((entry) => [...entry.sources]))
+			);
 			throw error;
 		}
 
-		const uploads = uploadTally(results);
-		for (const root of recordedRoots(results)) {
-			rootRetention.set(root.name, root);
+		record.recordRoots(recordedRoots(results), { updated: false });
+
+		for (const entry of pushes) {
+			if (entry.group?.complete === true) {
+				record.markUpdated(entry.group.root);
+			}
 		}
 
-		if (group === undefined) {
-			otherUploads = addUploads(otherUploads, uploads);
+		recordUploads(pushes, uploadTally(results));
+	};
+	const recordUploads = (
+		pushes: readonly PlannedCohortPush[],
+		uploads: UploadTally | undefined
+	): void => {
+		const roots = [
+			...new Set(pushes.flatMap((entry) => entry.group?.root ?? []))
+		];
+		const [onlyRoot] = roots;
+
+		// The push summary has no uploads per path, so the uploads of a push for
+		// several roots count only towards the cohort's total.
+		if (onlyRoot !== undefined && roots.length === 1) {
+			record.addRootUploads(onlyRoot, uploads);
 			return;
 		}
 
-		const recorded = addUploads(rootUploads.get(group.root), uploads);
-
-		if (recorded !== undefined) {
-			rootUploads.set(group.root, recorded);
-		}
-
-		if (group.complete) {
-			updatedRoots.add(group.root);
-		}
+		record.addOtherUploads(uploads);
 	};
-	const receiptForPush = (
-		index: number,
-		kind: string,
-		localPaths: readonly string[],
-		referencePathsFile: string,
-		intermediatePathsFile: string
-	): Pick<
-		CohortPushExtras,
-		'receiptFile' | 'referenceReceiptFile' | 'copiedFromFile'
-	> => {
-		if (!options.collectReceipts) {
-			return {};
-		}
 
-		const hasFullReceipt =
-			(inputs.store === '' && inputs.publish === 'closure') ||
-			(referencePathsFile !== '' &&
-				(localPaths.length > 0 || intermediatePathsFile !== ''));
-		const hasReferenceReceipt = referencePathsFile !== '' && !hasFullReceipt;
-
-		if (!hasFullReceipt && !hasReferenceReceipt) {
-			return {};
-		}
-
-		const receiptFile = `${inputs.receiptFile}.${String(index)}.${kind}`;
-		receiptFiles.push(receiptFile);
-
-		return hasFullReceipt
-			? { receiptFile, copiedFromFile: options.copiedFromFile }
-			: { referenceReceiptFile: receiptFile };
-	};
-	const selected = new Set(allTargetPaths);
-	const prepared = new Map<string, { source: string; narinfo: string }>();
-	const referenceIntermediates: ReferencePublicationManifestInput['paths'] = [];
-	for (const [source, references] of options.closureReferences) {
-		for (const reference of references) {
-			prepared.set(reference.storePath, { source, narinfo: reference.narinfo });
-			if (!selected.has(reference.storePath)) {
-				referenceIntermediates.push({
-					...reference,
-					source,
-					kind: 'intermediate'
-				});
-			}
-		}
-	}
-	if (referenceIntermediates.length > 0) {
-		const referenceManifestFile = `${inputs.referencePathsFile}.closure.json`;
-		await writeReferenceManifest(referenceManifestFile, referenceIntermediates);
-		const receiptFile = `${inputs.receiptFile}.closure`;
-		receiptFiles.push(receiptFile);
-		await push(
-			undefined,
-			cohortPushInvocation(
-				inputs,
-				{ root: '', paths: [], referencePaths: [], complete: false },
-				{
-					intermediatePathsFile: '',
-					referencePathsFile: '',
-					referenceManifestFile,
-					referenceSource: '',
-					referenceReceiptFile: receiptFile
-				}
-			),
-			manifestSources(referenceIntermediates)
-		);
-	}
-	for (const [index, group] of groups.entries()) {
-		const cachedTargets = group.paths.flatMap((storePath) => {
-			const reference = prepared.get(storePath);
-			return reference === undefined
-				? []
-				: { storePath, kind: 'target' as const, ...reference };
-		});
-		if (cachedTargets.length > 0) {
-			const cached = new Set(cachedTargets.map((entry) => entry.storePath));
-			const localPaths = group.paths.filter(
-				(storePath) => !cached.has(storePath)
-			);
-			const targetExtras = await targetPathsFile(index, localPaths);
-			const referenceManifestFile = `${inputs.referencePathsFile}.${String(index)}.json`;
-			await writeReferenceManifest(referenceManifestFile, cachedTargets);
-			const receiptFile = `${inputs.receiptFile}.${String(index)}.manifest`;
-			receiptFiles.push(receiptFile);
-			await push(
-				group,
-				cohortPushInvocation(
-					inputs,
-					{
-						...group,
-						paths: localPaths
-					},
-					{
-						...targetExtras,
-						intermediatePathsFile:
-							index === 0 && hasIntermediates
-								? inputs.intermediatePathsFile
-								: '',
-						referencePathsFile: '',
-						referenceSource: '',
-						referenceManifestFile,
-						receiptFile,
-						copiedFromFile: options.copiedFromFile
-					}
-				),
-				manifestSources(cachedTargets)
-			);
-			continue;
-		}
-		const attachOnlyPaths = group.paths.filter((targetPath) =>
-			attachOnly.has(targetPath)
-		);
-
-		if (attachOnlyPaths.length === 0) {
-			const referencePathsFile =
-				group.referencePaths.length === 0
-					? ''
-					: `${inputs.referencePathsFile}.${String(index)}`;
-
-			if (referencePathsFile !== '') {
-				if (referenceSource === '') {
-					throw new ReuseViewRequiredError();
-				}
-
-				await writeFile(referencePathsFile, linesOf(group.referencePaths));
-			}
-
-			const intermediatePathsFile =
-				index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '';
-			const localPaths = group.paths.filter(
-				(storePath) => !group.referencePaths.includes(storePath)
-			);
-			const receiptExtras = receiptForPush(
-				index,
-				'main',
-				localPaths,
-				referencePathsFile,
-				intermediatePathsFile
-			);
-			const targetExtras = await targetPathsFile(index, localPaths);
-			await push(
-				group,
-				cohortPushInvocation(
-					inputs,
-					{ ...group, paths: localPaths },
-					{
-						...targetExtras,
-						intermediatePathsFile,
-						referencePathsFile,
-						referenceSource: referencePathsFile === '' ? '' : referenceSource,
-						...receiptExtras
-					}
-				),
-				sourcesOf(group.referencePaths, referenceSource)
-			);
-			continue;
-		}
-
-		if (group.referencePaths.length > 0) {
-			if (referenceSource === '') {
-				throw new ReuseViewRequiredError();
-			}
-
-			const reusePathsFile = `${inputs.referencePathsFile}.reuse.${String(index)}`;
-			await writeFile(reusePathsFile, linesOf(group.referencePaths));
-			await push(
-				{ ...group, complete: false },
-				cohortPushInvocation(
-					inputs,
-					{ ...group, paths: [], complete: false },
-					{
-						intermediatePathsFile: '',
-						referencePathsFile: reusePathsFile,
-						referenceSource,
-						...receiptForPush(index, 'reuse', [], reusePathsFile, '')
-					}
-				),
-				sourcesOf(group.referencePaths, referenceSource)
-			);
-		}
-
-		const destinationPaths = group.paths.filter(
-			(targetPath) =>
-				attachOnly.has(targetPath) || group.referencePaths.includes(targetPath)
-		);
-		const destinationPathsFile =
-			destinationPaths.length === 0
-				? ''
-				: `${inputs.referencePathsFile}.destination.${String(index)}`;
-
-		if (destinationPathsFile !== '') {
-			await writeFile(destinationPathsFile, linesOf(destinationPaths));
-		}
-
-		const localPaths = group.paths.filter(
-			(targetPath) => !destinationPaths.includes(targetPath)
-		);
-		const intermediatePathsFile =
-			index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '';
-		const targetExtras = await targetPathsFile(index, localPaths);
-		await push(
-			group,
-			cohortPushInvocation(
-				inputs,
-				{
-					...group,
-					paths: localPaths
-				},
-				{
-					...targetExtras,
-					intermediatePathsFile,
-					referencePathsFile: destinationPathsFile,
-					referenceSource: destinationPathsFile === '' ? '' : destinationSource,
-					...receiptForPush(
-						index,
-						'destination',
-						localPaths,
-						destinationPathsFile,
-						intermediatePathsFile
-					)
-				}
-			),
-			sourcesOf(destinationPaths, destinationSource)
-		);
+	if (planned.length === 0) {
+		return;
 	}
 
-	return {
-		receiptFiles,
-		rootUploads,
-		rootRetention,
-		updatedRoots,
-		...(otherUploads !== undefined && { otherUploads })
-	};
+	if (await canSetRootsInOnePush(options)) {
+		const mergedPushes = mergedCohortPushes(planned);
+		assertRootTargetLimits(mergedPushes);
+
+		for (const [position, merged] of mergedPushes.entries()) {
+			await push(
+				merged.pushes,
+				await mergedPushInvocation(options, merged, position)
+			);
+		}
+
+		return;
+	}
+
+	for (const entry of planned) {
+		await push([entry], await separatePushInvocation(options, entry));
+	}
 }
 
 function partitionCounts(partition: PartitionData): {
