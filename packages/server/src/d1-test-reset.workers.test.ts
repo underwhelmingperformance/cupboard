@@ -13,6 +13,7 @@ import {
 	authorisedWorkerFetch,
 	clearBlobStorage,
 	currentServer,
+	fixtureWorkerServer,
 	initialiseViaWorker,
 	recordTransition,
 	resetTestServer
@@ -220,6 +221,101 @@ it("empties the Worker's R2 bucket at each reset", async () => {
 
 	expect({ before, after: await blobKeys() }).toStrictEqual({
 		before: ['t/earlier-test/object'],
+		after: []
+	});
+});
+
+const inFlightKey = 't/in-flight/object';
+
+type WriteOutcome = 'aborted' | 'committed';
+
+interface PendingWrite {
+	/**
+	Completes the write if the object that started it is still the fixture
+	tenant's object, and returns `committed` after R2 has stored the object.
+	After a reset, the fixture tenant's object is a new instance. The reset
+	has cancelled the old instance's put, which neither succeeds nor fails,
+	so this method returns `aborted` without waiting.
+	*/
+	finish: () => Promise<WriteOutcome>;
+}
+
+// The body stream stays open until `finish` writes to it. A stream cannot be
+// used from a different Durable Object, so the object creates it and `finish`
+// writes to it from inside the same object.
+async function startPendingWrite(): Promise<PendingWrite> {
+	const { starter, writer, committed } = await runInDurableObject(
+		fixtureWorkerServer(),
+		(instance) => {
+			const body = new FixedLengthStream(5);
+
+			return {
+				starter: instance,
+				writer: body.writable.getWriter(),
+				committed: instance.context.env.BLOBS.put(inFlightKey, body.readable)
+			};
+		}
+	);
+
+	return {
+		finish: () =>
+			runInDurableObject(fixtureWorkerServer(), async (current) => {
+				if (current !== starter) {
+					return 'aborted';
+				}
+
+				await writer.write(new Uint8Array(5));
+				await writer.close();
+				await committed;
+
+				return 'committed';
+			})
+	};
+}
+
+it("completes the fixture tenant's pending write when nothing resets the server", async () => {
+	await resetTestServer();
+	const write = await startPendingWrite();
+	const before = await blobKeys();
+
+	const outcome = await write.finish();
+
+	expect({ before, outcome, after: await blobKeys() }).toStrictEqual({
+		before: [],
+		outcome: 'committed',
+		after: [inFlightKey]
+	});
+});
+
+it("leaves no object from the fixture tenant's work in flight at a reset", async () => {
+	await resetTestServer();
+	const write = await startPendingWrite();
+	const before = await blobKeys();
+	let outcome: WriteOutcome | undefined;
+
+	// The clear starts by listing the bucket. Complete the write just after
+	// that listing. If the object is still alive at that point, the write lands
+	// after the listing and the clear misses it.
+	const list = env.BLOBS.list.bind(env.BLOBS);
+	const listing = vi
+		.spyOn(env.BLOBS, 'list')
+		.mockImplementationOnce(async (options) => {
+			const objects = await list(options);
+
+			outcome = await write.finish();
+
+			return objects;
+		});
+
+	try {
+		await resetTestServer();
+	} finally {
+		listing.mockRestore();
+	}
+
+	expect({ before, outcome, after: await blobKeys() }).toStrictEqual({
+		before: [],
+		outcome: 'aborted',
 		after: []
 	});
 });
