@@ -43,7 +43,7 @@ import {
 	CohortExecutionContextError,
 	CohortFailureToleranceError,
 	DerivationGraphShapeError,
-	DerivationRootCountError,
+	DerivationNodeMissingError,
 	DuplicateGroupKeyError,
 	TargetEvaluationError,
 	TargetRootUnresolvedError
@@ -59,10 +59,8 @@ import {
 	cacheProbePaths,
 	cohortPreFilterDecision,
 	cohortsFor,
-	derivationToTargetsFor,
 	evaluateTargetCoverage,
 	evaluateTargets,
-	evaluationFromJson,
 	expandComponents,
 	isBestEffortCohort,
 	joinRoot,
@@ -95,10 +93,8 @@ function storePathIn(
 const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
 const alternativeStoreDirectory = storeDirectorySchema.parse('/data/nix/store');
 
-const sharedBasename = '11111111111111111111111111111111-shared';
 const firstBasename = '22222222222222222222222222222222-first';
 
-const sharedPath = storePathIn(defaultStoreDirectory, sharedBasename);
 const firstPath = storePathIn(defaultStoreDirectory, firstBasename);
 const secondPath = storePath(
 	'/nix/store/33333333333333333333333333333333-second'
@@ -107,7 +103,7 @@ const manifestRootDrvPath = storePath(
 	'/nix/store/00000000000000000000000000000000-manifest-root.drv'
 );
 const failingNixEvaluator: NixEvaluator = () =>
-	Promise.reject(new Error('the recursive show failed'));
+	Promise.reject(new Error('the derivation show failed'));
 
 describe('planPublish', () => {
 	it('splits retained targets from the ones still pending', () => {
@@ -118,11 +114,10 @@ describe('planPublish', () => {
 			evaluation(
 				retained,
 				'retained',
-				storePath('/nix/store/44444444444444444444444444444444-retained'),
-				sharedPath
+				storePath('/nix/store/44444444444444444444444444444444-retained')
 			),
-			evaluation(first, 'first', firstPath, sharedPath),
-			evaluation(second, 'second', secondPath, sharedPath)
+			evaluation(first, 'first', firstPath),
+			evaluation(second, 'second', secondPath)
 		];
 
 		const plan = planPublish({
@@ -145,10 +140,9 @@ describe('planPublish', () => {
 			evaluation(
 				retained,
 				'retained',
-				storePath('/nix/store/44444444444444444444444444444444-retained'),
-				undefined
+				storePath('/nix/store/44444444444444444444444444444444-retained')
 			),
-			evaluation(first, 'first', firstPath, undefined)
+			evaluation(first, 'first', firstPath)
 		];
 
 		const plan = planPublish({
@@ -187,7 +181,7 @@ describe('planPublish', () => {
 
 	it('includes unevaluated targets as direct builds', () => {
 		const first = target('first');
-		const evaluations = [evaluation(first, 'first', firstPath, sharedPath)];
+		const evaluations = [evaluation(first, 'first', firstPath)];
 
 		const plan = planPublish({
 			evaluations,
@@ -488,27 +482,6 @@ describe('publishComponentSchema', () => {
 	});
 });
 
-describe('derivationToTargetsFor', () => {
-	it('maps a shared derivation to every target graph that contains it', () => {
-		const first = target('first');
-		const second = target('second');
-		const evaluations = [
-			evaluation(first, 'first', firstPath, sharedPath),
-			evaluation(second, 'second', secondPath, sharedPath)
-		];
-
-		expect(derivationToTargetsFor(evaluations)).toStrictEqual([
-			{ drvPath: '/nix/store/first.drv', targets: ['.#first'] },
-			{ drvPath: '/nix/store/second.drv', targets: ['.#second'] },
-			{ drvPath: '/nix/store/shared.drv', targets: ['.#first', '.#second'] }
-		]);
-	});
-
-	it('returns nothing for an empty evaluation set', () => {
-		expect(derivationToTargetsFor([])).toStrictEqual([]);
-	});
-});
-
 describe('evaluateTargetCoverage', () => {
 	const first = target('first');
 
@@ -620,9 +593,9 @@ describe('cacheProbePaths', () => {
 		const first = target('first');
 		const second = target('second');
 		const evaluations = [
-			evaluation(first, 'first', firstPath, sharedPath),
-			evaluation(second, 'second', secondPath, sharedPath),
-			evaluation(target('third'), 'third', firstPath, undefined)
+			evaluation(first, 'first', firstPath),
+			evaluation(second, 'second', secondPath),
+			evaluation(target('third'), 'third', firstPath)
 		];
 
 		expect(cacheProbePaths(evaluations)).toStrictEqual([firstPath, secondPath]);
@@ -636,9 +609,6 @@ describe('evaluateTargets', () => {
 	const homeRootDrvPath = storePath(
 		'/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-home.drv'
 	);
-	const dependencyDrvPath = storePath(
-		'/nix/store/cccccccccccccccccccccccccccccccc-dependency.drv'
-	);
 	const app = {
 		...target('app'),
 		bestEffort: false,
@@ -648,36 +618,24 @@ describe('evaluateTargets', () => {
 	const resolvedHome = { ...home, rootDrvPath: homeRootDrvPath };
 	const appNode = {
 		env: { out: firstPath },
-		inputs: {
-			drvs: {
-				[dependencyDrvPath]: { dynamicOutputs: {}, outputs: ['out'] }
-			}
-		},
 		outputs: { out: { path: firstBasename } }
 	};
 	const homeNode = {
 		env: { out: secondPath },
-		inputs: { drvs: {} },
 		outputs: { out: { path: secondPath.replace('/nix/store/', '') } }
 	};
-	const dependencyNode = {
-		env: { out: sharedPath },
-		inputs: { drvs: {} },
-		outputs: { out: { path: sharedBasename } }
-	};
-	const recursiveGraph = {
-		derivations: {
-			[appRootDrvPath]: appNode,
-			[dependencyDrvPath]: dependencyNode
-		}
-	};
+	const appRoots = { derivations: { [appRootDrvPath]: appNode } };
 
-	function graphEvaluator(calls: string[][]): NixEvaluator {
+	function rootsEvaluator(calls: string[][]): NixEvaluator {
 		return (arguments_) => {
 			calls.push([...arguments_]);
 
-			return Promise.resolve({ stdout: JSON.stringify(recursiveGraph) });
+			return Promise.resolve({ stdout: JSON.stringify(appRoots) });
 		};
+	}
+
+	function respondingWith(value: unknown): NixEvaluator {
+		return () => Promise.resolve({ stdout: JSON.stringify(value) });
 	}
 
 	it('uses a manifest evaluation failure as a direct best-effort build', async () => {
@@ -686,43 +644,35 @@ describe('evaluateTargets', () => {
 		const result = await evaluateTargets(
 			[app, home],
 			defaultStoreDirectory,
-			graphEvaluator(calls)
+			rootsEvaluator(calls)
 		);
 
-		expect({
-			evaluated: result.evaluations.map(
-				(entry) => `${entry.target.attr} from ${entry.rootDrvPath}`
-			),
-			unevaluated: result.unevaluated.map((entry) => ({
-				attr: entry.target.attr,
-				reason: entry.reason
-			})),
-			calls
-		}).toStrictEqual({
-			evaluated: [`.#app from ${appRootDrvPath}`],
-			unevaluated: [
-				{
-					attr: '.#home',
-					reason: 'Target manifest did not resolve a derivation path for .#home'
-				}
-			],
-			calls: [['derivation', 'show', '-r', '--', appRootDrvPath]]
+		expect({ result, calls }).toStrictEqual({
+			result: {
+				evaluations: [
+					{ target: app, rootDrvPath: appRootDrvPath, targetPaths: [firstPath] }
+				],
+				unevaluated: [
+					{
+						target: home,
+						reason:
+							'Target manifest did not resolve a derivation path for .#home'
+					}
+				]
+			},
+			calls: [['derivation', 'show', '--', appRootDrvPath]]
 		});
 	});
 
-	it('evaluates all manifest derivation paths in one recursive query', async () => {
+	it('reads every root derivation of the manifest in one query', async () => {
 		const calls: string[][] = [];
-		const appRootNode = {
-			...appNode,
-			inputs: { drvs: {} }
-		};
 		const evaluator: NixEvaluator = (arguments_) => {
 			calls.push([...arguments_]);
 
 			return Promise.resolve({
 				stdout: JSON.stringify({
 					derivations: {
-						[appRootDrvPath]: appRootNode,
+						[appRootDrvPath]: appNode,
 						[homeRootDrvPath]: homeNode
 					}
 				})
@@ -735,16 +685,23 @@ describe('evaluateTargets', () => {
 			evaluator
 		);
 
-		expect({
-			evaluated: result.evaluations.map((entry) => entry.target.attr),
-			unevaluated: result.unevaluated,
-			calls
-		}).toStrictEqual({
-			evaluated: ['.#app', '.#home'],
-			unevaluated: [],
-			calls: [
-				['derivation', 'show', '-r', '--', appRootDrvPath, homeRootDrvPath]
-			]
+		expect({ result, calls }).toStrictEqual({
+			result: {
+				evaluations: [
+					{
+						target: app,
+						rootDrvPath: appRootDrvPath,
+						targetPaths: [firstPath]
+					},
+					{
+						target: resolvedHome,
+						rootDrvPath: homeRootDrvPath,
+						targetPaths: [secondPath]
+					}
+				],
+				unevaluated: []
+			},
+			calls: [['derivation', 'show', '--', appRootDrvPath, homeRootDrvPath]]
 		});
 	});
 
@@ -755,25 +712,23 @@ describe('evaluateTargets', () => {
 		};
 
 		await expect(
-			evaluateTargets([broken], defaultStoreDirectory, graphEvaluator([]))
+			evaluateTargets([broken], defaultStoreDirectory, rootsEvaluator([]))
 		).rejects.toThrow(TargetRootUnresolvedError);
 	});
 
-	const recursiveFailureEvaluator: NixEvaluator = (arguments_) => {
+	const homeFailureEvaluator: NixEvaluator = (arguments_) => {
 		if (arguments_.includes(homeRootDrvPath)) {
 			return Promise.reject(new Error('cannot fetch the private input'));
 		}
 
-		return Promise.resolve({
-			stdout: JSON.stringify(recursiveGraph)
-		});
+		return Promise.resolve({ stdout: JSON.stringify(appRoots) });
 	};
 
-	it('confines a recursive evaluation failure to the best-effort target', async () => {
+	it('confines an evaluation failure to the best-effort target', async () => {
 		const result = await evaluateTargets(
 			[app, resolvedHome],
 			defaultStoreDirectory,
-			recursiveFailureEvaluator
+			homeFailureEvaluator
 		);
 
 		expect({
@@ -793,19 +748,19 @@ describe('evaluateTargets', () => {
 		});
 	});
 
-	it('fails when a strict target cannot be recursively evaluated', async () => {
+	it('fails when a strict target cannot be evaluated', async () => {
 		await expect(
 			evaluateTargets([app], defaultStoreDirectory, failingNixEvaluator)
 		).rejects.toThrow(TargetEvaluationError);
 	});
 
-	it('skips the recursive pass when every target fails to evaluate', async () => {
+	it('skips the query when every target fails to evaluate', async () => {
 		const calls: string[][] = [];
 
 		const result = await evaluateTargets(
 			[home],
 			defaultStoreDirectory,
-			graphEvaluator(calls)
+			rootsEvaluator(calls)
 		);
 
 		expect({
@@ -818,156 +773,95 @@ describe('evaluateTargets', () => {
 			calls: 0
 		});
 	});
-});
 
-describe('evaluationFromJson', () => {
 	it.each([
 		{ storeDirectory: defaultStoreDirectory },
 		{ storeDirectory: alternativeStoreDirectory }
 	])(
-		'parses Determinate derivation JSON under $storeDirectory and identifies the graph root',
-		({ storeDirectory }) => {
+		'resolves the output paths of a root keyed by basename under $storeDirectory',
+		async ({ storeDirectory }) => {
 			const appPath = storePathIn(storeDirectory, firstBasename);
-			const dependencyPath = storePathIn(storeDirectory, sharedBasename);
-			const parsed = evaluationFromJson(
-				target('app'),
-				{
+			const rootBasename = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app.drv';
+			const rootDrvPath = storePathIn(storeDirectory, rootBasename);
+			const resolved = { ...app, rootDrvPath };
+
+			const result = await evaluateTargets(
+				[resolved],
+				storeDirectory,
+				respondingWith({
 					derivations: {
-						'dep.drv': {
-							env: { out: dependencyPath },
-							inputs: { drvs: {} },
-							outputs: { out: { path: sharedBasename } }
-						},
-						'app.drv': {
+						[rootBasename]: {
 							env: { out: appPath },
-							inputs: {
-								drvs: { 'dep.drv': { dynamicOutputs: {}, outputs: ['out'] } }
-							},
-							outputs: { out: {} }
+							outputs: { out: { path: firstBasename } }
 						}
 					}
-				},
-				storeDirectory
+				})
 			);
 
-			expect({
-				rootDrvPath: parsed.rootDrvPath,
-				targetPaths: parsed.targetPaths,
-				nodes: parsed.nodes
-					.values()
-					.map((node) => ({
-						drvPath: node.drvPath,
-						inputs: node.inputs.entries().toArray(),
-						outputs: node.outputs
-					}))
-					.toArray()
-			}).toStrictEqual({
-				rootDrvPath: `${storeDirectory}/app.drv`,
-				targetPaths: [appPath],
-				nodes: [
-					{
-						drvPath: `${storeDirectory}/app.drv`,
-						inputs: [[`${storeDirectory}/dep.drv`, ['out']]],
-						outputs: [{ name: 'out', path: appPath }]
-					},
-					{
-						drvPath: `${storeDirectory}/dep.drv`,
-						inputs: [],
-						outputs: [{ name: 'out', path: dependencyPath }]
-					}
-				]
+			expect(result).toStrictEqual({
+				evaluations: [
+					{ target: resolved, rootDrvPath, targetPaths: [appPath] }
+				],
+				unevaluated: []
 			});
 		}
 	);
 
-	it('does not resolve a content-addressed placeholder as a store path', () => {
-		const parsed = evaluationFromJson(
-			target('app'),
-			{
+	it.each([
+		{
+			name: 'a content-addressed placeholder',
+			value: {
 				derivations: {
-					'app.drv': {
+					[appRootDrvPath]: {
 						env: {
 							out: '/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9'
 						},
-						inputs: { drvs: {} },
 						outputs: { out: {} }
 					}
 				}
 			},
-			defaultStoreDirectory
-		);
-
-		expect({
-			targetPaths: parsed.targetPaths,
-			nodes: parsed.nodes
-				.values()
-				.map((node) => ({
-					drvPath: node.drvPath,
-					inputs: node.inputs.entries().toArray(),
-					outputs: node.outputs
-				}))
-				.toArray()
-		}).toStrictEqual({
-			targetPaths: [],
-			nodes: [
-				{
-					drvPath: '/nix/store/app.drv',
-					inputs: [],
-					outputs: [{ name: 'out' }]
-				}
-			]
-		});
-	});
-
-	it('accepts the bare drvPath map layout', () => {
-		const parsed = evaluationFromJson(
-			target('app'),
-			{
-				'app.drv': {
-					env: { out: firstPath },
-					inputs: { drvs: {} },
-					outputs: { out: {} }
-				}
+			targetPaths: []
+		},
+		{
+			name: 'the bare drvPath map layout',
+			value: {
+				[appRootDrvPath]: { env: { out: firstPath }, outputs: { out: {} } }
 			},
-			defaultStoreDirectory
+			targetPaths: [firstPath]
+		}
+	])('reads the output paths from $name', async ({ value, targetPaths }) => {
+		const result = await evaluateTargets(
+			[app],
+			defaultStoreDirectory,
+			respondingWith(value)
 		);
 
-		expect({
-			rootDrvPath: parsed.rootDrvPath,
-			targetPaths: parsed.targetPaths
-		}).toStrictEqual({
-			rootDrvPath: '/nix/store/app.drv',
-			targetPaths: [firstPath]
+		expect(result).toStrictEqual({
+			evaluations: [{ target: app, rootDrvPath: appRootDrvPath, targetPaths }],
+			unevaluated: []
 		});
 	});
 
 	it.each([
-		{ name: 'a graph that is not an object', value: 'not a derivation graph' },
+		{
+			name: 'a response that is not an object',
+			value: 'not a derivation graph',
+			error: DerivationGraphShapeError
+		},
 		{
 			name: 'a malformed derivation node',
-			value: { derivations: { 'app.drv': 'not a node' } }
-		}
-	])('rejects $name', ({ value }) => {
-		expect(() =>
-			evaluationFromJson(target('app'), value, defaultStoreDirectory)
-		).toThrow(DerivationGraphShapeError);
-	});
-
-	it.each([
-		{ name: 'no derivations', value: { derivations: {} } },
+			value: { derivations: { [appRootDrvPath]: 'not a node' } },
+			error: DerivationGraphShapeError
+		},
 		{
-			name: 'more than one root derivation',
-			value: {
-				derivations: {
-					'a.drv': { env: {}, inputs: { drvs: {} }, outputs: { out: {} } },
-					'b.drv': { env: {}, inputs: { drvs: {} }, outputs: { out: {} } }
-				}
-			}
+			name: 'a response without the root derivation',
+			value: { derivations: { [homeRootDrvPath]: homeNode } },
+			error: DerivationNodeMissingError
 		}
-	])('rejects a graph with $name', ({ value }) => {
-		expect(() =>
-			evaluationFromJson(target('app'), value, defaultStoreDirectory)
-		).toThrow(DerivationRootCountError);
+	])('rejects $name for a strict target', async ({ value, error }) => {
+		await expect(
+			evaluateTargets([app], defaultStoreDirectory, respondingWith(value))
+		).rejects.toThrow(error);
 	});
 });
 
@@ -1660,33 +1554,12 @@ function withoutRootDrvPath(target_: PublishTarget): PublishTarget {
 function evaluation(
 	target_: PublishTarget,
 	name: string,
-	path: StorePathString,
-	shared: StorePathString | undefined
+	path: StorePathString
 ): TargetEvaluation {
 	return {
 		target: target_,
 		rootDrvPath: `/nix/store/${name}.drv`,
-		targetPaths: [path],
-		nodes: new Map([
-			[
-				'/nix/store/shared.drv',
-				{
-					drvPath: '/nix/store/shared.drv',
-					inputs: new Map(),
-					outputs: [
-						{ name: 'out', ...(shared !== undefined && { path: shared }) }
-					]
-				}
-			],
-			[
-				`/nix/store/${name}.drv`,
-				{
-					drvPath: `/nix/store/${name}.drv`,
-					inputs: new Map([['/nix/store/shared.drv', ['out']]]),
-					outputs: [{ name: 'out', path }]
-				}
-			]
-		])
+		targetPaths: [path]
 	};
 }
 

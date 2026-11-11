@@ -152,19 +152,10 @@ const cohortSchema = z.strictObject({
 });
 export type Cohort = z.output<typeof cohortSchema>;
 
-const derivationToTargetsEntrySchema = z.strictObject({
-	drvPath: z.string().min(1),
-	targets: z.array(z.string().min(1)).readonly()
-});
-export type DerivationToTargetsEntry = z.output<
-	typeof derivationToTargetsEntrySchema
->;
-
 const publishPlanSchema = z.strictObject({
 	retained: z.array(publishTargetSchema).readonly(),
 	targets: z.array(publishTargetSchema).readonly(),
-	cohorts: z.array(cohortSchema).readonly(),
-	derivationToTargets: z.array(derivationToTargetsEntrySchema).readonly()
+	cohorts: z.array(cohortSchema).readonly()
 });
 export type PublishPlan = z.output<typeof publishPlanSchema>;
 

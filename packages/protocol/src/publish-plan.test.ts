@@ -29,12 +29,6 @@ const document = {
 			installables: ['.#packages.x86_64-linux.app^out']
 		}
 	],
-	derivationToTargets: [
-		{
-			drvPath: `/nix/store/${'0'.repeat(32)}-app.drv`,
-			targets: ['.#packages.x86_64-linux.app']
-		}
-	],
 	cohortPreFilter: [
 		{
 			key: 'cohort-x86_64-linux-ubuntu-latest-local-0123456789abcdef',

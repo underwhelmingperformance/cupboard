@@ -25,7 +25,6 @@ import {
 	CupboardResolutionJsonError,
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
-	DerivationRootCountError,
 	DiskCleanupFailedError,
 	DuplicateGroupKeyError,
 	ExactReleaseTagRequiredError,
@@ -194,11 +193,6 @@ describe('action errors', () => {
 		[
 			'DerivationGraphShapeError',
 			new DerivationGraphShapeError('.#app', { cause: new z.ZodError([]) }),
-			genericExitCode
-		],
-		[
-			'DerivationRootCountError',
-			new DerivationRootCountError('.#app', 2),
 			genericExitCode
 		],
 		[
@@ -588,17 +582,6 @@ describe('DerivationGraphShapeError', () => {
 		expect({ attribute: error.attribute, cause: error.cause }).toStrictEqual({
 			attribute: '.#app',
 			cause
-		});
-	});
-});
-
-describe('DerivationRootCountError', () => {
-	it('records the attribute and root count', () => {
-		const error = new DerivationRootCountError('.#app', 2);
-
-		expect({ attribute: error.attribute, count: error.count }).toStrictEqual({
-			attribute: '.#app',
-			count: 2
 		});
 	});
 });
