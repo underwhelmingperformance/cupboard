@@ -133,6 +133,7 @@ import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { jsonRowList } from './json-list.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { noCost } from './operation-cost.test-support.ts';
 import {
 	PathReadAuthorityService,
 	pathReadDemotionPendingKey
@@ -1388,6 +1389,92 @@ describe('attestation attach and reads', () => {
 				attestations: [{ digest, predicateType, size: bundle.byteLength }]
 			},
 			bundleStatus: StatusCodes.OK
+		});
+	});
+
+	it('logs the D1 calls and duration of an alarm inheritance pass over three paths', async () => {
+		const destination = namedCache('inheritance-pass-cost');
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, destination);
+		const paths = [];
+		for (const name of ['cost-a', 'cost-b', 'cost-c']) {
+			const nar = await verifiableNar(`inheritance-pass-${name}`);
+			const metadata = uploadMetadata({
+				storePathHash: uniqueStorePathHash(),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
+			await attachBundle(
+				token,
+				metadata.storePathHash,
+				sigstoreBundleBytes(narDigestHex(nar.narHash))
+			);
+			paths.push({ metadata, nar });
+		}
+		await drainInheritance();
+		for (const { metadata, nar } of paths) {
+			await pushPathThroughTenant(
+				fixtureTenant,
+				token,
+				metadata,
+				nar,
+				destination
+			);
+		}
+		const capture = startCapture();
+
+		try {
+			await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance, state) => {
+					// The alarm runs the first due pass after the cursor's pass,
+					// which is the inheritance pass.
+					await state.storage.put(
+						maintenancePassCursorKey,
+						'read-authority-demotion'
+					);
+					await testWorkerServer(instance).runAlarmPass();
+				}
+			);
+		} finally {
+			capture.stop();
+		}
+
+		const records = capture.logs
+			.filter(
+				(entry) =>
+					entry.message === 'method finished' &&
+					entry.properties.method === 'attestation-inheritance'
+			)
+			.map(({ properties: { durationMs, ...properties } }) => ({
+				...properties,
+				durationMs: typeof durationMs
+			}));
+
+		// Each path makes five D1 calls: the reference generation lookup, the
+		// batch that reads its bundles, the batch that revalidates the bundle,
+		// the reservation batch and the list read. The pass also reads the retry
+		// clock once.
+		expect({ records, queued: await queuedInheritances() }).toStrictEqual({
+			records: [
+				{
+					method: 'attestation-inheritance',
+					durationMs: 'number',
+					...noCost,
+					rowsRead: 261,
+					rowsWritten: 34,
+					d1Calls: 16,
+					d1RowsRead: 95,
+					d1RowsWritten: 18,
+					d1CallsWithoutRows: 7,
+					r2Head: 3,
+					r2Put: 3
+				}
+			],
+			queued: []
 		});
 	});
 
@@ -3756,7 +3843,7 @@ describe('attestation attach and reads', () => {
 					}
 				],
 				sourceReferences: [{ digest }],
-				retryCalls: 10,
+				retryCalls: 8,
 				queued: [],
 				listed: [earlierDigest, digest].toSorted(byCodeUnit)
 			});

@@ -1785,6 +1785,19 @@ export class AttestationInheritanceSourceChangedError extends ServerHttpError {
 	}
 }
 
+/**
+`reserveReferenceAndCharge` received reservation reads that were made for a
+different attestation reference.
+*/
+export class ReservationChecksMismatchError extends Error {
+	constructor() {
+		super(
+			'The reservation reads were made for a different attestation reference'
+		);
+		this.name = 'ReservationChecksMismatchError';
+	}
+}
+
 export class AttestationBundleInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.UNPROCESSABLE_ENTITY;
 
