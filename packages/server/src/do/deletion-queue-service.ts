@@ -60,7 +60,10 @@ import {
 } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
 import { chunk, drainStatementBatches } from './bulk.ts';
-import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
+import {
+	type CachePurgePriority,
+	CachePurgeQueueService
+} from './cache-purge-queue-service.ts';
 import { cacheLifecycleFilter } from './cache-registration-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 import {
@@ -134,10 +137,26 @@ function deletionKey(entry: {
 	return JSON.stringify([entry.storePathHash, entry.generation]);
 }
 
+const purgePriorities: readonly CachePurgePriority[] = ['urgent', 'routine'];
+
+function purgePriority(deletion: {
+	readonly explicit: boolean;
+}): CachePurgePriority {
+	return deletion.explicit ? 'urgent' : 'routine';
+}
+
 export interface TornDownNarInfo {
 	readonly storePathHash: StorePathHash;
 	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
+}
+
+/**
+A queued narinfo deletion that a flush or a teardown retires. `explicit` is
+true for a deletion that a user requested, whose cache purges are urgent.
+*/
+export interface QueuedNarInfoDeletion extends TornDownNarInfo {
+	readonly explicit: boolean;
 }
 
 /**
@@ -430,7 +449,7 @@ export class DeletionQueueService {
 	// whose object this deletes are purged.
 	private async withdrawDeferredNarInfos(
 		cache: ResolvedCache,
-		deferred: readonly TornDownNarInfo[]
+		deferred: readonly QueuedNarInfoDeletion[]
 	): Promise<void> {
 		if (deferred.length === 0 || !hasSubrequestsFor(1)) {
 			return;
@@ -447,45 +466,60 @@ export class DeletionQueueService {
 
 			return live === undefined || live === entry.generation;
 		});
-		const removed = removable.map((entry) => entry.storePathHash);
-
-		await this.narInfoObjects.deleteNarInfoObjects(cache, removed);
-		await this.cachePurges.enqueueNarInfos(cache, removed);
+		await this.narInfoObjects.deleteNarInfoObjects(
+			cache,
+			removable.map((entry) => entry.storePathHash)
+		);
+		await this.purgeNarInfosOf(cache, removable);
 		await this.revokeReadAuthority(cache, deferred);
 		await this.markWithdrawn(cache, deferred);
 	}
 
+	// Queues the narinfo purges of the entries, urgent for explicit deletions
+	// and routine for the rest.
+	private async purgeNarInfosOf(
+		cache: ResolvedCache,
+		entries: readonly QueuedNarInfoDeletion[]
+	): Promise<void> {
+		if (entries.length === 0) {
+			return;
+		}
+
+		const purgeable = this.cachePurges.purgeableCache(cache);
+
+		if (purgeable === undefined) {
+			return;
+		}
+
+		for (const priority of purgePriorities) {
+			await this.cachePurges.enqueueNarInfos(
+				purgeable,
+				entries
+					.filter((entry) => purgePriority(entry) === priority)
+					.map((entry) => entry.storePathHash),
+				priority
+			);
+		}
+	}
+
+	// Revokes read authority for the explicit deletions among the entries and
+	// queues urgent purges of their NARs, each hash once.
 	private async revokeReadAuthority(
 		cache: ResolvedCache,
-		entries: readonly TornDownNarInfo[]
+		entries: readonly QueuedNarInfoDeletion[]
 	): Promise<void> {
-		const table = schema.narInfoDeletions;
-		for (const list of jsonRowLists(entries)) {
-			const explicit = this.context.db
-				.select({
-					storePathHash: table.storePathHash,
-					generation: table.generation
-				})
-				.from(table)
-				.where(
-					and(
-						eq(table.cacheId, cache.id),
-						eq(table.explicit, true),
-						list.matches({
-							storePathHash: table.storePathHash,
-							generation: table.generation
-						})
-					)
-				)
-				.all();
-			if (explicit.length === 0) {
-				continue;
-			}
-			await new PathReadAuthorityService(this.context).revoke(cache, explicit);
-			await this.cachePurges.enqueueNars(cache, [
-				...new Set(entries.map((entry) => entry.narHash))
-			]);
+		const explicit = entries.filter((entry) => entry.explicit);
+
+		if (explicit.length === 0) {
+			return;
 		}
+
+		await new PathReadAuthorityService(this.context).revoke(cache, explicit);
+		await this.cachePurges.enqueueNars(
+			cache,
+			[...new Set(explicit.map((entry) => entry.narHash))],
+			'urgent'
+		);
 	}
 
 	private async finishStorePathDeletion(
@@ -700,11 +734,12 @@ export class DeletionQueueService {
 	}
 
 	// Queues a cache-tag purge for each hash that this cache no longer
-	// references. The early return for a private cache also skips the D1
-	// reference query.
+	// references, urgent for the hashes in `urgentHashes`. The early return for
+	// a private cache also skips the D1 reference query.
 	private async purgeRetiredNars(
 		cache: ResolvedCache,
-		narHashes: readonly NixSha256HashString[]
+		narHashes: readonly NixSha256HashString[],
+		urgentHashes: ReadonlySet<NixSha256HashString>
 	): Promise<void> {
 		if (narHashes.length === 0) {
 			return;
@@ -732,10 +767,20 @@ export class DeletionQueueService {
 			}
 		}
 
-		await this.cachePurges.enqueueNars(
-			purgeable,
-			narHashes.filter((narHash) => !stillReferenced.has(narHash))
+		const unreferenced = narHashes.filter(
+			(narHash) => !stillReferenced.has(narHash)
 		);
+
+		for (const priority of purgePriorities) {
+			await this.cachePurges.enqueueNars(
+				purgeable,
+				unreferenced.filter(
+					(narHash) =>
+						(urgentHashes.has(narHash) ? 'urgent' : 'routine') === priority
+				),
+				priority
+			);
+		}
 	}
 
 	// Reports whether any tenant still has a committed reference to the hash. The
@@ -847,7 +892,7 @@ export class DeletionQueueService {
 	private async retireTornDownChunk(
 		cache: ResolvedCache,
 		tenant: TenantId,
-		batch: readonly TornDownNarInfo[],
+		batch: readonly QueuedNarInfoDeletion[],
 		now: IsoTimestamp
 	): Promise<number | undefined> {
 		// Start a chunk only when the remaining allowance covers its attestation
@@ -917,11 +962,11 @@ export class DeletionQueueService {
 			removable.map((entry) => entry.storePathHash)
 		);
 
-		await this.cachePurges.enqueueNarInfos(cache, storePathHashes);
+		await this.purgeNarInfosOf(cache, batch);
 
 		// Compute the credit from edges that still exist, then delete those exact
 		// generations in the same transaction. Replays cannot double-credit.
-		for (const entries of jsonRowLists(batch)) {
+		for (const entries of jsonRowLists<TornDownNarInfo>(batch)) {
 			const { creditUpdate, edgeDelete, publicationDelete, fenceDelete } =
 				fencedEdgeRetirement(
 					this.context.d1,
@@ -961,14 +1006,20 @@ export class DeletionQueueService {
 				})
 		);
 
-		await this.purgeRetiredNars(cache, retiredHashes);
+		await this.purgeRetiredNars(
+			cache,
+			retiredHashes,
+			new Set(
+				batch.filter((entry) => entry.explicit).map((entry) => entry.narHash)
+			)
+		);
 
 		await this.discardRetiredLists(cache, removable, superseded);
 
 		// Clear only the retired path and generation pairs. A later generation
 		// keeps its queue entry, and clearing each completed chunk preserves
 		// progress across a timeout.
-		for (const entries of jsonRowLists(batch)) {
+		for (const entries of jsonRowLists<TornDownNarInfo>(batch)) {
 			this.context.db
 				.delete(schema.narInfoDeletions)
 				.where(
@@ -1140,14 +1191,15 @@ export class DeletionQueueService {
 				: [];
 		const queued = [...retirable, ...toWithdraw];
 
-		const byCache = new Map<CacheId, TornDownNarInfo[]>();
+		const byCache = new Map<CacheId, QueuedNarInfoDeletion[]>();
 
 		for (const entry of queued) {
 			const entries = byCache.get(entry.cacheId) ?? [];
 			entries.push({
 				storePathHash: entry.storePathHash,
 				generation: entry.generation,
-				narHash: entry.narHash
+				narHash: entry.narHash,
+				explicit: entry.explicit
 			});
 			byCache.set(entry.cacheId, entries);
 		}
@@ -1371,7 +1423,11 @@ export class DeletionQueueService {
 		// generation's narinfo.
 		if (found.isDeferred) {
 			if (!wasNewerCommitted) {
-				await this.cachePurges.enqueueNarInfos(cache, [storePathHash]);
+				await this.cachePurges.enqueueNarInfos(
+					cache,
+					[storePathHash],
+					purgePriority(queued)
+				);
 			}
 
 			await this.markWithdrawn(cache, [queued]);
@@ -1444,7 +1500,11 @@ export class DeletionQueueService {
 		// A newer generation keeps the path-keyed object and the attestation list
 		// it owns. The captured generation's attestations still need to be retired.
 		if (wasNewerCommitted) {
-			await this.cachePurges.enqueueNarInfos(cache, [storePathHash]);
+			await this.cachePurges.enqueueNarInfos(
+				cache,
+				[storePathHash],
+				purgePriority(queued)
+			);
 
 			const hasRetiredEveryReference = await this.retireAttestationRefs(
 				cache,
@@ -1471,7 +1531,11 @@ export class DeletionQueueService {
 			};
 		}
 
-		await this.cachePurges.enqueueNarInfos(cache, [storePathHash]);
+		await this.cachePurges.enqueueNarInfos(
+			cache,
+			[storePathHash],
+			purgePriority(queued)
+		);
 
 		const hasRetiredEveryReference = await this.retireAttestationRefs(
 			cache,
@@ -1678,7 +1742,7 @@ export class DeletionQueueService {
 	*/
 	async retireTornDownNarInfos(
 		cache: ResolvedCache,
-		entries: readonly TornDownNarInfo[],
+		entries: readonly QueuedNarInfoDeletion[],
 		_origin?: RequestOrigin,
 		shouldDeferForInheritance = true
 	): Promise<number> {

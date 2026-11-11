@@ -2492,6 +2492,25 @@ describe('migrations', () => {
 		]);
 	});
 
+	it('makes a queued purge routine at 0083', async () => {
+		const insertContinuation =
+			"INSERT INTO cache_purge_continuation (id, kind, entries_json, created_at, expires_at) VALUES ('queued', 'mutation', '[\"narinfo-tag\"]', '2026-01-01T00:00:00.000Z', '2026-01-01T01:00:00.000Z')";
+		const selectPriority = 'SELECT id, priority FROM cache_purge_continuation';
+
+		const result = await runInDurableObject(
+			testServerFor('migration-cache-purge-priority'),
+			async (_instance, state) => {
+				await migrateThrough(state, 82);
+				state.storage.sql.exec(insertContinuation);
+				await migrateThrough(state, 83);
+
+				return state.storage.sql.exec(selectPriority).toArray();
+			}
+		);
+
+		expect(result).toStrictEqual([{ id: 'queued', priority: 1 }]);
+	});
+
 	it('leaves the blob declaration, commit time and promotion record null for a pending upload created before 0075', async () => {
 		const insertUndeclaredPendingUpload =
 			"INSERT INTO pending_upload (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES ('u1', 0, 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', 'committing')";

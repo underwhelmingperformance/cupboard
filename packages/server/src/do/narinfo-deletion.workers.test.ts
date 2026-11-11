@@ -28,6 +28,7 @@ import { z } from 'zod';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	attestationInheritances,
+	cachePurgeContinuations,
 	narInfoDeletions,
 	narInfos,
 	pendingUploads,
@@ -35,7 +36,16 @@ import {
 	retentionRootTargets
 } from '../db/schema.ts';
 import { ServerHttpError, SubrequestTimeoutError } from '../errors.ts';
-import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
+import {
+	legacyNarCacheTag,
+	narCacheTag,
+	narInfoCacheTag
+} from '../http/cache-tags.ts';
+import {
+	internalOrigin,
+	narInfoObjectKey,
+	r2ObjectKeySchema
+} from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,
@@ -79,6 +89,7 @@ import {
 	DeletionQueueService,
 	gcDeferralWakeKey,
 	maxFencedRetireRows,
+	type QueuedNarInfoDeletion,
 	type TornDownNarInfo
 } from './deletion-queue-service.ts';
 import {
@@ -99,12 +110,51 @@ const selectDeletions =
 	'SELECT cache_id, store_path_hash FROM narinfo_deletion';
 const buildsCache = namedCache('builds');
 
-function syntheticEntries(count: number): TornDownNarInfo[] {
+function syntheticEntries(count: number): QueuedNarInfoDeletion[] {
 	return Array.from({ length: count }, (_unused, index) => ({
 		storePathHash: syntheticStorePathHash(index),
 		generation: narInfoGenerationSchema.parse(1),
-		narHash: syntheticNarHash(index)
+		narHash: syntheticNarHash(index),
+		explicit: false
 	}));
+}
+
+// A synthetic queued deletion. A deferred one gets a pending upload of its
+// path and NAR.
+function flushEntry(
+	index: number,
+	options: { readonly isExplicit: boolean; readonly isDeferred?: boolean }
+): QueuedNarInfoDeletion & { readonly isDeferred: boolean } {
+	return {
+		storePathHash: syntheticStorePathHash(index),
+		generation: narInfoGenerationSchema.parse(1),
+		narHash: syntheticNarHash(index),
+		explicit: options.isExplicit,
+		isDeferred: options.isDeferred ?? false
+	};
+}
+
+function narInfoTag(queued: TornDownNarInfo): string {
+	return narInfoCacheTag(fixtureTenant, defaultCache(), queued.storePathHash);
+}
+
+function narTags(queued: TornDownNarInfo): string[] {
+	return [
+		narCacheTag(fixtureTenant, defaultCache(), queued.narHash),
+		legacyNarCacheTag(fixtureTenant, queued.narHash)
+	];
+}
+
+interface QueuedPurgeRow {
+	readonly priority: number;
+	readonly tags: readonly string[];
+}
+
+function byPurgeRow(left: QueuedPurgeRow, right: QueuedPurgeRow): number {
+	return (
+		left.priority - right.priority ||
+		byCodeUnit(left.tags.join(','), right.tags.join(','))
+	);
 }
 
 function storePathString(storePathHash: StorePathHash): StorePathString {
@@ -2281,6 +2331,107 @@ describe('narinfo deletion queue', () => {
 			withoutUploads: 84,
 			withUploads: 84
 		});
+	});
+
+	// A `cupboard delete` that fails after it queued its deletion is completed
+	// by a later flush. The flush queues urgent narinfo and NAR purges for the
+	// explicit deletions and routine purges for the rest, in the withdrawal of
+	// deferred entries and in the retirement of the others.
+	it('keeps the purges of explicit deletions urgent in a flush', async () => {
+		await initialise();
+		const now = Date.now();
+		const explicitRetired = flushEntry(0, { isExplicit: true });
+		const ordinaryRetired = flushEntry(1, { isExplicit: false });
+		const explicitDeferred = flushEntry(2, {
+			isExplicit: true,
+			isDeferred: true
+		});
+		const ordinaryDeferred = flushEntry(3, {
+			isExplicit: false,
+			isDeferred: true
+		});
+		const entries = [
+			explicitRetired,
+			ordinaryRetired,
+			explicitDeferred,
+			ordinaryDeferred
+		];
+
+		const queuedPurges = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const cache = resolvedCache(instance.context);
+
+				for (const queued of entries) {
+					instance.context.db
+						.insert(narInfoDeletions)
+						.values({
+							cacheId: cache.id,
+							storePathHash: queued.storePathHash,
+							narHash: queued.narHash,
+							generation: queued.generation,
+							createdAt: isoTimestamp(new Date(now)),
+							explicit: queued.explicit,
+							protectionCutoff: queued.explicit ? 10 : undefined,
+							protectionCapturedAt: queued.explicit
+								? isoTimestamp(new Date(now))
+								: undefined
+						})
+						.run();
+
+					if (!queued.isDeferred) {
+						continue;
+					}
+
+					// A pending upload of the same path and NAR defers the deletion.
+					instance.context.db
+						.insert(pendingUploads)
+						.values({
+							id: uploadIdSchema.parse(crypto.randomUUID()),
+							acceptedSequence: 1,
+							cacheId: cache.id,
+							narHash: queued.narHash,
+							r2Key: r2ObjectKeySchema.parse(`staging/${queued.storePathHash}`),
+							metadataJson: JSON.stringify({
+								storePathHash: queued.storePathHash
+							}),
+							createdAt: isoTimestamp(new Date(now)),
+							expiresAt: isoTimestamp(new Date(now + 3_600_000))
+						})
+						.run();
+				}
+
+				await asOneInvocation(() =>
+					instance.context.criticalSection(() =>
+						buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions()
+					)
+				);
+
+				return instance.context.db
+					.select({
+						priority: cachePurgeContinuations.priority,
+						entriesJson: cachePurgeContinuations.entriesJson
+					})
+					.from(cachePurgeContinuations)
+					.all()
+					.map((row) => ({
+						priority: row.priority,
+						tags: z.array(z.string()).parse(JSON.parse(row.entriesJson))
+					}))
+					.toSorted(byPurgeRow);
+			}
+		);
+		const expected = [
+			{ priority: 0, tags: [narInfoTag(explicitRetired)] },
+			{ priority: 0, tags: [narInfoTag(explicitDeferred)] },
+			{ priority: 0, tags: narTags(explicitDeferred) },
+			{ priority: 0, tags: narTags(explicitRetired) },
+			{ priority: 1, tags: [narInfoTag(ordinaryRetired)] },
+			{ priority: 1, tags: [narInfoTag(ordinaryDeferred)] },
+			{ priority: 1, tags: narTags(ordinaryRetired) }
+		];
+
+		expect(queuedPurges).toStrictEqual(expected.toSorted(byPurgeRow));
 	});
 
 	it('clears a completed chunk and leaves the rest when a later chunk fails', async () => {

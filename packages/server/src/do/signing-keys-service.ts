@@ -844,12 +844,19 @@ export class SigningKeysService {
 
 	private headBackfillContinuation():
 		typeof schema.cachePurgeContinuations.$inferSelect | undefined {
-		return this.context.db
-			.select()
-			.from(schema.cachePurgeContinuations)
-			.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
-			.orderBy(schema.cachePurgeContinuations.createdAt)
-			.get();
+		return (
+			this.context.db
+				.select()
+				.from(schema.cachePurgeContinuations)
+				.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
+				// Every backfill row has the same priority. Ordering by it as well
+				// lets SQLite read the rows in index order without sorting them.
+				.orderBy(
+					schema.cachePurgeContinuations.priority,
+					schema.cachePurgeContinuations.createdAt
+				)
+				.get()
+		);
 	}
 
 	private markRetrying(
@@ -1154,7 +1161,10 @@ export class SigningKeysService {
 			})
 			.from(schema.cachePurgeContinuations)
 			.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
-			.orderBy(schema.cachePurgeContinuations.createdAt)
+			.orderBy(
+				schema.cachePurgeContinuations.priority,
+				schema.cachePurgeContinuations.createdAt
+			)
 			.get();
 
 		if (continuation !== undefined) {

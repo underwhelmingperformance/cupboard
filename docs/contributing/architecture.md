@@ -582,15 +582,25 @@ object's critical-section deadline.
 When a change makes a cached public response wrong, the tenant object queues a
 purge of the response's cache tags in its `cache_purge_continuation` table. Each
 alarm sends one request through `CachedTenantReads.purgeTags`, which returns the
-Cache API's result. The request contains the tags of the oldest queued rows, as
+Cache API's result. The request contains the tags of the first queued rows, as
 many rows as fit in Cloudflare's limit of 100 tags for one request, so a burst
 of small changes costs one request for each 100 tags. The object deletes exactly
-those rows after the request succeeds. A row queued while the request is in
+the rows of the request after it succeeds. A row queued while the request is in
 flight therefore remains queued, and a crash between the request and the delete
-sends the same tags again. A row is dropped when the responses that it covers
-have expired, one hour after it was queued for narinfos and one year for NARs. A
-signing-key rotation queues its own rows, and the backfill maintenance pass
-purges them. Those rows remain until their purge succeeds.
+sends the same tags again.
+
+Each row has a priority. An explicit deletion queues its narinfo and NAR purges
+as urgent, also when a later flush completes it. Every other change, such as
+garbage collection, queues routine rows. The queue takes urgent rows before
+routine ones, and the oldest first within each priority. A request contains rows
+of one priority only, so a routine row cannot make an urgent request fail. A
+`cupboard delete` therefore does not wait behind routine purges, although it
+still waits for the rate limit.
+
+A row is dropped when the responses that it covers have expired, one hour after
+it was queued for narinfos and one year for NARs. A signing-key rotation queues
+its own rows, and the backfill maintenance pass purges them. Those rows remain
+until their purge succeeds.
 
 A change to a private cache queues no purge. The control Worker serves private
 reads itself with `Cache-Control: no-store`, so Workers Cache stores none of
@@ -612,8 +622,16 @@ other work wakes the object. The alarm is armed for it. A success on either path
 clears the wait, and so does the expiry of the last queued row. A refusal more
 than 5 minutes after the previous wait ended starts a new count. Any other
 failure delays only the queue or the backfill, whichever sent the request: the
-oldest row of the request records its own retry time in `next_attempt_at` and
-its consecutive failures in `failed_attempts`.
+first row of the request records its own retry time in `next_attempt_at` and its
+consecutive failures in `failed_attempts`. An urgent row queued during that wait
+becomes the first row, and it is sent without waiting for the routine row's
+retry time. A row with a recorded failure count, including a count that it took
+over from an expired row, is sent alone: it joins no other row's request, and no
+other row joins its request. A row whose purge keeps failing therefore cannot
+make another row's request fail, and another row cannot keep its retries
+failing. While such a row waits for its retry time at the head of the queue, the
+rows of its priority behind it wait too, because each alarm starts from the
+first row.
 
 A wait starts at 60 seconds after a rate-limit refusal and at 12 seconds after
 any other failure. It doubles with each further failure of the same kind, up to

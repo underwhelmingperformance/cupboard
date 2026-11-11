@@ -5,17 +5,25 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError, WorkersCachePurgeError } from '../errors.ts';
-import { narInfoCacheTag } from '../http/cache-tags.ts';
+import {
+	legacyNarCacheTag,
+	narCacheTag,
+	narInfoCacheTag
+} from '../http/cache-tags.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
 	currentServer,
 	defaultCache,
+	deletePath,
 	fakeAlarm,
+	narBytes,
 	narHash,
+	pushPath,
 	resetTestServer,
 	resolvedCache,
 	syntheticStorePathHash,
+	uploadMetadata,
 	withoutAlarmArming
 } from '../test-support.ts';
 
@@ -79,6 +87,7 @@ function insertRow(
 		readonly nextAttemptAt?: number;
 		readonly failedAttempts?: number;
 		readonly tags?: readonly string[];
+		readonly isUrgent?: boolean;
 	}
 ): void {
 	context.db
@@ -93,7 +102,8 @@ function insertRow(
 				row.nextAttemptAt === undefined
 					? undefined
 					: isoTimestamp(new Date(row.nextAttemptAt)),
-			failedAttempts: row.failedAttempts ?? 0
+			failedAttempts: row.failedAttempts ?? 0,
+			priority: row.isUrgent === true ? 0 : 1
 		})
 		.run();
 }
@@ -467,6 +477,271 @@ describe('cache purge queue', () => {
 						syntheticStorePathHash(1)
 					)
 				]
+			]
+		});
+	});
+
+	// An explicit deletion queues its purges as urgent, so they go out ahead of
+	// the 100 routine rows queued before it, in a request of their own. The
+	// routine NAR purge that the deletion also queues stays queued with the
+	// routine rows.
+	it('sends the purges of a deletion before routine purges queued earlier', async () => {
+		const init = await bootstrap();
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'd'.repeat(32),
+			name: 'deleted'
+		});
+		await withoutAlarmArming(() => pushPath(init.token, path));
+		const now = Date.now();
+		const ids = Array.from({ length: 100 }, (_, index) =>
+			String(index).padStart(3, '0')
+		);
+		await runInDurableObject(currentServer(), (instance) => {
+			for (const [index, id] of ids.entries()) {
+				insertRow(instance.context, {
+					id,
+					createdAt: now - 100_000 + index * 1000,
+					expiresAt: now + 3_600_000
+				});
+			}
+		});
+		await withoutAlarmArming(() => deletePath(init.token, path.storePathHash));
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockResolvedValue(undefined);
+
+				try {
+					await service.runOnce();
+
+					return {
+						purgeCalls: purge.mock.calls.map(([tags]) => tags),
+						rows: queuedTags(instance.context)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		const narTags = [
+			narCacheTag(fixtureTenant, defaultCache(), path.narHash),
+			legacyNarCacheTag(fixtureTenant, path.narHash)
+		];
+		const routineTags = ids.map((id) => `narinfo-${id}`);
+
+		expect(result).toStrictEqual({
+			purgeCalls: [
+				[
+					...narTags,
+					narInfoCacheTag(fixtureTenant, defaultCache(), path.storePathHash)
+				]
+			],
+			rows: [...routineTags.map((tag) => [tag]), narTags]
+		});
+	});
+
+	// A routine row waits for its own retry time after a timeout. An urgent row
+	// queued later goes first, so the request is sent at once, without the
+	// routine row.
+	it('sends an urgent row while a failed routine row waits', async () => {
+		await bootstrap();
+		const now = Date.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+				insertRow(instance.context, {
+					id: 'waiting',
+					createdAt: now - 1000,
+					expiresAt: now + 3_600_000,
+					nextAttemptAt: now + 60_000,
+					failedAttempts: 1
+				});
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockResolvedValue(undefined);
+
+				try {
+					await service.enqueueNarInfos(
+						resolvedCache(instance.context),
+						[syntheticStorePathHash(1)],
+						'urgent'
+					);
+					await service.runOnce();
+
+					return {
+						purgeCalls: purge.mock.calls.map(([sent]) => sent),
+						rows: queuedRows(instance.context).map(({ id }) => id)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+		const urgentTag = narInfoCacheTag(
+			fixtureTenant,
+			defaultCache(),
+			syntheticStorePathHash(1)
+		);
+
+		expect(result).toStrictEqual({
+			purgeCalls: [[urgentTag]],
+			rows: ['waiting']
+		});
+	});
+
+	// A routine row's purge fails for a reason specific to the row, and its
+	// retry time has passed when an urgent row is queued. The urgent request
+	// goes out without it and succeeds. The routine row is then sent as the
+	// head of its own request, and its next failure records a new retry time
+	// on it, not on the urgent row.
+	// Only the first row of a failed request records the failure. A head that
+	// has failed, or an urgent head, therefore goes out without routine rows
+	// that could make its request fail and back it off.
+	it.each([
+		{
+			head: 'has failed',
+			first: { failedAttempts: 1, nextAttemptAt: -1000, isUrgent: false }
+		},
+		{
+			head: 'is urgent',
+			first: { failedAttempts: 0, nextAttemptAt: undefined, isUrgent: true }
+		}
+	])('sends a head that $head without routine rows', async ({ first }) => {
+		await bootstrap();
+		const now = Date.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+				insertRow(instance.context, {
+					id: 'head',
+					createdAt: now - 1000,
+					expiresAt: now + 3_600_000,
+					nextAttemptAt:
+						first.nextAttemptAt === undefined
+							? undefined
+							: now + first.nextAttemptAt,
+					failedAttempts: first.failedAttempts,
+					isUrgent: first.isUrgent
+				});
+				insertRow(instance.context, {
+					id: 'follower',
+					createdAt: first.isUrgent ? now - 2000 : now,
+					expiresAt: now + 3_600_000
+				});
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockResolvedValue(undefined);
+
+				try {
+					await service.runOnce();
+
+					return {
+						purgeCalls: purge.mock.calls.map(([sent]) => sent),
+						rows: queuedRows(instance.context).map(({ id }) => id)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			purgeCalls: [['narinfo-head']],
+			rows: ['follower']
+		});
+	});
+
+	it('keeps a failing routine row from stalling an urgent row', async () => {
+		await bootstrap();
+		const now = Date.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+				insertRow(instance.context, {
+					id: 'failing',
+					createdAt: now - 60_000,
+					expiresAt: now + 3_600_000,
+					nextAttemptAt: now - 1000,
+					failedAttempts: 1
+				});
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockImplementation((sent) =>
+						sent.includes('narinfo-failing')
+							? Promise.reject(new SubrequestTimeoutError('cache.purge'))
+							: Promise.resolve()
+					);
+
+				try {
+					await service.enqueueNarInfos(
+						resolvedCache(instance.context),
+						[syntheticStorePathHash(1)],
+						'urgent'
+					);
+					await service.runOnce();
+					await service.runOnce();
+
+					return {
+						purgeCalls: purge.mock.calls.map(([sent]) => sent),
+						rows: queuedRows(instance.context)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			purgeCalls: [
+				[
+					narInfoCacheTag(
+						fixtureTenant,
+						defaultCache(),
+						syntheticStorePathHash(1)
+					)
+				],
+				['narinfo-failing']
+			],
+			rows: [
+				{
+					id: 'failing',
+					lastAttemptAt: isoTimestamp(new Date(now)),
+					hasLastError: true,
+					nextAttemptAt: isoTimestamp(new Date(now + 18_000)),
+					failedAttempts: 2
+				}
 			]
 		});
 	});

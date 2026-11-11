@@ -984,10 +984,17 @@ export const cachePurgeContinuations = sqliteTable(
 		lastAttemptAt: text('last_attempt_at').$type<IsoTimestamp>(),
 		lastError: text('last_error'),
 		nextAttemptAt: text('next_attempt_at').$type<IsoTimestamp>(),
-		failedAttempts: integer('failed_attempts').notNull().default(0)
+		failedAttempts: integer('failed_attempts').notNull().default(0),
+		// The queue sends lower values first: 0 for an urgent purge, 1 for a
+		// routine one.
+		priority: integer('priority').notNull().default(1)
 	},
 	(table) => [
-		index('cache_purge_kind_created_at_idx').on(table.kind, table.createdAt)
+		index('cache_purge_kind_priority_created_at_idx').on(
+			table.kind,
+			table.priority,
+			table.createdAt
+		)
 	]
 );
 
