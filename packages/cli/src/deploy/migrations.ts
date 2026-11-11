@@ -75,7 +75,7 @@ export interface RecordedMigration {
 	readonly verificationState?: VerificationState;
 }
 
-const ensureTrackingTable =
+export const ensureTrackingTableStatement =
 	'CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);';
 
 const trackingColumnsQuery =
@@ -217,7 +217,7 @@ export async function applyD1Migrations(
 	databaseId: DatabaseId,
 	migrations: readonly D1Migration[]
 ): Promise<string[]> {
-	await api.queryBatch(databaseId, [ensureTrackingTable]);
+	await api.queryBatch(databaseId, [ensureTrackingTableStatement]);
 	await ensureDigestColumns(api, databaseId);
 
 	const recorded = await readRecorded(api, databaseId);

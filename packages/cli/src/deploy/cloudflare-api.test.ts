@@ -22,6 +22,7 @@ import {
 	scriptNameSchema,
 	zoneIdSchema
 } from './identifiers.ts';
+import { checkPlan } from './plan-checks.ts';
 
 const accountId = () => cloudflareAccountIdSchema.parse('acc-1');
 const scriptName = (value: string) => scriptNameSchema.parse(value);
@@ -680,6 +681,320 @@ describe('R2 bucket lookup', () => {
 	});
 });
 
+describe('findQueue across a run', () => {
+	const queuesPath = '/accounts/acc-1/queues';
+	const manyQueues = Array.from({ length: 20 }, (_unused, index) => ({
+		queue_name: `other-${String(index)}`,
+		queue_id: `other-${String(index)}`
+	}));
+
+	it('lists the queues once and reads no consumers for missing queues', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${queuesPath}`]: manyQueues
+		});
+		const api = createCloudflareApi(client, accountId());
+
+		const found = [
+			await api.findQueue('staging-maintenance'),
+			await api.findQueue('staging-maintenance-dlq')
+		];
+
+		expect({
+			found,
+			requests: requests.map((request) => request.path)
+		}).toStrictEqual({
+			found: [undefined, undefined],
+			requests: [queuesPath]
+		});
+	});
+
+	it('ignores an unrelated queue whose consumers cannot be read', async () => {
+		const { client } = fakeCloudflare({
+			[`GET ${queuesPath}`]: [
+				{ queue_name: 'staging-maintenance-dlq', queue_id: 'queue-1' },
+				{ queue_name: 'deleted', queue_id: 'queue-2' },
+				{ queue_name: 'production-maintenance', queue_id: 'queue-3' }
+			],
+			[`GET ${queuesPath}/queue-1/consumers`]: [],
+			[`GET ${queuesPath}/queue-3/consumers`]: [
+				{
+					...liveWorkerConsumer,
+					script_name: 'production',
+					dead_letter_queue: 'staging-maintenance-dlq'
+				}
+			]
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId()).findQueue(
+				'staging-maintenance-dlq'
+			)
+		).toStrictEqual({ isUsed: false, deadLetterOf: ['production'] });
+	});
+
+	it("reads each queue's consumers once across checks of the same queue", async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${queuesPath}`]: [
+				{ queue_name: 'staging-maintenance', queue_id: 'queue-1' },
+				{ queue_name: 'production-maintenance', queue_id: 'queue-2' }
+			],
+			[`GET ${queuesPath}/queue-1/consumers`]: [],
+			[`GET ${queuesPath}/queue-2/consumers`]: []
+		});
+		const api = createCloudflareApi(client, accountId());
+
+		await api.findQueue('staging-maintenance');
+		await api.findQueue('staging-maintenance');
+
+		expect(requests.map((request) => request.path)).toStrictEqual([
+			queuesPath,
+			`${queuesPath}/queue-1/consumers`,
+			`${queuesPath}/queue-2/consumers`
+		]);
+	});
+
+	it('reports a queue as absent when reading its consumers returns 404', async () => {
+		const { client } = fakeCloudflare({
+			[`GET ${queuesPath}`]: [
+				{ queue_name: 'staging-maintenance', queue_id: 'queue-1' }
+			]
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId()).findQueue(
+				'staging-maintenance'
+			)
+		).toBeUndefined();
+	});
+
+	it('lists the queues again after a failed list', async () => {
+		let lists = 0;
+		const fetcher: typeof fetch = () => {
+			lists += 1;
+
+			return Promise.resolve(
+				lists === 1
+					? Response.json(
+							{ success: false, errors: [{ code: 10_000, message: 'denied' }] },
+							{ status: StatusCodes.FORBIDDEN }
+						)
+					: Response.json({
+							success: true,
+							errors: [],
+							messages: [],
+							result: []
+						})
+			);
+		};
+		const api = createCloudflareApi(
+			new Cloudflare({ apiToken: 'token', fetch: fetcher, maxRetries: 0 }),
+			accountId()
+		);
+
+		await expect(api.findQueue('staging-maintenance')).rejects.toBeInstanceOf(
+			Cloudflare.PermissionDeniedError
+		);
+		expect({
+			found: await api.findQueue('staging-maintenance'),
+			lists
+		}).toStrictEqual({ found: undefined, lists: 2 });
+	});
+});
+
+describe('findZoneId', () => {
+	it('asks for and accepts only the zones of the deployment account', async () => {
+		const accountIds: (string | null)[] = [];
+		// The response includes a zone of another account even for a scoped
+		// request, so the test also covers the client-side account filter.
+		const fetcher: typeof fetch = (input) => {
+			const rawUrl =
+				typeof input === 'string'
+					? input
+					: input instanceof URL
+						? input.href
+						: input.url;
+			const url = new URL(rawUrl);
+			const page = Number(url.searchParams.get('page') ?? '1');
+			accountIds.push(url.searchParams.get('account.id'));
+
+			return Promise.resolve(
+				Response.json({
+					success: true,
+					errors: [],
+					messages: [],
+					result:
+						page === 1
+							? [
+									{
+										id: 'zone-elsewhere',
+										name: 'example.com',
+										account: { id: 'acc-2' }
+									}
+								]
+							: [],
+					result_info: {
+						page,
+						per_page: 20,
+						count: page === 1 ? 1 : 0,
+						total_count: 1
+					}
+				})
+			);
+		};
+
+		const zone = await createCloudflareApi(
+			new Cloudflare({ apiToken: 'token', fetch: fetcher }),
+			accountId()
+		).findZoneId('example.com');
+
+		expect({ zone, accountIds: [...new Set(accountIds)] }).toStrictEqual({
+			zone: undefined,
+			accountIds: ['acc-1']
+		});
+	});
+});
+
+describe('listScriptNames', () => {
+	it('lists every Worker script on the account', async () => {
+		const { client } = fakeCloudflare({
+			'GET /accounts/acc-1/workers/scripts': [
+				{ id: 'cupboard' },
+				{ id: 'other' }
+			]
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId()).listScriptNames()
+		).toStrictEqual(['cupboard', 'other']);
+	});
+});
+
+describe('account resource lookups', () => {
+	const bucketPath = '/accounts/acc-1/r2/buckets/staging-blobs';
+	const namespacesPath = '/accounts/acc-1/storage/kv/namespaces';
+	const queuesPath = '/accounts/acc-1/queues';
+
+	it.each<[string, Readonly<Record<string, unknown>>, unknown]>([
+		['finds no bucket', {}, undefined],
+		[
+			'finds an empty bucket',
+			{
+				[`GET ${bucketPath}`]: { name: 'staging-blobs' },
+				[`GET ${bucketPath}/objects`]: []
+			},
+			{ isUsed: false }
+		],
+		[
+			'finds a bucket with objects',
+			{
+				[`GET ${bucketPath}`]: { name: 'staging-blobs' },
+				[`GET ${bucketPath}/objects`]: [{ key: 'staging/photo.jpg' }]
+			},
+			{ isUsed: true }
+		]
+	])('%s', async (_name, routes, expected) => {
+		const { client } = fakeCloudflare(routes);
+
+		expect(
+			await createCloudflareApi(client, accountId()).findR2Bucket(
+				'staging-blobs'
+			)
+		).toStrictEqual(expected);
+	});
+
+	it.each<[string, readonly unknown[], unknown]>([
+		['finds no KV namespace', [], undefined],
+		['finds an empty KV namespace', [], { id: 'kv-1', isUsed: false }],
+		[
+			'finds a KV namespace with keys',
+			[{ name: 'session' }],
+			{ id: 'kv-1', isUsed: true }
+		]
+	])('%s', async (name, keys, expected) => {
+		const { client } = fakeCloudflare({
+			[`GET ${namespacesPath}`]:
+				name === 'finds no KV namespace'
+					? []
+					: [{ id: 'kv-1', title: 'staging-cron-state' }],
+			[`GET ${namespacesPath}/kv-1/keys`]: keys
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId()).findKvNamespace(
+				'staging-cron-state'
+			)
+		).toStrictEqual(expected);
+	});
+
+	it.each<[string, readonly unknown[], readonly unknown[], unknown]>([
+		['finds no queue', [], [], undefined],
+		[
+			'finds a queue without consumers',
+			[{ queue_name: 'staging-maintenance', queue_id: 'queue-1' }],
+			[],
+			{ isUsed: false, deadLetterOf: [] }
+		],
+		[
+			'finds a queue that another Worker produces to',
+			[
+				{
+					queue_name: 'staging-maintenance',
+					queue_id: 'queue-1',
+					producers: [{ type: 'worker', script: 'other' }],
+					producers_total_count: 1
+				}
+			],
+			[],
+			{ isUsed: true, deadLetterOf: [] }
+		],
+		[
+			'finds a producer without a producer count',
+			[
+				{
+					queue_name: 'staging-maintenance',
+					queue_id: 'queue-1',
+					producers: [{ type: 'worker', script: 'other' }]
+				}
+			],
+			[],
+			{ isUsed: true, deadLetterOf: [] }
+		],
+		[
+			'finds a queue that another Worker consumes',
+			[{ queue_name: 'staging-maintenance', queue_id: 'queue-1' }],
+			[{ ...liveWorkerConsumer, script_name: 'other' }],
+			{ isUsed: true, deadLetterOf: [] }
+		],
+		[
+			"finds the Workers that use a queue as their consumer's dead-letter queue",
+			[
+				{ queue_name: 'staging-maintenance', queue_id: 'queue-1' },
+				{ queue_name: 'production-maintenance', queue_id: 'queue-2' }
+			],
+			[],
+			{ isUsed: false, deadLetterOf: ['production'] }
+		]
+	])('%s', async (_name, queues, consumers, expected) => {
+		const { client } = fakeCloudflare({
+			[`GET ${queuesPath}`]: queues,
+			[`GET ${consumersPath}`]: consumers,
+			[`GET ${queuesPath}/queue-2/consumers`]: [
+				{
+					...liveWorkerConsumer,
+					script_name: 'production',
+					dead_letter_queue: 'staging-maintenance'
+				}
+			]
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId()).findQueue(
+				'staging-maintenance'
+			)
+		).toStrictEqual(expected);
+	});
+});
+
 describe('ensureStagingLifecycleRule', () => {
 	const lifecyclePath = '/accounts/acc-1/r2/buckets/cupboard-blobs/lifecycle';
 
@@ -885,6 +1200,183 @@ describe('findCustomDomain', () => {
 	});
 });
 
+describe('findHostnameWorkers', () => {
+	const domainsPath = 'GET /accounts/acc-1/workers/domains';
+	const routesPath = 'GET /zones/zone-1/workers/routes';
+
+	it.each<[string, string, Readonly<Record<string, unknown>>, unknown]>([
+		[
+			'finds the Worker of a custom domain',
+			'cache.example.com',
+			{
+				[domainsPath]: [
+					{ hostname: 'cache.example.com', service: 'production' },
+					{ hostname: 'other.example.com', service: 'other' }
+				],
+				[routesPath]: []
+			},
+			{ customDomain: 'production', routes: [] }
+		],
+		[
+			'compares a mixed-case hostname in lower case',
+			'CACHE.Example.com',
+			{
+				[domainsPath]: [
+					{ hostname: 'cache.example.com', service: 'production' }
+				],
+				[routesPath]: [
+					{ id: 'r1', pattern: 'Cache.Example.com/*', script: 'logger' }
+				]
+			},
+			{ customDomain: 'production', routes: ['logger'] }
+		],
+		[
+			'finds the Workers of exact, wildcard and catch-all routes',
+			'cache.example.com',
+			{
+				[domainsPath]: [],
+				[routesPath]: [
+					{ id: 'r1', pattern: 'cache.example.com/*', script: 'production' },
+					{ id: 'r2', pattern: '*.example.com/api/*', script: 'api' },
+					{ id: 'r3', pattern: 'other.example.com/*', script: 'other' },
+					{ id: 'r4', pattern: 'cache.example.com/static/*' },
+					{ id: 'r5', pattern: '*/*', script: 'router' }
+				]
+			},
+			{ customDomain: undefined, routes: ['production', 'api', 'router'] }
+		],
+		[
+			'finds no Worker for a hostname that nothing serves',
+			'cache.example.com',
+			{
+				[domainsPath]: [{ hostname: 'other.example.com', service: 'other' }],
+				[routesPath]: [{ id: 'r1', pattern: 'example.com/*', script: 'apex' }]
+			},
+			{ customDomain: undefined, routes: [] }
+		]
+	])('%s', async (_name, hostname, routes, expected) => {
+		const { client } = fakeCloudflare(routes);
+
+		const workers = await createCloudflareApi(
+			client,
+			accountId()
+		).findHostnameWorkers(hostname, zoneIdSchema.parse('zone-1'));
+
+		expect(workers).toStrictEqual(expected);
+	});
+});
+
+const refusal = {
+	success: false,
+	errors: [{ code: 10_000, message: 'Authentication error' }]
+};
+
+/**
+A client that answers the custom-domain list with `domains` and the
+zone's route list with `routes`, each as a status and a body.
+*/
+function routesClient(
+	domains: { readonly status: number; readonly body: unknown },
+	routes: { readonly status: number; readonly body: unknown }
+): Cloudflare {
+	const fetcher: typeof fetch = (input) => {
+		const rawUrl =
+			typeof input === 'string'
+				? input
+				: input instanceof URL
+					? input.href
+					: input.url;
+		const response = new URL(rawUrl).pathname.endsWith('/workers/routes')
+			? routes
+			: domains;
+
+		return Promise.resolve(
+			Response.json(response.body, { status: response.status })
+		);
+	};
+
+	return new Cloudflare({ apiToken: 'token', fetch: fetcher, maxRetries: 0 });
+}
+
+const listed = (result: unknown) => ({
+	status: StatusCodes.OK,
+	body: { success: true, errors: [], messages: [], result }
+});
+
+describe('findHostnameWorkers with a token that may not list everything', () => {
+	it('reports the routes as unknown when the token may not list them', async () => {
+		const api = createCloudflareApi(
+			routesClient(
+				listed([{ hostname: 'cache.example.com', service: 'production' }]),
+				{ status: StatusCodes.FORBIDDEN, body: refusal }
+			),
+			accountId()
+		);
+
+		expect(
+			await api.findHostnameWorkers(
+				'cache.example.com',
+				zoneIdSchema.parse('zone-1')
+			)
+		).toStrictEqual({ customDomain: 'production', routes: undefined });
+	});
+
+	it('fails when the token may not list the custom domains', async () => {
+		const api = createCloudflareApi(
+			routesClient(
+				{ status: StatusCodes.FORBIDDEN, body: refusal },
+				listed([])
+			),
+			accountId()
+		);
+
+		await expect(
+			api.findHostnameWorkers('cache.example.com', zoneIdSchema.parse('zone-1'))
+		).rejects.toBeInstanceOf(Cloudflare.PermissionDeniedError);
+	});
+});
+
+describe('route Workers in front of the domain', () => {
+	it('do not block the plan in a zone with a */* route', async () => {
+		const { client } = fakeCloudflare({
+			'GET /accounts/acc-1/workers/domains': [
+				{ hostname: 'cache.example.com', service: 'cupboard' }
+			],
+			'GET /zones/zone-1/workers/routes': [
+				{ id: 'r1', pattern: '*/*', script: 'router' }
+			]
+		});
+		const config = parseDeploymentConfig(
+			'{ "name": "cupboard", "compatibility_date": "2026-05-15" }',
+			'{ "name": "cupboard-tenant", "compatibility_date": "2026-05-15" }'
+		);
+
+		const api = createCloudflareApi(client, accountId());
+
+		expect(
+			await checkPlan(
+				{
+					getScriptConfiguration: () => Promise.resolve(undefined),
+					findD1Database: () => Promise.resolve(undefined),
+					d1QueryRows: () => Promise.resolve([]),
+					findR2Bucket: () => Promise.resolve(undefined),
+					findQueue: () => Promise.resolve(undefined),
+					findKvNamespace: () => Promise.resolve(undefined),
+					findConsumerDeadLetterQueue: () => Promise.resolve(undefined),
+					accountWorkers: () =>
+						Promise.resolve({ kind: 'read' as const, bindings: new Map() }),
+					findZoneId: () => Promise.resolve(zoneIdSchema.parse('zone-1')),
+					findHostnameWorkers: (hostname, zoneId) =>
+						api.findHostnameWorkers(hostname, zoneId)
+				},
+				{ config, d1Migrations: [] },
+				'cache.example.com',
+				undefined
+			)
+		).toStrictEqual({ refusal: undefined, routeWorkers: ['router'] });
+	});
+});
+
 describe('listCustomDomains', () => {
 	it('returns every hostname routed to the script', async () => {
 		const { client } = fakeCloudflare({
@@ -928,6 +1420,53 @@ describe('setCustomDomain', () => {
 			{ method: 'DELETE', path: `${domainsPath}/old-a` },
 			{ method: 'DELETE', path: `${domainsPath}/old-b` }
 		]);
+	});
+
+	it('removes the other domains without a zone when it keeps an attached domain', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${domainsPath}`]: [
+				{ id: 'kept', hostname: 'a.example.com', service: 'cupboard' },
+				{ id: 'old', hostname: 'b.example.net', service: 'cupboard' }
+			],
+			[`DELETE ${domainsPath}/old`]: { success: true }
+		});
+
+		const outcome = await createCloudflareApi(
+			client,
+			accountId()
+		).setCustomDomain(scriptName('cupboard'), {
+			hostname: 'a.example.com',
+			zoneId: undefined
+		});
+
+		expect({ outcome, requests }).toStrictEqual({
+			outcome: 'set',
+			requests: [
+				{ method: 'GET', path: domainsPath },
+				{ method: 'DELETE', path: `${domainsPath}/old` }
+			]
+		});
+	});
+
+	it('changes nothing when the script does not have the domain and no zone is given', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${domainsPath}`]: [
+				{ id: 'old', hostname: 'b.example.net', service: 'cupboard' }
+			]
+		});
+
+		const outcome = await createCloudflareApi(
+			client,
+			accountId()
+		).setCustomDomain(scriptName('cupboard'), {
+			hostname: 'a.example.com',
+			zoneId: undefined
+		});
+
+		expect({ outcome, requests }).toStrictEqual({
+			outcome: 'zone-missing',
+			requests: [{ method: 'GET', path: domainsPath }]
+		});
 	});
 
 	it('attaches the configured domain before detaching an old domain', async () => {

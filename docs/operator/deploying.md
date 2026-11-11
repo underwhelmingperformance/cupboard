@@ -65,7 +65,8 @@ separate sign-in, so the token doesn't decide who becomes the admin.
    and cron triggers before you confirm. See
    [Resource names and cron triggers](#resource-names-and-cron-triggers).
 
-   The default plan shows the release, deployment URL, intended changes, storage
+   The default plan shows the release, the deployment and whether `init` creates
+   it or updates an existing one, the deployment URL, intended changes, storage
    credentials, tenant readiness and recovery instructions. Add `--details` for
    the resource names and maintenance schedule. The maintenance queue and its
    dead-letter queue have separate labels. Add `--debug` for database migration
@@ -270,13 +271,26 @@ own domain as well, pass `--domain`:
 cupboard init --domain cache.example.com
 ```
 
-The domain's zone must be in the same Cloudflare account. If it isn't, `init`
-warns you and doesn't change the Worker's domains.
+To attach or remove a custom domain, the domain's zone must be in the same
+Cloudflare account, and the token needs Zone: Read and Workers Routes: Edit on
+that zone. The plan is blocked before anything changes if the token cannot see
+the zone of a custom domain that the plan attaches or removes, or cannot list
+the Workers routes in that zone. Listing routes needs only Workers Routes: Read,
+so a token without Workers Routes: Edit passes the plan and the deploy fails
+when it changes the domain, after it has uploaded the Workers. A domain that the
+deployment already serves, and that the plan keeps, needs neither permission.
 
 The deployment only keeps the domain that you give it. `init` removes any other
-custom domain from the Worker. The workers.dev address stays enabled. A new
-domain can take a few minutes to start resolving. Later runs of `init` keep the
-existing domain unless you pass a different one.
+custom domain from the Worker. If the domain is already a custom domain of a
+Worker outside the deployment, the plan is blocked until you choose another
+domain, because attaching it would take it from that Worker. This keeps a second
+deployment from taking the domain of another deployment. Routes in the domain's
+zone don't block the plan: Cloudflare runs their Workers in front of the
+deployment, and the plan lists those Workers in a warning. If the Cloudflare
+token may not list the zone's Workers routes, the plan says so instead, as long
+as the deployment keeps the domain that it already serves. The workers.dev
+address stays enabled. A new domain can take a few minutes to start resolving.
+Later runs of `init` keep the existing domain unless you pass a different one.
 
 Choose the domain before you create tenants. Each tenant is tied to the address
 that it was created at: its tokens contain that tenant URL as their issuer and
@@ -371,6 +385,17 @@ adding a first custom domain to a deployment that serves on workers.dev. The
 deploy wakes the tenants to run any pending migration and initialises the
 deployment at the new URL, so it needs an admin token for the new URL before it
 changes anything. An admin token for one URL isn't accepted at another.
+
+When the plan's domain differs from the custom domains that are routed to the
+existing deployment's control Worker, the plan has a **Domain change** row and
+`init` warns that the run changes them. This includes a control Worker with more
+than one custom domain, because the deploy removes every domain except the
+plan's. `init` compares domains in lower case. In a terminal, the menu then asks
+whether to deploy and move the deployment. With `--yes`, which skips the menu,
+`init` refuses the run before it changes anything unless you also pass
+`--allow-domain-change`. If you meant to create another deployment, pass
+`--deployment-name` instead. See
+[Several deployments on one account](#several-deployments-on-one-account).
 
 A move doesn't change the tenants that already exist. Each one keeps the tenant
 URL that it was created at as the issuer and audience of its tokens. For each
@@ -722,6 +747,40 @@ including upgrades and runs from CI. `init` finds the existing deployment by the
 name of its control Worker. A run without `--deployment-name` therefore updates
 the deployment called `cupboard`, whatever `--instance-name` or `--domain` you
 pass.
+
+The plan's **Deployment** row says which deployment the run changes, and whether
+it creates that deployment or updates an existing one. `cupboard init` and
+`cupboard deploy` are the same command, so `init` updates a deployment that
+already exists, as it does for an upgrade. If the plan updates a deployment that
+you meant to leave alone, cancel and run `init` again with another
+`--deployment-name`. A run that would also move the existing deployment to
+another domain needs confirmation, as
+[Moving to a new URL](#moving-to-a-new-url) describes.
+
+Before you confirm, `init` also checks the resources that already have the
+deployment's names, and blocks the plan for one that isn't part of a cupboard
+deployment:
+
+- a Worker with the control Worker's or the tenant Worker's name that has no
+  Durable Object binding to the `CupboardServer` class;
+- a D1 database with tables whose `d1_migrations` table doesn't record the first
+  of cupboard's migrations for that database. Wrangler creates a `d1_migrations`
+  table too, so the table alone doesn't show that cupboard created the database.
+  A database that contains only the tables that `init` creates before its first
+  migration passes, so a first deploy that stopped there can run again;
+- a database, a bucket or a queue that a Worker outside the deployment uses, for
+  example after the plan menu renames it to another deployment's;
+- a bucket that contains objects, a queue that a Worker produces to or consumes,
+  or a KV namespace that contains keys, when none of the deployment's Workers
+  uses it. An empty bucket passes, so you can create the bucket before the first
+  deploy.
+
+`init` also blocks the plan when it can't list the Workers on the account, or
+read the bindings of one of them, while it checks whether another Worker uses
+one of these resources. Run it again once Cloudflare answers.
+
+Deploying would replace, migrate or take over such a resource. Choose another
+`--deployment-name`, or another name in the plan.
 
 A deployment name follows the rules for Worker names: lower-case letters, digits
 and hyphens, without a hyphen at either end. Every name derived from it must

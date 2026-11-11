@@ -6,6 +6,8 @@ import type { ScriptConfiguration } from './cloudflare-api.ts';
 import { type DeploymentConfig, parseDeploymentConfig } from './config.ts';
 import {
 	DeadLetterQueueLoopError,
+	type DeploymentTarget,
+	deploymentTarget,
 	DuplicateDefaultResourceNameError,
 	type ExistingDeploymentApi,
 	readExistingConfig,
@@ -111,9 +113,11 @@ function fakeApi(account: FakeAccount): ExistingDeploymentApi {
 			Promise.resolve(
 				isControlWorker(scriptName) ? account.deadLetters?.[queue] : undefined
 			),
-		findCustomDomain: (scriptName) =>
+		listCustomDomains: (scriptName) =>
 			Promise.resolve(
-				isControlWorker(scriptName) ? account.customDomain : undefined
+				isControlWorker(scriptName) && account.customDomain !== undefined
+					? [account.customDomain]
+					: []
 			)
 	};
 }
@@ -349,13 +353,14 @@ describe('startingPlanLookup', () => {
 				config: renameResources(defaults, {
 					bucket: new Map([['cupboard-blobs', 'my-blobs']])
 				}),
-				routedDomain: 'cache.example.com'
+				routedDomains: ['cache.example.com'],
+				isExisting: true
 			}
 		],
 		[
 			'starts from the defaults on an account without a control Worker',
 			freshAccount,
-			{ config: defaults, routedDomain: undefined }
+			{ config: defaults, routedDomains: [], isExisting: false }
 		]
 	])('%s', async (_name, account, expected) => {
 		expect(await lookup()(account)).toStrictEqual(expected);
@@ -372,5 +377,94 @@ describe('startingPlanLookup', () => {
 			isSame: true,
 			reads: [deployedAccount]
 		});
+	});
+});
+
+describe('deploymentTarget', () => {
+	const existing = (...routedDomains: string[]): StartingPlan => ({
+		config: defaults,
+		routedDomains,
+		isExisting: true
+	});
+
+	it.each<[string, StartingPlan, string | undefined, DeploymentTarget]>([
+		[
+			'creates a deployment on an account without its control Worker',
+			{ config: defaults, routedDomains: [], isExisting: false },
+			'cache.example.com',
+			{ isExisting: false, domainChange: undefined }
+		],
+		[
+			'keeps the domain of an existing deployment',
+			existing('cache.example.com'),
+			'cache.example.com',
+			{ isExisting: true, domainChange: undefined }
+		],
+		[
+			'keeps a domain given in mixed case',
+			existing('cache.example.com'),
+			'Cache.Example.com',
+			{ isExisting: true, domainChange: undefined }
+		],
+		[
+			'keeps the workers.dev address of an existing deployment',
+			existing(),
+			undefined,
+			{ isExisting: true, domainChange: undefined }
+		],
+		[
+			'moves an existing deployment to another domain',
+			existing('cache.example.com'),
+			'scratch.example.com',
+			{
+				isExisting: true,
+				domainChange: {
+					kind: 'move',
+					from: ['cache.example.com'],
+					to: 'scratch.example.com'
+				}
+			}
+		],
+		[
+			'moves an existing deployment from workers.dev to a domain',
+			existing(),
+			'scratch.example.com',
+			{
+				isExisting: true,
+				domainChange: {
+					kind: 'first-domain',
+					from: [],
+					to: 'scratch.example.com'
+				}
+			}
+		],
+		[
+			'moves an existing deployment from a domain to workers.dev',
+			existing('cache.example.com'),
+			undefined,
+			{
+				isExisting: true,
+				domainChange: {
+					kind: 'move',
+					from: ['cache.example.com'],
+					to: undefined
+				}
+			}
+		],
+		[
+			'removes the other custom domains of an existing deployment',
+			existing('cache.example.com', 'old.example.com'),
+			'cache.example.com',
+			{
+				isExisting: true,
+				domainChange: {
+					kind: 'removal',
+					from: ['cache.example.com', 'old.example.com'],
+					to: 'cache.example.com'
+				}
+			}
+		]
+	])('%s', (_name, starting, domain, expected) => {
+		expect(deploymentTarget(starting, domain)).toStrictEqual(expected);
 	});
 });

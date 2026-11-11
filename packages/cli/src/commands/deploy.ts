@@ -87,6 +87,10 @@ export function registerDeployCommand(
 		)
 		.option('--domain <host>', 'custom domain to serve the cache on')
 		.option(
+			'--allow-domain-change',
+			'with --yes, allow the plan to change the custom domains of an existing deployment, such as moving it to the domain given with --domain'
+		)
+		.option(
 			'--instance-name <name>',
 			"the first part of every signing key's name, such as cupboard in cupboard-acme-1",
 			parseInstanceName
