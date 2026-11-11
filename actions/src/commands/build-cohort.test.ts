@@ -66,6 +66,7 @@ import {
 	CohortPlanResultMissingError,
 	CommandOutputTooLargeError,
 	CupboardReportedError,
+	DiskCleanupFailedError,
 	EnvironmentCredentialVersionError,
 	FailOnDivergenceUnsupportedError,
 	InvalidMaxJobsError,
@@ -5004,6 +5005,82 @@ describe('buildCohortAction', () => {
 			buildRuns: []
 		});
 	});
+
+	it.each([
+		{
+			name: 'finishes',
+			cleanupFailure: undefined,
+			events: [
+				{
+					join: { status: '/runner/status', log: '/runner/log' },
+					options: {}
+				},
+				{ cupboard: 'plan cohort' }
+			]
+		},
+		{
+			name: 'fails',
+			cleanupFailure: new DiskCleanupFailedError({
+				status: 1,
+				output: 'df output\n'
+			}),
+			events: [
+				{
+					join: { status: '/runner/status', log: '/runner/log' },
+					options: {}
+				}
+			]
+		}
+	])(
+		'checks the store capacity only after the background disk cleanup $name',
+		async ({ cleanupFailure, events: expectedEvents }) => {
+			const events: unknown[] = [];
+			const stopped = new Error('stopped after the capacity check');
+			const runNixBuild = vi.fn(() =>
+				Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+			);
+
+			let outcome: unknown;
+
+			try {
+				await buildCohortAction(
+					baseOptions(),
+					{
+						...environment,
+						CUPBOARD_DISK_CLEANUP_STATUS: '/runner/status',
+						CUPBOARD_DISK_CLEANUP_LOG: '/runner/log'
+					},
+					{
+						joinDiskCleanup: (files, _reporter, options) => {
+							events.push({ join: files, options });
+
+							return cleanupFailure === undefined
+								? Promise.resolve()
+								: Promise.reject(cleanupFailure);
+						},
+						runCupboard: (_binaryPath, arguments_) => {
+							if (arguments_[1] === 'plan' && arguments_[2] === 'cohort') {
+								events.push({ cupboard: 'plan cohort' });
+							}
+
+							return Promise.reject(stopped);
+						},
+						runNixBuild
+					}
+				);
+			} catch (error) {
+				outcome = error;
+			}
+
+			const failure =
+				outcome instanceof CohortPlanCommandError ? outcome.cause : outcome;
+
+			expect({ failure, events }).toStrictEqual({
+				failure: cleanupFailure ?? stopped,
+				events: expectedEvents
+			});
+		}
+	);
 
 	it('includes the measured capacity and headroom in a store-capacity refusal', async () => {
 		const refusalEvents: readonly ReporterResultEvent[] = [

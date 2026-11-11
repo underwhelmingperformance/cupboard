@@ -136,26 +136,48 @@ Each cohort job goes through these steps:
 3. It evaluates each target's `attr` again, and fails if the result no longer
    matches the `rootDrvPath` that the plan used. This catches a flake that
    changed between jobs.
-4. It sorts the targets by how they are available, and prints the groups in the
+4. On macOS with `maximise-space`, it waits for the background removal of
+   preinstalled software to finish. See [how a macOS cohort frees disk space in
+   the background][background-removal].
+5. It sorts the targets by how they are available, and prints the groups in the
    log. `build: rebuild` puts each requested output in the build work even if
    the output was already available.
-5. It builds the requested outputs that the selected build mode requires. With
+6. It builds the requested outputs that the selected build mode requires. With
    `publish: outputs`, it publishes the selected outputs. With `publish: built`,
    it also publishes intermediates built during the run and required dependency
    outputs already available from configured tenant caches or reuse views.
    Dependencies absent from those sources cause no additional build or download.
    With `publish: closure`, it also publishes their runtime references. With
    `publish: none`, it publishes nothing.
-6. After publication succeeds, it sets each published target's retention root.
-7. With `attest: true`, it signs build provenance for builds observed on the
+7. After publication succeeds, it sets each published target's retention root.
+8. With `attest: true`, it signs build provenance for builds observed on the
    runner plus an attribute report for successful local verification rebuilds,
    and attaches those bundles to the published paths. Signing and attachment
    happen after publication; a failure fails the job but does not remove paths
    from the cache.
 
+### How a macOS cohort frees disk space in the background
+
+The removal of Xcode and the simulator runtimes takes minutes on a macOS runner.
+The prepare step starts the removal in the background and returns at once, so
+installing Nix and setting up cupboard run while the removal frees space. The
+cohort job evaluates its targets, and then waits for the removal to finish. The
+wait comes before the store capacity check and before any build of the targets,
+and the log shows it as "Waiting for disk space to be freed". If the removal
+failed, or did not finish within 20 minutes, the cohort job fails at that point
+with the output of the removal.
+
+Two kinds of work run before the wait. A flake whose evaluation builds or
+downloads large derivations (import from derivation) evaluates while the removal
+is still freeing space. A cupboard that the workflow builds from source is also
+built during setup, before the wait. On Linux, the cleanup runs in the
+foreground before the job installs Nix.
+
+[background-removal]: #how-a-macos-cohort-frees-disk-space-in-the-background
+
 ### The four groups in the log
 
-In step 4, each target ends up in one of these groups. The group names are the
+In step 5, each target ends up in one of these groups. The group names are the
 labels that you'll see in the job's log.
 
 | Log label                   | Which targets                                                                                         | What happens                                                                        |
