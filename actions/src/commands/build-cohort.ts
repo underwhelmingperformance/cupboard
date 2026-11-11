@@ -2309,11 +2309,6 @@ async function settleCohortBuild(
 	await setOutput(environment, 'left-upstream-file', inputs.leftUpstreamFile);
 	await setOutput(environment, 'counts-file', inputs.countsFile);
 	await setOutput(environment, 'receipt-file', receiptFile);
-	await setOutput(
-		environment,
-		'out-link-directory',
-		inputs.store === '' ? inputs.outLinkDirectory : ''
-	);
 
 	const uploadsBeforeRoots = addUploads(buildUploads, publication.otherUploads);
 	const owners = targetPathOwners(members, { resultBuilds, localBuilds });

@@ -7176,32 +7176,6 @@ if (args.includes('--help')) {
 		]);
 	});
 
-	// The caller removes this directory after publication to release the GC
-	// roots, so the action must return its path.
-	it('reports the directory holding the out-links that root its targets', async () => {
-		const outputFile = path.join(directory, 'github-output');
-		const runNixBuild = vi.fn(() =>
-			Promise.resolve({
-				paths: [libraryBuiltPath],
-				status: 0,
-				copiedFrom: new Map()
-			})
-		);
-
-		await buildCohortAction(baseOptions(), environment, {
-			runCupboard: vi.fn<typeof runCupboard>(cupboardStub()),
-			runNixBuild
-		});
-
-		const outputs = await readFile(outputFile, 'utf8');
-
-		expect(
-			outputs
-				.split('\n')
-				.filter((line) => line.startsWith('out-link-directory='))
-		).toStrictEqual([`out-link-directory=${outLinkDirectory(directory)}`]);
-	});
-
 	it('rebuilds queryable targets whose output paths cannot be predicted under supervision', async () => {
 		const multiOutputQueryInstallable =
 			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv^dev,out';
