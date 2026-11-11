@@ -334,8 +334,7 @@ describe('the fake S3 endpoint', () => {
 	});
 });
 
-// Each test compresses and sends tens of MiB through a loopback S3 endpoint.
-describe('r2BlobUploader', { timeout: 30_000 }, () => {
+describe('r2BlobUploader', () => {
 	it('signs each request with a credential from the provider', async () => {
 		await withFake({}, async (fake) => {
 			let issued = 0;

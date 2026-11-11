@@ -113,7 +113,7 @@ describe('attachment input validation', () => {
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
-	}, 30_000);
+	});
 
 	it.each([
 		{ kind: 'path-file-cache-name' },

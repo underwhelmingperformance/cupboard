@@ -117,7 +117,7 @@ beforeAll(async () => {
 			}
 		]
 	});
-}, 30_000);
+});
 
 afterAll(async () => {
 	await state.miniflare?.dispose();
@@ -135,7 +135,7 @@ it('bundles both Workers into bytes workerd can serve', async () => {
 		status: 200,
 		body: 'ok\n'
 	});
-}, 30_000);
+});
 
 it('couples versioned R2 object keys to declarative class lifecycle', () => {
 	expect({
