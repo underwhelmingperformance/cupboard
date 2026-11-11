@@ -1,5 +1,5 @@
 import { StatusCodes } from 'http-status-codes';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { ProgressiveCollectionLimitError } from './collections.ts';
 import {
@@ -9,7 +9,8 @@ import {
 	maximumGithubErrorResponseBytes,
 	maximumGithubReleaseCandidates,
 	maximumGithubReleasePages,
-	maximumGithubSuccessResponseBytes
+	maximumGithubSuccessResponseBytes,
+	retryOptions
 } from './octokit.ts';
 import { RemoteBodyTooLargeError } from './response-body.ts';
 
@@ -41,7 +42,8 @@ async function fetchCountFor(
 	const counter = countingFetch(status);
 	const octokit = createOctokitClient({
 		request: { fetch: counter.fetch },
-		replaySafety
+		replaySafety,
+		retryBaseDelayMs: 0
 	});
 
 	try {
@@ -161,10 +163,6 @@ describe('GitHub release lookup', () => {
 });
 
 describe('createOctokitClient', () => {
-	afterEach(() => {
-		vi.useRealTimers();
-	});
-
 	it.each([
 		['a rate-limit response', 429],
 		['a forbidden response', 403],
@@ -213,7 +211,6 @@ describe('createOctokitClient', () => {
 	])(
 		'bounds and cancels an oversized $name response',
 		async ({ status, maximumBytes }) => {
-			vi.useRealTimers();
 			let wasCancelled = false;
 			const octokit = createOctokitClient({
 				request: {
@@ -295,12 +292,14 @@ describe('createOctokitClient', () => {
 		expect(calls).toBe(1);
 	});
 
+	it('waits 1 s before the first retry unless a delay is given', () => {
+		expect({
+			default: retryOptions({}).retryAfterBaseValue,
+			explicit: retryOptions({ retryBaseDelayMs: 0 }).retryAfterBaseValue
+		}).toStrictEqual({ default: 1000, explicit: 0 });
+	});
+
 	it('retries a transient server error for a replay-safe client', async () => {
-		vi.useFakeTimers();
-
-		const pending = fetchCountFor(500, 'replay-safe');
-		await vi.runAllTimersAsync();
-
-		expect(await pending).toBe(4);
+		expect(await fetchCountFor(500, 'replay-safe')).toBe(4);
 	});
 });
