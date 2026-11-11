@@ -211,26 +211,45 @@ export class RootsService {
 					)
 					.run();
 			}
-			tx.delete(schema.retentionRoots)
-				.where(
-					and(
-						eq(schema.retentionRoots.cacheId, cache.id),
-						eq(schema.retentionRoots.name, request.name)
+			if (existing === undefined) {
+				tx.insert(schema.retentionRoots)
+					.values({
+						cacheId: cache.id,
+						name: request.name,
+						retentionEpoch,
+						closeAppliedEpoch: retentionEpoch,
+						expiresAt,
+						createdAt: created,
+						updatedAt: nowIso
+					})
+					.run();
+			} else {
+				// Each indexed column changed here rewrites its index entries, so set
+				// only the columns whose values differ.
+				tx.update(schema.retentionRoots)
+					.set({
+						...(existing.retentionEpoch !== retentionEpoch && {
+							retentionEpoch
+						}),
+						...(existing.closeAppliedEpoch !== retentionEpoch && {
+							closeAppliedEpoch: retentionEpoch
+						}),
+						...(existing.closeGraceUntil !== null && {
+							closeGraceUntil: sql`NULL`
+						}),
+						...((existing.expiresAt ?? undefined) !== expiresAt && {
+							expiresAt: expiresAt ?? sql`NULL`
+						}),
+						updatedAt: nowIso
+					})
+					.where(
+						and(
+							eq(schema.retentionRoots.cacheId, cache.id),
+							eq(schema.retentionRoots.name, request.name)
+						)
 					)
-				)
-				.run();
-
-			tx.insert(schema.retentionRoots)
-				.values({
-					cacheId: cache.id,
-					name: request.name,
-					retentionEpoch,
-					closeAppliedEpoch: retentionEpoch,
-					expiresAt,
-					createdAt: created,
-					updatedAt: nowIso
-				})
-				.run();
+					.run();
+			}
 
 			if (isTargetSetChanged) {
 				for (const targets of jsonRowLists(request.targets)) {
