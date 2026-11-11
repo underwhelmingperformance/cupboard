@@ -581,11 +581,16 @@ object's critical-section deadline.
 
 When a change makes a cached public response wrong, the tenant object queues a
 purge of the response's cache tags in its `cache_purge_continuation` table. Each
-alarm sends the oldest queued row through `CachedTenantReads.purgeTags`, which
-returns the Cache API's result. A row is dropped when the responses that it
-covers have expired, one hour after it was queued for narinfos and one year for
-NARs. A signing-key rotation queues its own rows, and the backfill maintenance
-pass purges them. Those rows remain until their purge succeeds.
+alarm sends one request through `CachedTenantReads.purgeTags`, which returns the
+Cache API's result. The request contains the tags of the oldest queued rows, as
+many rows as fit in Cloudflare's limit of 100 tags for one request, so a burst
+of small changes costs one request for each 100 tags. The object deletes exactly
+those rows after the request succeeds. A row queued while the request is in
+flight therefore remains queued, and a crash between the request and the delete
+sends the same tags again. A row is dropped when the responses that it covers
+have expired, one hour after it was queued for narinfos and one year for NARs. A
+signing-key rotation queues its own rows, and the backfill maintenance pass
+purges them. Those rows remain until their purge succeeds.
 
 Workers Cache applies the Free plan's [purge rate limit] on every plan: a token
 bucket for the whole account that refills at 5 requests a minute and has a
@@ -596,8 +601,9 @@ neither the queue nor the backfill sends a purge before that time, even when
 other work wakes the object. The alarm is armed for it. A success on either path
 clears the wait, and so does the expiry of the last queued row. A refusal more
 than 5 minutes after the previous wait ended starts a new count. Any other
-failure delays only the row that failed: the row records its own retry time in
-`next_attempt_at` and its consecutive failures in `failed_attempts`.
+failure delays only the queue or the backfill, whichever sent the request: the
+oldest row of the request records its own retry time in `next_attempt_at` and
+its consecutive failures in `failed_attempts`.
 
 A wait starts at 60 seconds after a rate-limit refusal and at 12 seconds after
 any other failure. It doubles with each further failure of the same kind, up to

@@ -4,10 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError, WorkersCachePurgeError } from '../errors.ts';
+import { narInfoCacheTag } from '../http/cache-tags.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
 	currentServer,
+	defaultCache,
 	fakeAlarm,
 	narHash,
 	resetTestServer,
@@ -46,6 +48,23 @@ function queuedRows(context: ServerContext) {
 		}));
 }
 
+// `count` numbered tags with the prefix, starting at `from`.
+function tags(prefix: string, from: number, count: number): string[] {
+	return Array.from(
+		{ length: count },
+		(_, index) => `${prefix}-${String(from + index).padStart(2, '0')}`
+	);
+}
+
+function queuedTags(context: ServerContext): unknown[] {
+	return context.db
+		.select({ entriesJson: schema.cachePurgeContinuations.entriesJson })
+		.from(schema.cachePurgeContinuations)
+		.orderBy(schema.cachePurgeContinuations.createdAt)
+		.all()
+		.map((row) => JSON.parse(row.entriesJson) as unknown);
+}
+
 function rateLimitState(storage: DurableObjectStorage): Promise<unknown> {
 	return storage.get(cachePurgeRateLimitKey);
 }
@@ -58,6 +77,7 @@ function insertRow(
 		readonly expiresAt: number;
 		readonly nextAttemptAt?: number;
 		readonly failedAttempts?: number;
+		readonly tags?: readonly string[];
 	}
 ): void {
 	context.db
@@ -65,7 +85,7 @@ function insertRow(
 		.values({
 			id: row.id,
 			kind: 'mutation',
-			entriesJson: JSON.stringify([`narinfo-${row.id}`]),
+			entriesJson: JSON.stringify(row.tags ?? [`narinfo-${row.id}`]),
 			createdAt: isoTimestamp(new Date(row.createdAt)),
 			expiresAt: isoTimestamp(new Date(row.expiresAt)),
 			nextAttemptAt:
@@ -107,6 +127,296 @@ describe('cache purge queue', () => {
 				`nar:${fixtureTenant}:${narHash}`
 			]
 		]);
+	});
+
+	// Each pass sends one request. The rows' tags fill it up to the platform's
+	// limit of 100 tags, oldest row first.
+	it('merges queued rows into requests of up to 100 tags', async () => {
+		await bootstrap();
+		const now = Date.now();
+		const ids = Array.from({ length: 250 }, (_, index) =>
+			String(index).padStart(3, '0')
+		);
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+
+				for (const [index, id] of ids.entries()) {
+					insertRow(instance.context, {
+						id,
+						createdAt: now - 250_000 + index * 1000,
+						expiresAt: now + 3_600_000
+					});
+				}
+
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockResolvedValue(undefined);
+				const meter = instance.context.dbCost;
+				const rowsWritten: number[] = [];
+
+				try {
+					for (let pass = 0; pass < 4; pass += 1) {
+						meter.recordOutstanding();
+						const before = meter.rowsWritten;
+						await service.runOnce();
+						meter.recordOutstanding();
+						rowsWritten.push(meter.rowsWritten - before);
+					}
+
+					return {
+						purgeCalls: purge.mock.calls.map(([tags]) => tags),
+						rowsWritten,
+						rows: queuedRows(instance.context)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		const tags = ids.map((id) => `narinfo-${id}`);
+
+		expect(result).toStrictEqual({
+			purgeCalls: [tags.slice(0, 100), tags.slice(100, 200), tags.slice(200)],
+			rowsWritten: [100, 100, 50, 0],
+			rows: []
+		});
+	});
+
+	// A request takes rows while their distinct tags fit in 100. The first row's
+	// 60 tags and the second row's 60 do not fit together, so the second row
+	// starts the next request. The third row shares 10 tags with the second, and
+	// the fourth row shares all of its tags with the second and third rows, so
+	// the second request takes all three rows with 80 tags.
+	it('stops a request at the row whose tags would exceed 100', async () => {
+		await bootstrap();
+		const now = Date.now();
+		const rows = [
+			{ id: 'first', tags: tags('a', 0, 60) },
+			{ id: 'second', tags: tags('b', 0, 60) },
+			{ id: 'third', tags: [...tags('b', 50, 10), ...tags('c', 0, 20)] },
+			{ id: 'fourth', tags: [...tags('b', 0, 10), ...tags('c', 0, 20)] }
+		];
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+
+				for (const [index, row] of rows.entries()) {
+					insertRow(instance.context, {
+						...row,
+						createdAt: now - 4000 + index * 1000,
+						expiresAt: now + 3_600_000
+					});
+				}
+
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockResolvedValue(undefined);
+
+				try {
+					await service.runOnce();
+					await service.runOnce();
+					await service.runOnce();
+
+					return {
+						purgeCalls: purge.mock.calls.map(([sent]) => sent),
+						rows: queuedRows(instance.context)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			purgeCalls: [
+				tags('a', 0, 60),
+				[...tags('b', 0, 60), ...tags('c', 0, 20)]
+			],
+			rows: []
+		});
+	});
+
+	// The first row leaves one free place in the request. Each of the ten rows
+	// after it repeats one of its tags, so they add no tag and all go out in
+	// the same request.
+	it('merges rows whose tags are already in the request', async () => {
+		await bootstrap();
+		const now = Date.now();
+		const head = tags('a', 0, 99);
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+				insertRow(instance.context, {
+					id: 'head',
+					createdAt: now - 11_000,
+					expiresAt: now + 3_600_000,
+					tags: head
+				});
+
+				for (let index = 0; index < 10; index += 1) {
+					insertRow(instance.context, {
+						id: `repeat-${String(index)}`,
+						createdAt: now - 10_000 + index * 1000,
+						expiresAt: now + 3_600_000,
+						tags: tags('a', index, 1)
+					});
+				}
+
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockResolvedValue(undefined);
+
+				try {
+					await service.runOnce();
+
+					return {
+						purgeCalls: purge.mock.calls.map(([sent]) => sent),
+						rows: queuedRows(instance.context)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({ purgeCalls: [head], rows: [] });
+	});
+
+	// Each of 150 queued rows has 100 tags of its own, so every request contains
+	// one row. The run still reads up to 100 rows after the first row, because
+	// a row whose tags all repeat the first row's would join the request.
+	it('reads a bounded number of rows for a request with a full first row', async () => {
+		await bootstrap();
+		const now = Date.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+
+				for (let index = 0; index < 150; index += 1) {
+					insertRow(instance.context, {
+						id: `full-${String(index).padStart(3, '0')}`,
+						createdAt: now - 150_000 + index * 1000,
+						expiresAt: now + 3_600_000,
+						tags: tags(`r${String(index)}`, 0, 100)
+					});
+				}
+
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockResolvedValue(undefined);
+				const meter = instance.context.dbCost;
+
+				try {
+					meter.recordOutstanding();
+					const before = {
+						rowsRead: meter.rowsRead,
+						rowsWritten: meter.rowsWritten
+					};
+					await service.runOnce();
+					meter.recordOutstanding();
+
+					return {
+						purgeCalls: purge.mock.calls.map(([sent]) => sent),
+						rowsRead: meter.rowsRead - before.rowsRead,
+						rowsWritten: meter.rowsWritten - before.rowsWritten
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			purgeCalls: [tags('r0', 0, 100)],
+			rowsRead: 404,
+			rowsWritten: 1
+		});
+	});
+
+	// The purge request is an RPC, and the tenant object accepts other events
+	// while it waits. A row queued then is not part of the request, so it
+	// remains queued after the run deletes the rows that it sent.
+	it('keeps a row queued while a purge request is in flight', async () => {
+		await bootstrap();
+		const now = Date.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+				insertRow(instance.context, {
+					id: 'sent',
+					createdAt: now - 1000,
+					expiresAt: now + 3_600_000
+				});
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockImplementationOnce(async () => {
+						await service.enqueueNarInfos(resolvedCache(instance.context), [
+							syntheticStorePathHash(1)
+						]);
+					});
+
+				try {
+					await service.runOnce();
+
+					return {
+						purgeCalls: purge.mock.calls.map(([sent]) => sent),
+						rows: queuedTags(instance.context)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			purgeCalls: [['narinfo-sent']],
+			rows: [
+				[
+					narInfoCacheTag(
+						fixtureTenant,
+						defaultCache(),
+						syntheticStorePathHash(1)
+					)
+				]
+			]
+		});
 	});
 
 	// The second pass simulates an alarm caused by other work. It must not send
@@ -317,11 +627,6 @@ describe('cache purge queue', () => {
 					createdAt: now - 2000,
 					expiresAt: now + 3_600_000
 				});
-				insertRow(instance.context, {
-					id: 'second',
-					createdAt: now - 1000,
-					expiresAt: now + 3_600_000
-				});
 				const purge = vi
 					.spyOn(instance.context, 'purgeCacheTags')
 					.mockResolvedValueOnce(undefined)
@@ -330,6 +635,13 @@ describe('cache purge queue', () => {
 				try {
 					await service.runOnce();
 					const afterSuccess = await rateLimitState(state.storage);
+					// A row queued before the first pass would go out in the same
+					// request, so the second row is queued after it.
+					insertRow(instance.context, {
+						id: 'second',
+						createdAt: now - 1000,
+						expiresAt: now + 3_600_000
+					});
 					alarm.clear();
 					await service.runOnce();
 
