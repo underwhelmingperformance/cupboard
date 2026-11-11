@@ -201,12 +201,19 @@ on:
         type: boolean
       gc-between-cohorts:
         description:
-          Run garbage collection on the runner's Nix store after each cohort in
-          a job has been published. This frees the disk space that the published
-          paths used, and a later build downloads them from the cache if it
-          needs them. It only happens on GitHub-hosted runners that use their
-          own store. On a self-hosted runner, or when store is set, the job
-          prints a notice and leaves the store as it is.
+          Run garbage collection on the runner's Nix store between the cohorts
+          of one job's build, after each has been published. A strict job builds
+          its installables in at most two cohorts, one for the installables that
+          build normally and one for the installables that rebuild, so it
+          collects at most once. A best-effort job builds each installable as
+          its own cohort and collects between them. This frees the disk space
+          that the published paths used, and a later cohort downloads them from
+          the cache if it needs them. The job runs no collection after its last
+          cohort, because the runner is discarded when the job ends. With
+          `publish` set to `none`, the job builds without the publishing build
+          and runs no collection. It only happens on GitHub-hosted runners that
+          use their own store. On a self-hosted runner, or when store is set,
+          the job prints a notice and leaves the store as it is.
         required: false
         default: false
         type: boolean

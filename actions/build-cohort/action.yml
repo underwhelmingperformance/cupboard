@@ -204,11 +204,6 @@ outputs:
       published from that store without runner-local build provenance. Empty
       when push is false or the cohort has no paths to publish.
     value: ${{ steps.build-cohort.outputs.receipt-file }}
-  out-link-directory:
-    description:
-      Directory of the build's out-links. They stop garbage collection from
-      removing the targets' closures until the job has finished with them.
-    value: ${{ steps.build-cohort.outputs.out-link-directory }}
 runs:
   using: composite
   steps:

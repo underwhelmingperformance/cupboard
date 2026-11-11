@@ -1666,19 +1666,19 @@ describe('publication attestation reporting', () => {
 });
 
 describe('local store collection', () => {
-	it('collects only an ephemeral local store, after the bundle is attached', async () => {
+	it('explains a skipped collection, and gates the collection between cohorts', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		const steps = workflow.jobs.cohort?.steps ?? [];
-		const named = (name: string) =>
-			steps.findIndex((step) => step.name === name);
+		const explain = steps.findIndex(
+			(step) => step.name === 'Explain skipped local store collection'
+		);
 
 		expect({
 			order:
 				steps.findIndex(
 					(step) => step.uses === cupboardAction('attest-attach')
-				) < named('Explain skipped local store collection'),
-			explain: steps[named('Explain skipped local store collection')]?.if,
-			collect: steps[named('Collect the local store')]?.if,
+				) < explain,
+			explain: steps[explain]?.if,
 			// The action's own collection between cohorts uses the same gate.
 			internal: inputsOf(workflow, cupboardAction('build-cohort'))[0]?.[
 				'gc-between-cohorts'
@@ -1687,27 +1687,24 @@ describe('local store collection', () => {
 			order: true,
 			explain:
 				"${{ !cancelled() && inputs.gc-between-cohorts && (runner.environment != 'github-hosted' || inputs.store != '') }}",
-			collect:
-				"${{ !cancelled() && inputs.gc-between-cohorts && runner.environment == 'github-hosted' && inputs.store == '' }}",
 			internal:
 				"${{ inputs.gc-between-cohorts && runner.environment == 'github-hosted' && inputs.store == '' }}"
 		});
 	});
 
-	it('releases the out-links before collecting and never fails the job', async () => {
+	it('runs no collection after the last cohort of the job', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
-		const collect = shellOf(workflow, 'cohort', 'Collect the local store');
+		const steps = workflow.jobs.cohort?.steps ?? [];
 
-		// The step is an inline script, so its order is read as text.
-		expect({
-			releasesBeforeCollecting:
-				collect.indexOf('rm -rf -- "${OUT_LINK_DIRECTORY}"') <
-				collect.indexOf('if ! nix store gc; then'),
-			warnsOnFailure: collect.includes("echo '::warning::nix store gc failed")
-		}).toStrictEqual({
-			releasesBeforeCollecting: true,
-			warnsOnFailure: true
-		});
+		// GitHub discards a hosted runner when its job ends, so a collection
+		// after the job's last cohort frees space that no build uses.
+		expect(
+			steps.filter(
+				(step) =>
+					step.name === 'Collect the local store' ||
+					step.run?.includes('nix store gc') === true
+			)
+		).toStrictEqual([]);
 	});
 });
 

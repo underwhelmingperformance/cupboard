@@ -211,12 +211,19 @@ on:
         type: boolean
       gc-between-cohorts:
         description:
-          Run garbage collection on the runner's Nix store after each cohort in
-          a job has been published. This frees the disk space that the published
-          paths used, and a later build downloads them from the cache if it
-          needs them. It only happens on GitHub-hosted runners that use their
-          own store. On a self-hosted runner, or when store is set, the job
-          prints a notice and leaves the store as it is.
+          Run garbage collection on the runner's Nix store between the cohorts
+          of one job's build, after each has been published. A strict job builds
+          its installables in at most two cohorts, one for the installables that
+          build normally and one for the installables that rebuild, so it
+          collects at most once. A best-effort job builds each installable as
+          its own cohort and collects between them. This frees the disk space
+          that the published paths used, and a later cohort downloads them from
+          the cache if it needs them. The job runs no collection after its last
+          cohort, because the runner is discarded when the job ends. With
+          `publish` set to `none`, the job builds without the publishing build
+          and runs no collection. It only happens on GitHub-hosted runners that
+          use their own store. On a self-hosted runner, or when store is set,
+          the job prints a notice and leaves the store as it is.
         required: false
         default: false
         type: boolean
@@ -829,11 +836,6 @@ jobs:
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
 
-      # At this point, every retention root has been set on the destination and
-      # attestation has read the committed narinfos. Remove this build's
-      # out-links before collection so a later cohort can substitute these
-      # outputs from the cache. `nix store gc` leaves other GC roots intact.
-      # Collection also runs after a failed cohort and does not fail the job.
       - name: Explain skipped local store collection
         if:
           ${{ !cancelled() && inputs.gc-between-cohorts && (runner.environment
@@ -846,22 +848,6 @@ jobs:
             echo '::notice::gc-between-cohorts was requested, but local store collection is unsupported on self-hosted runners; leaving the store untouched'
           elif [ -n "${STORE}" ]; then
             echo '::notice::gc-between-cohorts was requested, but the build uses a direct remote store; leaving the runner local store untouched'
-          fi
-
-      - name: Collect the local store
-        if:
-          ${{ !cancelled() && inputs.gc-between-cohorts && runner.environment ==
-          'github-hosted' && inputs.store == '' }}
-        env:
-          OUT_LINK_DIRECTORY:
-            ${{ steps.build-cohort.outputs.out-link-directory }}
-        run: |
-          set -uo pipefail
-          if [ -n "${OUT_LINK_DIRECTORY}" ]; then
-            rm -rf -- "${OUT_LINK_DIRECTORY}"
-          fi
-          if ! nix store gc; then
-            echo '::warning::nix store gc failed; a later cohort job builds with the store as it stands'
           fi
 
       - name: Save complete publication results

@@ -556,10 +556,15 @@ configuration:
 - `enable-packing: true` packs small single-target cohorts into as few jobs as
   fit within `pack-capacity` bytes of disk. It uses measured closure sizes. If
   the measurement fails, the manifest's cohorts are used as they are.
-- `gc-between-cohorts: true` runs garbage collection on the runner's store after
-  a cohort has published. This only happens on GitHub-hosted runners using their
-  own store. It mostly helps best-effort cohorts, which build their targets one
-  at a time.
+- `gc-between-cohorts: true` runs garbage collection on the runner's store
+  between the cohorts of one job's build, after each has published. A strict job
+  builds its installables in at most two cohorts, one for the installables that
+  build normally and one for the installables that rebuild, so it collects at
+  most once. A best-effort job builds each installable as its own cohort and
+  collects between them, so it benefits most. A job runs no collection after its
+  last cohort, because GitHub discards the runner when the job ends, and it runs
+  none with `publish: none`. This only happens on GitHub-hosted runners using
+  their own store.
 - `plan-runner` sets the runner label for the configure, plan and cache-removal
   jobs.
 - `nix-config` specifies a flake attribute containing extra `nix.conf` text for
