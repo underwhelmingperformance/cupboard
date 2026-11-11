@@ -140,8 +140,21 @@ export function buildMembershipFilter(slugs: readonly TenantId[]): Uint8Array {
 	return BinaryFuse8.build(slugs).serialise();
 }
 
-function filterCacheKey(): Request {
-	return new Request('https://tenant-filter.cupboard.invalid/current');
+/**
+The Cache API key of the membership filter. Every Worker in a zone shares
+the Cache API, so two deployments with custom domains in one zone would
+otherwise read each other's filter and reject each other's tenants. Each
+deployment's tenant Worker has its own Durable Object namespace, and
+`idFromName` derives an ID from the namespace without any I/O, so the ID of a
+fixed name identifies the deployment in every request, cron and queue
+context.
+*/
+export function membershipFilterCacheKey(
+	deployment: Pick<DurableObjectNamespace, 'idFromName'>
+): Request {
+	const id = deployment.idFromName('cache-key:tenant-filter').toString();
+
+	return new Request(`https://tenant-filter.cupboard.invalid/${id}`);
 }
 
 function deserialiseFilter(bytes: Uint8Array): BinaryFuse8 | undefined {
@@ -161,7 +174,7 @@ async function loadMembershipFilter(
 	env: Env,
 	ctx: DeferredContext
 ): Promise<BinaryFuse8 | undefined> {
-	const cacheKey = filterCacheKey();
+	const cacheKey = membershipFilterCacheKey(env.CUPBOARD_DO);
 	const cached = await boundedSubrequest(
 		async () => {
 			const response = await caches.default.match(cacheKey);
@@ -476,7 +489,7 @@ async function publishMembershipFilter(
 	await env.TENANT_CACHE.put(filterKey, buildMembershipFilter(live));
 	// Drop this colo's cached filter so it refetches the rebuilt one promptly;
 	// other colos pick it up on their cache TTL.
-	await caches.default.delete(filterCacheKey());
+	await caches.default.delete(membershipFilterCacheKey(env.CUPBOARD_DO));
 }
 
 async function liveTenantSlugs(database: Database): Promise<TenantId[]> {
