@@ -1359,25 +1359,15 @@ export async function ensureAvailableTargets(
 	runner: EnsureRunner = defaultEnsureRunner,
 	signal?: AbortSignal
 ): Promise<Set<string>> {
-	const cached = evaluations.filter(
-		(evaluation) =>
-			evaluation.targetPaths.length === evaluation.target.outputs.length &&
-			evaluation.targetPaths.every((storePath) => availablePaths.has(storePath))
-	);
+	const cached = cachedRoots(inputs.targets, evaluations, availablePaths);
 	const results = await mapWithConcurrency(
 		cached,
 		maximumConcurrentRootEnsures,
-		async (evaluation) => {
-			const root = joinRoot(inputs.rootPrefix, evaluation.target.rootSuffix);
-			const response = await ensureRoot(
-				inputs,
-				root,
-				evaluation.targetPaths,
-				runner,
-				signal
-			);
+		async ({ rootSuffix, paths }) => {
+			const root = joinRoot(inputs.rootPrefix, rootSuffix);
+			const response = await ensureRoot(inputs, root, paths, runner, signal);
 
-			return { rootSuffix: evaluation.target.rootSuffix, response };
+			return { rootSuffix, response };
 		}
 	);
 
@@ -1390,6 +1380,51 @@ export async function ensureAvailableTargets(
 	}
 
 	return retained;
+}
+
+interface CachedRoot {
+	readonly rootSuffix: string;
+	readonly paths: readonly StorePathString[];
+}
+
+// The components of an aggregate target share its root, and an ensure replaces
+// the root's whole target list. A root is therefore ensured once, with every
+// component's outputs, and only when the destination serves all of them.
+// Otherwise its components stay in their cohort and are built.
+function cachedRoots(
+	declared: readonly PublishTarget[],
+	evaluations: readonly TargetEvaluation[],
+	availablePaths: ReadonlySet<StorePathString>
+): readonly CachedRoot[] {
+	const evaluated = new Set(
+		evaluations.map((evaluation) => targetIdentityKey(evaluation.target))
+	);
+	const groups = Map.groupBy(
+		evaluations,
+		(evaluation) => evaluation.target.rootSuffix
+	);
+
+	return groups
+		.entries()
+		.filter(
+			([rootSuffix, group]) =>
+				declared
+					.filter((target) => target.rootSuffix === rootSuffix)
+					.every((target) => evaluated.has(targetIdentityKey(target))) &&
+				group.every(
+					(evaluation) =>
+						evaluation.targetPaths.length ===
+							evaluation.target.outputs.length &&
+						evaluation.targetPaths.every((storePath) =>
+							availablePaths.has(storePath)
+						)
+				)
+		)
+		.map(([rootSuffix, group]) => ({
+			rootSuffix,
+			paths: [...new Set(group.flatMap((evaluation) => evaluation.targetPaths))]
+		}))
+		.toArray();
 }
 
 async function ensureRoot(

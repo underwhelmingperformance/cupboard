@@ -1282,6 +1282,69 @@ describe('ensureAvailableTargets', () => {
 			).rejects.toThrow(RootEnsureResultInvalidError);
 		}
 	);
+
+	const componentPath = storePath(`/nix/store/${'1'.repeat(32)}-component-a`);
+	const siblingPath = storePath(`/nix/store/${'2'.repeat(32)}-component-b`);
+	const component = evaluation('app', componentPath);
+	const sibling: TargetEvaluation = {
+		...evaluation('app', siblingPath),
+		target: { ...component.target, attr: '.#component-b' }
+	};
+	const unevaluatedSibling = { ...component.target, attr: '.#component-c' };
+
+	it.each([
+		{
+			name: 'ensures the shared root once with every component when all are served',
+			declared: [component.target, sibling.target],
+			available: [componentPath, siblingPath],
+			expected: {
+				ensured: [
+					{
+						root: 'github:owner/repo/main/app',
+						paths: [componentPath, siblingPath]
+					}
+				],
+				retained: new Set(['app'])
+			}
+		},
+		{
+			name: 'leaves the shared root to the cohort when one component is not served',
+			declared: [component.target, sibling.target],
+			available: [componentPath],
+			expected: { ensured: [], retained: new Set() }
+		},
+		{
+			name: 'leaves the shared root to the cohort when one component did not evaluate',
+			declared: [component.target, sibling.target, unevaluatedSibling],
+			available: [componentPath, siblingPath],
+			expected: { ensured: [], retained: new Set() }
+		}
+	])('$name', async ({ declared, available, expected }) => {
+		const ensured: { root: string; paths: readonly string[] }[] = [];
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			const root = ensureRootArgument(arguments_);
+			const pathsStart = arguments_.indexOf(root) + 1;
+			ensured.push({
+				root,
+				paths: arguments_.slice(
+					pathsStart,
+					arguments_.indexOf('--github-oidc', pathsStart)
+				)
+			});
+			await writeFile(resultFileArgument(arguments_), retainedResultLine(root));
+
+			return { stdout: '', stderr: '' };
+		};
+
+		const retained = await ensureAvailableTargets(
+			planInputs({ temporaryDirectory: directory, targets: declared }),
+			[component, sibling],
+			new Set(available),
+			runner
+		);
+
+		expect({ ensured, retained }).toStrictEqual(expected);
+	});
 });
 
 function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
