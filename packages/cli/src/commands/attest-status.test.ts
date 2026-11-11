@@ -254,7 +254,7 @@ describe('attest status subprocess', () => {
 				]
 			});
 		});
-	}, 30_000);
+	});
 
 	it.each([
 		{ arguments_: ['invalid-path'] },

@@ -483,7 +483,7 @@ describe('NarArchive.open', () => {
 				mismatches: []
 			});
 		});
-	}, 30_000);
+	});
 
 	// Root can read a file without read permission, so the test could not tell
 	// whether the archive opened the file.
