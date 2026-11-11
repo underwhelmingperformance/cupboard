@@ -620,15 +620,19 @@ describe('attestation attach and reads', () => {
 					reads.push(...results.map((result) => result.meta.rows_read));
 					for (const result of results) {
 						for (const row of result.results) {
+							const flag = z
+								.union([z.boolean(), z.number()])
+								.transform(Boolean);
 							const parsed = z
-								.object({
-									digest: z.string(),
-									available: z
-										.union([z.boolean(), z.number()])
-										.transform(Boolean)
-								})
+								.object({ digest: z.string(), servable: flag, readable: flag })
 								.safeParse(row);
-							if (parsed.success && parsed.data.available) {
+							// No deletion protects the fixture's source, so a bundle is
+							// available when it is both servable and readable.
+							if (
+								parsed.success &&
+								parsed.data.servable &&
+								parsed.data.readable
+							) {
 								found.push(parsed.data.digest);
 							}
 						}
@@ -726,13 +730,19 @@ describe('attestation attach and reads', () => {
 							(index + 1).toString(16).padStart(64, '0')
 						)
 				),
-				reads: [shape === 'caches' ? 6 : 260, 0],
+				// The batch reads the reference generation, then the page, which
+				// selects the generation again as a subquery, then the destination.
+				reads: [1, shape === 'caches' ? 7 : 261, 0],
 				plans: [
 					[
 						'CO-ROUTINE inheritance_source_reference',
 						shape === 'caches'
 							? 'SEARCH attestation_ref_storage USING INDEX attestation_ref_named_identity_idx (tenant=? AND cache_name=? AND store_path_hash=? AND generation=?)'
 							: 'SEARCH attestation_ref_storage USING INDEX attestation_ref_default_identity_idx (tenant=? AND store_path_hash=? AND generation=?)',
+						'SCALAR SUBQUERY 3',
+						shape === 'caches'
+							? 'SEARCH blob_ref_storage USING COVERING INDEX blob_ref_named_identity_idx (tenant=? AND cache_name=? AND store_path_hash=? AND generation>? AND generation<?)'
+							: 'SEARCH blob_ref_storage USING INDEX blob_ref_default_identity_idx (tenant=? AND store_path_hash=? AND generation>? AND generation<?)',
 						'SCAN inheritance_source_reference',
 						shape === 'caches'
 							? 'SEARCH blob_ref_storage USING INDEX blob_ref_named_identity_idx (tenant=? AND cache_name=? AND store_path_hash=? AND generation=?) LEFT-JOIN'
@@ -1103,7 +1113,12 @@ describe('attestation attach and reads', () => {
 			})
 		);
 
-		expect(plans).toStrictEqual([{ searchesPathIndex: true, scans: 0 }]);
+		// The page query runs once for the source's reference generation and
+		// once more in the batch that finds no later generation.
+		expect(plans).toStrictEqual([
+			{ searchesPathIndex: true, scans: 0 },
+			{ searchesPathIndex: true, scans: 0 }
+		]);
 	});
 
 	it('counts only the sources that the destination lacks against its subrequests', async () => {
@@ -1454,9 +1469,9 @@ describe('attestation attach and reads', () => {
 				durationMs: typeof durationMs
 			}));
 
-		// Each path makes five D1 calls: the reference generation lookup, the
-		// batch that reads its bundles, the batch that revalidates the bundle,
-		// the reservation batch and the list read. The pass also reads the retry
+		// Each path makes four D1 calls: the batch that reads the reference
+		// generation and its bundles, the batch that revalidates the bundle, the
+		// reservation batch and the list read. The pass also reads the retry
 		// clock once.
 		expect({ records, queued: await queuedInheritances() }).toStrictEqual({
 			records: [
@@ -1464,12 +1479,12 @@ describe('attestation attach and reads', () => {
 					method: 'attestation-inheritance',
 					durationMs: 'number',
 					...noCost,
-					rowsRead: 261,
+					rowsRead: 249,
 					rowsWritten: 34,
-					d1Calls: 16,
-					d1RowsRead: 95,
+					d1Calls: 13,
+					d1RowsRead: 101,
 					d1RowsWritten: 18,
-					d1CallsWithoutRows: 7,
+					d1CallsWithoutRows: 4,
 					r2Head: 3,
 					r2Put: 3
 				}
@@ -1724,11 +1739,26 @@ describe('attestation attach and reads', () => {
 						boundary === 'source lookup'
 							? 'select "generation"'
 							: 'select "attestation_ref_storage"."digest"';
+					const replaceClaim = () => {
+						instance.context.db
+							.update(table)
+							.set({ claimOwner: 'replacement-owner' })
+							.where(filter)
+							.run();
+						replacement = instance.context.db
+							.select()
+							.from(table)
+							.where(filter)
+							.get();
+					};
+					// The query can run on its own or in a batch, so replace the claim
+					// before either one sends it.
+					const matching = new WeakSet<D1PreparedStatement>();
 					const wrap = (
 						statement: D1PreparedStatement,
 						query: string
-					): D1PreparedStatement =>
-						new Proxy(statement, {
+					): D1PreparedStatement => {
+						const wrapped = new Proxy(statement, {
 							get(source, field) {
 								if (field === 'bind') {
 									return (...values: unknown[]) =>
@@ -1736,16 +1766,7 @@ describe('attestation attach and reads', () => {
 								}
 								if (field === 'raw' && query.startsWith(queryPrefix)) {
 									return async () => {
-										instance.context.db
-											.update(table)
-											.set({ claimOwner: 'replacement-owner' })
-											.where(filter)
-											.run();
-										replacement = instance.context.db
-											.select()
-											.from(table)
-											.where(filter)
-											.get();
+										replaceClaim();
 										return source.raw();
 									};
 								}
@@ -1756,10 +1777,23 @@ describe('attestation attach and reads', () => {
 									: value;
 							}
 						});
+						if (query.startsWith(queryPrefix)) {
+							matching.add(wrapped);
+						}
+						return wrapped;
+					};
 					const binding = new Proxy(env.CUPBOARD_DB, {
 						get(target, field) {
 							if (field === 'prepare') {
 								return (query: string) => wrap(target.prepare(query), query);
+							}
+							if (field === 'batch') {
+								return async (statements: D1PreparedStatement[]) => {
+									if (statements.some((statement) => matching.has(statement))) {
+										replaceClaim();
+									}
+									return target.batch(statements);
+								};
 							}
 							const value: unknown = Reflect.get(target, field, target);
 							return typeof value === 'function'
@@ -3843,7 +3877,7 @@ describe('attestation attach and reads', () => {
 					}
 				],
 				sourceReferences: [{ digest }],
-				retryCalls: 8,
+				retryCalls: 7,
 				queued: [],
 				listed: [earlierDigest, digest].toSorted(byCodeUnit)
 			});

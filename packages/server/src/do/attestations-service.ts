@@ -164,9 +164,9 @@ interface PendingAttestationUpload {
 	readonly row: typeof schema.pendingAttestations.$inferSelect;
 }
 
-// A query selects the reference generation; a batch reads its bundles and
-// the destination's references.
-export const inheritanceLookupSubrequests = 2;
+// One batch selects the reference generation, reads its bundles and reads the
+// destination's references.
+export const inheritanceLookupSubrequests = 1;
 
 // Writing the destination's list reads its descriptors from D1 and puts it in R2.
 export const inheritanceListSubrequests = 2;
@@ -224,6 +224,15 @@ export interface InheritanceSourceRow {
 	readonly incarnation: number | null;
 	readonly alreadyInherited: boolean;
 	readonly available: boolean;
+}
+
+// A protected source remains available to the destination after its own
+// reads are revoked.
+function isSourceAvailable(
+	source: { readonly servable: boolean; readonly readable: boolean },
+	isProtected: boolean
+): boolean {
+	return source.servable && (isProtected || source.readable);
 }
 
 /**
@@ -755,9 +764,8 @@ export class AttestationsService {
 	private inheritanceSourceQuery(request: {
 		readonly cache: ResolvedCache;
 		readonly source: CacheScope;
-		readonly referenceGeneration: NarInfoGeneration;
+		readonly referenceGeneration: NarInfoGeneration | SQL;
 		readonly narHash: NixSha256HashString;
-		readonly protected: boolean;
 		readonly destinationGeneration?: NarInfoGeneration;
 		readonly candidates: SQL;
 		readonly limit: number;
@@ -815,7 +823,7 @@ export class AttestationsService {
 			eq(blob.tenant, this.context.requireTenant()),
 			cacheIdentityCondition(blob.cacheKind, blob.cacheName, request.source),
 			eq(blob.storePathHash, reference.storePathHash),
-			eq(blob.generation, request.referenceGeneration)
+			eq(blob.generation, reference.generation)
 		);
 		const destinationIdentity = cacheIdentityCondition(
 			reference.cacheKind,
@@ -826,16 +834,19 @@ export class AttestationsService {
 			eq(d1Schema.cacheLifecycle.access, 'public'),
 			destinationIdentity
 		);
-		const available = sql<boolean>`coalesce(${and(
+		const servable = sql<boolean>`coalesce(${and(
 			currentCacheGenerationReference(),
-			request.protected
-				? undefined
-				: and(eq(reference.readable, true), authorisedByPathGeneration()),
 			eq(blob.narHash, request.narHash),
 			allowedSource
 		)}, false)`
 			.mapWith(Boolean)
-			.as('available');
+			.as('servable');
+		const readable = sql<boolean>`coalesce(${and(
+			eq(reference.readable, true),
+			authorisedByPathGeneration()
+		)}, false)`
+			.mapWith(Boolean)
+			.as('readable');
 		const lifecycle = and(
 			eq(d1Schema.cacheLifecycle.tenant, this.context.requireTenant()),
 			cacheIdentityCondition(
@@ -854,7 +865,8 @@ export class AttestationsService {
 				size: d1Schema.casObject.size,
 				incarnation: d1Schema.casObject.incarnation,
 				alreadyInherited,
-				available
+				servable,
+				readable
 			})
 			.from(reference)
 			.leftJoin(blob, sameSourceReference)
@@ -1619,28 +1631,13 @@ export class AttestationsService {
 				cohort.cacheId === cache.id
 					? Math.min(cohort.generation, generation - 1)
 					: cohort.generation;
-			const [reference] = await this.sourceReferenceQuery(
+			const referenceQuery = this.sourceReferenceQuery(
 				cohort.scope,
 				storePathHash,
 				upper,
 				cohort.queue.sourceReferenceGeneration,
 				cohort.queue.sourceReferenceComplete
-			).all();
-			if (!this.isQueuedGenerationCurrent(cache, request)) {
-				return { kind: 'superseded' as const };
-			}
-			if (reference === undefined) {
-				service.advanceSource(cache, storePathHash, generation, cohort);
-				continue;
-			}
-			this.context.db
-				.update(table)
-				.set({
-					sourceReferenceGeneration: reference.generation,
-					sourceReferenceComplete: false
-				})
-				.where(queueFilter)
-				.run();
+			);
 			const cursor = cohort.queue;
 			const afterCursor =
 				cursor.sourcePredicateType === null || cursor.sourceDigest === null
@@ -1653,19 +1650,15 @@ export class AttestationsService {
 					otherSource,
 					afterCursor
 				) ?? sql`false`;
-			const [rows, existing] = await this.context.d1.batch([
+			// The page query embeds the reference query as a subquery, so one batch
+			// reads the generation and the bundles of that generation.
+			const [references, rows, existing] = await this.context.d1.batch([
+				referenceQuery,
 				this.inheritanceSourceQuery({
 					cache,
 					source: cohort.scope,
 					narHash,
-					referenceGeneration: reference.generation,
-					protected: service.isReferenceProtected(
-						cache,
-						storePathHash,
-						generation,
-						cohort.cacheId,
-						reference.generation
-					),
+					referenceGeneration: sql`${referenceQuery}`,
 					destinationGeneration: generation,
 					candidates: filter,
 					limit: maxInheritedBundlesPerPass + 1
@@ -1675,12 +1668,37 @@ export class AttestationsService {
 			if (!this.isQueuedGenerationCurrent(cache, request)) {
 				return { kind: 'superseded' as const };
 			}
+			const [reference] = references;
+			if (reference === undefined) {
+				service.advanceSource(cache, storePathHash, generation, cohort);
+				continue;
+			}
+			this.context.db
+				.update(table)
+				.set({
+					sourceReferenceGeneration: reference.generation,
+					sourceReferenceComplete: false
+				})
+				.where(queueFilter)
+				.run();
 			if (rows.length > 0) {
+				const isProtected = service.isReferenceProtected(
+					cache,
+					storePathHash,
+					generation,
+					cohort.cacheId,
+					reference.generation
+				);
 				return {
 					kind: 'page' as const,
 					cohort: { ...cohort, scope: cohort.scope },
 					referenceGeneration: reference.generation,
-					rows,
+					rows: rows.map(
+						({ servable, readable, ...row }): InheritanceSourceRow => ({
+							...row,
+							available: isSourceAvailable({ servable, readable }, isProtected)
+						})
+					),
 					hasExisting: existing.length > 0
 				};
 			}
@@ -1990,18 +2008,18 @@ export class AttestationsService {
 					) {
 						return 'unavailable' as const;
 					}
+					const isProtected = sourceService.isReferenceProtected(
+						cache,
+						storePathHash,
+						generation,
+						currentSource.cacheId,
+						referenceGeneration
+					);
 					const availableSource = this.inheritanceSourceQuery({
 						cache,
 						source: currentSource.scope,
 						narHash,
 						referenceGeneration,
-						protected: sourceService.isReferenceProtected(
-							cache,
-							storePathHash,
-							generation,
-							currentSource.cacheId,
-							referenceGeneration
-						),
 						candidates: sourceFilter,
 						limit: 1
 					}).as('available_inheritance_source');
@@ -2020,7 +2038,8 @@ export class AttestationsService {
 						.select({
 							size: availableSource.size,
 							incarnation: availableSource.incarnation,
-							available: availableSource.available,
+							servable: availableSource.servable,
+							readable: availableSource.readable,
 							registryIncarnation,
 							registryState: d1Schema.objectIncarnation.state
 						})
@@ -2040,7 +2059,7 @@ export class AttestationsService {
 
 					if (
 						source === undefined ||
-						!source.available ||
+						!isSourceAvailable(source, isProtected) ||
 						source.registryState === 'absent'
 					) {
 						return 'unavailable' as const;
