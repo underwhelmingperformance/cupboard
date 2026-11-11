@@ -73,6 +73,10 @@ export function domainProblemText(value: string): string | undefined {
 	return problem === undefined ? undefined : domainProblemMessage(problem);
 }
 
+/**
+Returns the domain in lower case, the form in which Cloudflare reports
+hostnames, so later comparisons with Cloudflare's values are exact.
+*/
 export function checkDomainOption(value: string): string {
 	const problem = domainProblem(value);
 
@@ -80,7 +84,7 @@ export function checkDomainOption(value: string): string {
 		throw new InvalidDomainError(value, problem);
 	}
 
-	return value;
+	return value.toLowerCase();
 }
 
 /**

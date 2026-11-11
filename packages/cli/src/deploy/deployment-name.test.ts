@@ -284,10 +284,10 @@ describe('startingPlanLookup for a named deployment', () => {
 				reads.push(`dead-letter queue ${queue} ${scriptName}`);
 				return Promise.resolve(undefined);
 			},
-			findCustomDomain: (scriptName) => {
-				reads.push(`domain ${scriptName}`);
+			listCustomDomains: (scriptName) => {
+				reads.push(`domains ${scriptName}`);
 				return Promise.resolve(
-					scriptName === 'staging' ? 'staging.example.com' : undefined
+					scriptName === 'staging' ? ['staging.example.com'] : []
 				);
 			}
 		};
@@ -306,11 +306,12 @@ describe('startingPlanLookup for a named deployment', () => {
 		}).toStrictEqual({
 			starting: {
 				config: defaults,
-				routedDomain: 'staging.example.com'
+				routedDomains: ['staging.example.com'],
+				isExisting: true
 			},
 			reads: [
 				'dead-letter queue staging-maintenance staging',
-				'domain staging',
+				'domains staging',
 				'schedules staging',
 				'script staging'
 			]

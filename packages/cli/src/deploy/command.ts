@@ -69,6 +69,7 @@ import {
 	collectResources,
 	deploymentReviewRows,
 	type DeployOptions,
+	domainChangeText,
 	queueRole,
 	runDeploy
 } from './deploy-run.ts';
@@ -77,10 +78,13 @@ import { deploymentUrl, withDeploymentUrl } from './deployment-url.ts';
 import { checkDomainOption, domainProblemText } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import {
+	type DeploymentTarget,
+	deploymentTarget,
+	type DomainChange,
 	type StartingPlan,
 	startingPlanLookup
 } from './existing-deployment.ts';
-import type { CloudflareAccountId } from './identifiers.ts';
+import type { CloudflareAccountId, ScriptName } from './identifiers.ts';
 import {
 	askFirstTenantSlug,
 	DeploymentClaimFailedError,
@@ -94,6 +98,14 @@ import {
 	withWorkersInvocationAllowance
 } from './overrides.ts';
 import { claimantLabel } from './owner.ts';
+import {
+	accountScanCache,
+	checkPlan,
+	type PlanCheck,
+	routeWorkersText,
+	scanAccountWorkers,
+	unreadableRoutesText
+} from './plan-checks.ts';
 import {
 	checkR2Credentials,
 	promptR2CredentialPair,
@@ -150,6 +162,48 @@ export class ConfirmationRequiredError extends CliUsageError {
 	constructor() {
 		super('Not running in a terminal: pass --yes to deploy without prompts.');
 		this.name = 'ConfirmationRequiredError';
+	}
+}
+
+/**
+Another way to run the deploy without changing the custom domains, when one
+exists. A deployment with two or more custom domains loses all but one of
+them on every deploy, so passing one of the current domains does not avoid
+the change.
+*/
+function domainChangeAlternative(change: DomainChange): string {
+	switch (change.kind) {
+		case 'first-domain': {
+			return 'omit --domain to keep only the workers.dev address, ';
+		}
+
+		case 'move': {
+			return change.from.length === 1
+				? 'pass the current domain with --domain, '
+				: '';
+		}
+
+		case 'removal': {
+			return '';
+		}
+	}
+}
+
+/**
+The plan changes the custom domains of an existing deployment, and the run
+skips the review without `--allow-domain-change`. `change.kind` says
+whether tenants keep the addresses that they were created at.
+*/
+export class DomainChangeConfirmationRequiredError extends CliUsageError {
+	constructor(
+		public readonly deployment: ScriptName,
+		public readonly change: DomainChange
+	) {
+		super(
+			`${domainChangeText(change)} The deployment is ${deployment}. ` +
+				`Pass --allow-domain-change to confirm the change, ${domainChangeAlternative(change)}or pass --deployment-name to create another deployment. Nothing was changed.`
+		);
+		this.name = 'DomainChangeConfirmationRequiredError';
 	}
 }
 
@@ -220,6 +274,11 @@ export interface DeployCliOptions {
 	*/
 	readonly deploymentName?: DeploymentName;
 	readonly domain?: string;
+	/**
+	Confirm, for a run that skips the review, that the plan may move an
+	existing deployment to another custom domain.
+	*/
+	readonly allowDomainChange?: boolean;
 	readonly instanceName?: InstanceName;
 	readonly account?: string;
 	/**
@@ -470,10 +529,23 @@ function cronsListProblem(value: string): string | undefined {
 export interface PlanReviewWorld {
 	readonly ui: DeployUi;
 	/**
-	Shows the plan for the state and returns the observation of the
-	deployment that the plan was built from.
+	Shows the plan for the state and its target, and returns the observation
+	of the deployment that the plan was built from.
 	*/
-	readonly render: (state: PlanState) => Promise<DeploymentObservation>;
+	readonly render: (
+		state: PlanState,
+		target: DeploymentTarget,
+		check: PlanCheck
+	) => Promise<DeploymentObservation>;
+	/**
+	Checks the plan and its target against the account: that its existing
+	resources belong to cupboard, and that its custom domain belongs to no
+	other Worker and can be attached.
+	*/
+	readonly check: (
+		state: PlanState,
+		target: DeploymentTarget
+	) => Promise<PlanCheck>;
 	readonly accounts: () => Promise<readonly AccountSummary[]>;
 	readonly skipReview: boolean;
 	readonly canReplaceR2Credentials?: (state: PlanState) => Promise<boolean>;
@@ -490,6 +562,11 @@ export interface PlanReviewWorld {
 	custom domain on every account.
 	*/
 	readonly requestedDomain: string | undefined;
+	/**
+	Whether a skipped review may accept a plan that moves an existing
+	deployment to another custom domain.
+	*/
+	readonly allowDomainChange: boolean;
 }
 
 async function applyPlanEdit(
@@ -513,7 +590,7 @@ async function applyPlanEdit(
 			...kept,
 			accountId: chosen,
 			config: starting.config,
-			domain: world.requestedDomain ?? starting.routedDomain
+			domain: world.requestedDomain ?? starting.routedDomains[0]
 		};
 	}
 
@@ -527,7 +604,7 @@ async function applyPlanEdit(
 		});
 
 		if (edit.kind === 'set') {
-			return { ...state, domain: edit.value };
+			return { ...state, domain: edit.value.toLowerCase() };
 		}
 
 		return edit.kind === 'clear' ? { ...state, domain: undefined } : state;
@@ -595,6 +672,28 @@ async function applyPlanEdit(
 	};
 }
 
+function reviewQuestion(target: DeploymentTarget): string {
+	if (target.domainChange === undefined) {
+		return 'Deploy to Cloudflare with the plan above?';
+	}
+
+	switch (target.domainChange.kind) {
+		case 'removal': {
+			return "Deploy to Cloudflare with the plan above, and remove the existing deployment's other custom domains?";
+		}
+
+		case 'move': {
+			return target.domainChange.to === undefined
+				? "Deploy to Cloudflare with the plan above, and remove the existing deployment's custom domains?"
+				: 'Deploy to Cloudflare with the plan above, and move the existing deployment to a new URL?';
+		}
+
+		case 'first-domain': {
+			return 'Deploy to Cloudflare with the plan above, and add a custom domain to the existing deployment?';
+		}
+	}
+}
+
 /**
 Show the plan and let the user adjust the deploy-time choices until they
 deploy or cancel. Returns the agreed state, or undefined when cancelled.
@@ -608,11 +707,30 @@ export async function reviewPlan(
 	let state = initial;
 
 	for (;;) {
-		const blocked = planBlockedError(await world.render(state));
+		const target = deploymentTarget(
+			await world.startingPlanFor(state.accountId),
+			state.domain
+		);
+		const check = await world.check(state, target);
+
+		if (world.skipReview && check.refusal !== undefined) {
+			throw check.refusal;
+		}
+
+		const blocked =
+			planBlockedError(await world.render(state, target, check)) ??
+			check.refusal;
 
 		if (world.skipReview) {
 			if (blocked !== undefined) {
 				throw blocked;
+			}
+
+			if (target.domainChange !== undefined && !world.allowDomainChange) {
+				throw new DomainChangeConfirmationRequiredError(
+					state.config.control.name,
+					target.domainChange
+				);
 			}
 
 			return state;
@@ -625,10 +743,7 @@ export async function reviewPlan(
 
 		const choice =
 			blocked === undefined
-				? await world.ui.menu(
-						'Deploy to Cloudflare with the plan above?',
-						entries
-					)
+				? await world.ui.menu(reviewQuestion(target), entries)
 				: await world.ui.menu(
 						'The plan above is blocked. Change it or cancel.',
 						entries.filter((entry) => entry.value !== 'deploy')
@@ -1314,6 +1429,14 @@ async function deployFlow(
 		};
 	};
 
+	const ownWorkers = new Set<string>([
+		artifact.config.control.name,
+		artifact.config.tenant.name
+	]);
+	const accountWorkersFor = accountScanCache((account: CloudflareAccountId) =>
+		scanAccountWorkers(apiFor(account), ownWorkers)
+	);
+
 	const startingPlanFor = startingPlanLookup({
 		apiFor,
 		defaults: artifact.config,
@@ -1348,11 +1471,11 @@ async function deployFlow(
 		{
 			accountId,
 			config: startingPlan.config,
-			domain: initialDomain ?? startingPlan.routedDomain
+			domain: initialDomain ?? startingPlan.routedDomains[0]
 		},
 		{
 			ui,
-			render: async (state) => {
+			render: async (state, target, check) => {
 				const { options, missing, annotated } = await planFor(state);
 				const allowance = await allowanceFor(state.accountId);
 				const plannedArtifact = {
@@ -1366,9 +1489,13 @@ async function deployFlow(
 						)
 					)
 				};
+				// A refused plan can name a database that cupboard did not create,
+				// whose tables the observation's queries cannot read.
 				reviewedPlan = planDeployment(
 					plannedArtifact,
-					await observeDeployment(apiFor(state.accountId), plannedArtifact),
+					check.refusal === undefined
+						? await observeDeployment(apiFor(state.accountId), plannedArtifact)
+						: { kind: 'offline' },
 					allowance.source
 				);
 
@@ -1386,10 +1513,39 @@ async function deployFlow(
 						options.secrets,
 						state.domain,
 						annotated,
-						runtimeOptions.presentation
+						runtimeOptions.presentation,
+						target
 					)
 				]);
 				warnMissing(missing);
+
+				// With `--yes`, the review throws the refusal, or the domain change
+				// without `--allow-domain-change`, as the run's error, so the plan
+				// does not print it as a warning first.
+				const isReviewSkipped = cliOptions.yes === true;
+
+				if (
+					target.domainChange !== undefined &&
+					(!isReviewSkipped || cliOptions.allowDomainChange === true)
+				) {
+					ui.warn(domainChangeText(target.domainChange));
+				}
+
+				if (state.domain !== undefined && check.routeWorkers === undefined) {
+					ui.warn(unreadableRoutesText(state.domain));
+				}
+
+				if (
+					state.domain !== undefined &&
+					check.routeWorkers !== undefined &&
+					check.routeWorkers.length > 0
+				) {
+					ui.warn(routeWorkersText(state.domain, check.routeWorkers));
+				}
+
+				if (!isReviewSkipped && check.refusal !== undefined) {
+					ui.warn(check.refusal.message);
+				}
 
 				return reviewedPlan.observation;
 			},
@@ -1397,8 +1553,19 @@ async function deployFlow(
 			skipReview: cliOptions.yes === true,
 			canReplaceR2Credentials: async (state) =>
 				r2Credentials === undefined && (await isR2AlreadySetFor(state)),
+			check: (state, target) =>
+				checkPlan(
+					{
+						...apiFor(state.accountId),
+						accountWorkers: () => accountWorkersFor(state.accountId)
+					},
+					{ ...artifact, config: state.config },
+					state.domain,
+					target.domainChange
+				),
 			startingPlanFor,
-			requestedDomain: initialDomain
+			requestedDomain: initialDomain,
+			allowDomainChange: cliOptions.allowDomainChange === true
 		}
 	);
 
@@ -1409,6 +1576,7 @@ async function deployFlow(
 
 	const agreedStartingPlan = await startingPlanFor(agreed.accountId);
 	const agreedApi = apiFor(agreed.accountId);
+
 	const controlName = agreed.config.control.name;
 	const loginDependencies = {
 		openBrowser: (url: string) => {
@@ -1785,7 +1953,9 @@ async function deployFlow(
 			// Only a genuinely new custom domain warrants the DNS caveat.
 			const dnsNote =
 				agreed.domain === undefined ||
-				agreedStartingPlan.routedDomain === agreed.domain
+				agreedStartingPlan.routedDomains.some(
+					(routedDomain) => routedDomain.toLowerCase() === agreed.domain
+				)
 					? ''
 					: ' A freshly added custom domain can take a while to resolve in DNS.';
 

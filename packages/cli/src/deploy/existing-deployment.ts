@@ -52,7 +52,7 @@ export type ExistingDeploymentApi = Pick<
 	| 'findD1DatabaseName'
 	| 'findConsumerDeadLetterQueue'
 	| 'listSchedules'
-	| 'findCustomDomain'
+	| 'listCustomDomains'
 >;
 
 type Rename = readonly [defaultName: string, liveName: string];
@@ -210,11 +210,118 @@ export async function readExistingConfig(
 
 /**
 The configuration that a plan starts from on an account, and the custom
-domain that is routed to the account's control Worker.
+domains that are routed to the account's control Worker.
 */
 export interface StartingPlan {
 	readonly config: DeploymentConfig;
-	readonly routedDomain: string | undefined;
+	readonly routedDomains: readonly string[];
+	/**
+	Whether the account has the deployment's control Worker.
+	*/
+	readonly isExisting: boolean;
+}
+
+/**
+A plan's change to the custom domains of an existing deployment. The deploy
+keeps only the plan's domain, `to`, and removes every other domain in
+`from`. `kind` says what the change does to the addresses that tenants were
+created at:
+
+- `first-domain`: the deployment served only its workers.dev address, which
+  stays, so every tenant keeps its address.
+- `move`: the deploy removes every current custom domain, so tenants created
+  at one of them lose that address. An undefined `to` leaves only the
+  workers.dev address.
+- `removal`: the deployment keeps the plan's domain, which it already
+  serves, and the deploy removes its other custom domains.
+*/
+export type DomainChange =
+	| {
+			readonly kind: 'first-domain';
+			readonly from: readonly [];
+			readonly to: string;
+	  }
+	| {
+			readonly kind: 'removal';
+			readonly from: readonly string[];
+			readonly to: string;
+	  }
+	| {
+			readonly kind: 'move';
+			readonly from: readonly string[];
+			readonly to: string | undefined;
+	  };
+
+/**
+The custom domains that the change removes from the deployment.
+*/
+export function removedDomains(change: DomainChange): readonly string[] {
+	const kept = change.to?.toLowerCase();
+
+	return change.from.filter((domain) => domain.toLowerCase() !== kept);
+}
+
+function domainChangeOf(
+	from: readonly string[],
+	to: string | undefined
+): DomainChange {
+	if (to === undefined) {
+		return { kind: 'move', from, to };
+	}
+
+	if (from.length === 0) {
+		return { kind: 'first-domain', from: [], to };
+	}
+
+	const kept = to.toLowerCase();
+
+	return {
+		kind: from.some((domain) => domain.toLowerCase() === kept)
+			? 'removal'
+			: 'move',
+		from,
+		to
+	};
+}
+
+/**
+What a plan does to the deployment on the account: whether it updates an
+existing deployment, and how it changes that deployment's custom domain.
+*/
+export interface DeploymentTarget {
+	readonly isExisting: boolean;
+	readonly domainChange: DomainChange | undefined;
+}
+
+/**
+Returns the target of a plan that serves `domain` and starts from
+`starting`.
+*/
+export function deploymentTarget(
+	starting: StartingPlan,
+	domain: string | undefined
+): DeploymentTarget {
+	if (!starting.isExisting) {
+		return { isExisting: false, domainChange: undefined };
+	}
+
+	const planned = domain?.toLowerCase();
+	const routed = starting.routedDomains.map((routedDomain) =>
+		routedDomain.toLowerCase()
+	);
+	const isKept =
+		planned === undefined
+			? routed.length === 0
+			: routed.length === 1 && routed[0] === planned;
+
+	if (isKept) {
+		return { isExisting: true, domainChange: undefined };
+	}
+
+	return {
+		isExisting: true,
+		domainChange: domainChangeOf(starting.routedDomains, domain)
+	};
 }
 
 /**
@@ -236,12 +343,16 @@ export function startingPlanLookup(options: {
 	const read = (account: CloudflareAccountId): Promise<StartingPlan> =>
 		phase('Reading the existing deployment', async () => {
 			const api = apiFor(account);
-			const [config, routedDomain] = await Promise.all([
+			const [config, routedDomains] = await Promise.all([
 				readExistingConfig(api, defaults),
-				api.findCustomDomain(defaults.control.name)
+				api.listCustomDomains(defaults.control.name)
 			]);
 
-			return { config: config ?? defaults, routedDomain };
+			return {
+				config: config ?? defaults,
+				routedDomains,
+				isExisting: config !== undefined
+			};
 		});
 
 	return (account) => {

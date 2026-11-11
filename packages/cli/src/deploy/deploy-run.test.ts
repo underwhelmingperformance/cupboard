@@ -18,7 +18,12 @@ import {
 } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
-import type { CloudflareApi, ScriptConfiguration } from './cloudflare-api.ts';
+import type {
+	CloudflareApi,
+	CustomDomain,
+	CustomDomainOutcome,
+	ScriptConfiguration
+} from './cloudflare-api.ts';
 import type { WorkerConfig } from './config.ts';
 import type { DeployDependencies } from './deploy-run.ts';
 import {
@@ -32,6 +37,7 @@ import {
 	UnknownDeploymentTransitionError,
 	UnrecognisedTransitionContractedError
 } from './deployment-state.ts';
+import type { DeploymentTarget } from './existing-deployment.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
@@ -288,6 +294,22 @@ function recordingApi(
 				recordFallbackApiCall(calls, 'r2BucketExists');
 				return Promise.resolve(false);
 			},
+			findR2Bucket: () => {
+				recordFallbackApiCall(calls, 'findR2Bucket');
+				return Promise.resolve(undefined);
+			},
+			findKvNamespace: () => {
+				recordFallbackApiCall(calls, 'findKvNamespace');
+				return Promise.resolve(undefined);
+			},
+			findQueue: () => {
+				recordFallbackApiCall(calls, 'findQueue');
+				return Promise.resolve(undefined);
+			},
+			listScriptNames: () => {
+				recordFallbackApiCall(calls, 'listScriptNames');
+				return Promise.resolve([]);
+			},
 			listTokenPermissionGroups: () => {
 				recordFallbackApiCall(calls, 'listTokenPermissionGroups');
 				return Promise.resolve([]);
@@ -430,9 +452,13 @@ function recordingApi(
 				recordFallbackApiCall(calls, 'listCustomDomains');
 				return Promise.resolve([]);
 			},
+			findHostnameWorkers: () => {
+				recordFallbackApiCall(calls, 'findHostnameWorkers');
+				return Promise.resolve({ customDomain: undefined, routes: [] });
+			},
 			setCustomDomain(scriptName, domain) {
 				calls.push(`domain:${domain?.hostname ?? '(none)'}->${scriptName}`);
-				return Promise.resolve();
+				return Promise.resolve('set');
 			}
 		}
 	};
@@ -661,7 +687,7 @@ describe('runDeploy', () => {
 			setCustomDomain: () => {
 				controller.abort(reason);
 
-				return Promise.resolve();
+				return Promise.resolve('set');
 			}
 		};
 
@@ -1098,6 +1124,65 @@ describe('runDeploy', () => {
 			'zone:cache.example.co.uk',
 			'domain:api.cache.example.co.uk->cupboard'
 		]);
+	});
+
+	it.each<{
+		readonly name: string;
+		readonly outcome: CustomDomainOutcome;
+		readonly warnings: readonly string[];
+	}>([
+		{
+			name: 'passes no zone for a domain whose zone the token cannot see',
+			outcome: 'set',
+			warnings: []
+		},
+		{
+			name: 'warns when the Worker does not have a domain whose zone the token cannot see',
+			outcome: 'zone-missing',
+			warnings: [
+				'No Cloudflare zone for: a.example.com; add the domain to this account, then re-run.'
+			]
+		}
+	])('$name', async ({ outcome, warnings: expectedWarnings }) => {
+		const { api } = recordingApi();
+		const domains: (CustomDomain | undefined)[] = [];
+		const warnings: string[] = [];
+		const invisibleZoneApi: CloudflareApi = {
+			...api,
+			findZoneId: () => Promise.resolve(undefined),
+			setCustomDomain: (_scriptName, domain) => {
+				domains.push(domain);
+
+				return Promise.resolve(outcome);
+			}
+		};
+
+		await runDeploy({
+			artifact,
+			api: invisibleZoneApi,
+			reporter: {
+				...silentReporter,
+				phase: (_label, body) =>
+					Promise.resolve(
+						body({
+							fact: vi.fn(),
+							warn: (label, value = '') => {
+								warnings.push(`${label}: ${value}`);
+							},
+							result: vi.fn()
+						})
+					)
+			},
+			options: {
+				domain: 'a.example.com',
+				secrets: { control: [], tenant: [] }
+			}
+		});
+
+		expect({ domains, warnings }).toStrictEqual({
+			domains: [{ hostname: 'a.example.com', zoneId: undefined }],
+			warnings: expectedWarnings
+		});
 	});
 
 	it('reconciles cache settings when the live build and bindings match', async () => {
@@ -2230,6 +2315,159 @@ describe('deployment review for operators', () => {
 			value:
 				'Deploying an older release will not undo this upgrade. If deployment stops partway through, fix the reported problem and rerun it with the same release and source.'
 		});
+	});
+	it.each<
+		[string, DeploymentTarget | undefined, string | undefined, ResultRow[]]
+	>([
+		[
+			'names the deployment without checking it',
+			undefined,
+			undefined,
+			[
+				{
+					label: 'Deployment',
+					value: 'cupboard (the account has not been checked)'
+				},
+				{ label: 'Deployment URL', value: 'Assigned during deployment' }
+			]
+		],
+		[
+			'says that it creates a deployment',
+			{ isExisting: false, domainChange: undefined },
+			'cache.example.com',
+			[
+				{ label: 'Deployment', value: 'Create the deployment cupboard' },
+				{ label: 'Deployment URL', value: 'https://cache.example.com' }
+			]
+		],
+		[
+			'says that it updates an existing deployment',
+			{ isExisting: true, domainChange: undefined },
+			'cache.example.com',
+			[
+				{
+					label: 'Deployment',
+					value: 'Update the existing deployment cupboard'
+				},
+				{ label: 'Deployment URL', value: 'https://cache.example.com' }
+			]
+		],
+		[
+			'reports moving an existing deployment to another domain',
+			{
+				isExisting: true,
+				domainChange: {
+					kind: 'move',
+					from: ['cache.example.com'],
+					to: 'scratch.example.com'
+				}
+			},
+			'scratch.example.com',
+			[
+				{
+					label: 'Deployment',
+					value: 'Update the existing deployment cupboard'
+				},
+				{ label: 'Deployment URL', value: 'https://scratch.example.com' },
+				{
+					label: 'Domain change',
+					value:
+						'Changes the custom domains of the existing deployment from https://cache.example.com to https://scratch.example.com. Tenants created at a removed domain lose that address.'
+				}
+			]
+		],
+		[
+			'reports removing the other custom domains of an existing deployment',
+			{
+				isExisting: true,
+				domainChange: {
+					kind: 'removal',
+					from: ['cache.example.com', 'old.example.com'],
+					to: 'cache.example.com'
+				}
+			},
+			'cache.example.com',
+			[
+				{
+					label: 'Deployment',
+					value: 'Update the existing deployment cupboard'
+				},
+				{ label: 'Deployment URL', value: 'https://cache.example.com' },
+				{
+					label: 'Domain change',
+					value:
+						'Removes the custom domain https://old.example.com from the existing deployment, which keeps https://cache.example.com. Tenants created at a removed domain lose that address.'
+				}
+			]
+		],
+		[
+			'reports moving an existing deployment off its workers.dev address',
+			{
+				isExisting: true,
+				domainChange: {
+					kind: 'first-domain',
+					from: [],
+					to: 'scratch.example.com'
+				}
+			},
+			'scratch.example.com',
+			[
+				{
+					label: 'Deployment',
+					value: 'Update the existing deployment cupboard'
+				},
+				{ label: 'Deployment URL', value: 'https://scratch.example.com' },
+				{
+					label: 'Domain change',
+					value:
+						'Adds the custom domain https://scratch.example.com to the existing deployment, which keeps its workers.dev address. Tenants keep the URL that they were created at.'
+				}
+			]
+		]
+	])('%s', (_name, target, domain, expected) => {
+		const rows = deploymentReviewRows(
+			planDeployment(artifact, { kind: 'offline' }, undefined, testTransitions),
+			{ control: [], tenant: [] },
+			domain,
+			[],
+			'summary',
+			target
+		);
+
+		expect(
+			rows.filter((row) =>
+				['Deployment', 'Deployment URL', 'Domain change'].includes(row.label)
+			)
+		).toStrictEqual(expected);
+	});
+	it('says that it recreates the control Worker of a deployment whose database is in use', () => {
+		const rows = deploymentReviewRows(
+			planDeployment(
+				artifact,
+				{
+					kind: 'existing',
+					transitions: new Map(),
+					readiness: { pending: 0, stragglers: [] },
+					blocked: undefined,
+					unrecognised: []
+				},
+				undefined,
+				testTransitions
+			),
+			{ control: [], tenant: [] },
+			undefined,
+			[],
+			'summary',
+			{ isExisting: false, domainChange: undefined }
+		);
+
+		expect(rows.filter((row) => row.label === 'Deployment')).toStrictEqual([
+			{
+				label: 'Deployment',
+				value:
+					'Recreate the control Worker of the existing deployment cupboard, whose database is already in use'
+			}
+		]);
 	});
 	it('disambiguates maintenance and failed-message queues in details', () => {
 		const planned = {

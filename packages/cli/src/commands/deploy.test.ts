@@ -94,18 +94,25 @@ describe('init result file', () => {
 
 describe('init deployment name', () => {
 	it.each(['init', 'deploy'])(
-		'passes the deployment name through %s',
+		'passes the deployment name and the domain change confirmation through %s',
 		async (command) => {
 			vi.mocked(executeDeploy).mockReset();
 			vi.mocked(executeDeploy).mockResolvedValue();
 			await buildProgram().parseAsync(
-				[command, '--deployment-name', 'staging', '--yes'],
+				[
+					command,
+					'--deployment-name',
+					'staging',
+					'--allow-domain-change',
+					'--yes'
+				],
 				{ from: 'user' }
 			);
 			expect(vi.mocked(executeDeploy).mock.calls).toStrictEqual([
 				[
 					{
 						deploymentName: 'staging',
+						allowDomainChange: true,
 						yes: true,
 						oidcIssuer: 'https://dash.cloudflare.com',
 						clientId: '6c915db1f16ece47255821ee6ca1d538',

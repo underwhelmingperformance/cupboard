@@ -10,9 +10,12 @@ import {
 	findProgressively,
 	type ProgressivePage
 } from '@cupboard/shared/collections';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import Cloudflare from 'cloudflare';
 import { NotFoundError } from 'cloudflare';
+import type { Queue } from 'cloudflare/resources/queues/queues';
 import type { LifecycleUpdateParams } from 'cloudflare/resources/r2/buckets/lifecycle';
+import type { RouteListResponse } from 'cloudflare/resources/workers/routes';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -30,6 +33,7 @@ import {
 	type QueueId,
 	queueIdSchema,
 	type ScriptName,
+	scriptNameSchema,
 	type ZoneId,
 	zoneIdSchema
 } from './identifiers.ts';
@@ -134,10 +138,21 @@ export interface WorkersDevelopmentRoutes {
 	readonly previewUrls: boolean;
 }
 
+/**
+The custom domain that a script keeps. `zoneId` is needed only to attach a
+domain that the script does not have yet.
+*/
 export interface CustomDomain {
 	readonly hostname: string;
-	readonly zoneId: ZoneId;
+	readonly zoneId: ZoneId | undefined;
 }
+
+/**
+The result of `setCustomDomain`. `zone-missing` means that the script does not
+have the domain and no zone was given to attach it in, so the call changed
+nothing.
+*/
+export type CustomDomainOutcome = 'set' | 'zone-missing';
 
 export interface TokenPermissionGroup {
 	readonly id: string;
@@ -171,6 +186,23 @@ export interface WorkerLogEvent {
 }
 
 /**
+An existing account resource, and whether anything uses it.
+*/
+export interface AccountResource {
+	readonly isUsed: boolean;
+}
+
+/**
+The Workers that serve a hostname. Cloudflare runs the Workers of matching
+routes in front of the custom-domain Worker. `routes` is `undefined` when
+the token may not list the zone's routes.
+*/
+export interface HostnameWorkers {
+	readonly customDomain: ScriptName | undefined;
+	readonly routes: readonly ScriptName[] | undefined;
+}
+
+/**
 The Cloudflare operations the deploy pipeline performs, as a narrow interface
 over the official SDK. Resource-creation methods return the live id and are
 safe to call when the resource already exists.
@@ -186,6 +218,31 @@ export interface CloudflareApi {
 	listAccountSubscriptions(signal?: AbortSignal): Promise<AccountSubscriptions>;
 
 	r2BucketExists(name: string): Promise<boolean>;
+	/**
+	The bucket called `name`, or `undefined` when it does not exist.
+	`isUsed` is true when it contains an object.
+	*/
+	findR2Bucket(name: string): Promise<AccountResource | undefined>;
+	/**
+	The KV namespace with the title, or `undefined` when none has it.
+	`isUsed` is true when it contains a key.
+	*/
+	findKvNamespace(
+		title: string
+	): Promise<(AccountResource & { readonly id: KvNamespaceId }) | undefined>;
+	/**
+	The queue called `name`, or `undefined` when it does not exist.
+	`isUsed` is true when a producer writes to it or a consumer reads it.
+	`deadLetterOf` lists the Workers whose consumers use it as their
+	dead-letter queue; it is empty when `isUsed` is true, because a used
+	queue is refused regardless.
+	*/
+	findQueue(
+		name: string
+	): Promise<
+		| (AccountResource & { readonly deadLetterOf: readonly ScriptName[] })
+		| undefined
+	>;
 	ensureR2Bucket(name: string): Promise<void>;
 	/**
 	Configures the one-day legacy staging rule and publication staging's
@@ -261,6 +318,10 @@ export interface CloudflareApi {
 	*/
 	deleteSecret(scriptName: ScriptName, name: string): Promise<void>;
 	listScriptSecrets(scriptName: ScriptName): Promise<string[]>;
+	/**
+	The names of every Worker script on the account.
+	*/
+	listScriptNames(): Promise<ScriptName[]>;
 
 	findZoneId(name: string): Promise<ZoneId | undefined>;
 	findCustomDomain(scriptName: ScriptName): Promise<string | undefined>;
@@ -268,10 +329,19 @@ export interface CloudflareApi {
 	The hostnames of every custom domain routed to the script.
 	*/
 	listCustomDomains(scriptName: ScriptName): Promise<string[]>;
+	/**
+	The Workers that serve `hostname`: the Worker whose custom domain it is
+	on the account, and the Workers of the routes in the zone `zoneId` that
+	match it. Hostnames are compared in lower case.
+	*/
+	findHostnameWorkers(
+		hostname: string,
+		zoneId: ZoneId | undefined
+	): Promise<HostnameWorkers>;
 	setCustomDomain(
 		scriptName: ScriptName,
 		domain: CustomDomain | undefined
-	): Promise<void>;
+	): Promise<CustomDomainOutcome>;
 
 	listTokenPermissionGroups(): Promise<TokenPermissionGroup[]>;
 	findApiTokenId(name: string): Promise<string | undefined>;
@@ -440,6 +510,8 @@ function isConsumerSettled(
 	);
 }
 
+const consumerListConcurrency = 6;
+
 const stagingPrefix = 'staging/';
 const stagingReclaimRuleId = 'cupboard-staging-reclaim';
 const oneDayInSeconds = 24 * 60 * 60;
@@ -493,6 +565,21 @@ function managedLifecycleFields(rule: ManagedLifecycleFields): {
 }
 
 /**
+Whether a Workers route pattern, such as `cache.example.com/*` or
+`*.example.com/api/*`, matches requests to `hostname`. A leading `*` in the
+host matches any prefix, so `*example.com` matches `example.com` and every
+subdomain.
+*/
+function doesRouteMatchHost(pattern: string, hostname: string): boolean {
+	const withoutScheme = pattern.replace(/^https?:\/\//, '');
+	const host = (withoutScheme.split('/', 1)[0] ?? '').toLowerCase();
+
+	return host.startsWith('*')
+		? hostname.endsWith(host.slice(1))
+		: host === hostname;
+}
+
+/**
 A D1 query response has no `results`. The caller cannot tell it from a query
 that found no rows, so the read fails.
 */
@@ -538,6 +625,61 @@ export function createCloudflareApi(
 		return existing?.queue_id === undefined
 			? undefined
 			: queueIdSchema.parse(existing.queue_id);
+	};
+
+	// The queue list and the consumers of each queue are read at most once in
+	// a run, and only when a lookup needs them. A failed read is not kept, so
+	// the next lookup reads again.
+	let queueList: Promise<readonly Queue[]> | undefined;
+	const listQueues = (): Promise<readonly Queue[]> => {
+		if (queueList === undefined) {
+			const listed = filterCloudflareItems(
+				client.queues.list(account),
+				() => true,
+				'Cloudflare queue list'
+			);
+			queueList = listed;
+			void listed.catch(() => {
+				queueList = undefined;
+			});
+		}
+
+		return queueList;
+	};
+	const queueConsumers = new Map<string, Promise<readonly unknown[]>>();
+	const consumersOf = (queueId: string): Promise<readonly unknown[]> => {
+		const existing = queueConsumers.get(queueId);
+
+		if (existing !== undefined) {
+			return existing;
+		}
+
+		const read = filterCloudflareItems(
+			client.queues.consumers.list(queueId, account),
+			() => true,
+			'Cloudflare queue consumer list'
+		);
+		queueConsumers.set(queueId, read);
+		void read.catch(() => {
+			queueConsumers.delete(queueId);
+		});
+
+		return read;
+	};
+	// The consumers of a queue that was deleted after the list cannot be read,
+	// and that queue has no consumers to report.
+	const consumersOfListedQueue = async (
+		queueId: string
+	): Promise<readonly unknown[]> => {
+		try {
+			return await consumersOf(queueId);
+		} catch (error) {
+			if (error instanceof NotFoundError) {
+				return [];
+			}
+
+			throw error;
+		}
 	};
 
 	const listSchedules = async (scriptName: ScriptName): Promise<string[]> => {
@@ -635,6 +777,124 @@ export function createCloudflareApi(
 		},
 
 		r2BucketExists: isBucketPresent,
+
+		async listScriptNames() {
+			const scripts = await filterCloudflareItems(
+				client.workers.scripts.list(account),
+				() => true,
+				'Cloudflare Worker script list'
+			);
+
+			const names: ScriptName[] = [];
+
+			for (const script of scripts) {
+				if (script.id !== undefined) {
+					names.push(scriptNameSchema.parse(script.id));
+				}
+			}
+
+			return names;
+		},
+
+		async findR2Bucket(name) {
+			if (!(await isBucketPresent(name))) {
+				return;
+			}
+
+			const objects = await client.r2.buckets.objects.list(name, {
+				...account,
+				per_page: 1
+			});
+
+			return { isUsed: objects.getPaginatedItems().length > 0 };
+		},
+
+		async findKvNamespace(title) {
+			const existing = await findCloudflareItem(
+				client.kv.namespaces.list(account),
+				(namespace) => namespace.title === title,
+				'Cloudflare KV namespace list'
+			);
+
+			if (existing?.id === undefined) {
+				return;
+			}
+
+			const keys = await client.kv.namespaces.keys.list(existing.id, {
+				...account,
+				limit: 10
+			});
+
+			return {
+				id: kvNamespaceIdSchema.parse(existing.id),
+				isUsed: keys.getPaginatedItems().length > 0
+			};
+		},
+
+		async findQueue(name) {
+			const queues = await listQueues();
+			const queue = queues.find((item) => item.queue_name === name);
+
+			if (queue?.queue_id === undefined) {
+				return;
+			}
+
+			const producers = queue.producers_total_count ?? queue.producers?.length;
+
+			if (producers !== undefined && producers > 0) {
+				return { isUsed: true, deadLetterOf: [] };
+			}
+
+			let ownConsumers: readonly unknown[];
+
+			try {
+				ownConsumers = await consumersOf(queue.queue_id);
+			} catch (error) {
+				// A 404 here means that the queue was deleted after the list was
+				// read, so report it as absent.
+				if (error instanceof NotFoundError) {
+					return;
+				}
+
+				throw error;
+			}
+
+			if (ownConsumers.length > 0) {
+				return { isUsed: true, deadLetterOf: [] };
+			}
+
+			const otherQueueIds: string[] = [];
+
+			for (const item of queues) {
+				if (item.queue_id !== undefined && item.queue_id !== queue.queue_id) {
+					otherQueueIds.push(item.queue_id);
+				}
+			}
+
+			const consumers = await mapWithConcurrency(
+				otherQueueIds,
+				consumerListConcurrency,
+				consumersOfListedQueue
+			);
+			const deadLetterOf: ScriptName[] = [];
+
+			for (const consumer of consumers.flat()) {
+				const parsed = liveConsumerSchema.safeParse(consumer);
+
+				if (!parsed.success || parsed.data.dead_letter_queue !== name) {
+					continue;
+				}
+
+				const script =
+					parsed.data.script_name ?? parsed.data.script ?? parsed.data.service;
+
+				if (script !== undefined) {
+					deadLetterOf.push(scriptNameSchema.parse(script));
+				}
+			}
+
+			return { isUsed: false, deadLetterOf };
+		},
 
 		async ensureR2Bucket(name) {
 			if (await isBucketPresent(name)) {
@@ -1049,8 +1309,8 @@ export function createCloudflareApi(
 
 		async findZoneId(name) {
 			const zone = await findCloudflareItem(
-				client.zones.list({ name }),
-				(item) => item.name === name,
+				client.zones.list({ name, account: { id: accountId } }),
+				(item) => item.name === name && item.account.id === accountId,
 				'Cloudflare zone list'
 			);
 
@@ -1077,6 +1337,50 @@ export function createCloudflareApi(
 			return domains.map((domain) => domain.hostname);
 		},
 
+		async findHostnameWorkers(hostname, zoneId) {
+			const normalised = hostname.toLowerCase();
+			const domain = await findCloudflareItem(
+				client.workers.domains.list(account),
+				(item) => item.hostname.toLowerCase() === normalised,
+				'Cloudflare Worker domain list'
+			);
+			const customDomain =
+				domain === undefined
+					? undefined
+					: scriptNameSchema.parse(domain.service);
+
+			if (zoneId === undefined) {
+				return { customDomain, routes: [] };
+			}
+
+			let routes: RouteListResponse[];
+
+			try {
+				routes = await filterCloudflareItems(
+					client.workers.routes.list({ zone_id: zoneId }),
+					(route) => doesRouteMatchHost(route.pattern, normalised),
+					'Cloudflare Worker route list'
+				);
+			} catch (error) {
+				if (isTokenRefusal(error)) {
+					return { customDomain, routes: undefined };
+				}
+
+				throw error;
+			}
+
+			const routeScripts = new Set(
+				routes.flatMap((route) => route.script ?? [])
+			);
+
+			return {
+				customDomain,
+				routes: [...routeScripts].map((script) =>
+					scriptNameSchema.parse(script)
+				)
+			};
+		},
+
 		async setCustomDomain(scriptName, desired) {
 			const current = await filterCloudflareItems(
 				client.workers.domains.list(account),
@@ -1088,6 +1392,10 @@ export function createCloudflareApi(
 				desired !== undefined &&
 				current.every((domain) => domain.hostname !== desired.hostname)
 			) {
+				if (desired.zoneId === undefined) {
+					return 'zone-missing';
+				}
+
 				await client.workers.domains.update({
 					...account,
 					hostname: desired.hostname,
@@ -1103,6 +1411,8 @@ export function createCloudflareApi(
 
 				await client.workers.domains.delete(domain.id, account);
 			}
+
+			return 'set';
 		},
 
 		async listTokenPermissionGroups() {

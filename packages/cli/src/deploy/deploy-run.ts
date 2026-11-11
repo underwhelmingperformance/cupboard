@@ -31,6 +31,11 @@ import {
 	isFreshDeployment
 } from './deployment-state.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
+import {
+	type DeploymentTarget,
+	type DomainChange,
+	removedDomains
+} from './existing-deployment.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
 import type { DeploySecrets } from './secrets.ts';
 import {
@@ -232,7 +237,8 @@ export function deploymentReviewRows(
 	secrets: DeploySecrets,
 	domain: string | undefined,
 	annotatedSecrets: readonly string[] = [],
-	presentation: PresentationLevel = 'summary'
+	presentation: PresentationLevel = 'summary',
+	target?: DeploymentTarget
 ): ResultRow[] {
 	const observed = plan.observation;
 	const config = plan.artifact.config;
@@ -250,6 +256,10 @@ export function deploymentReviewRows(
 	const rows: ResultRow[] = [
 		{ label: 'Version', value: plan.artifact.buildVersion },
 		{
+			label: 'Deployment',
+			value: deploymentRowValue(config, target, observed)
+		},
+		{
 			label: 'Deployment URL',
 			value:
 				domain === undefined
@@ -257,6 +267,14 @@ export function deploymentReviewRows(
 						'Assigned during deployment')
 					: `https://${domain}`
 		},
+		...(target?.domainChange === undefined
+			? []
+			: [
+					{
+						label: 'Domain change',
+						value: domainChangeText(target.domainChange)
+					}
+				]),
 		{
 			label: 'Changes',
 			value:
@@ -342,6 +360,57 @@ export function deploymentReviewRows(
 		);
 	}
 	return rows;
+}
+
+function deploymentRowValue(
+	config: DeploymentConfig,
+	target: DeploymentTarget | undefined,
+	observed: DeploymentPlan['observation']
+): string {
+	const name = config.control.name;
+
+	if (target === undefined) {
+		return `${name} (the account has not been checked)`;
+	}
+
+	if (target.isExisting) {
+		return `Update the existing deployment ${name}`;
+	}
+
+	return observed.kind === 'existing'
+		? `Recreate the control Worker of the existing deployment ${name}, whose database is already in use`
+		: `Create the deployment ${name}`;
+}
+
+/**
+Describes a plan's change to the custom domains of an existing deployment,
+and whether tenants keep the addresses that they were created at.
+*/
+export function domainChangeText(change: DomainChange): string {
+	const kept = change.to === undefined ? [] : [change.to];
+	const removed = removedDomains(change);
+
+	switch (change.kind) {
+		case 'first-domain': {
+			return `Adds the custom domain ${domainAddresses(kept)} to the existing deployment, which keeps its workers.dev address. Tenants keep the URL that they were created at.`;
+		}
+
+		case 'move': {
+			return `Changes the custom domains of the existing deployment from ${domainAddresses(change.from)} to ${domainAddresses(kept)}. Tenants created at a removed domain lose that address.`;
+		}
+
+		case 'removal': {
+			const noun = removed.length === 1 ? 'custom domain' : 'custom domains';
+
+			return `Removes the ${noun} ${domainAddresses(removed)} from the existing deployment, which keeps ${domainAddresses(kept)}. Tenants created at a removed domain lose that address.`;
+		}
+	}
+}
+
+function domainAddresses(domains: readonly string[]): string {
+	return domains.length === 0
+		? 'none (its workers.dev address only)'
+		: domains.map((domain) => `https://${domain}`).join(' and ');
 }
 
 /**
@@ -437,28 +506,28 @@ async function configureTriggers(
 				return;
 			}
 
-			const zoneId = await findZoneId(api, options.domain);
+			const outcome = await api.setCustomDomain(control.name, {
+				hostname: options.domain,
+				zoneId: await findHostnameZoneId(api, options.domain)
+			});
 
-			if (zoneId === undefined) {
+			if (outcome === 'zone-missing') {
 				context.warn(
 					'No Cloudflare zone for',
 					`${options.domain}; add the domain to this account, then re-run.`
 				);
-
-				return;
 			}
-
-			await api.setCustomDomain(control.name, {
-				hostname: options.domain,
-				zoneId
-			});
 		},
 		{ humanLabel: 'Configuring maintenance and domain' }
 	);
 }
 
-async function findZoneId(
-	api: CloudflareApi,
+/**
+The Cloudflare zone of `hostname`: the most specific candidate zone that the
+account can see.
+*/
+export async function findHostnameZoneId(
+	api: Pick<CloudflareApi, 'findZoneId'>,
 	hostname: string
 ): Promise<Awaited<ReturnType<CloudflareApi['findZoneId']>>> {
 	for (const candidate of cloudflareZoneCandidates(hostname)) {

@@ -46,6 +46,22 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'r2BucketExists');
 			return Promise.resolve(false);
 		},
+		findR2Bucket: () => {
+			recordApiCall(apiCalls, 'findR2Bucket');
+			return Promise.resolve(undefined);
+		},
+		findKvNamespace: () => {
+			recordApiCall(apiCalls, 'findKvNamespace');
+			return Promise.resolve(undefined);
+		},
+		findQueue: () => {
+			recordApiCall(apiCalls, 'findQueue');
+			return Promise.resolve(undefined);
+		},
+		listScriptNames: () => {
+			recordApiCall(apiCalls, 'listScriptNames');
+			return Promise.resolve([]);
+		},
 		ensureR2Bucket: () => {
 			recordApiCall(apiCalls, 'ensureR2Bucket');
 			return Promise.resolve();
@@ -122,9 +138,13 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'listCustomDomains');
 			return Promise.resolve([]);
 		},
+		findHostnameWorkers: () => {
+			recordApiCall(apiCalls, 'findHostnameWorkers');
+			return Promise.resolve({ customDomain: undefined, routes: [] });
+		},
 		setCustomDomain: () => {
 			recordApiCall(apiCalls, 'setCustomDomain');
-			return Promise.resolve();
+			return Promise.resolve('set');
 		},
 		listTokenPermissionGroups: () => {
 			recordApiCall(apiCalls, 'listTokenPermissionGroups');

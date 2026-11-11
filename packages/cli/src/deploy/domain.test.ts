@@ -62,8 +62,11 @@ describe('domainProblem', () => {
 });
 
 describe('checkDomainOption', () => {
-	it('returns a valid domain unchanged', () => {
-		expect(checkDomainOption('cache.example.com')).toBe('cache.example.com');
+	it.each([
+		['cache.example.com', 'cache.example.com'],
+		['Cache.Example.COM', 'cache.example.com']
+	])('returns the valid domain %s in lower case', (value, expected) => {
+		expect(checkDomainOption(value)).toBe(expected);
 	});
 
 	it('throws the typed error for an invalid domain', () => {

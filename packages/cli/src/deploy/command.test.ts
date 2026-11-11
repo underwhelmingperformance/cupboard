@@ -1,9 +1,12 @@
+import { readdir, readFile } from 'node:fs/promises';
+
 import { localStep } from '@cupboard/protocol/deployment';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
+import Cloudflare from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -17,6 +20,10 @@ import {
 	UnreachableHostError
 } from '../errors.ts';
 
+import type * as ArtifactModule from './artifact.ts';
+import { buildArtifactFromTree } from './artifact.ts';
+import type * as AuthModule from './auth.ts';
+import { resolveCloudflare } from './auth.ts';
 import {
 	type AdminAccess,
 	adminAccessFor,
@@ -32,6 +39,7 @@ import {
 	tenantMigratorFor,
 	withClaimSecret
 } from './authority.ts';
+import type { CloudflareApi } from './cloudflare-api.ts';
 import {
 	AccountOptionRequiredError,
 	AudienceWithoutGithubOidcError,
@@ -41,6 +49,7 @@ import {
 	DeployCancelledError,
 	type DeployCliOptions,
 	DeploymentUnclaimedError,
+	DomainChangeConfirmationRequiredError,
 	endBeforeReady,
 	envR2Credentials,
 	executeDeploy,
@@ -62,15 +71,25 @@ import {
 } from './command.ts';
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
-import type { StartingPlan } from './existing-deployment.ts';
+import { deploymentNameSchema } from './deployment-name.ts';
+import type { DeploymentTarget, StartingPlan } from './existing-deployment.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
 	scriptNameSchema
 } from './identifiers.ts';
+import { parseD1Migrations } from './migrations.ts';
 import { DeploymentClaimFailedError, type OnboardOutcome } from './onboard.ts';
 import { renameResource } from './overrides.ts';
 import { type Claimant, claimantLabel, type OwnerBinding } from './owner.ts';
+import {
+	DomainServedByOtherWorkerError,
+	type PlanCheck
+} from './plan-checks.ts';
+import {
+	UnrecognisedDatabaseError,
+	UnrecognisedWorkerError
+} from './plan-checks.ts';
 import {
 	r2AccessKeyIdSchema,
 	type R2CredentialCheck,
@@ -82,6 +101,16 @@ import { claimSecretSchema } from './secrets.ts';
 import type { DeploymentObservation } from './transition.ts';
 import type { DeployUi, TextEdit } from './ui.ts';
 import * as deployUi from './ui.ts';
+
+vi.mock('./auth.ts', async (importOriginal) => ({
+	...(await importOriginal<typeof AuthModule>()),
+	resolveCloudflare: vi.fn()
+}));
+
+vi.mock('./artifact.ts', async (importOriginal) => ({
+	...(await importOriginal<typeof ArtifactModule>()),
+	buildArtifactFromTree: vi.fn()
+}));
 
 /**
 A sign-in whose ID tokens have `claims` and the requested nonce. `onSignIn`
@@ -569,25 +598,46 @@ describe('reviewPlan', () => {
 			readonly startingPlan?: StartingPlan;
 			readonly requestedDomain?: string;
 			readonly observation?: DeploymentObservation;
+			readonly allowDomainChange?: boolean;
+			readonly check?: (state: PlanState) => PlanCheck;
 		}
-	): { world: PlanReviewWorld; rendered: PlanState[] } {
+	): {
+		world: PlanReviewWorld;
+		rendered: PlanState[];
+		targets: DeploymentTarget[];
+	} {
 		const rendered: PlanState[] = [];
+		const targets: DeploymentTarget[] = [];
 
 		return {
 			rendered,
+			targets,
 			world: {
 				ui,
-				render: (state) => {
+				render: (state, target) => {
 					rendered.push(state);
+					targets.push(target);
 					return Promise.resolve(options?.observation ?? { kind: 'offline' });
 				},
+				check: (state) =>
+					Promise.resolve(
+						options?.check?.(state) ?? {
+							refusal: undefined,
+							routeWorkers: []
+						}
+					),
 				accounts: () => Promise.resolve(accounts),
 				skipReview: options?.skipReview ?? false,
 				startingPlanFor: () =>
 					Promise.resolve(
-						options?.startingPlan ?? { config, routedDomain: undefined }
+						options?.startingPlan ?? {
+							config,
+							routedDomains: [],
+							isExisting: false
+						}
 					),
 				requestedDomain: options?.requestedDomain,
+				allowDomainChange: options?.allowDomainChange ?? false,
 				...(options?.canReplaceR2Credentials !== undefined && {
 					canReplaceR2Credentials: () =>
 						Promise.resolve(options.canReplaceR2Credentials ?? false)
@@ -603,6 +653,225 @@ describe('reviewPlan', () => {
 			agreed: await reviewPlan(initial, w),
 			rendered
 		}).toStrictEqual({ agreed: initial, rendered: [initial] });
+	});
+
+	const deployed: StartingPlan = {
+		config,
+		routedDomains: ['cache.example.com'],
+		isExisting: true
+	};
+	const moved: PlanState = { ...initial, domain: 'scratch.example.com' };
+	const movedTarget: DeploymentTarget = {
+		isExisting: true,
+		domainChange: {
+			kind: 'move',
+			from: ['cache.example.com'],
+			to: 'scratch.example.com'
+		}
+	};
+
+	it.each<[string, PlanState, boolean, unknown, DeploymentTarget]>([
+		[
+			'refuses to move an existing deployment to another domain',
+			moved,
+			false,
+			new DomainChangeConfirmationRequiredError(
+				scriptNameSchema.parse('cupboard'),
+				{
+					kind: 'move',
+					from: ['cache.example.com'],
+					to: 'scratch.example.com'
+				}
+			),
+			movedTarget
+		],
+		[
+			'moves an existing deployment with --allow-domain-change',
+			moved,
+			true,
+			moved,
+			movedTarget
+		],
+		[
+			'keeps the domain of an existing deployment',
+			{ ...initial, domain: 'cache.example.com' },
+			false,
+			{ ...initial, domain: 'cache.example.com' },
+			{ isExisting: true, domainChange: undefined }
+		]
+	])(
+		'%s when the review is skipped',
+		async (_name, state, allowDomainChange, expected, target) => {
+			const { world: w, targets } = world(scriptedUi({}), {
+				skipReview: true,
+				startingPlan: deployed,
+				allowDomainChange
+			});
+			let outcome: unknown;
+
+			try {
+				outcome = await reviewPlan(state, w);
+			} catch (error) {
+				outcome = error;
+			}
+
+			expect({ outcome, targets }).toStrictEqual({
+				outcome: expected,
+				targets: [target]
+			});
+		}
+	);
+
+	const takenDomain = (state: PlanState): PlanCheck => ({
+		refusal:
+			state.domain === 'cache.example.com'
+				? new DomainServedByOtherWorkerError(
+						'cache.example.com',
+						scriptNameSchema.parse('production')
+					)
+				: undefined,
+		routeWorkers: [scriptNameSchema.parse('router')]
+	});
+
+	it('throws the refusal of the account checks before rendering when the review is skipped', async () => {
+		const { world: w, rendered } = world(scriptedUi({}), {
+			skipReview: true,
+			check: takenDomain
+		});
+		const state = { ...initial, domain: 'cache.example.com' };
+		let outcome: unknown;
+
+		try {
+			outcome = await reviewPlan(state, w);
+		} catch (error) {
+			outcome = error;
+		}
+
+		expect({ outcome, rendered }).toStrictEqual({
+			outcome: takenDomain(state).refusal,
+			rendered: []
+		});
+	});
+
+	it('accepts a plan with route Workers in front of its domain', async () => {
+		const { world: w } = world(scriptedUi({}), {
+			skipReview: true,
+			check: takenDomain
+		});
+		const state = { ...initial, domain: 'staging.example.com' };
+
+		expect(await reviewPlan(state, w)).toStrictEqual(state);
+	});
+
+	it('offers a domain edit while the account checks block the plan', async () => {
+		const offered: (readonly string[])[] = [];
+		const ui = scriptedUi({
+			menuChoices: ['domain', 'deploy'],
+			textEdits: [{ kind: 'set', value: 'staging.example.com' }]
+		});
+		const { world: w } = world(
+			{
+				...ui,
+				menu: (message, entries) => {
+					offered.push([
+						message,
+						String(entries.some((entry) => entry.value === 'deploy'))
+					]);
+					return ui.menu(message, entries);
+				}
+			},
+			{ check: takenDomain }
+		);
+
+		expect({
+			agreed: await reviewPlan({ ...initial, domain: 'cache.example.com' }, w),
+			offered
+		}).toStrictEqual({
+			agreed: { ...initial, domain: 'staging.example.com' },
+			offered: [
+				['The plan above is blocked. Change it or cancel.', 'false'],
+				['Deploy to Cloudflare with the plan above?', 'true']
+			]
+		});
+	});
+
+	it('asks whether to remove the other custom domains of an existing deployment', async () => {
+		const menus: string[] = [];
+		const ui = scriptedUi({ menuChoices: ['deploy'] });
+		const { world: w } = world(
+			{
+				...ui,
+				menu: (message, entries) => {
+					menus.push(message);
+					return ui.menu(message, entries);
+				}
+			},
+			{
+				startingPlan: {
+					config,
+					routedDomains: ['cache.example.com', 'old.example.com'],
+					isExisting: true
+				}
+			}
+		);
+		const state = { ...initial, domain: 'cache.example.com' };
+
+		expect({ agreed: await reviewPlan(state, w), menus }).toStrictEqual({
+			agreed: state,
+			menus: [
+				"Deploy to Cloudflare with the plan above, and remove the existing deployment's other custom domains?"
+			]
+		});
+	});
+
+	it('asks whether to remove every custom domain when the plan clears the domain', async () => {
+		const menus: string[] = [];
+		const ui = scriptedUi({ menuChoices: ['deploy'] });
+		const { world: w } = world(
+			{
+				...ui,
+				menu: (message, entries) => {
+					menus.push(message);
+					return ui.menu(message, entries);
+				}
+			},
+			{
+				startingPlan: {
+					config,
+					routedDomains: ['cache.example.com'],
+					isExisting: true
+				}
+			}
+		);
+
+		expect({ agreed: await reviewPlan(initial, w), menus }).toStrictEqual({
+			agreed: initial,
+			menus: [
+				"Deploy to Cloudflare with the plan above, and remove the existing deployment's custom domains?"
+			]
+		});
+	});
+
+	it('asks whether to move an existing deployment to another domain', async () => {
+		const menus: string[] = [];
+		const ui = scriptedUi({ menuChoices: ['deploy'] });
+		const { world: w } = world(
+			{
+				...ui,
+				menu: (message, entries) => {
+					menus.push(message);
+					return ui.menu(message, entries);
+				}
+			},
+			{ startingPlan: deployed }
+		);
+
+		expect({ agreed: await reviewPlan(moved, w), menus }).toStrictEqual({
+			agreed: moved,
+			menus: [
+				'Deploy to Cloudflare with the plan above, and move the existing deployment to a new URL?'
+			]
+		});
 	});
 
 	// A deployment where `deployment-transitions` could expand only after the
@@ -728,6 +997,20 @@ describe('reviewPlan', () => {
 		});
 	});
 
+	it('lowers the case of a domain edit', async () => {
+		const { world: w } = world(
+			scriptedUi({
+				menuChoices: ['domain', 'deploy'],
+				textEdits: [{ kind: 'set', value: 'Cache.Example.com' }]
+			})
+		);
+
+		expect(await reviewPlan(initial, w)).toStrictEqual({
+			...initial,
+			domain: 'cache.example.com'
+		});
+	});
+
 	it('renames a bucket everywhere both workers reference it', async () => {
 		const { world: w } = world(
 			scriptedUi({
@@ -809,7 +1092,11 @@ describe('reviewPlan', () => {
 					accountChoice: 'acc-2'
 				}),
 				{
-					startingPlan: { config: other, routedDomain },
+					startingPlan: {
+						config: other,
+						routedDomains: routedDomain === undefined ? [] : [routedDomain],
+						isExisting: true
+					},
 					...(requestedDomain !== undefined && { requestedDomain })
 				}
 			);
@@ -1827,9 +2114,13 @@ describe('establishAuthority', () => {
 							startingPlanFor: () =>
 								Promise.resolve({
 									config: deployedConfig,
-									routedDomain: undefined
+									routedDomains: [],
+									isExisting: true
 								}),
-							requestedDomain: undefined
+							requestedDomain: undefined,
+							allowDomainChange: false,
+							check: () =>
+								Promise.resolve({ refusal: undefined, routeWorkers: [] })
 						}
 					)
 				);
@@ -2647,4 +2938,304 @@ describe('deployAndOnboard', () => {
 			calls: ['removeLeftover', 'deploy', 'onboard']
 		});
 	});
+});
+
+/**
+The release's Workers configuration and D1 migrations, with empty bundles.
+*/
+async function releaseArtifact(): Promise<
+	Awaited<ReturnType<typeof buildArtifactFromTree>>
+> {
+	const server = new URL('../../../server/', import.meta.url);
+	const source = (file: string) => readFile(new URL(file, server), 'utf8');
+	const migrations = async (directory: string) => {
+		const entries = await readdir(new URL(directory, server));
+		const names = entries.filter((name) => name.endsWith('.sql'));
+
+		return parseD1Migrations(
+			await Promise.all(
+				names.map(async (name) => ({
+					name,
+					sql: await source(`${directory}/${name}`)
+				}))
+			)
+		);
+	};
+	const shared = await migrations('drizzle-d1');
+
+	return {
+		config: parseDeploymentConfig(
+			await source('wrangler.jsonc'),
+			await source('wrangler.tenant.jsonc')
+		),
+		controlBundle: { mainModule: 'worker.js', code: '' },
+		tenantBundle: { mainModule: 'tenant-worker.js', code: '' },
+		d1Migrations: shared,
+		d1MigrationSets: {
+			CUPBOARD_DB: shared,
+			CONTROL_DB: await migrations('drizzle-control-d1')
+		},
+		buildVersion: 'v0.0.0-test'
+	};
+}
+
+describe('executeDeploy plan checks', () => {
+	interface FlowAccount {
+		readonly scripts?: Readonly<Record<string, readonly unknown[]>>;
+		/**
+		Each existing D1 database, by name: its tables, and the names that its
+		`d1_migrations` table records.
+		*/
+		readonly databases?: Readonly<
+			Record<
+				string,
+				{
+					readonly tables: readonly string[];
+					readonly migrations?: readonly string[];
+					/**
+					The columns of the `tenant` table. A query of a column that
+					it does not have fails, as D1 does.
+					*/
+					readonly tenantColumns?: readonly string[];
+				}
+			>
+		>;
+		readonly customDomainWorker?: string;
+	}
+
+	/**
+	A Cloudflare account that answers the deploy's reads from `account` and
+	records every script it reads and every write that the deploy attempts.
+	*/
+	function flowApi(account: FlowAccount): {
+		api: CloudflareApi;
+		reads: string[];
+		writes: string[];
+	} {
+		const reads: string[] = [];
+		const writes: string[] = [];
+		const write = (method: string) => () => {
+			writes.push(method);
+			return Promise.reject(new Error(`unexpected write ${method}`));
+		};
+		const api: CloudflareApi = {
+			listAccounts: () => Promise.resolve(accounts),
+			listAccountSubscriptions: () =>
+				Promise.resolve({ kind: 'listed' as const, subscriptions: [] }),
+			r2BucketExists: () => Promise.resolve(false),
+			findR2Bucket: () => Promise.resolve(undefined),
+			findKvNamespace: () => Promise.resolve(undefined),
+			findQueue: () => Promise.resolve(undefined),
+			listScriptNames: () =>
+				Promise.resolve(
+					Object.keys(account.scripts ?? {}).map((name) =>
+						scriptNameSchema.parse(name)
+					)
+				),
+			ensureR2Bucket: write('ensureR2Bucket'),
+			ensureStagingLifecycleRule: write('ensureStagingLifecycleRule'),
+			findD1Database: (name) =>
+				Promise.resolve(
+					account.databases?.[name] === undefined
+						? undefined
+						: databaseIdSchema.parse(name)
+				),
+			findD1DatabaseName: () => Promise.resolve(undefined),
+			ensureD1Database: write('ensureD1Database'),
+			ensureKvNamespace: write('ensureKvNamespace'),
+			ensureQueue: write('ensureQueue'),
+			findConsumerDeadLetterQueue: () => Promise.resolve(undefined),
+			d1QueryBatch: write('d1QueryBatch'),
+			d1QueryRows: (id, sql) => {
+				const database = account.databases?.[id];
+
+				if (
+					sql.startsWith("SELECT name FROM sqlite_master WHERE type = 'table'")
+				) {
+					return Promise.resolve([...(database?.tables ?? [])]);
+				}
+
+				if (sql.includes("pragma_table_info('tenant')")) {
+					return Promise.resolve([...(database?.tenantColumns ?? [])]);
+				}
+
+				if (
+					sql.includes('FROM tenant WHERE status') &&
+					database?.tenantColumns?.includes('status') !== true
+				) {
+					return Promise.reject(new Error('no such column: status'));
+				}
+
+				if (sql.includes('FROM tenant')) {
+					return Promise.resolve(['1']);
+				}
+
+				return Promise.resolve(
+					sql === 'SELECT name FROM d1_migrations;'
+						? [...(database?.migrations ?? [])]
+						: []
+				);
+			},
+			getScriptConfiguration: (scriptName) => {
+				reads.push(scriptName);
+				const bindings = account.scripts?.[scriptName];
+
+				return Promise.resolve(
+					bindings === undefined
+						? undefined
+						: { bindings, cacheEnabled: false, crossVersionCache: false }
+				);
+			},
+			uploadScript: write('uploadScript'),
+			listDeployedVersions: () => Promise.resolve([]),
+			ensureQueueConsumer: write('ensureQueueConsumer'),
+			listSchedules: () => Promise.resolve([]),
+			ensureSchedules: write('ensureSchedules'),
+			putSecret: write('putSecret'),
+			deleteSecret: write('deleteSecret'),
+			listScriptSecrets: (scriptName) => {
+				reads.push(scriptName);
+				return Promise.resolve([]);
+			},
+			findZoneId: () => Promise.resolve(undefined),
+			findCustomDomain: () => Promise.resolve(undefined),
+			listCustomDomains: () => Promise.resolve([]),
+			findHostnameWorkers: () =>
+				Promise.resolve({
+					customDomain:
+						account.customDomainWorker === undefined
+							? undefined
+							: scriptNameSchema.parse(account.customDomainWorker),
+					routes: []
+				}),
+			setCustomDomain: write('setCustomDomain'),
+			listTokenPermissionGroups: () => Promise.resolve([]),
+			findApiTokenId: () => Promise.resolve(undefined),
+			createApiToken: write('createApiToken'),
+			rollApiTokenSecret: write('rollApiTokenSecret'),
+			getWorkersDevSubdomain: () => Promise.resolve('example'),
+			setWorkersDevRoutes: write('setWorkersDevRoutes'),
+			queryWorkerLogs: () => Promise.resolve([])
+		};
+
+		return { api, reads, writes };
+	}
+
+	const staging = { deploymentName: deploymentNameSchema.parse('staging') };
+	const stagingScripts = ['staging', 'staging-tenant'];
+
+	it.each<
+		[string, Partial<DeployCliOptions>, FlowAccount, Error, readonly string[]]
+	>([
+		[
+			'an unrelated Worker with the derived control Worker name',
+			staging,
+			{ scripts: { staging: [{ type: 'kv_namespace', name: 'CACHE' }] } },
+			new UnrecognisedWorkerError(scriptNameSchema.parse('staging')),
+			stagingScripts
+		],
+		[
+			'an unrelated Worker with the derived tenant Worker name',
+			{ deploymentName: deploymentNameSchema.parse('api') },
+			{ scripts: { 'api-tenant': [{ type: 'kv_namespace', name: 'CACHE' }] } },
+			new UnrecognisedWorkerError(scriptNameSchema.parse('api-tenant')),
+			['api', 'api-tenant']
+		],
+		[
+			'an unrelated database with the derived database name',
+			staging,
+			{ databases: { staging: { tables: ['users'] } } },
+			new UnrecognisedDatabaseError('staging', '0000_blob_state.sql'),
+			stagingScripts
+		],
+		[
+			'an unrelated database whose tenant table the plan cannot read',
+			staging,
+			{
+				databases: {
+					staging: { tables: ['tenant'], tenantColumns: ['id'] }
+				}
+			},
+			new UnrecognisedDatabaseError('staging', '0000_blob_state.sql'),
+			stagingScripts
+		],
+		[
+			'a database that Wrangler migrated with other migrations',
+			staging,
+			{
+				databases: {
+					staging: {
+						tables: ['d1_migrations', 'users'],
+						migrations: ['0000_users.sql']
+					}
+				}
+			},
+			new UnrecognisedDatabaseError('staging', '0000_blob_state.sql'),
+			stagingScripts
+		],
+		[
+			"another Worker's custom domain",
+			{ ...staging, domain: 'cache.example.com' },
+			{ customDomainWorker: 'cupboard' },
+			new DomainServedByOtherWorkerError(
+				'cache.example.com',
+				scriptNameSchema.parse('cupboard')
+			),
+			stagingScripts
+		]
+	])(
+		'refuses %s once, before any change to the account',
+		async (_name, options, account, expected, scripts) => {
+			const warnings: string[] = [];
+			const { api, reads, writes } = flowApi(account);
+			vi.mocked(buildArtifactFromTree).mockResolvedValue(
+				await releaseArtifact()
+			);
+			vi.mocked(resolveCloudflare).mockResolvedValue({
+				client: new Cloudflare({ apiToken: 'test' }),
+				clientWithSignal: () => new Cloudflare({ apiToken: 'test' }),
+				api,
+				accountId: accountId('acc-1'),
+				credentialSource: 'environment',
+				subject: undefined,
+				loginIdToken: undefined
+			});
+			vi.spyOn(deployUi, 'createDeployUi').mockReturnValue({
+				...scriptedUi({}),
+				interactive: false,
+				warn: (message) => {
+					warnings.push(message);
+				}
+			});
+			let outcome: unknown;
+
+			try {
+				await executeDeploy({
+					oidcIssuer: 'https://dash.cloudflare.com',
+					clientId: 'client',
+					yes: true,
+					workersPlan: 'paid',
+					...options
+				});
+			} catch (error) {
+				outcome = error;
+			} finally {
+				vi.restoreAllMocks();
+			}
+
+			expect({
+				outcome,
+				writes,
+				scripts: [...new Set(reads)].toSorted((left, right) =>
+					left.localeCompare(right)
+				),
+				repeated: warnings.filter((warning) => warning === expected.message)
+			}).toStrictEqual({
+				outcome: expected,
+				writes: [],
+				scripts,
+				repeated: []
+			});
+		}
+	);
 });
