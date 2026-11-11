@@ -41,6 +41,7 @@ jobs:
   static:
     name: static and types
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -64,6 +65,7 @@ jobs:
   unit:
     name: workspace unit tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,6 +89,7 @@ jobs:
   server:
     name: server tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,6 +113,7 @@ jobs:
   actions:
     name: action tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -133,6 +137,7 @@ jobs:
   scripts:
     name: script tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -156,6 +161,7 @@ jobs:
   conformance:
     name: conformance (${{ matrix.system }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -185,6 +191,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Check the generated oracle data
+        timeout-minutes: 15
         env:
           NIX_SYSTEM: ${{ matrix.system }}
           CUPBOARD_DEFER_ERROR_ANNOTATIONS: '1'
@@ -199,6 +206,7 @@ jobs:
   binary:
     name: binary smoke
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -221,6 +229,7 @@ jobs:
   flake:
     name: flake build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -266,6 +275,7 @@ jobs:
   e2e:
     name: e2e
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -289,6 +299,7 @@ jobs:
   e2e-remote-store:
     name: remote Nix store tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -312,6 +323,7 @@ jobs:
   pipeline-e2e:
     name: publish pipeline e2e
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -337,6 +349,7 @@ jobs:
   action-e2e:
     name: action e2e
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       attestations: read # read the release's attestation to verify it
@@ -367,6 +380,7 @@ jobs:
   action-e2e-no-project:
     name: action e2e (no caller project)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       attestations: read # read the release's attestation to verify it

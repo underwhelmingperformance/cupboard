@@ -106,6 +106,7 @@ describe('required source check', () => {
 				NIX_SYSTEM: '${{ matrix.system }}',
 				CUPBOARD_DEFER_ERROR_ANNOTATIONS: '1'
 			},
+			'timeout-minutes': 15,
 			run: [
 				'pnpm update:conformance-oracle --system "$NIX_SYSTEM"',
 				'git diff --exit-code -- \\',
@@ -114,6 +115,21 @@ describe('required source check', () => {
 				''
 			].join('\n')
 		});
+	});
+
+	it('limits every job to less than the merge queue check timeout', async () => {
+		const { jobs } = await workflow();
+		const mergeQueueCheckTimeoutMinutes = 60;
+
+		expect(
+			Object.entries(jobs)
+				.filter(
+					([, job]) =>
+						(job['timeout-minutes'] ?? Infinity) >=
+						mergeQueueCheckTimeoutMinutes
+				)
+				.map(([name]) => name)
+		).toStrictEqual([]);
 	});
 
 	it.each(['success', 'failure', 'cancelled', 'skipped'])(
