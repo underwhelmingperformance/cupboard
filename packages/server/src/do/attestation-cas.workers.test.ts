@@ -24,7 +24,10 @@ import {
 	recordD1Statements
 } from '../d1-statements.test-support.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { UploadedObjectNotFoundError } from '../errors.ts';
+import {
+	ReservationChecksMismatchError,
+	UploadedObjectNotFoundError
+} from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
 import { runCasReaperDemote } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -721,6 +724,58 @@ describe('attestation CAS lifecycle', () => {
 				quotaBytes: 1
 			}
 		});
+	});
+
+	it('refuses reservation reads that were made for another reference', async () => {
+		const stagingKey = await stageAttestationBundle(
+			'mismatched-checks',
+			textEncoder.encode('bundle')
+		);
+		const measured = await currentServer().measureAttestationBundle(stagingKey);
+		const incarnation = await currentServer().promoteAttestationBundle(
+			stagingKey,
+			measured
+		);
+		const reference = {
+			cache: defaultCache(),
+			storePathHash,
+			generation: narInfoGenerationSchema.parse(0),
+			predicateType,
+			digest: measured.digest
+		};
+		const other = {
+			...reference,
+			generation: narInfoGenerationSchema.parse(1)
+		};
+		const usage = await tenantUsageRow();
+
+		const isMismatch = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const service = new AttestationCasService(instance.context);
+				const rows = await instance.context.d1.batch(
+					service.reservationReads(other)
+				);
+				try {
+					await service.reserveReferenceAndCharge(
+						reference,
+						measured.size,
+						incarnation,
+						{ reference: other, rows }
+					);
+				} catch (error) {
+					return error instanceof ReservationChecksMismatchError;
+				}
+				return false;
+			}
+		);
+
+		expect({
+			isMismatch,
+			refs: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({ isMismatch: true, refs: [], presence: [], usage });
 	});
 
 	it('removes only captured-generation refs when a store path is deleted', async () => {

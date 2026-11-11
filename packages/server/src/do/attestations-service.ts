@@ -171,8 +171,9 @@ export const inheritanceLookupSubrequests = 2;
 // Writing the destination's list reads its descriptors from D1 and puts it in R2.
 export const inheritanceListSubrequests = 2;
 
-// A bundle costs one CAS head, one source revalidation and three reference calls.
-export const inheritedBundleSubrequests = 5;
+// A bundle costs one CAS head, one batch that revalidates the source and reads
+// the reservation's inputs, and one reservation batch.
+export const inheritedBundleSubrequests = 3;
 
 export const maxInheritedBundlesPerPass = 64;
 
@@ -2004,25 +2005,38 @@ export class AttestationsService {
 						candidates: sourceFilter,
 						limit: 1
 					}).as('available_inheritance_source');
-					const [source] = await this.context.d1
+					const registry = and(
+						eq(d1Schema.objectIncarnation.kind, 'cas'),
+						eq(d1Schema.objectIncarnation.objectId, availableSource.digest)
+					);
+					// Drizzle maps D1 batch rows by column name, so every column in this
+					// select needs a distinct name.
+					const registryIncarnation = sql<
+						number | null
+					>`${d1Schema.objectIncarnation.incarnation}`.as(
+						'registry_incarnation'
+					);
+					const sourceQuery = this.context.d1
 						.select({
-							predicateType: availableSource.predicateType,
-							digest: availableSource.digest,
 							size: availableSource.size,
 							incarnation: availableSource.incarnation,
 							available: availableSource.available,
-							registryIncarnation: d1Schema.objectIncarnation.incarnation,
+							registryIncarnation,
 							registryState: d1Schema.objectIncarnation.state
 						})
 						.from(availableSource)
-						.leftJoin(
-							d1Schema.objectIncarnation,
-							and(
-								eq(d1Schema.objectIncarnation.kind, 'cas'),
-								eq(d1Schema.objectIncarnation.objectId, availableSource.digest)
-							)
-						)
-						.all();
+						.leftJoin(d1Schema.objectIncarnation, registry);
+					const reference = {
+						cache: cache.scope,
+						storePathHash,
+						generation,
+						predicateType: row.predicateType,
+						digest: row.digest
+					};
+					const [[source], ...reservationRows] = await this.context.d1.batch([
+						sourceQuery,
+						...this.attestationCas.reservationReads(reference)
+					]);
 
 					if (
 						source === undefined ||
@@ -2055,15 +2069,10 @@ export class AttestationsService {
 					}
 
 					const reserved = await this.attestationCas.reserveReferenceAndCharge(
-						{
-							cache: cache.scope,
-							storePathHash,
-							generation,
-							predicateType: source.predicateType,
-							digest: source.digest
-						},
+						reference,
 						source.size,
-						source.incarnation
+						source.incarnation,
+						{ reference, rows: reservationRows }
 					);
 					if (reserved === 'object-changed') {
 						throw new AttestationInheritanceSourceChangedError(row.digest);

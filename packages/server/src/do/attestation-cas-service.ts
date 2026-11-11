@@ -1,5 +1,6 @@
 import {
 	type CacheScope,
+	isSameCacheScope,
 	type NarInfoGeneration,
 	type PredicateType,
 	type Sha256HexDigest,
@@ -10,6 +11,7 @@ import {
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, exists, isNotNull, ne, notExists, sql } from 'drizzle-orm';
+import { type BatchResponse } from 'drizzle-orm/batch';
 import { z } from 'zod';
 
 import {
@@ -28,6 +30,7 @@ import { pathReferenceReadability } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
+	ReservationChecksMismatchError,
 	TenantUsageMissingError,
 	TenantWritesStoppedError,
 	UploadedObjectNotFoundError
@@ -57,6 +60,30 @@ export interface AttestationReference {
 
 export type AttestationReferenceOutcome =
 	'referenced' | 'already-present' | 'over-quota' | 'object-changed';
+
+/**
+The results of `AttestationCasService.reservationReads`, in the same order,
+and the reference that the reads were made for.
+*/
+interface ReservationChecks {
+	readonly reference: AttestationReference;
+	readonly rows: BatchResponse<
+		ReturnType<AttestationCasService['reservationReads']>
+	>;
+}
+
+function isSameReference(
+	left: AttestationReference,
+	right: AttestationReference
+): boolean {
+	return (
+		isSameCacheScope(left.cache, right.cache) &&
+		left.storePathHash === right.storePathHash &&
+		left.generation === right.generation &&
+		left.predicateType === right.predicateType &&
+		left.digest === right.digest
+	);
+}
 
 const reservedReferenceRowsSchema = z.array(
 	z.object({ digest: sha256HexDigestSchema })
@@ -172,36 +199,6 @@ export class AttestationCasService {
 		);
 
 		return reserved.incarnation;
-	}
-
-	private async overQuota(
-		tenant: TenantId,
-		digest: Sha256HexDigest,
-		size: number
-	): Promise<boolean> {
-		const usageFilter = eq(d1Schema.tenantUsage.tenant, tenant);
-		const [usageRows, ownedRows] = await this.context.d1.batch([
-			this.context.d1
-				.select({
-					bytes: d1Schema.tenantUsage.bytes,
-					casBytes: d1Schema.tenantUsage.casBytes,
-					quotaBytes: d1Schema.tenantUsage.quotaBytes
-				})
-				.from(d1Schema.tenantUsage)
-				.where(usageFilter),
-			this.context.d1
-				.select({ digest: d1Schema.tenantCasBlob.digest })
-				.from(d1Schema.tenantCasBlob)
-				.where(this.presenceFilter(tenant, digest))
-		]);
-
-		const usage = usageRows[0];
-
-		if (usage === undefined) {
-			throw new TenantUsageMissingError(tenant);
-		}
-
-		return this.overQuotaForCharge(usage, ownedRows.length > 0, size);
 	}
 
 	private edgeFilter(tenant: TenantId, reference: AttestationReference) {
@@ -407,20 +404,65 @@ export class AttestationCasService {
 		);
 	}
 
+	/**
+	The reads that decide whether `reserveReferenceAndCharge` writes: the
+	reference itself, the tenant's usage and the tenant's presence row for the
+	digest. A caller can send them in its own D1 batch, together with reads of
+	its own, and pass their results with the same reference to
+	`reserveReferenceAndCharge`.
+	*/
+	reservationReads(reference: AttestationReference) {
+		const tenant = this.context.requireTenant();
+
+		return [
+			this.context.d1
+				.select({ digest: d1Schema.attestationReference.digest })
+				.from(d1Schema.attestationReference)
+				.where(this.edgeFilter(tenant, reference))
+				.limit(1),
+			this.context.d1
+				.select({
+					bytes: d1Schema.tenantUsage.bytes,
+					casBytes: d1Schema.tenantUsage.casBytes,
+					quotaBytes: d1Schema.tenantUsage.quotaBytes
+				})
+				.from(d1Schema.tenantUsage)
+				.where(eq(d1Schema.tenantUsage.tenant, tenant)),
+			this.context.d1
+				.select({ digest: d1Schema.tenantCasBlob.digest })
+				.from(d1Schema.tenantCasBlob)
+				.where(this.presenceFilter(tenant, reference.digest))
+		] as const;
+	}
+
 	async reserveReferenceAndCharge(
 		reference: AttestationReference,
 		size: number,
-		incarnation: number
+		incarnation: number,
+		checks?: ReservationChecks
 	): Promise<AttestationReferenceOutcome> {
+		if (checks !== undefined && !isSameReference(checks.reference, reference)) {
+			throw new ReservationChecksMismatchError();
+		}
+
 		await new PathReadAuthorityService(this.context).requireWritable();
 
 		const tenant = this.context.requireTenant();
+		const [existing, usageRows, ownedRows] =
+			checks?.rows ??
+			(await this.context.d1.batch(this.reservationReads(reference)));
 
-		if (await this.hasReference(tenant, reference)) {
+		if (existing.length > 0) {
 			return 'already-present';
 		}
 
-		if (await this.overQuota(tenant, reference.digest, size)) {
+		const usage = usageRows[0];
+
+		if (usage === undefined) {
+			throw new TenantUsageMissingError(tenant);
+		}
+
+		if (this.overQuotaForCharge(usage, ownedRows.length > 0, size)) {
 			return 'over-quota';
 		}
 

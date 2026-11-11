@@ -1313,7 +1313,7 @@ describe('tenant contract round trip', () => {
 	);
 
 	it.each([
-		{ mode: 'fresh', operations: 18 },
+		{ mode: 'fresh', operations: 17 },
 		{ mode: 'replay', operations: 10 },
 		{ mode: 'restore', operations: 24 }
 	] as const)(
