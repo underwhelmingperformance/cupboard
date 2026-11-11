@@ -89,7 +89,7 @@ const chunkedRequests: readonly ChunkedRequest[] = [
 		requestsPerItem: inheritedBundleSubrequests,
 		d1Calls: inheritanceLookupSubrequests + inheritanceListSubrequests,
 		fanOut:
-			'Each inherited bundle heads its CAS object and makes two D1 batches. The source lookup and the list write add four calls for the path.'
+			'Each inherited bundle heads its CAS object and makes two D1 batches. The source lookup and the list write add three calls for the path.'
 	},
 	{
 		chunk: 'cacheAvailabilityChunkSize',
