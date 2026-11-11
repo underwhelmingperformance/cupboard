@@ -3,6 +3,7 @@ import {
 	type CacheScope,
 	rootNameSchema
 } from '@cupboard/nix-store/scalars';
+import { rootBatchCapacity } from '@cupboard/protocol/retention';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { describe, expect, it } from 'vitest';
 
@@ -10,10 +11,12 @@ import {
 	attestAttachAuthorizationDetails,
 	confirmAuthorizationDetails,
 	contentReadAuthorizationDetails,
+	exactRootGrantsMaxBytes,
 	previewAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
-	rootListAuthorizationDetails
+	rootListAuthorizationDetails,
+	rootsEnsureAuthorizationDetails
 } from './attenuate.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
@@ -173,6 +176,105 @@ describe('rootEnsureAuthorizationDetails', () => {
 				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
 			}
 		]);
+	});
+});
+
+describe('rootsEnsureAuthorizationDetails', () => {
+	const manyRoots = Array.from(
+		{ length: 400 },
+		(_, index) => `github:acme/app/main/x86_64-linux/target-${String(index)}`
+	);
+	const manyUnrelatedRoots = manyRoots.map((root, index) =>
+		index % 2 === 0 ? root : root.replace('github:', 'gitlab:')
+	);
+
+	it.each([
+		{
+			name: 'the exact name of a single root',
+			roots: ['github:acme/app/main/app', 'github:acme/app/main/app'],
+			selectors: ['github:acme/app/main/app']
+		},
+		{
+			name: 'the exact name of each root while the grants are small',
+			roots: [
+				'github:acme/app/main/x86_64-linux/app',
+				'github:acme/app/main/x86_64-linux/apps',
+				'github:acme/app/main/aarch64-darwin/app'
+			],
+			selectors: [
+				'github:acme/app/main/x86_64-linux/app',
+				'github:acme/app/main/x86_64-linux/apps',
+				'github:acme/app/main/aarch64-darwin/app'
+			]
+		},
+		{
+			name: 'the longest shared prefix when exact grants would exceed the budget',
+			roots: manyRoots,
+			selectors: ['github:acme/app/main/x86_64-linux/']
+		},
+		{
+			name: 'the exact name of each root when the roots share no prefix',
+			roots: manyUnrelatedRoots,
+			selectors: manyUnrelatedRoots
+		}
+	])('selects $name', ({ roots, selectors }) => {
+		expect(
+			rootsEnsureAuthorizationDetails({
+				cache: namedCache('nightly'),
+				roots: roots.map((root) => rootName(root))
+			})
+		).toStrictEqual(
+			selectors.map((root) => ({
+				type: 'cupboard_cache',
+				actions: ['root:set'],
+				cache: namedCache('nightly'),
+				root
+			}))
+		);
+	});
+
+	// Roots whose exact grants serialise to `bytes`, one batch capacity of them.
+	function rootsWithGrantBytes(bytes: number): readonly string[] {
+		const prefix = 'github:acme/app/main/';
+		const single = JSON.stringify(
+			rootsEnsureAuthorizationDetails({
+				cache: defaultCache,
+				roots: [rootName(prefix)]
+			})
+		);
+		const grantOverhead = single.length - 2 - prefix.length;
+		const count = rootBatchCapacity;
+		const nameBytes = bytes - 2 - (count - 1) - count * grantOverhead;
+		const baseLength = Math.floor(nameBytes / count);
+
+		return Array.from({ length: count }, (_, index) => {
+			const length = baseLength + (index < nameBytes % count ? 1 : 0);
+			const name = `${prefix}${String(index).padStart(3, '0')}`;
+
+			return name.padEnd(length, 'x');
+		});
+	}
+
+	it.each([
+		{
+			name: 'exact grants for one batch of roots at the budget',
+			roots: rootsWithGrantBytes(exactRootGrantsMaxBytes),
+			isExact: true
+		},
+		{
+			name: 'the shared prefix one byte over the budget',
+			roots: rootsWithGrantBytes(exactRootGrantsMaxBytes + 1),
+			isExact: false
+		}
+	])('requests $name', ({ roots, isExact }) => {
+		const details = rootsEnsureAuthorizationDetails({
+			cache: defaultCache,
+			roots: roots.map((root) => rootName(root))
+		});
+
+		expect(
+			details.map((detail) => ('root' in detail ? detail.root : undefined))
+		).toStrictEqual(isExact ? roots : ['github:acme/app/main/']);
 	});
 });
 

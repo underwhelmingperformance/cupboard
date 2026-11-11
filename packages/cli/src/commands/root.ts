@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import type { CliUi } from '@cupboard/cli-ui';
 import {
 	type CacheScope,
@@ -6,7 +8,14 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import type { AuthorizationDetails } from '@cupboard/protocol/grants';
+import {
+	type RetainedRoot,
+	retainedRoots
+} from '@cupboard/protocol/publish-plan';
 import type {
+	RootBatchBody,
+	RootBatchResponse,
+	RootBatchResult,
 	RootEnsureBodyInput,
 	RootEnsureResponse,
 	RootListEntry,
@@ -25,13 +34,15 @@ import {
 	type ResultRow
 } from '@cupboard/reporter';
 import { collectProgressively } from '@cupboard/shared/collections';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { cursorPages } from '@cupboard/shared/paging';
 import type { Command } from 'commander';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	rootEnsureAuthorizationDetails,
-	rootListAuthorizationDetails
+	rootListAuthorizationDetails,
+	rootsEnsureAuthorizationDetails
 } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
@@ -40,8 +51,17 @@ import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import { CupboardClient } from '../client/client.ts';
 import { listingLimits } from '../client/listings.ts';
 import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
+import {
+	applyRootBatches,
+	type RootBatchEntry,
+	rootBatches,
+	separateRootRequestConcurrency
+} from '../client/root-batches.ts';
+import { isRpcProcedureMissingError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
+import { CliUsageError } from '../errors.ts';
+import { parsePublishPlan } from '../plan/publish-plan-file.ts';
 import { RootTargetLimitError } from '../push/push.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -56,6 +76,21 @@ interface RootSetOptions {
 interface RootEnsureOptions extends RootSetOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
+	readonly plan?: string;
+}
+
+/**
+`root ensure` takes either a root name with its store paths, or `--plan`.
+*/
+export class RootEnsureArgumentsError extends CliUsageError {
+	constructor(readonly reason: 'plan-with-root' | 'root-required') {
+		super(
+			reason === 'plan-with-root'
+				? '--plan cannot be combined with a root name or store paths'
+				: 'give a root name and at least one store path, or --plan'
+		);
+		this.name = 'RootEnsureArgumentsError';
+	}
 }
 
 interface RootOptions {
@@ -97,6 +132,7 @@ export interface RootClient {
 		RootEnsureBodyInput & { readonly name: string },
 		RootEnsureResponse
 	>;
+	batch: CacheScopedClient<RootBatchBody, RootBatchResponse>;
 	list: CacheScopedClient<
 		{
 			cursor?: string;
@@ -129,6 +165,53 @@ export function registerRootCommands(
 		.description(
 			'Manage retention roots, which keep named sets of store paths in a cache.'
 		);
+	const ensurePlanRoots = async (
+		url: URL,
+		planFile: string,
+		options: RootEnsureOptions
+	): Promise<void> => {
+		const roots = retainedRoots(
+			parsePublishPlan(await readFile(planFile, 'utf8'))
+		);
+		const retention = rootRetentionChoice(options.ttl, options.permanent);
+		// Refuse an oversized root before the token exchange.
+		rootBatches(ensureEntries(roots, retention));
+		const target = cacheTargetFromUrl(url);
+		const reporter = commandUi(program, programOptions).reporter();
+
+		// A token exchange must request at least one grant.
+		if (roots.length === 0) {
+			reportRootEnsures(reporter, []);
+			return;
+		}
+
+		const credential = await authenticateForPush(
+			CupboardClient.fromUrl(target.tenantUrl, {
+				cache: target.cache,
+				signal: programOptions.signal
+			}),
+			{
+				githubOidc: options.githubOidc,
+				audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
+				authorizationDetails: rootsEnsureAuthorizationDetails({
+					cache: target.cache,
+					roots: roots.map((entry) => entry.name)
+				})
+			}
+		);
+		const rpc = tenantRpc(target.tenantUrl, {
+			credential,
+			signal: programOptions.signal
+		});
+
+		await runRootEnsurePlan(
+			target.cache,
+			roots,
+			retention,
+			reporter,
+			rpc.roots
+		);
+	};
 
 	root
 		.command('ensure')
@@ -137,8 +220,12 @@ export function registerRootCommands(
 				'list the missing store paths and change nothing.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'root name (e.g. github:acme/app/main)', parseRootName)
-		.argument('<store-path...>', 'the store paths for the root to keep')
+		.argument('[name]', 'root name (e.g. github:acme/app/main)', parseRootName)
+		.argument('[store-path...]', 'the store paths for the root to keep')
+		.option(
+			'--plan <file>',
+			"ensure the root of every retained target in this publish plan, which the publish workflow's plan step writes, instead of one named root"
+		)
 		.option(
 			'--ttl <duration>',
 			'expire the root after this duration (e.g. 7d, 12h)',
@@ -150,7 +237,7 @@ export function registerRootCommands(
 			[
 				'',
 				'The command exits with status 0 in both cases. It reports the status',
-				'"retained" or "build required".'
+				'"retained" or "build required" for each root.'
 			].join('\n')
 		)
 		.option(
@@ -165,10 +252,23 @@ export function registerRootCommands(
 		.action(
 			async (
 				url: URL,
-				name: RootName,
+				name: RootName | undefined,
 				targets: string[],
 				options: RootEnsureOptions
 			) => {
+				if (options.plan !== undefined) {
+					if (name !== undefined || targets.length > 0) {
+						throw new RootEnsureArgumentsError('plan-with-root');
+					}
+
+					await ensurePlanRoots(url, options.plan, options);
+					return;
+				}
+
+				if (name === undefined || targets.length === 0) {
+					throw new RootEnsureArgumentsError('root-required');
+				}
+
 				validateRootTargets(targets);
 				const target = cacheTargetFromUrl(url);
 				const reporter = commandUi(program, programOptions).reporter();
@@ -401,6 +501,99 @@ export async function runRootEnsure(
 							value: storePath
 						}))
 					]
+	});
+}
+
+function ensureEntries(
+	roots: readonly RetainedRoot[],
+	retention: RootRetentionRequest
+): readonly RootBatchEntry[] {
+	return roots.map((root) => ({
+		action: 'ensure',
+		name: root.name,
+		targets: [...root.targets],
+		retention
+	}));
+}
+
+/**
+Ensures the root of every retained target in a plan through batched requests
+and reports one result per root. When the cache cannot serve all of a root's
+targets, the root is left unchanged and reported as requiring a build.
+*/
+export async function runRootEnsurePlan(
+	cache: CacheScope,
+	roots: readonly RetainedRoot[],
+	retention: RootRetentionRequest,
+	reporter: Reporter,
+	client: Pick<RootClient, 'batch' | 'ensure'>
+): Promise<void> {
+	const results: readonly RootBatchResult[] =
+		roots.length === 0
+			? []
+			: await reporter.phase('Ensuring retention roots', () =>
+					ensureRoots(cache, ensureEntries(roots, retention), client)
+				);
+
+	reportRootEnsures(reporter, results);
+}
+
+// A server from before `roots.batch` gets one ensure per root, with the same
+// result for each root.
+async function ensureRoots(
+	cache: CacheScope,
+	entries: readonly RootBatchEntry[],
+	client: Pick<RootClient, 'batch' | 'ensure'>
+): Promise<readonly RootBatchResult[]> {
+	try {
+		return await applyRootBatches(client, cache, entries);
+	} catch (error) {
+		if (!isRpcProcedureMissingError(error)) {
+			throw error;
+		}
+	}
+
+	return mapWithConcurrency(
+		entries,
+		separateRootRequestConcurrency,
+		async ({ name, targets, retention }): Promise<RootBatchResult> => {
+			const response = await callInCache(client.ensure, cache, {
+				name,
+				targets: [...targets],
+				retention
+			});
+
+			return response.status === 'retained'
+				? { name, status: 'retained', root: response.root }
+				: { name, status: 'build-required', unavailable: response.unavailable };
+		}
+	);
+}
+
+function reportRootEnsures(
+	reporter: Reporter,
+	results: readonly RootBatchResult[]
+): void {
+	reporter.result({
+		kind: 'root-ensures',
+		title: 'Retention roots',
+		data: results,
+		rows: results.flatMap((result) => [
+			{
+				label: result.name,
+				value:
+					result.status === 'retained'
+						? `retained, ${describeExpiry(result.root)}`
+						: `build required, ${String(result.unavailable.length)} unavailable`
+			},
+			...(result.status === 'retained'
+				? []
+				: result.unavailable.map((storePath) => ({
+						label: 'Unavailable',
+						value: storePath
+					})))
+		]),
+		empty: 'The plan has no retained targets.'
 	});
 }
 

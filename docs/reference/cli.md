@@ -111,6 +111,7 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard plan cohort`](#cupboard-plan-cohort)
   - [`cupboard plan measure`](#cupboard-plan-measure)
   - [`cupboard plan reprobe`](#cupboard-plan-reprobe)
+- [`cupboard document-versions`](#cupboard-document-versions)
 
 ## cupboard
 
@@ -160,6 +161,7 @@ Commands:
   oidc-trust                                      Manage the trust rules that let administrators and CI jobs sign in to the tenant with OIDC identity tokens.
   github                                          Set up and check a tenant for cupboard's GitHub flake publish workflow.
   check [options] <url>                           Check that every store path in the tenant still has all of its stored files.
+  document-versions                               Print, as JSON, the version of each publish workflow document that this cupboard reads.
   help [command]                                  display help for command
 
 Most commands need you to sign in first with `cupboard login <url>`.
@@ -957,7 +959,7 @@ Options:
   -h, --help                                     display help for command
 
 Commands:
-  ensure [options] <url> <name> <store-path...>  Set a root only if the cache can serve every store path. Otherwise, list the missing store paths and change nothing.
+  ensure [options] <url> [name] [store-path...]  Set a root only if the cache can serve every store path. Otherwise, list the missing store paths and change nothing.
   set [options] <url> <name> <store-path...>     Create a retention root, or replace an existing root's targets.
   list [options] <url> [cache]                   List a cache's retention roots, with their target counts and expiry.
   targets [options] <url> <name>                 List a retention root's targets, and show which of them the cache is missing.
@@ -968,7 +970,7 @@ Commands:
 #### cupboard root ensure
 
 ```text
-Usage: cupboard root ensure [options] <url> <name> <store-path...>
+Usage: cupboard root ensure [options] <url> [name] [store-path...]
 
 Set a root only if the cache can serve every store path. Otherwise, list the
 missing store paths and change nothing.
@@ -980,6 +982,9 @@ Arguments:
   store-path             the store paths for the root to keep
 
 Options:
+  --plan <file>          ensure the root of every retained target in this
+                         publish plan, which the publish workflow's plan step
+                         writes, instead of one named root
   --ttl <duration>       expire the root after this duration (e.g. 7d, 12h)
   --permanent            keep the root permanently
   --github-oidc          sign in with the job's GitHub Actions OIDC token
@@ -989,7 +994,7 @@ Options:
   -h, --help             display help for command
 
 The command exits with status 0 in both cases. It reports the status
-"retained" or "build required".
+"retained" or "build required" for each root.
 ```
 
 #### cupboard root set
@@ -2629,4 +2634,16 @@ Options:
                                    reuse view (default:
                                    $CUPBOARD_VIEW_READ_PASSWORD)
   -h, --help                       display help for command
+```
+
+### cupboard document-versions
+
+```text
+Usage: cupboard document-versions [options]
+
+Print, as JSON, the version of each publish workflow document that this cupboard
+reads.
+
+Options:
+  -h, --help  display help for command
 ```

@@ -1,17 +1,46 @@
-import { storePathSchema } from '@cupboard/nix-store/scalars';
-import { hasControlCharacter, trimSlashes } from '@cupboard/shared/text';
+import {
+	type RootName,
+	rootNameSchema,
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
+import {
+	hasControlCharacter,
+	trimSlashes,
+	trimTrailingSlashes
+} from '@cupboard/shared/text';
 import { z } from 'zod';
 
 // The plan action writes the publish plan as a JSON document, and later steps
 // read it back. A reader may come from a different cupboard release than the
 // writer, so the document records the version of its shape. Increase the
 // version whenever a change would make an older reader misread the document.
-export const publishPlanVersion = 1;
+export const publishPlanVersion = 2;
+
+/**
+The version of each publish workflow document that a cupboard release reads,
+as `cupboard document-versions` prints it. An action hands a document to the
+CLI only when the CLI reads the version that the action writes. A field is
+absent when the release reads no such document.
+*/
+export const documentVersionsSchema = z.looseObject({
+	publishPlan: z.number().int().optional()
+});
+export type DocumentVersions = z.output<typeof documentVersionsSchema>;
 
 // Strip only leading and trailing slashes. Equivalent suffix spellings must
 // produce the same root, while interior slashes remain significant.
 export function canonicalRootSuffix(suffix: string): string {
 	return trimSlashes(suffix);
+}
+
+/**
+Joins the plan's root prefix and a target's root suffix into the target's root
+name. The plan job and the cohort jobs must construct byte-identical names, so
+every consumer uses this function.
+*/
+export function joinRoot(prefix: string, suffix: string): string {
+	return `${trimTrailingSlashes(prefix)}/${canonicalRootSuffix(suffix)}`;
 }
 
 /**
@@ -152,8 +181,18 @@ const cohortSchema = z.strictObject({
 });
 export type Cohort = z.output<typeof cohortSchema>;
 
+/**
+A target that the destination already retains. `paths` contains the evaluated
+path of each selected output, which the plan job retains under the target's
+root.
+*/
+const retainedTargetSchema = publishTargetSchema.extend({
+	paths: z.array(storePathSchema).min(1).readonly()
+});
+export type RetainedTarget = z.output<typeof retainedTargetSchema>;
+
 const publishPlanSchema = z.strictObject({
-	retained: z.array(publishTargetSchema).readonly(),
+	retained: z.array(retainedTargetSchema).readonly(),
 	targets: z.array(publishTargetSchema).readonly(),
 	cohorts: z.array(cohortSchema).readonly()
 });
@@ -182,13 +221,57 @@ export type PlanReferenceOutcome = z.output<typeof planReferenceOutcomeSchema>;
 The document that the plan action writes to its `plan-file` output. A reader
 parses it with this schema, which refuses a document of any other version.
 */
-export const publishPlanDocumentSchema = publishPlanSchema.extend({
-	version: z.literal(publishPlanVersion),
-	cohortPreFilter: z.array(cohortPreFilterDecisionSchema).readonly(),
-	referencePublications: z
-		.array(planReferenceOutcomeSchema)
-		.min(1)
-		.readonly()
-		.optional()
-});
+export const publishPlanDocumentSchema = publishPlanSchema
+	.extend({
+		version: z.literal(publishPlanVersion),
+		rootPrefix: z.string().min(1),
+		cohortPreFilter: z.array(cohortPreFilterDecisionSchema).readonly(),
+		referencePublications: z
+			.array(planReferenceOutcomeSchema)
+			.min(1)
+			.readonly()
+			.optional()
+	})
+	.superRefine((document, ctx) => {
+		for (const [index, target] of document.retained.entries()) {
+			const root = joinRoot(document.rootPrefix, target.rootSuffix);
+
+			if (!rootNameSchema.safeParse(root).success) {
+				ctx.addIssue({
+					code: 'custom',
+					path: ['retained', index, 'rootSuffix'],
+					message: `'${root}' is not a valid root name`
+				});
+			}
+		}
+	});
 export type PublishPlanDocument = z.output<typeof publishPlanDocumentSchema>;
+
+/**
+One retention root of a plan's retained targets, with its targets.
+*/
+export interface RetainedRoot {
+	readonly name: RootName;
+	readonly targets: readonly StorePathString[];
+}
+
+/**
+Returns the roots of a plan's retained targets in the order of their first
+target. The components of an aggregate target share its root, so a root's
+targets are the union of the paths of every retained target with its suffix.
+*/
+export function retainedRoots(
+	document: Pick<PublishPlanDocument, 'rootPrefix' | 'retained'>
+): readonly RetainedRoot[] {
+	const groups = Map.groupBy(document.retained, (target) =>
+		joinRoot(document.rootPrefix, target.rootSuffix)
+	);
+
+	return groups
+		.entries()
+		.map(([name, targets]) => ({
+			name: rootNameSchema.parse(name),
+			targets: [...new Set(targets.flatMap((target) => target.paths))]
+		}))
+		.toArray();
+}

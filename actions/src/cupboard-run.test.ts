@@ -2,6 +2,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { publishPlanVersion } from '@cupboard/protocol/publish-plan';
 import { Command } from 'commander';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -13,6 +14,7 @@ import {
 	commandOptionsFromHelp,
 	cupboardDebugArguments,
 	detectCacheSelectionSyntax,
+	inspectDocumentVersions,
 	readCredentialInvocation,
 	runCupboard,
 	withoutReadCredential
@@ -96,6 +98,48 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 
 	return scriptPath;
 }
+
+async function executable(body: string): Promise<string> {
+	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-versions-'));
+	const file = path.join(directory, 'cupboard');
+
+	await writeFile(file, body, { mode: 0o755 });
+
+	return file;
+}
+
+describe('inspectDocumentVersions', () => {
+	it('reads the versions that the CLI prints', async () => {
+		const cli = path.resolve(
+			import.meta.dirname,
+			'../../packages/cli/src/main.ts'
+		);
+		const binary = await executable(
+			`#!/bin/sh\nexec node --experimental-transform-types --disable-warning=ExperimentalWarning ${JSON.stringify(cli)} "$@"\n`
+		);
+
+		expect(await inspectDocumentVersions(binary)).toStrictEqual({
+			publishPlan: publishPlanVersion
+		});
+	});
+
+	it.each([
+		{
+			name: 'a release without the command',
+			body: '#!/bin/sh\necho "error: unknown command \'document-versions\'" >&2\nexit 1\n',
+			error: CommandFailedError
+		},
+		{
+			name: 'output that is not the versions document',
+			body: '#!/bin/sh\necho notice\necho \'{"publishPlan":2}\'\n',
+			error: SyntaxError
+		}
+	])('refuses $name', async ({ body, error }) => {
+		await expect(
+			inspectDocumentVersions(await executable(body))
+		).rejects.toBeInstanceOf(error);
+	});
+});
 
 describe('commandOptionsFromHelp', () => {
 	it.each([

@@ -21,7 +21,8 @@ import {
 	type Cohort,
 	type CohortPreFilterDecision,
 	type PublishPlan,
-	type PublishTarget
+	type PublishTarget,
+	type RetainedTarget
 } from '@cupboard/protocol/publish-plan';
 import { type RandomSource } from '@cupboard/shared/backoff';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
@@ -33,7 +34,6 @@ import {
 	responseBodyFailureCode,
 	retryingFetcher
 } from '@cupboard/shared/retry';
-import { trimTrailingSlashes } from '@cupboard/shared/text';
 import { z } from 'zod';
 
 import {
@@ -67,14 +67,6 @@ const defaultNixEvaluator: NixEvaluator = (arguments_) =>
 		encoding: 'utf8',
 		maxBuffer: 256 * 1024 * 1024
 	});
-
-/**
-Retained-target checks and build jobs must construct byte-identical root
-names. Canonicalise the prefix and suffix here for every consumer.
-*/
-export function joinRoot(prefix: string, suffix: string): string {
-	return `${trimTrailingSlashes(prefix)}/${canonicalRootSuffix(suffix)}`;
-}
 
 /**
 A stable key for joining a target with its evaluated paths and coverage.
@@ -156,12 +148,12 @@ export function planPublish(options: {
 	readonly retainedRoots: ReadonlySet<string>;
 	readonly unevaluated?: readonly PublishTarget[];
 }): PublishPlan {
-	const retained: PublishTarget[] = [];
+	const retained: RetainedTarget[] = [];
 	const pending: TargetEvaluation[] = [];
 
 	for (const evaluation of options.evaluations) {
 		if (options.retainedRoots.has(evaluation.target.rootSuffix)) {
-			retained.push(evaluation.target);
+			retained.push({ ...evaluation.target, paths: evaluation.targetPaths });
 			continue;
 		}
 

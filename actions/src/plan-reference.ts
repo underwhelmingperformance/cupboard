@@ -5,7 +5,10 @@ import path from 'node:path';
 import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import { type StorePathString } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import { type PlanReferenceOutcome } from '@cupboard/protocol/publish-plan';
+import {
+	joinRoot,
+	type PlanReferenceOutcome
+} from '@cupboard/protocol/publish-plan';
 import {
 	pushSummaryResultKind,
 	pushSummarySchema
@@ -22,11 +25,7 @@ import {
 	CacheAvailabilityQueryError,
 	PlanReferencePublicationIncompleteError
 } from './errors.ts';
-import {
-	availableCachePaths,
-	joinRoot,
-	type TargetEvaluation
-} from './publish-plan.ts';
+import { availableCachePaths, type TargetEvaluation } from './publish-plan.ts';
 import { cacheUrlFor } from './substituters.ts';
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;

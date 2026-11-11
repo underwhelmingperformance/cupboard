@@ -10,6 +10,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	type Cohort,
+	type DocumentVersions,
+	joinRoot,
 	publishPlanDocumentSchema,
 	publishTargetsSchema
 } from '@cupboard/protocol/publish-plan';
@@ -42,11 +44,7 @@ import {
 } from '../errors.ts';
 import type { Environment } from '../inputs.ts';
 import { publishReferenceTargets } from '../plan-reference.ts';
-import {
-	joinRoot,
-	type NixEvaluator,
-	type TargetEvaluation
-} from '../publish-plan.ts';
+import { type NixEvaluator, type TargetEvaluation } from '../publish-plan.ts';
 import {
 	jobSummaryFile,
 	recordingGithubReporter
@@ -169,6 +167,7 @@ describe('planAction', () => {
 					runner,
 					fetcher,
 					storeDirectory: storeDirectorySchema.parse('/nix/store'),
+					inspectCommandOptions: completeTargetsOption,
 					buildSettings: { systems: ['x86_64-linux'], features: [] }
 				}
 			)
@@ -304,6 +303,7 @@ describe('planAction', () => {
 					fetcher,
 					inspectVersion,
 					storeDirectory: storeDirectorySchema.parse('/nix/store'),
+					inspectCommandOptions: completeTargetsOption,
 					buildSettings: { systems: ['x86_64-linux'], features: [] }
 				}
 			);
@@ -353,7 +353,8 @@ describe('planAction', () => {
 		);
 		const outputs = await readFile(output, 'utf8');
 		const expectedPlan = {
-			version: 1,
+			version: 2,
+			rootPrefix: 'github:owner/repo/main',
 			retained: [],
 			targets: [{ ...target, bestEffort: false, outputs: ['out'] }],
 			cohorts: [
@@ -530,6 +531,7 @@ describe('planAction', () => {
 			{
 				evaluator,
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				inspectCommandOptions: completeTargetsOption,
 				fetcher: probe.fetcher,
 				runner: preFilterRunner({})
 			}
@@ -1101,6 +1103,7 @@ describe('ensureAvailableTargets', () => {
 		const firstPath = storePath(`/nix/store/${'1'.repeat(32)}-first`);
 		const secondPath = storePath(`/nix/store/${'2'.repeat(32)}-second`);
 		const started: string[] = [];
+		const allStarted = Promise.withResolvers<undefined>();
 		const pending = new Map<
 			string,
 			{ readonly resultFile: string; readonly resolve: () => void }
@@ -1108,6 +1111,10 @@ describe('ensureAvailableTargets', () => {
 		const runner: EnsureRunner = (_command, arguments_) => {
 			const root = ensureRootArgument(arguments_);
 			started.push(root);
+
+			if (started.length === 2) {
+				allStarted.resolve(undefined);
+			}
 
 			return new Promise((resolve) => {
 				pending.set(root, {
@@ -1125,6 +1132,8 @@ describe('ensureAvailableTargets', () => {
 			new Set([firstPath, secondPath]),
 			runner
 		);
+		// Both ensures start before either of them is answered.
+		await allStarted.promise;
 
 		expect(
 			started.toSorted((left, right) => left.localeCompare(right))
@@ -1344,6 +1353,106 @@ describe('ensureAvailableTargets', () => {
 		);
 
 		expect({ ensured, retained }).toStrictEqual(expected);
+	});
+
+	it('ensures every served root through one root ensure of a provisional plan', async () => {
+		const toolPath = storePath(`/nix/store/${'3'.repeat(32)}-tool`);
+		const tool = evaluation('tool', toolPath);
+		const calls: {
+			readonly arguments_: readonly string[];
+			readonly plan: unknown;
+		}[] = [];
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			const planFile = arguments_[arguments_.indexOf('--plan') + 1] ?? '';
+			calls.push({
+				arguments_: arguments_.map((argument) =>
+					argument === planFile || argument === resultFileArgument(arguments_)
+						? path.basename(argument).replace(/-[0-9a-f-]{36}/u, '')
+						: argument
+				),
+				plan: JSON.parse(await readFile(planFile, 'utf8'))
+			});
+			await writeFile(
+				resultFileArgument(arguments_),
+				`${JSON.stringify({
+					kind: 'root-ensures',
+					data: [
+						{
+							name: 'github:owner/repo/main/app',
+							status: 'retained',
+							root: {
+								name: 'github:owner/repo/main/app',
+								expired: false,
+								createdAt: '2026-01-01T00:00:00.000Z',
+								updatedAt: '2026-01-01T00:00:00.000Z',
+								targets: []
+							}
+						},
+						{
+							name: 'github:owner/repo/main/tool',
+							status: 'build-required',
+							unavailable: [toolPath]
+						}
+					]
+				})}\n`
+			);
+
+			return { stdout: '', stderr: '' };
+		};
+
+		const retained = await ensureAvailableTargets(
+			planInputs({
+				temporaryDirectory: directory,
+				targets: [component.target, sibling.target, tool.target],
+				ttl: '7d'
+			}),
+			[component, sibling, tool],
+			new Set([componentPath, siblingPath, toolPath]),
+			runner,
+			undefined,
+			() => Promise.resolve('plan')
+		);
+
+		// The CLI parses the provisional plan with the strict document schema.
+		expect(
+			calls.map((call) => publishPlanDocumentSchema.parse(call.plan))
+		).toStrictEqual(calls.map((call) => call.plan));
+		expect({ calls, retained }).toStrictEqual({
+			calls: [
+				{
+					arguments_: [
+						'--output-mode',
+						'github',
+						'--no-colour',
+						'--result-file',
+						'cupboard-root-ensure.jsonl',
+						'root',
+						'ensure',
+						'https://cupboard.example/t/acme',
+						'--plan',
+						'cupboard-root-ensure-plan.json',
+						'--github-oidc',
+						'--audience',
+						'https://cupboard.example/t/acme',
+						'--ttl',
+						'7d'
+					],
+					plan: {
+						version: 2,
+						rootPrefix: 'github:owner/repo/main',
+						retained: [
+							{ ...component.target, paths: [componentPath] },
+							{ ...sibling.target, paths: [siblingPath] },
+							{ ...tool.target, paths: [toolPath] }
+						],
+						targets: [],
+						cohorts: [],
+						cohortPreFilter: []
+					}
+				}
+			],
+			retained: new Set(['app'])
+		});
 	});
 });
 
@@ -2019,6 +2128,7 @@ describe('cohort-matrix output', () => {
 			{
 				evaluator,
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				inspectCommandOptions: completeTargetsOption,
 				fetcher: alwaysAvailableFetcher,
 				runner
 			}
@@ -2084,6 +2194,7 @@ describe('cohort-matrix output', () => {
 			{
 				evaluator,
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				inspectCommandOptions: completeTargetsOption,
 				fetcher: alwaysAvailableFetcher,
 				runner
 			}
@@ -2150,6 +2261,7 @@ describe('cohort-matrix output', () => {
 				{
 					evaluator,
 					storeDirectory: storeDirectorySchema.parse('/nix/store'),
+					inspectCommandOptions: completeTargetsOption,
 					fetcher: alwaysAvailableFetcher,
 					runner
 				}
@@ -2198,6 +2310,7 @@ describe('cohort-matrix output', () => {
 			{
 				evaluator,
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				inspectCommandOptions: completeTargetsOption,
 				fetcher: alwaysAvailableFetcher,
 				runner: preFilterRunner({})
 			}
@@ -2396,8 +2509,9 @@ describe('cohort-matrix output', () => {
 		async ({ maximiseSpace, version, options, mayBuild, inspections }) => {
 			const cachedPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
 			const inspectVersion = vi.fn(() => Promise.resolve(version));
-			const inspectCommandOptions = vi.fn(() =>
-				Promise.resolve(new Set(options))
+			const inspectCommandOptions = vi.fn(
+				(_binaryPath: string, _command: readonly string[]) =>
+					Promise.resolve(new Set(options))
 			);
 
 			const planned = await plannedCohorts(
@@ -2425,7 +2539,9 @@ describe('cohort-matrix output', () => {
 				matrix: planned.matrix,
 				inspections: {
 					versions: inspectVersion.mock.calls.length,
-					helps: inspectCommandOptions.mock.calls.length
+					helps: inspectCommandOptions.mock.calls.filter(
+						([, command]) => command.join(' ') === 'plan cohort'
+					).length
 				}
 			}).toStrictEqual({
 				inspections,
@@ -2774,7 +2890,11 @@ async function plannedCohorts(
 		readonly fetcher: typeof fetch;
 		readonly runner: EnsureRunner;
 		readonly inspectVersion?: () => Promise<string>;
-		readonly inspectCommandOptions?: () => Promise<ReadonlySet<string>>;
+		readonly inspectCommandOptions?: (
+			binaryPath: string,
+			command: readonly string[]
+		) => Promise<ReadonlySet<string>>;
+		readonly inspectDocumentVersions?: () => Promise<DocumentVersions>;
 	}
 ): Promise<{
 	readonly matrix: unknown;
@@ -2823,6 +2943,78 @@ async function plannedCohorts(
 		warnings
 	};
 }
+
+describe('root ensure mode', () => {
+	const cachedPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+	const root = 'github:owner/repo/main/x86_64-linux/app';
+
+	it.each([
+		{
+			name: 'reads the plan version that the action writes',
+			versions: { publishPlan: 2 },
+			expected: ['plan']
+		},
+		{
+			name: 'reads another plan version',
+			versions: { publishPlan: 3 },
+			expected: ['per-root']
+		},
+		{
+			name: 'cannot report the document versions that it reads',
+			versions: undefined,
+			expected: ['per-root']
+		}
+	])(
+		'ensures the served roots with $expected when the installed cupboard $name',
+		async ({ versions, expected }) => {
+			const forms: string[] = [];
+			const runner: EnsureRunner = async (_command, arguments_) => {
+				const isPlan = arguments_.includes('--plan');
+				forms.push(isPlan ? 'plan' : 'per-root');
+				await writeFile(
+					resultFileArgument(arguments_),
+					isPlan
+						? `${JSON.stringify({
+								kind: 'root-ensures',
+								data: [
+									{
+										name: root,
+										status: 'build-required',
+										unavailable: [cachedPath]
+									}
+								]
+							})}\n`
+						: buildRequiredResultLine([cachedPath])
+				);
+
+				return { stdout: '', stderr: '' };
+			};
+
+			await plannedCohorts(
+				{ publish: 'built' },
+				{
+					[target.rootDrvPath]: {
+						env: { out: cachedPath },
+						inputs: { drvs: {} },
+						outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+					}
+				},
+				{
+					fetcher: alwaysAvailableFetcher,
+					runner,
+					inspectCommandOptions: () =>
+						Promise.resolve(new Set(['--complete-targets', '--plan'])),
+					inspectDocumentVersions: () =>
+						versions === undefined
+							? Promise.reject(new Error('unknown command'))
+							: Promise.resolve(versions)
+				}
+			);
+
+			expect(forms).toStrictEqual(expected);
+		}
+	);
+});
 
 describe('cohort packing', () => {
 	const appAStorePath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
@@ -2877,6 +3069,7 @@ describe('cohort packing', () => {
 			{
 				evaluator: twoTargetEvaluator,
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				inspectCommandOptions: completeTargetsOption,
 				fetcher: alwaysAvailableFetcher,
 				runner,
 				...(measurer !== undefined && { measurer })
@@ -3649,6 +3842,7 @@ it.each([
 			reporter,
 			{
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				inspectCommandOptions: completeTargetsOption,
 				evaluator,
 				runner,
 				fetcher: (url) =>
@@ -3951,6 +4145,7 @@ it.each([
 				warningReporter([]),
 				{
 					storeDirectory: storeDirectorySchema.parse('/nix/store'),
+					inspectCommandOptions: completeTargetsOption,
 					runner,
 					inspectVersion: () => Promise.resolve('v0.0.50'),
 					evaluator: () =>
@@ -4038,6 +4233,7 @@ it('keeps duplicate-attribute output paths when reference publication is unavail
 		warningReporter([]),
 		{
 			storeDirectory: storeDirectorySchema.parse('/nix/store'),
+			inspectCommandOptions: completeTargetsOption,
 			evaluator,
 			runner: preFilterRunner({
 				targetsByRoot: new Map([
@@ -4167,6 +4363,7 @@ describe('plan job summary', () => {
 			{
 				evaluator,
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				inspectCommandOptions: completeTargetsOption,
 				fetcher: alwaysAvailableFetcher,
 				runner
 			}

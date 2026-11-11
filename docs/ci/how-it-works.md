@@ -89,6 +89,17 @@ presence does not decide whether to build. With `build: rebuild`, each requested
 output is built again on the configured builder, even if it is already
 available. Nix may still substitute dependencies.
 
+With `build: missing` and `publish: outputs` or `publish: built`, the plan job
+asks the destination cache which target outputs it already serves. It ensures
+the roots of those targets with a single `cupboard root ensure --plan` command,
+which splits the roots into batches within the batch capacity of 149: each root
+uses one unit per target, and at least one. A target whose root is set is
+retained and needs no build; the other targets stay in their cohorts. A shared
+component root is ensured only when the destination serves every component, and
+then with the outputs of all the components. A cupboard release that reads a
+different plan version, as `cupboard document-versions` reports, gets one
+`cupboard root ensure` command per root instead.
+
 When a reference source is configured, the plan job also probes predictable
 single-output targets in that cache. With `build: missing` and
 `publish: outputs`, it publishes available targets by reference, sets their

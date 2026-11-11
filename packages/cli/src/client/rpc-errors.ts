@@ -49,6 +49,32 @@ export function isRpcNotFoundError(
 	);
 }
 
+/**
+Whether a procedure call failed because the server does not have the
+procedure. A server from before the procedure answers its route with a plain
+404, and oRPC then keeps the raw response in the error's data. The server
+reports an absent resource, such as a missing cache, with an oRPC error body
+instead, which oRPC turns into an error without the raw response.
+*/
+export function isRpcProcedureMissingError(error: unknown): boolean {
+	if (
+		!(error instanceof ORPCError) ||
+		error.status !== notFoundStatus ||
+		error.defined
+	) {
+		return false;
+	}
+
+	const data: unknown = error.data;
+
+	return (
+		typeof data === 'object' &&
+		data !== null &&
+		Object.hasOwn(data, 'body') &&
+		Object.hasOwn(data, 'headers')
+	);
+}
+
 export function isRpcCacheAlreadyExistsError(error: unknown): boolean {
 	return error instanceof ORPCError && error.code === 'CACHE_ALREADY_EXISTS';
 }
