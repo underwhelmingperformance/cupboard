@@ -1119,7 +1119,7 @@ describe('confirming already-present paths', () => {
 			race: false,
 			cost: {
 				...noCost,
-				rowsRead: 147,
+				rowsRead: 148,
 				rowsWritten: 23,
 				d1Calls: 11,
 				d1CallsWithoutRows: 9,
@@ -1132,7 +1132,7 @@ describe('confirming already-present paths', () => {
 			race: true,
 			cost: {
 				...noCost,
-				rowsRead: 163,
+				rowsRead: 164,
 				rowsWritten: 35,
 				d1Calls: 19,
 				d1CallsWithoutRows: 17,

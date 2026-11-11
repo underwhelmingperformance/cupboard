@@ -2,6 +2,7 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError, WorkersCachePurgeError } from '../errors.ts';
 import { narInfoCacheTag } from '../http/cache-tags.ts';
@@ -127,6 +128,57 @@ describe('cache purge queue', () => {
 				`nar:${fixtureTenant}:${narHash}`
 			]
 		]);
+	});
+
+	// Workers Cache never stores a private cache's responses, so a change to a
+	// private cache queues no purge.
+	it.each([
+		{
+			kind: 'narinfos',
+			enqueue: (service: CachePurgeQueueService, cache: ResolvedCache) =>
+				service.enqueueNarInfos(cache, [syntheticStorePathHash(1)])
+		},
+		{
+			kind: 'NARs',
+			enqueue: (service: CachePurgeQueueService, cache: ResolvedCache) =>
+				service.enqueueNars(cache, [narHash])
+		}
+	])('queues no purge of $kind for a private cache', async ({ enqueue }) => {
+		await bootstrap();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const service = new CachePurgeQueueService(
+					instance.context,
+					retryPolicy
+				);
+				const alarm = fakeAlarm(state.storage);
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockResolvedValue(undefined);
+
+				try {
+					const cache = instance.context.cacheRepository.setAccess(
+						resolvedCache(instance.context),
+						'private'
+					);
+					await enqueue(service, cache);
+					await service.runOnce();
+
+					return {
+						purgeCalls: purge.mock.calls,
+						rows: queuedRows(instance.context),
+						alarm: alarm.scheduled()
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({ purgeCalls: [], rows: [], alarm: Infinity });
 	});
 
 	// Each pass sends one request. The rows' tags fill it up to the platform's
