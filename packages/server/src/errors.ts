@@ -244,6 +244,17 @@ export class UploadRequestLimitExceededError extends ServerHttpError {
 	}
 }
 
+export class RootBatchLimitExceededError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor(readonly capacity: number) {
+		super(
+			`The batch exceeds the capacity of one request. Each entry uses one unit per target, or one unit without targets. Send at most ${String(capacity)} units per batch.`
+		);
+		this.name = 'RootBatchLimitExceededError';
+	}
+}
+
 /**
 The invocation spent so many subrequests before a confirmation started that
 the remaining calls cannot evaluate even one path. A later request runs in a

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	rootBatchBodySchema,
+	rootBatchCapacity,
+	rootBatchEntryCost,
 	type RootEnsureBodyInput,
 	rootEnsureBodySchema,
 	rootEnsureResponseSchema,
@@ -12,6 +15,14 @@ import {
 
 const storePathHash = '0'.repeat(32);
 const storePath = `/nix/store/${storePathHash}-name`;
+
+function emptySetEntries(count: number) {
+	return Array.from({ length: count }, (_, index) => ({
+		action: 'set',
+		name: `root-${String(index)}`,
+		targets: []
+	}));
+}
 
 describe('rootSetBodySchema', () => {
 	it.each([
@@ -97,6 +108,87 @@ describe('rootEnsureBodySchema', () => {
 
 	it('rejects an empty target list', () => {
 		expect(rootEnsureBodySchema.safeParse({ targets: [] }).success).toBe(false);
+	});
+});
+
+describe('rootBatchEntryCost', () => {
+	it.each([
+		{ name: 'an entry without targets', targets: [], cost: 1 },
+		{ name: 'an entry with one target', targets: [storePath], cost: 1 },
+		{
+			name: 'an entry with three targets',
+			targets: [storePath, storePath, storePath],
+			cost: 3
+		}
+	])('costs $cost for $name', ({ targets, cost }) => {
+		expect(rootBatchEntryCost({ targets })).toBe(cost);
+	});
+});
+
+describe('rootBatchBodySchema', () => {
+	it('accepts set and ensure entries and fills in their retention', () => {
+		expect(
+			rootBatchBodySchema.parse({
+				roots: [
+					{ action: 'set', name: 'cleared', targets: [] },
+					{
+						action: 'ensure',
+						name: 'main',
+						targets: [storePath],
+						retention: { kind: 'permanent' }
+					}
+				]
+			})
+		).toStrictEqual({
+			roots: [
+				{
+					action: 'set',
+					name: 'cleared',
+					targets: [],
+					retention: { kind: 'inherit' }
+				},
+				{
+					action: 'ensure',
+					name: 'main',
+					targets: [storePath],
+					retention: { kind: 'permanent' }
+				}
+			]
+		});
+	});
+
+	it('accepts a batch over the capacity for the tenant object to refuse', () => {
+		const roots = emptySetEntries(rootBatchCapacity + 1);
+
+		expect(rootBatchBodySchema.parse({ roots })).toStrictEqual({
+			roots: roots.map((entry) => ({
+				...entry,
+				retention: { kind: 'inherit' }
+			}))
+		});
+	});
+
+	it.each([
+		{ name: 'an empty batch', value: { roots: [] } },
+		{
+			name: 'two entries for one root',
+			value: {
+				roots: [
+					{ action: 'set', name: 'main', targets: [] },
+					{ action: 'ensure', name: 'main', targets: [storePath] }
+				]
+			}
+		},
+		{
+			name: 'an ensure without targets',
+			value: { roots: [{ action: 'ensure', name: 'main', targets: [] }] }
+		},
+		{
+			name: 'an unknown action',
+			value: { roots: [{ action: 'attach', name: 'main', targets: [] }] }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(rootBatchBodySchema.safeParse(value).success).toBe(false);
 	});
 });
 

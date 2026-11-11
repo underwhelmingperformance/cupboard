@@ -1,5 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import { SelectorTemplateUnrepresentableError } from '@cupboard/protocol/grants';
+import { rootBatchLimitErrorCode } from '@cupboard/protocol/retention';
 import { uploadRequestLimitErrorCode } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
@@ -16,6 +17,7 @@ import {
 	CacheRetirementTtlRequiredError,
 	ControlDatabaseMigrationPendingError,
 	OidcTrustRuleChangedError,
+	RootBatchLimitExceededError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -176,6 +178,15 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { id: error.id, usedBytes: error.usedBytes }
+		});
+	}
+
+	if (error instanceof RootBatchLimitExceededError) {
+		return new ORPCError(rootBatchLimitErrorCode, {
+			status: error.status,
+			message: error.message,
+			data: { capacity: error.capacity },
+			defined: true
 		});
 	}
 

@@ -1,8 +1,10 @@
 import {
 	type GraceSeconds,
 	type RootName,
-	type StorePathHash
+	type StorePathHash,
+	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import { type RootRetentionOverride } from '@cupboard/protocol/caches';
 import type { CacheRootRetention } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, inArray, lte, sql } from 'drizzle-orm';
@@ -96,30 +98,55 @@ export class RetentionService {
 		cache: ResolvedCache,
 		name: RootName
 	): CacheRootRetention {
-		const configured = this.context.db
-			.select({ ttlSeconds: schema.cacheIdentities.defaultRootTtlSeconds })
-			.from(schema.cacheIdentities)
-			.where(eq(schema.cacheIdentities.id, cache.id))
-			.get();
-		const override = this.rules
-			.listForCache(cache)
-			.filter(({ rootPrefix }) => name.startsWith(rootPrefix))
-			.toSorted(
-				(left, right) => right.rootPrefix.length - left.rootPrefix.length
-			)
-			.at(0);
+		return this.rootRetentionResolver(cache)(name);
+	}
 
-		if (override !== undefined) {
-			return override.retention;
-		}
+	/**
+	Returns a function that resolves the inherited retention of a root in
+	`cache`. The function reads the cache's default root lifetime and its root
+	prefix overrides on its first call, and later calls reuse them, so several
+	roots written together read those rows once.
+	*/
+	rootRetentionResolver(
+		cache: ResolvedCache
+	): (name: RootName) => CacheRootRetention {
+		let settings:
+			| {
+					readonly ttlSeconds: TtlSeconds | null | undefined;
+					readonly overrides: readonly RootRetentionOverride[];
+			  }
+			| undefined;
 
-		const ttlSeconds = configured?.ttlSeconds;
+		return (name) => {
+			settings ??= {
+				ttlSeconds: this.context.db
+					.select({
+						ttlSeconds: schema.cacheIdentities.defaultRootTtlSeconds
+					})
+					.from(schema.cacheIdentities)
+					.where(eq(schema.cacheIdentities.id, cache.id))
+					.get()?.ttlSeconds,
+				// The longest matching prefix wins.
+				overrides: this.rules
+					.listForCache(cache)
+					.toSorted(
+						(left, right) => right.rootPrefix.length - left.rootPrefix.length
+					)
+			};
+			const override = settings.overrides.find(({ rootPrefix }) =>
+				name.startsWith(rootPrefix)
+			);
 
-		if (ttlSeconds === undefined || ttlSeconds === null) {
-			return { kind: 'permanent' };
-		}
+			if (override !== undefined) {
+				return override.retention;
+			}
 
-		return { kind: 'duration', seconds: ttlSeconds };
+			if (settings.ttlSeconds === undefined || settings.ttlSeconds === null) {
+				return { kind: 'permanent' };
+			}
+
+			return { kind: 'duration', seconds: settings.ttlSeconds };
+		};
 	}
 
 	resolveGraceSeconds(cache: ResolvedCache): GraceSeconds | undefined {

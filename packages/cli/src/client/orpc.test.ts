@@ -215,6 +215,22 @@ const idempotentMutations = [
 				name: rootNameSchema.parse('channel'),
 				targets: [storePathSchema.parse(storePath)]
 			})
+	},
+	{
+		name: 'a batched root update',
+		response: {
+			roots: [{ name: 'channel', status: 'retained', root: rootSummary }]
+		},
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.roots.batch.inDefaultCache({
+				roots: [
+					{
+						action: 'ensure',
+						name: rootNameSchema.parse('channel'),
+						targets: [storePathSchema.parse(storePath)]
+					}
+				]
+			})
 	}
 ] as const;
 

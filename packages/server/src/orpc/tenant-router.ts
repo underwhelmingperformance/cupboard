@@ -316,6 +316,19 @@ export const tenantRouter = os.router({
 				})
 			)
 		},
+		batch: {
+			inDefaultCache: os.roots.batch.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.roots.applyRoots(context.cache, {
+						roots: input.roots
+					})
+			),
+			inNamedCache: os.roots.batch.inNamedCache.handler(({ input, context }) =>
+				context.services.roots.applyRoots(context.cache, {
+					roots: input.roots
+				})
+			)
+		},
 		remove: {
 			inDefaultCache: os.roots.remove.inDefaultCache.handler(
 				({ input, context }) =>
