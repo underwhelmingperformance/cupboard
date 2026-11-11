@@ -20,6 +20,8 @@ import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	type Cohort,
 	type CohortPreFilterDecision,
+	type DocumentVersions,
+	joinRoot,
 	type PlanReferenceOutcome,
 	type PublishPlan,
 	type PublishPlanDocument,
@@ -28,6 +30,8 @@ import {
 	publishTargetsSchema
 } from '@cupboard/protocol/publish-plan';
 import {
+	type RootBatchResult,
+	rootBatchResultSchema,
 	type RootEnsureResponse,
 	rootEnsureResponseSchema,
 	rootSetMaxTargets,
@@ -63,6 +67,7 @@ import {
 	cupboardDebugArguments,
 	inspectCommandOptions,
 	inspectCupboardVersion,
+	inspectDocumentVersions,
 	isReleaseVersion,
 	requireEnvironmentCredentialSupport,
 	resolveReadCredential
@@ -118,7 +123,6 @@ import {
 	evaluateTargets,
 	expandComponents,
 	isBestEffortCohort,
-	joinRoot,
 	type NixEvaluator,
 	planPublish,
 	type TargetCoverage,
@@ -351,6 +355,7 @@ export interface PlanDependencies {
 	readonly runner?: EnsureRunner;
 	readonly inspectVersion?: typeof inspectCupboardVersion;
 	readonly inspectCommandOptions?: typeof inspectCommandOptions;
+	readonly inspectDocumentVersions?: typeof inspectDocumentVersions;
 	readonly signal?: AbortSignal;
 	readonly createArtifactName?: () => string;
 	readonly createDerivationArtifactName?: () => string;
@@ -952,6 +957,44 @@ async function cohortSkippablePaths(
 	return options.has('--complete-targets') ? servedPaths : new Set();
 }
 
+/**
+Uses `root ensure --plan` only when the installed cupboard reads the plan
+version that this action writes. `resolve-cupboard` can select any release:
+an older release has no `--plan`, or reads another plan version, and gets one
+ensure per root, which every release accepts. A cupboard that cannot report
+its document versions is treated the same way.
+*/
+async function rootEnsureMode(
+	inputs: PlanInputs,
+	dependencies: PlanDependencies,
+	reporter: Reporter
+): Promise<RootEnsureMode> {
+	let versions: DocumentVersions;
+
+	try {
+		versions = await (
+			dependencies.inspectDocumentVersions ?? inspectDocumentVersions
+		)(inputs.cupboardPath, dependencies.signal);
+	} catch (error) {
+		dependencies.signal?.throwIfAborted();
+		reporter.info(
+			`Ensuring each served root separately, because cupboard could not report the document versions that it reads: ${error instanceof Error ? error.message : String(error)}`
+		);
+
+		return 'per-root';
+	}
+
+	if (versions.publishPlan !== publishPlanVersion) {
+		reporter.info(
+			`Ensuring each served root separately, because cupboard reads publish plan version ${String(versions.publishPlan ?? 'none')}, not ${String(publishPlanVersion)}.`
+		);
+
+		return 'per-root';
+	}
+
+	return 'plan';
+}
+
 async function optimisedPlan(
 	inputs: PlanInputs,
 	reporter: Reporter,
@@ -992,7 +1035,8 @@ async function optimisedPlan(
 			evaluations,
 			destinationPaths,
 			dependencies.runner,
-			dependencies.signal
+			dependencies.signal,
+			() => rootEnsureMode(inputs, dependencies, reporter)
 		),
 		checkReferenceForCohorts(inputs, evaluations, destinationPaths, {
 			...(dependencies.fetcher !== undefined && {
@@ -1052,7 +1096,10 @@ async function optimisedPlan(
 						joinRoot(inputs.rootPrefix, evaluation.target.rootSuffix)
 					)
 				)
-				.map((evaluation) => evaluation.target)
+				.map((evaluation) => ({
+					...evaluation.target,
+					paths: evaluation.targetPaths
+				}))
 		]
 	};
 	return {
@@ -1192,6 +1239,7 @@ async function writePlan(
 ): Promise<readonly Cohort[]> {
 	const document: PublishPlanDocument = {
 		version: publishPlanVersion,
+		rootPrefix: inputs.rootPrefix,
 		...plan,
 		cohortPreFilter: cohortDecisions,
 		...(referencePublications.length > 0 && { referencePublications })
@@ -1357,9 +1405,19 @@ export async function ensureAvailableTargets(
 	evaluations: readonly TargetEvaluation[],
 	availablePaths: ReadonlySet<StorePathString>,
 	runner: EnsureRunner = defaultEnsureRunner,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	ensureMode: () => Promise<RootEnsureMode> = () => Promise.resolve('per-root')
 ): Promise<Set<string>> {
 	const cached = cachedRoots(inputs.targets, evaluations, availablePaths);
+
+	if (cached.length === 0) {
+		return new Set();
+	}
+
+	if ((await ensureMode()) === 'plan') {
+		return ensureRootsFromPlan(inputs, cached, runner, signal);
+	}
+
 	const results = await mapWithConcurrency(
 		cached,
 		maximumConcurrentRootEnsures,
@@ -1382,9 +1440,152 @@ export async function ensureAvailableTargets(
 	return retained;
 }
 
+/**
+How the plan ensures the roots of served targets: through one
+`cupboard root ensure --plan` invocation, or, for a released cupboard without
+that option, through one `cupboard root ensure` invocation per root.
+*/
+export type RootEnsureMode = 'plan' | 'per-root';
+
 interface CachedRoot {
 	readonly rootSuffix: string;
+	readonly evaluations: readonly TargetEvaluation[];
 	readonly paths: readonly StorePathString[];
+}
+
+const describedRootsMaxNames = 3;
+
+// Error messages list a few roots and count the rest, so a plan with hundreds
+// of roots still produces a short message.
+function describedRoots(names: readonly string[]): string {
+	const shown = names.slice(0, describedRootsMaxNames).join(', ');
+	const hidden = names.length - describedRootsMaxNames;
+
+	return hidden > 0 ? `${shown} and ${String(hidden)} more` : shown;
+}
+
+// The provisional plan lists the served targets as retained, so a single
+// `root ensure --plan` invocation ensures each of their roots in batches.
+async function ensureRootsFromPlan(
+	inputs: PlanInputs,
+	cached: readonly CachedRoot[],
+	runner: EnsureRunner,
+	signal?: AbortSignal
+): Promise<Set<string>> {
+	const roots = cached.map((root) => ({
+		rootSuffix: root.rootSuffix,
+		name: joinRoot(inputs.rootPrefix, root.rootSuffix)
+	}));
+	const description = describedRoots(roots.map((root) => root.name));
+	const planFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-root-ensure-plan-${randomUUID()}.json`
+	);
+	const resultFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-root-ensure-${randomUUID()}.jsonl`
+	);
+	const provisional: PublishPlanDocument = {
+		version: publishPlanVersion,
+		rootPrefix: inputs.rootPrefix,
+		retained: cached.flatMap((root) =>
+			root.evaluations.map((evaluation) => ({
+				...evaluation.target,
+				paths: evaluation.targetPaths
+			}))
+		),
+		targets: [],
+		cohorts: [],
+		cohortPreFilter: []
+	};
+
+	await writeFile(planFile, `${JSON.stringify(provisional, undefined, 2)}\n`);
+
+	try {
+		await runner(
+			inputs.cupboardPath,
+			[
+				'--output-mode',
+				'github',
+				'--no-colour',
+				'--result-file',
+				resultFile,
+				'root',
+				'ensure',
+				canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
+				'--plan',
+				planFile,
+				'--github-oidc',
+				...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+				...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
+				...(inputs.permanent ? ['--permanent'] : [])
+			],
+			signal
+		);
+	} catch (error) {
+		signal?.throwIfAborted();
+
+		const replayed = replayCapturedCommandOutput(error);
+
+		throw new RootEnsureCommandError(description, {
+			cause: error,
+			wasReported: replayed.wasReported
+		});
+	}
+
+	const results = batchEnsureResults(
+		description,
+		await readEnsureResults(description, resultFile)
+	);
+	const statusByName = new Map<string, RootBatchResult['status']>(
+		results.map((result) => [result.name, result.status])
+	);
+	const retained = new Set<string>();
+
+	for (const root of roots) {
+		const status = statusByName.get(root.name);
+
+		if (status === undefined) {
+			throw new RootEnsureResultMissingError(root.name);
+		}
+
+		if (status === 'retained') {
+			retained.add(root.rootSuffix);
+		}
+	}
+
+	return retained;
+}
+
+function batchEnsureResults(
+	description: string,
+	recorded: string
+): readonly RootBatchResult[] {
+	let events: readonly ReporterResultEvent[];
+
+	try {
+		events = parseReporterResults(recorded);
+	} catch (error) {
+		throw new RootEnsureResultInvalidError(description, { cause: error });
+	}
+
+	for (const event of events) {
+		if (event.kind !== 'root-ensures') {
+			continue;
+		}
+
+		const results = z.array(rootBatchResultSchema).safeParse(event.data);
+
+		if (!results.success) {
+			throw new RootEnsureResultInvalidError(description, {
+				cause: results.error
+			});
+		}
+
+		return results.data;
+	}
+
+	throw new RootEnsureResultMissingError(description);
 }
 
 // The components of an aggregate target share its root, and an ensure replaces
@@ -1422,6 +1623,7 @@ function cachedRoots(
 		)
 		.map(([rootSuffix, group]) => ({
 			rootSuffix,
+			evaluations: group,
 			paths: [...new Set(group.flatMap((evaluation) => evaluation.targetPaths))]
 		}))
 		.toArray();

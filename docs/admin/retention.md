@@ -124,6 +124,17 @@ An unchanged root does not stop the server from writing the other roots in the
 batch. A 200 response therefore does not mean that every root was written, so
 check the result of every entry.
 
+A CLI command that sends batched root requests, such as `root ensure --plan`,
+sends one request per root instead when the server has no batched request. It
+also requests `root:set` for each root by name. The token request and the access
+token both contain the grants. The token request sends them percent-encoded,
+which can triple their size, and the token service accepts a request body of at
+most 128 KiB. When the grants for every name would serialise to more than 32
+KiB, the command therefore requests one grant for the roots' longest shared
+prefix that ends with `/` instead. 32 KiB covers one full batch of roots with
+names of about 130 characters. A prefix grant also covers other roots under the
+prefix, and the trust rule must allow it.
+
 ### Managing roots directly
 
 `cupboard root` lets you work with roots without pushing. The cache comes from
@@ -135,6 +146,7 @@ paths, not symlinks.
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `root set <url> <name> <path...>`    | Replaces the root's targets. Every store path must already be published to the cache.                                                                                   |
 | `root ensure <url> <name> <path...>` | Sets the root only if the cache can serve every store path. Otherwise it reports which store paths the cache can't serve, and changes nothing. Either way, it succeeds. |
+| `root ensure <url> --plan <file>`    | Ensures the root of every retained target in a publish plan, through batched requests. The publish workflow's plan step uses it.                                        |
 | `root list <url> [cache]`            | Lists the roots, with how many targets each has and when it expires.                                                                                                    |
 | `root targets <url> <name>`          | Lists a root's targets, and marks any that are missing.                                                                                                                 |
 | `root remove <url> <name>`           | Removes the root, which releases its targets. In a script, add `--yes` to skip the confirmation.                                                                        |

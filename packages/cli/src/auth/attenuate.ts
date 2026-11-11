@@ -1,4 +1,8 @@
-import { type CacheScope, type RootName } from '@cupboard/nix-store/scalars';
+import {
+	type CacheScope,
+	type RootName,
+	rootNameSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
@@ -25,6 +29,11 @@ export interface PushGrantIntent {
 export interface RootEnsureGrantIntent {
 	readonly cache: CacheScope;
 	readonly root: RootName;
+}
+
+export interface RootsEnsureGrantIntent {
+	readonly cache: CacheScope;
+	readonly roots: readonly RootName[];
 }
 
 export interface RootListGrantIntent {
@@ -270,4 +279,93 @@ export function cacheLifecycleAuthorizationDetails(intent: {
 			cache: intent.cache
 		}
 	]);
+}
+
+// The token request sends the grants as a form field, and the token service
+// refuses a form body above 128 KiB (`formBodyMaxBytes`). Percent-encoding can
+// triple the grants' size, so 32 KiB of grants keeps the body below that limit
+// together with the subject token. The issued token contains the grants in
+// base64url, about 43 KiB, and Workers accept 128 KB of request headers in
+// total. 32 KiB fits exact grants for one batch of roots with names of about
+// 130 characters.
+export const exactRootGrantsMaxBytes = 32 * 1024;
+
+/**
+Returns the longest prefix that ends with a slash and that starts every name,
+or `undefined` when the names share no such prefix.
+*/
+function sharedRootPrefix(roots: readonly RootName[]): RootName | undefined {
+	const [first, ...rest] = roots;
+
+	if (first === undefined) {
+		return undefined;
+	}
+
+	let common = first.length;
+
+	for (const root of rest) {
+		let index = 0;
+
+		while (index < common && root[index] === first[index]) {
+			index += 1;
+		}
+
+		common = index;
+	}
+
+	const end = common === 0 ? -1 : first.lastIndexOf('/', common - 1);
+
+	return end < 0 ? undefined : rootNameSchema.parse(first.slice(0, end + 1));
+}
+
+function rootSetDetails(
+	cache: CacheScope,
+	selectors: readonly RootName[]
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse(
+		selectors.map((root) => ({
+			type: 'cupboard_cache',
+			actions: ['root:set'],
+			cache,
+			root
+		}))
+	);
+}
+
+/**
+Returns the root selectors for a token that sets the named roots: the exact
+names, unless their grants would make the token too large for a request
+header. Then it returns the roots' longest shared prefix that ends with a
+slash, which also covers other roots under that prefix. Roots without such a
+prefix keep their exact names.
+*/
+export function rootSetSelectors(
+	cache: CacheScope,
+	roots: readonly RootName[]
+): readonly RootName[] {
+	const exact = [...new Set(roots)];
+	const exactBytes = new TextEncoder().encode(
+		JSON.stringify(rootSetDetails(cache, exact))
+	).byteLength;
+
+	if (exactBytes <= exactRootGrantsMaxBytes) {
+		return exact;
+	}
+
+	const prefix = sharedRootPrefix(exact);
+
+	return prefix === undefined ? exact : [prefix];
+}
+
+/**
+Requests `root:set` for every root that one batched ensure names, with the
+selectors that `rootSetSelectors` chooses.
+*/
+export function rootsEnsureAuthorizationDetails(
+	intent: RootsEnsureGrantIntent
+): AuthorizationDetails {
+	return rootSetDetails(
+		intent.cache,
+		rootSetSelectors(intent.cache, intent.roots)
+	);
 }

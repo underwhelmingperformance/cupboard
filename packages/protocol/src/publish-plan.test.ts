@@ -1,8 +1,11 @@
+import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
 	isNixPositionalArgument,
-	publishPlanDocumentSchema
+	joinRoot,
+	publishPlanDocumentSchema,
+	retainedRoots
 } from './publish-plan.ts';
 
 const target = {
@@ -15,9 +18,25 @@ const target = {
 	outputs: ['out']
 };
 
+const appPath = storePathSchema.parse(`/nix/store/${'1'.repeat(32)}-app`);
+const developmentPath = storePathSchema.parse(
+	`/nix/store/${'2'.repeat(32)}-app-dev`
+);
+const libraryPath = storePathSchema.parse(
+	`/nix/store/${'3'.repeat(32)}-library`
+);
+
 const document = {
-	version: 1,
-	retained: [],
+	version: 2,
+	rootPrefix: 'github:owner/repo/main',
+	retained: [
+		{
+			...target,
+			attr: '.#library',
+			rootSuffix: 'library',
+			paths: [libraryPath]
+		}
+	],
 	targets: [target],
 	cohorts: [
 		{
@@ -66,7 +85,8 @@ describe('publishPlanDocumentSchema', () => {
 
 	it.each([
 		{ name: 'an older version', value: { ...document, version: 0 } },
-		{ name: 'a newer version', value: { ...document, version: 2 } },
+		{ name: 'the previous version', value: { ...document, version: 1 } },
+		{ name: 'a newer version', value: { ...document, version: 3 } },
 		{
 			name: 'no version',
 			value: Object.fromEntries(
@@ -78,6 +98,55 @@ describe('publishPlanDocumentSchema', () => {
 
 		expect(parsed.error?.issues.map((issue) => issue.path)).toStrictEqual([
 			['version']
+		]);
+	});
+});
+
+describe('joinRoot', () => {
+	it.each([
+		{ prefix: 'github:owner/repo/main', suffix: 'app' },
+		{ prefix: 'github:owner/repo/main', suffix: '/app' },
+		{ prefix: 'github:owner/repo/main', suffix: 'app/' },
+		{ prefix: 'github:owner/repo/main/', suffix: 'app' }
+	])('joins $prefix and $suffix to one root', ({ prefix, suffix }) => {
+		expect(joinRoot(prefix, suffix)).toBe('github:owner/repo/main/app');
+	});
+});
+
+describe('retainedRoots', () => {
+	it('merges the retained targets that share a root, in plan order', () => {
+		const roots = retainedRoots({
+			rootPrefix: 'github:owner/repo/main/',
+			retained: [
+				{ ...target, rootSuffix: 'app', paths: [appPath] },
+				{ ...target, rootSuffix: 'library', paths: [libraryPath] },
+				{
+					...target,
+					attr: '.#app-dev',
+					rootSuffix: 'app',
+					outputs: ['dev', 'out'],
+					paths: [developmentPath, appPath]
+				}
+			]
+		});
+
+		expect(roots).toStrictEqual([
+			{
+				name: 'github:owner/repo/main/app',
+				targets: [appPath, developmentPath]
+			},
+			{ name: 'github:owner/repo/main/library', targets: [libraryPath] }
+		]);
+	});
+
+	it('refuses a document whose retained target has no valid root name', () => {
+		const parsed = publishPlanDocumentSchema.safeParse({
+			...document,
+			rootPrefix: 'x'.repeat(1024)
+		});
+
+		expect(parsed.error?.issues.map((issue) => issue.path)).toStrictEqual([
+			['retained', 0, 'rootSuffix']
 		]);
 	});
 });

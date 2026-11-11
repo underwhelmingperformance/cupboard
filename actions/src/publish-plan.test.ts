@@ -63,7 +63,6 @@ import {
 	evaluateTargets,
 	expandComponents,
 	isBestEffortCohort,
-	joinRoot,
 	type NixEvaluator,
 	planPublish,
 	type TargetCoverage,
@@ -1100,19 +1099,6 @@ describe('publishTargetsSchema', () => {
 		const targets = [{ ...target('first'), rootSuffix: '//' }];
 
 		expect(publishTargetsSchema.safeParse(targets).success).toBe(false);
-	});
-});
-
-describe('joinRoot', () => {
-	// Root checks and matrix jobs both use this function. Equivalent prefix and
-	// suffix spellings must therefore produce byte-identical roots.
-	it.each([
-		{ prefix: 'github:owner/repo/main', suffix: 'app' },
-		{ prefix: 'github:owner/repo/main', suffix: '/app' },
-		{ prefix: 'github:owner/repo/main', suffix: 'app/' },
-		{ prefix: 'github:owner/repo/main/', suffix: 'app' }
-	])('joins $prefix and $suffix to one root', ({ prefix, suffix }) => {
-		expect(joinRoot(prefix, suffix)).toBe('github:owner/repo/main/app');
 	});
 });
 

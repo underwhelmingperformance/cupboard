@@ -1,3 +1,7 @@
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import {
 	capturingReporter as reporter,
 	fakeCliUi
@@ -6,10 +10,13 @@ import {
 	cacheNameSchema,
 	type CacheScope,
 	rootNameSchema,
+	storePathSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
+	type RootBatchBody,
+	rootBatchResponseSchema,
 	rootEnsureResponseSchema,
 	rootListEntrySchema,
 	type RootListResponse,
@@ -24,6 +31,7 @@ import {
 } from '@cupboard/protocol/retention';
 import type { ResultRow } from '@cupboard/reporter';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
+import { ORPCError } from '@orpc/client';
 import { Command } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -42,6 +50,7 @@ import {
 	type RootClient,
 	rootListingAuthorizationDetails,
 	runRootEnsure,
+	runRootEnsurePlan,
 	runRootList,
 	runRootRemove,
 	runRootSet,
@@ -324,6 +333,263 @@ describe('runRootEnsure', () => {
 			],
 			results: [expectedRows]
 		});
+	});
+});
+
+describe('runRootEnsurePlan', () => {
+	const missing = '/nix/store/11111111111111111111111111111111-missing';
+
+	it('ensures every plan root in one batch and reports each result', async () => {
+		const results: ResultRow[][] = [];
+		const batch = recordingCacheScopedClient((input: RootBatchBody) =>
+			Promise.resolve(
+				rootBatchResponseSchema.parse({
+					roots: input.roots.map((entry) =>
+						entry.targets.includes(storePathSchema.parse(missing))
+							? {
+									name: entry.name,
+									status: 'build-required',
+									unavailable: [missing]
+								}
+							: {
+									name: entry.name,
+									status: 'retained',
+									root: summary({
+										name: entry.name,
+										targets: [presentTarget()]
+									})
+								}
+					)
+				})
+			)
+		);
+
+		await runRootEnsurePlan(
+			namedCache('nightly'),
+			[
+				{
+					name: rootName('github:acme/app/main/app'),
+					targets: [storePathSchema.parse(target)]
+				},
+				{
+					name: rootName('github:acme/app/main/tool'),
+					targets: [storePathSchema.parse(missing)]
+				}
+			],
+			{ kind: 'permanent' },
+			reporter(results),
+			{ batch, ensure: unexpectedEnsure }
+		);
+
+		expect({ calls: batch.calls, results }).toStrictEqual({
+			calls: [
+				{
+					cache: namedCache('nightly'),
+					input: {
+						cacheName: 'nightly',
+						roots: [
+							{
+								action: 'ensure',
+								name: 'github:acme/app/main/app',
+								targets: [target],
+								retention: { kind: 'permanent' }
+							},
+							{
+								action: 'ensure',
+								name: 'github:acme/app/main/tool',
+								targets: [missing],
+								retention: { kind: 'permanent' }
+							}
+						]
+					}
+				}
+			],
+			results: [
+				[
+					{ label: 'github:acme/app/main/app', value: 'retained, permanent' },
+					{
+						label: 'github:acme/app/main/tool',
+						value: 'build required, 1 unavailable'
+					},
+					{ label: 'Unavailable', value: missing }
+				]
+			]
+		});
+	});
+
+	it('ensures each root separately when the server has no batched root update', async () => {
+		const results: ResultRow[][] = [];
+		const batch = recordingCacheScopedClient((_input: RootBatchBody) =>
+			Promise.reject(
+				new ORPCError('NOT_FOUND', {
+					status: 404,
+					data: { status: 404, headers: {}, body: 'Not found\n' }
+				})
+			)
+		);
+		const ensure = recordingCacheScopedClient((input: RootBody) => {
+			const response = input.targets.includes(missing)
+				? { status: 'build-required', unavailable: [missing] }
+				: {
+						status: 'retained',
+						root: summary({ name: input.name, targets: [presentTarget()] })
+					};
+
+			return Promise.resolve(rootEnsureResponseSchema.parse(response));
+		});
+
+		await runRootEnsurePlan(
+			defaultCache,
+			[
+				{
+					name: rootName('github:acme/app/main/app'),
+					targets: [storePathSchema.parse(target)]
+				},
+				{
+					name: rootName('github:acme/app/main/tool'),
+					targets: [storePathSchema.parse(missing)]
+				}
+			],
+			{ kind: 'permanent' },
+			reporter(results),
+			{ batch, ensure }
+		);
+
+		expect({ ensures: ensure.calls, results }).toStrictEqual({
+			ensures: [
+				{
+					cache: defaultCache,
+					input: {
+						name: 'github:acme/app/main/app',
+						targets: [target],
+						retention: { kind: 'permanent' }
+					}
+				},
+				{
+					cache: defaultCache,
+					input: {
+						name: 'github:acme/app/main/tool',
+						targets: [missing],
+						retention: { kind: 'permanent' }
+					}
+				}
+			],
+			results: [
+				[
+					{ label: 'github:acme/app/main/app', value: 'retained, permanent' },
+					{
+						label: 'github:acme/app/main/tool',
+						value: 'build required, 1 unavailable'
+					},
+					{ label: 'Unavailable', value: missing }
+				]
+			]
+		});
+	});
+
+	it('sends no request for a plan without retained targets', async () => {
+		const results: ResultRow[][] = [];
+		const batch = recordingCacheScopedClient((_input: RootBatchBody) =>
+			Promise.resolve({ roots: [] })
+		);
+
+		await runRootEnsurePlan(
+			defaultCache,
+			[],
+			{ kind: 'inherit' },
+			reporter(results),
+			{ batch, ensure: unexpectedEnsure }
+		);
+
+		expect({ calls: batch.calls, results }).toStrictEqual({
+			calls: [],
+			results: [[]]
+		});
+	});
+});
+
+async function planFile(version: number): Promise<string> {
+	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-root-plan-'));
+	const file = path.join(directory, 'plan.json');
+
+	await writeFile(
+		file,
+		JSON.stringify({
+			version,
+			rootPrefix: 'github:acme/app/main',
+			retained: [],
+			targets: [],
+			cohorts: [],
+			cohortPreFilter: []
+		})
+	);
+
+	return file;
+}
+
+describe('root ensure arguments', () => {
+	it.each([
+		{
+			name: 'a plan with a root name',
+			arguments_: async () => ['main', '--plan', await planFile(2)],
+			expected: 'RootEnsureArgumentsError'
+		},
+		{
+			name: 'neither a plan nor a root',
+			arguments_: () => Promise.resolve([]),
+			expected: 'RootEnsureArgumentsError'
+		},
+		{
+			name: 'a plan of another version',
+			arguments_: async () => ['--plan', await planFile(1)],
+			expected: 'PublishPlanVersionError'
+		}
+	])(
+		'refuses $name before authentication',
+		async ({ arguments_, expected }) => {
+			const program = new Command().exitOverride();
+			registerRootCommands(program);
+			let failure: unknown;
+
+			try {
+				await program.parseAsync(
+					[
+						'root',
+						'ensure',
+						'http://127.0.0.1:1/t/acme',
+						...(await arguments_()),
+						'--github-oidc'
+					],
+					{ from: 'user' }
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expect({
+				name: failure instanceof Error ? failure.name : undefined,
+				status: cliExitCode(failure, 130)
+			}).toStrictEqual({ name: expected, status: 2 });
+		}
+	);
+
+	it('reports a plan without retained targets without exchanging a token', async () => {
+		const program = new Command().exitOverride();
+		registerRootCommands(program);
+
+		await expect(
+			program.parseAsync(
+				[
+					'root',
+					'ensure',
+					'http://127.0.0.1:1/t/acme',
+					'--plan',
+					await planFile(2),
+					'--github-oidc'
+				],
+				{ from: 'user' }
+			)
+		).resolves.toBe(program);
 	});
 });
 
@@ -646,6 +912,7 @@ function removeClient(response: RootRemoveResponse): RootClient & {
 				})
 			)
 		),
+		batch: recordingCacheScopedClient(() => Promise.resolve({ roots: [] })),
 		list: recordingCacheScopedClient(() => Promise.resolve({ roots: [] })),
 		targets: recordingCacheScopedClient(() => Promise.resolve({ targets: [] })),
 		remove: recordingCacheScopedClient((_input: { name: string }) =>
@@ -653,3 +920,7 @@ function removeClient(response: RootRemoveResponse): RootClient & {
 		)
 	};
 }
+
+const unexpectedEnsure = recordingCacheScopedClient((_input: RootBody) =>
+	Promise.reject(new Error('the batched request covers every root'))
+);

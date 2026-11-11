@@ -37,6 +37,7 @@ import { registerControlKeyCommands } from './commands/control-key.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerDeployCommand } from './commands/deploy.ts';
 import { registerDeploymentCommands } from './commands/deployment.ts';
+import { registerDocumentVersionsCommand } from './commands/document-versions.ts';
 import { registerGithubCommands } from './commands/github.ts';
 import { registerKeyCommands } from './commands/key.ts';
 import { registerLoginCommand } from './commands/login.ts';
@@ -230,6 +231,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerGithubCommands(program, options);
 	registerCheckCommand(program, options);
 	registerPlanCommands(program, options);
+	registerDocumentVersionsCommand(program, options);
 
 	return program;
 }

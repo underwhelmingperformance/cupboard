@@ -6,6 +6,10 @@ import process from 'node:process';
 
 import { rootLogger } from '@cupboard/logger';
 import {
+	type DocumentVersions,
+	documentVersionsSchema
+} from '@cupboard/protocol/publish-plan';
+import {
 	parseReporterResults,
 	type ReporterResultEvent,
 	reporterResultEventSchema
@@ -556,6 +560,32 @@ export async function inspectCommandOptions(
 	}
 
 	return commandOptionsFromHelp(help.output);
+}
+
+/**
+Reads the version of each publish workflow document that the installed
+cupboard reads. Releases before `cupboard document-versions` exit with an
+error, which the caller treats as reading none of the newer documents.
+*/
+export async function inspectDocumentVersions(
+	binaryPath: string,
+	signal?: AbortSignal
+): Promise<DocumentVersions> {
+	const printed = await readCommandOutput(
+		binaryPath,
+		['document-versions'],
+		signal
+	);
+
+	if (printed.status !== 0) {
+		throw new CommandFailedError(
+			binaryPath,
+			printed.status,
+			'unexpected document versions'
+		);
+	}
+
+	return documentVersionsSchema.parse(JSON.parse(printed.output));
 }
 
 async function readCommandOutput(

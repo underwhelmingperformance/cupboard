@@ -34,7 +34,7 @@ import { RedirectingOrigin } from '../redirecting-origin.test-support.ts';
 
 import type { TokenProvider } from './credentials.ts';
 import { controlRpc, tenantRpc } from './orpc.ts';
-import { translateRpcError } from './rpc-errors.ts';
+import { isRpcProcedureMissingError, translateRpcError } from './rpc-errors.ts';
 import { parseWorkerUrl } from './transport.ts';
 
 interface CapturedRequest {
@@ -1394,6 +1394,63 @@ describe('tenantRpc', () => {
 			});
 		}
 	});
+});
+
+describe('isRpcProcedureMissingError', () => {
+	it.each([
+		{
+			name: 'a plain 404 from a server without the procedure',
+			response: () =>
+				new Response('Not found\n', {
+					status: StatusCodes.NOT_FOUND,
+					headers: { 'content-type': 'text/plain; charset=utf-8' }
+				}),
+			isMissing: true
+		},
+		{
+			name: 'an oRPC 404 for an absent cache',
+			response: () =>
+				Response.json(
+					{
+						defined: false,
+						code: 'NOT_FOUND',
+						status: StatusCodes.NOT_FOUND,
+						message: 'Cache not found'
+					},
+					{ status: StatusCodes.NOT_FOUND }
+				),
+			isMissing: false
+		}
+	])(
+		'reports $name as missing: $isMissing',
+		async ({ response, isMissing }) => {
+			const { fetcher } = capturingFetcher([response]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher
+			});
+			let failure: unknown;
+
+			try {
+				await rpc.roots.batch.inDefaultCache({
+					roots: [
+						{
+							action: 'ensure',
+							name: 'github:acme/app/main/app',
+							targets: ['/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app']
+						}
+					]
+				});
+			} catch (error) {
+				failure = error;
+			}
+
+			expect({
+				isRpcError: failure instanceof ORPCError,
+				isMissing: isRpcProcedureMissingError(failure)
+			}).toStrictEqual({ isRpcError: true, isMissing });
+		}
+	);
 });
 
 describe('controlRpc', () => {
