@@ -74,10 +74,13 @@ import { currentRowBudgetMeter } from './row-budget.ts';
 import { StagingDeletes } from './staging-deletes.ts';
 import { TransitionGate } from './transition-gate.ts';
 
-// Cloudflare accepts at most 100 operations in one purge request, on every
-// plan. See the "Hostname, tag, prefix URL, and purge everything limits" table
-// at https://developers.cloudflare.com/cache/how-to/purge-cache/.
-const tagsPerPurgeRequest = 100;
+/**
+The most tags that one purge request may list. Cloudflare accepts at most 100
+operations in one purge request, on every plan. See the "Hostname, tag, prefix
+URL, and purge everything limits" table at
+https://developers.cloudflare.com/cache/how-to/purge-cache/.
+*/
+export const tagsPerPurgeRequest = 100;
 
 type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];

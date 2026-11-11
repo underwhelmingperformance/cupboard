@@ -3971,8 +3971,9 @@ describe('upload flow', () => {
 		const purge = await runInDurableObject(currentServer(), (instance) =>
 			vi.spyOn(instance.context, 'purgeCacheTags').mockResolvedValue(undefined)
 		);
-		// Each pass purges one queued batch. Run more passes than the deletions
-		// queue so the queue is empty whatever order the batches were written in.
+		// Each pass sends the distinct tags of as many queued rows as fit in one
+		// request. Run more passes than the deletions need so the queue is empty
+		// however the rows were split.
 		const drainQueuedPurges = async (): Promise<string[]> => {
 			for (let pass = 0; pass < 4; pass += 1) {
 				await runInDurableObject(currentServer(), (instance) =>
@@ -4003,8 +4004,6 @@ describe('upload flow', () => {
 				].toSorted(byCodeUnit),
 				afterSecond: [
 					narCacheTag(fixtureTenant, defaultCache(), second.narHash),
-					narCacheTag(fixtureTenant, defaultCache(), second.narHash),
-					legacyNarCacheTag(fixtureTenant, second.narHash),
 					legacyNarCacheTag(fixtureTenant, second.narHash),
 					narInfoCacheTag(fixtureTenant, defaultCache(), second.storePathHash)
 				].toSorted(byCodeUnit)
