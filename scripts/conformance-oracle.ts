@@ -325,6 +325,37 @@ export class NixNotRunnableError extends CodedError {
 	}
 }
 
+const timedOutStderrLines = 40;
+
+/**
+The last `count` lines of `text`, without trailing newlines.
+*/
+function lastLines(text: string, count: number): string {
+	return text.trimEnd().split('\n').slice(-count).join('\n');
+}
+
+/**
+The message includes the last lines of stderr because the reporter prints an
+error's message and causes, not its properties. `stderr` has all of the
+output.
+*/
+export class NixTimedOutError extends CodedError {
+	constructor(
+		public readonly binary: string,
+		public readonly arguments_: readonly string[],
+		public readonly deadlineMilliseconds: number,
+		public readonly stderr: string
+	) {
+		const excerpt = lastLines(stderr, timedOutStderrLines);
+
+		super(
+			`${binary} ${arguments_.join(' ')} did not finish within ${String(deadlineMilliseconds)} ms and was killed` +
+				(excerpt === '' ? '' : `:\n${excerpt}`)
+		);
+		this.name = 'NixTimedOutError';
+	}
+}
+
 export function parseOracleRecord(text: string): OracleRecord {
 	let parsed: unknown;
 
@@ -624,7 +655,84 @@ export interface NixOptions {
 	readonly cwd?: string;
 	readonly env?: NodeJS.ProcessEnv;
 	readonly stdoutEncoding?: BufferEncoding;
+	/**
+	Kills the command and rejects with `NixTimedOutError` when the command
+	has not exited after this many milliseconds. Without a deadline, the
+	command can run forever.
+	*/
+	readonly deadlineMilliseconds?: number;
+	/**
+	Receives each chunk of stderr as it arrives. The returned `NixResult` still
+	contains all of stderr.
+	*/
+	readonly onStderr?: (chunk: Buffer) => void;
 }
+
+/**
+A stream of output chunks from a child process.
+*/
+export interface NixOutput {
+	on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+}
+
+/**
+The part of a child process that `runNix` uses.
+*/
+export interface NixChild {
+	readonly stdout: NixOutput;
+	readonly stderr: NixOutput;
+	kill(signal: NodeJS.Signals): void;
+	onError(listener: (cause: Error) => void): void;
+	onClose(listener: (status: number | null) => void): void;
+}
+
+/**
+Starts a timer and returns a function that cancels it.
+*/
+export type StartTimer = (
+	callback: () => void,
+	milliseconds: number
+) => () => void;
+
+export interface NixRuntime {
+	readonly spawn: (
+		binary: string,
+		arguments_: readonly string[],
+		options: Pick<NixOptions, 'cwd' | 'env'>
+	) => NixChild;
+	readonly startTimer: StartTimer;
+}
+
+const systemNixRuntime: NixRuntime = {
+	spawn: (binary, arguments_, options) => {
+		const child = spawn(binary, [...arguments_], {
+			cwd: options.cwd,
+			env: options.env,
+			stdio: ['ignore', 'pipe', 'pipe']
+		});
+
+		return {
+			stdout: child.stdout,
+			stderr: child.stderr,
+			kill: (signal) => {
+				child.kill(signal);
+			},
+			onError: (listener) => {
+				child.once('error', listener);
+			},
+			onClose: (listener) => {
+				child.once('close', listener);
+			}
+		};
+	},
+	startTimer: (callback, milliseconds) => {
+		const timer = setTimeout(callback, milliseconds);
+
+		return () => {
+			clearTimeout(timer);
+		};
+	}
+};
 
 /**
 Runs a `nix` command to completion and returns its status and output. A
@@ -636,26 +744,54 @@ export function runNix(
 	arguments_: readonly string[],
 	options: NixOptions = {}
 ): Promise<NixResult> {
+	return runNixWith(systemNixRuntime, binary, arguments_, options);
+}
+
+/**
+Like `runNix`, but the caller supplies the process start and the deadline
+timer. A test can then run a command that never exits and trigger the
+deadline without waiting for a real timer.
+*/
+export function runNixWith(
+	runtime: NixRuntime,
+	binary: string,
+	arguments_: readonly string[],
+	options: NixOptions = {}
+): Promise<NixResult> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(binary, [...arguments_], {
-			cwd: options.cwd,
-			env: options.env,
-			stdio: ['ignore', 'pipe', 'pipe']
-		});
+		const child = runtime.spawn(binary, arguments_, options);
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
+		const { deadlineMilliseconds } = options;
+		const cancelDeadline =
+			deadlineMilliseconds === undefined
+				? undefined
+				: runtime.startTimer(() => {
+						child.kill('SIGKILL');
+						reject(
+							new NixTimedOutError(
+								binary,
+								arguments_,
+								deadlineMilliseconds,
+								Buffer.concat(stderr).toString('utf8')
+							)
+						);
+					}, deadlineMilliseconds);
 
 		child.stdout.on('data', (chunk: Buffer) => {
 			stdout.push(chunk);
 		});
 		child.stderr.on('data', (chunk: Buffer) => {
 			stderr.push(chunk);
+			options.onStderr?.(chunk);
 		});
 
-		child.once('error', (cause) => {
+		child.onError((cause) => {
+			cancelDeadline?.();
 			reject(new NixNotRunnableError(binary, { cause }));
 		});
-		child.once('close', (status) => {
+		child.onClose((status) => {
+			cancelDeadline?.();
 			resolve({
 				status,
 				stdout: Buffer.concat(stdout).toString(
@@ -701,6 +837,114 @@ function createConformanceNixOutLink(): {
 }
 
 /**
+The longest that a `nix build` in this file may run.
+*/
+const nixBuildDeadlineMilliseconds = 10 * 60 * 1000;
+
+/**
+Nix aborts a download that makes no progress for this many seconds, and then
+retries it up to `download-attempts` times (5 by default). A file that stalls
+on every attempt therefore fails after about five times this value. The
+default is 300 seconds.
+*/
+const stalledDownloadTimeoutSeconds = 60;
+
+/**
+How to run a build: the process and timer that run it, and where the build's
+stderr goes as it arrives. Without `onStderr`, the build output is kept only
+in the result.
+*/
+export interface OracleBuildOptions {
+	readonly runtime?: NixRuntime;
+	readonly onStderr?: (chunk: Buffer) => void;
+}
+
+export function nixBuildArguments(
+	output: string,
+	outLink: string
+): readonly string[] {
+	return [
+		'build',
+		output,
+		'--print-build-logs',
+		'--option',
+		'stalled-download-timeout',
+		String(stalledDownloadTimeoutSeconds),
+		'--out-link',
+		outLink,
+		'--print-out-paths'
+	];
+}
+
+function runBuild(
+	root: string,
+	arguments_: readonly string[],
+	options: OracleBuildOptions
+): Promise<NixResult> {
+	return runNixWith(options.runtime ?? systemNixRuntime, 'nix', arguments_, {
+		cwd: root,
+		deadlineMilliseconds: nixBuildDeadlineMilliseconds,
+		...(options.onStderr !== undefined && { onStderr: options.onStderr })
+	});
+}
+
+/**
+Accepts chunks of output and writes them one line at a time with a prefix.
+`push` keeps an unfinished last line until a later chunk completes it, and
+`flush` writes that line as it is.
+*/
+export interface LinePrefixer {
+	readonly push: (chunk: Buffer) => void;
+	readonly flush: () => void;
+}
+
+export function prefixLines(
+	prefix: string,
+	write: (line: string) => void
+): LinePrefixer {
+	let pending = '';
+
+	return {
+		push: (chunk) => {
+			const lines = (pending + chunk.toString('utf8')).split('\n');
+
+			pending = lines.pop() ?? '';
+
+			for (const line of lines) {
+				write(`${prefix}${line}\n`);
+			}
+		},
+		flush: () => {
+			if (pending === '') {
+				return;
+			}
+
+			write(`${prefix}${pending}\n`);
+			pending = '';
+		}
+	};
+}
+
+/**
+Runs `run` with an `onStderr` callback that writes the build's output one
+line at a time with `prefix`. It writes the last unfinished line when `run`
+succeeds and when it fails.
+*/
+export async function withPrefixedOutput<T>(
+	prefix: string,
+	write: (line: string) => void,
+	run: (onStderr: (chunk: Buffer) => void) => Promise<T>
+): Promise<T> {
+	const output = prefixLines(prefix, write);
+
+	try {
+		return await run(output.push);
+	} finally {
+		output.flush();
+	}
+}
+
+/**
 Builds the pinned flake output with the ambient environment so Nix can use
 the substituters configured on this machine.
 
@@ -708,19 +952,14 @@ A missing `nix` binary and a failed build both make the oracle unavailable.
 */
 async function buildConformanceNix(
 	root: string,
-	outLink: string
+	outLink: string,
+	options: OracleBuildOptions
 ): Promise<NixResult> {
 	try {
-		return await runNix(
-			'nix',
-			[
-				'build',
-				conformanceNixOutput,
-				'--out-link',
-				outLink,
-				'--print-out-paths'
-			],
-			{ cwd: root }
+		return await runBuild(
+			root,
+			nixBuildArguments(conformanceNixOutput, outLink),
+			options
 		);
 	} catch (error) {
 		if (error instanceof NixNotRunnableError) {
@@ -731,9 +970,10 @@ async function buildConformanceNix(
 	}
 }
 
-async function readFlakeOracleProbe(
+export async function readFlakeOracleProbe(
 	root: string,
-	system: OracleSystem
+	system: OracleSystem,
+	options: OracleBuildOptions = {}
 ): Promise<ProbedOracle> {
 	const output = `.#packages.${system}.conformanceOracleProbe`;
 	// The link must outlive the read below, so it goes in a directory this
@@ -743,7 +983,13 @@ async function readFlakeOracleProbe(
 	);
 
 	try {
-		return await readBuiltOracleProbe(root, system, output, linkDirectory);
+		return await readBuiltOracleProbe(
+			root,
+			system,
+			output,
+			linkDirectory,
+			options
+		);
 	} finally {
 		rmSync(linkDirectory, { force: true, recursive: true });
 	}
@@ -753,21 +999,16 @@ async function readBuiltOracleProbe(
 	root: string,
 	system: OracleSystem,
 	output: string,
-	linkDirectory: string
+	linkDirectory: string,
+	options: OracleBuildOptions
 ): Promise<ProbedOracle> {
 	let build: NixResult;
 
 	try {
-		build = await runNix(
-			'nix',
-			[
-				'build',
-				output,
-				'--out-link',
-				path.join(linkDirectory, 'probe'),
-				'--print-out-paths'
-			],
-			{ cwd: root }
+		build = await runBuild(
+			root,
+			nixBuildArguments(output, path.join(linkDirectory, 'probe')),
+			options
 		);
 	} catch (error) {
 		if (error instanceof NixNotRunnableError) {
@@ -824,12 +1065,13 @@ The caller owns the returned out-link and must release it after use. Build
 or output-validation failures remove the link before propagating.
 */
 export async function resolveConformanceNixBinary(
-	root: string
+	root: string,
+	options: OracleBuildOptions = {}
 ): Promise<ResolvedConformanceNix> {
 	const { outLink, release } = createConformanceNixOutLink();
 
 	try {
-		const build = await buildConformanceNix(root, outLink);
+		const build = await buildConformanceNix(root, outLink, options);
 
 		if (build.status !== 0) {
 			throw new ConformanceNixUnavailableError(build.stderr.trim());
@@ -1100,13 +1342,27 @@ function buildProgram(): Command {
 		.action(async (options: { system: string[] }) => {
 			const reporter = scriptReporter();
 			const systems = selectedOracleSystems(options.system);
+			// The terminal reporter redraws a spinner and the JSON reporter writes
+			// one event per line, so build output on stderr would corrupt both.
+			const shouldStreamBuildOutput = resolveReporterMode() === 'github';
 			const probes = await reporter.phase(
 				`Building ${String(systems.length)} conformance oracle probe${systems.length === 1 ? '' : 's'}`,
 				async (context) => {
 					const resolved = await Promise.all(
-						systems.map((system) =>
-							readFlakeOracleProbe(repositoryRoot, system)
-						)
+						systems.map((system) => {
+							if (!shouldStreamBuildOutput) {
+								return readFlakeOracleProbe(repositoryRoot, system);
+							}
+
+							return withPrefixedOutput(
+								`[${system}] `,
+								(line) => {
+									process.stderr.write(line);
+								},
+								(onStderr) =>
+									readFlakeOracleProbe(repositoryRoot, system, { onStderr })
+							);
+						})
 					);
 
 					for (const probe of resolved) {

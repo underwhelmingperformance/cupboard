@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	checkConformanceOracle,
+	ConformanceNixUnavailableError,
 	type GeneratedSettingsRecord,
 	IncompleteOracleProbeError,
 	IncompleteOracleUpdateError,
@@ -10,8 +11,13 @@ import {
 	InvalidOracleFileError,
 	InvalidOracleProbeError,
 	InvalidSettingsDocumentError,
+	type NixChild,
+	NixNotRunnableError,
+	type NixOutput,
+	type NixRuntime,
 	type NixSettingTable,
 	type NixSettingTypes,
+	NixTimedOutError,
 	type OracleRecord,
 	type OracleSystem,
 	oracleSystems,
@@ -20,8 +26,12 @@ import {
 	parseOracleRecord,
 	parseProbedOracle,
 	parseSettingTypes,
+	prefixLines,
 	type ProbedOracle,
+	readFlakeOracleProbe,
 	renderSettingTypes,
+	resolveConformanceNixBinary,
+	runNixWith,
 	serialiseOracleRecord,
 	SettingTypesVersionDriftError,
 	UnknownIntegerWidthError,
@@ -29,7 +39,8 @@ import {
 	UnparsableOracleFileError,
 	UnparsableOracleProbeError,
 	UnparsableSettingsDocumentError,
-	updateConformanceOracle
+	updateConformanceOracle,
+	withPrefixedOutput
 } from './conformance-oracle.ts';
 
 const pinnedRevision = 'b5aa0fbd538984f6e3d201be0005b4463d8b09f8';
@@ -548,5 +559,340 @@ describe('updateConformanceOracle', () => {
 			'aarch64-darwin'
 		]);
 		expect(workspace.tables).toStrictEqual([]);
+	});
+});
+
+class FakeNixOutput implements NixOutput {
+	private readonly listeners: ((chunk: Buffer) => void)[] = [];
+
+	on(_event: 'data', listener: (chunk: Buffer) => void): void {
+		this.listeners.push(listener);
+	}
+
+	write(text: string): void {
+		for (const listener of this.listeners) {
+			listener(Buffer.from(text));
+		}
+	}
+}
+
+class FakeNixChild implements NixChild {
+	private readonly closeListeners: ((status: number | null) => void)[] = [];
+	private readonly errorListeners: ((cause: Error) => void)[] = [];
+	readonly stdout = new FakeNixOutput();
+	readonly stderr = new FakeNixOutput();
+	readonly signals: NodeJS.Signals[] = [];
+
+	kill(signal: NodeJS.Signals): void {
+		this.signals.push(signal);
+	}
+
+	onError(listener: (cause: Error) => void): void {
+		this.errorListeners.push(listener);
+	}
+
+	onClose(listener: (status: number | null) => void): void {
+		this.closeListeners.push(listener);
+	}
+
+	fail(cause: Error): void {
+		for (const listener of this.errorListeners) {
+			listener(cause);
+		}
+	}
+
+	exit(status: number): void {
+		for (const listener of this.closeListeners) {
+			listener(status);
+		}
+	}
+}
+
+function fakeNixRuntime(child: FakeNixChild): NixRuntime & {
+	spawns: { binary: string; arguments_: readonly string[]; cwd?: string }[];
+	deadlines: { callback: () => void; milliseconds: number }[];
+	cancelled: number[];
+} {
+	const spawns: {
+		binary: string;
+		arguments_: readonly string[];
+		cwd?: string;
+	}[] = [];
+	const deadlines: { callback: () => void; milliseconds: number }[] = [];
+	const cancelled: number[] = [];
+
+	return {
+		spawns,
+		deadlines,
+		cancelled,
+		spawn: (binary, arguments_, options) => {
+			spawns.push({ binary, arguments_, cwd: options.cwd });
+
+			return child;
+		},
+		startTimer: (callback, milliseconds) => {
+			deadlines.push({ callback, milliseconds });
+
+			return () => {
+				cancelled.push(milliseconds);
+			};
+		}
+	};
+}
+
+describe('runNixWith', () => {
+	it('returns the buffered output and passes stderr to the callback as it arrives', async () => {
+		const child = new FakeNixChild();
+		const runtime = fakeNixRuntime(child);
+		const streamed: string[] = [];
+
+		const result = runNixWith(runtime, 'nix', ['build'], {
+			deadlineMilliseconds: 5000,
+			onStderr: (chunk) => {
+				streamed.push(chunk.toString('utf8'));
+			}
+		});
+		child.stdout.write('/nix/store/path\n');
+		child.stderr.write('building\n');
+		child.stderr.write('done\n');
+		child.exit(0);
+
+		await expect(result).resolves.toStrictEqual({
+			status: 0,
+			stdout: '/nix/store/path\n',
+			stderr: 'building\ndone\n'
+		});
+		expect(streamed).toStrictEqual(['building\n', 'done\n']);
+		expect(runtime.cancelled).toStrictEqual([5000]);
+	});
+
+	it('kills a command that outlasts its deadline and reports the stderr so far', async () => {
+		const child = new FakeNixChild();
+		const runtime = fakeNixRuntime(child);
+
+		const result = runNixWith(runtime, 'nix', ['build', '.#probe'], {
+			deadlineMilliseconds: 5000
+		});
+		child.stderr.write('downloading\n');
+
+		expect(
+			runtime.deadlines.map(({ milliseconds }) => milliseconds)
+		).toStrictEqual([5000]);
+
+		for (const { callback } of runtime.deadlines) {
+			callback();
+		}
+
+		const error = await captureError(NixTimedOutError, () => result);
+
+		expect({
+			binary: error.binary,
+			arguments_: error.arguments_,
+			deadlineMilliseconds: error.deadlineMilliseconds,
+			stderr: error.stderr
+		}).toStrictEqual({
+			binary: 'nix',
+			arguments_: ['build', '.#probe'],
+			deadlineMilliseconds: 5000,
+			stderr: 'downloading\n'
+		});
+		expect(child.signals).toStrictEqual(['SIGKILL']);
+		expect(runtime.cancelled).toStrictEqual([]);
+	});
+
+	it('reports a command that cannot start and cancels the deadline', async () => {
+		const child = new FakeNixChild();
+		const runtime = fakeNixRuntime(child);
+		const cause = new Error('spawn nix ENOENT');
+
+		const result = runNixWith(runtime, 'nix', ['build'], {
+			deadlineMilliseconds: 5000
+		});
+		child.fail(cause);
+
+		const error = await captureError(NixNotRunnableError, () => result);
+
+		expect({ binary: error.binary, cause: error.cause }).toStrictEqual({
+			binary: 'nix',
+			cause
+		});
+		expect(runtime.cancelled).toStrictEqual([5000]);
+	});
+});
+
+describe('oracle builds', () => {
+	it('builds the conformance output with a deadline and a stalled download timeout', async () => {
+		const child = new FakeNixChild();
+		const runtime = fakeNixRuntime(child);
+
+		const resolved = resolveConformanceNixBinary('/repo', { runtime });
+		child.stdout.write('/nix/store/abc-nix\n');
+		child.exit(0);
+		const nix = await resolved;
+		nix.releaseOutLink();
+
+		expect(runtime.spawns).toStrictEqual([
+			{
+				binary: 'nix',
+				arguments_: [
+					'build',
+					'.#conformanceNix',
+					'--print-build-logs',
+					'--option',
+					'stalled-download-timeout',
+					'60',
+					'--out-link',
+					nix.outLink,
+					'--print-out-paths'
+				],
+				cwd: '/repo'
+			}
+		]);
+		expect(
+			runtime.deadlines.map(({ milliseconds }) => milliseconds)
+		).toStrictEqual([600_000]);
+	});
+
+	it('builds the probe with a deadline and a stalled download timeout', async () => {
+		const child = new FakeNixChild();
+		const runtime = fakeNixRuntime(child);
+
+		const probe = readFlakeOracleProbe('/repo', 'x86_64-linux', { runtime });
+		child.stderr.write('error: build failed\n');
+		child.exit(1);
+		await captureError(ConformanceNixUnavailableError, () => probe);
+
+		expect(runtime.spawns).toStrictEqual([
+			{
+				binary: 'nix',
+				arguments_: [
+					'build',
+					'.#packages.x86_64-linux.conformanceOracleProbe',
+					'--print-build-logs',
+					'--option',
+					'stalled-download-timeout',
+					'60',
+					'--out-link',
+					expect.stringMatching(/\/probe$/u),
+					'--print-out-paths'
+				],
+				cwd: '/repo'
+			}
+		]);
+		expect(
+			runtime.deadlines.map(({ milliseconds }) => milliseconds)
+		).toStrictEqual([600_000]);
+	});
+});
+
+describe('prefixLines', () => {
+	it('writes each complete line with the prefix and keeps the unfinished line', () => {
+		const lines: string[] = [];
+		const output = prefixLines('[x86_64-darwin] ', (line) => {
+			lines.push(line);
+		});
+
+		output.push(Buffer.from('copying\nbuild'));
+		output.push(Buffer.from('ing\nunfinished'));
+
+		expect(lines).toStrictEqual([
+			'[x86_64-darwin] copying\n',
+			'[x86_64-darwin] building\n'
+		]);
+	});
+
+	it('writes the unfinished line once when flushed', () => {
+		const lines: string[] = [];
+		const output = prefixLines('[x86_64-darwin] ', (line) => {
+			lines.push(line);
+		});
+
+		output.push(Buffer.from('copying\nunfinished'));
+		output.flush();
+		output.flush();
+
+		expect(lines).toStrictEqual([
+			'[x86_64-darwin] copying\n',
+			'[x86_64-darwin] unfinished\n'
+		]);
+	});
+});
+
+async function settle(
+	promise: Promise<string>
+): Promise<{ settled: 'resolved' | 'rejected'; value: string }> {
+	try {
+		return { settled: 'resolved', value: await promise };
+	} catch (error) {
+		return {
+			settled: 'rejected',
+			value: error instanceof Error ? error.message : String(error)
+		};
+	}
+}
+
+describe('withPrefixedOutput', () => {
+	it.each([
+		{
+			outcome: 'succeeds',
+			run: (onStderr: (chunk: Buffer) => void) => {
+				onStderr(Buffer.from('done\nlast'));
+
+				return Promise.resolve('built');
+			},
+			expected: { settled: 'resolved', value: 'built' }
+		},
+		{
+			outcome: 'fails',
+			run: (onStderr: (chunk: Buffer) => void) => {
+				onStderr(Buffer.from('done\nlast'));
+
+				return Promise.reject(new Error('build failed'));
+			},
+			expected: { settled: 'rejected', value: 'build failed' }
+		}
+	])(
+		'writes the unfinished line when the build $outcome',
+		async ({ run, expected }) => {
+			const lines: string[] = [];
+
+			const settled = await settle(
+				withPrefixedOutput(
+					'[x] ',
+					(line) => {
+						lines.push(line);
+					},
+					run
+				)
+			);
+
+			expect({ settled, lines }).toStrictEqual({
+				settled: expected,
+				lines: ['[x] done\n', '[x] last\n']
+			});
+		}
+	);
+});
+
+describe('NixTimedOutError', () => {
+	it('puts the last lines of stderr in the message and keeps all of it in the property', () => {
+		const stderr = Array.from(
+			{ length: 50 },
+			(_, index) => `line ${String(index + 1)}\n`
+		).join('');
+
+		const error = new NixTimedOutError('nix', ['build'], 5000, stderr);
+
+		expect({
+			stderr: error.stderr,
+			messageHasLastLine: error.message.endsWith('\nline 50'),
+			messageHasFirstKeptLine: error.message.includes('\nline 11\n'),
+			messageHasDroppedLine: error.message.includes('line 10\n')
+		}).toStrictEqual({
+			stderr,
+			messageHasLastLine: true,
+			messageHasFirstKeptLine: true,
+			messageHasDroppedLine: false
+		});
 	});
 });

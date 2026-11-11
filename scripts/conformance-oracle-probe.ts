@@ -33,6 +33,22 @@ class OracleProbeCommandStartError extends Error {
 	}
 }
 
+class OracleProbeCommandTimedOutError extends Error {
+	constructor(
+		public readonly binary: string,
+		public readonly arguments_: readonly string[],
+		public readonly timeoutMilliseconds: number,
+		public readonly stderr: string,
+		options: { cause: unknown }
+	) {
+		super(
+			`${binary} ${arguments_.join(' ')} did not finish within ${String(timeoutMilliseconds)} ms:\n${stderr}`,
+			options
+		);
+		this.name = 'OracleProbeCommandTimedOutError';
+	}
+}
+
 class OracleProbeCommandError extends Error {
 	constructor(
 		public readonly operation: string,
@@ -74,6 +90,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const commandTimeoutMilliseconds = 60_000;
+
+function isTimeout(error: Error): boolean {
+	return 'code' in error && error.code === 'ETIMEDOUT';
+}
+
 function run(
 	binary: string,
 	arguments_: readonly string[],
@@ -81,8 +103,20 @@ function run(
 ): CommandResult {
 	const result = spawnSync(binary, arguments_, {
 		env: environment,
-		encoding: 'utf8'
+		encoding: 'utf8',
+		killSignal: 'SIGKILL',
+		timeout: commandTimeoutMilliseconds
 	});
+
+	if (result.error !== undefined && isTimeout(result.error)) {
+		throw new OracleProbeCommandTimedOutError(
+			binary,
+			arguments_,
+			commandTimeoutMilliseconds,
+			result.stderr.trim(),
+			{ cause: result.error }
+		);
+	}
 
 	if (result.error !== undefined) {
 		throw new OracleProbeCommandStartError(binary, { cause: result.error });
