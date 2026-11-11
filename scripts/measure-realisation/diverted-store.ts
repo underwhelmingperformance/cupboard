@@ -22,11 +22,11 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import type { PublishTarget } from '@cupboard/protocol/publish-plan';
 import { bestEffort } from '@cupboard/shared/cleanup';
 import { CodedError } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
-import type { PublishTarget } from '../../actions/src/publish-plan.ts';
 import {
 	createProcessNixDaemonConnector,
 	type DaemonCommandRunner,

@@ -9,6 +9,7 @@ import {
 	cacheCredentialsSchema
 } from '@cupboard/protocol/cache-credentials';
 import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
+import { hasControlCharacter } from '@cupboard/shared/text';
 
 import {
 	BooleanInputInvalidError,
@@ -23,29 +24,6 @@ import {
 	type UrlInputName
 } from './errors.ts';
 import { parseLines, parseListInput } from './inputs.ts';
-
-function hasControlCharacter(value: string): boolean {
-	for (const character of value) {
-		const codePoint = character.codePointAt(0);
-		if (
-			codePoint !== undefined &&
-			(codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f))
-		) {
-			return true;
-		}
-	}
-
-	return false;
-}
-
-/**
-Reject a leading hyphen so Nix cannot parse a positional input as an option.
-These values later enter Nix through newline-delimited stdin, so reject
-control characters that could create another installable.
-*/
-export function isNixPositionalArgument(value: string): boolean {
-	return !value.startsWith('-') && !hasControlCharacter(value);
-}
 
 /**
 Treat a blank workflow value as absent after trimming. Omitted and empty

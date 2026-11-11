@@ -8,6 +8,11 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import {
+	type Cohort,
+	publishPlanDocumentSchema,
+	publishTargetsSchema
+} from '@cupboard/protocol/publish-plan';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { type Reporter, type ResultPayload } from '@cupboard/reporter';
 import { StatusCodes } from 'http-status-codes';
@@ -38,10 +43,8 @@ import {
 import type { Environment } from '../inputs.ts';
 import { publishReferenceTargets } from '../plan-reference.ts';
 import {
-	type Cohort,
 	joinRoot,
 	type NixEvaluator,
-	publishTargetsSchema,
 	type TargetEvaluation
 } from '../publish-plan.ts';
 import {
@@ -341,29 +344,36 @@ describe('planAction', () => {
 			await readFile(path.join(directory, 'cupboard-publish-plan.json'), 'utf8')
 		);
 		const outputs = await readFile(output, 'utf8');
+		const expectedPlan = {
+			version: 1,
+			retained: [],
+			targets: [{ ...target, bestEffort: false, outputs: ['out'] }],
+			cohorts: [
+				{
+					key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+					system: 'x86_64-linux',
+					os: 'ubuntu-latest',
+					remote: true,
+					targets: [{ ...target, bestEffort: false, outputs: ['out'] }],
+					installables: ['.#packages.x86_64-linux.app^out']
+				}
+			],
+			derivationToTargets: [],
+			cohortPreFilter: [
+				{
+					key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+					pruned: false
+				}
+			]
+		};
 
-		expect({ plan, outputs }).toStrictEqual({
-			plan: {
-				retained: [],
-				targets: [{ ...target, bestEffort: false, outputs: ['out'] }],
-				cohorts: [
-					{
-						key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
-						system: 'x86_64-linux',
-						os: 'ubuntu-latest',
-						remote: true,
-						targets: [{ ...target, bestEffort: false, outputs: ['out'] }],
-						installables: ['.#packages.x86_64-linux.app^out']
-					}
-				],
-				derivationToTargets: [],
-				cohortPreFilter: [
-					{
-						key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
-						pruned: false
-					}
-				]
-			},
+		expect({
+			plan,
+			parsed: publishPlanDocumentSchema.parse(plan),
+			outputs
+		}).toStrictEqual({
+			plan: expectedPlan,
+			parsed: expectedPlan,
 			outputs:
 				`plan-file=${path.join(directory, 'cupboard-publish-plan.json')}\n` +
 				'plan-artifact-name=cupboard-publish-plan-test\n' +

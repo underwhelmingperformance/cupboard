@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
-import { type Cohort, isBestEffortCohort } from './publish-plan.ts';
+import { type Cohort } from '@cupboard/protocol/publish-plan';
+
+import { isBestEffortCohort } from './publish-plan.ts';
 
 export interface PackingHeadroom {
 	readonly absoluteMinimum: number;

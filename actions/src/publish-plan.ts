@@ -16,6 +16,14 @@ import {
 	cacheAvailabilityMaxPaths,
 	cacheAvailabilityResponseSchema
 } from '@cupboard/protocol/cache-availability';
+import {
+	canonicalRootSuffix,
+	type Cohort,
+	type CohortPreFilterDecision,
+	type DerivationToTargetsEntry,
+	type PublishPlan,
+	type PublishTarget
+} from '@cupboard/protocol/publish-plan';
 import { type RandomSource } from '@cupboard/shared/backoff';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
@@ -26,6 +34,7 @@ import {
 	responseBodyFailureCode,
 	retryingFetcher
 } from '@cupboard/shared/retry';
+import { trimTrailingSlashes } from '@cupboard/shared/text';
 import { z } from 'zod';
 
 import {
@@ -44,7 +53,6 @@ import {
 	TargetEvaluationResponseError,
 	TargetRootUnresolvedError
 } from './errors.ts';
-import { isNixPositionalArgument } from './options.ts';
 import { cacheUrlFor } from './substituters.ts';
 
 const execFileAsync = promisify(execFile);
@@ -62,134 +70,13 @@ const defaultNixEvaluator: NixEvaluator = (arguments_) =>
 		maxBuffer: 256 * 1024 * 1024
 	});
 
-// Strip only leading and trailing slashes. Equivalent suffix spellings must
-// produce the same root, while interior slashes remain significant.
-export function canonicalRootSuffix(suffix: string): string {
-	return suffix.replace(/^\/+/u, '').replace(/\/+$/u, '');
-}
-
 /**
 Retained-target checks and build jobs must construct byte-identical root
 names. Canonicalise the prefix and suffix here for every consumer.
 */
 export function joinRoot(prefix: string, suffix: string): string {
-	return `${prefix.replace(/\/+$/u, '')}/${canonicalRootSuffix(suffix)}`;
+	return `${trimTrailingSlashes(prefix)}/${canonicalRootSuffix(suffix)}`;
 }
-
-/**
-GitHub compares runner labels case-insensitively with .NET's ordinal rules.
-JavaScript's full case conversion differs outside ASCII, so manifest parsing
-permits only printable ASCII labels without spaces.
-*/
-export function isValidRunnerLabel(label: string): boolean {
-	return /^[!-~]+$/u.test(label);
-}
-
-const derivationPathSchema = storePathSchema.refine(
-	(value) => value.endsWith('.drv'),
-	{ message: 'rootDrvPath must name a derivation in /nix/store' }
-);
-
-// Bound cohort labels because they become part of matrix job keys.
-export const cohortLabelMaxLength = 100;
-
-const publishOutputsSchema = z
-	.array(
-		z.string().min(1).refine(isNixPositionalArgument, {
-			message:
-				'output must not start with a hyphen or contain control characters'
-		})
-	)
-	.min(1)
-	.default(['out'])
-	.transform((outputs) => [...new Set(outputs)]);
-
-/**
-Component entries inherit the aggregate target's execution context,
-retention root, failure policy and cohort; see {@link expandComponents}.
-*/
-export const publishComponentSchema = z.strictObject({
-	attr: z.string().min(1).refine(isNixPositionalArgument, {
-		message: 'attr must not start with a hyphen or contain control characters'
-	}),
-	rootDrvPath: derivationPathSchema.optional(),
-	outputs: publishOutputsSchema
-});
-export type PublishComponent = z.output<typeof publishComponentSchema>;
-
-export const publishTargetSchema = z.strictObject({
-	attr: z.string().min(1).refine(isNixPositionalArgument, {
-		message: 'attr must not start with a hyphen or contain control characters'
-	}),
-	rootDrvPath: derivationPathSchema.optional(),
-	system: z.string().min(1),
-	os: z.string().min(1).refine(isValidRunnerLabel, {
-		message: 'os must be a printable ASCII runner label without spaces'
-	}),
-	remote: z.boolean().default(false),
-	bestEffort: z.boolean().default(false),
-	rootSuffix: z
-		.string()
-		.min(1)
-		.refine((value) => canonicalRootSuffix(value) !== '', {
-			message: 'root suffix must contain more than slashes'
-		}),
-	outputs: publishOutputsSchema,
-	// Targets with the same cohort label form one cohort (see cohortsFor). A
-	// target without a label forms its own cohort, keyed by its identity.
-	cohort: z
-		.string()
-		.min(1)
-		.max(cohortLabelMaxLength)
-		.refine(isValidRunnerLabel, {
-			message: `cohort must be a printable ASCII label of at most ${String(cohortLabelMaxLength)} characters without spaces`
-		})
-		.optional(),
-	// When components are present, do not evaluate or build this target's own
-	// attr and rootDrvPath. Publish its components under its rootSuffix instead;
-	// see expandComponents.
-	components: z.array(publishComponentSchema).min(1).optional()
-});
-
-// Retention treats all targets sharing a root as retained after one successful
-// ensure. Duplicate roots could therefore race or cause an uncached target to
-// be skipped. Check canonical suffixes so `app`, `/app` and `app/` conflict.
-export const publishTargetsSchema = z
-	.array(publishTargetSchema)
-	.min(1)
-	.superRefine((targets, ctx) => {
-		const firstBySuffix = new Map<
-			string,
-			{ readonly index: number; readonly spelling: string }
-		>();
-
-		for (const [index, target] of targets.entries()) {
-			const canonical = canonicalRootSuffix(target.rootSuffix);
-			const first = firstBySuffix.get(canonical);
-
-			if (first === undefined) {
-				firstBySuffix.set(canonical, {
-					index,
-					spelling: target.rootSuffix
-				});
-				continue;
-			}
-
-			ctx.addIssue({
-				code: 'custom',
-				path: [index, 'rootSuffix'],
-				message: `duplicate rootSuffix '${target.rootSuffix}': names the same root as '${first.spelling}' on target ${String(first.index)}`
-			});
-		}
-	})
-	.transform((targets) =>
-		targets.map((target) => ({
-			...target,
-			rootSuffix: canonicalRootSuffix(target.rootSuffix)
-		}))
-	);
-
-export type PublishTarget = z.output<typeof publishTargetSchema>;
 
 /**
 A stable key for joining a target with its evaluated paths and coverage.
@@ -251,32 +138,6 @@ export interface TargetEvaluation {
 	readonly rootDrvPath: string;
 	readonly nodes: ReadonlyMap<string, DerivationNode>;
 	readonly targetPaths: readonly StorePathString[];
-}
-
-/**
-Targets in one cohort run in one job. A target without an explicit `cohort`
-label forms its own cohort. Cohorts partition the complete manifest before
-destination availability is checked, so retained targets remain members.
-*/
-export interface Cohort {
-	readonly key: string;
-	readonly system: string;
-	readonly os: string;
-	readonly remote: boolean;
-	readonly targets: readonly PublishTarget[];
-	readonly installables: readonly string[];
-}
-
-export interface DerivationToTargetsEntry {
-	readonly drvPath: string;
-	readonly targets: readonly string[];
-}
-
-export interface PublishPlan {
-	readonly retained: readonly PublishTarget[];
-	readonly targets: readonly PublishTarget[];
-	readonly cohorts: readonly Cohort[];
-	readonly derivationToTargets: readonly DerivationToTargetsEntry[];
 }
 
 export interface UnevaluatedTarget {
@@ -996,12 +857,6 @@ export function evaluateTargetCoverage(
 	);
 
 	return { attr: target.attr, status: isCovered ? 'covered' : 'not-covered' };
-}
-
-export interface CohortPreFilterDecision {
-	readonly key: string;
-	readonly pruned: boolean;
-	readonly reason?: string;
 }
 
 /**

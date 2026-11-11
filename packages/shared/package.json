@@ -44,6 +44,7 @@
 		"./sigstore": "./src/sigstore.ts",
 		"./sigstore-bundle-fixture": "./src/sigstore-bundle-fixture.ts",
 		"./slsa": "./src/slsa.ts",
+		"./text": "./src/text.ts",
 		"./timeout": "./src/timeout.ts",
 		"./log-context": "./src/log-context.ts"
 	},

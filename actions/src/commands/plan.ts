@@ -15,6 +15,16 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
+	type Cohort,
+	type CohortPreFilterDecision,
+	type PlanReferenceOutcome,
+	type PublishPlan,
+	type PublishPlanDocument,
+	publishPlanVersion,
+	type PublishTarget,
+	publishTargetsSchema
+} from '@cupboard/protocol/publish-plan';
+import {
 	type RootEnsureResponse,
 	rootEnsureResponseSchema,
 	rootSetMaxTargets,
@@ -92,14 +102,11 @@ import { packCohorts } from '../packing.ts';
 import {
 	checkReferenceForCohorts,
 	isPublishingByReference,
-	type PlanReferenceOutcome,
 	publishReferenceTargets
 } from '../plan-reference.ts';
 import {
 	availableCachePaths,
 	cacheProbePaths,
-	type Cohort,
-	type CohortPreFilterDecision,
 	cohortPreFilterDecision,
 	cohortsFor,
 	evaluateTargetCoverage,
@@ -109,9 +116,6 @@ import {
 	joinRoot,
 	type NixEvaluator,
 	planPublish,
-	type PublishPlan,
-	type PublishTarget,
-	publishTargetsSchema,
 	type TargetCoverage,
 	type TargetEvaluation,
 	targetIdentityKey
@@ -1051,7 +1055,8 @@ async function writePlan(
 	artifactName: string,
 	measurer: NonNullable<PlanDependencies['measurer']>
 ): Promise<void> {
-	const document = {
+	const document: PublishPlanDocument = {
+		version: publishPlanVersion,
 		...plan,
 		cohortPreFilter: cohortDecisions,
 		...(referencePublications.length > 0 && { referencePublications })

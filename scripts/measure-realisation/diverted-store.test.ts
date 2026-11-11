@@ -18,9 +18,9 @@ import {
 	storeDirectorySchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
+import type { PublishTarget } from '@cupboard/protocol/publish-plan';
 import { describe, expect, it } from 'vitest';
 
-import type { PublishTarget } from '../../actions/src/publish-plan.ts';
 import type {
 	DaemonCommandRunner,
 	NixDerivedPathString
