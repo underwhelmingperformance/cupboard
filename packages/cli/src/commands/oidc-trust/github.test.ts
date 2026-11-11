@@ -4,22 +4,13 @@ import nodeHttp from 'node:http';
 import nodeHttps from 'node:https';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { setImmediate as scheduleIo } from 'node:timers';
 
 import { maximumGithubSuccessResponseBytes } from '@cupboard/shared/octokit';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import makeFetchHappen from 'make-fetch-happen';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-import {
-	afterAll,
-	afterEach,
-	beforeAll,
-	describe,
-	expect,
-	it,
-	vi
-} from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { cliExitCode } from '../../cli.ts';
 import { parseExactWorkflowReference } from '../github/convention.ts';
@@ -59,6 +50,10 @@ function stubFetch(url: string, response: Response): typeof fetch {
 }
 
 const repositoryUrl = 'https://api.github.com/repos/iainlane/cupboard';
+
+// The retry plugin waits 1 s, 4 s and 9 s in real time before it retries a
+// transient failure (HTTP 408, a 5xx status or a network error).
+const noRetryDelay = { retryBaseDelayMs: 0 } as const;
 
 describe('lookupRepository', () => {
 	afterEach(() => {
@@ -125,19 +120,18 @@ describe('lookupRepository', () => {
 		vi.stubEnv('GH_TOKEN', '');
 		vi.stubEnv('GITHUB_TOKEN', '');
 		server.listen({ onUnhandledFrame: 'error' });
-		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 
 		try {
-			const original = await settleWithTimers(
-				lookupRepository('iainlane/cupboard')
+			const original = await lookupRepository(
+				'iainlane/cupboard',
+				noRetryDelay
 			);
 			ownerId = 999;
-			const cached = await settleWithTimers(
-				lookupRepository('iainlane/cupboard')
-			);
-			const current = await settleWithTimers(
-				lookupRepository('iainlane/cupboard', { shouldRevalidate: true })
-			);
+			const cached = await lookupRepository('iainlane/cupboard', noRetryDelay);
+			const current = await lookupRepository('iainlane/cupboard', {
+				...noRetryDelay,
+				shouldRevalidate: true
+			});
 
 			expect({ original, cached, current, requests }).toStrictEqual({
 				original: {
@@ -161,7 +155,6 @@ describe('lookupRepository', () => {
 				requests: 2
 			});
 		} finally {
-			vi.useRealTimers();
 			server.close();
 			await rm(directory, { recursive: true, force: true });
 		}
@@ -383,32 +376,9 @@ describe('lookupRepository', () => {
 	});
 });
 
-type Settlement<T> = { readonly value: T } | { readonly failure: unknown };
-
-async function settleWithTimers<T>(pending: Promise<T>): Promise<T> {
-	const completionState: { settlement?: Settlement<T> } = {};
-	const completion = (async () => {
-		try {
-			completionState.settlement = { value: await pending };
-		} catch (error) {
-			completionState.settlement = { failure: error };
-		}
-	})();
-	while (completionState.settlement === undefined) {
-		await vi.advanceTimersByTimeAsync(250);
-		await new Promise<void>((resolve) => scheduleIo(resolve));
-	}
-	await completion;
-	if ('failure' in completionState.settlement) {
-		throw completionState.settlement.failure;
-	}
-
-	return completionState.settlement.value;
-}
-
 async function requestFailure(pending: Promise<unknown>): Promise<unknown> {
 	try {
-		await settleWithTimers(pending);
+		await pending;
 	} catch (error) {
 		return error;
 	}
@@ -422,7 +392,7 @@ const temporaryRequestCallers = [
 		url: 'https://api.github.com/repos/acme/app',
 		resource: "repository 'acme/app'",
 		execute: (fetch: typeof globalThis.fetch, signal?: AbortSignal) =>
-			lookupRepository('acme/app', { fetch, signal })
+			lookupRepository('acme/app', { ...noRetryDelay, fetch, signal })
 	},
 	{
 		caller: 'workflow content',
@@ -434,7 +404,7 @@ const temporaryRequestCallers = [
 				parseExactWorkflowReference(
 					`acme/app/.github/workflows/publish.yml@${'a'.repeat(40)}`
 				),
-				{ fetch, signal }
+				{ ...noRetryDelay, fetch, signal }
 			)
 	},
 	{
@@ -447,7 +417,7 @@ const temporaryRequestCallers = [
 				parseExactWorkflowReference(
 					'acme/app/.github/workflows/publish.yml@refs/tags/v1.2.3'
 				),
-				{ fetch, signal }
+				{ ...noRetryDelay, fetch, signal }
 			)
 	},
 	{
@@ -455,21 +425,27 @@ const temporaryRequestCallers = [
 		url: 'https://api.github.com/repos/acme/app/branches/main',
 		resource: 'acme/app branch main',
 		execute: (fetch: typeof globalThis.fetch, signal?: AbortSignal) =>
-			githubWorkflowSource({ fetch, signal }).resolveBranch('acme/app', 'main')
+			githubWorkflowSource({ ...noRetryDelay, fetch, signal }).resolveBranch(
+				'acme/app',
+				'main'
+			)
 	},
 	{
 		caller: 'directory discovery',
 		url: 'https://api.github.com/repos/acme/app/contents/.github%2Fworkflows?ref=revision',
 		resource: 'acme/app/.github/workflows',
 		execute: (fetch: typeof globalThis.fetch, signal?: AbortSignal) =>
-			githubWorkflowSource({ fetch, signal }).list('acme/app', 'revision')
+			githubWorkflowSource({ ...noRetryDelay, fetch, signal }).list(
+				'acme/app',
+				'revision'
+			)
 	},
 	{
 		caller: 'file discovery',
 		url: 'https://api.github.com/repos/acme/app/contents/.github%2Fworkflows%2Fpublish.yml?ref=revision',
 		resource: 'acme/app/.github/workflows/publish.yml@revision',
 		execute: (fetch: typeof globalThis.fetch, signal?: AbortSignal) =>
-			githubWorkflowSource({ fetch, signal }).read(
+			githubWorkflowSource({ ...noRetryDelay, fetch, signal }).read(
 				'acme/app',
 				'.github/workflows/publish.yml',
 				'revision'
@@ -478,12 +454,6 @@ const temporaryRequestCallers = [
 ];
 
 describe('GitHub request failure diagnostics', () => {
-	beforeAll(() => {
-		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-	});
-	afterAll(() => {
-		vi.useRealTimers();
-	});
 	it.each(
 		temporaryRequestCallers.flatMap((caller) =>
 			[408, 500, 502, 503, 504, undefined].map((status) => ({
@@ -671,6 +641,7 @@ describe('GitHub request failure diagnostics', () => {
 			try {
 				const pending = requestFailure(
 					lookupRepository('acme/app', {
+						...noRetryDelay,
 						fetch: (input, init) => {
 							requests.push({
 								url: requestUrl(input),
@@ -748,7 +719,6 @@ describe('GitHub request failure diagnostics', () => {
 				headers: { accept: 'application/vnd.github.v3+json' }
 			});
 			expect(await response.text()).toBe(body);
-			await vi.advanceTimersByTimeAsync(3_600_001);
 			const digest = createHash('sha512').update(body).digest('hex');
 			const content = path.join(
 				cachePath,
@@ -767,7 +737,9 @@ describe('GitHub request failure diagnostics', () => {
 				.spyOn(nodeHttps, 'request')
 				.mockImplementation(network);
 			try {
-				failure = await requestFailure(lookupRepository('acme/app'));
+				failure = await requestFailure(
+					lookupRepository('acme/app', noRetryDelay)
+				);
 			} finally {
 				httpRequest.mockRestore();
 				httpsRequest.mockRestore();

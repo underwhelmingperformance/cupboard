@@ -162,6 +162,7 @@ export interface LookupRepositoryOptions {
 	readonly fetch?: typeof fetch;
 	readonly signal?: AbortSignal;
 	readonly shouldRevalidate?: boolean;
+	readonly retryBaseDelayMs?: number;
 }
 
 function isAsyncByteIterable(
@@ -266,6 +267,9 @@ export function githubApi(
 
 	const client = createOctokitClient({
 		replaySafety: 'replay-safe',
+		...(options.retryBaseDelayMs !== undefined && {
+			retryBaseDelayMs: options.retryBaseDelayMs
+		}),
 		...(token !== undefined && { auth: token }),
 		request: {
 			fetch: fetcher,
