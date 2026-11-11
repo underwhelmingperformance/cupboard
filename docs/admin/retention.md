@@ -97,6 +97,33 @@ One `root set` or `root ensure` request accepts at most 149 targets. Both
 commands replace the complete target set, so use several roots if that set is
 larger. Run roots grow through additive updates and have no total target limit.
 
+A batched request, `POST <tenant URL>/roots/batch` or
+`POST <tenant URL>/cache/<name>/roots/batch`, sets or ensures several different
+roots at once. Each entry has an `action` of `set` or `ensure` and follows the
+rules of that request, and the token needs `root:set` for every root in the
+batch. A repeated batch has the same effect as a repeated single request.
+
+One batch probes all of its targets within the subrequest budget of one request,
+so a batch has a capacity of 149. Each entry uses one unit per target, and an
+entry without targets uses one unit. The server refuses a batch over the
+capacity with `ROOT_BATCH_LIMIT_EXCEEDED` and changes nothing, so split it
+across several requests.
+
+The response has one result per entry, in request order. The `status` of each
+result reports what happened to that root:
+
+- `retained`: the server wrote the root.
+- `build-required`: the entry is an ensure, and the cache cannot serve every
+  target. The root is unchanged, and `unavailable` lists the targets that the
+  cache cannot serve.
+- `targets-unavailable`: the entry is a set, and at least one target has no
+  committed narinfo. The root is unchanged, and `unavailable` lists those
+  targets.
+
+An unchanged root does not stop the server from writing the other roots in the
+batch. A 200 response therefore does not mean that every root was written, so
+check the result of every entry.
+
 ### Managing roots directly
 
 `cupboard root` lets you work with roots without pushing. The cache comes from

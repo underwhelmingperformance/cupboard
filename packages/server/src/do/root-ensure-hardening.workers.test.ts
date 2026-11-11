@@ -1,4 +1,5 @@
 import {
+	type CacheScope,
 	firstCacheGeneration,
 	nixSha256HashSchema,
 	rootNameSchema,
@@ -10,6 +11,7 @@ import {
 	workersInvocationAllowances
 } from '@cupboard/protocol/platform';
 import {
+	rootBatchBodySchema,
 	rootEnsureBodySchema,
 	rootEnsureResponseSchema,
 	rootSetBodySchema,
@@ -144,107 +146,149 @@ function onceOnHead(mutate: () => void): () => void {
 	};
 }
 
+// A single ensure and a one-entry batch run the same checks between the probe
+// and the gate, but each sets up the demotion watch, the probe and the gate in
+// its own code.
+interface EnsureForm {
+	readonly form: string;
+	readonly ensure: (
+		roots: RootsService,
+		cache: CacheScope,
+		storePath: string
+	) => Promise<unknown>;
+	readonly buildRequired: (storePath: string) => unknown;
+}
+
+const ensureForms: readonly EnsureForm[] = [
+	{
+		form: 'a single ensure',
+		ensure: (roots, cache, storePath) =>
+			roots.ensureRoot(
+				cache,
+				rootName,
+				rootEnsureBodySchema.parse({ targets: [storePath] })
+			),
+		buildRequired: (storePath) => ({
+			status: 'build-required',
+			unavailable: [storePath]
+		})
+	},
+	{
+		form: 'a batched ensure',
+		ensure: (roots, cache, storePath) =>
+			roots.applyRoots(
+				cache,
+				rootBatchBodySchema.parse({
+					roots: [{ action: 'ensure', name: rootName, targets: [storePath] }]
+				})
+			),
+		buildRequired: (storePath) => ({
+			roots: [
+				{ name: rootName, status: 'build-required', unavailable: [storePath] }
+			]
+		})
+	}
+];
+
 describe('root ensure hardening', () => {
 	beforeEach(resetTestServer);
 
-	it('returns build-required when a target is recommitted between the ensure probe and the gate', async () => {
-		const token = await initialise();
-		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
-		await commitPath(token, committed);
+	it.each(ensureForms)(
+		'returns build-required from $form when a target is recommitted between the probe and the gate',
+		async ({ ensure, buildRequired }) => {
+			const token = await initialise();
+			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, committed);
 
-		const response = await runInDurableObject(
-			currentServer(),
-			(instance, state) => {
-				const { roots, cache } = rootsServiceWithHeadHook(
-					instance,
-					state,
-					onceOnHead(() => {
-						instance.context.db
-							.update(schema.narInfos)
-							.set({ narHash: syntheticNarHash(1) })
-							.where(eq(schema.narInfos.storePathHash, committed.storePathHash))
-							.run();
-					})
-				);
-
-				return roots.ensureRoot(
-					cache.scope,
-					rootName,
-					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
-				);
-			}
-		);
-
-		expect(response).toStrictEqual({
-			status: 'build-required',
-			unavailable: [committed.storePath]
-		});
-	});
-
-	it('returns build-required when demotion removes a target between the ensure probe and the gate', async () => {
-		const token = await initialise();
-		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
-		await commitPath(token, committed);
-		const narKey = await currentNarObjectKey(committed.narHash);
-		const storePathHash = storePathHashSchema.parse(committed.storePathHash);
-
-		const ensured = await runInDurableObject(
-			currentServer(),
-			async (instance) => {
-				const { context } = instance;
-				const narInfoObjects = new NarInfoObjectsService(context);
-				const probe =
-					narInfoObjects.servableStorePathHashes.bind(narInfoObjects);
-				vi.spyOn(
-					narInfoObjects,
-					'servableStorePathHashes'
-				).mockImplementationOnce(async (cache, hashes) => {
-					const served = await probe(cache, hashes);
-					await env.BLOBS.delete(narKey);
-					await narInfoObjects.demoteUnbacked(
-						cache,
-						storePathHash,
-						committed.narHash
-					);
-					return served;
-				});
-				const roots = new RootsService(
-					context,
-					new CacheRegistrationService(context),
-					new RetentionService(context),
-					narInfoObjects
-				);
-				const response = await roots.ensureRoot(
-					defaultCache(),
-					rootName,
-					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
-				);
-
-				return {
-					response,
-					roots: context.db
-						.select({ name: schema.retentionRoots.name })
-						.from(schema.retentionRoots)
-						.all(),
-					targets: context.db
-						.select({
-							storePathHash: schema.retentionRootTargets.storePathHash
+			const response = await runInDurableObject(
+				currentServer(),
+				(instance, state) => {
+					const { roots, cache } = rootsServiceWithHeadHook(
+						instance,
+						state,
+						onceOnHead(() => {
+							instance.context.db
+								.update(schema.narInfos)
+								.set({ narHash: syntheticNarHash(1) })
+								.where(
+									eq(schema.narInfos.storePathHash, committed.storePathHash)
+								)
+								.run();
 						})
-						.from(schema.retentionRootTargets)
-						.all()
-				};
-			}
-		);
+					);
 
-		expect(ensured).toStrictEqual({
-			response: {
-				status: 'build-required',
-				unavailable: [committed.storePath]
-			},
-			roots: [],
-			targets: []
-		});
-	});
+					return ensure(roots, cache.scope, committed.storePath);
+				}
+			);
+
+			expect(response).toStrictEqual(buildRequired(committed.storePath));
+		}
+	);
+
+	it.each(ensureForms)(
+		'returns build-required from $form when demotion removes a target between the probe and the gate',
+		async ({ ensure, buildRequired }) => {
+			const token = await initialise();
+			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, committed);
+			const narKey = await currentNarObjectKey(committed.narHash);
+			const storePathHash = storePathHashSchema.parse(committed.storePathHash);
+
+			const ensured = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const { context } = instance;
+					const narInfoObjects = new NarInfoObjectsService(context);
+					const probe =
+						narInfoObjects.servableStorePathHashes.bind(narInfoObjects);
+					vi.spyOn(
+						narInfoObjects,
+						'servableStorePathHashes'
+					).mockImplementationOnce(async (cache, hashes) => {
+						const served = await probe(cache, hashes);
+						await env.BLOBS.delete(narKey);
+						await narInfoObjects.demoteUnbacked(
+							cache,
+							storePathHash,
+							committed.narHash
+						);
+						return served;
+					});
+					const roots = new RootsService(
+						context,
+						new CacheRegistrationService(context),
+						new RetentionService(context),
+						narInfoObjects
+					);
+					const response = await ensure(
+						roots,
+						defaultCache(),
+						committed.storePath
+					);
+
+					return {
+						response,
+						roots: context.db
+							.select({ name: schema.retentionRoots.name })
+							.from(schema.retentionRoots)
+							.all(),
+						targets: context.db
+							.select({
+								storePathHash: schema.retentionRootTargets.storePathHash
+							})
+							.from(schema.retentionRootTargets)
+							.all()
+					};
+				}
+			);
+
+			expect(ensured).toStrictEqual({
+				response: buildRequired(committed.storePath),
+				roots: [],
+				targets: []
+			});
+		}
+	);
 
 	// A crash can leave the narinfo object and `blob_state` row after the
 	// canonical NAR disappears. The root is not retained because substitution

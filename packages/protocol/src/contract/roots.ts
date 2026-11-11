@@ -2,6 +2,10 @@ import { rootNameSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
+	rootBatchBodySchema,
+	rootBatchLimitErrorCode,
+	rootBatchLimitErrorDataSchema,
+	rootBatchResponseSchema,
 	rootEnsureBodySchema,
 	rootEnsureResponseSchema,
 	rootListPageSize,
@@ -55,6 +59,27 @@ const rootEnsure = writableCacheScopedProcedure(
 	rootEnsureResponseSchema
 );
 
+const rootBatch = writableCacheScopedProcedure(
+	{
+		method: 'POST',
+		suffix: '/roots/batch',
+		requires: 'root:set',
+		resource: { root: { eachIn: 'roots', field: 'name' } },
+		maintenance: true,
+		replaySafety: 'replay-safe'
+	},
+	rootBatchBodySchema.shape,
+	rootBatchResponseSchema
+);
+
+const rootBatchErrors = {
+	...retentionMigrationPendingError,
+	[rootBatchLimitErrorCode]: {
+		status: 413,
+		data: rootBatchLimitErrorDataSchema
+	}
+};
+
 export const rootsContract = {
 	list: cacheScopedProcedure(
 		{
@@ -98,6 +123,16 @@ export const rootsContract = {
 			retentionMigrationPendingError
 		),
 		inNamedCache: rootEnsure.inNamedCache.errors(retentionMigrationPendingError)
+	},
+
+	// Set or ensure several roots in one request. The token must grant
+	// `root:set` for this cache and for every root in the batch. Each entry has
+	// the effect of the single set or ensure request for its root. A repeated
+	// batch, like a repeated single request, keeps unchanged target sets and
+	// only refreshes each root's expiry and update time.
+	batch: {
+		inDefaultCache: rootBatch.inDefaultCache.errors(rootBatchErrors),
+		inNamedCache: rootBatch.inNamedCache.errors(rootBatchErrors)
 	},
 
 	// Removal keeps the default. A retry sent after the name was bound to a new

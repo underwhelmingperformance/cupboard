@@ -12,6 +12,11 @@ import {
 } from '@cupboard/nix-store/store-path';
 import {
 	type CacheRootRetention,
+	type RootBatchBody,
+	rootBatchCapacity,
+	rootBatchEntryCost,
+	type RootBatchResponse,
+	type RootBatchResult,
 	type RootEnsureBody,
 	type RootEnsureResponse,
 	rootListPageSize,
@@ -28,7 +33,10 @@ import { and, eq, sql } from 'drizzle-orm';
 
 import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
-import { RootTargetsUnavailableError } from '../errors.ts';
+import {
+	RootBatchLimitExceededError,
+	RootTargetsUnavailableError
+} from '../errors.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
 import { CacheClosureService } from './cache-closure-service.ts';
@@ -57,8 +65,8 @@ interface TargetIdentity {
 	readonly narHash: NixSha256HashString;
 }
 
-// The targets that `ensureRoot` found servable before its gate, and the
-// watch that records which of them demotion has removed since.
+// The targets that an ensure found servable before its gate, and the watch
+// that records which of them demotion has removed since.
 interface ExpectedTargets {
 	readonly identities: ReadonlyMap<StorePathHash, TargetIdentity>;
 	readonly demotions: NarInfoDemotionWatch;
@@ -70,6 +78,16 @@ type RootWrite =
 			readonly unavailable: readonly StorePathString[];
 	  }
 	| { readonly kind: 'written'; readonly stored: StoredRoot };
+
+interface RootWriteScope {
+	readonly retentionEpoch: number;
+	readonly inheritedRetention: (name: RootName) => CacheRootRetention;
+}
+
+interface BatchedRootRequest {
+	readonly action: RootBatchBody['roots'][number]['action'];
+	readonly command: RootSetCommand;
+}
 
 type EnsureCheck =
 	| {
@@ -118,15 +136,38 @@ export class RootsService {
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	private writeRoot(cache: ResolvedCache, request: RootSetCommand): StoredRoot {
+	// Returns the cache-level facts that every root write inside one critical
+	// section uses. They are read at the first write, so a request whose roots
+	// are all rejected reads none of them.
+	private rootWriteScope(cache: ResolvedCache): () => RootWriteScope {
+		let scope: RootWriteScope | undefined;
+
+		return () => {
+			if (scope === undefined) {
+				const closure = new CacheClosureService(this.context);
+				closure.assertWritable(cache);
+				scope = {
+					retentionEpoch: closure.epoch(cache),
+					inheritedRetention: this.retention.rootRetentionResolver(cache)
+				};
+			}
+
+			return scope;
+		};
+	}
+
+	private writeRoot(
+		cache: ResolvedCache,
+		request: RootSetCommand,
+		scope: RootWriteScope
+	): StoredRoot {
 		const closure = new CacheClosureService(this.context);
-		closure.assertWritable(cache);
-		const retentionEpoch = closure.epoch(cache);
+		const { retentionEpoch } = scope;
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
 		const resolvedRetention =
 			request.retention.kind === 'inherit'
-				? this.retention.resolveRootRetention(cache, request.name)
+				? scope.inheritedRetention(request.name)
 				: request.retention;
 		const expiresAt = rootExpiry(resolvedRetention, now);
 
@@ -390,23 +431,99 @@ export class RootsService {
 		requested: RootSetCommand,
 		expected?: ExpectedTargets
 	): Promise<RootWrite> {
-		return this.context.criticalSection((): Promise<RootWrite> => {
-			const absent =
-				expected === undefined
-					? requested.targets
-							.filter((target) => !this.rowPresent(cache, target.storePathHash))
-							.map((target) => target.storePath)
-					: this.mismatchedTargets(cache, requested.targets, expected);
+		return this.context.criticalSection((): Promise<RootWrite> =>
+			Promise.resolve(
+				this.checkedRootWrite(
+					cache,
+					requested,
+					this.rootWriteScope(cache),
+					expected
+				)
+			)
+		);
+	}
 
-			if (absent.length > 0) {
-				return Promise.resolve({ kind: 'rejected', unavailable: absent });
-			}
+	// Call this only inside the write gate.
+	private checkedRootWrite(
+		cache: ResolvedCache,
+		requested: RootSetCommand,
+		scope: () => RootWriteScope,
+		expected?: ExpectedTargets
+	): RootWrite {
+		const absent =
+			expected === undefined
+				? requested.targets
+						.filter((target) => !this.rowPresent(cache, target.storePathHash))
+						.map((target) => target.storePath)
+				: this.mismatchedTargets(cache, requested.targets, expected);
 
-			return Promise.resolve({
-				kind: 'written',
-				stored: this.writeRoot(cache, requested)
-			});
-		});
+		if (absent.length > 0) {
+			return { kind: 'rejected', unavailable: absent };
+		}
+
+		return {
+			kind: 'written',
+			stored: this.writeRoot(cache, requested, scope())
+		};
+	}
+
+	// Call this only inside the write gate. As with the single requests, an
+	// ensure writes its root only when the probe found every target servable
+	// and no target has changed since, and a set requires only a committed row
+	// for each target.
+	private batchedRootWrite(
+		cache: ResolvedCache,
+		request: BatchedRootRequest,
+		scope: () => RootWriteScope,
+		expected: ExpectedTargets
+	): RootWrite {
+		if (request.action === 'set') {
+			return this.checkedRootWrite(cache, request.command, scope);
+		}
+
+		const unavailable = request.command.targets
+			.filter((target) => !expected.identities.has(target.storePathHash))
+			.map((target) => target.storePath);
+
+		if (unavailable.length > 0) {
+			return { kind: 'rejected', unavailable };
+		}
+
+		return this.checkedRootWrite(cache, request.command, scope, expected);
+	}
+
+	private batchResult(
+		{ action, command }: BatchedRootRequest,
+		write: RootWrite,
+		servable: ReadonlySet<StorePathHash>
+	): RootBatchResult {
+		if (write.kind === 'written') {
+			return {
+				name: command.name,
+				status: 'retained',
+				root: this.rootSummaryFrom(
+					command.name,
+					write.stored,
+					write.stored.updatedAt,
+					command.targets,
+					servable
+				)
+			};
+		}
+
+		if (action === 'ensure') {
+			return {
+				name: command.name,
+				status: 'build-required',
+				unavailable: [...write.unavailable]
+			};
+		}
+
+		return {
+			name: command.name,
+			status: 'targets-unavailable',
+			unavailable: [...write.unavailable]
+		};
 	}
 
 	// Binding can extend an existing root's expiry without replacing targets or
@@ -573,6 +690,60 @@ export class RootsService {
 				write.stored.updatedAt,
 				requested.targets,
 				new Set(identities.keys())
+			)
+		};
+	}
+
+	// Apply each entry as the single set or ensure request for its root would.
+	// The batch resolves the cache once, probes every target in one pass and
+	// writes every root under one write gate, so the probe's fixed calls and the
+	// request's own overhead are shared by all of its roots.
+	async applyRoots(
+		cacheScope: CacheScope,
+		body: RootBatchBody
+	): Promise<RootBatchResponse> {
+		const cost = body.roots.reduce(
+			(total, entry) => total + rootBatchEntryCost(entry),
+			0
+		);
+
+		if (cost > rootBatchCapacity) {
+			throw new RootBatchLimitExceededError(rootBatchCapacity);
+		}
+
+		const cache = await this.registration.forWrite(cacheScope);
+		const requests = body.roots.map((entry): BatchedRootRequest => ({
+			action: entry.action,
+			command: this.buildRootSetCommand(entry.name, entry)
+		}));
+		const targets = requests.flatMap(({ command }) => command.targets);
+		const { identities, writes } = await this.context.narInfoDemotions.watching(
+			cache.id,
+			targets.map((target) => target.storePathHash),
+			async (demotions) => {
+				const identities = await this.servableTargetIdentities(cache, targets);
+				const writes = await this.context.criticalSection(() => {
+					const scope = this.rootWriteScope(cache);
+
+					return Promise.resolve(
+						requests.map((request) => ({
+							request,
+							write: this.batchedRootWrite(cache, request, scope, {
+								identities,
+								demotions
+							})
+						}))
+					);
+				});
+
+				return { identities, writes };
+			}
+		);
+		const servable = new Set(identities.keys());
+
+		return {
+			roots: writes.map(({ request, write }) =>
+				this.batchResult(request, write, servable)
 			)
 		};
 	}
