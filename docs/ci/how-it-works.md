@@ -163,6 +163,13 @@ Each cohort job goes through these steps:
    With `publish: closure`, it also publishes their runtime references. With
    `publish: none`, it publishes nothing.
 7. After publication succeeds, it sets each published target's retention root.
+   The root groups' pushes of the same kind that read from the same source and
+   record the same kind of receipt run as one `cupboard push`. That push sets
+   the roots of its groups in batched requests, except a push that only copies
+   reused paths to the destination, which sets no root. A cohort usually needs
+   one push. A cupboard release that reads another version of the roots
+   document, as `cupboard document-versions` reports, runs one push for each
+   root group, and two for a group with both reused and attach-only paths.
 8. With `attest: true`, it signs build provenance for builds observed on the
    runner plus an attribute report for successful local verification rebuilds,
    and attaches those bundles to the published paths. Signing and attachment

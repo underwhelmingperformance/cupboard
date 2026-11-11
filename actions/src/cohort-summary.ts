@@ -264,8 +264,8 @@ export interface CohortSummary {
 }
 
 /**
-The cohort job's summary: its duration, the uploads that happened while it
-built, the paths for which the build kept the cache's copy, and one row for
+The cohort job's summary: its duration, the uploads that happened before it set
+the roots, the paths for which the build kept the cache's copy, and one row for
 each root with the root's targets, outcome, uploads and expiry.
 */
 export function cohortSummaryResult(
@@ -281,7 +281,7 @@ export function cohortSummaryResult(
 				? []
 				: [
 						{
-							label: 'Uploaded during the build',
+							label: 'Uploaded before the roots were set',
 							value: uploadText(summary.buildUploads)
 						}
 					]),

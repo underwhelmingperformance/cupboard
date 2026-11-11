@@ -34,10 +34,12 @@ import {
 	describeUnknownPathsRefusal,
 	unknownPathsCeilingRefusalSchema
 } from '@cupboard/protocol/plan';
+import { type DocumentVersions } from '@cupboard/protocol/publish-plan';
 import {
 	buildSummarySchema,
 	pushSummaryResultKind
 } from '@cupboard/protocol/reports';
+import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { referencePublicationManifestSchema } from '@cupboard/protocol/upload';
 import type {
 	Reporter,
@@ -77,6 +79,7 @@ import {
 	LocalBuildOutputsOutsideCohortError,
 	MissingInputError,
 	PlannedTargetNotDerivationError,
+	PublishRootTargetLimitError,
 	ReadCredentialVariablesIncompleteError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
@@ -97,6 +100,7 @@ import {
 
 import { provenancedSubjects } from './attest.ts';
 import {
+	assertRootTargetLimits,
 	buildAndRootNixResults,
 	buildCohortAction as productionBuildCohortAction,
 	type BuildCohortDependencies,
@@ -109,9 +113,11 @@ import {
 	cohortPushInvocation,
 	cohortReceiptPushArguments,
 	materialiseDerivationGraph,
+	mergedCohortPushes,
 	nixBuildArguments,
 	nixDerivationShowArguments,
 	parseNixDerivationShow,
+	type PlannedCohortPush,
 	planReprobeInvocation,
 	type RemoteBuildSessionOptions,
 	remoteBuildSetOptions,
@@ -155,6 +161,10 @@ function argumentValue(
 	const index = argv.indexOf(flag);
 
 	return index === -1 ? undefined : argv[index + 1];
+}
+
+async function readJsonFile(file: string): Promise<unknown> {
+	return JSON.parse(await readFile(file, 'utf8'));
 }
 
 async function readPathManifest(file: string): Promise<readonly string[]> {
@@ -6678,6 +6688,9 @@ if (args.includes('--help')) {
 			readonly streamedFailed?: readonly string[];
 			readonly streamedBuilt?: readonly string[];
 			readonly receiptPushResults?: readonly ReporterResultEvent[];
+			readonly rootPushResults?: readonly ReporterResultEvent[];
+			readonly rootPushFailure?: readonly ReporterResultEvent[];
+			readonly documentVersions?: DocumentVersions;
 		} = {}
 	): Promise<PublicationRun> {
 		const calls: (readonly string[])[] = [];
@@ -6867,7 +6880,9 @@ if (args.includes('--help')) {
 						...(await readPaths('--paths-file'))
 					];
 					const isRootReceipt =
-						/\.\d+\.(?:main|destination|reuse|manifest)$/u.test(receiptFile);
+						/\.\d+\.(?:main|destination|reuse|manifest)(?:\.(?:full|reference))?$/u.test(
+							receiptFile
+						);
 					const references = isRootReceipt
 						? [
 								...(await readPaths('--reference-paths-file')),
@@ -6942,6 +6957,16 @@ if (args.includes('--help')) {
 						receiptFile,
 						`${JSON.stringify({ version: 3, paths, subjects })}\n`
 					);
+				}
+
+				if (arguments_[1] === 'push' && arguments_.includes('--roots-file')) {
+					if (flowPlan.rootPushFailure !== undefined) {
+						throw new CupboardReportedError(1, flowPlan.rootPushFailure);
+					}
+
+					if (flowPlan.rootPushResults !== undefined) {
+						return flowPlan.rootPushResults;
+					}
 				}
 
 				if (
@@ -7162,6 +7187,10 @@ if (args.includes('--help')) {
 		try {
 			await buildCohortAction(options, environment, {
 				inspectVersion: () => Promise.resolve('v0.0.50'),
+				...(flowPlan.documentVersions !== undefined && {
+					inspectDocumentVersions: () =>
+						Promise.resolve(flowPlan.documentVersions ?? {})
+				}),
 				tenantDependencyReferences: (paths, referenceOptions) => {
 					flowPlan.inspectDependencySources?.(
 						paths,
@@ -7294,7 +7323,10 @@ if (args.includes('--help')) {
 				signal
 			});
 		} catch (error: unknown) {
-			if (flowPlan.referenceUploadRequired !== true) {
+			if (
+				flowPlan.referenceUploadRequired !== true &&
+				flowPlan.rootPushFailure === undefined
+			) {
 				throw error;
 			}
 
@@ -8248,6 +8280,343 @@ if (args.includes('--help')) {
 				]
 			],
 			receiptLine: `receipt-file=${receiptFile}`
+		});
+	});
+
+	it('streams the build through build-push, then sets the roots of each kind of push with one push', async () => {
+		const runRoot = 'github:owner/repo/_cupboard-run/1';
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: cohortJson({
+					expectedPaths: [appPath, libraryBuiltPath, undefined]
+				}),
+				publish: 'outputs',
+				gcBetweenCohorts: 'true',
+				reuseView: 'pr-view',
+				cache: 'builds',
+				ttl: '7d',
+				runRoot,
+				runRootTtl: '2d',
+				maxJobs: '0'
+			},
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ documentVersions: { publishPlan: 2, cohortRoots: 1 } }
+		);
+
+		const targetPaths = path.join(
+			directory,
+			'cupboard-cohort-target-paths.txt'
+		);
+		const referencePaths = path.join(
+			directory,
+			'cupboard-cohort-reference-paths.txt'
+		);
+		const pushes = run.calls.slice(3);
+		const cacheUrl = `${url}/cache/builds`;
+
+		expect({
+			pushes,
+			mainPaths: await readPathManifest(`${targetPaths}.0.main.none`),
+			mainRoots: await readJsonFile(`${targetPaths}.0.main.none.roots.json`),
+			destinationPaths: await readPathManifest(
+				`${referencePaths}.1.destination.none`
+			),
+			destinationRoots: await readJsonFile(
+				`${targetPaths}.1.destination.none.roots.json`
+			)
+		}).toStrictEqual({
+			pushes: [
+				[
+					'--no-colour',
+					'push',
+					cacheUrl,
+					'--paths-file',
+					`${targetPaths}.0.main.none`,
+					'--github-oidc',
+					'--roots-file',
+					`${targetPaths}.0.main.none.roots.json`,
+					'--ttl',
+					'7d',
+					'--run-root',
+					runRoot,
+					'--run-root-ttl',
+					'2d'
+				],
+				[
+					'--no-colour',
+					'push',
+					cacheUrl,
+					'--github-oidc',
+					'--roots-file',
+					`${targetPaths}.1.destination.none.roots.json`,
+					'--ttl',
+					'7d',
+					'--reference-paths-file',
+					`${referencePaths}.1.destination.none`,
+					'--reference-source',
+					cacheUrl,
+					'--run-root',
+					runRoot,
+					'--run-root-ttl',
+					'2d'
+				]
+			],
+			mainPaths: [libraryBuiltPath, floatingBuiltPath],
+			mainRoots: {
+				version: 1,
+				roots: [
+					{
+						action: 'set',
+						name: 'github:owner/repo/main/lib',
+						targets: [libraryBuiltPath]
+					},
+					{
+						action: 'set',
+						name: 'github:owner/repo/main/floating',
+						targets: [floatingBuiltPath]
+					}
+				]
+			},
+			destinationPaths: [appPath],
+			destinationRoots: {
+				version: 1,
+				roots: [
+					{
+						action: 'set',
+						name: 'github:owner/repo/main/app',
+						targets: [appPath]
+					}
+				]
+			}
+		});
+	});
+
+	it('publishes a cached target that two roots own once, and keeps it in both roots', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				publish: 'closure',
+				cohortJson: remotelyQueryableCohortJson({
+					remote: false,
+					attrs: [
+						'.#packages.x86_64-linux.app',
+						'.#packages.x86_64-linux.app',
+						'.#packages.x86_64-linux.lib'
+					],
+					installables: [
+						'.#packages.x86_64-linux.app^out',
+						'.#packages.x86_64-linux.app^out',
+						'.#packages.x86_64-linux.lib^out'
+					],
+					queryInstallables: [
+						appQueryInstallable,
+						appQueryInstallable,
+						libraryQueryInstallable
+					],
+					expectedPaths: [appPath, appPath, libraryBuiltPath],
+					roots: [
+						'github:owner/repo/main/app',
+						'github:owner/repo/main/default',
+						'github:owner/repo/main/lib'
+					]
+				})
+			},
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				closureTargets: [appPath],
+				referencedClosure: [appPath, referencePath].map((storePath) =>
+					storePathSchema.parse(storePath)
+				),
+				materialisedClosure: [appPath, referencePath].map((storePath) =>
+					storePathSchema.parse(storePath)
+				),
+				streamedPublicationPaths: [libraryBuiltPath, floatingBuiltPath],
+				documentVersions: { publishPlan: 2, cohortRoots: 1 }
+			}
+		);
+		const manifestPush =
+			run.calls.find(
+				(call) =>
+					call[1] === 'push' &&
+					call.includes('--reference-manifest') &&
+					call.includes('--roots-file')
+			) ?? [];
+		const manifest = referencePublicationManifestSchema.parse(
+			await readJsonFile(
+				argumentValue(manifestPush, '--reference-manifest') ?? ''
+			)
+		);
+
+		expect({
+			actionError: run.actionError,
+			targets: manifest.paths
+				.filter((entry) => entry.kind === 'target')
+				.map((entry) => entry.storePath),
+			roots: await readJsonFile(
+				argumentValue(manifestPush, '--roots-file') ?? ''
+			)
+		}).toStrictEqual({
+			actionError: undefined,
+			targets: [appPath],
+			roots: {
+				version: 1,
+				roots: [
+					{
+						action: 'set',
+						name: 'github:owner/repo/main/app',
+						targets: [appPath]
+					},
+					{
+						action: 'set',
+						name: 'github:owner/repo/main/default',
+						targets: [appPath]
+					}
+				]
+			}
+		});
+	});
+
+	const twoSourceCohort = (): BuildCohortOptions => ({
+		...baseOptions(),
+		publish: 'closure',
+		reuseView: 'pr-view',
+		cohortJson: remotelyQueryableCohortJson({
+			remote: false,
+			attrs: ['.#packages.x86_64-linux.lib', '.#packages.x86_64-linux.app'],
+			installables: [
+				'.#packages.x86_64-linux.lib^out',
+				'.#packages.x86_64-linux.app^out'
+			],
+			queryInstallables: [libraryQueryInstallable, appQueryInstallable],
+			expectedPaths: [libraryBuiltPath, appPath],
+			roots: ['github:owner/repo/main/lib', 'github:owner/repo/main/app']
+		})
+	});
+
+	it('keeps the receipt of every merged push that reads from its own source', async () => {
+		const run = await runPublicationFlow(
+			twoSourceCohort(),
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				attachOnly: [],
+				publishByReference: [appPath],
+				documentVersions: { publishPlan: 2, cohortRoots: 1 }
+			}
+		);
+		const receipt = buildReceiptV3Schema.parse(
+			await readJsonFile(path.join(directory, 'cupboard-cohort-receipt.json'))
+		);
+
+		expect({
+			actionError: run.actionError,
+			paths: receipt.paths.filter((storePath) =>
+				[libraryBuiltPath, appPath].includes(storePath)
+			)
+		}).toStrictEqual({
+			actionError: undefined,
+			paths: [appPath, libraryBuiltPath]
+		});
+	});
+
+	it('writes the cohort summary with the roots that a failed push set', async () => {
+		const run = await runPublicationFlow(
+			twoSourceCohort(),
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				attachOnly: [],
+				publishByReference: [appPath],
+				documentVersions: { publishPlan: 2, cohortRoots: 1 },
+				rootPushFailure: [
+					mergedPushSummary(['github:owner/repo/main/lib'], {
+						paths: 1,
+						bytes: 7
+					})
+				]
+			}
+		);
+		const summary = run.reportedResults.find(
+			(result) => result.kind === 'cohort-summary'
+		);
+		const { roots } = summaryRootsSchema.parse(summary?.data);
+
+		expect({
+			failed: run.actionError instanceof CupboardReportedError,
+			recorded: roots
+				.filter((root) => root.recordedRetention !== undefined)
+				.map((root) => ({ root: root.root, uploads: root.uploads }))
+		}).toStrictEqual({
+			failed: true,
+			recorded: [
+				{
+					root: 'github:owner/repo/main/lib',
+					uploads: { paths: 1, bytes: 7 }
+				}
+			]
+		});
+	});
+
+	it('counts the uploads of a push for several roots in the cohort total', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				publish: 'outputs',
+				cohortJson: remotelyQueryableCohortJson({
+					remote: false,
+					attrs: ['.#packages.x86_64-linux.lib', '.#packages.x86_64-linux.app'],
+					installables: [
+						'.#packages.x86_64-linux.lib^out',
+						'.#packages.x86_64-linux.app^out'
+					],
+					queryInstallables: [libraryQueryInstallable, appQueryInstallable],
+					expectedPaths: [libraryBuiltPath, appPath],
+					roots: ['github:owner/repo/main/lib', 'github:owner/repo/main/app']
+				})
+			},
+			[libraryBuiltPath, appPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable, appQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				attachOnly: [],
+				documentVersions: { publishPlan: 2, cohortRoots: 1 },
+				rootPushResults: [
+					mergedPushSummary(
+						['github:owner/repo/main/lib', 'github:owner/repo/main/app'],
+						{ paths: 2, bytes: 40 }
+					)
+				]
+			}
+		);
+		const summary = run.reportedResults.find(
+			(result) => result.kind === 'cohort-summary'
+		);
+
+		expect({
+			actionError: run.actionError,
+			buildUploads: z
+				.looseObject({ buildUploads: z.unknown() })
+				.parse(summary?.data).buildUploads
+		}).toStrictEqual({
+			actionError: undefined,
+			buildUploads: { paths: 2, bytes: 40 }
 		});
 	});
 
@@ -10316,7 +10685,7 @@ if (args.includes('--help')) {
 			resultBuilds: run.resultBuilds
 		}).toStrictEqual({
 			copyCalls: [[[floatingDerivation], 'ssh-ng://build@example.test']],
-			informationCount: 1,
+			informationCount: 2,
 			resultBuilds: [
 				[[floatingQueryInstallable], '', 'ssh-ng://build@example.test']
 			]
@@ -10377,7 +10746,7 @@ if (args.includes('--help')) {
 					'ssh-ng://build@example.test'
 				]
 			],
-			informationCount: 2,
+			informationCount: 3,
 			resultBuilds: [
 				[[floatingQueryInstallable], '', 'ssh-ng://build@example.test']
 			]
@@ -10615,7 +10984,7 @@ if (args.includes('--help')) {
 				[[libraryQueryInstallable], '0', 'ssh-ng://build@example.test']
 			],
 			progress: [{ total: 1, completed: 1 }],
-			informationCount: 1,
+			informationCount: 2,
 			remoteConnection: {
 				lifecycle: ['opened', 'closed'],
 				sequence: [
@@ -10716,7 +11085,7 @@ function cohortSummaryText(
 		'|  |  |',
 		'| --- | --- |',
 		'| Duration | 12m 34.0s |',
-		`| Uploaded during the build | ${uploaded} |`,
+		`| Uploaded before the roots were set | ${uploaded} |`,
 		...divergedRows,
 		'',
 		'| Target | Root | Outcome | Uploaded paths | Uploaded bytes | Root expiry |',
@@ -11166,3 +11535,134 @@ it('passes a cache reference source to the availability reprobe with its own cre
 		environment: { CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' }
 	});
 });
+
+function plannedMainPush(
+	index: number,
+	referenceSource: string
+): PlannedCohortPush {
+	const referencePaths = referenceSource === '' ? [] : [appPath];
+
+	return {
+		kind: 'main',
+		index,
+		group: {
+			root: `github:owner/repo/main/${String(index)}`,
+			paths: [appPath],
+			referencePaths,
+			complete: true
+		},
+		localPaths: referenceSource === '' ? [appPath] : [],
+		hasIntermediates: false,
+		referencePaths,
+		referenceSource,
+		manifest: [],
+		receipt: 'full',
+		sources: new Map()
+	};
+}
+
+describe('assertRootTargetLimits', () => {
+	it('refuses a root with more targets than one root update accepts', () => {
+		const paths = Array.from(
+			{ length: rootSetMaxTargets + 1 },
+			(_, index) =>
+				`/nix/store/${String(index).padStart(32, '0')}-target-${String(index)}`
+		);
+		const oversized: PlannedCohortPush = {
+			kind: 'main',
+			index: 1,
+			hasIntermediates: false,
+			referencePaths: [],
+			referenceSource: '',
+			manifest: [],
+			receipt: 'full',
+			sources: new Map(),
+			group: {
+				root: 'github:owner/repo/main/checks',
+				paths,
+				referencePaths: [],
+				complete: true
+			},
+			localPaths: paths
+		};
+		let failure: unknown;
+
+		try {
+			assertRootTargetLimits(
+				mergedCohortPushes([plannedMainPush(0, ''), oversized])
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(PublishRootTargetLimitError);
+		expect(
+			failure instanceof PublishRootTargetLimitError
+				? {
+						identifier: failure.identifier,
+						count: failure.count,
+						limit: failure.limit
+					}
+				: undefined
+		).toStrictEqual({
+			identifier: 'github:owner/repo/main/checks',
+			count: rootSetMaxTargets + 1,
+			limit: rootSetMaxTargets
+		});
+	});
+});
+
+describe('mergedCohortPushes', () => {
+	it('keeps pushes that read references from different sources apart', () => {
+		const viewSource = 'https://cache.example.test/t/acme/reuse/view';
+		const merged = mergedCohortPushes([
+			plannedMainPush(0, ''),
+			plannedMainPush(1, viewSource),
+			plannedMainPush(2, '')
+		]);
+
+		expect(
+			merged.map((push) => ({
+				kind: push.kind,
+				receipt: push.receipt,
+				indices: push.pushes.map((entry) => entry.index)
+			}))
+		).toStrictEqual([
+			{ kind: 'main', receipt: 'full', indices: [0, 2] },
+			{ kind: 'main', receipt: 'full', indices: [1] }
+		]);
+	});
+});
+
+const summaryRootSchema = z.looseObject({
+	root: z.string(),
+	recordedRetention: z.unknown().optional(),
+	uploads: z.unknown().optional()
+});
+const summaryRootsSchema = z.looseObject({
+	roots: z.array(summaryRootSchema)
+});
+
+function mergedPushSummary(
+	roots: readonly string[],
+	uploads: { readonly paths: number; readonly bytes: number }
+): ReporterResultEvent {
+	return {
+		kind: pushSummaryResultKind,
+		data: {
+			uploadedPaths: uploads.paths,
+			reusedBlobs: 0,
+			skipped: 0,
+			uploadedBytes: uploads.bytes,
+			failures: [],
+			paths: [],
+			roots: roots.map((name) => ({
+				name,
+				expired: false,
+				createdAt: '2026-01-01T00:00:00.000Z',
+				updatedAt: '2026-01-01T00:00:00.000Z',
+				targets: []
+			}))
+		}
+	};
+}
