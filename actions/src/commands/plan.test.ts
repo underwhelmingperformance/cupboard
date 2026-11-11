@@ -358,7 +358,6 @@ describe('planAction', () => {
 					installables: ['.#packages.x86_64-linux.app^out']
 				}
 			],
-			derivationToTargets: [],
 			cohortPreFilter: [
 				{
 					key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
@@ -1099,7 +1098,6 @@ describe('ensureAvailableTargets', () => {
 				{
 					target: parsed,
 					rootDrvPath: '/nix/store/app.drv',
-					nodes: new Map(),
 					targetPaths: [value]
 				}
 			],
@@ -1223,7 +1221,6 @@ function evaluation(
 			outputs: ['out']
 		},
 		rootDrvPath: `/nix/store/${rootSuffix}.drv`,
-		nodes: new Map(),
 		targetPaths: [storePathValue]
 	};
 }
@@ -1622,7 +1619,6 @@ describe('cohortPreFilter', () => {
 		const partiallyResolvedEvaluation: TargetEvaluation = {
 			target: unknownOutputTarget,
 			rootDrvPath: '/nix/store/unknown.drv',
-			nodes: new Map(),
 			targetPaths: [outPath]
 		};
 
@@ -1681,13 +1677,11 @@ describe('cohortPreFilter', () => {
 				outputs: ['out']
 			},
 			rootDrvPath: '/nix/store/component-a.drv',
-			nodes: new Map(),
 			targetPaths: [outPath]
 		};
 		const componentB: TargetEvaluation = {
 			target: { ...componentA.target, attr: '.#component-b' },
 			rootDrvPath: '/nix/store/component-b.drv',
-			nodes: new Map(),
 			targetPaths: [developmentPath]
 		};
 		const systemRoot = 'github:owner/repo/main/system';

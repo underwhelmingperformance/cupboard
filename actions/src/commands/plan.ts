@@ -1038,8 +1038,7 @@ function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {
 	return {
 		retained: [],
 		targets,
-		cohorts: cohortsFor(targets),
-		derivationToTargets: []
+		cohorts: cohortsFor(targets)
 	};
 }
 

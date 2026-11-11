@@ -20,7 +20,6 @@ import {
 	canonicalRootSuffix,
 	type Cohort,
 	type CohortPreFilterDecision,
-	type DerivationToTargetsEntry,
 	type PublishPlan,
 	type PublishTarget
 } from '@cupboard/protocol/publish-plan';
@@ -46,7 +45,6 @@ import {
 	CohortFailureToleranceError,
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
-	DerivationRootCountError,
 	DuplicateGroupKeyError,
 	PublishPlanInvariantError,
 	TargetEvaluationError,
@@ -127,16 +125,14 @@ export interface DerivationOutput {
 	readonly path?: StorePathString;
 }
 
-export interface DerivationNode {
+interface DerivationNode {
 	readonly drvPath: string;
-	readonly inputs: ReadonlyMap<string, readonly string[]>;
 	readonly outputs: readonly DerivationOutput[];
 }
 
 export interface TargetEvaluation {
 	readonly target: PublishTarget;
 	readonly rootDrvPath: string;
-	readonly nodes: ReadonlyMap<string, DerivationNode>;
 	readonly targetPaths: readonly StorePathString[];
 }
 
@@ -187,8 +183,7 @@ export function planPublish(options: {
 	return {
 		retained,
 		targets,
-		cohorts: cohortsFor(allTargets),
-		derivationToTargets: derivationToTargetsFor(options.evaluations)
+		cohorts: cohortsFor(allTargets)
 	};
 }
 
@@ -239,7 +234,8 @@ export async function evaluateTargets(
 
 	return {
 		evaluations: evaluated.filter(
-			(evaluation): evaluation is TargetEvaluation => 'nodes' in evaluation
+			(evaluation): evaluation is TargetEvaluation =>
+				'targetPaths' in evaluation
 		),
 		unevaluated: [
 			...unevaluated,
@@ -258,7 +254,7 @@ async function evaluateResolvedTargets(
 	if (resolutions.length === 1) {
 		return [
 			await evaluateResolvedTarget(
-				requireIndex(resolutions, 0),
+				requireFirst(resolutions),
 				storeDirectory,
 				evaluator
 			)
@@ -329,68 +325,24 @@ function evaluationFailureReason(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-export function evaluationFromJson(
-	target: PublishTarget,
-	value: unknown,
-	storeDirectory: StoreDirectory
-): TargetEvaluation {
-	const nodes = derivationNodes(target.attr, value, storeDirectory);
-	const referenced = new Set<string>();
-
-	for (const node of nodes.values()) {
-		for (const input of node.inputs.keys()) {
-			referenced.add(input);
-		}
-	}
-
-	const roots = nodes
-		.keys()
-		.filter((drvPath) => !referenced.has(drvPath))
-		.toArray();
-
-	if (roots.length !== 1) {
-		throw new DerivationRootCountError(target.attr, roots.length);
-	}
-
-	const rootDrvPath = requireIndex(roots, 0);
-
-	return evaluationForRoot(target, nodes, rootDrvPath);
-}
-
 function evaluationForRoot(
 	target: PublishTarget,
-	graph: ReadonlyMap<string, DerivationNode>,
+	nodes: ReadonlyMap<string, DerivationNode>,
 	rootDrvPath: string
 ): TargetEvaluation {
-	const nodes = new Map<string, DerivationNode>();
-	const pending = [rootDrvPath];
+	const root = nodes.get(rootDrvPath);
 
-	while (pending.length > 0) {
-		const drvPath = requireIndex(pending, pending.length - 1);
-		pending.pop();
-
-		if (nodes.has(drvPath)) {
-			continue;
-		}
-
-		const node = graph.get(drvPath);
-
-		if (node === undefined) {
-			throw new DerivationNodeMissingError(target.attr, drvPath);
-		}
-
-		nodes.set(drvPath, node);
-		pending.push(...node.inputs.keys());
+	if (root === undefined) {
+		throw new DerivationNodeMissingError(target.attr, rootDrvPath);
 	}
 
-	const root = requireValue(nodes.get(rootDrvPath), rootDrvPath);
 	const selected = new Set(target.outputs);
 	const targetPaths = root.outputs
 		.filter((output) => selected.has(output.name))
 		.map((output) => output.path)
 		.filter((outputPath) => outputPath !== undefined);
 
-	return { target, rootDrvPath, nodes, targetPaths };
+	return { target, rootDrvPath, targetPaths };
 }
 
 async function evaluateDerivationsAsync(
@@ -398,7 +350,7 @@ async function evaluateDerivationsAsync(
 	evaluator: NixEvaluator,
 	label = installables.join(', ')
 ): Promise<unknown> {
-	const arguments_ = ['derivation', 'show', '-r', '--', ...installables];
+	const arguments_ = ['derivation', 'show', '--', ...installables];
 
 	try {
 		const result = await evaluator(arguments_);
@@ -424,27 +376,12 @@ function parseDerivationResponse(label: string, stdout: string): unknown {
 	}
 }
 
-// Nix prints an input either as a list of consumed output names or as an object
-// whose `outputs` field contains that list.
-const outputNamesSchema = z.array(z.string());
-const derivationInputSchema = z.union([
-	outputNamesSchema,
-	z.looseObject({ outputs: outputNamesSchema.default([]) })
-]);
-
-const derivationInputsSchema = z.record(z.string(), derivationInputSchema);
-const derivationInputsFieldSchema = z.looseObject({
-	drvs: derivationInputsSchema.optional()
-});
 const derivationOutputSchema = z.looseObject({ path: z.string().optional() });
 
-// Accept both `inputs.drvs`, which current Nix versions print, and the older
-// `inputDrvs` spelling. An output path can appear in `path` or in the matching
-// `env` value. Content-addressed placeholders are not store paths, so those
-// outputs remain unresolved. Ignore fields that planning does not use.
+// An output path can appear in `path` or in the matching `env` value.
+// Content-addressed placeholders are not store paths, so those outputs remain
+// unresolved. Ignore fields that planning does not use.
 const derivationNodeBaseSchema = z.looseObject({
-	inputs: derivationInputsFieldSchema.optional(),
-	inputDrvs: derivationInputsSchema.optional(),
 	outputs: z.record(z.string(), derivationOutputSchema).default({}),
 	env: z.record(z.string(), z.string()).default({})
 });
@@ -453,7 +390,6 @@ type DerivationNodeDocumentEntry = z.output<typeof derivationNodeBaseSchema>;
 
 function derivationNodeSchema(storeDirectory: StoreDirectory) {
 	return derivationNodeBaseSchema.transform((node) => ({
-		inputs: nodeInputs(node, storeDirectory),
 		outputs: nodeOutputs(node, storeDirectory)
 	}));
 }
@@ -494,23 +430,6 @@ function derivationNodes(
 	}
 
 	return nodes;
-}
-
-function nodeInputs(
-	node: DerivationNodeDocumentEntry,
-	storeDirectory: StoreDirectory
-): Map<string, readonly string[]> {
-	const drvs = node.inputs?.drvs ?? node.inputDrvs ?? {};
-	const inputs = new Map<string, readonly string[]>();
-
-	for (const [inputPath, input] of Object.entries(drvs)) {
-		inputs.set(
-			absoluteStorePath(inputPath, storeDirectory),
-			Array.isArray(input) ? input : input.outputs
-		);
-	}
-
-	return inputs;
 }
 
 function nodeOutputs(
@@ -742,7 +661,7 @@ export function cohortsFor(targets: readonly PublishTarget[]): Cohort[] {
 }
 
 function cohortFor(label: string, members: readonly PublishTarget[]): Cohort {
-	const first = requireIndex(members, 0);
+	const first = requireFirst(members);
 	const context = executionContextKey(first);
 
 	for (const member of members) {
@@ -788,37 +707,6 @@ function cohortKey(label: string, target: PublishTarget): string {
 		.slice(0, 16);
 
 	return `cohort-${target.system}-${os}-${mode}-${digest}`;
-}
-
-/**
-Record which target graphs contain each derivation. This map is attribution
-evidence only; it does not instruct a build to realise every derivation in
-those graphs.
-*/
-export function derivationToTargetsFor(
-	evaluations: readonly TargetEvaluation[]
-): DerivationToTargetsEntry[] {
-	const targetsByDrvPath = new Map<string, Set<string>>();
-
-	for (const evaluation of evaluations) {
-		for (const drvPath of evaluation.nodes.keys()) {
-			const attributes = targetsByDrvPath.get(drvPath) ?? new Set<string>();
-			attributes.add(evaluation.target.attr);
-			targetsByDrvPath.set(drvPath, attributes);
-		}
-	}
-
-	return targetsByDrvPath
-		.entries()
-		.map(([drvPath, attributes]) => ({
-			drvPath,
-			targets: attributes
-				.values()
-				.toArray()
-				.toSorted((left, right) => left.localeCompare(right))
-		}))
-		.toArray()
-		.toSorted((left, right) => left.drvPath.localeCompare(right.drvPath));
 }
 
 export type TargetCoverageStatus =
@@ -893,14 +781,12 @@ export function cohortPreFilterDecision(
 	return { key: cohort.key, pruned: isPruned };
 }
 
-function requireIndex<T>(values: readonly T[], index: number): T {
-	return requireValue(values[index], `index ${String(index)}`);
-}
+function requireFirst<T>(values: readonly T[]): T {
+	const [first] = values;
 
-function requireValue<T>(value: T | undefined, subject: string): T {
-	if (value === undefined) {
-		throw new PublishPlanInvariantError(subject);
+	if (first === undefined) {
+		throw new PublishPlanInvariantError('index 0');
 	}
 
-	return value;
+	return first;
 }

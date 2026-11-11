@@ -1302,18 +1302,6 @@ export class DerivationGraphShapeError extends CodedError {
 	}
 }
 
-export class DerivationRootCountError extends CodedError {
-	constructor(
-		public readonly attribute: string,
-		public readonly count: number
-	) {
-		super(
-			`Invalid derivation graph for ${attribute}: evaluated to ${String(count)} root derivations`
-		);
-		this.name = 'DerivationRootCountError';
-	}
-}
-
 export class DerivationNodeMissingError extends CodedError {
 	constructor(
 		public readonly attribute: string,
