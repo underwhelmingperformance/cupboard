@@ -27,6 +27,8 @@ import { controlTenantCreate } from '../control/control-plane.ts';
 import { tenantMemberKey } from '../control/tenant-member-key.ts';
 import {
 	admitTenant,
+	buildMembershipFilter,
+	membershipFilterCacheKey,
 	refreshTenantMembership,
 	type TenantEntry
 } from '../control/tenant-membership.ts';
@@ -197,6 +199,35 @@ describe('layered admission gate', () => {
 		expect(await admit('acme')).toStrictEqual({
 			status: 'suspended'
 		});
+	});
+
+	// The Cache API is shared by every Worker in a zone, so two deployments
+	// with custom domains in one zone must not share the filter's cache entry.
+	it('ignores the membership filter that another deployment cached', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+		await refreshTenantMembership(env);
+		const otherDeployment = {
+			idFromName: (name: string) =>
+				env.CUPBOARD_DO.idFromName(`other-deployment/${name}`)
+		};
+		const otherKey = membershipFilterCacheKey(otherDeployment);
+		const otherFilter = buildMembershipFilter([tenantIdSchema.parse('beta')]);
+		await caches.default.put(
+			otherKey,
+			new Response(otherFilter, {
+				headers: { 'cache-control': 'max-age=60' }
+			})
+		);
+
+		try {
+			expect({
+				isSameKey:
+					membershipFilterCacheKey(env.CUPBOARD_DO).url === otherKey.url,
+				admitted: await admit('acme')
+			}).toStrictEqual({ isSameKey: false, admitted: { status: 'active' } });
+		} finally {
+			await caches.default.delete(otherKey);
+		}
 	});
 
 	it('rejects a filter-positive slug whose membership marker is gone without reading the row', async () => {
