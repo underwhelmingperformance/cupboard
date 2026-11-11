@@ -16,9 +16,17 @@ export type ResourceLocation =
 	| { readonly field: string }
 	| { readonly pending: true; readonly missingDenies?: boolean };
 
+/**
+A procedure that acts on several roots lists them in an input array. The
+authoriser reads each root from `field` of every element of the array named
+`eachIn`, and the token must authorise every one of them.
+*/
+export type RootLocation =
+	ResourceLocation | { readonly eachIn: string; readonly field: string };
+
 export interface ResourceSpec {
 	readonly cache?: ResourceLocation;
-	readonly root?: ResourceLocation;
+	readonly root?: RootLocation;
 	readonly tenant?: ResourceLocation;
 }
 

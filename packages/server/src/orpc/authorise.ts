@@ -61,8 +61,29 @@ function inputField(input: unknown, name: string): string | undefined {
 	return nested.success ? nested.data.params[name] : undefined;
 }
 
+// Returns `field` of every element of the input array `list`, with undefined
+// for an element whose `field` is not a string. A missing array has no
+// elements.
+function inputListFields(
+	input: unknown,
+	list: string,
+	field: string
+): readonly (string | undefined)[] {
+	const parsed = z
+		.looseObject({ [list]: z.array(z.unknown()) })
+		.safeParse(input);
+	const elements = parsed.success ? (parsed.data[list] ?? []) : [];
+
+	return elements.map(
+		(element) =>
+			z.looseObject({ [field]: z.string() }).safeParse(element).data?.[field]
+	);
+}
+
 interface ResolvedResource {
-	readonly resource: ResourceRequest;
+	// One resource for each root in the request's root list, or a single
+	// resource when the procedure has no root list or the list is empty.
+	readonly resources: readonly ResourceRequest[];
 	// Only a wildcard grant can cover a resource field that failed validation.
 	readonly unresolved: boolean;
 	// Records whether an absent pending row must deny the request.
@@ -76,7 +97,7 @@ async function resolveResource(
 	pendingCache: PendingCacheResolver
 ): Promise<ResolvedResource> {
 	if (spec === undefined) {
-		return { resource: {}, unresolved: false, pendingMissing: false };
+		return { resources: [{}], unresolved: false, pendingMissing: false };
 	}
 
 	const resource: {
@@ -84,6 +105,7 @@ async function resolveResource(
 		root?: RootName;
 		tenant?: TenantId;
 	} = {};
+	let listedRoots: readonly RootName[] = [];
 	let isUnresolved = false;
 	let pendingMissing: ResolvedResource['pendingMissing'] = false;
 
@@ -119,7 +141,22 @@ async function resolveResource(
 		}
 	}
 
-	if (spec.root !== undefined && 'field' in spec.root) {
+	if (spec.root !== undefined && 'eachIn' in spec.root) {
+		const parsed = inputListFields(
+			input,
+			spec.root.eachIn,
+			spec.root.field
+		).map((raw) =>
+			raw === undefined ? undefined : rootNameSchema.safeParse(raw).data
+		);
+		const names = parsed.filter((name) => name !== undefined);
+
+		if (names.length === parsed.length) {
+			listedRoots = names;
+		} else {
+			isUnresolved = true;
+		}
+	} else if (spec.root !== undefined && 'field' in spec.root) {
 		const raw = inputField(input, spec.root.field);
 		const parsed =
 			raw === undefined ? undefined : rootNameSchema.safeParse(raw).data;
@@ -143,7 +180,12 @@ async function resolveResource(
 		}
 	}
 
-	return { resource, unresolved: isUnresolved, pendingMissing };
+	const resources =
+		listedRoots.length === 0
+			? [resource]
+			: listedRoots.map((root) => ({ ...resource, root }));
+
+	return { resources, unresolved: isUnresolved, pendingMissing };
 }
 
 // When a benign read outlives its pending row, allow polling only if the token
@@ -179,7 +221,7 @@ export async function authoriseRequest(
 		throw new InsufficientScopeError();
 	}
 
-	const { resource, unresolved, pendingMissing } = await resolveResource(
+	const { resources, unresolved, pendingMissing } = await resolveResource(
 		meta.resource,
 		input,
 		pathCache,
@@ -205,11 +247,17 @@ export async function authoriseRequest(
 		return undefined;
 	}
 
-	if (!isCoveredByToken(claims.grants, meta.requires, resource)) {
+	const operation = meta.requires;
+
+	if (
+		resources.some(
+			(resource) => !isCoveredByToken(claims.grants, operation, resource)
+		)
+	) {
 		throw new InsufficientScopeError();
 	}
 
-	return resource.cache;
+	return resources[0]?.cache;
 }
 
 /**
