@@ -22,8 +22,10 @@ inputs:
     required: false
   maximise-space:
     description:
-      When true, free disk space before installing Nix. On macOS the action
-      removes Xcode, and on Linux it runs nothing-but-nix.
+      When true, free disk space. On macOS the action starts removing Xcode in
+      the background, and the build-cohort action waits for the removal before
+      it checks the store capacity or builds. On Linux the action runs
+      nothing-but-nix before installing Nix.
     required: false
     default: 'false'
   remote:
@@ -123,21 +125,39 @@ runs:
         # configuration cannot outlive the key on a persistent runner.
         bash "${GITHUB_ACTION_PATH}/ssh-transport.sh" configure-input
 
-    - name: Free disk space
+    # The removal takes minutes, and the job needs the space only when it
+    # checks the store capacity or builds. Start it in the background so that
+    # installing Nix and setting up cupboard overlap with it. The build-cohort
+    # action waits for the removal and, if the removal failed, fails with the
+    # removal's output. It finds the files through the two variables that this
+    # step exports. GITHUB_ENV receives only runner-owned paths, which is the
+    # safe case documented by the github-env audit
+    # (https://docs.zizmor.sh/audits/#github-env).
+    - name: Start freeing disk space
       if: ${{ inputs.maximise-space == 'true' && runner.os == 'macOS' }}
       shell: bash
-      run: |
+      run: | # zizmor: ignore[github-env]
         set -euo pipefail
 
-        df -h /
+        directory="${RUNNER_TEMP}/cupboard-free-disk-space"
+        status="${directory}/status.fifo"
+        log="${directory}/output.log"
+        rm -rf "${directory}"
+        mkdir -p "${directory}"
+        mkfifo "${status}"
+        : > "${log}"
+        {
+          echo "CUPBOARD_DISK_CLEANUP_STATUS=${status}"
+          echo "CUPBOARD_DISK_CLEANUP_LOG=${log}"
+        } >> "${GITHUB_ENV}"
 
-        sudo xcode-select --switch /Library/Developer/CommandLineTools || true
-        sudo rm -rf /Applications/Xcode_*.app
-        sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* || true
-        sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
-        xcrun simctl delete unavailable || true
-
-        df -h /
+        # The runner ends a step only when every process that has the step's
+        # stdout and stderr open has closed them. Redirect the script's standard
+        # streams to the log, so that the step ends at once and the log receives
+        # any error from starting the script.
+        bash "${GITHUB_ACTION_PATH}/free-disk-space.sh" "${status}" "${log}" \
+          < /dev/null >> "${log}" 2>&1 &
+        disown
 
     - uses: underwhelmingperformance/nothing-but-nix@535748d2b794cacd337dcf68b0d7266e2a735566 # v10.0.1
       if: ${{ inputs.maximise-space == 'true' && runner.os == 'Linux' }}

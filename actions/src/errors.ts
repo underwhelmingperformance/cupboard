@@ -1586,6 +1586,45 @@ export class CommandFailedError extends CodedError {
 	}
 }
 
+/**
+The background cleanup that the prepare action started did not succeed.
+`status` is the exit status that the cleanup reported. It is undefined when
+the cleanup reported none. `timeoutMilliseconds` is set when the cleanup had
+not reported when the wait ended. `output` is what the cleanup wrote to its
+log.
+*/
+export class DiskCleanupFailedError extends CodedError {
+	readonly status: number | undefined;
+	readonly timeoutMilliseconds: number | undefined;
+	readonly output: string;
+
+	constructor(details: {
+		readonly status?: number;
+		readonly timeoutMilliseconds?: number;
+		readonly output: string;
+	}) {
+		let outcome = 'reported no exit status';
+		let output = 'Its output:';
+
+		if (details.timeoutMilliseconds === undefined) {
+			if (details.status !== undefined) {
+				outcome = `failed with status ${String(details.status)}`;
+			}
+		} else {
+			outcome = `did not finish within ${String(details.timeoutMilliseconds / 1000)} seconds`;
+			output = 'Its output so far:';
+		}
+
+		super(
+			`The disk cleanup that the prepare action started in the background ${outcome}. ${output}\n${details.output}`
+		);
+		this.name = 'DiskCleanupFailedError';
+		this.status = details.status;
+		this.timeoutMilliseconds = details.timeoutMilliseconds;
+		this.output = details.output;
+	}
+}
+
 export interface RemoteCohortBuildFailure {
 	readonly target: string;
 	readonly kind:

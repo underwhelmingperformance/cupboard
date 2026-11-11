@@ -552,7 +552,9 @@ configuration:
   `publish: none`, or when the workflow builds cupboard from source or installs
   a release whose `plan cohort` does not accept `--complete-targets`. A cohort
   job that skips the step still evaluates its targets, so a flake that imports
-  from a derivation can still build or download paths during that evaluation.
+  from a derivation can still build or download paths during that evaluation. On
+  macOS, the removal runs in the background. See [how the removal overlaps with
+  setup][background-removal] for what runs while it frees space.
 - `enable-packing: true` packs small single-target cohorts into as few jobs as
   fit within `pack-capacity` bytes of disk. It uses measured closure sizes. If
   the measurement fails, the manifest's cohorts are used as they are.
@@ -570,6 +572,9 @@ configuration:
 - `nix-config` specifies a flake attribute containing extra `nix.conf` text for
   the plan and cohort jobs. For example, `.#ciNixConfig` might evaluate to
   `"http-connections = 64\n"`.
+
+[background-removal]:
+  ./how-it-works.md#how-a-macos-cohort-frees-disk-space-in-the-background
 
 For outputs too large for a GitHub-hosted runner, see
 [Building elsewhere](./building-elsewhere.md).

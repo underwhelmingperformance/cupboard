@@ -26,6 +26,7 @@ import {
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
 	DerivationRootCountError,
+	DiskCleanupFailedError,
 	DuplicateGroupKeyError,
 	ExactReleaseTagRequiredError,
 	GithubApiError,
@@ -286,6 +287,11 @@ describe('action errors', () => {
 		[
 			'CommandFailedError',
 			new CommandFailedError('cupboard', 1),
+			genericExitCode
+		],
+		[
+			'DiskCleanupFailedError',
+			new DiskCleanupFailedError({ status: 1, output: '' }),
 			genericExitCode
 		],
 		['CupboardReportedError', new CupboardReportedError(2, []), 2],

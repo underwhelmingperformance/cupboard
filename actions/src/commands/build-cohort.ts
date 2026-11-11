@@ -99,6 +99,11 @@ import {
 	runCupboard as defaultRunCupboard,
 	withoutReadCredential
 } from '../cupboard-run.ts';
+import {
+	diskCleanupFiles,
+	type JoinDiskCleanup,
+	joinDiskCleanup
+} from '../disk-cleanup.ts';
 import { ReferenceSourceInvalidError } from '../errors.ts';
 import {
 	BuildObservationMissingError,
@@ -849,6 +854,11 @@ export interface BuildCohortDependencies {
 	readonly inspectVersion?: typeof inspectCupboardVersion;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
 	readonly inspectCommandOptions?: typeof inspectCommandOptions;
+	/**
+	Waits for the disk cleanup that the prepare action started. Called before
+	the capacity check and the build when the prepare action started a cleanup.
+	*/
+	readonly joinDiskCleanup?: JoinDiskCleanup;
 	readonly reporter?: Reporter;
 	readonly signal?: AbortSignal;
 	/**
@@ -1059,6 +1069,18 @@ export async function buildCohortAction(
 				};
 
 	const planAndBuild = async (execution: CohortExecution): Promise<void> => {
+		// The capacity check and every build need the space that the prepare
+		// action frees in the background on macOS.
+		const cleanupFiles = diskCleanupFiles(environment);
+
+		if (cleanupFiles !== undefined) {
+			await (dependencies.joinDiskCleanup ?? joinDiskCleanup)(
+				cleanupFiles,
+				reporter,
+				dependencies.signal === undefined ? {} : { signal: dependencies.signal }
+			);
+		}
+
 		const plannedGraph =
 			execution.kind === 'remote'
 				? execution.preparation.graph
