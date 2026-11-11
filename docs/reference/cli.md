@@ -173,6 +173,10 @@ Usage: cupboard init|deploy [options]
 Deploy cupboard to a Cloudflare account, or upgrade an existing deployment.
 
 Options:
+  --deployment-name <name>  name of the deployment on the Cloudflare account,
+                            which determines the names of its Workers and other
+                            resources, so that one account can have several
+                            deployments (default: cupboard)
   --domain <host>           custom domain to serve the cache on
   --instance-name <name>    the first part of every signing key's name, such as
                             cupboard in cupboard-acme-1

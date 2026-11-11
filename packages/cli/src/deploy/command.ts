@@ -72,6 +72,7 @@ import {
 	queueRole,
 	runDeploy
 } from './deploy-run.ts';
+import { type DeploymentName, withDeploymentName } from './deployment-name.ts';
 import { deploymentUrl, withDeploymentUrl } from './deployment-url.ts';
 import { checkDomainOption, domainProblemText } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
@@ -213,6 +214,11 @@ export class FirstCacheSlugRequiredError extends CliUsageError {
 }
 
 export interface DeployCliOptions {
+	/**
+	The deployment on the account to create or update. Without it, the deploy
+	uses the release's resource names.
+	*/
+	readonly deploymentName?: DeploymentName;
 	readonly domain?: string;
 	readonly instanceName?: InstanceName;
 	readonly account?: string;
@@ -1029,13 +1035,18 @@ async function deployFlow(
 	requireFirstCacheAccess(cliOptions, isInteractive);
 	requireGithubOidcForAudience(cliOptions);
 
-	const { artifact, notice } = await ui
+	const built = await ui
 		.reporter()
 		.phase(
 			'Building Workers',
 			() => resolveArtifact(cliOptions.fromTree ?? false),
 			{ humanLabel: 'Preparing deployment' }
 		);
+	const { notice } = built;
+	const artifact: DeploymentArtifact = {
+		...built.artifact,
+		config: withDeploymentName(built.artifact.config, cliOptions.deploymentName)
+	};
 
 	if (notice !== undefined) {
 		ui.info(notice);

@@ -17,6 +17,11 @@ import {
 	cloudflareOauthClientId
 } from '../deploy/cloudflare-oauth.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
+import {
+	type DeploymentName,
+	deploymentNameMaxLength,
+	deploymentNameSchema
+} from '../deploy/deployment-name.ts';
 import type { WorkersPlanOverride } from '../deploy/workers-plan.ts';
 
 function parseWorkersPlan(value: string): WorkersPlanOverride {
@@ -34,6 +39,19 @@ function parseInstanceName(value: string): InstanceName {
 		throw new InvalidArgumentError(
 			'Instance name must contain only lower-case letters, digits and internal ' +
 				'hyphens, and must be at most 63 characters long.'
+		);
+	}
+
+	return parsed.data;
+}
+
+function parseDeploymentName(value: string): DeploymentName {
+	const parsed = deploymentNameSchema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new InvalidArgumentError(
+			'Deployment name must contain only lower-case letters, digits and ' +
+				`internal hyphens, and must be at most ${String(deploymentNameMaxLength)} characters long.`
 		);
 	}
 
@@ -61,6 +79,11 @@ export function registerDeployCommand(
 		.description(
 			'Deploy cupboard to a Cloudflare account, or upgrade an existing ' +
 				'deployment.'
+		)
+		.option(
+			'--deployment-name <name>',
+			'name of the deployment on the Cloudflare account, which determines the names of its Workers and other resources, so that one account can have several deployments (default: cupboard)',
+			parseDeploymentName
 		)
 		.option('--domain <host>', 'custom domain to serve the cache on')
 		.option(

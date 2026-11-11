@@ -140,7 +140,7 @@ function resourceName(what: string): z.ZodString {
 		.max(63, `${what} must be at most 63 characters`);
 }
 
-const workerName = resourceName('worker name');
+export const workerNameSchema = resourceName('worker name');
 const bucketName = resourceName('R2 bucket name').min(
 	3,
 	'R2 bucket name must be at least 3 characters'
@@ -160,7 +160,14 @@ export const editableResourceKinds: readonly EditableResourceKind[] = [
 	'queue'
 ];
 
-const editableSchemas: Record<EditableResourceKind, () => z.ZodString> = {
+/**
+The kinds of account-level resource whose names follow Cloudflare's shared
+shape. KV namespace titles are not included, because their limits differ.
+*/
+export type NamedResourceKind = EditableResourceKind | 'worker';
+
+const nameSchemas: Record<NamedResourceKind, () => z.ZodString> = {
+	worker: () => workerNameSchema,
 	bucket: () => bucketName,
 	database: () => databaseName,
 	queue: () => queueName
@@ -168,13 +175,14 @@ const editableSchemas: Record<EditableResourceKind, () => z.ZodString> = {
 
 /**
 Uses the same schemas as the checked-in Wrangler configuration so an
-interactive edit cannot create a value that the configuration parser rejects.
+interactive edit or a deployment name cannot create a value that the
+configuration parser rejects.
 */
 export function resourceNameProblem(
-	kind: EditableResourceKind,
+	kind: NamedResourceKind,
 	value: string
 ): string | undefined {
-	const parsed = editableSchemas[kind]().safeParse(value);
+	const parsed = nameSchemas[kind]().safeParse(value);
 
 	return parsed.success ? undefined : parsed.error.issues[0]?.message;
 }
@@ -298,7 +306,7 @@ const queueProducer = z.object({ binding: z.string(), queue: queueName });
 
 const serviceBinding = z.object({
 	binding: z.string(),
-	service: workerName,
+	service: workerNameSchema,
 	entrypoint: z.string().optional()
 });
 
@@ -357,7 +365,7 @@ const observability = z.object({
 
 const rawWranglerSchema = z
 	.object({
-		name: workerName,
+		name: workerNameSchema,
 		compatibility_date: z
 			.string()
 			.regex(/^\d{4}-\d{2}-\d{2}$/, 'compatibility_date must be YYYY-MM-DD'),
