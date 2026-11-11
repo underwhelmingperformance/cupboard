@@ -600,7 +600,10 @@ still waits for the rate limit.
 A row is dropped when the responses that it covers have expired, one hour after
 it was queued for narinfos and one year for NARs. A signing-key rotation queues
 its own rows, and the backfill maintenance pass purges them. Those rows remain
-until their purge succeeds.
+until their purge succeeds. A backfill page can list more than 100 tags and then
+needs several requests. The pass records the entries of each request as soon as
+that request succeeds and removes them from the row, so a retry after a refusal
+sends only the tags of the refused request and the requests after it.
 
 A change to a private cache queues no purge. The control Worker serves private
 reads itself with `Cache-Control: no-store`, so Workers Cache stores none of
