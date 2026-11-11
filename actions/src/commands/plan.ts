@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
+import { rootLogger } from '@cupboard/logger';
 import { discoverNixStoreConfig, type NixBuildSettings } from '@cupboard/nix';
 import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import {
@@ -11,8 +12,10 @@ import {
 	rootNameMaxLength,
 	rootNameSchema,
 	type StoreDirectory,
+	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	type Cohort,
@@ -33,6 +36,7 @@ import {
 } from '@cupboard/protocol/retention';
 import {
 	createGithubReporter,
+	formatDuration,
 	parseReporterResults,
 	type Reporter,
 	type ReporterResultEvent,
@@ -63,6 +67,7 @@ import {
 	requireEnvironmentCredentialSupport,
 	resolveReadCredential
 } from '../cupboard-run.ts';
+import { exportDerivationClosure } from '../derivation-closure.ts';
 import {
 	BuildRebuildRemoteDispatchError,
 	BuiltPublicationObservationUnsupportedError,
@@ -121,6 +126,11 @@ import {
 	targetIdentityKey
 } from '../publish-plan.ts';
 import { cacheUrlFor } from '../substituters.ts';
+
+import {
+	runWithLocalDerivationRoots,
+	type WithLocalDerivationRoots
+} from './build-cohort.ts';
 
 /**
 Runs a cupboard command and returns its output. `environment` contains the
@@ -280,6 +290,7 @@ export interface PlanOptions {
 	readonly build?: string;
 	readonly substituter?: string;
 	readonly publish?: string;
+	readonly exportDerivations?: string;
 }
 
 export interface PlanInputs {
@@ -316,6 +327,11 @@ export interface PlanInputs {
 	readonly build: 'missing' | 'rebuild';
 	readonly substituter: 'leave' | 'copy';
 	readonly publish: 'none' | 'outputs' | 'built' | 'closure';
+	/**
+	Whether the plan writes the derivation closure of its cohorts to an archive
+	for the cohort jobs to import.
+	*/
+	readonly exportDerivations: boolean;
 }
 
 /**
@@ -337,6 +353,9 @@ export interface PlanDependencies {
 	readonly inspectCommandOptions?: typeof inspectCommandOptions;
 	readonly signal?: AbortSignal;
 	readonly createArtifactName?: () => string;
+	readonly createDerivationArtifactName?: () => string;
+	readonly exportDerivationClosure?: typeof exportDerivationClosure;
+	readonly withLocalDerivationRoots?: WithLocalDerivationRoots;
 	/**
 	When packing is enabled, returns each surviving target's substitutable NAR
 	size by attribute. The default runs `cupboard plan measure` against the
@@ -423,6 +442,10 @@ export function registerPlanCommand(
 		.option(
 			'--publish <scope>',
 			'control published paths: none, outputs, built, or closure'
+		)
+		.option(
+			'--export-derivations <value>',
+			'write the derivation closure of the planned cohorts to an archive for the cohort jobs: true or false'
 		)
 		.action((options: PlanOptions) =>
 			planAction(options, environment, undefined, {
@@ -577,6 +600,11 @@ export function resolvePlanInputs(
 			options.publish,
 			['none', 'outputs', 'built', 'closure'],
 			'outputs'
+		),
+		exportDerivations: isEnabled(
+			'export-derivations',
+			options.exportDerivations,
+			false
 		)
 	};
 }
@@ -718,6 +746,35 @@ export async function planAction(
 		);
 	}
 
+	if (!inputs.exportDerivations) {
+		await planResolved(inputs, environment, reporter, dependencies);
+		return;
+	}
+
+	// The manifest evaluation that created the derivations has exited, so
+	// nothing else keeps their closures alive until the export copies them.
+	const rootDerivations = [
+		...new Set(
+			inputs.targets
+				.map((target) => target.rootDrvPath)
+				.filter((rootDrvPath) => rootDrvPath !== undefined)
+				.map((rootDrvPath) => storePathSchema.parse(rootDrvPath))
+		)
+	].toSorted(byCodeUnit);
+
+	await (dependencies.withLocalDerivationRoots ?? runWithLocalDerivationRoots)(
+		rootDerivations,
+		() => planResolved(inputs, environment, reporter, dependencies),
+		dependencies.signal
+	);
+}
+
+async function planResolved(
+	inputs: PlanInputs,
+	environment: Environment,
+	reporter: Reporter,
+	dependencies: PlanDependencies
+): Promise<void> {
 	const { plan, evaluations, referencePublications, availability } =
 		inputs.optimise
 			? await optimisedPlan(inputs, reporter, dependencies)
@@ -757,7 +814,7 @@ export async function planAction(
 		}));
 	}
 
-	await writePlan(
+	const jobCohorts = await writePlan(
 		environment,
 		inputs,
 		reporter,
@@ -782,6 +839,85 @@ export async function planAction(
 				dependencies.runner,
 				dependencies.signal
 			)
+	);
+
+	if (inputs.exportDerivations) {
+		await exportCohortDerivations(
+			environment,
+			inputs,
+			reporter,
+			cohortDerivations(jobCohorts, evaluations),
+			dependencies
+		);
+	}
+}
+
+/**
+Returns the root derivation of every evaluated target in `cohorts`, once
+each and in a stable order. Cohort jobs build these derivations, so their
+closure is what a cohort job needs in its store.
+*/
+function cohortDerivations(
+	cohorts: readonly Cohort[],
+	evaluations: readonly TargetEvaluation[]
+): readonly StorePathString[] {
+	const evaluationByTarget = new Map(
+		evaluations.map((evaluation) => [
+			targetIdentityKey(evaluation.target),
+			evaluation
+		])
+	);
+	const derivations = cohorts
+		.flatMap((cohort) => cohort.targets)
+		.map((target) => evaluationByTarget.get(targetIdentityKey(target)))
+		.filter((evaluation) => evaluation !== undefined)
+		.map((evaluation) => storePathSchema.parse(evaluation.rootDrvPath));
+
+	return [...new Set(derivations)].toSorted(byCodeUnit);
+}
+
+async function exportCohortDerivations(
+	environment: Environment,
+	inputs: PlanInputs,
+	reporter: Reporter,
+	derivations: readonly StorePathString[],
+	dependencies: PlanDependencies
+): Promise<void> {
+	if (derivations.length === 0) {
+		reporter.info(
+			'No cohort has an evaluated target, so the plan exports no derivations.'
+		);
+		return;
+	}
+
+	const exported = await reporter.phase(
+		'Exporting the cohort derivations',
+		async (phase) => {
+			const result = await (
+				dependencies.exportDerivationClosure ?? exportDerivationClosure
+			)(
+				derivations,
+				path.join(inputs.temporaryDirectory, 'cupboard-derivations'),
+				dependencies.signal
+			);
+
+			phase.fact('Paths in the closure', result.paths);
+			phase.fact('Archive bytes', result.archiveBytes);
+			phase.fact('Checking the closure', formatDuration(result.checkMs));
+			phase.fact('Copying from the store', formatDuration(result.copyMs));
+			phase.fact('Packing', formatDuration(result.packMs));
+
+			return result;
+		}
+	);
+
+	rootLogger().info('exported the cohort derivations', { ...exported });
+	await setOutput(environment, 'derivation-cache-file', exported.archive);
+	await setOutput(
+		environment,
+		'derivation-artifact-name',
+		dependencies.createDerivationArtifactName?.() ??
+			`cupboard-derivations-${randomUUID()}`
 	);
 }
 
@@ -1053,7 +1189,7 @@ async function writePlan(
 	availability: CohortAvailability,
 	artifactName: string,
 	measurer: NonNullable<PlanDependencies['measurer']>
-): Promise<void> {
+): Promise<readonly Cohort[]> {
 	const document: PublishPlanDocument = {
 		version: publishPlanVersion,
 		...plan,
@@ -1111,6 +1247,8 @@ async function writePlan(
 			availability.referenceTargets
 		)
 	);
+
+	return packedCohorts;
 }
 
 interface PlannedTargetSummary {

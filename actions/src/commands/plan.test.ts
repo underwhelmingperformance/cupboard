@@ -90,6 +90,14 @@ const secondTarget = {
 	rootSuffix: 'x86_64-linux/app-b'
 };
 
+// The `nix derivation show` entry of a root derivation with one output.
+function derivationNode(basename: string): unknown {
+	return {
+		env: { out: `/nix/store/${basename}` },
+		outputs: { out: { path: basename } }
+	};
+}
+
 // A released cupboard whose `plan cohort` accepts `--complete-targets`.
 const releasedCupboard = (): Promise<string> => Promise.resolve('v0.0.52');
 const completeTargetsOption = (): Promise<ReadonlySet<string>> =>
@@ -528,6 +536,107 @@ describe('planAction', () => {
 		);
 
 		expect(probe.requestedUrls).toStrictEqual(expectedUrls);
+	});
+
+	it.each([
+		{
+			name: 'leaves the derivations unexported by default',
+			exportDerivations: undefined,
+			optimise: 'true',
+			exported: false
+		},
+		{
+			name: 'exports the root derivations of the planned cohorts',
+			exportDerivations: 'true',
+			optimise: 'true',
+			exported: true
+		},
+		{
+			name: 'exports nothing for a plan without evaluated targets',
+			exportDerivations: 'true',
+			optimise: 'false',
+			exported: false
+		}
+	])('$name', async ({ exportDerivations, optimise, exported }) => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const output = path.join(directory, 'output');
+		const exportDirectory = path.join(directory, 'cupboard-derivations');
+		const archive = path.join(exportDirectory, 'cupboard-derivations.tar');
+		const roots = JSON.stringify({
+			derivations: {
+				[targetRootDrvPath]: derivationNode(`${'1'.repeat(32)}-app`),
+				[secondTarget.rootDrvPath]: derivationNode(`${'2'.repeat(32)}-app-b`)
+			}
+		});
+		const evaluator: NixEvaluator = () => Promise.resolve({ stdout: roots });
+		const events: string[] = [];
+
+		await planAction(
+			{
+				...baseOptions,
+				targets: JSON.stringify([secondTarget, target]),
+				optimise,
+				build: 'rebuild',
+				store: 'ssh-ng://build@example.test',
+				...(exportDerivations !== undefined && { exportDerivations })
+			},
+			{ RUNNER_TEMP: directory, GITHUB_RUN_ID: '12345', GITHUB_OUTPUT: output },
+			undefined,
+			{
+				evaluator,
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				fetcher: recordingFetcher().fetcher,
+				runner: preFilterRunner({}),
+				createDerivationArtifactName: () => 'cupboard-derivations-test',
+				withLocalDerivationRoots: async (derivations, use) => {
+					events.push(`root ${derivations.join(',')}`);
+
+					const result = await use();
+
+					events.push('unroot');
+
+					return result;
+				},
+				exportDerivationClosure: (derivations, cacheDirectory) => {
+					events.push(`export ${derivations.join(',')} into ${cacheDirectory}`);
+
+					return Promise.resolve({
+						archive,
+						archiveBytes: 1024,
+						paths: 2000,
+						checkMs: 300,
+						copyMs: 1000,
+						packMs: 500
+					});
+				}
+			}
+		);
+
+		const outputs = await readFile(output, 'utf8');
+		const rooted = `root ${targetRootDrvPath},${secondTarget.rootDrvPath}`;
+
+		expect({
+			events,
+			outputs: outputs
+				.split('\n')
+				.filter((line) => line.startsWith('derivation-'))
+		}).toStrictEqual({
+			events: [
+				...(exportDerivations === undefined ? [] : [rooted]),
+				...(exported
+					? [
+							`export ${targetRootDrvPath},${secondTarget.rootDrvPath} into ${exportDirectory}`
+						]
+					: []),
+				...(exportDerivations === undefined ? [] : ['unroot'])
+			],
+			outputs: exported
+				? [
+						`derivation-cache-file=${archive}`,
+						'derivation-artifact-name=cupboard-derivations-test'
+					]
+				: []
+		});
 	});
 });
 
@@ -1201,6 +1310,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		build: 'missing',
 		substituter: 'leave',
 		publish: 'outputs',
+		exportDerivations: false,
 		...overrides
 	};
 }

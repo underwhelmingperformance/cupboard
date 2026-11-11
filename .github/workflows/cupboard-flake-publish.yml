@@ -247,6 +247,24 @@ on:
         required: false
         default: ''
         type: string
+      reuse-plan-derivations:
+        description:
+          Pass the derivations that the plan job evaluated to the cohort jobs.
+          The plan job copies the derivation closure of its cohorts into an
+          artifact that expires after one day. Each cohort job imports the
+          derivations of its targets from that artifact instead of evaluating
+          the targets again, so it no longer checks that each target still
+          evaluates to the plan's derivation. Every imported path must match its
+          content address or have a trusted signature, and the plan job fails
+          when a path has neither, as with import from derivation. The artifact
+          contains the sources that the derivations reference, including sources
+          from private flake inputs, and anyone who can read the repository can
+          download it, so leave this off in a public repository with private
+          inputs. The job logs and diagnostics record how long the export and
+          the import take.
+        required: false
+        default: false
+        type: boolean
       input-known-hosts:
         description:
           known_hosts lines for every SSH host that serves a private flake
@@ -511,6 +529,7 @@ jobs:
     outputs:
       cohort-matrix: ${{ steps.plan.outputs.cohort-matrix }}
       cohort-count: ${{ steps.plan.outputs.cohort-count }}
+      derivation-artifact-id: ${{ steps.derivations.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -650,6 +669,21 @@ jobs:
           build: ${{ inputs.build }}
           substituter: ${{ inputs.substituter }}
           publish: ${{ needs.configure.outputs.publish }}
+          export-derivations: ${{ inputs.reuse-plan-derivations }}
+
+      # Cohort jobs download this artifact by the ID that only this job can
+      # output, so an artifact with the same name from another job in the run
+      # cannot replace it.
+      - name: Upload the cohort derivations
+        id: derivations
+        if: ${{ steps.plan.outputs.derivation-cache-file != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.plan.outputs.derivation-artifact-name }}
+          path: ${{ steps.plan.outputs.derivation-cache-file }}
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
 
   cohort:
     needs: [configure, plan]
@@ -744,10 +778,21 @@ jobs:
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
+      - name: Download the cohort derivations
+        if: ${{ needs.plan.outputs.derivation-artifact-id != '' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.plan.outputs.derivation-artifact-id }}
+          path: ${{ runner.temp }}/cupboard-derivations
+
       - uses: $/actions/build-cohort
         id: build-cohort
         with:
           cohort-json: ${{ toJSON(matrix) }}
+          derivation-cache-file:
+            ${{ needs.plan.outputs.derivation-artifact-id != '' &&
+            format('{0}/cupboard-derivations/cupboard-derivations.tar',
+            runner.temp) || '' }}
           # The planner requires every member of a cohort to use the same value.
           # The action treats a failure as best-effort only when it can
           # attribute the failure to a target; infrastructure and unbounded

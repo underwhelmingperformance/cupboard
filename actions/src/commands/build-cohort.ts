@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
+import { rootLogger } from '@cupboard/logger';
 import {
 	copySources,
 	createProcessNixDaemonConnector,
@@ -99,6 +100,7 @@ import {
 	runCupboard as defaultRunCupboard,
 	withoutReadCredential
 } from '../cupboard-run.ts';
+import { importDerivationClosure } from '../derivation-closure.ts';
 import {
 	diskCleanupFiles,
 	type JoinDiskCleanup,
@@ -453,6 +455,7 @@ export interface BuildCohortOptions {
 	readonly referencePathsFile?: string;
 	readonly leftUpstreamFile?: string;
 	readonly countsFile?: string;
+	readonly derivationCacheFile?: string;
 }
 
 export interface BuildCohortInputs {
@@ -490,6 +493,12 @@ export interface BuildCohortInputs {
 	// Local-build out-links keep target closures alive while this directory
 	// exists. Remote publication uses daemon temporary roots instead.
 	readonly outLinkDirectory: string;
+	/**
+	The plan job's archive of the cohort derivations, or the empty string when
+	the cohort evaluates its targets.
+	*/
+	readonly derivationCacheFile: string;
+	readonly derivationCacheDirectory: string;
 }
 
 export function resolveBuildCohortInputs(
@@ -631,6 +640,7 @@ export function resolveBuildCohortInputs(
 				path.join(runnerTemporary, `cupboard-cohort-${name}`)
 		);
 
+	const derivationCacheFile = provided(options.derivationCacheFile);
 	const publish = providedChoice(
 		'publish',
 		options.publish,
@@ -703,6 +713,14 @@ export function resolveBuildCohortInputs(
 		outLinkDirectory: path.join(
 			runnerTemporary,
 			`cupboard-out-links-${cohort.data.key}`
+		),
+		derivationCacheFile:
+			derivationCacheFile === undefined
+				? ''
+				: path.resolve(derivationCacheFile),
+		derivationCacheDirectory: path.join(
+			runnerTemporary,
+			`cupboard-derivation-cache-${cohort.data.key}`
 		)
 	};
 }
@@ -821,6 +839,10 @@ export function registerBuildCohortCommand(
 			'--counts-file <path>',
 			'where to write the partition counts and capacity result for the receipt'
 		)
+		.option(
+			'--derivation-cache-file <path>',
+			"the plan job's archive of the cohort derivations, imported instead of evaluating the targets"
+		)
 		.action((options: BuildCohortOptions) =>
 			buildCohortAction(options, environment, {
 				...(signal !== undefined && { signal })
@@ -839,6 +861,7 @@ export interface BuildCohortDependencies {
 	readonly runNixCopy?: typeof runNixCopy;
 	readonly runNixDerivationShow?: typeof runNixDerivationShow;
 	readonly materialiseDerivationGraph?: typeof materialiseDerivationGraph;
+	readonly importDerivationClosure?: typeof importDerivationClosure;
 	readonly resolveLocalDerivationGraph?: typeof resolveLocalDerivationGraph;
 	readonly withLocalDerivationRoots?: WithLocalDerivationRoots;
 	readonly withLocalStoreSession?: <T>(
@@ -1035,6 +1058,8 @@ export async function buildCohortAction(
 		dependencies.runNixDerivationShow ?? runNixDerivationShow;
 	const materialiseGraph =
 		dependencies.materialiseDerivationGraph ?? materialiseDerivationGraph;
+	const importClosure =
+		dependencies.importDerivationClosure ?? importDerivationClosure;
 	const resolveLocalGraph =
 		dependencies.resolveLocalDerivationGraph ?? resolveLocalDerivationGraph;
 	const withLocalDerivationRoots =
@@ -1616,6 +1641,50 @@ export async function buildCohortAction(
 		throw new CommandFailedError('nix build', build.status);
 	};
 
+	// Take the derivation paths from the cohort matrix, never from the archive.
+	// Only the plan job can set the matrix, and Nix checks the contents of the
+	// archive against those paths.
+	const prepareDerivations = (
+		targets: readonly NixDerivedPathString[]
+	): Promise<readonly PlannedTargetBinding[]> => {
+		if (inputs.derivationCacheFile === '') {
+			return reporter.phase('Evaluating cohort targets', async (phase) => {
+				const bindings = await materialisePlannedDerivations(
+					queryable,
+					targets,
+					runDerivationShow,
+					materialiseGraph,
+					dependencies.signal
+				);
+				phase.fact('Targets', queryable.length);
+				return bindings;
+			});
+		}
+
+		return reporter.phase(
+			"Importing the plan job's derivations",
+			async (phase) => {
+				const imported = await importClosure(
+					inputs.derivationCacheFile,
+					[...new Set(targets.map((target) => derivationPathOf(target)))],
+					inputs.derivationCacheDirectory,
+					dependencies.signal
+				);
+
+				phase.fact('Paths in the archive', imported.archivePaths);
+				phase.fact('Unpacking', formatDuration(imported.unpackMs));
+				phase.fact('Checking the archive', formatDuration(imported.verifyMs));
+				phase.fact('Copying into the store', formatDuration(imported.copyMs));
+				rootLogger().info("imported the plan job's derivations", {
+					archive: inputs.derivationCacheFile,
+					...imported
+				});
+
+				return plannedTargetBindings(queryable, targets);
+			}
+		);
+	};
+
 	if (isRemotePublication && queryable.length > 0) {
 		const targets = queryable.map((member) =>
 			nixDerivedPathSchema.parse(member.queryInstallable)
@@ -1627,20 +1696,7 @@ export async function buildCohortAction(
 		await withLocalDerivationRoots(
 			plannedDerivations,
 			async () => {
-				const bindings = await reporter.phase(
-					'Evaluating cohort targets',
-					async (phase) => {
-						const bindings = await materialisePlannedDerivations(
-							queryable,
-							targets,
-							runDerivationShow,
-							materialiseGraph,
-							dependencies.signal
-						);
-						phase.fact('Targets', queryable.length);
-						return bindings;
-					}
-				);
+				const bindings = await prepareDerivations(targets);
 				const graph = await resolveLocalGraph(
 					plannedDerivations,
 					dependencies.signal
@@ -1672,17 +1728,7 @@ export async function buildCohortAction(
 		await withLocalDerivationRoots(
 			targets.map((target) => derivationPathOf(target)),
 			async () => {
-				await reporter.phase('Evaluating cohort targets', async (phase) => {
-					const bindings = await materialisePlannedDerivations(
-						queryable,
-						targets,
-						runDerivationShow,
-						materialiseGraph,
-						dependencies.signal
-					);
-					phase.fact('Targets', queryable.length);
-					return bindings;
-				});
+				await prepareDerivations(targets);
 				const graph = inputs.push
 					? await resolveLocalGraph(
 							targets.map((target) => derivationPathOf(target)),
@@ -5541,8 +5587,15 @@ async function resolveLocalBuildOwners(options: {
 			continue;
 		}
 
+		// After an import, the planned derivation is in the store, and the flake
+		// attribute would make Nix evaluate the flake again.
+		const ownerInstallable =
+			queryInstallable === undefined ||
+			options.inputs.derivationCacheFile === ''
+				? member.installable
+				: queryInstallable;
 		const result = await options.runNix(
-			[member.installable],
+			[ownerInstallable],
 			options.inputs.maxJobs,
 			options.inputs.store,
 			path.join(

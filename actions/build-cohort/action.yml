@@ -177,6 +177,20 @@ inputs:
       Where to write the number of targets in each group and the result of the
       disk-space check, for the receipt.
     required: false
+  derivation-cache-file:
+    description:
+      Archive of the cohort derivations from the plan action's
+      derivation-cache-file output. When it is set, the action copies the
+      derivations of the cohort-json entry from the archive into the runner's
+      store instead of evaluating the targets. Before the copy, the action
+      checks that every path in the archive matches its content address or, for
+      a path without one, has a signature from a trusted key. Nix then checks
+      each copied path against its hashes. The action fails when the archive
+      lacks a derivation or contains a changed one. Afterwards it deletes the
+      archive and its unpacked copy. The job log and the diagnostics record how
+      long the unpacking, the check and the copy took. Leave empty to evaluate
+      the targets.
+    required: false
 outputs:
   target-paths-file:
     description: File that lists the output paths of the cohort's targets.
@@ -266,6 +280,7 @@ runs:
         REFERENCE_PATHS_FILE: ${{ inputs.reference-paths-file }}
         LEFT_UPSTREAM_FILE: ${{ inputs.left-upstream-file }}
         COUNTS_FILE: ${{ inputs.counts-file }}
+        DERIVATION_CACHE_FILE: ${{ inputs.derivation-cache-file }}
       run: |
         args=(build-cohort
           --cohort-json "$COHORT_JSON"
@@ -295,7 +310,8 @@ runs:
           --intermediate-paths-file "$INTERMEDIATE_PATHS_FILE"
           --reference-paths-file "$REFERENCE_PATHS_FILE"
           --left-upstream-file "$LEFT_UPSTREAM_FILE"
-          --counts-file "$COUNTS_FILE")
+          --counts-file "$COUNTS_FILE"
+          --derivation-cache-file "$DERIVATION_CACHE_FILE")
         source "$GITHUB_ACTION_PATH/../read-session.sh"
         run_with_read_session \
           "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \

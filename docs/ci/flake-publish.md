@@ -572,7 +572,12 @@ configuration:
 - `nix-config` specifies a flake attribute containing extra `nix.conf` text for
   the plan and cohort jobs. For example, `.#ciNixConfig` might evaluate to
   `"http-connections = 64\n"`.
+- `reuse-plan-derivations: true` passes the plan job's derivations to the cohort
+  jobs, so a cohort job builds the targets that the plan evaluated without
+  evaluating them again. See [How a publication run
+  works][reuse-plan-derivations]. It is off by default.
 
+[reuse-plan-derivations]: ./how-it-works.md#importing-the-plan-jobs-derivations
 [background-removal]:
   ./how-it-works.md#how-a-macos-cohort-frees-disk-space-in-the-background
 
