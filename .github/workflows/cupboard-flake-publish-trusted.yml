@@ -237,6 +237,24 @@ on:
         required: false
         default: ''
         type: string
+      reuse-plan-derivations:
+        description:
+          Pass the derivations that the plan job evaluated to the cohort jobs.
+          The plan job copies the derivation closure of its cohorts into an
+          artifact that expires after one day. Each cohort job imports the
+          derivations of its targets from that artifact instead of evaluating
+          the targets again, so it no longer checks that each target still
+          evaluates to the plan's derivation. Every imported path must match its
+          content address or have a trusted signature, and the plan job fails
+          when a path has neither, as with import from derivation. The artifact
+          contains the sources that the derivations reference, including sources
+          from private flake inputs, and anyone who can read the repository can
+          download it, so leave this off in a public repository with private
+          inputs. The job logs and diagnostics record how long the export and
+          the import take.
+        required: false
+        default: false
+        type: boolean
       input-known-hosts:
         description:
           known_hosts lines for every SSH host that serves a private flake
@@ -445,6 +463,7 @@ jobs:
       gc-between-cohorts: ${{ inputs.gc-between-cohorts }}
       fail-on-divergence: ${{ inputs.fail-on-divergence }}
       nix-config: ${{ inputs.nix-config }}
+      reuse-plan-derivations: ${{ inputs.reuse-plan-derivations }}
       input-known-hosts: ${{ inputs.input-known-hosts }}
       builders: ${{ inputs.builders }}
       builder-known-hosts: ${{ inputs.builder-known-hosts }}

@@ -147,10 +147,30 @@ inputs:
       intermediates. `closure` also publishes their runtime references.
     required: false
     default: outputs
+  export-derivations:
+    description:
+      When true, copy the derivation closure of every planned cohort from the
+      runner's store into a binary cache and pack it into one archive, which the
+      cohort jobs can import instead of evaluating their targets. The action
+      fails when the closure contains a path that has neither a content address
+      nor a signature from a trusted key, because the cohort jobs would refuse
+      that path. The job log and the diagnostics record how long the copy and
+      the packing took.
+    required: false
+    default: 'false'
 outputs:
   plan-file:
     description: Path to the plan, which the cohort jobs read.
     value: ${{ steps.plan.outputs.plan-file }}
+  derivation-cache-file:
+    description:
+      Path to the archive of the cohort derivations. Empty unless
+      export-derivations is true and a cohort has an evaluated target.
+    value: ${{ steps.plan.outputs.derivation-cache-file }}
+  derivation-artifact-name:
+    description:
+      Unique artifact name for passing the archive to the cohort jobs.
+    value: ${{ steps.plan.outputs.derivation-artifact-name }}
   plan-artifact-name:
     description: Unique artifact name for passing this plan to the cohort jobs.
     value: ${{ steps.plan.outputs.plan-artifact-name }}
@@ -232,6 +252,7 @@ runs:
         BUILD: ${{ inputs.build }}
         SUBSTITUTER: ${{ inputs.substituter }}
         PUBLISH: ${{ inputs.publish }}
+        EXPORT_DERIVATIONS: ${{ inputs.export-derivations }}
       run: |
         args=(plan
           --targets "$TARGETS"
@@ -252,6 +273,7 @@ runs:
           --store "$STORE"
           --builders "$BUILDERS")
         args+=(--build "$BUILD" --substituter "$SUBSTITUTER" --publish "$PUBLISH")
+        args+=(--export-derivations "$EXPORT_DERIVATIONS")
         if [ -n "$PACK_CAPACITY" ]; then
           args+=(--pack-capacity "$PACK_CAPACITY")
         fi

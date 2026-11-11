@@ -893,7 +893,8 @@ describe('cohort planning and publication', () => {
 				'pack-capacity': '${{ inputs.pack-capacity }}',
 				'maximise-space': '${{ inputs.maximise-space }}',
 				store: '${{ inputs.store }}',
-				builders: "${{ inputs.store == '' && inputs.builders || '' }}"
+				builders: "${{ inputs.store == '' && inputs.builders || '' }}",
+				'export-derivations': '${{ inputs.reuse-plan-derivations }}'
 			}
 		]);
 	});
@@ -934,6 +935,52 @@ describe('cohort planning and publication', () => {
 			'cohort',
 			'close-cache'
 		]);
+	});
+
+	it('passes the derivations from the plan job to each cohort only by artifact ID', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const steps = (uses: string) =>
+			stepsUsing(workflow, uses).map(({ job, step }) => ({
+				job,
+				id: step.id,
+				if: step.if,
+				with: step.with
+			}));
+
+		expect({
+			output: workflow.jobs.plan?.outputs?.['derivation-artifact-id'],
+			uploads: steps('actions/upload-artifact').filter(
+				({ job }) => job === 'plan'
+			),
+			downloads: steps('actions/download-artifact')
+		}).toStrictEqual({
+			output: '${{ steps.derivations.outputs.artifact-id }}',
+			uploads: [
+				{
+					job: 'plan',
+					id: 'derivations',
+					if: "${{ steps.plan.outputs.derivation-cache-file != '' }}",
+					with: {
+						name: '${{ steps.plan.outputs.derivation-artifact-name }}',
+						path: '${{ steps.plan.outputs.derivation-cache-file }}',
+						'retention-days': 1,
+						'compression-level': 0,
+						'if-no-files-found': 'error'
+					}
+				}
+			],
+			downloads: [
+				{
+					job: 'cohort',
+					id: undefined,
+					if: "${{ needs.plan.outputs.derivation-artifact-id != '' }}",
+					with: {
+						'artifact-ids': '${{ needs.plan.outputs.derivation-artifact-id }}',
+						path: '${{ runner.temp }}/cupboard-derivations'
+					}
+				}
+			]
+		});
 	});
 
 	it('builds and publishes a cohort through one action', async () => {
@@ -1039,7 +1086,9 @@ describe('cohort planning and publication', () => {
 					"${{ format('{0}/_cupboard-run/{1}', needs.configure.outputs.root-prefix, github.run_id) }}",
 				'run-root-ttl': '${{ inputs.run-root-ttl }}',
 				'run-root-permanent': '${{ inputs.run-root-permanent }}',
-				'fail-on-divergence': '${{ inputs.fail-on-divergence }}'
+				'fail-on-divergence': '${{ inputs.fail-on-divergence }}',
+				'derivation-cache-file':
+					"${{ needs.plan.outputs.derivation-artifact-id != '' && format('{0}/cupboard-derivations/cupboard-derivations.tar', runner.temp) || '' }}"
 			}
 		]);
 	});

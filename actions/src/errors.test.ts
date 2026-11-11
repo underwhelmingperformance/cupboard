@@ -23,6 +23,8 @@ import {
 	CommandOutputTooLargeError,
 	CupboardReportedError,
 	CupboardResolutionJsonError,
+	DerivationClosureImportError,
+	DerivationClosureUntrustedError,
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
 	DiskCleanupFailedError,
@@ -198,6 +200,20 @@ describe('action errors', () => {
 		[
 			'DerivationNodeMissingError',
 			new DerivationNodeMissingError('.#app', '/nix/store/app.drv'),
+			genericExitCode
+		],
+		[
+			'DerivationClosureImportError',
+			new DerivationClosureImportError('/tmp/cupboard-derivations.tar', {
+				cause: new Error('failed')
+			}),
+			genericExitCode
+		],
+		[
+			'DerivationClosureUntrustedError',
+			new DerivationClosureUntrustedError({
+				cause: new CommandFailedError('nix store verify', 2)
+			}),
 			genericExitCode
 		],
 		[

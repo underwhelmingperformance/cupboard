@@ -1789,6 +1789,34 @@ export class CohortEvaluationDriftError extends CodedError {
 	}
 }
 
+export class DerivationClosureImportError extends CodedError {
+	constructor(
+		public readonly archive: string,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`Could not import the plan job's derivations from ${archive}. Set reuse-plan-derivations to false so that each cohort job evaluates its targets.`,
+			withCause(options.cause)
+		);
+		this.name = 'DerivationClosureImportError';
+	}
+}
+
+/**
+`nix store verify` refused the plan job's derivation closure. A cohort job
+would refuse the same closure, so the plan job exports nothing. The job log
+contains the paths that Nix refused.
+*/
+export class DerivationClosureUntrustedError extends CodedError {
+	constructor(options: { readonly cause: unknown }) {
+		super(
+			"The cohort jobs cannot import the plan job's derivations because Nix refused their closure. Each path must have a content address that produces its store path or a trusted signature, and paths that the flake builds during evaluation have neither. The job log above lists the refused paths. Set reuse-plan-derivations to false so that each cohort job evaluates its targets.",
+			withCause(options.cause)
+		);
+		this.name = 'DerivationClosureUntrustedError';
+	}
+}
+
 /**
 The cupboard binary exited non-zero after reporting the cause. This error
 stores the exit status adopted by the action and any result events recorded

@@ -135,7 +135,9 @@ Each cohort job goes through these steps:
    view, it adds that too, after the destination.
 3. It evaluates each target's `attr` again, and fails if the result no longer
    matches the `rootDrvPath` that the plan used. This catches a flake that
-   changed between jobs.
+   changed between jobs. With `reuse-plan-derivations: true`, it imports the
+   plan job's derivations instead; see
+   [Importing the plan job's derivations](#importing-the-plan-jobs-derivations).
 4. On macOS with `maximise-space`, it waits for the background removal of
    preinstalled software to finish. See [how a macOS cohort frees disk space in
    the background][background-removal].
@@ -224,6 +226,57 @@ for the NAR until the cache rewrites its narinfo. After the replacement upload,
 the maintenance queue finds those caches and schedules the rewrite. The queue
 retries failed work. A cache's periodic verification scan can also repair its
 narinfo.
+
+### Importing the plan job's derivations
+
+With `reuse-plan-derivations: true`, the plan job copies the derivations of
+every cohort in the matrix from its store into a binary cache, together with the
+sources that those derivations reference. It packs the cache into one file and
+uploads the file as an artifact that expires after one day. Each cohort job
+downloads the artifact by its ID, which only the plan job can output, and copies
+the derivations of its targets into the runner's store. It then deletes the
+artifact and its unpacked copy to free the disk space, and plans and builds as
+usual. It builds every target that has a derivation in the plan from that
+derivation, so it evaluates none of those targets. When the plan exports
+nothing, for example with `publish: none`, the cohort jobs evaluate their
+targets as described in step 3.
+
+The cohort job takes the derivation paths from the cohort matrix, not from the
+artifact. Derivations and the sources that they reference are content-addressed:
+each content address and its references produce the path's store path, so a path
+can be checked without a signature. A derivation can also reference a path that
+is not content-addressed, such as a build output that the flake reads during
+evaluation, which import from derivation produces. Such a path needs a signature
+from a trusted key, either one in `trusted-public-keys` or the public half of a
+readable key in `secret-key-files`.
+
+Both jobs apply this rule with `nix store verify`, using the keys that their own
+Nix configuration trusts. The plan job checks the closure in its store before
+the upload, and fails when a path has neither a matching content address nor a
+trusted signature. Set `reuse-plan-derivations: false` for such a flake. Before
+it copies anything, the cohort job checks the closure in the artifact, so Nix
+reads the artifact as it does during the copy. A Nix daemon whose configuration
+turns `require-sigs` off would not make this check for an untrusted client. Nix
+then checks each copied path against its NAR hash and content address, so the
+cohort job fails when the artifact lacks a path or contains a changed one.
+
+The artifact contains the sources that the derivations reference, including
+sources from private flake inputs. Anyone who can read the repository can
+download a workflow artifact, so leave `reuse-plan-derivations` off in a public
+repository whose flake has private inputs.
+
+A cohort job that imports the derivations skips the check in step 3 that each
+target still evaluates to the plan's `rootDrvPath`. `nix build` still evaluates
+a target that has no derivation in the plan, such as a best-effort target that
+did not evaluate. The prepare step still evaluates `nix-config`.
+
+The plan job's "Exporting the cohort derivations" log group shows how long the
+check, the copy and the packing took. The cohort job's "Importing the plan job's
+derivations" log group shows how long the unpacking, the check and the copy
+took. These durations are also in the diagnostic logs. The upload and the
+download are separate workflow steps, so the job log shows their times too. The
+artifact expires after one day. If you re-run a cohort job after that, it fails
+at the download, so re-run the whole workflow instead.
 
 ## Sharing work between cohorts: the run root
 

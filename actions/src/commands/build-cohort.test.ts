@@ -64,8 +64,10 @@ import {
 	CohortPlanRefusedError,
 	CohortPlanResultInvalidError,
 	CohortPlanResultMissingError,
+	CommandFailedError,
 	CommandOutputTooLargeError,
 	CupboardReportedError,
+	DerivationClosureImportError,
 	DiskCleanupFailedError,
 	EnvironmentCredentialVersionError,
 	FailOnDivergenceUnsupportedError,
@@ -3685,6 +3687,137 @@ describe('buildCohortAction', () => {
 		}
 	);
 
+	describe('with the plan job derivations', () => {
+		const archive =
+			'/runner/temp/cupboard-derivations/cupboard-derivations.tar';
+		const appCohortJson = cohortJson({
+			attrs: ['.#packages.x86_64-linux.app'],
+			installables: ['.#packages.x86_64-linux.app^out'],
+			queryInstallables: [appQueryInstallable],
+			expectedPaths: [appPath],
+			roots: ['github:owner/repo/main/app']
+		});
+
+		function recordingDependencies(
+			sequence: string[],
+			importClosure: BuildCohortDependencies['importDerivationClosure']
+		): BuildCohortDependencies {
+			const plan = cupboardStub({
+				plan: planCohortSuccess(measuredCapacity, []),
+				reprobe: planReprobeSuccess([], [])
+			});
+
+			return {
+				runCupboard: vi.fn<typeof runCupboard>(
+					(binaryPath, arguments_, passedEnvironment, dependencies) => {
+						sequence.push(`plan ${arguments_[2] ?? ''}`);
+
+						return plan(
+							binaryPath,
+							arguments_,
+							passedEnvironment,
+							dependencies
+						);
+					}
+				),
+				runNixDerivationShow: (installables) => {
+					sequence.push(`evaluate ${installables.join(',')}`);
+
+					return Promise.resolve(evaluatedDerivations(installables));
+				},
+				materialiseDerivationGraph: (installables) => {
+					sequence.push(`materialise ${installables.join(',')}`);
+
+					return Promise.resolve();
+				},
+				withLocalDerivationRoots: async (derivations, use) => {
+					sequence.push(`root ${derivations.join(',')}`);
+
+					const result = await use();
+
+					sequence.push('unroot');
+
+					return result;
+				},
+				...(importClosure !== undefined && {
+					importDerivationClosure: importClosure
+				})
+			};
+		}
+
+		it.each([
+			{ name: 'the local store', store: undefined },
+			{
+				name: 'a non-publishing remote store',
+				store: 'ssh-ng://build@example.test'
+			}
+		])(
+			'imports the planned derivations under temp roots without evaluating them against $name',
+			async ({ store }) => {
+				const sequence: string[] = [];
+
+				await buildCohortAction(
+					{
+						...baseOptions(),
+						cohortJson: appCohortJson,
+						derivationCacheFile: archive,
+						...(store !== undefined && { store })
+					},
+					environment,
+					recordingDependencies(
+						sequence,
+						(archiveFile, derivations, cacheDirectory) => {
+							sequence.push(
+								`import ${archiveFile} ${derivations.join(',')} into ${cacheDirectory}`
+							);
+
+							return Promise.resolve({
+								archivePaths: 2000,
+								unpackMs: 1,
+								verifyMs: 1,
+								copyMs: 2
+							});
+						}
+					)
+				);
+
+				expect(sequence).toStrictEqual([
+					'root /nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+					`import ${archive} /nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv into ${path.join(directory, 'cupboard-derivation-cache-cohort-x86_64-linux-ubuntu-latest-remote-abc123')}`,
+					'plan cohort',
+					'unroot'
+				]);
+			}
+		);
+
+		it('fails the cohort without evaluating when the import fails', async () => {
+			const sequence: string[] = [];
+			const failure = new DerivationClosureImportError(archive, {
+				cause: new CommandFailedError('nix copy', 1)
+			});
+
+			await expect(
+				buildCohortAction(
+					{
+						...baseOptions(),
+						cohortJson: appCohortJson,
+						derivationCacheFile: archive
+					},
+					environment,
+					recordingDependencies(sequence, () => {
+						sequence.push('import');
+
+						return Promise.reject(failure);
+					})
+				)
+			).rejects.toBe(failure);
+			expect(sequence).toStrictEqual([
+				'root /nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+				'import'
+			]);
+		});
+	});
+
 	it.each([
 		{
 			name: 'a destination read credential',
@@ -6845,6 +6978,10 @@ if (args.includes('--help')) {
 				'.#packages.x86_64-linux.multi^out,dev',
 				[libraryBuiltPath, referencePath]
 			],
+			[
+				'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv^dev,out',
+				[libraryBuiltPath, referencePath]
+			],
 			['.#packages.x86_64-linux.floating^out', [floatingBuiltPath]]
 		]);
 		const runNixBuild = vi.fn((installables: readonly string[]) =>
@@ -7084,6 +7221,16 @@ if (args.includes('--help')) {
 				runNixBuildWithResults,
 				runNixDerivationShow,
 				materialiseDerivationGraph: materialiseGraph,
+				importDerivationClosure: (_archive, derivations) => {
+					sequence.push('import');
+
+					return Promise.resolve({
+						archivePaths: derivations.length,
+						unpackMs: 0,
+						verifyMs: 0,
+						copyMs: 0
+					});
+				},
 				resolveLocalDerivationGraph,
 				runNixCopy,
 				withLocalDerivationRoots,
@@ -7253,80 +7400,94 @@ if (args.includes('--help')) {
 		]);
 	});
 
-	it('rebuilds queryable targets whose output paths cannot be predicted under supervision', async () => {
-		const multiOutputQueryInstallable =
-			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv^dev,out';
-		const options: BuildCohortOptions = {
-			...baseOptions(),
-			cohortJson: cohortJson({
-				remote: false,
-				attrs: [
-					'.#packages.x86_64-linux.app',
-					'.#packages.x86_64-linux.multi',
-					'.#packages.x86_64-linux.floating'
-				],
-				installables: [
-					'.#packages.x86_64-linux.app^out',
-					'.#packages.x86_64-linux.multi^out,dev',
-					'.#packages.x86_64-linux.floating^out'
-				],
-				queryInstallables: [
-					appQueryInstallable,
-					multiOutputQueryInstallable,
-					floatingQueryInstallable
-				],
-				expectedPaths: [appPath, undefined, undefined],
-				roots: [
-					'github:owner/repo/main/app',
-					'github:owner/repo/main/multi',
-					'github:owner/repo/main/floating'
-				]
-			}),
-			publish: 'outputs',
-			build: 'rebuild'
-		};
-		const unpredictableInstallables = [
-			multiOutputQueryInstallable,
-			floatingQueryInstallable
-		];
-		const installables = [appQueryInstallable, ...unpredictableInstallables];
-		const run = await runPublicationFlow(
-			options,
-			[appPath, libraryBuiltPath, referencePath, floatingBuiltPath],
-			[],
-			installables
-		);
+	const multiOutputQueryInstallable =
+		'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv^dev,out';
 
-		expect({
-			cohortsFile: run.cohortsFile,
-			nixBuilds: run.nixBuilds.map((call) => call.slice(0, 4))
-		}).toStrictEqual({
-			cohortsFile: {
-				cohorts: [
-					{
-						installables,
-						rebuild: true,
-						keepGoing: true
-					}
-				]
-			},
-			nixBuilds: [
-				[installables, '', '', outLinkDirectory(directory)],
-				[
-					['.#packages.x86_64-linux.multi^out,dev'],
-					'',
-					'',
-					path.join(outLinkDirectory(directory), 'owners', '0')
-				],
-				[
-					['.#packages.x86_64-linux.floating^out'],
-					'',
-					'',
-					path.join(outLinkDirectory(directory), 'owners', '1')
-				]
+	it.each([
+		{
+			name: 'by their flake attributes',
+			derivationCacheFile: undefined,
+			owners: [
+				'.#packages.x86_64-linux.multi^out,dev',
+				'.#packages.x86_64-linux.floating^out'
 			]
-		});
-	});
+		},
+		{
+			name: "by their planned derivations after importing the plan job's derivations",
+			derivationCacheFile:
+				'/runner/temp/cupboard-derivations/cupboard-derivations.tar',
+			owners: [multiOutputQueryInstallable, floatingQueryInstallable]
+		}
+	])(
+		'rebuilds queryable targets whose output paths cannot be predicted under supervision and resolves them $name',
+		async ({ derivationCacheFile, owners }) => {
+			const options: BuildCohortOptions = {
+				...baseOptions(),
+				cohortJson: cohortJson({
+					remote: false,
+					attrs: [
+						'.#packages.x86_64-linux.app',
+						'.#packages.x86_64-linux.multi',
+						'.#packages.x86_64-linux.floating'
+					],
+					installables: [
+						'.#packages.x86_64-linux.app^out',
+						'.#packages.x86_64-linux.multi^out,dev',
+						'.#packages.x86_64-linux.floating^out'
+					],
+					queryInstallables: [
+						appQueryInstallable,
+						multiOutputQueryInstallable,
+						floatingQueryInstallable
+					],
+					expectedPaths: [appPath, undefined, undefined],
+					roots: [
+						'github:owner/repo/main/app',
+						'github:owner/repo/main/multi',
+						'github:owner/repo/main/floating'
+					]
+				}),
+				publish: 'outputs',
+				build: 'rebuild',
+				...(derivationCacheFile !== undefined && { derivationCacheFile })
+			};
+			const unpredictableInstallables = [
+				multiOutputQueryInstallable,
+				floatingQueryInstallable
+			];
+			const installables = [appQueryInstallable, ...unpredictableInstallables];
+			const run = await runPublicationFlow(
+				options,
+				[appPath, libraryBuiltPath, referencePath, floatingBuiltPath],
+				[],
+				installables
+			);
+
+			expect({
+				cohortsFile: run.cohortsFile,
+				nixBuilds: run.nixBuilds.map((call) => call.slice(0, 4))
+			}).toStrictEqual({
+				cohortsFile: {
+					cohorts: [
+						{
+							installables,
+							rebuild: true,
+							keepGoing: true
+						}
+					]
+				},
+				nixBuilds: [
+					[installables, '', '', outLinkDirectory(directory)],
+					...owners.map((owner, index) => [
+						[owner],
+						'',
+						'',
+						path.join(outLinkDirectory(directory), 'owners', String(index))
+					])
+				]
+			});
+		}
+	);
 
 	it.each([
 		{
@@ -10274,6 +10435,53 @@ if (args.includes('--help')) {
 			],
 			resultBuilds: [
 				[[floatingQueryInstallable], '', 'ssh-ng://build@example.test']
+			]
+		});
+	});
+
+	it('imports the planned derivations for a remote-store publication without evaluating them', async () => {
+		const run = await runPublicationFlow({
+			...baseOptions(),
+			cohortJson: remotelyQueryableCohortJson({
+				roots: [
+					'github:owner/repo/main',
+					'github:owner/repo/main',
+					'github:owner/repo/main'
+				]
+			}),
+			publish: 'outputs',
+			maxJobs: '0',
+			store: 'ssh-ng://build@example.test',
+			derivationCacheFile:
+				'/runner/temp/cupboard-derivations/cupboard-derivations.tar'
+		});
+
+		expect({
+			sequence: run.remoteConnection.sequence,
+			evaluationCalls: run.remoteConnection.evaluationCalls,
+			copyCalls: run.remoteConnection.copyCalls
+		}).toStrictEqual({
+			sequence: [
+				'local session',
+				'local root /nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+				'local root /nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+				'local root /nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv',
+				'import',
+				'plan',
+				'session',
+				'copy',
+				'publish',
+				'publish',
+				'closed',
+				'local closed'
+			],
+			evaluationCalls: [],
+			copyCalls: [
+				[
+					['/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'],
+					'ssh-ng://build@example.test',
+					run.remoteConnection.signal
+				]
 			]
 		});
 	});

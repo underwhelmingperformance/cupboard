@@ -32,8 +32,9 @@ You need these to install dependencies and run the unit tests:
 You also need these for some of the slower checks:
 
 - Nix. The conformance suite and the end-to-end suites need it, and so do the
-  `update:conformance-oracle` and `update:flake-deps` scripts. CI installs the
-  version pinned in
+  action unit tests (`pnpm test:actions`, part of `check:test`), some of which
+  run `nix store verify`, and the `update:conformance-oracle` and
+  `update:flake-deps` scripts. CI installs the version pinned in
   [`actions/install-nix/versions.env`][nix-installer-versions]. The conformance
   suite uses the separate `conformanceNix` output from [`flake.nix`][flake].
 - Docker, or another container engine that Testcontainers can drive. The

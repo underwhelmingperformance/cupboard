@@ -16,6 +16,11 @@ export interface NixCopyOptions {
 	readonly paths: readonly StorePathString[];
 	readonly from?: string;
 	readonly to: string;
+	/**
+	Leave out the line that Nix prints for each copied path. Errors still
+	reach the job log.
+	*/
+	readonly quiet?: boolean;
 }
 
 export interface NixCopyProcess extends AbortableChildProcessLifecycle {
@@ -55,7 +60,8 @@ class CopyExecution implements AbortableChildProcessLifecycle {
 
 	constructor(
 		readonly child: NixCopyProcess,
-		readonly callerSignal?: AbortSignal
+		readonly callerSignal: AbortSignal | undefined,
+		readonly description: string
 	) {
 		this.#signal =
 			callerSignal === undefined
@@ -100,7 +106,7 @@ class CopyExecution implements AbortableChildProcessLifecycle {
 			this.#status !== null &&
 			this.#status !== 0
 		) {
-			throw new CommandFailedError('nix copy', this.#status);
+			throw new CommandFailedError(this.description, this.#status);
 		}
 		if (this.#inputError !== undefined) {
 			throw this.#inputError;
@@ -109,7 +115,7 @@ class CopyExecution implements AbortableChildProcessLifecycle {
 			throw outcome.reason;
 		}
 		if (outcome.value.status !== 0) {
-			throw new CommandFailedError('nix copy', outcome.value.status);
+			throw new CommandFailedError(this.description, outcome.value.status);
 		}
 	}
 
@@ -157,6 +163,7 @@ export async function copyNixPaths(
 	const child = (dependencies.start ?? startNixCopy)(
 		[
 			'copy',
+			...(options.quiet === true ? ['--quiet'] : []),
 			...(options.from === undefined ? [] : ['--from', options.from]),
 			'--to',
 			options.to,
@@ -164,5 +171,42 @@ export async function copyNixPaths(
 		],
 		signal
 	);
-	await new CopyExecution(child, signal).run(options.paths);
+	await new CopyExecution(child, signal, 'nix copy').run(options.paths);
+}
+
+export interface NixVerifyOptions {
+	readonly paths: readonly StorePathString[];
+	/**
+	The store to read. Leave it out to read the default store.
+	*/
+	readonly store?: string;
+}
+
+/**
+Runs `nix store verify` on the closure of the given paths without putting the
+path list in argv. It fails unless every path in the closure has a content
+address that produces its store path or a signature from a key that this
+process's Nix configuration trusts. It does not read the NARs.
+*/
+export async function verifyNixPaths(
+	options: NixVerifyOptions,
+	signal?: AbortSignal,
+	dependencies: NixCopyDependencies = {}
+): Promise<void> {
+	signal?.throwIfAborted();
+	const child = (dependencies.start ?? startNixCopy)(
+		[
+			'store',
+			'verify',
+			'--quiet',
+			'--no-contents',
+			'--sigs-needed',
+			'1',
+			'--recursive',
+			...(options.store === undefined ? [] : ['--store', options.store]),
+			'--stdin'
+		],
+		signal
+	);
+	await new CopyExecution(child, signal, 'nix store verify').run(options.paths);
 }
