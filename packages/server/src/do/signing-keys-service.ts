@@ -57,9 +57,13 @@ import {
 	type MaintenanceProgress,
 	noProgressRetryMs
 } from './alarm.ts';
-import { CachePurgeBackoff } from './cache-purge-backoff.ts';
+import { chunk } from './bulk.ts';
+import {
+	CachePurgeBackoff,
+	type CachePurgeRowRetry
+} from './cache-purge-backoff.ts';
 import { CachePurgeRetryPolicy } from './cache-purge-retry.ts';
-import { type ServerContext } from './context.ts';
+import { type ServerContext, tagsPerPurgeRequest } from './context.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -119,6 +123,14 @@ type PurgeEntry = z.output<typeof purgeEntrySchema>;
 const purgeEntriesSchema = z.array(purgeEntrySchema).min(1);
 
 type BackfillRow = typeof schema.signingKeyBackfills.$inferSelect;
+
+// What recording a purged request did to its continuation row: kept it with
+// the remaining entries, deleted it after the last entry, or found it already
+// deleted by an aborted rotation.
+type ContinuationSettlement =
+	| { readonly kind: 'kept'; readonly retry: CachePurgeRowRetry }
+	| { readonly kind: 'deleted' }
+	| { readonly kind: 'missing' };
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -649,15 +661,19 @@ export class SigningKeysService {
 	/**
 	Records the entries this pass published and removes them from the
 	continuation. The continuation row survives while `remaining` holds the
-	entries a later pass still has to publish.
+	entries a later pass still has to publish. Reports `deleted` when no entry
+	remains, and otherwise `missing` if `abortKeyRotation` has deleted the
+	row. The abort also clears the pending generation of the narinfo rows and
+	deletes the backfill row in the same transaction, so the earlier writes
+	then match no row.
 	*/
 	private settleContinuation(
 		continuation: typeof schema.cachePurgeContinuations.$inferSelect,
 		entries: readonly PurgeEntry[],
 		remaining: readonly PurgeEntry[],
 		now: IsoTimestamp
-	): void {
-		this.context.db.transaction((tx) => {
+	): ContinuationSettlement {
+		return this.context.db.transaction((tx) => {
 			let resigned = 0;
 
 			for (const entry of entries) {
@@ -715,22 +731,34 @@ export class SigningKeysService {
 				}
 			}
 
-			if (remaining.length > 0) {
-				tx.update(schema.cachePurgeContinuations)
-					.set({
-						entriesJson: JSON.stringify(remaining),
-						nextAttemptAt: sql`null`,
-						failedAttempts: 0
-					})
+			if (remaining.length === 0) {
+				tx.delete(schema.cachePurgeContinuations)
 					.where(eq(schema.cachePurgeContinuations.id, continuation.id))
 					.run();
 
-				return;
+				return { kind: 'deleted' };
 			}
 
-			tx.delete(schema.cachePurgeContinuations)
+			// An update that matched nothing returns no row, although `get` is
+			// typed as always returning one.
+			const retry = tx
+				.update(schema.cachePurgeContinuations)
+				.set({
+					entriesJson: JSON.stringify(remaining),
+					nextAttemptAt: sql`null`,
+					failedAttempts: 0
+				})
 				.where(eq(schema.cachePurgeContinuations.id, continuation.id))
-				.run();
+				.returning({
+					nextAttemptAt: schema.cachePurgeContinuations.nextAttemptAt,
+					failedAttempts: schema.cachePurgeContinuations.failedAttempts
+				})
+				.all()
+				.at(0);
+
+			return retry === undefined
+				? { kind: 'missing' }
+				: { kind: 'kept', retry };
 		});
 	}
 
@@ -741,9 +769,14 @@ export class SigningKeysService {
 	Reports `partial` when entries remain, so the caller wakes the alarm for
 	another pass rather than staging more work on top of them.
 
-	If publication or cache-tag purging fails, the pass removes none of the
-	selected entries from the continuation. A later pass retries the same
-	leading page and may publish the same objects again. After a purge failure,
+	If publication fails, the pass removes none of the selected entries from
+	the continuation. A later pass retries the same leading page and may
+	publish the same objects again.
+
+	The page's tags can need several purge requests. The pass records the
+	entries of each request as soon as the request succeeds and removes them
+	from the continuation, so a retry after a refused request sends only the
+	tags that no request has purged. After a purge failure,
 	{@link CachePurgeBackoff} decides the earliest time for the next attempt,
 	and the pass reports `waiting` until then without publishing.
 	*/
@@ -801,45 +834,72 @@ export class SigningKeysService {
 			return 'retrying';
 		}
 
-		try {
-			await this.context.purgeCacheTags(entries.map((entry) => entry.tag));
-			await this.purgeBackoff.recordSuccess();
-			this.settleContinuation(continuation, entries, remaining, now);
+		let unsettled = queued;
+		let retryState: CachePurgeRowRetry = continuation;
 
-			return remaining.length > 0 ? 'partial' : 'settled';
-		} catch (error) {
-			const failedAt = Date.now();
-			const retry = await this.purgeBackoff.recordFailure(
-				error,
-				continuation,
-				failedAt
-			);
-			const message = errorMessage(error);
-			this.context.db
-				.update(schema.cachePurgeContinuations)
-				.set({
-					lastAttemptAt: isoTimestamp(new Date(failedAt)),
-					lastError: message,
-					...retry
-				})
-				.where(eq(schema.cachePurgeContinuations.id, continuation.id))
-				.run();
+		for (const accepted of chunk(entries, tagsPerPurgeRequest)) {
+			try {
+				await this.context.purgeCacheTags(accepted.map((entry) => entry.tag));
+			} catch (error) {
+				await this.recordPurgeFailure(continuation, retryState, error, now);
 
-			if (continuation.signingKeyId !== null) {
-				this.markRetrying(
-					continuation.signingKeyId,
-					'cache-purge',
-					now,
-					message
-				);
+				return 'retrying';
 			}
 
-			await armAlarmNoLaterThan(
-				this.context.ctx.storage,
-				await this.purgeBackoff.dueAt(retry, failedAt)
+			await this.purgeBackoff.recordSuccess();
+			unsettled = unsettled.slice(accepted.length);
+			const settlement = this.settleContinuation(
+				continuation,
+				accepted,
+				unsettled,
+				now
 			);
-			return 'retrying';
+
+			// The rotation was aborted during the request, so the rest of the page
+			// needs no purge.
+			if (settlement.kind === 'missing') {
+				return 'settled';
+			}
+
+			if (settlement.kind === 'kept') {
+				retryState = settlement.retry;
+			}
 		}
+
+		return remaining.length > 0 ? 'partial' : 'settled';
+	}
+
+	private async recordPurgeFailure(
+		continuation: typeof schema.cachePurgeContinuations.$inferSelect,
+		retryState: CachePurgeRowRetry,
+		error: unknown,
+		now: IsoTimestamp
+	): Promise<void> {
+		const failedAt = Date.now();
+		const retry = await this.purgeBackoff.recordFailure(
+			error,
+			retryState,
+			failedAt
+		);
+		const message = errorMessage(error);
+		this.context.db
+			.update(schema.cachePurgeContinuations)
+			.set({
+				lastAttemptAt: isoTimestamp(new Date(failedAt)),
+				lastError: message,
+				...retry
+			})
+			.where(eq(schema.cachePurgeContinuations.id, continuation.id))
+			.run();
+
+		if (continuation.signingKeyId !== null) {
+			this.markRetrying(continuation.signingKeyId, 'cache-purge', now, message);
+		}
+
+		await armAlarmNoLaterThan(
+			this.context.ctx.storage,
+			await this.purgeBackoff.dueAt(retry, failedAt)
+		);
 	}
 
 	private headBackfillContinuation():

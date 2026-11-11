@@ -1,4 +1,7 @@
-import { signingKeyGenerationSchema } from '@cupboard/nix-store/scalars';
+import {
+	signingKeyGenerationSchema,
+	signingKeyIdSchema
+} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import type {
 	KeyAbortResponseInput,
@@ -11,6 +14,7 @@ import {
 	keyRetireResponseSchema,
 	keyRotateResponseSchema
 } from '@cupboard/protocol/keys';
+import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -51,11 +55,12 @@ import {
 	uploadMetadata,
 	withoutAlarmArming
 } from '../test-support.ts';
+import { CachedTenantReads } from '../test-worker.ts';
 
 import { maintenanceRetryKey, noProgressRetryMs } from './alarm.ts';
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { CachePurgeRetryPolicy } from './cache-purge-retry.ts';
-import type { ServerContext } from './context.ts';
+import { ServerContext } from './context.ts';
 import { withDeadlineBudget } from './deadline.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import type { CupboardServer } from './server.ts';
@@ -144,6 +149,66 @@ async function withStagedBackfill<T>(
 			alarm.restore();
 		}
 	});
+}
+
+// The tags of the page that `pagedBackfill` queues.
+const pagedTags = Array.from(
+	{ length: 150 },
+	(_, index) => `narinfo-${String(index)}`
+);
+
+// Queues a backfill continuation of 150 entries, more than one purge request
+// can list, and returns a backfill service on the Paid plan's allowance, so
+// one pass publishes the whole page. The entries have no narinfo rows, so the
+// pass publishes nothing and purges every tag.
+function pagedEntries(cacheId: number) {
+	return pagedTags.map((tag, index) => ({
+		cacheId,
+		storePathHash: `${'0'.repeat(30)}${nixBase32Pair(index)}`,
+		narInfoGeneration: 1,
+		targetGeneration: 2,
+		tag
+	}));
+}
+
+function pagedBackfill(
+	instance: CupboardServer,
+	state: DurableObjectState,
+	now: number
+): { readonly context: ServerContext; readonly service: SigningKeysService } {
+	const context = new ServerContext(state, {
+		...instance.context.env,
+		CUPBOARD_SUBREQUESTS_PER_INVOCATION: String(
+			workersInvocationAllowances.paid.subrequests
+		)
+	});
+	const entries = pagedEntries(resolvedCache(context).id);
+	context.db
+		.insert(schema.cachePurgeContinuations)
+		.values({
+			id: 'paged',
+			kind: 'backfill',
+			entriesJson: JSON.stringify(entries),
+			createdAt: isoTimestamp(new Date(now)),
+			expiresAt: isoTimestamp(new Date(now + 3_600_000))
+		})
+		.run();
+
+	return {
+		context,
+		service: new SigningKeysService(
+			context,
+			new NarInfoObjectsService(context),
+			retryPolicy
+		)
+	};
+}
+
+function continuationIds(context: ServerContext): { id: string }[] {
+	return context.db
+		.select({ id: schema.cachePurgeContinuations.id })
+		.from(schema.cachePurgeContinuations)
+		.all();
 }
 
 // A backfill pass that cannot stage reports a stall, and the scheduler records
@@ -1075,6 +1140,163 @@ describe('signing key rotation', () => {
 		expect({ remaining }).toStrictEqual({
 			remaining:
 				queued - backfillEntriesPerPass(await deployedSubrequestAllowance())
+		});
+	});
+
+	// On the Paid plan's allowance, a page of 150 entries needs two purge
+	// requests. The first request succeeds and the second is refused, so the
+	// retry sends only the second request's tags again.
+	it('resends only the refused purge request of a backfill page', async () => {
+		await bootstrap();
+		const now = Date.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const { service } = pagedBackfill(instance, state, now);
+				const alarm = fakeAlarm(state.storage);
+				const purge = vi
+					.spyOn(CachedTenantReads.prototype, 'purgeTags')
+					.mockResolvedValueOnce({ success: true, errors: [] })
+					.mockResolvedValueOnce({
+						success: false,
+						errors: [
+							{ code: 1134, message: 'Unable to purge, rate limit reached.' }
+						]
+					})
+					.mockResolvedValue({ success: true, errors: [] });
+
+				try {
+					await service.runBackfillOnce();
+					vi.setSystemTime(now + 45_000);
+					await service.runBackfillOnce();
+
+					return {
+						purgeCalls: purge.mock.calls.map(([tags]) => tags),
+						continuations: continuationIds(instance.context)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			purgeCalls: [
+				pagedTags.slice(0, 100),
+				pagedTags.slice(100),
+				pagedTags.slice(100)
+			],
+			continuations: []
+		});
+	});
+
+	// `abortKeyRotation` runs during the first purge request of a page. It
+	// deletes the rotation's continuation rows, so the pass sends no request
+	// for the rest of the page. It also clears the narinfo's pending
+	// generation and deletes the backfill row, so recording the request
+	// changes neither row.
+	it('stops purging a backfill page when the rotation is aborted', async () => {
+		const init = await bootstrap();
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'k'.repeat(32),
+			name: 'aborted-backfill'
+		});
+		await withoutAlarmArming(() => pushPath(init.token, path));
+		const now = Date.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const alarm = fakeAlarm(state.storage);
+				const { context, service } = pagedBackfill(instance, state, now);
+				const rotation = await service.rotateKey();
+				const keyId = signingKeyIdSchema.parse(rotation.rotated.key.id);
+				const { generation } = z
+					.object({ generation: signingKeyGenerationSchema })
+					.parse(
+						context.db
+							.select({ generation: schema.signingKeyBackfills.generation })
+							.from(schema.signingKeyBackfills)
+							.where(eq(schema.signingKeyBackfills.keyId, keyId))
+							.get()
+					);
+				const narInfo = context.db
+					.update(schema.narInfos)
+					.set({ pendingSignatureGeneration: generation })
+					.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+					.returning({
+						cacheId: schema.narInfos.cacheId,
+						generation: schema.narInfos.generation
+					})
+					.get();
+				context.db
+					.update(schema.cachePurgeContinuations)
+					.set({
+						signingKeyId: keyId,
+						entriesJson: JSON.stringify([
+							{
+								cacheId: narInfo.cacheId,
+								storePathHash: path.storePathHash,
+								narInfoGeneration: narInfo.generation,
+								targetGeneration: generation,
+								tag: pagedTags[0]
+							},
+							...pagedEntries(narInfo.cacheId).slice(1)
+						])
+					})
+					.where(eq(schema.cachePurgeContinuations.id, 'paged'))
+					.run();
+				const purge = vi
+					.spyOn(context, 'purgeCacheTags')
+					.mockImplementationOnce(async () => {
+						await service.abortKeyRotation(keyId);
+					})
+					.mockResolvedValue(undefined);
+
+				try {
+					const outcome = await service.runBackfillOnce();
+
+					return {
+						outcome,
+						purgeCalls: purge.mock.calls.map(([tags]) => tags),
+						continuations: continuationIds(instance.context),
+						narInfo: context.db
+							.select({
+								signatureGeneration: schema.narInfos.signatureGeneration,
+								pendingSignatureGeneration:
+									schema.narInfos.pendingSignatureGeneration
+							})
+							.from(schema.narInfos)
+							.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+							.all()
+							.map((row) => ({
+								signatureGeneration: row.signatureGeneration,
+								pendingSignatureGeneration:
+									row.pendingSignatureGeneration ?? undefined
+							})),
+						backfills: context.db
+							.select({ keyId: schema.signingKeyBackfills.keyId })
+							.from(schema.signingKeyBackfills)
+							.all()
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			outcome: 'progressed',
+			purgeCalls: [pagedTags.slice(0, 100)],
+			continuations: [],
+			narInfo: [
+				{ signatureGeneration: 1, pendingSignatureGeneration: undefined }
+			],
+			backfills: []
 		});
 	});
 
