@@ -30,7 +30,9 @@ deployment, you install a newer CLI and deploy with it.
 
 `cupboard deploy` is another name for `cupboard init`, and takes the same
 options. An upgrade keeps the custom domain, resource names and cron triggers.
-If you passed `--workers-plan` when you first deployed, pass it again. See
+If you passed `--workers-plan` or `--deployment-name` when you first deployed,
+pass them again. Without `--deployment-name`, `init` updates the deployment
+called `cupboard`. See
 [Running `init` again](./deploying.md#running-init-again).
 
 [release-notes]: https://github.com/underwhelmingperformance/cupboard/releases

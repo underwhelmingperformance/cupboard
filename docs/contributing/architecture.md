@@ -61,6 +61,16 @@ queue. The diagram shows how they connect:
 The D1 box represents the shared `CUPBOARD_DB` database. The control Worker also
 binds a separate `CONTROL_DB` database, which the tenant Worker never receives.
 
+The names in the diagram and below are those of the default deployment. A
+deployment with a deployment name (`cupboard deploy --deployment-name`) uses
+that name in place of `cupboard` at the start of every resource name, and its
+own rate-limit namespace ID. `withDeploymentName` in
+`packages/cli/src/deploy/deployment-name.ts` derives the names. See [Several
+deployments on one account][several-deployments].
+
+[several-deployments]:
+  ../operator/deploying.md#several-deployments-on-one-account
+
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a
 tenant URL, `/t/<tenant>/...`, are checked by the control Worker and then either

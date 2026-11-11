@@ -261,8 +261,10 @@ Once the deployment has an admin, you can upgrade it from CI with a token. See
 ## Custom domains
 
 By default, the deployment is served from
-`https://cupboard.<your-subdomain>.workers.dev`. To serve it from your own
-domain as well, pass `--domain`:
+`https://cupboard.<your-subdomain>.workers.dev`, or from
+`https://<name>.<your-subdomain>.workers.dev` for a deployment with a
+[deployment name](#several-deployments-on-one-account). To serve it from your
+own domain as well, pass `--domain`:
 
 ```sh
 cupboard init --domain cache.example.com
@@ -336,7 +338,9 @@ commands, so many jobs that start in the same minute can receive status 429.
 The Worker counts the requests with the Workers rate-limiting binding
 `TOKEN_RATE_LIMITER` and the namespace ID `28726273`. Every Worker in the
 account with a rate-limiting binding for that namespace ID shares the counts, so
-don't use that namespace ID in another Worker.
+don't use that namespace ID in another Worker. A deployment with a
+[deployment name](#several-deployments-on-one-account) uses another namespace
+ID, which `init` computes from the name, so it has its own counts.
 
 For a custom domain, you can also add a [rate limiting rule][zone-rate-limit] to
 the zone, which Cloudflare applies before a request reaches the Worker. On the
@@ -592,6 +596,12 @@ cupboard uses, not your Cloudflare subscription.
 
 ## What `init` creates
 
+These are the names for a deployment without a
+[deployment name](#several-deployments-on-one-account). With
+`--deployment-name`, the Worker, database, bucket, KV namespace and queue names
+start with the deployment name instead of `cupboard`. The account API token's
+name contains the bucket name, so it differs too.
+
 | Resource                               | Name                                                                         |
 | -------------------------------------- | ---------------------------------------------------------------------------- |
 | Control Worker, serving the deployment | `cupboard`                                                                   |
@@ -611,16 +621,18 @@ cupboard uses, not your Cloudflare subscription.
 Before it changes anything, `init` shows the plan and a menu for changing it. In
 the menu you can choose the names of the R2 bucket, both D1 databases, the
 maintenance queue and its dead-letter queue, and change the control Worker's
-cron triggers. The KV namespace names can't be changed. The list of cron
-triggers can't be empty, because the control Worker only runs maintenance when a
-cron trigger fires.
+cron triggers. The menu can't change the Worker names or the KV namespace names.
+They follow the [deployment name](#several-deployments-on-one-account). The list
+of cron triggers can't be empty, because the control Worker only runs
+maintenance when a cron trigger fires.
 
-On an account that already has a control Worker, the plan starts from the
-existing deployment. `init` reads the bucket, the database and the maintenance
-queue from the control Worker's bindings, the dead-letter queue from its queue
-consumer, and the cron triggers from its schedules. Accepting the plan as shown,
-or deploying with `--yes`, keeps them. On an account without a control Worker,
-the plan starts from the release's defaults.
+When the account already has the deployment's control Worker, the plan starts
+from the existing deployment. `init` reads the bucket, the database and the
+maintenance queue from the control Worker's bindings, the dead-letter queue from
+its queue consumer, and the cron triggers from its schedules. Accepting the plan
+as shown, or deploying with `--yes`, keeps them. When the account doesn't have
+the deployment's control Worker, the plan starts from the release's defaults,
+named for the deployment.
 
 A release that changes a default resource name or cron trigger doesn't change an
 existing deployment. There is one exception: when the control Worker has no
@@ -683,6 +695,51 @@ Once the deployment has an admin, `init` needs an admin token to update it. See
 Running `init` again with a newer CLI is how you upgrade. See
 [Upgrading](./upgrading.md).
 
+## Several deployments on one account
+
+One Cloudflare account can have several deployments, for example a staging
+deployment next to the production one. `init` tells them apart by their
+**deployment name**, which you give with `--deployment-name`. The deployment
+name is the control Worker's name, and every other resource in
+[What `init` creates](#what-init-creates) has a name that starts with it.
+Without `--deployment-name`, `init` uses the deployment name `cupboard`.
+
+To create a second deployment, choose a deployment name and an
+[instance name](#the-instance-name) for it:
+
+```sh
+cupboard init --deployment-name staging --instance-name staging
+```
+
+With the deployment name `staging`, the control Worker is called `staging`, the
+tenant Worker `staging-tenant`, the bucket `staging-blobs`, the databases
+`staging` and `staging-control`, and so on. The deployment is served from
+`https://staging.<your-subdomain>.workers.dev`, or from the domain that you give
+with `--domain`.
+
+Pass the same `--deployment-name` every time you run `init` for that deployment,
+including upgrades and runs from CI. `init` finds the existing deployment by the
+name of its control Worker. A run without `--deployment-name` therefore updates
+the deployment called `cupboard`, whatever `--instance-name` or `--domain` you
+pass.
+
+A deployment name follows the rules for Worker names: lower-case letters, digits
+and hyphens, without a hyphen at either end. Every name derived from it must
+also fit Cloudflare's limit of 63 characters. The longest suffix is
+`-maintenance-dlq`, so a deployment name can be up to 47 characters long.
+
+A deployment name can't end with one of those suffixes, such as `-tenant` or
+`-control`. The control Worker of a deployment called `staging-tenant` would
+otherwise be the tenant Worker of the deployment called `staging`.
+
+Give each deployment its own instance name. Nix clients identify a signing key
+by its name, and two deployments with the same instance name can each have a key
+called, for example, `staging-acme-1`.
+
+The CLI saves sessions by URL, so sessions for the two deployments stay apart.
+Each deployment has its own workers.dev address, and a custom domain can only
+serve one Worker.
+
 ## If the control Worker was deleted
 
 When the control Worker no longer exists, `init` reads the database binding of
@@ -711,6 +768,10 @@ that you're deploying:
      queue;
    - the `CUPBOARD_TENANT` service and the `CUPBOARD_DO` `script_name`: the
      tenant Worker's script name;
+   - the `TOKEN_RATE_LIMITER` `namespace_id` stays `28726273`, even for a
+     deployment with a [deployment name](#several-deployments-on-one-account),
+     whose own ID `init` computes from the name. Until step 7 sets that ID, the
+     redeployed Worker shares its rate-limit counts with the default deployment;
    - add `CUPBOARD_DEPLOYMENT_URL` under `vars`: the deployment's URL, such as
      `https://cupboard.example.workers.dev`. The checkout's configuration does
      not include this binding; `init` normally adds it when uploading the
@@ -728,15 +789,19 @@ that you're deploying:
 6. If the deployment served on a custom domain, route that domain to the Worker
    again.
 7. Run `cupboard init` as the admin, with `--domain` set to the custom domain if
-   the deployment served on one. `init` checks the admin token against the
-   redeployed Worker and replaces the Worker with this release.
+   the deployment served on one, and `--deployment-name` set to the deployment's
+   name if it has one. `init` checks the admin token against the redeployed
+   Worker and replaces the Worker with this release.
 
 ## Removing a deployment
 
 There's no command to remove a deployment. To remove one:
 
 1. Delete the resources listed in [What `init` creates](#what-init-creates), and
-   any custom domain, in the Cloudflare dashboard.
+   any custom domain, in the Cloudflare dashboard. On an account with
+   [several deployments](#several-deployments-on-one-account), delete only the
+   deployment's own resources: the names in the table, with the deployment name
+   in place of `cupboard`.
 2. On every machine that signed in to the deployment or its tenants, delete the
    saved sessions. `cupboard logout <url>` deletes the session for one
    deployment or tenant URL. If the machine uses no other cupboard deployment,
