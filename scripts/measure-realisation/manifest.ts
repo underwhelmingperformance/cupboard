@@ -1,11 +1,11 @@
+import {
+	type PublishTarget,
+	publishTargetsSchema
+} from '@cupboard/protocol/publish-plan';
 import { UsageError } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
-import {
-	expandComponents,
-	type PublishTarget,
-	publishTargetsSchema
-} from '../../actions/src/publish-plan.ts';
+import { expandComponents } from '../../actions/src/publish-plan.ts';
 
 export abstract class ManifestError extends UsageError {}
 

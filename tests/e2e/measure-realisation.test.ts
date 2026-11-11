@@ -2,9 +2,9 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
+import type { PublishTarget } from '@cupboard/protocol/publish-plan';
 import { describe, expect, it } from 'vitest';
 
-import type { PublishTarget } from '../../actions/src/publish-plan.ts';
 import { discoverNixStoreConfig } from '../../packages/nix/src/index.ts';
 import { parseFlakeLockRevision } from '../../scripts/conformance-oracle.ts';
 import {

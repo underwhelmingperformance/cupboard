@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 
+import { publishTargetsSchema } from '@cupboard/protocol/publish-plan';
 import {
 	type AbortableChildProcessLifecycle,
 	type ChildProcessEscalationScheduler,
@@ -9,7 +10,6 @@ import {
 import { CodedError } from '@cupboard/shared/errors';
 
 import type { Environment } from '../inputs.ts';
-import { publishTargetsSchema } from '../publish-plan.ts';
 
 const maximumCapturedOutputBytes = 256 * 1024 * 1024;
 

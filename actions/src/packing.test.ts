@@ -1,7 +1,7 @@
+import type { Cohort, PublishTarget } from '@cupboard/protocol/publish-plan';
 import { describe, expect, it } from 'vitest';
 
 import { packCohorts } from './packing.ts';
-import type { Cohort, PublishTarget } from './publish-plan.ts';
 
 function target(
 	attribute: string,

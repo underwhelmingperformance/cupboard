@@ -15,7 +15,6 @@ import {
 import {
 	collectLines,
 	isEnabled,
-	isNixPositionalArgument,
 	provided,
 	providedCache,
 	providedCacheCredentials,
@@ -33,19 +32,6 @@ const namedCache = (value: string): CacheScope => ({
 	name: cacheName(value)
 });
 const readPassword = 'A'.repeat(43);
-
-describe('isNixPositionalArgument', () => {
-	it.each([
-		['a flake attribute', '.#packages.x86_64-linux.app', true],
-		['an option-like value', '--refresh', false],
-		['a line break', '.#app\n--refresh', false],
-		['an embedded tab', '.#app\tdev', false],
-		['a delete character', '.#app\u{7F}', false],
-		['a C1 control character', '.#app\u{85}', false]
-	])('%s', (_name, value, expected) => {
-		expect(isNixPositionalArgument(value)).toBe(expected);
-	});
-});
 
 describe('provided', () => {
 	it.each([

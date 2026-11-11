@@ -12,6 +12,15 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { cacheAvailabilityRequestSchema } from '@cupboard/protocol/cache-availability';
+import {
+	type Cohort,
+	cohortLabelMaxLength,
+	type PublishComponent,
+	publishComponentSchema,
+	type PublishTarget,
+	publishTargetSchema,
+	publishTargetsSchema
+} from '@cupboard/protocol/publish-plan';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
@@ -48,8 +57,6 @@ import {
 	assertDistinctGroupKeys,
 	availableCachePaths,
 	cacheProbePaths,
-	type Cohort,
-	cohortLabelMaxLength,
 	cohortPreFilterDecision,
 	cohortsFor,
 	derivationToTargetsFor,
@@ -61,11 +68,6 @@ import {
 	joinRoot,
 	type NixEvaluator,
 	planPublish,
-	type PublishComponent,
-	publishComponentSchema,
-	type PublishTarget,
-	publishTargetSchema,
-	publishTargetsSchema,
 	type TargetCoverage,
 	type TargetEvaluation,
 	targetIdentityKey

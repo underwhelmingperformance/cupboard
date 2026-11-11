@@ -30,6 +30,7 @@ import {
 	type DerivationPath,
 	derivationPathSchema
 } from '@cupboard/protocol/build';
+import { isNixPositionalArgument } from '@cupboard/protocol/publish-plan';
 import {
 	observeChildProcess,
 	waitForAbortableChildProcess
@@ -71,7 +72,6 @@ import {
 import {
 	collectLines,
 	isEnabled,
-	isNixPositionalArgument,
 	provided,
 	providedChoice
 } from '../options.ts';

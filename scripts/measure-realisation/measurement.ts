@@ -3,9 +3,9 @@ import {
 	plannerPartitionSchema,
 	substitutableSizesSchema
 } from '@cupboard/protocol/build';
+import type { PublishTarget } from '@cupboard/protocol/publish-plan';
 import { z } from 'zod';
 
-import type { PublishTarget } from '../../actions/src/publish-plan.ts';
 import type {
 	NixDerivedPathString,
 	NixMissingPartition

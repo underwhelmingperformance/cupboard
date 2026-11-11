@@ -2,6 +2,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { resolveSink } from '@cupboard/logger';
+import { publishTargetsSchema } from '@cupboard/protocol/publish-plan';
 import { CodedError, formatErrorWithCauses } from '@cupboard/shared/errors';
 import { subprocessTraceEnvironment } from '@cupboard/shared/node-tracing';
 import { z } from 'zod';
@@ -9,7 +10,6 @@ import { z } from 'zod';
 import { cupboardDebugArguments } from '../cupboard-run.ts';
 import { withActionLogging } from '../diagnostics/logging.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
-import { publishTargetsSchema } from '../publish-plan.ts';
 
 import {
 	type CapturedCommand,

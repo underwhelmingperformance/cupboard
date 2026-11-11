@@ -5,6 +5,7 @@ import path from 'node:path';
 import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import { type StorePathString } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type PlanReferenceOutcome } from '@cupboard/protocol/publish-plan';
 import {
 	pushSummaryResultKind,
 	pushSummarySchema
@@ -34,15 +35,6 @@ export interface ReferencePlanInputs extends PlanInputs {
 	readonly referenceSource: string;
 	readonly fallbackReadUser: ReadUser | '';
 	readonly fallbackReadPassword: string;
-}
-
-export interface PlanReferenceOutcome {
-	readonly attr: string;
-	readonly root: string;
-	readonly source: string;
-	readonly paths: readonly StorePathString[];
-	readonly status: 'published' | 'unavailable' | 'failed';
-	readonly reason?: string;
 }
 
 export interface ReferencePlanDependencies {
