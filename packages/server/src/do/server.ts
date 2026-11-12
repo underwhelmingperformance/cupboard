@@ -80,6 +80,7 @@ import { isD1Overload } from '../db/transient.ts';
 import {
 	CacheCatalogueMigrationPendingError,
 	CacheNotFoundError,
+	CommitEntrySubrequestsExhaustedError,
 	CommitSessionGrantsUnavailableError,
 	CommitSessionLimitError,
 	CommitUpgradeRequiredError,
@@ -279,6 +280,10 @@ import { SigningKeysService } from './signing-keys-service.ts';
 import { StatsService } from './stats-service.ts';
 import {
 	enterSubrequestSliceOnDispatch,
+	hasRefusedSubrequests,
+	isSubrequestSliceRefusal,
+	recordRefusedUnit,
+	refusedUnits,
 	subrequestSliceBudget
 } from './subrequest-slice.ts';
 import {
@@ -1510,6 +1515,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				request.entries.map(async (entry) => {
 					await this.commitEntrySemaphore.acquire();
 					try {
+						if (hasRefusedSubrequests()) {
+							refusePublication(
+								socket,
+								attachment,
+								entry.operationId,
+								'subscribe',
+								new CommitEntrySubrequestsExhaustedError()
+							);
+							return;
+						}
 						const command = {
 							socket,
 							attachment,
@@ -1539,6 +1554,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			request.entries.map(async (entry) => {
 				await this.commitEntrySemaphore.acquire();
 				try {
+					if (hasRefusedSubrequests()) {
+						refusePublication(
+							socket,
+							attachment,
+							entry.operationId,
+							'publish',
+							new CommitEntrySubrequestsExhaustedError()
+						);
+						return;
+					}
 					await this.runPublication({
 						socket,
 						attachment,
@@ -1620,7 +1645,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					retention: true
 				},
 				...(entry.blob !== undefined && { blob: entry.blob }),
-				answerFromState: () => this.replayAfterAdmission(command)
+				answerFromState: () => this.replayAfterAdmission(command),
+				refuseExhausted: () => {
+					refusePublication(
+						socket,
+						attachment,
+						entry.operationId,
+						'publish',
+						new CommitEntrySubrequestsExhaustedError()
+					);
+				}
 			});
 		} catch (error) {
 			// The operation can fail or pass its deadline, and the push can expire,
@@ -2085,7 +2119,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			identity,
 			advisory,
 			blob,
-			answerFromState
+			answerFromState,
+			refuseExhausted
 		} = command;
 		try {
 			// Record the session before the commit can defer, so a verdict reached
@@ -2124,6 +2159,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				...(outcome.grace !== undefined && { grace: outcome.grace })
 			});
 		} catch (error) {
+			if (isSubrequestSliceRefusal(error)) {
+				if (refuseExhausted === undefined) {
+					answerExhaustedEntry(socket, uploadId);
+				} else {
+					refuseExhausted();
+				}
+				return;
+			}
 			// The commit can find that the operation failed, expired or passed its
 			// recovery deadline after admission accepted it. It can also find the
 			// pending row gone, because verification completed the operation or a
@@ -2148,7 +2191,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				return;
 			}
 			if (identity !== undefined && error instanceof UploadNotFoundError) {
-				await this.resolveGoneCommit(socket, cache, uploadId, identity);
+				await this.resolveGoneCommitWithinSlice(
+					socket,
+					cache,
+					uploadId,
+					identity
+				);
 				return;
 			}
 
@@ -2203,6 +2251,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			socket,
 			await this.goneCommitFrame(cache, uploadId, identity)
 		);
+	}
+
+	private async resolveGoneCommitWithinSlice(
+		socket: WebSocket,
+		cache: ResolvedCache,
+		uploadId: UploadId,
+		identity: Pick<CommitBatchEntry, 'storePathHash' | 'narHash' | 'retention'>
+	): Promise<void> {
+		try {
+			await this.resolveGoneCommit(socket, cache, uploadId, identity);
+		} catch (error) {
+			if (!isSubrequestSliceRefusal(error)) {
+				throw error;
+			}
+			answerExhaustedEntry(socket, uploadId);
+		}
 	}
 
 	private async goneCommitFrame(
@@ -2412,6 +2476,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		let hasDeferred = false;
 		for (const entry of entries) {
 			const { uploadId } = entry;
+			if (hasRefusedSubrequests()) {
+				answerExhaustedEntry(socket, uploadId);
+				continue;
+			}
 			const row = this.context.db
 				.select()
 				.from(schema.pendingUploads)
@@ -2419,7 +2487,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.get();
 
 			if (row === undefined) {
-				await this.resolveGoneCommit(socket, cache, uploadId, entry);
+				await this.resolveGoneCommitWithinSlice(socket, cache, uploadId, entry);
 				continue;
 			}
 
@@ -3924,6 +3992,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			operation: request.op,
 			messageBytes: new TextEncoder().encode(text).byteLength
 		});
+		try {
+			await this.runCommitSocketRequest(socket, attachment, request);
+		} finally {
+			const refused = refusedUnits();
+			if (refused > 0) {
+				rootLogger().warn('commit message ran out of subrequests', {
+					operation: request.op,
+					refusedEntries: refused
+				});
+			}
+		}
+	}
+
+	private async runCommitSocketRequest(
+		socket: WebSocket,
+		attachment: CommitSessionAttachment,
+		request: CommitSessionRequest
+	): Promise<void> {
 		const { cache: cacheScope, sessionId } = attachment;
 
 		if (request.op === 'request-credit') {
@@ -4061,6 +4147,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						await this.commitEntrySemaphore.acquire();
 
 						try {
+							if (hasRefusedSubrequests()) {
+								answerExhaustedEntry(socket, entry.uploadId);
+								answered.add(entry.uploadId);
+								return;
+							}
 							await this.runSessionCommit({
 								logger,
 								socket,
@@ -4972,6 +5063,9 @@ interface SessionCommit {
 	// For a publication entry: answers the entry from the operation's state when
 	// the commit finds that the operation has changed.
 	readonly answerFromState?: () => Promise<void>;
+	// For a publication entry: answers the entry when the message's slice
+	// refuses a call of the commit.
+	readonly refuseExhausted?: () => void;
 }
 
 // For a pruned record, `frame` is the `settled` frame for a path served with the
@@ -5081,11 +5175,16 @@ function refusePublication(
 	operation: 'publish' | 'subscribe',
 	failure: unknown
 ): void {
-	const error = isD1Overload(failure)
-		? new DatabaseOverloadedError(failure)
-		: isTransientR2Error(failure)
-			? new R2UnavailableError(failure)
-			: failure;
+	const error = isSubrequestSliceRefusal(failure)
+		? new CommitEntrySubrequestsExhaustedError()
+		: isD1Overload(failure)
+			? new DatabaseOverloadedError(failure)
+			: isTransientR2Error(failure)
+				? new R2UnavailableError(failure)
+				: failure;
+	if (error instanceof CommitEntrySubrequestsExhaustedError) {
+		recordRefusedUnit();
+	}
 	const isKnown = error instanceof ServerHttpError;
 	if (!isKnown) {
 		rootLogger().error('publication failed', {
@@ -5105,7 +5204,9 @@ function refusePublication(
 						? error.reason
 						: error instanceof InsufficientScopeError
 							? 'forbidden'
-							: isKnown && error.status < serverErrorStatus
+							: isKnown &&
+								  !(error instanceof CommitEntrySubrequestsExhaustedError) &&
+								  error.status < serverErrorStatus
 								? 'invalid-publication'
 								: 'temporary-failure';
 	sendCommitSessionFrame(socket, {
@@ -5117,6 +5218,21 @@ function refusePublication(
 				: releasedRefusalReason(reason),
 		status: isKnown ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
 		message: isKnown ? error.message : 'internal error'
+	});
+}
+
+// Answers an entry with a retryable error after the message's subrequest slice
+// refused work. The status is `commitEntryResendStatus`: current clients send
+// the entry again first in their next message, and released clients retry it
+// like any other 429.
+function answerExhaustedEntry(socket: WebSocket, uploadId: UploadId): void {
+	recordRefusedUnit();
+	const exhausted = new CommitEntrySubrequestsExhaustedError();
+	sendCommitSessionFrame(socket, {
+		ev: 'error',
+		uploadId,
+		status: exhausted.status,
+		message: exhausted.message
 	});
 }
 

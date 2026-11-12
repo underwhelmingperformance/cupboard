@@ -8,8 +8,10 @@ import {
 	commitAuthenticationExpiredCloseReason,
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
+	commitEntryResendStatus,
 	type CommitSessionFrameInput,
 	publicationCapability,
+	type PublicationEntry,
 	publicationMaxFrameBytes,
 	type PushId,
 	pushIdSchema,
@@ -1086,6 +1088,52 @@ describe('batch message windowing', () => {
 		session.close();
 	});
 
+	it.each([
+		{
+			window: 'a free slot',
+			ids: ['upload-1', 'upload-2'],
+			sent: [batchOp(['upload-1', 'upload-2']), batchOp(['upload-2'])]
+		},
+		{
+			window: 'no free slot',
+			ids: ['upload-1', 'upload-2', 'upload-3', 'upload-4', 'upload-5'],
+			sent: [
+				batchOp(['upload-1', 'upload-2']),
+				batchOp(['upload-3', 'upload-4']),
+				batchOp(['upload-5']),
+				batchOp(['upload-2'])
+			]
+		}
+	])(
+		'sends an entry that ran out of its message calls in the next message with $window',
+		({ ids, sent }) => {
+			const socket = new FakeCommitSocket();
+			const session = openSession(socket);
+			for (const id of ids) {
+				void session.commit(targetFor(id));
+			}
+
+			socket.emit('upgrade', {
+				headers: { 'x-cupboard-commit-capabilities': 'commit-batch;max=2' }
+			});
+			socket.emit('open');
+			socket.emit(
+				'message',
+				frame({
+					ev: 'error',
+					uploadId: 'upload-2',
+					status: commitEntryResendStatus,
+					message: 'Send the entry again.'
+				})
+			);
+			// The answer for the second message frees a slot in a full window.
+			socket.emit('message', settledFrame('upload-3'));
+
+			expect(socket.sent).toStrictEqual(sent);
+			session.close();
+		}
+	);
+
 	it('replays a queued-but-unsent chunk exactly once on reconnect, not double-sending', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
@@ -2140,6 +2188,47 @@ describe('credit-paced commits', () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	it('sends an entry that ran out of its message calls ahead of the queued entries', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const commits = queuedIds.map((id) => session.commit(targetFor(id)));
+
+		advertiseCredit(socket, 2, 2);
+		socket.emit('open');
+		socket.emit('message', settledFrame('upload-1'));
+		socket.emit(
+			'message',
+			frame({
+				ev: 'error',
+				uploadId: 'upload-2',
+				status: commitEntryResendStatus,
+				message: 'Send the entry again.'
+			})
+		);
+		socket.emit('message', frame({ ev: 'credit', grant: 1 }));
+		socket.emit('message', frame({ ev: 'credit', grant: 1 }));
+		socket.emit('message', settledFrame('upload-2'));
+		socket.emit('message', settledFrame('upload-3'));
+
+		expect({
+			sent: socket.sent,
+			outcomes: await Promise.all(commits.map((commit) => ackOf(commit)))
+		}).toStrictEqual({
+			sent: [
+				batchOp(['upload-1', 'upload-2']),
+				requestCreditOp(1),
+				requestCreditOp(2),
+				batchOp(['upload-2']),
+				batchOp(['upload-3'])
+			],
+			outcomes: queuedIds.map(() => ({
+				storePathHash,
+				narHash,
+				status: 'committed'
+			}))
+		});
 	});
 
 	// A zero-credit session declares the queued demand once, then consumes each
@@ -4680,6 +4769,92 @@ describe('publication operations', () => {
 			path
 		});
 	});
+
+	it.each([
+		{
+			kind: 'an error frame',
+			refusal: (uploadId: string) =>
+				frame({
+					ev: 'error',
+					uploadId,
+					status: commitEntryResendStatus,
+					message: 'Send the entry again.'
+				})
+		},
+		{
+			kind: 'a temporary-failure refusal',
+			refusal: (uploadId: string) =>
+				frame({
+					ev: 'publication-refused',
+					uploadId,
+					reason: 'temporary-failure',
+					status: commitEntryResendStatus,
+					message: 'Send the entry again.'
+				})
+		}
+	])(
+		'sends a publication again at once after $kind for its message calls, and retries it with back-off once it was first',
+		async ({ refusal }) => {
+			const socket = new FakeCommitSocket();
+			const session = openSession(socket);
+			const secondId = uploadIdSchema.parse('b'.repeat(64));
+			const second = {
+				...publicationTarget,
+				uploadId: secondId,
+				publication: {
+					...publication,
+					entry: { ...publication.entry, operationId: secondId }
+				}
+			};
+			void session.commit(publicationTarget);
+			const refused = session.commit(second);
+			socket.emit('upgrade', {
+				headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+			});
+			socket.emit('open');
+			await Promise.resolve();
+			const publish = (entries: readonly PublicationEntry[]) =>
+				JSON.stringify({
+					op: 'publish-batch',
+					pushId: publication.pushId,
+					entries
+				});
+
+			socket.emit('message', refusal(secondId));
+			const afterFollowingRefusal = socket.sent.filter(
+				(sent) => sent !== 'ping'
+			);
+			// Each later refusal finds the entry first in its message. Four of them
+			// exhaust the three-retry budget.
+			const failed = rejectedBy(refused, CupboardHttpError);
+			for (let attempt = 0; attempt < 4; attempt += 1) {
+				socket.emit('message', refusal(secondId));
+				await vi.advanceTimersByTimeAsync(60_000);
+			}
+			// An entry that is still retrying leaves `failed` pending, and the test
+			// fails instead of waiting for it.
+			const failure = await Promise.race([failed, Promise.resolve(undefined)]);
+
+			expect({
+				afterFollowingRefusal,
+				sent: socket.sent.filter((sent) => sent !== 'ping'),
+				failure: failure?.status
+			}).toStrictEqual({
+				afterFollowingRefusal: [
+					publish([publication.entry, second.publication.entry]),
+					publish([second.publication.entry])
+				],
+				sent: [
+					publish([publication.entry, second.publication.entry]),
+					...Array.from({ length: 4 }, () =>
+						publish([second.publication.entry])
+					)
+				],
+				failure: commitEntryResendStatus
+			});
+			session.close();
+		}
+	);
 
 	it('retries an entry refused with temporary-failure and a field that the client does not know', async () => {
 		const socket = new FakeCommitSocket();

@@ -21,6 +21,8 @@ to continue.
 class SubrequestSlice {
 	private spent = 0;
 	private held = 0;
+	private hasRefused = false;
+	private refusedUnitCount = 0;
 
 	constructor(
 		private readonly slice: number,
@@ -42,12 +44,29 @@ class SubrequestSlice {
 		return subrequests <= this.available;
 	}
 
+	get refused(): boolean {
+		return this.hasRefused;
+	}
+
+	get refusedUnits(): number {
+		return this.refusedUnitCount;
+	}
+
+	recordRefusedUnit(): void {
+		this.refusedUnitCount += 1;
+	}
+
 	spend(subrequests: number, subject: string): void {
 		if (this.spent + subrequests > this.slice) {
-			throw new SubrequestSliceExceededError(subject, subrequests);
+			this.refuse(subrequests, subject);
 		}
 
 		this.spent += subrequests;
+	}
+
+	refuse(subrequests: number, subject: string): never {
+		this.hasRefused = true;
+		throw new SubrequestSliceExceededError(subject, subrequests);
 	}
 
 	hold(subrequests: number): void {
@@ -202,9 +221,57 @@ export function requireSubrequestsFor(
 	subrequests: number,
 	subject: string
 ): void {
-	if (!hasSubrequestsFor(subrequests)) {
-		throw new SubrequestSliceExceededError(subject, subrequests);
+	const slice = sliceScope.getStore();
+
+	if (slice === undefined || slice.admits(subrequests)) {
+		return;
 	}
+
+	slice.refuse(subrequests, subject);
+}
+
+/**
+Whether `error` is a refusal by a slice, or is caused by one. Drizzle wraps
+an error from the D1 binding in its own query error, with the refusal as the
+cause.
+*/
+export function isSubrequestSliceRefusal(error: unknown): boolean {
+	let current = error;
+
+	while (current instanceof Error) {
+		if (current instanceof SubrequestSliceExceededError) {
+			return true;
+		}
+
+		current = current.cause;
+	}
+
+	return false;
+}
+
+/**
+Whether the current slice has refused a call, or a unit of work through
+{@link requireSubrequestsFor}. A refusal shows that the slice is used up or
+nearly so, and a caller that runs several independent units starts no more
+of them afterwards. Outside a slice nothing is metered and the answer is no.
+*/
+export function hasRefusedSubrequests(): boolean {
+	return sliceScope.getStore()?.refused ?? false;
+}
+
+/**
+Records that a caller turned away one unit of work, such as an entry of a
+message, because the current slice had refused work.
+*/
+export function recordRefusedUnit(): void {
+	sliceScope.getStore()?.recordRefusedUnit();
+}
+
+/**
+The units of work that callers turned away in the current slice.
+*/
+export function refusedUnits(): number {
+	return sliceScope.getStore()?.refusedUnits ?? 0;
 }
 
 /**
