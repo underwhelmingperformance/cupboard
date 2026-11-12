@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { buildReceiptV3Schema } from '@cupboard/protocol/build';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { renderActionBundle } from '../../scripts/action-bundles.ts';
@@ -149,26 +149,26 @@ beforeAll(async () => {
 			'/tmp/cupboard-hook-relay.c'
 		]);
 	});
-	await progress.step('nix-daemon start', async () =>
-		store().exec([
-			'sh',
-			'-c',
-			'nix-daemon </dev/null >/tmp/build-paths-daemon.log 2>&1 &'
-		])
+	const daemonSocketDirectory = '/nix/var/nix/daemon-socket';
+	await progress.step('nix-daemon socket directory creation', async () =>
+		store().exec(['install', '-d', '--mode=0755', daemonSocketDirectory])
 	);
-	await progress.step('nix-daemon socket readiness', async () =>
-		vi.waitFor(
-			async () => {
-				const readiness = await store().exec([
-					'sh',
-					'-c',
-					'test -S /nix/var/nix/daemon-socket/socket && echo ready || echo pending'
-				]);
-
-				expect(readiness).toBe('ready');
-			},
-			{ timeout: 10_000 }
-		)
+	await progress.step('nix-daemon start program copy', async () => {
+		await store().writeFile(
+			'/tmp/container-daemon-start.cjs',
+			await renderActionBundle(
+				path.resolve('tests/support/container-daemon-start.ts')
+			)
+		);
+	});
+	await progress.step('nix-daemon start and socket readiness', async () =>
+		store().exec([
+			node(),
+			'/tmp/container-daemon-start.cjs',
+			`${daemonSocketDirectory}/socket`,
+			'/tmp/build-paths-daemon.log',
+			'nix-daemon'
+		])
 	);
 	await progress.step('per-kind directory creation', async () => {
 		for (const kind of ['daemon', 'daemonless'] as const) {
