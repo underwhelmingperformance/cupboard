@@ -179,7 +179,8 @@ async function fetchCommittedNarInfo(
 
 			return readResponseText(response, {
 				description: `narinfo for ${storePath}`,
-				maximumBytes: maximumNarInfoBytes
+				maximumBytes: maximumNarInfoBytes,
+				ignoreBOM: true
 			});
 		}
 	);

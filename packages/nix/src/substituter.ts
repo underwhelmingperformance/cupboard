@@ -1095,7 +1095,8 @@ async function boundedText(
 	try {
 		return await readResponseText(response, {
 			description: 'substituter document',
-			maximumBytes: maxByteLength
+			maximumBytes: maxByteLength,
+			ignoreBOM: true
 		});
 	} catch (error) {
 		if (error instanceof RemoteBodyTooLargeError) {

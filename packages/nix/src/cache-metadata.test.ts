@@ -1,3 +1,4 @@
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import {
 	cacheMetadataCapability,
@@ -10,13 +11,50 @@ import {
 	loopbackServer
 } from '../../../tests/support/loopback-server.ts';
 
-import { CachedClosureReader } from './cache-metadata.ts';
+import {
+	CachedClosureReader,
+	CachedClosureSourceInvalidError
+} from './cache-metadata.ts';
 
 const storePath = storePathSchema.parse(
 	'/nix/store/11111111111111111111111111111111-app'
 );
 
 describe('CachedClosureReader', () => {
+	// Nix reads the byte order mark as part of the first field name, so it finds
+	// no `StorePath`. A decoder that removes the mark would hide that.
+	it('refuses a narinfo that starts with a byte order mark', async () => {
+		const narHash =
+			'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk';
+		const narinfo = NarInfo.fromFields({
+			storePath,
+			url: 'nar/app.nar.zst',
+			compression: 'zstd',
+			fileHash: narHash,
+			fileSize: 10,
+			narHash,
+			narSize: 20,
+			references: [],
+			sigs: []
+		}).render();
+		const server = await loopbackServer((_request, response) => {
+			response.end(`\u{FEFF}${narinfo}`);
+		});
+		try {
+			const reader = new CachedClosureReader(
+				{ url: new URL(`${server.origin}/t/acme`), paths: [storePath] },
+				fetch,
+				{ random: () => 0 }
+			);
+
+			await expect(reader.offers([storePath])).rejects.toBeInstanceOf(
+				CachedClosureSourceInvalidError
+			);
+		} finally {
+			await server.close();
+		}
+	});
+
 	it.each([
 		{ response: 'a metadata page', status: 200 },
 		{ response: 'an error response', status: 500 }

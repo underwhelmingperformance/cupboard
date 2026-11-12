@@ -27,6 +27,14 @@ export interface BoundedResponseBodyOptions {
 	readonly signal?: AbortSignal;
 }
 
+export interface ResponseTextOptions extends BoundedResponseBodyOptions {
+	/**
+	Keeps a leading byte order mark (U+FEFF) in the text, as the `ignoreBOM`
+	option of `TextDecoder` does. Without it, the decoder removes the mark.
+	*/
+	readonly ignoreBOM?: boolean;
+}
+
 export interface BoundedFetchResponseOptions {
 	readonly description: string;
 	readonly errorMaximumBytes: number;
@@ -222,10 +230,13 @@ Reads a bounded response body and decodes it as UTF-8 text.
 */
 export async function readResponseText(
 	response: ReadableResponseBody,
-	options: BoundedResponseBodyOptions
+	options: ResponseTextOptions
 ): Promise<string> {
 	return observeResponseBody(response, async () =>
-		new TextDecoder().decode(await collectResponseBytes(response, options))
+		new TextDecoder('utf-8', {
+			fatal: false,
+			ignoreBOM: options.ignoreBOM ?? false
+		}).decode(await collectResponseBytes(response, options))
 	);
 }
 

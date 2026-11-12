@@ -345,6 +345,26 @@ describe('attestation discovery client', () => {
 		}
 	});
 
+	it('classifies a fallback narinfo after a byte order mark as invalid service metadata', async () => {
+		capability('path-info-v1');
+		use(
+			http.get(
+				`${url.href}/${hash}.narinfo`,
+				() => new HttpResponse(`\u{FEFF}${narinfo}`)
+			)
+		);
+		let failure: unknown;
+		try {
+			await readAttestationInfo(options, mockedFetch);
+		} catch (error) {
+			failure = error;
+		}
+		expect({
+			name: failure instanceof Error ? failure.name : undefined,
+			status: cliExitCode(failure, 130)
+		}).toStrictEqual({ name: 'InvalidAttestationDiscoveryError', status: 75 });
+	});
+
 	it('classifies an oversized fallback narinfo as invalid service metadata', async () => {
 		capability('path-info-v1');
 		use(

@@ -198,6 +198,7 @@ export async function readAttestationInfo(
 						await discoveryText(response, {
 							description: 'Attestation discovery narinfo',
 							maximumBytes: 1024 * 1024,
+							ignoreBOM: true,
 							signal: options.signal
 						})
 					);
@@ -347,6 +348,7 @@ async function discoveryText(
 	options: {
 		readonly description: string;
 		readonly maximumBytes: number;
+		readonly ignoreBOM?: boolean;
 		readonly signal?: AbortSignal;
 	}
 ): Promise<string> {

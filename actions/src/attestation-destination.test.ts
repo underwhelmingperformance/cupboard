@@ -269,6 +269,10 @@ describe('requirePublishedSubjects', () => {
 	it.each([
 		{ name: 'malformed metadata', body: 'not a narinfo' },
 		{
+			name: 'metadata after a byte order mark',
+			body: `\u{FEFF}${publishedNarInfo(appName, 0xbb)}`
+		},
+		{
 			name: 'metadata for another path',
 			body: publishedNarInfo('4123456789abcdfghijklmnpqrsvwxyz-other', 0xbb)
 		},

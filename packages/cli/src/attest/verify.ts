@@ -288,6 +288,7 @@ async function fetchNarInfo(
 		await readResponseText(response, {
 			description: 'remote narinfo',
 			maximumBytes: maximumRemoteNarInfoBytes,
+			ignoreBOM: true,
 			...(signal !== undefined && { signal })
 		})
 	);
