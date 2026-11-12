@@ -169,13 +169,14 @@ describe('db cost meter', () => {
 		// request resolves before it negotiates anything. The request also probes
 		// for a managed retirement and durable teardown before eligibility
 		// reconciliation, then checks that the cache is still live before it
-		// inserts the pending upload. The request makes three D1 calls, and one of
+		// inserts the pending upload. Eligibility reconciliation also probes for a
+		// pending root release. The request makes three D1 calls, and one of
 		// them returns no row counts.
 		expect(negotiateLine(capture)).toStrictEqual({
 			...negotiateRequest,
 			status: StatusCodes.OK,
 			...noCost,
-			rowsRead: 41,
+			rowsRead: 42,
 			rowsWritten: 11,
 			d1Calls: 3,
 			d1RowsRead: 6,
@@ -208,7 +209,7 @@ describe('db cost meter', () => {
 			...negotiateRequest,
 			status: StatusCodes.OK,
 			...noCost,
-			rowsRead: 41,
+			rowsRead: 42,
 			rowsWritten: 13,
 			d1Calls: 3,
 			d1RowsRead: 6,
@@ -241,7 +242,7 @@ describe('db cost meter', () => {
 			...negotiateRequest,
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
 			...noCost,
-			rowsRead: 41,
+			rowsRead: 42,
 			rowsWritten: 1,
 			d1Calls: 2,
 			d1RowsRead: 6

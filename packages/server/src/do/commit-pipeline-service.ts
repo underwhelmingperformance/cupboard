@@ -1843,7 +1843,13 @@ export class CommitPipelineService {
 				continue;
 			}
 
-			insertLiveRootTargets(this.context.db, root, targets);
+			insertLiveRootTargets(
+				this.context.db,
+				this.retention,
+				cache,
+				root,
+				targets
+			);
 		}
 	}
 
@@ -2214,7 +2220,7 @@ export class CommitPipelineService {
 			return;
 		}
 
-		insertLiveRootTargets(this.context.db, root, [
+		insertLiveRootTargets(this.context.db, this.retention, cache, root, [
 			{ storePathHash, storePath }
 		]);
 	}

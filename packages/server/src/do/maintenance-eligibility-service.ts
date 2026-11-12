@@ -96,6 +96,14 @@ export class MaintenanceEligibilityService {
 		if (teardown !== undefined) {
 			return true;
 		}
+		const release = this.context.db
+			.select({ present: sql`1` })
+			.from(schema.retentionRootReleases)
+			.limit(1)
+			.get();
+		if (release !== undefined) {
+			return true;
+		}
 		return [
 			schema.legacyRefreshTokenMembers,
 			schema.legacyRefreshTokenFamilies,

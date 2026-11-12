@@ -4,9 +4,10 @@ import {
 	type StorePathHash,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { and, eq, isNull, type SQL, sql } from 'drizzle-orm';
+import { type IsoTimestamp } from '@cupboard/protocol/scalars';
+import { and, eq, inArray, isNull, type SQL, sql } from 'drizzle-orm';
 
-import { type CacheId } from '../db/cache.ts';
+import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import {
 	type RootIncarnation,
 	rootIncarnationSchema
@@ -14,11 +15,17 @@ import {
 import * as schema from '../db/schema.ts';
 
 import { type SchemaWriter } from './context.ts';
-import { jsonRowLists } from './json-list.ts';
+import {
+	jsonRowLists,
+	type JsonValueList,
+	jsonValueLists
+} from './json-list.ts';
+import { type RetentionService } from './retention-service.ts';
 import { WorkSequenceService } from './work-sequence-service.ts';
 
 const targets = schema.retentionRootTargets;
 const roots = schema.retentionRoots;
+const releases = schema.retentionRootReleases;
 
 /**
 A root's identity and the incarnation whose target rows it keeps. A root
@@ -116,13 +123,100 @@ export function rootIncarnationKey(
 }
 
 /**
+Selects each requested row of a root's name whose incarnation differs from
+the root's, joined to the pending release of the row's incarnation. The
+drain test imports this builder to check its query plan.
+*/
+export function takenTargetReleasesSelect(
+	database: SchemaWriter,
+	root: RootIncarnationKey,
+	hashes: JsonValueList<StorePathHash>
+) {
+	const incarnation =
+		root.incarnation === undefined ? sql`NULL` : sql`${root.incarnation}`;
+
+	return database
+		.select({
+			storePathHash: targets.storePathHash,
+			id: releases.id,
+			releasedAt: releases.releasedAt,
+			retainUntil: releases.retainUntil,
+			closeRetentionEpoch: releases.closeRetentionEpoch
+		})
+		.from(targets)
+		.innerJoin(
+			releases,
+			and(
+				eq(releases.cacheId, targets.cacheId),
+				eq(releases.rootName, targets.rootName),
+				sql`${releases.incarnation} IS ${targets.incarnation}`
+			)
+		)
+		.where(
+			and(
+				eq(targets.cacheId, root.cacheId),
+				eq(targets.rootName, root.name),
+				inArray(targets.storePathHash, hashes),
+				sql`${targets.incarnation} IS NOT ${incarnation}`
+			)
+		);
+}
+
+// Grants each requested path the deadline of the pending release that has the
+// path's row. It must run before the upsert, which moves the row into the
+// root's incarnation. After the move, this query cannot find the row's release.
+function grantTakenTargets(
+	database: SchemaWriter,
+	retention: RetentionService,
+	cache: ResolvedCache,
+	root: RootIncarnationKey,
+	hashes: readonly StorePathHash[]
+): void {
+	const taken = new Map<
+		number,
+		{
+			readonly releasedAt: IsoTimestamp;
+			readonly retainUntil: IsoTimestamp;
+			readonly closeRetentionEpoch: number | undefined;
+			readonly hashes: StorePathHash[];
+		}
+	>();
+
+	for (const list of jsonValueLists(hashes)) {
+		const rows = takenTargetReleasesSelect(database, root, list).all();
+
+		for (const row of rows) {
+			if (row.retainUntil === null) {
+				continue;
+			}
+
+			const release = taken.get(row.id) ?? {
+				releasedAt: row.releasedAt,
+				retainUntil: row.retainUntil,
+				closeRetentionEpoch: row.closeRetentionEpoch ?? undefined,
+				hashes: []
+			};
+			release.hashes.push(row.storePathHash);
+			taken.set(row.id, release);
+		}
+	}
+
+	for (const { hashes: released, ...release } of taken.values()) {
+		retention.extendReleasedGraceDeadlines(cache, released, release, database);
+	}
+}
+
+/**
 Adds paths to the target rows that a root keeps. A row that the root's name
 already has under another incarnation moves into the root's incarnation, so
-the drain of that earlier incarnation's release no longer deletes it. A row
-that the root already keeps is left unchanged.
+the drain of that earlier incarnation's release no longer deletes it, and
+the path gets that release's deadline here instead. A row that the root
+already keeps is left unchanged.
 */
 export function insertLiveRootTargets(
 	database: SchemaWriter,
+	retention: RetentionService,
+	cache: ResolvedCache,
 	root: RootIncarnationKey,
 	entries: readonly {
 		readonly storePathHash: StorePathHash;
@@ -131,6 +225,14 @@ export function insertLiveRootTargets(
 ): void {
 	const incarnation =
 		root.incarnation === undefined ? sql`NULL` : sql`${root.incarnation}`;
+
+	grantTakenTargets(
+		database,
+		retention,
+		cache,
+		root,
+		entries.map((entry) => entry.storePathHash)
+	);
 
 	for (const batch of jsonRowLists(entries)) {
 		database

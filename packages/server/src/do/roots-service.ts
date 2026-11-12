@@ -266,7 +266,7 @@ export class RootsService {
 			}
 
 			if (isTargetSetChanged) {
-				insertLiveRootTargets(tx, root, request.targets);
+				insertLiveRootTargets(tx, this.retention, cache, root, request.targets);
 			}
 
 			// Applied inside the same transaction as the delete above: a crash
@@ -624,7 +624,7 @@ export class RootsService {
 			return;
 		}
 
-		insertLiveRootTargets(database, root, targets);
+		insertLiveRootTargets(database, this.retention, cache, root, targets);
 	}
 
 	// Replace the complete target set, including when it is empty. The root and

@@ -37,7 +37,10 @@ export class RetentionService {
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[],
 		writer: SchemaWriter,
-		retentionEpoch?: number
+		bounds: {
+			readonly retentionEpoch?: number | undefined;
+			readonly createdAtOrBefore?: IsoTimestamp;
+		} = {}
 	): StorePathHash[] {
 		const backed = new Set<StorePathHash>();
 
@@ -49,9 +52,12 @@ export class RetentionService {
 					and(
 						eq(schema.narInfos.cacheId, cache.id),
 						inArray(schema.narInfos.storePathHash, hashes),
-						retentionEpoch === undefined
+						bounds.retentionEpoch === undefined
 							? undefined
-							: lte(schema.narInfos.retentionEpoch, retentionEpoch)
+							: lte(schema.narInfos.retentionEpoch, bounds.retentionEpoch),
+						bounds.createdAtOrBefore === undefined
+							? undefined
+							: lte(schema.narInfos.createdAt, bounds.createdAtOrBefore)
 					)
 				)
 				.all();
@@ -187,13 +193,39 @@ export class RetentionService {
 	): void {
 		this.extendGraceDeadlines(
 			cache,
-			this.narinfoBackedHashes(
-				cache,
-				storePathHashes,
-				writer,
-				grace.retentionEpoch
-			),
+			this.narinfoBackedHashes(cache, storePathHashes, writer, {
+				retentionEpoch: grace.retentionEpoch
+			}),
 			grace.retainUntil,
+			writer
+		);
+	}
+
+	/**
+	Grants a release's deadline to the released paths whose narinfo rows
+	existed when the root released them. A row created later belongs to a
+	path that was deleted and committed again, and a deletion drops the
+	path's grace, so the new row gets no deadline from the release. A
+	closed-root release also requires the row's retention epoch to be at
+	most the closed root's.
+	*/
+	extendReleasedGraceDeadlines(
+		cache: ResolvedCache,
+		storePathHashes: readonly StorePathHash[],
+		release: {
+			readonly releasedAt: IsoTimestamp;
+			readonly retainUntil: IsoTimestamp;
+			readonly closeRetentionEpoch: number | undefined;
+		},
+		writer: SchemaWriter
+	): void {
+		this.extendGraceDeadlines(
+			cache,
+			this.narinfoBackedHashes(cache, storePathHashes, writer, {
+				retentionEpoch: release.closeRetentionEpoch,
+				createdAtOrBefore: release.releasedAt
+			}),
+			release.retainUntil,
 			writer
 		);
 	}

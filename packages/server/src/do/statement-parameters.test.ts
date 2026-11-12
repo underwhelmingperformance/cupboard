@@ -30,7 +30,6 @@ import { drizzle } from 'drizzle-orm/d1';
 import { drizzle as drizzleDurable } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
-import { cacheIdSchema } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoReferenceQuery } from '../read/read.ts';
@@ -52,7 +51,6 @@ import {
 	fencedEdgeRetirement,
 	teardownPresenceBatch
 } from './deletion-queue-service.ts';
-import { expiredRootTargetSelect } from './garbage-collection-service.ts';
 import { sharedAccessReferenceSelect } from './integrity-check-service.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import {
@@ -90,7 +88,6 @@ const doDatabase = drizzleDurable({ exec: throwStub } as never, { schema });
 const tenant = tenantIdSchema.parse('fixture-tenant');
 const cache = cacheNameSchema.parse('builds');
 const cacheScope: CacheScope = { kind: 'named', name: cache };
-const cacheId = cacheIdSchema.parse(1);
 const now = isoTimestampSchema.parse('2024-01-01T00:00:00.000Z');
 
 const testNarHash = nixSha256HashSchema.parse(
@@ -347,21 +344,6 @@ function rootTargetInsertParameters(targets: number): number {
 		.toSQL().params.length;
 }
 
-// Any page size does here: the limit binds one parameter whatever its value,
-// so only the root list could grow the parameter count.
-const expiredRootTargetPage = 1000;
-
-function expiredRootTargetParameters(roots: number): number {
-	const list = firstList(jsonValueLists(repeated(roots, testRootName)));
-
-	return expiredRootTargetSelect(
-		doDatabase,
-		cacheId,
-		list,
-		expiredRootTargetPage
-	).toSQL().params.length;
-}
-
 function leaseParameters(uploads: number): number {
 	const list = firstList(jsonValueLists(repeated(uploads, testUploadId)));
 
@@ -510,11 +492,7 @@ const listStatements: readonly {
 		statement: 'reuse-view selector INSERT',
 		parameters: reuseViewSelectorParameters
 	},
-	{ statement: 'reuse-view edge SELECT', parameters: reuseEdgeParameters },
-	{
-		statement: 'expired root target SELECT',
-		parameters: expiredRootTargetParameters
-	}
+	{ statement: 'reuse-view edge SELECT', parameters: reuseEdgeParameters }
 ];
 
 describe('statements built from a list', () => {

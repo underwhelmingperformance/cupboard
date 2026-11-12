@@ -552,7 +552,7 @@ describe('batched root requests', () => {
 				singles: {
 					cost: {
 						...noCost,
-						rowsRead: 153,
+						rowsRead: 162,
 						rowsWritten: 33,
 						d1Calls: 9,
 						d1RowsRead: 23,
@@ -563,7 +563,7 @@ describe('batched root requests', () => {
 				batch: {
 					cost: {
 						...noCost,
-						rowsRead: 83,
+						rowsRead: 90,
 						rowsWritten: 33,
 						d1Calls: 3,
 						d1RowsRead: 15,
@@ -576,7 +576,7 @@ describe('batched root requests', () => {
 				singles: {
 					cost: {
 						...noCost,
-						rowsRead: 150,
+						rowsRead: 153,
 						rowsWritten: 9,
 						d1Calls: 9,
 						d1RowsRead: 23,
@@ -588,7 +588,7 @@ describe('batched root requests', () => {
 				batch: {
 					cost: {
 						...noCost,
-						rowsRead: 79,
+						rowsRead: 80,
 						rowsWritten: 9,
 						d1Calls: 3,
 						d1RowsRead: 15,
@@ -644,7 +644,7 @@ describe('batched root requests', () => {
 
 		expect(cost).toStrictEqual({
 			...noCost,
-			rowsRead: 88,
+			rowsRead: 95,
 			rowsWritten: 30,
 			d1Calls: 3,
 			d1RowsRead: 15,
