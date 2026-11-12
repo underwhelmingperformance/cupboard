@@ -245,6 +245,74 @@ Background work for the tenant runs from the object's alarm.
 The object's schema migrations live in `packages/server/drizzle`. The object
 applies them to its own database.
 
+### Root incarnations
+
+A retention root keeps the `retention_root_target` rows whose `incarnation`
+equals the root's own. Incarnations come from the tenant's work sequence, so no
+two roots of a tenant share one, and `retention_root_target_incarnation_idx`
+finds the rows of one incarnation. A root that an earlier version of cupboard
+created has no incarnation, and neither have its rows, until a change gives it
+one.
+
+A write that changes a root's targets gives the root a new incarnation and
+writes the requested targets into it. A row that the root already has for a
+requested path moves into the new incarnation. The write then records a
+`retention_root_release` row, a root release, for the old incarnation when that
+incarnation still has a row. Removing a root deletes the root row and records a
+root release. A collection scan's `expire-roots` phase does the same for each
+expired root. A write decides that the targets are unchanged by counting at most
+one more of the root's rows than it requests and reading each requested target
+by its primary key. Deciding whether to record a root release reads at most one
+row of the old incarnation. A write therefore reads a number of target rows that
+grows with the number of targets that it requests, not with the number of the
+root's targets, and a removal or an expiry reads at most one target row.
+
+A requested path can have a row in an incarnation whose root release is still
+pending, for example when a root is created again before the drain reaches its
+old rows. The write moves that row into the root's incarnation, and the drain
+then cannot find the row. In the same transaction, the write therefore grants
+the pending root release's deadline to the path. It reads the root release
+through `retention_root_release_root_idx`.
+
+A root release records the deadline that it grants, decided when the root
+releases its targets: the cache's grace period from the replacement, the removal
+or the recorded expiry, or, for a root of a closed cache, the close's deadline
+and the root's retention epoch. The drain reads up to 128 target rows of a root
+release at a time, through `retention_root_target_incarnation_idx` for a
+released incarnation and through `retention_root_target_legacy_idx` for rows
+without an incarnation, so it reads only rows that it releases. In one
+transaction it grants the deadline to the paths whose narinfo rows were created
+no later than the root release, and that a closed root's epoch covers, and
+deletes the rows. Until then the released rows remain collection seeds, so a
+released path has a seed or a deadline until the deadline passes. The
+`root-release` maintenance pass drains the root releases of every cache that is
+not being torn down, and a request that records a root release arms the alarm. A
+scan's `expire-roots` phase drains the root releases of the scanned cache, and
+the scan seeds only after none is left.
+
+Earlier versions of cupboard write target rows without an incarnation, and their
+attach leaves an existing row unchanged. A root of this version would not keep
+the rows that such a version wrote to it, and a pending root release could
+delete them. The migrator therefore records migration 0084 with the
+`verified-contraction` state, as it does 0052. Every earlier version refuses the
+state on any migration but 0052, so it can't run against a tenant that has
+applied 0084.
+
+A name without a root row has no live targets: `roots.targets` returns an empty
+page for it, and the publication replay treats its paths as not attached. A late
+attach by an earlier version of cupboard can leave target rows without an
+incarnation under such a name. Removing the name, or creating a root under it,
+records a root release for those rows when it has at least one and no root
+release of them is pending. The first check reads through
+`retention_root_target_legacy_idx`, so it reads no row of a released
+incarnation, and the second reads through `retention_root_release_root_idx`, so
+it reads none of the cache's other pending releases. The removal response
+reports the release to a client that sends the `root-remove-leftover-targets`
+capability. An attach to a run root that no longer exists adds no target and
+logs a warning. A removal or an expiry can delete the root between a run's
+negotiation and a later commit or verification. The run's next negotiation binds
+the root again.
+
 ## Storage
 
 ### D1
@@ -395,8 +463,8 @@ alarm's earlier steps can spend the budget first, so within each pass the first
 page that deletes rows runs whatever the budget, and every pass makes progress.
 Pending uploads go first: their accepted operations fail with `absent`, their
 staging keys move to `staging_cleanup`, and the canonical incarnations that they
-reserved are given up. Pending attestations, root targets, roots, grace
-deadlines, narinfo rows and the collection scan state follow. Each page of
+reserved are given up. Pending attestations, root releases, root targets, roots,
+grace deadlines, narinfo rows and the collection scan state follow. Each page of
 narinfo rows is deleted in the transaction that queues their deletions at the
 rows' generations. The passes also retire published state and delete staging
 objects in pages of at most 1,000 keys while the maintenance budget permits. A
@@ -2198,6 +2266,12 @@ migrations keep both cache representations and mirror inserts from either
 writer, and its contract migrations remove that compatibility. The tenant Worker
 upload is therefore the point after which a rollback can't recover: after an
 object contracts its SQLite schema, complete the deployment to recover.
+
+Every earlier build refuses a tenant that has applied migration 0084, because
+the migrator records 0084 with the `verified-contraction` state. The [root
+incarnations][root-incarnations] section explains why.
+
+[root-incarnations]: #root-incarnations
 
 The tenant objects and the control-plane trust gate ignore a
 `deployment_transition` row with an unknown transition ID, and count an unknown

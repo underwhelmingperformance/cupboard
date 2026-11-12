@@ -229,9 +229,19 @@ export const rootTargetsPageSchema = z.strictObject({
 });
 export type RootTargetsPage = z.output<typeof rootTargetsPageSchema>;
 
+// A client sends this capability in `x-cupboard-accept-capabilities` to
+// receive `releasedLeftoverTargets` from a root removal. An older client's
+// strict schema rejects a field that it does not know.
+export const rootRemoveLeftoverTargetsCapability =
+	'root-remove-leftover-targets';
+
+// `releasedLeftoverTargets` reports whether the removal released target rows
+// under a name without a root. A late attach by an earlier version of
+// cupboard can leave such rows.
 export const rootRemoveResponseSchema = z.strictObject({
 	name: rootNameSchema,
-	removed: z.boolean()
+	removed: z.boolean(),
+	releasedLeftoverTargets: z.boolean().optional()
 });
 export type RootRemoveResponse = z.output<typeof rootRemoveResponseSchema>;
 

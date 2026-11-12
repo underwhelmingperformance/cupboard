@@ -167,8 +167,17 @@ describe('repeated root writes', () => {
 				updatedAt: fiveMinutesLater.toISOString()
 			};
 			const isIdentical = repeat.storePath === target.storePath;
+			const incarnation = after.roots[0]?.incarnation;
 
-			expect({ repeated, after }).toStrictEqual({
+			// A new store path for the same hash moves the target row into the
+			// root's new incarnation in place. Collection reads only the hash, so
+			// neither write changes the cache's collection inputs.
+			expect({
+				repeated,
+				after,
+				isNewIncarnation: incarnation !== before.roots[0]?.incarnation
+			}).toStrictEqual({
+				isNewIncarnation: !isIdentical,
 				repeated: response({
 					name: 'channel',
 					...refreshed,
@@ -183,13 +192,18 @@ describe('repeated root writes', () => {
 					]
 				}),
 				after: {
-					roots: before.roots.map((root) => ({ ...root, ...refreshed })),
+					roots: before.roots.map((root) => ({
+						...root,
+						...refreshed,
+						incarnation
+					})),
 					targets: before.targets.map((row) => ({
 						...row,
-						storePath: repeat.storePath
+						storePath: repeat.storePath,
+						incarnation
 					})),
-					inputs: { ...before.inputs, inputsChanged: !isIdentical },
-					targetWrites: isIdentical ? [] : ['delete', 'insert']
+					inputs: before.inputs,
+					targetWrites: []
 				}
 			});
 		}

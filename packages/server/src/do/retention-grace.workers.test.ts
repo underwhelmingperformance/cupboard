@@ -507,6 +507,13 @@ async function clearDefaultCacheGrace(): Promise<void> {
 	});
 }
 
+// Runs the pass that grants released targets their deadlines.
+async function drainRootReleases(): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) =>
+		instance.resumeRootReleases()
+	);
+}
+
 async function graceDeadlineRows(
 	cache: CacheScope
 ): Promise<readonly { storePathHash: string; retainUntil: string }[]> {
@@ -579,6 +586,7 @@ describe('retention grace transitions', () => {
 			targets: [kept.storePath, released.storePath]
 		});
 		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
+		await drainRootReleases();
 
 		expect({
 			deadlines: await graceDeadlineRows(defaultCache()),
@@ -679,6 +687,7 @@ describe('retention grace transitions', () => {
 		// still releases the vanished hash; no deadline may back it.
 		await deletePath(token, deleted.storePathHash);
 		await removeRoot(token, 'channel');
+		await drainRootReleases();
 
 		expect(await graceDeadlineRows(defaultCache())).toStrictEqual([
 			{ storePathHash: kept.storePathHash, retainUntil: dayAfterStart }

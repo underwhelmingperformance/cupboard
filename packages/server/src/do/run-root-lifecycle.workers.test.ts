@@ -154,9 +154,17 @@ function seededTarget(index: number): {
 	};
 }
 
-async function seedRunRootTargets(count: number): Promise<void> {
+// The run's first negotiation creates the run root, and the seeded targets
+// get the root's incarnation.
+async function seedRunRootTargets(token: string, count: number): Promise<void> {
+	await negotiateWithRoot(token, [], runRoot);
 	await runInDurableObject(currentServer(), (instance) => {
 		const cache = resolvedCache(instance.context);
+		const incarnation = instance.context.db
+			.select({ incarnation: schema.retentionRoots.incarnation })
+			.from(schema.retentionRoots)
+			.where(eq(schema.retentionRoots.name, rootNameSchema.parse(runRoot.name)))
+			.get()?.incarnation;
 
 		for (let offset = 0; offset < count; offset += seedInsertBatchSize) {
 			const rows: (typeof schema.retentionRootTargets.$inferInsert)[] =
@@ -169,7 +177,8 @@ async function seedRunRootTargets(count: number): Promise<void> {
 							cacheId: cache.id,
 							rootName: rootNameSchema.parse(runRoot.name),
 							storePathHash: storePathHashSchema.parse(target.storePathHash),
-							storePath: storePathSchema.parse(target.storePath)
+							storePath: storePathSchema.parse(target.storePath),
+							incarnation
 						};
 					}
 				);
@@ -208,7 +217,7 @@ describe('run root lifecycle', () => {
 		// `rootSetMaxTargets` bounds one root-set request. A run root grows through
 		// `attachRoot`, which carries no such bound, so the targets it accumulates
 		// can pass that number.
-		await seedRunRootTargets(rootSetMaxTargets);
+		await seedRunRootTargets(token, rootSetMaxTargets);
 		await pushWithRoot(token, gated, runRoot);
 
 		const rows = await rootTargetRows();
@@ -309,6 +318,9 @@ describe('run root lifecycle', () => {
 		await setDefaultCacheGrace();
 
 		await setRoot(token, { name: 'main', targets: [next.storePath] });
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.resumeRootReleases()
+		);
 
 		const grace = await runInDurableObject(currentServer(), (instance) =>
 			instance.context.db

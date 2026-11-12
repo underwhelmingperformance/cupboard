@@ -785,39 +785,59 @@ describe('root listings', () => {
 });
 
 describe('runRootRemove', () => {
-	it('removes the root and reports the outcome once confirmed', async () => {
-		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
-		const response = rootRemoveResponseSchema.parse({
-			name: 'pr-123',
-			removed: true
-		});
-		const client = removeClient(response);
+	it.each([
+		{ name: 'a removed root', response: { removed: true }, removed: 'yes' },
+		{
+			name: 'a missing root from an older server',
+			response: { removed: false },
+			removed: 'not present'
+		},
+		{
+			name: 'a missing root without leftover store paths',
+			response: { removed: false, releasedLeftoverTargets: false },
+			removed: 'not present'
+		},
+		{
+			name: 'a missing root whose leftover store paths were released',
+			response: { removed: false, releasedLeftoverTargets: true },
+			removed: 'not present; its leftover store paths are released'
+		}
+	])(
+		'reports $name once the removal is confirmed',
+		async ({ response: fields, removed }) => {
+			const { ui, captured } = fakeCliUi({ confirm: 'yes' });
+			const response = rootRemoveResponseSchema.parse({
+				name: 'pr-123',
+				...fields
+			});
+			const client = removeClient(response);
 
-		await runRootRemove(namedCache('builds'), rootName('pr-123'), ui, client);
+			await runRootRemove(namedCache('builds'), rootName('pr-123'), ui, client);
 
-		expect({
-			calls: client.remove.calls,
-			results: captured.results
-		}).toStrictEqual({
-			calls: [
-				{
-					cache: namedCache('builds'),
-					input: { cacheName: 'builds', name: 'pr-123' }
-				}
-			],
-			results: [
-				{
-					kind: 'root',
-					title: 'Retention root',
-					data: response,
-					rows: [
-						{ label: 'Root', value: 'pr-123' },
-						{ label: 'Removed', value: 'yes' }
-					]
-				}
-			]
-		});
-	});
+			expect({
+				calls: client.remove.calls,
+				results: captured.results
+			}).toStrictEqual({
+				calls: [
+					{
+						cache: namedCache('builds'),
+						input: { cacheName: 'builds', name: 'pr-123' }
+					}
+				],
+				results: [
+					{
+						kind: 'root',
+						title: 'Retention root',
+						data: response,
+						rows: [
+							{ label: 'Root', value: 'pr-123' },
+							{ label: 'Removed', value: removed }
+						]
+					}
+				]
+			});
+		}
+	);
 
 	it('leaves the root in place when the confirmation is declined', async () => {
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });

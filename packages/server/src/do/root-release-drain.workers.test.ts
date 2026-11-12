@@ -1,8 +1,14 @@
 import { startCapture } from '@cupboard/logger/testing';
 import {
 	rootNameSchema,
-	storePathHashSchema
+	storePathHashSchema,
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
+import {
+	rootRemoveLeftoverTargetsCapability,
+	rootRemoveResponseSchema
+} from '@cupboard/protocol/retention';
+import { acceptCapabilitiesHeader } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,18 +23,28 @@ import {
 	listRootTargets,
 	narBytes,
 	pushPath,
+	removeRoot,
 	resetTestServer,
 	resolvedCache,
 	setRoot,
 	testPushId,
 	underOneUnitOfWork,
 	uploadMetadata,
+	uploadPathNegotiation,
 	withoutAlarmArming
 } from '../test-support.ts';
 
-import { collectOneUnitOfWork } from './garbage-collection.test-support.ts';
+import {
+	collectOneUnitOfWork,
+	useMinScanInterval
+} from './garbage-collection.test-support.ts';
 import { jsonValueList } from './json-list.ts';
-import { takenTargetReleasesSelect } from './live-root-targets.ts';
+import {
+	existingRootIncarnationKey,
+	insertLiveRootTargets,
+	takenTargetReleasesSelect
+} from './live-root-targets.ts';
+import { RetentionService } from './retention-service.ts';
 
 const releasedAt = '2026-01-01T00:00:00.000Z';
 const retainUntil = '2026-01-02T00:00:00.000Z';
@@ -263,22 +279,23 @@ describe('root release drain', () => {
 				retain_until: retainUntil
 			}));
 
-			// The set moves the rows of `a`, `b` and `f` into incarnation 12 and
-			// grants them what the drain would have granted. The drain then finds
-			// only the row of `c`.
+			// The set gives `run` the new incarnation 1, moves the rows of `a`, `b`
+			// and `f` into it, and grants them what the drain would have granted.
+			// Incarnation 12 has no row, so the set records no release of it. The
+			// drain then finds only the row of `c`.
 			expect({ taken, drained: await storedState() }).toStrictEqual({
 				taken: {
 					releases: [{ root_name: 'run', is_legacy: 0 }],
 					targets: [
-						{ root_name: 'run', incarnation: 9, targets: 1 },
-						{ root_name: 'run', incarnation: 12, targets: 3 }
+						{ root_name: 'run', incarnation: 1, targets: 3 },
+						{ root_name: 'run', incarnation: 9, targets: 1 }
 					],
 					legacyTargets: [{ targets: 0 }],
 					grace: deadlines
 				},
 				drained: {
 					releases: [],
-					targets: [{ root_name: 'run', incarnation: 12, targets: 3 }],
+					targets: [{ root_name: 'run', incarnation: 1, targets: 3 }],
 					legacyTargets: [{ targets: 0 }],
 					grace: deadlines
 				}
@@ -387,6 +404,366 @@ async function bindRunRoot(token: string, name: string): Promise<void> {
 
 	expect(response.status).toBe(StatusCodes.OK);
 }
+
+function legacyRows(cacheId: number, name: string) {
+	return ['a', 'b'].map(
+		(prefix) => [insertLegacyTarget, cacheId, name, hash(prefix)] as const
+	);
+}
+
+describe('removing a root that a set recreated before the drain', () => {
+	beforeEach(resetTestServer);
+
+	it('keeps the deadline of the first removal after a second removal without grace', async () => {
+		const token = await initialise();
+		await seed((cacheId) => [
+			[insertNarInfo, cacheId, hash('a'), before, 0],
+			['UPDATE cache_identity SET grace_seconds = 86400 WHERE id = ?', cacheId]
+		]);
+		const path = `/nix/store/${hash('a')}-p`;
+
+		await withoutAlarmArming(async () => {
+			await setRoot(token, { name: 'run', targets: [path] });
+			await removeRoot(token, 'run');
+			await setRoot(token, { name: 'run', targets: [path] });
+			await seed((cacheId) => [
+				['UPDATE cache_identity SET grace_seconds = 0 WHERE id = ?', cacheId]
+			]);
+			await removeRoot(token, 'run');
+		});
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.resumeRootReleases()
+		);
+
+		// The first removal granted `a` a day of grace. The recreated root took
+		// `a` back before the drain, and the second removal grants no grace.
+		expect(await storedState()).toStrictEqual({
+			releases: [],
+			targets: [],
+			legacyTargets: [{ targets: 0 }],
+			grace: [{ store_path_hash: hash('a'), retain_until: retainUntil }]
+		});
+	});
+});
+
+describe('removing a name that has rows without an incarnation', () => {
+	beforeEach(resetTestServer);
+
+	it('releases the rows under a name without a root, with grace, when the drain runs', async () => {
+		const token = await initialise();
+		// A late attach by an earlier version of cupboard left the rows under a
+		// name that has no root.
+		await seed((cacheId) => [
+			[insertNarInfo, cacheId, hash('a'), before, 0],
+			['UPDATE cache_identity SET grace_seconds = 86400 WHERE id = ?', cacheId],
+			...legacyRows(cacheId, 'orphan')
+		]);
+
+		// Without the alarm, the release pass runs only where the test calls it.
+		const removed = await withoutAlarmArming(async () => {
+			const response = await authorisedFetch('/roots/orphan', token, {
+				method: 'DELETE',
+				headers: {
+					[acceptCapabilitiesHeader]: rootRemoveLeftoverTargetsCapability
+				}
+			});
+
+			expect(response.status).toBe(StatusCodes.OK);
+
+			return rootRemoveResponseSchema.parse(await response.json());
+		});
+		const recorded = await storedState();
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.resumeRootReleases()
+		);
+
+		expect({
+			removed,
+			recorded,
+			drained: await storedState()
+		}).toStrictEqual({
+			removed: {
+				name: 'orphan',
+				removed: false,
+				releasedLeftoverTargets: true
+			},
+			recorded: {
+				releases: [{ root_name: 'orphan', is_legacy: 1 }],
+				targets: [],
+				legacyTargets: [{ targets: 2 }],
+				grace: []
+			},
+			drained: {
+				releases: [],
+				targets: [],
+				legacyTargets: [{ targets: 0 }],
+				grace: [{ store_path_hash: hash('a'), retain_until: retainUntil }]
+			}
+		});
+	});
+
+	it('lists no target of a removed root without an incarnation before the drain reaches its rows', async () => {
+		const token = await initialise();
+		await seed((cacheId) => [
+			[
+				"INSERT INTO retention_root (cache_id, name, created_at, updated_at) VALUES (?1, 'old', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+				cacheId
+			],
+			...legacyRows(cacheId, 'old')
+		]);
+
+		await withoutAlarmArming(() => removeRoot(token, 'old'));
+		const page = await listRootTargets(token, 'old');
+		const { legacyTargets } = await storedState();
+
+		expect({ page, legacyTargets }).toStrictEqual({
+			page: { targets: [] },
+			legacyTargets: [{ targets: 2 }]
+		});
+	});
+
+	it.each([
+		{
+			name: 'a second removal of a root without an incarnation',
+			statements: (cacheId: number): readonly SeedStatement[] => [
+				[
+					"INSERT INTO retention_root (cache_id, name, created_at, updated_at) VALUES (?1, 'old', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+					cacheId
+				],
+				...legacyRows(cacheId, 'old')
+			],
+			isRepeated: true,
+			releases: [{ root_name: 'old', is_legacy: 1 }],
+			targets: [],
+			legacyTargets: 2
+		},
+		{
+			name: 'a removal of a name that has only rows of a released incarnation',
+			statements: (cacheId: number): readonly SeedStatement[] => [
+				[insertTarget, cacheId, 'old', hash('a'), 9],
+				[insertRelease, cacheId, 'old', 9, releasedAt, retainUntil, -1]
+			],
+			isRepeated: false,
+			releases: [{ root_name: 'old', is_legacy: 0 }],
+			targets: [{ root_name: 'old', incarnation: 9, targets: 1 }],
+			legacyTargets: 0
+		}
+	])(
+		'records no release without an incarnation for $name',
+		async ({ statements, isRepeated, releases, targets, legacyTargets }) => {
+			const token = await initialise();
+			await seed(statements);
+
+			const last = await withoutAlarmArming(async () => {
+				const first = await removeRoot(token, 'old');
+
+				return isRepeated ? removeRoot(token, 'old') : first;
+			});
+
+			expect({ last, state: await storedState() }).toStrictEqual({
+				last: { name: 'old', removed: false },
+				state: {
+					releases,
+					targets,
+					legacyTargets: [{ targets: legacyTargets }],
+					grace: []
+				}
+			});
+		}
+	);
+
+	it('releases the rows without an incarnation when a run negotiation creates the run root', async () => {
+		const token = await initialise();
+		await seed((cacheId) => [
+			[insertNarInfo, cacheId, hash('a'), before, 0],
+			[insertNarInfo, cacheId, hash('b'), before, 0],
+			['UPDATE cache_identity SET grace_seconds = 86400 WHERE id = ?', cacheId],
+			...legacyRows(cacheId, 'orphan')
+		]);
+
+		await withoutAlarmArming(() => bindRunRoot(token, 'orphan'));
+		const recorded = await storedState();
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.resumeRootReleases()
+		);
+		const drained = await storedState();
+		const page = await listRootTargets(token, 'orphan');
+
+		expect({
+			recorded: recorded.releases,
+			releases: drained.releases,
+			legacyTargets: drained.legacyTargets,
+			grace: drained.grace,
+			page
+		}).toStrictEqual({
+			recorded: [{ root_name: 'orphan', is_legacy: 1 }],
+			releases: [],
+			legacyTargets: [{ targets: 0 }],
+			grace: [
+				{ store_path_hash: hash('a'), retain_until: retainUntil },
+				{ store_path_hash: hash('b'), retain_until: retainUntil }
+			],
+			page: { targets: [] }
+		});
+	});
+
+	it('keeps a path that a root attaches between its create-time release and the drain', async () => {
+		const token = await initialise();
+		await seed((cacheId) => [
+			[insertNarInfo, cacheId, hash('a'), before, 0],
+			[insertNarInfo, cacheId, hash('b'), before, 0],
+			['UPDATE cache_identity SET grace_seconds = 86400 WHERE id = ?', cacheId],
+			...legacyRows(cacheId, 'orphan')
+		]);
+
+		await withoutAlarmArming(() => bindRunRoot(token, 'orphan'));
+		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+			const root = existingRootIncarnationKey(
+				instance.context.db,
+				cache.id,
+				rootNameSchema.parse('orphan')
+			);
+
+			if (root !== undefined) {
+				insertLiveRootTargets(
+					instance.context.db,
+					new RetentionService(instance.context),
+					cache,
+					root,
+					[
+						{
+							storePathHash: storePathHashSchema.parse(hash('a')),
+							storePath: storePathSchema.parse(`/nix/store/${hash('a')}-p`)
+						}
+					]
+				);
+			}
+		});
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.resumeRootReleases()
+		);
+		const drained = await storedState();
+		const page = await listRootTargets(token, 'orphan');
+
+		// The attach moves `a` into the root's incarnation and grants it the
+		// release's deadline. The drain then grants `b` the deadline and deletes
+		// only its row.
+		expect({
+			releases: drained.releases,
+			legacyTargets: drained.legacyTargets,
+			grace: drained.grace,
+			page: page.targets.map((target) => target.storePathHash)
+		}).toStrictEqual({
+			releases: [],
+			legacyTargets: [{ targets: 0 }],
+			grace: [
+				{ store_path_hash: hash('a'), retain_until: retainUntil },
+				{ store_path_hash: hash('b'), retain_until: retainUntil }
+			],
+			page: [hash('a')]
+		});
+	});
+
+	it.each([
+		{
+			name: 'a set',
+			act: async (token: string) => {
+				await setRoot(token, {
+					name: 'orphan',
+					targets: [`/nix/store/${hash('a')}-p`]
+				});
+			},
+			taken: hash('a'),
+			granted: [hash('b')]
+		},
+		{
+			// An ensure needs a target that the cache can serve, so it ensures a
+			// pushed path, which gets the cache's grace from its push.
+			name: 'an ensure',
+			act: async (token: string) => {
+				const pushed = uploadMetadata({
+					fileSize: narBytes.byteLength,
+					name: 'pushed',
+					storePathHash: 'z'.repeat(32)
+				});
+				await pushPath(token, pushed);
+				const response = await authorisedFetch('/roots/orphan/ensure', token, {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ targets: [pushed.storePath] })
+				});
+
+				expect(response.status).toBe(StatusCodes.OK);
+			},
+			taken: 'z'.repeat(32),
+			granted: [hash('a'), hash('b'), 'z'.repeat(32)]
+		},
+		{
+			name: 'a batch entry',
+			act: async (token: string) => {
+				const response = await authorisedFetch('/roots/batch', token, {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						roots: [
+							{
+								action: 'set',
+								name: 'orphan',
+								targets: [`/nix/store/${hash('a')}-p`]
+							}
+						]
+					})
+				});
+
+				expect(response.status).toBe(StatusCodes.OK);
+			},
+			taken: hash('a'),
+			granted: [hash('b')]
+		}
+	])(
+		'releases the other rows without an incarnation when $name creates the root',
+		async ({ act, taken, granted }) => {
+			const token = await initialise();
+			await seed((cacheId) => [
+				[insertNarInfo, cacheId, hash('a'), before, 0],
+				[insertNarInfo, cacheId, hash('b'), before, 0],
+				[
+					'UPDATE cache_identity SET grace_seconds = 86400 WHERE id = ?',
+					cacheId
+				],
+				...legacyRows(cacheId, 'orphan')
+			]);
+
+			await withoutAlarmArming(() => act(token));
+			const recorded = await storedState();
+			await runInDurableObject(currentServer(), (instance) =>
+				instance.resumeRootReleases()
+			);
+			const drained = await storedState();
+			const page = await listRootTargets(token, 'orphan');
+
+			// The request takes its target into the root's incarnation, and the
+			// release grants the other rows the cache's grace.
+			expect({
+				recorded: recorded.releases,
+				releases: drained.releases,
+				legacyTargets: drained.legacyTargets,
+				grace: drained.grace,
+				page: page.targets.map((target) => target.storePathHash)
+			}).toStrictEqual({
+				recorded: [{ root_name: 'orphan', is_legacy: 1 }],
+				releases: [],
+				legacyTargets: [{ targets: 0 }],
+				grace: granted.map((storePathHash) => ({
+					store_path_hash: storePathHash,
+					retain_until: retainUntil
+				})),
+				page: [taken]
+			});
+		}
+	);
+});
 
 const passCostSchema = z.object({
 	method: z.literal('root-release'),
@@ -512,4 +889,142 @@ describe('one step of the release drain', () => {
 			large: drainedLegacyStep(10_000)
 		});
 	});
+});
+
+describe('a root of an earlier version of cupboard', () => {
+	beforeEach(resetTestServer);
+
+	// `legacy` has no incarnation and keeps `a` and `b`, which have narinfo
+	// rows. The cache has a day of grace.
+	async function seedLegacyRoot(expiresAt: string): Promise<string> {
+		const token = await initialise();
+		await seed((cacheId) => [
+			[insertNarInfo, cacheId, hash('a'), before, 0],
+			[insertNarInfo, cacheId, hash('b'), before, 0],
+			['UPDATE cache_identity SET grace_seconds = 86400 WHERE id = ?', cacheId],
+			[
+				"INSERT INTO retention_root (cache_id, name, expires_at, created_at, updated_at) VALUES (?1, 'legacy', ?2, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+				cacheId,
+				expiresAt
+			],
+			...legacyRows(cacheId, 'legacy')
+		]);
+
+		return token;
+	}
+
+	it('lists, pages and attaches to the root as before', async () => {
+		const token = await seedLegacyRoot('2099-01-01T00:00:00.000Z');
+		const attached = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'attached',
+			storePathHash: 'z'.repeat(32)
+		});
+		await pushPath(token, attached);
+		const response = await authorisedFetch('/uploads', token, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: [uploadPathNegotiation(attached)],
+				attachRoot: { name: 'legacy', retention: { kind: 'inherit' } }
+			})
+		});
+
+		expect(response.status).toBe(StatusCodes.OK);
+
+		const listed = await listRoots(token);
+		const page = await listRootTargets(token, 'legacy');
+		const state = await storedState();
+
+		expect({
+			counts: listed.roots.map((root) => [root.name, root.targetCount]),
+			page: page.targets.map((target) => target.storePathHash),
+			state
+		}).toStrictEqual({
+			counts: [['legacy', 3]],
+			page: [hash('a'), hash('b'), attached.storePathHash],
+			state: {
+				releases: [],
+				targets: [],
+				legacyTargets: [{ targets: 3 }],
+				// The push grants its path the cache's grace.
+				grace: [
+					{ store_path_hash: attached.storePathHash, retain_until: retainUntil }
+				]
+			}
+		});
+	});
+
+	it.each([
+		{
+			name: 'a set',
+			expiresAt: '2099-01-01T00:00:00.000Z',
+			act: async (token: string) => {
+				await setRoot(token, {
+					name: 'legacy',
+					targets: [`/nix/store/${hash('a')}-p`]
+				});
+			},
+			targets: 1,
+			grace: [hash('b')],
+			retainUntil
+		},
+		{
+			name: 'a removal',
+			expiresAt: '2099-01-01T00:00:00.000Z',
+			act: async (token: string) => {
+				await removeRoot(token, 'legacy');
+			},
+			targets: 0,
+			grace: [hash('a'), hash('b')],
+			retainUntil
+		},
+		{
+			name: 'an expiry',
+			expiresAt: '2025-12-31T12:00:00.000Z',
+			act: async () => {
+				await useMinScanInterval(0);
+				await collectOneUnitOfWork();
+			},
+			targets: 0,
+			grace: [hash('a'), hash('b')],
+			retainUntil: '2026-01-01T12:00:00.000Z'
+		}
+	])(
+		'releases the old targets with grace after $name',
+		async ({ expiresAt, act, targets, grace, retainUntil: deadline }) => {
+			const token = await seedLegacyRoot(expiresAt);
+
+			await act(token);
+			await runInDurableObject(currentServer(), (instance) =>
+				instance.resumeRootReleases()
+			);
+			const state = await storedState();
+			const live = await runInDurableObject(
+				currentServer(),
+				(_instance, state) =>
+					state.storage.sql
+						.exec<{ live: number }>(
+							'SELECT count(*) AS live FROM retention_root_target WHERE incarnation IS NOT NULL'
+						)
+						.one().live
+			);
+
+			expect({
+				releases: state.releases,
+				live,
+				legacyTargets: state.legacyTargets,
+				grace: state.grace
+			}).toStrictEqual({
+				releases: [],
+				live: targets,
+				legacyTargets: [{ targets: 0 }],
+				grace: grace.map((storePathHash) => ({
+					store_path_hash: storePathHash,
+					retain_until: deadline
+				}))
+			});
+		}
+	);
 });

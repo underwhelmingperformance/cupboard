@@ -788,10 +788,10 @@ describe('garbage collection cap', () => {
 			targets: [kept.storePath, newlyRetained.storePath]
 		});
 
-		// The write rewrites both targets of the root, so the barrier queues both
-		// the marked path and the new one. Observe the scan once the queue holds
-		// them.
-		await driveScanTo((scan) => scan?.frontier === 2);
+		// The write moves the marked target into the root's new incarnation,
+		// which fires no barrier, and inserts the new target, which the barrier
+		// queues. Observe the scan once the queue contains it.
+		await driveScanTo((scan) => scan?.frontier === 1);
 		const attached = await currentScanProgress();
 
 		expect(driven.isContinuationArmed).toBe(true);
@@ -806,7 +806,7 @@ describe('garbage collection cap', () => {
 			attached: {
 				phase: 'mark',
 				cursor: '',
-				frontier: 2,
+				frontier: 1,
 				marks: 1
 			}
 		});

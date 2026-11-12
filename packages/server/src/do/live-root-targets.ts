@@ -104,25 +104,6 @@ export function existingRootIncarnationKey(
 }
 
 /**
-Reads a root's identity and incarnation. A name without a root row reads as
-a root without an incarnation, so it includes the rows that a late attach by
-an earlier version of cupboard left under the name.
-*/
-export function rootIncarnationKey(
-	database: SchemaWriter,
-	cacheId: CacheId,
-	name: RootName
-): RootIncarnationKey {
-	return (
-		existingRootIncarnationKey(database, cacheId, name) ?? {
-			cacheId,
-			name,
-			incarnation: undefined
-		}
-	);
-}
-
-/**
 Selects each requested row of a root's name whose incarnation differs from
 the root's, joined to the pending release of the row's incarnation. The
 drain test imports this builder to check its query plan.
