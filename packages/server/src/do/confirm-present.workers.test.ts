@@ -362,7 +362,7 @@ describe('confirming already-present paths', () => {
 			status: StatusCodes.OK,
 			revisions: 1,
 			cost: {
-				rowsRead: 61,
+				rowsRead: 62,
 				rowsWritten: 7,
 				d1Calls: 4,
 				d1RowsRead: 7,
@@ -380,7 +380,7 @@ describe('confirming already-present paths', () => {
 				),
 			status: StatusCodes.OK,
 			revisions: 1,
-			cost: { rowsRead: 69, rowsWritten: 12, d1Calls: 4, d1RowsRead: 7 }
+			cost: { rowsRead: 72, rowsWritten: 12, d1Calls: 4, d1RowsRead: 7 }
 		},
 		{
 			confirmation: 'is refused',
@@ -388,7 +388,7 @@ describe('confirming already-present paths', () => {
 				Promise.resolve({ ...request([declared(path)]), cacheGeneration: 2 }),
 			status: StatusCodes.CONFLICT,
 			revisions: 1,
-			cost: { rowsRead: 31, rowsWritten: 2, d1Calls: 2, d1RowsRead: 1 }
+			cost: { rowsRead: 32, rowsWritten: 2, d1Calls: 2, d1RowsRead: 1 }
 		}
 	])(
 		'runs maintenance after a confirmation only when it $confirmation and changes state',
@@ -631,7 +631,7 @@ describe('confirming already-present paths', () => {
 		}).toStrictEqual({
 			cost: {
 				...noCost,
-				rowsRead: 63,
+				rowsRead: 66,
 				rowsWritten: 23,
 				d1Calls: 3,
 				d1CallsWithoutRows: 1,
@@ -640,7 +640,7 @@ describe('confirming already-present paths', () => {
 			},
 			repeat: {
 				...noCost,
-				rowsRead: 55,
+				rowsRead: 61,
 				d1Calls: 3,
 				d1CallsWithoutRows: 1,
 				d1RowsRead: 10,
@@ -672,7 +672,7 @@ describe('confirming already-present paths', () => {
 			response: first.response,
 			cost: {
 				...noCost,
-				rowsRead: 57,
+				rowsRead: 63,
 				d1Calls: 3,
 				d1CallsWithoutRows: 1,
 				d1RowsRead: 10,

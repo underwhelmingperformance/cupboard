@@ -274,6 +274,7 @@ import {
 	ReuseViewAdminService
 } from './reuse-view-admin-service.ts';
 import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
+import { RootReleaseService } from './root-releases.ts';
 import { RootsService } from './roots-service.ts';
 import { enterRowBudgetOnDispatch } from './row-budget.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
@@ -386,6 +387,7 @@ type MaintenancePassKey =
 	| 'local-step'
 	| 'managed-retirement'
 	| 'reconcile'
+	| 'root-release'
 	| 'signing-key-backfill'
 	| 'teardown'
 	| 'verdict-drain'
@@ -568,6 +570,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly cacheListingProjection: CacheListingProjection;
 	private readonly cacheRegistration: CacheRegistrationService;
 	private readonly garbageCollection: GarbageCollectionService;
+	private readonly rootReleases: RootReleaseService;
 	private readonly tokenExchange: TokenExchangeService;
 	private readonly refreshSessions: RefreshSessionsService;
 	private readonly uploads: UploadsService;
@@ -633,6 +636,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.retention,
 			this.cacheAdmin
 		);
+		this.rootReleases = new RootReleaseService(this.context, this.retention);
 		this.tokenExchange = new TokenExchangeService(
 			this.context,
 			this.authKeys,
@@ -3550,6 +3554,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				run: () => this.signingKeys.runBackfillOnce()
 			},
 			{
+				key: 'root-release',
+				workAt: readyWhen(() =>
+					Promise.resolve(this.rootReleases.hasPending())
+				),
+				run: async () => {
+					await this.resumeRootReleases();
+
+					return 'progressed';
+				}
+			},
+			{
 				key: 'garbage-collection',
 				// A deletion deferred for inheritance becomes work again when the
 				// pending upload that defers it expires. A replacement cleanup
@@ -4374,6 +4389,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		if (await this.cacheAdmin.hasPendingTeardown()) {
 			await this.ctx.storage.setAlarm(Date.now());
 		}
+	}
+
+	/**
+	Drains the target rows of released root incarnations until none is left
+	or the invocation's row budget is spent. A collection scan also drains
+	the releases of the cache that it scans, but a release changes no
+	collection input, so no scan would start for it.
+	*/
+	async resumeRootReleases(): Promise<void> {
+		await this.metered('root-release', () =>
+			this.withMaintenanceEligibility('continuation', () =>
+				this.context.criticalSection(() =>
+					Promise.resolve(this.rootReleases.drain())
+				)
+			)
+		);
 	}
 
 	// One cron invocation settles pending rows and scans a page of committed
@@ -5332,6 +5363,7 @@ type MeteredMethod =
 	| 'record-verification'
 	| 'record-verifications'
 	| 'reserve-canonical-write'
+	| 'root-release'
 	| 'verdict-drain'
 	| 'verification'
 	| 'verify-backstop';

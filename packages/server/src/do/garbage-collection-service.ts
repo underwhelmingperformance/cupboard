@@ -1,6 +1,5 @@
 import { type Logger } from '@cupboard/logger';
 import {
-	type RootName,
 	storePathBasenameSchema,
 	type StorePathHash,
 	storePathHashSchema
@@ -9,7 +8,11 @@ import {
 	publicationStagingKey,
 	publicationStagingPrefix
 } from '@cupboard/protocol/publication';
-import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import {
+	type IsoTimestamp,
+	isoTimestamp,
+	isoTimestampSchema
+} from '@cupboard/protocol/scalars';
 import { pushIdSchema, uploadIdSchema } from '@cupboard/protocol/upload';
 import { type PushId } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
@@ -30,7 +33,7 @@ import {
 
 import { type PushCredentialIssuer } from '../blob/push-credential.ts';
 import { wellFormedPushId } from '../blob/push-id.ts';
-import { type CacheId, type ResolvedCache } from '../db/cache.ts';
+import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
 	GarbageCollectionBarrierMissingError,
@@ -58,7 +61,6 @@ import { type CacheAdminService } from './cache-admin-service.ts';
 import {
 	type GarbageCollectionOutcome,
 	type GarbageCollectionTarget,
-	type SchemaDatabase,
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
@@ -66,12 +68,9 @@ import {
 	GarbageCollectionInputs,
 	type ScanDecision
 } from './garbage-collection-inputs.ts';
-import {
-	jsonRowLists,
-	type JsonValueList,
-	jsonValueLists
-} from './json-list.ts';
+import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type RetentionService } from './retention-service.ts';
+import { RootReleaseService } from './root-releases.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
 
 /**
@@ -212,40 +211,6 @@ export const collectionTriggers: readonly {
 	readonly table: string;
 }[] = [...barrierTriggers, ...inputTriggers, ...graceProjectionTriggers];
 
-/**
-Builds one ordered page of targets for roots that have just expired. The
-query must include every root from the expiry pass so its ordering and limit
-apply to the complete target set. Splitting the roots across queries would
-give each subset its own page and could omit targets from the first global
-page.
-
-The parameter test imports this builder and inspects the statement it makes.
-*/
-export function expiredRootTargetSelect(
-	database: SchemaDatabase,
-	cacheId: CacheId,
-	rootNames: JsonValueList<RootName>,
-	limit: number
-) {
-	return database
-		.select({
-			rootName: schema.retentionRootTargets.rootName,
-			storePathHash: schema.retentionRootTargets.storePathHash
-		})
-		.from(schema.retentionRootTargets)
-		.where(
-			and(
-				eq(schema.retentionRootTargets.cacheId, cacheId),
-				inArray(schema.retentionRootTargets.rootName, rootNames)
-			)
-		)
-		.orderBy(
-			asc(schema.retentionRootTargets.rootName),
-			asc(schema.retentionRootTargets.storePathHash)
-		)
-		.limit(limit + 1);
-}
-
 // Delete at most one R2 batch from each pending table. Deleted rows disappear
 // from the next indexed expiry query, so the existing alarm continuation drains
 // the remainder without a separate cursor.
@@ -374,17 +339,19 @@ import { CacheClosureService } from './cache-closure-service.ts';
 
 export class GarbageCollectionService {
 	private readonly inputs: GarbageCollectionInputs;
+	private readonly releases: RootReleaseService;
 
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService,
-		private readonly retention: RetentionService,
+		retention: RetentionService,
 		private readonly cacheAdmin: Pick<
 			CacheAdminService,
 			'scheduleManagedRetirement'
 		>
 	) {
 		this.inputs = new GarbageCollectionInputs(context);
+		this.releases = new RootReleaseService(context, retention);
 	}
 
 	/**
@@ -524,7 +491,6 @@ export class GarbageCollectionService {
 	): {
 		rootsExpired: number;
 		rootsInspected: number;
-		rootTargetsExpired: number;
 		hasMoreExpiredRoots: boolean;
 	} {
 		const rootPage = maxRootsExpiredPerRun;
@@ -533,13 +499,13 @@ export class GarbageCollectionService {
 
 		// Expire roots even when no unreachable path is collected. Permanent roots
 		// have a null expiry and cannot match this query.
-		//
 		const expiredRootCandidates = this.context.db
 			.select({
 				name: schema.retentionRoots.name,
 				expiresAt: schema.retentionRoots.expiresAt,
 				closeGraceUntil: schema.retentionRoots.closeGraceUntil,
-				retentionEpoch: schema.retentionRoots.retentionEpoch
+				retentionEpoch: schema.retentionRoots.retentionEpoch,
+				incarnation: schema.retentionRoots.incarnation
 			})
 			.from(schema.retentionRoots)
 			.where(
@@ -555,118 +521,43 @@ export class GarbageCollectionService {
 			.limit(rootPage + 1)
 			.all();
 		const expiredRoots = expiredRootCandidates.slice(0, rootPage);
-		const expiredRootNames = expiredRoots.map((root) => root.name);
-		const expiryByRoot = new Map(
-			expiredRoots.flatMap((root) =>
-				root.expiresAt === null ? [] : [[root.name, root.expiresAt] as const]
-			)
-		);
 
-		const closeGraceByRoot = new Map(
-			expiredRoots.flatMap((root) =>
-				root.closeGraceUntil === null
-					? []
-					: [
-							[
-								root.name,
-								{
-									retentionEpoch: root.retentionEpoch,
-									retainUntil: root.closeGraceUntil
-								}
-							] as const
-						]
-			)
-		);
-		const targetPage = phaseStepSize;
-
-		// Anchor each target's grace period to the root's recorded expiry. Using the
-		// collection time would extend retention whenever collection runs late.
-		const expiredRootTargetCandidates = jsonValueLists(
-			expiredRootNames
-		).flatMap((names) =>
-			expiredRootTargetSelect(
-				this.context.db,
-				cache.id,
-				names,
-				targetPage
-			).all()
-		);
-		const expiredRootTargets = expiredRootTargetCandidates.slice(0, targetPage);
-		let rootsExpired = 0;
-
+		// Each expired root becomes a release of its incarnation, and the root
+		// row goes, so the root leaves the listing at once. The release records
+		// the deadline that the root's expiry grants: the close's deadline for a
+		// root that a close expired, and otherwise the grace period from the
+		// recorded expiry, so a late collection does not extend retention. The
+		// drain grants it to the paths whose narinfo rows exist now.
 		this.context.db.transaction((tx) => {
-			// Add the grace deadline and remove the root target atomically. A crash
-			// between separate operations could leave the path with no retention source.
-			// A collection pass sweeps every cache, so the cache comes from stored
-			// state rather than from the request.
-			this.retention.applyGraceTransitions(
-				cache,
-				expiredRootTargets.flatMap((target) => {
-					if (closeGraceByRoot.has(target.rootName)) {
-						return [];
-					}
-					const anchorIso = expiryByRoot.get(target.rootName);
+			const gracePeriodFrom = this.releases.gracePeriods(cache, tx);
 
-					return anchorIso === undefined
-						? []
-						: { storePathHash: target.storePathHash, anchorIso };
-				}),
-				tx
-			);
+			for (const root of expiredRoots) {
+				// The query matches only roots with an expiry. The parse fails the
+				// transaction on a root without one, so no root is deleted without
+				// its release.
+				const expiresAt = isoTimestampSchema.parse(root.expiresAt);
 
-			for (const target of expiredRootTargets) {
-				const deadline = closeGraceByRoot.get(target.rootName);
-				if (deadline !== undefined) {
-					this.retention.extendClosedRootGraceDeadlines(
-						cache,
-						[target.storePathHash],
-						deadline,
-						tx
-					);
-				}
-			}
-			for (const targets of jsonRowLists(expiredRootTargets)) {
-				tx.delete(schema.retentionRootTargets)
-					.where(
-						and(
-							eq(schema.retentionRootTargets.cacheId, cache.id),
-							targets.matches({
-								rootName: schema.retentionRootTargets.rootName,
-								storePathHash: schema.retentionRootTargets.storePathHash
-							})
-						)
-					)
-					.run();
+				this.releases.record(
+					tx,
+					{
+						cacheId: cache.id,
+						name: root.name,
+						incarnation: root.incarnation ?? undefined
+					},
+					now,
+					() =>
+						root.closeGraceUntil === null
+							? gracePeriodFrom(expiresAt)
+							: {
+									retainUntil: root.closeGraceUntil,
+									closeRetentionEpoch: root.retentionEpoch
+								}
+				);
 			}
 
-			if (expiredRootNames.length === 0) {
-				return;
-			}
+			const nameLists = jsonValueLists(expiredRoots.map((root) => root.name));
 
-			const remainingRoots = new Set<RootName>();
-
-			for (const rootName of expiredRootNames) {
-				const remaining = tx
-					.select({ storePathHash: schema.retentionRootTargets.storePathHash })
-					.from(schema.retentionRootTargets)
-					.where(
-						and(
-							eq(schema.retentionRootTargets.cacheId, cache.id),
-							eq(schema.retentionRootTargets.rootName, rootName)
-						)
-					)
-					.limit(1)
-					.get();
-
-				if (remaining !== undefined) {
-					remainingRoots.add(rootName);
-				}
-			}
-			const completedRoots = expiredRootNames.filter(
-				(rootName) => !remainingRoots.has(rootName)
-			);
-
-			for (const names of jsonValueLists(completedRoots)) {
+			for (const names of nameLists) {
 				tx.delete(schema.retentionRoots)
 					.where(
 						and(
@@ -676,13 +567,11 @@ export class GarbageCollectionService {
 					)
 					.run();
 			}
-
-			rootsExpired = completedRoots.length;
 		});
 
 		// An event on a page that the cursor has passed can lose its last root
 		// in this step.
-		if (rootsExpired > 0) {
+		if (expiredRoots.length > 0) {
 			closure.restartHistory(cache);
 		}
 
@@ -690,13 +579,11 @@ export class GarbageCollectionService {
 		const hasMoreExpiredRoots =
 			hasMoreClosedRoots ||
 			hasMoreHistory ||
-			expiredRootCandidates.length > expiredRoots.length ||
-			expiredRoots.length > rootsExpired;
+			expiredRootCandidates.length > expiredRoots.length;
 
 		return {
-			rootsExpired,
+			rootsExpired: expiredRoots.length,
 			rootsInspected: expiredRoots.length,
-			rootTargetsExpired: expiredRootTargets.length,
 			hasMoreExpiredRoots
 		};
 	}
@@ -1324,17 +1211,24 @@ export class GarbageCollectionService {
 
 			if (scan.phase === 'expire-roots') {
 				const expired = this.expireRoots(cache, now);
+				// The scan seeds only after every release of the cache is drained,
+				// so the paths of a root that expires in this scan can be collected
+				// in it once their grace has passed.
+				const drained = expired.hasMoreExpiredRoots
+					? undefined
+					: this.releases.drain(cache);
 				rootsExpired += expired.rootsExpired;
-				rootTargetsExpired += expired.rootTargetsExpired;
+				rootTargetsExpired += drained?.targetsReleased ?? 0;
 				// Report what the last step saw, not what any step saw: a later step
 				// can finish the roots an earlier one left behind.
-				hasMoreExpiredRoots = expired.hasMoreExpiredRoots;
+				hasMoreExpiredRoots =
+					expired.hasMoreExpiredRoots || drained?.hasMore === true;
 				this.updateScan(cache, {
 					allowEmptyCollection:
 						scan.allowEmptyCollection ||
 						expired.rootsExpired > 0 ||
 						this.cacheGraceManaged(cache),
-					...(!expired.hasMoreExpiredRoots && { phase: 'expire-grace' })
+					...(!hasMoreExpiredRoots && { phase: 'expire-grace' })
 				});
 
 				if (isRowBudgetExhausted()) {

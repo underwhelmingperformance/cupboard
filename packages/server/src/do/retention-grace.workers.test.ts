@@ -838,6 +838,10 @@ describe('retention grace transitions', () => {
 
 					await state.storage.deleteAlarm();
 					resolveGrace.mockClear();
+					// The maintenance passes take turns: the first alarm drains the
+					// releases of the expired roots, and the second resumes the
+					// collection.
+					await instance.alarm();
 					await instance.alarm();
 
 					await state.storage.deleteAlarm();
@@ -890,8 +894,8 @@ describe('retention grace transitions', () => {
 		await pushPath(token, path);
 		const rootName = rootNameSchema.parse('multi-target');
 		const expiresAt = isoTimestamp(new Date(Date.now() - 1000));
-		// More targets than one step covers, so the first pass leaves the root in
-		// place with targets outstanding.
+		// More targets than one step covers. The first pass removes the root and
+		// leaves some of its released targets outstanding.
 		const targetCount = phaseStepSize + 2;
 
 		const observed = await runInDurableObject(
@@ -971,6 +975,9 @@ describe('retention grace transitions', () => {
 				};
 
 				await state.storage.deleteAlarm();
+				// The maintenance passes take turns: the first alarm drains the rest
+				// of the release, and the second resumes the collection.
+				await instance.alarm();
 				await instance.alarm();
 				await state.storage.deleteAlarm();
 
@@ -986,7 +993,7 @@ describe('retention grace transitions', () => {
 
 		expect(observed).toStrictEqual({
 			firstPass: {
-				roots: 1,
+				roots: 0,
 				targets: targetCount - phaseStepSize,
 				pathPresent: true,
 				deadlines: 1,
