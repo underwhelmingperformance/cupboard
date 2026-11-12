@@ -129,6 +129,7 @@ const expectedFinalState = {
 		...noCacheRows,
 		narinfo: livePaths,
 		roots: 1,
+		releases: 1,
 		targets: livePaths,
 		grace: livePaths,
 		uploads: seededVerdicts.length,
@@ -170,19 +171,19 @@ describe('cache teardown drain', () => {
 		const retirement = {
 			d1Calls: 17,
 			r2Delete: 8,
-			rowsRead: 1662,
+			rowsRead: 1663,
 			rowsWritten: 204
 		};
 		expect({ passes, state: await finalState(seeded) }).toStrictEqual({
 			passes: [
-				{ d1Calls: 3, r2Delete: 0, rowsRead: 20_527, rowsWritten: 4579 },
-				{ d1Calls: 1, r2Delete: 0, rowsRead: 19_876, rowsWritten: 7152 },
-				{ d1Calls: 1, r2Delete: 0, rowsRead: 15_507, rowsWritten: 9856 },
-				{ d1Calls: 1, r2Delete: 0, rowsRead: 16_384, rowsWritten: 9225 },
-				{ d1Calls: 1, r2Delete: 0, rowsRead: 20_242, rowsWritten: 5048 },
-				{ d1Calls: 18, r2Delete: 9, rowsRead: 2442, rowsWritten: 397 },
+				{ d1Calls: 3, r2Delete: 0, rowsRead: 20_532, rowsWritten: 4580 },
+				{ d1Calls: 1, r2Delete: 0, rowsRead: 19_877, rowsWritten: 7152 },
+				{ d1Calls: 1, r2Delete: 0, rowsRead: 15_508, rowsWritten: 9856 },
+				{ d1Calls: 1, r2Delete: 0, rowsRead: 16_385, rowsWritten: 9225 },
+				{ d1Calls: 1, r2Delete: 0, rowsRead: 20_243, rowsWritten: 5048 },
+				{ d1Calls: 18, r2Delete: 9, rowsRead: 2443, rowsWritten: 397 },
 				...Array.from({ length: 15 }, () => retirement),
-				{ d1Calls: 14, r2Delete: 6, rowsRead: 1117, rowsWritten: 139 }
+				{ d1Calls: 14, r2Delete: 6, rowsRead: 1118, rowsWritten: 139 }
 			],
 			state: expectedFinalState
 		});
@@ -214,6 +215,7 @@ describe('cache teardown drain', () => {
 					...noCacheRows,
 					narinfo: removedPaths,
 					roots: 1,
+					releases: 1,
 					targets: removedPaths,
 					grace: removedPaths,
 					attestations: seededAttestations,
@@ -257,6 +259,7 @@ describe('cache teardown drain', () => {
 				...noCacheRows,
 				narinfo: removedPaths,
 				roots: 1,
+				releases: 1,
 				targets: removedPaths,
 				grace: removedPaths,
 				stagingCleanup: seededAttestations,
@@ -278,6 +281,7 @@ describe('cache teardown drain', () => {
 					...noCacheRows,
 					narinfo: removedPaths,
 					roots: 1,
+					releases: 1,
 					targets: removedPaths,
 					grace: removedPaths,
 					attestations: seededAttestations,
@@ -299,6 +303,7 @@ describe('cache teardown drain', () => {
 					...noCacheRows,
 					narinfo: removedPaths,
 					roots: 1,
+					releases: 1,
 					targets: removedPaths,
 					grace: removedPaths,
 					stagingCleanup: seededAttestations,

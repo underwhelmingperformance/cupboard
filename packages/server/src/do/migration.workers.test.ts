@@ -2899,7 +2899,7 @@ describe('migrations', () => {
 		});
 	});
 
-	it('adds the root-expiry index without changing existing roots or targets', async () => {
+	it('adds the root-expiry index and the incarnation columns without changing existing roots or targets', async () => {
 		const migrated = await runInDurableObject(
 			testServerFor('migration-root-expiry-index'),
 			async (_instance, state) => {
@@ -2916,12 +2916,12 @@ describe('migrations', () => {
 				return {
 					roots: state.storage.sql
 						.exec(
-							'SELECT cache_identity.name AS cache, retention_root.name, retention_root.expires_at FROM retention_root JOIN cache_identity ON cache_identity.id = retention_root.cache_id ORDER BY cache, retention_root.name'
+							'SELECT cache_identity.name AS cache, retention_root.name, retention_root.expires_at, retention_root.incarnation IS NULL AS is_legacy FROM retention_root JOIN cache_identity ON cache_identity.id = retention_root.cache_id ORDER BY cache, retention_root.name'
 						)
 						.toArray(),
 					targets: state.storage.sql
 						.exec(
-							'SELECT cache_identity.name AS cache, retention_root_target.root_name, retention_root_target.store_path_hash, retention_root_target.store_path FROM retention_root_target JOIN cache_identity ON cache_identity.id = retention_root_target.cache_id ORDER BY cache, retention_root_target.root_name, retention_root_target.store_path_hash'
+							'SELECT cache_identity.name AS cache, retention_root_target.root_name, retention_root_target.store_path_hash, retention_root_target.store_path, retention_root_target.incarnation IS NULL AS is_legacy FROM retention_root_target JOIN cache_identity ON cache_identity.id = retention_root_target.cache_id ORDER BY cache, retention_root_target.root_name, retention_root_target.store_path_hash'
 						)
 						.toArray(),
 					indexes: state.storage.sql
@@ -2938,7 +2938,8 @@ describe('migrations', () => {
 				{
 					cache: 'builds',
 					name: 'main',
-					expires_at: '2026-02-01T00:00:00.000Z'
+					expires_at: '2026-02-01T00:00:00.000Z',
+					is_legacy: 1
 				}
 			],
 			targets: [
@@ -2946,7 +2947,8 @@ describe('migrations', () => {
 					cache: 'builds',
 					root_name: 'main',
 					store_path_hash: 'a'.repeat(32),
-					store_path: `/nix/store/${'a'.repeat(32)}-app`
+					store_path: `/nix/store/${'a'.repeat(32)}-app`,
+					is_legacy: 1
 				}
 			],
 			indexes: [

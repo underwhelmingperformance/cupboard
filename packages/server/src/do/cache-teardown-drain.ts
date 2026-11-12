@@ -334,6 +334,7 @@ export class CacheTeardownDrain {
 
 		const steps: readonly (() => TablePage)[] = [
 			() => this.deleteAttestationPage(cache),
+			() => this.deletePage(schema.retentionRootReleases, cache),
 			() => this.deletePage(schema.retentionRootTargets, cache),
 			() => this.deletePage(schema.retentionRoots, cache),
 			() => this.deletePage(schema.retentionGrace, cache),

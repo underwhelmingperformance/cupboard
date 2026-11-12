@@ -380,7 +380,7 @@ describe('confirming already-present paths', () => {
 				),
 			status: StatusCodes.OK,
 			revisions: 1,
-			cost: { rowsRead: 66, rowsWritten: 10, d1Calls: 4, d1RowsRead: 7 }
+			cost: { rowsRead: 66, rowsWritten: 11, d1Calls: 4, d1RowsRead: 7 }
 		},
 		{
 			confirmation: 'is refused',
@@ -632,7 +632,7 @@ describe('confirming already-present paths', () => {
 			cost: {
 				...noCost,
 				rowsRead: 60,
-				rowsWritten: 20,
+				rowsWritten: 22,
 				d1Calls: 3,
 				d1CallsWithoutRows: 1,
 				d1RowsRead: 10,

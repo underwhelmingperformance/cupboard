@@ -340,7 +340,8 @@ function rootTargetInsertParameters(targets: number): number {
 				sql`${cache}`,
 				sql`${testRootName}`,
 				rows.column('storePathHash'),
-				rows.column('storePath')
+				rows.column('storePath'),
+				sql`NULL`
 			])
 		)
 		.toSQL().params.length;

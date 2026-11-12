@@ -49,6 +49,7 @@ import {
 	emptyRootRetentionRuleSetId,
 	type RootRetentionRuleSetId
 } from './retention-rule.ts';
+import { type RootIncarnation } from './root-incarnation.ts';
 
 function rootNameConstraint(column: SQLWrapper): SQL {
 	return sql`length(${column}) BETWEEN 1 AND 256 AND instr(${column}, char(0)) = 0 AND ${column} NOT GLOB ('*[' || char(1) || '-' || char(31) || char(127) || ']*')`;
@@ -1008,7 +1009,8 @@ export const retentionRoots = sqliteTable(
 		closeGraceUntil: text('close_grace_until').$type<IsoTimestamp>(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+		incarnation: integer('incarnation').$type<RootIncarnation>()
 	},
 	// The maintenance pass finds the soonest-expiring TTL root; the index spares
 	// it a scan of every root.
@@ -1039,12 +1041,53 @@ export const retentionRootTargets = sqliteTable(
 		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		rootName: text('root_name').$type<RootName>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
-		storePath: text('store_path').$type<StorePathString>().notNull()
+		storePath: text('store_path').$type<StorePathString>().notNull(),
+		incarnation: integer('incarnation').$type<RootIncarnation>()
 	},
 	(table) => [
 		primaryKey({
 			columns: [table.cacheId, table.rootName, table.storePathHash]
-		})
+		}),
+		// SQLite uses a partial index only when the query's terms imply its
+		// predicate. `incarnation = ?` implies `IS NOT NULL`; no comparison with
+		// a bound parameter implies a range such as `> 0`.
+		index('retention_root_target_incarnation_idx')
+			.on(table.incarnation, table.storePathHash)
+			.where(sql`${table.incarnation} IS NOT NULL`),
+		// Rows without an incarnation belong to a root that an earlier version
+		// of cupboard created and that nothing has replaced since, or were left
+		// by such a version under a name without a root. This version adds
+		// them only when it attaches paths to such a root, and a release of
+		// them removes them.
+		index('retention_root_target_legacy_idx')
+			.on(table.cacheId, table.rootName)
+			.where(sql`${table.incarnation} IS NULL`)
+	]
+);
+
+// An incarnation of a root that a replacement, a removal or an expiry has
+// released, and whose target rows are still to be drained. The drain grants
+// `retain_until` to each released path whose narinfo row was created at or
+// before `released_at`. A closed-root release also requires the row's
+// retention epoch to be at most `close_retention_epoch`.
+export const retentionRootReleases = sqliteTable(
+	'retention_root_release',
+	{
+		id: integer('id').primaryKey({ autoIncrement: true }),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		rootName: text('root_name').$type<RootName>().notNull(),
+		incarnation: integer('incarnation').$type<RootIncarnation>(),
+		releasedAt: text('released_at').$type<IsoTimestamp>().notNull(),
+		retainUntil: text('retain_until').$type<IsoTimestamp>(),
+		closeRetentionEpoch: integer('close_retention_epoch')
+	},
+	(table) => [
+		index('retention_root_release_cache_idx').on(table.cacheId, table.id),
+		index('retention_root_release_root_idx').on(
+			table.cacheId,
+			table.rootName,
+			table.incarnation
+		)
 	]
 );
 

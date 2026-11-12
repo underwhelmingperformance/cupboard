@@ -259,7 +259,8 @@ export class RootsService {
 								sql`${cache.id}`,
 								sql`${request.name}`,
 								targets.column('storePathHash'),
-								targets.column('storePath')
+								targets.column('storePath'),
+								sql`NULL`
 							])
 						)
 						.run();
@@ -621,7 +622,8 @@ export class RootsService {
 						sql`${cache.id}`,
 						sql`${name}`,
 						batch.column('storePathHash'),
-						batch.column('storePath')
+						batch.column('storePath'),
+						sql`NULL`
 					])
 				)
 				.onConflictDoNothing()

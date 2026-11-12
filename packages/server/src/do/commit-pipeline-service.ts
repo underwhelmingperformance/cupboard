@@ -1817,7 +1817,8 @@ export class CommitPipelineService {
 						batch.column('cacheId'),
 						batch.column('rootName'),
 						batch.column('storePathHash'),
-						batch.column('storePath')
+						batch.column('storePath'),
+						sql`NULL`
 					])
 				)
 				.onConflictDoNothing()
