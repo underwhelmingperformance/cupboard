@@ -1068,7 +1068,15 @@ export const retentionGrace = sqliteTable(
 export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 	cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
 	phase: text('phase', {
-		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'collect']
+		enum: [
+			'expire-roots',
+			'expire-grace',
+			'roots',
+			'grace',
+			'mark',
+			'collect',
+			'clear'
+		]
 	}).notNull(),
 	cursor: text('cursor').notNull().default(''),
 	markStorePathHash: text('mark_store_path_hash').$type<StorePathHash>(),

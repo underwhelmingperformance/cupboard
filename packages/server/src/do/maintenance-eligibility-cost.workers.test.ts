@@ -554,8 +554,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 305,
-			largeBacklogCost: 305
+			smallBacklogCost: 308,
+			largeBacklogCost: 308
 		});
 	});
 });

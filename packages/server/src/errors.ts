@@ -1468,19 +1468,6 @@ export class GarbageCollectionBarrierMissingError extends ServerHttpError {
 	}
 }
 
-/**
-A collection scan has marks before its seed phases, so emptying its frontier
-could drop a path that a mark depends on.
-*/
-export class GarbageCollectionMarksBeforeSeedError extends ServerHttpError {
-	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
-
-	constructor(public readonly cacheId: number) {
-		super('A garbage-collection scan has marks before its seed phases');
-		this.name = 'GarbageCollectionMarksBeforeSeedError';
-	}
-}
-
 export class StoredReferencesInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

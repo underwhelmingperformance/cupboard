@@ -453,7 +453,7 @@ describe('garbage collection cost', () => {
 			const unchanged = { inputsChanged: false, scanCompletedAt: firstSweepAt };
 
 			expect({ cost, caches }).toStrictEqual({
-				cost: { invocations: 2, rowsRead: 9244, rowsWritten: 2836 },
+				cost: { invocations: 2, rowsRead: 9601, rowsWritten: 2837 },
 				caches: {
 					isAddedPathKept: false,
 					completions: {
