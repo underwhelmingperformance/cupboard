@@ -81,6 +81,7 @@ interface ProbeRoute {
 	readonly name: string;
 	readonly path: string;
 	readonly operation: string;
+	readonly refusalStep: string;
 	readonly store: () => Promise<StoredProbe>;
 }
 
@@ -89,6 +90,7 @@ const probes: readonly ProbeRoute[] = [
 		name: 'the path-info probe of a private cache',
 		path: '/api/v1/path-info',
 		operation: 'path-info.body',
+		refusalStep: 'narinfo-object-read',
 		store: async () => {
 			await initialiseViaWorker();
 			await provisionFixtureTenant({ read: reader });
@@ -117,6 +119,7 @@ const probes: readonly ProbeRoute[] = [
 		name: 'the attestation-info probe',
 		path: '/api/v1/attestation-info',
 		operation: 'attestation-info.body',
+		refusalStep: 'attestation-list-read',
 		store: async () => {
 			const path = await committedPath(
 				'stalled-attestation-info',
@@ -195,6 +198,19 @@ describe('a read probe whose R2 body stalls', () => {
 								objectKey: key,
 								length: size,
 								deadlineMs: readRequestBudgetMs
+							}
+						},
+						{
+							level: 'warning',
+							category: ['cupboard'],
+							message: 'request refused: cache facts unavailable',
+							properties: {
+								requestId: 'string',
+								method: 'POST',
+								path: `/t/${fixtureTenant}${probe.path}`,
+								tenant: fixtureTenant,
+								step: probe.refusalStep,
+								error: 'SubrequestTimeoutError'
 							}
 						}
 					]

@@ -1,7 +1,11 @@
-import { type Logger } from '@cupboard/logger';
+import { type Logger, rootLogger } from '@cupboard/logger';
+import { type TenantId } from '@cupboard/nix-store/scalars';
 
 import { remainingDeadlineMs } from '../do/deadline.ts';
-import { DatabaseOverloadedError } from '../errors.ts';
+import {
+	DatabaseOverloadedError,
+	SharedFactsUnavailableError
+} from '../errors.ts';
 
 const readRetryDelayMs = 100;
 
@@ -74,6 +78,88 @@ export function d1OverloadRefusal(
 	logger.warn('request refused: database overloaded', { error });
 
 	return new DatabaseOverloadedError(error);
+}
+
+/**
+The group of reads that failed, given as `step` in the "request refused: cache
+facts unavailable" record. One step can cover several call sites that read
+the same facts. A probe that reads objects in parallel uses one step for the
+object reads and the body reads of every path in a group.
+*/
+export type SharedFactsStep =
+	| 'attestation-list-read'
+	| 'bundle-reference-read'
+	| 'canonical-narinfo-read'
+	| 'nar-reference-read'
+	| 'narinfo-object-read'
+	| 'narinfo-reference-read'
+	| 'read-scope-recheck'
+	| 'reuse-view-object-probe'
+	| 'reuse-view-reference-read';
+
+const sharedFactsRefusalMessage = 'request refused: cache facts unavailable';
+
+/**
+Creates the retryable refusal for a failed shared-fact read and logs the
+underlying error at `warn`. The 503 response does not contain the error, so
+the record shows why the read failed. Pass the request's logger when the
+caller has one.
+*/
+export function sharedFactsRefusal(
+	logger: Logger,
+	tenant: TenantId,
+	step: SharedFactsStep,
+	error: unknown
+): SharedFactsUnavailableError {
+	logger.warn(sharedFactsRefusalMessage, { tenant, step, error });
+
+	return new SharedFactsUnavailableError(error);
+}
+
+/**
+Logs the refusal once for a group of reads that run in parallel. Each read in
+the group throws `new SharedFactsUnavailableError(cause)` without logging, so
+a failure of several reads does not write one record for each. Call this
+where the group's first failure is rethrown. It returns `failure` unchanged,
+and logs only when `failure` is a `SharedFactsUnavailableError`.
+*/
+export function logGroupRefusal(
+	logger: Logger,
+	tenant: TenantId,
+	step: SharedFactsStep,
+	failure: unknown
+): unknown {
+	if (failure instanceof SharedFactsUnavailableError) {
+		logger.warn(sharedFactsRefusalMessage, {
+			tenant,
+			step,
+			error: failure.cause
+		});
+	}
+
+	return failure;
+}
+
+/**
+The deployment and lifecycle transition reads that fail with a
+`SharedFactsUnavailableError`.
+*/
+export type TransitionReadStep =
+	'deployment-transition-read' | 'lifecycle-transition-read';
+
+/**
+Creates the retryable error for a failed transition read and logs the
+underlying error at `warn`. Background work (the local step, the deletion
+queue and migrations) and admin writes make these reads as well as cache
+requests, so the message does not say that a request was refused.
+*/
+export function transitionReadFailure(
+	step: TransitionReadStep,
+	error: unknown
+): SharedFactsUnavailableError {
+	rootLogger().warn('transition read failed', { step, error });
+
+	return new SharedFactsUnavailableError(error);
 }
 
 /**

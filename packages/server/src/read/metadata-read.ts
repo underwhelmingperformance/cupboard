@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type StorePathString,
@@ -12,6 +13,7 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import { isNarInfoObjectOfCommit } from '../blob/narinfo-object-metadata.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { logGroupRefusal } from '../db/transient.ts';
 import { chunk, maxOutgoingConnections } from '../do/bulk.ts';
 import { requireSubrequestsFor } from '../do/subrequest-slice.ts';
 import {
@@ -116,8 +118,12 @@ Reads the current committed narinfos in request order. Each group reads at
 most six bounded R2 bodies before yielding its entries, so a caller can stop
 after a response prefix without retaining every requested narinfo. Each body
 ends at the current read's deadline.
+
+When reads of a group fail, the function logs one refusal record for the
+group, using `logger`, and throws the first failure.
 */
 export async function* readCacheMetadata(
+	logger: Logger,
 	blobs: R2Bucket,
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -129,7 +135,8 @@ export async function* readCacheMetadata(
 		database,
 		tenant,
 		cache.scope,
-		storePaths.map((storePath) => StorePath.hash(storePath))
+		storePaths.map((storePath) => StorePath.hash(storePath)),
+		logger
 	);
 	const readEntry = async (
 		storePath: StorePathString
@@ -180,7 +187,12 @@ export async function* readCacheMetadata(
 		const failed = entries.find((entry) => entry.status === 'rejected');
 
 		if (failed !== undefined) {
-			const error: unknown = failed.reason;
+			const error: unknown = logGroupRefusal(
+				logger,
+				tenant,
+				'narinfo-object-read',
+				failed.reason
+			);
 			throw error;
 		}
 

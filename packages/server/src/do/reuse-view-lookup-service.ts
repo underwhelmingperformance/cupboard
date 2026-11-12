@@ -45,12 +45,15 @@ import {
 import { authorisedByPathGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { readWithOneRetry } from '../db/transient.ts';
+import {
+	readWithOneRetry,
+	sharedFactsRefusal,
+	type SharedFactsStep
+} from '../db/transient.ts';
 import {
 	MetadataCandidateBudgetExceededError,
 	MetadataNarInfoInvalidError,
 	MetadataNarInfoTooLargeError,
-	SharedFactsUnavailableError,
 	StoredReferencesInvalidError,
 	StoredSignaturesInvalidError
 } from '../errors.ts';
@@ -613,43 +616,47 @@ export class ReuseViewLookupService {
 			(versions) =>
 				reuseEdgeSelect(this.context.d1, tenant, snapshot.access, versions)
 		);
-		const [edgeResults, states, owned] = await this.sharedFacts(() =>
-			Promise.all([
-				readWithOneRetry(() => batchNonEmpty(this.context.d1, edgeQueries)),
-				readWithOneRetry(() =>
-					batchNonEmpty(
-						this.context.d1,
-						jsonValueLists(uniqueHashes).map((narHashes) =>
-							this.context.d1
-								.select({
-									narHash: d1Schema.blobState.narHash,
-									fileHash: d1Schema.blobState.fileHash,
-									fileSize: d1Schema.blobState.fileSize,
-									compression: d1Schema.blobState.compression,
-									incarnation: d1Schema.blobState.incarnation
-								})
-								.from(d1Schema.blobState)
-								.where(inArray(d1Schema.blobState.narHash, narHashes))
+		const [edgeResults, states, owned] = await this.sharedFacts(
+			logger,
+			tenant,
+			'reuse-view-reference-read',
+			() =>
+				Promise.all([
+					readWithOneRetry(() => batchNonEmpty(this.context.d1, edgeQueries)),
+					readWithOneRetry(() =>
+						batchNonEmpty(
+							this.context.d1,
+							jsonValueLists(uniqueHashes).map((narHashes) =>
+								this.context.d1
+									.select({
+										narHash: d1Schema.blobState.narHash,
+										fileHash: d1Schema.blobState.fileHash,
+										fileSize: d1Schema.blobState.fileSize,
+										compression: d1Schema.blobState.compression,
+										incarnation: d1Schema.blobState.incarnation
+									})
+									.from(d1Schema.blobState)
+									.where(inArray(d1Schema.blobState.narHash, narHashes))
+							)
 						)
-					)
-				),
-				readWithOneRetry(() =>
-					batchNonEmpty(
-						this.context.d1,
-						jsonValueLists(uniqueHashes).map((narHashes) =>
-							this.context.d1
-								.select({ narHash: d1Schema.tenantBlob.narHash })
-								.from(d1Schema.tenantBlob)
-								.where(
-									and(
-										eq(d1Schema.tenantBlob.tenant, tenant),
-										inArray(d1Schema.tenantBlob.narHash, narHashes)
+					),
+					readWithOneRetry(() =>
+						batchNonEmpty(
+							this.context.d1,
+							jsonValueLists(uniqueHashes).map((narHashes) =>
+								this.context.d1
+									.select({ narHash: d1Schema.tenantBlob.narHash })
+									.from(d1Schema.tenantBlob)
+									.where(
+										and(
+											eq(d1Schema.tenantBlob.tenant, tenant),
+											inArray(d1Schema.tenantBlob.narHash, narHashes)
+										)
 									)
-								)
+							)
 						)
 					)
-				)
-			])
+				])
 		);
 
 		// The edge rows come back in no guaranteed order, so match candidates on
@@ -686,11 +693,15 @@ export class ReuseViewLookupService {
 					ownedHashes.has(candidate.narHash)
 			)
 		);
-		const presentHashes = await this.sharedFacts(() =>
-			presentNarObjects(
-				this.context.env.BLOBS,
-				recordedObjectVersions(backed, blobs)
-			)
+		const presentHashes = await this.sharedFacts(
+			logger,
+			tenant,
+			'reuse-view-object-probe',
+			() =>
+				presentNarObjects(
+					this.context.env.BLOBS,
+					recordedObjectVersions(backed, blobs)
+				)
 		);
 
 		return {
@@ -742,12 +753,18 @@ export class ReuseViewLookupService {
 					)
 				)
 		);
-		const [edgePages, statePages, ownershipPages] = await this.sharedFacts(() =>
-			Promise.all([
-				readWithOneRetry(() => batchNonEmpty(this.context.d1, edgeQueries)),
-				readWithOneRetry(() => batchNonEmpty(this.context.d1, stateQueries)),
-				readWithOneRetry(() => batchNonEmpty(this.context.d1, ownershipQueries))
-			])
+		const [edgePages, statePages, ownershipPages] = await this.sharedFacts(
+			logger,
+			tenant,
+			'reuse-view-reference-read',
+			() =>
+				Promise.all([
+					readWithOneRetry(() => batchNonEmpty(this.context.d1, edgeQueries)),
+					readWithOneRetry(() => batchNonEmpty(this.context.d1, stateQueries)),
+					readWithOneRetry(() =>
+						batchNonEmpty(this.context.d1, ownershipQueries)
+					)
+				])
 		);
 
 		const committedCandidates = new Set(
@@ -798,11 +815,15 @@ export class ReuseViewLookupService {
 				? 'reuse-view metadata probe'
 				: 'reuse-view availability probe'
 		);
-		const presentHashes = await this.sharedFacts(() =>
-			presentNarObjects(
-				this.context.env.BLOBS,
-				recordedObjectVersions(backed, blobs)
-			)
+		const presentHashes = await this.sharedFacts(
+			logger,
+			tenant,
+			'reuse-view-object-probe',
+			() =>
+				presentNarObjects(
+					this.context.env.BLOBS,
+					recordedObjectVersions(backed, blobs)
+				)
 		);
 
 		return {
@@ -1094,11 +1115,16 @@ export class ReuseViewLookupService {
 
 	// A shared-state fault must remain distinguishable from a missing path. The
 	// latter can make Nix rebuild a path that the cache still has.
-	private async sharedFacts<T>(read: () => Promise<T>): Promise<T> {
+	private async sharedFacts<T>(
+		logger: Logger,
+		tenant: TenantId,
+		step: SharedFactsStep,
+		read: () => Promise<T>
+	): Promise<T> {
 		try {
 			return await read();
 		} catch (error) {
-			throw new SharedFactsUnavailableError(error);
+			throw sharedFactsRefusal(logger, tenant, step, error);
 		}
 	}
 

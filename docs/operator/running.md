@@ -310,11 +310,24 @@ than a second returns 503 with `Retry-After` before the body starts.
 The `path-info` and `attestation-info` probes of a default or named cache have
 the same 20-second deadline, which covers every narinfo or attestation list that
 the probe reads from R2. When one of those bodies misses the deadline, the same
-warning records it, and the probe returns 503 with `Retry-After`. For a public
-cache, `path-info` reads each narinfo through Workers Cache from the tenant
-Worker, and the narinfo deadline in the tenant Worker covers that body. The
-tenant object answers the `path-info` probe of a reuse view without a read
-deadline.
+warning records it, and the probe returns 503 with `Retry-After`. A refusal by a
+private-cache `path-info` probe or an `attestation-info` probe also logs one
+warning, `request refused: cache facts unavailable`, whatever the number of
+paths that failed. The warning has the tenant, the request's method and path,
+the failed `step` and the underlying `error`. The step is `narinfo-object-read`
+for a private cache and `attestation-list-read` for `attestation-info`. For a
+public cache, `path-info` reads each narinfo through Workers Cache from the
+tenant Worker, and the narinfo deadline in the tenant Worker covers that body.
+Each refused read logs its own warning in the tenant Worker, with the step of
+the read that failed, so a refused public probe can write one warning for each
+path. The tenant object answers the `path-info` probe of a reuse view without a
+read deadline.
+
+Other reads that a cache request makes before it answers log the same warning
+with their own step. A 503 with the message
+`Cache facts are temporarily unavailable` therefore has that warning, or
+`transition read failed` when a deployment transition read in the tenant object
+failed. The second warning has a `step` and an `error` but no tenant.
 
 In the control Worker, the deadline of a narinfo read or a probe of a default or
 named cache starts before admission and also covers it: the membership filter

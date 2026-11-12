@@ -17,6 +17,7 @@ import { StatusCodes } from 'http-status-codes';
 
 import { sha256Hex } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { logGroupRefusal } from '../db/transient.ts';
 import { maxOutgoingConnections } from '../do/bulk.ts';
 import {
 	MetadataNarInfoInvalidError,
@@ -139,7 +140,8 @@ async function* publicEntries(
 		drizzleD1(context.env.CUPBOARD_DB, { schema: d1Schema }),
 		context.get('tenant'),
 		scope.scope,
-		paths.map((storePath) => StorePath.hash(storePath))
+		paths.map((storePath) => StorePath.hash(storePath)),
+		context.get('logger')
 	);
 	for (const group of chunk(paths, maxOutgoingConnections)) {
 		const outcomes = await Promise.allSettled(
@@ -154,7 +156,12 @@ async function* publicEntries(
 		);
 		const failed = outcomes.find((outcome) => outcome.status === 'rejected');
 		if (failed !== undefined) {
-			const error: unknown = failed.reason;
+			const error: unknown = logGroupRefusal(
+				context.get('logger'),
+				context.get('tenant'),
+				'canonical-narinfo-read',
+				failed.reason
+			);
 			throw error;
 		}
 		for (const outcome of outcomes) {
@@ -206,6 +213,7 @@ export async function answerCacheMetadata(
 								);
 							})
 						: readCacheMetadata(
+								context.get('logger'),
 								context.env.BLOBS,
 								drizzleD1(context.env.CUPBOARD_DB, { schema: d1Schema }),
 								context.get('tenant'),

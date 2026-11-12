@@ -34,9 +34,16 @@ import {
 	type NarObjectName
 } from '../http/http.ts';
 import { passThrough } from '../http/stalled-body.test-support.ts';
-import { defaultCache, flakyD1, md5Etag, namedCache } from '../test-support.ts';
+import {
+	defaultCache,
+	flakyD1,
+	loggedAtWarning,
+	md5Etag,
+	namedCache
+} from '../test-support.ts';
 
 import {
+	authorisedNarInfoVersions,
 	missingStorePathHashes,
 	type NarAuthority,
 	narInfoReferenceQuery,
@@ -345,6 +352,56 @@ describe('NAR serve under shared-fact read faults', () => {
 			status: StatusCodes.SERVICE_UNAVAILABLE,
 			retryAfterSeconds: 5
 		});
+	});
+
+	it.each([
+		{
+			read: 'the NAR reference read',
+			step: 'nar-reference-read',
+			refuse: (database: D1Database) =>
+				serveNar(
+					new Request('https://cache.example/nar/probe'),
+					{ ...env, CUPBOARD_DB: database },
+					tenant,
+					parsedNar(),
+					defaultPublicAuthority,
+					true
+				)
+		},
+		{
+			read: 'the narinfo reference read',
+			step: 'narinfo-reference-read',
+			refuse: (database: D1Database) =>
+				authorisedNarInfoVersions(
+					drizzleD1(database, { schema: d1Schema }),
+					tenant,
+					defaultCache(),
+					[referencingPath]
+				)
+		}
+	])('logs the D1 error when $read fails twice', async ({ step, refuse }) => {
+		await seedOwnedNar();
+
+		const outage = new Error('simulated D1 outage');
+		const logged = await loggedAtWarning(async () => {
+			await expect(
+				refuse(
+					flakyD1(env.CUPBOARD_DB, {
+						failures: Number.MAX_SAFE_INTEGER,
+						error: outage
+					})
+				)
+			).rejects.toBeInstanceOf(SharedFactsUnavailableError);
+		});
+
+		expect(logged).toStrictEqual([
+			{
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'request refused: cache facts unavailable',
+				properties: { tenant, step, error: outage }
+			}
+		]);
 	});
 });
 
@@ -956,6 +1013,32 @@ async function contractAuthority(): Promise<void> {
 }
 
 describe('cache admission compatibility', () => {
+	it('logs the D1 error when the lifecycle transition read fails twice', async () => {
+		const outage = new Error('simulated D1 outage');
+		const database = drizzleD1(
+			flakyD1(env.CUPBOARD_DB, {
+				failures: Number.MAX_SAFE_INTEGER,
+				error: outage
+			}),
+			{ schema: d1Schema }
+		);
+
+		const logged = await loggedAtWarning(async () => {
+			await expect(
+				writeCacheLifecycle(database, () => Promise.resolve())
+			).rejects.toBeInstanceOf(SharedFactsUnavailableError);
+		});
+
+		expect(logged).toStrictEqual([
+			{
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'transition read failed',
+				properties: { step: 'lifecycle-transition-read', error: outage }
+			}
+		]);
+	});
+
 	it('writes lifecycle rows before contraction, refuses the switch, and resumes on physical storage', async () => {
 		await seedOwnedNar();
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });

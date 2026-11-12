@@ -37,6 +37,7 @@ import {
 	flakyD1,
 	initialiseViaWorker,
 	issueWorkerSignedToken,
+	loggedAtWarning,
 	namedCache,
 	provisionFixtureTenant,
 	putWorkerTestCache,
@@ -330,6 +331,168 @@ describe('cache metadata probe', () => {
 				}
 			]
 		});
+	});
+
+	it.each(['public', 'private'] as const)(
+		'logs the request fields when the reference read of a %s page fails',
+		async (access) => {
+			await initialiseViaWorker();
+			await provisionFixtureTenant({
+				read: { user: 'alice', password: 'secret' }
+			});
+			const path = await committedPath(
+				'metadata-reference-failure',
+				defaultCache(),
+				{
+					access
+				}
+			);
+			const failing = flakyD1(env.CUPBOARD_DB, {
+				failures: Number.MAX_SAFE_INTEGER,
+				matches: (query) => query.includes('requested_path_reference')
+			});
+			const overridden = new Proxy(env, {
+				get(target, key, receiver): unknown {
+					return key === 'CUPBOARD_DB'
+						? failing
+						: Reflect.get(target, key, receiver);
+				}
+			});
+			const logged = await loggedAtWarning(async () => {
+				const context = createExecutionContext();
+				const response = await worker.fetch(
+					new Request<unknown, IncomingRequestCfProperties>(
+						`${currentOrigin()}/t/${fixtureTenant}/api/v1/path-info`,
+						probe([path.storePath], true)
+					),
+					overridden,
+					context
+				);
+				await waitOnExecutionContext(context);
+				expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+			});
+
+			expect(logged).toStrictEqual([
+				{
+					level: 'warning',
+					category: ['cupboard'],
+					message: 'request refused: cache facts unavailable',
+					properties: {
+						requestId: stringMatcher,
+						method: 'POST',
+						path: `/t/${fixtureTenant}/api/v1/path-info`,
+						tenant: fixtureTenant,
+						step: 'narinfo-reference-read',
+						error: new Error('transient D1 fault')
+					}
+				}
+			]);
+		}
+	);
+
+	it('logs one record when several canonical narinfo reads fail', async () => {
+		await initialiseViaWorker();
+		const paths = [
+			await committedPath('metadata-canonical-failure-1', defaultCache(), {
+				storePathHash: 'a'.repeat(32)
+			}),
+			await committedPath('metadata-canonical-failure-2', defaultCache(), {
+				storePathHash: 'b'.repeat(32)
+			})
+		];
+		const requested = paths.map((path) => path.storePath);
+		const outage = new Error('tenant fetch failed');
+		const overridden = new Proxy(env, {
+			get(target, key, receiver): unknown {
+				if (key === 'CUPBOARD_TENANT') {
+					return { fetch: () => Promise.reject(outage) };
+				}
+				return Reflect.get(target, key, receiver);
+			}
+		});
+		const logged = await loggedAtWarning(async () => {
+			const context = createExecutionContext();
+			const response = await worker.fetch(
+				new Request<unknown, IncomingRequestCfProperties>(
+					`${currentOrigin()}/t/${fixtureTenant}/api/v1/path-info`,
+					probe(requested)
+				),
+				overridden,
+				context
+			);
+			await waitOnExecutionContext(context);
+			expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+		});
+
+		expect(logged).toStrictEqual([
+			{
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'request refused: cache facts unavailable',
+				properties: {
+					requestId: stringMatcher,
+					method: 'POST',
+					path: `/t/${fixtureTenant}/api/v1/path-info`,
+					tenant: fixtureTenant,
+					step: 'canonical-narinfo-read',
+					error: outage
+				}
+			}
+		]);
+	});
+
+	it('logs one record when several private narinfo object reads fail', async () => {
+		await initialiseViaWorker();
+		await provisionFixtureTenant({
+			read: { user: 'alice', password: 'secret' }
+		});
+		const paths = [
+			await committedPath('metadata-object-failure-1', defaultCache(), {
+				access: 'private',
+				storePathHash: 'a'.repeat(32)
+			}),
+			await committedPath('metadata-object-failure-2', defaultCache(), {
+				access: 'private',
+				storePathHash: 'b'.repeat(32)
+			})
+		];
+		const outage = new Error('provider unavailable');
+		const bucket = new Proxy(env.BLOBS, {
+			get(target, key, receiver): unknown {
+				if (key === 'get') {
+					return () => Promise.reject(outage);
+				}
+				const value: unknown = Reflect.get(target, key, receiver);
+				return typeof value === 'function' ? value.bind(target) : value;
+			}
+		});
+		const logged = await loggedAtWarning(async () => {
+			const response = await readFetch(
+				'/api/v1/path-info',
+				probe(
+					paths.map((path) => path.storePath),
+					true
+				),
+				{ BLOBS: bucket }
+			);
+			expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+		});
+
+		expect(logged).toStrictEqual([
+			{
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'request refused: cache facts unavailable',
+				properties: {
+					requestId: stringMatcher,
+					method: 'POST',
+					path: `/t/${fixtureTenant}/api/v1/path-info`,
+					tenant: fixtureTenant,
+					step: 'narinfo-object-read',
+					error: outage
+				}
+			}
+		]);
 	});
 
 	it.each([

@@ -8,8 +8,7 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { readRecordedTransitions } from '../db/deployment-transitions.ts';
-import { readWithOneRetry } from '../db/transient.ts';
-import { SharedFactsUnavailableError } from '../errors.ts';
+import { readWithOneRetry, transitionReadFailure } from '../db/transient.ts';
 
 // How long the gate uses the states that it last read. Reading on every
 // request would add a D1 statement to each one.
@@ -42,7 +41,7 @@ export class TransitionGate {
 		try {
 			return await readWithOneRetry(() => readRecordedTransitions(this.d1));
 		} catch (error) {
-			throw new SharedFactsUnavailableError(error);
+			throw transitionReadFailure('deployment-transition-read', error);
 		}
 	}
 

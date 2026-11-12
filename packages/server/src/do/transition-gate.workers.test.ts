@@ -4,7 +4,11 @@ import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
-import { recordTransition, testBase } from '../test-support.ts';
+import {
+	loggedAtWarning,
+	recordTransition,
+	testBase
+} from '../test-support.ts';
 
 import { transitionCacheMs, TransitionGate } from './transition-gate.ts';
 
@@ -164,5 +168,27 @@ describe('transition gate', () => {
 			caught: caught instanceof SharedFactsUnavailableError,
 			attempts: attempts.count
 		}).toStrictEqual({ caught: true, attempts: 2 });
+	});
+
+	it('logs the D1 error when the read fails twice', async () => {
+		const gate = gateOver(failingD1({ count: 0 }));
+
+		const logged = await loggedAtWarning(async () => {
+			await expect(
+				gate.hasReached('cache-identity', 'expanded')
+			).rejects.toBeInstanceOf(SharedFactsUnavailableError);
+		});
+
+		expect(logged).toStrictEqual([
+			{
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'transition read failed',
+				properties: {
+					step: 'deployment-transition-read',
+					error: new Error('simulated D1 outage')
+				}
+			}
+		]);
 	});
 });

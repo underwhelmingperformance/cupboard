@@ -1,4 +1,3 @@
-import { atWarningOrAbove, startCapture } from '@cupboard/logger/testing';
 import {
 	cacheNameSchema,
 	type CacheScope,
@@ -43,9 +42,13 @@ import { cacheIdentityColumns } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { d1AccountThrottleMessage } from '../db/transient.test-support.ts';
-import { TenantAdmissionUnavailableError } from '../errors.ts';
+import {
+	SharedFactsUnavailableError,
+	TenantAdmissionUnavailableError
+} from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import { cacheCatalogueVersion } from '../migration/cache-access.ts';
+import { requestLogger } from '../observability/logging.ts';
 import {
 	isReadPasswordMatching,
 	readPasswordHashSchema,
@@ -56,6 +59,7 @@ import {
 	defaultCache,
 	flakyD1,
 	issueTokenForTenant,
+	loggedAtWarning,
 	migrateThrough,
 	provisionNamedTenant,
 	testServerFor
@@ -63,7 +67,10 @@ import {
 
 import worker from './handler.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
-import { revalidateCacheReadAuthority } from './read-scope.ts';
+import {
+	revalidateCacheReadAuthority,
+	revalidateCacheReadScope
+} from './read-scope.ts';
 
 const stringMatcher: unknown = expect.any(String);
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
@@ -840,22 +847,54 @@ describe('layered admission gate', () => {
 				}
 			]);
 		});
+
+		it('logs the D1 error when the read scope recheck fails', async () => {
+			await ensureTenant(database(), createBody('acme'), now);
+
+			const failingEnv = {
+				...env,
+				CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
+					failures: Number.MAX_SAFE_INTEGER,
+					error: d1Overload
+				})
+			};
+			const app = new Hono<WorkerHonoEnv>();
+			app.get('/', async (context) => {
+				context.set('logger', requestLogger(context.req.raw));
+				context.set('tenant', tenantIdSchema.parse('acme'));
+				context.set('readScope', {
+					scope: defaultCache(),
+					access: 'private',
+					generation: firstCacheGeneration
+				});
+				await expect(
+					revalidateCacheReadScope(context, 'cache:1:1:private:false')
+				).rejects.toBeInstanceOf(SharedFactsUnavailableError);
+
+				return context.text('rechecked');
+			});
+			const logged = await loggedAtWarning(async () => {
+				const response = await app.request('/', {}, failingEnv);
+				expect(await response.text()).toBe('rechecked');
+			});
+
+			expect(logged).toStrictEqual([
+				{
+					level: 'warning',
+					category: ['cupboard'],
+					message: 'request refused: cache facts unavailable',
+					properties: {
+						method: 'GET',
+						path: '/',
+						tenant: 'acme',
+						step: 'read-scope-recheck',
+						error: d1Overload
+					}
+				}
+			]);
+		});
 	});
 });
-
-// Runs `body` and returns the records that it logged at warning level or above,
-// so an unexpected error-level record fails the test.
-async function loggedAtWarning(body: () => Promise<void>) {
-	const capture = startCapture();
-
-	try {
-		await body();
-	} finally {
-		capture.stop();
-	}
-
-	return atWarningOrAbove(capture.logs);
-}
 
 // A tenant namespace that returns `stub` for every id. It keeps the real
 // `idFromName`, because the membership filter's cache key derives from it.
