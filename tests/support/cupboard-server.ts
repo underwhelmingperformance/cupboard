@@ -478,6 +478,17 @@ export class CupboardTestServer {
 		return url;
 	}
 
+	/**
+	Sends a GET to the Worker through Miniflare, bypassing the loopback HTTP
+	server. Miniflare's entry Worker forwards the request to the Worker over a
+	service binding, and workerd writes the entry Worker's response to a socket.
+	The response's `content-length` and `transfer-encoding` are therefore the
+	framing that workerd chose for the entry Worker's response.
+	*/
+	dispatchGet(url: URL): Promise<MiniflareResponse> {
+		return this.worker.dispatchFetch(url.href);
+	}
+
 	withManualAlarms<T>(
 		use: (runAlarmPass: () => Promise<void>) => Promise<T>
 	): Promise<T> {
