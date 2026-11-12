@@ -1,23 +1,34 @@
 import {
-	applyAlarmFence,
 	closeAlarmFence,
-	isAlarmDeliveryIgnored,
+	controlAlarms,
 	isAlarmFenceOpen,
-	openAlarmFence
+	openAlarmFence,
+	runAlarmHandler,
+	runInTestGeneration
 } from './alarm-fence.test-support.ts';
 import { type RuntimeEnv } from './do/context.ts';
+import { wrapDispatchedMethods } from './do/dispatch-scope.ts';
 import { CupboardServer as ProductionCupboardServer } from './do/server.ts';
 import TenantWorker, {
 	CachedTenantReads as ProductionCachedTenantReads
 } from './tenant-worker.ts';
 
 export class CupboardServer extends ProductionCupboardServer {
+	static {
+		wrapDispatchedMethods(
+			CupboardServer.prototype,
+			(body) => runInTestGeneration(body),
+			{ includeInherited: true }
+		);
+	}
+
 	readonly #testState: DurableObjectState;
 	/**
-	Disables alarm arming before construction if a test holds an alarm fence.
+	Installs the test alarm controls from `alarm-fence.test-support.ts` before
+	construction.
 	*/
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
-		applyAlarmFence(ctx);
+		controlAlarms(ctx);
 		const tenantEnv = { ...env };
 		Reflect.deleteProperty(tenantEnv, 'TEST_CONTROL_DATABASE');
 		super(ctx, tenantEnv);
@@ -30,11 +41,7 @@ export class CupboardServer extends ProductionCupboardServer {
 	}
 
 	override alarm(): Promise<void> {
-		if (isAlarmDeliveryIgnored(this.#testState)) {
-			return Promise.resolve();
-		}
-
-		return super.alarm();
+		return runAlarmHandler(this.#testState, () => super.alarm());
 	}
 
 	runAlarmPass(): Promise<void> {

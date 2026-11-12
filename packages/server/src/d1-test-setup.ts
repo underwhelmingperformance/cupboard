@@ -5,6 +5,7 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, vi } from 'vitest';
 
+import { resumeAlarms } from './alarm-fence.test-support.ts';
 import {
 	applyControlD1TestMigrations,
 	testControlDatabase
@@ -26,6 +27,7 @@ await applyControlD1TestMigrations();
 // Fresh Durable Objects do not isolate D1 between tests. Add new shared tables
 // to resetD1TestState as the schema grows.
 beforeEach(async () => {
+	resumeAlarms();
 	configureLogging({ sink: cloudflareSink() });
 	vi.useFakeTimers({ toFake: ['Date'] });
 	vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));

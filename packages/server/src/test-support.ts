@@ -112,7 +112,11 @@ import { z } from 'zod';
 
 import migrations from '../drizzle/migrations.js';
 
-import { closeAlarmFence, openAlarmFence } from './alarm-fence.test-support.ts';
+import {
+	closeAlarmFence,
+	openAlarmFence,
+	stopAlarms
+} from './alarm-fence.test-support.ts';
 import { issueAccessJwt } from './auth/auth.ts';
 import { NarReadBufferPool } from './blob/nar-read-buffers.ts';
 import { type NarVerification } from './blob/nar-verify.ts';
@@ -269,9 +273,9 @@ const testRunId = crypto.randomUUID();
 
 const harness = {
 	origin: 'https://cupboard.test',
-	server: testServerFor('initial'),
+	server: tenantServer(env, tenantIdSchema.parse('initial')),
 	serverName: 'initial',
-	serversUsed: new Set<DurableObjectStub<CupboardServer>>(),
+	serversUsed: new Map<string, DurableObjectStub<CupboardServer>>(),
 	nextTestServerId: 0,
 	nextProvisionConfigVersion: 1
 };
@@ -313,7 +317,6 @@ export async function resetTestServer(): Promise<void> {
 	harness.origin = `https://cupboard-${serverName}.test`;
 	harness.serverName = serverName;
 	harness.server = testServerFor(harness.serverName);
-	harness.serversUsed.add(harness.server);
 	harness.nextTestServerId += 1;
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -364,8 +367,11 @@ Resets in-memory Durable Objects and refreshes the harness's stubs while
 preserving persisted storage.
 */
 export async function restartTestServers(): Promise<void> {
-	harness.serversUsed.add(harness.server);
-	const serverIds = [...harness.serversUsed].map((stub) => stub.id);
+	registerServer(harness.server);
+	const serverIds = harness.serversUsed
+		.values()
+		.map((stub) => stub.id)
+		.toArray();
 	const currentId = harness.server.id;
 	await abortAllDurableObjects();
 
@@ -373,7 +379,7 @@ export async function restartTestServers(): Promise<void> {
 	harness.server = namespace.get(currentId);
 	harness.serversUsed.clear();
 	for (const id of serverIds) {
-		harness.serversUsed.add(namespace.get(id));
+		registerServer(namespace.get(id));
 	}
 }
 
@@ -686,14 +692,25 @@ export async function useTestServer(name: string): Promise<void> {
 	harness.origin = `https://cupboard-${name}.test`;
 	harness.serverName = name;
 	harness.server = testServerFor(name);
-	harness.serversUsed.add(harness.server);
 
 	await provisionFixtureTenant();
 	await configureFixtureTenant(harness.server);
 }
 
+/**
+Returns the stub for a named tenant's Durable Object and registers the object
+with the harness. The shared `afterEach` stops the object's alarms and audits
+it for stalled maintenance passes.
+*/
 export function testServerFor(name: string): DurableObjectStub<CupboardServer> {
-	return tenantServer(env, tenantIdSchema.parse(name));
+	const stub = tenantServer(env, tenantIdSchema.parse(name));
+	registerServer(stub);
+
+	return stub;
+}
+
+function registerServer(stub: DurableObjectStub<CupboardServer>): void {
+	harness.serversUsed.set(stub.id.toString(), stub);
 }
 
 /**
@@ -867,14 +884,12 @@ export async function recordClaimedMissingObject(
 }
 
 /**
-Clears any alarm the test's Durable Objects left armed. A test's objects
-are abandoned when it ends (the next test points the harness elsewhere),
-and an armed alarm on an abandoned object fires into a test environment
-that has moved on: its handler's console output then races the pool's log
-forwarding and surfaces as teardown errors. The shared `afterEach` calls
-this. It covers every server selected by the harness during the test and the
-fixture tenant's object. A test that arms an alarm on another object clears
-that alarm itself.
+Deletes the alarm of every server that the harness selected during the test
+and of the fixture tenant's object. It does not stop the objects from arming
+another alarm. A file that deletes alarms in its own `afterEach` calls this
+function. The shared `afterEach` calls {@link finishTestServerLifecycle}
+instead, which also stops alarms on objects that armed an alarm without the
+harness.
 */
 export async function clearAbandonedAlarms(): Promise<void> {
 	for (const stub of testServersUsed()) {
@@ -924,12 +939,14 @@ export async function takeStalledMaintenancePasses(): Promise<
 // `useTestServer` added.
 function testServersUsed(): readonly DurableObjectStub<CupboardServer>[] {
 	const fixture = fixtureWorkerServer();
-	harness.serversUsed.add(harness.server);
+	registerServer(harness.server);
 
-	return [
-		...[...harness.serversUsed].filter((stub) => !stub.id.equals(fixture.id)),
-		fixture
-	];
+	const others = harness.serversUsed
+		.values()
+		.filter((stub) => !stub.id.equals(fixture.id))
+		.toArray();
+
+	return [...others, fixture];
 }
 
 async function stalledMaintenancePassesFor(
@@ -967,17 +984,21 @@ async function stalledMaintenancePassesFor(
 }
 
 /**
-Clears alarms and audits stalled maintenance on one snapshot of every
-Durable Object used by the test. The shared `afterEach` calls this before
-the next test resets the registry.
+Stops alarms on every Durable Object that armed an alarm during the test or
+that the harness selected, and audits stalled maintenance on one snapshot of
+the objects that the harness selected. Alarms stay stopped until the shared
+`beforeEach` of the next test resumes them. The shared `afterEach` calls this
+before the next test resets the registry.
 */
 export async function finishTestServerLifecycle(): Promise<
 	{ readonly pass: string; readonly waitMs: number }[]
 > {
 	const servers = testServersUsed();
 
-	for (const stub of servers) {
-		await runInDurableObject(stub, (_instance, state) =>
+	const stopped = stopAlarms(servers.map((stub) => stub.id));
+
+	for (const id of stopped) {
+		await runInDurableObject(env.CUPBOARD_DO.get(id), (_instance, state) =>
 			state.storage.deleteAlarm()
 		);
 	}
