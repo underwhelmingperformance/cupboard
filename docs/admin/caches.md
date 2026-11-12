@@ -184,6 +184,14 @@ A named cache can also be set up to remove itself once it's empty. See
 | `cupboard usage <url>`                | How much storage the tenant is using, and its quota if it has one.                        |
 | `cupboard root list <url> [name]`     | The cache's retention roots. See [Retention](./retention.md).                             |
 
+The tenant keeps a running count of the store paths in each cache, and these
+commands report that count. Reading it takes the same work for a large cache as
+for a small one. A tenant whose data predates the running count builds it in the
+background after an upgrade. Until it finishes, `cache list`, `stats` and the
+commands that configure, reopen or remove a cache fail with status 503 and a
+`Retry-After` header, and change nothing. `cache inspect` counts the cache's
+store paths directly until then, and creating a cache works as usual.
+
 ### How storage is counted
 
 Storage is counted once per tenant. If the same NAR or attestation bundle is

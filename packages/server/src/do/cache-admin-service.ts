@@ -65,6 +65,11 @@ import { drainObjectDeletionPages } from './bulk.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
 import { CacheCreationDefaultsService } from './cache-creation-defaults-service.ts';
 import {
+	hasNarInfoCounts,
+	projectedStorePathCount,
+	requireNarInfoCounts
+} from './cache-listing-projection.ts';
+import {
 	cacheLifecycleFilter,
 	type CacheRegistrationService
 } from './cache-registration-service.ts';
@@ -707,10 +712,22 @@ export class CacheAdminService {
 		};
 	}
 
+	// A caller that reads a cache's settings does not wait for the count
+	// migration. Until it completes, the summary counts the cache's rows.
 	getCache(scope: CacheScope): CacheSummary {
 		const cache = this.context.cacheRepository.require(scope);
 
-		return this.cacheSummary(cache);
+		if (hasNarInfoCounts(this.context.db)) {
+			return this.cacheSummary(cache);
+		}
+
+		const counted = this.context.db
+			.select({ count: count() })
+			.from(schema.narInfos)
+			.where(eq(schema.narInfos.cacheId, cache.id))
+			.get();
+
+		return this.cacheSummary(cache, counted?.count ?? 0);
 	}
 
 	async createCache(
@@ -741,7 +758,8 @@ export class CacheAdminService {
 				})
 			});
 
-			return this.cacheSummary(cache);
+			// A new cache has no store paths, so its summary needs no count.
+			return this.cacheSummary(cache, 0);
 		});
 	}
 
@@ -759,6 +777,7 @@ export class CacheAdminService {
 		scope: CacheScope,
 		update: CacheUpdateBody
 	): Promise<CacheSummary> {
+		requireNarInfoCounts(this.context.db);
 		const cache = this.context.cacheRepository.require(scope);
 
 		if (update.kind !== 'priority' && update.kind !== 'access') {
@@ -973,6 +992,7 @@ export class CacheAdminService {
 		scope: Extract<CacheScope, { kind: 'named' }>
 	): Promise<CacheSummary> {
 		return this.context.criticalSection(() => {
+			requireNarInfoCounts(this.context.db);
 			const cache = this.context.cacheRepository.require(scope);
 			this.context.db
 				.delete(schema.managedCacheRetirements)
@@ -992,6 +1012,7 @@ export class CacheAdminService {
 		shouldRetireWhenEmpty: boolean
 	): Promise<CacheSummary> {
 		return this.context.criticalSection(() => {
+			requireNarInfoCounts(this.context.db);
 			const cache = this.context.cacheRepository.require(scope);
 			new CacheClosureService(this.context).assertWritable(cache);
 
@@ -1217,16 +1238,13 @@ export class CacheAdminService {
 	}
 
 	cacheStorePathCount(cache: ResolvedCache): number {
-		const result = this.context.db
-			.select({ count: count() })
-			.from(schema.narInfos)
-			.where(eq(schema.narInfos.cacheId, cache.id))
-			.get();
-
-		return result?.count ?? 0;
+		return projectedStorePathCount(this.context.db, cache);
 	}
 
-	cacheSummary(cache: ResolvedCache): CacheSummary {
+	cacheSummary(
+		cache: ResolvedCache,
+		storePaths = this.cacheStorePathCount(cache)
+	): CacheSummary {
 		const row = this.context.db
 			.select()
 			.from(schema.cacheIdentities)
@@ -1254,7 +1272,7 @@ export class CacheAdminService {
 			scope: cache.scope,
 			access: cache.access,
 			priority: cachePrioritySchema.parse(row.priority),
-			storePaths: this.cacheStorePathCount(cache),
+			storePaths,
 			defaultRootRetention:
 				row.defaultRootTtlSeconds === null
 					? { kind: 'permanent' }

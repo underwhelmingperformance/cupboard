@@ -1,10 +1,58 @@
 import { eq, sql } from 'drizzle-orm';
 
+import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
+import { CacheListingProjectionPendingError } from '../errors.ts';
 
-import { type ServerContext } from './context.ts';
+import { type SchemaDatabase, type ServerContext } from './context.ts';
 
 export const cacheListingProjectionRowsPerPass = 48;
+
+/**
+Whether the migration has counted every narinfo row that existed before
+`cache_narinfo_count`, so that the projection counts every row.
+*/
+export function hasNarInfoCounts(database: SchemaDatabase): boolean {
+	const state = database
+		.select({
+			narinfoComplete: schema.cacheListingProjectionMigration.narinfoComplete
+		})
+		.from(schema.cacheListingProjectionMigration)
+		.where(eq(schema.cacheListingProjectionMigration.id, 1))
+		.get();
+
+	return state?.narinfoComplete === true;
+}
+
+/**
+Refuses with `CacheListingProjectionPendingError` until the projection
+counts every narinfo row.
+*/
+export function requireNarInfoCounts(database: SchemaDatabase): void {
+	if (!hasNarInfoCounts(database)) {
+		throw new CacheListingProjectionPendingError();
+	}
+}
+
+/**
+Returns the number of store paths in `cache` from `cache_narinfo_count`,
+which triggers keep equal to the number of the cache's narinfo rows. The
+read costs the same however many paths the cache has.
+*/
+export function projectedStorePathCount(
+	database: SchemaDatabase,
+	cache: ResolvedCache
+): number {
+	requireNarInfoCounts(database);
+
+	return (
+		database
+			.select({ count: schema.cacheNarInfoCounts.count })
+			.from(schema.cacheNarInfoCounts)
+			.where(eq(schema.cacheNarInfoCounts.cacheId, cache.id))
+			.get()?.count ?? 0
+	);
+}
 
 export class CacheListingProjection {
 	private complete = false;

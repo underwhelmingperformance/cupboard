@@ -24,6 +24,14 @@ const retentionMigrationPendingError = {
 	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
 };
 
+// The tenant object counts each cache's store paths in a projection, and a
+// migration fills it for paths that existed before it. Until the migration
+// completes, the procedures that declare this error answer 503 with
+// `Retry-After`.
+export const listingProjectionPendingError = {
+	CACHE_LISTING_PROJECTION_PENDING: { status: 503 }
+};
+
 const cacheAlreadyExistsError = {
 	CACHE_ALREADY_EXISTS: {
 		status: 409,
@@ -53,7 +61,7 @@ export const cachesContract = {
 		.meta({ requires: 'cache:list', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/caches' })
 		.input(cacheListInputSchema)
-		.errors({ CACHE_LISTING_PROJECTION_PENDING: { status: 503 } })
+		.errors(listingProjectionPendingError)
 		.output(cacheListResponseSchema),
 	get: {
 		inDefaultCache: baseProcedure
@@ -121,7 +129,8 @@ export const cachesContract = {
 				...cacheClosedError,
 				...retentionMigrationPendingError,
 				CACHE_RETENTION_RULE_LIMIT_EXCEEDED: { status: 409 },
-				CACHE_ACCESS_MIGRATION_PENDING: { status: 409 }
+				CACHE_ACCESS_MIGRATION_PENDING: { status: 409 },
+				...listingProjectionPendingError
 			})
 			.output(cacheSummarySchema),
 
@@ -136,7 +145,8 @@ export const cachesContract = {
 				...cacheClosedError,
 				...retentionMigrationPendingError,
 				CACHE_RETENTION_RULE_LIMIT_EXCEEDED: { status: 409 },
-				CACHE_ACCESS_MIGRATION_PENDING: { status: 409 }
+				CACHE_ACCESS_MIGRATION_PENDING: { status: 409 },
+				...listingProjectionPendingError
 			})
 			.output(cacheSummarySchema)
 	},
@@ -162,6 +172,7 @@ export const cachesContract = {
 		})
 		.route({ method: 'POST', path: '/caches/{cacheName}/reopen' })
 		.input(z.strictObject({ cacheName: cacheNameSchema }))
+		.errors(listingProjectionPendingError)
 		.output(cacheSummarySchema),
 
 	retirement: baseProcedure
@@ -179,7 +190,8 @@ export const cachesContract = {
 		)
 		.errors({
 			...cacheClosedError,
-			CACHE_RETIREMENT_TTL_REQUIRED: { status: 409 }
+			CACHE_RETIREMENT_TTL_REQUIRED: { status: 409 },
+			...listingProjectionPendingError
 		})
 		.output(cacheSummarySchema),
 
@@ -210,7 +222,8 @@ export const cachesContract = {
 			CACHE_NOT_EMPTY: {
 				status: 409,
 				data: z.strictObject({ cache: cacheScopeSchema })
-			}
+			},
+			...listingProjectionPendingError
 		})
 		.output(cacheRemoveResponseSchema)
 };
