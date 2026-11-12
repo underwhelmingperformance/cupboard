@@ -14,6 +14,12 @@ export const directUploadPageSize = Math.floor(
 	pageSubrequests / (1 + subrequestsPerReconcileRemoval)
 );
 
+// The most paths that one `uploads.plan` request may contain. CLIs up to
+// v0.0.52 send plan pages of 100 paths and cannot send a smaller page after a
+// refusal, so the limit stays at 100 whatever the other page sizes become. A
+// test runs a full page of distinct NARs under the Free plan's slice.
+export const uploadPlanMaxPaths = 100;
+
 // Admission can read twice during catalogue migration, with one retry per read.
 const tenantAdmissionSubrequests = 4;
 

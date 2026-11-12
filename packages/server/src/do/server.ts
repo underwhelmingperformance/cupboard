@@ -151,7 +151,10 @@ import {
 	commitSocketCeiling,
 	maxUncreditedCommitSessions
 } from '../policy/commit-sockets.ts';
-import { directUploadPageSize } from '../policy/upload-pages.ts';
+import {
+	directUploadPageSize,
+	uploadPlanMaxPaths
+} from '../policy/upload-pages.ts';
 import {
 	cacheMetadataPageResponse,
 	parseCacheMetadataRequest
@@ -766,7 +769,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				if (isUploadGraceEndpoint && !pathname.endsWith('/confirm')) {
 					response.headers.set(
 						uploadRequestMaxPathsHeader,
-						String(directUploadPageSize)
+						String(
+							pathname.endsWith('/uploads/plan')
+								? uploadPlanMaxPaths
+								: directUploadPageSize
+						)
 					);
 				}
 
