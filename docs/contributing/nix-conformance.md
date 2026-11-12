@@ -233,6 +233,20 @@ and signatures. The adapter smooths over two differences:
 - When a narinfo has no `FileSize`, Nix leaves out the download size, and our
   client reports zero.
 
+The suite reads each narinfo with a second reader, `parseNarInfo`. Reference
+publication and the attestation commands use it. It is stricter than Nix and
+refuses a document in which a reader that works line by line would find
+different fields from Nix, such as a blank line before a `CA` line. The suite
+checks two properties:
+
+- For every case, `parseNarInfo` either refuses the document or reports the same
+  fields as Nix, including the content address. A refusal satisfies this
+  property, and so does reading the document as Nix does.
+- For the cases in `parsedCases`, `parseNarInfo` must accept the document and
+  report the same fields as Nix. Put a case there when the parser has to read
+  the document. The cases in `hiddenFieldCases` are documents that the parser
+  may refuse, and the unit tests in `narinfo.test.ts` check that it does.
+
 ## Planning what a store needs
 
 Planning a build uses three operations:

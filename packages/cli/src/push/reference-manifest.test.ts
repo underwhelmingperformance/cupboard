@@ -133,6 +133,23 @@ describe('parseReferenceManifest', () => {
 			})
 		},
 		{
+			// Nix reads `Junk` with the value `References: <A> <B>`, so it sees no
+			// references, while a line-based reader would find two.
+			label: 'a References line that Nix does not read',
+			contents: JSON.stringify({
+				version: 1,
+				paths: [
+					{
+						...entry,
+						narinfo: narinfo.replace(
+							'References: \n',
+							'Junk:\nReferences: 22222222222222222222222222222222-a 33333333333333333333333333333333-b\n'
+						)
+					}
+				]
+			})
+		},
+		{
 			label: 'credentials in the source URL',
 			contents: JSON.stringify({
 				version: 1,

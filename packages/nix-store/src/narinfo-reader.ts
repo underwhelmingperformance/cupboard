@@ -1,19 +1,14 @@
 import { isContentAddress } from './content-address.ts';
 import { CorruptNarInfoError, MismatchedNarInfoPathError } from './errors.ts';
 import { decodeNixHashField, type NixHash, NixSha256Hash } from './hash.ts';
-import { narInfoSize } from './narinfo.ts';
+import { narInfoReferences, narInfoSize, unknownDeriver } from './narinfo.ts';
 import {
 	boundedReferencesSchema,
 	type StoreDirectory,
 	storePathSchema,
 	type StorePathString
 } from './scalars.ts';
-import { isNixSignature } from './signature.ts';
-import { byCodeUnit } from './store-path.ts';
-
-// Some caches use this value when the deriver is unknown. cache.nixos.org
-// serves it for many older paths, and Nix parses it as an absent deriver.
-const unknownDeriver = 'unknown-deriver';
+import { canonicalNixSignature } from './signature.ts';
 
 export interface NarInfoOffer {
 	readonly source: 'substituter';
@@ -80,7 +75,8 @@ class NarInfoReader {
 
 	private contentAddress?: string;
 
-	private readonly signatures: string[] = [];
+	// A set keeps each signature once, in the order of its first line.
+	private readonly signatures = new Set<string>();
 
 	constructor(
 		private readonly source: string,
@@ -165,10 +161,8 @@ class NarInfoReader {
 				throw new CorruptNarInfoError(this.storePath);
 			}
 
-			// Nix reads the references into a set, so a repeated reference counts
-			// once and the references come in the set's order.
 			const references = boundedReferencesSchema.safeParse(
-				[...new Set(value.split(' ').filter(Boolean))].toSorted(byCodeUnit)
+				narInfoReferences(value)
 			);
 
 			if (!references.success) {
@@ -191,11 +185,15 @@ class NarInfoReader {
 		}
 
 		if (name === 'Sig') {
-			if (!isNixSignature(value)) {
+			const canonical = canonicalNixSignature(value);
+
+			if (canonical === undefined) {
 				throw new CorruptNarInfoError(this.storePath);
 			}
 
-			this.signatures.push(value);
+			// Nix keeps the signatures in a set of the key name and the decoded
+			// signature, so two lines for the same signature count once.
+			this.signatures.add(canonical);
 
 			return;
 		}

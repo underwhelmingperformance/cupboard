@@ -2,6 +2,7 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { bytesToBase64 } from './encoding.ts';
 import { MalformedNarInfoLineError } from './errors.ts';
 import { toNixBase32 } from './hash.ts';
 import {
@@ -11,8 +12,15 @@ import {
 	parseFields,
 	parseNarInfo
 } from './narinfo.ts';
+import { canonicalNixSignature } from './signature.ts';
 import { byCodeUnit } from './store-path.ts';
 const exampleStorePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example';
+const exampleSignature = `cupboard-1:${bytesToBase64(new Uint8Array(64).fill(1))}`;
+const secondSignature = `cupboard-2:${bytesToBase64(new Uint8Array(64).fill(2))}`;
+const exampleContentAddress =
+	'fixed:r:sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk';
+const exampleReference = '0123456789abcdfghijklmnpqrsvwxyz-ref';
+const exampleDeriver = '2123456789abcdfghijklmnpqrsvwxyz-example.drv';
 
 function fingerprintWithReferences(references: readonly string[]): string {
 	return NarInfo.fromFields({
@@ -44,19 +52,35 @@ function narInfoWith(overrides: Partial<NarInfoFields>): NarInfo {
 }
 
 function narinfoLines(
-	overrides: { readonly fileSize?: string; readonly references?: string } = {}
+	overrides: {
+		readonly fileSize?: string;
+		readonly narSize?: string;
+		readonly references?: string;
+		readonly url?: string;
+	} = {}
 ): string[] {
 	return [
 		`StorePath: ${exampleStorePath}`,
-		'URL: nar/example.nar.zst',
+		`URL: ${overrides.url ?? 'nar/example.nar.zst'}`,
 		'Compression: zstd',
 		'FileHash: sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 		`FileSize: ${overrides.fileSize ?? '123'}`,
 		'NarHash: sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-		'NarSize: 456',
+		`NarSize: ${overrides.narSize ?? '456'}`,
 		`References: ${overrides.references ?? ''}`,
 		''
 	];
+}
+
+const hiddenFieldValues: readonly (readonly [string, string])[] = [
+	['CA', exampleContentAddress],
+	['Deriver', exampleDeriver],
+	['Sig', exampleSignature],
+	['References', exampleReference]
+];
+
+function narinfoWith(...extraLines: readonly string[]): string {
+	return [...narinfoLines().slice(0, -1), ...extraLines, ''].join('\n');
 }
 
 describe('NarInfo', () => {
@@ -69,8 +93,8 @@ describe('NarInfo', () => {
 			fileSize: 123,
 			narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			narSize: 456,
-			references: ['0123456789abcdfghijklmnpqrsvwxyz-ref'],
-			sigs: ['cupboard-1:signature']
+			references: [exampleReference],
+			sigs: [exampleSignature]
 		});
 
 		expect(NarInfo.parse(info.render()).toFields()).toStrictEqual(
@@ -175,7 +199,7 @@ describe('NarInfo', () => {
 			narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			narSize: 456,
 			references: [],
-			sigs: ['cupboard-1:first', 'cupboard-2:second']
+			sigs: [exampleSignature, secondSignature]
 		});
 		const rendered = info.render();
 
@@ -183,8 +207,8 @@ describe('NarInfo', () => {
 			sigLines: rendered.split('\n').filter((line) => line.startsWith('Sig: ')),
 			parsedSigs: NarInfo.parse(rendered).sigs
 		}).toStrictEqual({
-			sigLines: ['Sig: cupboard-1:first', 'Sig: cupboard-2:second'],
-			parsedSigs: ['cupboard-1:first', 'cupboard-2:second']
+			sigLines: [`Sig: ${exampleSignature}`, `Sig: ${secondSignature}`],
+			parsedSigs: [exampleSignature, secondSignature]
 		});
 	});
 
@@ -239,15 +263,15 @@ describe('NarInfo', () => {
 		},
 		{
 			name: 'a deriver containing a control character',
-			source: [...narinfoLines(), 'Deriver: bad\u{7}deriver'].join('\n')
+			source: narinfoWith('Deriver: bad\u{7}deriver')
 		},
 		{
 			name: 'a CA containing a control character',
-			source: [...narinfoLines(), 'CA: fixed:r:bad\u{7F}ca'].join('\n')
+			source: narinfoWith('CA: fixed:r:bad\u{7F}ca')
 		},
 		{
 			name: 'a signature containing a control character',
-			source: [...narinfoLines(), 'Sig: key:bad\u{7}sig'].join('\n')
+			source: narinfoWith('Sig: key:bad\u{7}sig')
 		}
 	])('rejects $name', ({ source }) => {
 		expect(narInfoSchema.safeParse(parseFields(source)).success).toBe(false);
@@ -292,10 +316,83 @@ describe('NarInfo', () => {
 		expect(narInfoSchema.safeParse(parseFields(source)).success).toBe(false);
 	});
 
-	it('parses CRLF line endings without a trailing carriage return', () => {
-		const info = parseNarInfo(narinfoLines().join('\r\n'));
+	// Nix ends a record at the first line feed, starts its value two bytes after
+	// the colon and trims nothing. A line-based reader would otherwise find
+	// fields that Nix does not see, or read a different value.
+	it.each([
+		{ name: 'a blank line', lines: ['', `CA: ${exampleContentAddress}`] },
+		{
+			name: 'a whitespace-only line',
+			lines: [' '.repeat(3), `CA: ${exampleContentAddress}`]
+		},
+		...hiddenFieldValues.map(([field, value]) => ({
+			name: `${field} after a field without a value`,
+			lines: ['Junk:', `${field}: ${value}`]
+		})),
+		{ name: 'no space after a colon', lines: ['NarSize:15678'] },
+		{ name: 'a tab after a colon', lines: ['Unknown:\tvalue'] },
+		{ name: 'a line without a colon', lines: ['no colon here'] }
+	])('refuses a narinfo with $name', ({ lines }) => {
+		expect(() => parseNarInfo(narinfoWith(...lines))).toThrow(
+			MalformedNarInfoLineError
+		);
+	});
 
-		expect(info.storePath.value).toBe(exampleStorePath);
+	it.each([
+		{
+			name: 'no final newline',
+			source: narinfoWith().slice(0, -1)
+		},
+		{ name: 'an unterminated record', source: `${narinfoWith()}Junk` }
+	])('refuses a narinfo with $name', ({ source }) => {
+		expect(() => parseNarInfo(source)).toThrow(MalformedNarInfoLineError);
+	});
+
+	it.each([
+		{
+			// Nix reads the mark as part of the first field name, which is then
+			// `StorePath` with a prefix, so it finds no `StorePath`.
+			name: 'a leading byte order mark',
+			source: `\u{FEFF}${narinfoWith()}`
+		},
+		{
+			name: 'CRLF line endings',
+			source: narinfoWith().replaceAll('\n', '\r\n')
+		},
+		{
+			name: 'trailing whitespace in a content address',
+			source: narinfoWith(`CA: ${exampleContentAddress} `)
+		},
+		{
+			name: 'trailing whitespace in a signature',
+			source: narinfoWith(`Sig: ${exampleSignature} `)
+		},
+		{
+			name: 'a NarSize of zero',
+			source: narinfoLines({ narSize: '0' }).join('\n')
+		},
+		{ name: 'an empty URL', source: narinfoLines({ url: '' }).join('\n') },
+		{
+			name: 'references separated by a tab',
+			source: narinfoLines({
+				references: `${exampleReference}\t1123456789abcdfghijklmnpqrsvwxyz-b`
+			}).join('\n')
+		},
+		{
+			name: 'a malformed content address',
+			source: narinfoWith('CA: not-a-content-address')
+		},
+		{
+			name: 'a malformed signature',
+			source: narinfoWith('Sig: not-a-signature')
+		},
+		{ name: 'an empty deriver', source: narinfoWith('Deriver: ') },
+		{
+			name: 'a deriver that is a full path',
+			source: narinfoWith(`Deriver: /nix/store/${exampleDeriver}`)
+		}
+	])('refuses a narinfo with $name', ({ source }) => {
+		expect(() => parseNarInfo(source)).toThrow(z.ZodError);
 	});
 
 	// Nix reads the references into a set, so a repeated reference counts once
@@ -312,17 +409,109 @@ describe('NarInfo', () => {
 		);
 	});
 
-	// A stored row can repeat a reference, because ingest did not refuse repeats
-	// when the row was written. The server serves such a row as stored.
-	it('reads a stored narinfo that repeats a reference as stored', () => {
-		const reference = '0123456789abcdfghijklmnpqrsvwxyz-a';
-		const source = narinfoLines({
-			references: `${reference} ${reference}`
-		}).join('\n');
+	// A row stored under earlier rules can repeat a reference or have a `CA`,
+	// `Deriver` or `Sig` that Nix rejects. The server must still read it.
+	it('reads a stored narinfo that input rules refuse', () => {
+		const source = [
+			...narinfoLines({
+				references: `${exampleReference} ${exampleReference}`
+			}).slice(0, -1),
+			'Deriver: nope',
+			'CA: not-a-content-address',
+			'Sig: padding',
+			''
+		].join('\n');
 
-		expect(NarInfo.parseStored(source).toFields()).toStrictEqual(
-			narInfoWith({ references: [reference, reference] }).toFields()
+		expect(() => parseNarInfo(source)).toThrow(z.ZodError);
+		expect(NarInfo.parseStored(source).toFields()).toStrictEqual({
+			storePath: exampleStorePath,
+			url: 'nar/example.nar.zst',
+			compression: 'zstd',
+			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			fileSize: 123,
+			narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narSize: 456,
+			references: [exampleReference, exampleReference],
+			deriver: 'nope',
+			ca: 'not-a-content-address',
+			sigs: ['padding']
+		});
+	});
+
+	// Nix compares the key name and the decoded signature, and prints the
+	// signature with padding.
+	it('reads signatures that differ only in padding as one signature', () => {
+		const unpadded = exampleSignature.replace(/=+$/u, '');
+		const info = parseNarInfo(
+			narinfoWith(`Sig: ${unpadded}`, `Sig: ${exampleSignature}`)
 		);
+
+		expect(info.toFields()).toStrictEqual(
+			narInfoWith({ sigs: [exampleSignature] }).toFields()
+		);
+	});
+
+	it('reads a signature that is listed twice once', () => {
+		const info = parseNarInfo(
+			narinfoWith(
+				`Sig: ${exampleSignature}`,
+				`Sig: ${secondSignature}`,
+				`Sig: ${exampleSignature}`
+			)
+		);
+
+		expect(info.toFields()).toStrictEqual(
+			narInfoWith({ sigs: [exampleSignature, secondSignature] }).toFields()
+		);
+	});
+
+	it('reads the optional fields that Nix reads', () => {
+		const info = parseNarInfo(
+			narinfoWith(
+				`Deriver: ${exampleDeriver}`,
+				`CA: ${exampleContentAddress}`,
+				`Sig: ${exampleSignature}`,
+				`Sig: ${secondSignature}`,
+				'Unknown: ignored'
+			)
+		);
+
+		expect(info.toFields()).toStrictEqual({
+			storePath: exampleStorePath,
+			url: 'nar/example.nar.zst',
+			compression: 'zstd',
+			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			fileSize: 123,
+			narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narSize: 456,
+			references: [],
+			deriver: exampleDeriver,
+			ca: exampleContentAddress,
+			sigs: [exampleSignature, secondSignature]
+		});
+	});
+
+	// Nix ignores a field that it does not know, whatever its name, so a cache
+	// can add its own fields.
+	it.each(['X-Foo', 'Unknown2', 'lowercase', 'with space', '_'])(
+		'ignores an unknown field named %j',
+		(name) => {
+			expect(parseNarInfo(narinfoWith(`${name}: 1`)).toFields()).toStrictEqual(
+				parseNarInfo(narinfoWith()).toFields()
+			);
+		}
+	);
+
+	it.each([
+		{ name: 'an unknown deriver', line: 'Deriver: unknown-deriver' },
+		{ name: 'an empty content address', line: 'CA: ' }
+	])('reads $name as an absent field', ({ line }) => {
+		const info = parseNarInfo(narinfoWith(line));
+
+		expect({ deriver: info.deriver, ca: info.ca }).toStrictEqual({
+			deriver: undefined,
+			ca: undefined
+		});
 	});
 
 	it('collapses runs of whitespace between references', () => {
@@ -352,22 +541,35 @@ describe('NarInfo', () => {
 		);
 	});
 
-	it('parses generated narinfos with reordered fields and blank lines', () => {
-		const blankLinesArbitrary = fc.array(fc.constant(''), { maxLength: 3 });
+	it('parses generated narinfos with reordered fields', () => {
 		fc.assert(
 			fc.property(
 				narInfoFieldsArbitrary,
 				narInfoFieldOrderArbitrary,
-				blankLinesArbitrary,
-				(fields, order, blankLines) => {
-					const source = [
-						...blankLines,
-						...narInfoLines(fields, order),
-						...blankLines
-					].join('\n');
+				(fields, order) => {
+					const source = `${narInfoLines(fields, order).join('\n')}\n`;
 					const expected = NarInfo.fromFields(fields).toFields();
 
 					expect(NarInfo.parse(source).toFields()).toStrictEqual(expected);
+				}
+			),
+			{ numRuns: 100 }
+		);
+	});
+
+	it('refuses a generated narinfo with a blank line anywhere', () => {
+		fc.assert(
+			fc.property(
+				narInfoFieldsArbitrary,
+				narInfoFieldOrderArbitrary,
+				fc.nat(),
+				(fields, order, position) => {
+					const lines = [...narInfoLines(fields, order)];
+					lines.splice(position % (lines.length + 1), 0, '');
+
+					expect(() => NarInfo.parse(`${lines.join('\n')}\n`)).toThrow(
+						MalformedNarInfoLineError
+					);
 				}
 			),
 			{ numRuns: 100 }
@@ -486,9 +688,12 @@ const storePathBasenameArbitrary = fc
 const storePathArbitrary = storePathBasenameArbitrary.map(
 	(basename) => `/nix/store/${basename}`
 );
-const namedBytesArbitrary = fc
-	.tuple(safeNameArbitrary, safeNameArbitrary)
-	.map(([name, value]) => `${name}:${value}`);
+const contentAddressArbitrary = nixSha256HashArbitrary.map(
+	(hash) => `fixed:r:${hash}`
+);
+const signatureArbitrary = fc
+	.tuple(safeNameArbitrary, fc.uint8Array({ minLength: 1, maxLength: 64 }))
+	.map(([name, bytes]) => `${name}:${bytesToBase64(bytes)}`);
 const narInfoFieldsArbitrary: fc.Arbitrary<NarInfoFields> = fc.record({
 	storePath: storePathArbitrary,
 	url: fc
@@ -498,14 +703,20 @@ const narInfoFieldsArbitrary: fc.Arbitrary<NarInfoFields> = fc.record({
 	fileHash: nixSha256HashArbitrary,
 	fileSize: fc.integer({ min: 0, max: 1_000_000_000 }),
 	narHash: nixSha256HashArbitrary,
-	narSize: fc.integer({ min: 0, max: 1_000_000_000 }),
+	narSize: fc.integer({ min: 1, max: 1_000_000_000 }),
 	// `parseNarInfo` returns the references in the order of Nix's set.
 	references: fc
 		.uniqueArray(storePathBasenameArbitrary, { maxLength: 8 })
 		.map((references) => references.toSorted(byCodeUnit)),
-	deriver: fc.option(storePathArbitrary, { nil: undefined }),
-	ca: fc.option(namedBytesArbitrary, { nil: undefined }),
-	sigs: fc.array(namedBytesArbitrary, { maxLength: 3 })
+	deriver: fc.option(storePathBasenameArbitrary, { nil: undefined }),
+	ca: fc.option(contentAddressArbitrary, { nil: undefined }),
+	// `parseNarInfo` folds signatures with the same key name and decoded
+	// signature, so the generated ones must differ in that sense. Distinct
+	// strings are not enough, because padding does not change a signature.
+	sigs: fc.uniqueArray(signatureArbitrary, {
+		maxLength: 3,
+		selector: (signature) => canonicalNixSignature(signature)
+	})
 });
 const narInfoFieldOrderArbitrary = fc.constantFrom(
 	[
