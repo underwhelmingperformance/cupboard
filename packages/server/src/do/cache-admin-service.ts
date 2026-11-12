@@ -73,6 +73,7 @@ import {
 	cacheLifecycleFilter,
 	type CacheRegistrationService
 } from './cache-registration-service.ts';
+import { CacheTeardownDrain } from './cache-teardown-drain.ts';
 import { type ServerContext } from './context.ts';
 import {
 	type DeletionQueueService,
@@ -342,10 +343,15 @@ export class CacheAdminService {
 	// interrupted deletion and queue them for the next pass. Check the queue after
 	// the drain because the last full chunk may have emptied it. A missed sweep
 	// would leave the storage and tenant charge in place indefinitely.
+	//
+	// The sweep waits until the cache has no narinfo rows left. It would
+	// otherwise queue the edges of paths whose rows a later page of the drain
+	// queues again.
 	private async drainTeardownChunk(
 		cache: ResolvedCache,
 		origin: RequestOrigin | undefined,
-		limit: number
+		limit: number,
+		canQueueRevokedEdges: boolean
 	): Promise<boolean> {
 		const queued = this.context.db
 			.select({
@@ -368,7 +374,11 @@ export class CacheAdminService {
 			false
 		);
 
-		if (this.hasQueuedDeletions(cache) || !hasSubrequestsFor(1)) {
+		if (
+			!canQueueRevokedEdges ||
+			this.hasQueuedDeletions(cache) ||
+			!hasSubrequestsFor(1)
+		) {
 			return false;
 		}
 
@@ -1401,7 +1411,24 @@ export class CacheAdminService {
 		)
 	): Promise<void> {
 		await this.context.criticalSection(async () => {
-			const hasSweptEdges = await this.drainTeardownChunk(cache, origin, limit);
+			const drained = await new CacheTeardownDrain(
+				this.context,
+				this.deletionQueue
+			).drain(cache);
+
+			// `limit` assumes the pass's whole subrequest allowance, and a
+			// retirement chunk reads and writes rows of its own. The next pass
+			// retires the queue with a full allowance and a fresh row budget.
+			if (drained.hasConcludedPromotions || isRowBudgetExhausted()) {
+				return;
+			}
+
+			const hasSweptEdges = await this.drainTeardownChunk(
+				cache,
+				origin,
+				limit,
+				drained.isEmpty
+			);
 			await this.drainStagingCleanup(cache);
 
 			// The queue, not the marker, decides when teardown is complete. The pass
@@ -1415,6 +1442,7 @@ export class CacheAdminService {
 			if (
 				!hasSweptEdges ||
 				hasMoreHistory ||
+				!drained.isEmpty ||
 				this.hasQueuedDeletions(cache) ||
 				this.hasStagingCleanup(cache)
 			) {
