@@ -100,11 +100,12 @@ import {
 	storedGraceFact
 } from './grace-decision.ts';
 import { hourlyDeadline } from './hourly-deadline.ts';
+import { type JsonValueList, jsonValueLists } from './json-list.ts';
 import {
-	jsonRowLists,
-	type JsonValueList,
-	jsonValueLists
-} from './json-list.ts';
+	existingRootIncarnationKey,
+	insertLiveRootTargets,
+	warnRootMissing
+} from './live-root-targets.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { ProtectedInheritanceService } from './protected-inheritance-service.ts';
@@ -1787,42 +1788,62 @@ export class CommitPipelineService {
 
 	// Attach the negotiated run root before releasing the generation fence. A
 	// replay is harmless because root targets are additive and idempotent. Do not
-	// alter the root expiry or run a grace transition here. Chunk the insert
-	// because one run can exceed the per-request root-write limit.
+	// alter the root expiry or run a grace transition here. The insert is
+	// chunked because one run can exceed the per-request root-write limit.
 	private applyRootAttach(
 		requests: readonly MaterialiseRequest[],
 		outcomes: readonly (BatchedMaterialiseOutcome | undefined)[]
 	): void {
-		const targets = requests.flatMap((request, index) =>
-			outcomes[index]?.kind === 'materialised' &&
-			request.attachRootName !== undefined &&
-			new CacheClosureService(this.context).firstClose(
-				request.cache,
-				request.graceDecision?.retentionEpoch ?? 0
-			) === undefined
-				? {
-						cacheId: request.cache.id,
-						rootName: request.attachRootName,
-						storePathHash: request.metadata.storePathHash,
-						storePath: request.metadata.storePath
-					}
-				: []
-		);
+		const byRoot = new Map<
+			string,
+			{
+				readonly cache: ResolvedCache;
+				readonly rootName: RootName;
+				readonly targets: {
+					readonly storePathHash: StorePathHash;
+					readonly storePath: StorePathString;
+				}[];
+			}
+		>();
 
-		for (const batch of jsonRowLists(targets)) {
-			this.context.db
-				.insert(schema.retentionRootTargets)
-				.select(
-					batch.insertSource([
-						batch.column('cacheId'),
-						batch.column('rootName'),
-						batch.column('storePathHash'),
-						batch.column('storePath'),
-						sql`NULL`
-					])
-				)
-				.onConflictDoNothing()
-				.run();
+		for (const [index, request] of requests.entries()) {
+			if (
+				outcomes[index]?.kind !== 'materialised' ||
+				request.attachRootName === undefined ||
+				new CacheClosureService(this.context).firstClose(
+					request.cache,
+					request.graceDecision?.retentionEpoch ?? 0
+				) !== undefined
+			) {
+				continue;
+			}
+
+			const key = `${String(request.cache.id)} ${request.attachRootName}`;
+			const group = byRoot.get(key) ?? {
+				cache: request.cache,
+				rootName: request.attachRootName,
+				targets: []
+			};
+			group.targets.push({
+				storePathHash: request.metadata.storePathHash,
+				storePath: request.metadata.storePath
+			});
+			byRoot.set(key, group);
+		}
+
+		for (const { cache, rootName, targets } of byRoot.values()) {
+			const root = existingRootIncarnationKey(
+				this.context.db,
+				cache.id,
+				rootName
+			);
+
+			if (root === undefined) {
+				warnRootMissing({ cacheId: cache.id, name: rootName }, targets.length);
+				continue;
+			}
+
+			insertLiveRootTargets(this.context.db, root, targets);
 		}
 	}
 
@@ -2159,7 +2180,8 @@ export class CommitPipelineService {
 	/**
 	Attaches a committed path to the run root selected at negotiation. Call
 	this only while the winning row's identity is proven; retries are
-	idempotent by cache, root, and store-path hash.
+	idempotent by cache, root, and store-path hash. A root that no longer
+	exists gets no target.
 	*/
 	attachRootTarget(
 		cache: ResolvedCache,
@@ -2180,16 +2202,21 @@ export class CommitPipelineService {
 			return;
 		}
 
-		this.context.db
-			.insert(schema.retentionRootTargets)
-			.values({
-				cacheId: cache.id,
-				rootName,
-				storePathHash,
-				storePath
-			})
-			.onConflictDoNothing()
-			.run();
+		const root = existingRootIncarnationKey(
+			this.context.db,
+			cache.id,
+			rootName
+		);
+
+		if (root === undefined) {
+			warnRootMissing({ cacheId: cache.id, name: rootName }, 1);
+
+			return;
+		}
+
+		insertLiveRootTargets(this.context.db, root, [
+			{ storePathHash, storePath }
+		]);
 	}
 
 	// Do not concede until the winning generation has both a committed edge and

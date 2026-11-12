@@ -47,11 +47,15 @@ import {
 	type ServerContext
 } from './context.ts';
 import { hourlyDeadline } from './hourly-deadline.ts';
-import { jsonRowLists } from './json-list.ts';
 import {
+	allocateRootIncarnation,
+	existingRootIncarnationKey,
+	insertLiveRootTargets,
 	liveRootTargetCount,
 	liveRootTargets,
-	rootIncarnationKey
+	type RootIncarnationKey,
+	rootIncarnationKey,
+	warnRootMissing
 } from './live-root-targets.ts';
 import { type NarInfoDemotionWatch } from './narinfo-demotion-watches.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -175,17 +179,9 @@ export class RootsService {
 				? scope.inheritedRetention(request.name)
 				: request.retention;
 		const expiresAt = rootExpiry(resolvedRetention, now);
-
-		// A replacement gives each target that it releases a grace deadline, so
-		// read the stored targets before the delete below discards them.
 		const requested = new Set<string>(
 			request.targets.map((target) => target.storePathHash)
 		);
-		const stored = this.liveTargetRows(cache, request.name);
-		const released = stored
-			.map((target) => target.storePathHash)
-			.filter((storePathHash) => !requested.has(storePathHash));
-		const isTargetSetChanged = !isSameTargetSet(stored, request.targets);
 
 		// A set request replaces the complete target set. Preserve the original
 		// creation time while storing no expiry as SQL NULL.
@@ -201,6 +197,23 @@ export class RootsService {
 				)
 				.get();
 			const created = existing?.createdAt ?? nowIso;
+			const root: RootIncarnationKey = {
+				cacheId: cache.id,
+				name: request.name,
+				incarnation:
+					existing === undefined
+						? allocateRootIncarnation(tx)
+						: (existing.incarnation ?? undefined)
+			};
+
+			// A replacement gives each target that it releases a grace deadline, so
+			// read the stored targets before the delete below discards them.
+			const stored =
+				existing === undefined ? [] : this.liveTargetRows(tx, root);
+			const released = stored
+				.map((target) => target.storePathHash)
+				.filter((storePathHash) => !requested.has(storePathHash));
+			const isTargetSetChanged = !isSameTargetSet(stored, request.targets);
 
 			// Deleting or inserting a target row sets the cache's collection-input
 			// flag. A cache that received an unchanged set at least once per minimum
@@ -208,13 +221,7 @@ export class RootsService {
 			// in every interval.
 			if (isTargetSetChanged) {
 				tx.delete(schema.retentionRootTargets)
-					.where(
-						liveRootTargets({
-							cacheId: cache.id,
-							name: request.name,
-							incarnation: existing?.incarnation ?? undefined
-						})
-					)
+					.where(liveRootTargets(root))
 					.run();
 			}
 			if (existing === undefined) {
@@ -226,7 +233,8 @@ export class RootsService {
 						closeAppliedEpoch: retentionEpoch,
 						expiresAt,
 						createdAt: created,
-						updatedAt: nowIso
+						updatedAt: nowIso,
+						incarnation: root.incarnation
 					})
 					.run();
 			} else {
@@ -258,19 +266,7 @@ export class RootsService {
 			}
 
 			if (isTargetSetChanged) {
-				for (const targets of jsonRowLists(request.targets)) {
-					tx.insert(schema.retentionRootTargets)
-						.select(
-							targets.insertSource([
-								sql`${cache.id}`,
-								sql`${request.name}`,
-								targets.column('storePathHash'),
-								targets.column('storePath'),
-								sql`NULL`
-							])
-						)
-						.run();
-				}
+				insertLiveRootTargets(tx, root, request.targets);
 			}
 
 			// Applied inside the same transaction as the delete above: a crash
@@ -301,18 +297,16 @@ export class RootsService {
 	}
 
 	private liveTargetRows(
-		cache: ResolvedCache,
-		name: RootName
+		database: SchemaWriter,
+		root: RootIncarnationKey
 	): readonly { storePathHash: StorePathHash; storePath: StorePathString }[] {
-		return this.context.db
+		return database
 			.select({
 				storePathHash: schema.retentionRootTargets.storePathHash,
 				storePath: schema.retentionRootTargets.storePath
 			})
 			.from(schema.retentionRootTargets)
-			.where(
-				liveRootTargets(rootIncarnationKey(this.context.db, cache.id, name))
-			)
+			.where(liveRootTargets(root))
 			.all();
 	}
 
@@ -573,6 +567,10 @@ export class RootsService {
 			resolvedRetention.kind === 'permanent'
 				? undefined
 				: hourlyDeadline(now.getTime(), resolvedRetention.seconds);
+		// Only a bind that creates the root allocates an incarnation, so repeated
+		// binds do not write the work sequence.
+		const isBound =
+			existingRootIncarnationKey(database, cache.id, name) !== undefined;
 
 		database
 			.insert(schema.retentionRoots)
@@ -583,7 +581,8 @@ export class RootsService {
 				closeAppliedEpoch: retentionEpoch,
 				expiresAt,
 				createdAt: nowIso,
-				updatedAt: nowIso
+				updatedAt: nowIso,
+				...(!isBound && { incarnation: allocateRootIncarnation(database) })
 			})
 			.onConflictDoUpdate({
 				target: [schema.retentionRoots.cacheId, schema.retentionRoots.name],
@@ -617,21 +616,15 @@ export class RootsService {
 		}[],
 		database: SchemaWriter = this.context.db
 	): void {
-		for (const batch of jsonRowLists(targets)) {
-			database
-				.insert(schema.retentionRootTargets)
-				.select(
-					batch.insertSource([
-						sql`${cache.id}`,
-						sql`${name}`,
-						batch.column('storePathHash'),
-						batch.column('storePath'),
-						sql`NULL`
-					])
-				)
-				.onConflictDoNothing()
-				.run();
+		const root = existingRootIncarnationKey(database, cache.id, name);
+
+		if (root === undefined) {
+			warnRootMissing({ cacheId: cache.id, name }, targets.length);
+
+			return;
 		}
+
+		insertLiveRootTargets(database, root, targets);
 	}
 
 	// Replace the complete target set, including when it is empty. The root and
@@ -876,9 +869,10 @@ export class RootsService {
 			return { name, removed: false };
 		}
 
-		const released = this.liveTargetRows(cache, name).map(
-			(target) => target.storePathHash
-		);
+		const released = this.liveTargetRows(
+			this.context.db,
+			rootIncarnationKey(this.context.db, cache.id, name)
+		).map((target) => target.storePathHash);
 		const nowIso = isoTimestamp(new Date());
 
 		return this.context.db.transaction((tx) => {

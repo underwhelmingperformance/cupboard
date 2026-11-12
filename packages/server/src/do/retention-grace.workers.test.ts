@@ -4545,11 +4545,11 @@ describe('repeating an unchanged retention write', () => {
 
 	it.each([
 		{ write: 'grace', retention: undefined, rowsRead: 11 },
-		{ write: 'root', retention: { kind: 'inherit' }, rowsRead: 5 },
+		{ write: 'root', retention: { kind: 'inherit' }, rowsRead: 6 },
 		{
 			write: 'root',
 			retention: { kind: 'duration', seconds: 3600 },
-			rowsRead: 3
+			rowsRead: 4
 		}
 	])(
 		'writes no rows when a $write write changes nothing (root retention $retention.kind)',
@@ -4664,15 +4664,15 @@ describe('binding a run root with a duration', () => {
 
 		expect({ first, repeat, later }).toStrictEqual({
 			first: {
-				cost: { ...noCost, rowsRead: 3, rowsWritten: 6 },
+				cost: { ...noCost, rowsRead: 5, rowsWritten: 7 },
 				expiresAt: '2026-01-01T02:00:00.000Z'
 			},
 			repeat: {
-				cost: { ...noCost, rowsRead: 4 },
+				cost: { ...noCost, rowsRead: 5 },
 				expiresAt: '2026-01-01T02:00:00.000Z'
 			},
 			later: {
-				cost: { ...noCost, rowsRead: 4, rowsWritten: 5 },
+				cost: { ...noCost, rowsRead: 5, rowsWritten: 5 },
 				expiresAt: '2026-01-01T03:00:00.000Z'
 			}
 		});
