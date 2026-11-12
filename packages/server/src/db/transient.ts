@@ -15,11 +15,21 @@ If the second attempt fails, the function propagates the error so the route
 can return its typed retryable response. A read is not retried when the
 enclosing deadline ends before the retry delay does, because the deadline
 would refuse the second attempt.
+
+A D1 overload or account throttle (see `isD1Overload`) is not retried. D1
+sends those errors to ask clients to send fewer requests, and a retry would
+double the requests that this read makes. Any other failure, such as a
+dropped connection or an internal D1 error, can clear within the delay, so
+the read still retries it.
 */
 export async function readWithOneRetry<T>(read: () => Promise<T>): Promise<T> {
 	try {
 		return await read();
 	} catch (error) {
+		if (isD1Overload(error)) {
+			throw error;
+		}
+
 		const remainingMs = remainingDeadlineMs();
 
 		if (remainingMs !== undefined && remainingMs <= readRetryDelayMs) {

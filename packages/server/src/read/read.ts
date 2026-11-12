@@ -282,8 +282,9 @@ export function narReferenceQuery(
 		.limit(65);
 }
 
-// Retry the D1 reference query once. A persistent failure becomes a retryable
-// refusal instead of a 404, which would report the NAR as absent.
+// A failed D1 reference query becomes a retryable refusal instead of a 404,
+// which would report the NAR as absent. `readWithOneRetry` retries the query
+// once unless D1 reports an overload.
 async function isNarReferenced(
 	env: Pick<ReadEnv, 'CUPBOARD_DB'>,
 	tenant: TenantId,
@@ -421,8 +422,9 @@ generations increase and are never reused for one cache and path.
 The greatest generation therefore belongs to the current commit. A path with
 no authorised edge is absent from the result.
 
-Retry the D1 query once, as the NAR read does: a persistent failure becomes a
-retryable refusal instead of a 404 reporting the path as absent.
+A failed D1 query becomes a retryable refusal instead of a 404 reporting the
+path as absent. As in the NAR read, `readWithOneRetry` retries the query once
+unless D1 reports an overload.
 */
 export async function authorisedNarInfoVersions(
 	database: DrizzleD1Database<typeof d1Schema>,
