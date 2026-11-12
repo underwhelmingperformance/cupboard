@@ -37,3 +37,18 @@ Nix rejects an entire narinfo when a `Sig` line is malformed.
 export function isNixSignature(value: string): boolean {
 	return parseNamedMaterial(value) !== undefined;
 }
+
+/**
+The value written in canonical form, or `undefined` when it is not a signature.
+Nix keeps a narinfo's signatures in a set of the key name and the decoded
+signature, and prints each one as the key name and padded base64. Two `Sig`
+lines are the same signature when they have the same canonical form, even if
+one of them leaves out the base64 padding.
+*/
+export function canonicalNixSignature(value: string): string | undefined {
+	const parsed = parseNamedMaterial(value);
+
+	return parsed === undefined
+		? undefined
+		: NixSignature.of(parsed.name, parsed.bytes).value;
+}

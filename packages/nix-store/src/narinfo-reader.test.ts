@@ -409,6 +409,36 @@ describe('offerFromNarInfo', () => {
 		expect(() => read({ fields: { Sig: value } })).toThrow(CorruptNarInfoError);
 	});
 
+	// Nix keeps signatures in a set.
+	it('returns a repeated Sig entry once', () => {
+		expect(read({ extraLines: [`Sig: ${signature}`] })).toStrictEqual(
+			wellFormedOffer()
+		);
+	});
+
+	// Nix compares the key name and the decoded signature, and prints the
+	// signature with padding.
+	it('returns signatures that differ only in padding as one signature', () => {
+		const unpadded = signature.replace(/=+$/u, '');
+
+		expect(read({ extraLines: [`Sig: ${unpadded}`] })).toStrictEqual(
+			wellFormedOffer()
+		);
+	});
+
+	it('returns each Sig entry once, in the order of its first line', () => {
+		const entries = ['k:AAAA', 'j:BBBB', 'k:AAAA', 'l:AAAA', 'j:BBBB'];
+
+		expect(
+			read({
+				fields: { Sig: undefined },
+				extraLines: entries.map((entry) => `Sig: ${entry}`)
+			})
+		).toStrictEqual(
+			wellFormedOffer({ signatures: ['k:AAAA', 'j:BBBB', 'l:AAAA'] })
+		);
+	});
+
 	it('returns every Sig entry in document order', () => {
 		const second = `cache.example.org-2:${bytesToBase64(new Uint8Array(64).fill(4))}`;
 

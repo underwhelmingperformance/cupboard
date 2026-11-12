@@ -802,13 +802,12 @@ describe('remote attestation verification', () => {
 		});
 	});
 
-	// A narinfo can include signatures for untrusted keys and malformed lines.
-	// Neither prevents cryptographic verification of the trusted key's signature.
+	// A narinfo can include signatures for untrusted keys. They do not prevent
+	// cryptographic verification of the trusted key's signature.
 	it('verifies the trusted signature despite other narinfo entries', async () => {
 		const signed = await signedNarInfo();
 		const source = NarInfo.parse(signed.source)
 			.withSignature('other-cache:c2lnbmVk')
-			.withSignature('not-a-signature')
 			.render();
 		const fetcher: typeof fetch = (input) => {
 			const url = fetchInputUrl(input);

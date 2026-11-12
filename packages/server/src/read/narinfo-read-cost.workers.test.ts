@@ -320,9 +320,9 @@ describe('public metadata page cost', () => {
 		}
 	);
 
-	// A row stored before `referencesSchema` refused repeats can repeat a
-	// reference. The endpoint serves it as stored, as the narinfo endpoint does,
-	// and does not report it as invalid.
+	// A row stored under earlier rules can repeat a reference or have a `CA`
+	// that Nix rejects. The endpoint serves it as stored, as the narinfo
+	// endpoint does, and does not report it as invalid.
 	it('serves a stored narinfo that new input rules would refuse', async () => {
 		const path = await committedPath(
 			'metadata-stored-unusual',
@@ -344,7 +344,8 @@ describe('public metadata page cost', () => {
 		const reference = `${'2'.repeat(32)}-dep`;
 		const unusual = NarInfo.fromFields({
 			...stored,
-			references: [reference, reference]
+			references: [reference, reference],
+			ca: 'not-a-content-address'
 		}).render();
 		await env.BLOBS.put(key, unusual, {
 			customMetadata: object.customMetadata,
@@ -392,8 +393,9 @@ describe('public metadata page cost', () => {
 			}
 			const original = await object.text();
 			const narinfo = NarInfo.parse(
-				original.replaceAll(/^CA:.*\n/gmu, '') +
-					(index < 5 ? `CA: ${'x'.repeat(850_000)}\n` : '')
+				index < 5
+					? `${original}Sig: padding:${'A'.repeat(850_000)}\n`
+					: original
 			).render();
 			await env.BLOBS.put(key, narinfo, {
 				customMetadata: object.customMetadata,

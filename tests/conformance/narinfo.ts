@@ -1,6 +1,8 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { MalformedNarInfoLineError } from '@cupboard/nix-store/errors';
+import { parseNarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type StoreDirectory,
 	storeDirectorySchema,
@@ -72,8 +74,8 @@ output order, and each fixture specifies only its changes.
 */
 const wellFormedFields: readonly (readonly [string, string])[] = [
 	['StorePath', fixtureStorePath],
-	['URL', 'nar/example.nar.xz'],
-	['Compression', 'xz'],
+	['URL', 'nar/example.nar.zst'],
+	['Compression', 'zstd'],
 	['FileHash', `sha256:${fileHashBase32}`],
 	['FileSize', '1234'],
 	['NarHash', `sha256:${narHashBase32}`],
@@ -98,6 +100,15 @@ export interface NarinfoFixture {
 	Whether the document ends with a newline, which Nix requires.
 	*/
 	readonly endsWithNewline?: boolean;
+	/**
+	The line terminator. Nix ends a record at `\n` only, so a `\r` before it
+	becomes part of the value.
+	*/
+	readonly lineEnding?: '\n' | '\r\n';
+	/**
+	Text written before the first line.
+	*/
+	readonly prefix?: string;
 }
 
 const wellFormedValues = new Map(wellFormedFields);
@@ -116,9 +127,12 @@ export function narinfoDocument(fixture: NarinfoFixture): string {
 		return value === undefined ? [] : `${name}: ${value}`;
 	});
 
-	const document = [...lines, ...(fixture.extraLines ?? [])].join('\n');
+	const lineEnding = fixture.lineEnding ?? '\n';
+	const document = [...lines, ...(fixture.extraLines ?? [])].join(lineEnding);
+	const terminated =
+		fixture.endsWithNewline === false ? document : `${document}${lineEnding}`;
 
-	return fixture.endsWithNewline === false ? document : `${document}\n`;
+	return `${fixture.prefix ?? ''}${terminated}`;
 }
 
 export type NarinfoVerdict = 'accepted' | 'absent' | 'rejected';
@@ -132,12 +146,28 @@ export interface OfferFields {
 	readonly signatures: readonly string[];
 }
 
+/**
+The fields that `parseNarInfo` reports. Nix also reports the content address,
+which the substituter client does not read.
+*/
+export interface ParsedFields extends OfferFields {
+	readonly ca: string | undefined;
+}
+
 export interface NarinfoOutcome {
 	readonly oracle: NarinfoVerdict;
 	readonly client: NarinfoVerdict;
 	readonly oracleStderr: string;
 	readonly fields: { oracle: OfferFields; client: OfferFields } | undefined;
 	readonly clientError: unknown;
+	/**
+	The fields from `nix path-info` and from `parseNarInfo`. Each is
+	`undefined` when that reader rejected the document.
+	*/
+	readonly parsed: {
+		oracle: ParsedFields | undefined;
+		parser: ParsedFields | undefined;
+	};
 }
 
 // When `FileSize` is absent, Nix omits the download-size field while our client
@@ -148,7 +178,8 @@ const pathInfoEntrySchema = z.object({
 	downloadSize: z.number().optional(),
 	references: z.array(z.string()),
 	deriver: z.string().nullable(),
-	signatures: z.array(z.string())
+	signatures: z.array(z.string()),
+	ca: z.string().nullable().optional()
 });
 
 const pathInfoSchema = z.record(
@@ -173,14 +204,12 @@ export class InvalidPathInfoError extends Error {
 	}
 }
 
-/**
-Parses the `nix path-info` result for the path. Nix prints a null entry and
-exits zero when no substituter has the path, so absence is a normal result.
-*/
-export function oracleOffer(
+type PathInfoEntry = z.infer<typeof pathInfoEntrySchema>;
+
+function oracleEntry(
 	output: string,
 	storePath: StorePathString
-): OfferFields | undefined {
+): PathInfoEntry | undefined {
 	let parsed: unknown;
 
 	try {
@@ -195,12 +224,10 @@ export function oracleOffer(
 		throw new InvalidPathInfoError(result.error.issues);
 	}
 
-	const entry = result.data[storePath];
+	return result.data[storePath] ?? undefined;
+}
 
-	if (entry === undefined || entry === null) {
-		return;
-	}
-
+function offerFields(entry: PathInfoEntry): OfferFields {
 	return {
 		narHash: entry.narHash,
 		narSize: entry.narSize,
@@ -209,6 +236,62 @@ export function oracleOffer(
 		deriver: entry.deriver ?? undefined,
 		signatures: sorted(entry.signatures)
 	};
+}
+
+/**
+Parses the `nix path-info` result for the path. Nix prints a null entry and
+exits zero when no substituter has the path, so absence is a normal result.
+*/
+export function oracleOffer(
+	output: string,
+	storePath: StorePathString
+): OfferFields | undefined {
+	const entry = oracleEntry(output, storePath);
+
+	return entry === undefined ? undefined : offerFields(entry);
+}
+
+function oracleParsedFields(
+	output: string,
+	storePath: StorePathString
+): ParsedFields | undefined {
+	const entry = oracleEntry(output, storePath);
+
+	return entry === undefined
+		? undefined
+		: { ...offerFields(entry), ca: entry.ca ?? undefined };
+}
+
+/**
+Reads the document with `parseNarInfo`, which is stricter than Nix. The result
+is `undefined` when it refuses the document, and the fields are in the form
+that `nix path-info` reports them.
+*/
+function parserFields(document: string): ParsedFields | undefined {
+	try {
+		const info = parseNarInfo(document);
+		const inStore = (basename: string): string =>
+			`${servedStoreDirectory}/${basename}`;
+
+		return {
+			narHash: `sha256-${info.narHash.digestBase64()}`,
+			narSize: info.narSize,
+			downloadSize: info.fileSize,
+			references: sorted(info.references.map((basename) => inStore(basename))),
+			deriver: info.deriver === undefined ? undefined : inStore(info.deriver),
+			signatures: sorted(info.sigs),
+			ca: info.ca
+		};
+	} catch (error) {
+		if (
+			error instanceof z.ZodError ||
+			error instanceof MalformedNarInfoLineError
+		) {
+			return;
+		}
+
+		throw error;
+	}
 }
 
 function compareStrings(left: string, right: string): number {
@@ -314,11 +397,10 @@ export async function readNarinfo(
 				`StoreDir: ${servedStoreDirectory}\nWantMassQuery: 1\nPriority: 30\n`
 			);
 
+			const document = narinfoDocument(fixture);
+
 			if (fixture.served !== false) {
-				await writeFile(
-					path.join(directory, fixtureNarinfoFile),
-					narinfoDocument(fixture)
-				);
+				await writeFile(path.join(directory, fixtureNarinfoFile), document);
 			}
 
 			const shown = await oracle.run(
@@ -331,12 +413,20 @@ export async function readNarinfo(
 					: undefined;
 			const client = await readAsClient(directory);
 			const oracleVerdict = oracleVerdictOf(shown.status, entry);
+			const parsedOracle =
+				shown.status === 0
+					? oracleParsedFields(shown.stdout, fixtureStorePath)
+					: undefined;
 
 			return {
 				oracle: oracleVerdict,
 				client: client.verdict,
 				oracleStderr: shown.stderr,
 				clientError: client.error,
+				parsed: {
+					oracle: parsedOracle,
+					parser: parserFields(document)
+				},
 				fields:
 					entry === undefined || client.offer === undefined
 						? undefined
@@ -385,4 +475,44 @@ export function comparedFields(outcome: NarinfoOutcome): {
 	}
 
 	return outcome.fields;
+}
+
+/**
+The fields from the oracle and from `parseNarInfo`, for a property: the parser
+either refuses the document or reports exactly the fields that Nix reports.
+When the parser refuses a document, the result is the oracle's own fields, so a
+refusal cannot fail the comparison. When the parser accepts a document that
+Nix rejects, the oracle's fields are `undefined`, which fails it.
+*/
+export function parserAgainstOracle(outcome: NarinfoOutcome): {
+	readonly parser: ParsedFields | undefined;
+	readonly oracle: ParsedFields | undefined;
+} {
+	const { oracle, parser = oracle } = outcome.parsed;
+
+	return { parser, oracle };
+}
+
+export class NarinfoRefusedByParserError extends Error {
+	constructor(public readonly outcome: NarinfoOutcome) {
+		super('parseNarInfo refused a document that it must read');
+		this.name = 'NarinfoRefusedByParserError';
+	}
+}
+
+/**
+The fields from the oracle and from `parseNarInfo` for a document that the
+parser must accept.
+*/
+export function parsedFields(outcome: NarinfoOutcome): {
+	readonly parser: ParsedFields;
+	readonly oracle: ParsedFields | undefined;
+} {
+	const { oracle, parser } = outcome.parsed;
+
+	if (parser === undefined) {
+		throw new NarinfoRefusedByParserError(outcome);
+	}
+
+	return { parser, oracle };
 }

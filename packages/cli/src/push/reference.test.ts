@@ -17,6 +17,7 @@ const storePathHash = storePathHashSchema.parse(
 const storePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example';
 const fileHash = 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk';
 const narHash = 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk';
+const signature = `cupboard-1:${Buffer.alloc(64, 1).toString('base64')}`;
 
 function narInfoText(
 	overrides: { readonly optionalLines?: readonly string[] } = {}
@@ -94,7 +95,7 @@ describe('fetchReferenceMetadata', () => {
 							optionalLines: [
 								'Deriver: d123456789abcdfghijklmnpqrsvwxyz-example.drv',
 								'CA: fixed:r:sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-								'Sig: cupboard-1:signature'
+								`Sig: ${signature}`
 							]
 						})
 					)
@@ -119,7 +120,7 @@ describe('fetchReferenceMetadata', () => {
 					fileSize: 123,
 					compression: 'zstd'
 				},
-				signatures: ['cupboard-1:signature']
+				signatures: [signature]
 			},
 			requests: [
 				{
