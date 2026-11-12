@@ -65,7 +65,7 @@
 		"check:lint": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/lint.ts",
 		"check:migrations": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/check-d1-migrations.ts",
 		"check:test": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/check.ts --group tests",
-		"check:types": "pnpm --workspace-concurrency=1 -r run check:types",
+		"check:types": "pnpm --workspace-concurrency=1 --no-bail -r run check:types",
 		"check:types:conformance": "tsc -p tests/conformance/tsconfig.json",
 		"check:types:perf": "tsc -p tests/perf/tsconfig.json",
 		"check:types:predecessor-fixture": "tsc -p tests/fixtures/cache-deployment-predecessor/tsconfig.json",
