@@ -65,6 +65,7 @@ export async function fetchReferenceMetadata(
 	const body = await readResponseText(response, {
 		description: `Narinfo response from ${target.href}`,
 		maximumBytes: maximumNarInfoBytes,
+		ignoreBOM: true,
 		signal: dependencies.signal
 	});
 

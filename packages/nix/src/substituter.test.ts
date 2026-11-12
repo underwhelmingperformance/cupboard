@@ -1955,6 +1955,62 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 		).rejects.toThrow(SubstituterAnswerUnreadableError);
 	});
 
+	// Nix reads the byte order mark as part of the first field name, so it finds
+	// no `StorePath`. A decoder that removes the mark would hide that.
+	it('rejects a narinfo that starts with a byte order mark', async () => {
+		const { fetch: fetcher } = caches({
+			'https://cache.example': {
+				narInfos: {
+					[`${'a'.repeat(32)}.narinfo`]: `\u{FEFF}${rendered(narInfo())}`
+				}
+			}
+		});
+
+		await expect(
+			clientOver(
+				[substituter('https://cache.example')],
+				fetcher
+			).querySubstitutablePathInfos([appPath])
+		).rejects.toThrow(SubstituterAnswerUnreadableError);
+	});
+
+	// Nix ignores a first line with a byte order mark before the field name. The
+	// narinfo has no other `References` line, so the references are empty. A
+	// decoder that removes the mark would report the reference from that line.
+	it('ignores a References line that follows a byte order mark', async () => {
+		const withoutReferences = Object.fromEntries(
+			Object.entries(narInfo()).filter(([name]) => name !== 'References')
+		);
+		const { fetch: fetcher } = caches({
+			'https://cache.example': {
+				narInfos: {
+					[`${'a'.repeat(32)}.narinfo`]:
+						`\u{FEFF}References: ${'b'.repeat(32)}-first\n` +
+						rendered(withoutReferences)
+				}
+			}
+		});
+
+		const infos = await clientOver(
+			[substituter('https://cache.example')],
+			fetcher
+		).querySubstitutablePathInfos([appPath]);
+
+		expect(infos).toStrictEqual([
+			{
+				source: 'substituter',
+				storePath: appPath,
+				deriver: deriverPath,
+				references: [],
+				narHash: offeredNarHash,
+				signatures: [],
+				fromTrustedSubstituter: false,
+				downloadSize: 400,
+				narSize: 1000
+			}
+		]);
+	});
+
 	it('rejects a narinfo written without the space after a colon', async () => {
 		const { fetch: fetcher } = caches({
 			'https://cache.example': {

@@ -266,7 +266,8 @@ async function sourceOffer(
 				bulk: false,
 				body: await readResponseText(response, {
 					description: `narinfo for ${storePath}`,
-					maximumBytes: cacheMetadataMaxNarInfoBytes
+					maximumBytes: cacheMetadataMaxNarInfoBytes,
+					ignoreBOM: true
 				})
 			};
 		},

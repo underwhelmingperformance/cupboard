@@ -944,6 +944,27 @@ describe('remote attestation verification', () => {
 		}
 	);
 
+	it('rejects a remote narinfo that starts with a byte order mark', async () => {
+		const signed = await signedNarInfo();
+		const fetcher: typeof fetch = () =>
+			Promise.resolve(new Response(`\u{FEFF}${signed.source}`));
+
+		await expect(
+			verifyRemoteAttestations(
+				{
+					url: new URL('https://cupboard.test/t/acme'),
+					storePathHash,
+					cache: { kind: 'default' },
+					predicateType,
+					trustedPublicKey: signed.publicKey,
+					certificateIdentity: policy.identity,
+					certificateOidcIssuer: policy.issuer
+				},
+				{ fetch: fetcher }
+			)
+		).rejects.toBeInstanceOf(z.ZodError);
+	});
+
 	it('rejects a remote narinfo whose signed store path has a different hash', async () => {
 		const replayedHash = '11111111111111111111111111111111';
 		const replayedStorePath = `/nix/store/${replayedHash}-app`;

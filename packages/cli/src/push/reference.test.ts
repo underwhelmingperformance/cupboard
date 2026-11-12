@@ -131,11 +131,18 @@ describe('fetchReferenceMetadata', () => {
 		});
 	});
 
-	it('omits optional upload metadata absent from the narinfo', async () => {
+	// Nix reads the mark as part of the first field name, so it ignores that line.
+	it.each([
+		{ name: 'absent from the narinfo', body: narInfoText() },
+		{
+			name: 'only after a byte order mark',
+			body: `\u{FEFF}CA: fixed:r:sha256:${fileHash.slice('sha256:'.length)}\n${narInfoText()}`
+		}
+	])('omits optional upload metadata $name', async ({ body }) => {
 		const metadata = await fetchReferenceMetadata(
 			{ url: new URL('https://cache.example.workers.dev/t/acme') },
 			storePathHash,
-			{ fetch: respondingFetcher([], () => respond(narInfoText())) }
+			{ fetch: respondingFetcher([], () => respond(body)) }
 		);
 
 		expect(metadata).toStrictEqual({
@@ -219,6 +226,10 @@ describe('fetchReferenceMetadata', () => {
 
 	it.each([
 		{ name: 'a body with no separators', body: 'not a narinfo' },
+		{
+			name: 'a narinfo after a byte order mark',
+			body: `\u{FEFF}${narInfoText()}`
+		},
 		{
 			name: 'a narinfo whose store path is outside the store',
 			body: narInfoText().replace(storePath, '/tmp/example')

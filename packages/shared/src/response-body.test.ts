@@ -48,6 +48,19 @@ describe('bounded response bodies', () => {
 		expect(cancel).toHaveBeenCalledOnce();
 	});
 
+	it.each([
+		{ name: 'removes', options: {}, text: 'hello' },
+		{ name: 'keeps', options: { ignoreBOM: true }, text: '\u{FEFF}hello' }
+	])('$name a leading byte order mark', async ({ options, text }) => {
+		await expect(
+			readResponseText(new Response('\u{FEFF}hello'), {
+				description: 'text response',
+				maximumBytes: 8,
+				...options
+			})
+		).resolves.toBe(text);
+	});
+
 	it('reads bounded text and JSON through the same byte limit', async () => {
 		await expect(
 			readResponseText(new Response('hello'), {
