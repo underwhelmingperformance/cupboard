@@ -21,20 +21,104 @@ This page explains what each kind covers, how to run it, and what it needs.
 
 ## Time and synchronisation
 
-Use an injected clock or scoped fake timers to test retry delays without waiting
-through them. Keep the operations under test real. For example, the failed-build
-cases in [`build-paths.test.ts`][build-paths-tests] run real Nix builds through
-a test Worker that injects `ManualClock`. They assert the retry delays and the
-resulting receipts and GC roots. Successful builds use the shipped Worker.
+These are the rules for new and changed tests, and they apply to every kind of
+test on this page. Many existing tests and configurations predate these rules
+and do not follow them yet. Don't copy a pattern that breaks a rule, even from
+neighbouring code.
 
-Synchronise concurrent operations with explicit acknowledgements or control
-sockets. File and socket readiness checks still need real I/O and deadlines. The
-[cross-DO quota tests][quota-tests] use R2 markers to pause and release
-verification. Their polling loops also need `scheduler.wait(0)` to let the other
-Worker progress; awaiting R2 operations alone can starve that Worker.
+1. A test waits on the event that decides its outcome. It awaits the promise of
+   the operation itself. When the test cannot reach that promise, expose it
+   through the object or client under test: an RPC that returns the operation's
+   promise, or a method that awaits the operation while the instance is live.
+   When the outcome is an effect outside the test process, wait for an event
+   from the process that produces it: its exit, a line of output, or a message
+   on a pipe or socket. Don't wait for a file to appear. A wait on file-system
+   events alone can hang, because `fs.watch` can lose events when other
+   processes write heavily to the watched directory, and the test then waits
+   until its time limit. The message of commit 6cb39b380 records a reproduction:
+   writing 200 files at a time into the directory made five tests hang. When
+   code in this repository, including a test fixture, gives no such event,
+   change it so that it reports the effect through a callback, a promise or a
+   line of output. When a program outside this repository gives no such event,
+   as the `nix-daemon` server does, create the listening socket in the test and
+   pass it to the server through systemd socket activation (`LISTEN_FDS` and
+   `LISTEN_PID`, which Nix supports), so that the socket exists before the
+   server starts.
 
-[build-paths-tests]: ../../tests/e2e/build-paths.test.ts
-[quota-tests]: ../../packages/server/src/do/quota.workers.test.ts
+   Don't check a condition on a timer, or in a loop that checks again without
+   waiting for an event. That rules out polling intervals, attempt-limited
+   retries, and `vi.waitFor` and `vi.waitUntil`. A loop that waits for an event
+   before each check is waiting on events, so it is allowed.
+   `ManualClock.waitForDelay` is such a loop. A check on a timer happens at
+   moments that the test chooses, not when the outcome happens, so a loaded
+   machine can make it run too late or give up too early.
+
+2. Don't give an individual test, hook or wait a time limit. Don't pass a
+   timeout argument to a test or hook, don't set a timeout option for one test,
+   and don't pass `AbortSignal.timeout` to a wait in test code. A deadline in
+   production code under test uses the injected clock (rule 3). In every Vitest
+   configuration, set `testTimeout` and `hookTimeout` to the same value,
+   1,800,000 ms (30 minutes), and don't tune them for one suite. The value only
+   detects a hung test or hook: Vitest fails it and continues with the next
+   test. Every package that has tests must have a Vitest configuration that sets
+   both limits, because without one Vitest applies its defaults of 5 seconds for
+   a test and 10 seconds for a hook.
+
+   Set the `timeout-minutes` of each CI job that runs tests to at least the
+   job's slowest recent run plus 30 minutes. A job's slowest recent run is its
+   slowest successful run among its last 40 runs. For a matrix job, use the
+   slowest of any matrix entry. A job that GitHub cancels gives no report of
+   what was running. With this margin, Vitest reports a single hung test or hook
+   near the end of the run before GitHub cancels the job. The margin covers one
+   hang. A hung test or hook followed by a teardown hook that waits on the same
+   operation takes two limits, so cancel that operation in teardown and don't
+   wait for it.
+
+   The merge queue fails an entry when a required check has not reported within
+   60 minutes of the queue starting the entry's checks. That time includes
+   waiting for a runner, so don't raise a job's limit beyond what this rule
+   requires.
+
+   Never raise a time limit to make a slow test pass. Remove the time dependence
+   instead. A time limit that fits one machine fails on a busier one, and the
+   failure then shows the machine's load, not a defect in the code.
+
+3. Inject the delays and deadlines of production code. Code that waits or sets a
+   deadline takes the delay or the clock as a parameter. A test passes a delay
+   of zero, or drives an injected clock such as `ManualClock` from
+   `tests/support/manual-clock.ts`. Don't fake the global timers and then
+   advance them, and never call `advanceTimersByTime` in a loop. Faked timers
+   tie the test to the number and order of the timers that the code arms. When a
+   refactor adds or reorders a timer, the test breaks or hangs, and an advance
+   that happens before the code arms its timer has no effect. An injected clock
+   lets the test see each delay that the code requests.
+
+4. Don't assert on wall-clock time. This covers a wall-clock timestamp, an
+   elapsed wall-clock time and a comparison of two wall-clock durations. A test
+   can record the delays that the code requests from an injected clock such as
+   `ManualClock`, and the clock's time after each one. The test can assert on
+   these values, because they don't depend on the machine. Test complexity
+   deterministically by counting steps, calls or rows. A Vitest benchmark
+   (`*.bench.ts`), run on demand, is the only place for timing, because elapsed
+   time varies with the load on the machine. See [Benchmarks](#benchmarks).
+
+5. A flaky test is a real defect. When a test fails once, capture the failure
+   and find the cause. Don't retry the test, widen a time limit or skip it. An
+   intermittent failure is usually a race or an unstated dependency in the test,
+   in a helper or in the code under test, and a retry hides it.
+
+Two helpers show rules 1, 3 and 4 in practice. The worker in
+`tests/support/build-paths-clock-worker.ts` runs the native build worker with a
+`ManualClock`. It advances the clock through each retry delay as the worker
+requests it, and writes the delay and the clock time to `retry-clock.jsonl`. The
+real Nix builds in `tests/e2e/build-paths.test.ts` therefore don't wait through
+the delays, and the test asserts the recorded entries.
+
+The remote store suite waits on a line of process output. The fixture container
+runs the script `cupboard-blocking-daemon`, which prints
+`cupboard-blocking-daemon-started` and `cupboard-blocking-daemon-stopped`.
+`waitForBlockingDaemonEvent` in `tests/support/remote-nix-store.ts` resolves
+when the fixture reads one of these lines.
 
 ## Package unit tests
 
@@ -94,7 +178,7 @@ pnpm --filter @cupboard/server exec vitest run --project workers <path>
 
 These tests run against real Durable Objects and hibernatable WebSockets. A test
 is responsible for every object, alarm and socket that its fixtures create, and
-it must clean them up itself. When a test times out, Vitest doesn't say which
+it must clean them up itself. When Vitest ends a hung test, it doesn't say which
 asynchronous step stalled, and it doesn't close any sockets that a helper still
 has open.
 
@@ -107,24 +191,23 @@ Follow these rules:
   pushes should push concurrently.
 - Always close commit sockets. `completeCommitSession` closes its socket in a
   `finally` block, so a parsing or verification error can't leave it open.
-- Give every wait a deadline and a diagnostic message. The commit fixture waits
-  up to 20 seconds for the first frame, and up to 20 seconds for the verdict.
-  That leaves time within the 30-second test timeout for clean-up and the checks
-  that run after each test. When a wait times out, the message gives the phase,
-  the upload ID, the server name, the socket state, the queued frames and any
-  pending readers.
-- Use the default test timeout. Don't raise a test's timeout to make a slow
-  fixture pass. Find the slow step instead.
+- Wait on events and don't give a test a time limit, as
+  [Time and synchronisation](#time-and-synchronisation) describes. Don't raise a
+  time limit to make a slow fixture pass. Find the slow step.
 
 After each test, a shared `afterEach` hook checks every Durable Object that the
 test used. It clears their alarms. If any object still has a retry scheduled for
 the future, the hook fails the test, and the message gives the maintenance pass
 and how long was left.
 
-When you investigate a timeout, start with the commit phase and socket state in
-the error. `workerd` also prints alarm and exception messages, but some tests
-cause failures on purpose and print the same messages. These messages only help
-once you've connected them to the failing test and Durable Object.
+`completeCommitSession` predates these rules and gives each phase a deadline of
+20 seconds. When it throws `CommitFixturePhaseTimeoutError` or
+`CommitFixturePassesExhaustedError`, start with the phase and the socket state
+in the error.
+
+`workerd` prints alarm and exception messages, but some tests cause failures on
+purpose and print the same messages. These messages only help once you've
+connected them to the failing test and Durable Object.
 
 The Worker project defaults to four workers. `CUPBOARD_TEST_WORKERS` supplies an
 explicit project budget, for example:
@@ -141,8 +224,7 @@ logs, and Vitest still captures them.
 ## Actions tests
 
 `pnpm test:actions` runs `actions/src/**/*.test.ts`. Many of these tests run the
-action as a real subprocess and create files on disk, so each test has a
-30-second timeout.
+action as a real subprocess and create files on disk.
 
 ## Script tests
 
@@ -154,9 +236,9 @@ workflows, among others.
 ## End-to-end tests
 
 `pnpm check:e2e` runs `tests/e2e/**/*.test.ts` and the tests for the shared test
-harness in `tests/support`. It runs one file at a time, and each test has a
-two-minute timeout. The remote store and publishing pipeline tests have their
-own configurations, so this command doesn't run them.
+harness in `tests/support`. It runs one file at a time. The remote store and
+publishing pipeline tests have their own configurations, so this command doesn't
+run them.
 
 Each test file starts a `CupboardTestServer`, from
 `tests/support/cupboard-server.ts`. The test server bundles the Worker with Vite
@@ -266,8 +348,9 @@ in more detail.
 
 `pnpm e2e:pipeline` runs a whole publishing run for a sample repository. It
 evaluates and builds for real, runs the composite action, and pushes to a Worker
-running in `workerd`, signing in with OIDC. Each test can take up to 30 minutes.
-`pnpm check` doesn't run it, but CI runs it as a separate job.
+running in `workerd`, signing in with OIDC. Each case is a whole publication
+job, so cases are slow. `pnpm check` doesn't run it, but CI runs it as a
+separate job.
 
 The whole test is skipped if Nix isn't installed. The remote store part needs a
 container engine, and is skipped without one.
@@ -280,14 +363,19 @@ To test an existing archive, set `CUPBOARD_RELEASE_ARCHIVE` to its path.
 
 ## Benchmarks
 
+Benchmarks are the only place for timing. Tests of any other kind must not
+assert on wall-clock time. `pnpm check` doesn't run benchmarks.
+
 `pnpm bench:push` runs the benchmarks in `tests/perf` against a Worker running
 under Miniflare. They need Nix.
 
 - `push.bench.ts` measures a real push of new store paths.
 - `reuse.bench.ts` measures reuse view lookups while commits are in progress.
 
-Some packages have their own benchmarks, in `*.bench.ts` files. To run the CLI's
-benchmarks, use `pnpm --filter @cupboard/cli bench`.
+Some packages have their own benchmarks, in `*.bench.ts` files. The server's
+`src/control/binary-fuse-filter/filter.bench.ts` belongs to the `node` project.
+To run it, use
+`pnpm --filter @cupboard/server exec vitest bench --run --project node`.
 
 To run the benchmarks for the logger's credential scanner, use
 `pnpm --filter @cupboard/logger bench`. For each input shape, they compare the
