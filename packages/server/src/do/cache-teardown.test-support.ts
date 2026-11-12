@@ -21,8 +21,39 @@ import {
 	uploadMetadata
 } from '../test-support.ts';
 
+import { AttestationCasService } from './attestation-cas-service.ts';
+import { AttestationsService } from './attestations-service.ts';
 import { teardownEntryPrefix } from './cache-admin-service.ts';
+import { CacheRegistrationService } from './cache-registration-service.ts';
+import { CacheTeardownDrain } from './cache-teardown-drain.ts';
 import { type ServerContext } from './context.ts';
+import { DeletionQueueService } from './deletion-queue-service.ts';
+import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+
+/**
+A teardown drain for the object's context, for a test that runs the drain
+without a whole teardown pass.
+*/
+export function teardownDrainFor(context: ServerContext): CacheTeardownDrain {
+	const narInfoObjects = new NarInfoObjectsService(context);
+	const attestationCas = new AttestationCasService(context);
+	const attestations = new AttestationsService(
+		context,
+		new CacheRegistrationService(context),
+		attestationCas,
+		narInfoObjects
+	);
+
+	return new CacheTeardownDrain(
+		context,
+		new DeletionQueueService(
+			context,
+			attestationCas,
+			attestations,
+			narInfoObjects
+		)
+	);
+}
 
 /**
 The verdicts of the pending uploads that {@link seedCacheRows} adds to a

@@ -158,10 +158,13 @@ cache that has roots but no store paths is removed without `--force`. If there's
 no cache with that name, the command succeeds and reports that it removed
 nothing.
 
-Success confirms that access has been revoked and the cache's local state has
-been removed. Physical cleanup continues asynchronously. The tenant's alarms
-remove staged uploads and retire published objects in bounded batches. Shared
-NARs remain available to other caches that reference them.
+Success confirms that access has been revoked and the cache has been removed.
+Reads of its store paths fail, it no longer appears in `cupboard cache list`,
+and its pending uploads fail. Removing a large cache takes the same work as
+removing a small one. Cleanup continues asynchronously: the tenant's alarms
+delete the cache's store paths, roots and pending uploads, remove staged uploads
+and retire published objects in bounded batches. Shared NARs remain available to
+other caches that reference them.
 
 The command asks you to confirm. In a script, add `--yes` to skip the question.
 

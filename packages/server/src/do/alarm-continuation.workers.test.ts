@@ -2,12 +2,13 @@ import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { narInfoDeletions } from '../db/schema.ts';
+import { narInfoDeletions, narInfos } from '../db/schema.ts';
 import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -44,7 +45,9 @@ const teardownAllowance = 200;
 const committedPaths = maxPathsTornDownPerRun(teardownAllowance) + 1;
 type AlarmObservation = MeasuredInvocation<{
 	readonly pass: string;
-	readonly queuedDeletions: number;
+	// The removed cache's narinfo rows and queued deletions, which teardown
+	// passes work through.
+	readonly teardownBacklog: number;
 }>;
 // Returns the maintenance pass recorded in the alarm cursor.
 async function currentMaintenancePass(
@@ -114,6 +117,12 @@ async function driveAlarms(
 				.select({ storePathHash: narInfoDeletions.storePathHash })
 				.from(narInfoDeletions)
 				.all().length;
+		const narInfoCount = (): number =>
+			drizzle(state.storage, { schema: { narInfos } })
+				.select({ storePathHash: narInfos.storePathHash })
+				.from(narInfos)
+				.where(eq(narInfos.cacheId, cache.id))
+				.all().length;
 
 		try {
 			const driven = await withDeployedSubrequestAllowance(
@@ -133,12 +142,12 @@ async function driveAlarms(
 							(await state.storage.get(teardownKey)) !== undefined ||
 							(await state.storage.get(gcContinuationKey)) !== undefined,
 						run: async () => {
-							const queuedDeletions = queueDepth();
+							const teardownBacklog = narInfoCount() + queueDepth();
 							await instance.alarm();
 
 							return {
 								pass: await currentMaintenancePass(state),
-								queuedDeletions
+								teardownBacklog
 							};
 						}
 					});
@@ -174,7 +183,7 @@ describe('alarm continuation', () => {
 		);
 
 		expect({
-			queuedDeletionsAtFirstAlarm: driven.alarms[0]?.queuedDeletions,
+			teardownBacklogAtFirstAlarm: driven.alarms[0]?.teardownBacklog,
 			passes: [...new Set(driven.alarms.map((alarm) => alarm.pass))].toSorted(
 				byCodeUnit
 			),
@@ -182,7 +191,7 @@ describe('alarm continuation', () => {
 			collectionPending: driven.collectionPending,
 			queuedDeletions: driven.queuedDeletions
 		}).toStrictEqual({
-			queuedDeletionsAtFirstAlarm: committedPaths,
+			teardownBacklogAtFirstAlarm: committedPaths,
 			passes: ['garbage-collection', 'teardown'],
 			teardownPending: undefined,
 			collectionPending: undefined,

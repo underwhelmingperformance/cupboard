@@ -522,7 +522,7 @@ describe('managed cache retirement', () => {
 					method: 'managed-retirement',
 					durationMs: 'number',
 					...noCost,
-					rowsRead: 18,
+					rowsRead: 16,
 					rowsWritten: 4,
 					d1Calls: 2,
 					d1RowsRead: 1,

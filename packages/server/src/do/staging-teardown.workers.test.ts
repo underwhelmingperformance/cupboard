@@ -119,7 +119,7 @@ describe('staged cache teardown', () => {
 					typeof keys === 'string' ? 1 : keys.length
 				)
 			}).toStrictEqual({
-				queued: { pending: 0, staging: 1002, live: undefined, marker: true },
+				queued: { pending: 1001, staging: 0, live: undefined, marker: true },
 				first: { pending: 0, staging: 0, live: undefined, marker: false },
 				second: { pending: 0, staging: 0, live: undefined, marker: false },
 				subjects: [],
@@ -201,8 +201,8 @@ describe('staged cache teardown', () => {
 				}).toStrictEqual({
 					eligible: { wake: '1970-01-01T00:00:00.000Z' },
 					missingMarker: {
-						pending: 0,
-						staging: uploads,
+						pending: uploads,
+						staging: 0,
 						live: undefined,
 						marker: false
 					},
@@ -347,7 +347,7 @@ describe('staged cache teardown', () => {
 					)
 				)
 			}).toStrictEqual({
-				queued: { pending: 0, staging: 1, live: newCache.id, marker: true },
+				queued: { pending: 3, staging: 0, live: newCache.id, marker: true },
 				old: { pending: 0, staging: 0, live: newCache.id, marker: false },
 				replacement: {
 					pending: 1,

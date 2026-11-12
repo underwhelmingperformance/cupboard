@@ -77,6 +77,7 @@ import {
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 import { maxCachesProjectedPerRun } from './cache-lifecycle-projection.ts';
+import { teardownDrainFor } from './cache-teardown.test-support.ts';
 import { type LocalStepOutcome, recordLocalStep } from './local-step.ts';
 
 const repeated = (character: string): string => character.repeat(32);
@@ -125,14 +126,22 @@ const defaultIdentity = {
 };
 
 /**
-Tears the cache down and reads the deletion queue in the same object visit.
-The teardown's alarm passes would otherwise retire the rows first.
+Tears the cache down, drains its rows into the deletion queue and reads the
+queue in the same object visit. The teardown's alarm passes would otherwise
+retire the rows first.
 */
 async function tearDownAndReadQueue(
 	cache: CacheScope
 ): Promise<{ cacheId: CacheId }[]> {
 	return runInDurableObject(currentServer(), async (instance) => {
 		await instance.runCacheTeardown(cache, origin);
+		const removed = instance.context.cacheRepository.lastDeleted(cache);
+		if (removed !== undefined) {
+			await asOneInvocation(() =>
+				teardownDrainFor(instance.context).drain(removed)
+			);
+		}
+
 		return instance.context.db
 			.select({ cacheId: schema.narInfoDeletions.cacheId })
 			.from(schema.narInfoDeletions)

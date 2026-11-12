@@ -106,7 +106,7 @@ async function rowsRemaining(
 describe('cache teardown', () => {
 	beforeEach(resetTestServer);
 
-	it('removes narinfo rows before cache deletion returns and drains narinfo objects later', async () => {
+	it('leaves narinfo rows and objects when cache deletion returns and drains them later', async () => {
 		await useTestServer('teardown-drain');
 		const { token } = await bootstrap({
 			caches: [{ scope: buildsCache }, { scope: otherCache }]
@@ -136,15 +136,17 @@ describe('cache teardown', () => {
 
 				return {
 					object: object !== null,
+					rows: instance.context.db
+						.select({ storePathHash: schema.narInfos.storePathHash })
+						.from(schema.narInfos)
+						.where(eq(schema.narInfos.cacheId, cache.id))
+						.all().length,
 					pending: await state.storage.get(
 						`${teardownEntryPrefix}${String(cache.id)}`
 					)
 				};
 			}
 		);
-		// The teardown drain never restores a narinfo row, so alarm delivery
-		// cannot change this count.
-		const rowsOnReturn = await rowsRemaining(paths);
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
@@ -154,12 +156,12 @@ describe('cache teardown', () => {
 
 		expect({
 			onReturn,
-			rowsOnReturn,
+			rows: await rowsRemaining(paths),
 			object: await isNarInfoObjectPresent(first.storePathHash, buildsCache),
 			pending: await teardownPending()
 		}).toStrictEqual({
-			onReturn: { object: true, pending: origin },
-			rowsOnReturn: 0,
+			onReturn: { object: true, rows: paths.length, pending: origin },
+			rows: 0,
 			object: false,
 			pending: undefined
 		});
@@ -178,8 +180,6 @@ describe('cache teardown', () => {
 
 		await currentServer().runCacheTeardown(buildsCache, origin);
 
-		expect(await rowsRemaining(paths)).toBe(0);
-
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
 			async () => (await teardownPending()) === undefined,
@@ -193,9 +193,10 @@ describe('cache teardown', () => {
 		);
 
 		expect({
+			rows: await rowsRemaining(paths),
 			objectsLeft: present.filter(Boolean).length,
 			pending: await teardownPending()
-		}).toStrictEqual({ objectsLeft: 0, pending: undefined });
+		}).toStrictEqual({ rows: 0, objectsLeft: 0, pending: undefined });
 	});
 
 	it('refuses reads as soon as an over-cap teardown returns, then drains the edges', async () => {
