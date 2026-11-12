@@ -16,17 +16,18 @@ invocation still has exactly one.
 `scope` also receives the dispatching object, so it can read
 instance-specific configuration. It also receives the dispatched method's
 name.
+
+A subclass sets `includeInherited` to wrap the methods that it inherits too.
+The wrappers are defined on `prototype` only, so the superclass keeps its own
+methods.
 */
 export function wrapDispatchedMethods<T extends object>(
 	prototype: T,
-	scope: (body: () => unknown, receiver: T, method: string) => unknown
+	scope: (body: () => unknown, receiver: T, method: string) => unknown,
+	options: { readonly includeInherited?: boolean } = {}
 ): void {
-	for (const property of Object.getOwnPropertyNames(prototype)) {
-		if (property === 'constructor') {
-			continue;
-		}
-
-		const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
+	for (const property of dispatchedProperties(prototype, options)) {
+		const descriptor = findDescriptor(prototype, property, options);
 
 		if (descriptor === undefined) {
 			continue;
@@ -49,5 +50,66 @@ export function wrapDispatchedMethods<T extends object>(
 				);
 			}
 		});
+	}
+}
+
+/**
+Lists the property names of `prototype`, and of the prototypes that it
+inherits from when `includeInherited` is set. The list leaves out
+`constructor` and everything that `Object.prototype` defines.
+*/
+function dispatchedProperties(
+	prototype: object,
+	options: { readonly includeInherited?: boolean }
+): Set<string> {
+	const names = new Set<string>();
+
+	for (const owner of prototypeChain(prototype, options)) {
+		for (const name of Object.getOwnPropertyNames(owner)) {
+			names.add(name);
+		}
+	}
+
+	names.delete('constructor');
+
+	return names;
+}
+
+/**
+Finds the descriptor that a call to the property reaches. It is the first
+descriptor along the chain, which is the descriptor of `prototype` itself
+unless `includeInherited` is set.
+*/
+function findDescriptor(
+	prototype: object,
+	property: string,
+	options: { readonly includeInherited?: boolean }
+): PropertyDescriptor | undefined {
+	for (const owner of prototypeChain(prototype, options)) {
+		const descriptor = Object.getOwnPropertyDescriptor(owner, property);
+
+		if (descriptor !== undefined) {
+			return descriptor;
+		}
+	}
+
+	return undefined;
+}
+
+function* prototypeChain(
+	prototype: object,
+	options: { readonly includeInherited?: boolean }
+): Generator<object> {
+	let owner: object | undefined = prototype;
+
+	while (owner !== undefined && owner !== Object.prototype) {
+		yield owner;
+
+		if (options.includeInherited !== true) {
+			return;
+		}
+
+		const parent: unknown = Object.getPrototypeOf(owner);
+		owner = typeof parent === 'object' && parent !== null ? parent : undefined;
 	}
 }

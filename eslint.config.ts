@@ -249,10 +249,12 @@ export default defineConfig(
 		// The cost scope, the deadline scope, the D1 statement allowance, the
 		// Durable Object row budget and the subrequest slice use `AsyncLocalStorage`
 		// to keep interleaved requests from sharing accounting, deadlines,
-		// allowances, budgets or slices.
+		// allowances, budgets or slices. The test alarm controls use it to give each
+		// call the test generation in which it started.
 		// Workerd exposes it through `nodejs_compat`; permit only
 		// `node:async_hooks` in these modules.
 		files: [
+			'packages/server/src/alarm-fence.test-support.ts',
 			'packages/server/src/do/operation-cost.ts',
 			'packages/server/src/do/deadline.ts',
 			'packages/server/src/do/row-budget.ts',

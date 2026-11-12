@@ -195,10 +195,21 @@ Follow these rules:
   [Time and synchronisation](#time-and-synchronisation) describes. Don't raise a
   time limit to make a slow fixture pass. Find the slow step.
 
-After each test, a shared `afterEach` hook checks every Durable Object that the
-test used. It clears their alarms. If any object still has a retry scheduled for
-the future, the hook fails the test, and the message gives the maintenance pass
-and how long was left.
+After each test, a shared `afterEach` hook stops alarms on every Durable Object
+that armed an alarm during the test and on every object that the harness
+selected. A stopped object does not arm alarms, and it skips its alarm handler,
+until the shared `beforeEach` hook of the next test resumes alarms. The hook
+also deletes the alarms that those objects armed. The hook then checks the
+objects that the harness selected. If any of them still has a retry scheduled
+for the future, the hook fails the test, and the message gives the maintenance
+pass and how long was left.
+
+A call that started in an earlier test, such as a `fetch` request, an RPC method
+call or an alarm handler, cannot arm alarms in a later test. Its `setAlarm` call
+resolves without arming an alarm and logs nothing. Work that an earlier test
+started keeps that test's generation, even when a call in a later test waits for
+the work. The retry alarm of a shared migration, for example, is refused in that
+case.
 
 `completeCommitSession` predates these rules and gives each phase a deadline of
 20 seconds. When it throws `CommitFixturePhaseTimeoutError` or
