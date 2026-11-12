@@ -27,6 +27,7 @@ import {
 	type PlanCheckApi,
 	ResourceOfOtherWorkerError,
 	RoutesPermissionRequiredError,
+	routesWarning,
 	scanAccountWorkers,
 	UnrecognisedDatabaseError,
 	UnrecognisedResourceError,
@@ -283,14 +284,16 @@ function fakeApi(account: FakeAccount): PlanCheckApi {
 				routes: []
 			};
 
-			// Like Cloudflare's, this lists no routes without a zone.
 			if (zoneId === undefined) {
-				return Promise.resolve({ ...workers, routes: [] });
+				return Promise.resolve({
+					...workers,
+					routes: { kind: 'zone-unavailable' }
+				});
 			}
 
 			return Promise.resolve(
 				account.unreadableRouteHostnames?.includes(hostname) === true
-					? { ...workers, routes: undefined }
+					? { ...workers, routes: { kind: 'permission-denied' } }
 					: workers
 			);
 		}
@@ -552,10 +555,13 @@ describe('checkPlan', () => {
 			release,
 			{
 				scripts: { cupboard: cupboardControlBindings },
-				hostnameWorkers: { customDomain: script('cupboard'), routes: undefined }
+				hostnameWorkers: {
+					customDomain: script('cupboard'),
+					routes: { kind: 'permission-denied' }
+				}
 			},
 			'cache.example.com',
-			{ refusal: undefined, routeWorkers: undefined }
+			{ refusal: undefined, routeWorkers: { kind: 'permission-denied' } }
 		],
 		[
 			'reports the Workers of routes without blocking',
@@ -785,7 +791,14 @@ describe('checkPlan when the token may not list routes', () => {
 			account(['cache.example.com'], 'cupboard'),
 			'cache.example.com',
 			undefined,
-			{ refusal: undefined, routeWorkers: undefined }
+			{ refusal: undefined, routeWorkers: { kind: 'permission-denied' } }
+		],
+		[
+			'warns that the routes were not checked when the token cannot see the zone of the domain that the deployment keeps',
+			{ ...account([], 'cupboard'), zones: ['example.net'] },
+			'cache.example.com',
+			undefined,
+			{ refusal: undefined, routeWorkers: { kind: 'zone-unavailable' } }
 		],
 		[
 			'refuses to attach a first custom domain',
@@ -797,7 +810,7 @@ describe('checkPlan when the token may not list routes', () => {
 					'cache.example.com',
 					'attach'
 				),
-				routeWorkers: undefined
+				routeWorkers: { kind: 'permission-denied' }
 			}
 		],
 		[
@@ -822,7 +835,7 @@ describe('checkPlan when the token may not list routes', () => {
 				from: ['a.example.com', 'b.example.net'],
 				to: 'a.example.com'
 			},
-			{ refusal: undefined, routeWorkers: [] }
+			{ refusal: undefined, routeWorkers: { kind: 'zone-unavailable' } }
 		],
 		[
 			'refuses a move off a domain in a zone that the token cannot see',
@@ -841,7 +854,7 @@ describe('checkPlan when the token may not list routes', () => {
 			{ kind: 'first-domain', from: [], to: 'cache.example.org' },
 			{
 				refusal: new DomainZoneUnavailableError('cache.example.org', 'attach'),
-				routeWorkers: []
+				routeWorkers: { kind: 'zone-unavailable' }
 			}
 		],
 		[
@@ -875,6 +888,59 @@ describe('checkPlan when the token may not list routes', () => {
 		expect(
 			await checkPlan(fakeApi(fake), release, domain, domainChange)
 		).toStrictEqual(expected);
+	});
+});
+
+describe('routesWarning', () => {
+	const domain = 'cache.example.com';
+
+	it.each<[string, PlanCheck, string | undefined]>([
+		[
+			'warns that a zone that the token cannot see was not checked',
+			{ refusal: undefined, routeWorkers: { kind: 'zone-unavailable' } },
+			'The Cloudflare token cannot see a zone for cache.example.com, so the plan cannot show which Workers run in front of the deployment. Give the token Zone: Read and Workers Routes: Read on that zone so that the plan can check the routes.'
+		],
+		[
+			'warns that routes that the token may not list were not checked',
+			{ refusal: undefined, routeWorkers: { kind: 'permission-denied' } },
+			'The Cloudflare token may not list the Workers routes in the zone of cache.example.com, so the plan cannot show which Workers run in front of the deployment. Give the token Workers Routes: Read on that zone so that the plan can check the routes.'
+		],
+		[
+			'warns about a zone that the token cannot see while the plan is refused for another domain',
+			{
+				refusal: new DomainZoneUnavailableError('old.example.net', 'remove'),
+				routeWorkers: { kind: 'zone-unavailable' }
+			},
+			'The Cloudflare token cannot see a zone for cache.example.com, so the plan cannot show which Workers run in front of the deployment. Give the token Zone: Read and Workers Routes: Read on that zone so that the plan can check the routes.'
+		],
+		[
+			'leaves a zone that the token cannot see to the refusal for it',
+			{
+				refusal: new DomainZoneUnavailableError(domain, 'attach'),
+				routeWorkers: { kind: 'zone-unavailable' }
+			},
+			undefined
+		],
+		[
+			'leaves routes that the token may not list to the refusal for them',
+			{
+				refusal: new RoutesPermissionRequiredError(domain, 'attach'),
+				routeWorkers: { kind: 'permission-denied' }
+			},
+			undefined
+		],
+		[
+			'lists the route Workers',
+			{ refusal: undefined, routeWorkers: [script('router')] },
+			'Routes in the zone of cache.example.com run the Workers router in front of the deployment. The deploy leaves them unchanged.'
+		],
+		[
+			'gives no warning when the zone has no route Workers',
+			{ refusal: undefined, routeWorkers: [] },
+			undefined
+		]
+	])('%s', (_name, check, expected) => {
+		expect(routesWarning(domain, check)).toStrictEqual(expected);
 	});
 });
 

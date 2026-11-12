@@ -1318,7 +1318,27 @@ describe('findHostnameWorkers with a token that may not list everything', () => 
 				'cache.example.com',
 				zoneIdSchema.parse('zone-1')
 			)
-		).toStrictEqual({ customDomain: 'production', routes: undefined });
+		).toStrictEqual({
+			customDomain: 'production',
+			routes: { kind: 'permission-denied' }
+		});
+	});
+
+	it('reports the routes as unknown when the token cannot see the zone', async () => {
+		const api = createCloudflareApi(
+			routesClient(
+				listed([{ hostname: 'cache.example.com', service: 'production' }]),
+				listed([{ id: 'r1', pattern: 'cache.example.com/*', script: 'other' }])
+			),
+			accountId()
+		);
+
+		expect(
+			await api.findHostnameWorkers('cache.example.com', undefined)
+		).toStrictEqual({
+			customDomain: 'production',
+			routes: { kind: 'zone-unavailable' }
+		});
 	});
 
 	it('fails when the token may not list the custom domains', async () => {

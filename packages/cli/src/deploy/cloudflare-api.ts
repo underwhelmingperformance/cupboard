@@ -193,13 +193,33 @@ export interface AccountResource {
 }
 
 /**
+The routes of a hostname's zone that the deploy could not list. The reason
+is `zone-unavailable` when the token cannot see the zone, and
+`permission-denied` when the token sees it but may not list its routes.
+*/
+export interface UncheckedRoutes {
+	readonly kind: 'zone-unavailable' | 'permission-denied';
+}
+
+/**
+Whether the routes were listed, which narrows them to the Workers that the
+matching routes run. An empty list means the zone has no matching route.
+*/
+export function areRoutesListed(
+	routes: readonly ScriptName[] | UncheckedRoutes
+): routes is readonly ScriptName[] {
+	return Array.isArray(routes);
+}
+
+/**
 The Workers that serve a hostname. Cloudflare runs the Workers of matching
-routes in front of the custom-domain Worker. `routes` is `undefined` when
-the token may not list the zone's routes.
+routes in front of the custom-domain Worker. `routes` says why the deploy
+could not list them when the token cannot see the zone or may not list its
+routes.
 */
 export interface HostnameWorkers {
 	readonly customDomain: ScriptName | undefined;
-	readonly routes: readonly ScriptName[] | undefined;
+	readonly routes: readonly ScriptName[] | UncheckedRoutes;
 }
 
 /**
@@ -1350,7 +1370,7 @@ export function createCloudflareApi(
 					: scriptNameSchema.parse(domain.service);
 
 			if (zoneId === undefined) {
-				return { customDomain, routes: [] };
+				return { customDomain, routes: { kind: 'zone-unavailable' } };
 			}
 
 			let routes: RouteListResponse[];
@@ -1363,7 +1383,7 @@ export function createCloudflareApi(
 				);
 			} catch (error) {
 				if (isTokenRefusal(error)) {
-					return { customDomain, routes: undefined };
+					return { customDomain, routes: { kind: 'permission-denied' } };
 				}
 
 				throw error;
