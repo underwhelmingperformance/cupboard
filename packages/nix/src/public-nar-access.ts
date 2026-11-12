@@ -1,6 +1,7 @@
 import { discardResponseBody, withCleanup } from '@cupboard/shared/cleanup';
-import { fetch as undiciFetch, type Response } from 'undici';
+import type { fetch as undiciFetch, Response } from 'undici';
 
+import { keepAliveUndiciFetch } from './keep-alive-undici-fetch.ts';
 import { NixStoreError } from './nix-store.ts';
 import { isReachableElsewhere } from './substituter-reach.ts';
 
@@ -34,7 +35,7 @@ export async function fetchPublicObject(
 		) {
 			throw new PublicNarAccessError();
 		}
-		const response = await (options.fetch ?? undiciFetch)(url, {
+		const response = await (options.fetch ?? keepAliveUndiciFetch)(url, {
 			redirect: 'manual',
 			signal: options.signal,
 			headers: options.headers

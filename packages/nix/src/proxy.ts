@@ -1,3 +1,4 @@
+import { afterPendingCallbacks } from '@cupboard/shared/keep-alive-fetch';
 import { EnvHttpProxyAgent, fetch as undiciFetch } from 'undici';
 
 export interface ProxySettings {
@@ -85,7 +86,7 @@ export function proxiedFetch(
 		noProxy: proxies.noProxy ?? ''
 	});
 
-	return (input, init) => {
+	return afterPendingCallbacks((input, init) => {
 		return undiciFetch(input, { ...init, dispatcher });
-	};
+	});
 }
