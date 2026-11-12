@@ -14,6 +14,7 @@ import {
 	commitCapabilitiesHeader,
 	commitCreditCapability,
 	commitCreditGrantAttribute,
+	commitEntryResendStatus,
 	commitSessionFrameSchema,
 	type CommitSessionRequestInput,
 	publicationCapability,
@@ -240,6 +241,9 @@ interface SessionEntry {
 	deadline?: NodeJS.Timeout;
 	retryAttempts: number;
 	retryTimer?: NodeJS.Timeout;
+	// Whether the entry was the first entry of the last message that contained
+	// it.
+	ledMessage?: boolean;
 	// The grace fact of the last `settled` or `verdict` frame, exposed through
 	// the outcome's `verdictGrace` once the entry has its verdict.
 	verdictGrace?: UploadGraceFact;
@@ -595,6 +599,23 @@ export function runCommitSession(
 		}
 	};
 
+	// Sends a message that contains the entries of `targets`, in order, and
+	// records which entry is first.
+	const sendEntries = (
+		request: CommitSessionRequestInput,
+		targets: readonly CommitSessionTarget[]
+	): void => {
+		for (const [index, target] of targets.entries()) {
+			const entry = outstanding.get(target.uploadId);
+
+			if (entry !== undefined) {
+				entry.ledMessage = index === 0;
+			}
+		}
+
+		sendNow(request);
+	};
+
 	// Window state for the batch path. Each in-flight chunk is tracked by a set
 	// of its uploadIds; any frame for a member of that set counts as an ack (the
 	// ANY-frame rule), removing the chunk from the window and releasing the next
@@ -623,16 +644,21 @@ export function runCommitSession(
 			return;
 		}
 		let entries: PublicationEntry[] = [];
+		let entryTargets: CommitSessionTarget[] = [];
 		let pushId: PushId | undefined;
 		const flush = () => {
 			if (pushId !== undefined && entries.length > 0) {
-				sendNow({
-					op: shouldSubscribe ? 'subscribe-publication' : 'publish-batch',
-					pushId,
-					entries
-				});
+				sendEntries(
+					{
+						op: shouldSubscribe ? 'subscribe-publication' : 'publish-batch',
+						pushId,
+						entries
+					},
+					entryTargets
+				);
 			}
 			entries = [];
+			entryTargets = [];
 		};
 		for (const target of batch) {
 			const publication = target.publication;
@@ -671,6 +697,7 @@ export function runCommitSession(
 				return;
 			}
 			entries.push(entry);
+			entryTargets.push(target);
 		}
 		flush();
 	};
@@ -687,22 +714,25 @@ export function runCommitSession(
 		}
 		if (effectiveBatchSize === undefined) {
 			for (const target of legacy) {
-				sendNow({ op: 'commit', uploadId: target.uploadId });
+				sendEntries({ op: 'commit', uploadId: target.uploadId }, [target]);
 			}
 			return;
 		}
-		sendNow({
-			op: 'commit-batch',
-			commits: legacy.map((target) => ({
-				uploadId: target.uploadId,
-				storePathHash: target.storePathHash,
-				narHash: target.narHash,
-				...(target.retention === true &&
-					hasBatchRetentionMarker && { retention: true as const }),
-				...(target.blob !== undefined &&
-					hasBatchBlobDeclaration && { blob: target.blob })
-			}))
-		});
+		sendEntries(
+			{
+				op: 'commit-batch',
+				commits: legacy.map((target) => ({
+					uploadId: target.uploadId,
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
+					...(target.retention === true &&
+						hasBatchRetentionMarker && { retention: true as const }),
+					...(target.blob !== undefined &&
+						hasBatchBlobDeclaration && { blob: target.blob })
+				}))
+			},
+			legacy
+		);
 	};
 
 	const sendBatchChunk = (batch: readonly CommitSessionTarget[]): void => {
@@ -938,7 +968,7 @@ export function runCommitSession(
 				batch.every((target) => target.publication === undefined)
 			) {
 				for (const target of batch) {
-					sendNow({ op: 'commit', uploadId: target.uploadId });
+					sendEntries({ op: 'commit', uploadId: target.uploadId }, [target]);
 				}
 			} else {
 				sendBatchMessage(batch);
@@ -974,7 +1004,7 @@ export function runCommitSession(
 		) {
 			for (const target of targets) {
 				inFlightEntries.add(target.uploadId);
-				sendNow({ op: 'commit', uploadId: target.uploadId });
+				sendEntries({ op: 'commit', uploadId: target.uploadId }, [target]);
 			}
 
 			return;
@@ -988,6 +1018,25 @@ export function runCommitSession(
 				pendingBatchChunks.push(batch);
 			}
 		}
+	};
+
+	// Sends targets ahead of every queued target, so each one runs first in the
+	// next message that the connection sends.
+	const sendCommitsFirst = (targets: readonly CommitSessionTarget[]): void => {
+		if (creditAvailable !== undefined) {
+			queuedTargets.unshift(...targets);
+			drainCredit();
+
+			return;
+		}
+
+		if (inFlightChunks.size < maxInFlightBatchMessages) {
+			sendCommits(targets);
+
+			return;
+		}
+
+		pendingBatchChunks.unshift(...chunk(targets, effectiveBatchSize ?? 1));
 	};
 
 	// Coalesce commits registered during one microtask so a burst, such as reuse
@@ -1423,6 +1472,26 @@ export function runCommitSession(
 					return;
 				}
 
+				// The entry's message ran out of calls before the entry finished.
+				// Sent first in a later message, the entry starts with that message's
+				// whole allowance, so this refusal does not count against its retries.
+				// The server starts a message's entries in order and runs at most six
+				// at once, so at most five other entries run alongside the first one.
+				// Sending a refused first entry again gives it no more calls, so that
+				// refusal takes the counted retries below.
+				if (status === commitEntryResendStatus && entry.ledMessage !== true) {
+					if (entry.retryTimer !== undefined) {
+						clearTimeout(entry.retryTimer);
+						entry.retryTimer = undefined;
+					}
+
+					inFlightEntries.delete(errorUploadId);
+					sendCommitsFirst([entry.target]);
+					updateCapacityWait();
+
+					return;
+				}
+
 				if (
 					retryableErrorStatuses.has(status) &&
 					entry.retryAttempts < maxEntryRetries
@@ -1565,24 +1634,30 @@ export function runCommitSession(
 		}
 		if (hasSubscribeIdentity) {
 			for (const batch of chunk(legacyTargets, commitBatchMaxEntries)) {
-				sendNow({
-					op: 'subscribe-identity',
-					entries: batch.map((target) => ({
-						uploadId: target.uploadId,
-						storePathHash: target.storePathHash,
-						narHash: target.narHash,
-						...(target.retention === true &&
-							hasIdentityRetentionMarker && { retention: true as const }),
-						...(target.blob !== undefined &&
-							hasIdentityBlobDeclaration && { blob: target.blob })
-					}))
-				});
+				sendEntries(
+					{
+						op: 'subscribe-identity',
+						entries: batch.map((target) => ({
+							uploadId: target.uploadId,
+							storePathHash: target.storePathHash,
+							narHash: target.narHash,
+							...(target.retention === true &&
+								hasIdentityRetentionMarker && { retention: true as const }),
+							...(target.blob !== undefined &&
+								hasIdentityBlobDeclaration && { blob: target.blob })
+						}))
+					},
+					batch
+				);
 			}
 		} else {
-			sendNow({
-				op: 'subscribe',
-				uploadIds: legacyTargets.map((target) => target.uploadId)
-			});
+			sendEntries(
+				{
+					op: 'subscribe',
+					uploadIds: legacyTargets.map((target) => target.uploadId)
+				},
+				legacyTargets
+			);
 		}
 	};
 

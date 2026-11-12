@@ -13,6 +13,7 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { storePathHashOf } from '@cupboard/nix-store/store-path';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
@@ -705,6 +706,15 @@ export type CommitSessionRequest = z.output<typeof commitSessionRequestSchema>;
 export type CommitSessionRequestInput = z.input<
 	typeof commitSessionRequestSchema
 >;
+
+// The status of an `error` frame, or of a `temporary-failure` refusal, for an
+// entry that could not finish because its message's invocation ran out of
+// calls. Each message runs in its own invocation, so the client sends the
+// entry again at the front of its next message, where it runs first. An entry
+// that was already first in the refused message is retried like any other 429,
+// after back-off and at most three times. Clients up to v0.0.52 retry every
+// such entry that way.
+export const commitEntryResendStatus: number = StatusCodes.TOO_MANY_REQUESTS;
 
 export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 	z.strictObject({

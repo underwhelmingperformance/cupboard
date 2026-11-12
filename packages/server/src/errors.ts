@@ -25,7 +25,10 @@ import {
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
 import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
-import { type UploadId } from '@cupboard/protocol/upload';
+import {
+	commitEntryResendStatus,
+	type UploadId
+} from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -269,6 +272,22 @@ export class UploadConfirmSubrequestsExhaustedError extends ServerHttpError {
 			`Only ${String(available)} subrequests remain, which is too few to confirm a path. Retry the request.`
 		);
 		this.name = 'UploadConfirmSubrequestsExhaustedError';
+	}
+}
+
+/**
+A commit-socket message used up its invocation's subrequests before this
+entry finished. Each message runs in its own invocation, so the client sends
+the entry again in a later message.
+*/
+export class CommitEntrySubrequestsExhaustedError extends ServerHttpError {
+	readonly status = commitEntryResendStatus;
+
+	constructor() {
+		super(
+			'The message used all of its subrequests before this entry finished. Send the entry again in a later message.'
+		);
+		this.name = 'CommitEntrySubrequestsExhaustedError';
 	}
 }
 

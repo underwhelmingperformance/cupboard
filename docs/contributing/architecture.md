@@ -1105,6 +1105,33 @@ them has changed, or the path was recommitted between the replay's reads, it
 tries again, and after three attempts it refuses the entry with
 `temporary-failure`.
 
+Each message on the commit socket runs in its own invocation of the tenant
+object, with its own [subrequest allowance](#the-subrequest-allowance). A
+message of up to 100 entries can need more calls than the Free plan's allowance.
+When the allowance refuses a call or a budget check of an entry, the object
+answers that entry with status 429. It also answers every entry of the message
+that has not started with status 429, without running it. Entries that are
+already running either finish or receive the same answer. A `publish-batch` or
+`subscribe-publication` entry is refused with `temporary-failure`, also when the
+refusal comes during its commit, and a `commit`, `commit-batch` or
+`subscribe-identity` entry receives an `error` frame.
+
+The CLI sends such an entry again at once, ahead of every queued entry, so it
+runs first in a later message with a fresh allowance. This answer does not count
+against the entry's three retries. The tenant object starts a message's entries
+in order and runs at most six at once, so the first entry of a message shares
+the allowance with at most five other entries. When an entry that was first in
+its message receives the answer, the CLI retries it like any other 429, with
+back-off and at most three times, and then fails it. CLIs up to v0.0.52 treat
+every such answer like any other 429: they send the entry again after a back-off
+of half a second, then one and two seconds, behind the entries that they have
+queued meanwhile, and fail the entry after its third retry. A full message of
+fresh publications on the Free plan refuses its last entries, so on those
+releases a large push can fail when one entry lands among the refused entries
+four times in a row. Each step of a commit or a publication can run again after
+an interruption, so an entry that stopped partway completes when the client
+sends it again.
+
 For both protocols, the client opens its publication session on the first commit
 or upload renewal.
 
