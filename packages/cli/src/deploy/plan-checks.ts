@@ -4,7 +4,12 @@ import { z } from 'zod';
 import { CliUsageError } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
-import { type CloudflareApi, liveD1BindingSchema } from './cloudflare-api.ts';
+import {
+	areRoutesListed,
+	type CloudflareApi,
+	liveD1BindingSchema,
+	type UncheckedRoutes
+} from './cloudflare-api.ts';
 import { type DeploymentConfig, deploymentD1Bindings } from './config.ts';
 import { findHostnameZoneId } from './deploy-run.ts';
 import {
@@ -377,12 +382,14 @@ export class DomainServedByOtherWorkerError extends CliUsageError {
 The result of checking a plan against the account before the operator
 approves it. `refusal` blocks the plan. `routeWorkers` lists the Workers
 that routes in the domain's zone run in front of the deployment, which the
-plan reports without blocking. `routeWorkers` is `undefined` when the token
-may not list the zone's routes.
+plan reports without blocking. An empty list means that no route in the zone
+runs a Worker outside the deployment in front of the domain, or that the plan
+has no domain. When the token cannot see the zone or may not list its routes,
+`routeWorkers` is an `UncheckedRoutes` value that gives the reason.
 */
 export interface PlanCheck {
 	readonly refusal: CliUsageError | undefined;
-	readonly routeWorkers: readonly ScriptName[] | undefined;
+	readonly routeWorkers: readonly ScriptName[] | UncheckedRoutes;
 }
 
 export type PlanCheckApi = Pick<
@@ -405,22 +412,44 @@ export type PlanCheckApi = Pick<
 	readonly accountWorkers: () => Promise<AccountWorkers>;
 };
 
-/**
-Says that the deploy could not list the routes in the zone of the
-deployment's domain, so it does not know which Workers run in front of it.
-*/
-export function unreadableRoutesText(domain: string): string {
-	return `The Cloudflare token may not list the Workers routes in the zone of ${domain}, so the plan cannot show which Workers run in front of the deployment.`;
-}
+const uncheckedRoutesText: Record<
+	UncheckedRoutes['kind'],
+	(domain: string) => string
+> = {
+	'zone-unavailable': (domain) =>
+		`The Cloudflare token cannot see a zone for ${domain}, so the plan cannot show which Workers run in front of the deployment. Give the token Zone: Read and Workers Routes: Read on that zone so that the plan can check the routes.`,
+	'permission-denied': (domain) =>
+		`The Cloudflare token may not list the Workers routes in the zone of ${domain}, so the plan cannot show which Workers run in front of the deployment. Give the token Workers Routes: Read on that zone so that the plan can check the routes.`
+};
 
 /**
-Describes the route Workers that run in front of the deployment's domain.
+The warning that the plan prints about the routes in the zone of its
+`domain`, or `undefined` when there is none. It lists the route Workers that
+run in front of the deployment. When the deploy could not list the routes, it
+gives the reason. It returns `undefined` when the plan is refused for the
+same hostname's zone or routes, because the refusal already gives that
+reason.
 */
-export function routeWorkersText(
+export function routesWarning(
 	domain: string,
-	workers: readonly ScriptName[]
-): string {
-	return `Routes in the zone of ${domain} run the Workers ${workers.join(', ')} in front of the deployment. The deploy leaves them unchanged.`;
+	check: PlanCheck
+): string | undefined {
+	const { refusal, routeWorkers } = check;
+
+	if (areRoutesListed(routeWorkers)) {
+		return routeWorkers.length === 0
+			? undefined
+			: `Routes in the zone of ${domain} run the Workers ${routeWorkers.join(', ')} in front of the deployment. The deploy leaves them unchanged.`;
+	}
+
+	const isRefusedForDomain =
+		(refusal instanceof DomainZoneUnavailableError ||
+			refusal instanceof RoutesPermissionRequiredError) &&
+		refusal.hostname === domain;
+
+	return isRefusedForDomain
+		? undefined
+		: uncheckedRoutesText[routeWorkers.kind](domain);
 }
 
 const cupboardServerBinding = z.looseObject({
@@ -794,9 +823,7 @@ export async function checkPlan(
 		? undefined
 		: zoneId === undefined
 			? new DomainZoneUnavailableError(domain, 'attach')
-			: workers.routes === undefined
-				? new RoutesPermissionRequiredError(domain, 'attach')
-				: undefined;
+			: uncheckedRoutesRefusal(domain, 'attach', workers.routes);
 
 	return {
 		refusal:
@@ -804,7 +831,9 @@ export async function checkPlan(
 			otherWorkerRefusal ??
 			attachRefusal ??
 			(await unchangeableDomain(api, removed)),
-		routeWorkers: workers.routes?.filter((worker) => !own.has(worker))
+		routeWorkers: areRoutesListed(workers.routes)
+			? workers.routes.filter((worker) => !own.has(worker))
+			: workers.routes
 	};
 }
 
@@ -826,10 +855,35 @@ async function unchangeableDomain(
 
 		const workers = await api.findHostnameWorkers(hostname, zoneId);
 
-		if (workers.routes === undefined) {
-			return new RoutesPermissionRequiredError(hostname, 'remove');
+		const refusal = uncheckedRoutesRefusal(hostname, 'remove', workers.routes);
+
+		if (refusal !== undefined) {
+			return refusal;
 		}
 	}
 
 	return undefined;
+}
+
+/**
+The refusal for a custom domain whose zone or routes the deploy could not
+check, or `undefined` when it listed the routes.
+*/
+function uncheckedRoutesRefusal(
+	hostname: string,
+	action: CustomDomainAction,
+	routes: readonly ScriptName[] | UncheckedRoutes
+): CliUsageError | undefined {
+	if (areRoutesListed(routes)) {
+		return undefined;
+	}
+
+	switch (routes.kind) {
+		case 'zone-unavailable': {
+			return new DomainZoneUnavailableError(hostname, action);
+		}
+		case 'permission-denied': {
+			return new RoutesPermissionRequiredError(hostname, action);
+		}
+	}
 }

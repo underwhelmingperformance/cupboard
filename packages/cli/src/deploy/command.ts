@@ -102,9 +102,8 @@ import {
 	accountScanCache,
 	checkPlan,
 	type PlanCheck,
-	routeWorkersText,
-	scanAccountWorkers,
-	unreadableRoutesText
+	routesWarning,
+	scanAccountWorkers
 } from './plan-checks.ts';
 import {
 	checkR2Credentials,
@@ -1531,16 +1530,13 @@ async function deployFlow(
 					ui.warn(domainChangeText(target.domainChange));
 				}
 
-				if (state.domain !== undefined && check.routeWorkers === undefined) {
-					ui.warn(unreadableRoutesText(state.domain));
-				}
+				const routes =
+					state.domain === undefined
+						? undefined
+						: routesWarning(state.domain, check);
 
-				if (
-					state.domain !== undefined &&
-					check.routeWorkers !== undefined &&
-					check.routeWorkers.length > 0
-				) {
-					ui.warn(routeWorkersText(state.domain, check.routeWorkers));
+				if (routes !== undefined) {
+					ui.warn(routes);
 				}
 
 				if (!isReviewSkipped && check.refusal !== undefined) {

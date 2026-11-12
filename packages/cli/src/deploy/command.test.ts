@@ -61,6 +61,7 @@ import {
 	type PlanReviewWorld,
 	type PlanState,
 	R2CredentialsRejectedError,
+	R2CredentialsRequiredError,
 	type R2KeyAction,
 	r2KeyActionFor,
 	requireFirstCacheAccess,
@@ -3099,14 +3100,17 @@ describe('executeDeploy plan checks', () => {
 			},
 			findZoneId: () => Promise.resolve(undefined),
 			findCustomDomain: () => Promise.resolve(undefined),
-			listCustomDomains: () => Promise.resolve([]),
-			findHostnameWorkers: () =>
+			listCustomDomains: (scriptName) =>
+				Promise.resolve(
+					account.customDomainWorker === scriptName ? ['cache.example.com'] : []
+				),
+			findHostnameWorkers: (_hostname, zoneId) =>
 				Promise.resolve({
 					customDomain:
 						account.customDomainWorker === undefined
 							? undefined
 							: scriptNameSchema.parse(account.customDomainWorker),
-					routes: []
+					routes: zoneId === undefined ? { kind: 'zone-unavailable' } : []
 				}),
 			setCustomDomain: write('setCustomDomain'),
 			listTokenPermissionGroups: () => Promise.resolve([]),
@@ -3119,6 +3123,58 @@ describe('executeDeploy plan checks', () => {
 		};
 
 		return { api, reads, writes };
+	}
+
+	/**
+	Runs the deploy against `account` until it fails, and returns the error,
+	the scripts that it read, the writes that it attempted and the warnings
+	that it printed. `flowApi` rejects every write.
+	*/
+	async function deployAgainst(
+		account: FlowAccount,
+		options: Partial<DeployCliOptions>
+	): Promise<{
+		outcome: unknown;
+		reads: string[];
+		writes: string[];
+		warnings: string[];
+	}> {
+		const warnings: string[] = [];
+		const { api, reads, writes } = flowApi(account);
+		vi.mocked(buildArtifactFromTree).mockResolvedValue(await releaseArtifact());
+		vi.mocked(resolveCloudflare).mockResolvedValue({
+			client: new Cloudflare({ apiToken: 'test' }),
+			clientWithSignal: () => new Cloudflare({ apiToken: 'test' }),
+			api,
+			accountId: accountId('acc-1'),
+			credentialSource: 'environment',
+			subject: undefined,
+			loginIdToken: undefined
+		});
+		vi.spyOn(deployUi, 'createDeployUi').mockReturnValue({
+			...scriptedUi({}),
+			interactive: false,
+			warn: (message) => {
+				warnings.push(message);
+			}
+		});
+		let outcome: unknown;
+
+		try {
+			await executeDeploy({
+				oidcIssuer: 'https://dash.cloudflare.com',
+				clientId: 'client',
+				yes: true,
+				workersPlan: 'paid',
+				...options
+			});
+		} catch (error) {
+			outcome = error;
+		} finally {
+			vi.restoreAllMocks();
+		}
+
+		return { outcome, reads, writes, warnings };
 	}
 
 	const staging = { deploymentName: deploymentNameSchema.parse('staging') };
@@ -3186,42 +3242,10 @@ describe('executeDeploy plan checks', () => {
 	])(
 		'refuses %s once, before any change to the account',
 		async (_name, options, account, expected, scripts) => {
-			const warnings: string[] = [];
-			const { api, reads, writes } = flowApi(account);
-			vi.mocked(buildArtifactFromTree).mockResolvedValue(
-				await releaseArtifact()
+			const { outcome, reads, writes, warnings } = await deployAgainst(
+				account,
+				options
 			);
-			vi.mocked(resolveCloudflare).mockResolvedValue({
-				client: new Cloudflare({ apiToken: 'test' }),
-				clientWithSignal: () => new Cloudflare({ apiToken: 'test' }),
-				api,
-				accountId: accountId('acc-1'),
-				credentialSource: 'environment',
-				subject: undefined,
-				loginIdToken: undefined
-			});
-			vi.spyOn(deployUi, 'createDeployUi').mockReturnValue({
-				...scriptedUi({}),
-				interactive: false,
-				warn: (message) => {
-					warnings.push(message);
-				}
-			});
-			let outcome: unknown;
-
-			try {
-				await executeDeploy({
-					oidcIssuer: 'https://dash.cloudflare.com',
-					clientId: 'client',
-					yes: true,
-					workersPlan: 'paid',
-					...options
-				});
-			} catch (error) {
-				outcome = error;
-			} finally {
-				vi.restoreAllMocks();
-			}
 
 			expect({
 				outcome,
@@ -3238,4 +3262,27 @@ describe('executeDeploy plan checks', () => {
 			});
 		}
 	);
+
+	it('warns that the routes were not checked for a kept domain in a zone that the token cannot see', async () => {
+		const { outcome, writes, warnings } = await deployAgainst(
+			{ customDomainWorker: 'cupboard' },
+			{ domain: 'cache.example.com' }
+		);
+
+		// The plan is accepted, so the deploy goes on to the R2 credentials,
+		// which this run does not have.
+		expect({
+			outcome,
+			writes,
+			routeWarnings: warnings.filter((warning) =>
+				warning.startsWith('The Cloudflare token')
+			)
+		}).toStrictEqual({
+			outcome: new R2CredentialsRequiredError(),
+			writes: [],
+			routeWarnings: [
+				'The Cloudflare token cannot see a zone for cache.example.com, so the plan cannot show which Workers run in front of the deployment. Give the token Zone: Read and Workers Routes: Read on that zone so that the plan can check the routes.'
+			]
+		});
+	});
 });

@@ -287,8 +287,10 @@ domain, because attaching it would take it from that Worker. This keeps a second
 deployment from taking the domain of another deployment. Routes in the domain's
 zone don't block the plan: Cloudflare runs their Workers in front of the
 deployment, and the plan lists those Workers in a warning. If the Cloudflare
-token may not list the zone's Workers routes, the plan says so instead, as long
-as the deployment keeps the domain that it already serves. The workers.dev
+token cannot see the domain's zone, or may not list the zone's Workers routes,
+and the deployment keeps the domain that it already serves, the plan warns that
+it could not check the routes and gives the reason. Route Workers can then run
+in front of the deployment without the plan listing them. The workers.dev
 address stays enabled. A new domain can take a few minutes to start resolving.
 Later runs of `init` keep the existing domain unless you pass a different one.
 
