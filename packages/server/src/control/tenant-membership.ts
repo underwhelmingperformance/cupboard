@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	type CacheAccessMode,
 	type CacheScope,
@@ -237,7 +238,8 @@ const cacheCredentialColumns = {
 async function readTenantAndCacheRows(
 	database: Database,
 	slug: TenantId,
-	cache: CacheScope
+	cache: CacheScope,
+	phase: RefusalPhase
 ): Promise<{
 	tenant: TenantAdmissionRow | undefined;
 	credential: TenantReadVerifier | undefined;
@@ -315,8 +317,39 @@ async function readTenantAndCacheRows(
 						}
 		};
 	} catch (error) {
-		throw new TenantAdmissionUnavailableError(error);
+		throw tenantRefusal(phase, slug, 'tenant-and-cache-rows', error);
 	}
+}
+
+/**
+When in a request the failed step ran. `admission` is the step that decides
+whether the request may proceed. `recheck` is a D1 read after admission that
+confirms the tenant's status or the cache's read authority again.
+*/
+export type RefusalPhase = 'admission' | 'recheck';
+
+type RefusalStep =
+	'tenant-and-cache-rows' | 'cache-catalogue-migration' | 'tenant-status';
+
+const refusalMessages: Record<RefusalPhase, string> = {
+	admission: 'tenant admission refused',
+	recheck: 'tenant recheck refused'
+};
+
+/**
+Creates the retryable refusal for a failed read and logs the underlying
+error at `warn`. The 503 response does not contain the error, so the record
+shows why the read failed.
+*/
+export function tenantRefusal(
+	phase: RefusalPhase,
+	tenant: TenantId,
+	step: RefusalStep,
+	error: unknown
+): TenantAdmissionUnavailableError {
+	rootLogger().warn(refusalMessages[phase], { tenant, step, error });
+
+	return new TenantAdmissionUnavailableError(error);
 }
 
 interface TenantAdmissionRow {
@@ -367,10 +400,11 @@ export async function readTenantReadVerifier(
 export async function readTenantEntry(
 	env: Env,
 	slug: TenantId,
-	cache: CacheScope
+	cache: CacheScope,
+	phase: RefusalPhase
 ): Promise<TenantAdmission | undefined> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	let rows = await readTenantAndCacheRows(database, slug, cache);
+	let rows = await readTenantAndCacheRows(database, slug, cache, phase);
 
 	if (rows.tenant === undefined || rows.tenant.status === 'offboarded') {
 		return undefined;
@@ -384,10 +418,10 @@ export async function readTenantEntry(
 				unboundedCapMs
 			);
 		} catch (error) {
-			throw new TenantAdmissionUnavailableError(error);
+			throw tenantRefusal(phase, slug, 'cache-catalogue-migration', error);
 		}
 
-		rows = await readTenantAndCacheRows(database, slug, cache);
+		rows = await readTenantAndCacheRows(database, slug, cache, phase);
 
 		if (rows.tenant === undefined || rows.tenant.status === 'offboarded') {
 			return undefined;
@@ -454,7 +488,7 @@ async function admitWithinDeadline(
 		return undefined;
 	}
 
-	return readTenantEntry(env, slug, cache);
+	return readTenantEntry(env, slug, cache, 'admission');
 }
 
 // Scheduled maintenance rebuilds the filter from one registry snapshot and

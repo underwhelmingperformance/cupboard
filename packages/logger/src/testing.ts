@@ -29,6 +29,21 @@ export function capturingSink(into: CapturedLog[]): Sink {
 	};
 }
 
+const warningLevels: ReadonlySet<LogLevel> = new Set<LogLevel>([
+	'warning',
+	'error',
+	'fatal'
+]);
+
+/**
+Returns the captured records at warning level or above. A test that asserts
+on this list fails when a path logs an unexpected error, and ignores the
+info and debug records that background work can log at the same time.
+*/
+export function atWarningOrAbove(logs: readonly CapturedLog[]): CapturedLog[] {
+	return logs.filter((entry) => warningLevels.has(entry.level));
+}
+
 export interface Capture {
 	readonly logs: CapturedLog[];
 	stop(): void;
