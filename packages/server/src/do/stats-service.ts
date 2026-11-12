@@ -9,6 +9,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { TenantUsageMissingError } from '../errors.ts';
 
+import { projectedStorePathCount } from './cache-listing-projection.ts';
 import { type ServerContext } from './context.ts';
 
 export class StatsService {
@@ -30,11 +31,7 @@ export class StatsService {
 		}
 
 		const tenant = this.context.requireTenant();
-		const storePaths = this.context.db
-			.select({ count: count() })
-			.from(schema.narInfos)
-			.where(eq(schema.narInfos.cacheId, cache.id))
-			.get();
+		const storePaths = projectedStorePathCount(this.context.db, cache);
 		const pending = this.context.db
 			.select({ count: count() })
 			.from(schema.pendingUploads)
@@ -100,7 +97,7 @@ export class StatsService {
 		const casFileSize = sum(casSizes);
 
 		return {
-			storePaths: storePaths?.count ?? 0,
+			storePaths,
 			narBlobs: narSizes.length,
 			narFileSize,
 			casObjects: casSizes.length,

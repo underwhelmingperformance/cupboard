@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import {
 	type CacheAccessMode,
 	cacheGenerationSchema,
@@ -1955,6 +1956,233 @@ describe('cache registry admin', () => {
 			stagedAfter: true,
 			cleaned: true,
 			commit: StatusCodes.NOT_FOUND
+		});
+	});
+});
+
+const insertNarInfoRows = `WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM sequence WHERE n < ?2)
+	INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at)
+	SELECT ?1, printf('%s%031d', ?3, n), printf('/nix/store/%s%031d-p', ?3, n), ?4, 1, '[]', ?5 FROM sequence`;
+const reopenNarInfoProjection =
+	'UPDATE cache_listing_projection_migration SET narinfo_complete = 0';
+
+const summaryCostSchema = z.object({
+	route: z.string(),
+	rowsRead: z.number(),
+	rowsWritten: z.number(),
+	d1Calls: z.number()
+});
+
+const storePathsSchema = z.object({ storePaths: z.number().optional() });
+
+interface SummaryRequest {
+	readonly name: string;
+	readonly path: (cache: string) => string;
+	readonly init: RequestInit;
+	// The status of the request against a cache that has store paths.
+	readonly status: StatusCodes;
+}
+
+const summaryRequests: readonly SummaryRequest[] = [
+	{
+		name: 'cache get',
+		path: (cache) => `/caches/${cache}`,
+		init: {},
+		status: StatusCodes.OK
+	},
+	{
+		name: 'priority update',
+		path: (cache) => `/caches/${cache}`,
+		init: {
+			method: 'PATCH',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ kind: 'priority', priority: 30 })
+		},
+		status: StatusCodes.OK
+	},
+	{
+		name: 'reopen',
+		path: (cache) => `/caches/${cache}/reopen`,
+		init: { method: 'POST' },
+		status: StatusCodes.OK
+	},
+	{
+		name: 'retirement',
+		path: (cache) => `/caches/${cache}/retirement`,
+		init: {
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ retireWhenEmpty: false })
+		},
+		status: StatusCodes.OK
+	},
+	{
+		name: 'stats',
+		path: (cache) => `/cache/${cache}/stats`,
+		init: {},
+		status: StatusCodes.OK
+	},
+	{
+		name: 'removal without force',
+		path: (cache) => `/caches/${cache}`,
+		init: { method: 'DELETE' },
+		status: StatusCodes.CONFLICT
+	}
+];
+
+// The requests that report a count from inside the critical section, or that
+// report only a count, and so wait for the count projection.
+const countingRequests: readonly SummaryRequest[] = [
+	...summaryRequests.filter((request) => request.name !== 'cache get'),
+	{
+		name: 'removal with force',
+		path: (cache) => `/caches/${cache}?force=true`,
+		init: { method: 'DELETE' },
+		status: StatusCodes.OK
+	}
+];
+
+// Adds `count` narinfo rows to a cache, with store-path hashes that start
+// with `prefix`.
+async function seedNarInfoRows(
+	scope: CacheScope,
+	count: number,
+	prefix: string
+): Promise<void> {
+	await runInDurableObject(currentServer(), (instance, state) => {
+		state.storage.sql.exec(
+			insertNarInfoRows,
+			resolvedCache(instance.context, scope).id,
+			count,
+			prefix,
+			narHash,
+			isoTimestamp(new Date())
+		);
+	});
+}
+
+// Sends one request and returns its status, the store-path count that it
+// reports, and the cost that the tenant object logged for it.
+async function measuredSummaryRequest(
+	token: string,
+	request: SummaryRequest,
+	cache: string
+) {
+	const capture = startCapture();
+	try {
+		const response = await authorisedFetch(
+			request.path(cache),
+			token,
+			request.init
+		);
+		const body = storePathsSchema.parse(await response.json());
+		const costs = capture.logs
+			.filter((entry) => entry.message === 'request finished')
+			.map((entry) => summaryCostSchema.parse(entry.properties));
+		return { status: response.status, storePaths: body.storePaths, costs };
+	} finally {
+		capture.stop();
+	}
+}
+
+describe('cache store-path counts', () => {
+	beforeEach(resetTestServer);
+
+	it.each(summaryRequests)(
+		'reads the store-path count for a $name without reading the paths',
+		async (request) => {
+			const init = await bootstrap();
+			await putCache(init.token, 'small', 40);
+			await putCache(init.token, 'large', 40);
+			await seedNarInfoRows(defaultCache(), 50, 'd');
+			await seedNarInfoRows(namedCache('small'), 1, 's');
+			await seedNarInfoRows(namedCache('large'), 300, 'l');
+
+			const small = await measuredSummaryRequest(init.token, request, 'small');
+			const large = await measuredSummaryRequest(init.token, request, 'large');
+
+			expect({
+				storePaths: [small.storePaths, large.storePaths],
+				statuses: [small.status, large.status],
+				costs: large.costs
+			}).toStrictEqual({
+				storePaths:
+					request.status === StatusCodes.OK ? [1, 300] : [undefined, undefined],
+				statuses: [request.status, request.status],
+				costs: small.costs
+			});
+		}
+	);
+
+	it.each(countingRequests)(
+		'asks a $name client to retry while the count projection is incomplete',
+		async (request) => {
+			const init = await bootstrap();
+			await putCache(init.token, 'builds', 40);
+			await runInDurableObject(currentServer(), (_instance, state) => {
+				state.storage.sql.exec(reopenNarInfoProjection);
+			});
+			const stored = () =>
+				runInDurableObject(currentServer(), (instance) => ({
+					caches: instance.context.db
+						.select()
+						.from(schema.cacheIdentities)
+						.all(),
+					retirements: instance.context.db
+						.select()
+						.from(schema.managedCacheRetirements)
+						.all()
+				}));
+			const before = await stored();
+
+			const response = await authorisedFetch(
+				request.path('builds'),
+				init.token,
+				request.init
+			);
+			const body = z.object({ code: z.string() }).parse(await response.json());
+
+			expect({
+				status: response.status,
+				retryAfter: response.headers.get('retry-after'),
+				body,
+				state: await stored()
+			}).toStrictEqual({
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				retryAfter: '1',
+				body: { code: 'CACHE_LISTING_PROJECTION_PENDING' },
+				state: before
+			});
+		}
+	);
+
+	it('reads and creates caches while the count projection is incomplete', async () => {
+		const init = await bootstrap();
+		await putCache(init.token, 'builds', 40);
+		await seedNarInfoRows(namedCache('builds'), 3, 'b');
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(reopenNarInfoProjection);
+		});
+
+		const read = await authorisedFetch('/caches/builds', init.token);
+		const created = await authorisedFetch('/caches/created', init.token, {
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ access: 'public', priority: 40 })
+		});
+
+		expect({
+			read: {
+				status: read.status,
+				storePaths: storePathsSchema.parse(await read.json()).storePaths
+			},
+			created: {
+				status: created.status,
+				storePaths: storePathsSchema.parse(await created.json()).storePaths
+			}
+		}).toStrictEqual({
+			read: { status: StatusCodes.OK, storePaths: 3 },
+			created: { status: StatusCodes.OK, storePaths: 0 }
 		});
 	});
 });
