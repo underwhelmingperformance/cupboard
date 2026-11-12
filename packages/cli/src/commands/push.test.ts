@@ -57,6 +57,7 @@ import {
 	ReferenceReceiptOptionError,
 	registerPushCommand,
 	resolvePushPath,
+	RootsFileConflictError,
 	validateRetentionChoice
 } from './push.ts';
 
@@ -188,6 +189,16 @@ describe('validateRetentionChoice', () => {
 			name: '--run-root-ttl without --run-root',
 			options: { runRootTtl: ttlSecondsSchema.parse(3600) },
 			error: RunRootTtlWithoutRunRootError
+		},
+		{
+			name: '--no-retain combined with --roots-file',
+			options: { retain: false, rootsFile: 'roots.json' },
+			error: NoRetainConflictError
+		},
+		{
+			name: '--root combined with --roots-file',
+			options: { root: rootName('main'), rootsFile: 'roots.json' },
+			error: RootsFileConflictError
 		}
 	])('rejects $name', ({ options, error }) => {
 		expect(() => {
@@ -212,6 +223,10 @@ describe('validateRetentionChoice', () => {
 			options: { githubOidc: true, dryRun: true }
 		},
 		{ name: 'an interactive push naming neither', options: {} },
+		{
+			name: 'a GitHub OIDC push with a roots file',
+			options: { githubOidc: true, rootsFile: 'roots.json' }
+		},
 		{
 			name: 'explicit unretained publication with a run root',
 			options: {
@@ -497,6 +512,72 @@ describe('pushCommandAuthorizationDetails', () => {
 	])('$name', ({ options, expected }) => {
 		expect(
 			pushCommandAuthorizationDetails(options, defaultCache)
+		).toStrictEqual(expected);
+	});
+
+	const fullPushActions = [
+		'upload:negotiate',
+		'upload:status',
+		'upload:commit',
+		'attestation:negotiate',
+		'attestation:attach'
+	];
+
+	const manyRoots = Array.from(
+		{ length: 400 },
+		(_, index) => `github:acme/app/main/target-${String(index)}`
+	);
+
+	it.each([
+		{
+			name: 'the exact root for a single root',
+			roots: ['github:acme/app/main/app'],
+			expected: [
+				{
+					type: 'cupboard_cache',
+					actions: [...fullPushActions, 'root:set'],
+					cache: defaultCache,
+					root: 'github:acme/app/main/app'
+				}
+			]
+		},
+		{
+			name: 'the shared prefix when exact grants would exceed the budget',
+			roots: manyRoots,
+			expected: [
+				{
+					type: 'cupboard_cache',
+					actions: [...fullPushActions, 'root:set'],
+					cache: defaultCache,
+					root: 'github:acme/app/main/'
+				}
+			]
+		},
+		{
+			name: 'a root:set grant for each of a few roots',
+			roots: ['main/app', 'release/app'],
+			expected: [
+				{
+					type: 'cupboard_cache',
+					actions: fullPushActions,
+					cache: defaultCache
+				},
+				...['main/app', 'release/app'].map((root) => ({
+					type: 'cupboard_cache',
+					actions: ['root:set'],
+					cache: defaultCache,
+					root
+				}))
+			]
+		}
+	])('requests $name of a roots file', ({ roots, expected }) => {
+		expect(
+			pushCommandAuthorizationDetails(
+				{},
+				defaultCache,
+				[],
+				roots.map((root) => rootName(root))
+			)
 		).toStrictEqual(expected);
 	});
 });

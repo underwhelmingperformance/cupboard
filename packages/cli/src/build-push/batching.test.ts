@@ -282,6 +282,8 @@ function harness(options: HarnessOptions = {}): Harness {
 				settled: Promise.resolve()
 			});
 		},
+		applyRoots: () =>
+			Promise.reject(new Error('applyRoots needs a roots file')),
 		setRoot: () => {
 			throw new Error('setRoot is not part of a flush');
 		}

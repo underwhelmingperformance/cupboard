@@ -602,6 +602,9 @@ Options:
                                     retention root (e.g.
                                     github:owner/repo/main); one push can retain
                                     at most 149 target paths
+  --roots-file <path>               JSON file, written by the publish workflow's
+                                    cohort job, of the roots to set once every
+                                    path is published, each with its own targets
   --ttl <duration>                  expire the root or pins after this duration
                                     (e.g. 7d, 12h)
   --permanent                       keep the root or pins permanently

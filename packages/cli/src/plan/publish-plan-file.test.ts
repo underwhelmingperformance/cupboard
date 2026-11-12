@@ -1,12 +1,49 @@
-import { publishPlanVersion } from '@cupboard/protocol/publish-plan';
+import {
+	cohortRootsVersion,
+	publishPlanVersion
+} from '@cupboard/protocol/publish-plan';
 import { describe, expect, it } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
 
 import {
+	CohortRootsVersionError,
+	parseCohortRoots,
 	parsePublishPlan,
 	PublishPlanVersionError
 } from './publish-plan-file.ts';
+
+describe('parseCohortRoots', () => {
+	const roots = {
+		version: cohortRootsVersion,
+		roots: [{ action: 'unchanged', name: 'github:acme/app/main/app' }]
+	};
+
+	it('reads a document of the supported version', () => {
+		expect(parseCohortRoots(JSON.stringify(roots))).toStrictEqual(roots);
+	});
+
+	it('refuses a document of another version', () => {
+		let failure: unknown;
+
+		try {
+			parseCohortRoots(JSON.stringify({ ...roots, version: 2 }));
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(CohortRootsVersionError);
+		expect({
+			found:
+				failure instanceof CohortRootsVersionError ? failure.found : undefined,
+			supported:
+				failure instanceof CohortRootsVersionError
+					? failure.supported
+					: undefined,
+			status: cliExitCode(failure, 130)
+		}).toStrictEqual({ found: 2, supported: cohortRootsVersion, status: 2 });
+	});
+});
 
 const plan = {
 	version: publishPlanVersion,

@@ -2,6 +2,7 @@ import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
+	cohortRootsDocumentSchema,
 	isNixPositionalArgument,
 	joinRoot,
 	publishPlanDocumentSchema,
@@ -147,6 +148,47 @@ describe('retainedRoots', () => {
 
 		expect(parsed.error?.issues.map((issue) => issue.path)).toStrictEqual([
 			['retained', 0, 'rootSuffix']
+		]);
+	});
+});
+
+describe('cohortRootsDocumentSchema', () => {
+	const roots = {
+		version: 1,
+		roots: [
+			{ action: 'set', name: 'github:owner/repo/main/app', targets: [appPath] },
+			{ action: 'set', name: 'github:owner/repo/main/upstream', targets: [] },
+			{ action: 'unchanged', name: 'github:owner/repo/main/failed' }
+		]
+	};
+
+	it('reads a document of the current version unchanged', () => {
+		expect(cohortRootsDocumentSchema.parse(roots)).toStrictEqual(roots);
+	});
+
+	it.each([
+		{
+			name: 'another version',
+			value: { ...roots, version: 2 },
+			path: ['version']
+		},
+		{ name: 'no roots', value: { ...roots, roots: [] }, path: ['roots'] },
+		{
+			name: 'a root listed twice',
+			value: {
+				...roots,
+				roots: [
+					...roots.roots,
+					{ action: 'unchanged', name: 'github:owner/repo/main/app' }
+				]
+			},
+			path: ['roots', 3, 'name']
+		}
+	])('refuses a document with $name', ({ value, path }) => {
+		const parsed = cohortRootsDocumentSchema.safeParse(value);
+
+		expect(parsed.error?.issues.map((issue) => issue.path)).toStrictEqual([
+			path
 		]);
 	});
 });

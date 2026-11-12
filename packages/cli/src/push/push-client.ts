@@ -617,6 +617,7 @@ export function pushClientFor(
 				storePathHashes: [...body.storePathHashes]
 			}),
 		setRoot: (name, body) =>
-			callInCache(rpc.roots.set, cache, { name, ...body })
+			callInCache(rpc.roots.set, cache, { name, ...body }),
+		applyRoots: (body) => callInCache(rpc.roots.batch, cache, body)
 	};
 }

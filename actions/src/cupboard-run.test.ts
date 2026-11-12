@@ -2,7 +2,10 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { publishPlanVersion } from '@cupboard/protocol/publish-plan';
+import {
+	cohortRootsVersion,
+	publishPlanVersion
+} from '@cupboard/protocol/publish-plan';
 import { Command } from 'commander';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -119,7 +122,8 @@ describe('inspectDocumentVersions', () => {
 		);
 
 		expect(await inspectDocumentVersions(binary)).toStrictEqual({
-			publishPlan: publishPlanVersion
+			publishPlan: publishPlanVersion,
+			cohortRoots: cohortRootsVersion
 		});
 	});
 

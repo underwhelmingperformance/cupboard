@@ -246,6 +246,8 @@ function recordingClient(record: RecordedCache): PushClient {
 				settled: Promise.resolve()
 			});
 		},
+		applyRoots: () =>
+			Promise.reject(new Error('applyRoots needs a roots file')),
 		setRoot: (name) =>
 			Promise.reject(new Error(`no root was expected, but ${name} was set`))
 	};

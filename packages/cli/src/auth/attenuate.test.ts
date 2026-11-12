@@ -16,7 +16,7 @@ import {
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
 	rootListAuthorizationDetails,
-	rootsEnsureAuthorizationDetails
+	rootSetAuthorizationDetails
 } from './attenuate.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
@@ -179,7 +179,7 @@ describe('rootEnsureAuthorizationDetails', () => {
 	});
 });
 
-describe('rootsEnsureAuthorizationDetails', () => {
+describe('rootSetAuthorizationDetails', () => {
 	const manyRoots = Array.from(
 		{ length: 400 },
 		(_, index) => `github:acme/app/main/x86_64-linux/target-${String(index)}`
@@ -219,7 +219,7 @@ describe('rootsEnsureAuthorizationDetails', () => {
 		}
 	])('selects $name', ({ roots, selectors }) => {
 		expect(
-			rootsEnsureAuthorizationDetails({
+			rootSetAuthorizationDetails({
 				cache: namedCache('nightly'),
 				roots: roots.map((root) => rootName(root))
 			})
@@ -237,7 +237,7 @@ describe('rootsEnsureAuthorizationDetails', () => {
 	function rootsWithGrantBytes(bytes: number): readonly string[] {
 		const prefix = 'github:acme/app/main/';
 		const single = JSON.stringify(
-			rootsEnsureAuthorizationDetails({
+			rootSetAuthorizationDetails({
 				cache: defaultCache,
 				roots: [rootName(prefix)]
 			})
@@ -267,7 +267,7 @@ describe('rootsEnsureAuthorizationDetails', () => {
 			isExact: false
 		}
 	])('requests $name', ({ roots, isExact }) => {
-		const details = rootsEnsureAuthorizationDetails({
+		const details = rootSetAuthorizationDetails({
 			cache: defaultCache,
 			roots: roots.map((root) => rootName(root))
 		});

@@ -11,6 +11,8 @@ import {
 } from '@cupboard/shared/text';
 import { z } from 'zod';
 
+import { rootSetMaxTargets } from './retention.ts';
+
 // The plan action writes the publish plan as a JSON document, and later steps
 // read it back. A reader may come from a different cupboard release than the
 // writer, so the document records the version of its shape. Increase the
@@ -24,7 +26,8 @@ CLI only when the CLI reads the version that the action writes. A field is
 absent when the release reads no such document.
 */
 export const documentVersionsSchema = z.looseObject({
-	publishPlan: z.number().int().optional()
+	publishPlan: z.number().int().optional(),
+	cohortRoots: z.number().int().optional()
 });
 export type DocumentVersions = z.output<typeof documentVersionsSchema>;
 
@@ -275,3 +278,50 @@ export function retainedRoots(
 		}))
 		.toArray();
 }
+
+// A cohort job writes the roots of one `cupboard push` invocation to a JSON
+// document, and the push sets them. The two come from the same cupboard
+// release only when the workflow builds cupboard from source, so the document
+// records the version of its shape, as the plan document does.
+export const cohortRootsVersion = 1;
+
+const cohortRootSchema = z.discriminatedUnion('action', [
+	// Replace the root's targets with `targets`, which may be empty.
+	z.strictObject({
+		action: z.literal('set'),
+		name: rootNameSchema,
+		targets: z.array(storePathSchema).max(rootSetMaxTargets).readonly()
+	}),
+	// Leave the root as it is, because some of its targets failed.
+	z.strictObject({ action: z.literal('unchanged'), name: rootNameSchema })
+]);
+export type CohortRoot = z.output<typeof cohortRootSchema>;
+export type CohortRootInput = z.input<typeof cohortRootSchema>;
+
+/**
+The roots that one cohort push sets after it has published every path, and the
+roots that it leaves unchanged. Each root appears once.
+*/
+export const cohortRootsDocumentSchema = z.strictObject({
+	version: z.literal(cohortRootsVersion),
+	roots: z
+		.array(cohortRootSchema)
+		.min(1)
+		.readonly()
+		.superRefine((roots, ctx) => {
+			const seen = new Set<string>();
+
+			for (const [index, root] of roots.entries()) {
+				if (seen.has(root.name)) {
+					ctx.addIssue({
+						code: 'custom',
+						path: [index, 'name'],
+						message: `root '${root.name}' appears more than once`
+					});
+				}
+
+				seen.add(root.name);
+			}
+		})
+});
+export type CohortRootsDocument = z.output<typeof cohortRootsDocumentSchema>;

@@ -1,4 +1,5 @@
 import {
+	cohortRootsVersion,
 	documentVersionsSchema,
 	publishPlanVersion
 } from '@cupboard/protocol/publish-plan';
@@ -26,7 +27,8 @@ describe('cupboard document-versions', () => {
 		const printed: unknown = JSON.parse(written.join(''));
 
 		expect(documentVersionsSchema.parse(printed)).toStrictEqual({
-			publishPlan: publishPlanVersion
+			publishPlan: publishPlanVersion,
+			cohortRoots: cohortRootsVersion
 		});
 	});
 });

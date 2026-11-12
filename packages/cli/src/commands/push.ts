@@ -26,7 +26,9 @@ import {
 	contentReadAuthorizationDetails,
 	type ContentReadGrantIntent,
 	previewAuthorizationDetails,
-	pushAuthorizationDetails
+	pushAuthorizationDetails,
+	rootSetAuthorizationDetails,
+	rootSetSelectors
 } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import { resolveAuthorisedCachePositionals } from '../cache-target.ts';
@@ -53,6 +55,7 @@ import {
 	RunRootRetentionWithoutRunRootError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
+import { parseCohortRoots } from '../plan/publish-plan-file.ts';
 import { PublicationCollection } from '../push/publication.ts';
 import { type PushStore, runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
@@ -77,6 +80,7 @@ interface PushOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly root?: RootName;
+	readonly rootsFile?: string;
 	readonly ttl?: TtlSeconds;
 	readonly permanent?: boolean;
 	readonly closure?: boolean;
@@ -129,6 +133,7 @@ export function validateRetentionChoice(
 		PushOptions,
 		| 'retain'
 		| 'root'
+		| 'rootsFile'
 		| 'ttl'
 		| 'permanent'
 		| 'githubOidc'
@@ -140,6 +145,14 @@ export function validateRetentionChoice(
 ): void {
 	if (options.retain === false && options.root !== undefined) {
 		throw new NoRetainConflictError('--root');
+	}
+
+	if (options.retain === false && options.rootsFile !== undefined) {
+		throw new NoRetainConflictError('--roots-file');
+	}
+
+	if (options.root !== undefined && options.rootsFile !== undefined) {
+		throw new RootsFileConflictError();
 	}
 
 	if (options.retain === false && options.ttl !== undefined) {
@@ -177,9 +190,17 @@ export function validateRetentionChoice(
 		options.githubOidc === true &&
 		options.dryRun !== true &&
 		options.root === undefined &&
+		options.rootsFile === undefined &&
 		options.retain !== false
 	) {
 		throw new OidcRetentionChoiceRequiredError();
+	}
+}
+
+export class RootsFileConflictError extends CliUsageError {
+	constructor() {
+		super('--roots-file cannot be combined with --root');
+		this.name = 'RootsFileConflictError';
 	}
 }
 
@@ -232,24 +253,37 @@ export async function observedCopiesFrom(
 The authority requested by a push's token exchange. A CI exchange must
 request its authorization_details explicitly. A dry run publishes nothing, so
 it requests only the read-only preview operation and never a push's full
-upload grant.
+upload grant. With a roots file, the push requests `root:set` with the
+selectors that `rootSetSelectors` chooses. A single selector joins the push
+grant, as `--root` does, and several selectors get separate grants.
 */
 export function pushCommandAuthorizationDetails(
 	options: Pick<PushOptions, 'dryRun' | 'attest' | 'root' | 'runRoot'>,
 	cache: CacheScope,
-	sourceReads: readonly ContentReadGrantIntent[] = []
+	sourceReads: readonly ContentReadGrantIntent[] = [],
+	rootsToSet: readonly RootName[] = []
 ): AuthorizationDetails {
 	if (options.dryRun === true) {
 		return previewAuthorizationDetails({ cache });
 	}
 
+	const selectors =
+		options.root === undefined
+			? rootSetSelectors(cache, rootsToSet)
+			: [options.root];
+	const [selector] = selectors;
+	const isSingleSelector = selectors.length === 1 && selector !== undefined;
+
 	return [
 		...pushAuthorizationDetails({
 			cache,
 			attest: options.attest !== false,
-			...(options.root !== undefined && { root: options.root }),
+			...(isSingleSelector && { root: selector }),
 			...(options.runRoot !== undefined && { runRoot: options.runRoot })
 		}),
+		...(selectors.length > 1
+			? rootSetAuthorizationDetails({ cache, roots: rootsToSet })
+			: []),
 		...sourceReads.flatMap((intent) => contentReadAuthorizationDetails(intent))
 	];
 }
@@ -425,6 +459,10 @@ export function registerPushCommand(
 			'--root <name>',
 			`retain the pushed paths under this named retention root (e.g. github:owner/repo/main); one push can retain at most ${String(rootSetMaxTargets)} target paths`,
 			parseRootName
+		)
+		.option(
+			'--roots-file <path>',
+			"JSON file, written by the publish workflow's cohort job, of the roots to set once every path is published, each with its own targets"
 		)
 		.option(
 			'--ttl <duration>',
@@ -667,9 +705,19 @@ export function registerPushCommand(
 					: parseReferenceManifest(
 							await readFile(options.referenceManifest, 'utf8')
 						);
+			const roots =
+				options.rootsFile === undefined
+					? undefined
+					: parseCohortRoots(await readFile(options.rootsFile, 'utf8')).roots;
+			const rootsToSet = (roots ?? [])
+				.filter((root) => root.action === 'set')
+				.map((root) => root.name);
+			const isRootUpdate =
+				(options.root !== undefined || roots !== undefined) &&
+				options.dryRun !== true;
 			const canAcceptEmptyPayload =
 				filePaths.length > 0 ||
-				(options.root !== undefined && options.dryRun !== true) ||
+				isRootUpdate ||
 				intermediatePaths !== undefined ||
 				referencePaths !== undefined ||
 				references !== undefined;
@@ -698,7 +746,8 @@ export function registerPushCommand(
 								authorizationDetails: pushCommandAuthorizationDetails(
 									options,
 									target.cache,
-									sourceReads.intents
+									sourceReads.intents,
+									rootsToSet
 								)
 							}
 						);
@@ -716,9 +765,7 @@ export function registerPushCommand(
 			});
 
 			const isEmptyRootReplacement =
-				publication.entries.length === 0 &&
-				options.root !== undefined &&
-				options.dryRun !== true;
+				publication.entries.length === 0 && isRootUpdate;
 
 			if (!isEmptyRootReplacement && publication.entries.length === 0) {
 				throw new EmptyPublicationError();
@@ -762,6 +809,7 @@ export function registerPushCommand(
 				attest: options.attest,
 				attestations: options.attestation.map((path) => ({ path })),
 				...(options.root !== undefined && { root: options.root }),
+				...(roots !== undefined && { roots }),
 				retention: rootRetentionChoice(options.ttl, options.permanent),
 				...(options.runRoot !== undefined && {
 					runRoot: {
