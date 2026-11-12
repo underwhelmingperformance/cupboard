@@ -8,7 +8,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
@@ -703,6 +703,83 @@ async function drivePagedBurst(
 		};
 	});
 }
+
+// A row reserved before uploads deduplicated their references can list one
+// twice. The same upload now arrives with the reference once, and the row is
+// still the reservation of that upload.
+describe('narinfo row reservation', () => {
+	beforeEach(resetTestServer);
+
+	it('recognises a reservation that repeats a reference as its own upload', async () => {
+		const reference = `${'2'.repeat(32)}-dependency`;
+		const metadata = uploadMetadata({ fileSize: 1, references: [reference] });
+
+		const outcomes = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const pipeline = drivenDirectly(pipelineFor(instance.context));
+				const cache = resolvedCache(instance.context);
+				const first = await pipeline.reserveNarInfoRow(cache, metadata, 0);
+
+				instance.context.db
+					.update(narInfos)
+					.set({ referencesJson: JSON.stringify([reference, reference]) })
+					.where(
+						and(
+							eq(narInfos.cacheId, cache.id),
+							eq(narInfos.storePathHash, metadata.storePathHash)
+						)
+					)
+					.run();
+
+				const second = await pipeline.reserveNarInfoRow(cache, metadata, 0);
+
+				return { first: first.kind, second: second.kind };
+			}
+		);
+
+		expect(outcomes).toStrictEqual({ first: 'reserved', second: 'mine' });
+	});
+
+	// A row that cannot be parsed is not the reservation of this upload. The
+	// reservation reports another version, so that verification can replace a
+	// row whose NAR is missing.
+	it('reports a row with unreadable references as another version', async () => {
+		const metadata = uploadMetadata({
+			fileSize: 1,
+			references: [`${'2'.repeat(32)}-dependency`]
+		});
+
+		const outcomes = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const pipeline = drivenDirectly(pipelineFor(instance.context));
+				const cache = resolvedCache(instance.context);
+				const first = await pipeline.reserveNarInfoRow(cache, metadata, 0);
+
+				instance.context.db
+					.update(narInfos)
+					.set({ referencesJson: '{"not":"a list"}' })
+					.where(
+						and(
+							eq(narInfos.cacheId, cache.id),
+							eq(narInfos.storePathHash, metadata.storePathHash)
+						)
+					)
+					.run();
+
+				const second = await pipeline.reserveNarInfoRow(cache, metadata, 0);
+
+				return { first: first.kind, second };
+			}
+		);
+
+		expect(outcomes).toStrictEqual({
+			first: 'reserved',
+			second: { kind: 'lost', narHash: metadata.narHash }
+		});
+	});
+});
 
 describe('materialise flush paging', () => {
 	beforeEach(resetTestServer);

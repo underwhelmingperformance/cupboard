@@ -10,6 +10,7 @@ import {
 	nixSha256HashSchema,
 	positiveIntSchema,
 	predicateTypeSchema,
+	referenceSet,
 	referencesMaxLength,
 	referencesSchema,
 	rootNameSchema,
@@ -97,10 +98,7 @@ const acceptedCases: readonly {
 	{
 		name: 'a references array within the cap',
 		schema: referencesSchema,
-		value: Array.from(
-			{ length: referencesMaxLength },
-			() => `${storePathHash}-name`
-		)
+		value: distinctReferences(referencesMaxLength)
 	},
 	{
 		name: 'a valid root name',
@@ -323,10 +321,7 @@ const rejectedCases: readonly {
 	{
 		name: 'a references array exceeding the cap',
 		schema: referencesSchema,
-		value: Array.from(
-			{ length: referencesMaxLength + 1 },
-			() => `${storePathHash}-name`
-		)
+		value: distinctReferences(referencesMaxLength + 1)
 	},
 	{
 		name: 'an empty root name',
@@ -450,6 +445,13 @@ const rejectedCases: readonly {
 	}
 ];
 
+function distinctReferences(length: number): string[] {
+	return Array.from(
+		{ length },
+		(_, index) => `${storePathHash}-name${String(index).padStart(5, '0')}`
+	);
+}
+
 describe('scalar schemas', () => {
 	it.each(acceptedCases)('accepts $name', ({ schema, value }) => {
 		expect(schema.parse(value)).toStrictEqual(value);
@@ -481,12 +483,48 @@ describe('scalar schemas', () => {
 		{ name: 'ingest', schema: referencesSchema, accepted: false },
 		{ name: 'a stored row', schema: storedReferencesSchema, accepted: true }
 	])('references one longer than the bound: $name', ({ schema, accepted }) => {
-		const value = Array.from(
-			{ length: referencesMaxLength + 1 },
-			() => `${storePathHash}-a`
-		);
+		const value = distinctReferences(referencesMaxLength + 1);
 
 		expect(schema.safeParse(value).success).toBe(accepted);
+	});
+
+	it('lists a repeated or reordered list of references as the same set', () => {
+		const first = `${storePathHash}-a`;
+		const second = `${'1'.repeat(32)}-b`;
+
+		expect([
+			referenceSet([second, first, second]),
+			referenceSet([first, second]),
+			referenceSet([])
+		]).toStrictEqual([[first, second], [first, second], []]);
+	});
+
+	// Ingest lists each basename once, in code-unit order, so that every new row
+	// lists each reference once. A stored row written before that can repeat one
+	// and is read as stored.
+	it.each([
+		{
+			name: 'ingest',
+			schema: referencesSchema,
+			expected: [`${storePathHash}-a`, `${'1'.repeat(32)}-b`]
+		},
+		{
+			name: 'a stored row',
+			schema: storedReferencesSchema,
+			expected: [
+				`${'1'.repeat(32)}-b`,
+				`${storePathHash}-a`,
+				`${'1'.repeat(32)}-b`
+			]
+		}
+	])('references listing a basename twice: $name', ({ schema, expected }) => {
+		const value = [
+			`${'1'.repeat(32)}-b`,
+			`${storePathHash}-a`,
+			`${'1'.repeat(32)}-b`
+		];
+
+		expect(schema.parse(value)).toStrictEqual(expected);
 	});
 });
 

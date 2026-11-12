@@ -4,6 +4,7 @@ import {
 	type CacheAccessMode,
 	type CacheScope,
 	nixSha256HashSchema,
+	storedReferencesSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
@@ -496,6 +497,44 @@ describe('reuse-view narinfo lookup', () => {
 		const response = await readFetch(lookupPath(first.storePathHash));
 
 		expect(response.status).toBe(StatusCodes.NOT_FOUND);
+	});
+
+	// A row stored before uploads deduplicated their references can list one
+	// twice. Nix reads both rows as the same set of references.
+	it('treats a repeated reference as the same candidate', async () => {
+		const first = await committedPath('reuse-repeat', namedCache('pr-1'), {
+			storePathHash: 'h'.repeat(32),
+			name: 'first'
+		});
+		await committedPath('reuse-repeat', namedCache('pr-2'), {
+			storePathHash: 'h'.repeat(32),
+			name: 'first'
+		});
+		const storePathHash = storePathHashSchema.parse(first.storePathHash);
+		await runInDurableObject(fixtureWorkerServer(), (instance) => {
+			const cache = resolvedCache(instance.context, namedCache('pr-1'));
+			const target = and(
+				eq(schema.narInfos.cacheId, cache.id),
+				eq(schema.narInfos.storePathHash, storePathHash)
+			);
+			const row = instance.context.db
+				.select({ referencesJson: schema.narInfos.referencesJson })
+				.from(schema.narInfos)
+				.where(target)
+				.get();
+			const storedJson: unknown = JSON.parse(row?.referencesJson ?? '[]');
+			const stored = storedReferencesSchema.parse(storedJson);
+			instance.context.db
+				.update(schema.narInfos)
+				.set({ referencesJson: JSON.stringify([...stored, ...stored]) })
+				.where(target)
+				.run();
+		});
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
+
+		const response = await readFetch(lookupPath(first.storePathHash));
+
+		expect(response.status).toBe(StatusCodes.OK);
 	});
 
 	it('merges the signature sets of identical candidates deterministically', async () => {

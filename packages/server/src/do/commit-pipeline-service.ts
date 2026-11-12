@@ -6,9 +6,11 @@ import {
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
+	referenceSet,
 	type RootName,
 	type SigningKeyGeneration,
 	signingKeyGenerationSchema,
+	storedReferencesSchema,
 	type StorePathHash,
 	type StorePathString,
 	type TenantId
@@ -370,6 +372,27 @@ export interface PrefetchedCommitFacts {
 const chargedReferenceRowsSchema = z.array(
 	z.object({ narHash: nixSha256HashSchema })
 );
+
+/**
+Whether a stored `references_json` is the set that `expected` lists, as JSON from
+`referenceSet`. A list that cannot be parsed is not the set.
+*/
+function isStoredReferenceSet(stored: string, expected: string): boolean {
+	let json: unknown;
+
+	try {
+		json = JSON.parse(stored);
+	} catch {
+		return false;
+	}
+
+	const references = storedReferencesSchema.safeParse(json);
+
+	return (
+		references.success &&
+		JSON.stringify(referenceSet(references.data)) === expected
+	);
+}
 
 function settledOutcome(
 	charged: ChargeOutcome,
@@ -2735,7 +2758,7 @@ export class CommitPipelineService {
 				storePath: metadata.storePath,
 				narHash: metadata.narHash,
 				narSize: metadata.narSize,
-				referencesJson: JSON.stringify(metadata.references),
+				referencesJson: JSON.stringify(referenceSet(metadata.references)),
 				deriver: metadata.deriver,
 				ca: metadata.ca,
 				sigsJson,
@@ -2776,7 +2799,7 @@ export class CommitPipelineService {
 			return;
 		}
 
-		const referencesJson = JSON.stringify(metadata.references);
+		const referencesJson = JSON.stringify(referenceSet(metadata.references));
 
 		// Read, stamp, and advance the generation atomically. The sequence survives
 		// deletion, so a recommit cannot reuse an old edge identity.
@@ -2832,13 +2855,16 @@ export class CommitPipelineService {
 			}
 
 			// Treat the row as the same narinfo version only when its store path,
-			// NAR identity, references, deriver, and content address match. Do not
-			// compare signatures: key rotation can re-sign the same version.
+			// NAR identity, references, deriver, and content address match. Compare
+			// the references as sets, because a row written before uploads
+			// deduplicated them can list one twice. A row with unreadable
+			// references is another version. Do not compare signatures: key rotation
+			// can re-sign the same version.
 			const isMine =
 				existing.narHash === metadata.narHash &&
 				existing.narSize === metadata.narSize &&
 				existing.storePath === metadata.storePath &&
-				existing.referencesJson === referencesJson &&
+				isStoredReferenceSet(existing.referencesJson, referencesJson) &&
 				(existing.deriver ?? undefined) === metadata.deriver &&
 				(existing.ca ?? undefined) === metadata.ca;
 

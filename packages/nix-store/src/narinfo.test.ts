@@ -11,6 +11,7 @@ import {
 	parseFields,
 	parseNarInfo
 } from './narinfo.ts';
+import { byCodeUnit } from './store-path.ts';
 const exampleStorePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example';
 
 function fingerprintWithReferences(references: readonly string[]): string {
@@ -109,6 +110,37 @@ describe('NarInfo', () => {
 				'0123456789abcdfghijklmnpqrsvwxyz-first',
 				'1123456789abcdfghijklmnpqrsvwxyz-second'
 			])
+		);
+	});
+
+	// Nix prints the references as a set of paths, so a repeated reference
+	// appears once. A stored row can repeat a reference, and the signature for it
+	// must be one that Nix can verify.
+	it('lists a repeated reference once in the fingerprint', () => {
+		const first = '0123456789abcdfghijklmnpqrsvwxyz-first';
+		const second = '1123456789abcdfghijklmnpqrsvwxyz-second';
+
+		expect(fingerprintWithReferences([second, first, second, first])).toBe(
+			`1;${exampleStorePath};sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk;456;/nix/store/${first},/nix/store/${second}`
+		);
+	});
+
+	// Rows without a repeat must keep the fingerprint that was signed for them.
+	it('keeps the fingerprint of distinct references unchanged', () => {
+		fc.assert(
+			fc.property(
+				fc.uniqueArray(storePathBasenameArbitrary, { maxLength: 8 }),
+				(references) => {
+					const sorted = references
+						.map((reference) => `/nix/store/${reference}`)
+						.toSorted(byCodeUnit);
+
+					expect(fingerprintWithReferences(references)).toBe(
+						`1;${exampleStorePath};sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk;456;${sorted.join(',')}`
+					);
+				}
+			),
+			{ numRuns: 100 }
 		);
 	});
 
@@ -264,6 +296,33 @@ describe('NarInfo', () => {
 		const info = parseNarInfo(narinfoLines().join('\r\n'));
 
 		expect(info.storePath.value).toBe(exampleStorePath);
+	});
+
+	// Nix reads the references into a set, so a repeated reference counts once
+	// and the references come in the set's order.
+	it('reads the references as a set', () => {
+		const first = '0123456789abcdfghijklmnpqrsvwxyz-a';
+		const second = '1123456789abcdfghijklmnpqrsvwxyz-b';
+		const source = narinfoLines({
+			references: `${second} ${first} ${second}`
+		}).join('\n');
+
+		expect(NarInfo.parse(source).toFields()).toStrictEqual(
+			narInfoWith({ references: [first, second] }).toFields()
+		);
+	});
+
+	// A stored row can repeat a reference, because ingest did not refuse repeats
+	// when the row was written. The server serves such a row as stored.
+	it('reads a stored narinfo that repeats a reference as stored', () => {
+		const reference = '0123456789abcdfghijklmnpqrsvwxyz-a';
+		const source = narinfoLines({
+			references: `${reference} ${reference}`
+		}).join('\n');
+
+		expect(NarInfo.parseStored(source).toFields()).toStrictEqual(
+			narInfoWith({ references: [reference, reference] }).toFields()
+		);
 	});
 
 	it('collapses runs of whitespace between references', () => {
@@ -440,9 +499,10 @@ const narInfoFieldsArbitrary: fc.Arbitrary<NarInfoFields> = fc.record({
 	fileSize: fc.integer({ min: 0, max: 1_000_000_000 }),
 	narHash: nixSha256HashArbitrary,
 	narSize: fc.integer({ min: 0, max: 1_000_000_000 }),
-	references: fc.uniqueArray(storePathBasenameArbitrary, {
-		maxLength: 8
-	}),
+	// `parseNarInfo` returns the references in the order of Nix's set.
+	references: fc
+		.uniqueArray(storePathBasenameArbitrary, { maxLength: 8 })
+		.map((references) => references.toSorted(byCodeUnit)),
 	deriver: fc.option(storePathArbitrary, { nil: undefined }),
 	ca: fc.option(namedBytesArbitrary, { nil: undefined }),
 	sigs: fc.array(namedBytesArbitrary, { maxLength: 3 })

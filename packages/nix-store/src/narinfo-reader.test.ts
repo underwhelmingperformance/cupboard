@@ -3,7 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { bytesToBase64, bytesToHex } from './encoding.ts';
 import { CorruptNarInfoError, MismatchedNarInfoPathError } from './errors.ts';
 import { NixSha256Hash, toNixBase32 } from './hash.ts';
-import { offerFromNarInfo, readNarInfoSubstitution } from './narinfo-reader.ts';
+import {
+	type NarInfoOffer,
+	offerFromNarInfo,
+	readNarInfoSubstitution
+} from './narinfo-reader.ts';
 import {
 	storeDirectorySchema,
 	storePathSchema,
@@ -66,6 +70,20 @@ function narInfoDocument(fixture: NarInfoFixture): string {
 	return fixture.endsWithNewline === false ? document : `${document}\n`;
 }
 
+// The offer for the well-formed document, with the given changes.
+function wellFormedOffer(overrides: Partial<NarInfoOffer> = {}): NarInfoOffer {
+	return {
+		source: 'substituter',
+		references: [libraryPath],
+		deriver: deriverPath,
+		narHash,
+		signatures: [signature],
+		downloadSize: 400,
+		narSize: 1000,
+		...overrides
+	};
+}
+
 function read(fixture: NarInfoFixture, storePath: StorePathString = appPath) {
 	return offerFromNarInfo(narInfoDocument(fixture), storePath, storeDirectory);
 }
@@ -112,7 +130,7 @@ describe('offerFromNarInfo', () => {
 			references: offer.references,
 			deriver: offer.deriver
 		}).toStrictEqual({
-			references: [libraryPath, appPath],
+			references: [appPath, libraryPath],
 			deriver: deriverPath
 		});
 	});
@@ -342,6 +360,21 @@ describe('offerFromNarInfo', () => {
 		{ name: 'an empty deriver', fields: { Deriver: '' } }
 	])('rejects a narinfo with $name', ({ fields }) => {
 		expect(() => read({ fields })).toThrow(CorruptNarInfoError);
+	});
+
+	// Nix reads the references into a set, so a repeated reference counts once
+	// and the references come in the set's order.
+	it('reads the references as a set', () => {
+		const offer = read({
+			fields: {
+				References:
+					'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-library aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-library'
+			}
+		});
+
+		expect(offer).toStrictEqual(
+			wellFormedOffer({ references: [appPath, libraryPath] })
+		);
 	});
 
 	it('rejects a repeated References field', () => {

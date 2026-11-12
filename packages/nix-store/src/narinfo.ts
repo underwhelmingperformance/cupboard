@@ -3,12 +3,12 @@ import { z } from 'zod';
 import { MalformedNarInfoLineError } from './errors.ts';
 import { NixSha256Hash } from './hash.ts';
 import {
+	boundedReferencesSchema,
 	compressionSchema,
 	hasControlCharacter,
 	type NixFingerprint,
 	nixFingerprintSchema,
 	nixSha256HashSchema,
-	referencesSchema,
 	type StorePathBasename,
 	storePathSchema
 } from './scalars.ts';
@@ -90,10 +90,16 @@ const narInfoInteger = z.tuple([z.string()]).transform(([digits], ctx) => {
 	return size;
 });
 
+// Nix reads the references into a set, so a repeated reference counts once and
+// the references come in the set's order.
 const references = z
 	.tuple([z.string()])
-	.transform(([value]) => value.split(/\s+/).filter((entry) => entry !== ''))
-	.pipe(referencesSchema);
+	.transform(([value]) =>
+		[...new Set(value.split(/\s+/).filter((entry) => entry !== ''))].toSorted(
+			byCodeUnit
+		)
+	)
+	.pipe(boundedReferencesSchema);
 
 const lineScalar = z.string().refine((value) => !hasControlCharacter(value));
 
@@ -110,27 +116,30 @@ const narInfoFieldsSchema = z.object({
 	fileSize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 	narHash: nixSha256HashSchema,
 	narSize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-	references: referencesSchema,
+	references: boundedReferencesSchema,
 	deriver: lineScalar.optional(),
 	ca: lineScalar.optional(),
 	sigs: z.array(lineScalar)
 });
 
-export const narInfoSchema = z
-	.object({
-		StorePath: single(storePathSchema),
-		URL: single(lineScalar),
-		Compression: single(compressionSchema),
-		FileHash: single(nixSha256HashSchema),
-		FileSize: narInfoInteger,
-		NarHash: single(nixSha256HashSchema),
-		NarSize: narInfoInteger,
-		References: references,
-		Deriver: optionalText,
-		CA: optionalText,
-		Sig: z.array(lineScalar).default([])
-	})
-	.transform((fields): NarInfoFields => ({
+const narInfoRecords = z.object({
+	StorePath: single(storePathSchema),
+	URL: single(lineScalar),
+	Compression: single(compressionSchema),
+	FileHash: single(nixSha256HashSchema),
+	FileSize: narInfoInteger,
+	NarHash: single(nixSha256HashSchema),
+	NarSize: narInfoInteger,
+	References: references,
+	Deriver: optionalText,
+	CA: optionalText,
+	Sig: z.array(lineScalar).default([])
+});
+
+function toNarInfoFields(
+	fields: z.output<typeof narInfoRecords>
+): NarInfoFields {
+	return {
 		storePath: fields.StorePath,
 		url: fields.URL,
 		compression: fields.Compression,
@@ -142,10 +151,35 @@ export const narInfoSchema = z
 		deriver: fields.Deriver,
 		ca: fields.CA,
 		sigs: fields.Sig
-	}));
+	};
+}
+
+export const narInfoSchema = narInfoRecords.transform(toNarInfoFields);
+
+// A stored row can repeat a reference, because `referencesSchema` did not
+// refuse repeats when the row was written. `NarInfo.render` accepts it.
+const storedNarInfoSchema = narInfoRecords
+	.extend({
+		References: z
+			.tuple([z.string()])
+			.transform(([value]) =>
+				value.split(/\s+/).filter((entry) => entry !== '')
+			)
+			.pipe(boundedReferencesSchema)
+	})
+	.transform(toNarInfoFields);
 
 export function parseNarInfo(source: string): NarInfo {
 	return NarInfo.fromFields(narInfoSchema.parse(parseFields(source)));
+}
+
+/**
+Parses a narinfo that this server rendered from a stored row. A row can be
+older than the rules that apply to new input. This reads such a narinfo as
+`NarInfo.render` writes it, so the server can serve what it already stores.
+*/
+function parseStoredNarInfo(source: string): NarInfo {
+	return NarInfo.fromFields(storedNarInfoSchema.parse(parseFields(source)));
 }
 
 export class NarInfo {
@@ -169,6 +203,10 @@ export class NarInfo {
 
 	static parse(source: string): NarInfo {
 		return parseNarInfo(source);
+	}
+
+	static parseStored(source: string): NarInfo {
+		return parseStoredNarInfo(source);
 	}
 
 	constructor(
@@ -250,8 +288,9 @@ export class NarInfo {
 	}
 }
 
-// Nix's canonical fingerprint sorts the full reference store paths, so a
-// signature never depends on the order the references arrive in.
+// Nix prints the references as a sorted set of full store paths, so a
+// signature depends neither on the order the references arrive in nor on a
+// repeated reference.
 function fingerprintReferenceStorePaths(
 	storePath: StorePath,
 	references: readonly StorePathBasename[]
@@ -261,13 +300,11 @@ function fingerprintReferenceStorePaths(
 	const storeDirectory =
 		separator === -1 ? undefined : path.slice(0, separator);
 
-	return references
-		.map((reference) =>
-			storeDirectory === undefined
-				? reference
-				: `${storeDirectory}/${reference}`
-		)
-		.toSorted(byCodeUnit);
+	const paths = references.map((reference) =>
+		storeDirectory === undefined ? reference : `${storeDirectory}/${reference}`
+	);
+
+	return [...new Set(paths)].toSorted(byCodeUnit);
 }
 
 /**

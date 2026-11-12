@@ -7,6 +7,7 @@ import {
 	type CacheScope,
 	type NarInfoGeneration,
 	type NixSha256HashString,
+	referenceSet,
 	storedReferencesSchema,
 	type StorePathHash,
 	type StorePathString,
@@ -959,8 +960,8 @@ export class ReuseViewLookupService {
 	}
 
 	// Signature sets may differ after key rotation without making two copies
-	// conflict. Compare the common fingerprint fields instead, with references
-	// sorted because the fingerprint treats them as a set.
+	// conflict. Compare the common fingerprint fields instead, with references as
+	// a set because the fingerprint lists each reference once, in order.
 	private hasSingleSemanticCandidate(
 		logger: Logger,
 		view: ReuseViewName,
@@ -979,13 +980,13 @@ export class ReuseViewLookupService {
 					candidate.storePath,
 					candidate.narHash,
 					candidate.narSize,
-					[
-						...parseStored(
+					referenceSet(
+						parseStored(
 							storedReferencesSchema,
 							candidate.referencesJson,
 							referencesFault
 						)
-					].toSorted(byCodeUnit),
+					),
 					candidate.deriver,
 					candidate.ca
 				])

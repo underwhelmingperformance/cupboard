@@ -45,7 +45,8 @@ export function renderCacheMetadataEntry(
 	let narinfo: string;
 
 	try {
-		narInfo = typeof metadata === 'string' ? NarInfo.parse(metadata) : metadata;
+		narInfo =
+			typeof metadata === 'string' ? NarInfo.parseStored(metadata) : metadata;
 		narinfo = narInfo.render();
 	} catch (error) {
 		throw new MetadataNarInfoInvalidError(storePath, error);
@@ -164,7 +165,7 @@ export async function* readCacheMetadata(
 		let narInfo: NarInfo;
 
 		try {
-			narInfo = NarInfo.parse(text);
+			narInfo = NarInfo.parseStored(text);
 		} catch (error) {
 			throw new MetadataNarInfoInvalidError(storePath, error);
 		}

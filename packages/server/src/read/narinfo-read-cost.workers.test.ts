@@ -320,6 +320,57 @@ describe('public metadata page cost', () => {
 		}
 	);
 
+	// A row stored before `referencesSchema` refused repeats can repeat a
+	// reference. The endpoint serves it as stored, as the narinfo endpoint does,
+	// and does not report it as invalid.
+	it('serves a stored narinfo that new input rules would refuse', async () => {
+		const path = await committedPath(
+			'metadata-stored-unusual',
+			defaultCache(),
+			{ storePathHash: '1'.repeat(32) }
+		);
+		const key = narInfoObjectKey(
+			fixtureTenant,
+			storePathHashSchema.parse(path.storePathHash),
+			defaultCache()
+		);
+		const canonical = await readFetch(`/${path.storePathHash}.narinfo`);
+		await canonical.text();
+		const object = await env.BLOBS.get(key);
+		if (object === null) {
+			throw new Error('Missing committed narinfo fixture');
+		}
+		const stored = NarInfo.parseStored(await object.text()).toFields();
+		const reference = `${'2'.repeat(32)}-dep`;
+		const unusual = NarInfo.fromFields({
+			...stored,
+			references: [reference, reference]
+		}).render();
+		await env.BLOBS.put(key, unusual, {
+			customMetadata: object.customMetadata,
+			httpMetadata: object.httpMetadata
+		});
+
+		const response = await readFetch('/api/v1/path-info', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ storePaths: [path.storePath] })
+		});
+
+		expect({
+			status: response.status,
+			body: cacheMetadataResponseSchema.parse(await response.json())
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			body: {
+				scopeVersion: 'cache:1:1:public:false',
+				entries: [
+					{ storePath: path.storePath, status: 'found', narinfo: unusual }
+				]
+			}
+		});
+	});
+
 	it('counts canonical reads beyond the continuation prefix', async () => {
 		const entries = [];
 		for (let index = 0; index < 32; index += 1) {

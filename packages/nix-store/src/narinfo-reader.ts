@@ -3,12 +3,13 @@ import { CorruptNarInfoError, MismatchedNarInfoPathError } from './errors.ts';
 import { decodeNixHashField, type NixHash, NixSha256Hash } from './hash.ts';
 import { narInfoSize } from './narinfo.ts';
 import {
-	referencesSchema,
+	boundedReferencesSchema,
 	type StoreDirectory,
 	storePathSchema,
 	type StorePathString
 } from './scalars.ts';
 import { isNixSignature } from './signature.ts';
+import { byCodeUnit } from './store-path.ts';
 
 // Some caches use this value when the deriver is unknown. cache.nixos.org
 // serves it for many older paths, and Nix parses it as an absent deriver.
@@ -164,8 +165,10 @@ class NarInfoReader {
 				throw new CorruptNarInfoError(this.storePath);
 			}
 
-			const references = referencesSchema.safeParse(
-				value.split(' ').filter(Boolean)
+			// Nix reads the references into a set, so a repeated reference counts
+			// once and the references come in the set's order.
+			const references = boundedReferencesSchema.safeParse(
+				[...new Set(value.split(' ').filter(Boolean))].toSorted(byCodeUnit)
 			);
 
 			if (!references.success) {
