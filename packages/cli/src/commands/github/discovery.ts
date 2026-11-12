@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 
 import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
-import { canonicalHref } from '@cupboard/nix-store/url';
+import { canonicalHref, withoutTrailingSlashes } from '@cupboard/nix-store/url';
 import { StatusCodes } from 'http-status-codes';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
@@ -518,7 +518,7 @@ function localActionDirectory(uses: string | undefined): string | undefined {
 		return undefined;
 	}
 
-	return uses.slice(2).replace(/\/+$/u, '');
+	return withoutTrailingSlashes(uses.slice(2));
 }
 
 function isDirectPublicationStep(step: WorkflowStep, tenant: URL): boolean {

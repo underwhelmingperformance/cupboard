@@ -3,6 +3,7 @@ import {
 	type CacheScope,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { withoutTrailingSlashes } from '@cupboard/nix-store/url';
 import { tenantContract } from '@cupboard/protocol/contract';
 import {
 	subrequestSafetyReserve,
@@ -544,7 +545,7 @@ export function pushClientFor(
 		// returns 401, so only a routing 404 means that the tenant does not exist.
 		tenantServes: async () => {
 			const target = new URL(url);
-			target.pathname = `${target.pathname.replace(/\/+$/u, '')}/nix-cache-info`;
+			target.pathname = `${withoutTrailingSlashes(target.pathname)}/nix-cache-info`;
 			const response = await baseFetcher(target, {
 				signal: options.signal
 			});

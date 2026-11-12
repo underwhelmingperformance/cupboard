@@ -1,7 +1,34 @@
 import { describe, expect, it } from 'vitest';
 
 import { InvalidCacheUrlBaseError } from './errors.ts';
-import { canonicalHref, isHttpsOrLoopbackHttp, parseBaseUrl } from './url.ts';
+import {
+	canonicalHref,
+	isHttpsOrLoopbackHttp,
+	parseBaseUrl,
+	withoutTrailingSlashes
+} from './url.ts';
+
+const longSlashRun = '/'.repeat(50_000);
+
+describe('withoutTrailingSlashes', () => {
+	it.each([
+		['an empty string', '', ''],
+		['only slashes', '///', ''],
+		['no slashes', 'acme', 'acme'],
+		['leading slashes', '//t/acme', '//t/acme'],
+		['leading and trailing slashes', '//t/acme//', '//t/acme'],
+		['trailing slashes', '/t/acme///', '/t/acme'],
+		['interior slashes', 'a//b', 'a//b'],
+		[
+			'a long slash run before a character',
+			`${longSlashRun}a`,
+			`${longSlashRun}a`
+		],
+		['a long slash run after a character', `a${longSlashRun}`, 'a']
+	])('%s', (_name, value, expected) => {
+		expect(withoutTrailingSlashes(value)).toBe(expected);
+	});
+});
 
 describe('parseBaseUrl', () => {
 	it.each([
