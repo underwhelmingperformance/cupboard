@@ -3,13 +3,10 @@ import { eq } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import { alias } from 'drizzle-orm/sqlite-core';
 
-import {
-	PathReadAuthorityMigrationPendingError,
-	SharedFactsUnavailableError
-} from '../errors.ts';
+import { PathReadAuthorityMigrationPendingError } from '../errors.ts';
 
 import * as schema from './d1-schema.ts';
-import { readWithOneRetry } from './transient.ts';
+import { readWithOneRetry, transitionReadFailure } from './transient.ts';
 
 const precedingStorage = alias(schema.cacheLifecycle, 'cache_lifecycle');
 export type CacheLifecycleWriteTable =
@@ -31,7 +28,7 @@ export async function writeCacheLifecycle<T>(
 					.get()
 			);
 		} catch (error) {
-			throw new SharedFactsUnavailableError(error);
+			throw transitionReadFailure('lifecycle-transition-read', error);
 		}
 	};
 	const transition = await readTransition();

@@ -32,6 +32,7 @@ import {
 	flakyD1,
 	type FlakyD1Plan,
 	flakyR2,
+	loggedAtWarning,
 	namedCache,
 	readFetch,
 	resetTestServer,
@@ -50,6 +51,7 @@ import {
 } from './reuse-view-read.test-support.ts';
 import { type CupboardServer } from './server.ts';
 
+const stringMatcher: unknown = expect.any(String);
 const viewName = reuseViewNameSchema.parse('reuse');
 const pr1Cache = namedCache('pr-1');
 const pr2Cache = namedCache('pr-2');
@@ -271,6 +273,38 @@ describe('reuse-view lookup hardening', () => {
 		).rejects.toBeInstanceOf(SharedFactsUnavailableError);
 	});
 
+	it('logs the D1 error under a persistent shared-fact fault', async () => {
+		const path = await committedPath('harden-logged', pr1Cache, {
+			storePathHash: 'h1'.repeat(16),
+			access: 'public'
+		});
+		await setView([{ kind: 'named', name: 'pr-1' }]);
+
+		const outage = new Error('simulated D1 outage');
+		const logged = await loggedAtWarning(async () => {
+			await expect(
+				lookupWithPlan(path.storePathHash, () => ({
+					failures: Number.MAX_SAFE_INTEGER,
+					error: outage,
+					matches: (query) => query.includes('blob_ref_storage')
+				}))
+			).rejects.toBeInstanceOf(SharedFactsUnavailableError);
+		});
+
+		expect(logged).toStrictEqual([
+			{
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'request refused: cache facts unavailable',
+				properties: {
+					tenant: fixtureTenant,
+					step: 'reuse-view-reference-read',
+					error: outage
+				}
+			}
+		]);
+	});
+
 	it('returns a retryable 503 when the canonical-object probe fails', async () => {
 		const path = await committedPath('harden-probe', pr1Cache, {
 			storePathHash: 'g1'.repeat(16),
@@ -284,9 +318,27 @@ describe('reuse-view lookup hardening', () => {
 			};
 		});
 
-		const refused = await readFetch(lookupPath(path.storePathHash));
+		let refused = new Response();
+		const logged = await loggedAtWarning(async () => {
+			refused = await readFetch(lookupPath(path.storePathHash));
+		});
 		const recovered = await readFetch(lookupPath(path.storePathHash));
 
+		expect(logged).toStrictEqual([
+			{
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'request refused: cache facts unavailable',
+				properties: {
+					requestId: stringMatcher,
+					method: 'GET',
+					path: lookupPath(path.storePathHash),
+					tenant: fixtureTenant,
+					step: 'reuse-view-object-probe',
+					error: new Error('transient R2 fault')
+				}
+			}
+		]);
 		expect({
 			refusedStatus: refused.status,
 			retryAfter: refused.headers.get('retry-after'),

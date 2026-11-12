@@ -1,3 +1,4 @@
+import { type Logger, rootLogger } from '@cupboard/logger';
 import {
 	type CacheAccessMode,
 	type CacheGeneration,
@@ -30,12 +31,11 @@ import {
 	referencedCacheLifecycle
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { readWithOneRetry } from '../db/transient.ts';
+import { readWithOneRetry, sharedFactsRefusal } from '../db/transient.ts';
 import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
 import { boundedSubrequest, unboundedCapMs } from '../do/deadline.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { requireSubrequestsFor } from '../do/subrequest-slice.ts';
-import { SharedFactsUnavailableError } from '../errors.ts';
 import {
 	boundedBody,
 	boundedBodyHeaders,
@@ -307,7 +307,7 @@ async function isNarReferenced(
 		}
 		return false;
 	} catch (error) {
-		throw new SharedFactsUnavailableError(error);
+		throw sharedFactsRefusal(rootLogger(), tenant, 'nar-reference-read', error);
 	}
 }
 
@@ -428,7 +428,8 @@ export async function authorisedNarInfoVersions(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	cache: CacheScope,
-	storePathHashes: readonly StorePathHash[]
+	storePathHashes: readonly StorePathHash[],
+	logger: Logger = rootLogger()
 ): Promise<ReadonlyMap<StorePathHash, CacheNarInfoVersion>> {
 	try {
 		const pages = await readWithOneRetry(() =>
@@ -455,7 +456,7 @@ export async function authorisedNarInfoVersions(
 
 		return current;
 	} catch (error) {
-		throw new SharedFactsUnavailableError(error);
+		throw sharedFactsRefusal(logger, tenant, 'narinfo-reference-read', error);
 	}
 }
 

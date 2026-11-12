@@ -19,7 +19,9 @@ import { attestationListObjectKey } from '../http/http.ts';
 import { authorisedNarInfoVersions } from '../read/read.ts';
 import {
 	defaultCache,
+	flakyD1,
 	initialiseViaWorker,
+	loggedAtWarning,
 	namedCache,
 	provisionFixtureTenant,
 	putWorkerTestCache,
@@ -30,6 +32,8 @@ import {
 } from '../test-support.ts';
 
 import { fixtureTenant } from './tenant-routing.test-support.ts';
+
+const stringMatcher: unknown = expect.any(String);
 
 const slsa = 'https://slsa.dev/provenance/v1';
 const other = 'https://example.org/predicate';
@@ -445,6 +449,83 @@ describe('attestation discovery', () => {
 			status: response.status,
 			cacheControl: response.headers.get('cache-control')
 		}).toStrictEqual({ status: 503, cacheControl: 'no-store' });
+	});
+
+	it('logs the request fields when the reference read fails', async () => {
+		const path = await committedPath('discovery-reference-log', defaultCache());
+		const failing = flakyD1(env.CUPBOARD_DB, {
+			failures: Number.MAX_SAFE_INTEGER,
+			matches: (query) => query.includes('requested_path_reference')
+		});
+		const logged = await loggedAtWarning(async () => {
+			const response = await readFetch(
+				'/api/v1/attestation-info',
+				probe([path.storePathHash]),
+				{ CUPBOARD_DB: failing }
+			);
+			expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+		});
+
+		expect(logged).toStrictEqual([
+			{
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'request refused: cache facts unavailable',
+				properties: {
+					requestId: stringMatcher,
+					method: 'POST',
+					path: `/t/${fixtureTenant}/api/v1/attestation-info`,
+					tenant: fixtureTenant,
+					step: 'narinfo-reference-read',
+					error: new Error('transient D1 fault')
+				}
+			}
+		]);
+	});
+
+	it('logs one record when several list reads fail', async () => {
+		const paths = [
+			await committedPath('discovery-provider-log-1', defaultCache(), {
+				storePathHash: 'a'.repeat(32)
+			}),
+			await committedPath('discovery-provider-log-2', defaultCache(), {
+				storePathHash: 'b'.repeat(32)
+			})
+		];
+		const outage = new Error('provider unavailable');
+		const bucket = new Proxy(env.BLOBS, {
+			get(target, key, receiver): unknown {
+				if (key === 'get') {
+					return () => Promise.reject(outage);
+				}
+				const value: unknown = Reflect.get(target, key, receiver);
+				return typeof value === 'function' ? value.bind(target) : value;
+			}
+		});
+		const logged = await loggedAtWarning(async () => {
+			const response = await readFetch(
+				'/api/v1/attestation-info',
+				probe(paths.map((path) => path.storePathHash)),
+				{ BLOBS: bucket }
+			);
+			expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+		});
+
+		expect(logged).toStrictEqual([
+			{
+				level: 'warning',
+				category: ['cupboard'],
+				message: 'request refused: cache facts unavailable',
+				properties: {
+					requestId: stringMatcher,
+					method: 'POST',
+					path: `/t/${fixtureTenant}/api/v1/attestation-info`,
+					tenant: fixtureTenant,
+					step: 'attestation-list-read',
+					error: outage
+				}
+			}
+		]);
 	});
 
 	it('rejects an access change during a page without forwarding object reads to the tenant', async () => {

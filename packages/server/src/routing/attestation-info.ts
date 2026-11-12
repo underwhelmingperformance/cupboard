@@ -19,6 +19,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context } from 'hono';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { logGroupRefusal } from '../db/transient.ts';
 import { maxOutgoingConnections } from '../do/bulk.ts';
 import {
 	AttestationInfoHttpError,
@@ -88,97 +89,110 @@ async function* entriesFor(
 		drizzleD1(context.env.CUPBOARD_DB, { schema: d1Schema }),
 		tenant,
 		scope.scope,
-		request.storePathHashes
+		request.storePathHashes,
+		context.get('logger')
 	);
 	for (const group of chunk(request.storePathHashes, maxOutgoingConnections)) {
-		const entries = await mapWithConcurrency(
-			group,
-			maxOutgoingConnections,
-			async (hash): Promise<AttestationInfoEntry> => {
-				const version = versions.get(hash);
-				if (version === undefined) {
-					return { storePathHash: hash, status: 'missing' };
-				}
-				const key = attestationListObjectKey(
-					tenant,
-					hash,
-					scope.scope,
-					version.cacheGeneration
-				);
-				let object: R2ObjectBody | null;
-				try {
-					object = await context.env.BLOBS.get(key);
-				} catch (error) {
-					throw new SharedFactsUnavailableError(error);
-				}
-				const found = {
-					storePathHash: hash,
-					status: 'found',
-					narHash: version.narHash
-				} as const;
-				if (object === null) {
-					return { ...found, attestations: [] };
-				}
-				if (!isListOfCommittedGeneration(object, scope, version.generation)) {
-					await object.body.cancel();
-					return { ...found, attestations: [] };
-				}
-				if (object.size > attestationInfoMaxListBytes) {
-					await cancelUnread(object.body);
-					throw new AttestationInfoHttpError(
-						'list-too-large',
-						'The attestation list exceeds 1 MiB.',
-						hash
-					);
-				}
-				let bytes: ArrayBuffer;
-				try {
-					bytes = await new Response(
-						boundedBody(
-							object.body,
-							object.size,
-							remainingReadBudgetMs(),
-							{ operation: 'attestation-info.body', objectKey: key },
-							keepAliveIn(context.executionCtx)
-						)
-					).arrayBuffer();
-				} catch (error) {
-					throw new SharedFactsUnavailableError(error);
-				}
-				let value: unknown;
-				try {
-					value = JSON.parse(
-						new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(
-							bytes
-						)
-					);
-				} catch (error) {
-					throw new AttestationInfoHttpError(
-						'list-invalid',
-						'The cache returned an invalid attestation list.',
+		let entries: AttestationInfoEntry[];
+		try {
+			entries = await mapWithConcurrency(
+				group,
+				maxOutgoingConnections,
+				async (hash): Promise<AttestationInfoEntry> => {
+					const version = versions.get(hash);
+					if (version === undefined) {
+						return { storePathHash: hash, status: 'missing' };
+					}
+					const key = attestationListObjectKey(
+						tenant,
 						hash,
-						error
+						scope.scope,
+						version.cacheGeneration
 					);
+					let object: R2ObjectBody | null;
+					try {
+						object = await context.env.BLOBS.get(key);
+					} catch (error) {
+						throw new SharedFactsUnavailableError(error);
+					}
+					const found = {
+						storePathHash: hash,
+						status: 'found',
+						narHash: version.narHash
+					} as const;
+					if (object === null) {
+						return { ...found, attestations: [] };
+					}
+					if (!isListOfCommittedGeneration(object, scope, version.generation)) {
+						await object.body.cancel();
+						return { ...found, attestations: [] };
+					}
+					if (object.size > attestationInfoMaxListBytes) {
+						await cancelUnread(object.body);
+						throw new AttestationInfoHttpError(
+							'list-too-large',
+							'The attestation list exceeds 1 MiB.',
+							hash
+						);
+					}
+					let bytes: ArrayBuffer;
+					try {
+						bytes = await new Response(
+							boundedBody(
+								object.body,
+								object.size,
+								remainingReadBudgetMs(),
+								{ operation: 'attestation-info.body', objectKey: key },
+								keepAliveIn(context.executionCtx)
+							)
+						).arrayBuffer();
+					} catch (error) {
+						throw new SharedFactsUnavailableError(error);
+					}
+					let value: unknown;
+					try {
+						value = JSON.parse(
+							new TextDecoder('utf-8', {
+								fatal: true,
+								ignoreBOM: false
+							}).decode(bytes)
+						);
+					} catch (error) {
+						throw new AttestationInfoHttpError(
+							'list-invalid',
+							'The cache returned an invalid attestation list.',
+							hash,
+							error
+						);
+					}
+					const list = attestationListSchema.safeParse(value);
+					if (!list.success) {
+						throw new AttestationInfoHttpError(
+							'list-invalid',
+							'The cache returned an invalid attestation list.',
+							hash,
+							list.error
+						);
+					}
+					return {
+						...found,
+						attestations: list.data.attestations.filter(
+							(descriptor) =>
+								request.predicateTypes === undefined ||
+								request.predicateTypes.includes(descriptor.predicateType)
+						)
+					};
 				}
-				const list = attestationListSchema.safeParse(value);
-				if (!list.success) {
-					throw new AttestationInfoHttpError(
-						'list-invalid',
-						'The cache returned an invalid attestation list.',
-						hash,
-						list.error
-					);
-				}
-				return {
-					...found,
-					attestations: list.data.attestations.filter(
-						(descriptor) =>
-							request.predicateTypes === undefined ||
-							request.predicateTypes.includes(descriptor.predicateType)
-					)
-				};
-			}
-		);
+			);
+		} catch (error) {
+			const refusal: unknown = logGroupRefusal(
+				context.get('logger'),
+				tenant,
+				'attestation-list-read',
+				error
+			);
+			throw refusal;
+		}
 		yield* entries;
 	}
 }

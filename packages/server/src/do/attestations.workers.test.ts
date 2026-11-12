@@ -91,6 +91,7 @@ import {
 	initialiseViaWorker,
 	interleaveBeforeInsert,
 	issueTokenForTenant,
+	loggedAtWarning,
 	md5Etag,
 	namedCache,
 	narDigestHex,
@@ -3220,13 +3221,29 @@ describe('attestation attach and reads', () => {
 					generation: narInfoGenerationSchema.parse(24_999)
 				}
 			]);
-			await expect(
-				attestationsFor(context).handleServeBundle(
-					new Request('https://example.com/bundle'),
-					defaultCacheScope,
-					digest
-				)
-			).rejects.toBeInstanceOf(SharedFactsUnavailableError);
+			const logged = await loggedAtWarning(async () => {
+				await expect(
+					attestationsFor(context).handleServeBundle(
+						new Request('https://example.com/bundle'),
+						defaultCacheScope,
+						digest
+					)
+				).rejects.toBeInstanceOf(SharedFactsUnavailableError);
+			});
+			expect(logged).toStrictEqual([
+				{
+					level: 'warning',
+					category: ['cupboard'],
+					message: 'request refused: cache facts unavailable',
+					properties: {
+						tenant: context.requireTenant(),
+						step: 'bundle-reference-read',
+						error: new Error(
+							'Path read authority demotion is pending. Retry the read.'
+						)
+					}
+				}
+			]);
 		});
 		const [query] = statements;
 		if (query === undefined) {

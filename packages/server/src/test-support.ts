@@ -1,4 +1,5 @@
 import { type Logger, rootLogger } from '@cupboard/logger';
+import { atWarningOrAbove, startCapture } from '@cupboard/logger/testing';
 import { bytesToHex } from '@cupboard/nix-store/encoding';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
@@ -1552,6 +1553,22 @@ export async function settledResponse(
 		statusText: response.statusText,
 		headers: response.headers
 	});
+}
+
+/**
+Runs `body` and returns the records that it logged at warning level or above,
+so an unexpected error-level record fails the test.
+*/
+export async function loggedAtWarning(body: () => Promise<void>) {
+	const capture = startCapture();
+
+	try {
+		await body();
+	} finally {
+		capture.stop();
+	}
+
+	return atWarningOrAbove(capture.logs);
 }
 
 /**

@@ -7,12 +7,8 @@ import { readTenantEntry } from '../control/tenant-membership.ts';
 import { cacheIdentityCondition } from '../db/cache.ts';
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { readWithOneRetry } from '../db/transient.ts';
-import {
-	MetadataScopeChangedError,
-	SharedFactsUnavailableError,
-	UnauthenticatedError
-} from '../errors.ts';
+import { readWithOneRetry, sharedFactsRefusal } from '../db/transient.ts';
+import { MetadataScopeChangedError, UnauthenticatedError } from '../errors.ts';
 import { guardScopedRead } from '../read/read.ts';
 
 import { tenantServer } from './durable-object.ts';
@@ -56,7 +52,12 @@ export async function revalidateCacheReadScope(
 	try {
 		current = await readWithOneRetry(() => query.get());
 	} catch (error) {
-		throw new SharedFactsUnavailableError(error);
+		throw sharedFactsRefusal(
+			context.get('logger'),
+			tenant,
+			'read-scope-recheck',
+			error
+		);
 	}
 	const actual = `cache:${String(current?.generation ?? firstCacheGeneration)}:${String(current?.readRevision ?? firstCacheReadRevision)}:${current?.access ?? 'private'}:${String(current?.generation === null || current?.generation === undefined || current.deletedAt !== null)}`;
 	if (actual !== expected || current?.status !== 'active') {

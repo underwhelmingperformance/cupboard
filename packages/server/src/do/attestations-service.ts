@@ -1,4 +1,4 @@
-import { type Logger } from '@cupboard/logger';
+import { type Logger, rootLogger } from '@cupboard/logger';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type CacheScope,
@@ -62,6 +62,7 @@ import {
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { sharedFactsRefusal } from '../db/transient.ts';
 import {
 	AttestationBundleInvalidError,
 	AttestationBundleTooLargeError,
@@ -75,7 +76,6 @@ import {
 	InvalidPushIdError,
 	ObjectIncarnationReservationContendedError,
 	QuotaExceededError,
-	SharedFactsUnavailableError,
 	SubrequestSliceExceededError,
 	TenantUsageMissingError,
 	TenantWritesStoppedError,
@@ -532,7 +532,10 @@ export class AttestationsService {
 			return true;
 		}
 		if (references.length > 64) {
-			throw new SharedFactsUnavailableError(
+			throw sharedFactsRefusal(
+				rootLogger(),
+				tenant,
+				'bundle-reference-read',
 				new Error('Path read authority demotion is pending. Retry the read.')
 			);
 		}
