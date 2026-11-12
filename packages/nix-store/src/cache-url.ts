@@ -4,7 +4,11 @@ import {
 	InvalidTenantCacheUrlError
 } from './errors.ts';
 import { cacheNameSchema, type CacheScope, tenantIdSchema } from './scalars.ts';
-import { isHttpsOrLoopbackHttp, parseBaseUrl } from './url.ts';
+import {
+	isHttpsOrLoopbackHttp,
+	parseBaseUrl,
+	withoutTrailingSlashes
+} from './url.ts';
 
 export interface TenantCacheUrl {
 	readonly tenantUrl: URL;
@@ -128,7 +132,7 @@ export function publicKeyUrl(baseUrl: URL): URL {
 
 function appendPathSegments(baseUrl: URL, ...segments: string[]): URL {
 	const url = new URL(baseUrl);
-	const basePath = url.pathname.replace(/\/+$/u, '');
+	const basePath = withoutTrailingSlashes(url.pathname);
 	const encoded = segments.map((segment) => encodeSegment(segment));
 
 	url.pathname = `${basePath}/${encoded.join('/')}`;

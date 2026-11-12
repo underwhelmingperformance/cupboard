@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { withoutTrailingSlashes } from '@cupboard/nix-store/url';
 import { describe, expect } from 'vitest';
 
 import { testWithConfigHome } from '../test-support.ts';
@@ -124,7 +125,7 @@ describe('session cache', () => {
 			const token = jwt({ iss: tenant, aud: tenant });
 			const tenantUrl = new URL(tenant);
 			const key = createHash('sha256')
-				.update(tenantUrl.href.replace(/\/+$/, ''))
+				.update(withoutTrailingSlashes(tenantUrl.href))
 				.digest('hex');
 			await mkdir(tokensDirectory(configHome), { recursive: true });
 			await writeFile(

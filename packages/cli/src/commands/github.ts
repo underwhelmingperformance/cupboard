@@ -4,6 +4,7 @@ import {
 	type CacheAccessMode,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
+import { withoutTrailingSlashes } from '@cupboard/nix-store/url';
 import {
 	type OidcTrustAddBodyInput,
 	type OidcTrustListResponse,
@@ -95,7 +96,7 @@ export function cacheAccessFetcher(
 
 	return async (url) => {
 		const target = new URL(url);
-		target.pathname = `${target.pathname.replace(/\/+$/u, '')}/nix-cache-info`;
+		target.pathname = `${withoutTrailingSlashes(target.pathname)}/nix-cache-info`;
 		const timeoutSignal = AbortSignal.timeout(timeoutMs);
 		const signal =
 			dependencies.signal === undefined
@@ -258,7 +259,7 @@ export function cacheInfoFetcher(
 
 	return async (url: URL) => {
 		const target = new URL(url);
-		target.pathname = `${target.pathname.replace(/\/+$/u, '')}/nix-cache-info`;
+		target.pathname = `${withoutTrailingSlashes(target.pathname)}/nix-cache-info`;
 		const timeoutSignal = AbortSignal.timeout(timeoutMs);
 		const signal =
 			options.signal === undefined

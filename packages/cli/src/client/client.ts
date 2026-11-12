@@ -6,6 +6,7 @@ import {
 	type NixSha256HashString,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { withoutTrailingSlashes } from '@cupboard/nix-store/url';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
@@ -178,7 +179,7 @@ export class CupboardClient {
 	// replace a tenant prefix such as `/t/<tenant>`.
 	private resolve(path: string): URL {
 		const url = new URL(this.baseUrl);
-		url.pathname = `${url.pathname.replace(/\/+$/, '')}${path}`;
+		url.pathname = `${withoutTrailingSlashes(url.pathname)}${path}`;
 
 		return url;
 	}

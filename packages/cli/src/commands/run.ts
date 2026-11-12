@@ -9,6 +9,7 @@ import {
 } from '@cupboard/nix';
 import { cacheUrl, reuseViewUrl } from '@cupboard/nix-store/cache-url';
 import { isSameCacheScope } from '@cupboard/nix-store/scalars';
+import { withoutTrailingSlashes } from '@cupboard/nix-store/url';
 import {
 	readAccessFileEnvironment,
 	type ReadResource,
@@ -456,8 +457,8 @@ function staticCredentialFor(
 
 		if (
 			configured.origin === url.origin &&
-			configured.pathname.replace(/\/+$/u, '') ===
-				url.pathname.replace(/\/+$/u, '') &&
+			withoutTrailingSlashes(configured.pathname) ===
+				withoutTrailingSlashes(url.pathname) &&
 			configured.username !== ''
 		) {
 			return {

@@ -5,7 +5,7 @@ import {
 	type CacheScope,
 	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
-import { canonicalHref } from '@cupboard/nix-store/url';
+import { canonicalHref, withoutTrailingSlashes } from '@cupboard/nix-store/url';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 
 import { type ContentReadGrantIntent } from '../auth/attenuate.ts';
@@ -21,7 +21,7 @@ interface SourceResource {
 }
 
 function reuseViewResource(source: URL): SourceResource | undefined {
-	const segments = source.pathname.replace(/\/+$/u, '').split('/');
+	const segments = withoutTrailingSlashes(source.pathname).split('/');
 
 	if (segments.at(-2) !== 'reuse' || segments.at(-4) !== 't') {
 		return undefined;
