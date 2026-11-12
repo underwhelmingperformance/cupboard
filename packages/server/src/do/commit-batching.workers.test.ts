@@ -752,7 +752,6 @@ describe('materialise flush paging', () => {
 				presence: driven.presence,
 				narinfoUsage: driven.narinfoUsage
 			}).toStrictEqual(expected);
-		},
-		240_000
+		}
 	);
 });

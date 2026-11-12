@@ -654,55 +654,51 @@ describe('local-step work on the alarm', () => {
 	// work towards a step that the tenant has not reached, so each cursor that
 	// advances is progress, and the object must not give up while it walks
 	// through a large tenant's caches.
-	it(
-		'keeps working towards a higher step after a repeated recording while its cursors advance',
-		{ timeout: 120_000 },
-		async () => {
-			await useServerWithCaches('local-step-higher', 1000);
-			await runInDurableObject(currentServer(), async (instance, state) => {
-				await state.storage.put(repeatedRecordingKey, expansionLocalStep);
-				await instance.context.d1
-					.update(d1Schema.tenant)
-					.set({ localStep: expansionLocalStep })
-					.where(eq(d1Schema.tenant.id, instance.context.requireTenant()))
-					.run();
-			});
-			await recordTransition('cache-identity', 'complete');
+	it('keeps working towards a higher step after a repeated recording while its cursors advance', async () => {
+		await useServerWithCaches('local-step-higher', 1000);
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			await state.storage.put(repeatedRecordingKey, expansionLocalStep);
+			await instance.context.d1
+				.update(d1Schema.tenant)
+				.set({ localStep: expansionLocalStep })
+				.where(eq(d1Schema.tenant.id, instance.context.requireTenant()))
+				.run();
+		});
+		await recordTransition('cache-identity', 'complete');
 
-			const value = await withRecordedAlarm(async (alarm) => {
-				const first = await wake(currentLocalStep);
-				let alarms = 0;
+		const value = await withRecordedAlarm(async (alarm) => {
+			const first = await wake(currentLocalStep);
+			let alarms = 0;
 
-				// Each alarm arrives thirty seconds after the previous one, as it would
-				// if every page stalled.
-				while (alarms < 200 && (await hasPending())) {
-					alarms += 1;
-					vi.setSystemTime(start + alarms * noProgressRetryMs);
-					await alarm.deliver();
-				}
+			// Each alarm arrives thirty seconds after the previous one, as it would
+			// if every page stalled.
+			while (alarms < 200 && (await hasPending())) {
+				alarms += 1;
+				vi.setSystemTime(start + alarms * noProgressRetryMs);
+				await alarm.deliver();
+			}
 
-				return { first, alarms };
-			});
-			const finishedAt = start + value.alarms * noProgressRetryMs;
+			return { first, alarms };
+		});
+		const finishedAt = start + value.alarms * noProgressRetryMs;
 
-			expect({
-				first: value.first,
-				outlastsStallWindow: finishedAt - start > localStepStallWindowMs,
-				pending: await hasPending(),
-				row: await localStepRow()
-			}).toStrictEqual({
-				first: { kind: 'incomplete', projected: 0, progressed: true },
-				outlastsStallWindow: true,
-				pending: false,
-				row: {
-					localStep: currentLocalStep,
-					attemptedAt: undefined,
-					progressedAt: at(finishedAt),
-					error: undefined
-				}
-			});
-		}
-	);
+		expect({
+			first: value.first,
+			outlastsStallWindow: finishedAt - start > localStepStallWindowMs,
+			pending: await hasPending(),
+			row: await localStepRow()
+		}).toStrictEqual({
+			first: { kind: 'incomplete', projected: 0, progressed: true },
+			outlastsStallWindow: true,
+			pending: false,
+			row: {
+				localStep: currentLocalStep,
+				attemptedAt: undefined,
+				progressedAt: at(finishedAt),
+				error: undefined
+			}
+		});
+	});
 
 	// The object stores the request as soon as its migrations have started,
 	// and the alarm continues them. A restart in between keeps the request, so

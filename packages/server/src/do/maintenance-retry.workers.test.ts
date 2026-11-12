@@ -981,7 +981,7 @@ describe('stalled maintenance passes', () => {
 		await expect(takeStalledMaintenancePasses()).resolves.toStrictEqual([
 			{ pass: 'reconcile', waitMs: noProgressRetryMs }
 		]);
-	}, 240_000);
+	});
 });
 
 describe('pre-existing retry clocks', () => {

@@ -336,8 +336,8 @@ export async function resetTestServer(): Promise<void> {
 /**
 Resets the fixture tenant's object so that its next request runs in a new
 instance. `evictDurableObject` and `abortAllDurableObjects` are unsuitable
-here. Eviction waits for the object's in-flight requests to drain, which can
-take longer than a test hook may run. Aborting every object breaks every stub
+here. Eviction rejects when the object is not running and waits for the
+object's in-flight requests to drain. Aborting every object breaks every stub
 created before the abort, including the stubs in a second copy of this module
 that `vi.resetModules()` creates. `abort()` resets only this object, at once,
 and rejects the call that made it with an error that has `durableObjectReset`
@@ -732,8 +732,6 @@ export function uploadStateOf(instance: CupboardServer): UploadStateService {
 		.uploadState;
 }
 
-// Leave most of Vitest's default 30-second case timeout for the test's own
-// checks and the shared after-test audit.
 const fixtureWaitDeadlineMs = 10_000;
 
 /**
@@ -3465,8 +3463,6 @@ export function closeSessionAndWait(socket: WebSocket): Promise<void> {
 
 type CommitFixturePhase = 'initial frame' | 'verdict';
 
-// Leave part of Vitest's default 30-second case timeout for socket cleanup and
-// the shared after-test audit after a phase reports that it stopped progressing.
 export const commitFixturePhaseDeadlineMs = 20_000;
 
 /**

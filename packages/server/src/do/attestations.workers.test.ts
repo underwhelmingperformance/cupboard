@@ -4827,7 +4827,7 @@ describe('attestation attach and reads', () => {
 				}
 			}
 		});
-	}, 120_000);
+	});
 
 	it('decides correctly for more bundles than a statement could bind', async () => {
 		// 101 distinct storePathHashes and the cache would be 102 parameters if

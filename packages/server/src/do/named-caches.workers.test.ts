@@ -376,7 +376,7 @@ describe('named caches', () => {
 				isBCollectablePresent: true
 			}
 		});
-	}, 30_000);
+	});
 
 	it('mirrors the per-route scope under a cache prefix', async () => {
 		await useTestServer('named-cache-scope');

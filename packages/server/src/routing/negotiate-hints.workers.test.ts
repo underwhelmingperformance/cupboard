@@ -349,7 +349,7 @@ describe('computing negotiate hints', () => {
 				narHash: path.narHash
 			}))
 		});
-	}, 60_000);
+	});
 
 	it.each([false, true])(
 		'bounds a direct page after canonical NAR loss with duplicate paths=%s',
@@ -419,8 +419,7 @@ describe('computing negotiate hints', () => {
 					actions: Array.from({ length: directUploadPageSize }, () => 'upload')
 				});
 			});
-		},
-		60_000
+		}
 	);
 
 	it('returns no hints without a bearer header', async () => {

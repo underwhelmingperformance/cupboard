@@ -605,7 +605,7 @@ describe('root ensure hardening', () => {
 			warm: { calls: 897, httpStatus: StatusCodes.OK, body: expectedBody },
 			maximumConcurrentPuts: 6
 		});
-	}, 120_000);
+	});
 
 	it('still returns retained when the row is rewritten to the same identity between the probe and the gate', async () => {
 		const token = await initialise();
