@@ -34,7 +34,6 @@ import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
 	GarbageCollectionBarrierMissingError,
-	GarbageCollectionMarksBeforeSeedError,
 	PushIdSigningKeyMissingError,
 	StoredReferencesInvalidError,
 	StoredReferencesJsonMalformedError,
@@ -93,6 +92,9 @@ export const phaseStepSize = 128;
 // The roots one expiry step inspects. A step size like `phaseStepSize`; the
 // row budget decides how many steps a pass runs.
 export const maxRootsExpiredPerRun = 32;
+
+// A cursor that sorts after every store-path hash.
+const clearedScanCursor = '~';
 
 /**
 Reachability comes from retention targets, grace entries and the references
@@ -385,18 +387,65 @@ export class GarbageCollectionService {
 		this.inputs = new GarbageCollectionInputs(context);
 	}
 
-	private clearScan(cache: ResolvedCache): void {
-		this.context.db.transaction((tx) => {
-			tx.delete(schema.garbageCollectionFrontier)
-				.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
-				.run();
-			tx.delete(schema.garbageCollectionMarks)
-				.where(eq(schema.garbageCollectionMarks.cacheId, cache.id))
-				.run();
-			tx.delete(schema.garbageCollectionScans)
-				.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
-				.run();
+	/**
+	Ends the scan of a cache. The `clear` phase deletes its marks and frontier
+	in steps, and the scan row goes once they are gone.
+	*/
+	private finishScan(cache: ResolvedCache): void {
+		this.updateScan(cache, {
+			phase: 'clear',
+			// An earlier release reads an unknown phase as `collect`. This cursor
+			// sorts after every store-path hash, so its collect step deletes no
+			// path while the marks are partly deleted.
+			cursor: clearedScanCursor,
+			markStorePathHash: sql`null`,
+			referenceCursor: -1
 		});
+	}
+
+	/**
+	Deletes up to one step of the marks of a cache, then, once no mark is left,
+	up to one step of its frontier. Returns whether both are now empty.
+	*/
+	private deleteScanStateStep(cache: ResolvedCache): boolean {
+		if (this.deletePathStep(schema.garbageCollectionMarks, cache)) {
+			return false;
+		}
+
+		return !this.deletePathStep(schema.garbageCollectionFrontier, cache);
+	}
+
+	// Deletes up to `phaseStepSize` rows of the cache from a table keyed by
+	// cache and store-path hash, in hash order. Returns whether rows of the
+	// cache can remain.
+	private deletePathStep(
+		table:
+			| typeof schema.garbageCollectionMarks
+			| typeof schema.garbageCollectionFrontier,
+		cache: ResolvedCache
+	): boolean {
+		const last = this.context.db
+			.select({ storePathHash: table.storePathHash })
+			.from(table)
+			.where(eq(table.cacheId, cache.id))
+			.orderBy(asc(table.storePathHash))
+			.limit(1)
+			.offset(phaseStepSize - 1)
+			.get();
+
+		this.context.db
+			.delete(table)
+			.where(
+				and(
+					eq(table.cacheId, cache.id),
+					last === undefined
+						? undefined
+						: lte(table.storePathHash, last.storePathHash)
+				)
+			)
+			.run();
+
+		return last !== undefined;
 	}
 
 	private startScan(cache: ResolvedCache): void {
@@ -955,7 +1004,7 @@ export class GarbageCollectionService {
 			!scan.allowEmptyCollection &&
 			!this.hasRetainedPath(cache)
 		) {
-			this.clearScan(cache);
+			this.finishScan(cache);
 			return true;
 		}
 
@@ -1101,7 +1150,7 @@ export class GarbageCollectionService {
 				cursor: batch.at(-1)?.storePathHash ?? cursor
 			});
 		} else {
-			this.clearScan(cache);
+			this.finishScan(cache);
 		}
 
 		return { pathsCollected, complete: rows.length <= batch.length };
@@ -1247,6 +1296,22 @@ export class GarbageCollectionService {
 			started;
 
 		while (scan !== undefined) {
+			if (scan.phase === 'clear') {
+				if (this.deleteScanStateStep(cache)) {
+					this.context.db
+						.delete(schema.garbageCollectionScans)
+						.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
+						.run();
+				}
+
+				if (isRowBudgetExhausted()) {
+					break;
+				}
+
+				scan = this.scanRow(cache);
+				continue;
+			}
+
 			if (scan.phase === 'expire-roots') {
 				const expired = this.expireRoots(cache, now);
 				rootsExpired += expired.rootsExpired;
@@ -1273,22 +1338,17 @@ export class GarbageCollectionService {
 			if (scan.phase === 'expire-grace') {
 				const expired = this.expireGraceStep(cache, now);
 
-				// Emptying the frontier is safe only before the seed phases. No path
-				// is marked yet, so every entry comes from a root-target or grace
-				// barrier, and the seed phases queue those paths again. Refuse if a
-				// mark exists, because a later phase order could then lose a path.
-				if (!expired.hasMoreDeadlines) {
-					this.assertNoMarks(cache);
-					this.context.db
-						.delete(schema.garbageCollectionFrontier)
-						.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
-						.run();
-				}
+				// The seed phases need a cache without marks or frontier rows. A mark
+				// that a discarded scan left would stop this scan from following the
+				// marked path's references. The seed phases queue every root target
+				// and grace path again, so no frontier row is needed.
+				const isCleared =
+					!expired.hasMoreDeadlines && this.deleteScanStateStep(cache);
 
 				this.updateScan(cache, {
 					allowEmptyCollection:
 						scan.allowEmptyCollection || this.cacheGraceManaged(cache),
-					...(!expired.hasMoreDeadlines && { phase: 'roots' })
+					...(isCleared && { phase: 'roots' })
 				});
 
 				if (isRowBudgetExhausted()) {
@@ -1316,9 +1376,9 @@ export class GarbageCollectionService {
 			}
 
 			if (scan.phase === 'mark') {
-				const marked = this.advanceMark(cache, scan);
+				this.advanceMark(cache, scan);
 
-				if (marked.complete || isRowBudgetExhausted()) {
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -1341,7 +1401,7 @@ export class GarbageCollectionService {
 			const collected = this.advanceCollect(cache, now, scan.cursor);
 			pathsCollected += collected.pathsCollected;
 
-			if (collected.complete || isRowBudgetExhausted()) {
+			if (isRowBudgetExhausted()) {
 				break;
 			}
 
@@ -1982,19 +2042,6 @@ export class GarbageCollectionService {
 		};
 	}
 
-	private assertNoMarks(cache: ResolvedCache): void {
-		const mark = this.context.db
-			.select({ storePathHash: schema.garbageCollectionMarks.storePathHash })
-			.from(schema.garbageCollectionMarks)
-			.where(eq(schema.garbageCollectionMarks.cacheId, cache.id))
-			.limit(1)
-			.get();
-
-		if (mark !== undefined) {
-			throw new GarbageCollectionMarksBeforeSeedError(cache.id);
-		}
-	}
-
 	// A write between two invocations of a scan leaves the input flag set, so
 	// the completed scan does not reflect the cache's current inputs.
 	private decisionAfterScan(
@@ -2197,17 +2244,21 @@ export class GarbageCollectionService {
 	its inputs and however recently it was scanned. A scan in progress is
 	discarded, because it may have marked a path before a later change
 	released the path, and that scan would keep the path.
+
+	Only the scan rows go here. The new scan deletes the marks and frontier
+	rows that the discarded scan left, in steps, before its seed phases.
 	*/
 	requestScan(target: GarbageCollectionTarget): void {
 		if (target.scope === 'cache') {
-			this.clearScan(target.cache);
+			this.context.db
+				.delete(schema.garbageCollectionScans)
+				.where(eq(schema.garbageCollectionScans.cacheId, target.cache.id))
+				.run();
 			this.inputs.requestScan(target.cache.id);
 			return;
 		}
 
 		this.context.db.transaction((tx) => {
-			tx.delete(schema.garbageCollectionFrontier).run();
-			tx.delete(schema.garbageCollectionMarks).run();
 			tx.delete(schema.garbageCollectionScans).run();
 			tx.delete(schema.garbageCollectionTenantRuns).run();
 		});

@@ -355,7 +355,10 @@ can request a collection through the admin API: `POST /gc` for the whole tenant,
 or `POST /cache/<name>/gc` for one named cache. The request ignores the
 collection interval and starts a new scan of every cache in its scope. It also
 discards any scan in progress in that scope, so a request that arrives while a
-large cache is being scanned starts that scan again.
+large cache is being scanned starts that scan again. Discarding a scan takes the
+same work for a cache of any size. The new scan deletes the discarded scan's
+marks in bounded steps before it marks anything, and a finished scan deletes its
+own marks in the same way.
 
 For each cache, a garbage collection:
 
