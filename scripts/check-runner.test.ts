@@ -1,5 +1,9 @@
+import { readFile } from 'node:fs/promises';
+
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
+import { z } from 'zod';
 
 import manifest from '../package.json';
 
@@ -67,6 +71,50 @@ describe('check plan', () => {
 				.select('tests')
 				.map(({ group }) => group)
 		).toStrictEqual(['server', 'unit', 'actions', 'scripts']);
+	});
+});
+
+const preCommitHookSchema = z.object({
+	id: z.string(),
+	entry: z.string().optional()
+});
+const preCommitRepositorySchema = z.object({
+	hooks: z.array(preCommitHookSchema)
+});
+const preCommitConfigSchema = z.object({
+	repos: z.array(preCommitRepositorySchema)
+});
+
+async function loadTypeCheckHookSelector(): Promise<RegExp> {
+	const configFile = new URL('../.pre-commit-config.yaml', import.meta.url);
+	const document: unknown = parse(await readFile(configFile, 'utf8'));
+	const config = preCommitConfigSchema.parse(document);
+	const hook = config.repos
+		.flatMap((repository) => repository.hooks)
+		.find(({ id }) => id === 'pnpm-check-types');
+	const selector = hook?.entry
+		?.split(' ')
+		.find((argument) => /^\/.+\/$/.test(argument));
+	if (selector === undefined) {
+		throw new Error('The pnpm-check-types hook has no script selector');
+	}
+
+	return new RegExp(selector.slice(1, -1));
+}
+
+describe('type-check commit hook', () => {
+	it('selects every script that type-checks a project', async () => {
+		const selector = await loadTypeCheckHookSelector();
+		expect(
+			Object.entries(manifest.scripts)
+				.filter(
+					([key, command]) =>
+						key === 'check:types' ||
+						(key.startsWith('check:') && /\btsc\b/.test(command))
+				)
+				.map(([key]) => key)
+				.filter((key) => !selector.test(key))
+		).toStrictEqual([]);
 	});
 });
 

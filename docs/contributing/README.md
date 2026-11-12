@@ -289,16 +289,19 @@ pnpm --filter @cupboard/server test
 pnpm test:actions
 pnpm test:scripts
 pnpm check:lint
-pnpm check:types
+pnpm run '/^check:types/'
 pnpm check --group server --concurrency 1
 ```
 
 The pre-commit hooks also catch a lot. When you commit, they run `check:deps`,
-`check:flake-deps`, `check:format`, `check:lint`, `check:knip` and
-`check:types`, but only when files that they check have changed. If you change
-the flake lock or the oracle data, they also run the conformance oracle test,
-which needs Nix. They run some standard file-hygiene checks too, and lint the
-workflows and actions with `actionlint` and `zizmor`.
+`check:flake-deps`, `check:format`, `check:lint`, `check:knip` and every script
+whose name starts with `check:types`, because a change in one project can break
+the types of another. A script that type-checks a project runs in the hooks only
+if its name starts with `check:types`. The hooks run only when files that they
+check have changed. If you change the flake lock or the oracle data, the hooks
+also run the conformance oracle test, which needs Nix. They run some standard
+file-hygiene checks too, and lint the workflows and actions with `actionlint`
+and `zizmor`.
 
 Run the full `pnpm check` before you push. CI runs each required source suite
 once and also checks:

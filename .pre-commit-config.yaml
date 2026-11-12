@@ -144,15 +144,22 @@ repos:
         files: *typescript_files
 
       - id: pnpm-check-types
-        name: pnpm check:types
-        entry: pnpm check:types
+        name: pnpm check:types (every TypeScript project)
+        # `pnpm check:types` runs only the packages' `check:types` scripts.
+        # The `check:types:*` scripts check `actions/`, `scripts/` and
+        # `tests/`.
+        entry: pnpm --workspace-concurrency=2 --no-bail run /^check:types/
         language: system
         pass_filenames: false
         files: >-
           (?x)^(
+            \.syncpackrc\.ts|
             actions/.+\.(json|ts|tsx)|
-            packages/.+\.(json|toml|ts|tsx)|
+            eslint\.config\.ts|
+            package\.json|
+            packages/.+\.(js|json|jsonc|ts|tsx|vars)|
             pnpm-lock\.yaml|
+            pnpm-workspace\.yaml|
             scripts/.+\.ts|
             tests/.+\.(json|ts|tsx)|
             tsconfig(\.base)?\.json
