@@ -1,6 +1,6 @@
 import { isContentAddress } from './content-address.ts';
 import { CorruptNarInfoError, MismatchedNarInfoPathError } from './errors.ts';
-import { decodeNixHashField, NixSha256Hash } from './hash.ts';
+import { decodeNixHashField, type NixHash, NixSha256Hash } from './hash.ts';
 import { narInfoSize } from './narinfo.ts';
 import {
 	referencesSchema,
@@ -75,7 +75,7 @@ class NarInfoReader {
 
 	private hasPath = false;
 
-	private narHash?: NixSha256Hash;
+	private narHash?: NixHash;
 
 	private contentAddress?: string;
 
@@ -180,7 +180,9 @@ class NarInfoReader {
 		}
 
 		if (name === 'Deriver') {
-			this.deriver = value === unknownDeriver ? undefined : this.inStore(value);
+			if (value !== unknownDeriver) {
+				this.deriver = this.inStore(value);
+			}
 
 			return;
 		}
@@ -217,8 +219,9 @@ class NarInfoReader {
 	}
 
 	// Validate every hash field so a malformed FileHash still rejects the
-	// document. Retain only a sha256 NarHash because offers compare NAR contents
-	// with that algorithm.
+	// document. The last NarHash line wins, as in Nix, whatever its algorithm.
+	// `substitution` then requires it to be sha256 because offers compare NAR
+	// contents with that algorithm.
 	private readHash(name: string, value: string): void {
 		const hash = decodeNixHashField(value);
 
@@ -226,11 +229,9 @@ class NarInfoReader {
 			throw new CorruptNarInfoError(this.storePath);
 		}
 
-		if (name !== 'NarHash' || hash.algorithm !== 'sha256') {
-			return;
+		if (name === 'NarHash') {
+			this.narHash = hash;
 		}
-
-		this.narHash = NixSha256Hash.fromDigest(hash.bytes);
 	}
 
 	private readSize(name: string, value: string): void {
@@ -267,7 +268,7 @@ class NarInfoReader {
 		// If any of these fields are missing, Nix treats the narinfo as corrupt.
 		// Reject the narinfo here so the client never reports the path as available.
 		if (
-			narHash === undefined ||
+			narHash?.algorithm !== 'sha256' ||
 			!this.hasPath ||
 			this.url === '' ||
 			this.narSize === 0
@@ -281,7 +282,7 @@ class NarInfoReader {
 				source: 'substituter',
 				references: this.references ?? [],
 				...(this.deriver !== undefined && { deriver: this.deriver }),
-				narHash,
+				narHash: NixSha256Hash.fromDigest(narHash.bytes),
 				signatures: [...this.signatures],
 				downloadSize: this.downloadSize,
 				narSize: this.narSize
