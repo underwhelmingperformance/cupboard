@@ -48,6 +48,11 @@ import {
 } from './context.ts';
 import { hourlyDeadline } from './hourly-deadline.ts';
 import { jsonRowLists } from './json-list.ts';
+import {
+	liveRootTargetCount,
+	liveRootTargets,
+	rootIncarnationKey
+} from './live-root-targets.ts';
 import { type NarInfoDemotionWatch } from './narinfo-demotion-watches.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
@@ -176,7 +181,7 @@ export class RootsService {
 		const requested = new Set<string>(
 			request.targets.map((target) => target.storePathHash)
 		);
-		const stored = this.rootTargetRows(cache, request.name);
+		const stored = this.liveTargetRows(cache, request.name);
 		const released = stored
 			.map((target) => target.storePathHash)
 			.filter((storePathHash) => !requested.has(storePathHash));
@@ -204,10 +209,11 @@ export class RootsService {
 			if (isTargetSetChanged) {
 				tx.delete(schema.retentionRootTargets)
 					.where(
-						and(
-							eq(schema.retentionRootTargets.cacheId, cache.id),
-							eq(schema.retentionRootTargets.rootName, request.name)
-						)
+						liveRootTargets({
+							cacheId: cache.id,
+							name: request.name,
+							incarnation: existing?.incarnation ?? undefined
+						})
 					)
 					.run();
 			}
@@ -294,7 +300,7 @@ export class RootsService {
 		return { expiresAt, createdAt, updatedAt: nowIso };
 	}
 
-	private rootTargetRows(
+	private liveTargetRows(
 		cache: ResolvedCache,
 		name: RootName
 	): readonly { storePathHash: StorePathHash; storePath: StorePathString }[] {
@@ -305,10 +311,7 @@ export class RootsService {
 			})
 			.from(schema.retentionRootTargets)
 			.where(
-				and(
-					eq(schema.retentionRootTargets.cacheId, cache.id),
-					eq(schema.retentionRootTargets.rootName, name)
-				)
+				liveRootTargets(rootIncarnationKey(this.context.db, cache.id, name))
 			)
 			.all();
 	}
@@ -789,7 +792,7 @@ export class RootsService {
 				expiresAt: new CacheClosureService(this.context).effectiveRootExpiry(),
 				createdAt: schema.retentionRoots.createdAt,
 				updatedAt: schema.retentionRoots.updatedAt,
-				targetCount: sql<number>`(select count(*) from ${schema.retentionRootTargets} where ${schema.retentionRootTargets.cacheId} = ${schema.retentionRoots.cacheId} and ${schema.retentionRootTargets.rootName} = ${schema.retentionRoots.name})`
+				targetCount: liveRootTargetCount()
 			})
 			.from(schema.retentionRoots)
 			.where(
@@ -833,6 +836,7 @@ export class RootsService {
 		}
 
 		const limit = Math.min(options.limit ?? rootListPageSize, rootListPageSize);
+		const root = rootIncarnationKey(this.context.db, cache.id, name);
 		const rows = this.context.db
 			.select({
 				storePathHash: schema.retentionRootTargets.storePathHash,
@@ -841,8 +845,7 @@ export class RootsService {
 			.from(schema.retentionRootTargets)
 			.where(
 				and(
-					eq(schema.retentionRootTargets.cacheId, cache.id),
-					eq(schema.retentionRootTargets.rootName, name),
+					liveRootTargets(root),
 					options.cursor === undefined
 						? undefined
 						: sql`${schema.retentionRootTargets.storePathHash} > ${options.cursor}`
@@ -873,7 +876,7 @@ export class RootsService {
 			return { name, removed: false };
 		}
 
-		const released = this.rootTargetRows(cache, name).map(
+		const released = this.liveTargetRows(cache, name).map(
 			(target) => target.storePathHash
 		);
 		const nowIso = isoTimestamp(new Date());
@@ -892,10 +895,11 @@ export class RootsService {
 
 			tx.delete(schema.retentionRootTargets)
 				.where(
-					and(
-						eq(schema.retentionRootTargets.cacheId, cache.id),
-						eq(schema.retentionRootTargets.rootName, name)
-					)
+					liveRootTargets({
+						cacheId: cache.id,
+						name,
+						incarnation: existing?.incarnation ?? undefined
+					})
 				)
 				.run();
 			tx.delete(schema.retentionRoots)
