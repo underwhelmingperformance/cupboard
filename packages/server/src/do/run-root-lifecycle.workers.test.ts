@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import {
 	graceSecondsSchema,
 	rootNameSchema,
@@ -24,6 +25,7 @@ import {
 	initialise,
 	narBytes,
 	putNarBytes,
+	removeRoot,
 	resetTestServer,
 	resolvedCache,
 	runGcResult,
@@ -83,23 +85,39 @@ async function pushWithRoot(
 	await commitUpload(token, decision.uploadId);
 }
 
+// Every target row, with whether the root of its name keeps it: the root
+// exists and has the row's incarnation.
 async function rootTargetRows() {
-	return runInDurableObject(currentServer(), (instance) =>
-		instance.context.db
+	return runInDurableObject(currentServer(), (instance) => {
+		const incarnations = new Map(
+			instance.context.db
+				.select({
+					cacheId: schema.retentionRoots.cacheId,
+					name: schema.retentionRoots.name,
+					incarnation: schema.retentionRoots.incarnation
+				})
+				.from(schema.retentionRoots)
+				.all()
+				.map((root) => [`${String(root.cacheId)} ${root.name}`, root])
+		);
+
+		return instance.context.db
 			.select()
 			.from(schema.retentionRootTargets)
 			.all()
-			.map(({ cacheId, ...row }) => ({
+			.map(({ cacheId, incarnation, ...row }) => ({
 				...row,
 				cache: instance.context.cacheRepository.scopeForId(cacheId),
-				incarnation: row.incarnation ?? undefined
+				isKept:
+					incarnations.get(`${String(cacheId)} ${row.rootName}`)
+						?.incarnation === incarnation
 			}))
 			.toSorted((left, right) =>
 				`${left.rootName} ${left.storePathHash}`.localeCompare(
 					`${right.rootName} ${right.storePathHash}`
 				)
-			)
-	);
+			);
+	});
 }
 
 async function retentionRootRows(): Promise<readonly unknown[]> {
@@ -203,7 +221,7 @@ describe('run root lifecycle', () => {
 			gatedRows: [
 				{
 					cache: defaultCache(),
-					incarnation: undefined,
+					isKept: true,
 					rootName: runRoot.name,
 					storePathHash: gated.storePathHash,
 					storePath: gated.storePath
@@ -250,14 +268,14 @@ describe('run root lifecycle', () => {
 		const expected = [
 			{
 				cache: defaultCache(),
-				incarnation: undefined,
+				isKept: true,
 				rootName: runRoot.name,
 				storePathHash: first.storePathHash,
 				storePath: first.storePath
 			},
 			{
 				cache: defaultCache(),
-				incarnation: undefined,
+				isKept: true,
 				rootName: runRoot.name,
 				storePathHash: second.storePathHash,
 				storePath: second.storePath
@@ -324,14 +342,14 @@ describe('run root lifecycle', () => {
 			targets: [
 				{
 					cache: defaultCache(),
-					incarnation: undefined,
+					isKept: true,
 					rootName: runRoot.name,
 					storePathHash: next.storePathHash,
 					storePath: next.storePath
 				},
 				{
 					cache: defaultCache(),
-					incarnation: undefined,
+					isKept: true,
 					rootName: 'main',
 					storePathHash: next.storePathHash,
 					storePath: next.storePath
@@ -408,7 +426,7 @@ describe('run root lifecycle', () => {
 			targets: [
 				{
 					cache: defaultCache(),
-					incarnation: undefined,
+					isKept: true,
 					rootName: 'main',
 					storePathHash: kept.storePathHash,
 					storePath: kept.storePath
@@ -477,7 +495,7 @@ describe('run root lifecycle', () => {
 			heldTargets: [
 				{
 					cache: defaultCache(),
-					incarnation: undefined,
+					isKept: true,
 					rootName: 'ci/run-2',
 					storePathHash: shared.storePathHash,
 					storePath: shared.storePath
@@ -534,4 +552,173 @@ describe('run root lifecycle', () => {
 			}
 		});
 	});
+
+	it('gives a new run root an incarnation once and stamps every attached target with it', async () => {
+		const token = await initialise();
+		const first = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'first',
+			storePathHash: 'a'.repeat(32)
+		});
+		const second = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'second',
+			storePathHash: 'b'.repeat(32)
+		});
+
+		await pushWithRoot(token, first, runRoot);
+		const afterFirst = await rootIncarnations();
+		await pushWithRoot(token, second, runRoot);
+		// A second run reuses `first`, so negotiation attaches it as a skip.
+		await negotiateWithRoot(token, [first], {
+			name: 'ci/run-2',
+			retention: runRoot.retention
+		});
+
+		const roots = await rootIncarnations();
+
+		expect({
+			isFirstStable: afterFirst.get(runRoot.name) === roots.get(runRoot.name),
+			areDistinct: roots.get(runRoot.name) !== roots.get('ci/run-2'),
+			targets: await targetIncarnations()
+		}).toStrictEqual({
+			isFirstStable: true,
+			areDistinct: true,
+			targets: [
+				{
+					rootName: runRoot.name,
+					storePathHash: first.storePathHash,
+					incarnation: roots.get(runRoot.name)
+				},
+				{
+					rootName: runRoot.name,
+					storePathHash: second.storePathHash,
+					incarnation: roots.get(runRoot.name)
+				},
+				{
+					rootName: 'ci/run-2',
+					storePathHash: first.storePathHash,
+					incarnation: roots.get('ci/run-2')
+				}
+			]
+		});
+	});
+
+	it('moves an attached path out of an earlier incarnation of the root', async () => {
+		const token = await initialise();
+		const shared = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'shared',
+			storePathHash: 'a'.repeat(32)
+		});
+
+		await pushWithRoot(token, shared, runRoot);
+		// A row of an earlier incarnation of the root, which a release would
+		// drain.
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				'UPDATE retention_root_target SET incarnation = 999999 WHERE root_name = ?',
+				runRoot.name
+			);
+		});
+		await negotiateWithRoot(token, [shared], runRoot);
+
+		expect(await rootTargetRows()).toStrictEqual([
+			{
+				cache: defaultCache(),
+				isKept: true,
+				rootName: runRoot.name,
+				storePathHash: shared.storePathHash,
+				storePath: shared.storePath
+			}
+		]);
+	});
+
+	it('adds no target and warns when the run root is removed before the commit attaches its path', async () => {
+		const token = await initialise();
+		const late = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'late',
+			storePathHash: 'a'.repeat(32)
+		});
+		const decision = singleDecision(
+			await negotiateWithRoot(token, [late], runRoot)
+		);
+
+		expect(decision.action).toBe('upload');
+
+		if (decision.action !== 'upload') {
+			return;
+		}
+
+		await putNarBytes(decision.r2Key);
+		await removeRoot(token, runRoot.name);
+		const capture = startCapture();
+
+		try {
+			await commitUpload(token, decision.uploadId);
+		} finally {
+			capture.stop();
+		}
+
+		const warnings = capture.logs
+			.filter((entry) => entry.level === 'warning')
+			.map((entry) => entry.properties);
+		const cacheId = await runInDurableObject(
+			currentServer(),
+			(instance) => resolvedCache(instance.context).id
+		);
+
+		expect({
+			targets: await rootTargetRows(),
+			roots: await retentionRootRows(),
+			warnings
+		}).toStrictEqual({
+			targets: [],
+			roots: [],
+			warnings: [
+				{
+					cacheId,
+					rootName: runRoot.name,
+					targets: 1
+				}
+			]
+		});
+	});
 });
+
+// The incarnation of each root, by name.
+async function rootIncarnations(): Promise<ReadonlyMap<string, unknown>> {
+	return runInDurableObject(
+		currentServer(),
+		(instance) =>
+			new Map(
+				instance.context.db
+					.select({
+						name: schema.retentionRoots.name,
+						incarnation: schema.retentionRoots.incarnation
+					})
+					.from(schema.retentionRoots)
+					.all()
+					.map((root) => [root.name, root.incarnation])
+			)
+	);
+}
+
+// Each target row's root, path and incarnation.
+async function targetIncarnations(): Promise<readonly unknown[]> {
+	return runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				rootName: schema.retentionRootTargets.rootName,
+				storePathHash: schema.retentionRootTargets.storePathHash,
+				incarnation: schema.retentionRootTargets.incarnation
+			})
+			.from(schema.retentionRootTargets)
+			.orderBy(
+				schema.retentionRootTargets.rootName,
+				schema.retentionRootTargets.storePathHash
+			)
+			.all()
+	);
+}

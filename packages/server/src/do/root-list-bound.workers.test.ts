@@ -4,6 +4,7 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
+import { and, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as schema from '../db/schema.ts';
@@ -31,6 +32,7 @@ function syntheticHash(index: number): string {
 	return `${'0'.repeat(30)}${suffix}`;
 }
 
+// Attaches the rows to the root's incarnation, as an attach does.
 async function seedTargets(
 	name: string,
 	indexes: readonly number[]
@@ -38,6 +40,17 @@ async function seedTargets(
 	await runInDurableObject(currentServer(), (instance) => {
 		const cacheId = resolvedCache(instance.context).id;
 		const rootName = rootNameSchema.parse(name);
+		const incarnation =
+			instance.context.db
+				.select({ incarnation: schema.retentionRoots.incarnation })
+				.from(schema.retentionRoots)
+				.where(
+					and(
+						eq(schema.retentionRoots.cacheId, cacheId),
+						eq(schema.retentionRoots.name, rootName)
+					)
+				)
+				.get()?.incarnation ?? undefined;
 
 		for (const index of indexes) {
 			const storePathHash = syntheticHash(index);
@@ -50,7 +63,8 @@ async function seedTargets(
 					storePathHash: storePathHashSchema.parse(storePathHash),
 					storePath: storePathSchema.parse(
 						`/nix/store/${storePathHash}-seeded-${String(index)}`
-					)
+					),
+					incarnation
 				})
 				.onConflictDoNothing()
 				.run();

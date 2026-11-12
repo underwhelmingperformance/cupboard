@@ -132,25 +132,36 @@ function singleRequest(token: string, entry: Entry): Promise<Response> {
 // The stored root and target rows of one root. The rows report the name
 // `compared`, so the rows of two roots compare equal when only their names
 // differ.
+// Two roots have different incarnations, so the comparison records only
+// whether a root has one and whether its targets have the same one.
 function storedRoot(context: ServerContext, name: string) {
 	const cacheId = resolvedCache(context).id;
 	const storedName = rootNameSchema.parse('compared');
+	const roots = context.db
+		.select()
+		.from(schema.retentionRoots)
+		.where(eq(schema.retentionRoots.cacheId, cacheId))
+		.all()
+		.filter((root) => root.name === name);
+	const incarnation = roots[0]?.incarnation;
 
 	return {
-		roots: context.db
-			.select()
-			.from(schema.retentionRoots)
-			.where(eq(schema.retentionRoots.cacheId, cacheId))
-			.all()
-			.filter((root) => root.name === name)
-			.map((root) => ({ ...root, name: storedName })),
+		roots: roots.map(({ incarnation: rootIncarnation, ...root }) => ({
+			...root,
+			name: storedName,
+			hasIncarnation: rootIncarnation !== null
+		})),
 		targets: context.db
 			.select()
 			.from(schema.retentionRootTargets)
 			.where(eq(schema.retentionRootTargets.cacheId, cacheId))
 			.all()
 			.filter((target) => target.rootName === name)
-			.map((target) => ({ ...target, rootName: storedName }))
+			.map(({ incarnation: targetIncarnation, ...target }) => ({
+				...target,
+				rootName: storedName,
+				isKept: targetIncarnation === incarnation
+			}))
 	};
 }
 
@@ -541,8 +552,8 @@ describe('batched root requests', () => {
 				singles: {
 					cost: {
 						...noCost,
-						rowsRead: 147,
-						rowsWritten: 30,
+						rowsRead: 153,
+						rowsWritten: 33,
 						d1Calls: 9,
 						d1RowsRead: 23,
 						r2Head: 6
@@ -552,8 +563,8 @@ describe('batched root requests', () => {
 				batch: {
 					cost: {
 						...noCost,
-						rowsRead: 77,
-						rowsWritten: 30,
+						rowsRead: 83,
+						rowsWritten: 33,
 						d1Calls: 3,
 						d1RowsRead: 15,
 						r2Head: 4
@@ -565,7 +576,7 @@ describe('batched root requests', () => {
 				singles: {
 					cost: {
 						...noCost,
-						rowsRead: 152,
+						rowsRead: 150,
 						rowsWritten: 9,
 						d1Calls: 9,
 						d1RowsRead: 23,
@@ -577,7 +588,7 @@ describe('batched root requests', () => {
 				batch: {
 					cost: {
 						...noCost,
-						rowsRead: 83,
+						rowsRead: 79,
 						rowsWritten: 9,
 						d1Calls: 3,
 						d1RowsRead: 15,
@@ -633,8 +644,8 @@ describe('batched root requests', () => {
 
 		expect(cost).toStrictEqual({
 			...noCost,
-			rowsRead: 82,
-			rowsWritten: 27,
+			rowsRead: 88,
+			rowsWritten: 30,
 			d1Calls: 3,
 			d1RowsRead: 15,
 			r2Head: 4
