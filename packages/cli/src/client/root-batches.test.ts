@@ -2,9 +2,11 @@ import { rootNameSchema, storePathSchema } from '@cupboard/nix-store/scalars';
 import { rootBatchCapacity } from '@cupboard/protocol/retention';
 import { describe, expect, it } from 'vitest';
 
-import { RootTargetLimitError } from '../push/push.ts';
-
-import { type RootBatchEntry, rootBatches } from './root-batches.ts';
+import {
+	type RootBatchEntry,
+	rootBatches,
+	RootTargetLimitError
+} from './root-batches.ts';
 
 function entry(index: number, targetCount: number): RootBatchEntry {
 	return {

@@ -772,6 +772,8 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 				status: 'committed' as const,
 				settled: Promise.resolve()
 			}),
+		applyRoots: () =>
+			Promise.reject(new Error('applyRoots needs a roots file')),
 		setRoot: (name, _body) => {
 			rootSets.push(name);
 			rootRequests.push({ name, body: _body });

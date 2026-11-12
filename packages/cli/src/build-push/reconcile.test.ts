@@ -317,6 +317,8 @@ function harness(options: HarnessOptions = {}): Harness {
 
 			return Promise.resolve(outcome);
 		},
+		applyRoots: () =>
+			Promise.reject(new Error('applyRoots needs a roots file')),
 		setRoot: (name, body) => {
 			rootReplacements.push({ name, body });
 

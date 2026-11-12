@@ -31,7 +31,7 @@ export interface RootEnsureGrantIntent {
 	readonly root: RootName;
 }
 
-export interface RootsEnsureGrantIntent {
+export interface RootSetGrantIntent {
 	readonly cache: CacheScope;
 	readonly roots: readonly RootName[];
 }
@@ -358,11 +358,11 @@ export function rootSetSelectors(
 }
 
 /**
-Requests `root:set` for every root that one batched ensure names, with the
-selectors that `rootSetSelectors` chooses.
+Requests `root:set` for every root in one batched update, with the selectors
+that `rootSetSelectors` chooses.
 */
-export function rootsEnsureAuthorizationDetails(
-	intent: RootsEnsureGrantIntent
+export function rootSetAuthorizationDetails(
+	intent: RootSetGrantIntent
 ): AuthorizationDetails {
 	return rootSetDetails(
 		intent.cache,

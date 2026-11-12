@@ -1,4 +1,5 @@
 import {
+	cohortRootsVersion,
 	type DocumentVersions,
 	publishPlanVersion
 } from '@cupboard/protocol/publish-plan';
@@ -7,7 +8,8 @@ import type { Command } from 'commander';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 
 const documentVersions: DocumentVersions = {
-	publishPlan: publishPlanVersion
+	publishPlan: publishPlanVersion,
+	cohortRoots: cohortRootsVersion
 };
 
 export function registerDocumentVersionsCommand(

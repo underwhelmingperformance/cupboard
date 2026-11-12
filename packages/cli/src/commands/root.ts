@@ -42,7 +42,7 @@ import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	rootEnsureAuthorizationDetails,
 	rootListAuthorizationDetails,
-	rootsEnsureAuthorizationDetails
+	rootSetAuthorizationDetails
 } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
@@ -55,6 +55,7 @@ import {
 	applyRootBatches,
 	type RootBatchEntry,
 	rootBatches,
+	RootTargetLimitError,
 	separateRootRequestConcurrency
 } from '../client/root-batches.ts';
 import { isRpcProcedureMissingError } from '../client/rpc-errors.ts';
@@ -62,7 +63,6 @@ import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
 import { CliUsageError } from '../errors.ts';
 import { parsePublishPlan } from '../plan/publish-plan-file.ts';
-import { RootTargetLimitError } from '../push/push.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -193,7 +193,7 @@ export function registerRootCommands(
 			{
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
-				authorizationDetails: rootsEnsureAuthorizationDetails({
+				authorizationDetails: rootSetAuthorizationDetails({
 					cache: target.cache,
 					roots: roots.map((entry) => entry.name)
 				})
@@ -546,7 +546,10 @@ async function ensureRoots(
 	client: Pick<RootClient, 'batch' | 'ensure'>
 ): Promise<readonly RootBatchResult[]> {
 	try {
-		return await applyRootBatches(client, cache, entries);
+		return await applyRootBatches(
+			(body) => callInCache(client.batch, cache, body),
+			entries
+		);
 	} catch (error) {
 		if (!isRpcProcedureMissingError(error)) {
 			throw error;

@@ -1446,7 +1446,9 @@ export class AttestAttachBundleRequiredError extends CliUsageError {
 }
 
 export class NoRetainConflictError extends CliUsageError {
-	constructor(public readonly flag: '--root' | '--ttl' | '--permanent') {
+	constructor(
+		public readonly flag: '--root' | '--roots-file' | '--ttl' | '--permanent'
+	) {
 		super(`--no-retain cannot be combined with ${flag}`);
 		this.name = 'NoRetainConflictError';
 	}

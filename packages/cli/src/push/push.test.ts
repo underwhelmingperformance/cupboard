@@ -25,6 +25,8 @@ import {
 } from '@cupboard/protocol/build';
 import { pushSummaryResultKind } from '@cupboard/protocol/reports';
 import {
+	type RootBatchBody,
+	rootBatchResponseSchema,
 	type RootSetBodyInput,
 	rootSetMaxTargets,
 	type RootSetResponseInput
@@ -55,6 +57,7 @@ import { z } from 'zod';
 
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
+import { RootTargetLimitError } from '../client/root-batches.ts';
 import { waitTimeoutSecondsSchema } from '../duration.ts';
 import {
 	AttestationDivergedPathError,
@@ -83,7 +86,7 @@ import { PublicationCollection } from './publication.ts';
 import {
 	type PushClient,
 	type PushDependencies,
-	RootTargetLimitError,
+	RootTargetsUnavailableError,
 	runPush
 } from './push.ts';
 import type { ReferenceMetadata } from './reference.ts';
@@ -197,6 +200,10 @@ function unexpectedSetRootCall(): Promise<never> {
 	return Promise.reject(
 		new Error('setRoot should not be called during a dry run')
 	);
+}
+
+function unexpectedApplyRootsCall(): Promise<never> {
+	return Promise.reject(new Error('applyRoots needs a roots file'));
 }
 
 describe('runPush', () => {
@@ -834,6 +841,7 @@ describe('runPush', () => {
 							),
 						uploadNar: unexpectedUploadNarCall,
 						commit: unexpectedCommitCall,
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: unexpectedSetRootCall
 					}
 				})
@@ -859,6 +867,7 @@ describe('runPush', () => {
 					negotiate: unexpectedNegotiateCall,
 					uploadNar: unexpectedUploadNarCall,
 					commit: unexpectedCommitCall,
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: unexpectedSetRootCall
 				}
 			})
@@ -886,6 +895,7 @@ describe('runPush', () => {
 					negotiate: unexpectedNegotiateCall,
 					uploadNar: unexpectedUploadNarCall,
 					commit: unexpectedCommitCall,
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: unexpectedSetRootCall
 				}
 			})
@@ -945,6 +955,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nix: nixStore({
@@ -1029,6 +1040,7 @@ describe('runPush', () => {
 						),
 					uploadNar: () => Promise.reject(failure),
 					commit: unexpectedCommitCall,
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: unexpectedSetRootCall
 				} satisfies PushClient,
 				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -1102,6 +1114,7 @@ describe('runPush', () => {
 				},
 				uploadNar: unexpectedUploadNarCall,
 				commit: unexpectedCommitCall,
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -1187,6 +1200,7 @@ describe('runPush', () => {
 					uploadedKeys.push(r2Key);
 				},
 				commit: () => Promise.resolve(fallbackCommitResponse()),
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nix: nixStore(closure),
@@ -1244,6 +1258,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (rootName, body) =>
 					Promise.resolve(rootSummary({ name: rootName, ...body }))
 			} satisfies PushClient,
@@ -1313,6 +1328,7 @@ describe('runPush', () => {
 					},
 					commit: unexpectedCommitCall,
 					openCommitSession: () => Promise.resolve(session),
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: (rootName, body) =>
 						Promise.resolve(rootSummary({ name: rootName, ...body }))
 				} satisfies PushClient,
@@ -1395,6 +1411,7 @@ describe('runPush', () => {
 						await collectReadableStream(body);
 					},
 					commit: () => Promise.resolve(fallbackCommitResponse()),
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: (rootName, body) =>
 						Promise.resolve(rootSummary({ name: rootName, ...body }))
 				} satisfies PushClient,
@@ -1466,6 +1483,7 @@ describe('runPush', () => {
 						await collectReadableStream(body);
 					},
 					commit: () => Promise.resolve(fallbackCommitResponse()),
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: (rootName, body) =>
 						Promise.resolve(rootSummary({ name: rootName, ...body }))
 				} satisfies PushClient,
@@ -1609,6 +1627,7 @@ describe('runPush', () => {
 						commits.push(target);
 						return Promise.resolve(fallbackCommitResponse());
 					},
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: (rootName, body) =>
 						Promise.resolve(rootSummary({ name: rootName, ...body }))
 				} satisfies PushClient,
@@ -1737,6 +1756,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (rootName, body) =>
 					Promise.resolve(rootSummary({ name: rootName, ...body }))
 			} satisfies PushClient,
@@ -1838,6 +1858,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (rootName, body) =>
 					Promise.resolve(rootSummary({ name: rootName, ...body }))
 			} satisfies PushClient,
@@ -1900,6 +1921,7 @@ describe('runPush', () => {
 					},
 					uploadNar: unexpectedUploadNarCall,
 					commit: unexpectedCommitCall,
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: (rootName, body) =>
 						Promise.resolve(rootSummary({ name: rootName, ...body }))
 				} satisfies PushClient,
@@ -1961,6 +1983,7 @@ describe('runPush', () => {
 
 					return Promise.resolve(fallbackCommitResponse());
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -2087,6 +2110,7 @@ describe('runPush', () => {
 
 					return Promise.resolve(fallbackCommitResponse());
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -2358,6 +2382,7 @@ describe('runPush', () => {
 
 					return Promise.resolve(fallbackCommitResponse());
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -2476,6 +2501,7 @@ describe('runPush', () => {
 								settled: absentVerdict
 							});
 						},
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: (name, body) =>
 							Promise.resolve(rootSummary({ name, ...body }))
 					} satisfies PushClient,
@@ -2598,6 +2624,7 @@ describe('runPush', () => {
 
 					return Promise.resolve(fallbackCommitResponse());
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: () => {
 					clientCalls.push({ method: 'setRoot' });
 
@@ -2694,6 +2721,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot() {
 					clientCalls.push({ method: 'setRoot' });
 
@@ -2776,6 +2804,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot(name, body) {
 					clientCalls.push({ method: 'setRoot', fields: { name, ...body } });
 
@@ -2966,6 +2995,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => {
 					events.push('setRoot');
 
@@ -3422,6 +3452,7 @@ describe('runPush', () => {
 						status: 'committed',
 						settled: Promise.resolve()
 					}),
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nix: nixStore({
@@ -3487,6 +3518,7 @@ describe('runPush', () => {
 
 					return Promise.resolve(fallbackCommitResponse());
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot() {
 					clientCalls.push({ method: 'setRoot' });
 
@@ -3816,6 +3848,443 @@ describe('runPush', () => {
 		});
 	});
 
+	it('sets the roots of a roots file through one batched request', async () => {
+		const clientCalls: unknown[] = [];
+		const results: ResultRow[][] = [];
+		const batches: RootBatchBody[] = [];
+
+		await runPush(publication([appPath, runtimePath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'github-oidc',
+			client: {
+				...skipClient([], clientCalls),
+				applyRoots(body) {
+					batches.push(body);
+
+					return Promise.resolve(
+						rootBatchResponseSchema.parse({
+							roots: body.roots.map((entry) => ({
+								name: entry.name,
+								status: 'retained' as const,
+								root: rootSummary(entry)
+							}))
+						})
+					);
+				}
+			},
+			roots: [
+				{
+					action: 'set',
+					name: rootName('github:acme/app/main/app'),
+					targets: [appPath]
+				},
+				{
+					action: 'set',
+					name: rootName('github:acme/app/main/upstream'),
+					targets: []
+				},
+				{ action: 'unchanged', name: rootName('github:acme/app/main/tool') }
+			],
+			retention: { kind: 'permanent' },
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			})
+		});
+
+		expect({ clientCalls, batches, results }).toStrictEqual({
+			clientCalls: [{ method: 'negotiate', paths: [appPath, runtimePath] }],
+			batches: [
+				{
+					roots: [
+						{
+							action: 'set',
+							name: 'github:acme/app/main/app',
+							targets: [appPath],
+							retention: { kind: 'permanent' }
+						},
+						{
+							action: 'set',
+							name: 'github:acme/app/main/upstream',
+							targets: [],
+							retention: { kind: 'permanent' }
+						}
+					]
+				}
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Available paths', value: '2' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '2' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Roots', value: '2' },
+					{ label: 'Unchanged roots', value: '1' },
+					{
+						label: StorePath.basename(appPath),
+						value: 'available; root github:acme/app/main/app, permanent'
+					},
+					{
+						label: StorePath.basename(runtimePath),
+						value: 'available; retention grace not reported'
+					}
+				]
+			]
+		});
+	});
+
+	it('sets each root of a roots file separately when the server has no batched root update', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+		const results: ResultRow[][] = [];
+
+		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'github-oidc',
+			client: {
+				...skipClient(roots, clientCalls),
+				applyRoots: () =>
+					Promise.reject(
+						new ORPCError('NOT_FOUND', {
+							status: 404,
+							data: { status: 404, headers: {}, body: 'Not found\n' }
+						})
+					)
+			},
+			roots: [
+				{
+					action: 'set',
+					name: rootName('github:acme/app/main/app'),
+					targets: [appPath]
+				},
+				{
+					action: 'set',
+					name: rootName('github:acme/app/main/upstream'),
+					targets: []
+				}
+			],
+			retention: { kind: 'permanent' },
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		expect({ roots, results }).toStrictEqual({
+			roots: [
+				{
+					fields: {
+						name: 'github:acme/app/main/app',
+						targets: [appPath],
+						retention: { kind: 'permanent' }
+					}
+				},
+				{
+					fields: {
+						name: 'github:acme/app/main/upstream',
+						targets: [],
+						retention: { kind: 'permanent' }
+					}
+				}
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Available paths', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '1' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Roots', value: '2' }
+				]
+			]
+		});
+	});
+
+	it('warns about the targets that no root of a roots file retains', async () => {
+		const warns: { label: string; value?: string }[] = [];
+
+		await runPush(publication([appPath, runtimePath]), reporter([], warns), {
+			command: 'cupboard push',
+			credential: 'github-oidc',
+			client: {
+				...skipClient([], []),
+				applyRoots: (body) =>
+					Promise.resolve(
+						rootBatchResponseSchema.parse({
+							roots: body.roots.map((entry) => ({
+								name: entry.name,
+								status: 'retained',
+								root: rootSummary(entry)
+							}))
+						})
+					)
+			},
+			roots: [
+				{
+					action: 'set',
+					name: rootName('github:acme/app/main/app'),
+					targets: [appPath]
+				},
+				{ action: 'unchanged', name: rootName('github:acme/app/main/runtime') }
+			],
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			})
+		});
+
+		expect(warns).toStrictEqual([
+			{
+				label: 'unretained',
+				value:
+					'the cache did not report retention grace; this push sets no retention root for these paths, so unless an existing root keeps them, the next collection can remove them'
+			}
+		]);
+	});
+
+	it('passes a typed 409 from a separate root update through unchanged', async () => {
+		const refusal = new ORPCError('CACHE_RETENTION_MIGRATION_PENDING', {
+			status: 409,
+			defined: true
+		});
+		let failure: unknown;
+
+		try {
+			await runPush(publication([]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'github-oidc',
+				client: {
+					...skipClient([], []),
+					applyRoots: () =>
+						Promise.reject(
+							new ORPCError('NOT_FOUND', {
+								status: 404,
+								data: { status: 404, headers: {}, body: 'Not found\n' }
+							})
+						),
+					setRoot: () => Promise.reject(refusal)
+				},
+				roots: [
+					{
+						action: 'set',
+						name: rootName('github:acme/app/main/app'),
+						targets: [appPath]
+					}
+				]
+			});
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBe(refusal);
+	});
+
+	it('previews the targets that no root of a roots file retains', async () => {
+		const results: ResultRow[][] = [];
+		const warns: { label: string; value?: string }[] = [];
+
+		await runPush(
+			publication([appPath, runtimePath]),
+			reporter(results, warns),
+			{
+				command: 'cupboard push',
+				credential: 'github-oidc',
+				dryRun: true,
+				client: {
+					...skipClient([], []),
+					preview: (body) =>
+						Promise.resolve(
+							uploadPreviewResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'skip',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash
+								}))
+							})
+						)
+				},
+				roots: [
+					{
+						action: 'set',
+						name: rootName('github:acme/app/main/app'),
+						targets: [appPath]
+					},
+					{
+						action: 'unchanged',
+						name: rootName('github:acme/app/main/runtime')
+					}
+				],
+				retention: {
+					kind: 'duration',
+					seconds: ttlSecondsSchema.parse(604_800)
+				},
+				nix: nixStore({
+					[appPath]: pathInfo(appPath, appDigest, []),
+					[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+				})
+			}
+		);
+
+		expect({ results, warns }).toStrictEqual({
+			results: [
+				[
+					{ label: 'Would upload', value: '0' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '2' },
+					{ label: 'Would set roots', value: '1' },
+					{ label: 'Root expiry', value: 'expires after 604,800s' },
+					{
+						label: StorePath.basename(appPath),
+						value: 'retention grace not reported'
+					},
+					{
+						label: StorePath.basename(runtimePath),
+						value: 'retention grace not reported'
+					}
+				]
+			],
+			warns: [
+				{
+					label: 'unretained',
+					value:
+						'the cache did not report retention grace; this push sets no retention root for these paths, so unless an existing root keeps them, the next collection can remove them'
+				}
+			]
+		});
+	});
+
+	it('lists every target of a preview, even after the first 20 paths', async () => {
+		const results: ResultRow[][] = [];
+		const appTargets = Array.from({ length: 21 }, (_, index) =>
+			storePathSchema.parse(
+				`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+			)
+		);
+		const store = nixStore({
+			[runtimePath]: pathInfo(runtimePath, runtimeDigest, []),
+			...Object.fromEntries(
+				appTargets.map((storePath) => [
+					storePath,
+					pathInfo(storePath, appDigest, [])
+				])
+			)
+		});
+
+		await runPush(
+			publication([...appTargets, runtimePath]),
+			reporter(results, []),
+			{
+				command: 'cupboard push',
+				credential: 'github-oidc',
+				dryRun: true,
+				client: {
+					...skipClient([], []),
+					preview: (body) =>
+						Promise.resolve(
+							uploadPreviewResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'skip',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash
+								}))
+							})
+						)
+				},
+				roots: [
+					{
+						action: 'set',
+						name: rootName('github:acme/app/main/app'),
+						targets: appTargets
+					},
+					{
+						action: 'unchanged',
+						name: rootName('github:acme/app/main/runtime')
+					}
+				],
+				nix: store
+			}
+		);
+
+		expect(results.at(-1)?.slice(5)).toStrictEqual(
+			[...appTargets, runtimePath].map((storePath) => ({
+				label: StorePath.basename(storePath),
+				value: 'retention grace not reported'
+			}))
+		);
+	});
+
+	it('reports the roots that the cache set before failing for a root that it refused', async () => {
+		const results: ResultRow[][] = [];
+		let failure: unknown;
+
+		try {
+			await runPush(publication([]), reporter(results), {
+				command: 'cupboard push',
+				credential: 'github-oidc',
+				client: {
+					...skipClient([], []),
+					applyRoots: (body) =>
+						Promise.resolve(
+							rootBatchResponseSchema.parse({
+								roots: body.roots.map((entry) =>
+									entry.targets.includes(runtimePath)
+										? {
+												name: entry.name,
+												status: 'targets-unavailable',
+												unavailable: [runtimePath]
+											}
+										: {
+												name: entry.name,
+												status: 'retained',
+												root: rootSummary(entry)
+											}
+								)
+							})
+						)
+				},
+				roots: [
+					{
+						action: 'set',
+						name: rootName('github:acme/app/main/app'),
+						targets: [appPath]
+					},
+					{
+						action: 'set',
+						name: rootName('github:acme/app/main/runtime'),
+						targets: [runtimePath]
+					}
+				]
+			});
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(RootTargetsUnavailableError);
+		expect({
+			refused:
+				failure instanceof RootTargetsUnavailableError
+					? failure.refused
+					: undefined,
+			results
+		}).toStrictEqual({
+			refused: [
+				{
+					root: 'github:acme/app/main/runtime',
+					unavailable: [runtimePath]
+				}
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Available paths', value: '0' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '0' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Roots', value: '1' },
+					{ label: 'Refused roots', value: '1' }
+				]
+			]
+		});
+	});
+
 	it('resolves metadata for exactly the publication entries by default', async () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
@@ -4095,6 +4564,7 @@ describe('runPush', () => {
 
 							return Promise.resolve(fallbackCommitResponse());
 						},
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot(name, body) {
 							roots.push({ fields: { name, ...body } });
 
@@ -4358,6 +4828,7 @@ describe('runPush', () => {
 							),
 						uploadNar: unexpectedUploadNarCall,
 						commit: unexpectedCommitCall,
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: unexpectedSetRootCall
 					} satisfies PushClient,
 					createNarArchive: () => {
@@ -4606,6 +5077,7 @@ describe('runPush', () => {
 							),
 						uploadNar: unexpectedUploadNarCall,
 						commit: unexpectedCommitCall,
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot(name, body) {
 							roots.push({ fields: { name, ...body } });
 
@@ -4679,6 +5151,7 @@ describe('runPush', () => {
 
 					return Promise.resolve(fallbackCommitResponse());
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			root: rootName('main'),
@@ -4745,6 +5218,7 @@ describe('runPush', () => {
 
 						return Promise.resolve(fallbackCommitResponse());
 					},
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: (name, body) =>
 						Promise.resolve(rootSummary({ name, ...body }))
 				} satisfies PushClient,
@@ -4805,6 +5279,7 @@ describe('runPush', () => {
 						),
 					uploadNar: () => Promise.resolve(),
 					commit: unexpectedCommitCall,
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: unexpectedSetRootCall
 				} satisfies PushClient,
 				root: rootName('main'),
@@ -5051,7 +5526,7 @@ describe('runPush', () => {
 				{
 					label: 'unretained',
 					value:
-						'the cache has no retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
+						'the cache did not report retention grace; these paths have no retention root and no reported grace deadline, so the next collection can remove them'
 				}
 			]
 		});
@@ -5217,6 +5692,7 @@ describe('runPush', () => {
 				},
 				uploadNar: unexpectedUploadNarCall,
 				commit: unexpectedCommitCall,
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: unexpectedSetRootCall
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -5271,6 +5747,7 @@ describe('runPush', () => {
 				client: {
 					preview: unexpectedPreviewCall,
 					...deferredUpload(events),
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot(name, body) {
 						events.push('setRoot');
 
@@ -5399,6 +5876,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot(name, body) {
 					events.push('setRoot');
 
@@ -5452,6 +5930,7 @@ describe('runPush', () => {
 
 				return Promise.resolve(fallbackCommitResponse());
 			},
+			applyRoots: unexpectedApplyRootsCall,
 			setRoot(name, body) {
 				const expiresAt = expiries.at(call) ?? expiries.at(-1);
 				call += 1;
@@ -5535,6 +6014,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot(name, body) {
 					events.push('setRoot');
 
@@ -5573,6 +6053,7 @@ describe('runPush', () => {
 						new UploadVerificationFailedError('upload-app', 'mismatch')
 					);
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot(name, body) {
 					events.push('setRoot');
 
@@ -5654,6 +6135,7 @@ describe('runPush', () => {
 						settled: failedVerdict
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot(name, body) {
 					events.push('setRoot');
 
@@ -5755,6 +6237,7 @@ describe('runPush', () => {
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot(_name, body) {
 					roots.push(body);
 
@@ -5871,6 +6354,7 @@ describe('runPush', () => {
 							}))
 						})
 					),
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: () => Promise.resolve(retained)
 			},
 			nix: nixStore({
@@ -5996,6 +6480,7 @@ describe('runPush', () => {
 							status: 'committed',
 							settled: Promise.resolve()
 						}),
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: (name, body) =>
 						Promise.resolve(rootSummary({ name, ...body }))
 				} satisfies PushClient,
@@ -6100,6 +6585,7 @@ describe('runPush', () => {
 						settled: Promise.resolve(),
 						grace: { graceSeconds: graceSecondsSchema.parse(900) }
 					}),
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -6277,6 +6763,7 @@ describe('runPush', () => {
 							Promise.reject(new ORPCError('NOT_FOUND', { defined: true })),
 						uploadNar: unexpectedUploadNarCall,
 						commit: unexpectedCommitCall,
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: unexpectedSetRootCall
 					} satisfies PushClient,
 					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -6312,6 +6799,7 @@ describe('runPush', () => {
 						},
 						uploadNar: unexpectedUploadNarCall,
 						commit: unexpectedCommitCall,
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: unexpectedSetRootCall
 					} satisfies PushClient,
 					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -6368,6 +6856,7 @@ describe('runPush', () => {
 						},
 						uploadNar: unexpectedUploadNarCall,
 						commit: unexpectedCommitCall,
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: unexpectedSetRootCall
 					} satisfies PushClient,
 					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -6411,6 +6900,7 @@ describe('runPush', () => {
 							tenantServes,
 							uploadNar: unexpectedUploadNarCall,
 							commit: unexpectedCommitCall,
+							applyRoots: unexpectedApplyRootsCall,
 							setRoot: unexpectedSetRootCall
 						} satisfies PushClient,
 						nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -6442,6 +6932,7 @@ describe('runPush', () => {
 						tenantServes: () => Promise.resolve(true),
 						uploadNar: unexpectedUploadNarCall,
 						commit: unexpectedCommitCall,
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: unexpectedSetRootCall
 					} satisfies PushClient,
 					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -6484,6 +6975,7 @@ describe('runPush', () => {
 					),
 				uploadNar: unexpectedUploadNarCall,
 				commit: unexpectedCommitCall,
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: unexpectedSetRootCall
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -6531,6 +7023,7 @@ describe('runPush', () => {
 							),
 						uploadNar: unexpectedUploadNarCall,
 						commit: unexpectedCommitCall,
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: unexpectedSetRootCall
 					} satisfies PushClient,
 					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -6561,6 +7054,54 @@ describe('runPush', () => {
 		}
 	);
 
+	it.each([
+		{
+			grace: {},
+			warning:
+				'the cache has no retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
+		},
+		{
+			grace: undefined,
+			warning:
+				'the cache did not report retention grace; these paths have no retention root and no reported grace deadline, so the next collection can remove them'
+		}
+	])(
+		'with --dry-run --no-retain and grace $grace, warns: $warning',
+		async ({ grace, warning }) => {
+			const warns: { label: string; value?: string }[] = [];
+
+			await runPush(publication([appPath]), reporter([], warns), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				dryRun: true,
+				retain: false,
+				client: {
+					negotiate: unexpectedNegotiateCall,
+					preview: () =>
+						Promise.resolve(
+							uploadPreviewResponseSchema.parse({
+								uploads: [
+									{
+										action: 'skip' as const,
+										storePathHash: StorePath.hash(appPath),
+										narHash: appDigest.narHash.toString(),
+										...(grace !== undefined && { grace })
+									}
+								]
+							})
+						),
+					uploadNar: unexpectedUploadNarCall,
+					commit: unexpectedCommitCall,
+					applyRoots: unexpectedApplyRootsCall,
+					setRoot: unexpectedSetRootCall
+				} satisfies PushClient,
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+			});
+
+			expect(warns).toStrictEqual([{ label: 'unretained', value: warning }]);
+		}
+	);
+
 	it('with --dry-run, warns when the cache holds a different NAR for a skipped path', async () => {
 		const cacheDigest = digest(9, 999);
 		const warns: { label: string; value?: string }[] = [];
@@ -6585,6 +7126,7 @@ describe('runPush', () => {
 					),
 				uploadNar: unexpectedUploadNarCall,
 				commit: unexpectedCommitCall,
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: unexpectedSetRootCall
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -6655,6 +7197,7 @@ function receiptPush(
 								status: 'already-present' as const
 							}
 				),
+			applyRoots: unexpectedApplyRootsCall,
 			setRoot: unexpectedSetRootCall
 		} satisfies PushClient,
 		nix: nixStore({
@@ -6923,6 +7466,7 @@ describe('the build receipt a push writes', () => {
 							),
 						uploadNar: unexpectedUploadNarCall,
 						commit: () => Promise.resolve(fallbackCommitResponse()),
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: unexpectedSetRootCall
 					} satisfies PushClient,
 					createNarArchive: () => new FakeNarArchive(appDigest),
@@ -6981,6 +7525,7 @@ describe('the build receipt a push writes', () => {
 							),
 						uploadNar: unexpectedUploadNarCall,
 						commit: unexpectedCommitCall,
+						applyRoots: unexpectedApplyRootsCall,
 						setRoot: unexpectedSetRootCall
 					} satisfies PushClient
 				}
@@ -7025,6 +7570,7 @@ describe('the build receipt a push writes', () => {
 						),
 					uploadNar: unexpectedUploadNarCall,
 					commit: () => Promise.resolve(fallbackCommitResponse()),
+					applyRoots: unexpectedApplyRootsCall,
 					setRoot: unexpectedSetRootCall
 				} satisfies PushClient,
 				nix: nixStore({
@@ -7284,6 +7830,7 @@ async function incompletePush(
 							: Promise.resolve()
 					});
 				},
+				applyRoots: unexpectedApplyRootsCall,
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nix: nixStore(localPaths),
@@ -7559,6 +8106,7 @@ function skipClient(roots: SetRootCall[], clientCalls: unknown[]): PushClient {
 
 			return Promise.resolve(fallbackCommitResponse());
 		},
+		applyRoots: unexpectedApplyRootsCall,
 		setRoot(name, body) {
 			const fields = { name, ...body };
 			clientCalls.push({ method: 'setRoot', fields });

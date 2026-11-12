@@ -22,12 +22,15 @@ import {
 	type BuildSubjectV3Input,
 	type NixStoreUri
 } from '@cupboard/protocol/build';
+import { type CohortRoot } from '@cupboard/protocol/publish-plan';
 import {
 	type PushSummaryPathInput,
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
 import {
+	type RootBatchBody,
+	type RootBatchResponse,
 	type RootRetentionRequest,
 	type RootSetBodyInput,
 	rootSetMaxTargets,
@@ -56,7 +59,7 @@ import {
 	shouldShowDetails
 } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { genericExitCode, UsageError } from '@cupboard/shared/errors';
+import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 
@@ -74,7 +77,17 @@ import {
 import type { AttestationBundleClient } from '../attest/bundle-transport.ts';
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
 import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
-import { isStaleUploadError } from '../client/rpc-errors.ts';
+import {
+	applyRootBatches,
+	type RootBatchEntry,
+	rootBatches,
+	RootTargetLimitError,
+	separateRootRequestConcurrency
+} from '../client/root-batches.ts';
+import {
+	isRpcProcedureMissingError,
+	isStaleUploadError
+} from '../client/rpc-errors.ts';
 import {
 	type WaitTimeoutSeconds,
 	waitTimeoutSecondsSchema
@@ -174,6 +187,12 @@ export interface PushDependencies {
 	readonly referenceSource?: ReferenceSource;
 	readonly fetchReferenceMetadata?: typeof fetchReferenceMetadataFromSource;
 	readonly root?: RootName;
+	/**
+	The roots to set, each with its own targets, once every path is published.
+	`roots` replaces `root` and the implicit pins; `retention` applies to every
+	root that it sets.
+	*/
+	readonly roots?: readonly CohortRoot[];
 	readonly retention?: RootRetentionRequest;
 	// Attach each committed path to this run root during negotiation. Run-root
 	// retention is independent of target `root` and `retain`, so an unretained
@@ -292,6 +311,7 @@ export interface PushClient extends Partial<AttestationBundleClient> {
 	): Promise<AttestationNegotiateResponseInput>;
 	attachAttestation?(uploadId: string): Promise<AttestationAttachResponseInput>;
 	setRoot(name: string, body: RootSetBodyInput): Promise<RootSetResponseInput>;
+	applyRoots(body: RootBatchBody): Promise<RootBatchResponse>;
 }
 
 const defaultWaitTimeoutSeconds = waitTimeoutSecondsSchema.parse(600);
@@ -459,7 +479,8 @@ export async function runPush(
 		publication.targetPaths,
 		dependencies.root,
 		dependencies.retention ?? { kind: 'inherit' },
-		dependencies.retain ?? true
+		dependencies.retain ?? true,
+		dependencies.roots
 	);
 	const openStore = dependencies.openStore ?? (() => Nix.open());
 	// A reference-only publication reads no local metadata and needs no store
@@ -895,7 +916,13 @@ async function runPushFlow(
 	dependencies.onResolved?.(localPathInfos(resolved));
 
 	if (dependencies.dryRun === true) {
-		await reportDryRun(reporter, client, resolved, retention);
+		await reportDryRun(
+			reporter,
+			client,
+			resolved,
+			retention,
+			publication.targetPaths
+		);
 		return undefined;
 	}
 
@@ -1599,7 +1626,17 @@ async function runPushFlow(
 					: [])
 			]
 		});
-		unretainedUngracedWarning(reporter, retention, summaryPaths);
+		unretainedUngracedWarning(
+			reporter,
+			retention,
+			unretainedPaths(retention, summaryPaths, publication.targetPaths)
+		);
+
+		const refusedRoots = recordedRetention.refused ?? [];
+
+		if (refusedRoots.length > 0) {
+			throw new RootTargetsUnavailableError(refusedRoots);
+		}
 
 		// Report every successful path first, then fail the overall command so a
 		// caller cannot treat a partial publication as complete.
@@ -1642,7 +1679,8 @@ async function reportDryRun(
 	reporter: Reporter,
 	client: PushClient,
 	resolved: readonly ResolvedPushPath[],
-	retention: RetentionPlan
+	retention: RetentionPlan,
+	targets: readonly StorePathString[]
 ): Promise<void> {
 	const preview = await reporter.phase(
 		'Previewing against cache',
@@ -1706,10 +1744,41 @@ async function reportDryRun(
 			{ label: 'Reused stored content', value: formatCount(reusedBlobs) },
 			{ label: 'Already available', value: formatCount(skipped) },
 			...retentionPlanRows(retention),
-			...previewPathRows(preview.uploads, retention, resolved, reporter)
+			...previewPathRows(
+				preview.uploads,
+				retention,
+				resolved,
+				reporter,
+				targets
+			)
 		]
 	});
-	unretainedUngracedWarning(reporter, retention, preview.uploads);
+	unretainedUngracedWarning(
+		reporter,
+		retention,
+		unretainedPaths(
+			retention,
+			previewedPaths(preview.uploads, resolved),
+			targets
+		)
+	);
+}
+
+function previewedPaths(
+	decisions: readonly UploadPreviewDecision[],
+	resolved: readonly ResolvedPushPath[]
+): readonly (UploadPreviewDecision & { readonly storePath?: string })[] {
+	const storePaths = new Map(
+		resolved.map((path) => [
+			StorePath.hash(resolvedStorePath(path)),
+			resolvedStorePath(path)
+		])
+	);
+
+	return decisions.map((decision) => ({
+		...decision,
+		storePath: storePaths.get(decision.storePathHash)
+	}));
 }
 
 // A stored deadline is an existing server fact. This wording is shared by real
@@ -1778,7 +1847,7 @@ function pushSummaryPathRows(
 	resultArtifact?: string
 ): readonly ResultRow[] {
 	if (
-		retention.kind !== 'none' &&
+		unretainedPaths(retention, paths, targets).length === 0 &&
 		!shouldShowDetails(reporter) &&
 		paths.every(
 			(path) => !hasGraceFact(path.grace) && path.outcome !== 'pending'
@@ -1829,6 +1898,35 @@ function cappedPathRows(
 
 const zeroGraceRow = 'no retention grace period';
 
+/**
+Returns the published paths that no root or pin retains: every path of a
+`--no-retain` push, and the targets of a roots file that no `set` entry lists.
+*/
+function unretainedPaths<
+	Path extends { readonly storePath?: string | undefined }
+>(
+	retention: RetentionPlan,
+	paths: readonly Path[],
+	targets: readonly StorePathString[]
+): readonly Path[] {
+	if (retention.kind === 'none') {
+		return paths;
+	}
+
+	if (retention.kind !== 'roots') {
+		return [];
+	}
+
+	const targetSet = new Set<string>(targets);
+
+	return paths.filter(
+		(path) =>
+			path.storePath !== undefined &&
+			targetSet.has(path.storePath) &&
+			!retention.retainedTargets.has(path.storePath)
+	);
+}
+
 // An unretained push needs a positive grace fact to survive collection. Keep a
 // zero-grace configuration distinct from a cache without configured grace in the
 // warning.
@@ -1839,7 +1937,7 @@ function unretainedUngracedWarning(
 		grace?: { retainUntil?: string; graceSeconds?: number };
 	}[]
 ): void {
-	if (retention.kind !== 'none') {
+	if (paths.length === 0) {
 		return;
 	}
 
@@ -1853,18 +1951,52 @@ function unretainedUngracedWarning(
 		return;
 	}
 
-	const isZeroMatched = paths.some((path) => path.grace?.graceSeconds === 0);
+	const isGraceReported = paths.some((path) => path.grace !== undefined);
+	const grace = cacheGraceDescription(paths, isGraceReported);
+
+	// A root that a roots file leaves unchanged can already list these paths.
+	// The push does not read existing roots, so it cannot say that none does.
+	if (retention.kind === 'roots') {
+		reporter.warn(
+			'unretained',
+			`${grace}; this push sets no retention root for these paths, so unless an existing root keeps them, the next collection can remove them`,
+			{
+				humanMessage:
+					'This push sets no retention root for these paths. Unless an existing root keeps them, the next cache cleanup may remove them.'
+			}
+		);
+		return;
+	}
+
+	const deadline = isGraceReported
+		? 'no retention root or grace deadline'
+		: 'no retention root and no reported grace deadline';
 
 	reporter.warn(
 		'unretained',
-		isZeroMatched
-			? 'the cache has zero retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
-			: 'the cache has no retention grace; these paths have no retention root or grace deadline, so the next collection can remove them',
+		`${grace}; these paths have ${deadline}, so the next collection can remove them`,
 		{
 			humanMessage:
 				'These paths are not retained and may be removed during the next cache cleanup.'
 		}
 	);
+}
+
+// An empty grace fact means that the cache has no grace. A missing fact comes
+// from a server that does not report grace, and the cache can still have grace.
+function cacheGraceDescription(
+	paths: readonly { grace?: { graceSeconds?: number } }[],
+	isGraceReported: boolean
+): string {
+	if (paths.some((path) => path.grace?.graceSeconds === 0)) {
+		return 'the cache has zero retention grace';
+	}
+
+	if (!isGraceReported) {
+		return 'the cache did not report retention grace';
+	}
+
+	return 'the cache has no retention grace';
 }
 
 function hasGraceFact(
@@ -1931,10 +2063,12 @@ function previewPathRows(
 	decisions: readonly UploadPreviewDecision[],
 	retention: RetentionPlan,
 	resolved: readonly ResolvedPushPath[],
-	reporter: Reporter
+	reporter: Reporter,
+	targets: readonly StorePathString[]
 ): readonly ResultRow[] {
 	if (
-		retention.kind !== 'none' &&
+		unretainedPaths(retention, previewedPaths(decisions, resolved), targets)
+			.length === 0 &&
 		decisions.every((decision) => !hasGraceFact(decision.grace))
 	) {
 		return [];
@@ -1946,9 +2080,26 @@ function previewPathRows(
 			resolvedStorePath(path)
 		])
 	);
-	return cappedPathRows(
-		decisions.map((decision) => previewPathRow(decision, paths, reporter))
+	const byHash = new Map(
+		decisions.map((decision) => [decision.storePathHash, decision])
 	);
+	const targetHashes = new Set(
+		targets.map((storePath) => StorePath.hash(storePath))
+	);
+	const targetDecisions = [...targetHashes].flatMap((hash) => {
+		const decision = byHash.get(hash);
+		return decision === undefined ? [] : [decision];
+	});
+	const otherDecisions = decisions.filter(
+		(decision) => !targetHashes.has(decision.storePathHash)
+	);
+	const row = (decision: UploadPreviewDecision): ResultRow =>
+		previewPathRow(decision, paths, reporter);
+
+	return [
+		...targetDecisions.map((decision) => row(decision)),
+		...cappedPathRows(otherDecisions.map((decision) => row(decision)))
+	];
 }
 
 // Deferred verification produces a final deadline only after the wait phase
@@ -1989,6 +2140,19 @@ function retentionPlanRows(retention: RetentionPlan): ResultRow[] {
 			{
 				label: 'Root expiry',
 				value: planExpiry(retention.request.body.retention)
+			}
+		];
+	}
+
+	if (retention.kind === 'roots') {
+		return [
+			{
+				label: 'Would set roots',
+				value: formatCount(retention.updates.length)
+			},
+			{
+				label: 'Root expiry',
+				value: planExpiry(retention.retention)
 			}
 		];
 	}
@@ -2113,16 +2277,21 @@ interface RootRequest {
 	readonly body: RootSetBodyInput;
 }
 
-export class RootTargetLimitError extends UsageError {
-	constructor(
-		public readonly count: number,
-		public readonly limit: number
-	) {
+/**
+A batched root update answered that some of a root's targets have no committed
+narinfo. The single root update refuses the same request with 409.
+*/
+export interface RefusedRoot {
+	readonly root: RootName;
+	readonly unavailable: readonly StorePathString[];
+}
+
+export class RootTargetsUnavailableError extends CodedError {
+	constructor(readonly refused: readonly RefusedRoot[]) {
 		super(
-			`the root update would carry ${String(count)} targets, but one update ` +
-				`accepts at most ${String(limit)}; split the paths across named roots`
+			`the cache has not published every target of ${String(refused.length)} root(s), so it left them unchanged: ${refused.map((entry) => entry.root).join(', ')}`
 		);
-		this.name = 'RootTargetLimitError';
+		this.name = 'RootTargetsUnavailableError';
 	}
 }
 
@@ -2136,6 +2305,13 @@ type RetentionPlan =
 			readonly name: RootName;
 			readonly request: RootRequest;
 	  }
+	| {
+			readonly kind: 'roots';
+			readonly updates: readonly RootBatchEntry[];
+			readonly unchanged: readonly RootName[];
+			readonly retainedTargets: ReadonlySet<string>;
+			readonly retention: RootRetentionRequest;
+	  }
 	| { readonly kind: 'pins'; readonly requests: readonly RootRequest[] }
 	| { readonly kind: 'none' };
 
@@ -2143,10 +2319,37 @@ function planRetention(
 	paths: readonly string[],
 	root: RootName | undefined,
 	retention: RootRetentionRequest,
-	shouldRetain: boolean
+	shouldRetain: boolean,
+	roots: readonly CohortRoot[] | undefined
 ): RetentionPlan {
 	if (!shouldRetain) {
 		return { kind: 'none' };
+	}
+
+	if (roots !== undefined) {
+		const updates = roots.flatMap((entry): RootBatchEntry[] =>
+			entry.action === 'set'
+				? [
+						{
+							action: 'set',
+							name: entry.name,
+							targets: [...entry.targets],
+							retention
+						}
+					]
+				: []
+		);
+		rootBatches(updates);
+
+		return {
+			kind: 'roots',
+			updates,
+			unchanged: roots
+				.filter((entry) => entry.action === 'unchanged')
+				.map((entry) => entry.name),
+			retainedTargets: new Set(updates.flatMap((entry) => entry.targets)),
+			retention
+		};
 	}
 
 	if (root !== undefined && paths.length > rootSetMaxTargets) {
@@ -2176,6 +2379,10 @@ function retentionPhaseLabel(retention: RetentionPlan): string {
 			return 'Updating retention root';
 		}
 
+		case 'roots': {
+			return 'Updating retention roots';
+		}
+
 		case 'pins': {
 			return 'Pinning pushed paths';
 		}
@@ -2189,6 +2396,7 @@ function retentionPhaseLabel(retention: RetentionPlan): string {
 interface RecordedRetention {
 	readonly rows: readonly ResultRow[];
 	readonly roots: readonly RootSummaryInput[];
+	readonly refused?: readonly RefusedRoot[];
 }
 
 function rootRetentionByPath(
@@ -2234,6 +2442,107 @@ function rootRetentionByPath(
 	return byPath;
 }
 
+const conflictStatus: number = StatusCodes.CONFLICT;
+
+type RootUpdateResult =
+	| {
+			readonly name: RootName;
+			readonly status: 'retained';
+			readonly root: RootSummaryInput;
+	  }
+	| {
+			readonly name: RootName;
+			readonly status: 'build-required' | 'targets-unavailable';
+			readonly unavailable: readonly StorePathString[];
+	  };
+
+// A server from before `roots.batch` gets one `roots.set` per root. It refuses
+// a root with an unavailable target with 409 and does not list the targets, so
+// the refusal lists all of the root's targets.
+async function setRoots(
+	updates: readonly RootBatchEntry[],
+	client: PushClient
+): Promise<readonly RootUpdateResult[]> {
+	try {
+		return await applyRootBatches((body) => client.applyRoots(body), updates);
+	} catch (error) {
+		if (!isRpcProcedureMissingError(error)) {
+			throw error;
+		}
+	}
+
+	return mapWithConcurrency(
+		updates,
+		separateRootRequestConcurrency,
+		async ({ name, targets, retention }): Promise<RootUpdateResult> => {
+			try {
+				const root = await client.setRoot(name, {
+					targets: [...targets],
+					retention
+				});
+
+				return { name, status: 'retained', root };
+			} catch (error) {
+				if (
+					!(error instanceof ORPCError) ||
+					error.defined ||
+					error.code !== 'CONFLICT' ||
+					error.status !== conflictStatus
+				) {
+					throw error;
+				}
+
+				return { name, status: 'targets-unavailable', unavailable: targets };
+			}
+		}
+	);
+}
+
+async function recordRoots(
+	retention: Extract<RetentionPlan, { readonly kind: 'roots' }>,
+	client: PushClient,
+	ctx: PhaseContext
+): Promise<RecordedRetention> {
+	const results =
+		retention.updates.length === 0
+			? []
+			: await setRoots(retention.updates, client);
+	const summaries: RootSummaryInput[] = [];
+	const refused: RefusedRoot[] = [];
+
+	// The cache writes every other root of a batch, so the summary reports the
+	// roots that it set even when it refused one.
+	for (const result of results) {
+		if (result.status === 'retained') {
+			summaries.push(result.root);
+			continue;
+		}
+
+		refused.push({ root: result.name, unavailable: result.unavailable });
+	}
+
+	ctx.fact('roots', formatCount(summaries.length));
+
+	return {
+		rows: [
+			{ label: 'Roots', value: formatCount(summaries.length) },
+			...(retention.unchanged.length === 0
+				? []
+				: [
+						{
+							label: 'Unchanged roots',
+							value: formatCount(retention.unchanged.length)
+						}
+					]),
+			...(refused.length === 0
+				? []
+				: [{ label: 'Refused roots', value: formatCount(refused.length) }])
+		],
+		roots: summaries,
+		refused
+	};
+}
+
 async function recordRetention(
 	retention: RetentionPlan,
 	client: PushClient,
@@ -2259,6 +2568,10 @@ async function recordRetention(
 			],
 			roots: [summary]
 		};
+	}
+
+	if (retention.kind === 'roots') {
+		return recordRoots(retention, client, ctx);
 	}
 
 	// Each pin is a separate root request, and the requests are independent, so

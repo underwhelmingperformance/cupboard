@@ -17,6 +17,7 @@ import {
 	presentationFromGlobals,
 	reportCliFailure
 } from './cli.ts';
+import { RootTargetLimitError } from './client/root-batches.ts';
 import { translateRpcError } from './client/rpc-errors.ts';
 import { GithubRateLimitError } from './commands/oidc-trust/github.ts';
 import {
@@ -35,7 +36,6 @@ import {
 	TrustRuleOptionsRequiredError,
 	UploadWaitTimeoutError
 } from './errors.ts';
-import { RootTargetLimitError } from './push/push.ts';
 
 const abortExitCode = 130;
 

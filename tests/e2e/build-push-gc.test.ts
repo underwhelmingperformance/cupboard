@@ -129,6 +129,8 @@ describe.skipIf(process.platform !== 'linux' || !isNixPresent)(
 						settled: Promise.resolve()
 					});
 				},
+				applyRoots: () =>
+					Promise.reject(new Error('applyRoots needs a roots file')),
 				setRoot: () =>
 					Promise.reject(new Error('setRoot is not part of a batch flush'))
 			};

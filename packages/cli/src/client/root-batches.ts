@@ -1,4 +1,3 @@
-import { type CacheScope } from '@cupboard/nix-store/scalars';
 import {
 	type RootBatchBody,
 	rootBatchCapacity,
@@ -6,10 +5,7 @@ import {
 	type RootBatchResponse,
 	type RootBatchResult
 } from '@cupboard/protocol/retention';
-
-import { RootTargetLimitError } from '../push/push.ts';
-
-import { type CacheScopedClient, callInCache } from './cache-scoped.ts';
+import { UsageError } from '@cupboard/shared/errors';
 
 export type RootBatchEntry = RootBatchBody['roots'][number];
 
@@ -17,12 +13,17 @@ export type RootBatchEntry = RootBatchBody['roots'][number];
 // implicit pins with the same number of requests at a time.
 export const separateRootRequestConcurrency = 6;
 
-/**
-The part of the derived roots client that sends batched root updates. The
-real `tenantRpc(...).roots` satisfies this interface by construction.
-*/
-export interface RootBatchClient {
-	batch: CacheScopedClient<RootBatchBody, RootBatchResponse>;
+export class RootTargetLimitError extends UsageError {
+	constructor(
+		public readonly count: number,
+		public readonly limit: number
+	) {
+		super(
+			`the root update would carry ${String(count)} targets, but one update ` +
+				`accepts at most ${String(limit)}; split the paths across named roots`
+		);
+		this.name = 'RootTargetLimitError';
+	}
 }
 
 /**
@@ -68,16 +69,13 @@ Sends the root updates in batches, one request at a time, and returns one
 result per update in the original order.
 */
 export async function applyRootBatches(
-	client: RootBatchClient,
-	cache: CacheScope,
+	send: (body: RootBatchBody) => Promise<RootBatchResponse>,
 	entries: readonly RootBatchEntry[]
 ): Promise<readonly RootBatchResult[]> {
 	const results: RootBatchResult[] = [];
 
 	for (const batch of rootBatches(entries)) {
-		const response = await callInCache(client.batch, cache, {
-			roots: [...batch]
-		});
+		const response = await send({ roots: [...batch] });
 
 		results.push(...response.roots);
 	}
