@@ -3,7 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { boundedSubrequest, withDeadlineBudget } from '../do/deadline.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 
-import { readWithOneRetry } from './transient.ts';
+import {
+	d1AccountThrottleMessage,
+	d1QueueOverloadMessage
+} from './transient.test-support.ts';
+import { isD1Overload, readWithOneRetry } from './transient.ts';
 
 const budgetMs = 1000;
 
@@ -73,4 +77,53 @@ describe('readWithOneRetry', () => {
 			}).toStrictEqual({ attempts, isTimeout });
 		}
 	);
+});
+
+describe('isD1Overload', () => {
+	const wrapped = (cause: unknown): Error =>
+		new Error('query failed', { cause });
+
+	it.each([
+		{
+			name: 'the queue overload',
+			error: new Error(d1QueueOverloadMessage),
+			expected: true
+		},
+		{
+			name: 'the account throttle',
+			error: new Error(d1AccountThrottleMessage),
+			expected: true
+		},
+		{
+			name: 'the account throttle without its second sentence',
+			error: new Error(
+				'D1_ERROR: Your account is generating too much load on D1 DBs'
+			),
+			expected: true
+		},
+		{
+			name: 'the account throttle in a cause',
+			error: wrapped(new Error(d1AccountThrottleMessage)),
+			expected: true
+		},
+		{
+			name: 'the Durable Object stub throttle',
+			error: new Error(
+				'Your account is generating too much load on Durable Objects. Please back off and try again later.'
+			),
+			expected: false
+		},
+		{
+			name: 'another D1 error',
+			error: new Error('D1_ERROR: no such table: tenant'),
+			expected: false
+		},
+		{
+			name: 'an overload message that is not an error',
+			error: d1AccountThrottleMessage,
+			expected: false
+		}
+	])('classifies $name as $expected', ({ error, expected }) => {
+		expect(isD1Overload(error)).toBe(expected);
+	});
 });

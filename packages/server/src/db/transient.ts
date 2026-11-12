@@ -1,4 +1,7 @@
+import { type Logger } from '@cupboard/logger';
+
 import { remainingDeadlineMs } from '../do/deadline.ts';
+import { DatabaseOverloadedError } from '../errors.ts';
 
 const readRetryDelayMs = 100;
 
@@ -25,11 +28,17 @@ export async function readWithOneRetry<T>(read: () => Promise<T>): Promise<T> {
 	}
 }
 
-const d1OverloadMessage = 'D1 DB is overloaded';
+// The first message is in Cloudflare's D1 error list. The second is an
+// account-level throttle that the list does not document. The first sentence of
+// it is enough to identify the throttle, so the match leaves out the rest.
+const d1OverloadMessages = [
+	'D1 DB is overloaded',
+	'Your account is generating too much load on D1 DBs'
+];
 
 /**
-Cloudflare's D1 overload error does not expose a structured code that the
-server can test, so detect it by matching the message. Drizzle can wrap the
+Cloudflare's D1 overload errors do not expose a structured code that the
+server can test, so detect them by matching the message. Drizzle can wrap the
 D1 error in another error's cause. Follow at most five causes; the limit also
 prevents a cyclic chain from looping forever.
 */
@@ -41,7 +50,9 @@ export function isD1Overload(error: unknown): boolean {
 			return false;
 		}
 
-		if (current.message.includes(d1OverloadMessage)) {
+		const { message } = current;
+
+		if (d1OverloadMessages.some((text) => message.includes(text))) {
 			return true;
 		}
 
@@ -49,6 +60,20 @@ export function isD1Overload(error: unknown): boolean {
 	}
 
 	return false;
+}
+
+/**
+Creates the retryable refusal for a D1 overload and logs the underlying error
+at `warn`. The 503 response does not contain the error, so the record is
+what lets an operator tell the account throttle from a database overload.
+*/
+export function d1OverloadRefusal(
+	logger: Logger,
+	error: unknown
+): DatabaseOverloadedError {
+	logger.warn('request refused: database overloaded', { error });
+
+	return new DatabaseOverloadedError(error);
 }
 
 /**

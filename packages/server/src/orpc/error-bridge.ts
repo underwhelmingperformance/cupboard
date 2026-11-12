@@ -5,7 +5,11 @@ import { uploadRequestLimitErrorCode } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 
-import { isControlDatabaseMigrationPending } from '../db/transient.ts';
+import {
+	d1OverloadRefusal,
+	isControlDatabaseMigrationPending,
+	isD1Overload
+} from '../db/transient.ts';
 import {
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
@@ -41,6 +45,16 @@ const codeByStatus: Record<number, string> = {
 	[StatusCodes.SERVICE_UNAVAILABLE]: 'SERVICE_UNAVAILABLE'
 };
 
+// A typed error keeps its own mapping even when a D1 overload is in its cause
+// chain, as in the Hono error handler.
+function isUntypedD1Overload(error: unknown): boolean {
+	return (
+		!(error instanceof ServerHttpError) &&
+		!(error instanceof ORPCError) &&
+		isD1Overload(error)
+	);
+}
+
 /**
 Converts cache, signing-key, tenant-removal and tenant-quota conflicts to
 the contract's typed errors.
@@ -48,6 +62,8 @@ Other `ServerHttpError` statuses in `codeByStatus` use the corresponding
 generic oRPC code. An unlisted status uses `INTERNAL_SERVER_ERROR`, while the
 original HTTP status and message remain unchanged.
 
+A D1 overload that is not inside a typed error becomes a
+`DatabaseOverloadedError`, which the client can retry, and is logged at `warn`.
 Existing `ORPCError` values pass through. Unexpected errors are logged with
 the request logger and returned unchanged so oRPC can mask them with its own
 500 response.
@@ -59,7 +75,9 @@ export function bridgedError(
 ): unknown {
 	const error = isControlDatabaseMigrationPending(caught)
 		? new ControlDatabaseMigrationPendingError()
-		: caught;
+		: isUntypedD1Overload(caught)
+			? d1OverloadRefusal(logger, caught)
+			: caught;
 
 	if (responseHeaders !== undefined && error instanceof ServerHttpError) {
 		for (const [name, value] of serverHttpErrorHeaders(error)) {

@@ -1,9 +1,15 @@
+import { atWarningOrAbove, startCapture } from '@cupboard/logger/testing';
 import { commitAcceptCapabilitiesHeader } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+	d1AccountThrottleMessage,
+	d1QueueOverloadMessage
+} from '../db/transient.test-support.ts';
+import { SharedFactsUnavailableError } from '../errors.ts';
 import {
 	commitSocketCeiling,
 	maxUncreditedCommitSessions
@@ -23,47 +29,101 @@ import {
 	uploadMetadata
 } from '../test-support.ts';
 
-// Keep this exact Cloudflare D1 text aligned with `transient.ts`, which must
-// identify this overload condition from the error message.
-const d1OverloadText =
-	'D1_ERROR: D1 DB is overloaded. Too many requests queued.';
+const stringMatcher: unknown = expect.any(String);
+
+// A typed error keeps its own response when a D1 overload is in its cause
+// chain, and the overload log record is not written.
+const rejections = [
+	{
+		name: 'the D1 queue overload',
+		error: new Error(d1QueueOverloadMessage),
+		message: 'Database is temporarily overloaded',
+		isLogged: true
+	},
+	{
+		name: 'the D1 account throttle',
+		error: new Error(d1AccountThrottleMessage),
+		message: 'Database is temporarily overloaded',
+		isLogged: true
+	},
+	{
+		name: 'a typed error that has the D1 account throttle as its cause',
+		error: new SharedFactsUnavailableError(new Error(d1AccountThrottleMessage)),
+		message: 'Cache facts are temporarily unavailable',
+		isLogged: false
+	}
+];
 
 describe('commit socket overload handling', () => {
 	beforeEach(resetTestServer);
 
-	it('sends a 503 error frame when D1 rejects the commit as overloaded', async () => {
-		const token = await initialise();
-		const path = uploadMetadata({ storePathHash: 'a'.repeat(32), fileSize: 1 });
-		const negotiated = await negotiateUploads(token, [path]);
-		const decision = negotiated.uploads[0];
-
-		if (decision?.action !== 'upload') {
-			throw new Error('expected an upload decision');
-		}
-
-		const { uploadId, r2Key } = decision;
-		await putNarBytes(r2Key);
-
-		const batchSpy = vi
-			.spyOn(env.CUPBOARD_DB, 'batch')
-			.mockRejectedValue(new Error(d1OverloadText));
-
-		try {
-			const session = await openCommitSession(token);
-			session.send({ op: 'commit', uploadId });
-			const frame = await session.nextFrame();
-			session.socket.close();
-
-			expect(frame).toStrictEqual({
-				ev: 'error',
-				uploadId,
-				status: StatusCodes.SERVICE_UNAVAILABLE,
-				message: 'Database is temporarily overloaded'
+	it.each(rejections)(
+		'sends a 503 error frame when the commit is rejected with $name',
+		async ({ error, message, isLogged }) => {
+			const token = await initialise();
+			const path = uploadMetadata({
+				storePathHash: 'a'.repeat(32),
+				fileSize: 1
 			});
-		} finally {
-			batchSpy.mockRestore();
+			const negotiated = await negotiateUploads(token, [path]);
+			const decision = negotiated.uploads[0];
+
+			if (decision?.action !== 'upload') {
+				throw new Error('expected an upload decision');
+			}
+
+			const { uploadId, r2Key } = decision;
+			await putNarBytes(r2Key);
+
+			const batchSpy = vi
+				.spyOn(env.CUPBOARD_DB, 'batch')
+				.mockRejectedValue(error);
+			const capture = startCapture();
+
+			try {
+				const session = await openCommitSession(token);
+				session.send({ op: 'commit', uploadId });
+				const frame = await session.nextFrame();
+				session.socket.close();
+
+				expect({
+					frame,
+					logged: atWarningOrAbove(capture.logs)
+				}).toStrictEqual({
+					frame: {
+						ev: 'error',
+						uploadId,
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						message
+					},
+					logged: isLogged
+						? [
+								{
+									level: 'warning',
+									category: ['cupboard'],
+									message: 'request refused: database overloaded',
+									properties: {
+										cache: {
+											access: 'public',
+											generation: 1,
+											id: 1,
+											scope: { kind: 'default' }
+										},
+										op: 'commit',
+										sessionId: stringMatcher,
+										uploadId,
+										error
+									}
+								}
+							]
+						: []
+				});
+			} finally {
+				capture.stop();
+				batchSpy.mockRestore();
+			}
 		}
-	});
+	);
 });
 
 async function openSessions(

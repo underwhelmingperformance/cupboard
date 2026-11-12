@@ -1,5 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
-import { startCapture } from '@cupboard/logger/testing';
+import { atWarningOrAbove, startCapture } from '@cupboard/logger/testing';
 import {
 	cacheGenerationSchema,
 	type CacheScope,
@@ -58,7 +58,14 @@ import { PushCredentialIssuer } from '../blob/push-credential.ts';
 import { resumeTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { SubrequestTimeoutError } from '../errors.ts';
+import {
+	d1AccountThrottleMessage,
+	d1QueueOverloadMessage
+} from '../db/transient.test-support.ts';
+import {
+	SharedFactsUnavailableError,
+	SubrequestTimeoutError
+} from '../errors.ts';
 import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
 import { uploadPlanMaxPaths } from '../policy/upload-pages.ts';
@@ -170,6 +177,7 @@ it.each(
 	}
 );
 
+const stringMatcher: unknown = expect.any(String);
 const publicationSession = `${publicationCapability},${publicationRefusalReasonsCapability}`;
 
 const planCostSchema = z.object({
@@ -2295,9 +2303,33 @@ describe('publication subscriptions', () => {
 		}
 	});
 
-	it.each(['publish-batch', 'subscribe-publication'] as const)(
-		'refuses a %s entry as a retryable failure when a D1-backed read is overloaded',
-		async (op) => {
+	it.each(
+		(['publish-batch', 'subscribe-publication'] as const).flatMap((op) =>
+			[
+				{
+					name: 'the D1 queue overload',
+					error: new Error(d1QueueOverloadMessage),
+					isLogged: true
+				},
+				{
+					name: 'the D1 account throttle',
+					error: new Error(d1AccountThrottleMessage),
+					isLogged: true
+				},
+				{
+					// A typed error keeps its own refusal, and the overload log record
+					// is not written.
+					name: 'a typed error that has the D1 account throttle as its cause',
+					error: new SharedFactsUnavailableError(
+						new Error(d1AccountThrottleMessage)
+					),
+					isLogged: false
+				}
+			].map((rejection) => ({ op, ...rejection }))
+		)
+	)(
+		'refuses a $op entry as a retryable failure when a D1-backed read is rejected with $name',
+		async ({ op, error, isLogged }) => {
 			vi.setSystemTime(vi.getRealSystemTime());
 			const token = await initialise();
 			const nar = await verifiableNar(`publication-overload-${op}`);
@@ -2339,11 +2371,10 @@ describe('publication subscriptions', () => {
 			}
 			await commitUpload(token, entry.operationId);
 			// Both messages read the completed path's availability from D1 and R2.
+			const capture = startCapture();
 			const fault = vi
 				.spyOn(NarInfoObjectsService.prototype, 'servableNarInfoVersions')
-				.mockRejectedValueOnce(
-					new Error('D1_ERROR: D1 DB is overloaded. Too many requests queued.')
-				);
+				.mockRejectedValueOnce(error);
 			const session = await openCommitSession(
 				token,
 				undefined,
@@ -2353,7 +2384,8 @@ describe('publication subscriptions', () => {
 				session.send({ op, pushId: testPushId, entries: [entry] });
 				expect({
 					frame: refusalFacts(await session.nextFrame()),
-					reads: fault.mock.calls.length
+					reads: fault.mock.calls.length,
+					logged: atWarningOrAbove(capture.logs)
 				}).toStrictEqual({
 					frame: {
 						ev: 'publication-refused',
@@ -2362,9 +2394,25 @@ describe('publication subscriptions', () => {
 						status: StatusCodes.SERVICE_UNAVAILABLE,
 						hasMessage: true
 					},
-					reads: 1
+					reads: 1,
+					logged: isLogged
+						? [
+								{
+									level: 'warning',
+									category: ['cupboard'],
+									message: 'request refused: database overloaded',
+									properties: {
+										operationId: entry.operationId,
+										operation: op === 'publish-batch' ? 'publish' : 'subscribe',
+										sessionId: stringMatcher,
+										error
+									}
+								}
+							]
+						: []
 				});
 			} finally {
+				capture.stop();
 				fault.mockRestore();
 				await closeSessionAndWait(session.socket);
 			}
