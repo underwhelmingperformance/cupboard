@@ -228,6 +228,7 @@ import {
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import { LegacyRetentionService } from './legacy-retention-service.ts';
+import { liveRootTargets, rootIncarnationKey } from './live-root-targets.ts';
 import { LocalSchemaRun } from './local-schema-run.ts';
 import {
 	type LocalStepOutcome,
@@ -1985,11 +1986,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		if (cache === undefined) {
 			return false;
 		}
+		const root = rootIncarnationKey(
+			this.context.db,
+			cache.id,
+			entry.attachRoot.name
+		);
 		const target = this.context.db
 			.select({ rootName: schema.retentionRootTargets.rootName })
 			.from(schema.retentionRootTargets)
 			.where(
 				and(
+					liveRootTargets(root),
 					eq(schema.retentionRootTargets.cacheId, cache.id),
 					eq(schema.retentionRootTargets.rootName, entry.attachRoot.name),
 					eq(
