@@ -306,6 +306,10 @@ interface StalledAdmission {
 interface AdmissionStall {
 	readonly wait: string;
 	readonly authorization: string;
+	// The step named by the `tenant admission refused` record that the stall
+	// causes. A stall that fails earlier or later than the D1 read and the
+	// migration call causes no such record.
+	readonly refusedStep?: 'tenant-and-cache-rows' | 'cache-catalogue-migration';
 	readonly stall: (reached: () => void) => Promise<StalledAdmission>;
 }
 
@@ -316,6 +320,7 @@ function nothingToRestore(): void {
 const markerStall: AdmissionStall = {
 	wait: 'the KV read of the membership marker',
 	authorization: credentials,
+	refusedStep: 'tenant-and-cache-rows',
 	stall: (reached) =>
 		Promise.resolve({
 			bindings: {
@@ -340,6 +345,7 @@ const tokenCheckStall: AdmissionStall = {
 const migrationStall: AdmissionStall = {
 	wait: 'the cache catalogue migration',
 	authorization: credentials,
+	refusedStep: 'cache-catalogue-migration',
 	stall: async (reached) => {
 		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 			.update(d1Schema.tenant)
@@ -375,6 +381,7 @@ const admissionStalls: readonly AdmissionStall[] = [
 	{
 		wait: 'the KV read of the membership filter',
 		authorization: credentials,
+		refusedStep: 'tenant-and-cache-rows',
 		stall: (reached) => {
 			const match = vi
 				.spyOn(caches.default, 'match')
@@ -625,12 +632,31 @@ function refusalFacts(
 	};
 }
 
-const refusedAtDeadline = {
-	status: StatusCodes.SERVICE_UNAVAILABLE,
-	retryAfter: '5',
-	cacheControl: 'no-store',
-	records: []
-};
+function refusedAtDeadline(
+	step: AdmissionStall['refusedStep']
+): Record<string, unknown> {
+	return {
+		status: StatusCodes.SERVICE_UNAVAILABLE,
+		retryAfter: '5',
+		cacheControl: 'no-store',
+		records:
+			step === undefined
+				? []
+				: [
+						{
+							level: 'warning',
+							category: ['cupboard'],
+							message: 'tenant admission refused',
+							properties: {
+								requestId: 'string',
+								tenant: fixtureTenant,
+								step,
+								error: 'SubrequestTimeoutError'
+							}
+						}
+					]
+	};
+}
 
 describe('a read whose admission stalls', () => {
 	beforeEach(async () => {
@@ -655,7 +681,7 @@ describe('a read whose admission stalls', () => {
 		async ({ prefix, ...admission }) => {
 			expect(
 				await stalledAdmissionResponse(narInfoRead, admission, prefix)
-			).toStrictEqual(refusedAtDeadline);
+			).toStrictEqual(refusedAtDeadline(admission.refusedStep));
 		}
 	);
 
@@ -668,7 +694,7 @@ describe('a read whose admission stalls', () => {
 		async ({ read, prefix }) => {
 			expect(
 				await stalledAdmissionResponse(read, markerStall, prefix)
-			).toStrictEqual(refusedAtDeadline);
+			).toStrictEqual(refusedAtDeadline(markerStall.refusedStep));
 		}
 	);
 
@@ -676,7 +702,7 @@ describe('a read whose admission stalls', () => {
 		'refuses $read.name retryably when $admission.wait stalls past the read deadline',
 		async ({ read, admission }) => {
 			expect(await stalledAdmissionResponse(read, admission, '')).toStrictEqual(
-				refusedAtDeadline
+				refusedAtDeadline(admission.refusedStep)
 			);
 		}
 	);
@@ -685,7 +711,7 @@ describe('a read whose admission stalls', () => {
 		'refuses $name retryably one read budget after admission starts when the token check stalls',
 		async (read) => {
 			expect(await slowAdmissionResponse(read)).toStrictEqual(
-				refusedAtDeadline
+				refusedAtDeadline(undefined)
 			);
 		}
 	);

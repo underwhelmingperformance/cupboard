@@ -37,7 +37,6 @@ import {
 import {
 	InsecureTransportError,
 	MetadataScopeChangedError,
-	TenantAdmissionUnavailableError,
 	TenantWritesStoppedError
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
@@ -62,7 +61,7 @@ import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import { uploadRequestSubrequestsFor } from '../policy/upload-pages.ts';
 import { parseCacheMetadataRequest } from '../read/metadata-page.ts';
 
-import { admitTenant, type TenantEntry } from './admission.ts';
+import { admitTenant, type TenantEntry, tenantRefusal } from './admission.ts';
 import {
 	answerAvailabilityInChunks,
 	reuseViewAvailabilityChunkSizeFor
@@ -840,6 +839,6 @@ async function tenantStatus(
 
 		return row?.status;
 	} catch (error) {
-		throw new TenantAdmissionUnavailableError(error);
+		throw tenantRefusal('recheck', tenant, 'tenant-status', error);
 	}
 }

@@ -1,6 +1,8 @@
+import { atWarningOrAbove, startCapture } from '@cupboard/logger/testing';
 import {
 	cacheNameSchema,
 	type CacheScope,
+	firstCacheGeneration,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
@@ -40,6 +42,7 @@ import {
 import { cacheIdentityColumns } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { d1AccountThrottleMessage } from '../db/transient.test-support.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import { cacheCatalogueVersion } from '../migration/cache-access.ts';
@@ -59,7 +62,10 @@ import {
 } from '../test-support.ts';
 
 import worker from './handler.ts';
+import { type WorkerHonoEnv } from './hono-env.ts';
+import { revalidateCacheReadAuthority } from './read-scope.ts';
 
+const stringMatcher: unknown = expect.any(String);
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const cachePassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23';
 const cacheCredential: TenantReadCredential = tenantReadCredentialSchema.parse({
@@ -68,12 +74,16 @@ const cacheCredential: TenantReadCredential = tenantReadCredentialSchema.parse({
 });
 
 async function admitWithFaults(
-	failures: number
+	failures: number,
+	error?: Error
 ): Promise<TenantEntry | undefined> {
 	const ctx = createExecutionContext();
 	const faultyEnv = {
 		...env,
-		CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, { failures })
+		CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
+			failures,
+			...(error !== undefined && { error })
+		})
 	};
 	const entry = await admitTenant(faultyEnv, ctx, tenantIdSchema.parse('acme'));
 	await waitOnExecutionContext(ctx);
@@ -648,7 +658,213 @@ describe('layered admission gate', () => {
 			}
 		});
 	});
+
+	describe('admission refusal logging', () => {
+		const d1Overload = new Error(d1AccountThrottleMessage);
+
+		it('logs the D1 error when the admission row read fails', async () => {
+			await ensureTenant(database(), createBody('acme'), now);
+			await refreshTenantMembership(env);
+
+			const logged = await loggedAtWarning(async () => {
+				await expect(
+					admitWithFaults(Number.MAX_SAFE_INTEGER, d1Overload)
+				).rejects.toBeInstanceOf(TenantAdmissionUnavailableError);
+			});
+
+			expect(logged).toStrictEqual([
+				{
+					level: 'warning',
+					category: ['cupboard'],
+					message: 'tenant admission refused',
+					properties: {
+						tenant: 'acme',
+						step: 'tenant-and-cache-rows',
+						error: d1Overload
+					}
+				}
+			]);
+		});
+
+		it('logs the RPC error when the catalogue migration fails', async () => {
+			await ensureTenant(database(), createBody('acme'), now);
+			await database()
+				.update(d1Schema.tenant)
+				.set({ cacheCatalogueVersion: cacheCatalogueVersion - 1 })
+				.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('acme')))
+				.run();
+			await refreshTenantMembership(env);
+
+			const rpcError = new Error('migration RPC failed');
+			const failingEnv = new Proxy(env, {
+				get(target, key, receiver): unknown {
+					if (key === 'CUPBOARD_DO') {
+						return namespaceWithStub({
+							migrateCacheCatalogue: () => Promise.reject(rpcError)
+						});
+					}
+
+					return Reflect.get(target, key, receiver);
+				}
+			});
+			const logged = await loggedAtWarning(async () => {
+				const ctx = createExecutionContext();
+				await expect(
+					admitTenant(failingEnv, ctx, tenantIdSchema.parse('acme'))
+				).rejects.toBeInstanceOf(TenantAdmissionUnavailableError);
+				await waitOnExecutionContext(ctx);
+			});
+
+			expect(logged).toStrictEqual([
+				{
+					level: 'warning',
+					category: ['cupboard'],
+					message: 'tenant admission refused',
+					properties: {
+						tenant: 'acme',
+						step: 'cache-catalogue-migration',
+						error: rpcError
+					}
+				}
+			]);
+		});
+
+		it('logs the D1 error when the metadata status read fails', async () => {
+			await ensureTenant(database(), createBody(gateSlug, 'public'), now);
+			await refreshTenantMembership(env);
+
+			const failingEnv = new Proxy(env, {
+				get(target, key, receiver): unknown {
+					if (key === 'CUPBOARD_DB') {
+						return flakyD1(env.CUPBOARD_DB, {
+							failures: Number.MAX_SAFE_INTEGER,
+							error: d1Overload,
+							matches: (query) => query.startsWith(statusGateQuery)
+						});
+					}
+
+					if (key === 'CUPBOARD_DO') {
+						return namespaceWithStub({
+							fetch: () => Promise.resolve(Response.json({ entries: [] }))
+						});
+					}
+
+					return Reflect.get(target, key, receiver);
+				}
+			});
+			const storePath = `/nix/store/${'a'.repeat(32)}-probe`;
+			const request = new Request(
+				`https://cache.example/t/${gateSlug}/reuse/builds/api/v1/path-info`,
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ storePaths: [storePath] })
+				}
+			);
+			let refusal: unknown;
+			const logged = await loggedAtWarning(async () => {
+				const ctx = createExecutionContext();
+				const response = await worker.fetch(request, failingEnv, ctx);
+				await waitOnExecutionContext(ctx);
+				refusal = {
+					status: response.status,
+					retryAfter: response.headers.get('retry-after'),
+					cacheControl: response.headers.get('cache-control'),
+					body: await response.text()
+				};
+			});
+
+			expect({ refusal, logged }).toStrictEqual({
+				refusal: {
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					retryAfter: '5',
+					cacheControl: 'no-store',
+					body: 'Tenant admission is temporarily unavailable\n'
+				},
+				logged: [
+					{
+						level: 'warning',
+						category: ['cupboard'],
+						message: 'tenant recheck refused',
+						properties: {
+							requestId: stringMatcher,
+							tenant: gateSlug,
+							step: 'tenant-status',
+							error: d1Overload
+						}
+					}
+				]
+			});
+		});
+
+		it('logs the D1 error when the private cache read recheck fails', async () => {
+			await ensureTenant(database(), createBody('acme'), now);
+			await refreshTenantMembership(env);
+
+			const failingEnv = {
+				...env,
+				CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
+					failures: Number.MAX_SAFE_INTEGER,
+					error: d1Overload
+				})
+			};
+			const app = new Hono<WorkerHonoEnv>();
+			app.get('/', async (context) => {
+				context.set('tenant', tenantIdSchema.parse('acme'));
+				context.set('readScope', {
+					scope: defaultCache(),
+					access: 'private',
+					generation: firstCacheGeneration
+				});
+				await expect(
+					revalidateCacheReadAuthority(context)
+				).rejects.toBeInstanceOf(TenantAdmissionUnavailableError);
+
+				return context.text('rechecked');
+			});
+			const logged = await loggedAtWarning(async () => {
+				const response = await app.request('/', {}, failingEnv);
+				expect(await response.text()).toBe('rechecked');
+			});
+
+			expect(logged).toStrictEqual([
+				{
+					level: 'warning',
+					category: ['cupboard'],
+					message: 'tenant recheck refused',
+					properties: {
+						tenant: 'acme',
+						step: 'tenant-and-cache-rows',
+						error: d1Overload
+					}
+				}
+			]);
+		});
+	});
 });
+
+// Runs `body` and returns the records that it logged at warning level or above,
+// so an unexpected error-level record fails the test.
+async function loggedAtWarning(body: () => Promise<void>) {
+	const capture = startCapture();
+
+	try {
+		await body();
+	} finally {
+		capture.stop();
+	}
+
+	return atWarningOrAbove(capture.logs);
+}
+
+// A tenant namespace that returns `stub` for every id. It keeps the real
+// `idFromName`, because the membership filter's cache key derives from it.
+function namespaceWithStub(stub: object) {
+	return {
+		idFromName: (name: string) => env.CUPBOARD_DO.idFromName(name),
+		get: () => stub
+	};
+}
 
 // Counts the D1 batches a call issues, so a test can show that admission reads
 // the tenant row, the cache verifier and the cache lifecycle in one round trip.

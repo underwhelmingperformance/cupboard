@@ -72,7 +72,12 @@ export async function revalidateCacheReadAuthority(
 		return;
 	}
 	const tenant = context.get('tenant');
-	const admission = await readTenantEntry(context.env, tenant, scope.scope);
+	const admission = await readTenantEntry(
+		context.env,
+		tenant,
+		scope.scope,
+		'recheck'
+	);
 	if (admission?.entry.status !== 'active') {
 		throw new UnauthenticatedError();
 	}
