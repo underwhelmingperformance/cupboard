@@ -2362,6 +2362,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		uploadId: UploadId,
 		row: typeof schema.pendingUploads.$inferSelect
 	): 'deferred' | undefined {
+		// The teardown drain deletes a removed cache's uploads later, and by then
+		// the cache's name can belong to a new cache. A session of that new cache
+		// receives `absent` for the upload. A session of any other cache receives
+		// the same refusal as for a live upload of another cache.
+		if (this.context.cacheRepository.wasReplacedBy(row.cacheId, cache)) {
+			sendCommitSessionFrame(socket, {
+				ev: 'verdict',
+				uploadId,
+				status: 'absent'
+			});
+			return undefined;
+		}
+
 		if (row.cacheId !== cache.id) {
 			sendCommitSessionFrame(socket, {
 				ev: 'error',

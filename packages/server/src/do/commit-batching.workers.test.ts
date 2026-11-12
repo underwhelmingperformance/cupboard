@@ -231,8 +231,11 @@ describe('commit batching', () => {
 								0
 							);
 
-							if (reserved.kind === 'lost') {
-								throw new Error('the reserved path has another narinfo row');
+							if (
+								reserved.kind === 'lost' ||
+								reserved.kind === 'cache-removed'
+							) {
+								throw new Error('the path could not be reserved');
 							}
 
 							return {

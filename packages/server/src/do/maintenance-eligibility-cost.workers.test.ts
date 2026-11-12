@@ -192,8 +192,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 3,
-			largeBacklogCost: 3
+			smallBacklogCost: 4,
+			largeBacklogCost: 4
 		});
 	});
 
@@ -236,9 +236,9 @@ describe('upload negotiation cost', () => {
 		const sparseDue = await reconcileCost();
 
 		expect({ smallDeferred, largeDeferred, sparseDue }).toStrictEqual({
-			smallDeferred: 23,
-			largeDeferred: 23,
-			sparseDue: 3
+			smallDeferred: 25,
+			largeDeferred: 25,
+			sparseDue: 4
 		});
 	});
 });
@@ -453,12 +453,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 253,
+				rowsRead: 254,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 253,
+				rowsRead: 254,
 				usesIndex: true,
 				sorts: false
 			}
@@ -554,8 +554,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 308,
-			largeBacklogCost: 308
+			smallBacklogCost: 309,
+			largeBacklogCost: 309
 		});
 	});
 });

@@ -153,6 +153,14 @@ export function confirmGrace(
 	narHash: NixSha256HashString,
 	decision: GraceDecision | undefined
 ): ConfirmedGrace {
+	// Commits and verification call this after deciding that a path is
+	// committed, and a removed cache's path can still look committed until its
+	// teardown retires the edge. Requests that confirm grace in batches resolve
+	// the cache by name inside the gate, so they cannot reach a removed cache.
+	if (context.cacheRepository.isRemoved(cache.id)) {
+		return { matched: false };
+	}
+
 	const facts = confirmGraceBatch(
 		context,
 		retention,
