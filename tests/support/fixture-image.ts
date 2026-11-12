@@ -3,7 +3,14 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 
+import {
+	ExponentialBackoff,
+	type ExponentialBackoffPolicy,
+	type RandomSource
+} from '@cupboard/shared/backoff';
 import { bestEffort } from '@cupboard/shared/cleanup';
+import { abortableSleep } from '@cupboard/shared/retry';
+import { StatusCodes } from 'http-status-codes';
 import {
 	GenericContainer,
 	getContainerRuntimeClient,
@@ -23,6 +30,15 @@ const buildMessage = z.object({
 const imageId = /^sha256:[\da-f]{64}$/u;
 const missingCacheImage = /No such image: (sha256:[\da-f]{64})(?:\s|$)/u;
 const diagnosticLimit = 16 * 1024;
+
+export const maxPullAttempts = 5;
+const pullBackoffPolicy: ExponentialBackoffPolicy = {
+	baseMs: 2000,
+	jitter: 'half'
+};
+const firstServerErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
+const rateLimitStatus: number = StatusCodes.TOO_MANY_REQUESTS;
+const transientPullCodes = new Set(['ECONNRESET', 'EPIPE']);
 
 export interface FixtureImageRuntime {
 	build(
@@ -169,6 +185,212 @@ export class FixtureImageBuilder {
 	}
 }
 
+/**
+A failed attempt to pull the base image that was followed by a wait and
+another attempt.
+*/
+export interface PullRetry {
+	/**
+	The number of the failed attempt, counting the first as 1.
+	*/
+	readonly attempt: number;
+	/**
+	The wait before the next attempt, in milliseconds.
+	*/
+	readonly delayMs: number;
+	readonly error: unknown;
+}
+
+/**
+How `prepareNixFixtureImage` retries the pull of the base image. Tests pass
+`delay` and `random` to make the retries instant and the delays predictable.
+*/
+export interface PullRetryOptions {
+	/**
+	Waits for the given number of milliseconds. The default is a timer.
+	*/
+	readonly delay?: (milliseconds: number) => Promise<void>;
+	/**
+	The random source for the backoff jitter. The default is `Math.random`.
+	*/
+	readonly random?: RandomSource;
+	/**
+	Called with each failure that is followed by another attempt. The default
+	writes the failure to standard error.
+	*/
+	readonly onRetry?: (retry: PullRetry) => void;
+}
+
+/**
+A pull of the base image that failed after the Docker daemon accepted it. The
+daemon reports registry failures and local ones in the same way: as an error
+in the progress stream, or as an image that is absent after the stream ends.
+A platform mismatch and a full disk are local failures, and a new attempt
+cannot fix them. Every such failure is retried anyway, which costs at most four
+extra attempts.
+*/
+export class FixtureImagePullError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = 'FixtureImagePullError';
+	}
+}
+
+function reportRetry({ attempt, delayMs, error }: PullRetry): void {
+	process.stderr.write(
+		`Pull of the Nix fixture base image failed on attempt ${attempt.toString()} of ${maxPullAttempts.toString()}, retrying in ${Math.round(delayMs).toString()} ms: ${errorMessage(error)}\n`
+	);
+}
+
+/**
+Whether a failed image pull can succeed when repeated. The daemon answers
+with an HTTP error, and `statusCode` is its status. Docker uses 500 for
+registry failures and for local ones alike, and the error has no field that
+tells them apart, so every 500 and above counts. A failure to reach the
+daemon has a `code`. docker-modem reports its own request timeout as
+ECONNRESET.
+*/
+function isTransientPullFailure(error: unknown): boolean {
+	if (error instanceof FixtureImagePullError) {
+		return true;
+	}
+
+	const status = z.object({ statusCode: z.number() }).safeParse(error);
+
+	if (status.success) {
+		const { statusCode } = status.data;
+
+		return (
+			statusCode >= firstServerErrorStatus || statusCode === rateLimitStatus
+		);
+	}
+
+	const failure = z.object({ code: z.string() }).safeParse(error);
+
+	return failure.success && transientPullCodes.has(failure.data.code);
+}
+
+/**
+Runs `pull`, and repeats it after a failure that {@link isTransientPullFailure}
+accepts, with at most {@link maxPullAttempts} attempts in total. The delay
+after the nth failed attempt is between half of a ceiling and the whole
+ceiling, and the ceiling is 2 s doubled n-1 times. Any other failure, such as
+a 404 for the image digest or refused credentials, is rethrown at once. After
+the last attempt, its failure is rethrown.
+*/
+export async function pullWithRetry(
+	pull: () => Promise<void>,
+	options: PullRetryOptions = {}
+): Promise<void> {
+	const { delay = abortableSleep, random, onRetry = reportRetry } = options;
+	const backoff = new ExponentialBackoff(pullBackoffPolicy, random);
+
+	for (let attempt = 1; ; attempt += 1) {
+		try {
+			await pull();
+
+			return;
+		} catch (error) {
+			if (attempt >= maxPullAttempts || !isTransientPullFailure(error)) {
+				throw error;
+			}
+
+			const delayMs = backoff.delayMs(attempt);
+			onRetry({ attempt, delayMs, error });
+			await delay(delayMs);
+		}
+	}
+}
+
+const pullMessage = z.object({
+	error: z.string().optional(),
+	errorDetail: z.object({ message: z.string().optional() }).optional()
+});
+
+/**
+The Docker daemon's operations for pulling the base image.
+*/
+export interface BaseImagePuller {
+	/**
+	Starts the pull and returns the progress stream.
+	*/
+	pull(): Promise<NodeJS.ReadableStream>;
+	/**
+	Rejects with a 404 error when the pulled image is not in the daemon.
+	*/
+	inspect(): Promise<void>;
+}
+
+/**
+Returns the first failure that the progress stream reports, or `undefined`.
+Lines that are not JSON are skipped.
+*/
+async function firstProgressFailure(
+	stream: NodeJS.ReadableStream
+): Promise<string | undefined> {
+	const lines = createInterface({ input: stream, crlfDelay: Infinity });
+	let failure: string | undefined;
+
+	try {
+		for await (const line of lines) {
+			const message = pullMessage.safeParse(parseJson(line));
+
+			failure ??= message.success
+				? (message.data.errorDetail?.message ?? message.data.error)
+				: undefined;
+		}
+	} finally {
+		lines.close();
+	}
+
+	return failure;
+}
+
+function parseJson(line: string): unknown {
+	try {
+		return JSON.parse(line);
+	} catch {
+		return undefined;
+	}
+}
+
+async function pullOnce(puller: BaseImagePuller): Promise<void> {
+	const failure = await firstProgressFailure(await puller.pull());
+
+	if (failure !== undefined) {
+		throw new FixtureImagePullError(
+			`Docker reported a failure while pulling the Nix fixture base image: ${failure}`
+		);
+	}
+
+	try {
+		await puller.inspect();
+	} catch (error) {
+		if (!isMissingImage(error)) {
+			throw error;
+		}
+
+		throw new FixtureImagePullError(
+			'The Nix fixture base image is missing after Docker finished pulling it.',
+			{ cause: error }
+		);
+	}
+}
+
+/**
+Pulls the base image and retries a transient failure, which includes a failure
+that the daemon reports inside the progress stream. The daemon answers an
+interrupted pull with status 200 and puts the error in the body, so the pull
+counts as complete only when the stream ends without a reported failure and
+the image exists.
+*/
+export async function pullBaseImage(
+	puller: BaseImagePuller,
+	options: PullRetryOptions = {}
+): Promise<void> {
+	await pullWithRetry(async () => pullOnce(puller), options);
+}
+
 function isMissingImage(error: unknown): boolean {
 	return z.object({ statusCode: z.literal(404) }).safeParse(error).success;
 }
@@ -182,7 +404,8 @@ function errorMessage(error: unknown): string {
 }
 
 export async function prepareNixFixtureImage(
-	directory: string
+	directory: string,
+	pullRetry: PullRetryOptions = {}
 ): Promise<GenericContainer> {
 	const client = await getContainerRuntimeClient();
 	const reaper = await getReaper(client);
@@ -215,10 +438,19 @@ export async function prepareNixFixtureImage(
 					throw error;
 				}
 
-				await client.image.pull(baseName, {
-					force: true,
-					platform: undefined
-				});
+				await pullBaseImage(
+					{
+						pull: async () =>
+							docker.pull(baseName.string, {
+								authconfig: auth,
+								platform: undefined
+							}),
+						inspect: async () => {
+							await docker.getImage(baseName.string).inspect();
+						}
+					},
+					pullRetry
+				);
 			}
 
 			return docker.buildImage(
