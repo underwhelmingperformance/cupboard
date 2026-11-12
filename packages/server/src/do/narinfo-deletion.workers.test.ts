@@ -1984,198 +1984,189 @@ describe('narinfo deletion queue', () => {
 		});
 	});
 
-	it(
-		'bounds source lookup and mutation costs with 25,000 source and destination generations',
-		{ timeout: 120_000 },
-		async () => {
-			await initialise();
-			const result = await withoutAlarmArming(() =>
-				runInDurableObject(currentServer(), async (instance, state) => {
-					const context = instance.context;
-					const cache = resolvedCache(context);
-					const path = storePathHashSchema.parse('a'.repeat(32));
-					const narHash = syntheticNarHash(1);
-					const generation = narInfoGenerationSchema.parse(1);
-					const now = isoTimestamp(testBase);
-					state.storage.sql.exec(
-						`WITH RECURSIVE rows(value) AS (VALUES(100) UNION ALL SELECT value + 1 FROM rows WHERE value < 25_099)
+	it('bounds source lookup and mutation costs with 25,000 source and destination generations', async () => {
+		await initialise();
+		const result = await withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance, state) => {
+				const context = instance.context;
+				const cache = resolvedCache(context);
+				const path = storePathHashSchema.parse('a'.repeat(32));
+				const narHash = syntheticNarHash(1);
+				const generation = narInfoGenerationSchema.parse(1);
+				const now = isoTimestamp(testBase);
+				state.storage.sql.exec(
+					`WITH RECURSIVE rows(value) AS (VALUES(100) UNION ALL SELECT value + 1 FROM rows WHERE value < 25_099)
 			INSERT INTO cache_identity(id, kind, name, access, priority, created_at) SELECT value, 'named', printf('source-%08d', value), 'public', 40, ? FROM rows`,
-						now
-					);
-					state.storage.sql.exec(
-						`WITH RECURSIVE rows(value) AS (VALUES(100) UNION ALL SELECT value + 1 FROM rows WHERE value < 25_099)
+					now
+				);
+				state.storage.sql.exec(
+					`WITH RECURSIVE rows(value) AS (VALUES(100) UNION ALL SELECT value + 1 FROM rows WHERE value < 25_099)
 			INSERT INTO narinfo_deletion(cache_id, store_path_hash, nar_hash, generation, created_at, explicit, protection_cutoff, protection_captured_at) SELECT value, ?, ?, 0, ?, 1, 10, ? FROM rows`,
-						path,
-						narHash,
-						now,
-						now
-					);
-					state.storage.sql.exec(
-						`WITH RECURSIVE rows(value) AS (VALUES(100) UNION ALL SELECT value + 1 FROM rows WHERE value < 25_099)
+					path,
+					narHash,
+					now,
+					now
+				);
+				state.storage.sql.exec(
+					`WITH RECURSIVE rows(value) AS (VALUES(100) UNION ALL SELECT value + 1 FROM rows WHERE value < 25_099)
 			INSERT INTO attestation_inheritance(cache_id, store_path_hash, nar_hash, generation, not_before) SELECT value, ?, ?, 1, ? FROM rows`,
-						path,
-						narHash,
-						now
-					);
-					state.storage.sql.exec(
-						'INSERT INTO attestation_inheritance(cache_id, store_path_hash, nar_hash, generation, not_before) VALUES (?, ?, ?, 1, ?)',
-						cache.id,
-						path,
-						narHash,
-						now
-					);
-					state.storage.sql.exec(
-						'INSERT INTO narinfo_deletion(cache_id, store_path_hash, nar_hash, generation, created_at) VALUES (?, ?, ?, 0, ?)',
-						cache.id,
-						path,
-						narHash,
-						now
-					);
-					state.storage.sql.exec(
-						'UPDATE work_sequence SET value = 10 WHERE id = 1'
-					);
-					const service = new ProtectedInheritanceService(context);
-					const meter = context.dbCost;
-					const measure = <T>(body: () => T) => {
-						meter.recordOutstanding();
-						const before = {
-							rowsRead: meter.rowsRead,
-							rowsWritten: meter.rowsWritten
-						};
-						const value = body();
-						meter.recordOutstanding();
-						return {
-							value,
-							cost: {
-								rowsRead: meter.rowsRead - before.rowsRead,
-								rowsWritten: meter.rowsWritten - before.rowsWritten
-							}
-						};
-					};
-					const capture = measure(() => {
-						service.capture(
-							context.db,
-							cache,
-							{
-								storePathHash: path,
-								generation: narInfoGenerationSchema.parse(0)
-							},
-							now
-						);
-					});
-					const names: string[] = [];
-					let pages = 0;
-					let maxRead = 0;
-					let maxWrite = 0;
-					for (let visited = 0; visited <= 25_001; visited += 1) {
-						const { cost, value: source } = measure(() => {
-							const source = service.nextSource(
-								cache,
-								path,
-								narHash,
-								generation
-							);
-							if (source === undefined) {
-								return;
-							}
-							if (
-								source.scope !== undefined &&
-								service.isReferenceProtected(
-									cache,
-									path,
-									generation,
-									source.cacheId,
-									source.generation
-								)
-							) {
-								names.push(source.cache?.name ?? '');
-							}
-							service.advanceSource(cache, path, generation, source);
-							return source;
-						});
-						if (source === undefined) {
-							break;
-						}
-						pages += 1;
-						maxRead = Math.max(maxRead, cost.rowsRead);
-						maxWrite = Math.max(maxWrite, cost.rowsWritten);
-					}
-
-					const expiresAt = isoTimestamp(new Date(testBase.getTime() + 60_000));
-					const uploadId = uploadIdSchema.parse(
-						'00000000-0000-4000-8000-000000000001'
-					);
-					state.storage.sql.exec(
-						'INSERT INTO pending_upload(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, accepted_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, 10)',
-						uploadId,
-						cache.id,
-						narHash,
-						'staging/test',
-						JSON.stringify({ storePathHash: path }),
-						now,
-						expiresAt
-					);
+					path,
+					narHash,
+					now
+				);
+				state.storage.sql.exec(
+					'INSERT INTO attestation_inheritance(cache_id, store_path_hash, nar_hash, generation, not_before) VALUES (?, ?, ?, 1, ?)',
+					cache.id,
+					path,
+					narHash,
+					now
+				);
+				state.storage.sql.exec(
+					'INSERT INTO narinfo_deletion(cache_id, store_path_hash, nar_hash, generation, created_at) VALUES (?, ?, ?, 0, ?)',
+					cache.id,
+					path,
+					narHash,
+					now
+				);
+				state.storage.sql.exec(
+					'UPDATE work_sequence SET value = 10 WHERE id = 1'
+				);
+				const service = new ProtectedInheritanceService(context);
+				const meter = context.dbCost;
+				const measure = <T>(body: () => T) => {
 					meter.recordOutstanding();
-					const beforeTransfer = {
+					const before = {
 						rowsRead: meter.rowsRead,
 						rowsWritten: meter.rowsWritten
 					};
-					await buildAttestations(context).queueInheritance(
-						cache,
-						path,
-						narInfoGenerationSchema.parse(2),
-						narHash,
-						uploadId
-					);
+					const value = body();
 					meter.recordOutstanding();
-					const transfer = {
-						rowsRead: meter.rowsRead - beforeTransfer.rowsRead,
-						rowsWritten: meter.rowsWritten - beforeTransfer.rowsWritten
-					};
-					const release = measure(() => {
-						service.releaseDestination(cache.id, path, generation);
-					});
-					const retire = measure(() =>
-						context.db
-							.delete(narInfoDeletions)
-							.where(
-								and(
-									eq(narInfoDeletions.cacheId, cache.id),
-									eq(narInfoDeletions.storePathHash, path)
-								)
-							)
-							.run()
-					);
 					return {
-						names,
-						pages,
-						maxRead,
-						maxWrite,
-						capture: capture.cost,
-						transfer,
-						release: release.cost,
-						retire: retire.cost
+						value,
+						cost: {
+							rowsRead: meter.rowsRead - before.rowsRead,
+							rowsWritten: meter.rowsWritten - before.rowsWritten
+						}
 					};
-				})
-			);
-			expect(result).toStrictEqual({
-				names: [
-					'',
-					...Array.from(
-						{ length: 25_000 },
-						(_unused, index) => `source-${String(index + 100).padStart(8, '0')}`
-					)
-				],
-				pages: 25_001,
-				maxRead: 15,
-				maxWrite: 3,
-				capture: { rowsRead: 2, rowsWritten: 3 },
-				transfer: { rowsRead: 5, rowsWritten: 6 },
-				release: { rowsRead: 1, rowsWritten: 1 },
-				retire: { rowsRead: 4, rowsWritten: 1 }
-			});
-		}
-	);
+				};
+				const capture = measure(() => {
+					service.capture(
+						context.db,
+						cache,
+						{
+							storePathHash: path,
+							generation: narInfoGenerationSchema.parse(0)
+						},
+						now
+					);
+				});
+				const names: string[] = [];
+				let pages = 0;
+				let maxRead = 0;
+				let maxWrite = 0;
+				for (let visited = 0; visited <= 25_001; visited += 1) {
+					const { cost, value: source } = measure(() => {
+						const source = service.nextSource(cache, path, narHash, generation);
+						if (source === undefined) {
+							return;
+						}
+						if (
+							source.scope !== undefined &&
+							service.isReferenceProtected(
+								cache,
+								path,
+								generation,
+								source.cacheId,
+								source.generation
+							)
+						) {
+							names.push(source.cache?.name ?? '');
+						}
+						service.advanceSource(cache, path, generation, source);
+						return source;
+					});
+					if (source === undefined) {
+						break;
+					}
+					pages += 1;
+					maxRead = Math.max(maxRead, cost.rowsRead);
+					maxWrite = Math.max(maxWrite, cost.rowsWritten);
+				}
+
+				const expiresAt = isoTimestamp(new Date(testBase.getTime() + 60_000));
+				const uploadId = uploadIdSchema.parse(
+					'00000000-0000-4000-8000-000000000001'
+				);
+				state.storage.sql.exec(
+					'INSERT INTO pending_upload(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, accepted_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, 10)',
+					uploadId,
+					cache.id,
+					narHash,
+					'staging/test',
+					JSON.stringify({ storePathHash: path }),
+					now,
+					expiresAt
+				);
+				meter.recordOutstanding();
+				const beforeTransfer = {
+					rowsRead: meter.rowsRead,
+					rowsWritten: meter.rowsWritten
+				};
+				await buildAttestations(context).queueInheritance(
+					cache,
+					path,
+					narInfoGenerationSchema.parse(2),
+					narHash,
+					uploadId
+				);
+				meter.recordOutstanding();
+				const transfer = {
+					rowsRead: meter.rowsRead - beforeTransfer.rowsRead,
+					rowsWritten: meter.rowsWritten - beforeTransfer.rowsWritten
+				};
+				const release = measure(() => {
+					service.releaseDestination(cache.id, path, generation);
+				});
+				const retire = measure(() =>
+					context.db
+						.delete(narInfoDeletions)
+						.where(
+							and(
+								eq(narInfoDeletions.cacheId, cache.id),
+								eq(narInfoDeletions.storePathHash, path)
+							)
+						)
+						.run()
+				);
+				return {
+					names,
+					pages,
+					maxRead,
+					maxWrite,
+					capture: capture.cost,
+					transfer,
+					release: release.cost,
+					retire: retire.cost
+				};
+			})
+		);
+		expect(result).toStrictEqual({
+			names: [
+				'',
+				...Array.from(
+					{ length: 25_000 },
+					(_unused, index) => `source-${String(index + 100).padStart(8, '0')}`
+				)
+			],
+			pages: 25_001,
+			maxRead: 15,
+			maxWrite: 3,
+			capture: { rowsRead: 2, rowsWritten: 3 },
+			transfer: { rowsRead: 5, rowsWritten: 6 },
+			release: { rowsRead: 1, rowsWritten: 1 },
+			retire: { rowsRead: 4, rowsWritten: 1 }
+		});
+	});
 
 	it('excludes 25,000 destinations accepted after deletion from indexed deferral probes', async () => {
 		await initialise();

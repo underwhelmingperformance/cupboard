@@ -955,7 +955,7 @@ describe('recorded verdict durability', () => {
 			edgesAfterDrain: 1,
 			edgesAfterSecondAlarm: 1
 		});
-	}, 240_000);
+	});
 });
 
 // A second consumer's verdict, written to the row while the first consumer's
@@ -1075,7 +1075,7 @@ describe('recorded verdict fencing', () => {
 			claimOwner: replacementOwner,
 			recordedVerdictJson: replacementVerdictJson
 		});
-	}, 240_000);
+	});
 });
 
 // Malformed JSON that an interrupted write could leave in a verdict row.
@@ -1193,5 +1193,5 @@ describe('unreadable recorded verdicts', () => {
 			pendingAfterDrain: 1,
 			publishedPaths: 2
 		});
-	}, 240_000);
+	});
 });

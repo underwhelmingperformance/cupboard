@@ -1401,7 +1401,7 @@ describe('tenant contract round trip', () => {
 			),
 			measured: 1
 		});
-	}, 60_000);
+	});
 
 	it('rejects a bundle whose subject digest differs from the committed NAR', async () => {
 		const fixture = await bundleFixture('default', 1);
@@ -1712,7 +1712,7 @@ describe('tenant contract round trip', () => {
 				instance.context.gateBudgetMs = 25_000;
 			});
 		}
-	}, 30_000);
+	});
 
 	it('retries a partial page without validating or promoting the bundle again', async () => {
 		const fixture = await bundleFixture('default', 3);

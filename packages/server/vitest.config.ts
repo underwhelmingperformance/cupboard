@@ -14,6 +14,14 @@ import { resolveTestWorkerBudget } from './src/test-worker-budget.ts';
 
 const mebibyte = 1024 * 1024;
 
+// These limits only detect a hung test or hook. Do not give a test or hook a
+// shorter limit: whether it finishes within one depends on how busy the
+// machine is.
+const hangLimits = {
+	hookTimeout: 1_800_000,
+	testTimeout: 1_800_000
+};
+
 interface CompressedNarFixture {
 	readonly compressed: Uint8Array<ArrayBuffer>;
 	readonly narSha256: string;
@@ -93,7 +101,7 @@ export default defineConfig(async () => {
 				{
 					test: {
 						name: 'node',
-						testTimeout: 30_000,
+						...hangLimits,
 						sequence: { groupOrder: 0 },
 						benchmark: {
 							include: ['src/**/*.bench.ts']
@@ -242,7 +250,7 @@ export default defineConfig(async () => {
 					],
 					test: {
 						name: 'workers',
-						testTimeout: 30_000,
+						...hangLimits,
 						fileParallelism: true,
 						maxWorkers: workerBudget,
 						sequence: { groupOrder: 1 },

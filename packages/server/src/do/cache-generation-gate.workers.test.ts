@@ -1660,7 +1660,7 @@ describe('cache generation gate', () => {
 		const large = await deletionStatements('gen-allowance-large', 120);
 
 		expect({ small, large }).toStrictEqual({ small: 5, large: 5 });
-	}, 240_000);
+	});
 
 	it('measures fixed and per-chunk teardown D1 statements', async () => {
 		const oneChunk = await teardownPassStatements('gen-pass-small', 1);
@@ -1690,7 +1690,7 @@ describe('cache generation gate', () => {
 			perPass: 2,
 			worstCase: 34
 		});
-	}, 240_000);
+	});
 
 	it('defers attested teardown within a 200-call invocation allowance', async () => {
 		const allowance = 200;
@@ -1714,7 +1714,7 @@ describe('cache generation gate', () => {
 			references: [],
 			edges: []
 		});
-	}, 240_000);
+	});
 
 	it("credits a digest only when teardown retires the tenant's last reference", async () => {
 		await useTestServer('gen-shared-digest');

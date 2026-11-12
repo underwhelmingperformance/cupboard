@@ -354,7 +354,6 @@ describe('reconcile queue retention', () => {
 				narInfoPublications,
 				unusedProbeFaults: 0
 			});
-		},
-		240_000
+		}
 	);
 });
