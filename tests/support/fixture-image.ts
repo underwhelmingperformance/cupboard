@@ -21,6 +21,8 @@ import {
 import { getAuthConfig } from 'testcontainers/build/container-runtime/index.js';
 import { z } from 'zod';
 
+import type { StepProgress } from './step-progress.ts';
+
 const buildMessage = z.object({
 	stream: z.string().optional(),
 	error: z.string().optional(),
@@ -108,33 +110,46 @@ class BuildOutput {
 }
 
 export class FixtureImageBuilder {
-	constructor(private readonly runtime: FixtureImageRuntime) {}
+	constructor(
+		private readonly runtime: FixtureImageRuntime,
+		private readonly progress: StepProgress
+	) {}
 
 	private async attempt(
 		image: string,
 		shouldSkipCache: boolean
 	): Promise<void> {
+		const suffix = shouldSkipCache ? ' without cache' : '';
 		const stream = await this.runtime.build(image, shouldSkipCache);
-		const lines = createInterface({
-			input: stream,
-			crlfDelay: Infinity
-		});
-		const output = new BuildOutput();
+		const output = await this.progress.step(
+			`image build output${suffix}`,
+			async () => {
+				const lines = createInterface({
+					input: stream,
+					crlfDelay: Infinity
+				});
+				const buildOutput = new BuildOutput();
 
-		try {
-			for await (const line of lines) {
-				if (line.trim() !== '') {
-					output.append(line);
+				try {
+					for await (const line of lines) {
+						if (line.trim() !== '') {
+							buildOutput.append(line);
+						}
+					}
+				} finally {
+					lines.close();
 				}
+
+				return buildOutput;
 			}
-		} finally {
-			lines.close();
-		}
+		);
 
 		output.validate(image);
 
 		try {
-			await this.runtime.inspect(image);
+			await this.progress.step(`built image inspection${suffix}`, async () =>
+				this.runtime.inspect(image)
+			);
 		} catch (error) {
 			if (!isMissingImage(error)) {
 				throw error;
@@ -156,12 +171,17 @@ export class FixtureImageBuilder {
 			return true;
 		}
 
-		try {
-			await this.runtime.inspect(error.missingImage);
-			return false;
-		} catch (inspectionError) {
-			return isMissingImage(inspectionError);
-		}
+		const { missingImage } = error;
+
+		return this.progress.step('missing image inspection', async () => {
+			try {
+				await this.runtime.inspect(missingImage);
+
+				return false;
+			} catch (inspectionError) {
+				return isMissingImage(inspectionError);
+			}
+		});
 	}
 
 	async build(image: string): Promise<void> {
@@ -405,10 +425,17 @@ function errorMessage(error: unknown): string {
 
 export async function prepareNixFixtureImage(
 	directory: string,
+	progress: StepProgress,
 	pullRetry: PullRetryOptions = {}
 ): Promise<GenericContainer> {
-	const client = await getContainerRuntimeClient();
-	const reaper = await getReaper(client);
+	const { client, reaper } = await progress.step(
+		'container runtime setup',
+		async () => {
+			const runtimeClient = await getContainerRuntimeClient();
+
+			return { client: runtimeClient, reaper: await getReaper(runtimeClient) };
+		}
+	);
 	const docker = client.container.dockerode;
 	const dockerfile = await readFile(path.join(directory, 'Dockerfile'), 'utf8');
 	const baseImage = /^FROM\s+(\S+)$/mu.exec(dockerfile)?.[1];
@@ -418,8 +445,10 @@ export async function prepareNixFixtureImage(
 	}
 
 	const baseName = ImageName.fromString(baseImage);
-	const auth = await getAuthConfig(
-		baseName.registry ?? client.info.containerRuntime.indexServerAddress
+	const auth = await progress.step('registry credential lookup', async () =>
+		getAuthConfig(
+			baseName.registry ?? client.info.containerRuntime.indexServerAddress
+		)
 	);
 	const registryconfig =
 		auth === undefined
@@ -431,44 +460,60 @@ export async function prepareNixFixtureImage(
 	const image = `cupboard-nix-fixture:${randomUUID()}`;
 	const runtime: FixtureImageRuntime = {
 		async build(image, shouldSkipCache) {
-			try {
-				await docker.getImage(baseImage).inspect();
-			} catch (error) {
-				if (!isMissingImage(error)) {
-					throw error;
-				}
+			const suffix = shouldSkipCache ? ' without cache' : '';
+			const isBasePresent = await progress.step(
+				`base image inspection${suffix}`,
+				async () => {
+					try {
+						await docker.getImage(baseImage).inspect();
 
-				await pullBaseImage(
-					{
-						pull: async () =>
-							docker.pull(baseName.string, {
-								authconfig: auth,
-								platform: undefined
-							}),
-						inspect: async () => {
-							await docker.getImage(baseName.string).inspect();
+						return true;
+					} catch (error) {
+						if (!isMissingImage(error)) {
+							throw error;
 						}
-					},
-					pullRetry
+
+						return false;
+					}
+				}
+			);
+
+			if (!isBasePresent) {
+				await progress.step(`base image pull${suffix}`, async () =>
+					pullBaseImage(
+						{
+							pull: async () =>
+								docker.pull(baseName.string, {
+									authconfig: auth,
+									platform: undefined
+								}),
+							inspect: async () => {
+								await docker.getImage(baseName.string).inspect();
+							}
+						},
+						pullRetry
+					)
 				);
 			}
 
-			return docker.buildImage(
-				{ context: directory, src: ['Dockerfile'] },
-				{
-					t: image,
-					dockerfile: 'Dockerfile',
-					nocache: shouldSkipCache,
-					rm: true,
-					forcerm: true,
-					version: '1',
-					registryconfig,
-					labels: {
-						'org.testcontainers': 'true',
-						'org.testcontainers.lang': 'node',
-						[LABEL_TESTCONTAINERS_SESSION_ID]: reaper.sessionId
+			return progress.step(`image build request${suffix}`, async () =>
+				docker.buildImage(
+					{ context: directory, src: ['Dockerfile'] },
+					{
+						t: image,
+						dockerfile: 'Dockerfile',
+						nocache: shouldSkipCache,
+						rm: true,
+						forcerm: true,
+						version: '1',
+						registryconfig,
+						labels: {
+							'org.testcontainers': 'true',
+							'org.testcontainers.lang': 'node',
+							[LABEL_TESTCONTAINERS_SESSION_ID]: reaper.sessionId
+						}
 					}
-				}
+				)
 			);
 		},
 		async inspect(image) {
@@ -477,7 +522,7 @@ export async function prepareNixFixtureImage(
 	};
 
 	try {
-		await new FixtureImageBuilder(runtime).build(image);
+		await new FixtureImageBuilder(runtime, progress).build(image);
 		return new GenericContainer(image);
 	} catch (error) {
 		await bestEffort(async () => {

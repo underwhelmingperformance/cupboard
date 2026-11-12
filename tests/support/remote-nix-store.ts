@@ -9,6 +9,7 @@ import { type StartedTestContainer, Wait } from 'testcontainers';
 import { onceAsync } from './cleanup.ts';
 import { prepareNixFixtureImage } from './fixture-image.ts';
 import { runCommand } from './process.ts';
+import type { StepProgress } from './step-progress.ts';
 
 const fixtureDirectory = path.resolve('tests/fixtures/nix-ssh-store');
 const sshPort = 22;
@@ -88,8 +89,15 @@ export async function stopNixSshStore(
 Starts an isolated Nix store whose daemon is reachable only through a real
 OpenSSH server. Testcontainers owns the image and container lifecycle; the
 matching private key remains in the fixture workspace on the host.
+
+Each slow step reports to `progress`. The key generation is not a step, so
+a stall there leaves no start line. The label of `progress` should identify
+the caller, because fixtures that start in separate processes write to the
+same terminal.
 */
-export async function startNixSshStore(): Promise<NixSshStoreFixture> {
+export async function startNixSshStore(
+	progress: StepProgress
+): Promise<NixSshStoreFixture> {
 	const workspace = await mkdtemp(path.join(tmpdir(), 'cupboard-nix-ssh-'));
 	const identityFile = path.join(workspace, 'id_ed25519');
 	const hostKeyFile = path.join(workspace, 'ssh_host_ed25519_key');
@@ -147,8 +155,8 @@ export async function startNixSshStore(): Promise<NixSshStoreFixture> {
 		process.env.RYUK_CONTAINER_IMAGE = ryukImage;
 
 		try {
-			const image = await prepareNixFixtureImage(fixtureDirectory);
-			container = await image
+			const image = await prepareNixFixtureImage(fixtureDirectory, progress);
+			const configured = image
 				.withExposedPorts(sshPort)
 				// Nix GC inspects process mappings and environments for runtime roots.
 				// Give the fixture the same process view as a system Nix daemon.
@@ -173,8 +181,11 @@ export async function startNixSshStore(): Promise<NixSshStoreFixture> {
 						mode: 0o644
 					}
 				])
-				.withWaitStrategy(Wait.forLogMessage(/Server listening on/u))
-				.start();
+				.withWaitStrategy(Wait.forLogMessage(/Server listening on/u));
+			container = await progress.step(
+				'container start and sshd readiness',
+				async () => configured.start()
+			);
 		} finally {
 			restoreRyukImage(previousRyukImage);
 		}

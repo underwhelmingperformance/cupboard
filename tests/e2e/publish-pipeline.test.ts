@@ -45,6 +45,7 @@ import {
 	startNixSshStore
 } from '../support/remote-nix-store.ts';
 import { StubRunnerTokenEndpoint } from '../support/runner-token.ts';
+import { StepProgress } from '../support/step-progress.ts';
 
 const isNixPresent =
 	spawnSync('nix', ['--version'], { stdio: 'ignore' }).status === 0;
@@ -1525,7 +1526,9 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 			const remote: { store?: NixSshStoreFixture } = {};
 
 			beforeAll(async () => {
-				const store = await startNixSshStore();
+				const store = await startNixSshStore(
+					new StepProgress('publish-pipeline')
+				);
 				remote.store = store;
 				// The transport `actions/prepare` configures for a job: the store
 				// URI names the host alone, and the credentials travel in the
