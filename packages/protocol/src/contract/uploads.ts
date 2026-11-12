@@ -96,17 +96,25 @@ const preview = cacheScopedProcedure(
 	uploadPreviewResponseSchema
 );
 
+// Plans at most one direct upload page, the limit that its responses
+// advertise in `x-cupboard-upload-max-paths`. A larger request receives
+// `UPLOAD_REQUEST_LIMIT_EXCEEDED` before the server reads any storage.
+const plan = cacheScopedProcedure(
+	{
+		method: 'POST',
+		suffix: '/uploads/plan',
+		requires: 'upload:negotiate',
+		replaySafety: 'replay-safe'
+	},
+	uploadPlanRequestSchema.shape,
+	uploadPlanResponseSchema
+);
+
 export const uploadsContract = {
-	plan: cacheScopedProcedure(
-		{
-			method: 'POST',
-			suffix: '/uploads/plan',
-			requires: 'upload:negotiate',
-			replaySafety: 'replay-safe'
-		},
-		uploadPlanRequestSchema.shape,
-		uploadPlanResponseSchema
-	),
+	plan: {
+		inDefaultCache: plan.inDefaultCache.errors(uploadRequestErrors),
+		inNamedCache: plan.inNamedCache.errors(uploadRequestErrors)
+	},
 	// Issues temporary R2 credentials for a push. Without a `pushId`, the server
 	// creates and signs a new identifier. With an existing `pushId`, the server
 	// issues replacement credentials for the same staging prefix after authorising

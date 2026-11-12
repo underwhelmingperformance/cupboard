@@ -57,7 +57,8 @@ import {
 	PublicationStagingDeletePendingError,
 	TenantWritesStoppedError,
 	UploadConfirmSubrequestsExhaustedError,
-	UploadPageSplitRequiredError
+	UploadPageSplitRequiredError,
+	UploadRequestLimitExceededError
 } from '../errors.ts';
 import {
 	narObjectKey,
@@ -67,6 +68,7 @@ import {
 } from '../http/http.ts';
 import { rootLogger } from '../observability/logging.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
+import { uploadPlanMaxPaths } from '../policy/upload-pages.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
@@ -580,6 +582,9 @@ export class UploadsService {
 		body: UploadNegotiateRequest,
 		grants: AuthorizationDetails
 	): Promise<UploadPlanResponse> {
+		if (body.paths.length > uploadPlanMaxPaths) {
+			throw new UploadRequestLimitExceededError(uploadPlanMaxPaths);
+		}
 		const expiresAtSeconds = pushIdExpiresAtSeconds(body.pushId);
 		if (
 			expiresAtSeconds === undefined ||

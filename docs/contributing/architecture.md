@@ -877,6 +877,16 @@ expected generation and no entries. A requested run root on an empty plan is
 neither created nor renewed. Explicit retention-root replacements with no
 targets continue through `setRoot`.
 
+A plan request contains at most `uploadPlanMaxPaths` paths, which is 100, and
+the tenant object advertises that limit in `x-cupboard-upload-max-paths`. CLIs
+up to v0.0.52 send plan pages of 100 paths and cannot send a smaller page after
+a refusal, so the limit stays at 100. The tenant object checks each skippable
+path's canonical NAR with one R2 head, and a test checks that a full page of
+distinct NARs completes within the Free plan's allowance. The tenant object
+answers a larger request with `UPLOAD_REQUEST_LIMIT_EXCEEDED`, HTTP 413 and
+`data.maxPaths` before it reads any storage. The Worker forwards a plan request
+without splitting it.
+
 Each plan includes a SHA-256 operation ID. The canonical UTF-8 JSON array has
 these fields, in order: protocol version `cupboard/publication/v1`, tenant,
 cache kind, cache name, expected cache generation, push ID, path metadata, and

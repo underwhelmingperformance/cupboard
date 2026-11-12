@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { startCapture } from '@cupboard/logger/testing';
 import {
 	cacheGenerationSchema,
 	type CacheScope,
@@ -8,6 +9,7 @@ import {
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { publicationStagingKey } from '@cupboard/protocol/publication';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
@@ -24,7 +26,9 @@ import {
 	uploadCapabilitiesHeader,
 	type UploadId,
 	type UploadPathNegotiation,
-	uploadPlanResponseSchema
+	uploadPlanResponseSchema,
+	uploadRequestLimitErrorCode,
+	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import { sessionIdSchema, uploadIdSchema } from '@cupboard/protocol/upload';
 import { CountingSemaphore } from '@cupboard/shared/concurrency';
@@ -44,6 +48,7 @@ import {
 	onTestFinished,
 	vi
 } from 'vitest';
+import { z } from 'zod';
 
 import {
 	deliverAlarms,
@@ -56,6 +61,7 @@ import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
+import { uploadPlanMaxPaths } from '../policy/upload-pages.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,
@@ -71,6 +77,7 @@ import {
 	currentServer,
 	defaultCache,
 	deletePath,
+	deployedSubrequestAllowance,
 	garbageCollectionOf,
 	initialise,
 	namedCache,
@@ -79,8 +86,12 @@ import {
 	putNarBytes,
 	recordClaimedVerification,
 	resetTestServer,
+	resolvedCache,
 	restartTestServers,
+	seedBlobStates,
 	suspendTenant,
+	syntheticNarHash,
+	syntheticStorePathHash,
 	testPushId,
 	testPushIdFor,
 	uploadMetadata,
@@ -160,6 +171,19 @@ it.each(
 );
 
 const publicationSession = `${publicationCapability},${publicationRefusalReasonsCapability}`;
+
+const planCostSchema = z.object({
+	route: z.string(),
+	d1Calls: z.number(),
+	r2Head: z.number()
+});
+
+const planRefusalSchema = z.object({
+	defined: z.boolean(),
+	code: z.string(),
+	status: z.number(),
+	data: z.object({ maxPaths: z.number() })
+});
 
 async function snapshot() {
 	return runInDurableObject(currentServer(), (instance) =>
@@ -259,6 +283,122 @@ describe('publication planning', () => {
 			expect(await snapshot()).toStrictEqual(before);
 		}
 	);
+
+	it('plans a full page of committed paths with distinct NARs under the Free slice', async () => {
+		const token = await initialise();
+		const paths = Array.from({ length: uploadPlanMaxPaths }, (_unused, index) =>
+			uploadPathNegotiation(
+				uploadMetadata({
+					fileSize: 1,
+					storePathHash: syntheticStorePathHash(index + 1),
+					narHash: syntheticNarHash(index + 1),
+					name: `full-${String(index)}`
+				})
+			)
+		);
+		await runInDurableObject(currentServer(), (instance) => {
+			const cacheId = resolvedCache(instance.context).id;
+			for (const path of paths) {
+				instance.context.db
+					.insert(schema.narInfos)
+					.values({
+						cacheId,
+						storePathHash: path.storePathHash,
+						storePath: path.storePath,
+						narHash: path.narHash,
+						narSize: path.narSize,
+						referencesJson: '[]',
+						createdAt: isoTimestamp(new Date())
+					})
+					.run();
+			}
+		});
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		for (const path of paths) {
+			await d1
+				.insert(d1Schema.blobReference)
+				.values({
+					tenant: fixtureTenant,
+					cacheKind: 'default',
+					storePathHash: path.storePathHash,
+					generation: narInfoGenerationSchema.parse(0),
+					narHash: path.narHash,
+					cacheGeneration: cacheGenerationSchema.parse(1)
+				})
+				.run();
+		}
+		await seedBlobStates(paths.map((path) => path.narHash));
+		const allowance = await deployedSubrequestAllowance();
+		const capture = startCapture();
+		let response: Response;
+		try {
+			response = await authorisedFetch('/uploads/plan', token, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ pushId: testPushId, paths })
+			});
+		} finally {
+			capture.stop();
+		}
+		const costs = capture.logs
+			.filter((entry) => entry.message === 'request finished')
+			.map((entry) => planCostSchema.parse(entry.properties));
+		const planned = uploadPlanResponseSchema.parse(await response.json());
+
+		expect({
+			allowance,
+			status: response.status,
+			r2Heads: costs.map((cost) => cost.r2Head),
+			actions: planned.uploads.map((decision) => decision.action)
+		}).toStrictEqual({
+			allowance: workersInvocationAllowances.free.subrequests,
+			status: StatusCodes.OK,
+			r2Heads: [uploadPlanMaxPaths],
+			// The canonical NAR objects are absent, so every path needs an upload.
+			actions: paths.map(() => 'upload')
+		});
+	});
+
+	it('refuses a plan with more paths than one page before reading storage', async () => {
+		const token = await initialise();
+		const before = await snapshot();
+		const metadata = uploadPathNegotiation(uploadMetadata({ fileSize: 1 }));
+		const capture = startCapture();
+		let response: Response;
+		try {
+			response = await authorisedFetch('/uploads/plan', token, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					pushId: testPushId,
+					paths: Array.from({ length: uploadPlanMaxPaths + 1 }, () => metadata)
+				})
+			});
+		} finally {
+			capture.stop();
+		}
+		const costs = capture.logs
+			.filter((entry) => entry.message === 'request finished')
+			.map((entry) => planCostSchema.parse(entry.properties));
+		expect({
+			status: response.status,
+			limit: response.headers.get(uploadRequestMaxPathsHeader),
+			body: planRefusalSchema.parse(await response.json()),
+			costs,
+			state: await snapshot()
+		}).toStrictEqual({
+			status: StatusCodes.REQUEST_TOO_LONG,
+			limit: String(uploadPlanMaxPaths),
+			body: {
+				defined: true,
+				code: uploadRequestLimitErrorCode,
+				status: StatusCodes.REQUEST_TOO_LONG,
+				data: { maxPaths: uploadPlanMaxPaths }
+			},
+			costs: [{ route: '/uploads/plan', d1Calls: 0, r2Head: 0 }],
+			state: before
+		});
+	});
 });
 
 it('accepts one durable operation when a complete publication is replayed', async () => {
