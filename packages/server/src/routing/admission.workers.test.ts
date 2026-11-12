@@ -43,6 +43,7 @@ import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { d1AccountThrottleMessage } from '../db/transient.test-support.ts';
 import {
+	LocalSchemaMigrationPendingError,
 	SharedFactsUnavailableError,
 	TenantAdmissionUnavailableError
 } from '../errors.ts';
@@ -176,6 +177,26 @@ async function primeRowCache(slug: string): Promise<void> {
 		ctx
 	);
 	await waitOnExecutionContext(ctx);
+}
+
+// The configured object answers an unknown route with a plain 404. Admission
+// refuses a tenant with a 404 that has `cache-control: no-store`.
+const objectNotFound = {
+	status: StatusCodes.NOT_FOUND,
+	retryAfter: undefined,
+	cacheControl: undefined
+};
+
+function gateProbeResponse(response: Response): {
+	readonly status: number;
+	readonly retryAfter: string | undefined;
+	readonly cacheControl: string | undefined;
+} {
+	return {
+		status: response.status,
+		retryAfter: response.headers.get('retry-after') ?? undefined,
+		cacheControl: response.headers.get('cache-control') ?? undefined
+	};
 }
 
 describe('layered admission gate', () => {
@@ -416,18 +437,16 @@ describe('layered admission gate', () => {
 	}
 
 	it('retries a transient fault on the write gate status read', async () => {
-		await ensureTenant(database(), createBody(gateSlug, 'public'), now);
-		await refreshTenantMembership(env);
+		await provisionNamedTenant(gateSlug);
 		await primeRowCache(gateSlug);
 
 		const response = await writeWithGateFaults(1, gateSlug);
 
-		expect(response.headers.get('retry-after')).toBeNull();
+		expect(gateProbeResponse(response)).toStrictEqual(objectNotFound);
 	});
 
 	it('uses the fresh admission row instead of a second write-gate read', async () => {
-		await ensureTenant(database(), createBody(gateSlug, 'public'), now);
-		await refreshTenantMembership(env);
+		await provisionNamedTenant(gateSlug);
 		await primeRowCache(gateSlug);
 
 		const response = await writeWithGateFaults(
@@ -435,23 +454,21 @@ describe('layered admission gate', () => {
 			gateSlug
 		);
 
-		expect(response.headers.get('retry-after')).toBeNull();
+		expect(gateProbeResponse(response)).toStrictEqual(objectNotFound);
 	});
 
 	it('trusts a fresh admission status, sparing the write gate read', async () => {
-		await ensureTenant(database(), createBody('acme'), now);
-		await refreshTenantMembership(env);
+		await provisionNamedTenant('acme', { defaultCacheAccess: 'private' });
 
 		// Private rows are never cached, so admission has already read this status
 		// from D1 and the write gate does not repeat the query.
 		const response = await writeWithGateFaults(Number.MAX_SAFE_INTEGER, 'acme');
 
-		expect(response.headers.get('retry-after')).toBeNull();
+		expect(gateProbeResponse(response)).toStrictEqual(objectNotFound);
 	});
 
 	it('reconfirms a cached status so a suspend still stops a write', async () => {
-		await ensureTenant(database(), createBody(gateSlug, 'public'), now);
-		await refreshTenantMembership(env);
+		await provisionNamedTenant(gateSlug);
 		await primeRowCache(gateSlug);
 		await setTenantStatus(
 			database(),
@@ -628,13 +645,32 @@ describe('layered admission gate', () => {
 		const slug = 'cold-negotiate-hints-migration';
 		await prepareColdMigrationTenant(slug);
 		const isAuthorised = async (): Promise<boolean> =>
-			testServerFor(slug).authoriseNegotiateHints(
-				'Bearer invalid',
-				defaultCache()
+			runInDurableObject(testServerFor(slug), (instance) =>
+				instance.authoriseNegotiateHints('Bearer invalid', defaultCache())
 			);
-		await expect(isAuthorised()).rejects.toThrow(
-			'Durable Object migration 0043_cache_access_backfill is still running stage catalogue-cache; retry shortly'
-		);
+		let rejection: unknown;
+
+		try {
+			await isAuthorised();
+		} catch (error) {
+			rejection = error;
+		}
+
+		expect(rejection).toBeInstanceOf(LocalSchemaMigrationPendingError);
+
+		if (!(rejection instanceof LocalSchemaMigrationPendingError)) {
+			return;
+		}
+
+		expect(rejection.pending).toStrictEqual({
+			kind: 'pending',
+			migration: '0043_cache_access_backfill',
+			stage: 'catalogue-cache',
+			cursor: 1000,
+			sourceRows: 1000,
+			declaredSourceWrites: 1000,
+			hasCommitted: true
+		});
 	});
 
 	it('reflects a tenant read credential change with no row caching', async () => {

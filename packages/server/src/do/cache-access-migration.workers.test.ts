@@ -1192,20 +1192,19 @@ describe('cache access migration', () => {
 		});
 
 		const result = await withoutAlarmArming(async () => {
-			let hasCompleted = false;
+			let isComplete = false;
 
-			for (let attempt = 0; attempt < 20; attempt++) {
+			// Each call advances the migration by one bounded step.
+			while (!isComplete) {
 				try {
-					await server.migrateCacheCatalogue(tenant);
-					hasCompleted = true;
-					break;
+					await runInDurableObject(server, (instance) =>
+						instance.migrateCacheCatalogue(tenant)
+					);
+					isComplete = true;
 				} catch (error) {
 					if (
-						!(error instanceof Error) ||
-						![
-							'LocalSchemaMigrationPendingError',
-							'CacheCatalogueMigrationPendingError'
-						].includes(error.name)
+						!(error instanceof LocalSchemaMigrationPendingError) &&
+						!(error instanceof CacheCatalogueMigrationPendingError)
 					) {
 						throw error;
 					}
@@ -1227,16 +1226,13 @@ describe('cache access migration', () => {
 				}));
 			});
 
-			return { hasCompleted, caches };
+			return caches;
 		}, server);
 
-		expect(result).toStrictEqual({
-			hasCompleted: true,
-			caches: [
-				{ cache: { kind: 'default' }, access: 'private' },
-				{ cache: { kind: 'named', name: 'builds' }, access: 'private' }
-			]
-		});
+		expect(result).toStrictEqual([
+			{ cache: { kind: 'default' }, access: 'private' },
+			{ cache: { kind: 'named', name: 'builds' }, access: 'private' }
+		]);
 	});
 
 	it('contracts once the reconciliation has supplied every access', async () => {
