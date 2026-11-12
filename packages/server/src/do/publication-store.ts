@@ -58,15 +58,54 @@ function pruneWakeTime(pruneAfter: number, notBefore: number): number {
 export class PublicationStore {
 	constructor(private readonly context: ServerContext) {}
 
+	/**
+	Returns the operation as every reader sees it. An accepted operation of a
+	removed cache is read as failed with `absent`, which is the outcome that the
+	teardown drain or the expiry pass later stores for it.
+	*/
 	get(id: UploadId) {
 		if (!publicationIdSchema.safeParse(id).success) {
 			return;
 		}
-		return this.context.db
+		const operation = this.context.db
 			.select()
 			.from(schema.publicationOperations)
 			.where(eq(schema.publicationOperations.id, id))
 			.get();
+		if (
+			operation?.state !== 'accepted' ||
+			!this.context.cacheRepository.isRemoved(operation.cacheId)
+		) {
+			return operation;
+		}
+
+		return {
+			...operation,
+			state: 'failed' as const,
+			resultJson: publicationFailureJson('absent')
+		};
+	}
+
+	/**
+	Stores the failure of an accepted operation whose cache has been removed.
+	Returns whether the operation was such an operation.
+	*/
+	failIfCacheRemoved(
+		operation: Pick<
+			typeof schema.publicationOperations.$inferSelect,
+			'id' | 'state' | 'cacheId'
+		>
+	): boolean {
+		if (
+			operation.state !== 'accepted' ||
+			!this.context.cacheRepository.isRemoved(operation.cacheId)
+		) {
+			return false;
+		}
+
+		this.fail(operation.id, 'absent');
+
+		return true;
 	}
 
 	assertLive(id: UploadId, now = Date.now()): void {
@@ -104,7 +143,14 @@ export class PublicationStore {
 			'id' | 'cacheId' | 'metadataJson'
 		>
 	): void {
-		if (this.get(pending.id) === undefined) {
+		const operation = this.get(pending.id);
+		if (operation === undefined) {
+			return;
+		}
+		// An accepted operation of a removed cache reads as failed. Store that
+		// outcome; a stored failure is left as it is.
+		if (operation.state === 'failed') {
+			this.fail(pending.id, 'absent');
 			return;
 		}
 		const metadata = parseStoredUploadPathMetadata(

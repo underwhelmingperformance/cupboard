@@ -30,7 +30,6 @@ import {
 	eq,
 	exists,
 	getTableColumns,
-	gt,
 	inArray,
 	isNotNull,
 	isNull,
@@ -119,6 +118,7 @@ import {
 	subrequestsPerReconcileRemoval,
 	subrequestsPerReconcileRestore
 } from './reconcile-queue-service.ts';
+import { liveNarInfoPage, pendingUploadOfLiveCache } from './removed-cache.ts';
 import { type RetentionService } from './retention-service.ts';
 import { RetryClockService } from './retry-clock-service.ts';
 import {
@@ -945,7 +945,8 @@ function claimableFilter(now: Date, running: readonly UploadId[]) {
 	return and(
 		sql`(${schema.pendingUploads.verdict} = 'pending' OR ${schema.pendingUploads.verdict} = 'committing') AND (${schema.pendingUploads.recordedVerdictJson} IS NULL OR ${schema.pendingUploads.claimOwner} IS NULL) AND ${schema.pendingUploads.settleExhaustion} IS NULL`,
 		lte(claimableReadyAt(), nowIso),
-		notRunning(running)
+		notRunning(running),
+		pendingUploadOfLiveCache()
 	);
 }
 
@@ -1608,7 +1609,7 @@ export class VerificationService {
 			};
 		}
 
-		if (reserved.kind === 'lost') {
+		if (reserved.kind === 'lost' || reserved.kind === 'cache-removed') {
 			const cleared = await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
@@ -2482,6 +2483,9 @@ export class VerificationService {
 		storePathHash: StorePathHash
 	): NarInfoRow | undefined {
 		const cache = this.cache(cacheId);
+		if (this.context.cacheRepository.isRemoved(cache.id)) {
+			return undefined;
+		}
 
 		return this.context.db
 			.select()
@@ -2555,9 +2559,12 @@ export class VerificationService {
 			pending.id,
 			pending.metadataJson
 		);
-		const cache = this.context.cacheRepository.resolve(
+		// After a removal, the scope can resolve to a cache registered again under
+		// the same name, which is a different cache.
+		const live = this.context.cacheRepository.resolve(
 			this.context.cacheRepository.scopeForId(pending.cacheId)
 		);
+		const cache = live?.id === pending.cacheId ? live : undefined;
 		return {
 			operation,
 			pending,
@@ -2830,6 +2837,11 @@ export class VerificationService {
 			const due = this.duePublications(now, storedCursor);
 			for (const operation of due) {
 				signal?.throwIfAborted();
+				// The teardown drain concludes the operation's pending upload.
+				if (store.failIfCacheRemoved(operation)) {
+					completed += 1;
+					continue;
+				}
 				try {
 					await this.expirePublication(logger, store, operation);
 					completed += 1;
@@ -3952,6 +3964,7 @@ export class VerificationService {
 			isNull(schema.pendingUploads.settleExhaustion),
 			lte(readyAt, now),
 			notRunning(this.commitPipeline.runningUploads()),
+			pendingUploadOfLiveCache(),
 			after === undefined
 				? undefined
 				: sql`(${readyAt}, ${schema.pendingUploads.id}) > (${after.readyAt}, ${after.id})`,
@@ -4329,25 +4342,17 @@ export class VerificationService {
 		}
 
 		// Verification spans every cache and resumes after the composite
-		// `(cache, storePathHash)` cursor. Keep both parts in the predicate so a
-		// pass cannot skip the beginning of the next cache.
-		const resumeAfter =
+		// `(cache, storePathHash)` cursor.
+		const rows = liveNarInfoPage(
+			this.context,
 			resumeCursor === undefined
 				? undefined
-				: or(
-						gt(schema.narInfos.cacheId, resumeCursor.cache.id),
-						and(
-							eq(schema.narInfos.cacheId, resumeCursor.cache.id),
-							gt(schema.narInfos.storePathHash, resumeCursor.storePathHash)
-						)
-					);
-		const rows = this.context.db
-			.select()
-			.from(schema.narInfos)
-			.where(resumeAfter)
-			.orderBy(asc(schema.narInfos.cacheId), asc(schema.narInfos.storePathHash))
-			.limit(pageLimit)
-			.all();
+				: {
+						cacheId: resumeCursor.cache.id,
+						storePathHash: resumeCursor.storePathHash
+					},
+			pageLimit
+		);
 
 		// Probe R2 for every row outside any critical section, so the batch's
 		// round-trips never block a concurrent commit or delete. A transient R2
@@ -4962,7 +4967,8 @@ export class VerificationService {
 			and(
 				exhausted,
 				lte(readyAt, claimedAt),
-				notRunning(this.commitPipeline.runningUploads())
+				notRunning(this.commitPipeline.runningUploads()),
+				pendingUploadOfLiveCache()
 			);
 		const rows = this.context.db
 			.select()

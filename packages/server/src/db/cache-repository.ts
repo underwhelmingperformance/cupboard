@@ -212,6 +212,36 @@ export class CacheRepository {
 	}
 
 	/**
+	Whether the cache has been removed. A removed cache keeps its rows until
+	the teardown drain deletes them, and code that reaches such a row through
+	the cache's id treats the row as absent.
+	*/
+	isRemoved(id: ResolvedCache['id']): boolean {
+		return (
+			this.database
+				.select({ id: schema.cacheIdentities.id })
+				.from(schema.cacheIdentities)
+				.where(
+					and(
+						eq(schema.cacheIdentities.id, id),
+						isNotNull(schema.cacheIdentities.deletedAt)
+					)
+				)
+				.get() !== undefined
+		);
+	}
+
+	/**
+	Whether the cache with `id` has been removed and its name now belongs to
+	`cache`.
+	*/
+	wasReplacedBy(id: ResolvedCache['id'], cache: ResolvedCache): boolean {
+		return (
+			this.isRemoved(id) && this.resolve(this.scopeForId(id))?.id === cache.id
+		);
+	}
+
+	/**
 	Records on the identity the generation `cache_lifecycle` holds for the
 	cache. The row is created at the first generation, so a name registered
 	again after a deletion has to take the generation the deletion advanced.

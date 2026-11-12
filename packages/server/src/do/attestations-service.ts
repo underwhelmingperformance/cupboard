@@ -449,6 +449,13 @@ export class AttestationsService {
 			);
 		}
 
+		// A cache registered again after a removal has the removed cache's scope,
+		// so the scope comparison cannot tell the two apart. A request through
+		// another cache's scope is refused above, as for a live upload.
+		if (this.context.cacheRepository.isRemoved(pending.cacheId)) {
+			throw new AttestationUploadNotFoundError(uploadId);
+		}
+
 		const now = isoTimestamp(new Date());
 
 		if (pending.expiresAt < now) {

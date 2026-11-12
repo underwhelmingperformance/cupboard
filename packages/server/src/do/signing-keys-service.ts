@@ -67,6 +67,7 @@ import { type ServerContext, tagsPerPurgeRequest } from './context.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { narInfoOfLiveCache } from './removed-cache.ts';
 import {
 	bootstrapKeyId,
 	byPublicKey,
@@ -331,7 +332,12 @@ export class SigningKeysService {
 			this.context.db
 				.select({ value: count() })
 				.from(schema.narInfos)
-				.where(lt(schema.narInfos.signatureGeneration, generation))
+				.where(
+					and(
+						lt(schema.narInfos.signatureGeneration, generation),
+						narInfoOfLiveCache()
+					)
+				)
 				.get()?.value ?? 0
 		);
 	}
@@ -341,7 +347,12 @@ export class SigningKeysService {
 			this.context.db
 				.select({ cache: schema.narInfos.cacheId })
 				.from(schema.narInfos)
-				.where(lt(schema.narInfos.signatureGeneration, generation))
+				.where(
+					and(
+						lt(schema.narInfos.signatureGeneration, generation),
+						narInfoOfLiveCache()
+					)
+				)
 				.limit(1)
 				.get() !== undefined
 		);
@@ -504,7 +515,8 @@ export class SigningKeysService {
 				.where(
 					and(
 						lt(schema.narInfos.signatureGeneration, row.generation),
-						isNull(schema.narInfos.pendingSignatureGeneration)
+						isNull(schema.narInfos.pendingSignatureGeneration),
+						narInfoOfLiveCache()
 					)
 				)
 				.orderBy(

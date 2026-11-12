@@ -4,6 +4,7 @@ import { type SQL, sql } from 'drizzle-orm';
 import * as schema from '../db/schema.ts';
 
 import { type ServerContext } from './context.ts';
+import { pendingUploadOfLiveCache } from './removed-cache.ts';
 import { RetryClockService } from './retry-clock-service.ts';
 
 export class UploadRetrySchedule {
@@ -20,9 +21,9 @@ export class UploadRetrySchedule {
 		const row = this.context.db.all<{ readyAt: string }>(
 			phase === 'recorded'
 				? sql`SELECT ${readyAt} AS readyAt FROM pending_upload INDEXED BY pending_upload_recorded_ready_idx
-				WHERE (recorded_verdict_json IS NOT NULL OR settle_exhaustion IS NOT NULL)${excludedIds(excluded)} ORDER BY ${readyAt}, id LIMIT 1`
+				WHERE (recorded_verdict_json IS NOT NULL OR settle_exhaustion IS NOT NULL) AND ${pendingUploadOfLiveCache()}${excludedIds(excluded)} ORDER BY ${readyAt}, id LIMIT 1`
 				: sql`SELECT ${readyAt} AS readyAt FROM pending_upload INDEXED BY pending_upload_fresh_ready_idx
-				WHERE (verdict = 'pending' OR verdict = 'committing') AND (recorded_verdict_json IS NULL OR claim_owner IS NULL) AND settle_exhaustion IS NULL${excludedIds(excluded)}
+				WHERE (verdict = 'pending' OR verdict = 'committing') AND (recorded_verdict_json IS NULL OR claim_owner IS NULL) AND settle_exhaustion IS NULL AND ${pendingUploadOfLiveCache()}${excludedIds(excluded)}
 				ORDER BY ${readyAt}, id LIMIT 1`
 		)[0];
 

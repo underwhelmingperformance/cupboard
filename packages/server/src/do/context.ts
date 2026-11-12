@@ -155,7 +155,8 @@ export interface RootSetCommand {
 export type ReserveOutcome =
 	| { kind: 'reserved'; generation: NarInfoGeneration }
 	| { kind: 'mine'; generation: NarInfoGeneration }
-	| { kind: 'lost'; narHash: NixSha256HashString };
+	| { kind: 'lost'; narHash: NixSha256HashString }
+	| { kind: 'cache-removed' };
 
 export type MaterialiseOutcome =
 	| {

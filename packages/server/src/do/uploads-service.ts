@@ -569,12 +569,22 @@ export class UploadsService {
 
 	uploadStatus(uploadId: UploadId): UploadStatusResponse {
 		const pending = this.context.db
-			.select({ verdict: schema.pendingUploads.verdict })
+			.select({
+				verdict: schema.pendingUploads.verdict,
+				cacheId: schema.pendingUploads.cacheId
+			})
 			.from(schema.pendingUploads)
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.get();
 
-		return { status: uploadStatusOf(pending) };
+		// The teardown drain deletes a removed cache's uploads later.
+		return {
+			status:
+				pending === undefined ||
+				this.context.cacheRepository.isRemoved(pending.cacheId)
+					? 'absent'
+					: uploadStatusOf(pending)
+		};
 	}
 
 	async plan(

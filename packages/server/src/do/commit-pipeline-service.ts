@@ -59,6 +59,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	BlobDeclarationConflictError,
+	CacheNotFoundError,
 	NarTooLargeError,
 	QuotaExceededError,
 	SubrequestTimeoutError,
@@ -528,6 +529,10 @@ export class CommitPipelineService {
 			metadata,
 			retentionEpoch
 		);
+
+		if (reserved.kind === 'cache-removed') {
+			return this.refuseRemovedCache(logger, cache, uploadId);
+		}
 
 		if (reserved.kind === 'lost') {
 			return this.concedeToWinner(
@@ -1511,7 +1516,8 @@ export class CommitPipelineService {
 		};
 		if (
 			row?.generation !== expected.generation ||
-			row.narHash !== expected.narHash
+			row.narHash !== expected.narHash ||
+			this.context.cacheRepository.isRemoved(cache.id)
 		) {
 			return { outcome: { kind: 'superseded' } };
 		}
@@ -1907,7 +1913,11 @@ export class CommitPipelineService {
 			return 'reclaimed';
 		}
 
-		if (current.generation !== generation || current.narHash !== narHash) {
+		if (
+			current.generation !== generation ||
+			current.narHash !== narHash ||
+			this.context.cacheRepository.isRemoved(cache.id)
+		) {
 			return 'superseded';
 		}
 
@@ -1984,6 +1994,9 @@ export class CommitPipelineService {
 					)
 				)
 				.get();
+			if (this.context.cacheRepository.isRemoved(cache.id)) {
+				return 'superseded';
+			}
 			return isCharged &&
 				row?.generation === generation &&
 				row.narHash === path.narHash
@@ -2086,6 +2099,31 @@ export class CommitPipelineService {
 		}
 	}
 
+	// A commit that resolved its cache before the cache was removed reaches its
+	// reservation afterwards. The upload is concluded as absent, and the client
+	// receives the same refusal as a commit that starts after the removal.
+	private async refuseRemovedCache(
+		logger: Logger,
+		cache: ResolvedCache,
+		uploadId: UploadId
+	): Promise<never> {
+		const pending = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+		if (pending !== undefined) {
+			await this.uploadState.clearPendingUploadAndStaging(
+				uploadId,
+				pending.r2Key,
+				pending.narHash,
+				{ logger, outcome: 'absent' }
+			);
+		}
+
+		throw new CacheNotFoundError(cache.scope);
+	}
+
 	/**
 	Reads tenant-wide account facts once for a commit batch. The charge batch
 	still makes the authoritative status and quota decision for each entry.
@@ -2112,7 +2150,8 @@ export class CommitPipelineService {
 			new CacheClosureService(this.context).firstClose(
 				cache,
 				retentionEpoch
-			) !== undefined
+			) !== undefined ||
+			this.context.cacheRepository.isRemoved(cache.id)
 		) {
 			return;
 		}
@@ -2142,6 +2181,12 @@ export class CommitPipelineService {
 		graceDecision?: GraceDecision,
 		attachRootName?: RootName
 	): Promise<CommitOutcome> {
+		// The charge fence reports a removed cache's row as superseded, and the
+		// removed cache's path stays committed until its teardown retires it.
+		if (this.context.cacheRepository.isRemoved(cache.id)) {
+			return this.refuseRemovedCache(logger, cache, uploadId);
+		}
+
 		// A recommit can replace the winner while its object is repaired. Retry a
 		// bounded number of times, then leave the upload for verification so churn
 		// cannot pin this request indefinitely.
@@ -2326,6 +2371,14 @@ export class CommitPipelineService {
 		}
 
 		if (pending.cacheId !== cache.id) {
+			// The teardown drain deletes a removed cache's uploads later. Only a
+			// session of the cache now registered under the removed cache's name
+			// learns that the upload is gone. Every other session receives the
+			// refusal for a live upload of another cache.
+			if (this.context.cacheRepository.wasReplacedBy(pending.cacheId, cache)) {
+				throw new UploadNotFoundError(uploadId);
+			}
+
 			throw new UploadCacheMismatchError(
 				uploadId,
 				this.context.cacheRepository.scopeForId(pending.cacheId),
@@ -2600,7 +2653,14 @@ export class CommitPipelineService {
 			// Reserve the row before verification so a root can retain it during
 			// the verification window. The verification pass repeats this
 			// idempotently.
-			await this.reserveNarInfoRow(cache, metadata, pending.retentionEpoch);
+			const reserved = await this.reserveNarInfoRow(
+				cache,
+				metadata,
+				pending.retentionEpoch
+			);
+			if (reserved.kind === 'cache-removed') {
+				return this.refuseRemovedCache(logger, cache, uploadId);
+			}
 
 			return {
 				kind: 'deferred',
@@ -2723,6 +2783,10 @@ export class CommitPipelineService {
 		return this.context.db.transaction((tx) => {
 			if (isStillOwned?.() === false) {
 				return;
+			}
+
+			if (this.context.cacheRepository.isRemoved(cache.id)) {
+				return { kind: 'cache-removed' };
 			}
 
 			const generation = this.nextGeneration(tx, cache, metadata.storePathHash);

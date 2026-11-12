@@ -33,6 +33,7 @@ import {
 import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueList, jsonValueLists } from './json-list.ts';
+import { liveNarInfoPage } from './removed-cache.ts';
 import { hasSubrequestsFor } from './subrequest-slice.ts';
 
 /**
@@ -199,17 +200,13 @@ export class IntegrityCheckService {
 	*/
 	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReportInput> {
 		const isResuming = cursor.cache !== 0 || cursor.storePathHash !== '';
-		const page = this.context.db
-			.select()
-			.from(schema.narInfos)
-			.where(
-				isResuming
-					? sql`(${schema.narInfos.cacheId}, ${schema.narInfos.storePathHash}) > (${cursor.cache}, ${cursor.storePathHash})`
-					: undefined
-			)
-			.orderBy(asc(schema.narInfos.cacheId), asc(schema.narInfos.storePathHash))
-			.limit(this.pageSize + 1)
-			.all();
+		const page = liveNarInfoPage(
+			this.context,
+			isResuming
+				? { cacheId: cursor.cache, storePathHash: cursor.storePathHash }
+				: undefined,
+			this.pageSize + 1
+		);
 		const rows = page.slice(0, this.pageSize);
 		const hasMore = page.length > this.pageSize;
 

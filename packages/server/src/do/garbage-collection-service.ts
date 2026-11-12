@@ -461,6 +461,16 @@ export class GarbageCollectionService {
 			.run();
 	}
 
+	private isBeingTornDown(cache: ResolvedCache): boolean {
+		return (
+			this.context.db
+				.select({ cacheId: schema.cacheTeardowns.cacheId })
+				.from(schema.cacheTeardowns)
+				.where(eq(schema.cacheTeardowns.cacheId, cache.id))
+				.get() !== undefined
+		);
+	}
+
 	private scanRow(
 		cache: ResolvedCache
 	): typeof schema.garbageCollectionScans.$inferSelect | undefined {
@@ -1990,6 +2000,21 @@ export class GarbageCollectionService {
 			this.scanRow(cache) === undefined
 				? this.inputs.scanDecision(cache, now)
 				: 'due';
+		// The teardown drain deletes a removed cache's rows, including its scan
+		// state, so a scan would only collect paths that the drain is deleting.
+		// Once the drain has finished, a scan finds no rows, and the cache's
+		// input row is then forgotten.
+		if (decision === 'due' && this.isBeingTornDown(cache)) {
+			return {
+				cache,
+				rootsExpired: 0,
+				pathsCollected: 0,
+				hasMoreExpiredRoots: false,
+				wasScanned: false,
+				hasMoreScanWork: false,
+				isGraphCurrent: true
+			};
+		}
 		const isDue = decision === 'due';
 		const hasMoreHistory =
 			!isDue &&
