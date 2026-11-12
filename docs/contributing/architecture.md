@@ -361,13 +361,49 @@ the staged bundle as a new version.
 
 [pushing-store-paths]: #pushing-store-paths
 
-Cache deletion revokes access before removing local state. Its local transaction
-copies pending staging keys into `staging_cleanup`, removes the pending rows,
-marks the cache deleted and records `cache_teardown` under its identity. Alarm
-passes retire published state first, then delete staging objects in pages of at
-most 1,000 keys while the maintenance budget permits. The queue retains a page
-until R2 confirms its deletion, and the teardown marker remains until staging
-and published-state cleanup finish. The indexed teardown header allows a pass to
+Cache deletion revokes access before it changes local state. Its local
+transaction marks the cache deleted, records `cache_teardown` under its
+identity, and deletes the rows that refer to the cache by key: its managed
+retirement, its legacy retention policy, and the tenant-wide collection position
+and the verification cursor when they point at it. Each statement changes at
+most one row, so the deletion costs the same for every cache. The cache's
+narinfo, root, grace, upload and scan rows stay in place.
+
+From that transaction on, code that reaches a deleted cache's rows through the
+cache's id treats them as absent. A reservation writes no narinfo row, a charge
+or a reservation release treats the cache's rows as superseded, and confirming
+grace or attaching a run-root target for the cache does nothing. A commit that
+resolved the cache earlier, or that concedes to the cache's committed path,
+fails with `CacheNotFoundError`. Verification does not claim the cache's
+uploads. Publication expiry fails the cache's accepted operations without
+reading a narinfo row, and every reader of an operation sees an accepted
+operation of the cache as failed with `absent`. The upload status and a
+commit-session subscription report the cache's uploads as `absent`. An
+attestation attach refuses the cache's uploads, garbage collection does not scan
+the cache, the verification scan and the integrity check skip its paths, and the
+signing-key backfill neither re-signs nor counts them. The backfill's queries
+still read each of those paths whose signature is older than the target until
+the drain deletes it, because the signature index does not lead with the cache.
+A request whose path contains a cache name resolves the cache by that name, so
+it cannot start on a deleted cache. A request that resolved the cache before the
+removal can still reach the cache after an `await`, as the commit described
+above does. The upload status, the subscription and the attestation attach reach
+a deleted cache through an upload or attestation id.
+
+Alarm passes delete the rows in pages of 128 while the row budget lasts. The
+alarm's earlier steps can spend the budget first, so within each pass the first
+page that deletes rows runs whatever the budget, and every pass makes progress.
+Pending uploads go first: their accepted operations fail with `absent`, their
+staging keys move to `staging_cleanup`, and the canonical incarnations that they
+reserved are given up. Pending attestations, root targets, roots, grace
+deadlines, narinfo rows and the collection scan state follow. Each page of
+narinfo rows is deleted in the transaction that queues their deletions at the
+rows' generations. The passes also retire published state and delete staging
+objects in pages of at most 1,000 keys while the maintenance budget permits. A
+pass that has spent its row budget on deleting rows leaves retirement to the
+next pass. The queue retains a page until R2 confirms its deletion, and the
+teardown marker remains until no row of the cache is left and staging and
+published-state cleanup finish. The indexed teardown header allows a pass to
 reconstruct a missing teardown marker. Only staging keys enter this queue;
 canonical NARs and bundles remain subject to shared-object reference accounting
 and the reapers.

@@ -56,7 +56,6 @@ import {
 	initialiseViaWorker,
 	namedCache,
 	narBytes,
-	narInfoGeneration,
 	provisionFixtureTenant,
 	publishAttestationList,
 	pushPath,
@@ -100,6 +99,25 @@ const storePathAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 
 // The narinfo version the first commit of a path takes.
 const firstNarInfoGeneration = 0;
+
+// The generation of the path's narinfo row in the live cache of `scope`. A
+// removed cache keeps its rows until its teardown drains them.
+function liveNarInfoGeneration(
+	scope: CacheScope,
+	storePathHash: StorePathHash
+): Promise<number | undefined> {
+	return runInDurableObject(
+		currentServer(),
+		(instance) =>
+			instance.context.db
+				.select({ generation: narInfos.generation })
+				.from(narInfos)
+				.where(
+					sql`${narInfos.cacheId} = ${instance.context.cacheRepository.require(scope).id} AND ${narInfos.storePathHash} = ${storePathHash}`
+				)
+				.get()?.generation
+	);
+}
 
 // Generated read passwords are exactly 43 base64url characters, which is what
 // the control plane accepts.
@@ -1006,7 +1024,10 @@ describe('deleted private cache', () => {
 
 		expect({
 			list: list.status,
-			generation: await narInfoGeneration(metadata.storePathHash),
+			generation: await liveNarInfoGeneration(
+				privateBuilds,
+				metadata.storePathHash
+			),
 			listObject:
 				(await env.BLOBS.head(
 					attestationListObjectKey(
@@ -1222,7 +1243,10 @@ describe('attestation list generation', () => {
 		expect({
 			beforeDeletion: beforeDeletion.status,
 			afterRecommit: afterRecommit.status,
-			generation: await narInfoGeneration(metadata.storePathHash)
+			generation: await liveNarInfoGeneration(
+				buildsCache,
+				metadata.storePathHash
+			)
 		}).toStrictEqual({
 			beforeDeletion: StatusCodes.OK,
 			afterRecommit: StatusCodes.NOT_FOUND,

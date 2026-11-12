@@ -1,4 +1,3 @@
-import { rootLogger } from '@cupboard/logger';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	cacheGenerationSchema,
@@ -21,7 +20,6 @@ import {
 	type CacheSummary,
 	type CacheUpdateBody
 } from '@cupboard/protocol/caches';
-import { publicationStagingPrefix } from '@cupboard/protocol/publication';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	and,
@@ -54,11 +52,7 @@ import {
 	CacheNotFoundError,
 	CacheRetirementTtlRequiredError
 } from '../errors.ts';
-import {
-	type RequestOrigin,
-	requestOriginSchema,
-	stagingPrefix
-} from '../http/http.ts';
+import { type RequestOrigin, requestOriginSchema } from '../http/http.ts';
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
 import { drainObjectDeletionPages } from './bulk.ts';
@@ -83,8 +77,6 @@ import {
 } from './deletion-queue-service.ts';
 import { jsonValueLists } from './json-list.ts';
 import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
-import { concludePromotion } from './promotion-record.ts';
-import { publicationFailureJson } from './publication-store.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionRuleService } from './retention-rule-service.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
@@ -444,73 +436,18 @@ export class CacheAdminService {
 
 		await this.deletionQueue.revokeCacheGenerationAndClearCredential(cache);
 
-		const now = isoTimestamp(new Date());
-
-		// Remove every narinfo row in the same transaction that queues its
-		// retirement. A later recommit creates a new generation that the queued
-		// deletion cannot remove.
-		const removedUploads = this.context.db.transaction((tx) => {
-			tx.update(schema.publicationOperations)
-				.set({ state: 'failed', resultJson: publicationFailureJson('absent') })
-				.where(
-					and(
-						eq(schema.publicationOperations.cacheId, cache.id),
-						eq(schema.publicationOperations.state, 'accepted')
-					)
-				)
-				.run();
+		// Each statement changes at most one row, so the removal costs the same
+		// for every cache. The cache's narinfo, root, grace and upload rows stay
+		// until `CacheTeardownDrain` deletes them, and code that reaches them
+		// through the cache's id treats them as absent.
+		this.context.db.transaction((tx) => {
 			tx.insert(schema.cacheTeardowns)
 				.values({ cacheId: cache.id })
 				.onConflictDoNothing()
 				.run();
-			for (const table of [schema.pendingUploads, schema.pendingAttestations]) {
-				tx.run(sql`INSERT INTO staging_cleanup (cache_id, r2_key)
-					SELECT cache_id, r2_key FROM ${table}
-					WHERE cache_id = ${cache.id}
-						AND (substr(r2_key, 1, ${stagingPrefix.length}) = ${stagingPrefix} OR substr(r2_key, 1, ${publicationStagingPrefix.length}) = ${publicationStagingPrefix})
-					ON CONFLICT (cache_id, r2_key) DO NOTHING`);
-			}
-			tx.run(
-				sql`INSERT INTO narinfo_deletion (cache_id, store_path_hash, nar_hash, generation, created_at)
-						SELECT cache_id, store_path_hash, nar_hash, generation, ${now}
-						FROM narinfo WHERE cache_id = ${cache.id}
-						ON CONFLICT (cache_id, store_path_hash, generation)
-						DO UPDATE SET nar_hash = excluded.nar_hash, created_at = excluded.created_at`
-			);
-			tx.delete(schema.narInfos)
-				.where(eq(schema.narInfos.cacheId, cache.id))
-				.run();
-			tx.delete(schema.verificationCursor)
-				.where(eq(schema.verificationCursor.cacheId, cache.id))
-				.run();
-			tx.delete(schema.retentionRootTargets)
-				.where(eq(schema.retentionRootTargets.cacheId, cache.id))
-				.run();
-			tx.delete(schema.retentionRoots)
-				.where(eq(schema.retentionRoots.cacheId, cache.id))
-				.run();
-			// Deleting the cache is the only transition out of grace-managed state;
-			// released paths receive no grace deadline.
-			tx.delete(schema.retentionGrace)
-				.where(eq(schema.retentionGrace.cacheId, cache.id))
-				.run();
 			tx.update(schema.cacheIdentities)
-				.set({ deletedAt: now })
+				.set({ deletedAt: isoTimestamp(new Date()) })
 				.where(eq(schema.cacheIdentities.id, cache.id))
-				.run();
-			// A policy scoped to the cache would match nothing once the cache is
-			// gone, and its `cache_id` would refer to a deleted identity.
-			tx.delete(schema.legacyRetentionPolicies)
-				.where(eq(schema.legacyRetentionPolicies.cacheId, cache.id))
-				.run();
-			// Remove in-flight uploads so a later commit cannot recreate the cache.
-			const removed = tx
-				.delete(schema.pendingUploads)
-				.where(eq(schema.pendingUploads.cacheId, cache.id))
-				.returning()
-				.all();
-			tx.delete(schema.pendingAttestations)
-				.where(eq(schema.pendingAttestations.cacheId, cache.id))
 				.run();
 			tx.delete(schema.managedCacheRetirements)
 				.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
@@ -518,18 +455,15 @@ export class CacheAdminService {
 			tx.delete(schema.garbageCollectionTenantRuns)
 				.where(eq(schema.garbageCollectionTenantRuns.cacheId, cache.id))
 				.run();
-
-			return removed;
+			// A policy scoped to the cache would match nothing once the cache is
+			// gone, and its `cache_id` would refer to a deleted identity.
+			tx.delete(schema.legacyRetentionPolicies)
+				.where(eq(schema.legacyRetentionPolicies.cacheId, cache.id))
+				.run();
+			tx.delete(schema.verificationCursor)
+				.where(eq(schema.verificationCursor.cacheId, cache.id))
+				.run();
 		});
-
-		for (const upload of removedUploads) {
-			if (upload.verdict === 'pending' || upload.verdict === 'committing') {
-				await concludePromotion(this.context.d1, upload, {
-					logger: rootLogger(),
-					outcome: 'absent'
-				});
-			}
-		}
 
 		await this.context.ctx.storage.put(this.teardownKey(cache), origin ?? {});
 		await this.context.ctx.storage.setAlarm(Date.now());
@@ -1377,21 +1311,22 @@ export class CacheAdminService {
 	}
 
 	/**
-	Revokes a cache's read authority, then removes its local state. Bounded
-	alarm passes run by {@link resumeTeardownPass} remove staging objects and
-	retire published state.
+	Revokes a cache's read authority, then marks the cache removed. Bounded
+	alarm passes run by {@link resumeTeardownPass} delete the cache's rows,
+	retire published state and remove staging objects.
 
 	Revocation advances the generation, records deletion and clears the cache
 	credential in one D1 transaction. Reads then exclude earlier generations
 	while cleanup continues.
 
-	The normal path runs two D1 statements in one batch, independently of the
-	number of committed paths. A missing lifecycle row needs an additional
-	lookup and insert batch. The teardown marker also starts the sweep for
-	edges left by an interrupted earlier deletion.
+	The normal path runs two D1 statements in one batch, and the local
+	transaction changes a fixed set of rows, independently of the size of the
+	cache. A missing lifecycle row needs an additional lookup and insert
+	batch. The teardown marker also starts the sweep for edges left by an
+	interrupted earlier deletion.
 
-	The deletion queue is durable, so garbage collection can resume it after a
-	crash before the alarm marker is written. The blob reaper later collects
+	The `cache_teardown` row is durable, so a pass reconstructs the marker if
+	a crash comes before the marker is written. The blob reaper later collects
 	unreferenced canonical objects.
 	*/
 	tearDownCache(cache: ResolvedCache, origin: RequestOrigin): Promise<void> {

@@ -19,9 +19,6 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
-import { AttestationCasService } from './attestation-cas-service.ts';
-import { AttestationsService } from './attestations-service.ts';
-import { CacheRegistrationService } from './cache-registration-service.ts';
 import {
 	cacheRowCounts,
 	drainTeardown,
@@ -33,12 +30,9 @@ import {
 	seededAttestations,
 	seededReservations,
 	seededStagingObjects,
-	seededVerdicts
+	seededVerdicts,
+	teardownDrainFor
 } from './cache-teardown.test-support.ts';
-import { CacheTeardownDrain } from './cache-teardown-drain.ts';
-import { type ServerContext } from './context.ts';
-import { DeletionQueueService } from './deletion-queue-service.ts';
-import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { withRowBudget } from './row-budget.ts';
 import { withSubrequestSlice } from './subrequest-slice.ts';
 
@@ -96,27 +90,6 @@ async function seedRemovedCache(): Promise<Seeded> {
 		.run();
 
 	return seeded;
-}
-
-function drainFor(context: ServerContext): CacheTeardownDrain {
-	const narInfoObjects = new NarInfoObjectsService(context);
-	const attestationCas = new AttestationCasService(context);
-	const attestations = new AttestationsService(
-		context,
-		new CacheRegistrationService(context),
-		attestationCas,
-		narInfoObjects
-	);
-
-	return new CacheTeardownDrain(
-		context,
-		new DeletionQueueService(
-			context,
-			attestationCas,
-			attestations,
-			narInfoObjects
-		)
-	);
 }
 
 const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -220,7 +193,7 @@ describe('cache teardown drain', () => {
 		const afterOnePage = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const drain = drainFor(instance.context);
+				const drain = teardownDrainFor(instance.context);
 				const progress = await withSubrequestSlice(() =>
 					withRowBudget(() => drain.drain(seeded.removed), 1)
 				);
@@ -264,7 +237,7 @@ describe('cache teardown drain', () => {
 					.delete(schema.pendingUploads)
 					.where(eq(schema.pendingUploads.cacheId, seeded.removed.id))
 					.run();
-				const drain = drainFor(instance.context);
+				const drain = teardownDrainFor(instance.context);
 				const progress = await withSubrequestSlice(() =>
 					withRowBudget(() => drain.drain(seeded.removed), 1)
 				);
@@ -349,7 +322,7 @@ describe('cache teardown drain', () => {
 							.where(eq(schema.pendingUploads.cacheId, seeded.removed.id))
 							.run();
 					}
-					const drain = drainFor(instance.context);
+					const drain = teardownDrainFor(instance.context);
 					const progress = await withSubrequestSlice(() =>
 						withRowBudget(() => {
 							// An alarm runs other steps before the teardown pass, and they

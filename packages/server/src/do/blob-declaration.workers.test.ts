@@ -1757,6 +1757,7 @@ describe('logging each promotion', () => {
 						internalOrigin
 					);
 				});
+				await currentServer().resumeCacheTeardown();
 			} finally {
 				capture.stop();
 			}
