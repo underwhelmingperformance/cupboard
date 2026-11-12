@@ -45,6 +45,11 @@ This is a pnpm workspace.
 - Use guard clauses and early returns; keep the happy path left-aligned.
 - Be type-first: prefer explicit types and small domain models over ad-hoc
   untyped objects.
+- Write new and changed tests, and the production delays that they exercise, to
+  the rules for waits, time limits and timing in
+  [Time and synchronisation](./docs/contributing/testing.md#time-and-synchronisation).
+  Older tests do not all follow them, so don't copy an older pattern that breaks
+  them.
 - Run `pnpm check` before committing. It runs every `check:*` script:
   `syncpack`, `prettier`, `eslint`, `knip`, `tsc`, the unit tests, and the
   end-to-end and conformance suites, which need Nix and Docker. Treat every
