@@ -30,37 +30,62 @@ describe('readWithOneRetry', () => {
 		vi.useRealTimers();
 	});
 
+	const transientFailure = new Error('transient failure');
+
 	it.each([
 		{
 			failure: 'a read that the deadline refuses after the budget has gone',
+			error: transientFailure,
 			elapsedMs: budgetMs,
 			attempts: 1,
 			isTimeout: true
 		},
 		{
 			failure: 'a read that fails with less budget left than the retry delay',
+			error: transientFailure,
 			elapsedMs: budgetMs - 50,
 			attempts: 1,
 			isTimeout: false
 		},
 		{
 			failure: 'a read that fails while budget remains',
+			error: transientFailure,
 			elapsedMs: 0,
 			attempts: 2,
+			isTimeout: false
+		},
+		{
+			failure: 'a read that fails with the D1 queue overload',
+			error: new Error(d1QueueOverloadMessage),
+			elapsedMs: 0,
+			attempts: 1,
+			isTimeout: false
+		},
+		{
+			failure: 'a read that fails with the account throttle',
+			error: new Error(d1AccountThrottleMessage),
+			elapsedMs: 0,
+			attempts: 1,
+			isTimeout: false
+		},
+		{
+			failure: 'a read that fails with the account throttle in a cause',
+			error: new Error('query failed', {
+				cause: new Error(d1AccountThrottleMessage)
+			}),
+			elapsedMs: 0,
+			attempts: 1,
 			isTimeout: false
 		}
 	])(
 		'makes $attempts attempts at $failure',
-		async ({ elapsedMs, attempts, isTimeout }) => {
+		async ({ error, elapsedMs, attempts, isTimeout }) => {
 			vi.useFakeTimers();
 			const calls = { count: 0 };
 			const read = (): Promise<never> => {
 				calls.count += 1;
 
-				return boundedSubrequest(
-					() => Promise.reject(new Error('transient failure')),
-					'd1.all'
-				);
+				return boundedSubrequest(() => Promise.reject(error), 'd1.all');
 			};
 			const settled = failureOf(
 				withDeadlineBudget(budgetMs, async () => {
@@ -69,11 +94,11 @@ describe('readWithOneRetry', () => {
 				})
 			);
 			await vi.runAllTimersAsync();
-			const error = await settled;
+			const failure = await settled;
 
 			expect({
 				attempts: calls.count,
-				isTimeout: error instanceof SubrequestTimeoutError
+				isTimeout: failure instanceof SubrequestTimeoutError
 			}).toStrictEqual({ attempts, isTimeout });
 		}
 	);
