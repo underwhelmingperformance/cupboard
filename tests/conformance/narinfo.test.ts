@@ -28,6 +28,25 @@ const agreedCases: readonly NarinfoCase[] = [
 		fixture: { extraLines: ['Deriver: unknown-deriver'] }
 	},
 	{
+		// Nix keeps the references in a set and reads this as one reference.
+		name: 'a reference listed twice',
+		fixture: {
+			fields: {
+				References:
+					'11111111111111111111111111111111-dep-a 11111111111111111111111111111111-dep-a'
+			}
+		}
+	},
+	{
+		name: 'references in another order, one of them twice',
+		fixture: {
+			fields: {
+				References:
+					'22222222222222222222222222222222-dep-b 11111111111111111111111111111111-dep-a 22222222222222222222222222222222-dep-b'
+			}
+		}
+	},
+	{
 		name: 'an empty compression',
 		fixture: { fields: { Compression: '' } }
 	},

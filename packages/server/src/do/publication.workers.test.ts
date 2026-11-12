@@ -7003,6 +7003,40 @@ describe('publication admission of an operation that changes state', () => {
 		}
 	);
 
+	// A committed row whose references cannot be read is not the same version as
+	// the upload, so verification replaces it when its NAR is missing.
+	it('replaces a committed path whose references cannot be read and whose NAR is missing', async () => {
+		const token = await initialise();
+		const { lost, nar, metadata } = await lostPathUpload(
+			token,
+			'publication-unreadable-references'
+		);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(schema.narInfos)
+				.set({ referencesJson: '{"not":"a list"}' })
+				.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+				.run();
+		});
+
+		await verifyCurrentTenant();
+		const replaced = await pathRowAndEdges(metadata.storePathHash);
+
+		const lostRow = {
+			generation: narInfoGenerationSchema.parse(0),
+			narHash: lost.narHash
+		};
+		const row = {
+			generation: narInfoGenerationSchema.parse(1),
+			narHash: nar.narHash
+		};
+		expect(replaced).toStrictEqual({
+			row,
+			edges: [lostRow, row],
+			cleanups: []
+		});
+	});
+
 	it('keeps the cleanup of a replacement whose lost row changes after the charge', async () => {
 		const token = await initialise();
 		const { lost, nar, metadata } = await lostPathUpload(

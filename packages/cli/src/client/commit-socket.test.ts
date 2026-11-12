@@ -4339,9 +4339,13 @@ describe('publication operations', () => {
 			operationId: uploadIdSchema.parse(character.repeat(64)),
 			metadata: uploadPathNegotiationSchema.parse({
 				...metadata,
+				// The upload schema lists each reference once, so the references must
+				// differ to make the entries large. The zero-padded binary hashes are
+				// already in code-unit order.
 				references: Array.from(
 					{ length: 10_000 },
-					() => `${storePathHash}-${'a'.repeat(211)}`
+					(_, index) =>
+						`${index.toString(2).padStart(32, '0')}-${'a'.repeat(211)}`
 				)
 			})
 		}));

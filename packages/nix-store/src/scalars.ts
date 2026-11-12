@@ -277,9 +277,51 @@ export type CacheReadRevision = z.infer<typeof cacheReadRevisionSchema>;
 
 export const compressionSchema = z.literal('zstd');
 
-export const referencesSchema = z
+/**
+A list of reference basenames within the length cap. A stored row can repeat a
+basename, so this schema accepts repeats. `parseNarInfo` and the narinfo reader
+deduplicate the references before they apply it.
+*/
+export const boundedReferencesSchema = z
 	.array(storePathBasenameSchema)
 	.max(referencesMaxLength);
+
+// `store-path.ts` imports this module, so `byCodeUnit` is not available here.
+function compareCodeUnits(a: string, b: string): number {
+	if (a < b) {
+		return -1;
+	}
+
+	return a > b ? 1 : 0;
+}
+
+/**
+The references as a set: each basename once, in code-unit order, which is the
+order of Nix's set of store paths. Compare reference lists with this function,
+so that a list with a repeat or in another order matches the same set.
+*/
+export function referenceSet<Reference extends string>(
+	references: readonly Reference[]
+): Reference[] {
+	return [...new Set(references)].toSorted(compareCodeUnits);
+}
+
+/**
+The references that a client uploads, as a set. The upload API has always
+accepted a repeat and any order. cupboard's own clients sort the references,
+but a reference push repeats one that the source narinfo repeats. This schema
+therefore accepts both and returns `referenceSet`, so every new row lists each
+reference once, as Nix reads the `References` line.
+
+The server also parses the metadata of a pending upload with this schema when it
+reads it back, so a list that was stored before this schema deduplicated comes
+out as a set. A narinfo row written before then can still repeat a basename, and
+`storedReferencesSchema` reads it as stored. Compare a stored list with an
+upload through `referenceSet`.
+*/
+export const referencesSchema = boundedReferencesSchema.transform(
+	(references) => referenceSet(references)
+);
 
 /**
 A narinfo's references read back from the row that holds them. It has no

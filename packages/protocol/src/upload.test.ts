@@ -78,6 +78,24 @@ describe('uploadNegotiateRequestSchema', () => {
 		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
 	});
 
+	// The upload API has always accepted a repeat and any order. cupboard's own
+	// clients sort the references, and a reference push repeats one that the
+	// source narinfo repeats. The request lists each reference once, in code-unit
+	// order.
+	it('lists the references of a path once, in order', () => {
+		const first = `${storePathHash}-name`;
+		const second = `${'1'.repeat(32)}-other`;
+		const value = {
+			pushId,
+			paths: [{ ...negotiationPath, references: [second, first, second] }]
+		};
+
+		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual({
+			pushId,
+			paths: [{ ...negotiationPath, references: [first, second] }]
+		});
+	});
+
 	it.each([
 		{
 			name: 'a run root which inherits retention',
