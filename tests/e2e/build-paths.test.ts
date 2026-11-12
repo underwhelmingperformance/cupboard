@@ -11,6 +11,7 @@ import {
 	type NixSshStoreFixture,
 	startNixSshStore
 } from '../support/remote-nix-store.ts';
+import { StepProgress } from '../support/step-progress.ts';
 
 type StoreKind = 'daemon' | 'daemonless';
 
@@ -94,79 +95,95 @@ function nix(
 }
 
 beforeAll(async () => {
+	const progress = new StepProgress('build-paths');
+
 	await readFile(path.join(bundlesDirectory, 'main.cjs'));
 	await readFile(path.join(bundlesDirectory, 'post.cjs'));
-	fixture.store = await startNixSshStore();
-	await store().copyDirectory(bundlesDirectory, '/tmp/action/dist');
-	await store().copyDirectory(bundlesDirectory, '/tmp/clock-action/dist');
-	await store().writeFile(
-		'/tmp/clock-action/dist/worker.cjs',
-		await renderActionBundle(
-			path.resolve('tests/support/build-paths-clock-worker.ts')
-		)
-	);
+	fixture.store = await startNixSshStore(progress);
+	await progress.step('action bundle copy', async () => {
+		await store().copyDirectory(bundlesDirectory, '/tmp/action/dist');
+		await store().copyDirectory(bundlesDirectory, '/tmp/clock-action/dist');
+		await store().writeFile(
+			'/tmp/clock-action/dist/worker.cjs',
+			await renderActionBundle(
+				path.resolve('tests/support/build-paths-clock-worker.ts')
+			)
+		);
+	});
 	const lock: unknown = JSON.parse(await readFile('flake.lock', 'utf8'));
 	const revision = nixpkgsLockSchema.parse(
 		flakeLockSchema.parse(lock).nodes.nixpkgs
 	).locked.rev;
 	const packages = `github:NixOS/nixpkgs/${revision}`;
-	const runtime = await store().exec([
-		'nix',
-		'build',
-		'--print-out-paths',
-		'--out-link',
-		'/tmp/node-runtime',
-		`${packages}#nodejs_24^out`
-	]);
+	const runtime = await progress.step('Node runtime build', async () =>
+		store().exec([
+			'nix',
+			'build',
+			'--print-out-paths',
+			'--out-link',
+			'/tmp/node-runtime',
+			`${packages}#nodejs_24^out`
+		])
+	);
 	fixture.node = `${runtime.trim()}/bin/node`;
-	const compiler = await store().exec([
-		'nix',
-		'build',
-		'--print-out-paths',
-		'--out-link',
-		'/tmp/cc-runtime',
-		`${packages}#stdenv.cc^out`
-	]);
-	await store().writeFile(
-		'/tmp/cupboard-hook-relay.c',
-		await readFile('packages/cli/hook-helper/cupboard-hook-relay.c', 'utf8')
+	const compiler = await progress.step('C compiler build', async () =>
+		store().exec([
+			'nix',
+			'build',
+			'--print-out-paths',
+			'--out-link',
+			'/tmp/cc-runtime',
+			`${packages}#stdenv.cc^out`
+		])
 	);
-	await store().exec([
-		`${compiler.trim()}/bin/cc`,
-		'-O2',
-		'-o',
-		'/tmp/cupboard-hook-relay',
-		'/tmp/cupboard-hook-relay.c'
-	]);
-	await store().exec([
-		'sh',
-		'-c',
-		'nix-daemon </dev/null >/tmp/build-paths-daemon.log 2>&1 &'
-	]);
-	await vi.waitFor(
-		async () => {
-			const readiness = await store().exec([
-				'sh',
-				'-c',
-				'test -S /nix/var/nix/daemon-socket/socket && echo ready || echo pending'
-			]);
-
-			expect(readiness).toBe('ready');
-		},
-		{ timeout: 10_000 }
-	);
-	for (const kind of ['daemon', 'daemonless'] as const) {
+	await progress.step('hook relay compile', async () => {
+		await store().writeFile(
+			'/tmp/cupboard-hook-relay.c',
+			await readFile('packages/cli/hook-helper/cupboard-hook-relay.c', 'utf8')
+		);
 		await store().exec([
-			'install',
-			'-d',
-			'--mode=0755',
-			`/var/lib/build-paths-${kind}/home`,
-			`/tmp/build-paths-${kind}/runner`,
-			`/var/lib/build-paths-${kind}/store`,
-			`/var/lib/build-paths-${kind}/state`,
-			`/var/lib/build-paths-${kind}/log`
+			`${compiler.trim()}/bin/cc`,
+			'-O2',
+			'-o',
+			'/tmp/cupboard-hook-relay',
+			'/tmp/cupboard-hook-relay.c'
 		]);
-	}
+	});
+	await progress.step('nix-daemon start', async () =>
+		store().exec([
+			'sh',
+			'-c',
+			'nix-daemon </dev/null >/tmp/build-paths-daemon.log 2>&1 &'
+		])
+	);
+	await progress.step('nix-daemon socket readiness', async () =>
+		vi.waitFor(
+			async () => {
+				const readiness = await store().exec([
+					'sh',
+					'-c',
+					'test -S /nix/var/nix/daemon-socket/socket && echo ready || echo pending'
+				]);
+
+				expect(readiness).toBe('ready');
+			},
+			{ timeout: 10_000 }
+		)
+	);
+	await progress.step('per-kind directory creation', async () => {
+		for (const kind of ['daemon', 'daemonless'] as const) {
+			await store().exec([
+				'install',
+				'-d',
+				'--mode=0755',
+				`/var/lib/build-paths-${kind}/home`,
+				`/tmp/build-paths-${kind}/runner`,
+				`/var/lib/build-paths-${kind}/store`,
+				`/var/lib/build-paths-${kind}/state`,
+				`/var/lib/build-paths-${kind}/log`
+			]);
+		}
+	});
 }, 240_000);
 
 afterAll(async () => {

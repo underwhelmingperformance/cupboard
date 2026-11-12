@@ -5,6 +5,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import { startNixSshStore, stopNixSshStore } from './remote-nix-store.ts';
+import { StepProgress } from './step-progress.ts';
 
 const failures = vi.hoisted(() => ({
 	keygen: new Error('ssh-keygen failed'),
@@ -32,7 +33,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 describe('startNixSshStore', () => {
 	it('reports the startup failure when removing the workspace also fails', async () => {
-		await expect(startNixSshStore()).rejects.toBe(failures.keygen);
+		await expect(
+			startNixSshStore(new StepProgress('remote-nix-store-test'))
+		).rejects.toBe(failures.keygen);
 	});
 });
 

@@ -19,6 +19,7 @@ import {
 } from '../../actions/src/prepare-builders/hook.ts';
 import { discoverNixStoreConfig } from '../../packages/nix/src/store-config.ts';
 import { startNixSshStore } from '../support/remote-nix-store.ts';
+import { StepProgress } from '../support/step-progress.ts';
 
 const execute = promisify(execFile);
 const evaluatedSchema = z.object({
@@ -37,7 +38,7 @@ it('copies inputs and outputs through a separate builder while observing the com
 		);
 	}
 	const directory = await mkdtemp('/tmp/cb-builder-');
-	const remote = await startNixSshStore();
+	const remote = await startNixSshStore(new StepProgress('remote-builder'));
 	let hookDirectory: string | undefined;
 	let listener: BuildEventListener | undefined;
 	try {

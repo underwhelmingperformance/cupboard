@@ -68,6 +68,7 @@ import {
 	type NixSshStoreFixture,
 	startNixSshStore
 } from '../support/remote-nix-store.ts';
+import { StepProgress } from '../support/step-progress.ts';
 
 interface RemoteNixStoreFixtureState {
 	store?: NixSshStoreFixture;
@@ -188,7 +189,9 @@ export function describeRemoteNixStore(): void {
 	describe('remote Nix store end to end', () => {
 		beforeAll(async () => {
 			fixture.hostEnvironment = { ...process.env };
-			fixture.store = await startNixSshStore();
+			fixture.store = await startNixSshStore(
+				new StepProgress('remote-nix-store')
+			);
 			fixture.workspace = await mkdtemp(
 				path.join(temporaryRoot, 'cupboard-remote-local-store-')
 			);
@@ -1499,7 +1502,11 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 			let server: CupboardTestServer | undefined;
 
 			try {
-				store = await withHostEnvironment(() => startNixSshStore());
+				store = await withHostEnvironment(() =>
+					startNixSshStore(
+						new StepProgress('remote-nix-store: per-test fixture')
+					)
+				);
 				server = await CupboardTestServer.start(path.join(directory, 'server'));
 				const activeStore = store;
 				const activeServer = server;

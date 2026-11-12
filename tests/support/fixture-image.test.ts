@@ -15,6 +15,7 @@ import {
 	type PullRetry,
 	pullWithRetry
 } from './fixture-image.ts';
+import { StepProgress } from './step-progress.ts';
 
 const preparation = vi.hoisted(() => ({
 	auth: vi.fn<
@@ -58,6 +59,22 @@ vi.mock('testcontainers', async (importOriginal) => ({
 vi.mock('testcontainers/build/container-runtime/index.js', () => ({
 	getAuthConfig: preparation.auth
 }));
+
+const quiet = new StepProgress('Fixture', {
+	write: vi.fn<(line: string) => void>()
+});
+
+function recordedProgress() {
+	const lines: string[] = [];
+	const progress = new StepProgress('Fixture', {
+		write: (line) => {
+			lines.push(line);
+		},
+		now: () => 0
+	});
+
+	return { lines, progress };
+}
 
 const image = 'cupboard-nix-fixture:owned-image';
 const id = `sha256:${'a'.repeat(64)}`;
@@ -112,7 +129,7 @@ describe('Nix fixture image preparation', () => {
 	it('rebuilds without cache when the completed image disappears before inspection', async () => {
 		const runtime = fixture();
 		runtime.inspect.mockRejectedValueOnce(missing);
-		await new FixtureImageBuilder(runtime).build(image);
+		await new FixtureImageBuilder(runtime, quiet).build(image);
 		expect({
 			builds: runtime.build.mock.calls,
 			inspections: runtime.inspect.mock.calls
@@ -136,7 +153,7 @@ describe('Nix fixture image preparation', () => {
 			])
 		);
 		runtime.inspect.mockRejectedValueOnce(missing);
-		await new FixtureImageBuilder(runtime).build(image);
+		await new FixtureImageBuilder(runtime, quiet).build(image);
 		expect({
 			builds: runtime.build.mock.calls,
 			inspections: runtime.inspect.mock.calls
@@ -163,18 +180,18 @@ describe('Nix fixture image preparation', () => {
 				{ errorDetail: { message: diagnostic }, error: diagnostic }
 			])
 		);
-		await expect(new FixtureImageBuilder(runtime).build(image)).rejects.toThrow(
-			diagnostic
-		);
+		await expect(
+			new FixtureImageBuilder(runtime, quiet).build(image)
+		).rejects.toThrow(diagnostic);
 		expect(runtime.build.mock.calls).toStrictEqual([[image, false]]);
 	});
 
 	it('reports both attempts when the built image disappears twice', async () => {
 		const runtime = fixture();
 		runtime.inspect.mockRejectedValue(missing);
-		await expect(new FixtureImageBuilder(runtime).build(image)).rejects.toThrow(
-			'disappeared'
-		);
+		await expect(
+			new FixtureImageBuilder(runtime, quiet).build(image)
+		).rejects.toThrow('disappeared');
 		expect(runtime.build.mock.calls).toStrictEqual([
 			[image, false],
 			[image, true]
@@ -186,9 +203,9 @@ describe('Nix fixture image preparation', () => {
 		runtime.build.mockResolvedValueOnce(
 			stream([{ stream: 'Step 1/2: FROM base\n' }])
 		);
-		await expect(new FixtureImageBuilder(runtime).build(image)).rejects.toThrow(
-			'without an image identifier'
-		);
+		await expect(
+			new FixtureImageBuilder(runtime, quiet).build(image)
+		).rejects.toThrow('without an image identifier');
 		expect({
 			builds: runtime.build.mock.calls,
 			inspections: runtime.inspect.mock.calls
@@ -202,9 +219,9 @@ describe('Nix fixture image preparation', () => {
 				statusCode
 			});
 			runtime.inspect.mockRejectedValue(failure);
-			await expect(new FixtureImageBuilder(runtime).build(image)).rejects.toBe(
-				failure
-			);
+			await expect(
+				new FixtureImageBuilder(runtime, quiet).build(image)
+			).rejects.toBe(failure);
 			expect(runtime.build.mock.calls).toStrictEqual([[image, false]]);
 		}
 	);
@@ -220,9 +237,9 @@ describe('Nix fixture image preparation', () => {
 			})()
 		);
 		runtime.build.mockResolvedValueOnce(broken);
-		await expect(new FixtureImageBuilder(runtime).build(image)).rejects.toBe(
-			failure
-		);
+		await expect(
+			new FixtureImageBuilder(runtime, quiet).build(image)
+		).rejects.toBe(failure);
 		expect({
 			builds: runtime.build.mock.calls,
 			inspections: runtime.inspect.mock.calls
@@ -238,9 +255,9 @@ describe('Nix fixture image preparation', () => {
 			}
 		});
 		runtime.build.mockResolvedValueOnce(broken);
-		await expect(new FixtureImageBuilder(runtime).build(image)).rejects.toBe(
-			failure
-		);
+		await expect(
+			new FixtureImageBuilder(runtime, quiet).build(image)
+		).rejects.toBe(failure);
 		expect({
 			builds: runtime.build.mock.calls,
 			inspections: runtime.inspect.mock.calls
@@ -487,7 +504,7 @@ describe('Nix fixture build runtime', () => {
 				/^cupboard-nix-fixture:/u
 			);
 			preparation.auth.mockResolvedValue(auth);
-			await prepareNixFixtureImage('tests/fixtures/nix-ssh-store');
+			await prepareNixFixtureImage('tests/fixtures/nix-ssh-store', quiet);
 			expect({
 				builds: preparation.build.mock.calls,
 				credentials: preparation.auth.mock.calls
@@ -528,7 +545,11 @@ describe('Nix fixture build runtime', () => {
 		);
 		preparation.inspect.mockRejectedValueOnce(missing);
 		preparation.pull.mockRejectedValueOnce(failure);
-		await prepareNixFixtureImage('tests/fixtures/nix-ssh-store', options);
+		await prepareNixFixtureImage(
+			'tests/fixtures/nix-ssh-store',
+			quiet,
+			options
+		);
 		expect({
 			pulls: preparation.pull.mock.calls,
 			inspections: preparation.inspect.mock.calls,
@@ -547,6 +568,59 @@ describe('Nix fixture build runtime', () => {
 		});
 	});
 
+	it('reports each step of the preparation when the base image has to be pulled', async () => {
+		const { lines, progress } = recordedProgress();
+		preparation.inspect.mockRejectedValueOnce(missing);
+		await prepareNixFixtureImage('tests/fixtures/nix-ssh-store', progress);
+		expect(lines).toStrictEqual([
+			'Fixture: container runtime setup started',
+			'Fixture: container runtime setup finished in 0 ms',
+			'Fixture: registry credential lookup started',
+			'Fixture: registry credential lookup finished in 0 ms',
+			'Fixture: base image inspection started',
+			'Fixture: base image inspection finished in 0 ms',
+			'Fixture: base image pull started',
+			'Fixture: base image pull finished in 0 ms',
+			'Fixture: image build request started',
+			'Fixture: image build request finished in 0 ms',
+			'Fixture: image build output started',
+			'Fixture: image build output finished in 0 ms',
+			'Fixture: built image inspection started',
+			'Fixture: built image inspection finished in 0 ms'
+		]);
+	});
+
+	it('gives the steps of the rebuild without cache different names from the first attempt', async () => {
+		const { lines, progress } = recordedProgress();
+		preparation.build.mockResolvedValueOnce(
+			stream([{ errorDetail: { message: `No such image: ${id}` } }])
+		);
+		preparation.inspect.mockResolvedValueOnce().mockRejectedValueOnce(missing);
+		await prepareNixFixtureImage('tests/fixtures/nix-ssh-store', progress);
+		expect(lines).toStrictEqual([
+			'Fixture: container runtime setup started',
+			'Fixture: container runtime setup finished in 0 ms',
+			'Fixture: registry credential lookup started',
+			'Fixture: registry credential lookup finished in 0 ms',
+			'Fixture: base image inspection started',
+			'Fixture: base image inspection finished in 0 ms',
+			'Fixture: image build request started',
+			'Fixture: image build request finished in 0 ms',
+			'Fixture: image build output started',
+			'Fixture: image build output finished in 0 ms',
+			'Fixture: missing image inspection started',
+			'Fixture: missing image inspection finished in 0 ms',
+			'Fixture: base image inspection without cache started',
+			'Fixture: base image inspection without cache finished in 0 ms',
+			'Fixture: image build request without cache started',
+			'Fixture: image build request without cache finished in 0 ms',
+			'Fixture: image build output without cache started',
+			'Fixture: image build output without cache finished in 0 ms',
+			'Fixture: built image inspection without cache started',
+			'Fixture: built image inspection without cache finished in 0 ms'
+		]);
+	});
+
 	it('preserves the Docker build diagnostic when removing a failed fixture image also fails', async () => {
 		preparation.build.mockResolvedValueOnce(
 			stream([
@@ -557,7 +631,7 @@ describe('Nix fixture build runtime', () => {
 			new Error('Docker cleanup failed')
 		);
 		await expect(
-			prepareNixFixtureImage('tests/fixtures/nix-ssh-store')
+			prepareNixFixtureImage('tests/fixtures/nix-ssh-store', quiet)
 		).rejects.toThrow('non-zero code: 29');
 		expect(preparation.remove.mock.calls).toStrictEqual([
 			[expect.stringMatching(/^cupboard-nix-fixture:/u)]
