@@ -57,6 +57,7 @@ import {
 import { PushCredentialIssuer } from '../blob/push-credential.ts';
 import { resumeTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { rootIncarnationSchema } from '../db/root-incarnation.ts';
 import * as schema from '../db/schema.ts';
 import {
 	d1AccountThrottleMessage,
@@ -92,6 +93,7 @@ import {
 	openCommitSession,
 	putNarBytes,
 	recordClaimedVerification,
+	removeRoot,
 	resetTestServer,
 	resolvedCache,
 	restartTestServers,
@@ -106,7 +108,8 @@ import {
 	uploadStateOf,
 	verifiableNar,
 	verificationOf,
-	verifyCurrentTenant
+	verifyCurrentTenant,
+	withoutAlarmArming
 } from '../test-support.ts';
 import { CupboardServer as TestCupboardServer } from '../test-worker.ts';
 
@@ -5156,12 +5159,47 @@ describe('publication subscriptions to terminal operations', () => {
 		});
 	});
 
+	// A root of an earlier version of cupboard has no incarnation. The target
+	// row of a released incarnation remains until the release pass drains it.
 	it.each([
-		{ name: 'includes', isRootTarget: true },
-		{ name: 'does not include', isRootTarget: false }
-	])(
+		{
+			name: 'without an incarnation includes',
+			incarnation: undefined,
+			target: 'live',
+			isRemoved: false,
+			isServed: true
+		},
+		{
+			name: 'without an incarnation does not include',
+			incarnation: undefined,
+			target: 'none',
+			isRemoved: false,
+			isServed: false
+		},
+		{
+			name: 'with an incarnation includes',
+			incarnation: 7,
+			target: 'live',
+			isRemoved: false,
+			isServed: true
+		},
+		{
+			name: 'with an incarnation released an earlier incarnation that included',
+			incarnation: 7,
+			target: 'earlier',
+			isRemoved: false,
+			isServed: false
+		},
+		{
+			name: 'without an incarnation was removed before the release pass drained',
+			incarnation: undefined,
+			target: 'live',
+			isRemoved: true,
+			isServed: false
+		}
+	] as const)(
 		'answers an entry with no record whose run root $name its served path after the push expires',
-		async ({ isRootTarget }) => {
+		async ({ incarnation, target, isRemoved, isServed }) => {
 			const token = await initialise();
 			const { path } = await completedPublication(
 				token,
@@ -5183,25 +5221,45 @@ describe('publication subscriptions to terminal operations', () => {
 			if (entry === undefined) {
 				throw new Error('Expected a planned entry');
 			}
-			if (isRootTarget) {
-				await runInDurableObject(currentServer(), (instance) => {
-					const cache =
-						instance.context.cacheRepository.require(defaultCache());
+			const rootIncarnation =
+				incarnation === undefined
+					? undefined
+					: rootIncarnationSchema.parse(incarnation);
+			const targetIncarnation =
+				target === 'earlier' ? rootIncarnationSchema.parse(5) : rootIncarnation;
+			await runInDurableObject(currentServer(), (instance) => {
+				const cache = instance.context.cacheRepository.require(defaultCache());
+				instance.context.db
+					.insert(schema.retentionRoots)
+					.values({
+						cacheId: cache.id,
+						name: root,
+						incarnation: rootIncarnation,
+						createdAt: isoTimestamp(new Date()),
+						updatedAt: isoTimestamp(new Date())
+					})
+					.run();
+				if (target !== 'none') {
 					instance.context.db
 						.insert(schema.retentionRootTargets)
 						.values({
 							cacheId: cache.id,
 							rootName: root,
 							storePathHash: path.storePathHash,
-							storePath: path.storePath
+							storePath: path.storePath,
+							incarnation: targetIncarnation
 						})
 						.run();
-					return Promise.resolve();
-				});
+				}
+				return Promise.resolve();
+			});
+			if (isRemoved) {
+				// Without the alarm, the release pass does not drain the rows.
+				await withoutAlarmArming(() => removeRoot(token, root));
 			}
 			vi.setSystemTime(new Date((expiresAt + 1) * 1000));
 			expect(await subscribe(token, undefined, pushId, entry)).toStrictEqual(
-				isRootTarget
+				isServed
 					? {
 							ev: 'settled',
 							uploadId: entry.operationId,

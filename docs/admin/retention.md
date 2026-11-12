@@ -78,7 +78,9 @@ don't affect each other.
 Setting a root replaces all of its targets. It doesn't add to them. Any store
 path that was a target before, and isn't now, is released. If the cache has a
 grace period, the grace period keeps the store path for a while. Otherwise
-nothing keeps it.
+nothing keeps it. Shortly after the request, a background pass grants the old
+targets their grace period and stops keeping them. Until then they stay kept.
+The grace period still counts from the request.
 
 Setting a root to the targets that it already has keeps those targets and
 releases nothing, so it doesn't make the cache need
@@ -181,6 +183,9 @@ A run root behaves differently from an ordinary root:
 - A later push can make a run root last longer, but never shorter. Once a push
   makes it permanent, it stays permanent.
 - A run root has no limit on its number of targets.
+- A push that finishes after garbage collection has removed its expired run
+  root, or after the root has been removed, doesn't add its store paths to the
+  root. The run's next push creates the root again.
 
 ```sh
 cupboard push https://cupboard.example.workers.dev/t/acme \

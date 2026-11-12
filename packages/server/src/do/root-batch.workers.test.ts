@@ -576,7 +576,7 @@ describe('batched root requests', () => {
 				singles: {
 					cost: {
 						...noCost,
-						rowsRead: 153,
+						rowsRead: 159,
 						rowsWritten: 9,
 						d1Calls: 9,
 						d1RowsRead: 23,
@@ -588,7 +588,7 @@ describe('batched root requests', () => {
 				batch: {
 					cost: {
 						...noCost,
-						rowsRead: 80,
+						rowsRead: 86,
 						rowsWritten: 9,
 						d1Calls: 3,
 						d1RowsRead: 15,

@@ -2,7 +2,10 @@ import { type Logger } from '@cupboard/logger';
 import { type RootName, type StorePathHash } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type VerifyReportInput } from '@cupboard/protocol/reports';
-import { type GcResponseInput } from '@cupboard/protocol/retention';
+import {
+	type GcResponseInput,
+	rootRemoveLeftoverTargetsCapability
+} from '@cupboard/protocol/retention';
 import { publicationCapability } from '@cupboard/protocol/upload';
 import {
 	type UploadConfirmPresentRequest,
@@ -332,10 +335,24 @@ export const tenantRouter = os.router({
 		remove: {
 			inDefaultCache: os.roots.remove.inDefaultCache.handler(
 				({ input, context }) =>
-					context.services.roots.removeRoot(context.cache, input.name)
+					context.services.roots.removeRoot(
+						context.cache,
+						input.name,
+						hasAcceptedCapability(
+							context.request,
+							rootRemoveLeftoverTargetsCapability
+						)
+					)
 			),
 			inNamedCache: os.roots.remove.inNamedCache.handler(({ input, context }) =>
-				context.services.roots.removeRoot(context.cache, input.name)
+				context.services.roots.removeRoot(
+					context.cache,
+					input.name,
+					hasAcceptedCapability(
+						context.request,
+						rootRemoveLeftoverTargetsCapability
+					)
+				)
 			)
 		}
 	},

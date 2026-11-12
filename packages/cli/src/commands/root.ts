@@ -27,7 +27,10 @@ import type {
 	RootTarget,
 	RootTargetsPage
 } from '@cupboard/protocol/retention';
-import { rootSetMaxTargets } from '@cupboard/protocol/retention';
+import {
+	rootRemoveLeftoverTargetsCapability,
+	rootSetMaxTargets
+} from '@cupboard/protocol/retention';
 import {
 	formatTimestamp,
 	type Reporter,
@@ -47,6 +50,7 @@ import {
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { acceptingCapability } from '../client/accepted-capability.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import { CupboardClient } from '../client/client.ts';
 import { listingLimits } from '../client/listings.ts';
@@ -458,7 +462,8 @@ export function registerRootCommands(
 				credential: cachedOwnerProvider(target.tenantUrl, {
 					signal: programOptions.signal
 				}),
-				signal: programOptions.signal
+				signal: programOptions.signal,
+				fetcher: acceptingCapability(rootRemoveLeftoverTargetsCapability)
 			});
 
 			await runRootRemove(target.cache, name, ui, rpc.roots);
@@ -735,9 +740,21 @@ export async function runRootRemove(
 		data: result,
 		rows: [
 			{ label: 'Root', value: result.name },
-			{ label: 'Removed', value: result.removed ? 'yes' : 'not present' }
+			{ label: 'Removed', value: describeRemoval(result) }
 		]
 	});
+}
+
+function describeRemoval(result: RootRemoveResponse): string {
+	if (result.removed) {
+		return 'yes';
+	}
+
+	if (result.releasedLeftoverTargets === true) {
+		return 'not present; its leftover store paths are released';
+	}
+
+	return 'not present';
 }
 
 function rootListRow(root: RootListEntry): ResultRow {

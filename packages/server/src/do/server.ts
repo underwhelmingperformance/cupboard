@@ -228,7 +228,10 @@ import {
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import { LegacyRetentionService } from './legacy-retention-service.ts';
-import { liveRootTargets, rootIncarnationKey } from './live-root-targets.ts';
+import {
+	existingRootIncarnationKey,
+	liveRootTargets
+} from './live-root-targets.ts';
 import { LocalSchemaRun } from './local-schema-run.ts';
 import {
 	type LocalStepOutcome,
@@ -1981,7 +1984,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// Whether the entry's run root includes its path. An entry without a run root
-	// needs none.
+	// needs none, and a root that no longer exists includes no path.
 	private isRootTarget(scope: CacheScope, entry: PublicationEntry): boolean {
 		if (entry.attachRoot === undefined) {
 			return true;
@@ -1990,11 +1993,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		if (cache === undefined) {
 			return false;
 		}
-		const root = rootIncarnationKey(
+		const root = existingRootIncarnationKey(
 			this.context.db,
 			cache.id,
 			entry.attachRoot.name
 		);
+		if (root === undefined) {
+			return false;
+		}
 		const target = this.context.db
 			.select({ rootName: schema.retentionRootTargets.rootName })
 			.from(schema.retentionRootTargets)

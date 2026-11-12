@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import { rootNameSchema } from '@cupboard/nix-store/scalars';
 import {
 	type UploadAttachRootInput,
@@ -17,6 +18,7 @@ import {
 	initialise,
 	narBytes,
 	putNarBytes,
+	removeRoot,
 	resetTestServer,
 	resolvedCache,
 	runGcResult,
@@ -298,6 +300,54 @@ describe('root attach at commit', () => {
 			afterSettle,
 			afterRedrive: await rootTargetRows()
 		}).toStrictEqual({ afterSettle: expected, afterRedrive: expected });
+	});
+
+	it('a verification pass that re-drives a commit adds no target to a removed run root', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'a'.repeat(32)
+		});
+		const decision = singleDecision(
+			await negotiateWithRoot(token, [metadata], runRoot)
+		);
+
+		if (decision.action !== 'upload') {
+			throw new Error('expected an upload decision');
+		}
+
+		await putNarBytes(decision.r2Key);
+		const planted = await pendingRowSnapshot(decision.uploadId);
+		await commitUpload(token, decision.uploadId);
+		await removeRoot(token, runRoot.name);
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.resumeRootReleases()
+		);
+
+		// The verify pass re-drives the same commit after the root is gone.
+		await replantStuckPending(planted);
+		const capture = startCapture();
+
+		try {
+			await verifyCurrentTenant();
+		} finally {
+			capture.stop();
+		}
+
+		const cacheId = await runInDurableObject(
+			currentServer(),
+			(instance) => resolvedCache(instance.context).id
+		);
+
+		expect({
+			targets: await rootTargetRows(),
+			warnings: capture.logs
+				.filter((entry) => entry.level === 'warning')
+				.map((entry) => entry.properties)
+		}).toStrictEqual({
+			targets: [],
+			warnings: [{ cacheId, rootName: runRoot.name, targets: 1 }]
+		});
 	});
 
 	it("a losing push's root still gains the winner's path", async () => {

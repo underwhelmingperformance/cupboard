@@ -719,6 +719,11 @@ describe('managed cache retirement', () => {
 			token,
 			{ method: 'DELETE' }
 		);
+		// The release pass deletes the removed root's targets, which changes the
+		// cache's collection inputs.
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.resumeRootReleases()
+		);
 		vi.setSystemTime(new Date('2026-01-01T02:00:00.000Z'));
 		await scheduleRetirement();
 		const afterSkip = {

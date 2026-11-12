@@ -1,8 +1,8 @@
-import { type StorePathHash } from '@cupboard/nix-store/scalars';
+import { type RootName, type StorePathHash } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, asc, eq, inArray, isNull, notExists } from 'drizzle-orm';
 
-import { type ResolvedCache } from '../db/cache.ts';
+import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 
 import { CacheClosureService } from './cache-closure-service.ts';
@@ -64,6 +64,25 @@ export class RootReleaseService {
 		private readonly context: ServerContext,
 		private readonly retention: RetentionService
 	) {}
+
+	private insert(
+		writer: SchemaWriter,
+		root: RootIncarnationKey,
+		releasedAt: IsoTimestamp,
+		grace: ReleaseGrace
+	): void {
+		writer
+			.insert(releases)
+			.values({
+				cacheId: root.cacheId,
+				rootName: root.name,
+				incarnation: root.incarnation,
+				releasedAt,
+				retainUntil: grace.retainUntil,
+				closeRetentionEpoch: grace.closeRetentionEpoch
+			})
+			.run();
+	}
 
 	private nextRelease(cache: ResolvedCache | undefined): Release | undefined {
 		const teardown = this.context.db
@@ -249,19 +268,74 @@ export class RootReleaseService {
 			return false;
 		}
 
-		const decided = grace();
+		this.insert(writer, root, releasedAt, grace());
 
-		writer
-			.insert(releases)
-			.values({
-				cacheId: root.cacheId,
-				rootName: root.name,
-				incarnation: root.incarnation,
-				releasedAt,
-				retainUntil: decided.retainUntil,
-				closeRetentionEpoch: decided.closeRetentionEpoch
-			})
-			.run();
+		return true;
+	}
+
+	/**
+	Records a release of the rows without an incarnation under a name, and
+	returns whether it did. A late attach by an earlier version of cupboard
+	can leave such rows under a name without a root. Nothing is recorded when
+	the name has no such row, or when a release of them is already pending,
+	so a repeated removal does not change the deadline that the first one
+	granted.
+
+	Call it only when the name has no root, or has a root with an
+	incarnation. A root without an incarnation keeps the rows without one as
+	its targets, and the drain would delete them.
+
+	The target check reads through the partial index of rows without an
+	incarnation, so it reads no row of a released incarnation. The pending
+	check reads through the index of releases by root name and incarnation,
+	so it reads none of the cache's other pending releases.
+	*/
+	recordLeftoverTargets(
+		writer: SchemaWriter,
+		root: { readonly cacheId: CacheId; readonly name: RootName },
+		releasedAt: IsoTimestamp,
+		grace: () => ReleaseGrace
+	): boolean {
+		const first = writer
+			.select({ cacheId: targets.cacheId })
+			.from(targets)
+			.where(
+				and(
+					eq(targets.cacheId, root.cacheId),
+					eq(targets.rootName, root.name),
+					isNull(targets.incarnation)
+				)
+			)
+			.limit(1)
+			.get();
+
+		if (first === undefined) {
+			return false;
+		}
+
+		const pending = writer
+			.select({ id: releases.id })
+			.from(releases)
+			.where(
+				and(
+					eq(releases.cacheId, root.cacheId),
+					eq(releases.rootName, root.name),
+					isNull(releases.incarnation)
+				)
+			)
+			.limit(1)
+			.get();
+
+		if (pending !== undefined) {
+			return false;
+		}
+
+		this.insert(
+			writer,
+			{ ...root, incarnation: undefined },
+			releasedAt,
+			grace()
+		);
 
 		return true;
 	}

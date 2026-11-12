@@ -29,7 +29,7 @@ import {
 	type RootTargetsPage
 } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
@@ -39,6 +39,7 @@ import {
 } from '../errors.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
+import { armAlarmNoLaterThan } from './alarm.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
 import {
@@ -47,6 +48,7 @@ import {
 	type ServerContext
 } from './context.ts';
 import { hourlyDeadline } from './hourly-deadline.ts';
+import { jsonValueList } from './json-list.ts';
 import {
 	allocateRootIncarnation,
 	existingRootIncarnationKey,
@@ -54,12 +56,12 @@ import {
 	liveRootTargetCount,
 	liveRootTargets,
 	type RootIncarnationKey,
-	rootIncarnationKey,
 	warnRootMissing
 } from './live-root-targets.ts';
 import { type NarInfoDemotionWatch } from './narinfo-demotion-watches.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
+import { RootReleaseService } from './root-releases.ts';
 
 interface StoredRoot {
 	readonly expiresAt: IsoTimestamp | undefined;
@@ -86,7 +88,12 @@ type RootWrite =
 			readonly kind: 'rejected';
 			readonly unavailable: readonly StorePathString[];
 	  }
-	| { readonly kind: 'written'; readonly stored: StoredRoot };
+	| {
+			readonly kind: 'written';
+			readonly stored: StoredRoot;
+			// Whether the write released the root's previous incarnation.
+			readonly isReleased: boolean;
+	  };
 
 interface RootWriteScope {
 	readonly retentionEpoch: number;
@@ -120,30 +127,25 @@ function rootExpiry(
 	return isoTimestamp(new Date(now.getTime() + retention.seconds * 1000));
 }
 
-function isSameTargetSet(
-	stored: readonly ResolvedRootTarget[],
-	requested: readonly ResolvedRootTarget[]
-): boolean {
-	if (stored.length !== requested.length) {
-		return false;
-	}
-
-	const storedPaths = new Map(
-		stored.map((target) => [target.storePathHash, target.storePath])
-	);
-
-	return requested.every(
-		(target) => storedPaths.get(target.storePathHash) === target.storePath
-	);
-}
-
 export class RootsService {
+	private readonly releases: RootReleaseService;
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly registration: CacheRegistrationService,
 		private readonly retention: RetentionService,
 		private readonly narInfoObjects: NarInfoObjectsService
-	) {}
+	) {
+		this.releases = new RootReleaseService(context, retention);
+	}
+
+	// Wakes the object so the release pass drains a release that a request
+	// recorded.
+	private async armReleaseDrain(writes: readonly RootWrite[]): Promise<void> {
+		if (writes.some((write) => write.kind === 'written' && write.isReleased)) {
+			await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+		}
+	}
 
 	// Returns the cache-level facts that every root write inside one critical
 	// section uses. They are read at the first write, so a request whose roots
@@ -169,8 +171,7 @@ export class RootsService {
 		cache: ResolvedCache,
 		request: RootSetCommand,
 		scope: RootWriteScope
-	): StoredRoot {
-		const closure = new CacheClosureService(this.context);
+	): { readonly stored: StoredRoot; readonly isReleased: boolean } {
 		const { retentionEpoch } = scope;
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
@@ -179,13 +180,10 @@ export class RootsService {
 				? scope.inheritedRetention(request.name)
 				: request.retention;
 		const expiresAt = rootExpiry(resolvedRetention, now);
-		const requested = new Set<string>(
-			request.targets.map((target) => target.storePathHash)
-		);
 
 		// A set request replaces the complete target set. Preserve the original
 		// creation time while storing no expiry as SQL NULL.
-		const createdAt = this.context.db.transaction((tx) => {
+		const written = this.context.db.transaction((tx) => {
 			const existing = tx
 				.select()
 				.from(schema.retentionRoots)
@@ -197,33 +195,29 @@ export class RootsService {
 				)
 				.get();
 			const created = existing?.createdAt ?? nowIso;
-			const root: RootIncarnationKey = {
+			const current: RootIncarnationKey | undefined =
+				existing === undefined
+					? undefined
+					: {
+							cacheId: cache.id,
+							name: request.name,
+							incarnation: existing.incarnation ?? undefined
+						};
+			// Writing a target row sets the cache's collection-input flag. A cache
+			// that received an unchanged set at least once per minimum scan interval
+			// would then never become current, and would be scanned in every
+			// interval.
+			const kept =
+				current !== undefined && this.keepsExactly(tx, current, request.targets)
+					? current
+					: undefined;
+			const isUnchanged = kept !== undefined;
+			const root: RootIncarnationKey = kept ?? {
 				cacheId: cache.id,
 				name: request.name,
-				incarnation:
-					existing === undefined
-						? allocateRootIncarnation(tx)
-						: (existing.incarnation ?? undefined)
+				incarnation: allocateRootIncarnation(tx)
 			};
 
-			// A replacement gives each target that it releases a grace deadline, so
-			// read the stored targets before the delete below discards them.
-			const stored =
-				existing === undefined ? [] : this.liveTargetRows(tx, root);
-			const released = stored
-				.map((target) => target.storePathHash)
-				.filter((storePathHash) => !requested.has(storePathHash));
-			const isTargetSetChanged = !isSameTargetSet(stored, request.targets);
-
-			// Deleting or inserting a target row sets the cache's collection-input
-			// flag. A cache that received an unchanged set at least once per minimum
-			// scan interval would then never become current, and would be scanned
-			// in every interval.
-			if (isTargetSetChanged) {
-				tx.delete(schema.retentionRootTargets)
-					.where(liveRootTargets(root))
-					.run();
-			}
 			if (existing === undefined) {
 				tx.insert(schema.retentionRoots)
 					.values({
@@ -254,6 +248,7 @@ export class RootsService {
 						...((existing.expiresAt ?? undefined) !== expiresAt && {
 							expiresAt: expiresAt ?? sql`NULL`
 						}),
+						...(!isUnchanged && { incarnation: root.incarnation }),
 						updatedAt: nowIso
 					})
 					.where(
@@ -265,49 +260,100 @@ export class RootsService {
 					.run();
 			}
 
-			if (isTargetSetChanged) {
-				insertLiveRootTargets(tx, this.retention, cache, root, request.targets);
+			if (isUnchanged) {
+				return { created, isReleased: false };
 			}
 
-			// Applied inside the same transaction as the delete above: a crash
-			// between the two could otherwise release these targets from the old
-			// root's retention with no deadline ever established.
-			const close =
-				existing === undefined
-					? undefined
-					: closure.firstClose(cache, existing.retentionEpoch);
-			if (close === undefined || existing === undefined) {
-				this.retention.applyGraceTransition(cache, released, nowIso, tx);
-			} else {
-				this.retention.extendClosedRootGraceDeadlines(
-					cache,
-					released,
-					{
-						retentionEpoch: existing.retentionEpoch,
-						retainUntil: close.graceUntil
-					},
-					tx
-				);
+			insertLiveRootTargets(tx, this.retention, cache, root, request.targets);
+
+			// The previous incarnation's rows that the new set does not keep stay in
+			// place, and a release grants them their grace when it drains them. A
+			// new root's name can still have rows that a late attach by an earlier
+			// version of cupboard left under it. The new root has an incarnation,
+			// so those rows are not its targets, and they get a release as well.
+			if (existing === undefined) {
+				return {
+					created,
+					isReleased: this.releases.recordLeftoverTargets(
+						tx,
+						{ cacheId: cache.id, name: request.name },
+						nowIso,
+						() => this.releases.gracePeriodFrom(cache, nowIso, tx)
+					)
+				};
 			}
 
-			return created;
+			const isReleased = this.releases.record(
+				tx,
+				{
+					cacheId: cache.id,
+					name: request.name,
+					incarnation: existing.incarnation ?? undefined
+				},
+				nowIso,
+				() => this.releases.graceOnRelease(cache, existing, nowIso, tx)
+			);
+
+			return { created, isReleased };
 		});
 
-		return { expiresAt, createdAt, updatedAt: nowIso };
+		return {
+			stored: { expiresAt, createdAt: written.created, updatedAt: nowIso },
+			isReleased: written.isReleased
+		};
 	}
 
-	private liveTargetRows(
+	// Whether a root keeps exactly the requested targets. Counts at most one
+	// more of the root's rows than were requested, then reads each requested
+	// target's row by its primary key, so the reads do not depend on the
+	// number of the root's targets.
+	private keepsExactly(
 		database: SchemaWriter,
-		root: RootIncarnationKey
-	): readonly { storePathHash: StorePathHash; storePath: StorePathString }[] {
-		return database
-			.select({
-				storePathHash: schema.retentionRootTargets.storePathHash,
-				storePath: schema.retentionRootTargets.storePath
-			})
+		root: RootIncarnationKey,
+		requested: readonly ResolvedRootTarget[]
+	): boolean {
+		const kept = database
+			.select({ storePathHash: schema.retentionRootTargets.storePathHash })
 			.from(schema.retentionRootTargets)
 			.where(liveRootTargets(root))
+			.limit(requested.length + 1)
+			.all().length;
+
+		if (kept !== requested.length) {
+			return false;
+		}
+
+		if (requested.length === 0) {
+			return true;
+		}
+
+		const hashes = jsonValueList(
+			requested.map((target) => target.storePathHash)
+		);
+		const rows = database
+			.select({
+				storePathHash: schema.retentionRootTargets.storePathHash,
+				storePath: schema.retentionRootTargets.storePath,
+				incarnation: schema.retentionRootTargets.incarnation
+			})
+			.from(schema.retentionRootTargets)
+			.where(
+				and(
+					eq(schema.retentionRootTargets.cacheId, root.cacheId),
+					eq(schema.retentionRootTargets.rootName, root.name),
+					inArray(schema.retentionRootTargets.storePathHash, hashes)
+				)
+			)
 			.all();
+		const keptPaths = new Map(
+			rows
+				.filter((row) => (row.incarnation ?? undefined) === root.incarnation)
+				.map((row) => [row.storePathHash, row.storePath])
+		);
+
+		return requested.every(
+			(target) => keptPaths.get(target.storePathHash) === target.storePath
+		);
 	}
 
 	private async servableTargets(
@@ -478,10 +524,7 @@ export class RootsService {
 			return { kind: 'rejected', unavailable: absent };
 		}
 
-		return {
-			kind: 'written',
-			stored: this.writeRoot(cache, requested, scope())
-		};
+		return { kind: 'written', ...this.writeRoot(cache, requested, scope()) };
 	}
 
 	// Call this only inside the write gate. As with the single requests, an
@@ -602,6 +645,18 @@ export class RootsService {
 					OR (${schema.retentionRoots.expiresAt} IS NOT NULL AND (excluded.expires_at IS NULL OR excluded.expires_at > ${schema.retentionRoots.expiresAt}))`
 			})
 			.run();
+
+		// A late attach by an earlier version of cupboard can leave rows under
+		// the name of a run root that no longer existed. The root that this bind
+		// created has an incarnation, so those rows are not its targets.
+		if (!isBound) {
+			this.releases.recordLeftoverTargets(
+				database,
+				{ cacheId: cache.id, name },
+				nowIso,
+				() => this.releases.gracePeriodFrom(cache, nowIso, database)
+			);
+		}
 	}
 
 	// A skipped path has no later commit at which to join the run root, so attach
@@ -638,6 +693,7 @@ export class RootsService {
 		const requested = this.buildRootSetCommand(rootName, body);
 		const servable = await this.servableTargets(cache, requested.targets);
 		const write = await this.gatedRootWrite(cache, requested);
+		await this.armReleaseDrain([write]);
 
 		if (write.kind === 'rejected') {
 			throw new RootTargetsUnavailableError(rootName, write.unavailable);
@@ -691,6 +747,7 @@ export class RootsService {
 		}
 
 		const { identities, write } = checked;
+		await this.armReleaseDrain([write]);
 
 		if (write.kind === 'rejected') {
 			return {
@@ -757,6 +814,7 @@ export class RootsService {
 			}
 		);
 		const servable = new Set(identities.keys());
+		await this.armReleaseDrain(writes.map(({ write }) => write));
 
 		return {
 			roots: writes.map(({ request, write }) =>
@@ -823,13 +881,16 @@ export class RootsService {
 		options: { readonly cursor?: string; readonly limit?: number } = {}
 	): Promise<RootTargetsPage> {
 		const cache = this.context.cacheRepository.resolve(cacheScope);
+		const root =
+			cache === undefined
+				? undefined
+				: existingRootIncarnationKey(this.context.db, cache.id, name);
 
-		if (cache === undefined) {
+		if (cache === undefined || root === undefined) {
 			return { targets: [] };
 		}
 
 		const limit = Math.min(options.limit ?? rootListPageSize, rootListPageSize);
-		const root = rootIncarnationKey(this.context.db, cache.id, name);
 		const rows = this.context.db
 			.select({
 				storePathHash: schema.retentionRootTargets.storePathHash,
@@ -862,20 +923,25 @@ export class RootsService {
 		};
 	}
 
-	removeRoot(cacheScope: CacheScope, name: RootName): RootRemoveResponse {
+	// The root's targets stay in place, and a release grants them their grace
+	// when it drains them.
+	async removeRoot(
+		cacheScope: CacheScope,
+		name: RootName,
+		shouldReportLeftoverTargets = false
+	): Promise<RootRemoveResponse> {
 		const cache = this.context.cacheRepository.resolve(cacheScope);
 
 		if (cache === undefined) {
-			return { name, removed: false };
+			return {
+				name,
+				removed: false,
+				...(shouldReportLeftoverTargets && { releasedLeftoverTargets: false })
+			};
 		}
 
-		const released = this.liveTargetRows(
-			this.context.db,
-			rootIncarnationKey(this.context.db, cache.id, name)
-		).map((target) => target.storePathHash);
 		const nowIso = isoTimestamp(new Date());
-
-		return this.context.db.transaction((tx) => {
+		const removal = this.context.db.transaction((tx) => {
 			const existing = tx
 				.select()
 				.from(schema.retentionRoots)
@@ -887,15 +953,20 @@ export class RootsService {
 				)
 				.get();
 
-			tx.delete(schema.retentionRootTargets)
-				.where(
-					liveRootTargets({
-						cacheId: cache.id,
-						name,
-						incarnation: existing?.incarnation ?? undefined
-					})
-				)
-				.run();
+			// A late attach by an earlier version of cupboard can leave target rows
+			// under a name without a root. Removing the name releases them.
+			if (existing === undefined) {
+				return {
+					removed: false,
+					isReleased: this.releases.recordLeftoverTargets(
+						tx,
+						{ cacheId: cache.id, name },
+						nowIso,
+						() => this.releases.gracePeriodFrom(cache, nowIso, tx)
+					)
+				};
+			}
+
 			tx.delete(schema.retentionRoots)
 				.where(
 					and(
@@ -904,32 +975,30 @@ export class RootsService {
 					)
 				)
 				.run();
+			const root = {
+				cacheId: cache.id,
+				name,
+				incarnation: existing.incarnation ?? undefined
+			};
 
-			// Applied inside the same transaction as the delete above: a crash
-			// between the two could otherwise release these targets with no
-			// deadline ever established.
-			const close =
-				existing === undefined
-					? undefined
-					: new CacheClosureService(this.context).firstClose(
-							cache,
-							existing.retentionEpoch
-						);
-			if (close === undefined || existing === undefined) {
-				this.retention.applyGraceTransition(cache, released, nowIso, tx);
-			} else {
-				this.retention.extendClosedRootGraceDeadlines(
-					cache,
-					released,
-					{
-						retentionEpoch: existing.retentionEpoch,
-						retainUntil: close.graceUntil
-					},
-					tx
-				);
-			}
-
-			return { name, removed: existing !== undefined };
+			return {
+				removed: true,
+				isReleased: this.releases.record(tx, root, nowIso, () =>
+					this.releases.graceOnRelease(cache, existing, nowIso, tx)
+				)
+			};
 		});
+
+		if (removal.isReleased) {
+			await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+		}
+
+		return {
+			name,
+			removed: removal.removed,
+			...(shouldReportLeftoverTargets && {
+				releasedLeftoverTargets: !removal.removed && removal.isReleased
+			})
+		};
 	}
 }
