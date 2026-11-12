@@ -34,8 +34,9 @@ import {
 	readResponseText,
 	RemoteBodyTooLargeError
 } from '@cupboard/shared/response-body';
-import { fetch as undiciFetch, type Response } from 'undici';
+import type { fetch as undiciFetch, Response } from 'undici';
 
+import { keepAliveUndiciFetch } from './keep-alive-undici-fetch.ts';
 import {
 	type LocalStoreDirectories,
 	localStoreOfUri,
@@ -746,7 +747,7 @@ async function fetchDocument(
 	credentialForRequest: () => BasicCredential | undefined,
 	dependencies: SubstituterEnvironment
 ): Promise<DocumentOutcome> {
-	const fetcher = dependencies.fetch ?? undiciFetch;
+	const fetcher = dependencies.fetch ?? keepAliveUndiciFetch;
 	const settings = transferSettings(dependencies);
 	const backoff = new TransferBackoff(settings, dependencies.spread);
 	let failure: SubstituterUnreachableError | undefined;
