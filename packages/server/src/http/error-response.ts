@@ -8,13 +8,13 @@ import type { Context, ErrorHandler } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 
 import {
+	d1OverloadRefusal,
 	isControlDatabaseMigrationPending,
 	isD1Overload
 } from '../db/transient.ts';
 import {
 	AttestationInfoHttpError,
 	ControlDatabaseMigrationPendingError,
-	DatabaseOverloadedError,
 	InsufficientScopeError,
 	InvalidAccessTokenError,
 	MetadataHttpError,
@@ -185,7 +185,9 @@ export const serverErrorHandler: ErrorHandler = (error, context) => {
 	}
 
 	if (isD1Overload(error)) {
-		return serverHttpErrorResponse(new DatabaseOverloadedError(error));
+		return serverHttpErrorResponse(
+			d1OverloadRefusal(loggerFor(context), error)
+		);
 	}
 
 	if (isRuntimeRetryable(error)) {

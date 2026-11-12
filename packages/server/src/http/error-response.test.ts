@@ -9,6 +9,10 @@ import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+	d1AccountThrottleMessage,
+	d1QueueOverloadMessage
+} from '../db/transient.test-support.ts';
+import {
 	InsufficientScopeError,
 	InvalidAccessTokenError,
 	MetadataNarInfoInvalidError,
@@ -265,31 +269,49 @@ describe('serverErrorHandler', () => {
 	it.each([
 		{
 			name: 'direct overload message',
-			error: new Error(
-				'D1_ERROR: D1 DB is overloaded. Too many requests queued.'
-			)
+			error: new Error(d1QueueOverloadMessage)
 		},
 		{
 			name: 'overload message in cause chain',
 			error: new Error('query failed', {
-				cause: new Error(
-					'D1_ERROR: D1 DB is overloaded. Too many requests queued.'
-				)
+				cause: new Error(d1QueueOverloadMessage)
+			})
+		},
+		{
+			name: 'account throttle message',
+			error: new Error(d1AccountThrottleMessage)
+		},
+		{
+			name: 'account throttle message in cause chain',
+			error: new Error('query failed', {
+				cause: new Error(d1AccountThrottleMessage)
 			})
 		}
-	])('returns a retryable 503 for a D1 overload ($name)', async ({ error }) => {
-		const response = await appThatThrows(error).request('/');
+	])(
+		'returns a retryable 503 for a D1 overload ($name) and logs it',
+		async ({ error }) => {
+			const response = await appThatThrows(error).request('/');
 
-		expect({
-			status: response.status,
-			retryAfter: response.headers.get('retry-after'),
-			cacheControl: response.headers.get('cache-control'),
-			body: await response.text()
-		}).toStrictEqual({
-			status: 503,
-			retryAfter: '5',
-			cacheControl: 'no-store',
-			body: 'Database is temporarily overloaded\n'
-		});
-	});
+			expect({
+				status: response.status,
+				retryAfter: response.headers.get('retry-after'),
+				cacheControl: response.headers.get('cache-control'),
+				body: await response.text(),
+				logs: capture.logs
+			}).toStrictEqual({
+				status: 503,
+				retryAfter: '5',
+				cacheControl: 'no-store',
+				body: 'Database is temporarily overloaded\n',
+				logs: [
+					{
+						level: 'warning',
+						category: ['cupboard'],
+						message: 'request refused: database overloaded',
+						properties: { error }
+					}
+				]
+			});
+		}
+	);
 });

@@ -12,6 +12,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	d1AccountThrottleMessage,
+	d1QueueOverloadMessage
+} from '../db/transient.test-support.ts';
+import {
 	CacheAlreadyExistsError,
 	CacheClosedError,
 	CacheNotEmptyError,
@@ -20,6 +24,7 @@ import {
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
+	TenantAdmissionUnavailableError,
 	TenantOffboardingError,
 	UploadNotFoundError,
 	UploadRequestLimitExceededError
@@ -164,6 +169,81 @@ describe('bridgedError', () => {
 			message: 'Upload not found'
 		});
 		expect(capture.logs).toStrictEqual([]);
+	});
+
+	it.each([d1QueueOverloadMessage, d1AccountThrottleMessage])(
+		'maps the D1 overload %j to a retryable 503 and logs it',
+		(message) => {
+			const headers = new Headers();
+			const overload = new Error(message);
+
+			const bridged = bridgedError(rootLogger(), overload, headers);
+
+			expect(bridged).toBeInstanceOf(ORPCError);
+			expect({
+				bridged: bridged instanceof ORPCError ? bridged.toJSON() : bridged,
+				headers: Object.fromEntries(headers),
+				logs: capture.logs
+			}).toStrictEqual({
+				bridged: {
+					defined: false,
+					code: 'SERVICE_UNAVAILABLE',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					message: 'Database is temporarily overloaded',
+					data: undefined
+				},
+				headers: { 'cache-control': 'no-store', 'retry-after': '5' },
+				logs: [
+					{
+						level: 'warning',
+						category: ['cupboard'],
+						message: 'request refused: database overloaded',
+						properties: { error: overload }
+					}
+				]
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'a typed server error',
+			error: new TenantAdmissionUnavailableError(
+				new Error(d1AccountThrottleMessage)
+			),
+			expected: {
+				defined: false,
+				code: 'SERVICE_UNAVAILABLE',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				message: 'Tenant admission is temporarily unavailable',
+				data: undefined
+			}
+		},
+		{
+			name: 'a defined oRPC error',
+			error: new ORPCError('CACHE_CLOSED', {
+				defined: true,
+				status: StatusCodes.CONFLICT,
+				message: 'The cache is closed',
+				data: { cache: 'pr-1' },
+				cause: new Error(d1AccountThrottleMessage)
+			}),
+			expected: {
+				defined: true,
+				code: 'CACHE_CLOSED',
+				status: StatusCodes.CONFLICT,
+				message: 'The cache is closed',
+				data: { cache: 'pr-1' }
+			}
+		}
+	])('keeps $name whose cause is a D1 overload', ({ error, expected }) => {
+		const bridged = bridgedError(rootLogger(), error);
+
+		expect(bridged).toBeInstanceOf(ORPCError);
+		expect({
+			bridged: bridged instanceof ORPCError ? bridged.toJSON() : bridged,
+			logs: capture.logs
+		}).toStrictEqual({ bridged: expected, logs: [] });
 	});
 
 	it('preserves retry metadata in the oRPC response headers', () => {

@@ -76,7 +76,7 @@ import { readTenantReadVerifier } from '../control/tenant-membership.ts';
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import { summariseLocalStepError } from '../db/local-step-attempts.ts';
 import * as schema from '../db/schema.ts';
-import { isD1Overload } from '../db/transient.ts';
+import { d1OverloadRefusal, isD1Overload } from '../db/transient.ts';
 import {
 	CacheCatalogueMigrationPendingError,
 	CacheNotFoundError,
@@ -84,7 +84,6 @@ import {
 	CommitSessionGrantsUnavailableError,
 	CommitSessionLimitError,
 	CommitUpgradeRequiredError,
-	DatabaseOverloadedError,
 	InsufficientScopeError,
 	InvalidAccessTokenError,
 	LocalSchemaMigrationPendingError,
@@ -2200,8 +2199,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				return;
 			}
 
-			if (isD1Overload(error)) {
-				const overload = new DatabaseOverloadedError(error);
+			if (!(error instanceof ServerHttpError) && isD1Overload(error)) {
+				const overload = d1OverloadRefusal(
+					sessionLogger.with({ uploadId }),
+					error
+				);
 				sendCommitSessionFrame(socket, {
 					ev: 'error',
 					uploadId,
@@ -5177,8 +5179,11 @@ function refusePublication(
 ): void {
 	const error = isSubrequestSliceRefusal(failure)
 		? new CommitEntrySubrequestsExhaustedError()
-		: isD1Overload(failure)
-			? new DatabaseOverloadedError(failure)
+		: !(failure instanceof ServerHttpError) && isD1Overload(failure)
+			? d1OverloadRefusal(
+					rootLogger().with({ operationId: uploadId, operation }),
+					failure
+				)
 			: isTransientR2Error(failure)
 				? new R2UnavailableError(failure)
 				: failure;
