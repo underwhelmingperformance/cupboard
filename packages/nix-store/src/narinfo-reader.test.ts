@@ -24,6 +24,7 @@ const deriverPath = storePathSchema.parse(
 const narDigest = Uint8Array.from({ length: 32 }, (_, index) => index * 7);
 const fileDigest = Uint8Array.from({ length: 32 }, (_, index) => index * 3);
 const narHash = NixSha256Hash.fromDigest(narDigest);
+const sha512Hash = `sha512:${bytesToHex(new Uint8Array(64))}`;
 const signature = `cache.example.org-1:${bytesToBase64(new Uint8Array(64).fill(9))}`;
 
 const wellFormedFields: readonly (readonly [string, string])[] = [
@@ -113,6 +114,18 @@ describe('offerFromNarInfo', () => {
 		}).toStrictEqual({
 			references: [libraryPath, appPath],
 			deriver: deriverPath
+		});
+	});
+
+	it('keeps an earlier deriver when a later line is `unknown-deriver`', () => {
+		expect(read({ extraLines: ['Deriver: unknown-deriver'] })).toStrictEqual({
+			source: 'substituter',
+			references: [libraryPath],
+			deriver: deriverPath,
+			narHash,
+			signatures: [signature],
+			downloadSize: 400,
+			narSize: 1000
 		});
 	});
 
@@ -268,6 +281,23 @@ describe('offerFromNarInfo', () => {
 		);
 	});
 
+	// Nix uses the last NarHash line, so the reader must not use an earlier
+	// sha256 line when a later line uses another algorithm.
+	it('rejects a sha256 NarHash followed by a sha512 one', () => {
+		expect(() => read({ extraLines: [`NarHash: ${sha512Hash}`] })).toThrow(
+			CorruptNarInfoError
+		);
+	});
+
+	it('reads the last NarHash line when it uses sha256', () => {
+		const offer = read({
+			fields: { NarHash: sha512Hash },
+			extraLines: [`NarHash: sha256:${toNixBase32(narDigest)}`]
+		});
+
+		expect(offer.narHash).toStrictEqual(narHash);
+	});
+
 	// FileHash may use any supported algorithm; only NarHash must use sha256.
 	it('accepts a FileHash using another supported algorithm', () => {
 		expect(() =>
@@ -307,6 +337,7 @@ describe('offerFromNarInfo', () => {
 			name: 'a reference that is not a store path',
 			fields: { References: 'nope' }
 		},
+
 		{ name: 'a deriver that is not a store path', fields: { Deriver: 'nope' } },
 		{ name: 'an empty deriver', fields: { Deriver: '' } }
 	])('rejects a narinfo with $name', ({ fields }) => {

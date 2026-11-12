@@ -24,6 +24,10 @@ const agreedCases: readonly NarinfoCase[] = [
 		fixture: { fields: { Deriver: 'unknown-deriver' } }
 	},
 	{
+		name: 'an unknown deriver after a real one',
+		fixture: { extraLines: ['Deriver: unknown-deriver'] }
+	},
+	{
 		name: 'an empty compression',
 		fixture: { fields: { Compression: '' } }
 	},
@@ -110,6 +114,12 @@ const refusedCases: readonly NarinfoCase[] = [
 Documents accepted by the pinned Nix but rejected by our stricter client.
 */
 const stricterCases: readonly NarinfoCase[] = [
+	{
+		// Nix reads the last NarHash line, so it takes this SHA-512 hash. Our
+		// client only compares SHA-256 NAR hashes and rejects the document.
+		name: 'a SHA-512 NAR hash after a SHA-256 one',
+		fixture: { extraLines: [`NarHash: sha512:${'0'.repeat(128)}`] }
+	},
 	{
 		name: 'a compression algorithm Nix has no decompressor for',
 		fixture: { fields: { Compression: 'banana' } }
