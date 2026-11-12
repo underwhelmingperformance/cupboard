@@ -130,7 +130,8 @@ describe('applyMigrations', () => {
 					hash: entry.tag,
 					digest: await sha256Hex(migrationSource(migrations, entry.idx)),
 					verificationState:
-						entry.tag === '0052_cache_identity_contract'
+						entry.tag === '0052_cache_identity_contract' ||
+						entry.tag === '0084_root_incarnations'
 							? 'verified-contraction'
 							: 'verified'
 				}))
@@ -467,75 +468,89 @@ describe('admitMigrationSource', () => {
 		expect(outcome).toStrictEqual({ refused: false, error: undefined });
 	});
 
-	it('refuses a contracted store to the preceding migration bundle', async () => {
-		const contractedBundle = migrationsThrough(migrations, 52);
-		const outcome = await runInDurableObject(
-			testServerFor('admit-contracted-successor'),
-			async (_instance, state) => {
-				const database = drizzle(state.storage);
-				await applyMigrations(database, contractedBundle);
+	// Older builds must not run past these migrations: 0052 removed columns
+	// that they read, and after 0084 they would write root targets without
+	// the root's incarnation.
+	const barriers = [
+		{ tag: '0052_cache_identity_contract', index: 52 },
+		{ tag: '0084_root_incarnations', index: 84 }
+	];
 
-				return {
-					contracted: recordedRows(state.storage).at(-1),
-					predecessor: await admissionOf(
-						state.storage,
-						migrationsThrough(migrations, 51)
-					),
-					current: await admissionOf(state.storage, contractedBundle)
-				};
-			}
-		);
+	it.each(barriers)(
+		'refuses a store migrated through $tag to the preceding migration bundle',
+		async ({ tag, index }) => {
+			const migratedBundle = migrationsThrough(migrations, index);
+			const outcome = await runInDurableObject(
+				testServerFor(`admit-barrier-${tag}`),
+				async (_instance, state) => {
+					const database = drizzle(state.storage);
+					await applyMigrations(database, migratedBundle);
 
-		expect(outcome).toStrictEqual({
-			contracted: {
-				hash: '0052_cache_identity_contract',
-				digest: await sha256Hex(migrationSource(migrations, 52)),
-				verificationState: 'verified-contraction'
-			},
-			predecessor: {
-				refused: true,
-				error: 'DurableObjectMigrationJournalError'
-			},
-			current: { refused: false, error: undefined }
-		});
-	});
+					return {
+						barrier: recordedRows(state.storage).at(-1),
+						predecessor: await admissionOf(
+							state.storage,
+							migrationsThrough(migrations, index - 1)
+						),
+						current: await admissionOf(state.storage, migratedBundle)
+					};
+				}
+			);
 
-	it('marks an existing verified contraction before serving it', async () => {
-		const contractedBundle = migrationsThrough(migrations, 52);
-		const outcome = await runInDurableObject(
-			testServerFor('admit-preview-contraction'),
-			async (_instance, state) => {
-				const database = drizzle(state.storage);
-				await applyMigrations(database, contractedBundle);
-				database.run(sql`
-					UPDATE __drizzle_migrations SET verification_state = 'verified'
-					WHERE hash = '0052_cache_identity_contract'
-				`);
+			expect(outcome).toStrictEqual({
+				barrier: {
+					hash: tag,
+					digest: await sha256Hex(migrationSource(migrations, index)),
+					verificationState: 'verified-contraction'
+				},
+				predecessor: {
+					refused: true,
+					error: 'DurableObjectMigrationJournalError'
+				},
+				current: { refused: false, error: undefined }
+			});
+		}
+	);
 
-				await applyMigrations(database, contractedBundle);
+	it.each(barriers)(
+		'marks an existing verified $tag before serving it',
+		async ({ tag, index }) => {
+			const migratedBundle = migrationsThrough(migrations, index);
+			const outcome = await runInDurableObject(
+				testServerFor(`admit-preview-barrier-${tag}`),
+				async (_instance, state) => {
+					const database = drizzle(state.storage);
+					await applyMigrations(database, migratedBundle);
+					database.run(sql`
+						UPDATE __drizzle_migrations SET verification_state = 'verified'
+						WHERE hash = ${tag}
+					`);
 
-				return {
-					contracted: recordedRows(state.storage).at(-1),
-					predecessor: await admissionOf(
-						state.storage,
-						migrationsThrough(migrations, 51)
-					)
-				};
-			}
-		);
+					await applyMigrations(database, migratedBundle);
 
-		expect(outcome).toStrictEqual({
-			contracted: {
-				hash: '0052_cache_identity_contract',
-				digest: await sha256Hex(migrationSource(migrations, 52)),
-				verificationState: 'verified-contraction'
-			},
-			predecessor: {
-				refused: true,
-				error: 'DurableObjectMigrationJournalError'
-			}
-		});
-	});
+					return {
+						barrier: recordedRows(state.storage).at(-1),
+						predecessor: await admissionOf(
+							state.storage,
+							migrationsThrough(migrations, index - 1)
+						)
+					};
+				}
+			);
+
+			expect(outcome).toStrictEqual({
+				barrier: {
+					hash: tag,
+					digest: await sha256Hex(migrationSource(migrations, index)),
+					verificationState: 'verified-contraction'
+				},
+				predecessor: {
+					refused: true,
+					error: 'DurableObjectMigrationJournalError'
+				}
+			});
+		}
+	);
 
 	it('refuses an unverified migration beyond the ones this build carries', async () => {
 		const outcome = await runInDurableObject(

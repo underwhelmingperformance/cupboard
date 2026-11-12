@@ -672,7 +672,7 @@ describe('managed cache retirement', () => {
 				{
 					method: 'garbage-collection',
 					...noCost,
-					rowsRead: 284,
+					rowsRead: 289,
 					rowsWritten: 3,
 					d1Calls: 2,
 					d1RowsRead: 2,

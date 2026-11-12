@@ -83,7 +83,7 @@ async function pushWithRoot(
 	await commitUpload(token, decision.uploadId);
 }
 
-async function rootTargetRows(): Promise<readonly unknown[]> {
+async function rootTargetRows() {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
 			.select()
@@ -91,7 +91,8 @@ async function rootTargetRows(): Promise<readonly unknown[]> {
 			.all()
 			.map(({ cacheId, ...row }) => ({
 				...row,
-				cache: instance.context.cacheRepository.scopeForId(cacheId)
+				cache: instance.context.cacheRepository.scopeForId(cacheId),
+				incarnation: row.incarnation ?? undefined
 			}))
 			.toSorted((left, right) =>
 				`${left.rootName} ${left.storePathHash}`.localeCompare(
@@ -192,16 +193,7 @@ describe('run root lifecycle', () => {
 		await seedRunRootTargets(rootSetMaxTargets);
 		await pushWithRoot(token, gated, runRoot);
 
-		const rows = await runInDurableObject(currentServer(), (instance) =>
-			instance.context.db
-				.select()
-				.from(schema.retentionRootTargets)
-				.all()
-				.map(({ cacheId, ...row }) => ({
-					...row,
-					cache: instance.context.cacheRepository.scopeForId(cacheId)
-				}))
-		);
+		const rows = await rootTargetRows();
 		const gatedRows = rows.filter(
 			(row) => row.storePathHash === gated.storePathHash
 		);
@@ -211,6 +203,7 @@ describe('run root lifecycle', () => {
 			gatedRows: [
 				{
 					cache: defaultCache(),
+					incarnation: undefined,
 					rootName: runRoot.name,
 					storePathHash: gated.storePathHash,
 					storePath: gated.storePath
@@ -257,12 +250,14 @@ describe('run root lifecycle', () => {
 		const expected = [
 			{
 				cache: defaultCache(),
+				incarnation: undefined,
 				rootName: runRoot.name,
 				storePathHash: first.storePathHash,
 				storePath: first.storePath
 			},
 			{
 				cache: defaultCache(),
+				incarnation: undefined,
 				rootName: runRoot.name,
 				storePathHash: second.storePathHash,
 				storePath: second.storePath
@@ -329,12 +324,14 @@ describe('run root lifecycle', () => {
 			targets: [
 				{
 					cache: defaultCache(),
+					incarnation: undefined,
 					rootName: runRoot.name,
 					storePathHash: next.storePathHash,
 					storePath: next.storePath
 				},
 				{
 					cache: defaultCache(),
+					incarnation: undefined,
 					rootName: 'main',
 					storePathHash: next.storePathHash,
 					storePath: next.storePath
@@ -411,6 +408,7 @@ describe('run root lifecycle', () => {
 			targets: [
 				{
 					cache: defaultCache(),
+					incarnation: undefined,
 					rootName: 'main',
 					storePathHash: kept.storePathHash,
 					storePath: kept.storePath
@@ -479,6 +477,7 @@ describe('run root lifecycle', () => {
 			heldTargets: [
 				{
 					cache: defaultCache(),
+					incarnation: undefined,
 					rootName: 'ci/run-2',
 					storePathHash: shared.storePathHash,
 					storePath: shared.storePath

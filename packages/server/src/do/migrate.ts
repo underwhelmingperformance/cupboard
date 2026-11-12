@@ -218,18 +218,30 @@ type MigrationDatabase<TSchema extends Record<string, unknown>> =
 /**
 How much a recorded digest proves. `verified` and `verified-contraction`
 rows were written with the digest of the SQL the store ran. The contraction
-state makes older builds refuse a schema that removed their columns.
+state makes older builds refuse the store: they admit a migration beyond
+their bundle only when it is `verified`, and a build refuses the
+contraction state on any tag outside its `barrierMigrationTags`.
 `unverified-baseline` rows were written before digests were recorded; their
 digest was adopted from the bundle afterwards.
 */
 type VerificationState =
 	'verified' | 'verified-contraction' | 'unverified-baseline';
 
-const contractionMigrationTag = '0052_cache_identity_contract';
+/**
+The migrations that older builds must not run past. 0052 removed columns
+that they read. After 0084, a root keeps only the target rows of its
+incarnation, and older builds write target rows without one.
+
+A tag can never leave the set: this build refuses the contraction state on
+any other tag, so it would refuse every store that recorded the tag.
+*/
+const barrierMigrationTags: ReadonlySet<string> = new Set([
+	'0052_cache_identity_contract',
+	'0084_root_incarnations'
+]);
 
 function appliedVerificationState(tag: string): VerificationState {
-	// Older builds reject this state before reading tables removed by 0052.
-	return tag === contractionMigrationTag ? 'verified-contraction' : 'verified';
+	return barrierMigrationTags.has(tag) ? 'verified-contraction' : 'verified';
 }
 
 interface TrackingRow {
@@ -414,11 +426,11 @@ function admit<TSchema extends Record<string, unknown>>(
 	for (const [index, row] of rows.entries()) {
 		if (
 			row.verificationState === 'verified-contraction' &&
-			row.hash !== contractionMigrationTag
+			!barrierMigrationTags.has(row.hash)
 		) {
 			throw new DurableObjectMigrationJournalError(
 				row.hash,
-				'the contraction verification state belongs only to 0052'
+				'the contraction verification state belongs only to a barrier migration'
 			);
 		}
 
@@ -541,7 +553,8 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 		const entry = entries[index];
 
 		if (
-			entry?.tag === contractionMigrationTag &&
+			entry !== undefined &&
+			barrierMigrationTags.has(entry.tag) &&
 			row.verificationState === 'verified' &&
 			row.digest !== undefined
 		) {

@@ -78,6 +78,8 @@ const insertNarInfoRows = `WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SEL
 	SELECT ?1, printf('%s%031d', ?3, n), printf('/nix/store/%s%031d-p', ?3, n), ?4, 1, '[]', ?5 FROM sequence`;
 const insertRootRow =
 	'INSERT INTO retention_root (cache_id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)';
+const insertReleaseRow =
+	'INSERT INTO retention_root_release (cache_id, root_name, released_at) VALUES (?1, ?2, ?3)';
 const insertTargetRows = `WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM sequence WHERE n < ?2)
 	INSERT INTO retention_root_target (cache_id, root_name, store_path_hash, store_path)
 	SELECT ?1, ?3, printf('%s%031d', ?4, n), printf('/nix/store/%s%031d-p', ?4, n) FROM sequence`;
@@ -98,6 +100,7 @@ const countedTables = {
 	narinfo: schema.narInfos,
 	narInfoDeletions: schema.narInfoDeletions,
 	roots: schema.retentionRoots,
+	releases: schema.retentionRootReleases,
 	targets: schema.retentionRootTargets,
 	grace: schema.retentionGrace,
 	uploads: schema.pendingUploads,
@@ -229,8 +232,8 @@ function insertUploads(context: ServerContext, cache: ResolvedCache): void {
 
 /**
 Adds rows for a cache to every table that a removal empties: `paths` narinfo
-rows, a root with a target for each path, a grace deadline for each path
-(half of them passed), scan state, an upload of each verdict in
+rows, a root with a target for each path, a release of the root's targets,
+a grace deadline for each path (half of them passed), scan state, an upload of each verdict in
 {@link seededVerdicts} with an accepted operation, and attestation uploads.
 The cache's store-path hashes start with `prefix`.
 */
@@ -246,6 +249,7 @@ export function seedCacheRows(
 
 	storage.sql.exec(insertNarInfoRows, cache.id, paths, prefix, narHash, now);
 	storage.sql.exec(insertRootRow, cache.id, root, now);
+	storage.sql.exec(insertReleaseRow, cache.id, root, now);
 	storage.sql.exec(insertTargetRows, cache.id, paths, root, prefix);
 	storage.sql.exec(insertGraceRows, cache.id, paths, prefix);
 	storage.sql.exec(insertScanRow, cache.id);
