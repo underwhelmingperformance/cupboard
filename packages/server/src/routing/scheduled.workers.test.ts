@@ -12,7 +12,7 @@ import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { noCost } from '../do/operation-cost.test-support.ts';
-import { passThrough } from '../http/stalled-body.test-support.ts';
+import { passThrough } from '../do/pass-through.ts';
 import {
 	flakyD1,
 	offboardTenant,

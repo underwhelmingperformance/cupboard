@@ -1744,6 +1744,19 @@ export class SubrequestTimeoutError extends ServerHttpError {
 	}
 }
 
+// The tenant object did not return the response headers of a forwarded write
+// or admin request within the deadline. The object can still complete the
+// request, so the outcome is unknown and the response has no `Retry-After`.
+// A client retries a 504 only for a procedure that is safe to replay.
+export class TenantObjectTimeoutError extends ServerHttpError {
+	readonly status = StatusCodes.GATEWAY_TIMEOUT;
+
+	constructor() {
+		super('The tenant did not respond in time');
+		this.name = 'TenantObjectTimeoutError';
+	}
+}
+
 export class R2ReadUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;

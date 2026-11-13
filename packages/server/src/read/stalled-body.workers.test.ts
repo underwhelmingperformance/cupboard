@@ -15,10 +15,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
+import { passThrough } from '../do/pass-through.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import {
 	drain,
-	passThrough,
 	recordKeptPromises,
 	stallingBlobs,
 	streamRecords

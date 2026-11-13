@@ -1,13 +1,8 @@
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 
-import { boundedWorkerEnv } from './do/bounded-io.ts';
-import { withSubrequestSlice } from './do/subrequest-slice.ts';
 import { WorkersCacheUnavailableError } from './errors.ts';
-import { withInternalRequest } from './observability/request-context.ts';
-import { withSpan } from './observability/span.ts';
-import { subrequestsPerInvocation } from './policy/subrequests.ts';
-import { tenantReadFetch } from './routing/tenant-read-handler.ts';
+import { cachedTenantReadFetch } from './routing/tenant-read-handler.ts';
 
 export { ControlDatabaseRollbackGuard } from './control-database-rollback-guard.ts';
 export { CupboardServer } from './do/server.ts';
@@ -43,17 +38,7 @@ Serves cacheable reads admitted by the control Worker.
 */
 export class CachedTenantReads extends WorkerEntrypoint<TenantEnv> {
 	override fetch(request: Request): Promise<Response> {
-		return withInternalRequest(request, () =>
-			withSubrequestSlice(
-				() =>
-					tenantReadFetch(
-						request,
-						boundedWorkerEnv(this.env, withSpan),
-						this.ctx
-					),
-				{ subrequests: subrequestsPerInvocation(this.env) }
-			)
-		);
+		return cachedTenantReadFetch(request, this.env, this.ctx);
 	}
 
 	/**

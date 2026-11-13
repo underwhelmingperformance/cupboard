@@ -6,6 +6,7 @@ import { forbidStoring } from '../http/bounded-body.ts';
 import { canonicalCacheRequest } from './cache-request.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
+import { forwardRead, type ReadDeadline } from './read-forward.ts';
 import { tenantReadFetch } from './tenant-read-handler.ts';
 
 /**
@@ -49,14 +50,18 @@ export async function cachedTenantRead(
 }
 
 /**
-Sends a read straight to the tenant Durable Object, bypassing Workers Cache.
+Sends a read straight to the tenant Durable Object, bypassing Workers Cache,
+with the deadline that `deadline` chooses.
 */
 export async function tenantUncachedRead(
 	context: Context<WorkerHonoEnv>,
+	deadline: ReadDeadline,
 	shouldForceNoStore = false
 ): Promise<Response> {
-	const response = await tenantServer(context.env, context.get('tenant')).fetch(
-		innerRequest(context)
+	const response = await forwardRead(context, deadline, () =>
+		tenantServer(context.env, context.get('tenant')).fetch(
+			innerRequest(context)
+		)
 	);
 
 	return shouldForceNoStore ? withoutStoring(response) : response;

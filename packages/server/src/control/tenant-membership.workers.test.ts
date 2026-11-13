@@ -7,7 +7,7 @@ import { env as tenantEnv } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
-import { passThrough } from '../http/stalled-body.test-support.ts';
+import { passThrough } from '../do/pass-through.ts';
 import {
 	enqueueMaintenanceJobs,
 	handleMaintenanceQueue,

@@ -9,9 +9,15 @@ import {
 	type OperationCost,
 	type R2Operation
 } from './operation-cost.ts';
+import { passThrough } from './pass-through.ts';
 import { getR2Object } from './r2-read.ts';
 import { admitBoundParameters } from './statement-admission.ts';
 import { spendSubrequests } from './subrequest-slice.ts';
+import {
+	boundedTenantObjects,
+	type Delay,
+	systemClock
+} from './tenant-object-fetch.ts';
 
 interface CallCost<R> {
 	readonly start: (cost: OperationCost) => void;
@@ -118,32 +124,23 @@ function unboundable(member: string): () => never {
 	};
 }
 
-// Bind pass-through methods to the host object because their implementations
-// depend on the receiver.
-function passThrough(target: object, property: PropertyKey): unknown {
-	const value: unknown = Reflect.get(target, property, target);
-
-	if (typeof value !== 'function') {
-		return value;
-	}
-
-	const bound: unknown = value.bind(target);
-
-	return bound;
-}
-
 /**
 Wraps a Worker's D1 and R2 bindings with deadlines and subrequest accounting.
 R2 reads bound the wait for `get()` to return separately from body streaming.
-Uploads use only an enclosing deadline. Other bindings receive no wrapper.
+Uploads use only an enclosing deadline. A fetch from the tenant object
+namespace has a deadline for its response headers, which `delay` waits out.
+Other bindings receive no wrapper.
 */
 export function boundedWorkerEnv<
 	T extends {
 		readonly BLOBS: R2Bucket;
 		readonly CUPBOARD_DB: D1Database;
 		readonly CONTROL_DB?: D1Database;
+		readonly CUPBOARD_DO?: DurableObjectNamespace<
+			Rpc.DurableObjectBranded | undefined
+		>;
 	}
->(env: T, observeRead?: typeof withSpan): T {
+>(env: T, observeRead?: typeof withSpan, delay: Delay = systemClock.delay): T {
 	// A proxy, not a spread: tests supply a service binding through a `get`
 	// trap, which a spread would not copy.
 	return new Proxy(env, {
@@ -159,6 +156,11 @@ export function boundedWorkerEnv<
 				}
 				case 'CUPBOARD_DB': {
 					return boundedD1(target.CUPBOARD_DB);
+				}
+				case 'CUPBOARD_DO': {
+					return target.CUPBOARD_DO === undefined
+						? undefined
+						: boundedTenantObjects(target.CUPBOARD_DO, delay);
 				}
 				default: {
 					return passThrough(target, property);

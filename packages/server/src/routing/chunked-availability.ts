@@ -23,6 +23,7 @@ import {
 
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
+import { forwardRead } from './read-forward.ts';
 
 // The hashes one object request may carry: the subrequests an invocation has,
 // less the reserve its slice keeps and the D1 calls the probe makes before its
@@ -98,15 +99,18 @@ export async function answerAvailabilityInChunks(
 		...(authorization !== undefined && { authorization })
 	};
 
-	return mergeAvailabilityChunks(
-		(hashes) =>
-			object.fetch(target, {
-				body: JSON.stringify({ storePathHashes: hashes }),
-				headers,
-				method: 'POST'
-			}),
-		storePathHashes,
-		chunkSize
+	// Each chunk makes one or two R2 heads for every hash in it.
+	return forwardRead(context, 'none', () =>
+		mergeAvailabilityChunks(
+			(hashes) =>
+				object.fetch(target, {
+					body: JSON.stringify({ storePathHashes: hashes }),
+					headers,
+					method: 'POST'
+				}),
+			storePathHashes,
+			chunkSize
+		)
 	);
 }
 

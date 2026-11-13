@@ -97,8 +97,14 @@ one budget.
 export class SharedDeadline {
 	private readonly deadline: number;
 
-	constructor(budgetMs: number) {
-		this.deadline = Date.now() + budgetMs;
+	/**
+	@param now The clock that the deadline starts and ends on.
+	*/
+	constructor(
+		budgetMs: number,
+		private readonly now: () => number = Date.now
+	) {
+		this.deadline = now() + budgetMs;
 	}
 
 	/**
@@ -106,8 +112,53 @@ export class SharedDeadline {
 	deadline that ends sooner.
 	*/
 	run<T>(body: () => Promise<T>, subrequest?: string): Promise<T> {
-		return withDeadlineBudget(this.deadline - Date.now(), body, subrequest);
+		return withDeadlineBudget(this.remainingMs(), body, subrequest);
 	}
+
+	remainingMs(): number {
+		return Math.max(0, this.deadline - this.now());
+	}
+}
+
+/**
+How long a request forwarded to the tenant object may wait for its response
+headers, when the request does not have the default operation deadline.
+*/
+export type ForwardDeadline =
+	| { readonly kind: 'read'; readonly deadline: SharedDeadline }
+	| { readonly kind: 'unbounded' };
+
+const forwardDeadlineScope = new AsyncLocalStorage<ForwardDeadline>();
+
+/**
+Runs `body` with `deadline` as the current read deadline. A forwarded request
+to the tenant object that `body` sends must return its response headers
+within what remains of it. Unlike {@link SharedDeadline.run}, the deadline
+does not abort the scope: the code that waits for the response applies it.
+*/
+export function withinReadDeadline<T>(
+	deadline: SharedDeadline,
+	body: () => Promise<T>
+): Promise<T> {
+	return forwardDeadlineScope.run({ kind: 'read', deadline }, body);
+}
+
+/**
+Runs `body` so that a request that it forwards to the tenant object waits
+for the response without a deadline. Use it only for a route where the
+object does not bound the time of its work, because any fixed deadline could
+then end a healthy request.
+*/
+export function withoutForwardDeadline<T>(body: () => Promise<T>): Promise<T> {
+	return forwardDeadlineScope.run({ kind: 'unbounded' }, body);
+}
+
+/**
+Returns the deadline that {@link withinReadDeadline} or
+{@link withoutForwardDeadline} set for the current scope, if any.
+*/
+export function currentForwardDeadline(): ForwardDeadline | undefined {
+	return forwardDeadlineScope.getStore();
 }
 
 /**

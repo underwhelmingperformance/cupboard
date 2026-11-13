@@ -27,13 +27,18 @@ import { controlApp } from '../control/control-app.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
-import { SharedDeadline } from '../do/deadline.ts';
+import {
+	SharedDeadline,
+	withinReadDeadline,
+	withoutForwardDeadline
+} from '../do/deadline.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
 import { withOperationCost } from '../do/operation-cost.ts';
 import {
 	subrequestsAvailable,
 	withSubrequestSlice
 } from '../do/subrequest-slice.ts';
+import { type DeadlineClock, systemClock } from '../do/tenant-object-fetch.ts';
 import {
 	InsecureTransportError,
 	MetadataScopeChangedError,
@@ -74,7 +79,9 @@ import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
 import { readApp, routeReadDeadlines } from './read-app.ts';
+import { forwardRead } from './read-forward.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
+import { sizeBoundTenantRoutes } from './size-bound-routes.ts';
 import {
 	innerRequest,
 	tenantUncachedRead,
@@ -127,7 +134,7 @@ const httpsOnly = createMiddleware<WorkerHonoEnv>(async (context, next) => {
 	});
 });
 
-function buildApp(): Hono<WorkerHonoEnv> {
+function buildApp(clock: DeadlineClock): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
 
 	app.onError(serverErrorHandler);
@@ -201,10 +208,13 @@ function buildApp(): Hono<WorkerHonoEnv> {
 				return notFoundResponse();
 			}
 
+			const deadline = new SharedDeadline(readRequestBudgetMs, clock.now);
 			const admission = await admitTenant(
 				context.env,
 				context.executionCtx,
-				tenant.data
+				tenant.data,
+				{ kind: 'default' },
+				deadline
 			);
 
 			if (admission?.entry.status !== 'active') {
@@ -213,8 +223,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 			const inner = new URL(context.req.url);
 			inner.pathname = '/.well-known/oauth-authorization-server';
-			const response = await tenantServer(context.env, tenant.data).fetch(
-				new Request(inner, context.req.raw)
+			const response = await withinReadDeadline(deadline, () =>
+				tenantServer(context.env, tenant.data).fetch(
+					new Request(inner, context.req.raw)
+				)
 			);
 			const headers = new Headers(response.headers);
 			headers.set('cache-control', 'no-store');
@@ -250,7 +262,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		// batch, before any route runs.
 		const namedCache = parseNamedCachePath(route.rest);
 		const cacheScope: CacheScope = namedCache?.scope ?? { kind: 'default' };
-		const admissionDeadline = new SharedDeadline(readRequestBudgetMs);
+		const admissionDeadline = new SharedDeadline(
+			readRequestBudgetMs,
+			clock.now
+		);
 		const admission = await admitTenant(
 			context.env,
 			context.executionCtx,
@@ -312,16 +327,18 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 	app.use('/t/:tenant/cache/:cacheName/*', requireLiteralCachePath);
 
+	for (const { method, path } of sizeBoundTenantRoutes()) {
+		app.on(method, path, (_context, next) => withoutForwardDeadline(next));
+	}
+
 	// Fetch discovery and signing keys from the tenant Durable Object without
 	// caching them. Discovery uses the stored issuer, so an alias cannot advertise
 	// another identity.
 	app.get('/t/:tenant/.well-known/oauth-authorization-server', (context) =>
-		tenantUncachedRead(context, true)
+		tenantUncachedRead(context, 'admission-budget', true)
 	);
 	app.get('/t/:tenant/.well-known/jwks.json', (context) =>
-		tenantServer(context.env, context.get('tenant')).fetch(
-			innerRequest(context)
-		)
+		tenantUncachedRead(context, 'admission-budget')
 	);
 
 	for (const mount of readAppMounts) {
@@ -346,15 +363,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 	// The Durable Object resolves the view's access and authenticates private
 	// views. Reuse-view responses are never cached because a view or a selected
-	// cache can change without a purge key for this URL.
-	const serveReuse = async (
-		context: Context<WorkerHonoEnv>
-	): Promise<Response> =>
-		withoutStoring(
-			await tenantServer(context.env, context.get('tenant')).fetch(
-				innerRequest(context)
-			)
-		);
+	// cache can change without a purge key for this URL. A private view's guard
+	// reads D1 with one retry, up to 30 seconds, which exceeds the read budget.
+	const serveReuse = (context: Context<WorkerHonoEnv>): Promise<Response> =>
+		tenantUncachedRead(context, 'none', true);
 
 	app.get('/t/:tenant/reuse/:view/nix-cache-info', serveReuse);
 	app.get(
@@ -371,15 +383,15 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		const request = await parseCacheMetadataRequest(context.req.raw);
 		const target = new URL(context.req.url);
 		target.pathname = context.get('tenantRest');
-		const response = await tenantServer(
-			context.env,
-			context.get('tenant')
-		).fetch(
-			new Request(target, {
-				method: 'POST',
-				headers: context.req.raw.headers,
-				body: JSON.stringify(request)
-			})
+		// The object reads every candidate of every requested path.
+		const response = await forwardRead(context, 'none', () =>
+			tenantServer(context.env, context.get('tenant')).fetch(
+				new Request(target, {
+					method: 'POST',
+					headers: context.req.raw.headers,
+					body: JSON.stringify(request)
+				})
+			)
 		);
 		try {
 			if (
@@ -530,8 +542,6 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	return app;
 }
 
-const app = buildApp();
-
 // Workers apply the memory limit per isolate, and concurrent queue invocations
 // can run in the same isolate. Every verification in the isolate must
 // therefore use this pool, which code below the entrypoint receives as an
@@ -665,50 +675,69 @@ function withoutRevealingConditions(request: Request): Request {
 	return hasConditions(request) ? withoutLegacyConditions(request) : request;
 }
 
-export default {
-	fetch: async (request: Request, env: Env, ctx: ExecutionContext) =>
-		withoutLastModified(
-			await withPublicRequest(withoutRevealingConditions(request), (internal) =>
-				withSubrequestSlice(
-					() => app.fetch(internal, boundedWorkerEnv(env, withSpan), ctx),
-					{
-						subrequests: subrequestsPerInvocation(env)
-					}
+/**
+Returns the control Worker's handlers. `clock` starts and waits out the
+deadlines of requests that the Worker forwards to the tenant object.
+*/
+export function controlWorker(clock: DeadlineClock = systemClock) {
+	const app = buildApp(clock);
+
+	return {
+		fetch: async (request: Request, env: Env, ctx: ExecutionContext) =>
+			withoutLastModified(
+				await withPublicRequest(
+					withoutRevealingConditions(request),
+					(internal) =>
+						withSubrequestSlice(
+							() =>
+								app.fetch(
+									internal,
+									boundedWorkerEnv(env, withSpan, clock.delay),
+									ctx
+								),
+							{
+								subrequests: subrequestsPerInvocation(env)
+							}
+						)
 				)
-			)
-		),
+			),
 
-	async scheduled(_controller, env) {
-		// Enqueue bounded jobs so execution failures retry per message rather than
-		// repeating the whole cron plan.
-		await withSubrequestSlice(
-			() =>
-				withOperationCost(
-					'cron-enqueue',
-					() => enqueueMaintenanceJobs(boundedWorkerEnv(env, withSpan)),
-					(cost) => {
-						logMethodFinished(
-							rootLogger().with({ method: 'cron-enqueue' }),
-							cost
-						);
-					}
-				),
-			{ subrequests: subrequestsPerInvocation(env) }
-		);
-	},
+		async scheduled(_controller, env) {
+			// Enqueue bounded jobs so execution failures retry per message rather than
+			// repeating the whole cron plan.
+			await withSubrequestSlice(
+				() =>
+					withOperationCost(
+						'cron-enqueue',
+						() => enqueueMaintenanceJobs(boundedWorkerEnv(env, withSpan)),
+						(cost) => {
+							logMethodFinished(
+								rootLogger().with({ method: 'cron-enqueue' }),
+								cost
+							);
+						}
+					),
+				{ subrequests: subrequestsPerInvocation(env) }
+			);
+		},
 
-	async queue(batch, env) {
-		await withSubrequestSlice(
-			() =>
-				handleMaintenanceQueue(
-					batch,
-					boundedWorkerEnv(env, withSpan),
-					narReadBuffers
-				),
-			{ subrequests: subrequestsPerInvocation(env) }
-		);
-	}
-} satisfies ExportedHandler<Env>;
+		async queue(batch, env) {
+			await withSubrequestSlice(
+				() =>
+					handleMaintenanceQueue(
+						batch,
+						boundedWorkerEnv(env, withSpan),
+						narReadBuffers
+					),
+				{ subrequests: subrequestsPerInvocation(env) }
+			);
+		}
+	} satisfies ExportedHandler<Env>;
+}
+
+const handlers = controlWorker();
+
+export default handlers;
 
 // The object resolves the view and answers each chunk; an unknown view is a
 // miss for every hash of every chunk.

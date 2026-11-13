@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { passThrough } from '../http/stalled-body.test-support.ts';
+import { passThrough } from '../do/pass-through.ts';
 import {
 	controlFetch,
 	issueControlAdminToken,

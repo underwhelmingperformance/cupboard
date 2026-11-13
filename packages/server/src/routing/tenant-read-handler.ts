@@ -7,6 +7,10 @@ import {
 import { type Context, Hono } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 
+import { boundedWorkerEnv } from '../do/bounded-io.ts';
+import { SharedDeadline, withinReadDeadline } from '../do/deadline.ts';
+import { withSubrequestSlice } from '../do/subrequest-slice.ts';
+import { type DeadlineClock, systemClock } from '../do/tenant-object-fetch.ts';
 import { forbidStoring, keepAliveIn } from '../http/bounded-body.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
@@ -20,7 +24,13 @@ import {
 	loggerMiddleware,
 	requestCostMiddleware
 } from '../observability/logging.ts';
-import { withoutCachedCorrelation } from '../observability/request-context.ts';
+import {
+	withInternalRequest,
+	withoutCachedCorrelation
+} from '../observability/request-context.ts';
+import { withSpan } from '../observability/span.ts';
+import { readRequestBudgetMs } from '../policy/streaming.ts';
+import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import {
 	narAuthorityForScope,
 	type ReadEnv,
@@ -75,6 +85,22 @@ function innerRequest(context: Context<TenantReadHonoEnv>): Request {
 }
 
 /**
+Forwards the read to the tenant Durable Object. The capped worst case of the
+object's work for these reads fits within the read budget. This Worker has
+no admission budget, so each read starts a read deadline of its own on `now`.
+*/
+function forwardRead(
+	context: Context<TenantReadHonoEnv>,
+	now: () => number
+): Promise<Response> {
+	return withinReadDeadline(new SharedDeadline(readRequestBudgetMs, now), () =>
+		tenantServer(context.env, context.get('tenant')).fetch(
+			innerRequest(context)
+		)
+	);
+}
+
+/**
 The reads this Worker serves through Workers Cache, relative to the cache
 each one addresses. The control Worker forwards a read here only after it has
 admitted the tenant and resolved the selected cache as public.
@@ -82,7 +108,7 @@ admitted the tenant and resolved the selected cache as public.
 Hono answers HEAD by re-dispatching the request to the GET handler with the
 body stripped, so a separate HEAD registration would never match.
 */
-function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
+function buildCachedReadApp(now: () => number): Hono<TenantReadHonoEnv> {
 	const app = new Hono<TenantReadHonoEnv>();
 
 	app.get(String.raw`/:name{[0-9a-z]+\.narinfo}`, readDeadline, (context) => {
@@ -125,19 +151,14 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			return next();
 		}
 
-		return noStore(
-			await tenantServer(context.env, context.get('tenant')).fetch(
-				innerRequest(context)
-			)
-		);
+		return noStore(await forwardRead(context, now));
 	});
 
 	return app;
 }
 
-const cachedReadApp = buildCachedReadApp();
-
-function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
+function buildTenantReadApp(now: () => number): Hono<TenantReadHonoEnv> {
+	const cachedReadApp = buildCachedReadApp(now);
 	const app = new Hono<TenantReadHonoEnv>();
 
 	app.onError(serverErrorHandler);
@@ -205,12 +226,7 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 
 	app.get(
 		'/t/:tenant/.well-known/oauth-authorization-server',
-		async (context) =>
-			noStore(
-				await tenantServer(context.env, context.get('tenant')).fetch(
-					innerRequest(context)
-				)
-			)
+		async (context) => noStore(await forwardRead(context, now))
 	);
 
 	app.route('/t/:tenant', cachedReadApp);
@@ -219,7 +235,22 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 	return app;
 }
 
-const tenantReadApp = buildTenantReadApp();
+type TenantReadContext = Parameters<Hono<TenantReadHonoEnv>['fetch']>[2];
+
+const tenantReadApps = new WeakMap<DeadlineClock, Hono<TenantReadHonoEnv>>();
+
+function tenantReadAppFor(clock: DeadlineClock): Hono<TenantReadHonoEnv> {
+	const existing = tenantReadApps.get(clock);
+
+	if (existing !== undefined) {
+		return existing;
+	}
+
+	const app = buildTenantReadApp(clock.now);
+	tenantReadApps.set(clock, app);
+
+	return app;
+}
 
 /**
 Serves public cacheable reads after the control Worker admits the tenant.
@@ -227,9 +258,36 @@ Serves public cacheable reads after the control Worker admits the tenant.
 export async function tenantReadFetch(
 	request: Request,
 	env: ReadEnv,
-	ctx: Parameters<typeof tenantReadApp.fetch>[2]
+	ctx: TenantReadContext,
+	clock: DeadlineClock = systemClock
 ): Promise<Response> {
-	const response = await tenantReadApp.fetch(request, env, ctx);
+	const response = await tenantReadAppFor(clock).fetch(request, env, ctx);
 
 	return withoutCachedCorrelation(response);
+}
+
+/**
+Serves one read for the tenant Worker's `CachedTenantReads` entrypoint. It
+bounds the bindings of `env` and runs the read within the invocation's
+subrequest slice. `clock` starts and waits out the deadlines of the reads
+that the tenant Worker forwards to the tenant object.
+*/
+export function cachedTenantReadFetch(
+	request: Request,
+	env: ReadEnv & Parameters<typeof subrequestsPerInvocation>[0],
+	ctx: TenantReadContext,
+	clock: DeadlineClock = systemClock
+): Promise<Response> {
+	return withInternalRequest(request, () =>
+		withSubrequestSlice(
+			() =>
+				tenantReadFetch(
+					request,
+					boundedWorkerEnv(env, withSpan, clock.delay),
+					ctx,
+					clock
+				),
+			{ subrequests: subrequestsPerInvocation(env) }
+		)
+	);
 }

@@ -35,6 +35,7 @@ import {
 } from './chunked-availability.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
+import { forwardRead } from './read-forward.ts';
 import {
 	cachedTenantRead,
 	tenantUncachedRead,
@@ -85,7 +86,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			return denied;
 		}
 
-		return tenantUncachedRead(context, true);
+		return tenantUncachedRead(context, 'admission-budget', true);
 	});
 
 	app.get(narInfoRoute, async (context) => {
@@ -193,12 +194,11 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 		const pubkeyUrl = new URL(context.req.url);
 		pubkeyUrl.pathname = '/pubkey';
 
-		const response = await tenantServer(
-			context.env,
-			context.get('tenant')
-		).fetch(new Request(pubkeyUrl, context.req.raw));
-
-		return response;
+		return forwardRead(context, 'admission-budget', () =>
+			tenantServer(context.env, context.get('tenant')).fetch(
+				new Request(pubkeyUrl, context.req.raw)
+			)
+		);
 	});
 
 	// Path and cache deletion can change attestation lists and bundle references,
@@ -213,7 +213,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 
 		const denied = await guardContentRead(context);
 
-		return denied ?? tenantUncachedRead(context);
+		return denied ?? tenantUncachedRead(context, 'admission-budget');
 	});
 
 	app.get('/attestation-bundles/:digest', async (context, next) => {
@@ -227,7 +227,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			return denied;
 		}
 
-		return tenantUncachedRead(context, true);
+		return tenantUncachedRead(context, 'admission-budget', true);
 	});
 
 	app.post(attestationInfoRoute, async (context) => {

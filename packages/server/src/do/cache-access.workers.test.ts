@@ -45,7 +45,6 @@ import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	drain,
-	passThrough,
 	recordKeptPromises,
 	type Settlement,
 	stallingBlobs,
@@ -86,6 +85,7 @@ import worker from '../worker.ts';
 
 import { type RuntimeEnv } from './context.ts';
 import { remainingDeadlineMs } from './deadline.ts';
+import { passThrough } from './pass-through.ts';
 
 const localName = cacheNameSchema.parse('builds');
 const sibling = cacheNameSchema.parse('guides');

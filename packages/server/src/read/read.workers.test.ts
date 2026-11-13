@@ -21,6 +21,7 @@ import { cacheIdentityColumns } from '../db/cache.ts';
 import { writeCacheLifecycle } from '../db/cache-lifecycle-write.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { jsonRowList, jsonValueLists } from '../do/json-list.ts';
+import { passThrough } from '../do/pass-through.ts';
 import { reuseEdgeSelect } from '../do/reuse-view-lookup-service.ts';
 import {
 	PathReadAuthorityMigrationPendingError,
@@ -33,7 +34,6 @@ import {
 	narObjectKey,
 	type NarObjectName
 } from '../http/http.ts';
-import { passThrough } from '../http/stalled-body.test-support.ts';
 import {
 	defaultCache,
 	flakyD1,
