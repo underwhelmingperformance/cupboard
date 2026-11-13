@@ -129,8 +129,99 @@ export function createOctokitClient(
 	return octokit;
 }
 
-function hasNextPage(link: string | undefined = ''): boolean {
-	return /(?:^|,)\s*<[^>]+>;[^,]*\brel="next"/u.test(link);
+/**
+Whether a GitHub `Link` response header contains a `rel="next"` link. A
+missing header has no next page.
+*/
+export function hasNextPageLink(link: string | undefined = ''): boolean {
+	// The two comma searches stay separate. The start of the next entry
+	// advances one comma at a time, but the parameters of an entry can begin
+	// after several later commas, so the two sequences of indexes differ.
+	const nextClose = ascendingSearch((from) => link.indexOf('>', from));
+	const nextEntry = ascendingSearch((from) => link.indexOf(',', from));
+	const entryEnd = ascendingSearch((from) => link.indexOf(',', from));
+	const nextRelation = ascendingSearch((from) => nextRelationStart(link, from));
+
+	// Each link entry starts at the beginning or after a comma. A target can
+	// contain commas, so an entry can extend past the next comma.
+	for (let start = 0; start <= link.length;) {
+		let target = start;
+
+		while (target < link.length && /\s/u.test(link.charAt(target))) {
+			target += 1;
+		}
+
+		const close = link.charAt(target) === '<' ? nextClose(target + 1) : -1;
+
+		if (close > target + 1 && link.charAt(close + 1) === ';') {
+			const parameters = close + 2;
+			const relation = nextRelation(parameters);
+			const end = entryEnd(parameters);
+
+			if (relation !== -1 && (end === -1 || relation < end)) {
+				return true;
+			}
+		}
+
+		const comma = nextEntry(start);
+
+		if (comma === -1) {
+			return false;
+		}
+
+		start = comma + 1;
+	}
+
+	return false;
+}
+
+/**
+Wraps a search for the first match at or after an index, for callers whose
+indexes never decrease. A result at or after a later index is also the
+result for that index, so the wrapper returns it without searching again.
+Every search therefore covers text that the previous searches did not. The
+wrapper throws when an index is lower than the previous one, because it
+would return a result that is too late.
+*/
+function ascendingSearch(
+	search: (from: number) => number
+): (from: number) => number {
+	let previous = 0;
+	let result = -Infinity;
+
+	return (from) => {
+		if (from < previous) {
+			throw new RangeError(
+				`Search index ${String(from)} is lower than ${String(previous)}`
+			);
+		}
+
+		previous = from;
+
+		if (result === -1 || result >= from) {
+			return result;
+		}
+
+		result = search(from);
+
+		return result;
+	};
+}
+
+function nextRelationStart(link: string, from: number): number {
+	const relation = 'rel="next"';
+
+	for (
+		let index = link.indexOf(relation, from);
+		index !== -1;
+		index = link.indexOf(relation, index + 1)
+	) {
+		if (index === 0 || !/\w/u.test(link.charAt(index - 1))) {
+			return index;
+		}
+	}
+
+	return -1;
 }
 
 async function githubReleasePage(
@@ -146,7 +237,7 @@ async function githubReleasePage(
 
 	return {
 		items: response.data,
-		...(hasNextPage(response.headers.link) && {
+		...(hasNextPageLink(response.headers.link) && {
 			next: () => githubReleasePage(octokit, repository, page + 1)
 		})
 	};

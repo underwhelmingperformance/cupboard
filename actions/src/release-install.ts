@@ -37,7 +37,8 @@ import {
 } from '@cupboard/shared/cleanup';
 import {
 	createOctokitClient,
-	findGithubRelease
+	findGithubRelease,
+	hasNextPageLink
 } from '@cupboard/shared/octokit';
 import {
 	readResponseBytes,
@@ -2373,9 +2374,7 @@ async function listAttestations(
 				const page = parsed.attestations ?? [];
 				observedCandidates += page.length;
 				observedPages += 1;
-				const hasNextPage = /(?:^|,)\s*<[^>]+>;[^,]*\brel="next"/u.test(
-					response.headers.link ?? ''
-				);
+				const hasNextPage = hasNextPageLink(response.headers.link);
 
 				if (
 					observedCandidates > maximumReleaseAttestationCandidates ||
