@@ -5,6 +5,7 @@ import {
 	type CacheAccessMode,
 	cacheNamePattern
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
 	ConfiguredInstanceSummary,
@@ -23,7 +24,6 @@ import type {
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import {
 	defaultReadUser,
-	type MembershipRebuildResponse,
 	type TenantCreateBodyInput,
 	type TenantListResponse,
 	type TenantReadCredential,
@@ -48,7 +48,11 @@ import { cacheLoginSession } from '../commands/login.ts';
 import {
 	CliError,
 	CupboardHttpError,
+	MembershipRebuildError,
+	MembershipRebuildStalledError,
 	OwnerLoginRequiredError,
+	ScopeForbiddenError,
+	SessionRejectedError,
 	UnreachableHostError
 } from '../errors.ts';
 import { ownDisplayName, principalLabel } from '../principal.ts';
@@ -167,9 +171,14 @@ export interface OnboardClient extends Pick<
 		credential: AccessCredential,
 		body: TenantCreateBodyInput
 	): Promise<TenantSummary>;
+	/**
+	Writes the marker of every live tenant, page by page, and returns the
+	number of markers. It throws a `MembershipRebuildError` when a page fails,
+	unless the failure is an abort or an authentication failure.
+	*/
 	rebuildMembership(
 		credential: AccessCredential
-	): Promise<MembershipRebuildResponse>;
+	): Promise<{ readonly tenants: number }>;
 	controlCheck(credential: AccessCredential): Promise<ControlCheckReport>;
 }
 
@@ -435,9 +444,10 @@ export async function onboardDeployment(
 
 	// Existing tenants were provisioned by an earlier build, and a deploy can
 	// change how admission is represented, leaving them inadmissible until the
-	// hourly cron reasserts the gate. Reassert it now from the registry so they
-	// stay reachable. A fresh deploy has none yet; the create below establishes
-	// the first tenant's gate itself.
+	// hourly cron reasserts the gate. Reassert it now from the registry, and
+	// do not continue until every marker is written, so that they stay
+	// reachable. A fresh deploy has none yet; the create below establishes the
+	// first tenant's gate itself.
 	if (existing.length > 0) {
 		await ui.reporter().phase(
 			'Refreshing tenant membership',
@@ -601,6 +611,80 @@ async function resolveDeploymentUrl(
 	return url;
 }
 
+/**
+The `membership.rebuild` procedure, with the result narrowed to the fields
+that the caller reads.
+*/
+export interface MembershipRebuilder {
+	rebuild(input: {
+		readonly page: { readonly after?: string };
+	}): Promise<{ readonly tenants: number; readonly cursor?: string }>;
+}
+
+/**
+Writes the marker of every live tenant with one request for each page, and
+returns the number of markers. A page that fails stops the rebuild. An abort,
+a missing sign-in, and an oRPC error with the code `UNAUTHORIZED` or
+`FORBIDDEN` keep their own types, so that the CLI reports them and exits as it
+does for any other request. Any other failure, including a server error and a
+network failure, becomes a `MembershipRebuildError`. That error reports that
+the rebuild failed and the number of tenants that were already written, keeps
+the failure as its cause, and exits with the cause's exit code. A cursor that
+does not advance stops the rebuild with a `MembershipRebuildStalledError`.
+*/
+export async function rebuildMembershipPages(
+	client: MembershipRebuilder
+): Promise<{ readonly tenants: number }> {
+	let tenants = 0;
+	let after: string | undefined;
+
+	do {
+		const page = await rebuildPage(client, after, tenants);
+		tenants += page.tenants;
+
+		if (
+			after !== undefined &&
+			page.cursor !== undefined &&
+			byCodeUnit(page.cursor, after) <= 0
+		) {
+			throw new MembershipRebuildStalledError(after, page.cursor);
+		}
+
+		after = page.cursor;
+	} while (after !== undefined);
+
+	return { tenants };
+}
+
+async function rebuildPage(
+	client: MembershipRebuilder,
+	after: string | undefined,
+	rebuilt: number
+): Promise<{ readonly tenants: number; readonly cursor?: string }> {
+	try {
+		return await client.rebuild({
+			page: after === undefined ? {} : { after }
+		});
+	} catch (error) {
+		if (hasOwnReport(error)) {
+			throw error;
+		}
+
+		throw new MembershipRebuildError(rebuilt, { cause: error });
+	}
+}
+
+function hasOwnReport(error: unknown): boolean {
+	return (
+		isAbortError(error) ||
+		error instanceof OwnerLoginRequiredError ||
+		error instanceof SessionRejectedError ||
+		error instanceof ScopeForbiddenError ||
+		(error instanceof ORPCError &&
+			(error.code === 'UNAUTHORIZED' || error.code === 'FORBIDDEN'))
+	);
+}
+
 // The raw endpoints come from the hand-written client; each control call
 // builds a derived client bound to the token issued earlier in the flow.
 function onboardClientFor(
@@ -649,7 +733,8 @@ function onboardClientFor(
 		listTenants: (credential) => control(credential).tenants.list(),
 		createTenant: (credential, body) =>
 			control(credential).tenants.create(body),
-		rebuildMembership: (credential) => control(credential).membership.rebuild(),
+		rebuildMembership: (credential) =>
+			rebuildMembershipPages(control(credential).membership),
 		controlCheck: (credential) => control(credential).check()
 	};
 }

@@ -955,7 +955,10 @@ describe('control contract round trip', () => {
 		});
 
 		// The harness provisions the fixture `v1` tenant alongside the created one.
-		expect(await client.membership.rebuild()).toStrictEqual({ tenants: 2 });
+		expect({
+			legacy: await client.membership.rebuild(),
+			paged: await client.membership.rebuild({ page: {} })
+		}).toStrictEqual({ legacy: { tenants: 2 }, paged: { tenants: 2 } });
 	});
 
 	it('updates tenant status and fallback read credentials through the derived client', async () => {

@@ -21,7 +21,7 @@ import {
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ProgressHandle, StepLog } from '@cupboard/reporter';
-import { ORPCError } from '@orpc/client';
+import { ORPCError, safe } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -37,7 +37,10 @@ import {
 	type TokenProvider
 } from '../client/client.ts';
 import {
+	CliAbortError,
 	CupboardHttpError,
+	MembershipRebuildError,
+	MembershipRebuildStalledError,
 	OwnerLoginRequiredError,
 	UnreachableHostError
 } from '../errors.ts';
@@ -62,6 +65,7 @@ import {
 	onboardDeployment,
 	type OnboardOptions,
 	type OnboardOutcome,
+	rebuildMembershipPages,
 	slugProblem
 } from './onboard.ts';
 import type { OwnerBinding } from './owner.ts';
@@ -610,6 +614,61 @@ function tenantSummary(id: string): TenantSummary {
 	};
 }
 
+const rebuildBodySchema = z.object({
+	page: z.object({ after: z.string().optional() })
+});
+
+interface ControlRequest {
+	readonly route: string;
+	readonly query: Record<string, string>;
+	readonly body: unknown;
+}
+
+/**
+A `fetch` for the real control client. It records each request that reaches
+the control tenant and membership routes, and answers the instance routes
+itself. `respond` answers the tenant and membership routes.
+*/
+function controlFetcher(respond: (request: ControlRequest) => Response) {
+	const requests: ControlRequest[] = [];
+	const fetcher: typeof fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const url = new URL(request.url);
+		const route = `${request.method} ${url.pathname}`;
+		const text = await request.text();
+		const body: unknown = text === '' ? undefined : JSON.parse(text);
+		const control = {
+			route,
+			query: Object.fromEntries(url.searchParams),
+			body
+		};
+
+		if (route === 'GET /_version') {
+			return new Response('v-new');
+		}
+
+		if (
+			route === 'GET /control/instance' ||
+			route === 'PUT /control/instance'
+		) {
+			return Response.json({ state: 'configured', name: 'cupboard' });
+		}
+
+		if (
+			route === 'GET /control/tenants' ||
+			route === 'POST /control/membership/rebuild'
+		) {
+			requests.push(control);
+
+			return respond(control);
+		}
+
+		return new Response(undefined, { status: StatusCodes.NOT_FOUND });
+	};
+
+	return { fetcher, requests };
+}
+
 /**
 One scripted answer: a value, an HTTP status to fail with, a `fetch` that
 fails before any response, a network failure as `CupboardClient` reports
@@ -941,6 +1000,85 @@ describe('slugProblem', () => {
 		['has space', 'invalid-format']
 	])('rejects %j', (value, problem) => {
 		expect(slugProblem(value)).toBe(problem);
+	});
+});
+
+describe('rebuildMembershipPages', () => {
+	it('requests each page until no cursor remains and adds up the markers', async () => {
+		const requests: unknown[] = [];
+		const pages = [
+			{ tenants: 900, cursor: 'tenant-0900' },
+			{ tenants: 900, cursor: 'tenant-1800' },
+			{ tenants: 201 }
+		];
+
+		const result = await rebuildMembershipPages({
+			rebuild: (input) => {
+				requests.push(input);
+
+				return Promise.resolve(pages[requests.length - 1] ?? { tenants: 0 });
+			}
+		});
+
+		expect({ result, requests }).toStrictEqual({
+			result: { tenants: 2001 },
+			requests: [
+				{ page: {} },
+				{ page: { after: 'tenant-0900' } },
+				{ page: { after: 'tenant-1800' } }
+			]
+		});
+	});
+
+	it('fails with an error that reports the rebuild and the markers already written', async () => {
+		const cause = new Error('control Worker unavailable');
+		const requests: unknown[] = [];
+
+		const [failure] = await safe(
+			rebuildMembershipPages({
+				rebuild: (input) => {
+					requests.push(input);
+
+					return requests.length === 1
+						? Promise.resolve({ tenants: 900, cursor: 'tenant-0900' })
+						: Promise.reject(cause);
+				}
+			})
+		);
+
+		expect(failure).toStrictEqual(new MembershipRebuildError(900, { cause }));
+	});
+
+	it.each([
+		['an abort', new CliAbortError()],
+		['a missing sign-in', new OwnerLoginRequiredError()],
+		['a rejected token', new ORPCError('UNAUTHORIZED')],
+		['a refused scope', new ORPCError('FORBIDDEN')]
+	])('keeps the type of %s', async (_name, cause) => {
+		const [failure] = await safe(
+			rebuildMembershipPages({ rebuild: () => Promise.reject(cause) })
+		);
+
+		expect(failure).toBe(cause);
+	});
+
+	it('stops when a page returns a cursor that does not advance', async () => {
+		const requests: unknown[] = [];
+
+		const [failure] = await safe(
+			rebuildMembershipPages({
+				rebuild: (input) => {
+					requests.push(input);
+
+					return Promise.resolve({ tenants: 900, cursor: 'tenant-0900' });
+				}
+			})
+		);
+
+		expect({ failure, requests }).toStrictEqual({
+			failure: new MembershipRebuildStalledError('tenant-0900', 'tenant-0900'),
+			requests: [{ page: {} }, { page: { after: 'tenant-0900' } }]
+		});
 	});
 });
 
@@ -2139,6 +2277,97 @@ describe('onboardDeployment', () => {
 			signupBodies: [],
 			tenantExchanges: [],
 			cacheAccessTokens: ['session:https://cache.example.com/t/laney']
+		});
+	});
+
+	it('sends the membership rebuild one page at a time through the control client', async () => {
+		const { ui } = scriptedUi();
+		const { fetcher, requests } = controlFetcher((request) => {
+			if (request.route === 'GET /control/tenants') {
+				return Response.json({
+					tenants: [tenantSummary('builds'), tenantSummary('laney')]
+				});
+			}
+
+			return Response.json(
+				rebuildBodySchema.parse(request.body).page.after === undefined
+					? { tenants: 900, cursor: 'builds' }
+					: { tenants: 1 }
+			);
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, scriptedClient({})),
+			clientFactory: undefined,
+			fetcher
+		});
+
+		expect({
+			outcome,
+			rebuilds: requests.filter((request) => request.route.startsWith('POST'))
+		}).toStrictEqual({
+			outcome: {
+				kind: 'already-initialised',
+				url: 'https://cache.example.com',
+				slugs: ['builds', 'laney']
+			} satisfies OnboardOutcome,
+			rebuilds: [
+				{
+					route: 'POST /control/membership/rebuild',
+					query: {},
+					body: { page: {} }
+				},
+				{
+					route: 'POST /control/membership/rebuild',
+					query: {},
+					body: { page: { after: 'builds' } }
+				}
+			]
+		});
+	});
+
+	it('reports a server error on a later page as a failed rebuild with the error as its cause', async () => {
+		const { ui } = scriptedUi();
+		const { fetcher } = controlFetcher((request) => {
+			if (request.route === 'GET /control/tenants') {
+				return Response.json({
+					tenants: [tenantSummary('builds'), tenantSummary('laney')]
+				});
+			}
+
+			const { after } = rebuildBodySchema.parse(request.body).page;
+
+			return after === undefined
+				? Response.json({ tenants: 900, cursor: 'builds' })
+				: new Response(undefined, {
+						status: StatusCodes.INTERNAL_SERVER_ERROR
+					});
+		});
+
+		const options = {
+			...baseOptions(ui, scriptedClient({})),
+			clientFactory: undefined,
+			fetcher
+		};
+
+		const [failure] = await safe(onboardDeployment(options));
+
+		const rebuild =
+			failure instanceof MembershipRebuildError ? failure : undefined;
+		const cause = rebuild?.cause;
+		const causeStatus =
+			cause instanceof CupboardHttpError ? cause.status : undefined;
+		const causeExitCode =
+			cause instanceof CupboardHttpError ? cause.exitCode : undefined;
+
+		expect({
+			rebuiltTenants: rebuild?.rebuiltTenants,
+			causeStatus,
+			exitCode: rebuild?.exitCode
+		}).toStrictEqual({
+			rebuiltTenants: 900,
+			causeStatus: StatusCodes.INTERNAL_SERVER_ERROR,
+			exitCode: causeExitCode
 		});
 	});
 

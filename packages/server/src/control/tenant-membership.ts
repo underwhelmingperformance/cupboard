@@ -5,9 +5,13 @@ import {
 	firstCacheGeneration,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import {
+	kvOperationsPerInvocation,
+	kvOperationsReserve
+} from '@cupboard/protocol/platform';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { type ReadUser } from '@cupboard/shared/http';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, gt, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 
@@ -491,9 +495,46 @@ async function admitWithinDeadline(
 	return readTenantEntry(env, slug, cache, 'admission');
 }
 
-// Scheduled maintenance rebuilds the filter from one registry snapshot and
-// reasserts every live tenant's marker. Reassertion repairs a marker lost during
-// creation, which keeps a definitive marker miss safe to return as 404.
+/**
+The number of markers that one refresh page writes. Each marker is one KV
+operation, so a page writes as many markers as the KV operations of an
+invocation allow, less the reserve of KV operations.
+*/
+export const membershipMarkersPerPage =
+	kvOperationsPerInvocation - kvOperationsReserve;
+
+/**
+A queued page of the membership refresh. It writes the markers of the live
+tenants whose ids sort after `after`.
+*/
+export interface MembershipRefreshMessage {
+	readonly kind: 'membership-refresh';
+	readonly after: TenantId;
+}
+
+type MembershipRefreshQueue = Pick<
+	Queue<MembershipRefreshMessage>,
+	'sendBatch'
+>;
+
+export interface MembershipRefreshPage {
+	/**
+	The number of markers that the page wrote.
+	*/
+	readonly written: number;
+	/**
+	The id of the last tenant of the page, present when more live tenants
+	follow it.
+	*/
+	readonly cursor?: TenantId;
+}
+
+// Writes every live tenant's marker and rebuilds the filter in one invocation,
+// so it fails on a deployment with more live tenants than the KV operations of
+// an invocation (`kvOperationsPerInvocation`). It serves the legacy
+// `membership.rebuild` request and the test harness. Reassertion repairs a
+// marker lost during creation, which keeps a definitive marker miss safe to
+// return as 404.
 export async function refreshTenantMembership(env: Env): Promise<number> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const live = await liveTenantSlugs(database);
@@ -504,6 +545,63 @@ export async function refreshTenantMembership(env: Env): Promise<number> {
 	await publishMembershipFilter(env, live);
 
 	return live.length;
+}
+
+/**
+Writes the markers of one page of live tenants, in id order after `after`, or
+from the first tenant. The first page also rebuilds the filter from the
+registry. The cron and the queued chain call this for every page, and the
+`membership.rebuild` procedure calls it for each request that has a `page`.
+*/
+export async function refreshTenantMembershipPage(
+	env: Env,
+	after?: TenantId
+): Promise<MembershipRefreshPage> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const size = membershipMarkersPerPage;
+	const rows = await liveTenantSlugs(database, { after, limit: size + 1 });
+	const page = rows.slice(0, size);
+	const last = page.at(-1);
+	const hasMore = last !== undefined && rows.length > page.length;
+
+	await Promise.all(
+		page.map((slug) => writeTenantMember(env.TENANT_CACHE, slug))
+	);
+
+	if (after === undefined) {
+		if (hasMore) {
+			await rebuildMembershipFilter(env);
+		} else {
+			await publishMembershipFilter(env, page);
+		}
+	}
+
+	return { written: page.length, ...(hasMore && { cursor: last }) };
+}
+
+/**
+Runs a queued page of the membership refresh. It queues the next page when
+live tenants remain after this one.
+*/
+export async function continueTenantMembershipRefresh(
+	env: Env,
+	message: MembershipRefreshMessage,
+	queue: MembershipRefreshQueue = env.MAINTENANCE_QUEUE
+): Promise<void> {
+	const page = await refreshTenantMembershipPage(env, message.after);
+
+	if (page.cursor !== undefined) {
+		await queue.sendBatch([{ body: membershipRefreshMessage(page.cursor) }]);
+	}
+}
+
+/**
+The message for the page of the refresh that follows the tenant `after`.
+*/
+export function membershipRefreshMessage(
+	after: TenantId
+): MembershipRefreshMessage {
+	return { kind: 'membership-refresh', after };
 }
 
 // Rebuild the filter after creation so the new tenant becomes admissible within
@@ -526,12 +624,25 @@ async function publishMembershipFilter(
 	await caches.default.delete(membershipFilterCacheKey(env.CUPBOARD_DO));
 }
 
-async function liveTenantSlugs(database: Database): Promise<TenantId[]> {
-	const rows = await database
+async function liveTenantSlugs(
+	database: Database,
+	page: { readonly after?: TenantId | undefined; readonly limit?: number } = {}
+): Promise<TenantId[]> {
+	const query = database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
-		.where(ne(d1Schema.tenant.status, 'offboarded'))
-		.all();
+		.where(
+			and(
+				ne(d1Schema.tenant.status, 'offboarded'),
+				page.after === undefined
+					? undefined
+					: gt(d1Schema.tenant.id, page.after)
+			)
+		)
+		.orderBy(d1Schema.tenant.id);
+	const rows = await (page.limit === undefined
+		? query.all()
+		: query.limit(page.limit).all());
 
 	return rows.map((row) => row.id);
 }

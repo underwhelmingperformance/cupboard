@@ -185,8 +185,8 @@ export const controlRouter = os.router({
 		)
 	},
 	membership: {
-		rebuild: os.membership.rebuild.handler(({ context }) =>
-			controlMembershipRebuild(context.env)
+		rebuild: os.membership.rebuild.handler(({ input, context }) =>
+			controlMembershipRebuild(context.env, input)
 		)
 	},
 	deployment: {

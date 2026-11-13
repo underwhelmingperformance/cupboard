@@ -556,6 +556,24 @@ refreshes the tenant membership in KV. It then adds jobs to the
 `cupboard-maintenance` queue. Each job is small and bounded, so a failure only
 retries that one message, not the whole hourly run.
 
+Each tenant marker is one KV operation. [Cloudflare's KV limits][kv-limits]
+allow 1,000 operations in one Worker invocation on both the Free and the Paid
+plan. That is lower than the Paid plan's allowance of subrequests, so the KV
+limit sets the page size on every plan. The membership refresh therefore writes
+one page of 900 markers at a time, which leaves a reserve of 100 operations. The
+first page also rebuilds the filter. When more live tenants remain, the cron
+adds a `membership-refresh` job that contains the last slug of the page. That
+job writes the next page and adds the next job.
+
+`POST /control/membership/rebuild` writes one page for each request that has a
+`page` and returns a `cursor` while more tenants remain. `cupboard deploy`
+follows the cursor until every marker is written, and fails if a page fails. A
+request without a `page` is the legacy shape of a released CLI. It writes every
+marker in one invocation, so it fails when the deployment has more live tenants
+than the KV limit allows.
+
+[kv-limits]: https://developers.cloudflare.com/kv/platform/limits/
+
 These are the jobs that the cron trigger adds:
 
 - `cache-catalogue-migration`, for up to 100 tenants whose cache catalogue

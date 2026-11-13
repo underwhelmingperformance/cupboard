@@ -136,10 +136,31 @@ export const tenantQuotaBelowUsageErrorDataSchema = z.strictObject({
 });
 
 // A membership rebuild reasserts every live tenant's marker and reconstructs
-// the admission filter from the registry. The response reports how many tenants
-// the gate now admits. No tenant data changes.
+// the admission filter from the registry. No tenant data changes.
+//
+// A request with a `page` writes one page of markers, in tenant id order, after
+// the tenant `after`. The first page also rebuilds the filter. A page has at
+// most 900 markers, which is the KV limit of 1,000 operations in an invocation
+// less a reserve of 100. The response has the number of markers written and,
+// when more tenants follow, the `cursor` to send as the next page's `after`. A
+// caller that needs every marker follows the cursor.
+//
+// A request without a `page` is the legacy shape. A released CLI sends it and
+// validates the response with a strict schema that has no `cursor`. That request
+// writes every marker in one invocation, so it fails on a deployment with more
+// live tenants than the KV limit allows, and its response has no `cursor`.
+export const membershipRebuildInputSchema = z
+	.strictObject({
+		page: z.strictObject({ after: tenantIdSchema.optional() }).optional()
+	})
+	.default({});
+export type MembershipRebuildInput = z.output<
+	typeof membershipRebuildInputSchema
+>;
+
 export const membershipRebuildResponseSchema = z.strictObject({
-	tenants: z.number().int().nonnegative()
+	tenants: z.number().int().nonnegative(),
+	cursor: tenantIdSchema.optional()
 });
 export type MembershipRebuildResponse = z.output<
 	typeof membershipRebuildResponseSchema

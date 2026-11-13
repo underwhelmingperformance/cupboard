@@ -37,6 +37,7 @@ import {
 } from '../sessions.ts';
 import {
 	cacheReadCredentialResponseSchema,
+	membershipRebuildInputSchema,
 	membershipRebuildResponseSchema,
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
@@ -296,10 +297,13 @@ export const controlContract = {
 		// Rebuilds the admission filter and republishes each live tenant's marker
 		// from the registry. Deployment calls this procedure after an admission-format
 		// change so existing tenants remain admitted before the next hourly cron. It
-		// changes only the KV admission data.
+		// changes only the KV admission data. Deployment sends a `page` and follows
+		// the cursor until it has written every marker. A repeated request writes
+		// the same markers, so the procedure is replay-safe.
 		rebuild: controlProcedure
-			.meta({ requires: 'membership:rebuild' })
+			.meta({ requires: 'membership:rebuild', replaySafety: 'replay-safe' })
 			.route({ method: 'POST', path: '/membership/rebuild' })
+			.input(membershipRebuildInputSchema)
 			.output(membershipRebuildResponseSchema)
 	},
 

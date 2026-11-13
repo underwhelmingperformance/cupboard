@@ -805,6 +805,7 @@ describe('scheduled tenant pass failure records', () => {
 									'blob-demote',
 									'narinfo-refresh',
 									'narinfo-refresh-tenant',
+									'membership-refresh',
 									'cas-demote',
 									'control-key-retirement',
 									'control-session-pruning',

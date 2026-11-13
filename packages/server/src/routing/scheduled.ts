@@ -56,8 +56,11 @@ import {
 	wakeLocalStepTenants
 } from '../control/local-step.ts';
 import {
+	continueTenantMembershipRefresh,
 	deleteTenantMember,
-	refreshTenantMembership
+	type MembershipRefreshMessage,
+	membershipRefreshMessage,
+	refreshTenantMembershipPage
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import { cacheIdSchema } from '../db/cache.ts';
@@ -226,6 +229,10 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 			.object({ cacheId: cacheIdSchema, storePathHash: storePathHashSchema })
 			.optional()
 	}),
+	z.object({
+		kind: z.literal('membership-refresh'),
+		after: tenantIdSchema
+	}),
 	z.object({ kind: z.literal('cas-demote') }),
 	z.object({ kind: z.literal('control-key-retirement') }),
 	z.object({ kind: z.literal('control-session-pruning') }),
@@ -241,6 +248,7 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 
 export type MaintenanceQueueMessage =
 	| LocalStepWakeMessage
+	| MembershipRefreshMessage
 	| { readonly kind: 'cache-catalogue-migration'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-maintenance'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-verify'; readonly tenant: TenantId }
@@ -305,9 +313,10 @@ export async function enqueueMaintenanceJobs(
 	env: Env,
 	queue: MaintenanceQueue = env.MAINTENANCE_QUEUE
 ): Promise<MaintenanceQueueMessage[]> {
-	// Refresh membership before sending queue messages. New tenants and missing
-	// markers must not depend on successful queue delivery.
-	await refreshTenantMembership(env);
+	// Write the first page of markers before building the other messages. A
+	// message for each later page joins the messages below, so a failed send
+	// does not stop the other jobs.
+	const membership = await refreshTenantMembershipPage(env);
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const catalogueTenants = await incompleteCacheCatalogueTenants(
@@ -324,6 +333,9 @@ export async function enqueueMaintenanceJobs(
 	);
 	const localStepWakes = await selectLocalStepWakeMessages(env);
 	const messages: MaintenanceQueueMessage[] = [
+		...(membership.cursor === undefined
+			? []
+			: [membershipRefreshMessage(membership.cursor)]),
 		...catalogueTenants.map(({ id }): MaintenanceQueueMessage => ({
 			kind: 'cache-catalogue-migration',
 			tenant: id
@@ -541,6 +553,10 @@ export async function executeMaintenanceQueueMessage(
 					]);
 				}
 
+				return { action: 'ack' };
+			}
+			case 'membership-refresh': {
+				await continueTenantMembershipRefresh(env, message);
 				return { action: 'ack' };
 			}
 			case 'cas-demote': {
