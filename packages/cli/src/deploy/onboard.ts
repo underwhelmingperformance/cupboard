@@ -25,10 +25,10 @@ import type { SignupResponse } from '@cupboard/protocol/signup';
 import {
 	defaultReadUser,
 	type TenantCreateBodyInput,
-	type TenantListResponse,
 	type TenantReadCredential,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
+import { collectProgressively } from '@cupboard/shared/collections';
 import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
@@ -41,6 +41,7 @@ import {
 	canonicalTarget
 } from '../auth/bound-sign-in.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { listingLimits, tenantPages } from '../client/listings.ts';
 import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
@@ -166,7 +167,10 @@ export interface OnboardClient extends Pick<
 		credential: AccessCredential,
 		name: InstanceName
 	): Promise<ConfiguredInstanceSummary>;
-	listTenants(credential: AccessCredential): Promise<TenantListResponse>;
+	/**
+	Every tenant of the deployment, read page by page.
+	*/
+	listTenants(credential: AccessCredential): Promise<TenantSummary[]>;
 	createTenant(
 		credential: AccessCredential,
 		body: TenantCreateBodyInput
@@ -439,7 +443,7 @@ export async function onboardDeployment(
 		.phase('Checking existing caches', async () => {
 			const listed = await client.listTenants(credential);
 
-			return listed.tenants.filter((tenant) => tenant.status !== 'offboarded');
+			return listed.filter((tenant) => tenant.status !== 'offboarded');
 		});
 
 	// Existing tenants were provisioned by an earlier build, and a deploy can
@@ -730,7 +734,11 @@ function onboardClientFor(
 		initialiseInstance: (credential, name) =>
 			control(credential).instance.initialise({ name }),
 		getInstance: (credential) => control(credential).instance.get(),
-		listTenants: (credential) => control(credential).tenants.list(),
+		listTenants: async (credential) =>
+			collectProgressively(
+				await tenantPages(control(credential).tenants),
+				listingLimits('The tenant listing')
+			),
 		createTenant: (credential, body) =>
 			control(credential).tenants.create(body),
 		rebuildMembership: (credential) =>

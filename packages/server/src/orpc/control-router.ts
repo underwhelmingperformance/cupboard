@@ -121,8 +121,8 @@ export const controlRouter = os.router({
 		)
 	},
 	tenants: {
-		list: os.tenants.list.handler(({ context }) =>
-			controlTenantList(context.env)
+		list: os.tenants.list.handler(({ input, context }) =>
+			controlTenantList(context.env, input)
 		),
 		create: os.tenants.create.handler(({ input, context }) => {
 			const requestUrl = new URL(context.request.url);

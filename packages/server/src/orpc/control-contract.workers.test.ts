@@ -12,6 +12,8 @@ import {
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { tenantListPageSize } from '@cupboard/protocol/tenants';
+import { chunk } from '@cupboard/shared/collections';
 import { createORPCClient, ORPCError, safe } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
@@ -23,6 +25,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { insertBulkTenants } from '../control/bulk-tenants.test-support.ts';
 import { controlAuthenticate } from '../control/control-plane.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -621,6 +624,83 @@ describe('control contract round trip', () => {
 			suspended: { id: 'acme', status: 'suspended' },
 			removed: { id: 'acme', status: 'offboarding' }
 		});
+	});
+
+	it.each([250, 600])(
+		'lists %i tenants in pages of at most the page size',
+		async (tenants) => {
+			await insertBulkTenants(tenants);
+			const client = controlClient(await issueControlAdminToken());
+			const pages: { ids: string[]; cursor: string | undefined }[] = [];
+			let cursor: string | undefined;
+
+			do {
+				const page = await client.tenants.list({
+					limit: tenantListPageSize,
+					...(cursor !== undefined && { cursor })
+				});
+				pages.push({
+					ids: page.tenants.map((entry) => entry.id),
+					cursor: page.cursor
+				});
+				cursor = page.cursor;
+			} while (cursor !== undefined);
+
+			// The harness provisions the fixture `v1` tenant, which sorts last.
+			const ids = [
+				...Array.from(
+					{ length: tenants },
+					(_, index) => `bulk${String(index + 1).padStart(6, '0')}`
+				),
+				'v1'
+			];
+			const expected = chunk(ids, tenantListPageSize).map(
+				(pageIds, index, all) => ({
+					ids: pageIds,
+					cursor: index < all.length - 1 ? pageIds.at(-1) : undefined
+				})
+			);
+
+			expect(pages).toStrictEqual(expected);
+		}
+	);
+
+	// A released CLI sends no query and validates the response with a strict
+	// schema that has no `cursor`.
+	it('answers a request without a limit with every tenant and no cursor', async () => {
+		await insertBulkTenants(250);
+		const response = await controlFetch('/control/tenants', {
+			headers: { authorization: `Bearer ${await issueControlAdminToken()}` }
+		});
+		// A loose object keeps unknown keys, so a `cursor` in the response would
+		// show in `keys`.
+		const entrySchema = z.object({ id: z.string() });
+		const bodySchema = z.looseObject({ tenants: z.array(entrySchema) });
+		const body = bodySchema.parse(await response.json());
+
+		expect({
+			status: response.status,
+			keys: Object.keys(body),
+			ids: body.tenants.map((entry) => entry.id)
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			keys: ['tenants'],
+			ids: [
+				...Array.from(
+					{ length: 250 },
+					(_, index) => `bulk${String(index + 1).padStart(6, '0')}`
+				),
+				'v1'
+			]
+		});
+	});
+
+	it('rejects a cursor without a limit', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		const [error] = await safe(client.tenants.list({ cursor: 'acme' }));
+
+		expect(error).toMatchObject({ code: 'BAD_REQUEST' });
 	});
 
 	it('returns TENANT_OFFBOARDING when suspending or resuming an offboarding tenant', async () => {

@@ -49,7 +49,10 @@ const alice = readUserInputSchema.parse('alice');
 const password = 'A'.repeat(43);
 
 const quotaMocks = vi.hoisted(() => ({ client: vi.fn(), set: vi.fn() }));
-vi.mock('../client/orpc.ts', () => ({ controlRpc: quotaMocks.client }));
+vi.mock('../client/orpc.ts', async (importOriginal) => ({
+	...(await importOriginal<typeof import('../client/orpc.ts')>()),
+	controlRpc: quotaMocks.client
+}));
 
 describe('parsed quota selection', () => {
 	it.each([['0'], ['--quota-bytes', '0']])(
@@ -379,6 +382,33 @@ describe('runTenantList', () => {
 				{ label: 'acme', value: 'Suspended' }
 			]
 		]);
+	});
+
+	it('requests each page of the listing', async () => {
+		const rows: ResultRow[][] = [];
+		const requested: unknown[] = [];
+		const pages = [
+			tenantListResponseSchema.parse({ tenants: [summary()], cursor: 'acme' }),
+			tenantListResponseSchema.parse({ tenants: [summary('suspended')] })
+		];
+
+		await runTenantList(reporter(rows), {
+			list: (input) => {
+				requested.push(input);
+
+				return Promise.resolve(pages[requested.length - 1] ?? { tenants: [] });
+			}
+		});
+
+		expect({ requested, rows }).toStrictEqual({
+			requested: [{ limit: 200 }, { limit: 200, cursor: 'acme' }],
+			rows: [
+				[
+					{ label: 'acme', value: 'Active' },
+					{ label: 'acme', value: 'Suspended' }
+				]
+			]
+		});
 	});
 });
 
