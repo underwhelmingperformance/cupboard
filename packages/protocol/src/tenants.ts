@@ -79,8 +79,37 @@ export const tenantSummarySchema = z.strictObject({
 export type TenantSummary = z.output<typeof tenantSummarySchema>;
 export type TenantSummaryInput = z.input<typeof tenantSummarySchema>;
 
+export const tenantListPageSize = 200;
+
+// A request pages the listing only when it has a `limit`. A released CLI sends
+// no `limit` and validates the response with a strict schema that has no
+// `cursor`, so a request without one gets every tenant and no `cursor`. That
+// legacy shape reads the whole tenant table in one request. `cursor` is the id
+// of the last tenant of the previous page, and it needs a `limit`. Tenants are
+// listed in id order.
+export const tenantListInputSchema = z
+	.strictObject({
+		cursor: tenantIdSchema.optional(),
+		limit: z.number().int().min(1).max(tenantListPageSize).optional()
+	})
+	.superRefine((input, context) => {
+		if (input.cursor !== undefined && input.limit === undefined) {
+			context.addIssue({
+				code: 'custom',
+				path: ['cursor'],
+				message: 'A cursor needs a limit.'
+			});
+		}
+	})
+	.default({});
+export type TenantListInput = z.output<typeof tenantListInputSchema>;
+
+// `cursor` is present only in the response to a request with a `limit`, when
+// more tenants follow the page. It is the id to send as the next request's
+// cursor.
 export const tenantListResponseSchema = z.strictObject({
-	tenants: z.array(tenantSummarySchema)
+	tenants: z.array(tenantSummarySchema),
+	cursor: tenantIdSchema.optional()
 });
 export type TenantListResponse = z.output<typeof tenantListResponseSchema>;
 export type TenantListResponseInput = z.input<typeof tenantListResponseSchema>;

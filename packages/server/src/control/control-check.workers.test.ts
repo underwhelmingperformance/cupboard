@@ -5,11 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { passThrough } from '../http/stalled-body.test-support.ts';
 import {
 	controlFetch,
 	issueControlAdminToken,
-	resetTestServer
+	resetTestServer,
+	testControlEnv
 } from '../test-support.ts';
+
+import { insertBulkTenants } from './bulk-tenants.test-support.ts';
+import { controlCheck } from './control-plane.ts';
 
 describe('control plane GET /control/check', () => {
 	beforeEach(resetTestServer);
@@ -109,4 +114,77 @@ describe('control plane GET /control/check', () => {
 			});
 		}
 	);
+
+	it.each([250, 600])(
+		'reads one tenant row to find a tenant to probe through with %i tenants',
+		async (tenants) => {
+			await insertBulkTenants(tenants);
+			vi.stubGlobal('fetch', () =>
+				Promise.resolve(new Response(undefined, { status: 404 }))
+			);
+			const counter = { tenantRows: 0 };
+
+			await controlCheck(
+				Object.assign({}, env, testControlEnv, {
+					CUPBOARD_DB: countingDatabase(env.CUPBOARD_DB, counter)
+				})
+			);
+
+			expect(counter).toStrictEqual({ tenantRows: 1 });
+		}
+	);
 });
+
+// A D1 binding that counts the rows that selects from the tenant table return.
+function countingDatabase(
+	binding: D1Database,
+	counter: { tenantRows: number }
+): D1Database {
+	return new Proxy(binding, {
+		get(target, property) {
+			if (property !== 'prepare') {
+				return passThrough(target, property);
+			}
+
+			return (query: string) =>
+				countingStatement(target.prepare(query), query, counter);
+		}
+	});
+}
+
+function countingStatement(
+	statement: D1PreparedStatement,
+	query: string,
+	counter: { tenantRows: number }
+): D1PreparedStatement {
+	const isTenantSelect = query.includes('from "tenant"');
+
+	return new Proxy(statement, {
+		get(target, property) {
+			if (property === 'bind') {
+				return (...values: unknown[]) =>
+					countingStatement(target.bind(...values), query, counter);
+			}
+
+			if (property === 'raw') {
+				return async () => {
+					const rows = await target.raw();
+					counter.tenantRows += isTenantSelect ? rows.length : 0;
+
+					return rows;
+				};
+			}
+
+			if (property === 'all') {
+				return async () => {
+					const result = await target.all();
+					counter.tenantRows += isTenantSelect ? result.results.length : 0;
+
+					return result;
+				};
+			}
+
+			return passThrough(target, property);
+		}
+	});
+}

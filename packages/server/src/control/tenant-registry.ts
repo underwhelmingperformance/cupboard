@@ -9,18 +9,20 @@ import {
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
-import type {
-	TenantCreateBody,
-	TenantQuota,
-	TenantQuotaResponse,
-	TenantReadCredential,
-	TenantSummary
+import {
+	type TenantCreateBody,
+	type TenantListResponse,
+	type TenantQuota,
+	type TenantQuotaResponse,
+	type TenantReadCredential,
+	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ReadUser } from '@cupboard/shared/http';
 import {
 	and,
 	eq,
 	exists,
+	gt,
 	lte,
 	ne,
 	notExists,
@@ -377,16 +379,59 @@ async function loadUsage(
 		.get();
 }
 
+/**
+Lists the tenants that sort after `after`, or from the first tenant, in id
+order. With a `limit`, a page has at most that many tenants. Its cursor is
+the id of its last tenant, and is present only when more tenants follow.
+Without a `limit`, the result has every remaining tenant and no cursor. That
+legacy shape serves a CLI that cannot read a cursor, and it reads every row
+of the tenant table.
+*/
 export async function listTenants(
-	database: Database
-): Promise<TenantSummary[]> {
-	const rows = await database
+	database: Database,
+	page: { readonly after?: TenantId; readonly limit?: number } = {}
+): Promise<TenantListResponse> {
+	const query = database
 		.select()
 		.from(d1Schema.tenant)
-		.orderBy(d1Schema.tenant.id)
-		.all();
+		.where(
+			page.after === undefined ? undefined : gt(d1Schema.tenant.id, page.after)
+		)
+		.orderBy(d1Schema.tenant.id);
 
-	return rows.map((row) => toSummary(row));
+	if (page.limit === undefined) {
+		const all = await query.all();
+
+		return { tenants: all.map((row) => toSummary(row)) };
+	}
+
+	const rows = await query.limit(page.limit + 1).all();
+	const tenants = rows.slice(0, page.limit);
+	const last = tenants.at(-1);
+
+	return {
+		tenants: tenants.map((row) => toSummary(row)),
+		...(last !== undefined &&
+			rows.length > tenants.length && { cursor: last.id })
+	};
+}
+
+/**
+Returns the id of the first tenant that is not offboarded, or undefined when
+every tenant is offboarded or none exists.
+*/
+export async function firstLiveTenantId(
+	database: Database
+): Promise<TenantId | undefined> {
+	const row = await database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(ne(d1Schema.tenant.status, 'offboarded'))
+		.orderBy(d1Schema.tenant.id)
+		.limit(1)
+		.get();
+
+	return row?.id;
 }
 
 // Sets a tenant's status and returns its summary. Every request reads this D1 row

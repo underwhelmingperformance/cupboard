@@ -772,7 +772,7 @@ describe('tenant registry', () => {
 		await ensureTenant(database(), createBody('beta'), now);
 		await ensureTenant(database(), createBody('alpha'), now);
 
-		const tenants = await listTenants(database());
+		const { tenants } = await listTenants(database());
 		const ids = tenants.map((summary) => summary.id);
 
 		expect(ids).toStrictEqual(['alpha', 'beta']);
@@ -1022,10 +1022,11 @@ describe('tenant lifecycle operations', () => {
 		await setTenantStatus(database(), acme, 'suspended');
 
 		const resumed = await resumeTenant(database(), acme);
+		const { tenants: stored } = await listTenants(database());
 
 		expect({
 			returned: resumed,
-			stored: await listTenants(database())
+			stored
 		}).toStrictEqual({
 			returned: {
 				id: acme,

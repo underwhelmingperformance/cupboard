@@ -849,9 +849,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 					});
 					return answer(signups, '/signup', signupRejection);
 				},
-				listTenants: async () => ({
-					tenants: await answer(lists, '/control/tenants', orpcRejection)
-				}),
+				listTenants: () => answer(lists, '/control/tenants', orpcRejection),
 				createTenant: (_token, body) => {
 					createdBodies.push(body);
 					return answer(creates, '/control/tenants', orpcRejection);
@@ -2321,6 +2319,50 @@ describe('onboardDeployment', () => {
 					route: 'POST /control/membership/rebuild',
 					query: {},
 					body: { page: { after: 'builds' } }
+				}
+			]
+		});
+	});
+
+	it('requests the tenant listing with a limit and follows its cursor', async () => {
+		const { ui } = scriptedUi();
+		const { fetcher, requests } = controlFetcher((request) => {
+			if (request.route === 'POST /control/membership/rebuild') {
+				return Response.json({ tenants: 2 });
+			}
+
+			return Response.json(
+				request.query.cursor === undefined
+					? { tenants: [tenantSummary('builds')], cursor: 'builds' }
+					: { tenants: [tenantSummary('laney')] }
+			);
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, scriptedClient({})),
+			clientFactory: undefined,
+			fetcher
+		});
+
+		expect({
+			outcome,
+			listings: requests.filter((request) => request.route.startsWith('GET'))
+		}).toStrictEqual({
+			outcome: {
+				kind: 'already-initialised',
+				url: 'https://cache.example.com',
+				slugs: ['builds', 'laney']
+			} satisfies OnboardOutcome,
+			listings: [
+				{
+					route: 'GET /control/tenants',
+					query: { limit: '200' },
+					body: undefined
+				},
+				{
+					route: 'GET /control/tenants',
+					query: { limit: '200', cursor: 'builds' },
+					body: undefined
 				}
 			]
 		});

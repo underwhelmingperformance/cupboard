@@ -57,6 +57,7 @@ import {
 	type MembershipRebuildInput,
 	type MembershipRebuildResponse,
 	type TenantCreateBody,
+	type TenantListInput,
 	type TenantListResponse,
 	type TenantMutateResponse,
 	type TenantQuota,
@@ -151,6 +152,7 @@ import {
 	clearCacheReadCredential,
 	clearTenantReadCredential,
 	ensureTenant,
+	firstLiveTenantId,
 	getTenantQuota,
 	listTenants,
 	resumeTenant,
@@ -642,13 +644,12 @@ export async function controlCheck(env: Env): Promise<ControlCheckReport> {
 		return { db: databaseCheck, r2: { result: 'no-tenant' } };
 	}
 
-	const tenants = await listTenants(sharedDatabase(env));
-	const live = tenants.find((tenant) => tenant.status !== 'offboarded');
+	const live = await firstLiveTenantId(sharedDatabase(env));
 
 	const r2 =
 		live === undefined
 			? ({ result: 'no-tenant' } as const)
-			: await tenantServer(env, live.id).checkR2();
+			: await tenantServer(env, live).checkR2();
 
 	return { db: databaseCheck, r2 };
 }
@@ -702,8 +703,14 @@ export async function controlKeyRetire(
 	return { kid, retired: isRetired };
 }
 
-export async function controlTenantList(env: Env): Promise<TenantListResponse> {
-	return { tenants: await listTenants(sharedDatabase(env)) };
+export function controlTenantList(
+	env: Env,
+	input: TenantListInput
+): Promise<TenantListResponse> {
+	return listTenants(sharedDatabase(env), {
+		...(input.cursor !== undefined && { after: input.cursor }),
+		...(input.limit !== undefined && { limit: input.limit })
+	});
 }
 
 // The deploy reasserts every live tenant's membership marker and rebuilds the

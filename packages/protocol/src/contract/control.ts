@@ -40,6 +40,7 @@ import {
 	membershipRebuildInputSchema,
 	membershipRebuildResponseSchema,
 	tenantCreateBodySchema,
+	tenantListInputSchema,
 	tenantListResponseSchema,
 	tenantMutateResponseSchema,
 	tenantOffboardingErrorDataSchema,
@@ -140,6 +141,7 @@ export const controlContract = {
 		list: controlProcedure
 			.meta({ requires: 'tenant:list', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/tenants' })
+			.input(tenantListInputSchema)
 			.output(tenantListResponseSchema),
 
 		create: controlProcedure

@@ -26,6 +26,7 @@ import {
 	type ResultRow,
 	shouldShowDebug
 } from '@cupboard/reporter';
+import { collectProgressively } from '@cupboard/shared/collections';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
@@ -33,14 +34,18 @@ import { cachedOwnerProvider } from '../auth/auth.ts';
 import { parseCacheAccess } from '../cache-access.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { cacheLabel } from '../client/client.ts';
-import { controlRpc } from '../client/orpc.ts';
+import { listingLimits, tenantPages } from '../client/listings.ts';
+import { type CallOptions, controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { CliUsageError } from '../errors.ts';
 import { generateReadPassword, parseReadUser } from '../read-user.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
 export interface TenantClient {
-	list(): Promise<TenantListResponse>;
+	list(
+		input?: { readonly cursor?: string; readonly limit?: number },
+		options?: CallOptions
+	): Promise<TenantListResponse>;
 	create(input: TenantCreateBody): Promise<TenantSummary>;
 	suspend(input: { id: TenantId }): Promise<TenantMutateResponse>;
 	resume(input: { id: TenantId }): Promise<TenantMutateResponse>;
@@ -510,8 +515,11 @@ export async function runTenantList(
 	reporter: Reporter,
 	client: Pick<TenantClient, 'list'>
 ): Promise<void> {
-	const { tenants } = await reporter.phase('Listing tenants', () =>
-		client.list()
+	const tenants = await reporter.phase('Listing tenants', async () =>
+		collectProgressively(
+			await tenantPages(client),
+			listingLimits('The tenant listing')
+		)
 	);
 
 	reporter.result({
