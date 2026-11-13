@@ -7,7 +7,7 @@ import {
 	rootLogger,
 	withContext
 } from './config.ts';
-import { type Capture, startCapture } from './testing.ts';
+import { type Capture, CaptureStoppedError, startCapture } from './testing.ts';
 
 function record(overrides: Partial<LogRecord> = {}): LogRecord {
 	return {
@@ -41,6 +41,56 @@ describe('rootLogger with capture', () => {
 		} finally {
 			scoped.stop();
 		}
+	});
+
+	it('resolves until for a record that is captured before and one that is captured after the call', async () => {
+		const scoped = startCapture();
+
+		try {
+			rootLogger().info('first');
+			const earlier = scoped.until((entry) => entry.message === 'first');
+			const later = scoped.until((entry) => entry.message === 'third');
+			rootLogger().info('second');
+			rootLogger().info('third', { index: 3 });
+
+			expect({ earlier: await earlier, later: await later }).toStrictEqual({
+				earlier: {
+					level: 'info',
+					category: ['cupboard'],
+					message: 'first',
+					properties: {}
+				},
+				later: {
+					level: 'info',
+					category: ['cupboard'],
+					message: 'third',
+					properties: { index: 3 }
+				}
+			});
+		} finally {
+			scoped.stop();
+		}
+	});
+
+	it('rejects until when the capture stops before a record matches', async () => {
+		const scoped = startCapture();
+		const pending = scoped.until((entry) => entry.message === 'never');
+
+		scoped.stop();
+
+		await expect(pending).rejects.toBeInstanceOf(CaptureStoppedError);
+		await expect(
+			scoped.until((entry) => entry.message === 'never')
+		).rejects.toBeInstanceOf(CaptureStoppedError);
+	});
+
+	// Vitest fails the run with an unhandled rejection when stop() rejects a
+	// promise that has no handler.
+	it('does not leave an unhandled rejection when stop() rejects an unawaited until', () => {
+		const scoped = startCapture();
+
+		void scoped.until((entry) => entry.message === 'never');
+		scoped.stop();
 	});
 
 	let capture: Capture | undefined;
