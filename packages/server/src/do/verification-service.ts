@@ -17,7 +17,6 @@ import {
 import {
 	type CommitBlobDeclaration,
 	type SessionId,
-	type UploadGraceFact,
 	type UploadId,
 	uploadIdSchema,
 	type UploadPathNegotiation,
@@ -90,14 +89,9 @@ import {
 	type PrefetchedMaterialisationFacts,
 	type ReservationRead
 } from './commit-pipeline-service.ts';
-import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type SchemaDatabase, type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
-import {
-	confirmGrace,
-	parseStoredGraceDecision,
-	storedGraceFact
-} from './grace-decision.ts';
+import { confirmGrace, parseStoredGraceDecision } from './grace-decision.ts';
 import {
 	type JsonValueList,
 	jsonValueList,
@@ -134,6 +128,7 @@ import {
 	isAwaitingVerdict,
 	type UploadStateService
 } from './upload-state-service.ts';
+import { sendUploadVerdict } from './upload-verdict.ts';
 import {
 	raceVerificationOperation,
 	withRenewedVerificationClaim
@@ -1322,41 +1317,7 @@ export class VerificationService {
 			return;
 		}
 
-		// The grace fact is sent only for an upload that accepted grace facts,
-		// keeping a legacy upload's frames on the legacy shape.
-		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
-		const grace =
-			graceDecision?.reportsGrace === true
-				? status === 'servable'
-					? this.servableGraceFact(pending)
-					: {}
-				: undefined;
-
-		for (const socket of this.context.ctx.getWebSockets(sessionId)) {
-			sendCommitSessionFrame(socket, {
-				ev: 'verdict',
-				uploadId: pending.id,
-				status,
-				...(grace !== undefined && { grace })
-			});
-		}
-	}
-
-	// Read grace at notification time so a replayed verdict reports the current
-	// deadline.
-	private servableGraceFact(
-		pending: typeof schema.pendingUploads.$inferSelect
-	): UploadGraceFact {
-		const metadata = parseStoredUploadPathMetadata(
-			pending.id,
-			pending.metadataJson
-		);
-
-		return storedGraceFact(
-			this.context.db,
-			this.cache(pending.cacheId),
-			metadata.storePathHash
-		);
+		sendUploadVerdict(this.context, sessionId, pending, status);
 	}
 
 	private async prepareRecordedVerdict(

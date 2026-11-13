@@ -83,7 +83,6 @@ import { armAlarmNoLaterThan } from './alarm.ts';
 import { type AttestationsService } from './attestations-service.ts';
 import { batchNonEmpty, maxOutgoingConnections } from './bulk.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
-import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type MaterialiseOutcome,
 	type ReserveOutcome,
@@ -96,8 +95,7 @@ import {
 	confirmGrace,
 	type GraceDecision,
 	parseStoredGraceDecision,
-	storedGraceDeadlines,
-	storedGraceFact
+	storedGraceDeadlines
 } from './grace-decision.ts';
 import { hourlyDeadline } from './hourly-deadline.ts';
 import { type JsonValueList, jsonValueLists } from './json-list.ts';
@@ -126,6 +124,7 @@ import {
 	isAwaitingVerdict,
 	type UploadStateService
 } from './upload-state-service.ts';
+import { sendUploadVerdict } from './upload-verdict.ts';
 
 // Keep this shorter than `verifyBackstopDelayMs`. When the alarm backstop
 // fires, the previous queue request must be stale so the alarm can send again.
@@ -461,8 +460,9 @@ export class CommitPipelineService {
 	): void {
 		const row = this.context.db
 			.select({
+				id: schema.pendingUploads.id,
 				sessionId: schema.pendingUploads.sessionId,
-				cache: schema.pendingUploads.cacheId,
+				cacheId: schema.pendingUploads.cacheId,
 				metadataJson: schema.pendingUploads.metadataJson,
 				graceDecisionJson: schema.pendingUploads.graceDecisionJson
 			})
@@ -480,27 +480,12 @@ export class CommitPipelineService {
 			return;
 		}
 
-		// Do not add grace fields to a legacy session. Read the stored deadline
-		// after the caller has applied the captured decision.
-		const graceDecision = parseStoredGraceDecision(row.graceDecisionJson);
-		const grace =
-			graceDecision?.reportsGrace === true
-				? storedGraceFact(
-						this.context.db,
-						this.context.cacheRepository.resolvedForId(row.cache),
-						parseStoredUploadPathMetadata(uploadId, row.metadataJson)
-							.storePathHash
-					)
-				: undefined;
-
-		for (const socket of this.context.ctx.getWebSockets(sessionId)) {
-			sendCommitSessionFrame(socket, {
-				ev: 'verdict',
-				uploadId,
-				status: status === 'committed' ? 'servable' : 'absent',
-				...(grace !== undefined && { grace })
-			});
-		}
+		sendUploadVerdict(
+			this.context,
+			sessionId,
+			row,
+			status === 'committed' ? 'servable' : 'absent'
+		);
 	}
 
 	// A declaration is written once. A verification pass may already have claimed

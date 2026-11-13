@@ -1246,6 +1246,34 @@ describe('removed cache fence', () => {
 		}
 	);
 
+	it('includes an empty grace fact in the absent verdict of an upload that accepted grace facts', async () => {
+		const token = await initialise();
+		await seedUploadOfReplacedCache(token);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(schema.pendingUploads)
+				.set({ graceDecisionJson: '{"reportsGrace":true}' })
+				.where(eq(schema.pendingUploads.id, operationId))
+				.run();
+		});
+		const session = await openCommitSession(token, builds);
+		let received: CommitSessionFrame;
+
+		try {
+			session.send(sessionRequest('subscribe', operationId));
+			received = await session.nextFrame();
+		} finally {
+			await closeSessionAndWait(session.socket);
+		}
+
+		expect(received).toStrictEqual({
+			ev: 'verdict',
+			uploadId: operationId,
+			status: 'absent',
+			grace: {}
+		});
+	});
+
 	// Verification sends an upload's verdict to the session recorded on its row,
 	// so a session of another cache must not replace that session.
 	it.each([
