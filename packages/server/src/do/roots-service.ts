@@ -53,9 +53,10 @@ import {
 	allocateRootIncarnation,
 	existingRootIncarnationKey,
 	insertLiveRootTargets,
-	liveRootTargetCount,
+	insertNewIncarnationTargets,
 	liveRootTargets,
 	type RootIncarnationKey,
+	rootTargetCount,
 	warnRootMissing
 } from './live-root-targets.ts';
 import { type NarInfoDemotionWatch } from './narinfo-demotion-watches.ts';
@@ -217,6 +218,9 @@ export class RootsService {
 				name: request.name,
 				incarnation: allocateRootIncarnation(tx)
 			};
+			// Either the root keeps exactly the requested targets, or it gets a new
+			// incarnation that will keep only them.
+			const targetCount = request.targets.length;
 
 			if (existing === undefined) {
 				tx.insert(schema.retentionRoots)
@@ -228,7 +232,8 @@ export class RootsService {
 						expiresAt,
 						createdAt: created,
 						updatedAt: nowIso,
-						incarnation: root.incarnation
+						incarnation: root.incarnation,
+						targetCount
 					})
 					.run();
 			} else {
@@ -249,6 +254,7 @@ export class RootsService {
 							expiresAt: expiresAt ?? sql`NULL`
 						}),
 						...(!isUnchanged && { incarnation: root.incarnation }),
+						...(existing.targetCount !== targetCount && { targetCount }),
 						updatedAt: nowIso
 					})
 					.where(
@@ -264,7 +270,13 @@ export class RootsService {
 				return { created, isReleased: false };
 			}
 
-			insertLiveRootTargets(tx, this.retention, cache, root, request.targets);
+			insertNewIncarnationTargets(
+				tx,
+				this.retention,
+				cache,
+				root,
+				request.targets
+			);
 
 			// The previous incarnation's rows that the new set does not keep stay in
 			// place, and a release grants them their grace when it drains them. A
@@ -625,7 +637,10 @@ export class RootsService {
 				expiresAt,
 				createdAt: nowIso,
 				updatedAt: nowIso,
-				...(!isBound && { incarnation: allocateRootIncarnation(database) })
+				...(!isBound && {
+					incarnation: allocateRootIncarnation(database),
+					targetCount: 0
+				})
 			})
 			.onConflictDoUpdate({
 				target: [schema.retentionRoots.cacheId, schema.retentionRoots.name],
@@ -823,8 +838,9 @@ export class RootsService {
 		};
 	}
 
-	// Count targets in SQLite and paginate roots by name without reading target
-	// rows or probing R2. Large run roots therefore do not expand this request.
+	// Paginate roots by name and read each root's stored target count, without
+	// probing R2. Only a root that the backfill has not counted yet reads its
+	// target rows.
 	listRoots(
 		cacheScope: CacheScope,
 		options: { readonly cursor?: string; readonly limit?: number } = {}
@@ -843,7 +859,7 @@ export class RootsService {
 				expiresAt: new CacheClosureService(this.context).effectiveRootExpiry(),
 				createdAt: schema.retentionRoots.createdAt,
 				updatedAt: schema.retentionRoots.updatedAt,
-				targetCount: liveRootTargetCount()
+				targetCount: rootTargetCount()
 			})
 			.from(schema.retentionRoots)
 			.where(

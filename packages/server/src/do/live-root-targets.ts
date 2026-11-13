@@ -5,7 +5,16 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, inArray, isNull, type SQL, sql } from 'drizzle-orm';
+import {
+	and,
+	count,
+	eq,
+	inArray,
+	isNotNull,
+	isNull,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import {
@@ -70,6 +79,18 @@ export function liveRootTargetCount(): SQL<number> {
 	return sql<number>`CASE WHEN retention_root.incarnation IS NULL
 		THEN (SELECT count(*) FROM retention_root_target AS target WHERE target.cache_id = retention_root.cache_id AND target.root_name = retention_root.name AND target.incarnation IS NULL)
 		ELSE (SELECT count(*) FROM retention_root_target AS target WHERE target.incarnation = retention_root.incarnation) END`;
+}
+
+/**
+The number of target rows that each `retention_root` row of the enclosing
+query keeps. A root with a stored count costs no target row. SQLite
+evaluates the `ELSE` branch only for a root without one, which the backfill
+has not reached yet.
+*/
+export function rootTargetCount(): SQL<number> {
+	return sql<number>`CASE WHEN retention_root.target_count IS NOT NULL
+		THEN retention_root.target_count
+		ELSE ${liveRootTargetCount()} END`;
 }
 
 /**
@@ -187,22 +208,21 @@ function grantTakenTargets(
 	}
 }
 
-/**
-Adds paths to the target rows that a root keeps. A row that the root's name
-already has under another incarnation moves into the root's incarnation, so
-the drain of that earlier incarnation's release no longer deletes it, and
-the path gets that release's deadline here instead. A row that the root
-already keeps is left unchanged.
-*/
-export function insertLiveRootTargets(
+interface RootTargetEntry {
+	readonly storePathHash: StorePathHash;
+	readonly storePath: StorePathString;
+}
+
+// A row that the root's name already has under another incarnation moves into
+// the root's incarnation, so the drain of that earlier incarnation's release
+// no longer deletes it, and the path gets that release's deadline here
+// instead. A row that the root already keeps is left unchanged.
+function upsertRootTargets(
 	database: SchemaWriter,
 	retention: RetentionService,
 	cache: ResolvedCache,
 	root: RootIncarnationKey,
-	entries: readonly {
-		readonly storePathHash: StorePathHash;
-		readonly storePath: StorePathString;
-	}[]
+	entries: readonly RootTargetEntry[]
 ): void {
 	const incarnation =
 		root.incarnation === undefined ? sql`NULL` : sql`${root.incarnation}`;
@@ -235,6 +255,139 @@ export function insertLiveRootTargets(
 				},
 				setWhere: sql`${targets.incarnation} IS NOT excluded.incarnation OR ${targets.storePath} IS NOT excluded.store_path`
 			})
+			.run();
+	}
+}
+
+// How many of the paths the root already keeps. Each list is read through the
+// root's rows for its paths, so the count reads no other row of the root.
+function keptTargetCount(
+	database: SchemaWriter,
+	root: RootIncarnationKey,
+	hashes: readonly StorePathHash[]
+): number {
+	let kept = 0;
+
+	for (const list of jsonValueLists(hashes)) {
+		kept +=
+			database
+				.select({ count: count() })
+				.from(targets)
+				.where(and(liveRootTargets(root), inArray(targets.storePathHash, list)))
+				.get()?.count ?? 0;
+	}
+
+	return kept;
+}
+
+/**
+Writes the targets of a root's new incarnation, which has no target row yet,
+as `upsertRootTargets` describes. The caller stores the number of entries as
+the root's `target_count` in the statement that gives the root the
+incarnation. The entries must have distinct paths, as `resolveRootTargets`
+returns them.
+*/
+export function insertNewIncarnationTargets(
+	database: SchemaWriter,
+	retention: RetentionService,
+	cache: ResolvedCache,
+	root: RootIncarnationKey,
+	entries: readonly RootTargetEntry[]
+): void {
+	upsertRootTargets(database, retention, cache, root, entries);
+}
+
+/**
+Adds paths to the target rows that a root keeps, as `upsertRootTargets`
+describes, and adds the number of paths that the root did not keep yet to
+the root's `target_count`.
+*/
+export function insertLiveRootTargets(
+	database: SchemaWriter,
+	retention: RetentionService,
+	cache: ResolvedCache,
+	root: RootIncarnationKey,
+	entries: readonly RootTargetEntry[]
+): void {
+	const hashes = [...new Set(entries.map((entry) => entry.storePathHash))];
+	const added = hashes.length - keptTargetCount(database, root, hashes);
+
+	upsertRootTargets(database, retention, cache, root, entries);
+
+	if (added === 0) {
+		return;
+	}
+
+	database
+		.update(roots)
+		.set({ targetCount: sql`${roots.targetCount} + ${added}` })
+		.where(
+			and(
+				eq(roots.cacheId, root.cacheId),
+				eq(roots.name, root.name),
+				isNotNull(roots.targetCount)
+			)
+		)
+		.run();
+}
+
+/**
+Deletes the target rows of a path in every root of a cache, and subtracts
+one from the `target_count` of each root whose incarnation kept a deleted
+row. A row of a released incarnation counts for no root.
+*/
+export function deletePathTargets(
+	database: SchemaWriter,
+	cacheId: CacheId,
+	storePathHash: StorePathHash
+): void {
+	const deleted = database
+		.delete(targets)
+		.where(
+			and(
+				eq(targets.cacheId, cacheId),
+				eq(targets.storePathHash, storePathHash)
+			)
+		)
+		.returning({ rootName: targets.rootName, incarnation: targets.incarnation })
+		.all();
+
+	if (deleted.length === 0) {
+		return;
+	}
+
+	// The primary key has the root name, so a name has at most one deleted row.
+	const deletedIncarnations = new Map(
+		deleted.map((row) => [row.rootName, row.incarnation])
+	);
+	const deletedNames = deletedIncarnations.keys().toArray();
+	const losing: RootName[] = [];
+
+	for (const names of jsonValueLists(deletedNames)) {
+		const rows = database
+			.select({ name: roots.name, incarnation: roots.incarnation })
+			.from(roots)
+			.where(and(eq(roots.cacheId, cacheId), inArray(roots.name, names)))
+			.all();
+
+		for (const root of rows) {
+			if (deletedIncarnations.get(root.name) === root.incarnation) {
+				losing.push(root.name);
+			}
+		}
+	}
+
+	for (const names of jsonValueLists(losing)) {
+		database
+			.update(roots)
+			.set({ targetCount: sql`${roots.targetCount} - 1` })
+			.where(
+				and(
+					eq(roots.cacheId, cacheId),
+					inArray(roots.name, names),
+					isNotNull(roots.targetCount)
+				)
+			)
 			.run();
 	}
 }

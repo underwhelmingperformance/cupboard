@@ -126,7 +126,7 @@ describe('reading a root through its incarnation', () => {
 		const expected = {
 			list: {
 				result: { roots: [listedRoot('legacy', 3), listedRoot('main', 1)] },
-				costs: [{ route: '/roots', rowsRead: 12, rowsWritten: 0 }]
+				costs: [{ route: '/roots', rowsRead: 11, rowsWritten: 0 }]
 			},
 			targets: {
 				result: {

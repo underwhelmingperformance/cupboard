@@ -1010,7 +1010,11 @@ export const retentionRoots = sqliteTable(
 		expiresAt: text('expires_at').$type<IsoTimestamp>(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
-		incarnation: integer('incarnation').$type<RootIncarnation>()
+		incarnation: integer('incarnation').$type<RootIncarnation>(),
+		// The number of target rows of the root's incarnation. A root that
+		// existed before migration 0085 has NULL until the backfill counts its
+		// rows, and a listing counts them itself until then.
+		targetCount: integer('target_count')
 	},
 	// The maintenance pass finds the soonest-expiring TTL root; the index spares
 	// it a scan of every root.
@@ -1062,6 +1066,25 @@ export const retentionRootTargets = sqliteTable(
 		index('retention_root_target_legacy_idx')
 			.on(table.cacheId, table.rootName)
 			.where(sql`${table.incarnation} IS NULL`)
+	]
+);
+
+// The progress of the backfill of `retention_root.target_count`. The backfill
+// visits the roots in rowid order up to the highest rowid at migration time.
+// Every root inserted after the migration has a count.
+export const rootTargetCountBackfill = sqliteTable(
+	'root_target_count_backfill',
+	{
+		id: integer('id').primaryKey(),
+		rowidHighWater: integer('rowid_high_water').notNull(),
+		cursor: integer('cursor').notNull()
+	},
+	(table) => [
+		check('root_target_count_backfill_id_check', sql`${table.id} = 1`),
+		check(
+			'root_target_count_backfill_cursor_check',
+			sql`${table.cursor} BETWEEN 0 AND ${table.rowidHighWater}`
+		)
 	]
 );
 

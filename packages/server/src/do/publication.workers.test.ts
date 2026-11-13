@@ -9713,6 +9713,16 @@ it('removes the retention targets of a reservation that a reuse commit reclaims 
 	const materialise = await runInDurableObject(currentServer(), (instance) => {
 		const cache = instance.context.cacheRepository.require(defaultCache());
 		instance.context.db
+			.insert(schema.retentionRoots)
+			.values({
+				cacheId: cache.id,
+				name: rootNameSchema.parse('run'),
+				createdAt: isoTimestamp(new Date()),
+				updatedAt: isoTimestamp(new Date()),
+				targetCount: 1
+			})
+			.run();
+		instance.context.db
 			.insert(schema.retentionRootTargets)
 			.values({
 				cacheId: cache.id,
@@ -9762,6 +9772,13 @@ it('removes the retention targets of a reservation that a reuse commit reclaims 
 				.where(
 					eq(schema.retentionRootTargets.storePathHash, path.storePathHash)
 				)
+				.all(),
+			roots: instance.context.db
+				.select({
+					name: schema.retentionRoots.name,
+					targetCount: schema.retentionRoots.targetCount
+				})
+				.from(schema.retentionRoots)
 				.all()
 		})
 	);
@@ -9775,7 +9792,11 @@ it('removes the retention targets of a reservation that a reuse commit reclaims 
 				hasMessage: true
 			}
 		],
-		after: { narInfos: [], targets: [] }
+		after: {
+			narInfos: [],
+			targets: [],
+			roots: [{ name: 'run', targetCount: 0 }]
+		}
 	});
 });
 
