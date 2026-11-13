@@ -1,3 +1,7 @@
+import {
+	charactersRead,
+	unsafeRegularExpressions
+} from '@cupboard/shared/scan-cost.test-support';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -195,6 +199,16 @@ describe('human error presentation', () => {
 			'provider refused request'
 		);
 	});
+
+	const sessionRefusedSummary =
+		'Your saved sign-in was refused. Run `cupboard login <url>` to sign in again.\nThe server refused your session; it may have expired. Run `cupboard login <url>` to sign in again.';
+
+	function renderedWithCause(message: string): string {
+		const error = new SessionRejectedError({ cause: new Error(message) });
+
+		return formatHumanError(error, { debug: true });
+	}
+
 	it('redacts credentials in diagnostic causes without changing the error', () => {
 		const cause = new Error(
 			'Authorization: Bearer sensitive-token; https://user:password@cupboard.example.workers.dev?access_token=secret&attempt=2'
@@ -203,11 +217,91 @@ describe('human error presentation', () => {
 		const rendered = formatHumanError(error, { debug: true });
 
 		expect({ rendered, cause: error.cause }).toStrictEqual({
-			rendered:
-				'Your saved sign-in was refused. Run `cupboard login <url>` to sign in again.\nThe server refused your session; it may have expired. Run `cupboard login <url>` to sign in again.\n  Error: Authorization: Bearer [redacted]; https://[redacted]@cupboard.example.workers.dev?access_token=[redacted]&attempt=2',
+			rendered: `${sessionRefusedSummary}\n  Error: Authorization: Bearer [redacted]; https://[redacted]@cupboard.example.workers.dev?access_token=[redacted]&attempt=2`,
 			cause
 		});
 	});
+
+	it.each([
+		[
+			'a user name and password',
+			'https://user:password@host/path',
+			'https://[redacted]@host/path'
+		],
+		['another scheme', 'postgres://u:p@h', 'postgres://[redacted]@h'],
+		[
+			'an upper-case scheme and user',
+			'HTTPS://User:Pw@host',
+			'HTTPS://[redacted]@host'
+		],
+		['a scheme with punctuation', 'a+b.c-d://u:p@h', 'a+b.c-d://[redacted]@h'],
+		['an empty password', 'https://u:@host', 'https://[redacted]@host'],
+		[
+			'a password with a colon',
+			'https://u:p:q@host',
+			'https://[redacted]@host'
+		],
+		['a scheme after a digit', '1http://u:p@h', '1http://[redacted]@h'],
+		[
+			'two addresses',
+			'see https://u:p@h and http://x:y@z',
+			'see https://[redacted]@h and http://[redacted]@z'
+		],
+		[
+			'a scheme inside the user information',
+			'a://b://c:d@e',
+			'a://b://[redacted]@e'
+		],
+		[
+			'a user name without a password',
+			'https://user@host',
+			'https://user@host'
+		],
+		['a password without a user name', 'https://:pw@host', 'https://:pw@host'],
+		['a slash before the at sign', 'https://a:b/path@x', 'https://a:b/path@x'],
+		['a space before the at sign', 'https://u:p @h', 'https://u:p @h'],
+		['no scheme', '://u:p@h', '://u:p@h'],
+		['a scheme that starts with a digit', '9://u:p@h', '9://u:p@h'],
+		['a run of letters', 'aaaaaaaa', 'aaaaaaaa'],
+		['repeated scheme separators', 'a://a://a://', 'a://a://a://'],
+		['colons without an at sign', 'x://:a:a:a:a', 'x://:a:a:a:a'],
+		['colons before an at sign', 'x://a:a:a:a:@h', 'x://[redacted]@h']
+	])(
+		'redacts credentials in an address with %s',
+		(_name, message, expected) => {
+			expect(renderedWithCause(message)).toBe(
+				`${sessionRefusedSummary}\n  Error: ${expected}`
+			);
+		}
+	);
+
+	it('executes only regular expressions that recheck proves safe', async () => {
+		const unsafe = await unsafeRegularExpressions(() => {
+			renderedWithCause('see https://u:p@h and Authorization: Bearer t');
+		});
+
+		expect(unsafe).toStrictEqual([]);
+	});
+
+	it.each([
+		['a run of letters', '', 'a'],
+		['repeated scheme separators', '', 'a://'],
+		['colons without an at sign', 'x://', ':a'],
+		['colons before an at sign', 'x://', 'a:']
+	])(
+		'reads each character of %s a bounded number of times',
+		(_name, prefix, unit) => {
+			const readsPerCharacter = [1000, 4000].map((length) => {
+				const message = `${prefix}${unit.repeat(length / unit.length)}`;
+
+				return (
+					charactersRead(() => renderedWithCause(message)) / message.length
+				);
+			});
+
+			expect(Math.max(...readsPerCharacter)).toBeLessThanOrEqual(3);
+		}
+	);
 
 	it.each([
 		[

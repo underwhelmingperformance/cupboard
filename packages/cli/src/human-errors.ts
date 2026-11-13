@@ -579,23 +579,112 @@ function unknownError(options: HumanErrorOptions): string {
 }
 
 function redactCredentials(message: string): string {
-	return message
-		.replaceAll(
-			/(Authorization:\s*(?:Bearer|Basic)\s+)[^\s;,]+/giu,
-			'$1[redacted]'
-		)
-		.replaceAll(
-			/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]*@/giu,
-			'$1[redacted]@'
-		)
-		.replaceAll(
-			/(["'](?:access_token|refresh_token|id_token|client_secret|accessToken|refreshToken|idToken|clientSecret|apiToken|password)["']\s*:\s*["'])[^"']+/giu,
-			'$1[redacted]'
-		)
-		.replaceAll(
-			/((?:access_token|refresh_token|id_token|client_secret|accessToken|refreshToken|idToken|clientSecret|apiToken|password)=)[^\s&;,"'}]+/giu,
-			'$1[redacted]'
-		);
+	const withoutAuthorization = message.replaceAll(
+		/(Authorization:\s*(?:Bearer|Basic)\s+)[^\s;,]+/giu,
+		'$1[redacted]'
+	);
+	const withoutUrlCredentials = redactUrlCredentials(withoutAuthorization);
+	const withoutQuotedTokens = withoutUrlCredentials.replaceAll(
+		/(["'](?:access_token|refresh_token|id_token|client_secret|accessToken|refreshToken|idToken|clientSecret|apiToken|password)["']\s*:\s*["'])[^"']+/giu,
+		'$1[redacted]'
+	);
+
+	return withoutQuotedTokens.replaceAll(
+		/((?:access_token|refresh_token|id_token|client_secret|accessToken|refreshToken|idToken|clientSecret|apiToken|password)=)[^\s&;,"'}]+/giu,
+		'$1[redacted]'
+	);
+}
+
+const schemeCharacter = /[a-z0-9+.-]/iu;
+const schemeLetter = /[a-z]/iu;
+const whitespaceCharacter = /\s/u;
+
+/**
+Whether the text before `separator` ends with a URL scheme: letters, digits,
+`+`, `.` and `-`, with at least one letter. The scan stops at `floor`.
+*/
+function hasSchemeBefore(
+	text: string,
+	separator: number,
+	floor: number
+): boolean {
+	let hasLetter = false;
+
+	for (let index = separator - 1; index >= floor; index -= 1) {
+		const character = text.charAt(index);
+
+		if (!schemeCharacter.test(character)) {
+			break;
+		}
+
+		hasLetter ||= schemeLetter.test(character);
+	}
+
+	return hasLetter;
+}
+
+interface UserInformation {
+	readonly end: number;
+	readonly hasPassword: boolean;
+}
+
+/**
+Scans the user information that starts at `start` in `text`. It ends at the
+next whitespace, slash or at sign. The user information contains a password
+when it has a colon after its first character.
+*/
+function scanUserInformation(text: string, start: number): UserInformation {
+	let end = start;
+	let hasPassword = false;
+
+	while (end < text.length) {
+		const character = text.charAt(end);
+
+		if (
+			character === '/' ||
+			character === '@' ||
+			whitespaceCharacter.test(character)
+		) {
+			return { end, hasPassword };
+		}
+
+		hasPassword ||= end > start && character === ':';
+		end += 1;
+	}
+
+	return { end, hasPassword };
+}
+
+/**
+Replaces the user name and password in `scheme://user:password@host` with
+`[redacted]`. The user information must end at an at sign and contain a colon
+after its first character. The function visits each character a bounded
+number of times, so its cost is proportional to the length of the message.
+*/
+function redactUrlCredentials(message: string): string {
+	let result = '';
+	let copied = 0;
+	let separator = message.indexOf('://');
+
+	while (separator !== -1) {
+		const start = separator + 3;
+		const { end, hasPassword } = scanUserInformation(message, start);
+
+		if (
+			hasPassword &&
+			message.charAt(end) === '@' &&
+			hasSchemeBefore(message, separator, copied)
+		) {
+			result += `${message.slice(copied, start)}[redacted]@`;
+			copied = end + 1;
+			separator = message.indexOf('://', copied);
+			continue;
+		}
+
+		separator = message.indexOf('://', separator + 1);
+	}
+
+	return result + message.slice(copied);
 }
 
 function isSafeDomainError(error: unknown): error is Error {
