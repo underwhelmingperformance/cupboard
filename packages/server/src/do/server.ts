@@ -2124,7 +2124,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		try {
 			// Record the session before the commit can defer, so a verdict reached
 			// before this returns still routes here.
-			this.uploadState.attachSession(uploadId, sessionId);
+			this.uploadState.attachSession(cache, uploadId, sessionId);
 
 			const outcome = await this.metered('commit', (logger) =>
 				this.afterHotMutation(cache.scope, () =>
@@ -2387,7 +2387,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return undefined;
 		}
 
-		this.uploadState.attachSession(uploadId, sessionId);
+		this.uploadState.attachSession(cache, uploadId, sessionId);
 		const status = uploadStatusOf(row);
 		// Include grace only when this upload negotiated grace reporting. Legacy
 		// clients cannot parse the extended frame.

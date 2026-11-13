@@ -600,13 +600,25 @@ export class UploadStateService {
 	}
 
 	// A reconnect replaces the session associated with this upload. Verification
-	// re-reads this value and sends the verdict to the latest connection. If the
-	// upload row is already gone, the update is a no-op.
-	attachSession(uploadId: UploadId, sessionId: SessionId): void {
+	// re-reads this value and sends the verdict to the latest connection.
+	// A commit attaches its session before the commit pipeline checks the
+	// upload's cache, so this update has to check the cache itself. It changes
+	// the row only when the row belongs to the session's cache. If the upload
+	// row is already gone, the update changes no row.
+	attachSession(
+		cache: ResolvedCache,
+		uploadId: UploadId,
+		sessionId: SessionId
+	): void {
 		this.context.db
 			.update(schema.pendingUploads)
 			.set({ sessionId })
-			.where(eq(schema.pendingUploads.id, uploadId))
+			.where(
+				and(
+					eq(schema.pendingUploads.id, uploadId),
+					eq(schema.pendingUploads.cacheId, cache.id)
+				)
+			)
 			.run();
 	}
 
