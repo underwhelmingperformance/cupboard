@@ -1788,6 +1788,47 @@ export class GithubCheckOptionError extends CliUsageError {
 }
 
 /**
+A page of the tenant membership rebuild failed. The tenants of the earlier
+pages have their markers. The hourly refresh writes the rest.
+*/
+export class MembershipRebuildError extends CliCausedError {
+	constructor(
+		public readonly rebuiltTenants: number,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`The tenant membership rebuild failed after ${String(rebuiltTenants)} ` +
+				'tenants. The markers of the tenants after those may be missing ' +
+				'until the hourly membership refresh writes them, and those ' +
+				'tenants may be unreachable if this release changed how ' +
+				'membership is stored. Run `cupboard deploy` again to retry the ' +
+				'rebuild.',
+			{ cause: options.cause }
+		);
+		this.name = 'MembershipRebuildError';
+	}
+}
+
+/**
+A page of the tenant membership rebuild, requested after the tenant `after`,
+returned a cursor that does not come after `after`. Following it would request
+the same page again.
+*/
+export class MembershipRebuildStalledError extends CliError {
+	constructor(
+		public readonly after: string,
+		public readonly cursor: string
+	) {
+		super(
+			`The tenant membership rebuild returned the cursor ${cursor} after ` +
+				`${after}, which does not advance. The rebuild stopped. Report ` +
+				'this as a server defect.'
+		);
+		this.name = 'MembershipRebuildStalledError';
+	}
+}
+
+/**
 Optional trust-rule removals failed after the new configuration was already
 applied. The result report names each rule that stayed behind; the non-zero
 exit tells scripts the cleanup is incomplete.

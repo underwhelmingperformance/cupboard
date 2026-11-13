@@ -54,6 +54,7 @@ import {
 } from '@cupboard/protocol/sessions';
 import {
 	type CacheReadCredentialResponse,
+	type MembershipRebuildInput,
 	type MembershipRebuildResponse,
 	type TenantCreateBody,
 	type TenantListResponse,
@@ -143,6 +144,7 @@ import {
 	invalidateTenantRow,
 	rebuildMembershipFilter,
 	refreshTenantMembership,
+	refreshTenantMembershipPage,
 	writeTenantMember
 } from './tenant-membership.ts';
 import {
@@ -705,12 +707,25 @@ export async function controlTenantList(env: Env): Promise<TenantListResponse> {
 }
 
 // The deploy reasserts every live tenant's membership marker and rebuilds the
-// filter after an admission-format change. This avoids waiting for scheduled
-// maintenance before existing tenants become reachable through the new format.
+// filter after an admission-format change, so that existing tenants become
+// reachable through the new format without waiting for scheduled maintenance.
+// The deploy sends a `page` for each request and follows the cursor until every
+// marker is written. A request without a `page` is the legacy shape of a
+// released CLI, which expects the whole rebuild in one response.
 export async function controlMembershipRebuild(
-	env: Env
+	env: Env,
+	input: MembershipRebuildInput
 ): Promise<MembershipRebuildResponse> {
-	return { tenants: await refreshTenantMembership(env) };
+	if (input.page === undefined) {
+		return { tenants: await refreshTenantMembership(env) };
+	}
+
+	const page = await refreshTenantMembershipPage(env, input.page.after);
+
+	return {
+		tenants: page.written,
+		...(page.cursor !== undefined && { cursor: page.cursor })
+	};
 }
 
 export async function controlOidcTrustList(
