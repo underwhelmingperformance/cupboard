@@ -516,17 +516,73 @@ export function cacheSelectionSyntax(
 	return options.has('--cache') ? 'flag' : 'url';
 }
 
+const optionList = /(?:-\w, )?(?<options>--[\w-]+(?:, --[\w-]+)*)/uy;
+const lineTerminator = /[\n\r\p{Zl}\p{Zp}]/u;
+
+function endOfWhitespace(text: string, start: number): number {
+	let end = start;
+
+	while (end < text.length && /\s/u.test(text.charAt(end))) {
+		end += 1;
+	}
+
+	return end;
+}
+
+/**
+Whether the whitespace run in `[start, end)` can be the indentation of a
+line. That is the case when the run begins the text or contains a line
+terminator that is followed by more whitespace.
+*/
+function isIndentation(text: string, start: number, end: number): boolean {
+	if (start === 0) {
+		return true;
+	}
+
+	for (let index = start; index < end - 1; index += 1) {
+		if (lineTerminator.test(text.charAt(index))) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 export function commandOptionsFromHelp(output: string): CommandOptions {
 	const options = new Set<string>();
+	let index = 0;
 
-	for (const match of output.matchAll(
-		/^\s+(?:-\w, )?(?<options>--[\w-]+(?:, --[\w-]+)*)/gmu
-	)) {
+	// Each whitespace run is scanned once, so a long run of blank lines costs
+	// time in proportion to its length.
+	while (index < output.length) {
+		const end = endOfWhitespace(output, index);
+
+		if (end === index) {
+			index += 1;
+			continue;
+		}
+
+		const start = index;
+		index = end;
+
+		if (!isIndentation(output, start, end)) {
+			continue;
+		}
+
+		optionList.lastIndex = end;
+		const match = optionList.exec(output);
+
+		if (match === null) {
+			continue;
+		}
+
 		const aliases = match.groups?.options?.split(', ') ?? [];
 
 		for (const option of aliases) {
 			options.add(option);
 		}
+
+		index = optionList.lastIndex;
 	}
 
 	return options;
