@@ -1,5 +1,7 @@
 import { defineConfig } from 'vitest/config';
 
+import { hangLimits } from '../../tests/support/hang-limits.ts';
+
 export default defineConfig({
 	test: {
 		// The tests stub every HTTP request. A proxy variable inherited from the
@@ -15,9 +17,7 @@ export default defineConfig({
 			PROXY: '',
 			proxy: ''
 		},
-		// No test has its own time limit. These values only end a hung run.
-		hookTimeout: 1_800_000,
-		setupFiles: ['./src/network-guard-test-setup.ts'],
-		testTimeout: 1_800_000
+		...hangLimits,
+		setupFiles: ['./src/network-guard-test-setup.ts']
 	}
 });

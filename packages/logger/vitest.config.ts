@@ -1,8 +1,9 @@
 import { defineConfig } from 'vitest/config';
 
+import { hangLimits } from '../../tests/support/hang-limits.ts';
+
 export default defineConfig({
 	test: {
-		hookTimeout: 1_800_000,
-		testTimeout: 1_800_000
+		...hangLimits
 	}
 });

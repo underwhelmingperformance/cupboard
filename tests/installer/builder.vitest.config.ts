@@ -1,13 +1,14 @@
 import { defineConfig, type ViteUserConfig } from 'vitest/config';
 
+import { hangLimits } from '../support/hang-limits.ts';
+
 import RequiredInstallerTestsReporter from './required-tests-reporter.ts';
 
 export default defineConfig((): ViteUserConfig => ({
 	test: {
 		include: ['tests/installer/remote-builder.test.ts'],
+		...hangLimits,
 		fileParallelism: false,
-		hookTimeout: 120_000,
-		testTimeout: 180_000,
 		reporters: [
 			'default',
 			[

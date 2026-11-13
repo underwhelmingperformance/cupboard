@@ -58,11 +58,16 @@ neighbouring code.
    and don't pass `AbortSignal.timeout` to a wait in test code. A deadline in
    production code under test uses the injected clock (rule 3). In every Vitest
    configuration, set `testTimeout` and `hookTimeout` to the same value,
-   1,800,000 ms (30 minutes), and don't tune them for one suite. The value only
-   detects a hung test or hook: Vitest fails it and continues with the next
-   test. Every package that has tests must have a Vitest configuration that sets
-   both limits, because without one Vitest applies its defaults of 5 seconds for
-   a test and 10 seconds for a hook.
+   1,800,000 ms (30 minutes), and don't tune them for one suite. Spread
+   `hangLimits` from `tests/support/hang-limits.ts` into the configuration. Also
+   spread it into each inline project that doesn't set `extends: true`, because
+   such a project doesn't inherit the limits of its configuration. A
+   configuration that uses `mergeConfig` on one that already spreads
+   `hangLimits` needs nothing more. The value only detects a hung test or hook:
+   Vitest fails it and continues with the next test. Every package that has
+   tests must have a Vitest configuration that sets both limits, because without
+   one Vitest applies its defaults of 5 seconds for a test and 10 seconds for a
+   hook.
 
    Set the `timeout-minutes` of each CI job that runs tests to at least the
    job's slowest recent run plus 30 minutes. A job's slowest recent run is its

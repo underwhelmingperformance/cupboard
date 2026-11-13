@@ -1,9 +1,11 @@
 import { defineConfig } from 'vitest/config';
 
+import { hangLimits } from '../support/hang-limits.ts';
 import StrictEndToEndReporter from '../support/strict-e2e-reporter.ts';
 
 export default defineConfig(() => ({
 	test: {
+		...hangLimits,
 		globalSetup: ['tests/support/e2e-artifacts.global-setup.ts'],
 		setupFiles: ['tests/support/e2e-artifacts.setup.ts'],
 		reporters:
@@ -15,7 +17,6 @@ export default defineConfig(() => ({
 			'tests/e2e/remote-nix-store.test.ts'
 		],
 		fileParallelism: false,
-		include: ['tests/e2e/**/*.test.ts', 'tests/support/**/*.test.ts'],
-		testTimeout: 120_000
+		include: ['tests/e2e/**/*.test.ts', 'tests/support/**/*.test.ts']
 	}
 }));

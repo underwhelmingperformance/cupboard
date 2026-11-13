@@ -1,10 +1,11 @@
 import { defineConfig } from 'vitest/config';
 
+import { hangLimits } from '../support/hang-limits.ts';
+
 export default defineConfig({
 	test: {
+		...hangLimits,
 		fileParallelism: false,
-		hookTimeout: 600_000,
-		testTimeout: 600_000,
 		benchmark: {
 			include: ['tests/perf/**/*.bench.ts']
 		}
