@@ -13,6 +13,7 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type CommitSessionFrame,
 	type CommitSessionRequestInput,
+	sessionIdSchema,
 	type UploadId,
 	uploadIdSchema,
 	uploadStatusResponseSchema
@@ -40,6 +41,7 @@ import {
 	adminGrants,
 	asOneInvocation,
 	authorisedFetch,
+	closeSessionAndWait,
 	currentServer,
 	drivenDirectly,
 	garbageCollectionOf,
@@ -82,6 +84,7 @@ const other = namedCache('other');
 const attestationId = uploadIdSchema.parse('d'.repeat(32));
 const liveAttestationId = uploadIdSchema.parse('6'.repeat(32));
 const exhaustedUploadId = uploadIdSchema.parse('9'.repeat(64));
+const ownerSessionId = sessionIdSchema.parse('owner-session');
 
 function pipelineFor(context: ServerContext): CommitPipelineService {
 	const narInfoObjects = new NarInfoObjectsService(context);
@@ -782,6 +785,19 @@ function sessionRequest(
 	}
 }
 
+function uploadSession(id: UploadId) {
+	return runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				id: schema.pendingUploads.id,
+				sessionId: schema.pendingUploads.sessionId
+			})
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, id))
+			.get()
+	);
+}
+
 // Error frames are compared without their message text.
 function frameFacts(frame: CommitSessionFrame): object {
 	if (frame.ev !== 'error') {
@@ -1227,6 +1243,61 @@ describe('removed cache fence', () => {
 			}
 
 			expect(frames.map((frame) => frameFacts(frame))).toStrictEqual(expected);
+		}
+	);
+
+	// Verification sends an upload's verdict to the session recorded on its row,
+	// so a session of another cache must not replace that session.
+	it.each([
+		{
+			op: 'subscribe' as const,
+			frame: { ev: 'verdict', uploadId: operationId, status: 'absent' }
+		},
+		{
+			op: 'subscribe-identity' as const,
+			frame: { ev: 'verdict', uploadId: operationId, status: 'absent' }
+		},
+		{
+			op: 'commit' as const,
+			frame: {
+				ev: 'error',
+				uploadId: operationId,
+				status: StatusCodes.NOT_FOUND
+			}
+		},
+		{
+			op: 'commit-batch' as const,
+			frame: { ev: 'verdict', uploadId: operationId, status: 'absent' }
+		}
+	])(
+		'keeps the session recorded on its upload after $op from a session of the cache registered again under its name',
+		async ({ op, frame }) => {
+			const token = await initialise();
+			await seedUploadOfReplacedCache(token);
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.update(schema.pendingUploads)
+					.set({ sessionId: ownerSessionId })
+					.where(eq(schema.pendingUploads.id, operationId))
+					.run();
+			});
+			const session = await openCommitSession(token, builds);
+			let received: CommitSessionFrame;
+
+			try {
+				session.send(sessionRequest(op, operationId));
+				received = await session.nextFrame();
+			} finally {
+				await closeSessionAndWait(session.socket);
+			}
+
+			expect({
+				frame: frameFacts(received),
+				upload: await uploadSession(operationId)
+			}).toStrictEqual({
+				frame,
+				upload: { id: operationId, sessionId: ownerSessionId }
+			});
 		}
 	);
 
