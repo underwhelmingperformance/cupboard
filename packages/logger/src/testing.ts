@@ -16,16 +16,22 @@ export interface CapturedLog {
 	readonly properties: Record<string, unknown>;
 }
 
-export function capturingSink(into: CapturedLog[]): Sink {
+export function capturingSink(
+	into: CapturedLog[],
+	onCapture?: (entry: CapturedLog) => void
+): Sink {
 	return (record) => {
-		into.push({
+		const entry: CapturedLog = {
 			level: record.level,
 			category: record.category,
 			message: record.message
 				.map((part) => (typeof part === 'string' ? part : String(part)))
 				.join(''),
 			properties: record.properties
-		});
+		};
+
+		into.push(entry);
+		onCapture?.(entry);
 	};
 }
 
@@ -44,9 +50,37 @@ export function atWarningOrAbove(logs: readonly CapturedLog[]): CapturedLog[] {
 	return logs.filter((entry) => warningLevels.has(entry.level));
 }
 
+/**
+Rejects the promise of `Capture.until` when the capture stops before a
+matching record is logged.
+*/
+export class CaptureStoppedError extends Error {
+	constructor() {
+		super('The log capture stopped before a matching record was logged');
+		this.name = 'CaptureStoppedError';
+	}
+}
+
 export interface Capture {
 	readonly logs: CapturedLog[];
+	/**
+	Returns a promise for the first record that satisfies `isMatch`. The
+	promise resolves at once with a record that was captured already, and
+	otherwise when the sink receives a matching record. It rejects with a
+	`CaptureStoppedError` when the capture stops first.
+	*/
+	until(isMatch: (entry: CapturedLog) => boolean): Promise<CapturedLog>;
 	stop(): void;
+}
+
+function ignoreRejection(): void {
+	return;
+}
+
+interface LogWaiter {
+	readonly isMatch: (entry: CapturedLog) => boolean;
+	readonly resolve: (entry: CapturedLog) => void;
+	readonly reject: (error: CaptureStoppedError) => void;
 }
 
 /**
@@ -56,11 +90,27 @@ global to the process.
 */
 export function startCapture(): Capture {
 	const logs: CapturedLog[] = [];
+	let waiters: LogWaiter[] = [];
+	let isStopped = false;
 
 	configureSync({
 		reset: true,
 		contextLocalStorage: new AsyncLocalStorage<Record<string, unknown>>(),
-		sinks: { capture: capturingSink(logs) },
+		sinks: {
+			capture: capturingSink(logs, (entry) => {
+				const unmatched: LogWaiter[] = [];
+
+				for (const waiter of waiters) {
+					if (waiter.isMatch(entry)) {
+						waiter.resolve(entry);
+					} else {
+						unmatched.push(waiter);
+					}
+				}
+
+				waiters = unmatched;
+			})
+		},
 		loggers: [
 			{
 				category: [...loggerCategory],
@@ -79,8 +129,38 @@ export function startCapture(): Capture {
 
 	return {
 		logs,
+		until: (isMatch) => {
+			const captured = logs.find((entry) => isMatch(entry));
+
+			if (captured !== undefined) {
+				return Promise.resolve(captured);
+			}
+
+			const { promise, resolve, reject } = Promise.withResolvers<CapturedLog>();
+
+			// A test that fails before it awaits the promise would otherwise report
+			// an unhandled rejection when the capture stops. A caller that awaits the
+			// promise still receives the rejection.
+			void promise.catch(ignoreRejection);
+
+			if (isStopped) {
+				reject(new CaptureStoppedError());
+			} else {
+				waiters.push({ isMatch, resolve, reject });
+			}
+
+			return promise;
+		},
 		stop: () => {
+			isStopped = true;
 			resetSync();
+
+			const unmatched = waiters;
+			waiters = [];
+
+			for (const waiter of unmatched) {
+				waiter.reject(new CaptureStoppedError());
+			}
 		}
 	};
 }
