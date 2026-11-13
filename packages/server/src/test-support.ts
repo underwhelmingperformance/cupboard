@@ -1487,12 +1487,19 @@ export function workerFetch(
 	return fixtureWorkerServer().fetch(new URL(pathname, harness.origin), init);
 }
 
+/**
+The control Worker's `fetch` handler. A test that injects a delay into the
+control Worker passes the handler of `controlWorker(delay)`.
+*/
+export type ControlFetchHandler = Pick<typeof worker, 'fetch'>;
+
 export function readFetch(
 	pathname: string,
 	init?: RequestInit,
-	envOverride?: Partial<Env>
+	envOverride?: Partial<Env>,
+	handler?: ControlFetchHandler
 ): Promise<Response> {
-	return handlerFetch(tenantReadPath(pathname), init, envOverride);
+	return handlerFetch(tenantReadPath(pathname), init, envOverride, handler);
 }
 
 // Drives the real Worker handler for an exact path (no tenant prefix added), so a
@@ -1503,14 +1510,15 @@ export function readFetch(
 export async function handlerFetch(
 	pathname: string,
 	init?: RequestInit,
-	envOverride: Partial<Env> = {}
+	envOverride: Partial<Env> = {},
+	handler: ControlFetchHandler = worker
 ): Promise<Response> {
 	const ctx = createExecutionContext();
 	const request = new Request<unknown, IncomingRequestCfProperties>(
 		new URL(pathname, harness.origin),
 		init as RequestInit<IncomingRequestCfProperties>
 	);
-	const response = await worker.fetch(
+	const response = await handler.fetch(
 		request,
 		Object.assign({}, env, envOverride),
 		ctx

@@ -2,6 +2,7 @@ import { type CapturedLog } from '@cupboard/logger/testing';
 import { env } from 'cloudflare:workers';
 import { type MockInstance, vi } from 'vitest';
 
+import { passThrough } from '../do/pass-through.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 
 /**
@@ -37,22 +38,6 @@ export type StallPlan = (
 	key: string,
 	options: R2GetOptions | undefined
 ) => number | undefined;
-
-/**
-Reads `property` of a binding for a proxy. Methods are bound to the binding,
-because their implementations depend on the receiver.
-*/
-export function passThrough(target: object, property: PropertyKey): unknown {
-	const value: unknown = Reflect.get(target, property, target);
-
-	if (typeof value !== 'function') {
-		return value;
-	}
-
-	const bound: unknown = value.bind(target);
-
-	return bound;
-}
 
 function withBody(
 	object: R2ObjectBody,

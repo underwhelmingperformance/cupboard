@@ -8,10 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { tenantMemberKey } from '../control/tenant-member-key.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { passThrough } from '../do/pass-through.ts';
 import { committedPath } from '../do/reuse-view-read.test-support.ts';
 import { attestationListObjectKey, narInfoObjectKey } from '../http/http.ts';
 import {
-	passThrough,
 	stalledBody,
 	streamRecords
 } from '../http/stalled-body.test-support.ts';

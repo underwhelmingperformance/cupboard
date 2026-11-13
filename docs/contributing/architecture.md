@@ -1022,11 +1022,84 @@ deadline for admission. The admission middleware starts a budget of 20 seconds
 checks its credential within what admission left of the same budget, so
 admission and the check of a read token together end before the CLI's 30-second
 attempt. When the budget runs out, the request returns a retryable 503. The
-budget bounds only these two steps. The route's work after them, such as a NAR
-body, a write or the call that forwards a request to the tenant object, does not
-observe it. The tenant object's own deadline for an attestation list or bundle
-starts only when the request arrives, so an admission that is slow but finishes
-in time delays the end of a stalled body.
+budget bounds only these two steps and the forwarded reads described below. The
+route's other work, such as a NAR body or the D1 status read after a reuse
+view's `path-info` answer, does not observe it. The tenant object's own deadline
+for an attestation list or bundle starts only when the request arrives, so an
+admission that is slow but finishes in time delays the end of a stalled body.
+
+#### Deadlines for forwarded requests
+
+Every `fetch` that a Worker sends to the tenant object has a deadline for the
+response headers. `boundedWorkerEnv` in `do/bounded-io.ts` wraps the
+`CUPBOARD_DO` binding, so a new route cannot forward a request without one. The
+deadline ends when the headers arrive. It does not cover a streamed body, such
+as a reuse view's NAR, or a WebSocket after the upgrade.
+
+A deadline goes only where the server bounds the work in time, because a fixed
+deadline on work that grows with the request could end a healthy request. Every
+tenant procedure in `@cupboard/protocol/contract` therefore declares a
+`workBound`. `time` means that the object makes a fixed number of calls with
+capped durations. `size` means that only the size of the page or the number of
+rows bounds the work. A test in the protocol package lists the classification of
+every procedure, so a new procedure without one, or a renamed procedure, fails
+it. A raw read outside the contract states its deadline where the route forwards
+the request, through the required argument of `forwardRead` in
+`routing/tenant-forward.ts`: `admission-budget` only when the capped worst case
+of the object's work fits within the 20-second read budget, and `none`
+otherwise.
+
+- A replay-safe read whose capped worst case fits within the read budget waits
+  only for what admission left of that budget: `nix-cache-info`, the public key
+  (at most one D1 read), the JWKS and discovery documents, and attestation lists
+  and bundles (the object's own 20-second read deadline). Admission, the check
+  of a read token and the object's answer together then end before the CLI's
+  30-second attempt. A read that misses the deadline returns the retryable 503
+  of a timed-out storage call. When admission has used the whole budget, the
+  Worker returns that 503 without forwarding the read. The tenant Worker has no
+  admission budget, so each read that it forwards, a public attestation bundle
+  or the discovery document, starts a read deadline of 20 seconds of its own.
+  The current control Worker does not send these reads to the tenant Worker. An
+  earlier one can, during a deployment.
+- A write or admin request with work bounded in time has
+  `tenantOperationBudgetMs`, 110 seconds: token exchange and revocation, the
+  commit WebSocket upgrade, and the tenant procedures with the `workBound` of
+  `time`. The slowest of them take about 70 seconds in the worst case. Closing a
+  cache or rotating an auth key runs one critical section of 25 seconds, then
+  the maintenance reconcile, whose three D1 calls are capped at 15 seconds each.
+  A token exchange fetches issuer metadata and keys with timeouts of 15 seconds
+  and twice 5 seconds, then runs the same reconcile. The 40-second margin covers
+  waiting behind one critical section of another request. A request that waits
+  behind a longer queue of critical sections can miss the deadline while the
+  object is healthy. A request that misses the deadline returns 504 without
+  `Retry-After`, because the object can still complete it. The CLI retries a 504
+  only for a procedure that the contract marks replay-safe.
+- A request has no deadline when its work grows with the request, or when the
+  capped worst case of a read exceeds the read budget. Middleware derives the
+  size-bound procedures from the contract (`routing/size-bound-routes.ts`) and
+  runs them within `withoutForwardDeadline`. Of the raw reads, the
+  `missing-paths` probes of a cache and of a reuse view and a reuse view's
+  `path-info` probe grow with the request. Every other reuse-view read can
+  exceed the budget: a private view's guard reads D1 with one retry, up to 30
+  seconds, and a narinfo can need three rounds of R2 heads for its candidates.
+  The lists of sessions, reuse views, OIDC trust rules and policies are not
+  paged. The other procedures call R2 or D1 for each path or bundle of a page,
+  in rounds of calls of at most 15 seconds each, so their worst case grows with
+  the page: upload previews, negotiation, planning and confirmation, a `check`
+  page, the root procedures that set targets or list them, attestation
+  negotiation and attachment, and the collection and verification passes. A deep
+  `check` page also reads each NAR whole, and nothing bounds the time of that
+  read.
+
+When a deadline passes, the Worker logs `tenant object response deadline passed`
+with the request class (`kind`) and `deadlineMs`, and aborts the request's
+signal. The runtime then cancels the subrequest and rejects the pending fetch,
+so the Worker never receives an answer that the object sends later. The object
+can still complete the request. A response that arrives in the short interval
+between the deadline and the abort is dropped unread, and the runtime releases
+it when the invocation ends. The deadlines start and wait on the `DeadlineClock`
+that `controlWorker` and `cachedTenantReadFetch` receive, which tests replace to
+decide when a deadline passes.
 
 The server does not bound NAR bodies. Nix ends a transfer that receives no data
 for 300 seconds and retries it. When it has already received bytes, it resumes

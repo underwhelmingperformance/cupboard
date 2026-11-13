@@ -338,6 +338,31 @@ share a budget of 20 seconds, which does not cover the route's work after them.
 Admission that is still waiting when its deadline passes returns 503 with
 `Retry-After`.
 
+A request that the Worker forwards to the tenant Durable Object must receive the
+object's response headers within a deadline, when the object's work for the
+request is bounded in time. A read whose worst case fits within admission's
+20-second budget, such as `nix-cache-info`, the public key or an attestation,
+gets what remains of that budget and returns 503 with `Retry-After` when the
+object does not answer in time. A token exchange or revocation, the commit
+WebSocket upgrade and an admin procedure that the object completes within a
+fixed time, such as closing a cache or removing a root, get 110 seconds and
+return 504 without `Retry-After`, because the object can still complete the
+request. A request that waits behind several other requests' critical sections
+can miss this deadline even when the object is healthy.
+
+Requests with work that grows with the page or with the number of rows have no
+deadline: `missing-paths` and `path-info` probes of a reuse view,
+`missing-paths` probes of a cache, upload previews, negotiation, planning and
+confirmation, `check` pages, collection and verification passes, root writes
+that set targets, root target listings, attestation writes, and the unpaged
+lists of sessions, reuse views, OIDC trust rules and policies. A reuse view's
+`nix-cache-info`, narinfos and NARs have no deadline either, because their worst
+case can exceed the read budget. When a deadline passes, the Worker cancels the
+request, discards any answer that the object sends later, and logs the warning
+`tenant object response deadline passed` with the request class (`kind`) and
+`deadlineMs`. The deadline ends when the headers arrive, so it does not limit a
+streamed body or an open WebSocket.
+
 The native binding has no abort option for `get`. A timed-out operation can
 continue after the server returns 503. The server observes late rejection and
 cancels a late unused body once, best-effort within the invocation's lifetime.
