@@ -781,6 +781,9 @@ describe('lookupInPages', () => {
 	it('follows continuations within each page and returns results in input order', async () => {
 		const requests: number[][] = [];
 		const releases = new Map<number, () => void>();
+		const started = Array.from({ length: 5 }, () =>
+			Promise.withResolvers<undefined>()
+		);
 
 		const pending = lookupInPages([1, 2, 3, 4, 5, 6, 7], {
 			pageSize: 3,
@@ -788,6 +791,7 @@ describe('lookupInPages', () => {
 			deadline: replaySafe,
 			request: async (inputs) => {
 				requests.push([...inputs]);
+				started[requests.length - 1]?.resolve(undefined);
 				const { promise, resolve } = Promise.withResolvers<undefined>();
 				releases.set(inputs[0] ?? 0, () => {
 					resolve(undefined);
@@ -797,15 +801,11 @@ describe('lookupInPages', () => {
 			}
 		});
 
-		await vi.waitFor(() => {
-			expect(releases.size).toBe(3);
-		});
+		await Promise.all(started.slice(0, 3).map(({ promise }) => promise));
 		for (const first of [7, 4, 1]) {
 			releases.get(first)?.();
 		}
-		await vi.waitFor(() => {
-			expect(releases.size).toBe(5);
-		});
+		await Promise.all(started.slice(3).map(({ promise }) => promise));
 		for (const first of [6, 3]) {
 			releases.get(first)?.();
 		}
