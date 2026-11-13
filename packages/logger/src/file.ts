@@ -26,10 +26,41 @@ import { jsonLinesSink } from './sinks.ts';
 const mebibyte = 1024 * 1024;
 const maximumReadBytes = 32 * mebibyte;
 
+/**
+Starts the periodic flush and returns a function that stops it. The sink
+passes a `flush` function and the schedule calls it whenever a flush is due.
+`flush` returns a promise that resolves when the file contains every record
+that the sink had accepted before the call. A call that arrives while a flush
+is pending returns the promise of that flush, so a schedule that calls `flush`
+while the sink is busy does not queue more work.
+*/
+export type FlushSchedule = (flush: () => Promise<void>) => () => void;
+
 export interface FileSinkOptions {
 	readonly maximumBytes?: number;
 	readonly maximumQueuedBytes?: number;
 	readonly onError?: (error: unknown) => void;
+	/**
+	Defaults to a flush once every second.
+	*/
+	readonly schedule?: FlushSchedule;
+	/**
+	Returns the time in milliseconds since the epoch. Defaults to `Date.now`.
+	*/
+	readonly now?: () => number;
+}
+
+const flushIntervalMs = 1000;
+
+function everySecond(flush: () => Promise<void>): () => void {
+	const timer = setInterval(() => {
+		void flush();
+	}, flushIntervalMs);
+	timer.unref();
+
+	return () => {
+		clearInterval(timer);
+	};
 }
 
 export interface FileLogging {
@@ -130,7 +161,7 @@ class RotatingLogFile implements FileLogging {
 	readonly #filename: string;
 	readonly #options: FileSinkOptions;
 	readonly #pending: PendingRecord[] = [];
-	readonly #timer: ReturnType<typeof setInterval>;
+	readonly #stopSchedule: () => void;
 	#output: LogOutput;
 	#bytes = 0;
 	#queuedBytes = 0;
@@ -141,6 +172,7 @@ class RotatingLogFile implements FileLogging {
 	#hasFailed = false;
 	#shouldFlush = false;
 	#shouldFlushAtEnd = false;
+	#draining: Promise<void> | undefined;
 
 	readonly sink: Sink;
 
@@ -162,11 +194,11 @@ class RotatingLogFile implements FileLogging {
 
 			serialise(record);
 		};
-		this.#timer = setInterval(() => {
-			this.#shouldFlush = true;
-			this.#start();
-		}, 1000);
-		this.#timer.unref();
+		this.#stopSchedule = (options.schedule ?? everySecond)(() => this.drain());
+	}
+
+	#now(): number {
+		return (this.#options.now ?? Date.now)();
 	}
 
 	#report(error: unknown): void {
@@ -196,7 +228,7 @@ class RotatingLogFile implements FileLogging {
 
 	#reportToStderr(message: string, error: unknown): void {
 		jsonLinesSink((line) => process.stderr.write(line))({
-			timestamp: Date.now(),
+			timestamp: this.#now(),
 			category: ['logtape', 'meta'],
 			level: 'warning',
 			message: [message],
@@ -326,7 +358,7 @@ class RotatingLogFile implements FileLogging {
 		}
 
 		const record: LogRecord = {
-			timestamp: Date.now(),
+			timestamp: this.#now(),
 			category: ['logtape', 'meta'],
 			level: 'warning',
 			message: ['log records dropped'],
@@ -348,7 +380,7 @@ class RotatingLogFile implements FileLogging {
 
 	async #close(): Promise<void> {
 		this.#isClosing = true;
-		clearInterval(this.#timer);
+		this.#stopSchedule();
 		await this.drain();
 
 		this.#output.stream.end();
@@ -360,14 +392,26 @@ class RotatingLogFile implements FileLogging {
 		}
 	}
 
-	async drain(): Promise<void> {
+	async #untilIdle(): Promise<void> {
+		while (this.#working !== undefined) {
+			await this.#working;
+		}
+
+		this.#draining = undefined;
+	}
+
+	drain(): Promise<void> {
 		this.#shouldFlush = true;
 		this.#shouldFlushAtEnd = true;
 		this.#start();
 
-		while (this.#working !== undefined) {
-			await this.#working;
+		if (this.#working === undefined) {
+			return Promise.resolve();
 		}
+
+		this.#draining ??= this.#untilIdle();
+
+		return this.#draining;
 	}
 
 	close(): Promise<void> {
