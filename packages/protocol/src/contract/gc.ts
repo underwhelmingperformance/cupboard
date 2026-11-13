@@ -7,7 +7,7 @@ export const gcContract = {
 	// One tenant-wide call advances a bounded collection continuation. It does
 	// not necessarily reach every cache; alarms resume the remaining work.
 	runAll: baseProcedure
-		.meta({ requires: 'gc:run', maintenance: true })
+		.meta({ requires: 'gc:run', maintenance: true, workBound: 'size' })
 		.route({ method: 'POST', path: '/gc' })
 		.output(gcResponseSchema),
 
@@ -15,7 +15,13 @@ export const gcContract = {
 	// default cache. Collecting the default cache alone therefore has no route;
 	// the tenant-wide pass reaches it.
 	runCache: namedCacheProcedure(
-		{ method: 'POST', suffix: '/gc', requires: 'gc:run', maintenance: true },
+		{
+			method: 'POST',
+			suffix: '/gc',
+			requires: 'gc:run',
+			maintenance: true,
+			workBound: 'size'
+		},
 		{},
 		gcResponseSchema
 	)

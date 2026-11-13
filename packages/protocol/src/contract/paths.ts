@@ -10,7 +10,8 @@ export const pathsContract = {
 			method: 'DELETE',
 			suffix: '/paths/{hash}',
 			requires: 'narinfo:delete',
-			maintenance: true
+			maintenance: true,
+			workBound: 'time'
 		},
 		{ hash: storePathHashSchema },
 		pathDeletionResponseSchema

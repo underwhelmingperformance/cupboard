@@ -26,11 +26,13 @@ interface CacheScopedRoute {
 	readonly resource?: ResourceSpec;
 	readonly maintenance?: AuthzMeta['maintenance'];
 	readonly replaySafety?: AuthzMeta['replaySafety'];
+	readonly workBound: NonNullable<AuthzMeta['workBound']>;
 }
 
 function scopedMeta(route: CacheScopedRoute): AuthzMeta {
 	return {
 		requires: route.requires,
+		workBound: route.workBound,
 		resource: { cache: { fromPath: true }, ...route.resource },
 		...(route.maintenance !== undefined && { maintenance: route.maintenance }),
 		...(route.replaySafety !== undefined && {

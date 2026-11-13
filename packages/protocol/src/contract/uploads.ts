@@ -64,7 +64,8 @@ const confirmPresent = writableCacheScopedProcedure(
 		suffix: '/uploads/confirm-present',
 		requires: 'upload:commit',
 		maintenance: 'when-changed',
-		replaySafety: 'replay-safe'
+		replaySafety: 'replay-safe',
+		workBound: 'size'
 	},
 	uploadConfirmPresentRequestSchema.shape,
 	uploadConfirmPresentResponseSchema
@@ -75,7 +76,8 @@ const negotiate = writableCacheScopedProcedure(
 		method: 'POST',
 		suffix: '/uploads',
 		requires: 'upload:negotiate',
-		maintenance: true
+		maintenance: true,
+		workBound: 'size'
 	},
 	uploadNegotiateRequestSchema.shape,
 	uploadNegotiateResponseSchema
@@ -92,7 +94,8 @@ const preview = cacheScopedProcedure(
 		method: 'POST',
 		suffix: '/uploads/preview',
 		requires: 'upload:preview',
-		replaySafety: 'replay-safe'
+		replaySafety: 'replay-safe',
+		workBound: 'size'
 	},
 	uploadPreviewRequestSchema.shape,
 	uploadPreviewResponseSchema
@@ -106,7 +109,8 @@ const plan = cacheScopedProcedure(
 		method: 'POST',
 		suffix: '/uploads/plan',
 		requires: 'upload:negotiate',
-		replaySafety: 'replay-safe'
+		replaySafety: 'replay-safe',
+		workBound: 'size'
 	},
 	uploadPlanRequestSchema.shape,
 	uploadPlanResponseSchema
@@ -132,7 +136,8 @@ export const uploadsContract = {
 		{
 			method: 'POST',
 			suffix: '/uploads/credential',
-			requires: 'upload:negotiate'
+			requires: 'upload:negotiate',
+			workBound: 'time'
 		},
 		{ pushId: pushIdSchema.optional() },
 		pushCredentialSchema
@@ -174,7 +179,8 @@ export const uploadsContract = {
 			suffix: '/uploads/confirm',
 			requires: 'upload:confirm',
 			maintenance: true,
-			replaySafety: 'replay-safe'
+			replaySafety: 'replay-safe',
+			workBound: 'size'
 		},
 		uploadConfirmRequestSchema.shape,
 		uploadConfirmResponseSchema
@@ -188,7 +194,8 @@ export const uploadsContract = {
 		.meta({
 			requires: 'upload:status',
 			resource: { cache: { pending: true, missingDenies: false } },
-			replaySafety: 'replay-safe'
+			replaySafety: 'replay-safe',
+			workBound: 'time'
 		})
 		.route({ method: 'GET', path: '/uploads/{id}/status' })
 		.input(z.strictObject({ id: uploadIdSchema }))

@@ -47,18 +47,30 @@ const namedCacheUpdateSchema = z.intersection(
 export const cachesContract = {
 	defaults: {
 		get: baseProcedure
-			.meta({ requires: 'cache:defaults-read', replaySafety: 'replay-safe' })
+			.meta({
+				requires: 'cache:defaults-read',
+				replaySafety: 'replay-safe',
+				workBound: 'time'
+			})
 			.route({ method: 'GET', path: '/cache-defaults' })
 			.output(cacheCreationDefaultsSchema),
 		set: baseProcedure
-			.meta({ requires: 'cache:defaults-update', replaySafety: 'replay-safe' })
+			.meta({
+				requires: 'cache:defaults-update',
+				replaySafety: 'replay-safe',
+				workBound: 'time'
+			})
 			.route({ method: 'PUT', path: '/cache-defaults' })
 			.input(cacheCreationDefaultsSchema)
 			.errors(retentionMigrationPendingError)
 			.output(cacheCreationDefaultsSchema)
 	},
 	list: baseProcedure
-		.meta({ requires: 'cache:list', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'cache:list',
+			replaySafety: 'replay-safe',
+			workBound: 'time'
+		})
 		.route({ method: 'GET', path: '/caches' })
 		.input(cacheListInputSchema)
 		.errors(listingProjectionPendingError)
@@ -68,7 +80,8 @@ export const cachesContract = {
 			.meta({
 				requires: 'cache:read',
 				resource: { cache: { fromPath: true } },
-				replaySafety: 'replay-safe'
+				replaySafety: 'replay-safe',
+				workBound: 'time'
 			})
 			.route({ method: 'GET', path: '/cache' })
 			.output(cacheSummarySchema),
@@ -77,7 +90,8 @@ export const cachesContract = {
 			.meta({
 				requires: 'cache:read',
 				resource: { cache: { field: 'cacheName' } },
-				replaySafety: 'replay-safe'
+				replaySafety: 'replay-safe',
+				workBound: 'time'
 			})
 			.route({ method: 'GET', path: '/caches/{cacheName}' })
 			.input(z.strictObject({ cacheName: cacheNameSchema }))
@@ -88,7 +102,8 @@ export const cachesContract = {
 		inDefaultCache: baseProcedure
 			.meta({
 				requires: 'cache:create',
-				resource: { cache: { fromPath: true } }
+				resource: { cache: { fromPath: true } },
+				workBound: 'time'
 			})
 			.route({ method: 'PUT', path: '/cache' })
 			.input(cachePutBodySchema)
@@ -101,7 +116,8 @@ export const cachesContract = {
 		inNamedCache: baseProcedure
 			.meta({
 				requires: 'cache:create',
-				resource: { cache: { field: 'cacheName' } }
+				resource: { cache: { field: 'cacheName' } },
+				workBound: 'time'
 			})
 			.route({ method: 'PUT', path: '/caches/{cacheName}' })
 			.input(
@@ -121,7 +137,8 @@ export const cachesContract = {
 		inDefaultCache: baseProcedure
 			.meta({
 				requires: 'cache:update',
-				resource: { cache: { fromPath: true } }
+				resource: { cache: { fromPath: true } },
+				workBound: 'time'
 			})
 			.route({ method: 'PATCH', path: '/cache' })
 			.input(cacheUpdateBodySchema)
@@ -137,7 +154,8 @@ export const cachesContract = {
 		inNamedCache: baseProcedure
 			.meta({
 				requires: 'cache:update',
-				resource: { cache: { field: 'cacheName' } }
+				resource: { cache: { field: 'cacheName' } },
+				workBound: 'time'
 			})
 			.route({ method: 'PATCH', path: '/caches/{cacheName}' })
 			.input(namedCacheUpdateSchema)
@@ -156,7 +174,8 @@ export const cachesContract = {
 			requires: 'cache:close',
 			resource: { cache: { field: 'cacheName' } },
 			maintenance: true,
-			replaySafety: 'replay-safe'
+			replaySafety: 'replay-safe',
+			workBound: 'time'
 		})
 		.route({ method: 'POST', path: '/caches/{cacheName}/close' })
 		.input(z.strictObject({ cacheName: cacheNameSchema }))
@@ -168,7 +187,8 @@ export const cachesContract = {
 			requires: 'cache:reopen',
 			resource: { cache: { field: 'cacheName' } },
 			maintenance: true,
-			replaySafety: 'replay-safe'
+			replaySafety: 'replay-safe',
+			workBound: 'time'
 		})
 		.route({ method: 'POST', path: '/caches/{cacheName}/reopen' })
 		.input(z.strictObject({ cacheName: cacheNameSchema }))
@@ -179,7 +199,8 @@ export const cachesContract = {
 		.meta({
 			requires: 'cache:retire',
 			resource: { cache: { field: 'cacheName' } },
-			maintenance: true
+			maintenance: true,
+			workBound: 'time'
 		})
 		.route({ method: 'PUT', path: '/caches/{cacheName}/retirement' })
 		.input(
@@ -202,7 +223,8 @@ export const cachesContract = {
 		.meta({
 			requires: 'cache:delete',
 			resource: { cache: { field: 'cacheName' } },
-			maintenance: true
+			maintenance: true,
+			workBound: 'time'
 		})
 		.route({
 			method: 'DELETE',

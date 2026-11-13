@@ -13,25 +13,33 @@ import { baseProcedure } from './base.ts';
 
 export const oidcTrustContract = {
 	list: baseProcedure
-		.meta({ requires: 'oidc-trust:list', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'oidc-trust:list',
+			replaySafety: 'replay-safe',
+			workBound: 'size'
+		})
 		.route({ method: 'GET', path: '/oidc-trust' })
 		.output(oidcTrustListResponseSchema),
 
 	get: baseProcedure
-		.meta({ requires: 'oidc-trust:read', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'oidc-trust:read',
+			replaySafety: 'replay-safe',
+			workBound: 'time'
+		})
 		.route({ method: 'GET', path: '/oidc-trust/{id}' })
 		.input(z.strictObject({ id: trustRuleIdSchema }))
 		.output(oidcTrustSummarySchema),
 
 	add: baseProcedure
-		.meta({ requires: 'oidc-trust:add' })
+		.meta({ requires: 'oidc-trust:add', workBound: 'time' })
 		.route({ method: 'POST', path: '/oidc-trust' })
 		.input(oidcTrustAddBodySchema)
 		.errors({ CACHE_GRANT_MIGRATION_PENDING: { status: 409 } })
 		.output(oidcTrustSummarySchema),
 
 	extend: baseProcedure
-		.meta({ requires: 'oidc-trust:add' })
+		.meta({ requires: 'oidc-trust:add', workBound: 'time' })
 		.route({ method: 'POST', path: '/oidc-trust/{id}/grants' })
 		.input(oidcTrustExtendBodySchema.extend({ id: trustRuleIdSchema }))
 		.errors({
@@ -41,7 +49,7 @@ export const oidcTrustContract = {
 		.output(oidcTrustSummarySchema),
 
 	remove: baseProcedure
-		.meta({ requires: 'oidc-trust:remove' })
+		.meta({ requires: 'oidc-trust:remove', workBound: 'time' })
 		.route({ method: 'DELETE', path: '/oidc-trust/{id}' })
 		.input(z.strictObject({ id: trustRuleIdSchema }))
 		.output(oidcTrustRemoveResponseSchema)

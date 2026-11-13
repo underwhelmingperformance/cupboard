@@ -42,6 +42,35 @@ export interface AuthzMeta {
 	readonly resource?: ResourceSpec;
 	readonly maintenance?: Maintenance;
 	readonly replaySafety?: ReplaySafety;
+	readonly workBound?: WorkBound;
+}
+
+/**
+What bounds the tenant object's work for one call of a tenant procedure.
+`time`: the call makes a fixed number of calls with capped durations, such
+as one critical section and a few D1 calls, so the Worker waits for the
+response with a fixed deadline. `size`: only the size of the page or the
+number of rows bounds the work, so its duration grows with the input and the
+Worker waits without a deadline. Every tenant procedure declares it.
+*/
+export type WorkBound = 'time' | 'size';
+
+/**
+Returns the `workBound` that a procedure declares in its metadata, or
+`undefined` when it declares none.
+*/
+export function workBoundOf(procedure: {
+	readonly '~orpc': { readonly meta: unknown };
+}): WorkBound | undefined {
+	const { meta } = procedure['~orpc'];
+
+	if (typeof meta !== 'object' || meta === null || !('workBound' in meta)) {
+		return undefined;
+	}
+
+	return meta.workBound === 'time' || meta.workBound === 'size'
+		? meta.workBound
+		: undefined;
 }
 
 /**

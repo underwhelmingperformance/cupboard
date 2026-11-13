@@ -10,7 +10,11 @@ export const verifyContract = {
 	// restores missing narinfo objects and removes metadata whose NAR object is
 	// absent. The server clamps `limit` to 500.
 	run: baseProcedure
-		.meta({ requires: 'verification:run', maintenance: true })
+		.meta({
+			requires: 'verification:run',
+			maintenance: true,
+			workBound: 'size'
+		})
 		.route({ method: 'POST', path: '/verify' })
 		.input(z.strictObject({ limit: z.number().int().min(1).optional() }))
 		.output(verifyReportSchema)
