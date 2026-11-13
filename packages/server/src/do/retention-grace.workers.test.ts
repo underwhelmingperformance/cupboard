@@ -616,6 +616,7 @@ describe('retention grace transitions', () => {
 		// Replacing the target set must preserve the root row and its expiry while
 		// granting grace to the released path.
 		const settled = await setRoot(token, { name: 'channel', targets: [] });
+		await drainRootReleases();
 		const { roots } = await listRoots(token);
 		const remaining = await listRootTargets(token, 'channel');
 		const deadlines = await graceDeadlineRows(defaultCache());
