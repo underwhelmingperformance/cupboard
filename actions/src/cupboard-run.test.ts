@@ -6,6 +6,10 @@ import {
 	cohortRootsVersion,
 	publishPlanVersion
 } from '@cupboard/protocol/publish-plan';
+import {
+	charactersRead,
+	unsafeRegularExpressions
+} from '@cupboard/shared/scan-cost.test-support';
 import { Command } from 'commander';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -195,6 +199,84 @@ describe('commandOptionsFromHelp', () => {
 			'--help'
 		]);
 	});
+
+	const lineSeparator = String.fromCodePoint(0x20_28);
+	const paragraphSeparator = String.fromCodePoint(0x20_29);
+
+	it.each([
+		['an indented option', '  --cache <name>  push', ['--cache']],
+		['a tab-indented option', '\t--cache', ['--cache']],
+		['an indented option on a later line', 'Options:\n  --cache', ['--cache']],
+		['an option after a carriage return', 'Options:\r  --cache', ['--cache']],
+		['an option after a CRLF', 'Options:\r\n  --cache\r\n', ['--cache']],
+		['an option after blank lines', 'Options:\n\n   \n  --cache', ['--cache']],
+		['a short flag and a long alias', '  -h, --help  show help', ['--help']],
+		['two long aliases', '  --a, --b <x>', ['--a', '--b']],
+		[
+			'options on several lines',
+			'  --a, --b\n  --c\n  -d, --e',
+			['--a', '--b', '--c', '--e']
+		],
+		['an option with a dash run', '  ---x', ['---x']],
+		['an alias without a space', '  --a,--b', ['--a']],
+		['an option without indentation', '--cache', []],
+		['an option on the first line with indentation', ' --cache', ['--cache']],
+		['an option after text on the same line', 'Usage: --cache', []],
+		['an option after other text and spaces', 'x  --cache', []],
+		['a short flag without a space', '  -h,--help', []],
+		['a long short flag', '  -ab, --help', []],
+		['a single dash', '  -cache', []],
+		['no options', 'Usage: cupboard\n\nOptions:\n', []],
+		[
+			'an indented option after a line separator',
+			`x${lineSeparator}  --cache`,
+			['--cache']
+		],
+		[
+			'an indented option after a paragraph separator',
+			`x${paragraphSeparator}  --cache`,
+			['--cache']
+		],
+		[
+			'an option directly after a line separator',
+			`x${lineSeparator}--cache`,
+			[]
+		],
+		['blank lines before text', '\n\n\nx', []],
+		['blank lines before an option', '\n\n\n--cache', ['--cache']],
+		['blank lines after text, before an option', 'x\n\n\n--cache', ['--cache']],
+		['indentation before text', '      x', []],
+		['spaces after text, before an option', 'x      --cache', []]
+	])('collects %s', (_name, help, expected) => {
+		expect([...commandOptionsFromHelp(help)]).toStrictEqual(expected);
+	});
+
+	it('executes only regular expressions that recheck proves safe', async () => {
+		const unsafe = await unsafeRegularExpressions(() => {
+			commandOptionsFromHelp('Usage: x\n\n  -h, --help, --more  show help\n');
+		});
+
+		expect(unsafe).toStrictEqual([]);
+	});
+
+	it.each([
+		['blank lines before text', '\n', 'x'],
+		['blank lines before an option', '\n', '--cache'],
+		['spaces after text', ' ', '--cache'],
+		['indentation before text', '  ', 'x'],
+		['indented options', '  --cache\n', '']
+	])(
+		'reads each character of %s a bounded number of times',
+		(_name, unit, suffix) => {
+			const readsPerCharacter = [1000, 4000].map((length) => {
+				const help = `x${unit.repeat(length / unit.length)}${suffix}`;
+
+				return charactersRead(() => commandOptionsFromHelp(help)) / help.length;
+			});
+
+			expect(Math.max(...readsPerCharacter)).toBeLessThanOrEqual(3);
+		}
+	);
 });
 
 describe('detectCacheSelectionSyntax', () => {
