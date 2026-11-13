@@ -101,6 +101,63 @@ export class CacheRepository {
 	}
 
 	/**
+	Whether a cache of this scope was deleted at or after `since`. A scope has
+	at most one live cache, so its newest deleted identity has the latest
+	deletion, and the check reads that one row.
+	*/
+	wasDeletedSince(scope: CacheScope, since: Date): boolean {
+		const newest = this.database
+			.select({ deletedAt: schema.cacheIdentities.deletedAt })
+			.from(schema.cacheIdentities)
+			.where(
+				and(
+					cacheIdentityCondition(
+						schema.cacheIdentities.kind,
+						schema.cacheIdentities.name,
+						scope
+					),
+					isNotNull(schema.cacheIdentities.deletedAt)
+				)
+			)
+			.orderBy(desc(schema.cacheIdentities.id))
+			.limit(1)
+			.get();
+
+		return (
+			newest?.deletedAt != undefined && newest.deletedAt >= isoTimestamp(since)
+		);
+	}
+
+	/**
+	Whether the cache of this scope that had `generation` was deleted. A name
+	that was removed, registered again and removed again has a deleted
+	identity for each generation.
+	*/
+	wasDeletedAtGeneration(
+		scope: CacheScope,
+		generation: CacheGeneration
+	): boolean {
+		const deleted = this.database
+			.select({ id: schema.cacheIdentities.id })
+			.from(schema.cacheIdentities)
+			.where(
+				and(
+					cacheIdentityCondition(
+						schema.cacheIdentities.kind,
+						schema.cacheIdentities.name,
+						scope
+					),
+					isNotNull(schema.cacheIdentities.deletedAt),
+					eq(schema.cacheIdentities.generation, generation)
+				)
+			)
+			.limit(1)
+			.get();
+
+		return deleted !== undefined;
+	}
+
+	/**
 	The most recently deleted cache of this scope, or undefined when no cache
 	of the scope has been deleted. A teardown that began under the previous
 	build is keyed by name and is resumed through this lookup.

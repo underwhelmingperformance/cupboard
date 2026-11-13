@@ -14,41 +14,92 @@ import { isConstantTimeEqual } from '../crypto/crypto.ts';
 export const pushIdSigningKeySchema = z.string().brand('PushIdSigningKey');
 export type PushIdSigningKey = z.infer<typeof pushIdSigningKeySchema>;
 
-const pushIdDomain = 'cupboard/push-id/v2';
+interface PushIdLayout {
+	readonly domain: string;
+	readonly expiryByteLength: number;
+	readonly millisecondsPerExpiryUnit: number;
+}
+
 const nonceByteLength = 16;
 const hmacByteLength = 32;
-const expiryByteLength = 4;
-const maximumExpirySeconds = 2 ** (expiryByteLength * 8) - 1;
-const pushIdLength = (nonceByteLength + expiryByteLength + hmacByteLength) * 2;
+
+// A v2 push ID records its expiry in whole seconds. A v3 push ID records it in
+// milliseconds, so the server can tell whether a push started before or after
+// a cache removal in the same second. The server issues v3 push IDs and
+// accepts both layouts, which have different lengths.
+const v2Layout: PushIdLayout = {
+	domain: 'cupboard/push-id/v2',
+	expiryByteLength: 4,
+	millisecondsPerExpiryUnit: 1000
+};
+const v3Layout: PushIdLayout = {
+	domain: 'cupboard/push-id/v3',
+	expiryByteLength: 6,
+	millisecondsPerExpiryUnit: 1
+};
 
 const textEncoder = new TextEncoder();
 
-function hasPushIdLayout(value: string): boolean {
-	return value.length === pushIdLength && /^[0-9a-f]+$/u.test(value);
+function layoutLength(layout: PushIdLayout): number {
+	return (nonceByteLength + layout.expiryByteLength + hmacByteLength) * 2;
+}
+
+function layoutOf(value: string): PushIdLayout | undefined {
+	if (!/^[0-9a-f]+$/u.test(value)) {
+		return undefined;
+	}
+
+	return [v2Layout, v3Layout].find(
+		(layout) => layoutLength(layout) === value.length
+	);
 }
 
 /**
 The value as a push ID when it has the length and lowercase hexadecimal
-layout that `issuePushId` produces.
+layout of a v2 or v3 push ID.
 */
 export function wellFormedPushId(value: string): PushId | undefined {
-	if (!hasPushIdLayout(value)) {
+	if (layoutOf(value) === undefined) {
 		return undefined;
 	}
 
 	return pushIdSchema.parse(value);
 }
 
-export function pushIdExpiresAtSeconds(pushId: string): number | undefined {
-	if (!hasPushIdLayout(pushId)) {
+/**
+The push ID's expiry in milliseconds since the epoch. A v2 push ID gives
+whole seconds.
+*/
+export function pushIdExpiresAtMilliseconds(
+	pushId: string
+): number | undefined {
+	const layout = layoutOf(pushId);
+	if (layout === undefined) {
 		return undefined;
 	}
 
 	const expiryStart = nonceByteLength * 2;
-	return Number.parseInt(
-		pushId.slice(expiryStart, expiryStart + expiryByteLength * 2),
+	const expiry = Number.parseInt(
+		pushId.slice(expiryStart, expiryStart + layout.expiryByteLength * 2),
 		16
 	);
+
+	return expiry * layout.millisecondsPerExpiryUnit;
+}
+
+export function pushIdExpiresAtSeconds(pushId: string): number | undefined {
+	const expiresAtMilliseconds = pushIdExpiresAtMilliseconds(pushId);
+
+	return expiresAtMilliseconds === undefined
+		? undefined
+		: Math.floor(expiresAtMilliseconds / 1000);
+}
+
+/**
+Whether the push ID records its expiry in whole seconds.
+*/
+export function hasSecondPushIdExpiry(pushId: string): boolean {
+	return layoutOf(pushId) === v2Layout;
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -71,6 +122,7 @@ export async function importPushIdKey(
 
 async function tagFor(
 	key: CryptoKey,
+	layout: PushIdLayout,
 	tenant: TenantId,
 	expiryHex: string,
 	nonceHex: string
@@ -78,7 +130,7 @@ async function tagFor(
 	const signature = await crypto.subtle.sign(
 		'HMAC',
 		key,
-		textEncoder.encode(`${pushIdDomain}:${tenant}:${expiryHex}:${nonceHex}`)
+		textEncoder.encode(`${layout.domain}:${tenant}:${expiryHex}:${nonceHex}`)
 	);
 
 	return toHex(new Uint8Array(signature));
@@ -90,32 +142,30 @@ export const pushIdNonceSchema = z
 	.brand('PushIdNonce');
 export type PushIdNonce = z.infer<typeof pushIdNonceSchema>;
 
-/**
-Signs a caller-supplied 16-byte nonce. Callers must provide exactly 16 bytes
-because verification rejects every other push ID length.
-*/
-export async function issuePushId(
+async function issueInLayout(
+	layout: PushIdLayout,
 	secret: PushIdSigningKey,
 	tenant: TenantId,
-	expiresAtSeconds: number,
+	expiry: number,
 	nonce: PushIdNonce
 ): Promise<PushId> {
 	if (
-		!Number.isSafeInteger(expiresAtSeconds) ||
-		expiresAtSeconds < 0 ||
-		expiresAtSeconds > maximumExpirySeconds
+		!Number.isSafeInteger(expiry) ||
+		expiry < 0 ||
+		expiry > 2 ** (layout.expiryByteLength * 8) - 1
 	) {
-		throw new RangeError('Push id expiry does not fit the v2 format');
+		throw new RangeError(`Push id expiry does not fit ${layout.domain}`);
 	}
 
 	const nonceHex = toHex(nonce);
-	const expiryHex = expiresAtSeconds
+	const expiryHex = expiry
 		.toString(16)
-		.padStart(expiryByteLength * 2, '0');
+		.padStart(layout.expiryByteLength * 2, '0');
 
 	return pushIdSchema.parse(
 		`${nonceHex}${expiryHex}${await tagFor(
 			await importPushIdKey(secret),
+			layout,
 			tenant,
 			expiryHex,
 			nonceHex
@@ -124,17 +174,43 @@ export async function issuePushId(
 }
 
 /**
-Signs a push ID with a fresh random nonce.
+Signs a v3 push ID over a caller-supplied 16-byte nonce. Callers must provide
+exactly 16 bytes because verification rejects every other push ID length.
+*/
+export async function issuePushId(
+	secret: PushIdSigningKey,
+	tenant: TenantId,
+	expiresAtMilliseconds: number,
+	nonce: PushIdNonce
+): Promise<PushId> {
+	return issueInLayout(v3Layout, secret, tenant, expiresAtMilliseconds, nonce);
+}
+
+/**
+Signs a v2 push ID, which servers issued before v3. The server accepts it
+until it expires.
+*/
+export async function issueV2PushId(
+	secret: PushIdSigningKey,
+	tenant: TenantId,
+	expiresAtSeconds: number,
+	nonce: PushIdNonce
+): Promise<PushId> {
+	return issueInLayout(v2Layout, secret, tenant, expiresAtSeconds, nonce);
+}
+
+/**
+Signs a v3 push ID with a fresh random nonce.
 */
 export async function createPushId(
 	secret: PushIdSigningKey,
 	tenant: TenantId,
-	expiresAtSeconds: number
+	expiresAtMilliseconds: number
 ): Promise<PushId> {
 	const random = crypto.getRandomValues(new Uint8Array(nonceByteLength));
 	const nonce = pushIdNonceSchema.parse(random);
 
-	return issuePushId(secret, tenant, expiresAtSeconds, nonce);
+	return issuePushId(secret, tenant, expiresAtMilliseconds, nonce);
 }
 
 /**
@@ -146,11 +222,11 @@ export async function isPushIdValid(
 	tenant: TenantId,
 	now: Date
 ): Promise<boolean> {
-	const expiresAtSeconds = pushIdExpiresAtSeconds(pushId);
+	const expiresAtMilliseconds = pushIdExpiresAtMilliseconds(pushId);
 
 	if (
-		expiresAtSeconds === undefined ||
-		expiresAtSeconds <= Math.floor(now.getTime() / 1000)
+		expiresAtMilliseconds === undefined ||
+		expiresAtMilliseconds <= now.getTime()
 	) {
 		return false;
 	}
@@ -175,16 +251,17 @@ async function hasTenantTag(
 	pushId: string,
 	tenant: TenantId
 ): Promise<boolean> {
-	if (pushIdExpiresAtSeconds(pushId) === undefined) {
+	const layout = layoutOf(pushId);
+	if (layout === undefined) {
 		return false;
 	}
 
 	const nonceHex = pushId.slice(0, nonceByteLength * 2);
 	const expiryStart = nonceByteLength * 2;
-	const tagStart = expiryStart + expiryByteLength * 2;
+	const tagStart = expiryStart + layout.expiryByteLength * 2;
 	const expiryHex = pushId.slice(expiryStart, tagStart);
 	const providedTag = pushId.slice(tagStart);
-	const expectedTag = await tagFor(key, tenant, expiryHex, nonceHex);
+	const expectedTag = await tagFor(key, layout, tenant, expiryHex, nonceHex);
 
 	return isConstantTimeEqual(providedTag, expectedTag, hmacByteLength * 2);
 }

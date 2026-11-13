@@ -277,13 +277,17 @@ const drainNotificationCases: readonly DrainNotificationCase[] = [
 		drained: [cacheRemovedFrame, probeAnswer]
 	},
 	{
-		// A released client would negotiate the path again and create the
-		// removed cache again.
-		name: 'sends no frame to a session that does not accept the reason',
-		upload: { verdict: 'pending' },
-		subscribed: deferredFrame,
+		// An older client negotiates the path again after `absent`, and the
+		// server refuses the negotiation of a push that started before the
+		// removal.
+		name: 'sends a plain absent verdict to a session that does not accept the reason',
+		upload: { verdict: 'pending', graceDecisionJson: '{"reportsGrace":true}' },
+		subscribed: { ...deferredFrame, grace: {} },
 		expiresBeforeDrain: false,
-		drained: [probeAnswer]
+		drained: [
+			{ ev: 'verdict', uploadId: waitingUploadId, status: 'absent', grace: {} },
+			probeAnswer
+		]
 	},
 	{
 		// Expiry fails the operation and leaves its upload for the drain.

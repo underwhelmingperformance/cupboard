@@ -29,11 +29,13 @@ import {
 	type RootTargetsPage
 } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { type PushId } from '@cupboard/protocol/upload';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
+	InvalidPushIdError,
 	RootBatchLimitExceededError,
 	RootTargetsUnavailableError
 } from '../errors.ts';
@@ -146,6 +148,23 @@ export class RootsService {
 		if (writes.some((write) => write.kind === 'written' && write.isReleased)) {
 			await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
 		}
+	}
+
+	// A push sends its push ID with its root writes. An expired push ID still
+	// identifies the push, so a root write at the end of a long push is not
+	// refused for its age.
+	private async cacheForWrite(
+		cacheScope: CacheScope,
+		pushId: PushId | undefined
+	): Promise<ResolvedCache> {
+		if (pushId !== undefined) {
+			if (!(await this.context.pushCredentials().isIssuedToTenant(pushId))) {
+				throw new InvalidPushIdError();
+			}
+			this.registration.refusePushOfRemovedCache(cacheScope, pushId);
+		}
+
+		return this.registration.forWrite(cacheScope);
 	}
 
 	// Returns the cache-level facts that every root write inside one critical
@@ -702,9 +721,10 @@ export class RootsService {
 	async setRoot(
 		cacheScope: CacheScope,
 		rootName: RootName,
-		body: RootSetBody
+		body: RootSetBody,
+		pushId?: PushId
 	): Promise<RootSetResponse> {
-		const cache = await this.registration.forWrite(cacheScope);
+		const cache = await this.cacheForWrite(cacheScope, pushId);
 		const requested = this.buildRootSetCommand(rootName, body);
 		const servable = await this.servableTargets(cache, requested.targets);
 		const write = await this.gatedRootWrite(cache, requested);
@@ -726,9 +746,10 @@ export class RootsService {
 	async ensureRoot(
 		cacheScope: CacheScope,
 		rootName: RootName,
-		body: RootEnsureBody
+		body: RootEnsureBody,
+		pushId?: PushId
 	): Promise<RootEnsureResponse> {
-		const cache = await this.registration.forWrite(cacheScope);
+		const cache = await this.cacheForWrite(cacheScope, pushId);
 		const requested = this.buildRootSetCommand(rootName, body);
 		const checked = await this.context.narInfoDemotions.watching(
 			cache.id,
@@ -789,7 +810,8 @@ export class RootsService {
 	// request's own overhead are shared by all of its roots.
 	async applyRoots(
 		cacheScope: CacheScope,
-		body: RootBatchBody
+		body: RootBatchBody,
+		pushId?: PushId
 	): Promise<RootBatchResponse> {
 		const cost = body.roots.reduce(
 			(total, entry) => total + rootBatchEntryCost(entry),
@@ -800,7 +822,7 @@ export class RootsService {
 			throw new RootBatchLimitExceededError(rootBatchCapacity);
 		}
 
-		const cache = await this.registration.forWrite(cacheScope);
+		const cache = await this.cacheForWrite(cacheScope, pushId);
 		const requests = body.roots.map((entry): BatchedRootRequest => ({
 			action: entry.action,
 			command: this.buildRootSetCommand(entry.name, entry)

@@ -491,10 +491,39 @@ deletes the upload before its verdict is decided, or when verification finds the
 cache deleted. A client that accepts the capability treats the frame as a final
 failure. An older client fails the whole session on a frame with a field that it
 does not know, so a session without the capability receives a 404 for a commit
-and `absent` from verification and from a publication's replay. An older client
-also negotiates a path again after `absent`, and negotiation registers a missing
-named cache, so a teardown pass sends such a session no frame when it deletes
-the upload.
+and `absent` from verification, from a publication's replay and from a teardown
+pass that deletes the upload. An older client then negotiates the path again,
+and the server refuses that negotiation because the push started before the
+removal.
+
+A push that started before the removal cannot create the cache again. The server
+finds when a push started from its push ID: every push ID expires 24 hours after
+the server issues it, so the issue time is the expiry less 24 hours, and the
+server stores nothing per push. The server issues v3 push IDs, which record the
+expiry in milliseconds, and a removal in the millisecond of the issue counts as
+a removal before the push started. It still accepts v2 push IDs until they
+expire. They record whole seconds, so a removal in the second of the issue
+counts as a removal after the push started. For a push that started before a
+removal of its named cache, `uploads.plan`, `uploads.negotiate`,
+`attestations.negotiate` and `attestations.negotiateBundles` answer 410 with the
+contract error `CACHE_REMOVED`, whose data gives the cache. `roots.set`,
+`roots.ensure` and `roots.batch` answer the same when the request includes the
+push ID. Publication admission refuses the push's entry with the `cache-removed`
+verdict for a session that accepted `cache-removed-verdict`, and with
+`generation-conflict` for any other session. Admission checks for the removal
+before its generation checks, and again when they fail, so a removal during
+admission also produces the removal's refusal. Apart from a root write without
+the push ID, these are the requests of a push that can create a cache.
+`uploads.confirmPresent` also answers 410 with `CACHE_REMOVED` when the plan's
+generation belongs to the removed cache, and so does an attestation attach for
+an upload of the removed cache. Those two requests never create a cache, so the
+answer only tells the client why the push stopped. A push that starts after the
+removal creates the cache again.
+
+A client sends the push ID with its root writes only when the credential
+response echoed `push-root-writes`, because older servers reject a root write
+with a field that they do not know. A root write without a push ID is not part
+of a push and creates a missing named cache, as before.
 
 Alarm passes delete the rows in pages of 128 while the row budget lasts. The
 alarm's earlier steps can spend the budget first, so within each pass the first
@@ -1153,17 +1182,18 @@ fails if bytes are required and it has no NAR source. Batches contain one to 100
 entries and encoded messages are limited to 4 MiB.
 
 First admission creates or adopts the expected cache generation and captures
-retention. Deletion between planning and admission produces a generation
-conflict. The durable `publication_operation` record and pending-work ownership
-are written in one SQLite transaction. Cache registration, D1 references and R2
-writes retain their existing recoverable transitions. Replays do not create
-another pending upload, change a supplied compressed declaration or extend the
-original grace decision. Every first accepted operation captures a grace
-decision, including an operation that confirms an already-served path. That
-confirmation can therefore extend the path's retention to the confirmation time
-plus grace, rounded up to a whole hour; legacy skips leave its deadline
-unchanged. Completed operations retain their resulting path identity after
-pending cleanup.
+retention. A deletion between planning and admission is a removal after the push
+started, so admission refuses the entry with the `cache-removed` verdict or
+`generation-conflict`, as the section on cache removal describes. The durable
+`publication_operation` record and pending-work ownership are written in one
+SQLite transaction. Cache registration, D1 references and R2 writes retain their
+existing recoverable transitions. Replays do not create another pending upload,
+change a supplied compressed declaration or extend the original grace decision.
+Every first accepted operation captures a grace decision, including an operation
+that confirms an already-served path. That confirmation can therefore extend the
+path's retention to the confirmation time plus grace, rounded up to a whole
+hour; legacy skips leave its deadline unchanged. Completed operations retain
+their resulting path identity after pending cleanup.
 
 A commit can find its path already committed by another upload, or lose the
 reservation to another upload of the same path. Outside the critical section, it

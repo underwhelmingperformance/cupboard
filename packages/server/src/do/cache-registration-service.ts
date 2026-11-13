@@ -8,8 +8,10 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { type PushId } from '@cupboard/protocol/upload';
 import { and, eq, sql } from 'drizzle-orm';
 
+import { firstRemovalAfterPushStart } from '../blob/push-credential.ts';
 import {
 	cacheIdentityColumns,
 	cacheIdentityCondition,
@@ -29,6 +31,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import {
 	CacheAlreadyExistsError,
 	CacheNotFoundError,
+	CacheRemovedDuringPushError,
 	PublicationConflictError
 } from '../errors.ts';
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
@@ -168,6 +171,24 @@ export class CacheRegistrationService {
 		);
 
 		return cache;
+	}
+
+	/**
+	Refuses a request of a push that started before a cache with the scope's
+	name was removed. Such a push planned or uploaded paths for the removed
+	cache, and a later request of the push would otherwise create a new cache
+	under the name, or write into one that another client created after the
+	removal. A push that starts after the removal creates the cache as usual.
+	*/
+	refusePushOfRemovedCache(scope: CacheScope, pushId: PushId): void {
+		const firstRemoval = firstRemovalAfterPushStart(pushId);
+		if (firstRemoval === undefined || scope.kind === 'default') {
+			return;
+		}
+
+		if (this.context.cacheRepository.wasDeletedSince(scope, firstRemoval)) {
+			throw new CacheRemovedDuringPushError(scope);
+		}
 	}
 
 	/**

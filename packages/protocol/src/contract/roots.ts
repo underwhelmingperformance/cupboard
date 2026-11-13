@@ -15,8 +15,10 @@ import {
 	rootSetResponseSchema,
 	rootTargetsPageSchema
 } from '../retention.ts';
+import { pushIdSchema } from '../upload.ts';
 
 import {
+	cacheRemovedErrors,
 	cacheScopedProcedure,
 	writableCacheScopedProcedure
 } from './cache-scoped.ts';
@@ -33,6 +35,16 @@ const retentionMigrationPendingError = {
 	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
 };
 
+// A push sends its push ID with the root writes of the push, but only when the
+// server echoed `push-root-writes` on the push's credential request. The
+// server then refuses the write when the push started before the cache was
+// removed. A root write without a push ID is not part of a push.
+const rootWriteErrors = {
+	...retentionMigrationPendingError,
+	...cacheRemovedErrors
+};
+const pushShape = { pushId: pushIdSchema.optional() };
+
 const rootSet = writableCacheScopedProcedure(
 	{
 		method: 'PUT',
@@ -42,7 +54,7 @@ const rootSet = writableCacheScopedProcedure(
 		maintenance: true,
 		replaySafety: 'replay-safe'
 	},
-	{ name: rootNameSchema, ...rootSetBodySchema.shape },
+	{ name: rootNameSchema, ...rootSetBodySchema.shape, ...pushShape },
 	rootSetResponseSchema
 );
 
@@ -55,7 +67,7 @@ const rootEnsure = writableCacheScopedProcedure(
 		maintenance: true,
 		replaySafety: 'replay-safe'
 	},
-	{ name: rootNameSchema, ...rootEnsureBodySchema.shape },
+	{ name: rootNameSchema, ...rootEnsureBodySchema.shape, ...pushShape },
 	rootEnsureResponseSchema
 );
 
@@ -68,12 +80,12 @@ const rootBatch = writableCacheScopedProcedure(
 		maintenance: true,
 		replaySafety: 'replay-safe'
 	},
-	rootBatchBodySchema.shape,
+	{ ...rootBatchBodySchema.shape, ...pushShape },
 	rootBatchResponseSchema
 );
 
 const rootBatchErrors = {
-	...retentionMigrationPendingError,
+	...rootWriteErrors,
 	[rootBatchLimitErrorCode]: {
 		status: 413,
 		data: rootBatchLimitErrorDataSchema
@@ -112,17 +124,13 @@ export const rootsContract = {
 	// and `root ensure` commands require at least one store path, so
 	// clearing a root requires a direct request with an empty list.
 	set: {
-		inDefaultCache: rootSet.inDefaultCache.errors(
-			retentionMigrationPendingError
-		),
-		inNamedCache: rootSet.inNamedCache.errors(retentionMigrationPendingError)
+		inDefaultCache: rootSet.inDefaultCache.errors(rootWriteErrors),
+		inNamedCache: rootSet.inNamedCache.errors(rootWriteErrors)
 	},
 
 	ensure: {
-		inDefaultCache: rootEnsure.inDefaultCache.errors(
-			retentionMigrationPendingError
-		),
-		inNamedCache: rootEnsure.inNamedCache.errors(retentionMigrationPendingError)
+		inDefaultCache: rootEnsure.inDefaultCache.errors(rootWriteErrors),
+		inNamedCache: rootEnsure.inNamedCache.errors(rootWriteErrors)
 	},
 
 	// Set or ensure several roots in one request. The token must grant
