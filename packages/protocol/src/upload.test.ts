@@ -554,6 +554,12 @@ describe('commit session schemas', () => {
 		},
 		{ ev: 'deferred', uploadId: 'upload-1', storePathHash, narHash },
 		{ ev: 'verdict', uploadId: 'upload-1', status: 'servable' },
+		{
+			ev: 'verdict',
+			uploadId: 'upload-1',
+			status: 'absent',
+			reason: 'cache-removed'
+		},
 		{ ev: 'error', uploadId: 'upload-1', status: 500, message: 'boom' }
 	])('accepts the upload-specific $ev frame', (value) => {
 		expect(commitSessionFrameSchema.parse(value)).toStrictEqual(value);
@@ -566,6 +572,20 @@ describe('commit session schemas', () => {
 	])('accepts %s', (_name, value) => {
 		expect(commitSessionFrameSchema.parse(value)).toStrictEqual(value);
 	});
+
+	it.each(['servable', 'mismatch', 'pending'])(
+		'rejects the cache-removed reason with the %s status',
+		(status) => {
+			expect(
+				commitSessionFrameSchema.safeParse({
+					ev: 'verdict',
+					uploadId: 'upload-1',
+					status,
+					reason: 'cache-removed'
+				}).success
+			).toBe(false);
+		}
+	);
 
 	it('requires an uploadId on a verdict frame', () => {
 		expect(

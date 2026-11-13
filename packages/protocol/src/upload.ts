@@ -585,6 +585,13 @@ export const confirmPresentCapability = 'confirm-present-v1';
 export const publicationRefusalReasonsCapability =
 	'publication-refusal-reasons';
 
+// A client accepts this token when it treats a `verdict` frame with the reason
+// `cache-removed` as a final failure of the upload. Older clients parse frames
+// strictly and fail the whole session on a frame with a field that they do not
+// know, so the server sends the reason only to a client that accepts this
+// token.
+export const cacheRemovedVerdictCapability = 'cache-removed-verdict';
+
 export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken},${uploadRenewalCapability},${publicationCapability}`;
 
 export function commitCapabilitiesValueWithCredit(
@@ -716,7 +723,7 @@ export type CommitSessionRequestInput = z.input<
 // such entry that way.
 export const commitEntryResendStatus: number = StatusCodes.TOO_MANY_REQUESTS;
 
-export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
+const commitSessionEventFrameSchema = z.discriminatedUnion('ev', [
 	z.strictObject({
 		ev: z.literal('publication-accepted'),
 		uploadId: publicationIdSchema
@@ -807,6 +814,24 @@ export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 		renewed: uploadIdsSchema,
 		refused: uploadIdsSchema
 	})
+]);
+
+// The `absent` verdict for an upload whose cache was removed. The upload can
+// no longer be committed under the cache's name. Only a session that accepted
+// `cache-removed-verdict` receives this frame, and a later reason needs a new
+// capability token, because a client fails the session on a frame that it
+// cannot parse.
+const cacheRemovedVerdictSchema = z.strictObject({
+	ev: z.literal('verdict'),
+	uploadId: uploadIdSchema,
+	status: z.literal('absent'),
+	reason: z.literal('cache-removed'),
+	grace: uploadGraceFactSchema.optional()
+});
+
+export const commitSessionFrameSchema = z.union([
+	commitSessionEventFrameSchema,
+	cacheRemovedVerdictSchema
 ]);
 export type CommitSessionFrame = z.output<typeof commitSessionFrameSchema>;
 export type CommitSessionFrameInput = z.input<typeof commitSessionFrameSchema>;
