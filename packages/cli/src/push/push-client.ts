@@ -14,6 +14,8 @@ import {
 	confirmPresentCapability,
 	publicationCapability,
 	type PublicationEntry,
+	type PushId,
+	pushRootWritesCapability,
 	type UploadActionDecision,
 	uploadAttachRootSchema,
 	uploadCapabilitiesHeader,
@@ -47,6 +49,7 @@ import { CupboardClient } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { procedureDeadline, tenantRpc } from '../client/orpc.ts';
+import { cacheRemovedErrorOf } from '../client/rpc-errors.ts';
 import { UploadNegotiationMismatchError } from '../errors.ts';
 
 import { credentialSession } from './credential-session.ts';
@@ -147,6 +150,7 @@ export function pushClientFor(
 	};
 	let hasCredentialPublication = false;
 	let hasCredentialConfirmation = false;
+	let hasCredentialRootWrites = false;
 	let isConfirmationUnavailable = false;
 	let confirmationPageSize = confirmationDefaultPageSize;
 	let protocolSelection: Promise<'publication' | 'legacy'> | undefined;
@@ -168,7 +172,7 @@ export function pushClientFor(
 			const headers = new Headers(request.headers);
 			headers.set(
 				acceptCapabilitiesHeader,
-				`${publicationCapability},${confirmPresentCapability}`
+				`${publicationCapability},${confirmPresentCapability},${pushRootWritesCapability}`
 			);
 			const response = await baseFetcher(new Request(request, { headers }));
 			if (request.url.endsWith('/uploads/credential')) {
@@ -180,6 +184,7 @@ export function pushClientFor(
 				);
 				hasCredentialPublication = echoed.has(publicationCapability);
 				hasCredentialConfirmation = echoed.has(confirmPresentCapability);
+				hasCredentialRootWrites = echoed.has(pushRootWritesCapability);
 			}
 			if (request.url.endsWith('/uploads/confirm-present')) {
 				confirmationPageSize =
@@ -443,11 +448,62 @@ export function pushClientFor(
 			);
 		} catch (error) {
 			if (!(error instanceof ORPCError) || error.code !== 'NOT_FOUND') {
-				throw error;
+				throw cacheRemovedErrorOf(error) ?? error;
 			}
 			isConfirmationUnavailable = true;
 			return;
 		}
+	};
+
+	const negotiateInCache: PushClient['negotiate'] = async (body) => {
+		if ((await publicationProtocol()) === 'publication') {
+			return plan(body);
+		}
+		const pushId = await session.pushId();
+		let hasGraceFactsForEveryPage = true;
+
+		const uploads = await decisionPages(
+			body.paths,
+			negotiationDeadline,
+			async (paths, signal) => {
+				const page = await acknowledged(signal, (rpc) =>
+					callInCache(
+						rpc.uploads.negotiate,
+						cache,
+						{
+							pushId,
+							paths,
+							...(body.attachRoot !== undefined && {
+								attachRoot: body.attachRoot
+							})
+						},
+						{ signal }
+					)
+				);
+				hasGraceFactsForEveryPage &&= page.hasUploadGraceFacts;
+
+				return page.result.uploads;
+			}
+		);
+
+		return { uploads, hasUploadGraceFacts: hasGraceFactsForEveryPage };
+	};
+
+	const inPush = async <Result>(
+		call: () => Promise<Result>
+	): Promise<Result> => {
+		try {
+			return await call();
+		} catch (error) {
+			throw cacheRemovedErrorOf(error) ?? error;
+		}
+	};
+	// A root write includes the push ID only after the server issued one, so a
+	// push that negotiated nothing does not request a credential for its roots.
+	const pushBinding = (): { readonly pushId?: PushId } => {
+		const pushId = session.issuedPushId();
+
+		return pushId !== undefined && hasCredentialRootWrites ? { pushId } : {};
 	};
 
 	return {
@@ -456,39 +512,7 @@ export function pushClientFor(
 			decision.action === 'skip'
 				? skips.get(decision.storePathHash)
 				: entries.get(decision.uploadId)?.upload,
-		negotiate: async (body) => {
-			if ((await publicationProtocol()) === 'publication') {
-				return plan(body);
-			}
-			const pushId = await session.pushId();
-			let hasGraceFactsForEveryPage = true;
-
-			const uploads = await decisionPages(
-				body.paths,
-				negotiationDeadline,
-				async (paths, signal) => {
-					const page = await acknowledged(signal, (rpc) =>
-						callInCache(
-							rpc.uploads.negotiate,
-							cache,
-							{
-								pushId,
-								paths,
-								...(body.attachRoot !== undefined && {
-									attachRoot: body.attachRoot
-								})
-							},
-							{ signal }
-						)
-					);
-					hasGraceFactsForEveryPage &&= page.hasUploadGraceFacts;
-
-					return page.result.uploads;
-				}
-			);
-
-			return { uploads, hasUploadGraceFacts: hasGraceFactsForEveryPage };
-		},
+		negotiate: (body) => inPush(() => negotiateInCache(body)),
 		// Never touches the credential session: a dry run requests no upload
 		// credential, so preview must not negotiate a pushId to get one.
 		preview: async (body) => {
@@ -600,25 +624,38 @@ export function pushClientFor(
 				}
 			});
 		},
-		negotiateAttestations: async (body) =>
-			callInCache(rpc.attestations.negotiate, cache, {
-				pushId: await session.pushId(),
-				...body
-			}),
+		negotiateAttestations: (body) =>
+			inPush(async () =>
+				callInCache(rpc.attestations.negotiate, cache, {
+					pushId: await session.pushId(),
+					...body
+				})
+			),
 		attachAttestation: (uploadId) =>
-			callInCache(rpc.attestations.attach, cache, { id: uploadId }),
-		negotiateAttestationBundles: async (body) =>
-			callInCache(rpc.attestations.negotiateBundles, cache, {
-				pushId: await session.pushId(),
-				...body
-			}),
+			inPush(() =>
+				callInCache(rpc.attestations.attach, cache, { id: uploadId })
+			),
+		negotiateAttestationBundles: (body) =>
+			inPush(async () =>
+				callInCache(rpc.attestations.negotiateBundles, cache, {
+					pushId: await session.pushId(),
+					...body
+				})
+			),
 		attachAttestationPaths: (uploadId, body) =>
-			callInCache(rpc.attestations.attachPaths, cache, {
-				id: uploadId,
-				storePathHashes: [...body.storePathHashes]
-			}),
+			inPush(() =>
+				callInCache(rpc.attestations.attachPaths, cache, {
+					id: uploadId,
+					storePathHashes: [...body.storePathHashes]
+				})
+			),
 		setRoot: (name, body) =>
-			callInCache(rpc.roots.set, cache, { name, ...body }),
-		applyRoots: (body) => callInCache(rpc.roots.batch, cache, body)
+			inPush(() =>
+				callInCache(rpc.roots.set, cache, { name, ...body, ...pushBinding() })
+			),
+		applyRoots: (body) =>
+			inPush(() =>
+				callInCache(rpc.roots.batch, cache, { ...body, ...pushBinding() })
+			)
 	};
 }

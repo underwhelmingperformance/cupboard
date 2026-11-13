@@ -166,6 +166,24 @@ delete the cache's store paths, roots and pending uploads, remove staged uploads
 and retire published objects in bounded batches. Shared NARs remain available to
 other caches that reference them.
 
+The server refuses the rest of any push that started before the removal, so a
+push from the current `cupboard` does not create the cache again. A push starts
+when it requests its push credential, before it negotiates its first paths.
+`cupboard build-push` requests the credential when it publishes its first
+output: during the build when it publishes outputs as they finish, and after the
+build when it publishes them together. A removal before that point counts as a
+removal before the push started, so the push publishes into a new, empty cache
+with default settings.
+
+A running `cupboard push` to the cache stops at its next request, or when the
+server reports the removal of a path that it is waiting for, and fails with an
+error that gives the cache's name. A running `cupboard build-push` whose push
+has started lets its build finish, publishes nothing more, reports the removal
+and exits with status 74, unless another failure has a more specific publishing
+status. A push that has already sent its last request finishes without an error.
+An older `cupboard` fails with an error that depends on how far the push had
+progressed, and its root writes can still create the cache again.
+
 The command asks you to confirm. In a script, add `--yes` to skip the question.
 
 You can't remove the default cache.

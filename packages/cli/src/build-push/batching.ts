@@ -18,8 +18,11 @@ import { abortable } from '../abort.ts';
 import type { CommitOptions } from '../client/client.ts';
 import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
-import { PublicationUploadRequiredError } from '../errors.ts';
-import { PushNarMetadataMismatchError } from '../errors.ts';
+import {
+	CacheRemovedError,
+	PublicationUploadRequiredError,
+	PushNarMetadataMismatchError
+} from '../errors.ts';
 import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import type { NarSource } from '../nix/nar-source.ts';
@@ -168,6 +171,9 @@ export class BuildOutputBatcher {
 	private readonly divergences: BuildOutputDivergences;
 	private timer: NodeJS.Timeout | undefined;
 	private chain: Promise<void> = Promise.resolve();
+	// The server refuses every later request of the push once its cache was
+	// removed, so the batcher sends no further batch.
+	private removal: CacheRemovedError | undefined;
 
 	constructor(private readonly options: BuildOutputBatcherOptions) {
 		this.divergences = options.divergences ?? new BuildOutputDivergences();
@@ -215,6 +221,9 @@ export class BuildOutputBatcher {
 	}
 
 	private recordFailure(storePath: StorePathString, reason: unknown): void {
+		if (reason instanceof CacheRemovedError) {
+			this.removal ??= reason;
+		}
 		this.inFlight.delete(storePath);
 		this.waiting.add(storePath);
 		this.options.onFailure?.({ storePath, reason });
@@ -236,6 +245,14 @@ export class BuildOutputBatcher {
 	}
 
 	private async flushBatch(batch: readonly StorePathString[]): Promise<void> {
+		const removal = this.removal;
+		if (removal !== undefined) {
+			for (const storePath of batch) {
+				this.recordFailure(storePath, removal);
+			}
+			return;
+		}
+
 		const remaining = new Set(batch);
 
 		try {
@@ -270,6 +287,10 @@ export class BuildOutputBatcher {
 							this.options.uploadConcurrency ?? defaultUploadConcurrency,
 						negotiationOf: (info) => prepareStorePathNegotiation(info),
 						negotiate: async (paths) => {
+							if (this.removal !== undefined) {
+								throw this.removal;
+							}
+
 							const negotiation = await this.options.client.negotiate({
 								paths: [...paths],
 								...(this.options.runRoot !== undefined && {
@@ -356,6 +377,11 @@ export class BuildOutputBatcher {
 			decision = { ...publication, action: 'commit' };
 		}
 
+		if (this.removal !== undefined) {
+			this.settlePath(storePath, this.removal, remaining);
+			return;
+		}
+
 		let wasAlreadyPresent: boolean;
 		try {
 			const outcome = await this.uploadAndCommit(decision, item.path);
@@ -369,6 +395,9 @@ export class BuildOutputBatcher {
 						await outcome.settled;
 						return { kind: 'servable' };
 					} catch (error) {
+						if (error instanceof CacheRemovedError) {
+							this.removal ??= error;
+						}
 						return { kind: 'failed', reason: error };
 					} finally {
 						this.pendingVerdicts.delete(storePath);

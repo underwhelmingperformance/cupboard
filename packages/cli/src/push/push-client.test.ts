@@ -2,7 +2,9 @@ import { publicationCapability } from '@cupboard/protocol/upload';
 import { uploadPathNegotiationSchema } from '@cupboard/protocol/upload';
 import {
 	acceptCapabilitiesHeader,
+	cacheRemovedErrorCode,
 	confirmPresentCapability,
+	pushRootWritesCapability,
 	type UploadAttachRootInput,
 	uploadCapabilitiesHeader,
 	uploadGraceFactsCapability,
@@ -21,8 +23,10 @@ import { z } from 'zod';
 import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
 import { CupboardClient } from '../client/client.ts';
 import { translateRpcError } from '../client/rpc-errors.ts';
+import { CacheRemovedError } from '../errors.ts';
 import { errorExitCode } from '../exit-code.ts';
 
+import { type PushClient } from './push.ts';
 import { pushClientFor } from './push-client.ts';
 
 function later(ms: number): Promise<void> {
@@ -580,7 +584,11 @@ describe('pushClientFor', () => {
 		}
 	);
 });
-import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	type CacheScope,
+	rootNameSchema
+} from '@cupboard/nix-store/scalars';
 import { attestationBundleNegotiateRequestSchema } from '@cupboard/protocol/attestations';
 
 it.each([
@@ -702,6 +710,264 @@ it.each([
 		} finally {
 			open.mockRestore();
 		}
+	}
+);
+
+const removedCacheMetadata = uploadPathNegotiationSchema.parse({
+	storePathHash: '0'.repeat(32),
+	storePath: `/nix/store/${'0'.repeat(32)}-app`,
+	narHash: `sha256:${'1'.repeat(52)}`,
+	narSize: 1,
+	references: []
+});
+const unsupportedCall = (): Promise<never> =>
+	Promise.reject(new Error('The push client lacks this call.'));
+
+// A push client for `builds` whose credential response echoes `echoed`. Every
+// other request is answered by `answer`. The path and body of every request,
+// including the credential request, are recorded.
+function recordingPushClient(
+	echoed: readonly string[],
+	answer: (path: string) => Response
+) {
+	const requests: { readonly path: string; readonly body: unknown }[] = [];
+	const client = pushClientFor(new URL('https://cupboard.test'), 'token', {
+		cache: { kind: 'named', name: cacheNameSchema.parse('builds') },
+		fetcher: async (input, init) => {
+			const request = new Request(input, init);
+			const text = await request.text();
+			const body: unknown = text === '' ? undefined : JSON.parse(text);
+			const path = new URL(request.url).pathname;
+			requests.push({ path, body });
+			if (path.endsWith('/uploads/credential')) {
+				return Response.json(
+					{
+						pushId: 'push-1',
+						accessKeyId: 'access',
+						secretAccessKey: 'secret',
+						sessionToken: 'session',
+						endpoint: 'https://r2.test',
+						bucket: 'blobs',
+						expiresAt: '2099-01-01T00:00:00.000Z'
+					},
+					{
+						headers:
+							echoed.length === 0
+								? {}
+								: { [uploadCapabilitiesHeader]: echoed.join(',') }
+					}
+				);
+			}
+
+			return answer(path);
+		}
+	});
+
+	return { client, requests };
+}
+
+const removedCacheAnswer = () =>
+	Response.json(
+		{
+			defined: true,
+			code: cacheRemovedErrorCode,
+			status: StatusCodes.GONE,
+			message: 'The cache builds was removed.',
+			data: { cache: { kind: 'named', name: 'builds' } }
+		},
+		{ status: StatusCodes.GONE }
+	);
+const skippedOperationId = 'a'.repeat(64);
+// Answers the plan with `removedCacheMetadata` as already served, and every
+// other request with the removal.
+const removedAfterPlanAnswer = (path: string) =>
+	path.endsWith('/uploads/plan')
+		? Response.json({
+				cacheGeneration: 1,
+				pushExpiresAt: '2099-01-01T00:00:00.000Z',
+				uploads: [
+					{
+						action: 'skip',
+						storePathHash: removedCacheMetadata.storePathHash,
+						narHash: removedCacheMetadata.narHash,
+						operationId: skippedOperationId,
+						r2Key: `staging-v2/acme/push-1/${skippedOperationId}.nar.zst`
+					}
+				]
+			})
+		: removedCacheAnswer();
+const rootBatch = {
+	roots: [
+		{
+			action: 'set' as const,
+			name: rootNameSchema.parse('release'),
+			targets: [],
+			retention: { kind: 'inherit' as const }
+		}
+	]
+};
+
+it.each([
+	{
+		procedure: 'uploads.plan',
+		echoed: [publicationCapability],
+		answer: removedCacheAnswer,
+		call: (client: PushClient) =>
+			client.negotiate({ paths: [removedCacheMetadata] })
+	},
+	{
+		procedure: 'uploads.negotiate',
+		echoed: [],
+		answer: removedCacheAnswer,
+		call: (client: PushClient) =>
+			client.negotiate({ paths: [removedCacheMetadata] })
+	},
+	{
+		procedure: 'uploads.confirmPresent',
+		echoed: [publicationCapability, confirmPresentCapability],
+		answer: removedAfterPlanAnswer,
+		call: async (client: PushClient) => {
+			const plan = await client.negotiate({ paths: [removedCacheMetadata] });
+
+			const skips = plan.uploads.flatMap((decision) =>
+				decision.action === 'skip' ? [decision] : []
+			);
+
+			return client.confirmPresent?.(skips) ?? unsupportedCall();
+		}
+	},
+	{
+		procedure: 'attestations.negotiate',
+		echoed: [],
+		answer: removedCacheAnswer,
+		call: (client: PushClient) =>
+			client.negotiateAttestations?.({
+				bundles: [
+					{
+						storePathHash: removedCacheMetadata.storePathHash,
+						digest: 'f'.repeat(64)
+					}
+				]
+			}) ?? unsupportedCall()
+	},
+	{
+		procedure: 'attestations.negotiateBundles',
+		echoed: [],
+		answer: removedCacheAnswer,
+		call: (client: PushClient) =>
+			client.negotiateAttestationBundles?.({
+				bundles: [{ digest: 'f'.repeat(64) }]
+			}) ?? unsupportedCall()
+	},
+	{
+		procedure: 'attestations.attach',
+		echoed: [],
+		answer: removedCacheAnswer,
+		call: (client: PushClient) =>
+			client.attachAttestation?.(skippedOperationId) ?? unsupportedCall()
+	},
+	{
+		procedure: 'attestations.attachPaths',
+		echoed: [],
+		answer: removedCacheAnswer,
+		call: (client: PushClient) =>
+			client.attachAttestationPaths?.(skippedOperationId, {
+				storePathHashes: [removedCacheMetadata.storePathHash]
+			}) ?? unsupportedCall()
+	},
+	{
+		procedure: 'roots.set',
+		echoed: [],
+		answer: removedCacheAnswer,
+		call: (client: PushClient) => client.setRoot('release', { targets: [] })
+	},
+	{
+		procedure: 'roots.batch',
+		echoed: [],
+		answer: removedCacheAnswer,
+		call: (client: PushClient) => client.applyRoots(rootBatch)
+	}
+])(
+	'reports a CACHE_REMOVED refusal of $procedure as the removal of the cache',
+	async ({ echoed, answer, call }) => {
+		const { client } = recordingPushClient(echoed, answer);
+
+		await expect(call(client)).rejects.toStrictEqual(
+			new CacheRemovedError('builds')
+		);
+	}
+);
+
+const rootAnswer = (path: string) =>
+	Response.json(
+		path.endsWith('/roots/batch')
+			? { roots: [] }
+			: path.endsWith('/uploads')
+				? { uploads: [] }
+				: {
+						name: 'release',
+						expired: false,
+						createdAt: '2026-07-31T00:00:00.000Z',
+						updatedAt: '2026-07-31T00:00:00.000Z',
+						targets: []
+					}
+	);
+const rootWrites = [
+	{
+		write: 'roots.set',
+		path: '/cache/builds/roots/release',
+		body: { targets: [] },
+		send: (client: PushClient) => client.setRoot('release', { targets: [] })
+	},
+	{
+		write: 'roots.batch',
+		path: '/cache/builds/roots/batch',
+		body: {
+			roots: [
+				{
+					action: 'set',
+					name: 'release',
+					targets: [],
+					retention: { kind: 'inherit' }
+				}
+			]
+		},
+		send: (client: PushClient) => client.applyRoots(rootBatch)
+	}
+] as const;
+
+it.each(
+	rootWrites.flatMap((rootWrite) => [
+		{ ...rootWrite, echoed: [pushRootWritesCapability], hasPushId: true },
+		{ ...rootWrite, echoed: [], hasPushId: false }
+	])
+)(
+	'sends the push ID with $write only when the credential response echoes push-root-writes: $hasPushId',
+	async ({ path, body, send, echoed, hasPushId }) => {
+		const { client, requests } = recordingPushClient(echoed, rootAnswer);
+		await client.negotiate({ paths: [] });
+
+		await send(client);
+
+		expect(requests).toStrictEqual([
+			{ path: '/cache/builds/uploads/credential', body: {} },
+			{ path: '/cache/builds/uploads', body: { pushId: 'push-1', paths: [] } },
+			{ path, body: { ...body, ...(hasPushId && { pushId: 'push-1' }) } }
+		]);
+	}
+);
+
+it.each(rootWrites)(
+	'sends $write of a push that has no push ID without requesting a credential',
+	async ({ path, body, send }) => {
+		const { client, requests } = recordingPushClient(
+			[pushRootWritesCapability],
+			rootAnswer
+		);
+
+		await send(client);
+
+		expect(requests).toStrictEqual([{ path, body }]);
 	}
 );
 
@@ -888,7 +1154,7 @@ it.each([
 			const skips = uploads.filter((decision) => decision.action === 'skip');
 			const first = await client.confirmPresent?.(skips);
 			const second = await client.confirmPresent?.(skips);
-			const accepted = `${publicationCapability},${confirmPresentCapability}`;
+			const accepted = `${publicationCapability},${confirmPresentCapability},${pushRootWritesCapability}`;
 			const confirmation = {
 				path: '/uploads/confirm-present',
 				accepted,

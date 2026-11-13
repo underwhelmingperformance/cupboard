@@ -43,6 +43,7 @@ import type {
 } from '../client/commit-socket.ts';
 import {
 	BuildOutputDivergedError,
+	CacheRemovedError,
 	PublicationUploadRequiredError,
 	UploadNegotiationMismatchError,
 	UploadVerificationFailedError
@@ -190,13 +191,17 @@ interface HarnessOptions {
 	readonly failUploads?: ReadonlySet<StorePathString>;
 	readonly commitBehaviour?: ReadonlyMap<
 		StorePathString,
-		'pending-servable' | 'pending-failed'
+		| 'pending-servable'
+		| 'pending-failed'
+		| 'pending-removed'
+		| 'refused-removed'
 	>;
 	readonly derivationOutputs?: ReadonlyMap<string, readonly StorePathString[]>;
 	readonly decisions?: (
 		paths: readonly { readonly storePath: string }[]
 	) => UploadNegotiateResponse['uploads'];
 	readonly failNegotiationFor?: ReadonlySet<StorePathString>;
+	readonly negotiationError?: Error;
 }
 
 class NegotiationTestError extends Error {}
@@ -257,7 +262,9 @@ function harness(options: HarnessOptions = {}): Harness {
 					options.failNegotiationFor?.has(storePathSchema.parse(path.storePath))
 				)
 			) {
-				return Promise.reject(new NegotiationTestError());
+				return Promise.reject(
+					options.negotiationError ?? new NegotiationTestError()
+				);
 			}
 
 			return Promise.resolve({
@@ -302,12 +309,17 @@ function harness(options: HarnessOptions = {}): Harness {
 				storePath === undefined
 					? undefined
 					: options.commitBehaviour?.get(storePath);
+			if (behaviour === 'refused-removed') {
+				return Promise.reject(new CacheRemovedError('builds'));
+			}
 			const settled =
 				behaviour === 'pending-failed'
 					? Promise.reject(
 							new UploadVerificationFailedError(commitTarget.uploadId, 'absent')
 						)
-					: Promise.resolve();
+					: behaviour === 'pending-removed'
+						? Promise.reject(new CacheRemovedError('builds'))
+						: Promise.resolve();
 			const outcome: CommitOutcome = {
 				storePathHash: commitTarget.storePathHash,
 				narHash: commitTarget.narHash,
@@ -1414,6 +1426,133 @@ describe('reconcileBuild', () => {
 				{ root: rootTwo, applied: true, targets: [pathB] }
 			],
 			failureTypes: [NegotiationTestError]
+		});
+	});
+
+	it('stops negotiating and writes no roots after a negotiation reports that the cache was removed', async () => {
+		const removal = new CacheRemovedError('builds');
+		const harnessed = harness({
+			valid: [pathA, pathB, pathC],
+			failNegotiationFor: new Set([pathA]),
+			negotiationError: removal
+		});
+		const result = await reconcileWith(harnessed, {
+			targets: [target(pathA, rootOne), target(pathB, rootTwo), target(pathC)],
+			uploadConcurrency: 1
+		});
+
+		expect({
+			negotiated: harnessed.negotiatedPaths,
+			failed: result.receipt.failed,
+			roots: result.roots,
+			rootReplacements: harnessed.rootReplacements,
+			causes: result.failures.map((failure) => failure.cause)
+		}).toStrictEqual({
+			negotiated: [[pathA]],
+			failed: [pathA, pathB, pathC],
+			roots: [
+				{ root: rootOne, applied: false, targets: [pathA] },
+				{ root: rootTwo, applied: false, targets: [pathB] }
+			],
+			rootReplacements: [],
+			causes: [removal, removal, removal]
+		});
+	});
+
+	it('negotiates no later group after a deferred verdict reports that the cache was removed', async () => {
+		const removal = new CacheRemovedError('builds');
+		const harnessed = harness({
+			valid: [pathA, pathB],
+			actions: new Map<StorePathString, UploadDecisionInput['action']>([
+				[pathA, 'commit'],
+				[pathB, 'commit']
+			]),
+			commitBehaviour: new Map<StorePathString, 'pending-removed'>([
+				[pathA, 'pending-removed']
+			])
+		});
+
+		const result = await reconcileWith(harnessed, {
+			targets: [target(pathA), target(pathB)],
+			uploadConcurrency: 1
+		});
+
+		expect({
+			negotiated: harnessed.negotiatedPaths,
+			commits: harnessed.clientCommits,
+			failed: result.receipt.failed,
+			causes: result.failures.map((failure) => failure.cause)
+		}).toStrictEqual({
+			negotiated: [[pathA]],
+			commits: [StorePath.hash(pathA)],
+			failed: [pathA, pathB],
+			causes: [removal, removal]
+		});
+	});
+
+	// One upload worker takes the paths one group at a time. After the skipped
+	// pathC, the next group has two paths, so pathB is negotiated in pathA's
+	// group.
+	it('commits no further path of a negotiated group after a commit reports that the cache was removed', async () => {
+		const removal = new CacheRemovedError('builds');
+		const harnessed = harness({
+			valid: [pathC, pathA, pathB],
+			actions: new Map<StorePathString, UploadDecisionInput['action']>([
+				[pathA, 'commit'],
+				[pathB, 'commit']
+			]),
+			commitBehaviour: new Map<StorePathString, 'refused-removed'>([
+				[pathA, 'refused-removed']
+			])
+		});
+
+		const result = await reconcileWith(harnessed, {
+			targets: [target(pathC), target(pathA), target(pathB)],
+			uploadConcurrency: 1
+		});
+
+		expect({
+			negotiated: harnessed.negotiatedPaths,
+			commits: harnessed.clientCommits,
+			failed: result.receipt.failed,
+			causes: result.failures.map((failure) => failure.cause)
+		}).toStrictEqual({
+			negotiated: [[pathC], [pathA, pathB]],
+			commits: [StorePath.hash(pathA)],
+			failed: [pathA, pathB],
+			causes: [removal, removal]
+		});
+	});
+
+	it('writes no roots after a deferred verdict reports that the cache was removed', async () => {
+		const harnessed = harness({
+			valid: [pathA, pathB],
+			actions: new Map<StorePathString, UploadDecisionInput['action']>([
+				[pathA, 'commit'],
+				[pathB, 'commit']
+			]),
+			commitBehaviour: new Map<StorePathString, 'pending-removed'>([
+				[pathA, 'pending-removed']
+			])
+		});
+
+		const result = await reconcileWith(harnessed, {
+			targets: [target(pathA, rootOne), target(pathB, rootTwo)]
+		});
+
+		expect({
+			failed: result.receipt.failed,
+			roots: result.roots,
+			rootReplacements: harnessed.rootReplacements,
+			causes: result.failures.map((failure) => failure.cause)
+		}).toStrictEqual({
+			failed: [pathA],
+			roots: [
+				{ root: rootOne, applied: false, targets: [pathA] },
+				{ root: rootTwo, applied: false, targets: [pathB] }
+			],
+			rootReplacements: [],
+			causes: [new CacheRemovedError('builds')]
 		});
 	});
 

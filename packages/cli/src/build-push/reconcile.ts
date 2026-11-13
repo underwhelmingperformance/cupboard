@@ -36,6 +36,7 @@ import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
 import { PublicationUploadRequiredError } from '../errors.ts';
 import {
+	CacheRemovedError,
 	PushNarMetadataMismatchError,
 	UploadVerificationFailedError
 } from '../errors.ts';
@@ -294,6 +295,9 @@ interface PublicationLedger {
 	>;
 	readonly collected: Set<StorePathString>;
 	readonly divergences: BuildOutputDivergences;
+	// The server refuses every later request of the push once the cache was
+	// removed, so reconciliation negotiates nothing more and writes no roots.
+	removal?: CacheRemovedError;
 }
 
 function recordFailure(
@@ -302,6 +306,10 @@ function recordFailure(
 	reason: TargetFailureReason,
 	cause: unknown
 ): void {
+	if (cause instanceof CacheRemovedError) {
+		ledger.removal ??= cause;
+	}
+
 	if (ledger.failures.has(storePath)) {
 		return;
 	}
@@ -378,10 +386,16 @@ interface AcknowledgedPath {
 	readonly verdict: Promise<Verdict>;
 }
 
-async function verdictOf(outcome: CommitOutcome): Promise<Verdict> {
+async function verdictOf(
+	outcome: CommitOutcome,
+	ledger: PublicationLedger
+): Promise<Verdict> {
 	try {
 		await outcome.settled;
 	} catch (error) {
+		if (error instanceof CacheRemovedError) {
+			ledger.removal ??= error;
+		}
 		return { kind: 'failed', error };
 	}
 
@@ -457,6 +471,9 @@ async function uploadAndAcknowledge(
 				return uploadAndAcknowledge(upload, info, isTarget, options, ledger);
 			}
 		}
+		if (error instanceof CacheRemovedError) {
+			ledger.removal ??= error;
+		}
 		return { info, verdict: Promise.resolve({ kind: 'failed', error }) };
 	}
 
@@ -471,7 +488,7 @@ async function uploadAndAcknowledge(
 		return undefined;
 	}
 
-	return { info, verdict: verdictOf(outcome) };
+	return { info, verdict: verdictOf(outcome, ledger) };
 }
 
 // Record an acknowledged path's verdict. An absent verdict can mean that
@@ -553,6 +570,10 @@ async function publishNegotiated(
 		}
 		decision = { ...publication, action: 'commit' };
 	}
+	if (ledger.removal !== undefined) {
+		recordFailure(ledger, info.storePath, 'upload', ledger.removal);
+		return;
+	}
 	const acknowledgement = await uploadAndAcknowledge(
 		decision,
 		info,
@@ -619,6 +640,10 @@ async function publishRequired(
 			concurrency,
 			negotiationOf: (info) => prepareStorePathNegotiation(info),
 			negotiate: async (paths) => {
+				if (ledger.removal !== undefined) {
+					throw ledger.removal;
+				}
+
 				const negotiation = await options.client.negotiate({
 					paths: [...paths],
 					...(options.runRoot !== undefined && { attachRoot: options.runRoot })
@@ -782,7 +807,10 @@ async function applyTargetRoots(
 			.toArray();
 		const resolvedPaths = group.flatMap((item) => resolvedPathsOf(item));
 
-		if (group.some((item) => !isConfirmed(item, ledger))) {
+		if (
+			ledger.removal !== undefined ||
+			group.some((item) => !isConfirmed(item, ledger))
+		) {
 			roots.push({ root, applied: false, targets });
 			continue;
 		}

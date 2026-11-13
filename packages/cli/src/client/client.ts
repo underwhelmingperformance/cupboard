@@ -29,6 +29,7 @@ import {
 	signupResponseSchema
 } from '@cupboard/protocol/signup';
 import {
+	cacheRemovedVerdictCapability,
 	commitAcceptCapabilitiesHeader,
 	commitBatchCapability,
 	type CommitBlobDeclaration,
@@ -203,6 +204,7 @@ export class CupboardClient {
 			credentials,
 			{
 				path,
+				cacheName: cacheLabel(this.cache),
 				timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
 				signal: this.signal,
 				onFailure: options.onFailure,
@@ -219,7 +221,7 @@ export class CupboardClient {
 		// declaration even if an intermediary strips the response capability. An
 		// `unsupported` frame is the only signal that permits the local window.
 		const headers = {
-			[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability},${publicationCapability},${publicationRefusalReasonsCapability}`
+			[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability},${publicationCapability},${publicationRefusalReasonsCapability},${cacheRemovedVerdictCapability}`
 		};
 		const authorise = () => bearerAttempt(credential, headers);
 

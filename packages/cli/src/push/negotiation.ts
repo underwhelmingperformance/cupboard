@@ -9,7 +9,10 @@ import {
 import { drainWithConcurrency } from '@cupboard/shared/concurrency';
 
 import { isAbortError } from '../abort.ts';
-import { UploadNegotiationMismatchError } from '../errors.ts';
+import {
+	CacheRemovedError,
+	UploadNegotiationMismatchError
+} from '../errors.ts';
 
 export interface UploadNegotiationIdentity {
 	readonly storePathHash: string;
@@ -120,7 +123,9 @@ Confirms the planned skips in `decisions` for which `isRefused` returns
 false, and returns the retained paths by store-path hash. The result omits a
 path that the destination does not serve, and every path when the client
 cannot confirm skips or the confirmation fails. The caller commits those
-paths, so a failed confirmation costs only the ordinary commits.
+paths, so a failed confirmation costs only the ordinary commits. A
+`CacheRemovedError` propagates, because the server refuses every later
+request of the push.
 */
 export async function confirmPlannedSkips(
 	confirmPresent: ConfirmPresent | undefined,
@@ -140,7 +145,7 @@ export async function confirmPlannedSkips(
 	try {
 		answered = (await confirmPresent(skips)) ?? [];
 	} catch (error) {
-		if (isAbortError(error)) {
+		if (isAbortError(error) || error instanceof CacheRemovedError) {
 			throw error;
 		}
 		rootLogger().warn('confirmation failed; committing the planned skips', {

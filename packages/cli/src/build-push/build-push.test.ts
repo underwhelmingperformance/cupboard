@@ -62,12 +62,14 @@ import {
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
 	BuildRebuildRemoteDispatchError,
+	CacheRemovedError,
 	CliAbortError,
 	CliError,
 	CommitCapacityQueuedError,
 	CommitCapacityTimeoutError,
 	CupboardHttpError,
 	PostBuildHookConflictError,
+	publicationExitCode,
 	PushIncompleteError,
 	QuotaExceededError,
 	SessionRejectedError,
@@ -76,7 +78,7 @@ import {
 	UploadRequestLimitExceededError,
 	UploadVerificationFailedError
 } from '../errors.ts';
-import { classifyPublicationFailures } from '../exit-code.ts';
+import { classifyPublicationFailures, errorExitCode } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
 import type { NarCompressionFacts } from '../nix/blob.ts';
 import { type NarSource, SequentialNarSource } from '../nix/nar-source.ts';
@@ -1284,6 +1286,7 @@ function pacedSession(
 		},
 		{
 			path: commitPath,
+			cacheName: 'builds',
 			timeoutSeconds: 100,
 			keepaliveMs: 600_000,
 			onWaiting
@@ -1537,6 +1540,30 @@ describe('classifyPublicationFailures', () => {
 			expectedCauseIndex: 0
 		},
 		{
+			name: 'a removed cache',
+			causes: [new CacheRemovedError('builds')],
+			expectedExitCode: 74,
+			expectedCauseIndex: 0
+		},
+		{
+			name: 'authentication outranking a removed cache',
+			causes: [
+				new CacheRemovedError('builds'),
+				new CupboardHttpError('PUT', '/nar', 401, '')
+			],
+			expectedExitCode: 77,
+			expectedCauseIndex: 1
+		},
+		{
+			name: 'a transient failure outranking a removed cache',
+			causes: [
+				new CacheRemovedError('builds'),
+				new CupboardHttpError('PUT', '/nar', 503, '')
+			],
+			expectedExitCode: 75,
+			expectedCauseIndex: 1
+		},
+		{
 			name: 'an unclassified failure',
 			causes: [new Error('lost')],
 			expectedExitCode: 74,
@@ -1621,6 +1648,25 @@ describe('runBuildPush', () => {
 				cause: new UploadRequestLimitExceededError(100, { cause: failure })
 			}),
 			requests: 1
+		});
+	});
+
+	it('exits with the publication status and reports the removal when the server reports that the cache was removed', async () => {
+		const removal = new CacheRemovedError('builds');
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			negotiateFailure: removal
+		});
+
+		expect({
+			error: run.error,
+			exitCode: errorExitCode(run.error)
+		}).toStrictEqual({
+			error: new BuildPublicationFailedError([pathA], publicationExitCode, {
+				cause: removal
+			}),
+			exitCode: publicationExitCode
 		});
 	});
 
