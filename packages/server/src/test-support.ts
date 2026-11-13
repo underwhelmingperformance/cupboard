@@ -171,6 +171,7 @@ import {
 	type ObjectReaperPhase
 } from './do/blob-reaper-service.ts';
 import { CacheRegistrationService } from './do/cache-registration-service.ts';
+import { CommitPipelineService } from './do/commit-pipeline-service.ts';
 import type { ServerContext } from './do/context.ts';
 import type { GarbageCollectionService } from './do/garbage-collection-service.ts';
 import { jsonRowList, jsonValueLists } from './do/json-list.ts';
@@ -748,6 +749,21 @@ of `CupboardServer`. The verification service uses the same instance.
 export function uploadStateOf(instance: CupboardServer): UploadStateService {
 	return (instance as unknown as { uploadState: UploadStateService })
 		.uploadState;
+}
+
+/**
+Returns the Durable Object's own commit pipeline, which is a private field of
+`CupboardServer`. Session commits and verification use the same instance.
+*/
+export function commitPipelineOf(
+	instance: CupboardServer
+): CommitPipelineService {
+	const pipeline: unknown = Reflect.get(instance, 'commitPipeline');
+	if (!(pipeline instanceof CommitPipelineService)) {
+		throw new TypeError('The test server has no commit pipeline.');
+	}
+
+	return pipeline;
 }
 
 const fixtureWaitDeadlineMs = 10_000;
@@ -3497,6 +3513,36 @@ export function closeSessionAndWait(socket: WebSocket): Promise<void> {
 		});
 		socket.close();
 	});
+}
+
+/**
+The server's answer to the request that {@link framesThroughProbe} sends.
+*/
+export const probeAnswer: CommitSessionFrame = {
+	ev: 'unsupported',
+	op: 'request-credit'
+};
+
+/**
+Sends `request-credit` on a session that did not negotiate credit, which the
+server answers with an `unsupported` frame whatever the state of the session's
+cache. Returns the session's frames up to and including that answer. The
+server sends a session's frames in order, so the result includes every frame
+that the server sent before it received the request.
+*/
+export async function framesThroughProbe(
+	session: CommitConversation
+): Promise<CommitSessionFrame[]> {
+	session.send({ op: 'request-credit', entries: 1 });
+	const frames: CommitSessionFrame[] = [];
+
+	for (;;) {
+		const frame = await session.nextFrame();
+		frames.push(frame);
+		if (frame.ev === 'unsupported') {
+			return frames;
+		}
+	}
 }
 
 type CommitFixturePhase = 'initial frame' | 'verdict';

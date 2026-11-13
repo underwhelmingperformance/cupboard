@@ -59,6 +59,7 @@ export const commitSessionAttachmentSchema = z.object({
 	reuseGrantsStored: z.literal(true).optional(),
 	publication: z.literal(true).optional(),
 	publicationRefusalReasons: z.literal(true).optional(),
+	cacheRemovedVerdicts: z.literal(true).optional(),
 	isClosing: z.boolean().optional(),
 	credit: commitCreditStateSchema.optional(),
 	lastActivityAt: epochMillisSchema.optional(),

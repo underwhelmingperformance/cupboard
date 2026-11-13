@@ -30,6 +30,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
+	cacheRemovedVerdictCapability,
 	type CommitBatchEntry,
 	type CommitBlobDeclaration,
 	commitCapabilitiesHeader,
@@ -303,6 +304,8 @@ import {
 	UploadStateService
 } from './upload-state-service.ts';
 import {
+	cacheRemovedVerdictFrame,
+	hasAcceptedCacheRemovedVerdict,
 	unservableVerdictFrame,
 	uploadVerdictFrame
 } from './upload-verdict.ts';
@@ -1274,6 +1277,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const hasRefusalReasons =
 			hasPublication &&
 			hasAcceptedCapability(request, publicationRefusalReasonsCapability);
+		const hasCacheRemovedVerdicts = hasAcceptedCapability(
+			request,
+			cacheRemovedVerdictCapability
+		);
 		if (!hasPublication) {
 			this.context.cacheRepository.require(cache);
 		}
@@ -1299,7 +1306,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				correlation: requestCorrelation(request),
 				reuseGrantsStored: true,
 				...(hasPublication && { publication: true as const }),
-				...(hasRefusalReasons && { publicationRefusalReasons: true as const })
+				...(hasRefusalReasons && { publicationRefusalReasons: true as const }),
+				...(hasCacheRemovedVerdicts && { cacheRemovedVerdicts: true })
 			},
 			hasNegotiatedCredit,
 			Date.now()
@@ -1446,14 +1454,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			request.op === 'commit'
 				? [request.uploadId]
 				: request.commits.map((entry) => entry.uploadId);
+		const isRemoved =
+			hasAcceptedCacheRemovedVerdict(socket) &&
+			this.context.cacheRepository.lastDeleted(attachment.cache) !== undefined;
 		try {
 			for (const uploadId of uploadIds) {
-				sendCommitSessionFrame(socket, {
-					ev: 'error',
-					uploadId,
-					status: error.status,
-					message: error.message
-				});
+				sendCommitSessionFrame(
+					socket,
+					isRemoved
+						? cacheRemovedVerdictFrame(uploadId)
+						: {
+								ev: 'error',
+								uploadId,
+								status: error.status,
+								message: error.message
+							}
+				);
 			}
 		} finally {
 			if (decision === 'accounted') {
@@ -1786,13 +1802,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 			return;
 		}
+		// Every reader sees an accepted operation of a removed cache as failed
+		// with `absent`, so a commit refused by the removal, a subscription and a
+		// resent entry of the operation all reach this replay.
 		sendCommitSessionFrame(
 			socket,
-			unservableVerdictFrame(
-				operation.id,
-				operation.graceDecisionJson,
-				publicationFailure(operation.resultJson)
-			)
+			this.context.cacheRepository.isRemoved(operation.cacheId) &&
+				hasAcceptedCacheRemovedVerdict(socket)
+				? cacheRemovedVerdictFrame(operation.id, operation.graceDecisionJson)
+				: unservableVerdictFrame(
+						operation.id,
+						operation.graceDecisionJson,
+						publicationFailure(operation.resultJson)
+					)
 		);
 	}
 
@@ -2164,7 +2186,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						uploadId,
 						authority,
 						advisory,
-						blob
+						blob,
+						sessionId
 					)
 				)
 			);
@@ -2217,6 +2240,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					status: error.status,
 					message: error.message
 				});
+				return;
+			}
+			// The commit resolved the cache before the cache was removed.
+			if (
+				error instanceof CacheNotFoundError &&
+				hasAcceptedCacheRemovedVerdict(socket)
+			) {
+				sendCommitSessionFrame(socket, cacheRemovedVerdictFrame(uploadId));
 				return;
 			}
 			if (identity !== undefined && error instanceof UploadNotFoundError) {
@@ -4107,6 +4138,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				request,
 				new CacheNotFoundError(cacheScope)
 			);
+			return;
+		}
+		if (
+			cache === undefined &&
+			(request.op === 'subscribe' || request.op === 'subscribe-identity') &&
+			hasAcceptedCacheRemovedVerdict(socket) &&
+			this.context.cacheRepository.lastDeleted(cacheScope) !== undefined
+		) {
+			const uploadIds =
+				request.op === 'subscribe'
+					? request.uploadIds
+					: request.entries.map((entry) => entry.uploadId);
+			for (const uploadId of uploadIds) {
+				sendCommitSessionFrame(socket, cacheRemovedVerdictFrame(uploadId));
+			}
 			return;
 		}
 		if (cache === undefined) {

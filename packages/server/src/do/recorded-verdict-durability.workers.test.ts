@@ -20,6 +20,7 @@ import { narObjectKeyPrefix } from '../http/http.ts';
 import {
 	asOneInvocation,
 	collectVerificationPasses,
+	commitPipelineOf,
 	currentServer,
 	deferFreshUpload,
 	flakyD1,
@@ -33,10 +34,7 @@ import {
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
-import {
-	type BatchedMaterialiseOutcome,
-	CommitPipelineService
-} from './commit-pipeline-service.ts';
+import { type BatchedMaterialiseOutcome } from './commit-pipeline-service.ts';
 import type { ServerContext } from './context.ts';
 import { maintenancePassCursorKey } from './server.ts';
 import {
@@ -127,15 +125,6 @@ function verifiedResults(
 			}
 		} satisfies VerificationResult;
 	});
-}
-
-function commitPipelineOf(instance: object): CommitPipelineService {
-	const pipeline: unknown = Reflect.get(instance, 'commitPipeline');
-	if (!(pipeline instanceof CommitPipelineService)) {
-		throw new TypeError('The test server has no commit pipeline.');
-	}
-
-	return pipeline;
 }
 
 function pendingRowStates(context: ServerContext): {

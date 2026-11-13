@@ -1,7 +1,15 @@
+import { rootLogger } from '@cupboard/logger';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
+import {
+	cacheRemovedVerdictCapability,
+	type CommitSessionFrame,
+	uploadIdSchema
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 
 import {
@@ -11,12 +19,22 @@ import {
 import { type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
 import {
+	asOneInvocation,
+	authorisedFetch,
+	closeSessionAndWait,
 	currentServer,
+	framesThroughProbe,
 	initialise,
 	namedCache,
+	openCommitSession,
+	probeAnswer,
 	putTestCache,
-	resetTestServer
+	resetTestServer,
+	testPushId,
+	uploadMetadata,
+	verificationOf
 } from '../test-support.ts';
 
 import {
@@ -33,6 +51,7 @@ import {
 	seededVerdicts,
 	teardownDrainFor
 } from './cache-teardown.test-support.ts';
+import { type ServerContext } from './context.ts';
 import { withRowBudget } from './row-budget.ts';
 import { withSubrequestSlice } from './subrequest-slice.ts';
 
@@ -148,6 +167,160 @@ const expectedFinalState = {
 	].map(() => false),
 	reservations: ['absent', 'absent']
 };
+
+const waitingUploadId = uploadIdSchema.parse('a'.repeat(64));
+const waitingPath = uploadMetadata({
+	fileSize: 1,
+	storePathHash: 'a'.repeat(32)
+});
+
+interface WaitingUpload {
+	readonly verdict: 'pending' | 'servable';
+	readonly graceDecisionJson?: string;
+	// An accepted publication operation of the upload whose recovery deadline
+	// has passed.
+	readonly expiredOperation?: { readonly graceDecisionJson: string };
+}
+
+function insertWaitingUpload(
+	context: ServerContext,
+	cache: ResolvedCache,
+	{ verdict, graceDecisionJson, expiredOperation }: WaitingUpload
+): void {
+	const now = new Date();
+	const inAnHour = new Date(now.getTime() + 60 * 60 * 1000);
+
+	context.db
+		.insert(schema.pendingUploads)
+		.values({
+			id: waitingUploadId,
+			cacheId: cache.id,
+			narHash: waitingPath.narHash,
+			r2Key: r2ObjectKeySchema.parse(`staging/${waitingUploadId}`),
+			metadataJson: JSON.stringify(waitingPath),
+			createdAt: isoTimestamp(now),
+			expiresAt: isoTimestamp(inAnHour),
+			verdict,
+			graceDecisionJson
+		})
+		.run();
+	if (expiredOperation === undefined) {
+		return;
+	}
+
+	context.db
+		.insert(schema.publicationOperations)
+		.values({
+			id: waitingUploadId,
+			cacheId: cache.id,
+			cacheGeneration: cache.generation,
+			pushId: testPushId,
+			canonicalJson: '[]',
+			acceptedAt: now.toISOString(),
+			pushExpiresAt: now.toISOString(),
+			recoveryDeadline: new Date(now.getTime() - 1000).toISOString(),
+			pruneAfter: inAnHour.toISOString(),
+			graceDecisionJson: expiredOperation.graceDecisionJson
+		})
+		.run();
+}
+
+// Runs publication expiry and returns the waiting upload's operation.
+function expirePublications() {
+	return runInDurableObject(currentServer(), async (instance) => {
+		await asOneInvocation(() =>
+			verificationOf(instance).expirePublications(rootLogger())
+		);
+
+		return instance.context.db
+			.select({
+				state: schema.publicationOperations.state,
+				resultJson: schema.publicationOperations.resultJson
+			})
+			.from(schema.publicationOperations)
+			.where(eq(schema.publicationOperations.id, waitingUploadId))
+			.get();
+	});
+}
+
+const deferredFrame: CommitSessionFrame = {
+	ev: 'deferred',
+	uploadId: waitingUploadId,
+	storePathHash: waitingPath.storePathHash,
+	narHash: waitingPath.narHash
+};
+const cacheRemovedFrame: CommitSessionFrame = {
+	ev: 'verdict',
+	uploadId: waitingUploadId,
+	status: 'absent',
+	reason: 'cache-removed'
+};
+
+interface DrainNotificationCase {
+	readonly name: string;
+	readonly upload: WaitingUpload;
+	// The capabilities that the session accepts.
+	readonly accepted?: string;
+	readonly subscribed: CommitSessionFrame;
+	// Whether publication expiry runs between the removal and the drain.
+	readonly expiresBeforeDrain: boolean;
+	readonly drained: readonly CommitSessionFrame[];
+}
+
+const drainNotificationCases: readonly DrainNotificationCase[] = [
+	{
+		name: 'tells a session that accepts the reason that the cache of its upload was removed',
+		upload: { verdict: 'pending' },
+		accepted: cacheRemovedVerdictCapability,
+		subscribed: deferredFrame,
+		expiresBeforeDrain: false,
+		drained: [cacheRemovedFrame, probeAnswer]
+	},
+	{
+		// A released client would negotiate the path again and create the
+		// removed cache again.
+		name: 'sends no frame to a session that does not accept the reason',
+		upload: { verdict: 'pending' },
+		subscribed: deferredFrame,
+		expiresBeforeDrain: false,
+		drained: [probeAnswer]
+	},
+	{
+		// Expiry fails the operation and leaves its upload for the drain.
+		name: 'tells the session of an expired publication when its upload is drained',
+		upload: {
+			verdict: 'pending',
+			graceDecisionJson: '{"reportsGrace":true}',
+			expiredOperation: { graceDecisionJson: '{"reportsGrace":true}' }
+		},
+		accepted: cacheRemovedVerdictCapability,
+		subscribed: { ...deferredFrame, grace: {} },
+		expiresBeforeDrain: true,
+		drained: [
+			{
+				ev: 'verdict',
+				uploadId: waitingUploadId,
+				status: 'absent',
+				reason: 'cache-removed',
+				grace: {}
+			},
+			probeAnswer
+		]
+	},
+	{
+		// The session received the upload's verdict when it settled.
+		name: 'sends no frame to the session of a settled upload',
+		upload: { verdict: 'servable' },
+		accepted: cacheRemovedVerdictCapability,
+		subscribed: {
+			ev: 'verdict',
+			uploadId: waitingUploadId,
+			status: 'servable'
+		},
+		expiresBeforeDrain: false,
+		drained: [probeAnswer]
+	}
+];
 
 describe('cache teardown drain', () => {
 	beforeEach(async () => {
@@ -346,6 +519,60 @@ describe('cache teardown drain', () => {
 			);
 
 			expect(observed).toStrictEqual(afterOnePage);
+		}
+	);
+
+	it.each(drainNotificationCases)(
+		'$name',
+		async ({ upload, accepted, subscribed, expiresBeforeDrain, drained }) => {
+			const token = await initialise();
+			await putTestCache(token, builds);
+			const removed = await runInDurableObject(currentServer(), (instance) => {
+				const cache = instance.context.cacheRepository.require(builds);
+				insertWaitingUpload(instance.context, cache, upload);
+
+				return cache;
+			});
+			const session = await openCommitSession(token, builds, accepted);
+
+			try {
+				session.send({ op: 'subscribe', uploadIds: [waitingUploadId] });
+				const reply = await session.nextFrame();
+				const removal = await authorisedFetch(
+					'/caches/builds?force=true',
+					token,
+					{ method: 'DELETE' }
+				);
+				const expiry = expiresBeforeDrain
+					? {
+							operation: await expirePublications(),
+							frames: await framesThroughProbe(session)
+						}
+					: undefined;
+				await drainTeardown(removed.id);
+
+				expect({
+					reply,
+					removal: removal.status,
+					expiry,
+					drained: await framesThroughProbe(session)
+				}).toStrictEqual({
+					reply: subscribed,
+					removal: StatusCodes.OK,
+					expiry: expiresBeforeDrain
+						? {
+								operation: {
+									state: 'failed',
+									resultJson: '{"verdict":"absent"}'
+								},
+								frames: [probeAnswer]
+							}
+						: undefined,
+					drained
+				});
+			} finally {
+				await closeSessionAndWait(session.socket);
+			}
 		}
 	);
 });
