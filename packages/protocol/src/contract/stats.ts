@@ -9,7 +9,8 @@ const cacheStats = cacheScopedProcedure(
 		method: 'GET',
 		suffix: '/stats',
 		requires: 'stats:read',
-		replaySafety: 'replay-safe'
+		replaySafety: 'replay-safe',
+		workBound: 'time'
 	},
 	{},
 	statsResponseSchema
@@ -25,7 +26,11 @@ export const statsContract = {
 
 	// Usage covers the tenant and therefore declares no cache resource.
 	usage: baseProcedure
-		.meta({ requires: 'stats:read', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'stats:read',
+			replaySafety: 'replay-safe',
+			workBound: 'time'
+		})
 		.route({ method: 'GET', path: '/usage' })
 		.output(usageResponseSchema)
 };

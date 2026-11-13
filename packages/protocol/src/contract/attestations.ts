@@ -25,7 +25,8 @@ const bundleNegotiation = writableCacheScopedProcedure(
 		method: 'POST',
 		suffix: '/attestations/bundles',
 		requires: 'attestation:negotiate',
-		maintenance: true
+		maintenance: true,
+		workBound: 'size'
 	},
 	attestationBundleNegotiateRequestSchema.shape,
 	attestationBundleNegotiateResponseSchema
@@ -36,7 +37,8 @@ const pathNegotiation = writableCacheScopedProcedure(
 		method: 'POST',
 		suffix: '/attestations',
 		requires: 'attestation:negotiate',
-		maintenance: true
+		maintenance: true,
+		workBound: 'size'
 	},
 	attestationNegotiateRequestSchema.shape,
 	attestationNegotiateResponseSchema
@@ -49,7 +51,8 @@ const bundleAttach = cacheScopedProcedure(
 		requires: 'attestation:attach',
 		resource: { cache: { pending: true, missingDenies: false } },
 		maintenance: true,
-		replaySafety: 'replay-safe'
+		replaySafety: 'replay-safe',
+		workBound: 'size'
 	},
 	attestationAttachPathsRequestSchema.shape,
 	attestationAttachPathsResponseSchema
@@ -62,7 +65,8 @@ const pathAttach = cacheScopedProcedure(
 		requires: 'attestation:attach',
 		resource: { cache: { pending: true } },
 		maintenance: true,
-		replaySafety: 'replay-safe'
+		replaySafety: 'replay-safe',
+		workBound: 'size'
 	},
 	{ id: uploadIdSchema },
 	attestationAttachResponseSchema

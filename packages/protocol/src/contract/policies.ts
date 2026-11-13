@@ -11,20 +11,36 @@ import { baseProcedure } from './base.ts';
 
 export const policiesContract = {
 	list: baseProcedure
-		.meta({ requires: 'policy:list', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'policy:list',
+			replaySafety: 'replay-safe',
+			workBound: 'size'
+		})
 		.route({ method: 'GET', path: '/policies' })
 		.output(retentionPolicyListResponseSchema),
 	remove: baseProcedure
-		.meta({ requires: 'policy:remove', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'policy:remove',
+			replaySafety: 'replay-safe',
+			workBound: 'time'
+		})
 		.route({ method: 'DELETE', path: '/policies/{id}' })
 		.input(z.strictObject({ id: z.string() }))
 		.output(retentionPolicyRemoveResponseSchema),
 	graceList: baseProcedure
-		.meta({ requires: 'policy:list', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'policy:list',
+			replaySafety: 'replay-safe',
+			workBound: 'size'
+		})
 		.route({ method: 'GET', path: '/policies/grace' })
 		.output(gracePolicyListResponseSchema),
 	graceRemove: baseProcedure
-		.meta({ requires: 'policy:remove', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'policy:remove',
+			replaySafety: 'replay-safe',
+			workBound: 'time'
+		})
 		.route({ method: 'DELETE', path: '/policies/grace/{id}' })
 		.input(z.strictObject({ id: z.string() }))
 		.output(gracePolicyRemoveResponseSchema)

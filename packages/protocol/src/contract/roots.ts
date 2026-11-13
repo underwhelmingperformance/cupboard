@@ -52,7 +52,8 @@ const rootSet = writableCacheScopedProcedure(
 		requires: 'root:set',
 		resource: { root: { field: 'name' } },
 		maintenance: true,
-		replaySafety: 'replay-safe'
+		replaySafety: 'replay-safe',
+		workBound: 'size'
 	},
 	{ name: rootNameSchema, ...rootSetBodySchema.shape, ...pushShape },
 	rootSetResponseSchema
@@ -65,7 +66,8 @@ const rootEnsure = writableCacheScopedProcedure(
 		requires: 'root:set',
 		resource: { root: { field: 'name' } },
 		maintenance: true,
-		replaySafety: 'replay-safe'
+		replaySafety: 'replay-safe',
+		workBound: 'size'
 	},
 	{ name: rootNameSchema, ...rootEnsureBodySchema.shape, ...pushShape },
 	rootEnsureResponseSchema
@@ -78,7 +80,8 @@ const rootBatch = writableCacheScopedProcedure(
 		requires: 'root:set',
 		resource: { root: { eachIn: 'roots', field: 'name' } },
 		maintenance: true,
-		replaySafety: 'replay-safe'
+		replaySafety: 'replay-safe',
+		workBound: 'size'
 	},
 	{ ...rootBatchBodySchema.shape, ...pushShape },
 	rootBatchResponseSchema
@@ -98,7 +101,8 @@ export const rootsContract = {
 			method: 'GET',
 			suffix: '/roots',
 			requires: 'root:list',
-			replaySafety: 'replay-safe'
+			replaySafety: 'replay-safe',
+			workBound: 'time'
 		},
 		listPageShape,
 		rootListResponseSchema
@@ -113,7 +117,8 @@ export const rootsContract = {
 			suffix: '/roots/{name}/targets',
 			requires: 'root:list',
 			resource: { root: { field: 'name' } },
-			replaySafety: 'replay-safe'
+			replaySafety: 'replay-safe',
+			workBound: 'size'
 		},
 		{ name: rootNameSchema, ...listPageShape },
 		rootTargetsPageSchema
@@ -151,7 +156,8 @@ export const rootsContract = {
 			suffix: '/roots/{name}',
 			requires: 'root:remove',
 			resource: { root: { field: 'name' } },
-			maintenance: true
+			maintenance: true,
+			workBound: 'time'
 		},
 		{ name: rootNameSchema },
 		rootRemoveResponseSchema

@@ -12,7 +12,11 @@ export const checkContract = {
 	// the next call starts after it. Pass `cursor` and `cursorCache` back until
 	// `cursor` is empty.
 	run: baseProcedure
-		.meta({ requires: 'check:run', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'check:run',
+			replaySafety: 'replay-safe',
+			workBound: 'size'
+		})
 		.route({ method: 'GET', path: '/check' })
 		.input(
 			z.strictObject({
@@ -23,7 +27,11 @@ export const checkContract = {
 		)
 		.output(checkReportSchema),
 	sharedAccess: baseProcedure
-		.meta({ requires: 'check:run', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'check:run',
+			replaySafety: 'replay-safe',
+			workBound: 'time'
+		})
 		.route({ method: 'GET', path: '/check/shared-access' })
 		.input(
 			z.strictObject({

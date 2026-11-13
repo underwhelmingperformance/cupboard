@@ -10,12 +10,16 @@ import { baseProcedure } from './base.ts';
 
 export const sessionsContract = {
 	list: baseProcedure
-		.meta({ requires: 'session:list', replaySafety: 'replay-safe' })
+		.meta({
+			requires: 'session:list',
+			replaySafety: 'replay-safe',
+			workBound: 'size'
+		})
 		.route({ method: 'GET', path: '/sessions' })
 		.output(refreshSessionListResponseSchema),
 
 	revoke: baseProcedure
-		.meta({ requires: 'session:revoke' })
+		.meta({ requires: 'session:revoke', workBound: 'time' })
 		.route({ method: 'DELETE', path: '/sessions/{id}' })
 		.input(z.strictObject({ id: refreshSessionIdSchema }))
 		.output(refreshSessionRevokeResponseSchema)

@@ -21,7 +21,11 @@ export const keysContract = {
 	// Nix verifies narinfo signatures with these keys.
 	signing: {
 		list: baseProcedure
-			.meta({ requires: 'signing-key:list', replaySafety: 'replay-safe' })
+			.meta({
+				requires: 'signing-key:list',
+				replaySafety: 'replay-safe',
+				workBound: 'time'
+			})
 			.route({ method: 'GET', path: '/keys' })
 			.output(keyListResponseSchema),
 
@@ -31,7 +35,7 @@ export const keysContract = {
 		// creates a second key once that backfill has completed. Auth-key rotation
 		// inserts a key with a fresh `kid` on every call.
 		rotate: baseProcedure
-			.meta({ requires: 'signing-key:rotate' })
+			.meta({ requires: 'signing-key:rotate', workBound: 'time' })
 			.route({ method: 'POST', path: '/keys/rotate' })
 			.errors({
 				SIGNING_KEY_ROTATION_IN_PROGRESS: {
@@ -42,7 +46,7 @@ export const keysContract = {
 			.output(keyRotateResponseSchema),
 
 		retire: baseProcedure
-			.meta({ requires: 'signing-key:retire' })
+			.meta({ requires: 'signing-key:retire', workBound: 'time' })
 			.route({ method: 'POST', path: '/keys/retire/{id}' })
 			.input(z.strictObject({ id: signingKeyIdSchema }))
 			.errors({
@@ -54,7 +58,7 @@ export const keysContract = {
 			.output(keyRetireResponseSchema),
 
 		abort: baseProcedure
-			.meta({ requires: 'signing-key:retire' })
+			.meta({ requires: 'signing-key:retire', workBound: 'time' })
 			.route({ method: 'POST', path: '/keys/abort/{id}' })
 			.input(z.strictObject({ id: signingKeyIdSchema }))
 			.errors({
@@ -69,17 +73,29 @@ export const keysContract = {
 	// Auth-token keys rotate independently of the narinfo keys.
 	auth: {
 		list: baseProcedure
-			.meta({ requires: 'auth-key:list', replaySafety: 'replay-safe' })
+			.meta({
+				requires: 'auth-key:list',
+				replaySafety: 'replay-safe',
+				workBound: 'time'
+			})
 			.route({ method: 'GET', path: '/keys/auth' })
 			.output(authKeyListResponseSchema),
 
 		rotate: baseProcedure
-			.meta({ requires: 'auth-key:rotate', maintenance: true })
+			.meta({
+				requires: 'auth-key:rotate',
+				maintenance: true,
+				workBound: 'time'
+			})
 			.route({ method: 'POST', path: '/keys/auth/rotate' })
 			.output(authKeyRotateResponseSchema),
 
 		retire: baseProcedure
-			.meta({ requires: 'auth-key:retire', maintenance: true })
+			.meta({
+				requires: 'auth-key:retire',
+				maintenance: true,
+				workBound: 'time'
+			})
 			.route({ method: 'POST', path: '/keys/auth/retire/{kid}' })
 			.input(z.strictObject({ kid: authKeyIdSchema }))
 			.output(authKeyRetireResponseSchema)
