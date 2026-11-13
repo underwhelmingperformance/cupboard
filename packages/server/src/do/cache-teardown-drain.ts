@@ -15,7 +15,10 @@ import { concludePromotion, parsePromotionRecord } from './promotion-record.ts';
 import { publicationFailureJson } from './publication-store.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
 import { affordableSubrequestOperations } from './subrequest-slice.ts';
-import { sendCacheRemovedVerdict } from './upload-verdict.ts';
+import {
+	sendCacheRemovedVerdict,
+	unservableVerdictFrame
+} from './upload-verdict.ts';
 
 // The most rows of one table that a step deletes, as in a collection scan's
 // phases.
@@ -298,7 +301,12 @@ export class CacheTeardownDrain {
 
 		for (const upload of deleted) {
 			if (upload.sessionId !== null && !isSettled(upload)) {
-				sendCacheRemovedVerdict(this.context, upload.sessionId, upload);
+				sendCacheRemovedVerdict(
+					this.context,
+					upload.sessionId,
+					upload,
+					unservableVerdictFrame(upload.id, upload.graceDecisionJson, 'absent')
+				);
 			}
 		}
 

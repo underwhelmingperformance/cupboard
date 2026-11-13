@@ -16,10 +16,11 @@ import { stagingPushPrefix } from '../http/http.ts';
 import type { R2PresignerConfiguration } from './presign.ts';
 import {
 	createPushId,
+	hasSecondPushIdExpiry,
 	importPushIdKey,
 	isPushIdIssuedTo,
 	isPushIdValid,
-	pushIdExpiresAtSeconds,
+	pushIdExpiresAtMilliseconds,
 	type PushIdSigningKey,
 	pushIdSigningKeySchema
 } from './push-id.ts';
@@ -36,8 +37,35 @@ export const pushCredentialMaxTtlSeconds = 6 * 60 * 60;
 // for publication staging relies on this push ID expiry and the 24-hour
 // recovery window. A client can stage bytes early in the push and first submit
 // the publication just before the push expires, so the recovery window can end
-// almost 48 hours after the first staging write.
+// almost 48 hours after the first staging write. `firstRemovalAfterPushStart`
+// subtracts this value from a push ID's expiry to find when the push started.
+// Changing it gives every push ID issued under the old value a wrong start
+// until the push ID expires.
 const pushIdTtlSeconds = 24 * 60 * 60;
+
+/**
+The earliest cache removal time that counts as a removal after the push
+started. Every push ID expires `pushIdTtlSeconds` after it is issued, and a
+replacement credential keeps the push ID. A v3 push ID gives the issue time
+in milliseconds, and a removal in the same millisecond counts as a removal
+before the push started. A v2 push ID gives whole seconds, so a removal in
+its issue second counts as a removal after the push started. Undefined for a
+value without a push ID layout.
+*/
+export function firstRemovalAfterPushStart(pushId: PushId): Date | undefined {
+	const expiresAtMilliseconds = pushIdExpiresAtMilliseconds(pushId);
+	if (expiresAtMilliseconds === undefined) {
+		return undefined;
+	}
+
+	const issuedAtMilliseconds = expiresAtMilliseconds - pushIdTtlSeconds * 1000;
+
+	return new Date(
+		hasSecondPushIdExpiry(pushId)
+			? issuedAtMilliseconds
+			: issuedAtMilliseconds + 1
+	);
+}
 
 /**
 Returns the access token's remaining whole seconds, capped at six hours.
@@ -98,14 +126,22 @@ export class PushCredentialIssuer {
 		now: Date,
 		hasPublication = false
 	): Promise<PushCredentialInput> {
-		const expiresAtSeconds = pushIdExpiresAtSeconds(pushId);
+		const expiresAtMilliseconds = pushIdExpiresAtMilliseconds(pushId);
 
-		if (expiresAtSeconds === undefined || !(await this.verify(pushId, now))) {
+		if (
+			expiresAtMilliseconds === undefined ||
+			!(await this.verify(pushId, now))
+		) {
 			throw new InvalidPushIdError();
 		}
 
-		const remainingSeconds =
-			expiresAtSeconds - Math.floor(now.getTime() / 1000);
+		const remainingSeconds = Math.floor(
+			(expiresAtMilliseconds - now.getTime()) / 1000
+		);
+		if (remainingSeconds < 1) {
+			throw new InvalidPushIdError();
+		}
+
 		const boundedTtl = ttlSecondsSchema.parse(
 			Math.min(ttlSeconds, remainingSeconds)
 		);
@@ -135,11 +171,10 @@ export class PushCredentialIssuer {
 		now: Date,
 		hasPublication = false
 	): Promise<PushCredentialInput> {
-		const expiresAtSeconds =
-			Math.floor(now.getTime() / 1000) + pushIdTtlSeconds;
+		const expiresAtMilliseconds = now.getTime() + pushIdTtlSeconds * 1000;
 
 		return this.issueFor(
-			await createPushId(this.signingKey, this.tenant, expiresAtSeconds),
+			await createPushId(this.signingKey, this.tenant, expiresAtMilliseconds),
 			ttlSeconds,
 			now,
 			hasPublication

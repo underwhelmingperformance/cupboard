@@ -547,6 +547,22 @@ export class CacheNotFoundError extends ServerHttpError {
 	}
 }
 
+/**
+A push request for a cache name whose cache was removed after the push
+started. Creating the cache again would publish the push into a new cache that the
+tenant did not ask for.
+*/
+export class CacheRemovedDuringPushError extends ServerHttpError {
+	readonly status = StatusCodes.GONE;
+
+	constructor(public readonly cache: CacheScope) {
+		super(
+			'The cache was removed after this push started. Start a new push to create the cache again.'
+		);
+		this.name = 'CacheRemovedDuringPushError';
+	}
+}
+
 export class CacheIdentityMissingError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

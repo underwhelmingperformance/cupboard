@@ -793,7 +793,7 @@ describe('tenant contract round trip', () => {
 		});
 
 		expect({
-			pushIdShape: /^[0-9a-f]{104}$/u.test(issued.pushId),
+			pushIdShape: /^[0-9a-f]{108}$/u.test(issued.pushId),
 			bucket: issued.bucket,
 			endpoint: issued.endpoint,
 			hasCredential:

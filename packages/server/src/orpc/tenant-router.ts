@@ -292,44 +292,56 @@ export const tenantRouter = os.router({
 		set: {
 			inDefaultCache: os.roots.set.inDefaultCache.handler(
 				({ input, context }) =>
-					context.services.roots.setRoot(context.cache, input.name, {
-						targets: input.targets,
-						retention: input.retention
-					})
+					context.services.roots.setRoot(
+						context.cache,
+						input.name,
+						{ targets: input.targets, retention: input.retention },
+						input.pushId
+					)
 			),
 			inNamedCache: os.roots.set.inNamedCache.handler(({ input, context }) =>
-				context.services.roots.setRoot(context.cache, input.name, {
-					targets: input.targets,
-					retention: input.retention
-				})
+				context.services.roots.setRoot(
+					context.cache,
+					input.name,
+					{ targets: input.targets, retention: input.retention },
+					input.pushId
+				)
 			)
 		},
 		ensure: {
 			inDefaultCache: os.roots.ensure.inDefaultCache.handler(
 				({ input, context }) =>
-					context.services.roots.ensureRoot(context.cache, input.name, {
-						targets: input.targets,
-						retention: input.retention
-					})
+					context.services.roots.ensureRoot(
+						context.cache,
+						input.name,
+						{ targets: input.targets, retention: input.retention },
+						input.pushId
+					)
 			),
 			inNamedCache: os.roots.ensure.inNamedCache.handler(({ input, context }) =>
-				context.services.roots.ensureRoot(context.cache, input.name, {
-					targets: input.targets,
-					retention: input.retention
-				})
+				context.services.roots.ensureRoot(
+					context.cache,
+					input.name,
+					{ targets: input.targets, retention: input.retention },
+					input.pushId
+				)
 			)
 		},
 		batch: {
 			inDefaultCache: os.roots.batch.inDefaultCache.handler(
 				({ input, context }) =>
-					context.services.roots.applyRoots(context.cache, {
-						roots: input.roots
-					})
+					context.services.roots.applyRoots(
+						context.cache,
+						{ roots: input.roots },
+						input.pushId
+					)
 			),
 			inNamedCache: os.roots.batch.inNamedCache.handler(({ input, context }) =>
-				context.services.roots.applyRoots(context.cache, {
-					roots: input.roots
-				})
+				context.services.roots.applyRoots(
+					context.cache,
+					{ roots: input.roots },
+					input.pushId
+				)
 			)
 		},
 		remove: {

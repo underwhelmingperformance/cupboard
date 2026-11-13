@@ -1,5 +1,6 @@
 import {
 	cacheGenerationSchema,
+	cacheScopeSchema,
 	compressionSchema,
 	graceSecondsSchema,
 	narInfoGenerationSchema,
@@ -142,6 +143,14 @@ export const uploadRequestLimitErrorDataSchema = z.strictObject({
 	maxPaths: z.number().int().nonnegative()
 });
 export const uploadRequestMaxPathsHeader = 'x-cupboard-upload-max-paths';
+
+// A push request is refused with this code when a cache with the push's
+// cache name was removed after the push started. The push must not create the
+// cache again, so the client stops the push.
+export const cacheRemovedErrorCode = 'CACHE_REMOVED';
+export const cacheRemovedErrorDataSchema = z.strictObject({
+	cache: cacheScopeSchema
+});
 
 // `retainUntil` reports the durable deadline after a path was confirmed.
 // `graceSeconds` reports the configured grace when no deadline was written,
@@ -574,6 +583,12 @@ export const publicationCapability = 'publication-v1';
 // `uploads.confirmPresent`. The server echoes it beside `publication-v1`, and
 // the client confirms planned skips only when both tokens are echoed.
 export const confirmPresentCapability = 'confirm-present-v1';
+
+// A client accepts this token on the credential request when it sends the
+// push's ID with the root writes of the push. Older servers reject a root write
+// with a field that they do not know, so the client sends the push ID only when
+// the server echoes this token.
+export const pushRootWritesCapability = 'push-root-writes';
 
 // A client accepts this token when it parses the publication refusal reasons
 // `resend`, `declaration-changed` and `parameters-changed`. Clients that accept

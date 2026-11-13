@@ -1,7 +1,10 @@
 import { type Logger } from '@cupboard/logger';
 import { SelectorTemplateUnrepresentableError } from '@cupboard/protocol/grants';
 import { rootBatchLimitErrorCode } from '@cupboard/protocol/retention';
-import { uploadRequestLimitErrorCode } from '@cupboard/protocol/upload';
+import {
+	cacheRemovedErrorCode,
+	uploadRequestLimitErrorCode
+} from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 
@@ -16,6 +19,7 @@ import {
 	CacheClosedError,
 	CacheListingProjectionPendingError,
 	CacheNotEmptyError,
+	CacheRemovedDuringPushError,
 	CacheRetentionMigrationPendingError,
 	CacheRetentionRuleLimitExceededError,
 	CacheRetirementTtlRequiredError,
@@ -204,6 +208,15 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { capacity: error.capacity },
+			defined: true
+		});
+	}
+
+	if (error instanceof CacheRemovedDuringPushError) {
+		return new ORPCError(cacheRemovedErrorCode, {
+			status: error.status,
+			message: error.message,
+			data: { cache: error.cache },
 			defined: true
 		});
 	}

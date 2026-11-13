@@ -145,7 +145,9 @@ describe('PushCredentialIssuer', () => {
 		const signingKey = pushIdSigningKeySchema.parse('signing-key');
 		const tenant = tenantIdSchema.parse('acme');
 		const pushIds = await Promise.all(
-			[1, 2, 3].map(() => createPushId(signingKey, tenant, issuedAt + 600))
+			[1, 2, 3].map(() =>
+				createPushId(signingKey, tenant, (issuedAt + 600) * 1000)
+			)
 		);
 		const ownershipIssuer = new PushCredentialIssuer(
 			() => configuration,

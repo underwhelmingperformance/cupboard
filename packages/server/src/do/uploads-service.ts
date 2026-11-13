@@ -245,6 +245,40 @@ export class UploadsService {
 		return row?.generation ?? firstCacheGeneration;
 	}
 
+	// The cache that admits a publication entry. `acceptedCacheId` is the cache
+	// of an operation that was accepted earlier, and undefined for a new
+	// operation, which may create the cache at the planned generation.
+	private async admissionCache(
+		scope: CacheScope,
+		entry: PublicationEntry,
+		acceptedCacheId: ResolvedCache['id'] | undefined
+	): Promise<ResolvedCache> {
+		if (
+			(await this.publicationGeneration(scope, true)) !== entry.cacheGeneration
+		) {
+			throw new PublicationConflictError(
+				'The cache generation changed. Start a fresh push.',
+				'generation-conflict'
+			);
+		}
+		await new PathReadAuthorityService(this.context).requireWritable();
+		const cache =
+			acceptedCacheId === undefined
+				? await this.registration.forWrite(scope, entry.cacheGeneration)
+				: this.context.cacheRepository.resolve(scope);
+		if (
+			cache?.generation !== entry.cacheGeneration ||
+			(acceptedCacheId !== undefined && acceptedCacheId !== cache.id)
+		) {
+			throw new PublicationConflictError(
+				'The cache generation changed. Start a fresh push.',
+				'generation-conflict'
+			);
+		}
+
+		return cache;
+	}
+
 	private existingNarInfos(
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
@@ -602,6 +636,7 @@ export class UploadsService {
 		) {
 			throw new InvalidPushIdError();
 		}
+		this.registration.refusePushOfRemovedCache(scope, body.pushId);
 		const cacheGeneration = await this.publicationGeneration(scope);
 		const preview = await this.preview(
 			scope,
@@ -668,6 +703,9 @@ export class UploadsService {
 				'parameters-changed'
 			);
 		}
+		// Before the generation checks, so an entry planned before the removal is
+		// refused because the cache was removed.
+		this.registration.refusePushOfRemovedCache(scope, pushId);
 		const operations = new PublicationStore(this.context);
 		const original = operations.get(entry.operationId);
 		if (
@@ -701,28 +739,7 @@ export class UploadsService {
 				'The publication failed. Start a fresh push.'
 			);
 		}
-		if (
-			(await this.publicationGeneration(scope, true)) !== entry.cacheGeneration
-		) {
-			throw new PublicationConflictError(
-				'The cache generation changed. Start a fresh push.',
-				'generation-conflict'
-			);
-		}
-		await new PathReadAuthorityService(this.context).requireWritable();
-		const cache =
-			original === undefined
-				? await this.registration.forWrite(scope, entry.cacheGeneration)
-				: this.context.cacheRepository.resolve(scope);
-		if (
-			cache?.generation !== entry.cacheGeneration ||
-			(original !== undefined && original.cacheId !== cache.id)
-		) {
-			throw new PublicationConflictError(
-				'The cache generation changed. Start a fresh push.',
-				'generation-conflict'
-			);
-		}
+		const cache = await this.admissionCache(scope, entry, original?.cacheId);
 		// Demotion deletes a narinfo object without changing the path's row, so
 		// the row checks below cannot detect it. Watch the path until admission
 		// has decided whether the path is served and whether bytes are needed.
@@ -1115,6 +1132,7 @@ export class UploadsService {
 		if (!(await this.context.pushCredentials().verify(body.pushId))) {
 			throw new InvalidPushIdError();
 		}
+		this.registration.refusePushOfRemovedCache(cacheScope, body.pushId);
 
 		requireServedStorePaths(body.paths.map((path) => path.storePath));
 

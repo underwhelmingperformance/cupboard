@@ -17,6 +17,7 @@ import { currentCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import type * as schema from '../db/schema.ts';
 import {
+	CacheRemovedDuringPushError,
 	PublicationConflictError,
 	TenantUsageMissingError,
 	TenantWritesStoppedError,
@@ -89,8 +90,22 @@ export class ConfirmationService {
 			throw new TenantUsageMissingError(tenant);
 		}
 		if (account.generation !== cacheGeneration) {
-			throw generationConflict();
+			throw this.generationConflict(scope, cacheGeneration);
 		}
+	}
+
+	// The planned generation belongs to a cache that was removed after the
+	// plan, so the push started before the removal.
+	private generationConflict(
+		scope: CacheScope,
+		cacheGeneration: UploadConfirmPresentRequest['cacheGeneration']
+	): CacheRemovedDuringPushError | PublicationConflictError {
+		return this.context.cacheRepository.wasDeletedAtGeneration(
+			scope,
+			cacheGeneration
+		)
+			? new CacheRemovedDuringPushError(scope)
+			: generationConflict();
 	}
 
 	private requireCurrentCache(cache: ResolvedCache): void {
@@ -131,7 +146,7 @@ export class ConfirmationService {
 			};
 		}
 		if (cache.generation !== request.cacheGeneration) {
-			throw generationConflict();
+			throw this.generationConflict(scope, request.cacheGeneration);
 		}
 
 		const declared = new Map(

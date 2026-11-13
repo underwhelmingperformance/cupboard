@@ -123,6 +123,7 @@ import { type NarVerification } from './blob/nar-verify.ts';
 import { queueObjectDeletion } from './blob/object-incarnation.ts';
 import {
 	issuePushId,
+	issueV2PushId,
 	pushIdNonceSchema,
 	pushIdSigningKeySchema
 } from './blob/push-id.ts';
@@ -3029,7 +3030,30 @@ export async function testPushIdFor(
 	nonceFill = 0,
 	expiresAtSeconds = 0xff_ff_ff_ff
 ): Promise<PushId> {
+	return testPushIdExpiringAt(tenant, nonceFill, expiresAtSeconds * 1000);
+}
+
+export async function testPushIdExpiringAt(
+	tenant: string,
+	nonceFill: number,
+	expiresAtMilliseconds: number
+): Promise<PushId> {
 	return issuePushId(
+		testPushIdSigningKey,
+		tenantIdSchema.parse(tenant),
+		expiresAtMilliseconds,
+		pushIdNonceSchema.parse(new Uint8Array(16).fill(nonceFill))
+	);
+}
+
+// The v2 push ID that a server issued before v3 push IDs, which records its
+// expiry in whole seconds.
+export async function testV2PushIdFor(
+	tenant: string,
+	nonceFill: number,
+	expiresAtSeconds: number
+): Promise<PushId> {
+	return issueV2PushId(
 		testPushIdSigningKey,
 		tenantIdSchema.parse(tenant),
 		expiresAtSeconds,

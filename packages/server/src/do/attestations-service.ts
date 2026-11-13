@@ -73,6 +73,7 @@ import {
 	AttestationUploadCacheMismatchError,
 	AttestationUploadExpiredError,
 	AttestationUploadNotFoundError,
+	CacheRemovedDuringPushError,
 	InvalidPushIdError,
 	ObjectIncarnationReservationContendedError,
 	QuotaExceededError,
@@ -451,9 +452,11 @@ export class AttestationsService {
 
 		// A cache registered again after a removal has the removed cache's scope,
 		// so the scope comparison cannot tell the two apart. A request through
-		// another cache's scope is refused above, as for a live upload.
+		// another cache's scope is refused above, as for a live upload. The
+		// upload was negotiated before the removal, so its push started before
+		// the removal.
 		if (this.context.cacheRepository.isRemoved(pending.cacheId)) {
-			throw new AttestationUploadNotFoundError(uploadId);
+			throw new CacheRemovedDuringPushError(cache.scope);
 		}
 
 		const now = isoTimestamp(new Date());
@@ -2197,6 +2200,7 @@ export class AttestationsService {
 		if (body.bundles.length === 0) {
 			return { bundles: [] };
 		}
+		this.registration.refusePushOfRemovedCache(cacheScope, body.pushId);
 		const cache = await this.registration.forWrite(cacheScope);
 		const bundles: AttestationBundleDecisionInput[] = [];
 		const digests = new Set(body.bundles.map((bundle) => bundle.digest));
@@ -2276,6 +2280,7 @@ export class AttestationsService {
 			return { bundles: [] };
 		}
 
+		this.registration.refusePushOfRemovedCache(cacheScope, body.pushId);
 		const cache = await this.registration.forWrite(cacheScope);
 		const storePathHashes = [
 			...new Set(body.bundles.map((bundle) => bundle.storePathHash))

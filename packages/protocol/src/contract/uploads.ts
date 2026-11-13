@@ -22,6 +22,7 @@ import {
 
 import { baseProcedure } from './base.ts';
 import {
+	cacheRemovedErrors,
 	cacheScopedProcedure,
 	writableCacheScopedProcedure
 } from './cache-scoped.ts';
@@ -40,6 +41,7 @@ const uploadNegotiateErrors = {
 
 const confirmPresentErrors = {
 	...uploadNegotiateErrors,
+	...cacheRemovedErrors,
 	CONFLICT: { status: StatusCodes.CONFLICT }
 };
 
@@ -112,8 +114,14 @@ const plan = cacheScopedProcedure(
 
 export const uploadsContract = {
 	plan: {
-		inDefaultCache: plan.inDefaultCache.errors(uploadRequestErrors),
-		inNamedCache: plan.inNamedCache.errors(uploadRequestErrors)
+		inDefaultCache: plan.inDefaultCache.errors({
+			...uploadRequestErrors,
+			...cacheRemovedErrors
+		}),
+		inNamedCache: plan.inNamedCache.errors({
+			...uploadRequestErrors,
+			...cacheRemovedErrors
+		})
 	},
 	// Issues temporary R2 credentials for a push. Without a `pushId`, the server
 	// creates and signs a new identifier. With an existing `pushId`, the server
@@ -131,8 +139,14 @@ export const uploadsContract = {
 	),
 
 	negotiate: {
-		inDefaultCache: negotiate.inDefaultCache.errors(uploadNegotiateErrors),
-		inNamedCache: negotiate.inNamedCache.errors(uploadNegotiateErrors)
+		inDefaultCache: negotiate.inDefaultCache.errors({
+			...uploadNegotiateErrors,
+			...cacheRemovedErrors
+		}),
+		inNamedCache: negotiate.inNamedCache.errors({
+			...uploadNegotiateErrors,
+			...cacheRemovedErrors
+		})
 	},
 	preview: {
 		inDefaultCache: preview.inDefaultCache.errors(uploadRequestErrors),

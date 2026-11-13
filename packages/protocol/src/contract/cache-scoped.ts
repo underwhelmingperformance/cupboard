@@ -1,5 +1,11 @@
 import { cacheNameSchema, cacheScopeSchema } from '@cupboard/nix-store/scalars';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
+
+import {
+	cacheRemovedErrorCode,
+	cacheRemovedErrorDataSchema
+} from '../upload.ts';
 
 import { type AuthzMeta, baseProcedure, type ResourceSpec } from './base.ts';
 
@@ -74,6 +80,15 @@ export function cacheScopedProcedure<
 		inNamedCache: namedCacheProcedure(route, shape, output)
 	};
 }
+
+// A request of a push that started before a cache with the push's cache name
+// was removed.
+export const cacheRemovedErrors = {
+	[cacheRemovedErrorCode]: {
+		status: StatusCodes.GONE,
+		data: cacheRemovedErrorDataSchema
+	}
+};
 
 export const cacheClosedError = {
 	CACHE_CLOSED: {

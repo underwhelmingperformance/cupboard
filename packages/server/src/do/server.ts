@@ -47,6 +47,7 @@ import {
 	publicationRefusalReasonsCapability,
 	publicationResultSchema,
 	type PushId,
+	pushRootWritesCapability,
 	type SessionId,
 	sessionIdSchema,
 	uploadCapabilitiesHeader,
@@ -81,6 +82,7 @@ import { d1OverloadRefusal, isD1Overload } from '../db/transient.ts';
 import {
 	CacheCatalogueMigrationPendingError,
 	CacheNotFoundError,
+	CacheRemovedDuringPushError,
 	CommitEntrySubrequestsExhaustedError,
 	CommitSessionGrantsUnavailableError,
 	CommitSessionLimitError,
@@ -823,7 +825,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				}
 
 				if (pathname.endsWith('/uploads/credential')) {
-					const echoed = [publicationCapability, confirmPresentCapability]
+					const echoed = [
+						publicationCapability,
+						confirmPresentCapability,
+						pushRootWritesCapability
+					]
 						.filter((capability) =>
 							hasAcceptedCapability(context.req.raw, capability)
 						)
@@ -1684,6 +1690,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				}
 			});
 		} catch (error) {
+			if (error instanceof CacheRemovedDuringPushError) {
+				this.refuseEntryOfRemovedCache(socket, attachment, entry.operationId);
+				return;
+			}
 			// The operation can fail or pass its deadline, and the push can expire,
 			// while admission runs.
 			if (!this.answersFromState(entry.operationId, pushId)) {
@@ -1700,6 +1710,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	// A session without `cache-removed-verdict` is refused with
+	// `generation-conflict`, which every client that publishes treats as a final
+	// failure of the entry.
+	private refuseEntryOfRemovedCache(
+		socket: WebSocket,
+		attachment: CommitSessionAttachment,
+		operationId: UploadId
+	): void {
+		if (hasAcceptedCacheRemovedVerdict(socket)) {
+			sendCommitSessionFrame(socket, cacheRemovedVerdictFrame(operationId));
+			return;
+		}
+		refusePublication(
+			socket,
+			attachment,
+			operationId,
+			'publish',
+			new PublicationConflictError(
+				'The cache generation changed. Start a fresh push.',
+				'generation-conflict'
+			)
+		);
+	}
+
 	// Another operation can commit, delete or verify the entry's path while
 	// admission runs. Admission then refuses the entry, and running it again
 	// reads the path again, so the server retries before the client sees the
@@ -1713,6 +1747,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					this.uploads.admitPublication(scope, pushId, entry, grants)
 				);
 			} catch (error) {
+				// A removal during admission's awaits also changes the generation.
+				if (
+					error instanceof PublicationConflictError &&
+					error.reason === 'generation-conflict'
+				) {
+					this.cacheRegistration.refusePushOfRemovedCache(scope, pushId);
+				}
 				if (
 					!(error instanceof PublicationPathChangedError) ||
 					attempt >= maxPublicationAdmissions

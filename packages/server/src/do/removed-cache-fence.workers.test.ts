@@ -33,6 +33,7 @@ import {
 	AttestationUploadCacheMismatchError,
 	AttestationUploadNotFoundError,
 	CacheNotFoundError,
+	CacheRemovedDuringPushError,
 	UploadCacheMismatchError,
 	UploadNotFoundError
 } from '../errors.ts';
@@ -152,6 +153,10 @@ async function attachRefusal(
 
 		if (error instanceof AttestationUploadCacheMismatchError) {
 			return 'cache-mismatch';
+		}
+
+		if (error instanceof CacheRemovedDuringPushError) {
+			return 'cache-removed';
 		}
 
 		return error instanceof Error ? error.name : 'unknown';
@@ -493,7 +498,7 @@ const fenceCases: readonly FenceCase[] = [
 			insertPendingAttestation(context, cache.id, attestationId);
 		},
 		act: (instance) => attachRefusal(instance.context, builds, attestationId),
-		expected: 'not-found'
+		expected: 'cache-removed'
 	},
 	{
 		name: 'the integrity check skips its narinfo rows',
@@ -1374,7 +1379,7 @@ describe('removed cache fence', () => {
 		{
 			session: 'the cache registered again under its name',
 			scope: builds,
-			expected: [{ id: attestationId, refusal: 'not-found' }]
+			expected: [{ id: attestationId, refusal: 'cache-removed' }]
 		},
 		{
 			// The second upload is a live attestation upload of another cache.
