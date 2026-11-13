@@ -4,10 +4,8 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
-import { and, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import * as schema from '../db/schema.ts';
 import {
 	currentServer,
 	initialise,
@@ -21,6 +19,12 @@ import {
 	uploadMetadata
 } from '../test-support.ts';
 
+import {
+	existingRootIncarnationKey,
+	insertLiveRootTargets
+} from './live-root-targets.ts';
+import { RetentionService } from './retention-service.ts';
+
 // The base32 store-path-hash alphabet, so synthetic hashes sort the way the
 // keyset pagination does.
 const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
@@ -32,43 +36,41 @@ function syntheticHash(index: number): string {
 	return `${'0'.repeat(30)}${suffix}`;
 }
 
-// Attaches the rows to the root's incarnation, as an attach does.
+// Attaches paths without narinfo rows to the root, as a commit's attach does.
 async function seedTargets(
 	name: string,
 	indexes: readonly number[]
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
-		const cacheId = resolvedCache(instance.context).id;
-		const rootName = rootNameSchema.parse(name);
-		const incarnation =
-			instance.context.db
-				.select({ incarnation: schema.retentionRoots.incarnation })
-				.from(schema.retentionRoots)
-				.where(
-					and(
-						eq(schema.retentionRoots.cacheId, cacheId),
-						eq(schema.retentionRoots.name, rootName)
-					)
-				)
-				.get()?.incarnation ?? undefined;
+		const cache = resolvedCache(instance.context);
+		const root = existingRootIncarnationKey(
+			instance.context.db,
+			cache.id,
+			rootNameSchema.parse(name)
+		);
 
-		for (const index of indexes) {
-			const storePathHash = syntheticHash(index);
+		expect(root).toBeDefined();
 
-			instance.context.db
-				.insert(schema.retentionRootTargets)
-				.values({
-					cacheId,
-					rootName,
+		if (root === undefined) {
+			return;
+		}
+
+		insertLiveRootTargets(
+			instance.context.db,
+			new RetentionService(instance.context),
+			cache,
+			root,
+			indexes.map((index) => {
+				const storePathHash = syntheticHash(index);
+
+				return {
 					storePathHash: storePathHashSchema.parse(storePathHash),
 					storePath: storePathSchema.parse(
 						`/nix/store/${storePathHash}-seeded-${String(index)}`
-					),
-					incarnation
-				})
-				.onConflictDoNothing()
-				.run();
-		}
+					)
+				};
+			})
+		);
 	});
 }
 
