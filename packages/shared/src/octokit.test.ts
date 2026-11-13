@@ -6,6 +6,7 @@ import {
 	createOctokitClient,
 	filterGithubReleases,
 	findGithubRelease,
+	hasNextPageLink,
 	maximumGithubErrorResponseBytes,
 	maximumGithubReleaseCandidates,
 	maximumGithubReleasePages,
@@ -13,6 +14,10 @@ import {
 	retryOptions
 } from './octokit.ts';
 import { RemoteBodyTooLargeError } from './response-body.ts';
+import {
+	charactersRead,
+	unsafeRegularExpressions
+} from './scan-cost.test-support.ts';
 
 function countingFetch(status: number): {
 	readonly fetch: typeof fetch;
@@ -159,6 +164,86 @@ describe('GitHub release lookup', () => {
 			)
 		);
 		expect(pages).toHaveLength(maximumGithubReleasePages);
+	});
+});
+
+describe('hasNextPageLink', () => {
+	it.each([
+		['a missing header', undefined, false],
+		['an empty header', '', false],
+		['a next link', '<https://api.github.com/r?page=2>; rel="next"', true],
+		['a next link without a space', '<https://x/r?page=2>;rel="next"', true],
+		[
+			'a next link after a previous link',
+			'<https://x/r?page=1>; rel="prev", <https://x/r?page=3>; rel="next"',
+			true
+		],
+		[
+			'a next link before a last link',
+			'<https://x/r?page=2>; rel="next", <https://x/r?page=9>; rel="last"',
+			true
+		],
+		[
+			'a next link after another parameter',
+			'<https://x/r>; a="b"; rel="next"',
+			true
+		],
+		[
+			'a next link with leading whitespace',
+			' \n\t<https://x/r>; rel="next"',
+			true
+		],
+		[
+			'a next link after a comma and whitespace',
+			'<a>; rel="prev",\n  <b>; rel="next"',
+			true
+		],
+		['a comma inside the target', '<https://x/r?a=1,2>; rel="next"', true],
+		['only previous and last links', '<a>; rel="prev", <b>; rel="last"', false],
+		['a relation that only starts with next', '<a>; rel="nextish"', false],
+		['a parameter that ends with rel', '<a>; xrel="next"', false],
+		['a relation in single quotes', "<a>; rel='next'", false],
+		['a relation that lists several values', '<a>; rel="prev,next"', false],
+		['whitespace before the semicolon', '<a> ; rel="next"', false],
+		['an empty target', '<>; rel="next"', false],
+		['no target', 'rel="next"', false],
+		[
+			'a relation in the target of another link',
+			'<a?rel="next">; rel="prev"',
+			false
+		],
+		['a relation after the next comma', '<a>; rel="prev", rel="next"', false],
+		['opening brackets with no closing bracket', ',<,<,<,<', false],
+		['opening brackets closed at the end', ',<,<,<x>; rel="next"', true],
+		['commas and spaces', ', , , ,', false],
+		['whitespace before the semicolon, repeated', '<a>   ;<a>  ;', false],
+		['a parameter without a relation', '<a>; xxxxxxxx', false]
+	])('reports %s', (_name, link, expected) => {
+		expect(hasNextPageLink(link)).toBe(expected);
+	});
+
+	it('executes only regular expressions that recheck proves safe', async () => {
+		const unsafe = await unsafeRegularExpressions(() => {
+			hasNextPageLink('<a>; rel="prev", <b,c>; xrel="x", \n<d>; rel="next"');
+		});
+
+		expect(unsafe).toStrictEqual([]);
+	});
+
+	it.each([
+		['opening brackets with no closing bracket', ',<'],
+		['commas and spaces', ', '],
+		['whitespace before a semicolon', '<a> '],
+		['entries with a misplaced relation', ',<x>; xrel="next"'],
+		['entries with a relation', ',<x>; rel="prev"']
+	])('reads each character of %s a bounded number of times', (_name, unit) => {
+		const readsPerCharacter = [1000, 4000].map((length) => {
+			const link = unit.repeat(length / unit.length);
+
+			return charactersRead(() => hasNextPageLink(link)) / link.length;
+		});
+
+		expect(Math.max(...readsPerCharacter)).toBeLessThanOrEqual(5);
 	});
 });
 
