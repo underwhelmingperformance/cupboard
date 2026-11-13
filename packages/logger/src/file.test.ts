@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
-import { resetSync } from '@logtape/logtape';
+import { type LogRecord, resetSync } from '@logtape/logtape';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { configureLogging, getLogger } from './config.ts';
@@ -33,6 +33,17 @@ async function logPath(extension: string): Promise<string> {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-logs-'));
 	directories.push(directory);
 	return path.join(directory, `command.jsonl${extension}`);
+}
+
+function infoRecord(message: string): LogRecord {
+	return {
+		timestamp: 0,
+		category: ['cupboard'],
+		level: 'info',
+		rawMessage: message,
+		message: [message],
+		properties: {}
+	};
 }
 
 describe('file logging', () => {
@@ -198,10 +209,18 @@ describe('file logging', () => {
 	});
 
 	it('reports queue drops on the periodic flush before the file closes', async () => {
-		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
-		vi.setSystemTime(0);
 		const filename = await logPath('.zst');
-		const file = createFileSink(filename, { maximumQueuedBytes: 1 });
+		const flushes: (() => Promise<void>)[] = [];
+		const stopSchedule = vi.fn();
+		const file = createFileSink(filename, {
+			maximumQueuedBytes: 1,
+			now: () => 1000,
+			schedule: (flush) => {
+				flushes.push(flush);
+
+				return stopSchedule;
+			}
+		});
 
 		try {
 			file.sink({
@@ -212,24 +231,121 @@ describe('file logging', () => {
 				message: ['not buffered'],
 				properties: {}
 			});
-			await vi.advanceTimersByTimeAsync(1000);
-			await vi.waitFor(async () => {
-				expect(await readLogFile(filename)).toStrictEqual({
-					records: [
-						{
-							timestamp: 1000,
-							level: 'warning',
-							category: 'logtape.meta',
-							msg: 'log records dropped',
-							droppedRecords: 1
-						}
-					],
-					incomplete: true
-				});
+			const [flush] = flushes;
+
+			if (flush === undefined) {
+				throw new Error('the sink did not start a periodic flush');
+			}
+
+			await flush();
+			expect(await readLogFile(filename)).toStrictEqual({
+				records: [
+					{
+						timestamp: 1000,
+						level: 'warning',
+						category: 'logtape.meta',
+						msg: 'log records dropped',
+						droppedRecords: 1
+					}
+				],
+				incomplete: true
 			});
 		} finally {
 			await file.close();
-			vi.useRealTimers();
+		}
+
+		expect(stopSchedule).toHaveBeenCalledTimes(1);
+	});
+
+	it('flushes every record that the sink accepted before the periodic flush', async () => {
+		const filename = await logPath('.zst');
+		const flushes: (() => Promise<void>)[] = [];
+		const file = createFileSink(filename, {
+			schedule: (flush) => {
+				flushes.push(flush);
+
+				return vi.fn();
+			}
+		});
+
+		try {
+			for (const message of ['first', 'second', 'third']) {
+				file.sink(infoRecord(message));
+			}
+
+			const [flush] = flushes;
+
+			if (flush === undefined) {
+				throw new Error('the sink did not start a periodic flush');
+			}
+
+			await flush();
+			expect(await readLogFile(filename)).toStrictEqual({
+				records: ['first', 'second', 'third'].map((message) => ({
+					timestamp: 0,
+					level: 'info',
+					category: 'cupboard',
+					msg: message
+				})),
+				incomplete: true
+			});
+		} finally {
+			await file.close();
+		}
+	});
+
+	it('does not reuse a drain promise after the sink has failed', async () => {
+		const filename = await logPath('.zst');
+		await mkdir(`${filename}.2`);
+		const onError = vi.fn();
+		const file = createFileSink(filename, { maximumBytes: 1, onError });
+
+		file.sink(infoRecord('first'));
+		file.sink(infoRecord('second'));
+		await file.drain();
+
+		const first = file.drain();
+		const second = file.drain();
+
+		expect({
+			errors: onError.mock.calls.length,
+			isShared: first === second
+		}).toStrictEqual({ errors: 1, isShared: false });
+		await Promise.all([first, second]);
+	});
+
+	it('gives a call that arrives during a flush the same promise', async () => {
+		const filename = await logPath('.zst');
+		const flushes: (() => Promise<void>)[] = [];
+		const file = createFileSink(filename, {
+			schedule: (flush) => {
+				flushes.push(flush);
+
+				return vi.fn();
+			}
+		});
+
+		try {
+			file.sink(infoRecord('first'));
+
+			const [flush] = flushes;
+
+			if (flush === undefined) {
+				throw new Error('the sink did not start a periodic flush');
+			}
+
+			const pending = flush();
+			const duringFlush = flush();
+			await pending;
+			const afterFlush = flush();
+			await afterFlush;
+
+			expect({
+				duringFlush: duringFlush === pending,
+				afterFlush: afterFlush === pending
+			}).toStrictEqual({ duringFlush: true, afterFlush: false });
+		} finally {
+			await file.close();
 		}
 	});
 
