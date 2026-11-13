@@ -1,8 +1,10 @@
 import { defineConfig } from 'vitest/config';
 
+import { hangLimits } from '../tests/support/hang-limits.ts';
+
 export default defineConfig({
 	test: {
-		setupFiles: ['tests/support/action-test-environment.ts'],
-		testTimeout: 1_800_000
+		...hangLimits,
+		setupFiles: ['tests/support/action-test-environment.ts']
 	}
 });

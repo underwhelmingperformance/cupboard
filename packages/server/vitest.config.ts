@@ -10,17 +10,11 @@ import {
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { defineConfig } from 'vitest/config';
 
+import { hangLimits } from '../../tests/support/hang-limits.ts';
+
 import { resolveTestWorkerBudget } from './src/test-worker-budget.ts';
 
 const mebibyte = 1024 * 1024;
-
-// These limits only detect a hung test or hook. Do not give a test or hook a
-// shorter limit: whether it finishes within one depends on how busy the
-// machine is.
-const hangLimits = {
-	hookTimeout: 1_800_000,
-	testTimeout: 1_800_000
-};
 
 interface CompressedNarFixture {
 	readonly compressed: Uint8Array<ArrayBuffer>;
