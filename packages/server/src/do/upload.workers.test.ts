@@ -752,22 +752,18 @@ describe('upload flow', () => {
 	it('logs the eligibility publication after a commit as maintenance-eligibility-reconcile', async () => {
 		const init = await bootstrap();
 		const capture = startCapture();
-		const methods = (): unknown[] =>
-			capture.logs
-				.filter((entry) => entry.message === 'method finished')
-				.map((entry) => entry.properties.method);
+		const reconciled = capture.until(
+			(entry) =>
+				entry.message === 'method finished' &&
+				entry.properties.method === 'maintenance-eligibility-reconcile'
+		);
 
 		try {
 			await pushPath(
 				init.token,
 				uploadMetadata({ fileSize: narBytes.byteLength })
 			);
-			await vi.waitFor(
-				() => {
-					expect(methods()).toContain('maintenance-eligibility-reconcile');
-				},
-				{ timeout: 10_000, interval: 20 }
-			);
+			await reconciled;
 		} finally {
 			capture.stop();
 		}
