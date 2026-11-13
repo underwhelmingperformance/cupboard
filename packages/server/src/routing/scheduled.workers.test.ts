@@ -12,6 +12,7 @@ import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { noCost } from '../do/operation-cost.test-support.ts';
+import { passThrough } from '../http/stalled-body.test-support.ts';
 import {
 	flakyD1,
 	offboardTenant,
@@ -462,6 +463,51 @@ describe('scheduled tenant pass failure records', () => {
 
 		expect({ isFault: caught === fault, sent }).toStrictEqual({
 			isFault: true,
+			sent: [
+				{ kind: 'blob-reaper' },
+				{ kind: 'cas-reaper' },
+				{ kind: 'blob-demote' },
+				{ kind: 'cas-demote' },
+				{ kind: 'control-key-retirement' },
+				{ kind: 'control-session-pruning' }
+			]
+		});
+	});
+
+	it('enqueues the other jobs and reports both failures when the membership step and the local-step selection fail', async () => {
+		const membershipFault = new Error('membership fault');
+		const selectionFault = new Error('selection fault');
+		const sent: MaintenanceQueueMessage[] = [];
+
+		let caught: unknown;
+
+		try {
+			await enqueueMaintenanceJobs(
+				{
+					...env,
+					TENANT_CACHE: new Proxy(env.TENANT_CACHE, {
+						get: (target, property) =>
+							property === 'list'
+								? () => Promise.reject(membershipFault)
+								: passThrough(target, property)
+					}),
+					CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
+						failures: 1,
+						matches: (query) => query.includes('local_step_progressed_at'),
+						error: selectionFault
+					})
+				},
+				queueCollector(sent)
+			);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect({
+			errors: caught instanceof AggregateError ? caught.errors : caught,
+			sent
+		}).toStrictEqual({
+			errors: [membershipFault, selectionFault],
 			sent: [
 				{ kind: 'blob-reaper' },
 				{ kind: 'cas-reaper' },

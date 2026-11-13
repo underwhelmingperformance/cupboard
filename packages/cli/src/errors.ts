@@ -1789,7 +1789,8 @@ export class GithubCheckOptionError extends CliUsageError {
 
 /**
 A page of the tenant membership rebuild failed. The tenants of the earlier
-pages have their markers. The hourly refresh writes the rest.
+pages have their markers. The hourly refresh writes the markers that are
+missing, but it does not rewrite a marker that exists.
 */
 export class MembershipRebuildError extends CliCausedError {
 	constructor(
@@ -1798,11 +1799,11 @@ export class MembershipRebuildError extends CliCausedError {
 	) {
 		super(
 			`The tenant membership rebuild failed after ${String(rebuiltTenants)} ` +
-				'tenants. The markers of the tenants after those may be missing ' +
-				'until the hourly membership refresh writes them, and those ' +
-				'tenants may be unreachable if this release changed how ' +
-				'membership is stored. Run `cupboard deploy` again to retry the ' +
-				'rebuild.',
+				'tenants. The hourly membership refresh writes markers that are ' +
+				'missing but does not rewrite existing ones, so if this release ' +
+				'changed how membership is stored, the tenants after those may ' +
+				'be unreachable until the rebuild completes. Run `cupboard ' +
+				'deploy` again to retry the rebuild.',
 			{ cause: options.cause }
 		);
 		this.name = 'MembershipRebuildError';

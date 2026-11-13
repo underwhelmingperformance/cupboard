@@ -3,7 +3,8 @@ import {
 	type CacheAccessMode,
 	type CacheScope,
 	firstCacheGeneration,
-	type TenantId
+	type TenantId,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	kvOperationsPerInvocation,
@@ -11,7 +12,7 @@ import {
 } from '@cupboard/protocol/platform';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { type ReadUser } from '@cupboard/shared/http';
-import { and, eq, gt, ne } from 'drizzle-orm';
+import { and, eq, gt, lte, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 
@@ -37,7 +38,11 @@ import {
 import { tenantServer } from '../routing/durable-object.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
-import { tenantMemberKey } from './tenant-member-key.ts';
+import {
+	tenantMemberKey,
+	tenantMemberKeyPrefix,
+	tenantMemberSlug
+} from './tenant-member-key.ts';
 
 // Admission first checks an in-memory filter, then a per-tenant KV marker, and
 // finally the authoritative D1 row. The first two layers can reject a slug or
@@ -504,12 +509,15 @@ export const membershipMarkersPerPage =
 	kvOperationsPerInvocation - kvOperationsReserve;
 
 /**
-A queued page of the membership refresh. It writes the markers of the live
-tenants whose ids sort after `after`.
+A queued step of the membership reconcile. It continues from `after` and
+`listCursor`, which `MembershipReconcilePosition` describes. A message from an
+earlier build has only `after`. The step then lists the markers from the start
+and skips the ones that sort at or before `after`.
 */
 export interface MembershipRefreshMessage {
 	readonly kind: 'membership-refresh';
-	readonly after: TenantId;
+	readonly after?: TenantId | undefined;
+	readonly listCursor?: string | undefined;
 }
 
 type MembershipRefreshQueue = Pick<
@@ -550,8 +558,10 @@ export async function refreshTenantMembership(env: Env): Promise<number> {
 /**
 Writes the markers of one page of live tenants, in id order after `after`, or
 from the first tenant. The first page also rebuilds the filter from the
-registry. The cron and the queued chain call this for every page, and the
-`membership.rebuild` procedure calls it for each request that has a `page`.
+registry. The `membership.rebuild` procedure calls it for each request that has
+a `page`. It writes every marker of the page, because a deploy that changes the
+admission format needs every marker reasserted. The cron uses
+`reconcileTenantMembership` instead.
 */
 export async function refreshTenantMembershipPage(
 	env: Env,
@@ -580,28 +590,311 @@ export async function refreshTenantMembershipPage(
 }
 
 /**
-Runs a queued page of the membership refresh. It queues the next page when
-live tenants remain after this one.
+Where a membership reconcile continues. Every slug that sorts at or before
+`after` is already reconciled. `listCursor` is the KV listing cursor of the
+page that contains the first marker after `after`, and is absent when that page
+is the first one.
+*/
+export interface MembershipReconcilePosition {
+	readonly after?: TenantId | undefined;
+	readonly listCursor?: string | undefined;
+}
+
+/**
+What one step of the membership reconcile did.
+*/
+export interface MembershipReconcileStep {
+	/**
+	The number of markers that the step wrote.
+	*/
+	readonly written: number;
+	/**
+	The number of stale markers that the step deleted.
+	*/
+	readonly deleted: number;
+	/**
+	Where the next step continues. It is present while markers or live
+	tenants remain after this step.
+	*/
+	readonly next?: MembershipReconcilePosition;
+}
+
+// The most keys that one KV listing returns.
+const kvListLimit = 1000;
+
+// The most pages that a step skips to reach the first marker after `after`.
+// Each skipped page is a KV operation, so it reduces the writes and deletes of
+// the step.
+const maxSkippedListPages = 100;
+
+// A page of the KV listing. KV can return a page with no keys while it is not
+// complete, because it steps over the tombstones of deleted keys. Such a page
+// covers no slug. A key whose slug is not a tenant id is not a marker that this
+// code wrote, and no admission lookup uses it, so the page leaves it out.
+interface MarkerPage {
+	readonly slugs: readonly TenantId[];
+	readonly isComplete: boolean;
+	readonly cursor: string | undefined;
+}
+
+async function listMarkerPage(
+	kv: KVNamespace,
+	cursor: string | undefined
+): Promise<MarkerPage> {
+	const listing = await kv.list({
+		prefix: tenantMemberKeyPrefix,
+		limit: kvListLimit,
+		...(cursor !== undefined && { cursor })
+	});
+	const slugs = listing.keys
+		.map((key) => tenantIdSchema.safeParse(tenantMemberSlug(key.name)))
+		.filter((parsed) => parsed.success)
+		.map((parsed) => parsed.data);
+
+	return listing.list_complete
+		? { slugs, isComplete: true, cursor: undefined }
+		: { slugs, isComplete: false, cursor: listing.cursor };
+}
+
+// Lists the page of markers that starts at `cursor`. Earlier steps write
+// markers that sort before `after`, so a cursor from before those writes can
+// lead to a page whose markers all sort at or before `after`. The function
+// skips such pages, and pages that cover no slug. It returns the cursor that
+// leads to the page that it returns, so the step can continue from that page.
+async function listMarkersAfter(
+	kv: KVNamespace,
+	after: TenantId | undefined,
+	cursor: string | undefined
+): Promise<{
+	page: MarkerPage;
+	cursor: string | undefined;
+	skipped: number;
+}> {
+	let current = cursor;
+	let skipped = 0;
+	let page = await listMarkerPage(kv, current);
+
+	while (
+		!page.isComplete &&
+		skipped < maxSkippedListPages &&
+		isBeforeOrAt(page.slugs.at(-1), after)
+	) {
+		current = page.cursor;
+		skipped += 1;
+		page = await listMarkerPage(kv, current);
+	}
+
+	return { page, cursor: current, skipped };
+}
+
+// Whether a page whose last slug is `last` has nothing after `after`. A page
+// with no slug has nothing after any slug.
+function isBeforeOrAt(
+	last: TenantId | undefined,
+	after: TenantId | undefined
+): boolean {
+	return last === undefined || (after !== undefined && last <= after);
+}
+
+function laterSlug(
+	left: TenantId | undefined,
+	right: TenantId | undefined
+): TenantId | undefined {
+	if (left === undefined || right === undefined) {
+		return left ?? right;
+	}
+
+	return right > left ? right : left;
+}
+
+interface MarkerChange {
+	readonly kind: 'write' | 'delete';
+	readonly slug: TenantId;
+}
+
+// Compares the markers of one range with the live tenants of that range, both
+// in slug order. A live tenant without a marker needs a write, and a marker
+// without a live tenant needs a delete.
+function markerChanges(
+	markers: readonly TenantId[],
+	live: readonly TenantId[]
+): MarkerChange[] {
+	const changes: MarkerChange[] = [];
+	let marker = 0;
+	let tenant = 0;
+
+	while (marker < markers.length || tenant < live.length) {
+		const markerSlug = markers[marker];
+		const liveSlug = live[tenant];
+
+		if (
+			liveSlug !== undefined &&
+			(markerSlug === undefined || liveSlug < markerSlug)
+		) {
+			changes.push({ kind: 'write', slug: liveSlug });
+			tenant += 1;
+			continue;
+		}
+
+		if (
+			markerSlug !== undefined &&
+			(liveSlug === undefined || markerSlug < liveSlug)
+		) {
+			changes.push({ kind: 'delete', slug: markerSlug });
+			marker += 1;
+			continue;
+		}
+
+		marker += 1;
+		tenant += 1;
+	}
+
+	return changes;
+}
+
+/**
+Reconciles one range of the membership markers with the live tenants. It lists
+a page of markers and reads the live tenants in the range that the page covers.
+It writes the markers that are missing and deletes the markers that have no live
+tenant, so a range that is already correct makes no KV write. The first step,
+which has no position, also writes the filter when its bytes differ from the
+stored filter.
+
+A step lists one page of up to 1,000 markers. It lists up to
+`maxSkippedListPages` more pages while the cursor leads to pages that have
+nothing after `after`. It makes at most `membershipMarkersPerPage` writes,
+deletes and extra listings together, and the filter read and write. That
+stays within the KV operations of an invocation. The cron runs the first step,
+and the queued chain runs the others.
+*/
+export async function reconcileTenantMembership(
+	env: Env,
+	position: MembershipReconcilePosition = {}
+): Promise<MembershipReconcileStep> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const { after, listCursor } = position;
+	const isFirstStep = after === undefined && listCursor === undefined;
+
+	// List before reading D1. A new tenant's row is inserted before its marker,
+	// so a marker in the listing always has a row that the later read returns.
+	// The reconcile therefore cannot delete the marker of a tenant that is being
+	// created.
+	const { page, cursor, skipped } = await listMarkersAfter(
+		env.TENANT_CACHE,
+		after,
+		listCursor
+	);
+
+	// A page with no slug reaches this point only after the skip budget ends.
+	// The page has no slug to bound a range of live tenants, so the step reads no
+	// range from D1. The first step still reads every live tenant to publish the
+	// filter. The step continues from the cursor of the page.
+	if (!page.isComplete && page.slugs.length === 0) {
+		if (isFirstStep) {
+			await publishMembershipFilterIfChanged(
+				env,
+				await liveTenantSlugs(database)
+			);
+		}
+
+		return {
+			written: 0,
+			deleted: 0,
+			next: { after, listCursor: page.cursor }
+		};
+	}
+
+	const listEnd = page.isComplete ? undefined : page.slugs.at(-1);
+	const rowLimit = kvListLimit + membershipMarkersPerPage;
+	const rows = await liveTenantSlugs(database, {
+		after,
+		upper: listEnd,
+		limit: rowLimit + 1
+	});
+	const live = rows.slice(0, rowLimit);
+	const lastLive = live.at(-1);
+	const isTruncated = rows.length > live.length;
+
+	// The step covers the slugs after `after`, up to the last live tenant that it
+	// read when more follow, and otherwise up to the end of the listed page.
+	const covered = isTruncated ? lastLive : listEnd;
+	const markers = page.slugs.filter(
+		(slug) =>
+			(after === undefined || slug > after) &&
+			(covered === undefined || slug <= covered)
+	);
+	const changes = markerChanges(markers, live);
+	const applied = changes.slice(0, membershipMarkersPerPage - skipped);
+	const lastApplied = applied.at(-1);
+
+	await Promise.all(
+		applied.map((change) =>
+			change.kind === 'write'
+				? writeTenantMember(env.TENANT_CACHE, change.slug)
+				: deleteTenantMember(env.TENANT_CACHE, change.slug)
+		)
+	);
+
+	if (isFirstStep) {
+		// When the first step read every live tenant, the filter needs no second
+		// read.
+		const everyLive =
+			listEnd === undefined && !isTruncated
+				? live
+				: await liveTenantSlugs(database);
+
+		await publishMembershipFilterIfChanged(env, everyLive);
+	}
+
+	const written = applied.filter((change) => change.kind === 'write').length;
+	const counts = { written, deleted: applied.length - written };
+
+	if (lastApplied !== undefined && changes.length > applied.length) {
+		return {
+			...counts,
+			next: { after: lastApplied.slug, listCursor: cursor }
+		};
+	}
+
+	if (isTruncated && lastLive !== undefined) {
+		return { ...counts, next: { after: lastLive, listCursor: cursor } };
+	}
+
+	if (page.isComplete) {
+		return counts;
+	}
+
+	// The next step starts after this page. When every listed slug sorts at or
+	// before `after`, `after` stays where it is.
+	return {
+		...counts,
+		next: { after: laterSlug(after, listEnd), listCursor: page.cursor }
+	};
+}
+
+/**
+Runs a queued step of the membership reconcile. It queues the next step when
+markers or live tenants remain after this one.
 */
 export async function continueTenantMembershipRefresh(
 	env: Env,
 	message: MembershipRefreshMessage,
 	queue: MembershipRefreshQueue = env.MAINTENANCE_QUEUE
 ): Promise<void> {
-	const page = await refreshTenantMembershipPage(env, message.after);
+	const step = await reconcileTenantMembership(env, message);
 
-	if (page.cursor !== undefined) {
-		await queue.sendBatch([{ body: membershipRefreshMessage(page.cursor) }]);
+	if (step.next !== undefined) {
+		await queue.sendBatch([{ body: membershipRefreshMessage(step.next) }]);
 	}
 }
 
 /**
-The message for the page of the refresh that follows the tenant `after`.
+The message for the step of the reconcile that continues from `position`.
 */
 export function membershipRefreshMessage(
-	after: TenantId
+	position: MembershipReconcilePosition
 ): MembershipRefreshMessage {
-	return { kind: 'membership-refresh', after };
+	return { kind: 'membership-refresh', ...position };
 }
 
 // Rebuild the filter after creation so the new tenant becomes admissible within
@@ -614,11 +907,39 @@ export async function rebuildMembershipFilter(env: Env): Promise<void> {
 	await publishMembershipFilter(env, await liveTenantSlugs(database));
 }
 
+// Writes the filter only when its bytes differ from the stored filter. The
+// build is deterministic for a sorted list of slugs, so an unchanged tenant set
+// produces the stored bytes and the write is skipped.
+async function publishMembershipFilterIfChanged(
+	env: Env,
+	live: readonly TenantId[]
+): Promise<void> {
+	const bytes = buildMembershipFilter(live);
+	const stored = await env.TENANT_CACHE.get(filterKey, 'arrayBuffer');
+
+	if (stored !== null && hasSameBytes(new Uint8Array(stored), bytes)) {
+		return;
+	}
+
+	await publishFilterBytes(env, bytes);
+}
+
+function hasSameBytes(left: Uint8Array, right: Uint8Array): boolean {
+	return (
+		left.length === right.length &&
+		left.every((byte, index) => byte === right[index])
+	);
+}
+
 async function publishMembershipFilter(
 	env: Env,
 	live: readonly TenantId[]
 ): Promise<void> {
-	await env.TENANT_CACHE.put(filterKey, buildMembershipFilter(live));
+	await publishFilterBytes(env, buildMembershipFilter(live));
+}
+
+async function publishFilterBytes(env: Env, bytes: Uint8Array): Promise<void> {
+	await env.TENANT_CACHE.put(filterKey, bytes);
 	// Drop this colo's cached filter so it refetches the rebuilt one promptly;
 	// other colos pick it up on their cache TTL.
 	await caches.default.delete(membershipFilterCacheKey(env.CUPBOARD_DO));
@@ -626,7 +947,11 @@ async function publishMembershipFilter(
 
 async function liveTenantSlugs(
 	database: Database,
-	page: { readonly after?: TenantId | undefined; readonly limit?: number } = {}
+	range: {
+		readonly after?: TenantId | undefined;
+		readonly upper?: TenantId | undefined;
+		readonly limit?: number;
+	} = {}
 ): Promise<TenantId[]> {
 	const query = database
 		.select({ id: d1Schema.tenant.id })
@@ -634,15 +959,18 @@ async function liveTenantSlugs(
 		.where(
 			and(
 				ne(d1Schema.tenant.status, 'offboarded'),
-				page.after === undefined
+				range.after === undefined
 					? undefined
-					: gt(d1Schema.tenant.id, page.after)
+					: gt(d1Schema.tenant.id, range.after),
+				range.upper === undefined
+					? undefined
+					: lte(d1Schema.tenant.id, range.upper)
 			)
 		)
 		.orderBy(d1Schema.tenant.id);
-	const rows = await (page.limit === undefined
+	const rows = await (range.limit === undefined
 		? query.all()
-		: query.limit(page.limit).all());
+		: query.limit(range.limit).all());
 
 	return rows.map((row) => row.id);
 }

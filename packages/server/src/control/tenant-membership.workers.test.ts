@@ -4,7 +4,7 @@ import {
 	kvOperationsReserve
 } from '@cupboard/protocol/platform';
 import { env as tenantEnv } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { passThrough } from '../http/stalled-body.test-support.ts';
@@ -13,11 +13,13 @@ import {
 	handleMaintenanceQueue,
 	type MaintenanceQueueMessage
 } from '../routing/scheduled.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import { resetTestServer, testControlEnv } from '../test-support.ts';
 
 import { insertBulkTenants } from './bulk-tenants.test-support.ts';
 import { controlMembershipRebuild } from './control-plane.ts';
 import { tenantMemberKey } from './tenant-member-key.ts';
+import { reconcileTenantMembership } from './tenant-membership.ts';
 
 const baseEnv = Object.assign({}, tenantEnv, testControlEnv);
 
@@ -49,22 +51,108 @@ function markerKeys(slugs: readonly TenantId[]): string[] {
 	return slugs.map((slug) => tenantMemberKey(slug));
 }
 
-// An environment whose KV namespace records its puts and whose queue records
-// its messages.
-function recordedEnvironment() {
+/**
+The KV operations that an invocation made. `gets` counts every read of a
+key, and `lists` counts every listing.
+*/
+interface KvOperations {
+	readonly puts: string[];
+	readonly deletes: string[];
+	readonly gets: number;
+	readonly lists: number;
+}
+
+// An environment whose KV namespace records its operations and whose queue
+// records its messages. `puts` accumulates every put. `take` returns the
+// operations since the previous call and resets the per-call record.
+// `listOverride` can replace the keys and the cursor of an incomplete listing,
+// from the options of the call and the number of the call. It returns
+// `undefined` to use the real listing.
+function recordedEnvironment(
+	options: {
+		readonly failure?: Error;
+		readonly listOverride?: (
+			listOptions: KVNamespaceListOptions | undefined,
+			call: number
+		) =>
+			| { readonly keys: { name: string }[]; readonly cursor: string }
+			| undefined;
+	} = {}
+) {
+	let listCalls = 0;
+	const overriddenCursors = new Set<string>();
 	const puts: string[] = [];
+	let sinceTake: {
+		puts: string[];
+		deletes: string[];
+		gets: number;
+		lists: number;
+	} = {
+		puts: [],
+		deletes: [],
+		gets: 0,
+		lists: 0
+	};
 	const messages: MaintenanceQueueMessage[] = [];
 	const kv = new Proxy(baseEnv.TENANT_CACHE, {
 		get(target, property) {
-			if (property !== 'put') {
-				return passThrough(target, property);
+			if (property === 'put') {
+				return (key: string, value: string | ArrayBuffer) => {
+					puts.push(key);
+					sinceTake.puts.push(key);
+
+					return options.failure === undefined
+						? target.put(key, value)
+						: Promise.reject(options.failure);
+				};
 			}
 
-			return (key: string, value: string | ArrayBuffer) => {
-				puts.push(key);
+			if (property === 'delete') {
+				return (key: string) => {
+					sinceTake.deletes.push(key);
 
-				return target.put(key, value);
-			};
+					return target.delete(key);
+				};
+			}
+
+			if (property === 'get') {
+				return (key: string, type: 'arrayBuffer') => {
+					sinceTake.gets += 1;
+
+					return target.get(key, type);
+				};
+			}
+
+			if (property === 'list') {
+				return async (listOptions?: KVNamespaceListOptions) => {
+					sinceTake.lists += 1;
+					listCalls += 1;
+
+					if (options.failure !== undefined) {
+						throw options.failure;
+					}
+
+					// A cursor that an override returned leads to the real listing from the
+					// start, which models a cursor that leads to the remaining keys.
+					const { cursor, ...withoutCursor } = listOptions ?? {};
+					const listing = await target.list(
+						typeof cursor === 'string' && overriddenCursors.has(cursor)
+							? withoutCursor
+							: listOptions
+					);
+					const overridden = options.listOverride?.(listOptions, listCalls);
+
+					if (overridden === undefined) {
+						return listing;
+					}
+
+					overriddenCursors.add(overridden.cursor);
+
+					return { ...listing, ...overridden, list_complete: false as const };
+				};
+			}
+
+			return passThrough(target, property);
 		}
 	});
 	const queue = new Proxy(baseEnv.MAINTENANCE_QUEUE, {
@@ -81,6 +169,12 @@ function recordedEnvironment() {
 		puts,
 		messages,
 		queue,
+		take(): KvOperations {
+			const taken = sinceTake;
+			sinceTake = { puts: [], deletes: [], gets: 0, lists: 0 };
+
+			return taken;
+		},
 		environment: {
 			...baseEnv,
 			TENANT_CACHE: kv,
@@ -202,47 +296,373 @@ describe('membership rebuild', () => {
 			puts: [...markerKeys(slugs), filterKey]
 		});
 	});
+});
 
-	it('queues the later pages from the cron tick and writes them through the queue consumer', async () => {
-		await insertBulkTenants(2000);
-		const slugs = await liveSlugs();
-		const recorded = recordedEnvironment();
-		const answers: string[] = [];
-		const putsPerStep: number[] = [];
+type Recorded = ReturnType<typeof recordedEnvironment>;
 
-		await enqueueMaintenanceJobs(recorded.environment, recorded.queue);
-		putsPerStep.push(recorded.puts.length);
-		const queued = recorded.messages.filter(
+// Runs one cron tick and every queued membership message that follows from
+// it, in order. Returns the KV operations of each invocation.
+async function runMembershipTick(recorded: Recorded): Promise<KvOperations[]> {
+	const answers: string[] = [];
+	const invocations: KvOperations[] = [];
+
+	await enqueueMaintenanceJobs(recorded.environment, recorded.queue);
+	invocations.push(recorded.take());
+
+	let queued = recorded.messages.filter(
+		(message) => message.kind === 'membership-refresh'
+	);
+
+	while (queued[0] !== undefined) {
+		recorded.messages.length = 0;
+		await handleMaintenanceQueue(
+			queueBatch(queued[0], answers),
+			recorded.environment,
+			new NarReadBufferPool()
+		);
+		invocations.push(recorded.take());
+		queued = recorded.messages.filter(
 			(message) => message.kind === 'membership-refresh'
 		);
-		recorded.messages.length = 0;
+	}
 
-		// The consumer parses each body with the queue's schema, so a body that
-		// the schema rejects would be acknowledged without writing a page.
-		let message: MaintenanceQueueMessage | undefined = queued[0];
+	recorded.messages.length = 0;
 
-		while (message !== undefined) {
-			const before = recorded.puts.length;
-			await handleMaintenanceQueue(
-				queueBatch(message, answers),
-				recorded.environment,
-				new NarReadBufferPool()
-			);
-			putsPerStep.push(recorded.puts.length - before);
-			message = recorded.messages.shift();
+	return invocations;
+}
+
+// A tick that finds nothing to change: one listing, and one read of the stored
+// filter to compare it with the rebuilt one.
+const unchangedInvocation: KvOperations = {
+	puts: [],
+	deletes: [],
+	gets: 1,
+	lists: 1
+};
+
+describe('membership refresh from the cron', () => {
+	beforeEach(resetTestServer);
+
+	it.each([1, 50])(
+		'makes no KV write in a tick when %i live tenants already have markers',
+		async (tenants) => {
+			await insertBulkTenants(tenants);
+			const recorded = recordedEnvironment();
+			await runMembershipTick(recorded);
+
+			expect(await runMembershipTick(recorded)).toStrictEqual([
+				unchangedInvocation
+			]);
 		}
+	);
 
-		expect({ queued, putsPerStep, answers, puts: recorded.puts }).toStrictEqual(
+	it('writes only the marker and the filter for a tenant that has no marker', async () => {
+		const recorded = recordedEnvironment();
+		await runMembershipTick(recorded);
+		await insertBulkTenants(1);
+
+		expect(await runMembershipTick(recorded)).toStrictEqual([
 			{
-				queued: [{ kind: 'membership-refresh', after: slugs[pageSize - 1] }],
-				putsPerStep: [pageSize + 1, pageSize, slugs.length - 2 * pageSize],
-				answers: ['ack', 'ack'],
-				puts: [
-					...markerKeys(slugs.slice(0, pageSize)),
-					filterKey,
-					...markerKeys(slugs.slice(pageSize))
-				]
+				puts: [tenantMemberKey(tenantIdSchema.parse('bulk000001')), filterKey],
+				deletes: [],
+				gets: 1,
+				lists: 1
 			}
+		]);
+	});
+
+	it('deletes the marker of a tenant that is no longer live and rewrites the filter', async () => {
+		await insertBulkTenants(3);
+		const recorded = recordedEnvironment();
+		await runMembershipTick(recorded);
+		await baseEnv.CUPBOARD_DB.prepare(
+			"UPDATE tenant SET status = 'offboarded' WHERE id = 'bulk000002'"
+		).run();
+
+		expect(await runMembershipTick(recorded)).toStrictEqual([
+			{
+				puts: [filterKey],
+				deletes: [tenantMemberKey(tenantIdSchema.parse('bulk000002'))],
+				gets: 1,
+				lists: 1
+			}
+		]);
+	});
+
+	it('sends the maintenance jobs and then rejects when the membership refresh fails', async () => {
+		const healthy = recordedEnvironment();
+		await enqueueMaintenanceJobs(healthy.environment, healthy.queue);
+		const failure = new Error('KV unavailable');
+		const failing = recordedEnvironment({ failure });
+
+		await expect(
+			enqueueMaintenanceJobs(failing.environment, failing.queue)
+		).rejects.toBe(failure);
+		expect(failing.messages).toStrictEqual(healthy.messages);
+	});
+
+	// The fixture tenant already has a marker, and it sorts after the bulk
+	// tenants. The third invocation lists two pages: the first page now ends
+	// before the point where the chain continues, so it skips that page.
+	it('writes the missing markers once through the queued invocations', async () => {
+		await insertBulkTenants(2000);
+		const slugs = await liveSlugs();
+		const bulk = slugs.slice(0, 2000);
+		const recorded = recordedEnvironment();
+
+		const invocations = await runMembershipTick(recorded);
+
+		expect({ invocations, puts: recorded.puts }).toStrictEqual({
+			invocations: [
+				{
+					puts: [...markerKeys(bulk.slice(0, pageSize)), filterKey],
+					deletes: [],
+					gets: 1,
+					lists: 1
+				},
+				{
+					puts: markerKeys(bulk.slice(pageSize, 2 * pageSize)),
+					deletes: [],
+					gets: 0,
+					lists: 1
+				},
+				{
+					puts: markerKeys(bulk.slice(2 * pageSize)),
+					deletes: [],
+					gets: 0,
+					lists: 2
+				}
+			],
+			puts: [
+				...markerKeys(bulk.slice(0, pageSize)),
+				filterKey,
+				...markerKeys(bulk.slice(pageSize))
+			]
+		});
+	});
+
+	it('lists one page of markers in each invocation and deletes a stale marker on the page that contains it', async () => {
+		await insertBulkTenants(1200);
+		const recorded = recordedEnvironment();
+		await runMembershipTick(recorded);
+		const stale = tenantMemberKey(tenantIdSchema.parse('bulk001201'));
+		await baseEnv.TENANT_CACHE.put(stale, '1');
+
+		expect(await runMembershipTick(recorded)).toStrictEqual([
+			unchangedInvocation,
+			{ puts: [], deletes: [stale], gets: 0, lists: 1 }
+		]);
+	});
+
+	// KV can answer a listing with no keys and `list_complete: false` while it
+	// steps over the tombstones of deleted keys. The namespace of the test
+	// environment cannot produce such a page, so the override answers the first
+	// call with one. The cursor that it returns leads to the real listing.
+	it('rewrites no marker when the first listing page is empty but incomplete', async () => {
+		await insertBulkTenants(50);
+		await runMembershipTick(recordedEnvironment());
+		const recorded = recordedEnvironment({
+			listOverride: (listOptions, call) =>
+				call === 1 ? { keys: [], cursor: 'after-tombstones' } : undefined
+		});
+
+		expect(await runMembershipTick(recorded)).toStrictEqual([
+			{ puts: [], deletes: [], gets: 1, lists: 2 }
+		]);
+	});
+
+	// Every listing answers with a page that ends before `after`, so the step
+	// skips as many pages as its budget allows and then continues by cursor.
+	it('keeps its position and continues by cursor when the skipped pages reach the cap', async () => {
+		await insertBulkTenants(3);
+		const after = tenantIdSchema.parse('bulk000002');
+		const recorded = recordedEnvironment({
+			listOverride: (_listOptions, call) => ({
+				keys: [{ name: tenantMemberKey(tenantIdSchema.parse('bulk000001')) }],
+				cursor: `page-${String(call)}`
+			})
+		});
+
+		const step = await reconcileTenantMembership(recorded.environment, {
+			after,
+			listCursor: 'start'
+		});
+
+		expect({ step, operations: recorded.take() }).toStrictEqual({
+			step: {
+				written: 0,
+				deleted: 0,
+				next: { after, listCursor: 'page-101' }
+			},
+			operations: { puts: [], deletes: [], gets: 0, lists: 101 }
+		});
+	});
+
+	// With 1,000 of the 1,900 bulk markers present, the first step reads 1,900
+	// live tenants and one more, and writes the 900 missing markers, which is
+	// the whole write budget. It continues after the last tenant that it read.
+	it('continues after the last tenant that it read when the live tenants fill the step', async () => {
+		await insertBulkTenants(1900);
+		await runMembershipTick(recordedEnvironment());
+		const slugs = await liveSlugs();
+		const bulk = slugs.slice(0, 1900);
+		const missing = bulk.slice(100, 1000);
+		await Promise.all(
+			[...markerKeys(missing), tenantMemberKey(fixtureTenant)].map((key) =>
+				baseEnv.TENANT_CACHE.delete(key)
+			)
 		);
+		const recorded = recordedEnvironment();
+
+		expect(await runMembershipTick(recorded)).toStrictEqual([
+			{ puts: markerKeys(missing), deletes: [], gets: 1, lists: 1 },
+			{
+				puts: [tenantMemberKey(fixtureTenant)],
+				deletes: [],
+				gets: 0,
+				lists: 2
+			}
+		]);
+	});
+
+	// 950 stale markers sort before the fixture tenant's marker. The first step
+	// deletes 900 of them, so the next step continues after a deleted slug.
+	it('continues after a deleted marker when the deletes fill the step', async () => {
+		const settled = recordedEnvironment();
+		await runMembershipTick(settled);
+		const stale = Array.from({ length: 950 }, (_, index) =>
+			tenantMemberKey(
+				tenantIdSchema.parse(`stale${String(index + 1).padStart(6, '0')}`)
+			)
+		);
+		await Promise.all(stale.map((key) => baseEnv.TENANT_CACHE.put(key, '1')));
+		onTestFinished(async () => {
+			await Promise.all(stale.map((key) => baseEnv.TENANT_CACHE.delete(key)));
+		});
+		const recorded = recordedEnvironment();
+
+		expect(await runMembershipTick(recorded)).toStrictEqual([
+			{ puts: [], deletes: stale.slice(0, 900), gets: 1, lists: 1 },
+			{ puts: [], deletes: stale.slice(900), gets: 0, lists: 1 }
+		]);
+	});
+
+	// A message from the previous build has only `after`. The step lists from the
+	// start and queues the step that follows its page.
+	it('continues a queued message that has only the slug', async () => {
+		await insertBulkTenants(1200);
+		await runMembershipTick(recordedEnvironment());
+		const recorded = recordedEnvironment();
+		const answers: string[] = [];
+
+		await handleMaintenanceQueue(
+			queueBatch(
+				{
+					kind: 'membership-refresh',
+					after: tenantIdSchema.parse('bulk000500')
+				},
+				answers
+			),
+			recorded.environment,
+			new NarReadBufferPool()
+		);
+
+		const [queued] = recorded.messages;
+		const listCursor =
+			queued?.kind === 'membership-refresh' ? queued.listCursor : undefined;
+
+		expect({
+			answers,
+			operations: recorded.take(),
+			queued,
+			hasListCursor: listCursor !== undefined
+		}).toStrictEqual({
+			answers: ['ack'],
+			operations: { puts: [], deletes: [], gets: 0, lists: 1 },
+			queued: {
+				kind: 'membership-refresh',
+				after: tenantIdSchema.parse('bulk001000'),
+				listCursor
+			},
+			hasListCursor: true
+		});
+	});
+
+	// The first step reads 101 empty incomplete pages, which is the skip budget
+	// plus the first listing. It writes the filter, because the tenant set
+	// changed, and continues from the cursor of the last page. The queued step
+	// then finds the real markers and writes the one that is missing.
+	it('publishes the filter and continues from the cursor when the first step reaches only empty pages', async () => {
+		await runMembershipTick(recordedEnvironment());
+		await insertBulkTenants(1);
+		const recorded = recordedEnvironment({
+			listOverride: (_listOptions, call) =>
+				call <= 101 ? { keys: [], cursor: `empty-${String(call)}` } : undefined
+		});
+
+		expect(await runMembershipTick(recorded)).toStrictEqual([
+			{ puts: [filterKey], deletes: [], gets: 1, lists: 101 },
+			{
+				puts: [tenantMemberKey(tenantIdSchema.parse('bulk000001'))],
+				deletes: [],
+				gets: 0,
+				lists: 1
+			}
+		]);
+	});
+
+	it('continues from the cursor of the last page when a queued step reaches only empty pages', async () => {
+		await insertBulkTenants(3);
+		const after = tenantIdSchema.parse('bulk000002');
+		const recorded = recordedEnvironment({
+			listOverride: (_listOptions, call) => ({
+				keys: [],
+				cursor: `empty-${String(call)}`
+			})
+		});
+
+		const step = await reconcileTenantMembership(recorded.environment, {
+			after,
+			listCursor: 'start'
+		});
+
+		expect({ step, operations: recorded.take() }).toStrictEqual({
+			step: {
+				written: 0,
+				deleted: 0,
+				next: { after, listCursor: 'empty-101' }
+			},
+			operations: { puts: [], deletes: [], gets: 0, lists: 101 }
+		});
+	});
+
+	// One skipped page leaves 899 of the 900 operations for writes. A step that
+	// has more changes than that writes 899 markers, so the invocation stays
+	// within its KV operations.
+	it('reduces the writes of a step by the pages that it skipped', async () => {
+		await insertBulkTenants(2000);
+		await baseEnv.TENANT_CACHE.delete(filterKey);
+		const slugs = await liveSlugs();
+		const bulk = slugs.slice(0, 2000);
+		const recorded = recordedEnvironment({
+			listOverride: (_listOptions, call) =>
+				call === 1 ? { keys: [], cursor: 'skipped' } : undefined
+		});
+
+		const step = await reconcileTenantMembership(recorded.environment);
+
+		expect({ step, operations: recorded.take() }).toStrictEqual({
+			step: {
+				written: 899,
+				deleted: 0,
+				next: { after: bulk[898], listCursor: 'skipped' }
+			},
+			operations: {
+				puts: [...markerKeys(bulk.slice(0, 899)), filterKey],
+				deletes: [],
+				gets: 1,
+				lists: 2
+			}
+		});
 	});
 });
