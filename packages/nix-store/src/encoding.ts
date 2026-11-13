@@ -29,10 +29,16 @@ export function base64ToBytes(value: string): Uint8Array {
 Encodes bytes with the URL-safe base64 alphabet and no padding.
 */
 export function bytesToBase64Url(bytes: Uint8Array): string {
-	return bytesToBase64(bytes)
+	const encoded = bytesToBase64(bytes)
 		.replaceAll('+', '-')
-		.replaceAll('/', '_')
-		.replace(/=+$/u, '');
+		.replaceAll('/', '_');
+	let end = encoded.length;
+
+	while (end > 0 && encoded.charAt(end - 1) === '=') {
+		end -= 1;
+	}
+
+	return encoded.slice(0, end);
 }
 
 /**
