@@ -302,6 +302,10 @@ import {
 	isAwaitingVerdict,
 	UploadStateService
 } from './upload-state-service.ts';
+import {
+	unservableVerdictFrame,
+	uploadVerdictFrame
+} from './upload-verdict.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
 	type CanonicalWriteReservation,
@@ -1782,13 +1786,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 			return;
 		}
-		const graceDecision = parseStoredGraceDecision(operation.graceDecisionJson);
-		sendCommitSessionFrame(socket, {
-			ev: 'verdict',
-			uploadId: operation.id,
-			status: publicationFailure(operation.resultJson),
-			...(graceDecision?.reportsGrace === true && { grace: {} })
-		});
+		sendCommitSessionFrame(
+			socket,
+			unservableVerdictFrame(
+				operation.id,
+				operation.graceDecisionJson,
+				publicationFailure(operation.resultJson)
+			)
+		);
 	}
 
 	// Answers a subscription, and a `publish-batch` entry for a concluded
@@ -2394,11 +2399,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// receives `absent` for the upload. A session of any other cache receives
 		// the same refusal as for a live upload of another cache.
 		if (this.context.cacheRepository.wasReplacedBy(row.cacheId, cache)) {
-			sendCommitSessionFrame(socket, {
-				ev: 'verdict',
-				uploadId,
-				status: 'absent'
-			});
+			sendCommitSessionFrame(
+				socket,
+				uploadVerdictFrame(this.context, row, 'absent')
+			);
 			return undefined;
 		}
 
@@ -2435,22 +2439,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return isAwaitingVerdict(row) ? 'deferred' : undefined;
 		}
 
-		sendCommitSessionFrame(socket, {
-			ev: 'verdict',
-			uploadId,
-			status,
-			...(graceDecision?.reportsGrace === true && {
-				grace:
-					status === 'servable'
-						? storedGraceFact(
-								this.context.db,
-								cache,
-								parseStoredUploadPathMetadata(uploadId, row.metadataJson)
-									.storePathHash
-							)
-						: {}
-			})
-		});
+		sendCommitSessionFrame(
+			socket,
+			uploadVerdictFrame(this.context, row, status, cache)
+		);
 		return undefined;
 	}
 
