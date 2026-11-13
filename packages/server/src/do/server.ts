@@ -588,6 +588,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly localSchemaRun: LocalSchemaRun;
 	readonly context: ServerContext;
 
+	// Called once the `webSocketClose` handler has finished. A test sets it to
+	// observe that the Durable Object has handled a client's close.
+	afterCommitSocketClose: (() => void) | undefined;
+
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
 		this.context = new ServerContext(ctx, env, withSpan);
@@ -4990,10 +4994,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		_reason?: string,
 		wasClean?: boolean
 	): Promise<void> {
-		return withCommitSocketEvent(socket, 'close', async () => {
-			rootLogger().debug('commit socket closed', { code, wasClean });
-			await this.closeCommitSocket(socket);
-		});
+		try {
+			await withCommitSocketEvent(socket, 'close', async () => {
+				rootLogger().debug('commit socket closed', { code, wasClean });
+				await this.closeCommitSocket(socket);
+			});
+		} finally {
+			this.afterCommitSocketClose?.();
+		}
 	}
 
 	async webSocketError(socket: WebSocket, error?: unknown): Promise<void> {
