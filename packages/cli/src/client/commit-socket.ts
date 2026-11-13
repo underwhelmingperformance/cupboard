@@ -42,6 +42,7 @@ import { z } from 'zod';
 
 import { abortReason } from '../abort.ts';
 import {
+	CacheRemovedError,
 	CommitCapacityQueuedError,
 	CommitCapacityTimeoutError,
 	CommitSocketCapabilityMismatchError,
@@ -155,6 +156,10 @@ export type AdvertisedCapabilities = ReadonlyMap<string, CapabilityAttributes>;
 
 export interface CommitSessionOptions {
 	readonly path: string;
+	/**
+	The session's cache, as `CacheRemovedError` reports it.
+	*/
+	readonly cacheName: string;
 	/**
 	Bounds both a deferred verdict and the wait for commit capacity.
 	*/
@@ -1448,10 +1453,10 @@ export function runCommitSession(
 
 				const status = frame.status;
 				finishEntry(frame.uploadId, (settling) => {
-					const error = new UploadVerificationFailedError(
-						frame.uploadId,
-						status
-					);
+					const error =
+						'reason' in frame
+							? new CacheRemovedError(options.cacheName)
+							: new UploadVerificationFailedError(frame.uploadId, status);
 					settling.settleFailed(error);
 
 					// A failure racing ahead of the deferred frame has no `pending`

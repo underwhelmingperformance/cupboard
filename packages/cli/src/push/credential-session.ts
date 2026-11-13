@@ -16,6 +16,10 @@ export interface CredentialSessionOptions {
 
 export interface CredentialSession {
 	pushId(): Promise<PushId>;
+	/**
+	The push ID once the server has issued one, without requesting it.
+	*/
+	issuedPushId(): PushId | undefined;
 	readonly provider: CredentialProvider;
 }
 
@@ -75,6 +79,7 @@ export function credentialSession(
 
 			return credential.pushId;
 		},
+		issuedPushId: () => pushId,
 		provider
 	};
 }

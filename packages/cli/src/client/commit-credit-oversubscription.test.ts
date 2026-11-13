@@ -206,7 +206,7 @@ describe('publications that oversubscribe the server budget', () => {
 								Promise.resolve(undefined)
 						})
 				},
-				{ path, timeoutSeconds: 600 }
+				{ path, cacheName: 'builds', timeoutSeconds: 600 }
 			);
 
 			try {

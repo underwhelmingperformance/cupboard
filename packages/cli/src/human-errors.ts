@@ -425,6 +425,10 @@ function publicationError(error: unknown): string | undefined {
 		return `Publication checks are still pending for ${String(error.pending)} paths after ${String(error.timeoutSeconds)} seconds. The server may still publish them. Retry the push later and contact the tenant administrator if the delay continues.`;
 	}
 
+	if (error instanceof errors.CacheRemovedError) {
+		return error.message;
+	}
+
 	if (error instanceof errors.UploadVerificationFailedError) {
 		switch (error.status) {
 			case 'mismatch': {

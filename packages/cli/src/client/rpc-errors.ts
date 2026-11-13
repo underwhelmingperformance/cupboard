@@ -3,6 +3,8 @@ import {
 	tenantQuotaBelowUsageErrorDataSchema
 } from '@cupboard/protocol/tenants';
 import {
+	cacheRemovedErrorCode,
+	cacheRemovedErrorDataSchema,
 	uploadRequestLimitErrorCode,
 	uploadRequestLimitErrorDataSchema
 } from '@cupboard/protocol/upload';
@@ -12,6 +14,7 @@ import { StatusCodes } from 'http-status-codes';
 import {
 	AdminApiTransientError,
 	type AdminApiTransientStatus,
+	CacheRemovedError,
 	CupboardHttpError,
 	QuotaBelowUsageError,
 	QuotaExceededError,
@@ -20,6 +23,8 @@ import {
 	TenantOffboardingError,
 	UploadRequestLimitExceededError
 } from '../errors.ts';
+
+import { cacheLabel } from './client.ts';
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 const insufficientStorageStatus: number = StatusCodes.INSUFFICIENT_STORAGE;
@@ -97,6 +102,25 @@ export function isStaleUploadError(error: unknown): boolean {
 	return error instanceof CupboardHttpError && error.status === notFoundStatus;
 }
 
+/**
+The `CacheRemovedError` for a push request that the server refused with
+`CACHE_REMOVED` because the push's cache was removed while the push ran.
+Undefined for any other error.
+*/
+export function cacheRemovedErrorOf(
+	error: unknown
+): CacheRemovedError | undefined {
+	if (!(error instanceof ORPCError) || error.code !== cacheRemovedErrorCode) {
+		return undefined;
+	}
+
+	const data = cacheRemovedErrorDataSchema.safeParse(error.data);
+
+	return data.success
+		? new CacheRemovedError(cacheLabel(data.data.cache))
+		: undefined;
+}
+
 export interface TranslateRpcErrorOptions {
 	/**
 	Whether a session or scope error keeps the oRPC error as its cause. The
@@ -112,8 +136,9 @@ export interface TranslateRpcErrorOptions {
 }
 
 /**
-Converts authentication and scope failures, `TENANT_OFFBOARDING`,
-`TENANT_QUOTA_BELOW_USAGE`, `UPLOAD_REQUEST_LIMIT_EXCEEDED`, and any oRPC
+Converts authentication and scope failures, `CACHE_REMOVED`,
+`TENANT_OFFBOARDING`, `TENANT_QUOTA_BELOW_USAGE`,
+`UPLOAD_REQUEST_LIMIT_EXCEEDED`, and any oRPC
 error with status 408, 429, 503 or 507, into CLI errors. Every other oRPC
 error and every non-oRPC error passes through unchanged. A caller that
 needs the oRPC code or data of a 408, 429, 503 or 507 must inspect the error
@@ -130,6 +155,10 @@ export function translateRpcError(
 	const causeOptions = options.keepAuthCause === true ? { cause: error } : {};
 
 	switch (error.code) {
+		case cacheRemovedErrorCode: {
+			return cacheRemovedErrorOf(error) ?? error;
+		}
+
 		case uploadRequestLimitErrorCode: {
 			const data = uploadRequestLimitErrorDataSchema.safeParse(error.data);
 			return data.success

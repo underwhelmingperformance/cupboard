@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
 import {
+	CacheRemovedError,
 	CommitCapacityTimeoutError,
 	CommitSocketCapabilityMismatchError,
 	CommitSocketProtocolError,
@@ -62,6 +63,7 @@ const storePathHash = storePathHashSchema.parse(
 );
 const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
 const path = '/commit';
+const cacheName = 'builds';
 // Advancing by this cap fires every possible jittered reconnect delay.
 const maxBackoffMs = 5000;
 // Node truncates longer timer delays. The session chains timers to preserve a
@@ -161,6 +163,7 @@ function openSessionOver(
 		credentials,
 		{
 			path,
+			cacheName,
 			timeoutSeconds: options.timeoutSeconds ?? 600,
 			signal: options.signal,
 			keepaliveMs: options.keepaliveMs,
@@ -383,6 +386,52 @@ describe('runCommitSession', () => {
 				uploadId,
 				status,
 				exitCode
+			});
+		}
+	);
+
+	// The server sends this verdict for a commit that it refuses because the
+	// cache was removed, and for a parked upload that the removal deleted.
+	it.each([
+		{ entry: 'a commit', isParked: false },
+		{ entry: 'a parked upload', isParked: true }
+	])(
+		'fails $entry with the removed cache when the verdict reports the removal',
+		async ({ isParked }) => {
+			const socket = new FakeCommitSocket();
+			const session = openSession(socket);
+			const committed = session.commit(target);
+
+			socket.emit('open');
+			if (isParked) {
+				socket.emit(
+					'message',
+					frame({ ev: 'deferred', uploadId, storePathHash, narHash })
+				);
+			}
+			socket.emit(
+				'message',
+				frame({
+					ev: 'verdict',
+					uploadId,
+					status: 'absent',
+					reason: 'cache-removed'
+				})
+			);
+
+			const error = await rejectedBy(
+				isParked ? settledOf(committed) : ackOf(committed),
+				CacheRemovedError
+			);
+
+			expect({
+				name: error.name,
+				cacheName: error.cacheName,
+				exitCode: cliExitCode(error, 130)
+			}).toStrictEqual({
+				name: 'CacheRemovedError',
+				cacheName,
+				exitCode: 1
 			});
 		}
 	);

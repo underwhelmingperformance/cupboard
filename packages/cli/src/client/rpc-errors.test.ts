@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	AdminApiTransientError,
 	type AdminApiTransientStatus,
+	CacheRemovedError,
 	QuotaBelowUsageError,
 	QuotaExceededError,
 	ScopeForbiddenError,
@@ -143,6 +144,34 @@ describe('translateRpcError', () => {
 				? { name: translated.name, tenant: translated.tenant }
 				: translated
 		).toStrictEqual({ name: 'TenantOffboardingError', tenant: 'beta' });
+	});
+
+	it.each([
+		{ cache: { kind: 'named', name: 'builds' }, expected: 'builds' },
+		{ cache: { kind: 'default' }, expected: '(default)' }
+	])(
+		'translates CACHE_REMOVED into CacheRemovedError for the cache $expected',
+		({ cache, expected }) => {
+			const translated = translateRpcError(
+				new ORPCError('CACHE_REMOVED', {
+					status: 410,
+					message: 'raw',
+					data: { cache }
+				})
+			);
+
+			expect(translated).toStrictEqual(new CacheRemovedError(expected));
+		}
+	);
+
+	it('returns CACHE_REMOVED unchanged when its data does not identify a cache', () => {
+		const error = new ORPCError('CACHE_REMOVED', {
+			status: 410,
+			message: 'raw',
+			data: { cache: 'builds' }
+		});
+
+		expect(translateRpcError(error)).toBe(error);
 	});
 
 	it('reports the charged bytes when a quota would be below them', () => {

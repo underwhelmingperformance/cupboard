@@ -63,6 +63,7 @@ import {
 	AttestationDivergedPathError,
 	AttestationSubjectNotPushedError,
 	authExitCode,
+	CacheRemovedError,
 	CupboardHttpError,
 	type FailedPushPath,
 	type IncompletePushExitStatus,
@@ -2141,6 +2142,67 @@ describe('runPush', () => {
 		});
 	});
 
+	it('stops without uploading or committing when the confirmation reports that the cache was removed', async () => {
+		const removal = new CacheRemovedError('builds');
+		const uploads: string[] = [];
+		const commits: string[] = [];
+
+		const push = runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
+			closure: true,
+			retain: false,
+			attest: false,
+			client: {
+				...skipClient([], []),
+				negotiate: () =>
+					Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-app',
+									r2Key: 'staging/upload-app',
+									expiresAt: '2099-01-01T00:00:00.000Z'
+								},
+								{
+									action: 'skip',
+									storePathHash: StorePath.hash(runtimePath),
+									narHash: runtimeDigest.narHash.toString()
+								}
+							]
+						})
+					),
+				confirmPresent: () => Promise.reject(removal),
+				async uploadNar(r2Key, body) {
+					await collectReadableStream(body);
+					uploads.push(r2Key);
+				},
+				commit(target) {
+					commits.push(target.uploadId);
+					return Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: target.narHash,
+						status: 'committed',
+						settled: Promise.resolve()
+					});
+				}
+			},
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			}),
+			createNarArchive: (storePath) =>
+				new FakeNarArchive(storePath === appPath ? appDigest : runtimeDigest),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+
+		await expect(push).rejects.toBe(removal);
+		expect({ uploads, commits }).toStrictEqual({ uploads: [], commits: [] });
+	});
+
 	it.each([
 		{
 			failure: 'a 503',
@@ -2422,6 +2484,174 @@ describe('runPush', () => {
 				]
 			}
 		});
+	});
+
+	// The server refuses every later request of a push whose cache was removed.
+	// In the wait case, the removal arrives before the push records retention.
+	it.each([
+		{
+			phase: 'commit',
+			isParked: false,
+			expectedEvents: ['negotiate app', 'upload app', 'commit upload-app']
+		},
+		{
+			phase: 'wait',
+			isParked: true,
+			expectedEvents: [
+				'negotiate app',
+				'upload app',
+				'commit upload-app',
+				'negotiate runtime',
+				'upload runtime',
+				'commit upload-runtime'
+			]
+		}
+	])(
+		'stops without negotiating again or writing roots when the cache is removed in the $phase phase',
+		async ({ isParked, expectedEvents }) => {
+			const events: string[] = [];
+			const name = (storePathHash: string): string =>
+				storePathHash === StorePath.hash(appPath) ? 'app' : 'runtime';
+			const removal = new CacheRemovedError('builds');
+			// Attach an assertion at once so the rejection stays handled until the
+			// wait phase awaits it.
+			const removedVerdict = Promise.reject(removal);
+			const removedObserved = expect(removedVerdict).rejects.toBe(removal);
+
+			const push = runPush(publication([appPath, runtimePath]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				uploadConcurrency: 1,
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate(body) {
+						events.push(
+							`negotiate ${body.paths.map((path) => name(path.storePathHash)).join(',')}`
+						);
+
+						return Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'upload',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash,
+									uploadId: `upload-${name(path.storePathHash)}`,
+									r2Key: `nar/${name(path.storePathHash)}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}))
+							})
+						);
+					},
+					async uploadNar(r2Key, body) {
+						await collectReadableStream(body);
+						events.push(
+							`upload ${r2Key === 'nar/app.nar.zst' ? 'app' : 'runtime'}`
+						);
+					},
+					commit(target) {
+						events.push(`commit ${target.uploadId}`);
+						if (target.uploadId === 'upload-runtime') {
+							return Promise.resolve({
+								storePathHash: target.storePathHash,
+								narHash: target.narHash,
+								status: 'committed',
+								settled: Promise.resolve()
+							});
+						}
+
+						if (!isParked) {
+							return Promise.reject(removal);
+						}
+
+						return Promise.resolve({
+							...fallbackCommitResponse(),
+							status: 'pending',
+							settled: removedVerdict
+						});
+					},
+					applyRoots: unexpectedApplyRootsCall,
+					setRoot: (rootName, body) => {
+						events.push(`set root ${rootName}`);
+
+						return Promise.resolve(rootSummary({ name: rootName, ...body }));
+					}
+				} satisfies PushClient,
+				nix: nixStore({
+					[appPath]: pathInfo(appPath, appDigest, []),
+					[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+				}),
+				createNarArchive: (storePath) =>
+					new FakeNarArchive(storePath === appPath ? appDigest : runtimeDigest),
+				compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+			});
+
+			await expect(push).rejects.toBe(removal);
+			await removedObserved;
+			expect(events).toStrictEqual(expectedEvents);
+		}
+	);
+
+	it('stops when the server refuses the negotiation that follows an absent verdict', async () => {
+		const events: string[] = [];
+		const removal = new CacheRemovedError('builds');
+		let negotiations = 0;
+
+		const push = runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
+			client: {
+				preview: unexpectedPreviewCall,
+				negotiate() {
+					negotiations += 1;
+					events.push(`negotiate ${String(negotiations)}`);
+					if (negotiations > 1) {
+						return Promise.reject(removal);
+					}
+
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'commit',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-lost'
+								}
+							]
+						})
+					);
+				},
+				uploadNar: unexpectedUploadNarCall,
+				commit(target) {
+					events.push(`commit ${target.uploadId}`);
+
+					return Promise.resolve({
+						...fallbackCommitResponse(),
+						status: 'pending',
+						settled: Promise.reject(
+							new UploadVerificationFailedError(target.uploadId, 'absent')
+						)
+					});
+				},
+				applyRoots: unexpectedApplyRootsCall,
+				setRoot: (rootName, body) => {
+					events.push(`set root ${rootName}`);
+
+					return Promise.resolve(rootSummary({ name: rootName, ...body }));
+				}
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+
+		await expect(push).rejects.toBe(removal);
+		expect(events).toStrictEqual([
+			'negotiate 1',
+			'commit upload-lost',
+			`set root pin:${StorePath.hash(appPath)}`,
+			'negotiate 2'
+		]);
 	});
 
 	it.each(['matching', 'different'] as const)(

@@ -28,6 +28,7 @@ import type {
 	CommitSessionTarget
 } from '../client/commit-socket.ts';
 import {
+	CacheRemovedError,
 	CliAbortError,
 	PublicationUploadRequiredError,
 	UploadVerificationFailedError
@@ -50,6 +51,9 @@ const pathA = storePathSchema.parse(
 );
 const pathB = storePathSchema.parse(
 	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
+);
+const pathC = storePathSchema.parse(
+	'/nix/store/5123456789abcdfghijklmnpqrsvwxyz-data'
 );
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
 const divergentNarHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xbb));
@@ -150,6 +154,16 @@ interface HarnessOptions {
 	readonly vanished?: ReadonlySet<StorePathString>;
 	readonly failCommitsOnce?: ReadonlySet<StorePathString>;
 	readonly failNegotiate?: boolean;
+	readonly negotiationError?: Error;
+	/**
+	Acknowledges the commit of each of these paths as pending, and rejects its
+	verdict with the error.
+	*/
+	readonly deferredRejections?: ReadonlyMap<StorePathString, Error>;
+	/**
+	Rejects the commit of each of these paths with the error.
+	*/
+	readonly commitRejections?: ReadonlyMap<StorePathString, Error>;
 	/**
 	Rejects every upload with this error.
 	*/
@@ -227,6 +241,10 @@ function harness(options: HarnessOptions = {}): Harness {
 				expiresAt.set(path.storePathHash, minutes + 15);
 			}
 
+			if (options.negotiationError !== undefined) {
+				return Promise.reject(options.negotiationError);
+			}
+
 			if (options.failNegotiate === true) {
 				return Promise.reject(new Error('negotiate refused'));
 			}
@@ -273,6 +291,27 @@ function harness(options: HarnessOptions = {}): Harness {
 				commitFailuresLeft.delete(storePath);
 
 				return Promise.reject(new Error('commit refused'));
+			}
+
+			const refusal =
+				storePath === undefined
+					? undefined
+					: options.commitRejections?.get(storePath);
+			if (refusal !== undefined) {
+				return Promise.reject(refusal);
+			}
+
+			const rejection =
+				storePath === undefined
+					? undefined
+					: options.deferredRejections?.get(storePath);
+			if (rejection !== undefined) {
+				return Promise.resolve({
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
+					status: 'pending' as const,
+					settled: Promise.reject(rejection)
+				});
 			}
 
 			return Promise.resolve({
@@ -977,6 +1016,114 @@ describe('BuildOutputBatcher', () => {
 			candidates: batcher.candidates
 		}).toStrictEqual({ negotiateCount: 1, candidates: [] });
 	});
+
+	it('sends no further batch after the server reports that the cache was removed', async () => {
+		vi.useRealTimers();
+		const removal = new CacheRemovedError('builds');
+		const { batcher, failures, negotiations } = harness({
+			negotiationError: removal,
+			maxEntries: 1
+		});
+
+		batcher.enqueue(pathA);
+		await batcher.settled();
+		batcher.enqueue(pathB);
+		await batcher.settled();
+
+		expect({
+			negotiated: negotiations.map((negotiation) =>
+				negotiation.paths.map((path) => path.storePath)
+			),
+			failures,
+			candidates: batcher.candidates
+		}).toStrictEqual({
+			negotiated: [[pathA]],
+			failures: [
+				{ storePath: pathA, reason: removal },
+				{ storePath: pathA, reason: removal }
+			],
+			candidates: [pathB, pathA]
+		});
+	});
+
+	it('sends no further batch after a deferred verdict reports that the cache was removed', async () => {
+		vi.useRealTimers();
+		const removal = new CacheRemovedError('builds');
+		const { batcher, failures, negotiations } = harness({
+			actions: new Map<StorePathString, UploadDecisionInput['action']>([
+				[pathA, 'commit']
+			]),
+			deferredRejections: new Map([[pathA, removal]]),
+			maxEntries: 1
+		});
+
+		batcher.enqueue(pathA);
+		await batcher.settled();
+		batcher.enqueue(pathB);
+		await batcher.settled();
+
+		expect({
+			negotiated: negotiations.map((negotiation) =>
+				negotiation.paths.map((path) => path.storePath)
+			),
+			failures
+		}).toStrictEqual({
+			negotiated: [[pathA]],
+			failures: [{ storePath: pathB, reason: removal }]
+		});
+	});
+
+	// One upload worker takes the flush's paths one group at a time. After the
+	// skipped pathC, the next group has two paths, so pathB is negotiated in
+	// pathA's group.
+	it.each([
+		{
+			guard: 'negotiates no later group of the flush',
+			paths: [pathA, pathB],
+			negotiated: [[pathA]]
+		},
+		{
+			guard: 'commits no path of a negotiated group',
+			paths: [pathC, pathA, pathB],
+			negotiated: [[pathC], [pathA, pathB]]
+		}
+	])(
+		'$guard after a commit reports that the cache was removed',
+		async ({ paths, negotiated }) => {
+			vi.useRealTimers();
+			const removal = new CacheRemovedError('builds');
+			const { batcher, events, failures, negotiations } = harness({
+				actions: new Map<StorePathString, UploadDecisionInput['action']>([
+					[pathA, 'commit'],
+					[pathB, 'commit'],
+					[pathC, 'skip']
+				]),
+				commitRejections: new Map([[pathA, removal]]),
+				maxEntries: paths.length,
+				uploadConcurrency: 1
+			});
+
+			for (const path of paths) {
+				batcher.enqueue(path);
+			}
+			await batcher.settled();
+
+			expect({
+				negotiated: negotiations.map((negotiation) =>
+					negotiation.paths.map((path) => path.storePath)
+				),
+				commits: events.filter((event) => event.startsWith('commit:')),
+				failures
+			}).toStrictEqual({
+				negotiated,
+				commits: [`commit:${StorePath.basename(pathA)}`],
+				failures: [
+					{ storePath: pathA, reason: removal },
+					{ storePath: pathB, reason: removal }
+				]
+			});
+		}
+	);
 
 	it('returns the whole batch to the candidate set when negotiation fails', async () => {
 		const { batcher, failures, outcomes } = harness({ failNegotiate: true });

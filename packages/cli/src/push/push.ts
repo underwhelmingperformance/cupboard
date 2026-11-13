@@ -97,6 +97,7 @@ import {
 	PublicationUploadRequiredError
 } from '../errors.ts';
 import {
+	CacheRemovedError,
 	type FailedPushPath,
 	type PushCommand,
 	type PushCredential,
@@ -1140,6 +1141,7 @@ async function runPushFlow(
 		// after every path has been acknowledged, so slow verification does not
 		// keep an upload worker busy. With `--no-wait`, a deferred commit returns
 		// `pending` once the server has stored its metadata.
+		let observedRemoval: CacheRemovedError | undefined;
 		const commit = await reporter.progress(
 			'Publishing paths',
 			{
@@ -1318,7 +1320,9 @@ async function runPushFlow(
 						);
 						commitRefusal = noteCommitOutcome(outcome);
 					} catch (error) {
-						if (isAbortError(error)) {
+						// The server refuses the rest of a push whose cache was removed,
+						// so the push stops before it negotiates another group.
+						if (isAbortError(error) || error instanceof CacheRemovedError) {
 							throw error;
 						}
 
@@ -1338,6 +1342,11 @@ async function runPushFlow(
 							decision,
 							storePathHash: outcome.storePathHash,
 							settled: outcome.settled
+						});
+						void outcome.settled.catch((error: unknown) => {
+							if (error instanceof CacheRemovedError) {
+								observedRemoval ??= error;
+							}
 						});
 						return;
 					}
@@ -1395,6 +1404,10 @@ async function runPushFlow(
 			effectiveActions.delete(path.storePathHash);
 		}
 
+		if (observedRemoval !== undefined) {
+			throw observedRemoval;
+		}
+
 		// A reserved row is enough for a root to refer to the path, even while
 		// verification is pending. Record retention before waiting so it survives
 		// a client disconnect. A failed commit creates no row and prevents all
@@ -1447,7 +1460,10 @@ async function runPushFlow(
 							continue;
 						}
 
-						if (isAbortError(result.reason)) {
+						if (
+							isAbortError(result.reason) ||
+							result.reason instanceof CacheRemovedError
+						) {
 							throw result.reason;
 						}
 

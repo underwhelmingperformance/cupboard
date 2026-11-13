@@ -987,6 +987,20 @@ export class UploadVerificationFailedError extends CliError {
 	}
 }
 
+/**
+The push's cache was removed while the push was running. The server refuses
+the rest of the push, and the push stops without negotiating its remaining
+paths.
+*/
+export class CacheRemovedError extends CliError {
+	constructor(public readonly cacheName: string) {
+		super(
+			`The cache ${cacheName} was removed while this push was running, so the push stopped. Pushing again creates a new, empty cache ${cacheName} with default settings.`
+		);
+		this.name = 'CacheRemovedError';
+	}
+}
+
 function uploadVerificationMessage(status: UploadVerificationStatus): string {
 	switch (status) {
 		case 'mismatch': {
