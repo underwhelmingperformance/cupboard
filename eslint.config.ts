@@ -17,6 +17,9 @@ const gitignorePath = fileURLToPath(new URL('.gitignore', import.meta.url));
 const hasNativeUint8ArrayBase64 =
 	'toBase64' in Uint8Array.prototype && 'fromBase64' in Uint8Array;
 
+const timerWaitMessage =
+	'This call checks a condition on a timer and gives up after a fixed time. Await the event that decides the outcome instead. See "Time and synchronisation" in docs/contributing/testing.md.';
+
 const nodeBuiltInImports = [
 	'assert',
 	'async_hooks',
@@ -295,6 +298,22 @@ export default defineConfig(
 		files: ['**/*.test.ts'],
 		rules: {
 			'unicorn/prefer-https': 'off'
+		}
+	},
+	{
+		files: [
+			'**/*.test.ts',
+			'**/*test-support.ts',
+			'**/*-test-setup.ts',
+			'**/*.bench.ts',
+			'tests/**/*.ts'
+		],
+		rules: {
+			'no-restricted-properties': [
+				'error',
+				{ object: 'vi', property: 'waitFor', message: timerWaitMessage },
+				{ object: 'vi', property: 'waitUntil', message: timerWaitMessage }
+			]
 		}
 	},
 	{
