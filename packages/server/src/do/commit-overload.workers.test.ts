@@ -157,13 +157,6 @@ function attemptUpgrade(token: string, accepted?: string): Promise<Response> {
 	});
 }
 
-async function liveSocketCount(): Promise<number> {
-	return runInDurableObject(
-		currentServer(),
-		(_instance, state) => state.getWebSockets().length
-	);
-}
-
 // The test environment configures a lower ceiling than production so the suite
 // can reach it with a small number of sockets.
 const ceiling = commitSocketCeiling(env);
@@ -192,30 +185,46 @@ describe('commit socket ceiling', () => {
 		closeAll(sessions);
 	});
 
-	it('frees a place once a session closes', async () => {
+	it('returns the credit of a session when its close handler finishes', async () => {
 		const token = await initialise();
-		const [first, ...rest] = await openSessions(
+		const first = await openCommitSession(
 			token,
-			ceiling,
+			defaultCache(),
 			commitCreditAccept
 		);
 
-		if (first === undefined) {
-			throw new Error('expected an open session');
-		}
+		// The promise is created and awaited inside the object. A test that
+		// awaits a promise resolved by the object continues in the object's I/O
+		// context, and its next call into another object fails.
+		const closeHandled = await runInDurableObject(
+			currentServer(),
+			(instance) => {
+				const handled = Promise.withResolvers<undefined>();
+				instance.afterCommitSocketClose = () => {
+					handled.resolve(undefined);
+				};
 
+				return handled;
+			}
+		);
 		first.socket.close();
-		await vi.waitFor(async () => {
-			expect(await liveSocketCount()).toBe(ceiling - 1);
+		await runInDurableObject(currentServer(), async () => {
+			await closeHandled.promise;
 		});
 
+		// The opening grant is half of the credit that is free. It matches the
+		// first session's grant only when the first session's credit is free again.
 		const reopened = await openCommitSession(
 			token,
 			defaultCache(),
 			commitCreditAccept
 		);
 
-		closeAll([reopened, ...rest]);
+		expect({ capabilities: reopened.capabilities }).toStrictEqual({
+			capabilities: first.capabilities
+		});
+
+		reopened.socket.close();
 	});
 
 	// The server cannot pace a session that did not negotiate credit, so it uses
