@@ -436,11 +436,13 @@ describe('tenantRpc', () => {
 			const call = new AbortController();
 			const reason = new CliAbortError();
 			let requests = 0;
+			const requestSent = Promise.withResolvers<undefined>();
 			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
 				credential: 'admin-token',
 				...(clientSignal !== undefined && { signal: clientSignal }),
 				fetcher: (_input, init) => {
 					requests += 1;
+					requestSent.resolve(undefined);
 					return stalledResponse(init?.signal);
 				}
 			});
@@ -448,9 +450,7 @@ describe('tenantRpc', () => {
 			const failure = rejectedBy(() =>
 				rpc.caches.list(undefined, { signal: call.signal })
 			);
-			await vi.waitFor(() => {
-				expect(requests).toBe(1);
-			});
+			await requestSent.promise;
 			call.abort(reason);
 
 			expect({ failure: await failure, requests }).toStrictEqual({

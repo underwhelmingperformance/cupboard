@@ -1789,13 +1789,13 @@ describe('runPush', () => {
 		// The re-drive's negotiation does not acknowledge grace facts; every
 		// other negotiation does. Each response arrives and is then read in two
 		// steps, so the test can interleave the two negotiations.
-		const gates = new Map<
-			string,
-			{
-				readonly arrived: PromiseWithResolvers<undefined>;
-				readonly read: PromiseWithResolvers<undefined>;
-			}
-		>();
+		const newGate = () => ({
+			reached: Promise.withResolvers<undefined>(),
+			arrived: Promise.withResolvers<undefined>(),
+			awaitingRead: Promise.withResolvers<undefined>(),
+			read: Promise.withResolvers<undefined>()
+		});
+		const gates = { group: newGate(), redrive: newGate() };
 		let negotiations = 0;
 		const commits: { uploadId: string; retention?: true }[] = [];
 		const store = Object.fromEntries(
@@ -1827,12 +1827,10 @@ describe('runPush', () => {
 					}).uploads;
 
 					if (negotiations > 1) {
-						const gate = {
-							arrived: Promise.withResolvers<undefined>(),
-							read: Promise.withResolvers<undefined>()
-						};
-						gates.set(isRedrive ? 'redrive' : 'group', gate);
+						const gate = isRedrive ? gates.redrive : gates.group;
+						gate.reached.resolve(undefined);
 						await gate.arrived.promise;
+						gate.awaitingRead.resolve(undefined);
 						await gate.read.promise;
 					}
 
@@ -1865,15 +1863,16 @@ describe('runPush', () => {
 			nix: nixStore(store)
 		});
 
-		await vi.waitFor(() => {
-			expect(gates.size).toBe(2);
-		});
-		gates.get('group')?.arrived.resolve(undefined);
-		await flushMicrotasks();
-		gates.get('redrive')?.arrived.resolve(undefined);
-		await flushMicrotasks();
-		gates.get('group')?.read.resolve(undefined);
-		gates.get('redrive')?.read.resolve(undefined);
+		await Promise.all([
+			gates.group.reached.promise,
+			gates.redrive.reached.promise
+		]);
+		gates.group.arrived.resolve(undefined);
+		await gates.group.awaitingRead.promise;
+		gates.redrive.arrived.resolve(undefined);
+		await gates.redrive.awaitingRead.promise;
+		gates.group.read.resolve(undefined);
+		gates.redrive.read.resolve(undefined);
 		await pushed;
 
 		expect(
@@ -8226,10 +8225,4 @@ function scheduleNothing(): () => void {
 
 function cancelNothing(): void {
 	return;
-}
-
-async function flushMicrotasks(): Promise<void> {
-	for (let iteration = 0; iteration < 50; iteration += 1) {
-		await Promise.resolve();
-	}
 }
