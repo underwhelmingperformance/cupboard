@@ -1,6 +1,10 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
 
-const memberKeyPrefix = 'tenant-member:';
+/**
+The prefix that every membership marker key starts with. A KV listing with
+this prefix returns exactly the markers.
+*/
+export const tenantMemberKeyPrefix = 'tenant-member:';
 
 /**
 The KV key under which a tenant's membership marker is stored.
@@ -10,5 +14,13 @@ write the marker without pulling the admission code, and the Workers types it
 needs, into its own TypeScript program.
 */
 export function tenantMemberKey(slug: TenantId): string {
-	return `${memberKeyPrefix}${slug}`;
+	return `${tenantMemberKeyPrefix}${slug}`;
+}
+
+/**
+The slug in a membership marker key. A listing by `tenantMemberKeyPrefix` returns
+only keys that start with it.
+*/
+export function tenantMemberSlug(key: string): string {
+	return key.slice(tenantMemberKeyPrefix.length);
 }

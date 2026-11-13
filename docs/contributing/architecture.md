@@ -552,18 +552,31 @@ reaper's under `reaper:demote-cursor`, and the attestation reaper's under
 ## Scheduled and background work
 
 The control Worker's cron trigger fires every hour (`0 * * * *`). It first
-refreshes the tenant membership in KV. It then adds jobs to the
+reconciles the tenant membership in KV. It then adds jobs to the
 `cupboard-maintenance` queue. Each job is small and bounded, so a failure only
-retries that one message, not the whole hourly run.
+retries that one message, not the whole hourly run. If the reconcile fails, the
+cron still adds the other jobs and then reports the failure.
 
-Each tenant marker is one KV operation. [Cloudflare's KV limits][kv-limits]
-allow 1,000 operations in one Worker invocation on both the Free and the Paid
-plan. That is lower than the Paid plan's allowance of subrequests, so the KV
-limit sets the page size on every plan. The membership refresh therefore writes
-one page of 900 markers at a time, which leaves a reserve of 100 operations. The
-first page also rebuilds the filter. When more live tenants remain, the cron
-adds a `membership-refresh` job that contains the last slug of the page. That
-job writes the next page and adds the next job.
+The reconcile lists the `tenant-member:` keys, compares them with the live
+tenants in D1, writes the markers that are missing and deletes the markers of
+tenants that are no longer live. It does not rewrite a marker that exists, so a
+tick with no change makes no KV write. The Workers Free plan allows 1,000 KV
+writes a day, and the reconcile makes writes only for the changes that it finds.
+The first step also writes the filter, but only when its bytes differ from the
+stored filter.
+
+[Cloudflare's KV limits][kv-limits] allow 1,000 operations in one Worker
+invocation on both the Free and the Paid plan. That is lower than the Paid
+plan's allowance of subrequests, so the KV limit sets the size of a step on
+every plan. A step lists a page of up to 1,000 markers. When the listing cursor
+leads to pages that have nothing after the step's position, the step lists up to
+100 more pages. Each extra listing counts against the budget of the step, which
+makes at most 900 writes, deletes and extra listings together. That leaves a
+reserve of 100 operations. A tick with no change makes one listing for each
+1,000 markers, and each listing after the first runs in its own queued step.
+When markers or live tenants remain after a step, the step adds a
+`membership-refresh` job that contains the position to continue from. That job
+runs the next step and adds the next job.
 
 `POST /control/membership/rebuild` writes one page for each request that has a
 `page` and returns a `cursor` while more tenants remain. `cupboard deploy`

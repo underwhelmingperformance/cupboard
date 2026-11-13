@@ -447,9 +447,10 @@ export async function onboardDeployment(
 		});
 
 	// Existing tenants were provisioned by an earlier build, and a deploy can
-	// change how admission is represented, leaving them inadmissible until the
-	// hourly cron reasserts the gate. Reassert it now from the registry, and
-	// do not continue until every marker is written, so that they stay
+	// change how admission is represented. The hourly cron writes only the
+	// markers that are missing, so it does not repair a marker that has the old
+	// representation. Reassert every marker now from the registry, and do not
+	// continue until every marker is written, so that the tenants stay
 	// reachable. A fresh deploy has none yet; the create below establishes the
 	// first tenant's gate itself.
 	if (existing.length > 0) {

@@ -58,9 +58,10 @@ import {
 import {
 	continueTenantMembershipRefresh,
 	deleteTenantMember,
+	type MembershipReconcileStep,
 	type MembershipRefreshMessage,
 	membershipRefreshMessage,
-	refreshTenantMembershipPage
+	reconcileTenantMembership
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import { cacheIdSchema } from '../db/cache.ts';
@@ -231,7 +232,8 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 	}),
 	z.object({
 		kind: z.literal('membership-refresh'),
-		after: tenantIdSchema
+		after: tenantIdSchema.optional(),
+		listCursor: z.string().optional()
 	}),
 	z.object({ kind: z.literal('cas-demote') }),
 	z.object({ kind: z.literal('control-key-retirement') }),
@@ -313,10 +315,7 @@ export async function enqueueMaintenanceJobs(
 	env: Env,
 	queue: MaintenanceQueue = env.MAINTENANCE_QUEUE
 ): Promise<MaintenanceQueueMessage[]> {
-	// Write the first page of markers before building the other messages. A
-	// message for each later page joins the messages below, so a failed send
-	// does not stop the other jobs.
-	const membership = await refreshTenantMembershipPage(env);
+	const membership = await reconcileFirstMembershipStep(env);
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const catalogueTenants = await incompleteCacheCatalogueTenants(
@@ -333,9 +332,9 @@ export async function enqueueMaintenanceJobs(
 	);
 	const localStepWakes = await selectLocalStepWakeMessages(env);
 	const messages: MaintenanceQueueMessage[] = [
-		...(membership.cursor === undefined
-			? []
-			: [membershipRefreshMessage(membership.cursor)]),
+		...(membership.kind === 'reconciled' && membership.step.next !== undefined
+			? [membershipRefreshMessage(membership.step.next)]
+			: []),
 		...catalogueTenants.map(({ id }): MaintenanceQueueMessage => ({
 			kind: 'cache-catalogue-migration',
 			tenant: id
@@ -357,13 +356,17 @@ export async function enqueueMaintenanceJobs(
 		...(localStepWakes.kind === 'selected' ? localStepWakes.messages : [])
 	];
 
+	const selectionFailures = [membership, localStepWakes].flatMap((selection) =>
+		selection.kind === 'failed' ? [selection.error] : []
+	);
+
 	try {
 		await sendQueueMessages(queue, messages);
 	} catch (error) {
-		if (localStepWakes.kind === 'failed') {
+		if (selectionFailures.length > 0) {
 			throw new AggregateError(
-				[localStepWakes.error, error],
-				'the local-step selection and the enqueue failed',
+				[...selectionFailures, error],
+				'a selection and the enqueue failed',
 				{ cause: error }
 			);
 		}
@@ -371,11 +374,38 @@ export async function enqueueMaintenanceJobs(
 		throw error;
 	}
 
+	if (membership.kind === 'failed' && localStepWakes.kind === 'failed') {
+		throw new AggregateError(
+			selectionFailures,
+			'the membership refresh and the local-step selection failed'
+		);
+	}
+
+	if (membership.kind === 'failed') {
+		throw membership.error;
+	}
+
 	if (localStepWakes.kind === 'failed') {
 		throw localStepWakes.error;
 	}
 
 	return messages;
+}
+
+// A failed first step of the membership reconcile is returned, not thrown, so
+// that it does not stop the other jobs of the tick. In that case the cron does
+// not queue the next step, and the next tick starts the reconcile again.
+async function reconcileFirstMembershipStep(
+	env: Env
+): Promise<
+	| { readonly kind: 'reconciled'; readonly step: MembershipReconcileStep }
+	| { readonly kind: 'failed'; readonly error: unknown }
+> {
+	try {
+		return { kind: 'reconciled', step: await reconcileTenantMembership(env) };
+	} catch (error) {
+		return { kind: 'failed', error };
+	}
 }
 
 // A failed selection of the local-step wakes is returned, not thrown, so that
