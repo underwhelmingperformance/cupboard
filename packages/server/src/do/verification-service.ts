@@ -128,7 +128,11 @@ import {
 	isAwaitingVerdict,
 	type UploadStateService
 } from './upload-state-service.ts';
-import { sendUploadVerdict } from './upload-verdict.ts';
+import {
+	sendCacheRemovedVerdict,
+	sendUploadVerdict,
+	uploadVerdictFrame
+} from './upload-verdict.ts';
 import {
 	raceVerificationOperation,
 	withRenewedVerificationClaim
@@ -1320,6 +1324,22 @@ export class VerificationService {
 		sendUploadVerdict(this.context, sessionId, pending, status);
 	}
 
+	// A session that did not accept `cache-removed-verdict` receives `absent`.
+	private notifyCacheRemoved(pending: PendingUploadRow): void {
+		const sessionId = this.currentSessionId(pending);
+
+		if (sessionId === null) {
+			return;
+		}
+
+		sendCacheRemovedVerdict(
+			this.context,
+			sessionId,
+			pending,
+			uploadVerdictFrame(this.context, pending, 'absent')
+		);
+	}
+
 	private async prepareRecordedVerdict(
 		logger: Logger,
 		captured: PendingUploadRow,
@@ -1583,7 +1603,11 @@ export class VerificationService {
 				return { kind: 'ignored' };
 			}
 
-			this.notifyWaiters(cleared, 'absent');
+			if (reserved.kind === 'cache-removed') {
+				this.notifyCacheRemoved(cleared);
+			} else {
+				this.notifyWaiters(cleared, 'absent');
+			}
 
 			return { kind: 'applied' };
 		}

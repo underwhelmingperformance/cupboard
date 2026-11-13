@@ -124,7 +124,10 @@ import {
 	isAwaitingVerdict,
 	type UploadStateService
 } from './upload-state-service.ts';
-import { sendUploadVerdict } from './upload-verdict.ts';
+import {
+	sendCacheRemovedVerdict,
+	sendUploadVerdict
+} from './upload-verdict.ts';
 
 // Keep this shorter than `verifyBackstopDelayMs`. When the alarm backstop
 // fires, the previous queue request must be stale so the alarm can send again.
@@ -529,7 +532,7 @@ export class CommitPipelineService {
 		graceDecision: GraceDecision | undefined,
 		attachRootName: RootName | undefined,
 		probe: MaterialisationProbe,
-		committingSessionId: SessionId | null | undefined,
+		committingSessionId: SessionId | undefined,
 		isProbeFromPrefetch: boolean
 	): Promise<CommitOutcome> {
 		const canonicalKey = narObjectKey(metadata.narHash);
@@ -540,7 +543,12 @@ export class CommitPipelineService {
 		);
 
 		if (reserved.kind === 'cache-removed') {
-			return this.refuseRemovedCache(logger, cache, uploadId);
+			return this.refuseRemovedCache(
+				logger,
+				cache,
+				uploadId,
+				committingSessionId
+			);
 		}
 
 		if (reserved.kind === 'lost') {
@@ -551,7 +559,8 @@ export class CommitPipelineService {
 				metadata,
 				canonicalKey,
 				graceDecision,
-				attachRootName
+				attachRootName,
+				committingSessionId
 			);
 		}
 
@@ -653,7 +662,8 @@ export class CommitPipelineService {
 				metadata,
 				canonicalKey,
 				graceDecision,
-				attachRootName
+				attachRootName,
+				committingSessionId
 			);
 		}
 
@@ -2138,23 +2148,33 @@ export class CommitPipelineService {
 	// A commit that resolved its cache before the cache was removed reaches its
 	// reservation afterwards. The upload is concluded as absent, and the client
 	// receives the same refusal as a commit that starts after the removal.
+	// Another session recorded on the upload is told that the cache was removed.
 	private async refuseRemovedCache(
 		logger: Logger,
 		cache: ResolvedCache,
-		uploadId: UploadId
+		uploadId: UploadId,
+		committingSessionId: SessionId | undefined
 	): Promise<never> {
 		const pending = this.context.db
 			.select()
 			.from(schema.pendingUploads)
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.get();
-		if (pending !== undefined) {
-			await this.uploadState.clearPendingUploadAndStaging(
-				uploadId,
-				pending.r2Key,
-				pending.narHash,
-				{ logger, outcome: 'absent' }
-			);
+		const cleared =
+			pending === undefined
+				? undefined
+				: await this.uploadState.clearPendingUploadAndStaging(
+						uploadId,
+						pending.r2Key,
+						pending.narHash,
+						{ logger, outcome: 'absent' }
+					);
+		if (
+			cleared?.sessionId !== undefined &&
+			cleared.sessionId !== null &&
+			cleared.sessionId !== committingSessionId
+		) {
+			sendCacheRemovedVerdict(this.context, cleared.sessionId, cleared);
 		}
 
 		throw new CacheNotFoundError(cache.scope);
@@ -2221,12 +2241,18 @@ export class CommitPipelineService {
 		metadata: UploadPathNegotiation,
 		stagingKey: R2ObjectKey,
 		graceDecision?: GraceDecision,
-		attachRootName?: RootName
+		attachRootName?: RootName,
+		committingSessionId?: SessionId
 	): Promise<CommitOutcome> {
 		// The charge fence reports a removed cache's row as superseded, and the
 		// removed cache's path stays committed until its teardown retires it.
 		if (this.context.cacheRepository.isRemoved(cache.id)) {
-			return this.refuseRemovedCache(logger, cache, uploadId);
+			return this.refuseRemovedCache(
+				logger,
+				cache,
+				uploadId,
+				committingSessionId
+			);
 		}
 
 		// A recommit can replace the winner while its object is repaired. Retry a
@@ -2391,7 +2417,10 @@ export class CommitPipelineService {
 			readonly account?: TenantAccount;
 			readonly reuseReferences?: readonly ReusableReference[];
 		},
-		blob?: CommitBlobDeclaration
+		blob?: CommitBlobDeclaration,
+		// The session that sent the commit receives the returned result, so it is
+		// excluded from the frames that the commit sends to the upload's session.
+		committingSessionId?: SessionId
 	): Promise<CommitOutcome> {
 		// Do not defer a commit after offboarding begins. It could otherwise be
 		// restored after the drain has removed this tenant's references.
@@ -2651,16 +2680,6 @@ export class CommitPipelineService {
 			// receiving bytes and resume it.
 			this.uploadState.markUploadCommitting(uploadId);
 
-			// The initiating session receives the returned commit result.
-			// Exclude it from waiter notification so a verdict frame cannot
-			// arrive first.
-			const committingRow = this.context.db
-				.select({ sessionId: schema.pendingUploads.sessionId })
-				.from(schema.pendingUploads)
-				.where(eq(schema.pendingUploads.id, uploadId))
-				.get();
-			const committingSessionId = committingRow?.sessionId;
-
 			// Canonical bytes passed verification when they entered the CAS, so
 			// reuse does not decode them again.
 			if (pending.r2Key === canonicalKey) {
@@ -2701,7 +2720,12 @@ export class CommitPipelineService {
 				pending.retentionEpoch
 			);
 			if (reserved.kind === 'cache-removed') {
-				return this.refuseRemovedCache(logger, cache, uploadId);
+				return this.refuseRemovedCache(
+					logger,
+					cache,
+					uploadId,
+					committingSessionId
+				);
 			}
 
 			return {

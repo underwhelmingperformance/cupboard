@@ -9,6 +9,7 @@ import {
 import { type ResolvedCache } from '../db/cache.ts';
 import type * as schema from '../db/schema.ts';
 
+import { readCommitSessionAttachment } from './commit-credit-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type ServerContext } from './context.ts';
 import { parseStoredGraceDecision, storedGraceFact } from './grace-decision.ts';
@@ -87,6 +88,57 @@ export function uploadVerdictFrame(
 			)
 		})
 	};
+}
+
+/**
+Whether the socket's commit session accepted `cache-removed-verdict`.
+*/
+export function hasAcceptedCacheRemovedVerdict(socket: WebSocket): boolean {
+	return readCommitSessionAttachment(socket)?.cacheRemovedVerdicts === true;
+}
+
+/**
+The verdict that tells a session that an upload's cache was removed. Send it
+only to a session that accepted `cache-removed-verdict`. Like
+{@link unservableVerdictFrame}, it includes an empty grace fact when the
+upload accepted grace facts. Omit `graceDecisionJson` when the upload's
+record is gone.
+*/
+export function cacheRemovedVerdictFrame(
+	uploadId: UploadId,
+	graceDecisionJson?: string | null
+): CommitSessionFrameInput {
+	const graceDecision = parseStoredGraceDecision(graceDecisionJson);
+
+	return {
+		ev: 'verdict',
+		uploadId,
+		status: 'absent',
+		reason: 'cache-removed',
+		...(graceDecision?.reportsGrace === true && { grace: {} })
+	};
+}
+
+/**
+Tells every socket of a commit session that an upload's cache was removed.
+A socket whose session accepted `cache-removed-verdict` receives
+{@link cacheRemovedVerdictFrame}. Any other socket receives `legacyFrame`,
+or no frame when it is undefined.
+*/
+export function sendCacheRemovedVerdict(
+	context: ServerContext,
+	sessionId: SessionId,
+	upload: Pick<VerdictUpload, 'id' | 'graceDecisionJson'>,
+	legacyFrame?: CommitSessionFrameInput
+): void {
+	for (const socket of context.ctx.getWebSockets(sessionId)) {
+		const frame = hasAcceptedCacheRemovedVerdict(socket)
+			? cacheRemovedVerdictFrame(upload.id, upload.graceDecisionJson)
+			: legacyFrame;
+		if (frame !== undefined) {
+			sendCommitSessionFrame(socket, frame);
+		}
+	}
 }
 
 /**

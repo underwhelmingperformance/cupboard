@@ -458,6 +458,22 @@ removal can still reach the cache after an `await`, as the commit described
 above does. The upload status, the subscription and the attestation attach reach
 a deleted cache through an upload or attestation id.
 
+A commit session that accepted the `cache-removed-verdict` capability receives a
+`verdict` frame with the status `absent` and the reason `cache-removed` for an
+upload of the deleted cache. It receives the frame for a `commit`, a
+`commit-batch` entry or a `publish-batch` entry that the removal refuses, for a
+`commit` or `commit-batch` entry that it sends after the removal, and for a
+subscription or a resent entry of the cache's upload or publication. It also
+receives the frame for an upload recorded with its session when a teardown pass
+deletes the upload before its verdict is decided, or when verification finds the
+cache deleted. A client that accepts the capability treats the frame as a final
+failure. An older client fails the whole session on a frame with a field that it
+does not know, so a session without the capability receives a 404 for a commit
+and `absent` from verification and from a publication's replay. An older client
+also negotiates a path again after `absent`, and negotiation registers a missing
+named cache, so a teardown pass sends such a session no frame when it deletes
+the upload.
+
 Alarm passes delete the rows in pages of 128 while the row budget lasts. The
 alarm's earlier steps can spend the budget first, so within each pass the first
 page that deletes rows runs whatever the budget, and every pass makes progress.

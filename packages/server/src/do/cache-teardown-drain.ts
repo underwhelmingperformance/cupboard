@@ -15,6 +15,7 @@ import { concludePromotion, parsePromotionRecord } from './promotion-record.ts';
 import { publicationFailureJson } from './publication-store.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
 import { affordableSubrequestOperations } from './subrequest-slice.ts';
+import { sendCacheRemovedVerdict } from './upload-verdict.ts';
 
 // The most rows of one table that a step deletes, as in a collection scan's
 // phases.
@@ -91,6 +92,18 @@ type UploadStep =
 
 function isAwaitingVerdict(upload: PendingUploadRow): boolean {
 	return upload.verdict === 'pending' || upload.verdict === 'committing';
+}
+
+const settledVerdicts: ReadonlySet<PendingUploadRow['verdict']> = new Set([
+	'servable',
+	'mismatch',
+	'over-quota'
+]);
+
+// A settled upload keeps its row only so that its status can still be read.
+// Its session received the settled verdict when the upload settled.
+function isSettled(upload: PendingUploadRow): boolean {
+	return settledVerdicts.has(upload.verdict);
 }
 
 // Whether concluding the upload's promotion makes a D1 call.
@@ -216,8 +229,9 @@ export class CacheTeardownDrain {
 	/**
 	Deletes one page of the cache's pending uploads and concludes each one as
 	`absent`: its accepted operation fails, its staged object goes to
-	`staging_cleanup`, and the promotion of an upload that awaited a verdict
-	gives up its reservation. The page ends before the first upload whose
+	`staging_cleanup`, the session recorded on an unsettled upload is told
+	that the cache was removed, and the promotion of an upload that awaited a
+	verdict gives up its reservation. The page ends before the first upload whose
 	promotion the remaining subrequests cannot conclude.
 	*/
 	private async deleteUploadPage(cache: ResolvedCache): Promise<UploadStep> {
@@ -281,6 +295,12 @@ export class CacheTeardownDrain {
 
 			return tx.delete(schema.pendingUploads).where(inPage).returning().all();
 		});
+
+		for (const upload of deleted) {
+			if (upload.sessionId !== null && !isSettled(upload)) {
+				sendCacheRemovedVerdict(this.context, upload.sessionId, upload);
+			}
+		}
 
 		for (const upload of deleted) {
 			if (!isAwaitingVerdict(upload)) {
