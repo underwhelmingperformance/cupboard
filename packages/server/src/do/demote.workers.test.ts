@@ -2,6 +2,8 @@ import { rootLogger } from '@cupboard/logger';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NixSha256HashString,
+	type Sha256HexDigest,
+	sha256HexDigestSchema,
 	type StorePathHash,
 	type TenantId,
 	tenantIdSchema
@@ -17,6 +19,7 @@ import {
 	enqueueNarInfoRefreshTenants,
 	executeMaintenanceQueueMessage,
 	type MaintenanceQueueMessage,
+	runCasReaperDemote,
 	runReaperDemote
 } from '../routing/scheduled.ts';
 import {
@@ -30,6 +33,7 @@ import {
 	provisionNamedTenant,
 	pushPathToTenant,
 	resetTestServer,
+	seedCasObjects,
 	storedObjectVersion,
 	testBase,
 	testControlEnv,
@@ -516,4 +520,109 @@ describe('missing blob demotion', () => {
 			isNarPresent: true
 		});
 	});
+});
+
+interface DemoteCursorCase {
+	readonly name: string;
+	readonly key: string;
+	readonly run: (limit: number) => Promise<number>;
+	readonly seedOne: () => Promise<string>;
+}
+
+const demoteCursorCases: readonly DemoteCursorCase[] = [
+	{
+		name: 'blob',
+		key: 'reaper:demote-cursor',
+		run: (limit) => runReaperDemote(rootLogger(), env, limit),
+		seedOne: async () => {
+			const { narHash } = await committedTenantPath('cursor-moves');
+
+			return narHash;
+		}
+	},
+	{
+		name: 'CAS',
+		key: 'reaper:cas-demote-cursor',
+		run: (limit) => runCasReaperDemote(rootLogger(), env, limit),
+		seedOne: async () => {
+			const digest: Sha256HexDigest = sha256HexDigestSchema.parse(
+				'a'.repeat(64)
+			);
+			await seedCasObjects([digest]);
+
+			return digest;
+		}
+	}
+];
+
+describe('demote cursor writes', () => {
+	beforeEach(async () => {
+		await resetTestServer();
+	});
+
+	it.each(demoteCursorCases)(
+		'does not write the $name cursor when the pass leaves it empty',
+		async ({ run }) => {
+			const put = vi.spyOn(env.CRON_STATE, 'put');
+
+			try {
+				const demoted = await run(10);
+				const stored = await env.CRON_STATE.list();
+
+				expect({
+					demoted,
+					puts: put.mock.calls,
+					storedKeys: stored.keys.map((entry) => entry.name)
+				}).toStrictEqual({ demoted: 0, puts: [], storedKeys: [] });
+			} finally {
+				put.mockRestore();
+			}
+		}
+	);
+
+	it.each(demoteCursorCases)(
+		'does not write the $name cursor when a short page leaves it empty',
+		async ({ run, seedOne }) => {
+			await seedOne();
+			const put = vi.spyOn(env.CRON_STATE, 'put');
+
+			try {
+				await run(10);
+				const stored = await env.CRON_STATE.list();
+
+				expect({
+					puts: put.mock.calls,
+					storedKeys: stored.keys.map((entry) => entry.name)
+				}).toStrictEqual({ puts: [], storedKeys: [] });
+			} finally {
+				put.mockRestore();
+			}
+		}
+	);
+
+	it.each(demoteCursorCases)(
+		'writes the $name cursor when a pass moves it and when the scan wraps',
+		async ({ key, run, seedOne }) => {
+			const position = await seedOne();
+			const put = vi.spyOn(env.CRON_STATE, 'put');
+
+			try {
+				await run(1);
+				await run(1);
+
+				expect({
+					puts: put.mock.calls,
+					stored: await env.CRON_STATE.get(key)
+				}).toStrictEqual({
+					puts: [
+						[key, position],
+						[key, '']
+					],
+					stored: ''
+				});
+			} finally {
+				put.mockRestore();
+			}
+		}
+	);
 });
