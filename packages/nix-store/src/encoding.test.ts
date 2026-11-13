@@ -24,6 +24,14 @@ describe('encoding', () => {
 		expect(bytesToBase64Url(Uint8Array.from([104, 105]))).toBe('aGk');
 	});
 
+	it.each([
+		['no bytes', [], ''],
+		['one byte, encoded with two padding characters', [104], 'aA'],
+		['three bytes, encoded without padding', [104, 105, 106], 'aGlq']
+	])('omits the padding for %s', (_name, input, expected) => {
+		expect(bytesToBase64Url(Uint8Array.from(input))).toBe(expected);
+	});
+
 	it('encodes lowercase hex', () => {
 		expect(bytesToHex(bytes)).toBe('000102fafbff');
 	});
