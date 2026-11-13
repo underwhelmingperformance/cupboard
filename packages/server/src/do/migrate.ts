@@ -230,14 +230,17 @@ type VerificationState =
 /**
 The migrations that older builds must not run past. 0052 removed columns
 that they read. After 0084, a root keeps only the target rows of its
-incarnation, and older builds write target rows without one.
+incarnation, and older builds write target rows without one. After 0085, a
+root's stored target count must change with every change to its targets,
+and older builds change the targets without updating the count.
 
 A tag can never leave the set: this build refuses the contraction state on
 any other tag, so it would refuse every store that recorded the tag.
 */
 const barrierMigrationTags: ReadonlySet<string> = new Set([
 	'0052_cache_identity_contract',
-	'0084_root_incarnations'
+	'0084_root_incarnations',
+	'0085_root_target_counts'
 ]);
 
 function appliedVerificationState(tag: string): VerificationState {

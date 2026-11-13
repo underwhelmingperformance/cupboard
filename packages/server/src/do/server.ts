@@ -278,6 +278,7 @@ import {
 } from './reuse-view-admin-service.ts';
 import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
 import { RootReleaseService } from './root-releases.ts';
+import { RootTargetCountBackfill } from './root-target-count-backfill.ts';
 import { RootsService } from './roots-service.ts';
 import { enterRowBudgetOnDispatch } from './row-budget.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
@@ -391,6 +392,7 @@ type MaintenancePassKey =
 	| 'managed-retirement'
 	| 'reconcile'
 	| 'root-release'
+	| 'root-target-count-backfill'
 	| 'signing-key-backfill'
 	| 'teardown'
 	| 'verdict-drain'
@@ -571,6 +573,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly integrityCheck: IntegrityCheckService;
 	private readonly cacheAdmin: CacheAdminService;
 	private readonly cacheListingProjection: CacheListingProjection;
+	private readonly rootTargetCountBackfill: RootTargetCountBackfill;
 	private readonly cacheRegistration: CacheRegistrationService;
 	private readonly garbageCollection: GarbageCollectionService;
 	private readonly rootReleases: RootReleaseService;
@@ -599,6 +602,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.localStepRun = new LocalStepRun(this.context);
 		this.localSchemaRun = new LocalSchemaRun(this.context);
 		this.cacheListingProjection = new CacheListingProjection(this.context);
+		this.rootTargetCountBackfill = new RootTargetCountBackfill(this.context);
 
 		this.tenantIdentity = new TenantIdentityService(this.context);
 		this.authKeys = new AuthKeysService(this.context, this.tenantIdentity);
@@ -2872,7 +2876,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			});
 		}
 
-		if (this.cacheListingProjection.hasPending()) {
+		if (
+			this.cacheListingProjection.hasPending() ||
+			this.rootTargetCountBackfill.hasPending()
+		) {
 			await this.ctx.storage.setAlarm(Date.now());
 		}
 
@@ -3572,6 +3579,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					await this.resumeRootReleases();
 
 					return 'progressed';
+				}
+			},
+			{
+				key: 'root-target-count-backfill',
+				workAt: readyWhen(() =>
+					Promise.resolve(this.rootTargetCountBackfill.hasPending())
+				),
+				run: () => {
+					this.rootTargetCountBackfill.advance();
+					return Promise.resolve('progressed');
 				}
 			},
 			{

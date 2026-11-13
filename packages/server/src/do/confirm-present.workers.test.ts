@@ -380,7 +380,7 @@ describe('confirming already-present paths', () => {
 				),
 			status: StatusCodes.OK,
 			revisions: 1,
-			cost: { rowsRead: 72, rowsWritten: 12, d1Calls: 4, d1RowsRead: 7 }
+			cost: { rowsRead: 75, rowsWritten: 13, d1Calls: 4, d1RowsRead: 7 }
 		},
 		{
 			confirmation: 'is refused',
@@ -631,8 +631,8 @@ describe('confirming already-present paths', () => {
 		}).toStrictEqual({
 			cost: {
 				...noCost,
-				rowsRead: 66,
-				rowsWritten: 23,
+				rowsRead: 70,
+				rowsWritten: 24,
 				d1Calls: 3,
 				d1CallsWithoutRows: 1,
 				d1RowsRead: 10,
@@ -640,7 +640,7 @@ describe('confirming already-present paths', () => {
 			},
 			repeat: {
 				...noCost,
-				rowsRead: 61,
+				rowsRead: 68,
 				d1Calls: 3,
 				d1CallsWithoutRows: 1,
 				d1RowsRead: 10,
@@ -672,7 +672,7 @@ describe('confirming already-present paths', () => {
 			response: first.response,
 			cost: {
 				...noCost,
-				rowsRead: 63,
+				rowsRead: 70,
 				d1Calls: 3,
 				d1CallsWithoutRows: 1,
 				d1RowsRead: 10,

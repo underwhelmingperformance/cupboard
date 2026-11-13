@@ -298,6 +298,28 @@ delete them. The migrator therefore records migration 0084 with the
 state on any migration but 0052, so it can't run against a tenant that has
 applied 0084.
 
+A root row also stores `target_count`, the number of target rows of its
+incarnation, so `roots.list` reads one row for each root whatever the number of
+targets. The statements that change a root's targets keep the count up to date,
+and each of them writes the root row at most once. A write that gives a root a
+new incarnation stores the number of requested targets, and a write that finds
+the targets unchanged stores the same number. An attach counts the paths that
+the root already keeps, by reading the root's rows for the attached paths, and
+adds the number of the other paths. When a commit reclaims a reserved narinfo
+row, it deletes the path's target rows in every root of the cache and subtracts
+one from the count of each root whose incarnation had one of those rows. The
+drain of a root release deletes only rows of a released incarnation, so it
+changes no count.
+
+A root that existed before migration 0085 has no count, and the listing counts
+its target rows instead. The `root-target-count-backfill` maintenance pass
+counts these roots in rowid order, up to the highest rowid at the time of the
+migration, and records its progress in `root_target_count_backfill`. It counts
+one root per statement and stops once the row budget is spent, so a pass always
+counts at least one root. An earlier version would change targets without
+updating the count, so the migrator records 0085 with the `verified-contraction`
+state as well.
+
 A name without a root row has no live targets: `roots.targets` returns an empty
 page for it, and the publication replay treats its paths as not attached. A late
 attach by an earlier version of cupboard can leave target rows without an
@@ -2298,9 +2320,9 @@ writer, and its contract migrations remove that compatibility. The tenant Worker
 upload is therefore the point after which a rollback can't recover: after an
 object contracts its SQLite schema, complete the deployment to recover.
 
-Every earlier build refuses a tenant that has applied migration 0084, because
-the migrator records 0084 with the `verified-contraction` state. The [root
-incarnations][root-incarnations] section explains why.
+Every earlier build refuses a tenant that has applied migration 0084 or 0085,
+because the migrator records both with the `verified-contraction` state. The
+[root incarnations][root-incarnations] section explains why.
 
 [root-incarnations]: #root-incarnations
 

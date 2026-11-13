@@ -102,6 +102,7 @@ import {
 import { hourlyDeadline } from './hourly-deadline.ts';
 import { type JsonValueList, jsonValueLists } from './json-list.ts';
 import {
+	deletePathTargets,
 	existingRootIncarnationKey,
 	insertLiveRootTargets,
 	warnRootMissing
@@ -2063,15 +2064,7 @@ export class CommitPipelineService {
 			request.isStillSettleable
 		);
 		if (result === 'reclaimed') {
-			this.context.db
-				.delete(schema.retentionRootTargets)
-				.where(
-					and(
-						eq(schema.retentionRootTargets.cacheId, cache.id),
-						eq(schema.retentionRootTargets.storePathHash, path.storePathHash)
-					)
-				)
-				.run();
+			deletePathTargets(this.context.db, cache.id, path.storePathHash);
 		}
 		return result;
 	}

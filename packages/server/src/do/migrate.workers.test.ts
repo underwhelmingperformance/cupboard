@@ -67,6 +67,16 @@ const everyEntry = migrations.journal.entries.toSorted((a, b) => a.idx - b.idx);
 
 const everyTag = everyEntry.map((entry) => entry.tag);
 
+// Older builds must not run past these migrations: 0052 removed columns
+// that they read, after 0084 they would write root targets without the
+// root's incarnation, and after 0085 they would change a root's targets
+// without updating its stored count.
+const barriers = [
+	{ tag: '0052_cache_identity_contract', index: 52 },
+	{ tag: '0084_root_incarnations', index: 84 },
+	{ tag: '0085_root_target_counts', index: 85 }
+];
+
 const migrationSource = (bundle: MigrationBundle, index: number): string => {
 	const source = bundle.migrations[`m${index.toString().padStart(4, '0')}`];
 
@@ -129,11 +139,11 @@ describe('applyMigrations', () => {
 				everyEntry.map(async (entry) => ({
 					hash: entry.tag,
 					digest: await sha256Hex(migrationSource(migrations, entry.idx)),
-					verificationState:
-						entry.tag === '0052_cache_identity_contract' ||
-						entry.tag === '0084_root_incarnations'
-							? 'verified-contraction'
-							: 'verified'
+					verificationState: barriers.some(
+						(barrier) => barrier.tag === entry.tag
+					)
+						? 'verified-contraction'
+						: 'verified'
 				}))
 			)
 		);
@@ -467,14 +477,6 @@ describe('admitMigrationSource', () => {
 
 		expect(outcome).toStrictEqual({ refused: false, error: undefined });
 	});
-
-	// Older builds must not run past these migrations: 0052 removed columns
-	// that they read, and after 0084 they would write root targets without
-	// the root's incarnation.
-	const barriers = [
-		{ tag: '0052_cache_identity_contract', index: 52 },
-		{ tag: '0084_root_incarnations', index: 84 }
-	];
 
 	it.each(barriers)(
 		'refuses a store migrated through $tag to the preceding migration bundle',
