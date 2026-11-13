@@ -777,19 +777,36 @@ export function runCasReaperDemote(
 	);
 }
 
-// An empty cursor restarts the scan from the first shared blob.
-function demoteCursor(env: Env): DemoteCursor {
+// An empty cursor restarts the scan from the first shared blob. The cursor
+// skips the KV put when the position equals the value that `read` returned. A
+// pass that starts at the beginning and reads a short page leaves the cursor
+// empty, and would otherwise write an unchanged value on every pass.
+function kvDemoteCursor(env: Env, key: string): DemoteCursor {
+	let stored: string | undefined;
+
 	return {
-		read: async () => (await env.CRON_STATE.get(demoteCursorKey)) ?? '',
-		advance: (position) => env.CRON_STATE.put(demoteCursorKey, position)
+		read: async () => {
+			stored = (await env.CRON_STATE.get(key)) ?? '';
+
+			return stored;
+		},
+		advance: async (position) => {
+			if (position === stored) {
+				return;
+			}
+
+			await env.CRON_STATE.put(key, position);
+			stored = position;
+		}
 	};
 }
 
+function demoteCursor(env: Env): DemoteCursor {
+	return kvDemoteCursor(env, demoteCursorKey);
+}
+
 function casDemoteCursor(env: Env): DemoteCursor {
-	return {
-		read: async () => (await env.CRON_STATE.get(casDemoteCursorKey)) ?? '',
-		advance: (position) => env.CRON_STATE.put(casDemoteCursorKey, position)
-	};
+	return kvDemoteCursor(env, casDemoteCursorKey);
 }
 
 function blobReaper(env: Env): BlobReaperService {
