@@ -128,6 +128,14 @@ export const tenantOffboardingErrorDataSchema = z.strictObject({
 	id: tenantIdSchema
 });
 
+// The data of the `TENANT_MEMBERSHIP_UNPUBLISHED` contract error: the tenant,
+// which the create wrote, and the seconds to wait before repeating the
+// identical create request.
+export const tenantMembershipUnpublishedErrorDataSchema = z.strictObject({
+	id: tenantIdSchema,
+	retryAfterSeconds: z.number().int().positive()
+});
+
 // A tenant's storage limit: a number of bytes, or none.
 export const tenantQuotaSchema = z.discriminatedUnion('kind', [
 	z.strictObject({

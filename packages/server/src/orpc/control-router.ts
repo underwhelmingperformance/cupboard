@@ -39,6 +39,10 @@ import {
 	controlLocalStepStatus,
 	enqueueLocalStepWakes
 } from '../control/local-step.ts';
+import {
+	type FilterWriteRetry,
+	rebuildMembershipFilter
+} from '../control/tenant-membership.ts';
 
 import { authoriseRequest, noPendingCache } from './authorise.ts';
 import { bridgedError } from './error-bridge.ts';
@@ -50,6 +54,9 @@ export interface ControlOrpcContext {
 	readonly env: Env;
 	readonly logger: Logger;
 	readonly resHeaders?: Headers;
+	// The waits between the membership filter writes of a tenant create. A test
+	// passes waits that return at once; the worker leaves it unset.
+	readonly filterWriteRetry?: FilterWriteRetry;
 }
 
 // Verify every control token and check the procedure's declared operation
@@ -126,7 +133,13 @@ export const controlRouter = os.router({
 		),
 		create: os.tenants.create.handler(({ input, context }) => {
 			const requestUrl = new URL(context.request.url);
-			return controlTenantCreate(context.env, input, requestUrl.origin);
+			return controlTenantCreate(
+				context.env,
+				input,
+				requestUrl.origin,
+				context.logger,
+				(env) => rebuildMembershipFilter(env, context.filterWriteRetry)
+			);
 		}),
 		suspend: os.tenants.suspend.handler(({ input, context }) =>
 			controlTenantSuspend(context.env, input.id)

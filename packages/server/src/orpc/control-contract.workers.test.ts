@@ -28,6 +28,7 @@ import { z } from 'zod';
 import { insertBulkTenants } from '../control/bulk-tenants.test-support.ts';
 import { controlAuthenticate } from '../control/control-plane.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { passThrough } from '../do/pass-through.ts';
 import {
 	adminGrants,
 	cacheWriteGrants,
@@ -743,6 +744,92 @@ describe('control contract round trip', () => {
 				data: { id: 'acme' }
 			},
 			listed: { id: 'acme', status: 'offboarding' }
+		});
+	});
+
+	// KV refuses every put and delete of the filter, and the publication's waits
+	// return at once. The real control handler answers the create, and the
+	// derived client validates the error against the contract's strict schema.
+	it('returns TENANT_MEMBERSHIP_UNPUBLISHED through the derived client when the filter can be neither written nor deleted', async () => {
+		const token = await issueControlAdminToken();
+		const refusingFilterWrites = new Proxy(env.TENANT_CACHE, {
+			get(target, property) {
+				if (property === 'put') {
+					return async (key: string, value: string | ArrayBuffer) => {
+						if (key === 'tenant-filter') {
+							throw new Error('KV PUT failed: 503 Service Unavailable');
+						}
+
+						await target.put(key, value);
+					};
+				}
+
+				if (property === 'delete') {
+					return async (key: string) => {
+						if (key === 'tenant-filter') {
+							throw new Error('KV DELETE failed: 503 Service Unavailable');
+						}
+
+						await target.delete(key);
+					};
+				}
+
+				return passThrough(target, property);
+			}
+		});
+		const failingEnv = Object.assign({}, env, testControlEnv, {
+			TENANT_CACHE: refusingFilterWrites
+		});
+		const link = new OpenAPILink(controlContract, {
+			url: `${currentOrigin()}/control`,
+			headers: { authorization: `Bearer ${token}` },
+			fetch: async (request) => {
+				const { response } = await controlOrpcHandler.handle(request, {
+					prefix: '/control',
+					context: {
+						request,
+						authenticate: () => controlAuthenticate(request, failingEnv),
+						env: failingEnv,
+						logger: rootLogger(),
+						filterWriteRetry: {
+							wait: () => Promise.resolve(),
+							random: () => 0
+						}
+					}
+				});
+
+				return (
+					response ?? new Response(undefined, { status: StatusCodes.NOT_FOUND })
+				);
+			},
+			plugins: [new ResponseValidationPlugin(controlContract)]
+		});
+		const client: ControlClient = createORPCClient(link);
+
+		const [error] = await safe(
+			client.tenants.create({
+				id: 'acme',
+				defaultCacheAccess: 'private',
+				ownerIssuer: 'https://idp.test',
+				ownerSubject: 'owner',
+				ownerAudience: 'aud'
+			})
+		);
+
+		expect(
+			z
+				.object({
+					defined: z.boolean(),
+					code: z.string(),
+					status: z.number(),
+					data: z.unknown()
+				})
+				.parse(error)
+		).toStrictEqual({
+			defined: true,
+			code: 'TENANT_MEMBERSHIP_UNPUBLISHED',
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			data: { id: 'acme', retryAfterSeconds: 5 }
 		});
 	});
 

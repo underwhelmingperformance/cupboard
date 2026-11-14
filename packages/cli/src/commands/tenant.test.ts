@@ -18,11 +18,17 @@ import {
 	tenantSummarySchema
 } from '@cupboard/protocol/tenants';
 import type { ResultRow } from '@cupboard/reporter';
+import { genericExitCode } from '@cupboard/shared/errors';
 import { readUserInputSchema } from '@cupboard/shared/http';
+import { ORPCError } from '@orpc/client';
 import { Command } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
+import {
+	OwnerLoginRequiredError,
+	TenantCreateIncompleteError
+} from '../errors.ts';
 
 import {
 	InvalidQuotaBytesError,
@@ -41,7 +47,8 @@ import {
 	runTenantRotateCredential,
 	runTenantSetQuota,
 	runTenantSuspend,
-	type TenantClient
+	type TenantClient,
+	type TenantCreateOptions
 } from './tenant.ts';
 
 const acme = tenantIdSchema.parse('acme');
@@ -146,6 +153,26 @@ function summary(status: 'active' | 'suspended' = 'active') {
 		configVersion: 3,
 		createdAt: '2026-09-01T00:00:00.000Z'
 	});
+}
+
+// The message and stack of `error` and of every error in its cause chain,
+// with each error's own properties.
+function errorChainText(error: unknown): string {
+	const parts: string[] = [];
+	const seen = new Set<unknown>();
+	let current = error;
+
+	while (current instanceof Error && !seen.has(current)) {
+		seen.add(current);
+		parts.push(
+			current.message,
+			current.stack ?? '',
+			JSON.stringify(Object.entries(current))
+		);
+		current = current.cause;
+	}
+
+	return parts.join('\n');
 }
 
 function tenantClient(overrides: Partial<TenantClient>): TenantClient {
@@ -314,7 +341,7 @@ describe('runTenantCreate', () => {
 			body,
 			reporter(rows),
 			{ create: () => Promise.resolve(summary()) },
-			password
+			{ generatedReadPassword: password }
 		);
 
 		expect(rows).toStrictEqual([
@@ -326,6 +353,277 @@ describe('runTenantCreate', () => {
 				{ label: 'Read password', raw: true, value: password }
 			]
 		]);
+	});
+
+	const bodyWithPassword = tenantCreateBodySchema.parse({
+		id: acme,
+		defaultCacheAccess: 'public',
+		ownerIssuer: 'https://issuer.example',
+		ownerSubject: 'owner',
+		ownerAudience: 'cupboard',
+		read: { user: alice, password }
+	});
+
+	function unpublished(retryAfterSeconds: number): ORPCError<string, unknown> {
+		return new ORPCError('TENANT_MEMBERSHIP_UNPUBLISHED', {
+			status: 503,
+			message: 'raw',
+			data: { id: acme, retryAfterSeconds }
+		});
+	}
+
+	// The options of a create with the generated password, which record each
+	// wait that the command requests.
+	function createOptions(sleeps: number[]): TenantCreateOptions {
+		return {
+			generatedReadPassword: password,
+			sleep: (ms) => {
+				sleeps.push(ms);
+
+				return Promise.resolve();
+			}
+		};
+	}
+
+	// The deployment created the tenant but could not publish its membership.
+	// The command repeats the identical request, with the same password, after
+	// the delay that the deployment asked for.
+	it('repeats the identical create after the requested delay when the membership is unpublished', async () => {
+		const rows: ResultRow[][] = [];
+		const requests: unknown[] = [];
+		const sleeps: number[] = [];
+		let refusals = 1;
+
+		await runTenantCreate(
+			bodyWithPassword,
+			reporter(rows),
+			{
+				create: (body) => {
+					requests.push(body);
+					refusals -= 1;
+
+					return refusals >= 0
+						? Promise.reject(unpublished(5))
+						: Promise.resolve(summary());
+				}
+			},
+			createOptions(sleeps)
+		);
+
+		expect({ requests, sleeps, rows }).toStrictEqual({
+			requests: [bodyWithPassword, bodyWithPassword],
+			sleeps: [5000],
+			rows: [
+				[
+					{ label: 'Tenant', value: 'acme' },
+					{ label: 'Status', value: 'Active' },
+					{ label: 'Default cache access', value: 'public' },
+					{ label: 'Read user', raw: true, value: 'alice' },
+					{ label: 'Read password', raw: true, value: password }
+				]
+			]
+		});
+	});
+
+	const noteMatcher: unknown = expect.any(String);
+
+	// The card that the command prints when the tenant may exist but the
+	// command did not confirm it.
+	const unconfirmedCredential: unknown[] = [
+		{ label: 'Tenant', value: 'acme' },
+		{ label: 'Read user', raw: true, value: 'alice' },
+		{ label: 'Read password', raw: true, value: password },
+		{ label: 'Note', value: noteMatcher }
+	];
+
+	// Every request gets the same answer. The command waits at most ten seconds
+	// between requests. It prints the generated credential through the reporter,
+	// and the error does not contain the password.
+	it('prints the credential and throws TenantCreateIncompleteError when every create leaves the membership unpublished', async () => {
+		const rows: ResultRow[][] = [];
+		const requests: unknown[] = [];
+		const sleeps: number[] = [];
+		let failure: unknown;
+
+		try {
+			await runTenantCreate(
+				bodyWithPassword,
+				reporter(rows),
+				{
+					create: (body) => {
+						requests.push(body);
+
+						return Promise.reject(unpublished(30));
+					}
+				},
+				createOptions(sleeps)
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect({
+			failure:
+				failure instanceof TenantCreateIncompleteError
+					? {
+							name: failure.name,
+							tenant: failure.tenant,
+							attempts: failure.attempts,
+							hasPrintedReadCredential: failure.hasPrintedReadCredential,
+							exitCode: cliExitCode(failure, 130),
+							containsPassword: errorChainText(failure).includes(password)
+						}
+					: failure,
+			rows,
+			requests,
+			sleeps
+		}).toStrictEqual({
+			failure: {
+				name: 'TenantCreateIncompleteError',
+				tenant: acme,
+				attempts: 3,
+				hasPrintedReadCredential: true,
+				exitCode: genericExitCode,
+				containsPassword: false
+			},
+			rows: [unconfirmedCredential],
+			requests: [bodyWithPassword, bodyWithPassword, bodyWithPassword],
+			sleeps: [10_000, 10_000]
+		});
+	});
+
+	// After an unpublished answer the tenant exists. A later failure becomes
+	// TenantCreateIncompleteError with that failure as its cause. The command
+	// prints the credential first, and it exits with the generic code.
+	it.each([
+		{
+			failure: 'a lost connection',
+			later: new TypeError('fetch failed')
+		},
+		{
+			failure: 'an abort during the wait',
+			later: new DOMException('The operation was aborted.', 'AbortError')
+		}
+	])(
+		'prints the credential and throws TenantCreateIncompleteError for $failure after an unpublished answer',
+		async ({ later }) => {
+			const rows: ResultRow[][] = [];
+			const sleeps: number[] = [];
+			const answers = [unpublished(5), later];
+			let failure: unknown;
+
+			try {
+				await runTenantCreate(
+					bodyWithPassword,
+					reporter(rows),
+					{
+						create: () =>
+							Promise.reject(
+								answers.shift() ?? new Error('the test ran out of answers')
+							)
+					},
+					createOptions(sleeps)
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expect({
+				failure:
+					failure instanceof TenantCreateIncompleteError
+						? {
+								name: failure.name,
+								tenant: failure.tenant,
+								attempts: failure.attempts,
+								hasPrintedReadCredential: failure.hasPrintedReadCredential,
+								cause: failure.cause,
+								exitCode: cliExitCode(failure, 130)
+							}
+						: failure,
+				rows,
+				sleeps
+			}).toStrictEqual({
+				failure: {
+					name: 'TenantCreateIncompleteError',
+					tenant: acme,
+					attempts: 2,
+					hasPrintedReadCredential: true,
+					cause: later,
+					exitCode: genericExitCode
+				},
+				rows: [unconfirmedCredential],
+				sleeps: [5000]
+			});
+		}
+	);
+
+	// A 503 on the first request leaves the outcome unknown, so the command
+	// prints the credential and throws the failure unchanged.
+	it('prints the credential before it throws a 503 on the first request', async () => {
+		const rows: ResultRow[][] = [];
+		const unavailable = new ORPCError('SERVICE_UNAVAILABLE', {
+			status: 503,
+			message: 'raw'
+		});
+
+		await expect(
+			runTenantCreate(
+				bodyWithPassword,
+				reporter(rows),
+				{ create: () => Promise.reject(unavailable) },
+				createOptions([])
+			)
+		).rejects.toBe(unavailable);
+		expect(rows).toStrictEqual([unconfirmedCredential]);
+	});
+
+	// Without a session, the client fails before it sends the request, so the
+	// tenant cannot exist and the command prints no credential.
+	it('prints no credential when the create fails before a request is sent', async () => {
+		const rows: ResultRow[][] = [];
+		const noSession = new OwnerLoginRequiredError();
+		const wasRequestSent = false;
+
+		await expect(
+			runTenantCreate(
+				bodyWithPassword,
+				reporter(rows),
+				{ create: () => Promise.reject(noSession) },
+				{ ...createOptions([]), wasRequestSent: () => wasRequestSent }
+			)
+		).rejects.toBe(noSession);
+		expect({ rows, wasRequestSent }).toStrictEqual({
+			rows: [],
+			wasRequestSent: false
+		});
+	});
+
+	it('neither repeats nor prints the credential for a create that the deployment refused for another reason', async () => {
+		const conflict = new ORPCError('CONFLICT', { status: 409, message: 'raw' });
+		const rows: ResultRow[][] = [];
+		const requests: unknown[] = [];
+
+		await expect(
+			runTenantCreate(
+				bodyWithPassword,
+				reporter(rows),
+				{
+					create: (body) => {
+						requests.push(body);
+
+						return Promise.reject(conflict);
+					}
+				},
+				{
+					generatedReadPassword: password,
+					sleep: () => Promise.reject(new Error('the command must not wait'))
+				}
+			)
+		).rejects.toBe(conflict);
+		expect({ requests, rows }).toStrictEqual({
+			requests: [bodyWithPassword],
+			rows: []
+		});
 	});
 });
 

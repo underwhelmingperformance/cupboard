@@ -59,6 +59,22 @@ generated password. The password isn't shown again. These options change that:
 You can also limit how much storage the tenant can use with `--quota-bytes`. By
 default there's no limit. See [Changing a quota](#changing-a-quota).
 
+Sometimes the deployment creates the tenant but can't publish its membership,
+which admission checks before it serves a request. The command then sends the
+same request twice more, waiting up to 10 seconds before each. If those fail
+too, the command prints an "Unconfirmed tenant read credential" card with the
+read user and password, and then reports that the tenant exists. It does the
+same when a later request fails in another way, such as a lost connection or
+Ctrl-C between the requests. It also prints the card when the first request
+fails and the deployment may have created the tenant, such as after a lost
+connection.
+
+Save that password: running `cupboard tenant create` again generates a different
+one, and the deployment refuses it for the existing tenant. Until the membership
+is published, requests to the tenant can get 404. Run `cupboard deploy` again to
+publish it. If you didn't save the password, `cupboard tenant rotate-credential`
+replaces it. That command doesn't publish the membership.
+
 Once the tenant exists, the owner can sign in and add other administrators
 themselves. See [Who can use your tenant](../admin/access.md).
 

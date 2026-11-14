@@ -11,6 +11,11 @@ import {
 	kvOperationsReserve
 } from '@cupboard/protocol/platform';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
+import {
+	ExponentialBackoff,
+	type ExponentialBackoffPolicy,
+	type RandomSource
+} from '@cupboard/shared/backoff';
 import { type ReadUser } from '@cupboard/shared/http';
 import { and, eq, gt, lte, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
@@ -456,9 +461,9 @@ export async function readTenantEntry(
 Admits a tenant request. The membership filter and marker reject unknown
 slugs, while a cache fault falls through to the authoritative D1 read.
 
-Pass the cache the request addresses. Admission resolves that cache's access,
-lifecycle version, deletion state and cache-specific verifier before routing
-can authenticate the request or consult Workers Cache.
+Pass the cache that the request addresses. Admission resolves that cache's
+access, lifecycle version, deletion state and cache-specific verifier before
+routing can authenticate the request or consult Workers Cache.
 
 Admission runs within `deadline`, or within an enclosing deadline that ends
 sooner. The scope ends when admission returns, so it does not bound the
@@ -543,14 +548,17 @@ export interface MembershipRefreshPage {
 // `membership.rebuild` request and the test harness. Reassertion repairs a
 // marker lost during creation, which keeps a definitive marker miss safe to
 // return as 404.
-export async function refreshTenantMembership(env: Env): Promise<number> {
+export async function refreshTenantMembership(
+	env: Env,
+	retry: FilterWriteRetry = systemFilterWriteRetry
+): Promise<number> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const live = await liveTenantSlugs(database);
 
 	await Promise.all(
 		live.map((slug) => writeTenantMember(env.TENANT_CACHE, slug))
 	);
-	await publishMembershipFilter(env, live);
+	await publishMembershipFilter(env, database, retry);
 
 	return live.length;
 }
@@ -565,7 +573,8 @@ admission format needs every marker reasserted. The cron uses
 */
 export async function refreshTenantMembershipPage(
 	env: Env,
-	after?: TenantId
+	after?: TenantId,
+	retry: FilterWriteRetry = systemFilterWriteRetry
 ): Promise<MembershipRefreshPage> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const size = membershipMarkersPerPage;
@@ -579,11 +588,7 @@ export async function refreshTenantMembershipPage(
 	);
 
 	if (after === undefined) {
-		if (hasMore) {
-			await rebuildMembershipFilter(env);
-		} else {
-			await publishMembershipFilter(env, page);
-		}
+		await publishMembershipFilter(env, database, retry);
 	}
 
 	return { written: page.length, ...(hasMore && { cursor: last }) };
@@ -763,13 +768,15 @@ stored filter.
 A step lists one page of up to 1,000 markers. It lists up to
 `maxSkippedListPages` more pages while the cursor leads to pages that have
 nothing after `after`. It makes at most `membershipMarkersPerPage` writes,
-deletes and extra listings together, and the filter read and write. That
+deletes and extra listings together. The filter adds one read, up to
+`maxFilterPutAttempts` puts and up to `maxFilterDeleteAttempts` deletes. That
 stays within the KV operations of an invocation. The cron runs the first step,
 and the queued chain runs the others.
 */
 export async function reconcileTenantMembership(
 	env: Env,
-	position: MembershipReconcilePosition = {}
+	position: MembershipReconcilePosition = {},
+	retry: FilterWriteRetry = systemFilterWriteRetry
 ): Promise<MembershipReconcileStep> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const { after, listCursor } = position;
@@ -791,10 +798,7 @@ export async function reconcileTenantMembership(
 	// filter. The step continues from the cursor of the page.
 	if (!page.isComplete && page.slugs.length === 0) {
 		if (isFirstStep) {
-			await publishMembershipFilterIfChanged(
-				env,
-				await liveTenantSlugs(database)
-			);
+			await publishMembershipFilterIfChanged(env, database, retry);
 		}
 
 		return {
@@ -836,14 +840,11 @@ export async function reconcileTenantMembership(
 	);
 
 	if (isFirstStep) {
-		// When the first step read every live tenant, the filter needs no second
-		// read.
-		const everyLive =
-			listEnd === undefined && !isTruncated
-				? live
-				: await liveTenantSlugs(database);
+		// When the first step read every live tenant, a tick without change
+		// needs no second read to compare the filter.
+		const everyLive = listEnd === undefined && !isTruncated ? live : undefined;
 
-		await publishMembershipFilterIfChanged(env, everyLive);
+		await publishMembershipFilterIfChanged(env, database, retry, everyLive);
 	}
 
 	const written = applied.filter((change) => change.kind === 'write').length;
@@ -897,31 +898,65 @@ export function membershipRefreshMessage(
 	return { kind: 'membership-refresh', ...position };
 }
 
-// Rebuild the filter after creation so the new tenant becomes admissible within
-// the filter cache TTL instead of waiting for scheduled maintenance. This is
-// the only writer of the filter key, so a negative result remains definitive
-// until a later rebuild includes the tenant.
-export async function rebuildMembershipFilter(env: Env): Promise<void> {
-	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-
-	await publishMembershipFilter(env, await liveTenantSlugs(database));
+/**
+How a publication waits before it writes the filter again. `wait` waits the
+given number of milliseconds, and `random` chooses the jitter of each delay.
+A test passes a wait that moves its own clock and a fixed random source.
+*/
+export interface FilterWriteRetry {
+	readonly wait: (ms: number) => Promise<void>;
+	readonly random: RandomSource;
 }
 
-// Writes the filter only when its bytes differ from the stored filter. The
-// build is deterministic for a sorted list of slugs, so an unchanged tenant set
-// produces the stored bytes and the write is skipped.
+const systemFilterWriteRetry: FilterWriteRetry = {
+	wait: (ms) => scheduler.wait(ms),
+	random: Math.random
+};
+
+// Tenant creation calls this after it writes the tenant's row and marker. This
+// colo admits the new tenant at once. Another colo can keep the previous filter
+// for up to 70 seconds: KV serves a value up to 60 seconds old, and the Cache
+// API keeps the colo's copy for `filterCacheTtlSeconds` more.
+export async function rebuildMembershipFilter(
+	env: Env,
+	retry: FilterWriteRetry = systemFilterWriteRetry
+): Promise<void> {
+	await publishMembershipFilter(
+		env,
+		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+		retry
+	);
+}
+
+// The cron writes the filter only when its bytes differ from the stored filter.
+// The build is deterministic for a sorted list of slugs, so an unchanged tenant
+// set produces the stored bytes. `live`, when present, is a read of every live
+// tenant that the caller already has. It decides whether the filter changed
+// without another D1 read.
+//
+// The `get` can return a value that this colo cached up to 60 seconds earlier,
+// and KV has no read that bypasses that cache. If the cached value equals the
+// filter of the live tenants while the stored filter is a stale put from the
+// last 60 seconds, the cron skips its write and the stale filter stays until
+// the next filter write.
 async function publishMembershipFilterIfChanged(
 	env: Env,
-	live: readonly TenantId[]
+	database: Database,
+	retry: FilterWriteRetry,
+	live?: readonly TenantId[]
 ): Promise<void> {
-	const bytes = buildMembershipFilter(live);
 	const stored = await env.TENANT_CACHE.get(filterKey, 'arrayBuffer');
+	const storedBytes = stored === null ? undefined : new Uint8Array(stored);
 
-	if (stored !== null && hasSameBytes(new Uint8Array(stored), bytes)) {
+	if (
+		live !== undefined &&
+		storedBytes !== undefined &&
+		hasSameBytes(storedBytes, buildMembershipFilter(live))
+	) {
 		return;
 	}
 
-	await publishFilterBytes(env, bytes);
+	await publishMembershipFilter(env, database, retry, storedBytes);
 }
 
 function hasSameBytes(left: Uint8Array, right: Uint8Array): boolean {
@@ -931,18 +966,176 @@ function hasSameBytes(left: Uint8Array, right: Uint8Array): boolean {
 	);
 }
 
-async function publishMembershipFilter(
-	env: Env,
-	live: readonly TenantId[]
-): Promise<void> {
-	await publishFilterBytes(env, buildMembershipFilter(live));
+// Workers KV refuses, with a 429, a write to a key within a second of the
+// previous write to that key. A delete is a write too. Half jitter keeps each
+// delay at or above half its ceiling, so the first ceiling of two seconds keeps
+// every wait at a second or more. The jitter spreads the retries of writers
+// that collided, so they do not retry in step.
+const filterWriteBackoff: ExponentialBackoffPolicy = {
+	baseMs: 2000,
+	maximumMs: 4000,
+	jitter: 'half'
+};
+
+// The most attempts that one publication makes to put the filter, and then to
+// delete it.
+const maxFilterPutAttempts = 3;
+const maxFilterDeleteAttempts = 2;
+
+/**
+The error of a publication that could neither put a verified filter nor delete
+the filter. `errors` lists the failure of each attempt, in order.
+*/
+export class MembershipFilterWriteError extends AggregateError {
+	constructor(failures: readonly unknown[]) {
+		super(failures, 'the membership filter could not be written or deleted');
+		this.name = 'MembershipFilterWriteError';
+	}
 }
 
-async function publishFilterBytes(env: Env, bytes: Uint8Array): Promise<void> {
-	await env.TENANT_CACHE.put(filterKey, bytes);
-	// Drop this colo's cached filter so it refetches the rebuilt one promptly;
-	// other colos pick it up on their cache TTL.
-	await caches.default.delete(membershipFilterCacheKey(env.CUPBOARD_DO));
+/**
+Writes the filter of the live tenants in D1. Tenant creation, the cron and the
+deploy rebuild all write the filter. KV has no conditional write, and the last
+write wins, so a put built from an older read of D1 can replace a filter that
+contains a tenant created since that read.
+
+An attempt reads D1, puts the filter of that read and reads D1 again. The
+publication ends when the second read finds no live tenant that the put lacks.
+Otherwise, or when the put or a read fails, it waits for a delay from
+`filterWriteBackoff` and makes another attempt from a fresh read, up to
+`maxFilterPutAttempts`. The wait keeps this writer's writes of the key a second
+or more apart. It also lets a retry succeed when KV refused this writer's put
+because another writer had just written the key.
+
+When the put attempts run out, the publication deletes the filter, with the
+same backoff before each of up to `maxFilterDeleteAttempts` deletes, and
+admission then checks the marker of every slug. If KV counts only accepted
+writes against its limit, a put or delete that it refuses with a 429 a second
+or more after this writer's last put shows that another writer has written the
+key since, and that writer verifies its own put in the same way. The
+publication throws `MembershipFilterWriteError` when every delete fails, and
+the stored filter can then lack a tenant until the next filter write.
+
+A creation that fails after it inserts the tenant's row and before it
+publishes the filter reports the failure. The next writer reads the row from
+D1 and includes it.
+
+Pass `stored`, the bytes of the stored filter, to skip the put when the filter
+is unchanged.
+*/
+async function publishMembershipFilter(
+	env: Env,
+	database: Database,
+	retry: FilterWriteRetry,
+	stored?: Uint8Array
+): Promise<void> {
+	const backoff = new ExponentialBackoff(filterWriteBackoff, retry.random);
+	const failures: unknown[] = [];
+
+	for (let attempt = 1; attempt <= maxFilterPutAttempts; attempt += 1) {
+		if (attempt > 1) {
+			await retry.wait(backoff.delayMs(attempt - 1));
+		}
+
+		const result = await attemptFilterPut(
+			env,
+			database,
+			attempt === 1 ? stored : undefined
+		);
+
+		if (result.kind === 'unchanged') {
+			return;
+		}
+
+		if (result.kind === 'verified') {
+			// Drop this colo's cached filter so it refetches the rebuilt one
+			// promptly. Other colos can keep the previous filter for up to 70
+			// seconds, as `rebuildMembershipFilter` describes.
+			await caches.default.delete(membershipFilterCacheKey(env.CUPBOARD_DO));
+
+			return;
+		}
+
+		if (result.kind === 'failed') {
+			failures.push(result.error);
+		}
+	}
+
+	await deleteMembershipFilter(env, retry, backoff, failures);
+}
+
+/**
+The result of one attempt to put the filter. `missing` means that the read
+after the put found a live tenant that the put lacks.
+*/
+type FilterPutAttempt =
+	| { readonly kind: 'unchanged' | 'verified' | 'missing' }
+	| { readonly kind: 'failed'; readonly error: unknown };
+
+async function attemptFilterPut(
+	env: Env,
+	database: Database,
+	stored: Uint8Array | undefined
+): Promise<FilterPutAttempt> {
+	try {
+		const live = await liveTenantSlugs(database);
+		const bytes = buildMembershipFilter(live);
+
+		if (stored !== undefined && hasSameBytes(stored, bytes)) {
+			return { kind: 'unchanged' };
+		}
+
+		await env.TENANT_CACHE.put(filterKey, bytes);
+		const known = new Set(live);
+		const current = await liveTenantSlugs(database);
+
+		return {
+			kind: current.every((slug) => known.has(slug)) ? 'verified' : 'missing'
+		};
+	} catch (error) {
+		return { kind: 'failed', error };
+	}
+}
+
+// Deletes the filter so that admission checks the marker of every slug. The
+// deletes continue the backoff of the put attempts. `failures` lists the failed
+// put attempts, and the failed deletes join them.
+async function deleteMembershipFilter(
+	env: Env,
+	retry: FilterWriteRetry,
+	backoff: ExponentialBackoff,
+	failures: unknown[]
+): Promise<void> {
+	for (let attempt = 1; attempt <= maxFilterDeleteAttempts; attempt += 1) {
+		await retry.wait(backoff.delayMs(maxFilterPutAttempts + attempt - 1));
+		const result = await attemptFilterDelete(env);
+
+		if (result.kind === 'deleted') {
+			rootLogger().warn('membership filter deleted', { failures });
+			await caches.default.delete(membershipFilterCacheKey(env.CUPBOARD_DO));
+
+			return;
+		}
+
+		failures.push(result.error);
+	}
+
+	throw new MembershipFilterWriteError(failures);
+}
+
+async function attemptFilterDelete(
+	env: Env
+): Promise<
+	| { readonly kind: 'deleted' }
+	| { readonly kind: 'failed'; readonly error: unknown }
+> {
+	try {
+		await env.TENANT_CACHE.delete(filterKey);
+
+		return { kind: 'deleted' };
+	} catch (error) {
+		return { kind: 'failed', error };
+	}
 }
 
 async function liveTenantSlugs(

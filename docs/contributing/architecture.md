@@ -620,6 +620,49 @@ before it creates a Durable Object for it. They can't admit a tenant, though.
 The final decision always comes from reading D1. If KV fails, the control Worker
 falls back to that D1 read rather than refusing the request.
 
+Tenant creation, the hourly reconcile and the deploy's rebuild all write the
+filter. KV has no conditional write, so a writer's put can replace a filter that
+another writer built from a later read of D1, and drop a tenant that was just
+created. KV also refuses, with a 429, a second write to one key within a second.
+Each writer therefore reads the live tenants from D1 again after its put. If
+that read finds a tenant that the put lacks, or the put or a read fails, the
+writer waits and tries again from a fresh read, up to three attempts. The wait
+is a random delay of 1 to 2 seconds before the second attempt and 2 to 4 seconds
+before each later write, so it always keeps the writer's own writes a second or
+more apart, and writers that collided do not retry in step. After the third
+attempt the writer deletes the filter, with the same kind of wait before each of
+up to two deletes, and admission then checks the marker of every slug.
+
+If KV counts only accepted writes against its limit, a write that it refuses
+with a 429 a second or more after the writer's last put shows that another
+writer wrote the key after that put, and that writer checks its own put in the
+same way. Cloudflare does not document whether refused writes count. If they do,
+two writers can keep refusing each other's writes. The random waits make that
+unlikely but do not exclude it. When every put and delete of a writer fails, the
+filter can lack a new tenant until the next filter write. Tenant creation then
+fails with `TENANT_MEMBERSHIP_UNPUBLISHED`, a 503 with the tenant and a retry
+delay, because admission does not read the marker while the filter excludes the
+tenant. The tenant's row and marker exist. The create is idempotent only for an
+identical request, including the same read password, so repeating that request
+publishes the filter. `cupboard tenant create` repeats it twice, after the delay
+that the response gives, capped at 10 seconds. When the third request fails too,
+or a later request fails in another way after this answer, the command prints
+the generated read password as a result, then exits with an error that says the
+tenant exists, with the generic exit code. The error itself never contains the
+password. A new run would generate a different password, which the deployment
+refuses for the existing tenant. Running `cupboard deploy` again publishes the
+filter for every tenant, because the deploy rebuilds the membership.
+`cupboard tenant rotate-credential` replaces a lost read password, but it does
+not publish the filter.
+
+Other colos can serve the previous filter for up to about 70 seconds after a
+write: KV can serve a value up to 60 seconds old, and the Cache API keeps each
+colo's copy for 10 seconds. The cron's read of the stored filter has the same
+60-second cache, and KV has no read that bypasses it. If the cron reads a cached
+filter that matches the live tenants while the stored filter is a stale put from
+the last 60 seconds, the cron skips its write, and the stale filter stays until
+the next filter write.
+
 `CRON_STATE` records where each reaper's demote scan should resume: the NAR
 reaper's under `reaper:demote-cursor`, and the attestation reaper's under
 `reaper:cas-demote-cursor`.
@@ -647,11 +690,13 @@ every plan. A step lists a page of up to 1,000 markers. When the listing cursor
 leads to pages that have nothing after the step's position, the step lists up to
 100 more pages. Each extra listing counts against the budget of the step, which
 makes at most 900 writes, deletes and extra listings together. That leaves a
-reserve of 100 operations. A tick with no change makes one listing for each
-1,000 markers, and each listing after the first runs in its own queued step.
-When markers or live tenants remain after a step, the step adds a
-`membership-refresh` job that contains the position to continue from. That job
-runs the next step and adds the next job.
+reserve of 100 operations, which covers the first listing and the first step's
+filter: one read, up to three puts and up to two deletes. A filter write that
+needs a retry also waits before each retry, under 14 seconds in all. A tick with
+no change makes one listing for each 1,000 markers, and each listing after the
+first runs in its own queued step. When markers or live tenants remain after a
+step, the step adds a `membership-refresh` job that contains the position to
+continue from. That job runs the next step and adds the next job.
 
 `POST /control/membership/rebuild` writes one page for each request that has a
 `page` and returns a `cursor` while more tenants remain. `cupboard deploy`

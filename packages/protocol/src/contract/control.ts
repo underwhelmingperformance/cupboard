@@ -42,6 +42,7 @@ import {
 	tenantCreateBodySchema,
 	tenantListInputSchema,
 	tenantListResponseSchema,
+	tenantMembershipUnpublishedErrorDataSchema,
 	tenantMutateResponseSchema,
 	tenantOffboardingErrorDataSchema,
 	tenantQuotaBelowUsageErrorDataSchema,
@@ -151,6 +152,12 @@ export const controlContract = {
 			})
 			.route({ method: 'POST', path: '/tenants' })
 			.input(tenantCreateBodySchema)
+			.errors({
+				TENANT_MEMBERSHIP_UNPUBLISHED: {
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					data: tenantMembershipUnpublishedErrorDataSchema
+				}
+			})
 			.output(tenantSummarySchema),
 
 		suspend: controlProcedure

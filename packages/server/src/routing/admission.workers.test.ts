@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	cacheNameSchema,
 	type CacheScope,
@@ -30,6 +31,8 @@ import {
 	admitTenant,
 	buildMembershipFilter,
 	membershipFilterCacheKey,
+	MembershipFilterWriteError,
+	rebuildMembershipFilter,
 	refreshTenantMembership,
 	type TenantEntry
 } from '../control/tenant-membership.ts';
@@ -42,10 +45,12 @@ import { cacheIdentityColumns } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { d1AccountThrottleMessage } from '../db/transient.test-support.ts';
+import { passThrough } from '../do/pass-through.ts';
 import {
 	LocalSchemaMigrationPendingError,
 	SharedFactsUnavailableError,
-	TenantAdmissionUnavailableError
+	TenantAdmissionUnavailableError,
+	TenantMembershipUnpublishedError
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import { cacheCatalogueVersion } from '../migration/cache-access.ts';
@@ -283,7 +288,12 @@ describe('layered admission gate', () => {
 		await refreshTenantMembership(env);
 		const seeded = await admit('acme');
 
-		await controlTenantCreate(env, createBody('beta'), 'https://cupboard.test');
+		await controlTenantCreate(
+			env,
+			createBody('beta'),
+			'https://cupboard.test',
+			rootLogger()
+		);
 		const created = await admit('beta');
 
 		expect({ seeded, created }).toStrictEqual({
@@ -292,35 +302,95 @@ describe('layered admission gate', () => {
 		});
 	});
 
-	it('fails the create when the filter cannot be published, leaving the tenant recoverable', async () => {
+	// KV refuses every put and delete of the filter, so the stored filter still
+	// excludes the new tenant. The create fails with a retryable error, and the
+	// retried create publishes the filter.
+	it('fails the create retryably when the filter can be neither written nor deleted, and a retry admits the tenant', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
+		const refusal = new Error('KV PUT failed: 503 Service Unavailable');
+		const refusingFilterWrites = new Proxy(env.TENANT_CACHE, {
+			get(target, property) {
+				if (property === 'put') {
+					return async (key: string, value: string | ArrayBuffer) => {
+						if (key === 'tenant-filter') {
+							throw refusal;
+						}
 
-		let outcome: 'created' | 'failed';
-		try {
-			await controlTenantCreate(
-				env,
-				createBody('beta'),
-				'https://cupboard.test',
-				() => Promise.reject(new Error('filter publish failed'))
-			);
-			outcome = 'created';
-		} catch {
-			outcome = 'failed';
-		}
+						await target.put(key, value);
+					};
+				}
 
-		const beforeRecovery = await admit('beta');
-		await refreshTenantMembership(env);
-		const afterRecovery = await admit('beta');
+				if (property === 'delete') {
+					return async (key: string) => {
+						if (key === 'tenant-filter') {
+							throw refusal;
+						}
+
+						await target.delete(key);
+					};
+				}
+
+				return passThrough(target, property);
+			}
+		});
+		const retryAtOnce = { wait: () => Promise.resolve(), random: () => 0 };
+		const beta = tenantIdSchema.parse('beta');
+		let failure: unknown;
+
+		const logged = await loggedAtWarning(async () => {
+			try {
+				await controlTenantCreate(
+					{ ...env, TENANT_CACHE: refusingFilterWrites },
+					createBody('beta'),
+					'https://cupboard.test',
+					rootLogger(),
+					(failingEnv) => rebuildMembershipFilter(failingEnv, retryAtOnce)
+				);
+			} catch (error) {
+				failure = error;
+			}
+		});
+		const beforeRetry = await admit('beta');
+		const retried = await controlTenantCreate(
+			env,
+			createBody('beta'),
+			'https://cupboard.test',
+			rootLogger()
+		);
+		const afterRetry = await admit('beta');
+		const writeError = new MembershipFilterWriteError([
+			refusal,
+			refusal,
+			refusal,
+			refusal,
+			refusal
+		]);
 
 		expect({
-			outcome,
-			beforeRecovery: beforeRecovery !== undefined,
-			afterRecovery: afterRecovery !== undefined
+			failure,
+			failedTenant:
+				failure instanceof TenantMembershipUnpublishedError
+					? failure.tenant
+					: undefined,
+			logged,
+			beforeRetry,
+			retriedTenant: retried.id,
+			afterRetry
 		}).toStrictEqual({
-			outcome: 'failed',
-			beforeRecovery: false,
-			afterRecovery: true
+			failure: new TenantMembershipUnpublishedError(beta, writeError),
+			failedTenant: beta,
+			logged: [
+				{
+					level: 'error',
+					category: ['cupboard'],
+					message: 'membership filter not published after tenant create',
+					properties: { tenant: beta, error: writeError }
+				}
+			],
+			beforeRetry: undefined,
+			retriedTenant: beta,
+			afterRetry: { status: 'active' }
 		});
 	});
 
