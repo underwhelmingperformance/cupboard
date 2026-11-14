@@ -36,6 +36,7 @@ import {
 	tenantUsageRow,
 	testBase,
 	uploadMetadata,
+	uploadPathNegotiation,
 	uploadStatus,
 	verifiableNar,
 	verifyCurrentTenant,
@@ -72,6 +73,33 @@ function claimOrder(
 			narSize: upload.metadata.narSize,
 			reuse: false
 		}));
+}
+
+function splitFirstClaim<Upload extends { readonly uploadId: UploadId }>(
+	uploads: readonly Upload[]
+): { first: Upload; rest: Upload[] } {
+	const [first, ...rest] = uploads.toSorted((left, right) =>
+		byCodeUnit(left.uploadId, right.uploadId)
+	);
+
+	if (first === undefined) {
+		throw new Error('The fixture needs an upload.');
+	}
+
+	return { first, rest };
+}
+
+async function replaceStoredMetadata(
+	uploadId: UploadId,
+	metadataJson: string
+): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		instance.context.db
+			.update(schema.pendingUploads)
+			.set({ metadataJson })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
+	});
 }
 
 function withoutOwner(
@@ -668,6 +696,98 @@ describe('claiming a verification batch', () => {
 		expect(withoutOwner(batch)).toStrictEqual({
 			claims: ordered.slice(0, 2),
 			truncated: true
+		});
+	});
+
+	// A row stored before `ca` had to be a content address can contain any
+	// narinfo line there, and a claim must still read it.
+	it('claims a stored row whose ca is not a content address', async () => {
+		const token = await initialise();
+		const uploads = [
+			await deferFreshUpload(token, 'stored-ca-a', 'a'.repeat(32)),
+			await deferFreshUpload(token, 'stored-ca-b', 'b'.repeat(32))
+		];
+		const { first } = splitFirstClaim(uploads);
+		await replaceStoredMetadata(
+			first.uploadId,
+			JSON.stringify({
+				...uploadPathNegotiation(first.metadata),
+				ca: 'not-a-content-address'
+			})
+		);
+
+		const batch = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+
+		expect(withoutOwner(batch)).toStrictEqual({
+			claims: claimOrder(uploads),
+			truncated: false
+		});
+	});
+
+	it('reports a truncated claim when it sets aside a row of a full window', async () => {
+		const token = await initialise();
+		const uploads = [
+			await deferFreshUpload(token, 'full-window-a', 'a'.repeat(32)),
+			await deferFreshUpload(token, 'full-window-b', 'b'.repeat(32)),
+			await deferFreshUpload(token, 'full-window-c', 'c'.repeat(32)),
+			await deferFreshUpload(token, 'full-window-d', 'd'.repeat(32))
+		];
+		const { first, rest } = splitFirstClaim(uploads);
+		await replaceStoredMetadata(first.uploadId, '{}');
+
+		const claimed = await currentServer().claimVerificationBatch(
+			2,
+			Number.MAX_SAFE_INTEGER
+		);
+
+		expect(withoutOwner(claimed)).toStrictEqual({
+			claims: claimOrder(rest).slice(0, 2),
+			truncated: true
+		});
+	});
+
+	it('sets aside a stored row that cannot be read and claims the others', async () => {
+		const token = await initialise();
+		const uploads = [
+			await deferFreshUpload(token, 'unreadable-a', 'a'.repeat(32)),
+			await deferFreshUpload(token, 'unreadable-b', 'b'.repeat(32)),
+			await deferFreshUpload(token, 'unreadable-c', 'c'.repeat(32))
+		];
+		const { first, rest } = splitFirstClaim(uploads);
+		await replaceStoredMetadata(
+			first.uploadId,
+			String.raw`{"ca":"fixed:r:\t"}`
+		);
+
+		const claimed = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+		const next = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+		const row = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db
+				.select({ id: schema.pendingUploads.id })
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, first.uploadId))
+				.get()
+		);
+
+		expect({
+			claimed: withoutOwner(claimed),
+			next: withoutOwner(next),
+			row,
+			status: await uploadStatus(first.uploadId)
+		}).toStrictEqual({
+			claimed: { claims: claimOrder(rest), truncated: false },
+			next: { claims: [], truncated: false },
+			row: undefined,
+			status: 'absent'
 		});
 	});
 

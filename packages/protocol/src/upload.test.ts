@@ -3,6 +3,7 @@ import {
 	rootTtlMaxSeconds
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
+import { type z } from 'zod';
 
 import {
 	blobDeclarationAttribute,
@@ -18,6 +19,8 @@ import {
 	retentionMarkerAttribute,
 	retentionMarkerAttributeValue,
 	statsResponseSchema,
+	storedUploadPathMetadataSchema,
+	storedUploadPathNegotiationSchema,
 	subscribeIdentityCapabilityToken,
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
@@ -29,6 +32,7 @@ import {
 	uploadGraceFactSchema,
 	uploadNegotiateMaxPaths,
 	uploadNegotiateRequestSchema,
+	uploadPreviewRequestSchema,
 	uploadPreviewResponseSchema,
 	usageResponseSchema
 } from './upload.ts';
@@ -37,6 +41,7 @@ const storePathHash = '0'.repeat(32);
 const storePath = `/nix/store/${storePathHash}-name`;
 const narHash = `sha256:${'1'.repeat(52)}`;
 const pushId = 'push-1';
+const base32 = '1'.repeat(52);
 
 const negotiationPath = {
 	storePathHash,
@@ -45,6 +50,20 @@ const negotiationPath = {
 	narSize: 1234,
 	references: [`${storePathHash}-name`]
 };
+const blobMetadata = {
+	fileHash: `sha256:${'2'.repeat(52)}`,
+	fileSize: 456,
+	compression: 'zstd'
+};
+
+function issueLocations(result: z.ZodSafeParseResult<unknown>) {
+	return result.success
+		? undefined
+		: result.error.issues.map((issue) => ({
+				code: issue.code,
+				path: issue.path
+			}));
+}
 
 describe('referencePublicationManifestSchema', () => {
 	it('preserves a list of targets and intermediates without a total path cap', () => {
@@ -224,6 +243,115 @@ describe('uploadNegotiateRequestSchema', () => {
 		};
 
 		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{ name: 'a flat fixed-output address', ca: `fixed:sha256:${base32}` },
+		{ name: 'a NAR fixed-output address', ca: `fixed:r:sha256:${base32}` },
+		{ name: 'a text address', ca: `text:sha256:${base32}` },
+		{ name: 'a base16 digest', ca: `fixed:sha256:${'ab'.repeat(32)}` },
+		{ name: 'an MD5 digest', ca: `fixed:md5:${'ab'.repeat(16)}` },
+		{
+			name: 'the git method, which Nix reads with git-hashing',
+			ca: `fixed:git:sha1:${'ab'.repeat(20)}`
+		},
+		{
+			name: 'a BLAKE3 digest, which Nix reads with blake3-hashes',
+			ca: `fixed:r:blake3:${base32}`
+		},
+		{ name: 'an empty value, which Nix reads as no address', ca: '' }
+	])('accepts a ca with $name', ({ ca }) => {
+		const value = { pushId, paths: [{ ...negotiationPath, ca }] };
+
+		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{ name: 'no method separator', ca: 'no separator here' },
+		{ name: 'an unknown method', ca: `flat:sha256:${base32}` },
+		{ name: 'a bare hash', ca: `sha256:${base32}` },
+		{ name: 'a digest of the wrong length', ca: 'fixed:sha256:abcd' },
+		{ name: 'a missing hash', ca: 'fixed:r:' },
+		{
+			name: 'the git method after the NAR prefix',
+			ca: `fixed:r:git:sha1:${'ab'.repeat(20)}`
+		}
+	])('refuses a ca with $name', ({ ca }) => {
+		const result = uploadNegotiateRequestSchema.safeParse({
+			pushId,
+			paths: [{ ...negotiationPath, ca }]
+		});
+
+		expect(issueLocations(result)).toStrictEqual([
+			{ code: 'custom', path: ['paths', 0, 'ca'] }
+		]);
+	});
+
+	// Every request that contains upload path metadata shares the `ca` check.
+	it.each([
+		{
+			name: 'a negotiate request',
+			schema: uploadNegotiateRequestSchema,
+			request: (path: object) => ({ pushId, paths: [path] }),
+			path: ['paths', 0, 'ca']
+		},
+		{
+			name: 'a preview request',
+			schema: uploadPreviewRequestSchema,
+			request: (path: object) => ({ paths: [path] }),
+			path: ['paths', 0, 'ca']
+		},
+		{
+			name: 'a publish-batch request',
+			schema: commitSessionRequestSchema,
+			request: (path: object) => ({
+				op: 'publish-batch',
+				pushId,
+				entries: [
+					{ operationId: '1'.repeat(64), cacheGeneration: 1, metadata: path }
+				]
+			}),
+			path: ['entries', 0, 'metadata', 'ca']
+		}
+	])('refuses an invalid ca in $name', ({ schema, request, path }) => {
+		const result = schema.safeParse(
+			request({ ...negotiationPath, ca: 'not-a-content-address' })
+		);
+
+		expect(issueLocations(result)).toStrictEqual([{ code: 'custom', path }]);
+	});
+
+	// A row written before `ca` had to be a content address can contain any
+	// narinfo line there, and the server must still read it.
+	it.each([
+		{
+			name: 'path metadata',
+			schema: storedUploadPathNegotiationSchema,
+			stored: negotiationPath
+		},
+		{
+			name: 'path and blob metadata',
+			schema: storedUploadPathMetadataSchema,
+			stored: { ...negotiationPath, ...blobMetadata }
+		}
+	])(
+		'reads stored $name with a ca that is not an address',
+		({ schema, stored }) => {
+			const row = { ...stored, ca: 'not-a-content-address' };
+
+			expect(schema.parse(row)).toStrictEqual(row);
+		}
+	);
+
+	it('refuses a stored ca that is not a narinfo line', () => {
+		const result = storedUploadPathNegotiationSchema.safeParse({
+			...negotiationPath,
+			ca: 'fixed:r:sha256:\t'
+		});
+
+		expect(issueLocations(result)).toStrictEqual([
+			{ code: 'custom', path: ['ca'] }
+		]);
 	});
 
 	it.each([

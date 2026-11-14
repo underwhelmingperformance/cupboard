@@ -104,7 +104,8 @@ import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	logPromotionAttemptFailed,
 	type PromotedPath,
-	type PromotionRecord
+	type PromotionRecord,
+	type UploadConclusion
 } from './promotion-record.ts';
 import { PublicationStore } from './publication-store.ts';
 import {
@@ -128,6 +129,7 @@ import {
 } from './upload-metadata.ts';
 import { UploadRetrySchedule } from './upload-retry-schedule.ts';
 import {
+	type AbsentPublication,
 	isAwaitingVerdict,
 	type UploadStateService
 } from './upload-state-service.ts';
@@ -1121,6 +1123,22 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<boolean> {
+		if (storedStorePathHash(pending) === undefined) {
+			// Without the stored metadata the pass cannot find the row's path, so it
+			// releases no reservation.
+			logger.warn('pending upload metadata cannot be read', {
+				uploadId: pending.id,
+				reason: 'stored-metadata-invalid'
+			});
+
+			return this.concludeExhaustedUpload(
+				logger,
+				pending,
+				owner,
+				{ verdict: 'absent', absentPublication: 'fail-publication' },
+				signal
+			);
+		}
 		const metadata = parseStoredUploadPathMetadata(
 			pending.id,
 			pending.metadataJson
@@ -1228,6 +1246,27 @@ export class VerificationService {
 		) {
 			return false;
 		}
+
+		return this.concludeExhaustedUpload(
+			logger,
+			pending,
+			owner,
+			resolution,
+			signal
+		);
+	}
+
+	private async concludeExhaustedUpload(
+		logger: Logger,
+		pending: PendingUploadRow,
+		owner: string,
+		resolution: {
+			readonly verdict: UploadConclusion['outcome'] &
+				UploadStatusResponse['status'];
+			readonly absentPublication: AbsentPublication;
+		},
+		signal?: AbortSignal
+	): Promise<boolean> {
 		// A failed delete of a legacy upload's staged object keeps its row for
 		// another attempt. A publication's staged object is deleted after the
 		// clear has recorded the operation's outcome, and orphan staging collection
@@ -3426,7 +3465,7 @@ export class VerificationService {
 				? this.claimableTail(page, head.scannedTo, after)
 				: undefined;
 		const ids = [...head.ids, ...(tail?.window.ids ?? [])].slice(0, page.limit);
-		const pendings = this.context.db
+		const selected = this.context.db
 			.select({
 				...getTableColumns(schema.pendingUploads),
 				readyAt: claimableReadyAt()
@@ -3435,7 +3474,14 @@ export class VerificationService {
 			.where(inArray(schema.pendingUploads.id, jsonValueList(ids)))
 			.orderBy(asc(claimableReadyAt()), asc(schema.pendingUploads.id))
 			.all();
-		const batch = chunkClaims(pendings, limit, maxNarBytes);
+		const pendings = this.setAsideUnreadableRows(selected);
+		const chunk = chunkClaims(pendings, limit, maxNarBytes);
+		// A full window contains `limit + 1` rows. When the set-aside removes a row
+		// from it, `chunkClaims` no longer sees that more rows remain.
+		const batch = {
+			...chunk,
+			truncated: chunk.truncated || selected.length > limit
+		};
 		const owner = crypto.randomUUID();
 		const continuation =
 			tail === undefined ? undefined : tailContinuation(tail, batch, pendings);
@@ -3445,6 +3491,43 @@ export class VerificationService {
 			isScanEnd: tail?.isScanEnd === true,
 			now
 		};
+	}
+
+	// `chunkClaims` throws on a row whose stored metadata does not parse, and it
+	// would throw on every later claim that selects the row. Mark such a row
+	// exhausted so that later claims skip it. `finishExhaustedUpload` then
+	// deletes the row and records the upload as absent.
+	private setAsideUnreadableRows<Row extends PendingUploadRow>(
+		rows: readonly Row[]
+	): Row[] {
+		const readable: Row[] = [];
+
+		for (const row of rows) {
+			if (storedStorePathHash(row) !== undefined) {
+				readable.push(row);
+				continue;
+			}
+
+			this.context.db
+				.update(schema.pendingUploads)
+				.set({
+					settleExhaustion: 'attempt-limit',
+					settleRetryAfter: isoTimestamp(new Date()),
+					lastSettleError: 'stored-metadata-invalid'
+				})
+				.where(
+					and(
+						eq(schema.pendingUploads.id, row.id),
+						isNull(schema.pendingUploads.settleExhaustion)
+					)
+				)
+				.run();
+			rootLogger().warn('pending upload metadata cannot be read', {
+				uploadId: row.id
+			});
+		}
+
+		return readable;
 	}
 
 	// Reads the claim's second window, after the stored position when it is

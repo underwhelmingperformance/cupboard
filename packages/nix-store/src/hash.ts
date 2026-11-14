@@ -17,6 +17,7 @@ import {
 
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const sha256DigestBytes = 32;
+const blake3Prefix = 'blake3:';
 
 export type NixHashAlgorithm = 'md5' | 'sha1' | 'sha256' | 'sha512';
 
@@ -32,7 +33,9 @@ interface NixHashSize {
 
 // The supported hash algorithms and their digest sizes. Nix also supports
 // `blake3` behind the blake3-hashes experimental feature, so the default build
-// cannot read a value that specifies it.
+// cannot read a value that specifies it. Nix computes `NarHash` and `FileHash`
+// with SHA-256, so it writes `blake3` only in a content address; see
+// `isContentAddressHash`.
 function hashAlgorithm(name: string): NixHashSize | undefined {
 	switch (name) {
 		case 'md5': {
@@ -69,12 +72,21 @@ function decodeBase16(digest: string): Uint8Array | undefined {
 	}
 }
 
+// `atob` skips ASCII whitespace, and Nix's base64 decoder rejects it. A digest
+// with a space in place of a digit has the expected encoded length and decodes
+// to the right number of bytes, so the whitespace check has to come first.
+const asciiWhitespacePattern = /[\t\n\f\r ]/u;
+
 // A base64 string of the expected encoded length can still decode to more
 // bytes than the algorithm's digest size.
 function decodeBase64(
 	digest: string,
 	digestBytes: number
 ): Uint8Array | undefined {
+	if (asciiWhitespacePattern.test(digest)) {
+		return undefined;
+	}
+
 	let bytes: Uint8Array;
 
 	try {
@@ -125,6 +137,27 @@ export function decodeNixHash(value: string): NixHash | undefined {
 	return decodeNamedDigest(
 		value.slice(0, separator),
 		value.slice(separator + 1)
+	);
+}
+
+/**
+Whether the value is an `<algorithm>:<digest>` hash in a content address. It
+accepts every hash that `decodeNixHash` decodes. It also accepts `blake3`,
+which Nix reads when the `blake3-hashes` experimental feature is enabled. A
+BLAKE3 digest has 32 bytes, so it uses the same encodings as a SHA-256 digest.
+*/
+export function isContentAddressHash(value: string): boolean {
+	if (decodeNixHash(value) !== undefined) {
+		return true;
+	}
+
+	if (!value.startsWith(blake3Prefix)) {
+		return false;
+	}
+
+	return (
+		decodeDigest(value.slice(blake3Prefix.length), sha256DigestBytes) !==
+		undefined
 	);
 }
 

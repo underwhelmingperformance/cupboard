@@ -1,12 +1,12 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import {
+	storedUploadPathMetadataSchema,
+	storedUploadPathNegotiationSchema,
 	type UploadBlobMetadata,
 	type UploadId,
 	type UploadPathMetadata,
-	uploadPathMetadataSchema,
-	type UploadPathNegotiation,
-	uploadPathNegotiationSchema
+	type UploadPathNegotiation
 } from '@cupboard/protocol/upload';
 
 import {
@@ -63,7 +63,7 @@ export function parseStoredUploadPathMetadata(
 	// A row may store the path metadata alone (a streaming upload) or carry the
 	// blob fields too (a reuse row); the commit path needs only the path
 	// metadata, so project a full record down to it before validating.
-	const full = uploadPathMetadataSchema.safeParse(json);
+	const full = storedUploadPathMetadataSchema.safeParse(json);
 
 	if (full.success) {
 		const {
@@ -87,7 +87,7 @@ export function parseStoredUploadPathMetadata(
 		};
 	}
 
-	const path = uploadPathNegotiationSchema.safeParse(json);
+	const path = storedUploadPathNegotiationSchema.safeParse(json);
 
 	if (path.success) {
 		return path.data;
