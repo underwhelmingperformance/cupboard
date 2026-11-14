@@ -73,6 +73,7 @@ import {
 	installCupboard,
 	normaliseVersion
 } from '../release-install.ts';
+import { assertReleasePlatformSupported } from '../release-platform.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
 const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
@@ -719,6 +720,8 @@ export async function publishPushAcquisitionOutputs(
 interface AcquirePushCupboardDependencies {
 	readonly install: typeof installCupboard;
 	readonly inspectVersion: typeof inspectCupboardVersion;
+	readonly platform?: string;
+	readonly architecture?: string;
 }
 
 const defaultAcquirePushCupboardDependencies: AcquirePushCupboardDependencies =
@@ -743,6 +746,11 @@ export async function acquirePushCupboard(
 	dependencies: AcquirePushCupboardDependencies = defaultAcquirePushCupboardDependencies,
 	signal?: AbortSignal
 ): Promise<PushCupboard> {
+	assertReleasePlatformSupported(
+		dependencies.platform,
+		dependencies.architecture
+	);
+
 	if (inputs.cupboardPath !== '') {
 		const binaryPath = path.resolve(inputs.cupboardPath);
 

@@ -30,6 +30,7 @@ import {
 	CommandFailedError,
 	CupboardReportedError,
 	EnvironmentCredentialVersionError,
+	IntelMacOsUnsupportedError,
 	MissingInputError
 } from './errors.ts';
 
@@ -340,6 +341,26 @@ const releasedRootHelp = rootHelp([
 ]);
 
 describe('cupboardDebugArguments', () => {
+	it('refuses an x86_64 macOS host before running the supplied executable', async () => {
+		const temporary = await runnerTemporary();
+		const captureArgvFile = path.join(temporary, 'executed.json');
+		const binary = await fakeCupboard({
+			results: [],
+			exitCode: 0,
+			captureArgvFile
+		});
+
+		await expect(
+			cupboardDebugArguments(binary, { RUNNER_DEBUG: '1' }, undefined, {
+				platform: 'darwin',
+				architecture: 'x64'
+			})
+		).rejects.toBeInstanceOf(IntelMacOsUnsupportedError);
+		await expect(readFile(captureArgvFile, 'utf8')).rejects.toMatchObject({
+			code: 'ENOENT'
+		});
+	});
+
 	it.each([
 		{
 			supported: true,

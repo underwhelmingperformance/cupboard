@@ -6,6 +6,8 @@ import path from 'node:path';
 import { build } from 'esbuild';
 import { describe, expect, it } from 'vitest';
 
+import { assetNameFor } from '../actions/src/release-platform.ts';
+
 import {
 	binaryCliEntrySource,
 	compileHookHelper,
@@ -140,7 +142,6 @@ describe('releaseAssetNameFor', () => {
 	it.each([
 		['linux', 'x64', 'cupboard-linux-x64.tar.gz'],
 		['linux', 'arm64', 'cupboard-linux-arm64.tar.gz'],
-		['darwin', 'x64', 'cupboard-macos-x64.tar.gz'],
 		['darwin', 'arm64', 'cupboard-macos-arm64.tar.gz']
 	])(
 		'names the %s %s release asset independently of its tag',
@@ -150,6 +151,31 @@ describe('releaseAssetNameFor', () => {
 			);
 		}
 	);
+});
+
+function archiveNameOrNothing(archiveName: () => string): string | undefined {
+	try {
+		return archiveName();
+	} catch {
+		return;
+	}
+}
+
+describe('releaseAssetNameFor and assetNameFor', () => {
+	it.each([
+		['linux', 'x64'],
+		['linux', 'arm64'],
+		['darwin', 'x64'],
+		['darwin', 'arm64'],
+		['win32', 'x64'],
+		['linux', 'riscv64']
+	])('agree on the archive for %s %s', (platform, architecture) => {
+		expect(
+			archiveNameOrNothing(() => assetNameFor(platform, architecture))
+		).toBe(
+			archiveNameOrNothing(() => releaseAssetNameFor(platform, architecture))
+		);
+	});
 });
 
 describe('generateSeaPreparationBlob', () => {
