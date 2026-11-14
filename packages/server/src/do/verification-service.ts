@@ -1810,6 +1810,35 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<FinaliseCommittedResult> {
+		return this.watchingDemotion(pending, metadata, (isDemoted) =>
+			this.finaliseIfCommittedWhileWatched(
+				logger,
+				pending,
+				metadata,
+				generation,
+				owner,
+				isDemoted,
+				signal
+			)
+		);
+	}
+
+	// When the committed check finds the narinfo object and the NAR present, the
+	// NAR can still go missing before the gate. Demotion then deletes the narinfo
+	// object without changing the path's row, which the gate compares. The path
+	// is therefore watched from the check until the gate, and a demoted path is
+	// treated as not committed. The ordinary saga restores the NAR only when the
+	// upload still has staged bytes; a reuse upload, or one whose staged bytes
+	// are gone, ends as `absent`.
+	private async finaliseIfCommittedWhileWatched(
+		logger: Logger,
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration,
+		owner: string,
+		isDemoted: () => boolean,
+		signal?: AbortSignal
+	): Promise<FinaliseCommittedResult> {
 		const isCommitted = await this.commitPipeline.isGenerationCommitted(
 			this.cache(pending.cacheId),
 			metadata,
@@ -1831,16 +1860,18 @@ export class VerificationService {
 			generation
 		);
 		return this.whileDeletingStaging(pending, async () => {
-			const cleared = await this.context.criticalSection(() =>
-				this.finaliseIfAlreadyCommittedLocked(
-					logger,
-					pending,
-					metadata,
-					generation,
-					verdict,
-					owner,
-					signal
-				)
+			const cleared = await this.context.criticalSection(async () =>
+				isDemoted()
+					? 'continue'
+					: this.finaliseIfAlreadyCommittedLocked(
+							logger,
+							pending,
+							metadata,
+							generation,
+							verdict,
+							owner,
+							signal
+						)
 			);
 			if (cleared === 'continue' || cleared === 'ignored') {
 				return cleared;
