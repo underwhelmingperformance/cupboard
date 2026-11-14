@@ -52,11 +52,44 @@ const unpaddedSignature: NarinfoCase = {
 	fixture: { extraLines: [`Sig: ${signature.replace(/=+$/u, '')}`] }
 };
 
+// Nix reads these content addresses only when it runs with the `git-hashing`
+// and `blake3-hashes` experimental features. It prints each digest in base32,
+// so a document that already uses base32 keeps its content address unchanged.
+const experimentalContentAddressCases: readonly NarinfoCase[] = [
+	{
+		name: 'a git-method content address',
+		ca: 'fixed:git:sha1:mfmspaxbmfmspaxbmfmspaxbmfmspaxb'
+	},
+	{
+		name: 'a git-method content address with a SHA-256 digest',
+		ca: 'fixed:git:sha256:1axbmfmspaxbmfmspaxbmfmspaxbmfmspaxbmfmspaxbmfmspaxb'
+	},
+	{
+		name: 'a flat BLAKE3 content address',
+		ca: 'fixed:blake3:1axbmfmspaxbmfmspaxbmfmspaxbmfmspaxbmfmspaxbmfmspaxb'
+	},
+	{
+		name: 'a NAR BLAKE3 content address',
+		ca: 'fixed:r:blake3:1axbmfmspaxbmfmspaxbmfmspaxbmfmspaxbmfmspaxbmfmspaxb'
+	},
+	{
+		name: 'a BLAKE3 text content address',
+		ca: 'text:blake3:1axbmfmspaxbmfmspaxbmfmspaxbmfmspaxbmfmspaxbmfmspaxb'
+	}
+].map(({ name, ca }) => ({
+	name,
+	fixture: {
+		fields: { CA: ca },
+		experimentalFeatures: ['git-hashing', 'blake3-hashes']
+	}
+}));
+
 /**
 Documents accepted by Nix, allowing exact field comparison between clients.
 */
 const agreedCases: readonly NarinfoCase[] = [
 	{ name: 'a well-formed narinfo', fixture: {} },
+	...experimentalContentAddressCases,
 	{
 		// The literal a cache serves for a path whose deriver it does not know.
 		name: 'a deriver named as unknown',
@@ -178,6 +211,7 @@ refusal does not satisfy the comparison with the oracle by itself.
 */
 const parsedCases: readonly NarinfoCase[] = [
 	{ name: 'a well-formed narinfo', fixture: {} },
+	...experimentalContentAddressCases,
 	{
 		name: 'a content address and a second signature',
 		fixture: {
@@ -225,6 +259,14 @@ const refusedCases: readonly NarinfoCase[] = [
 	{
 		name: 'a malformed content address',
 		fixture: { fields: { CA: 'not a valid content address' } }
+	},
+	{
+		// The digest has 44 characters, as a 32-byte base64 digest does, but a
+		// space replaces one of its digits.
+		name: 'a content address with a space in its base64 digest',
+		fixture: {
+			fields: { CA: `fixed:sha256:${'A'.repeat(20)} ${'A'.repeat(23)}` }
+		}
 	},
 	{
 		name: 'a content address with an unsupported hash algorithm',

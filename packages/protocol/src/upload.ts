@@ -1,3 +1,4 @@
+import { isContentAddress } from '@cupboard/nix-store/content-address';
 import {
 	cacheGenerationSchema,
 	cacheScopeSchema,
@@ -29,6 +30,12 @@ const isStorePathHashForPath = (value: {
 const storePathHashMismatchMessage =
 	'storePathHash does not match the hash of storePath';
 
+// Keep the empty value: the narinfo reader and renderer read an empty `CA` as
+// no content address.
+const uploadContentAddressSchema = narInfoLineSchema.refine(
+	(value) => value === '' || isContentAddress(value)
+);
+
 const uploadPathNegotiationShape = {
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema,
@@ -39,7 +46,7 @@ const uploadPathNegotiationShape = {
 	// the cache's `StoreDir` supplies the directory. `CA` contains a
 	// content-address specification, not a path.
 	deriver: storePathBasenameSchema.optional(),
-	ca: narInfoLineSchema.optional()
+	ca: uploadContentAddressSchema.optional()
 };
 
 const uploadBlobMetadataShape = {
@@ -65,6 +72,26 @@ export const uploadPathMetadataSchema = z
 	})
 	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
 export type UploadPathMetadata = z.output<typeof uploadPathMetadataSchema>;
+
+// The server parses the metadata of an upload row with these schemas. A row
+// can have been written before `ca` had to be a content address, so they check
+// `ca` as a narinfo line only. A stricter check would make every later read of
+// such a row fail.
+const storedUploadPathNegotiationShape = {
+	...uploadPathNegotiationShape,
+	ca: narInfoLineSchema.optional()
+};
+
+export const storedUploadPathNegotiationSchema = z
+	.strictObject(storedUploadPathNegotiationShape)
+	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
+
+export const storedUploadPathMetadataSchema = z
+	.strictObject({
+		...storedUploadPathNegotiationShape,
+		...uploadBlobMetadataShape
+	})
+	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
 
 const referencePublicationEntrySchema = z.strictObject({
 	storePath: storePathSchema,

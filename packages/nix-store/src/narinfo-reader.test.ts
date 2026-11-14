@@ -257,6 +257,14 @@ describe('offerFromNarInfo', () => {
 			value: `sha256:2${toNixBase32(narDigest).slice(1)}`
 		},
 		{
+			name: 'a base64 digest with a space in place of a digit',
+			value: `sha256:${'A'.repeat(20)} ${'A'.repeat(23)}`
+		},
+		{
+			name: 'an integrity digest with a space in place of a digit',
+			value: `sha256-${'A'.repeat(20)} ${'A'.repeat(23)}`
+		},
+		{
 			name: 'an integrity digest decoding to another length',
 			value: `sha256-${bytesToBase64(new Uint8Array(31))}`
 		},
@@ -461,6 +469,14 @@ describe('offerFromNarInfo', () => {
 		{
 			name: 'another algorithm',
 			value: `fixed:md5:${bytesToHex(narDigest.slice(0, 16))}`
+		},
+		{
+			name: 'a method behind an experimental feature',
+			value: `fixed:git:sha256:${toNixBase32(narDigest)}`
+		},
+		{
+			name: 'an algorithm behind an experimental feature',
+			value: `fixed:r:blake3:${toNixBase32(narDigest)}`
 		}
 	])('accepts a content address for $name', ({ value }) => {
 		expect(() => read({ fields: { CA: value } })).not.toThrow();
@@ -472,10 +488,6 @@ describe('offerFromNarInfo', () => {
 		{
 			name: 'an unsupported method',
 			value: `flat:sha256:${toNixBase32(narDigest)}`
-		},
-		{
-			name: 'a method behind an experimental feature',
-			value: `fixed:git:sha256:${toNixBase32(narDigest)}`
 		},
 		{ name: 'no hash at all', value: 'fixed:r:' },
 		{

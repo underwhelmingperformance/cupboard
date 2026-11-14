@@ -29,6 +29,26 @@ describe('isContentAddress', () => {
 		{
 			name: 'accepts an MD5 digest',
 			value: `fixed:md5:${bytesToHex(digest.slice(0, 16))}`
+		},
+		{
+			name: 'accepts the git method with a SHA-1 digest',
+			value: `fixed:git:sha1:${bytesToHex(digest.slice(0, 20))}`
+		},
+		{
+			name: 'accepts the git method with a SHA-256 digest',
+			value: `fixed:git:sha256:${base32}`
+		},
+		{
+			name: 'accepts the BLAKE3 algorithm in a flat address',
+			value: `fixed:blake3:${bytesToHex(digest)}`
+		},
+		{
+			name: 'accepts the BLAKE3 algorithm in a NAR address',
+			value: `fixed:r:blake3:${base32}`
+		},
+		{
+			name: 'accepts the BLAKE3 algorithm in a text address',
+			value: `text:blake3:${bytesToBase64(digest)}`
 		}
 	])('$name', ({ value }) => {
 		expect(isContentAddress(value)).toBe(true);
@@ -45,9 +65,38 @@ describe('isContentAddress', () => {
 			value: `sha256:${base32}`
 		},
 		{
-			name: 'rejects the git method without git-hashing',
-			value: `fixed:git:sha256:${base32}`
+			name: 'rejects the git method after the NAR prefix',
+			value: `fixed:r:git:sha1:${bytesToHex(digest.slice(0, 20))}`
 		},
+		{
+			name: 'rejects the NAR prefix after the git method',
+			value: `fixed:git:r:sha1:${bytesToHex(digest.slice(0, 20))}`
+		},
+		{
+			name: 'rejects the git method in a text address',
+			value: `text:git:sha1:${bytesToHex(digest.slice(0, 20))}`
+		},
+		{ name: 'rejects the git method without a hash', value: 'fixed:git:' },
+		{
+			name: 'rejects a BLAKE3 digest with the wrong length',
+			value: `fixed:blake3:${bytesToHex(digest.slice(0, 20))}`
+		},
+		...[
+			{ name: 'a space', character: ' ' },
+			{ name: 'a tab', character: '\t' },
+			{ name: 'a line feed', character: '\n' },
+			{ name: 'a form feed', character: '\f' },
+			{ name: 'a carriage return', character: '\r' }
+		].flatMap(({ name, character }) => [
+			{
+				name: `rejects a base64 SHA-256 digest with ${name} in place of a digit`,
+				value: `fixed:sha256:${'A'.repeat(20)}${character}${'A'.repeat(23)}`
+			},
+			{
+				name: `rejects a base64 BLAKE3 digest with ${name} in place of a digit`,
+				value: `fixed:blake3:${'A'.repeat(20)}${character}${'A'.repeat(23)}`
+			}
+		]),
 		{ name: 'rejects a missing hash', value: 'fixed:' },
 		{
 			name: 'rejects a missing hash algorithm',

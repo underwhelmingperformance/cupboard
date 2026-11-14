@@ -34,11 +34,12 @@ silently change field semantics.
 */
 export function pathInfoArguments(
 	directory: string,
-	storePath: StorePathString
+	storePath: StorePathString,
+	experimentalFeatures: readonly string[] = []
 ): readonly string[] {
 	return [
 		'--extra-experimental-features',
-		'nix-command',
+		['nix-command', ...experimentalFeatures].join(' '),
 		'path-info',
 		'--store',
 		`file://${directory}`,
@@ -109,6 +110,10 @@ export interface NarinfoFixture {
 	Text written before the first line.
 	*/
 	readonly prefix?: string;
+	/**
+	Experimental features that Nix runs with while it reads the document.
+	*/
+	readonly experimentalFeatures?: readonly string[];
 }
 
 const wellFormedValues = new Map(wellFormedFields);
@@ -404,7 +409,11 @@ export async function readNarinfo(
 			}
 
 			const shown = await oracle.run(
-				pathInfoArguments(directory, fixtureStorePath),
+				pathInfoArguments(
+					directory,
+					fixtureStorePath,
+					fixture.experimentalFeatures
+				),
 				{ env: environment }
 			);
 			const entry =
