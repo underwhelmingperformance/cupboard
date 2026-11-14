@@ -1,8 +1,16 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	stat,
+	writeFile
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { platform } from 'node:process';
 
+import { ActivityLogReadError, ActivityLogTooLargeError } from '@cupboard/nix';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -107,6 +115,14 @@ function controlledChild() {
 			exited.reject(error);
 		}
 	};
+}
+
+function callRecord(call: number): string {
+	return JSON.stringify({
+		action: 'msg',
+		level: 0,
+		msg: `call ${String(call)}`
+	});
 }
 
 function recordingRunChild(exit: ChildExit) {
@@ -505,7 +521,7 @@ describe('superviseAttemptedBuild', () => {
 			nextAttemptId: attemptIds(),
 			runChild: async (options) => {
 				calls += 1;
-				await writeFile(options.command[2] ?? '', `{"call":${String(calls)}}`);
+				await writeFile(options.command[2] ?? '', callRecord(calls));
 
 				return { status: calls < 2 ? 1 : 0, signal: undefined };
 			},
@@ -523,13 +539,13 @@ describe('superviseAttemptedBuild', () => {
 					{
 						attempt: 1,
 						attemptId: 'attempt-1',
-						log: '{"call":1}',
+						log: callRecord(1),
 						exit: { status: 1, signal: undefined }
 					},
 					{
 						attempt: 2,
 						attemptId: 'attempt-2',
-						log: '{"call":2}',
+						log: callRecord(2),
 						exit: { status: 0, signal: undefined }
 					}
 				]
@@ -743,6 +759,110 @@ describe('superviseAttemptedBuild', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it('keeps only the records that the readers use from a log of many other records', async () => {
+		const directory = await runtimeDirectory();
+		const progress = JSON.stringify({
+			action: 'result',
+			fields: [0, 0, 0, 0],
+			id: 1,
+			type: 105
+		});
+		const build = JSON.stringify({
+			action: 'start',
+			type: 105,
+			fields: ['/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv', '', 1, 1]
+		});
+		const failure = JSON.stringify({
+			action: 'msg',
+			level: 0,
+			msg: 'error: builder failed'
+		});
+
+		const result = await superviseAttemptedBuild({
+			command: (logFile) => ['sh', '-c', logFile],
+			attempts: 1,
+			environment: { PATH: '/usr/bin:/bin' },
+			runtimeDirectory: directory,
+			nextAttemptId: attemptIds(),
+			maxLogBytes: 1024,
+			runChild: async (options) => {
+				await writeFile(
+					options.command[2] ?? '',
+					[
+						build,
+						...Array.from({ length: 5000 }, () => progress),
+						failure
+					].join('\n')
+				);
+
+				return { status: 1, signal: undefined };
+			}
+		});
+
+		expect(result.attempts.map((attempt) => attempt.log)).toStrictEqual([
+			`${build}\n${failure}`
+		]);
+	});
+
+	it('refuses a log whose records exceed the limit', async () => {
+		const directory = await runtimeDirectory();
+		const failure = JSON.stringify({
+			action: 'msg',
+			level: 0,
+			msg: 'error: builder failed'
+		});
+
+		const run = superviseAttemptedBuild({
+			command: (file) => ['sh', '-c', file],
+			attempts: 3,
+			environment: { PATH: '/usr/bin:/bin' },
+			runtimeDirectory: directory,
+			nextAttemptId: attemptIds(),
+			maxLogBytes: failure.length * 2,
+			runChild: async (options) => {
+				await writeFile(
+					options.command[2] ?? '',
+					[failure, failure, failure].join('\n')
+				);
+
+				return { status: 1, signal: undefined };
+			},
+			startDelay: immediateDelay
+		});
+
+		await expect(run).rejects.toBeInstanceOf(ActivityLogTooLargeError);
+		await expect(run).rejects.toMatchObject({
+			logFile: path.join(directory, 'nix-log-attempt-1.jsonl'),
+			maxBytes: failure.length * 2
+		});
+		await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
+	});
+
+	it('reports a log that exists but cannot be read', async () => {
+		const directory = await runtimeDirectory();
+
+		const run = superviseAttemptedBuild({
+			command: (file) => ['sh', '-c', file],
+			attempts: 3,
+			environment: { PATH: '/usr/bin:/bin' },
+			runtimeDirectory: directory,
+			nextAttemptId: attemptIds(),
+			runChild: async (options) => {
+				await mkdir(options.command[2] ?? '');
+
+				return { status: 1, signal: undefined };
+			},
+			startDelay: immediateDelay
+		});
+
+		await expect(run).rejects.toBeInstanceOf(ActivityLogReadError);
+		await expect(run).rejects.toMatchObject({
+			logFile: path.join(directory, 'nix-log-attempt-1.jsonl'),
+			cause: { code: 'EISDIR' }
+		});
+		await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
 	});
 
 	it('removes the runtime directory once the attempts are over', async () => {

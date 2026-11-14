@@ -6,6 +6,7 @@ import {
 	buildFailureStatuses,
 	copySources,
 	firstBuildFailure,
+	isReadActivityLogLine,
 	unreachableBuilders
 } from './activity-log.ts';
 
@@ -278,6 +279,67 @@ describe('unreachableBuilders', () => {
 		}
 	])('reads $name', ({ lines, expected }) => {
 		expect(unreachableBuilders(lines.join('\n'))).toStrictEqual(expected);
+	});
+});
+
+describe('isReadActivityLogLine', () => {
+	it.each([
+		{
+			name: 'the start of a build',
+			line: JSON.stringify({
+				action: 'start',
+				type: 105,
+				fields: [appDerivation, '', 1, 1]
+			}),
+			expected: true
+		},
+		{
+			name: 'the start of a copy',
+			line: copyLine(appPath, 'https://cache.nixos.org'),
+			expected: true
+		},
+		{
+			name: 'an error message',
+			line: daemonError('timed out after 1 seconds'),
+			expected: true
+		},
+		{
+			name: 'a progress result of a build',
+			line: JSON.stringify({
+				action: 'result',
+				fields: [0, 0, 0, 0],
+				id: 1,
+				type: 105
+			}),
+			expected: false
+		},
+		{
+			name: 'the start of a download',
+			line: JSON.stringify({
+				action: 'start',
+				type: 101,
+				fields: ['https://cache.nixos.org/a.narinfo']
+			}),
+			expected: false
+		},
+		{
+			name: 'the end of an activity',
+			line: JSON.stringify({ action: 'stop', id: 1 }),
+			expected: false
+		},
+		{
+			name: 'a message below the error level',
+			line: JSON.stringify({ action: 'msg', level: 3, msg: 'building' }),
+			expected: false
+		},
+		{
+			name: 'a line that is not JSON',
+			line: '{"action":"msg"',
+			expected: false
+		},
+		{ name: 'an empty line', line: '', expected: false }
+	])('returns $expected for $name', ({ line, expected }) => {
+		expect(isReadActivityLogLine(line)).toBe(expected);
 	});
 });
 
