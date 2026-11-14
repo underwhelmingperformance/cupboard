@@ -61,6 +61,7 @@ import {
 	PublicationExpiryPendingError,
 	PublicationStateChangedError,
 	StagedObjectDigestMismatchError,
+	StoredUploadMetadataInvalidError,
 	SubrequestSliceExceededError,
 	TenantWritesStoppedError,
 	UploadedObjectNotFoundError
@@ -75,6 +76,7 @@ import {
 	type R2ObjectKey,
 	type RequestOrigin
 } from '../http/http.ts';
+import { errorFacts } from '../observability/refusal-log.ts';
 import {
 	type EligibleRetryClock,
 	type RetryFailureCategory,
@@ -681,6 +683,23 @@ function writtenAttempt(
 		...(code !== undefined && { r2ErrorCode: code }),
 		reservation: { incarnation, owner }
 	};
+}
+
+// Returns `undefined` when the stored metadata cannot be read. A failure that
+// the caller is already reporting can be that same unreadable metadata.
+function storedStorePathHash(
+	pending: PendingUploadRow
+): StorePathHash | undefined {
+	try {
+		return parseStoredUploadPathMetadata(pending.id, pending.metadataJson)
+			.storePathHash;
+	} catch (error) {
+		if (error instanceof StoredUploadMetadataInvalidError) {
+			return undefined;
+		}
+
+		throw error;
+	}
 }
 
 function promotedPath(
@@ -3695,8 +3714,10 @@ export class VerificationService {
 			return;
 		}
 
+		const storePathHash = storedStorePathHash(pending);
 		const properties = {
 			uploadId: pending.id,
+			...(storePathHash !== undefined && { storePathHash }),
 			kind:
 				reason === 'verification-failed' || pending.recordedVerdictJson !== null
 					? 'fresh'
@@ -3704,7 +3725,8 @@ export class VerificationService {
 						? 'reuse'
 						: 'committed-recovery',
 			reason,
-			failures: failure.failures
+			failures: failure.failures,
+			...errorFacts(error)
 		};
 		logger.warn('pending upload verification failed', properties);
 	}

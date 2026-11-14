@@ -64,6 +64,14 @@ import {
 	d1QueueOverloadMessage
 } from '../db/transient.test-support.ts';
 import {
+	CommitSessionGrantsUnavailableError,
+	ObjectIncarnationReservationContendedError,
+	PublicationExpiryPendingError,
+	PublicationPushExpiredError,
+	PublicationRecoveryExpiredError,
+	PublicationResendRequiredError,
+	PublicationStagingDeletePendingError,
+	PublicationStateChangedError,
 	SharedFactsUnavailableError,
 	SubrequestTimeoutError
 } from '../errors.ts';
@@ -181,6 +189,9 @@ it.each(
 );
 
 const stringMatcher: unknown = expect.any(String);
+const grantsFailureMatcher: unknown = expect.any(
+	CommitSessionGrantsUnavailableError
+);
 const publicationSession = `${publicationCapability},${publicationRefusalReasonsCapability}`;
 
 const planCostSchema = z.object({
@@ -1282,21 +1293,6 @@ function refusalFacts(frame: CommitSessionFrame) {
 
 class GrantStorageFault extends Error {}
 
-function isGrantsFailureRecord(
-	record: unknown
-): record is { readonly level: string; readonly op: string } {
-	return (
-		typeof record === 'object' &&
-		record !== null &&
-		'errorName' in record &&
-		record.errorName === 'CommitSessionGrantsUnavailableError' &&
-		'level' in record &&
-		typeof record.level === 'string' &&
-		'op' in record &&
-		typeof record.op === 'string'
-	);
-}
-
 // The v0.0.47 to v0.0.49 releases accept these capabilities.
 const releasedPublication = `${commitCreditAccept},${publicationCapability}`;
 const creditedPublication = `${releasedPublication},${publicationRefusalReasonsCapability}`;
@@ -1743,6 +1739,7 @@ describe('publication commit credit', () => {
 				defaultCache(),
 				capabilities
 			);
+			const capture = startCapture();
 			const answers = [];
 			try {
 				session.send({ op: 'subscribe-publication', pushId, entries: [entry] });
@@ -1752,24 +1749,29 @@ describe('publication commit credit', () => {
 				}
 			} finally {
 				await closeSessionAndWait(session.socket);
+				capture.stop();
 			}
 			// A released session never receives `resend`. The server repairs the
-			// operation, which needs the bytes again.
-			expect(answers).toStrictEqual(
-				isReleased
-					? [
-							{ ev: 'publication-accepted', uploadId: entry.operationId },
-							{ ev: 'upload-required', uploadId: entry.operationId }
-						]
-					: [
-							{
-								ev: 'publication-refused',
-								uploadId: entry.operationId,
-								reason: 'resend',
-								status: StatusCodes.SERVICE_UNAVAILABLE,
-								hasMessage: true
-							}
-						]
+			// operation, which needs the bytes again. The resend request is a normal
+			// step of a reconnect, so the server logs no warning.
+			expect({ answers, logged: atWarningOrAbove(capture.logs) }).toStrictEqual(
+				{
+					answers: isReleased
+						? [
+								{ ev: 'publication-accepted', uploadId: entry.operationId },
+								{ ev: 'upload-required', uploadId: entry.operationId }
+							]
+						: [
+								{
+									ev: 'publication-refused',
+									uploadId: entry.operationId,
+									reason: 'resend',
+									status: StatusCodes.SERVICE_UNAVAILABLE,
+									hasMessage: true
+								}
+							],
+					logged: []
+				}
 			);
 		}
 	);
@@ -1856,8 +1858,7 @@ describe('publication commit credit', () => {
 			const read = vi
 				.spyOn(CommitReuseGrantsService.prototype, 'read')
 				.mockRejectedValueOnce(new GrantStorageFault());
-			const logged = vi.spyOn(console, 'error');
-			const records: unknown[] = [];
+			const capture = startCapture();
 			const refused: unknown[] = [];
 			const resent: unknown[] = [];
 			let capabilities: string | null;
@@ -1884,14 +1885,15 @@ describe('publication commit credit', () => {
 			} finally {
 				await closeSessionAndWait(session.socket);
 				read.mockRestore();
-				records.push(...logged.mock.calls.map(([record]: unknown[]) => record));
-				logged.mockRestore();
+				capture.stop();
 			}
-			const failures = records
-				.filter((record) => isGrantsFailureRecord(record))
-				.map((record) => ({ level: record.level, op: record.op }));
 			const spent = op === 'publish-batch' ? entries.length : 0;
-			expect({ refused, capabilities, resent, failures }).toStrictEqual({
+			expect({
+				refused,
+				capabilities,
+				resent,
+				logged: atWarningOrAbove(capture.logs)
+			}).toStrictEqual({
 				refused: entries.map((entry) => ({
 					ev: 'publication-refused',
 					uploadId: entry.operationId,
@@ -1917,7 +1919,19 @@ describe('publication commit credit', () => {
 								status: StatusCodes.NOT_FOUND,
 								hasMessage: true
 							})),
-				failures: [{ level: 'error', op }]
+				// One record for the whole message, not one for each entry.
+				logged: [
+					{
+						level: 'error',
+						category: ['cupboard'],
+						message: 'commit session grants could not be read',
+						properties: {
+							sessionId: stringMatcher,
+							op,
+							error: grantsFailureMatcher
+						}
+					}
+				]
 			});
 		}
 	);
@@ -2308,31 +2322,81 @@ describe('publication subscriptions', () => {
 
 	it.each(
 		(['publish-batch', 'subscribe-publication'] as const).flatMap((op) =>
-			[
-				{
-					name: 'the D1 queue overload',
-					error: new Error(d1QueueOverloadMessage),
-					isLogged: true
-				},
-				{
-					name: 'the D1 account throttle',
-					error: new Error(d1AccountThrottleMessage),
-					isLogged: true
-				},
-				{
-					// A typed error keeps its own refusal, and the overload log record
-					// is not written.
-					name: 'a typed error that has the D1 account throttle as its cause',
-					error: new SharedFactsUnavailableError(
-						new Error(d1AccountThrottleMessage)
-					),
-					isLogged: false
-				}
-			].map((rejection) => ({ op, ...rejection }))
+			(
+				[
+					{
+						name: 'the D1 queue overload',
+						error: new Error(d1QueueOverloadMessage),
+						reason: 'temporary-failure',
+						logging: 'overload'
+					},
+					{
+						name: 'the D1 account throttle',
+						error: new Error(d1AccountThrottleMessage),
+						reason: 'temporary-failure',
+						logging: 'overload'
+					},
+					{
+						// A typed error keeps its own refusal, and the overload log record
+						// is not written. The refusal has its own warning.
+						name: 'a typed error that has the D1 account throttle as its cause',
+						error: new SharedFactsUnavailableError(
+							new Error(d1AccountThrottleMessage)
+						),
+						reason: 'temporary-failure',
+						logging: 'fault'
+					},
+					// These refusals are normal steps of the protocol, so none is logged.
+					{
+						name: 'a resend request',
+						error: new PublicationResendRequiredError(),
+						reason: 'resend',
+						logging: 'none'
+					},
+					{
+						name: 'an expired push lease',
+						error: new PublicationPushExpiredError(),
+						reason: 'push-expired',
+						logging: 'none'
+					},
+					{
+						name: 'an expired recovery deadline',
+						error: new PublicationRecoveryExpiredError(),
+						reason: 'recovery-expired',
+						logging: 'none'
+					},
+					{
+						name: 'a changed publication state',
+						error: new PublicationStateChangedError(),
+						reason: 'temporary-failure',
+						logging: 'none'
+					},
+					{
+						name: 'a contended object incarnation',
+						error: new ObjectIncarnationReservationContendedError(),
+						reason: 'temporary-failure',
+						logging: 'none'
+					},
+					{
+						name: 'a pending delete of staged bytes',
+						error: new PublicationStagingDeletePendingError(),
+						reason: 'temporary-failure',
+						logging: 'none'
+					},
+					// `expireOperation` logs a failed expiry at error level before it
+					// throws, so the refusal adds no second record.
+					{
+						name: 'a pending expiry',
+						error: new PublicationExpiryPendingError(),
+						reason: 'temporary-failure',
+						logging: 'none'
+					}
+				] as const
+			).map((rejection) => ({ op, ...rejection }))
 		)
 	)(
-		'refuses a $op entry as a retryable failure when a D1-backed read is rejected with $name',
-		async ({ op, error, isLogged }) => {
+		'refuses a $op entry with $reason when a D1-backed read is rejected with $name',
+		async ({ op, error, reason, logging }) => {
 			vi.setSystemTime(vi.getRealSystemTime());
 			const token = await initialise();
 			const nar = await verifiableNar(`publication-overload-${op}`);
@@ -2393,26 +2457,42 @@ describe('publication subscriptions', () => {
 					frame: {
 						ev: 'publication-refused',
 						uploadId: entry.operationId,
-						reason: 'temporary-failure',
+						reason,
 						status: StatusCodes.SERVICE_UNAVAILABLE,
 						hasMessage: true
 					},
 					reads: 1,
-					logged: isLogged
-						? [
-								{
-									level: 'warning',
-									category: ['cupboard'],
-									message: 'request refused: database overloaded',
-									properties: {
-										operationId: entry.operationId,
-										operation: op === 'publish-batch' ? 'publish' : 'subscribe',
-										sessionId: stringMatcher,
-										error
-									}
+					logged: {
+						overload: [
+							{
+								level: 'warning',
+								category: ['cupboard'],
+								message: 'request refused: database overloaded',
+								properties: {
+									operationId: entry.operationId,
+									operation: op === 'publish-batch' ? 'publish' : 'subscribe',
+									sessionId: stringMatcher,
+									error
 								}
-							]
-						: []
+							}
+						],
+						fault: [
+							{
+								level: 'warning',
+								category: ['cupboard'],
+								message: 'publication refused',
+								properties: {
+									operationId: entry.operationId,
+									operation: op === 'publish-batch' ? 'publish' : 'subscribe',
+									sessionId: stringMatcher,
+									storePathHash: entry.metadata.storePathHash,
+									errorName: 'SharedFactsUnavailableError',
+									errorStatus: StatusCodes.SERVICE_UNAVAILABLE
+								}
+							}
+						],
+						none: []
+					}[logging]
 				});
 			} finally {
 				capture.stop();
@@ -3637,7 +3717,7 @@ describe('publication subscriptions to terminal operations', () => {
 		});
 	});
 
-	it('refuses an expired operation with recovery-expired', async () => {
+	it('refuses an expired operation with recovery-expired and logs no warning', async () => {
 		const token = await initialise();
 		const [entry] = await plannedEntries(token, '/uploads/plan', [
 			distinctPath('1')
@@ -3657,13 +3737,23 @@ describe('publication subscriptions to terminal operations', () => {
 				.run();
 			return Promise.resolve();
 		});
-		expect(await subscribe(token, undefined, testPushId, entry)).toStrictEqual({
-			ev: 'publication-refused',
-			uploadId: entry.operationId,
-			reason: 'recovery-expired',
-			status: StatusCodes.SERVICE_UNAVAILABLE,
-			hasMessage: true
-		});
+		const capture = startCapture();
+		try {
+			const frame = await subscribe(token, undefined, testPushId, entry);
+
+			expect({ frame, logged: atWarningOrAbove(capture.logs) }).toStrictEqual({
+				frame: {
+					ev: 'publication-refused',
+					uploadId: entry.operationId,
+					reason: 'recovery-expired',
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					hasMessage: true
+				},
+				logged: []
+			});
+		} finally {
+			capture.stop();
+		}
 	});
 
 	it.each([

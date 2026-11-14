@@ -441,9 +441,40 @@ The tenant Worker records failed upload verification and publication attempts in
 `pending_upload.settle_failures`. `last_settle_error` contains a controlled
 failure category. Retries start after 30 seconds and double up to ten minutes.
 The tenant Worker's `pending upload verification failed` log includes the upload
-ID, category, phase and failure count, without provider messages or URLs. A
-stored decode verdict remains available while publication retries, so the next
-attempt does not decode the NAR again.
+ID, category, phase, failure count and error class, code and status, without
+provider messages or URLs. It also includes the store path hash when the server
+can read the upload's stored metadata. A stored decode verdict remains available
+while publication retries, so the next attempt does not decode the NAR again.
+
+The tenant Worker logs a warning when the commit socket refuses an entry because
+of a server fault. A server fault is an error with status 500 or above that is
+not an expected refusal. A refused commit or commit-batch entry gets a
+`commit refused` warning. A publication entry that fails before the server
+accepts it, or while the server replays it, gets a `publication refused`
+warning. A publication entry whose commit fails after the server accepted it
+gets a `commit refused` warning, like any other commit.
+
+The Worker logs no warning for an expected refusal, which is a normal step of
+the protocol even when its status is 5xx. These are a request to resend an
+entry, an expired push lease or recovery deadline, a publication whose state or
+path changed, a publication whose staged bytes are still being deleted, a
+contended object incarnation, and a full storage quota (507). It also logs no
+warning for a refusal with a status below 500, such as a 409
+`generation-conflict`. Three failures are logged once by another record, so they
+get no warning for each entry. A database overload is logged as
+`request refused: database overloaded`. A failure to read the session's grants
+is logged once for the message as `commit session grants could not be read`. A
+failed publication expiry is logged as `publication expiry failed`.
+
+`commit refused` has the fields `uploadId`, `sessionId`, `errorName` and
+`errorStatus`. A commit that the session sends itself, as a `commit` or
+`commit-batch` message, also has `op` and the session's cache. A commit that
+follows the acceptance of a publication entry has neither. The record has
+`storePathHash` when the server could read the upload's stored metadata or
+received the hash in the message. `publication refused` has `operationId`,
+`operation` (`publish` or `subscribe`), `storePathHash`, `sessionId`,
+`errorName` and `errorStatus`. Both records have `errorCode` when the error has
+a code. They do not include the error message.
 
 The queue consumer logs its own `pending upload verification failed` warning
 when it abandons an upload. The warning includes the stage that was running

@@ -484,6 +484,7 @@ describe('batched verify fault isolation', () => {
 				properties: {
 					method: 'record-verifications',
 					uploadId: upload.uploadId,
+					storePathHash: upload.storePathHash,
 					kind: 'fresh',
 					reason: 'verification-failed',
 					failures: 1
@@ -627,6 +628,9 @@ describe('batched verify fault isolation', () => {
 			reused
 		);
 		await markUploadPendingVerification(upload.uploadId);
+		const probeFailure = new Error(
+			'persistent canonical probe failure https://r2.example/secret?signature=abc'
+		);
 		const capture = startCapture();
 
 		try {
@@ -641,7 +645,7 @@ describe('batched verify fault isolation', () => {
 				};
 				const hasProbed = vi
 					.spyOn(probeTarget, 'isCurrentNarPresent')
-					.mockRejectedValue(new Error('persistent canonical probe failure'));
+					.mockRejectedValue(probeFailure);
 
 				try {
 					for (let attempt = 1; attempt <= 11; attempt += 1) {
@@ -692,20 +696,23 @@ describe('batched verify fault isolation', () => {
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		await fetchNarInfo(reused.storePathHash);
 
-		expect(
-			capture.logs
-				.filter(
-					(record) => record.message === 'pending upload verification failed'
-				)
-				.map((record) => record.properties)
-		).toStrictEqual(
+		const warnings = capture.logs
+			.filter(
+				(record) => record.message === 'pending upload verification failed'
+			)
+			.map((record) => record.properties);
+
+		expect(warnings).toStrictEqual(
 			Array.from({ length: 11 }, (_, index) => ({
 				uploadId: upload.uploadId,
+				storePathHash: reused.storePathHash,
 				kind: 'reuse',
 				reason: 'prepare-failed',
-				failures: index + 1
+				failures: index + 1,
+				errorName: 'Error'
 			}))
 		);
+		expect(JSON.stringify(warnings)).not.toContain('r2.example');
 	});
 
 	it('retries publication after a committed edge has been charged', async () => {

@@ -2413,7 +2413,11 @@ export class CommitPipelineService {
 		blob?: CommitBlobDeclaration,
 		// The session that sent the commit receives the returned result, so it is
 		// excluded from the frames that the commit sends to the upload's session.
-		committingSessionId?: SessionId
+		committingSessionId?: SessionId,
+		// Called with the upload's store path hash as soon as the pipeline has
+		// read it from the pending row. The row can be gone by the time that
+		// the commit fails.
+		onStorePathHash?: (storePathHash: StorePathHash) => void
 	): Promise<CommitOutcome> {
 		// Do not defer a commit after offboarding begins. It could otherwise be
 		// restored after the drain has removed this tenant's references.
@@ -2492,6 +2496,7 @@ export class CommitPipelineService {
 			uploadId,
 			pending.metadataJson
 		);
+		onStorePathHash?.(metadata.storePathHash);
 		const tenant = this.context.requireTenant();
 		const account = advisory?.account ?? (await this.tenantAccount(tenant));
 
