@@ -804,11 +804,11 @@ A row is dropped when the responses that it covers have expired, one hour after
 it was queued for narinfos and one year for NARs. A signing-key rotation queues
 its own rows, and the backfill maintenance pass purges them. Those rows remain
 until their purge succeeds. A backfill pass sends one request of up to 100 tags.
-The request takes the entries of the oldest backfill rows in sending order, so
-the rows of 32 entries that staging writes share one request. The pass records
-the entries of each row as soon as the request succeeds and removes them from
-the row, so a retry after a refusal sends only the tags that no request has
-purged.
+The request takes the entries of several backfill rows, in the order that the
+following paragraphs describe, so the rows of 32 entries that staging writes
+share one request. The pass records the entries of each row as soon as the
+request succeeds and removes them from the row, so a retry after a refusal sends
+only the tags that no request has purged.
 
 The backfill requests of all tenants in one deployment share one pace. The
 `backfill_purge_pace` table in `CUPBOARD_DB` has one row, and its `next_at` is
@@ -824,13 +824,63 @@ Claims are at least one interval apart. A pass publishes the page after it
 claims and before it sends the request, so the requests of two tenants can be
 closer than the interval when a publication is slow, although the rate over time
 stays one request for each interval. A failed publication or a failed request
-still uses its claim. The row then waits for its retry time, which grows with
-each failure, so a row that fails on every attempt uses one slot for each retry
-and not one for each pass. The next attempt waits for the later of the interval
-and the retry time. A row with a failure count is purged alone, and the rows
-behind a failing head row wait until the head's purge succeeds, as in the queue:
-a row that joined a failed head could keep the head's retries failing, and a row
-that might fail a request never joins a healthy head's request.
+still uses its claim.
+
+The backfill separates two kinds of failure. A failure of an entry is a narinfo
+that cannot be built or rendered from its stored fields, for example because one
+of them is malformed, or a narinfo whose cache is missing from the cache
+registry. The pass detects it before any write for that entry, publishes the
+other entries of the page, purges their tags, records them as signed, and moves
+the failed entries of each row to a new row. Such a narinfo therefore stays out
+of the requests of the other narinfos. A run of such narinfos that is longer
+than a page moves to rows with failures one page at a time, and staging
+continues behind it. The new row's `last_error` gives the store path hash and
+the defect, such as the field that does not render, and
+`cupboard key status --debug` shows the most recent one.
+
+Every other failure is a failure of the whole attempt: a D1 read or an R2 write
+that fails for any entry, a deadline that expires during publication, or a purge
+request that fails. The pass records no entry as signed and moves no entry, so
+the rows keep their entries, their failure counts and their order. The objects
+of the entries that it wrote before the failure are written again by the next
+attempt. A transient failure of one write therefore moves no entry, but it
+delays the page by at least 30 seconds: the failed pass reports a stall, and the
+maintenance scheduler does not run it again for 30 seconds. The retry also waits
+for the backfill's wait and for the pace interval. The row that started the page
+records the error in `last_attempt_at` and `last_error`, and the key's backfill
+reports it. A rate-limit refusal sets the wait that the queue shares. Any other
+failure of a whole attempt sets the backfill's own wait under the storage key
+`cache-purge:backfill-retry`, which grows with each consecutive failure of this
+kind as the queue's retry times do. A purge request that succeeds clears it, and
+so do the end of the backfill, the abort of a rotation and the start of a
+rotation. A turn of the rows with failures that publishes nothing leaves it in
+place. During an outage, the rows without a failure therefore keep their order
+and are sent once the wait ends.
+
+A backfill row's `priority` is 1, or 2 when it has a failure, so the index lists
+the rows without a failure first, and the rows with failures after them, each
+oldest first. Each failure writes the failed entries to a new row, so of the
+rows with a failure, the oldest failed least recently. Each pass sends the rows
+with failures when the tenant's turn has come, and otherwise the rows without a
+failure. A turn comes when the tenant has sent no request for rows with failures
+in the last 5 minutes. A turn sends at most 100 entries, so an entry waits one
+turn for every 100 entries with failures ahead of it. The rows with failures
+therefore take their turns least recently failed first, a row that always fails
+goes to the back after each attempt, and one tenant's rows with failures use at
+most one slot of the deployment's pace every 5 minutes, however many of them
+there are. At the default interval of 24 seconds, that is one slot in 12.5.
+Backfill rows never expire, so an entry that always fails keeps its row and its
+turns, and the backfill cannot complete until it is published.
+
+Staging counts only the rows without a failure when it decides how many rows to
+queue, so the rows with failures do not reduce the size of the requests. Staging
+runs after every pass except one that waits for the pace or for a wait after a
+failure, or that ends with a failure of the whole attempt or of the claim. A
+failure that refuses every request therefore stages nothing more, and staging
+continues while only entries fail. While a row has a failure, the key's backfill
+reports `retrying` with the failure that the backfill recorded most recently.
+That failure can belong to a row that has since succeeded, while another row's
+failure keeps the state at `retrying`.
 
 The interval is twice the 12 seconds that the account's bucket needs to refill
 one token, so the backfills of one deployment use at most half of the refill,
@@ -859,17 +909,17 @@ neither the queue nor the backfill sends a purge before that time, even when
 other work wakes the object. The alarm is armed for it. A success on either path
 clears the wait, and so does the expiry of the last queued row. A refusal more
 than 5 minutes after the previous wait ended starts a new count. Any other
-failure delays only the queue or the backfill, whichever sent the request: the
-first row of the request records its own retry time in `next_attempt_at` and its
-consecutive failures in `failed_attempts`. An urgent row queued during that wait
-becomes the first row, and it is sent without waiting for the routine row's
-retry time. A row with a recorded failure count, including a count that it took
-over from an expired row, is sent alone: it joins no other row's request, and no
-other row joins its request. A row whose purge keeps failing therefore cannot
-make another row's request fail, and another row cannot keep its retries
-failing. While such a row waits for its retry time at the head of the queue, the
-rows of its priority behind it wait too, because each alarm starts from the
-first row.
+failure delays only the queue or the backfill, whichever sent the request. The
+backfill's own wait is described above. In the queue, the first row of the
+request records its own retry time in `next_attempt_at` and its consecutive
+failures in `failed_attempts`. An urgent row queued during that wait becomes the
+first row, and it is sent without waiting for the routine row's retry time. A
+row with a recorded failure count, including a count that it took over from an
+expired row, is sent alone: it joins no other row's request, and no other row
+joins its request. A row whose purge keeps failing therefore cannot make another
+row's request fail, and another row cannot keep its retries failing. While such
+a row waits for its retry time at the head of the queue, the rows of its
+priority behind it wait too, because each alarm starts from the first row.
 
 A wait starts at 60 seconds after a rate-limit refusal and at 12 seconds after
 any other failure. It doubles with each further failure of the same kind, up to

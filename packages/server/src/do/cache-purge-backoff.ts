@@ -59,13 +59,20 @@ export class CachePurgeBackoff {
 	state may be sent: `now` or later.
 	*/
 	async dueAt(row: CachePurgeRowRetry, now: number): Promise<number> {
+		return Math.max(
+			await this.sharedDueAt(now),
+			row.nextAttemptAt === null ? now : Date.parse(row.nextAttemptAt)
+		);
+	}
+
+	/**
+	Returns the earliest time at which any purge may be sent: `now`, or the end
+	of the shared rate-limit wait if that is later.
+	*/
+	async sharedDueAt(now: number): Promise<number> {
 		const rateLimit = await this.rateLimit();
 
-		return Math.max(
-			now,
-			row.nextAttemptAt === null ? now : Date.parse(row.nextAttemptAt),
-			rateLimit?.notBefore ?? now
-		);
+		return Math.max(now, rateLimit?.notBefore ?? now);
 	}
 
 	/**

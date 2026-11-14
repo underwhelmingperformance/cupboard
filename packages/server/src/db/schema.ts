@@ -987,7 +987,8 @@ export const cachePurgeContinuations = sqliteTable(
 		nextAttemptAt: text('next_attempt_at').$type<IsoTimestamp>(),
 		failedAttempts: integer('failed_attempts').notNull().default(0),
 		// The queue sends lower values first: 0 for an urgent purge, 1 for a
-		// routine one.
+		// routine one. A backfill row has 1, or 2 when it has a recorded
+		// failure.
 		priority: integer('priority').notNull().default(1)
 	},
 	(table) => [
