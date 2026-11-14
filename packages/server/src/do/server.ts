@@ -87,11 +87,13 @@ import {
 	CommitSessionGrantsUnavailableError,
 	CommitSessionLimitError,
 	CommitUpgradeRequiredError,
+	DatabaseOverloadedError,
 	InsufficientScopeError,
 	InvalidAccessTokenError,
 	LocalSchemaMigrationPendingError,
 	MetadataScopeChangedError,
 	PublicationConflictError,
+	PublicationExpiryPendingError,
 	PublicationPathChangedError,
 	PublicationPushExpiredError,
 	PublicationRecoveryExpiredError,
@@ -138,6 +140,7 @@ import {
 	requestCostMiddleware,
 	rootLogger
 } from '../observability/logging.ts';
+import { warnOfRefusal } from '../observability/refusal-log.ts';
 import { withInternalRequest } from '../observability/request-context.ts';
 import { withSpan } from '../observability/span.ts';
 import { authoriseRequest, noPendingCache } from '../orpc/authorise.ts';
@@ -1538,13 +1541,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				error: unavailable
 			});
 			for (const entry of request.entries) {
-				refusePublication(
-					socket,
-					attachment,
-					entry.operationId,
-					operation,
-					unavailable
-				);
+				refusePublication(socket, attachment, entry, operation, unavailable);
 			}
 			releaseAll();
 			return;
@@ -1560,7 +1557,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 							refusePublication(
 								socket,
 								attachment,
-								entry.operationId,
+								entry,
 								'subscribe',
 								new CommitEntrySubrequestsExhaustedError()
 							);
@@ -1599,7 +1596,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						refusePublication(
 							socket,
 							attachment,
-							entry.operationId,
+							entry,
 							'publish',
 							new CommitEntrySubrequestsExhaustedError()
 						);
@@ -1691,7 +1688,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					refusePublication(
 						socket,
 						attachment,
-						entry.operationId,
+						entry,
 						'publish',
 						new CommitEntrySubrequestsExhaustedError()
 					);
@@ -1699,19 +1696,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			});
 		} catch (error) {
 			if (error instanceof CacheRemovedDuringPushError) {
-				this.refuseEntryOfRemovedCache(socket, attachment, entry.operationId);
+				this.refuseEntryOfRemovedCache(socket, attachment, entry);
 				return;
 			}
 			// The operation can fail or pass its deadline, and the push can expire,
 			// while admission runs.
 			if (!this.answersFromState(entry.operationId, pushId)) {
-				refusePublication(
-					socket,
-					attachment,
-					entry.operationId,
-					'publish',
-					error
-				);
+				refusePublication(socket, attachment, entry, 'publish', error);
 				return;
 			}
 			await this.replayAfterAdmission(command);
@@ -1724,16 +1715,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private refuseEntryOfRemovedCache(
 		socket: WebSocket,
 		attachment: CommitSessionAttachment,
-		operationId: UploadId
+		entry: PublicationEntry
 	): void {
 		if (hasAcceptedCacheRemovedVerdict(socket)) {
-			sendCommitSessionFrame(socket, cacheRemovedVerdictFrame(operationId));
+			sendCommitSessionFrame(
+				socket,
+				cacheRemovedVerdictFrame(entry.operationId)
+			);
 			return;
 		}
 		refusePublication(
 			socket,
 			attachment,
-			operationId,
+			entry,
 			'publish',
 			new PublicationConflictError(
 				'The cache generation changed. Start a fresh push.',
@@ -1787,7 +1781,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			refusePublication(
 				socket,
 				attachment,
-				entry.operationId,
+				entry,
 				'publish',
 				new PublicationStateChangedError()
 			);
@@ -1926,13 +1920,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 			throw new PublicationStateChangedError();
 		} catch (error) {
-			refusePublication(
-				socket,
-				attachment,
-				entry.operationId,
-				operationKind,
-				error
-			);
+			refusePublication(socket, attachment, entry, operationKind, error);
 			return undefined;
 		}
 	}
@@ -2214,6 +2202,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			answerFromState,
 			refuseExhausted
 		} = command;
+		let storePathHash = identity?.storePathHash;
+
 		try {
 			// Record the session before the commit can defer, so a verdict reached
 			// before this returns still routes here.
@@ -2228,7 +2218,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						authority,
 						advisory,
 						blob,
-						sessionId
+						sessionId,
+						(hash) => {
+							storePathHash = hash;
+						}
 					)
 				)
 			);
@@ -2319,7 +2312,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// over the socket.
 			const isKnown = error instanceof ServerHttpError;
 
-			if (!isKnown) {
+			if (isKnown) {
+				warnOfRefusal(sessionLogger, 'commit refused', error, {
+					uploadId,
+					...(storePathHash !== undefined && { storePathHash })
+				});
+			} else {
 				sessionLogger
 					.with({ uploadId })
 					.error('commit failed with an internal error', { error });
@@ -4225,7 +4223,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					authority = await this.sessionReuseAuthority(cache, attachment);
 				} catch (error) {
 					const unavailable = new CommitSessionGrantsUnavailableError(error);
-					logger.error('commit session grants could not be read', { error });
+					logger.error('commit session grants could not be read', {
+						uploadId: request.uploadId,
+						error
+					});
 					sendCommitSessionFrame(socket, {
 						ev: 'error',
 						uploadId: request.uploadId,
@@ -5334,10 +5335,11 @@ function releasedRefusalReason(
 function refusePublication(
 	socket: WebSocket,
 	attachment: CommitSessionAttachment,
-	uploadId: UploadId,
+	entry: Pick<PublicationEntry, 'operationId' | 'metadata'>,
 	operation: 'publish' | 'subscribe',
 	failure: unknown
 ): void {
+	const uploadId = entry.operationId;
 	const error = isSubrequestSliceRefusal(failure)
 		? new CommitEntrySubrequestsExhaustedError()
 		: !(failure instanceof ServerHttpError) && isD1Overload(failure)
@@ -5357,6 +5359,19 @@ function refusePublication(
 			operationId: uploadId,
 			operation,
 			error
+		});
+	} else if (!(
+		error instanceof DatabaseOverloadedError ||
+		error instanceof CommitSessionGrantsUnavailableError ||
+		error instanceof PublicationExpiryPendingError
+	)) {
+		// `d1OverloadRefusal` logs an overload refusal, and the caller logs a
+		// grants failure once for the whole message. `expireOperation` logs a
+		// failed expiry at error level before it throws.
+		warnOfRefusal(rootLogger(), 'publication refused', error, {
+			operationId: uploadId,
+			operation,
+			storePathHash: entry.metadata.storePathHash
 		});
 	}
 	const reason: PublicationRefusalReason =

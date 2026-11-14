@@ -1,6 +1,9 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
-import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
+import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
@@ -1378,7 +1381,14 @@ describe('claiming a verification batch', () => {
 		});
 		await commitPath(token, laterCanonical, laterNar);
 
-		const faulting: { uploadId: UploadId; narHash: NixSha256HashString }[] = [];
+		const faulting: {
+			uploadId: UploadId;
+			storePathHash: StorePathHash;
+			narHash: NixSha256HashString;
+		}[] = [];
+		const reuseFault = new Error(
+			'simulated reuse provider error https://r2.example/secret?signature=abc'
+		);
 
 		for (const { index, nar } of faultingSources) {
 			const reuseMetadata = uploadMetadata({
@@ -1396,6 +1406,7 @@ describe('claiming a verification batch', () => {
 			await markUploadPendingVerification(reuse.uploadId);
 			faulting.push({
 				uploadId: reuse.uploadId,
+				storePathHash: reuseMetadata.storePathHash,
 				narHash: nar.narHash
 			});
 		}
@@ -1476,7 +1487,7 @@ describe('claiming a verification batch', () => {
 							.spyOn(probeTarget, 'isCurrentNarPresent')
 							.mockImplementation((narHash) =>
 								faultingNarHashes.has(narHash)
-									? Promise.reject(new Error('sensitive reuse provider error'))
+									? Promise.reject(reuseFault)
 									: hasCurrentProbe(narHash)
 							);
 
@@ -1556,21 +1567,26 @@ describe('claiming a verification batch', () => {
 			warnings: [
 				{
 					uploadId: uploadIdSchema.parse('a-faulting-reuse'),
+					storePathHash: faulting[0]?.storePathHash,
 					kind: 'reuse',
 					reason: 'prepare-failed',
-					failures: 1
+					failures: 1,
+					errorName: 'Error'
 				},
 				{
 					uploadId: uploadIdSchema.parse('b-faulting-reuse'),
+					storePathHash: faulting[1]?.storePathHash,
 					kind: 'reuse',
 					reason: 'prepare-failed',
-					failures: 1
+					failures: 1,
+					errorName: 'Error'
 				}
 			]
 		});
+		expect(JSON.stringify(warnings)).not.toContain('r2.example');
 	});
 
-	it('logs controlled context when a recovery probe fails', async () => {
+	it('logs the error and store path hash when a recovery probe fails', async () => {
 		const token = await initialise();
 		const fresh = await deferFreshUpload(
 			token,
@@ -1581,6 +1597,9 @@ describe('claiming a verification batch', () => {
 			markUploadCommitting(fresh.uploadId),
 			seedReservedNarInfo(fresh.metadata)
 		]);
+		const probeFailure = new Error(
+			'simulated commit state probe failure https://r2.example/secret?signature=abc'
+		);
 		const capture = startCapture();
 
 		try {
@@ -1595,9 +1614,7 @@ describe('claiming a verification batch', () => {
 				).commitPipeline;
 				const hasCommittedProbe = vi
 					.spyOn(pipeline, 'isGenerationCommitted')
-					.mockRejectedValue(
-						new Error(`sensitive-provider-error:${fresh.uploadId}`)
-					);
+					.mockRejectedValue(probeFailure);
 
 				try {
 					await asOneInvocation(() =>
@@ -1625,12 +1642,15 @@ describe('claiming a verification batch', () => {
 				level: 'warning',
 				properties: {
 					uploadId: fresh.uploadId,
+					storePathHash: fresh.metadata.storePathHash,
 					kind: 'committed-recovery',
 					reason: 'commit-state-probe-failed',
-					failures: 1
+					failures: 1,
+					errorName: 'Error'
 				}
 			}
 		]);
+		expect(JSON.stringify(warnings)).not.toContain('r2.example');
 	});
 });
 

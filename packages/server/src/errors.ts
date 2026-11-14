@@ -43,6 +43,16 @@ export abstract class ServerHttpError extends Error {
 	readonly retryAfterSeconds?: number;
 }
 
+/**
+A refusal that results from the tenant's own state or from normal protocol
+timing, even though its status can be 500 or above. It does not report a
+failure of the server, so the server does not log a warning for it. Whether the
+client can recover without help depends on the error. Examples are a resend
+request after a reconnect, an expired push lease, a race between publications
+and a full storage quota.
+*/
+export abstract class ExpectedRefusalError extends ServerHttpError {}
+
 export abstract class InvalidRequestBodyError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 }
@@ -70,7 +80,7 @@ export class CommitSessionGrantsUnavailableError extends ServerHttpError {
 	}
 }
 
-export class PublicationPushExpiredError extends ServerHttpError {
+export class PublicationPushExpiredError extends ExpectedRefusalError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {
 		super('The push lease expired. Start a fresh push.');
@@ -78,7 +88,7 @@ export class PublicationPushExpiredError extends ServerHttpError {
 	}
 }
 
-export class PublicationRecoveryExpiredError extends ServerHttpError {
+export class PublicationRecoveryExpiredError extends ExpectedRefusalError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {
 		super('The upload recovery deadline expired. Start a fresh push.');
@@ -96,7 +106,7 @@ export class PublicationExpiryPendingError extends ServerHttpError {
 	}
 }
 
-export class PublicationStagingDeletePendingError extends ServerHttpError {
+export class PublicationStagingDeletePendingError extends ExpectedRefusalError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {
 		super(
@@ -106,7 +116,7 @@ export class PublicationStagingDeletePendingError extends ServerHttpError {
 	}
 }
 
-export class PublicationStateChangedError extends ServerHttpError {
+export class PublicationStateChangedError extends ExpectedRefusalError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {
 		super(
@@ -116,7 +126,7 @@ export class PublicationStateChangedError extends ServerHttpError {
 	}
 }
 
-export class PublicationPathChangedError extends ServerHttpError {
+export class PublicationPathChangedError extends ExpectedRefusalError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {
 		super(
@@ -126,7 +136,7 @@ export class PublicationPathChangedError extends ServerHttpError {
 	}
 }
 
-export class PublicationResendRequiredError extends ServerHttpError {
+export class PublicationResendRequiredError extends ExpectedRefusalError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	constructor() {
 		super(
@@ -291,7 +301,7 @@ export class CommitEntrySubrequestsExhaustedError extends ServerHttpError {
 	}
 }
 
-export class ObjectIncarnationReservationContendedError extends ServerHttpError {
+export class ObjectIncarnationReservationContendedError extends ExpectedRefusalError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;
 
@@ -865,7 +875,7 @@ export class TenantNotSuspendedError extends ServerHttpError {
 // is gated on the tenant's 0-to-1 blob transition, so this is raised only when
 // the tenant does not already hold the hash and the new bytes would exceed the
 // limit.
-export class QuotaExceededError extends ServerHttpError {
+export class QuotaExceededError extends ExpectedRefusalError {
 	readonly status = StatusCodes.INSUFFICIENT_STORAGE;
 
 	constructor(public readonly tenant: TenantId) {

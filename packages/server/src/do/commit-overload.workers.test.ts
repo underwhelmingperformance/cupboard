@@ -1,5 +1,16 @@
 import { atWarningOrAbove, startCapture } from '@cupboard/logger/testing';
-import { commitAcceptCapabilitiesHeader } from '@cupboard/protocol/upload';
+import {
+	type NixSha256HashString,
+	type StorePathHash,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
+import { cacheMetadataErrorCodes } from '@cupboard/protocol/cache-metadata';
+import {
+	commitAcceptCapabilitiesHeader,
+	type CommitSessionFrame,
+	type UploadId,
+	uploadIdSchema
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -9,7 +20,16 @@ import {
 	d1AccountThrottleMessage,
 	d1QueueOverloadMessage
 } from '../db/transient.test-support.ts';
-import { SharedFactsUnavailableError } from '../errors.ts';
+import {
+	MetadataNarInfoInvalidError,
+	ObjectIncarnationReservationContendedError,
+	PublicationPathChangedError,
+	PublicationPushExpiredError,
+	PublicationResendRequiredError,
+	PublicationStateChangedError,
+	QuotaExceededError,
+	SharedFactsUnavailableError
+} from '../errors.ts';
 import {
 	commitSocketCeiling,
 	maxUncreditedCommitSessions
@@ -31,50 +51,130 @@ import {
 
 const stringMatcher: unknown = expect.any(String);
 
-// A typed error keeps its own response when a D1 overload is in its cause
-// chain, and the overload log record is not written.
-const rejections = [
-	{
-		name: 'the D1 queue overload',
-		error: new Error(d1QueueOverloadMessage),
-		message: 'Database is temporarily overloaded',
-		isLogged: true
-	},
+const overloads = [
+	{ name: 'the D1 queue overload', error: new Error(d1QueueOverloadMessage) },
 	{
 		name: 'the D1 account throttle',
-		error: new Error(d1AccountThrottleMessage),
-		message: 'Database is temporarily overloaded',
-		isLogged: true
-	},
-	{
-		name: 'a typed error that has the D1 account throttle as its cause',
-		error: new SharedFactsUnavailableError(new Error(d1AccountThrottleMessage)),
-		message: 'Cache facts are temporarily unavailable',
-		isLogged: false
+		error: new Error(d1AccountThrottleMessage)
 	}
 ];
+
+// Each error has a URL in its cause, which the warning must not contain.
+const providerUrl = 'https://r2.example/secret?signature=abc';
+
+const serverFaults = [
+	{
+		name: 'an error without a code',
+		error: new SharedFactsUnavailableError(
+			new Error(`${d1AccountThrottleMessage} ${providerUrl}`)
+		),
+		facts: {
+			errorName: 'SharedFactsUnavailableError',
+			errorStatus: StatusCodes.SERVICE_UNAVAILABLE
+		}
+	},
+	{
+		name: 'an error with a code',
+		error: new MetadataNarInfoInvalidError(undefined, new Error(providerUrl)),
+		facts: {
+			errorName: 'MetadataNarInfoInvalidError',
+			errorCode: cacheMetadataErrorCodes.narInfoInvalid,
+			errorStatus: StatusCodes.INTERNAL_SERVER_ERROR
+		}
+	}
+];
+
+// Refusals that are a normal step of the protocol, with the frame that the
+// server sends for each. None of them is logged, although most have a 5xx
+// status.
+const expectedRefusals = [
+	{
+		name: 'a full quota',
+		error: new QuotaExceededError(tenantIdSchema.parse('acme')),
+		frame: {
+			ev: 'error',
+			status: StatusCodes.INSUFFICIENT_STORAGE,
+			hasMessage: true
+		}
+	},
+	...[
+		{ name: 'a resend request', error: new PublicationResendRequiredError() },
+		{ name: 'an expired push lease', error: new PublicationPushExpiredError() },
+		{
+			name: 'a changed publication state',
+			error: new PublicationStateChangedError()
+		},
+		{
+			name: 'a changed path',
+			error: new PublicationPathChangedError()
+		},
+		{
+			name: 'a contended object incarnation',
+			error: new ObjectIncarnationReservationContendedError()
+		}
+	].map((refusal) => ({
+		...refusal,
+		frame: {
+			ev: 'error',
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			hasMessage: true
+		}
+	}))
+];
+
+// The frame without its message text, which these tests do not assert on.
+function frameFacts(frame: CommitSessionFrame): object {
+	if (!('message' in frame)) {
+		return frame;
+	}
+
+	const { message, ...facts } = frame;
+
+	return { ...facts, hasMessage: message.length > 0 };
+}
+
+const cacheFields = {
+	access: 'public',
+	generation: 1,
+	id: 1,
+	scope: { kind: 'default' }
+};
+
+interface StagedCommit {
+	readonly uploadId: UploadId;
+	readonly storePathHash: StorePathHash;
+	readonly narHash: NixSha256HashString;
+}
+
+async function stageCommit(token: string): Promise<StagedCommit> {
+	const path = uploadMetadata({
+		storePathHash: 'a'.repeat(32),
+		fileSize: 1
+	});
+	const negotiated = await negotiateUploads(token, [path]);
+	const decision = negotiated.uploads[0];
+
+	if (decision?.action !== 'upload') {
+		throw new Error('expected an upload decision');
+	}
+
+	await putNarBytes(decision.r2Key);
+
+	return {
+		uploadId: uploadIdSchema.parse(decision.uploadId),
+		storePathHash: path.storePathHash,
+		narHash: path.narHash
+	};
+}
 
 describe('commit socket overload handling', () => {
 	beforeEach(resetTestServer);
 
-	it.each(rejections)(
-		'sends a 503 error frame when the commit is rejected with $name',
-		async ({ error, message, isLogged }) => {
+	it.each(overloads)(
+		'sends a 503 error frame and logs the overload when the commit is rejected with $name',
+		async ({ error }) => {
 			const token = await initialise();
-			const path = uploadMetadata({
-				storePathHash: 'a'.repeat(32),
-				fileSize: 1
-			});
-			const negotiated = await negotiateUploads(token, [path]);
-			const decision = negotiated.uploads[0];
-
-			if (decision?.action !== 'upload') {
-				throw new Error('expected an upload decision');
-			}
-
-			const { uploadId, r2Key } = decision;
-			await putNarBytes(r2Key);
-
+			const { uploadId } = await stageCommit(token);
 			const batchSpy = vi
 				.spyOn(env.CUPBOARD_DB, 'batch')
 				.mockRejectedValue(error);
@@ -94,29 +194,22 @@ describe('commit socket overload handling', () => {
 						ev: 'error',
 						uploadId,
 						status: StatusCodes.SERVICE_UNAVAILABLE,
-						message
+						message: 'Database is temporarily overloaded'
 					},
-					logged: isLogged
-						? [
-								{
-									level: 'warning',
-									category: ['cupboard'],
-									message: 'request refused: database overloaded',
-									properties: {
-										cache: {
-											access: 'public',
-											generation: 1,
-											id: 1,
-											scope: { kind: 'default' }
-										},
-										op: 'commit',
-										sessionId: stringMatcher,
-										uploadId,
-										error
-									}
-								}
-							]
-						: []
+					logged: [
+						{
+							level: 'warning',
+							category: ['cupboard'],
+							message: 'request refused: database overloaded',
+							properties: {
+								cache: cacheFields,
+								op: 'commit',
+								sessionId: stringMatcher,
+								uploadId,
+								error
+							}
+						}
+					]
 				});
 			} finally {
 				capture.stop();
@@ -124,6 +217,125 @@ describe('commit socket overload handling', () => {
 			}
 		}
 	);
+});
+
+describe('commit refusal logging', () => {
+	beforeEach(resetTestServer);
+
+	// A typed error keeps its own response when a D1 overload is in its cause
+	// chain, and the overload log record is not written. The server logs the
+	// refusal instead, with the error's class, code and status but without its
+	// message or cause.
+	it.each(
+		serverFaults.flatMap((fault) =>
+			(['commit', 'commit-batch'] as const).map((op) => ({ ...fault, op }))
+		)
+	)(
+		'logs one warning for a $op entry refused with $name',
+		async ({ op, error, facts }) => {
+			const token = await initialise();
+			const staged = await stageCommit(token);
+			const batchSpy = vi
+				.spyOn(env.CUPBOARD_DB, 'batch')
+				.mockRejectedValue(error);
+			const capture = startCapture();
+
+			try {
+				const session = await openCommitSession(token);
+				session.send(
+					op === 'commit'
+						? { op, uploadId: staged.uploadId }
+						: { op, commits: [staged] }
+				);
+				const frame = await session.nextFrame();
+				session.socket.close();
+				const logged = atWarningOrAbove(capture.logs);
+
+				expect({ frame: frameFacts(frame), logged }).toStrictEqual({
+					frame: {
+						ev: 'error',
+						uploadId: staged.uploadId,
+						status: facts.errorStatus,
+						hasMessage: true
+					},
+					logged: [
+						{
+							level: 'warning',
+							category: ['cupboard'],
+							message: 'commit refused',
+							properties: {
+								cache: cacheFields,
+								op,
+								sessionId: stringMatcher,
+								uploadId: staged.uploadId,
+								storePathHash: staged.storePathHash,
+								...facts
+							}
+						}
+					]
+				});
+				expect(JSON.stringify(logged)).not.toContain(providerUrl);
+			} finally {
+				capture.stop();
+				batchSpy.mockRestore();
+			}
+		}
+	);
+
+	it.each(expectedRefusals)(
+		'does not log a warning when a commit is refused with $name',
+		async ({ error, frame: expected }) => {
+			const token = await initialise();
+			const { uploadId } = await stageCommit(token);
+			const batchSpy = vi
+				.spyOn(env.CUPBOARD_DB, 'batch')
+				.mockRejectedValue(error);
+			const capture = startCapture();
+
+			try {
+				const session = await openCommitSession(token);
+				session.send({ op: 'commit', uploadId });
+				const frame = await session.nextFrame();
+				session.socket.close();
+
+				expect({
+					frame: frameFacts(frame),
+					logged: atWarningOrAbove(capture.logs)
+				}).toStrictEqual({ frame: { ...expected, uploadId }, logged: [] });
+			} finally {
+				capture.stop();
+				batchSpy.mockRestore();
+			}
+		}
+	);
+
+	it('does not log a warning when a commit is refused with a 4xx error', async () => {
+		const token = await initialise();
+		const uploadId = uploadIdSchema.parse('never-negotiated');
+		const capture = startCapture();
+
+		try {
+			const session = await openCommitSession(token);
+			session.send({ op: 'commit', uploadId });
+			const frame = await session.nextFrame();
+			session.socket.close();
+
+			expect({
+				frame: frameFacts(frame),
+				logged: atWarningOrAbove(capture.logs)
+			}).toStrictEqual({
+				frame: {
+					ev: 'error',
+					uploadId,
+					status: StatusCodes.NOT_FOUND,
+					hasMessage: true
+				},
+				logged: []
+			});
+		} finally {
+			capture.stop();
+		}
+	});
 });
 
 async function openSessions(
