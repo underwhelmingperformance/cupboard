@@ -53,14 +53,30 @@ async function acquireSecretFileLock(
 	}
 }
 
+/**
+The state of a held secret file lock, as the operation under it sees it.
+*/
+export interface SecretFileLockState {
+	/**
+	Whether the lock has been compromised. Another process may then own the
+	file, so the operation must not write it. The operation's signal also
+	aborts when its caller aborts, so the signal cannot tell the two apart.
+	*/
+	readonly isLost: boolean;
+}
+
 async function runUntilSettled<T>(
-	action: (signal?: AbortSignal) => Promise<T>,
+	action: (signal?: AbortSignal, lock?: SecretFileLockState) => Promise<T>,
 	actionSignal: AbortSignal,
 	compromise: Promise<never>,
 	compromiseError: () => Error | undefined
 ): Promise<T> {
 	throwIfAborted(actionSignal);
-	const pending = action(actionSignal);
+	const pending = action(actionSignal, {
+		get isLost() {
+			return compromiseError() !== undefined;
+		}
+	});
 
 	try {
 		return await Promise.race([pending, compromise]);
@@ -84,7 +100,7 @@ released until the operation has stopped.
 */
 export async function withSecretFileLock<T>(
 	file: string,
-	action: (signal?: AbortSignal) => Promise<T>,
+	action: (signal?: AbortSignal, lock?: SecretFileLockState) => Promise<T>,
 	signal?: AbortSignal
 ): Promise<T> {
 	await ensureSecretDirectory(path.dirname(file));

@@ -48,7 +48,6 @@ export const refreshTokenFamilyTtlSeconds = ttlSecondsSchema.parse(
 // the session that its sign-in starts.
 export const consumedSubjectNonceRetentionSeconds =
 	refreshTokenFamilyTtlSeconds;
-export const refreshTokenRetryGraceMs = 60_000;
 // A client can rotate twice during each access-token lifetime throughout the
 // complete family lifetime. Reaching the bound ends the family instead of
 // discarding a spent bearer that must still detect replay.

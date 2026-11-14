@@ -153,15 +153,41 @@ for retry recovery. Bounded maintenance clears that ciphertext after the grace
 window; ciphertext can remain until the relevant maintenance pass runs, but
 expired ciphertext cannot recover a response.
 
-The CLI retries a refresh request automatically only when it could not connect
-to the server. The request never reached the server, so the automatic retry
-cannot revoke the refresh-token family.
+The CLI repeats a refresh request when it cannot connect to the server, when the
+connection fails before the whole response arrives, when the response has status
+502, 503 or 504, or when no response arrives within 10 seconds. It sends at most
+five requests in one renewal. The server returns the same successor refresh
+token to a repeat for one minute after it creates the successor, and it creates
+the successor only after the first request arrives. A repeat after that minute
+revokes the refresh-token family.
 
-If a refresh response is lost, retry the command within one minute. The CLI
-keeps the consumed refresh token until it receives a response. The server then
-returns the same successor refresh token and issues a new access token after
-checking the current trust rules. A later retry revokes that refresh-token
-family, and you have to sign in again.
+Before the CLI first sends a refresh token, it records the time in the saved
+session. It keeps the refresh token until it receives a response, and it sends
+that token only within 30 seconds of the recorded time, in the same command or a
+later one. Each request therefore has at least 30 seconds to reach the server
+before the minute ends. The CLI reads the system clock for this. If the clock is
+earlier than the recorded time, the CLI treats the 30 seconds as passed. It
+cannot detect a clock that was moved back by less than the time that has passed.
+
+The CLI removes the record again when the server cannot have received any
+request of the renewal that made it. That is the case when the CLI wrote no
+request to any connection. Each connection then failed first, for example during
+the TLS handshake, or the CLI stopped waiting for it, which it does after at
+most 10 seconds. It is also the case when the token endpoint's rate limit
+answered with status 429, which it does before it reads the request, and when
+the command was interrupted before any request was written. The command reports
+the failure, and a later command starts a new 30 seconds.
+
+If a renewal stops without a token response while some of the 30 seconds remain,
+the command fails with exit status 75, and the server may already have replaced
+the refresh token. Run the command again straight away. If its request reaches
+the server, the server returns the same successor refresh token and issues a new
+access token after checking the current trust rules. An error response to the
+first request, such as status 500, is reported as the server sent it. The 30
+seconds still apply to a rerun, because the server may have replaced the token
+before it failed. Once the 30 seconds have passed, the CLI does not send the
+refresh token again. The command fails with exit status 77 and asks you to run
+`cupboard login`.
 
 A deployment session renews in the same way, and each renewal checks the
 deployment's control-plane trust rules. Neither a tenant nor the control plane

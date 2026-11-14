@@ -685,13 +685,83 @@ export class UnreachableHostError extends CliError {
 }
 
 export class OwnerLoginRequiredError extends CliError {
-	constructor() {
-		super('No cupboard session, or it has expired. Run `cupboard login`.');
+	constructor(
+		message = 'No cupboard session, or it has expired. Run `cupboard login`.',
+		options?: ErrorOptions
+	) {
+		super(message, options);
 		this.name = 'OwnerLoginRequiredError';
 	}
 
 	override get exitCode(): number {
 		return authExitCode;
+	}
+}
+
+/**
+Renders a renewal window in whole seconds, for error messages.
+*/
+export function windowSeconds(windowMs: number): string {
+	return String(Math.round(windowMs / 1000));
+}
+
+/**
+The CLI stopped a session renewal without a token response, while time is
+left in the window after its first attempt with the refresh token. The server
+may already have replaced the refresh token. A later renewal with it inside
+the window can still return the replacement.
+*/
+export class SessionRenewalUnconfirmedError extends CliError {
+	/**
+	@param host The host of the session's server.
+	@param attempts The number of refresh requests in this renewal.
+	@param windowMs The length of the window, from the start of the first
+	attempt.
+	@param cause The failure of the last attempt.
+	*/
+	constructor(
+		public readonly host: string,
+		public readonly attempts: number,
+		public readonly windowMs: number,
+		cause: Error
+	) {
+		super(
+			`The CLI could not confirm the session renewal with ${host}. It can repeat the renewal until ${windowSeconds(windowMs)} seconds after the first attempt, so run the command again now. If it reports that it can no longer renew the session, run \`cupboard login\`.`,
+			{ cause }
+		);
+		this.name = 'SessionRenewalUnconfirmedError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
+/**
+The window after the first refresh attempt with the cached refresh token has
+passed, and no attempt has returned a token response. The server may already
+have replaced the refresh token and stopped returning the replacement. It
+revokes the whole session when it receives the old token after that, so the
+CLI does not send the token again. Code that handles a missing session
+handles this error too.
+*/
+export class SessionRenewalExpiredError extends OwnerLoginRequiredError {
+	/**
+	@param host The host of the session's server.
+	@param windowMs The length of the window, from the start of the first
+	attempt.
+	@param cause The failure of the last attempt, if this renewal made one.
+	*/
+	constructor(
+		public readonly host: string,
+		public readonly windowMs: number,
+		cause?: Error
+	) {
+		super(
+			`The CLI could not confirm the session renewal with ${host} within ${windowSeconds(windowMs)} seconds of its first attempt, so it can no longer renew the session. Run \`cupboard login\`.`,
+			{ cause }
+		);
+		this.name = 'SessionRenewalExpiredError';
 	}
 }
 

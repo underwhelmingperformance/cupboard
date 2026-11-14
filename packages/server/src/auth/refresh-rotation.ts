@@ -2,9 +2,9 @@ import {
 	type AuthorizationDetails,
 	isAuthorizationDetailCovered
 } from '@cupboard/protocol/grants';
+import { refreshTokenRetryGraceMs } from '@cupboard/protocol/oidc';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 
-import { refreshTokenRetryGraceMs } from './auth.ts';
 import { type AuthenticatedRefreshAuthority } from './refresh-credential.ts';
 
 /**

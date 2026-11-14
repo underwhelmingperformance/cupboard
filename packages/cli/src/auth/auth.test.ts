@@ -7,9 +7,12 @@ import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
+import { ManualClock } from '../../../../tests/support/manual-clock.ts';
 import { abortReason } from '../abort.ts';
 import { audienceSchema } from '../audience.ts';
 import { CupboardClient } from '../client/client.ts';
+import { manualRefreshTiming } from '../client/refresh-retry.test-support.ts';
+import { type RefreshWindow } from '../client/refresh-retry.ts';
 import { writeCachedGrant } from '../deploy/grant-store.ts';
 import {
 	authExitCode,
@@ -450,8 +453,42 @@ function tokenResponse(name: string): TokenResponse {
 }
 
 interface FakeSessionClient {
-	readonly tokenRefresh: (refreshToken: string) => Promise<TokenResponse>;
+	readonly tokenRefresh: (
+		refreshToken: string,
+		window: RefreshWindow
+	) => Promise<TokenResponse>;
 }
+
+// The harness's clock reading, which a renewal records as the start of the
+// first refresh attempt with a refresh token.
+const renewalStartedAtMs = past * 1000;
+
+// A fetch that fails before it has a connection to send the request on.
+function connectionRefused(): Promise<Response> {
+	const refused = Object.assign(new Error('connect ECONNREFUSED'), {
+		code: 'ECONNREFUSED',
+		syscall: 'connect'
+	});
+
+	return Promise.reject(new TypeError('fetch failed', { cause: refused }));
+}
+
+function serviceUnavailable(): Response {
+	return new Response('', { status: StatusCodes.SERVICE_UNAVAILABLE });
+}
+
+// A cached session whose access token has expired.
+const staleSession: CachedSession = {
+	accessToken: accessToken('stale', past - 60),
+	refreshToken: 'refresh-stale'
+};
+
+// The cached session after a renewal with `refresh-stale` has started.
+const staleSessionInRenewal: CachedSession = {
+	accessToken: accessToken('stale', past - 60),
+	refreshToken: 'refresh-stale',
+	refreshStartedAtMs: renewalStartedAtMs
+};
 
 interface SessionHarness extends OwnerSessionDependencies {
 	readonly client: FakeSessionClient;
@@ -537,6 +574,7 @@ describe('cachedOwnerProvider', () => {
 			token: accessToken('rotated', farFuture),
 			rotatedWith: ['refresh-stale'],
 			sessions: [
+				staleSessionInRenewal,
 				{
 					accessToken: accessToken('rotated', farFuture),
 					refreshToken: 'refresh-rotated'
@@ -580,6 +618,7 @@ describe('cachedOwnerProvider', () => {
 			],
 			rotatedWith: ['refresh-stale'],
 			sessions: [
+				staleSessionInRenewal,
 				{
 					accessToken: accessToken('rotated', farFuture),
 					refreshToken: 'refresh-rotated'
@@ -652,6 +691,7 @@ describe('cachedOwnerProvider', () => {
 			entrants: 2,
 			rotatedWith: ['refresh-stale'],
 			sessions: [
+				staleSessionInRenewal,
 				{
 					accessToken: accessToken('rotated', farFuture),
 					refreshToken: 'refresh-rotated'
@@ -777,11 +817,360 @@ describe('cachedOwnerProvider', () => {
 			attempts: 2,
 			retried: accessToken('retried', farFuture),
 			sessions: [
+				staleSessionInRenewal,
 				{
 					accessToken: accessToken('retried', farFuture),
 					refreshToken: 'refresh-retried'
 				}
 			]
+		});
+	});
+
+	it('measures a later renewal from the first attempt with the same refresh token', async () => {
+		const failure = new Error('refresh response lost');
+		const { harness, sessions } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-stale'
+		});
+		const calls: unknown[] = [];
+		const client: FakeSessionClient = {
+			tokenRefresh: async (refreshToken, window) => {
+				calls.push({
+					refreshToken,
+					window: window.kind === 'new' ? { kind: 'new' } : window,
+					stored: await harness.readSession?.(target)
+				});
+
+				if (calls.length === 1) {
+					throw failure;
+				}
+
+				return tokenResponse('rotated');
+			}
+		};
+
+		const first = await outcomeOf(
+			cachedOwnerProvider(target, { ...harness, client }).get()
+		);
+		const rerun = await cachedOwnerProvider(target, {
+			...harness,
+			client,
+			now: () => renewalStartedAtMs + 20_000
+		}).get();
+
+		expect({ first, rerun, calls, sessions: sessions() }).toStrictEqual({
+			first: { kind: 'rejected', error: failure },
+			rerun: accessToken('rotated', farFuture),
+			calls: [
+				{
+					refreshToken: 'refresh-stale',
+					window: { kind: 'new' },
+					stored: staleSessionInRenewal
+				},
+				{
+					refreshToken: 'refresh-stale',
+					window: { kind: 'continued', sinceFirstAttemptMs: 20_000 },
+					stored: staleSessionInRenewal
+				}
+			],
+			sessions: [
+				staleSessionInRenewal,
+				{
+					accessToken: accessToken('rotated', farFuture),
+					refreshToken: 'refresh-rotated'
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			label: 'sends the rest of the window to a rerun inside it',
+			sinceFirstAttemptMs: 25_000,
+			expected: {
+				outcome: { token: accessToken('rotated', farFuture) },
+				requests: ['https://cupboard.test/token'],
+				delays: [5000],
+				sessions: [
+					{
+						accessToken: accessToken('rotated', farFuture),
+						refreshToken: 'refresh-rotated'
+					}
+				]
+			}
+		},
+		{
+			label: 'does not send the refresh token in a rerun after the window',
+			sinceFirstAttemptMs: 30_000,
+			expected: {
+				outcome: { error: 'SessionRenewalExpiredError' },
+				requests: [],
+				delays: [],
+				sessions: []
+			}
+		}
+	])('$label', async ({ sinceFirstAttemptMs, expected }) => {
+		const requests: string[] = [];
+		const delays: number[] = [];
+		const { harness, sessions } = sessionHarness({
+			...staleSessionInRenewal,
+			refreshStartedAtMs: renewalStartedAtMs - sinceFirstAttemptMs
+		});
+		const client = new CupboardClient(
+			target,
+			(input) => {
+				requests.push(requestUrl(input));
+
+				return Promise.resolve(Response.json(tokenResponse('rotated')));
+			},
+			{ kind: 'default' },
+			undefined,
+			undefined,
+			undefined,
+			manualRefreshTiming(new ManualClock(), delays)
+		);
+
+		const outcome = await outcomeOf(
+			cachedOwnerProvider(target, { ...harness, client }).get()
+		);
+
+		expect({
+			outcome:
+				outcome.kind === 'resolved'
+					? { token: outcome.value }
+					: {
+							error:
+								outcome.error instanceof Error ? outcome.error.name : undefined
+						},
+			requests,
+			delays,
+			sessions: sessions()
+		}).toStrictEqual(expected);
+	});
+
+	it.each([
+		{
+			label:
+				'renews in a rerun after a minute when every attempt failed to connect',
+			first: Array.from({ length: 5 }, () => connectionRefused),
+			abortsBeforeSending: false,
+			expected: {
+				first: 'UnreachableHostError',
+				firstSent: 5,
+				rerun: { token: accessToken('rotated', farFuture) },
+				rerunSent: 1
+			}
+		},
+		{
+			label:
+				'renews in a rerun after a minute when the token endpoint answered 429',
+			first: [
+				() =>
+					new Response('', {
+						status: StatusCodes.TOO_MANY_REQUESTS,
+						headers: { 'retry-after': '60' }
+					})
+			],
+			abortsBeforeSending: false,
+			expected: {
+				first: 'CupboardHttpError',
+				firstSent: 1,
+				rerun: { token: accessToken('rotated', farFuture) },
+				rerunSent: 1
+			}
+		},
+		{
+			label:
+				'renews in a rerun after a minute when it was aborted before sending',
+			first: [],
+			abortsBeforeSending: true,
+			expected: {
+				first: 'Error',
+				firstSent: 0,
+				rerun: { token: accessToken('rotated', farFuture) },
+				rerunSent: 1
+			}
+		},
+		{
+			label:
+				'does not send the refresh token in a rerun after a minute when the server answered 503',
+			first: Array.from({ length: 5 }, () => serviceUnavailable),
+			abortsBeforeSending: false,
+			expected: {
+				first: 'SessionRenewalUnconfirmedError',
+				firstSent: 5,
+				rerun: { error: 'SessionRenewalExpiredError' },
+				rerunSent: 0
+			}
+		}
+	])('$label', async ({ first, abortsBeforeSending, expected }) => {
+		const controller = new AbortController();
+		const sent = { first: 0, rerun: 0 };
+		let phase: keyof typeof sent = 'first';
+		const fetcher = (): Response | Promise<Response> => {
+			sent[phase] += 1;
+
+			if (phase === 'rerun') {
+				return Response.json(tokenResponse('rotated'));
+			}
+
+			const script = first[sent.first - 1];
+
+			if (script === undefined) {
+				throw new Error('fetch script exhausted');
+			}
+
+			return script();
+		};
+		const clientFor = (signal?: AbortSignal): CupboardClient =>
+			new CupboardClient(
+				target,
+				async () => fetcher(),
+				{ kind: 'default' },
+				signal,
+				undefined,
+				() => 0,
+				manualRefreshTiming(new ManualClock())
+			);
+		const { harness } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-stale'
+		});
+
+		const firstOutcome = await outcomeOf(
+			cachedOwnerProvider(target, {
+				...harness,
+				client: clientFor(controller.signal),
+				writeSession: async (session, at, signal) => {
+					await harness.writeSession?.(session, at, signal);
+
+					if (abortsBeforeSending) {
+						controller.abort(new Error('interrupted'));
+					}
+				},
+				signal: controller.signal
+			}).get()
+		);
+		phase = 'rerun';
+		const rerun = await outcomeOf(
+			cachedOwnerProvider(target, {
+				...harness,
+				client: clientFor(),
+				now: () => renewalStartedAtMs + 60_000
+			}).get()
+		);
+
+		expect({
+			first:
+				firstOutcome.kind === 'rejected' && firstOutcome.error instanceof Error
+					? firstOutcome.error.name
+					: firstOutcome,
+			firstSent: sent.first,
+			rerun:
+				rerun.kind === 'resolved'
+					? { token: rerun.value }
+					: {
+							error: rerun.error instanceof Error ? rerun.error.name : undefined
+						},
+			rerunSent: sent.rerun
+		}).toStrictEqual(expected);
+	});
+
+	it.each([
+		{
+			label:
+				'removes the record after an interruption while the session lock is held',
+			isLockLost: false,
+			expected: [staleSessionInRenewal, staleSession]
+		},
+		{
+			label:
+				'does not write the session after an interruption once the session lock is lost',
+			isLockLost: true,
+			expected: [staleSessionInRenewal]
+		}
+	])('$label', async ({ isLockLost, expected }) => {
+		const caller = new AbortController();
+		const compromise = new AbortController();
+		// The session lock aborts its action when the caller aborts and when the
+		// lock is lost.
+		const lockSignal = AbortSignal.any([caller.signal, compromise.signal]);
+		const lock = { isLost: false };
+		const { harness, sessions } = sessionHarness(staleSession);
+		const client = new CupboardClient(
+			target,
+			() => Promise.reject(new Error('fetch script exhausted')),
+			{ kind: 'default' },
+			lockSignal,
+			undefined,
+			() => 0,
+			manualRefreshTiming(new ManualClock())
+		);
+
+		const outcome = await outcomeOf(
+			cachedOwnerProvider(target, {
+				...harness,
+				client,
+				signal: caller.signal,
+				withSessionLock: (_target, action) => action(lockSignal, lock),
+				writeSession: async (session, at, signal) => {
+					await harness.writeSession?.(session, at, signal);
+
+					if (sessions().length !== 1) {
+						return;
+					}
+
+					if (isLockLost) {
+						lock.isLost = true;
+						compromise.abort(new Error('session lock lost'));
+					}
+
+					caller.abort(new Error('interrupted'));
+				}
+			}).get()
+		);
+
+		expect({
+			rejected: outcome.kind === 'rejected',
+			sessions: sessions()
+		}).toStrictEqual({ rejected: true, sessions: expected });
+	});
+
+	it('keeps the window and asks for a prompt rerun when a rerun cannot connect', async () => {
+		let sent = 0;
+		const { harness, sessions } = sessionHarness({
+			...staleSessionInRenewal,
+			refreshStartedAtMs: renewalStartedAtMs - 5000
+		});
+		const client = new CupboardClient(
+			target,
+			() => {
+				sent += 1;
+
+				return connectionRefused();
+			},
+			{ kind: 'default' },
+			undefined,
+			undefined,
+			() => 0,
+			manualRefreshTiming(new ManualClock())
+		);
+
+		const outcome = await outcomeOf(
+			cachedOwnerProvider(target, { ...harness, client }).get()
+		);
+
+		expect({
+			error:
+				outcome.kind === 'rejected' && outcome.error instanceof Error
+					? outcome.error.name
+					: outcome,
+			sent,
+			sessions: sessions()
+		}).toStrictEqual({
+			error: 'SessionRenewalUnconfirmedError',
+			sent: 5,
+			sessions: []
 		});
 	});
 
@@ -805,10 +1194,11 @@ describe('cachedOwnerProvider', () => {
 					)
 				);
 			};
-			const { harness, sessions } = sessionHarness({
+			const spent = {
 				accessToken: accessToken('stale', past - 60),
 				refreshToken: 'refresh-spent'
-			});
+			};
+			const { harness, sessions } = sessionHarness(spent);
 
 			await writeCachedGrant({
 				accessToken: 'cf-access',
@@ -820,12 +1210,17 @@ describe('cachedOwnerProvider', () => {
 			vi.stubGlobal('fetch', recordingFetch);
 
 			try {
-				const provider = cachedOwnerProvider(target, {
-					...harness,
-					client: new CupboardClient(target, recordingFetch, {
-						kind: 'default'
-					})
-				});
+				const timing = manualRefreshTiming(new ManualClock());
+				const client = new CupboardClient(
+					target,
+					recordingFetch,
+					{ kind: 'default' },
+					undefined,
+					undefined,
+					undefined,
+					timing
+				);
+				const provider = cachedOwnerProvider(target, { ...harness, client });
 				const outcome = await outcomeOf(provider.refresh());
 
 				expect({
@@ -837,7 +1232,7 @@ describe('cachedOwnerProvider', () => {
 				}).toStrictEqual({
 					rejected: true,
 					requests: ['https://cupboard.test/token refresh_token'],
-					sessions: []
+					sessions: [{ ...spent, refreshStartedAtMs: renewalStartedAtMs }]
 				});
 			} finally {
 				vi.unstubAllGlobals();

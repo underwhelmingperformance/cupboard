@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, vi } from 'vitest';
 
 import { testWithConfigHome } from '../test-support.ts';
 
+import { type SecretFileLockState } from './secret-lock.ts';
 import { withCachedSessionLock } from './token-store.ts';
 
 type Lock = (
@@ -156,6 +157,54 @@ describe('cached session lock', () => {
 			expect(actionSignal).toMatchObject({ aborted: true });
 			expect(actionSignal?.reason).toBe(compromised);
 			expect(release).toHaveBeenCalledOnce();
+		}
+	);
+
+	testWithConfigHome(
+		'reports a lost lock to the action, and not a caller abort',
+		async () => {
+			const action = Promise.withResolvers<string>();
+			const compromised = Object.assign(new Error('lock ownership was lost'), {
+				code: 'ECOMPROMISED'
+			});
+			const caller = new AbortController();
+			let onCompromised: LockOptions['onCompromised'];
+			let lockState: SecretFileLockState | undefined;
+			const actionStarted = Promise.withResolvers<undefined>();
+
+			mocks.lock.mockImplementation((_file, options) => {
+				onCompromised = options?.onCompromised;
+
+				return Promise.resolve(() => Promise.resolve());
+			});
+
+			const locked = withCachedSessionLock(
+				target,
+				(_signal, lock) => {
+					lockState = lock;
+					actionStarted.resolve(undefined);
+
+					return action.promise;
+				},
+				caller.signal
+			);
+			await actionStarted.promise;
+
+			caller.abort(new Error('interrupted'));
+			const isLostAfterCallerAbort = lockState?.isLost;
+			onCompromised?.(compromised);
+			const isLostAfterCompromise = lockState?.isLost;
+			action.resolve('late result');
+
+			expect({
+				isLostAfterCallerAbort,
+				isLostAfterCompromise,
+				outcome: await outcomeOf(locked)
+			}).toStrictEqual({
+				isLostAfterCallerAbort: false,
+				isLostAfterCompromise: true,
+				outcome: { kind: 'rejected', error: compromised }
+			});
 		}
 	);
 });

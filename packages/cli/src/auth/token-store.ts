@@ -13,7 +13,7 @@ import {
 	removeSecretFile,
 	writeSecretFile
 } from './secret-file.ts';
-import { withSecretFileLock } from './secret-lock.ts';
+import { type SecretFileLockState, withSecretFileLock } from './secret-lock.ts';
 
 /**
 Where cached sessions live, within the CLI's configuration directory.
@@ -27,7 +27,11 @@ export function tokensDirectory(): string {
 
 const cachedSessionSchema = z.object({
 	accessToken: z.string().min(1),
-	refreshToken: z.string().min(1).optional()
+	refreshToken: z.string().min(1).optional(),
+	// When the first refresh attempt with `refreshToken` started, in
+	// milliseconds since the Unix epoch. A rotation replaces the session
+	// without it.
+	refreshStartedAtMs: z.number().int().optional()
 });
 export type CachedSession = z.output<typeof cachedSessionSchema>;
 
@@ -55,7 +59,7 @@ operation runs, so a slow token endpoint does not make a live lock stale.
 */
 export async function withCachedSessionLock<T>(
 	target: URL,
-	action: (signal?: AbortSignal) => Promise<T>,
+	action: (signal?: AbortSignal, lock?: SecretFileLockState) => Promise<T>,
 	signal?: AbortSignal
 ): Promise<T> {
 	const file = tokenFilePath(canonicalHref(target));

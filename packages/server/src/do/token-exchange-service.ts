@@ -10,6 +10,7 @@ import {
 	type RefreshTokenGrantRequest,
 	refreshTokenGrantRequestSchema,
 	refreshTokenGrantType,
+	refreshTokenRetryGraceMs,
 	subjectTokenTypeIdToken,
 	type TokenExchangeGrantRequest,
 	tokenExchangeGrantRequestSchema,
@@ -48,7 +49,6 @@ import {
 	issueAccessJwt,
 	maxRefreshTokenFamilyMembers,
 	refreshTokenFamilyTtlSeconds,
-	refreshTokenRetryGraceMs,
 	verifyAccessJwt,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';

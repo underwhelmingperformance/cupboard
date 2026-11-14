@@ -239,7 +239,7 @@ Returns the delay before the next attempt after a transient response. A
 `Retry-After` value in seconds or as an HTTP date supplies the delay,
 limited to the maximum backoff. A missing or invalid value uses `backoff`.
 */
-function transientResponseDelayMs(
+export function transientResponseDelayMs(
 	response: Response,
 	attempt: number,
 	backoff: ExponentialBackoff
@@ -359,7 +359,7 @@ const lookupFailureCodes = new Set(['ENOTFOUND', 'EAI_AGAIN']);
 Whether Node's fetch failed before it had a connection to send the request
 on: the DNS lookup failed, or every connection attempt failed or timed out.
 */
-function isConnectionSetupFailure(error: unknown): error is TypeError {
+export function isConnectionSetupFailure(error: unknown): error is TypeError {
 	return error instanceof TypeError && isConnectionSetupCause(error.cause);
 }
 
