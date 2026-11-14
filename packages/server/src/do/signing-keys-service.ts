@@ -1,4 +1,8 @@
-import { narFingerprint } from '@cupboard/nix-store/narinfo';
+import {
+	InvalidNixSha256HashError,
+	InvalidStorePathError
+} from '@cupboard/nix-store/errors';
+import { narFingerprint, type NarInfo } from '@cupboard/nix-store/narinfo';
 import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import {
 	narInfoGenerationSchema,
@@ -25,7 +29,8 @@ import type {
 	SigningKeyEntryInput
 } from '@cupboard/protocol/keys';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, count, eq, isNull, lt, ne, sql } from 'drizzle-orm';
+import { and, count, eq, gt, isNull, lt, ne, sql } from 'drizzle-orm';
+import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 import { z } from 'zod';
 
 import {
@@ -33,17 +38,22 @@ import {
 	generateSigningKeyMaterial,
 	signNixFingerprint
 } from '../crypto/crypto.ts';
-import { cacheIdSchema } from '../db/cache.ts';
+import { cacheIdSchema, type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
+	type BackfillEntryDefect,
+	BackfillEntryInvalidError,
+	CacheIdentityMissingError,
 	LastSigningKeyError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyInstanceMissingError,
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
 	SigningKeySequenceMissingError,
-	SigningKeyVanishedError
+	SigningKeyVanishedError,
+	StoredReferencesInvalidError,
+	StoredSignaturesInvalidError
 } from '../errors.ts';
 import { narInfoCacheTag } from '../http/cache-tags.ts';
 import {
@@ -61,12 +71,17 @@ import {
 	type BackfillPurgeClaim,
 	BackfillPurgePace
 } from './backfill-purge-pace.ts';
+import { CachePurgeBackoff } from './cache-purge-backoff.ts';
 import {
-	CachePurgeBackoff,
-	type CachePurgeRowRetry
-} from './cache-purge-backoff.ts';
-import { CachePurgeRetryPolicy } from './cache-purge-retry.ts';
-import { type ServerContext, tagsPerPurgeRequest } from './context.ts';
+	cachePurgeBackoffCapMs,
+	CachePurgeRetryPolicy,
+	isRateLimitedPurgeFailure
+} from './cache-purge-retry.ts';
+import {
+	type SchemaWriter,
+	type ServerContext,
+	tagsPerPurgeRequest
+} from './context.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -89,10 +104,41 @@ const sequenceId = 'singleton';
 const backfillBatchSize = 32;
 
 // A pass sends one purge request of up to `tagsPerPurgeRequest` tags. Staging
-// keeps this many rows queued, so the request is full when the pace allows it.
+// keeps this many rows without a recorded failure queued, so the request is
+// full when the pace allows it. A row with a recorded failure joins only the
+// requests of other rows with failures, so it does not count.
 const backfillRowsPerRequest = Math.ceil(
 	tagsPerPurgeRequest / backfillBatchSize
 );
+
+// The `priority` of a backfill row. The index on `(kind, priority,
+// created_at)` lists the rows without a failure first and the rows with
+// failures after them, each oldest first. Each failure writes the failed
+// entries to a new row, so of the rows with failures, the oldest failed least
+// recently.
+const unfailedBackfillPriority = 1;
+const failingBackfillPriority = 2;
+
+// The storage key of the earliest time at which this tenant may send the
+// request of another row with a recorded failure.
+const failingRowTurnKey = 'cache-purge:backfill-failing-turn';
+
+const failingRowTurnSchema = z.strictObject({ notBefore: z.number() });
+
+// A tenant sends at most one request for rows with a recorded failure in this
+// time, however many of its rows have failures. The rows that keep failing use
+// at most one slot of the deployment's backfill pace every 5 minutes for each
+// tenant.
+const failingRowTurnMs = cachePurgeBackoffCapMs;
+
+// The storage key of the backfill's wait after a failure of a whole attempt,
+// and the number of consecutive such failures.
+const attemptRetryKey = 'cache-purge:backfill-retry';
+
+const attemptRetrySchema = z.strictObject({
+	notBefore: z.number(),
+	failures: z.number().int().positive()
+});
 
 // Publishing one continuation entry reads the shared blob row from which its
 // narinfo is rendered. The publish then re-renders the entry if the row changed
@@ -147,12 +193,95 @@ interface BackfillPagePart {
 // the remaining entries, deleted it after the last entry, or found it already
 // deleted by an aborted rotation.
 type ContinuationSettlement =
-	| { readonly kind: 'kept'; readonly retry: CachePurgeRowRetry }
+	| { readonly kind: 'kept' }
 	| { readonly kind: 'deleted' }
 	| { readonly kind: 'missing' };
 
+// An entry that its stored row keeps from being published, and the error.
+interface PublicationFailure {
+	readonly entry: PurgeEntry;
+	readonly error: BackfillEntryInvalidError;
+}
+
+// The entries of one row that their stored rows keep from being published.
+// They move to a new row with the failure recorded.
+interface FailedEntries {
+	readonly entries: readonly PurgeEntry[];
+	readonly failedAttempts: number;
+	readonly message: string;
+}
+
+// The backfill row whose request is sent next, and the earliest time at which
+// it may be sent, before the shared rate-limit wait and the pace.
+interface NextBackfillRow {
+	readonly row: ContinuationRow;
+	readonly dueAt: number;
+}
+
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+// The fields of a narinfo, as rendering names them when it rejects one.
+const narInfoFields = [
+	'storePath',
+	'url',
+	'compression',
+	'fileHash',
+	'fileSize',
+	'narHash',
+	'narSize',
+	'references',
+	'deriver',
+	'ca',
+	'sigs'
+] as const satisfies readonly BackfillEntryDefect[];
+
+// The part of a stored narinfo row that `error` shows to be invalid. Building
+// parses the references, the signatures, the store path and the hashes, and
+// rendering validates every field and names the first that it rejects.
+function narInfoDefect(error: unknown): BackfillEntryDefect {
+	if (error instanceof StoredReferencesInvalidError) {
+		return 'references';
+	}
+
+	if (error instanceof StoredSignaturesInvalidError) {
+		return 'sigs';
+	}
+
+	if (error instanceof InvalidStorePathError) {
+		return 'storePath';
+	}
+
+	if (error instanceof InvalidNixSha256HashError) {
+		return 'hash';
+	}
+
+	if (!(error instanceof z.ZodError)) {
+		return 'unknown';
+	}
+
+	const field = error.issues.at(0)?.path.at(0);
+
+	return narInfoFields.find((name) => name === field) ?? 'unknown';
+}
+
+// The failed entries of one row, or undefined when none of them failed.
+function failedEntries(
+	row: ContinuationRow,
+	failures: readonly PublicationFailure[]
+): FailedEntries | undefined {
+	const first = failures.at(0);
+
+	if (first === undefined) {
+		return undefined;
+	}
+
+	return {
+		entries: failures.map((failure) => failure.entry),
+		failedAttempts: row.failedAttempts + 1,
+		message: errorMessage(first.error)
+	};
 }
 
 export class SigningKeysService {
@@ -163,7 +292,7 @@ export class SigningKeysService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly narInfoObjects: NarInfoObjectsService,
-		purgeRetryPolicy: CachePurgeRetryPolicy = new CachePurgeRetryPolicy(),
+		private readonly purgeRetryPolicy: CachePurgeRetryPolicy = new CachePurgeRetryPolicy(),
 		private readonly now: () => number = () => Date.now(),
 		private readonly purgePace: BackfillPurgePace = new BackfillPurgePace(
 			context
@@ -542,22 +671,64 @@ export class SigningKeysService {
 	// Staging more than that would grow the backlog faster than the requests
 	// can drain it.
 	private async stageBackfills(row: BackfillRow): Promise<void> {
-		while (this.backfillRowCount() < backfillRowsPerRequest) {
+		while (this.unfailedBackfillRowCount() < backfillRowsPerRequest) {
 			if ((await this.stageBackfill(row)) === 0) {
 				return;
 			}
 		}
 	}
 
-	private backfillRowCount(): number {
+	private unfailedBackfillRowCount(): number {
+		const table = schema.cachePurgeContinuations;
+
 		return (
 			this.context.db
 				.select({ rows: count() })
-				.from(schema.cachePurgeContinuations)
-				.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
+				.from(table)
+				.where(
+					and(
+						eq(table.kind, 'backfill'),
+						eq(table.priority, unfailedBackfillPriority)
+					)
+				)
 				.all()
 				.at(0)?.rows ?? 0
 		);
+	}
+
+	// The fields that record progress on a key's backfill. The failure stays
+	// reported while a row of the key has a recorded failure, because that
+	// row's entries remain unsigned until one of its retries succeeds.
+	private backfillProgress(
+		tx: SchemaWriter,
+		keyId: string,
+		now: IsoTimestamp
+	): SQLiteUpdateSetSource<typeof schema.signingKeyBackfills> {
+		const table = schema.cachePurgeContinuations;
+		const failing = tx
+			.select({ id: table.id })
+			.from(table)
+			.where(
+				and(
+					eq(table.kind, 'backfill'),
+					eq(table.priority, failingBackfillPriority),
+					eq(table.signingKeyId, keyId)
+				)
+			)
+			.limit(1)
+			.get();
+
+		if (failing !== undefined) {
+			return { updatedAt: now };
+		}
+
+		return {
+			state: 'running',
+			updatedAt: now,
+			failureOperation: sql`null`,
+			failedAt: sql`null`,
+			failureMessage: sql`null`
+		};
 	}
 
 	private async stageBackfill(row: BackfillRow): Promise<number> {
@@ -667,13 +838,7 @@ export class SigningKeysService {
 				}
 
 				tx.update(schema.signingKeyBackfills)
-					.set({
-						state: 'running',
-						updatedAt: createdAt,
-						failureOperation: sql`null`,
-						failedAt: sql`null`,
-						failureMessage: sql`null`
-					})
+					.set(this.backfillProgress(tx, row.keyId, createdAt))
 					.where(eq(schema.signingKeyBackfills.keyId, row.keyId))
 					.run();
 			});
@@ -682,60 +847,113 @@ export class SigningKeysService {
 		});
 	}
 
+	// Publishes every entry, and returns the entries that their stored rows
+	// keep from being published. Such an entry does not keep the others from
+	// being published and signed. A read or a write that fails throws, and so
+	// does a deadline that expires during the loop, in `withDeadlineBudget`:
+	// those are failures of the whole attempt.
 	private async publishContinuationEntries(
 		entries: readonly PurgeEntry[]
-	): Promise<void> {
+	): Promise<PublicationFailure[]> {
+		const failures: PublicationFailure[] = [];
+
 		for (const entry of entries) {
-			const cache = this.context.cacheRepository.resolvedForId(entry.cacheId);
-			const row = this.context.db
-				.select()
-				.from(schema.narInfos)
-				.where(
-					and(
-						eq(schema.narInfos.cacheId, entry.cacheId),
-						eq(schema.narInfos.storePathHash, entry.storePathHash),
-						eq(schema.narInfos.generation, entry.narInfoGeneration),
-						eq(
-							schema.narInfos.pendingSignatureGeneration,
-							entry.targetGeneration
-						)
-					)
-				)
-				.get();
+			const failure = await this.publishContinuationEntry(entry);
 
-			if (row === undefined) {
-				continue;
+			if (failure !== undefined) {
+				failures.push(failure);
 			}
-
-			const narInfo = await this.narInfoObjects.narInfoFromRow(row);
-
-			if (narInfo === undefined) {
-				continue;
-			}
-
-			await this.narInfoObjects.publishNarInfoObject(
-				cache,
-				entry.storePathHash,
-				entry.narInfoGeneration,
-				row.narHash,
-				narInfo
-			);
 		}
+
+		return failures;
+	}
+
+	private async publishContinuationEntry(
+		entry: PurgeEntry
+	): Promise<PublicationFailure | undefined> {
+		const row = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cacheId, entry.cacheId),
+					eq(schema.narInfos.storePathHash, entry.storePathHash),
+					eq(schema.narInfos.generation, entry.narInfoGeneration),
+					eq(schema.narInfos.pendingSignatureGeneration, entry.targetGeneration)
+				)
+			)
+			.get();
+
+		if (row === undefined) {
+			return undefined;
+		}
+
+		let cache: ResolvedCache;
+
+		try {
+			cache = this.context.cacheRepository.resolvedForId(entry.cacheId);
+		} catch (error) {
+			if (!(error instanceof CacheIdentityMissingError)) {
+				throw error;
+			}
+
+			return {
+				entry,
+				error: new BackfillEntryInvalidError(
+					entry.storePathHash,
+					'cacheIdentity'
+				)
+			};
+		}
+
+		const blob = await this.narInfoObjects.blobFields(row.narHash);
+
+		if (blob === undefined) {
+			return undefined;
+		}
+
+		let narInfo: NarInfo;
+
+		try {
+			narInfo = this.narInfoObjects.buildNarInfo(row, blob);
+			narInfo.render();
+		} catch (error) {
+			return {
+				entry,
+				error: new BackfillEntryInvalidError(
+					entry.storePathHash,
+					narInfoDefect(error)
+				)
+			};
+		}
+
+		await this.narInfoObjects.publishNarInfoObject(
+			cache,
+			entry.storePathHash,
+			entry.narInfoGeneration,
+			row.narHash,
+			narInfo
+		);
+
+		return undefined;
 	}
 
 	/**
 	Records the entries this pass published and removes them from the
-	continuation. The continuation row survives while `remaining` holds the
-	entries a later pass still has to publish. Reports `deleted` when no entry
-	remains, and otherwise `missing` if `abortKeyRotation` has deleted the
-	row. The abort also clears the pending generation of the narinfo rows and
-	deletes the backfill row in the same transaction, so the earlier writes
-	then match no row.
+	continuation. The continuation row remains while `remaining` contains
+	entries that a later pass still has to publish. `failed` moves the entries
+	whose publication failed to a new row with the failure recorded. Reports
+	`deleted` when no entry remains, and otherwise `missing` if
+	`abortKeyRotation` has deleted the row. The abort also clears the pending
+	generation of the narinfo rows and deletes the backfill row in the same
+	transaction, so the earlier writes then match no row, and no new row is
+	written for the failed entries.
 	*/
 	private settleContinuation(
-		continuation: typeof schema.cachePurgeContinuations.$inferSelect,
+		continuation: ContinuationRow,
 		entries: readonly PurgeEntry[],
 		remaining: readonly PurgeEntry[],
+		failed: FailedEntries | undefined,
 		now: IsoTimestamp
 	): ContinuationSettlement {
 		return this.context.db.transaction((tx) => {
@@ -770,6 +988,33 @@ export class SigningKeysService {
 				resigned += updated.length;
 			}
 
+			// The settled row is deleted or shortened, and the row of failed
+			// entries is written, before the backfill row is updated. Otherwise
+			// `backfillProgress` would see the failure that this request
+			// resolved and miss the failure that it recorded.
+			const settlement = this.settleContinuationRow(
+				tx,
+				continuation.id,
+				remaining
+			);
+
+			if (failed !== undefined && settlement.kind !== 'missing') {
+				tx.insert(schema.cachePurgeContinuations)
+					.values({
+						id: crypto.randomUUID(),
+						kind: 'backfill',
+						signingKeyId: continuation.signingKeyId,
+						entriesJson: JSON.stringify(failed.entries),
+						createdAt: now,
+						expiresAt: continuation.expiresAt,
+						lastAttemptAt: now,
+						lastError: failed.message,
+						failedAttempts: failed.failedAttempts,
+						priority: failingBackfillPriority
+					})
+					.run();
+			}
+
 			if (continuation.signingKeyId !== null) {
 				const backfill = tx
 					.select({ resigned: schema.signingKeyBackfills.resigned })
@@ -782,12 +1027,8 @@ export class SigningKeysService {
 				if (backfill !== undefined) {
 					tx.update(schema.signingKeyBackfills)
 						.set({
-							state: 'running',
-							updatedAt: now,
-							resigned: backfill.resigned + resigned,
-							failureOperation: sql`null`,
-							failedAt: sql`null`,
-							failureMessage: sql`null`
+							...this.backfillProgress(tx, continuation.signingKeyId, now),
+							resigned: backfill.resigned + resigned
 						})
 						.where(
 							eq(schema.signingKeyBackfills.keyId, continuation.signingKeyId)
@@ -796,35 +1037,35 @@ export class SigningKeysService {
 				}
 			}
 
-			if (remaining.length === 0) {
-				tx.delete(schema.cachePurgeContinuations)
-					.where(eq(schema.cachePurgeContinuations.id, continuation.id))
-					.run();
-
-				return { kind: 'deleted' };
-			}
-
-			// An update that matched nothing returns no row, although `get` is
-			// typed as always returning one.
-			const retry = tx
-				.update(schema.cachePurgeContinuations)
-				.set({
-					entriesJson: JSON.stringify(remaining),
-					nextAttemptAt: sql`null`,
-					failedAttempts: 0
-				})
-				.where(eq(schema.cachePurgeContinuations.id, continuation.id))
-				.returning({
-					nextAttemptAt: schema.cachePurgeContinuations.nextAttemptAt,
-					failedAttempts: schema.cachePurgeContinuations.failedAttempts
-				})
-				.all()
-				.at(0);
-
-			return retry === undefined
-				? { kind: 'missing' }
-				: { kind: 'kept', retry };
+			return settlement;
 		});
+	}
+
+	private settleContinuationRow(
+		tx: SchemaWriter,
+		id: string,
+		remaining: readonly PurgeEntry[]
+	): ContinuationSettlement {
+		const table = schema.cachePurgeContinuations;
+
+		if (remaining.length === 0) {
+			const deleted = tx
+				.delete(table)
+				.where(eq(table.id, id))
+				.returning({ id: table.id })
+				.all();
+
+			return { kind: deleted.length === 0 ? 'missing' : 'deleted' };
+		}
+
+		const kept = tx
+			.update(table)
+			.set({ entriesJson: JSON.stringify(remaining) })
+			.where(eq(table.id, id))
+			.returning({ id: table.id })
+			.all();
+
+		return { kind: kept.length === 0 ? 'missing' : 'kept' };
 	}
 
 	// The entries of one continuation row that a pass publishes and purges, and
@@ -844,17 +1085,16 @@ export class SigningKeysService {
 		};
 	}
 
-	// Fills one purge request. The page starts with the head row and continues
-	// with the rows after it in sending order. A head with a recorded failure
-	// count is purged alone, so a row that joined it cannot keep its retries
-	// failing. A row with a recorded failure count joins no head's page, because
-	// it might fail a request that would succeed without it. The rows behind a
-	// failing head wait until the head's purge succeeds.
+	// Fills one purge request. The page starts with `head`, the row from
+	// `nextBackfillRow`, and continues with the rows of the same priority after
+	// it, oldest first. Each entry is published separately, so an entry that
+	// fails does not keep the others from being purged. A row with failures
+	// joins only the requests of other rows with failures, because its turn
+	// decides when it is sent.
 	private backfillPage(head: ContinuationRow): BackfillPagePart[] {
-		// A publication that fails removes no entry from the continuation, so the
-		// page must be one that the invocation's allowance covers in full.
-		// Otherwise the entry that the binding refused would fail the same page on
-		// every pass.
+		// The page must be one that the invocation's allowance covers in full.
+		// Otherwise the binding would refuse a call part of the way through every
+		// attempt at the same page, and each attempt would fail as a whole.
 		const limit = Math.min(
 			backfillEntriesPerPass(this.context.subrequestsPerInvocation),
 			affordableSubrequestOperations(
@@ -866,7 +1106,7 @@ export class SigningKeysService {
 		const first = this.backfillPagePart(head, limit);
 		const page = [first];
 
-		if (head.failedAttempts > 0 || first.entries.length >= limit) {
+		if (first.entries.length >= limit) {
 			return page;
 		}
 
@@ -878,11 +1118,11 @@ export class SigningKeysService {
 			.where(
 				and(
 					eq(table.kind, 'backfill'),
-					ne(table.id, head.id),
-					eq(table.failedAttempts, 0)
+					eq(table.priority, head.priority),
+					ne(table.id, head.id)
 				)
 			)
-			.orderBy(table.priority, table.createdAt)
+			.orderBy(table.createdAt)
 			.limit(room)
 			.all();
 
@@ -911,39 +1151,55 @@ export class SigningKeysService {
 	}
 
 	/**
-	Sends one purge request for the oldest backfill continuation rows, and
-	records the entries that it purged.
+	Sends one purge request for backfill continuation rows, and records the
+	entries that it purged.
 
-	The pass first claims the deployment's next backfill purge request from
+	{@link nextBackfillRow} chooses the row that starts the request. The pass
+	reports `turn` without publishing when only rows with failures remain and
+	the tenant's turn for them has not come. It reports `waiting` while a
+	rate-limit refusal or a failed attempt of the whole backfill delays every
+	request. It then claims the deployment's next backfill purge request from
 	{@link BackfillPurgePace}. It reports `paced` when the deployment's last
 	claim is less than one interval old, and it neither publishes nor purges
-	until a claim succeeds. A D1 error in the claim is a failed attempt, and the
-	pass reports `retrying`.
+	until a claim succeeds. A D1 error in the claim is a failed attempt, and
+	the pass reports `retrying`.
 
-	With the claim, the pass publishes the entries of one page and purges their
-	tags in one request. The page is the head row and, up to the request's limit
-	of 100 tags, the rows after it. The pass records the entries of each row as
-	signed and removes them from the row. It reports `partial` while a backfill
-	row remains, and `runBackfillOnce` then arms the alarm for that row's next
-	request.
+	With the claim, the pass publishes the entries of one page and purges the
+	tags of the published entries in one request. The page starts with the
+	chosen row and, up to the request's limit of 100 tags, continues with the
+	rows of the same priority after it. An entry is not published when its
+	narinfo cannot be built or rendered from its stored fields, or when its
+	cache is missing from the cache registry. The pass records the published
+	entries of each row as signed, and moves the entries that it could not
+	publish to a new row with a `BackfillEntryInvalidError` recorded. It reports `partial`
+	while a backfill row remains, and `runBackfillOnce` then stages more rows
+	and arms the alarm.
 
-	If publication fails, the pass removes none of the selected entries from
-	their rows. A later pass retries the same leading page and may publish the
-	same objects again. After a purge failure, {@link CachePurgeBackoff}
-	decides the earliest time for the next attempt, and the pass reports
-	`waiting` until then without publishing. The claim stays used, so the next
-	request still waits for its interval.
+	Any other failure is a failure of the whole attempt: a D1 read or an R2
+	write that fails for any entry, a deadline that expires during publication,
+	or a purge request that fails. The pass then records no entry as signed and
+	moves no entry. The row that started the page records the error, the key's
+	backfill reports it, and the backfill as a whole waits for a retry time that
+	grows with each consecutive failure of this kind. The pass reports
+	`retrying`. The claim stays used, so the next request still waits for its
+	interval.
 	*/
 	private async processContinuation(): Promise<
-		'none' | 'settled' | 'partial' | 'retrying' | 'waiting' | 'paced'
+		'none' | 'turn' | 'settled' | 'partial' | 'retrying' | 'waiting' | 'paced'
 	> {
-		const continuation = this.headBackfillContinuation();
+		this.reclassifyEarlierFailedRows();
+		const next = await this.nextBackfillRow(this.now());
 
-		if (continuation === undefined) {
+		if (next === undefined) {
 			return 'none';
 		}
 
-		const dueAt = await this.purgeBackoff.dueAt(continuation, this.now());
+		if (next.dueAt > this.now()) {
+			return 'turn';
+		}
+
+		const continuation = next.row;
+		const dueAt = await this.attemptDueAt(this.now());
 
 		if (dueAt > this.now()) {
 			await armAlarmNoLaterThan(this.context.ctx.storage, dueAt);
@@ -972,37 +1228,95 @@ export class SigningKeysService {
 			return 'paced';
 		}
 
+		if (continuation.priority === failingBackfillPriority) {
+			await this.context.ctx.storage.put(failingRowTurnKey, {
+				notBefore: this.now() + failingRowTurnMs
+			});
+		}
+
 		const page = this.backfillPage(continuation);
 		const entries = page.flatMap((part) => part.entries);
+		let failures: PublicationFailure[];
 
 		try {
-			await withDeadlineBudget(criticalSectionBudgetMs, () =>
+			failures = await withDeadlineBudget(criticalSectionBudgetMs, () =>
 				this.publishContinuationEntries(entries)
 			);
 		} catch (error) {
-			await this.recordFailure(continuation, error, 'resigning', now);
+			await this.recordAttemptFailure(continuation, error, 'resigning', now);
 
 			return 'retrying';
 		}
 
-		try {
-			await this.context.purgeCacheTags(entries.map((entry) => entry.tag));
-		} catch (error) {
-			await this.recordFailure(continuation, error, 'cache-purge', now);
+		const failed = new Set(failures.map((failure) => failure.entry));
+		const published = entries.filter((entry) => !failed.has(entry));
 
-			return 'retrying';
+		if (published.length > 0) {
+			try {
+				await this.context.purgeCacheTags(published.map((entry) => entry.tag));
+			} catch (error) {
+				await this.recordAttemptFailure(
+					continuation,
+					error,
+					'cache-purge',
+					now
+				);
+
+				return 'retrying';
+			}
+
+			await this.purgeBackoff.recordSuccess();
+			await this.forgetAttemptFailures();
 		}
 
-		await this.purgeBackoff.recordSuccess();
+		this.settlePage(page, failures, now);
 
-		// `abortKeyRotation` can delete a row while the request is in flight. The
-		// settlement of that row matches nothing, and the other rows still need
-		// theirs.
+		if (this.hasBackfillContinuation()) {
+			return 'partial';
+		}
+
+		await this.forgetBackfillWaits();
+
+		return 'settled';
+	}
+
+	// Records a purged page. `abortKeyRotation` can delete a row while the
+	// request is in flight. The settlement of that row matches nothing, and the
+	// other rows still need theirs.
+	private settlePage(
+		page: readonly BackfillPagePart[],
+		failures: readonly PublicationFailure[],
+		now: IsoTimestamp
+	): void {
 		for (const part of page) {
-			this.settleContinuation(part.row, part.entries, part.remaining, now);
-		}
+			const partFailures = failures.filter((failure) =>
+				part.entries.includes(failure.entry)
+			);
+			const failed = failedEntries(part.row, partFailures);
+			const published = part.entries.filter((entry) =>
+				partFailures.every((failure) => failure.entry !== entry)
+			);
+			const settlement = this.settleContinuation(
+				part.row,
+				published,
+				part.remaining,
+				failed,
+				now
+			);
 
-		return this.hasBackfillContinuation() ? 'partial' : 'settled';
+			if (
+				failed !== undefined &&
+				settlement.kind !== 'missing' &&
+				part.row.signingKeyId !== null
+			) {
+				this.markRetrying(
+					part.row.signingKeyId,
+					'resigning',
+					now,
+					failed.message
+				);
+			}
+		}
 	}
 
 	// A D1 error in the claim is a failed attempt that has used no slot of the
@@ -1030,32 +1344,42 @@ export class SigningKeysService {
 		);
 	}
 
-	// A publication or a purge that fails has used its claim. The head row backs
-	// off with the retry state of the purge queue, which grows with each failure.
-	// A row that fails on every attempt therefore uses one slot of the pace for
-	// each retry, not one for each pass.
-	private async recordFailure(
+	// A failure of a whole attempt changes no row's entries, failure count or
+	// order. The row that started the page records the error. A rate-limit
+	// refusal sets the wait that the purge queue shares. Any other failure sets
+	// the backfill's own wait, which grows with each consecutive failure of a
+	// whole attempt, so every row waits and none of them moves.
+	private async recordAttemptFailure(
 		continuation: ContinuationRow,
 		error: unknown,
 		operation: 'resigning' | 'cache-purge',
 		now: IsoTimestamp
 	): Promise<void> {
 		const failedAt = this.now();
-		const retry = await this.purgeBackoff.recordFailure(
-			error,
-			continuation,
-			failedAt
-		);
 		const message = errorMessage(error);
 		this.context.db
 			.update(schema.cachePurgeContinuations)
 			.set({
 				lastAttemptAt: isoTimestamp(new Date(failedAt)),
-				lastError: message,
-				...retry
+				lastError: message
 			})
 			.where(eq(schema.cachePurgeContinuations.id, continuation.id))
 			.run();
+
+		if (isRateLimitedPurgeFailure(error)) {
+			await this.purgeBackoff.recordFailure(error, continuation, failedAt);
+		} else {
+			const previous = await this.attemptRetry();
+			const failures = (previous?.failures ?? 0) + 1;
+			await this.context.ctx.storage.put(attemptRetryKey, {
+				notBefore: this.purgeRetryPolicy.nextAttemptAt(
+					error,
+					failures,
+					failedAt
+				),
+				failures
+			});
+		}
 
 		if (continuation.signingKeyId !== null) {
 			this.markRetrying(continuation.signingKeyId, operation, now, message);
@@ -1063,25 +1387,142 @@ export class SigningKeysService {
 
 		await armAlarmNoLaterThan(
 			this.context.ctx.storage,
-			await this.purgeBackoff.dueAt(retry, failedAt)
+			await this.attemptDueAt(failedAt)
 		);
 	}
 
-	private headBackfillContinuation():
-		typeof schema.cachePurgeContinuations.$inferSelect | undefined {
-		return (
-			this.context.db
-				.select()
-				.from(schema.cachePurgeContinuations)
-				.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
-				// Every backfill row has the same priority. Ordering by it as well
-				// lets SQLite read the rows in index order without sorting them.
-				.orderBy(
-					schema.cachePurgeContinuations.priority,
-					schema.cachePurgeContinuations.createdAt
-				)
-				.get()
+	private async attemptRetry(): Promise<
+		z.infer<typeof attemptRetrySchema> | undefined
+	> {
+		const stored = await this.context.ctx.storage.get(attemptRetryKey);
+
+		return stored === undefined ? undefined : attemptRetrySchema.parse(stored);
+	}
+
+	// The earliest time at which a backfill request may be sent: after the
+	// shared rate-limit wait and after the backfill's own wait. A backfill row
+	// has no retry time of its own, so a retry time that an earlier build wrote
+	// on a row delays nothing.
+	private async attemptDueAt(now: number): Promise<number> {
+		const retry = await this.attemptRetry();
+
+		return Math.max(
+			await this.purgeBackoff.sharedDueAt(now),
+			retry?.notBefore ?? now
 		);
+	}
+
+	private async forgetAttemptFailures(): Promise<void> {
+		if ((await this.attemptRetry()) === undefined) {
+			return;
+		}
+
+		await this.context.ctx.storage.delete(attemptRetryKey);
+	}
+
+	private async forgetBackfillWaits(): Promise<void> {
+		await this.context.ctx.storage.delete([failingRowTurnKey, attemptRetryKey]);
+	}
+
+	// An earlier build gave a row with a failure count priority 1 and a retry
+	// time of its own. Such a row follows the rule of the rows with failures:
+	// priority 2, and no retry time apart from the tenant's turn.
+	private reclassifyEarlierFailedRows(): void {
+		const table = schema.cachePurgeContinuations;
+		this.context.db
+			.update(table)
+			.set({ priority: failingBackfillPriority, nextAttemptAt: sql`null` })
+			.where(
+				and(
+					eq(table.kind, 'backfill'),
+					eq(table.priority, unfailedBackfillPriority),
+					gt(table.failedAttempts, 0)
+				)
+			)
+			.run();
+	}
+
+	/**
+	Chooses the backfill row whose request is sent next, and when it is due,
+	before the shared waits and the pace.
+
+	The oldest row with a recorded failure goes first when the tenant's turn
+	has come: the tenant has sent no request for rows with failures in the last
+	{@link failingRowTurnMs}. Otherwise the oldest row without a failure goes.
+	When no such row remains, the oldest row with a failure goes at the next
+	turn. Each failure writes the failed entries to a new row, so the rows with
+	failures take their turns least recently failed first, and a row that
+	always fails goes to the back after each attempt.
+
+	However many rows have failures, they use at most one slot of the pace in
+	each turn. Each query reads one row through the index on `(kind, priority,
+	created_at)`.
+	*/
+	private async nextBackfillRow(
+		now: number
+	): Promise<NextBackfillRow | undefined> {
+		const failing =
+			this.oldestBackfillRow(failingBackfillPriority, 'any') ??
+			this.oldestBackfillRow(unfailedBackfillPriority, 'failed');
+		const turnAt =
+			failing === undefined
+				? undefined
+				: Math.max(now, (await this.failingRowTurnAt()) ?? now);
+
+		if (failing !== undefined && turnAt === now) {
+			return { row: failing, dueAt: now };
+		}
+
+		const unfailed = this.oldestBackfillRow(
+			unfailedBackfillPriority,
+			'unfailed'
+		);
+
+		if (unfailed !== undefined) {
+			return { row: unfailed, dueAt: now };
+		}
+
+		return failing === undefined || turnAt === undefined
+			? undefined
+			: { row: failing, dueAt: turnAt };
+	}
+
+	// The oldest backfill row of `priority` whose failure count matches
+	// `failures`. Rows of priority 1 with a failure count come from an earlier
+	// build until a pass gives them priority 2, so the choice of row reads them
+	// as rows with failures. There are few rows of priority 1, so the filter on
+	// the failure count reads few rows beyond the index.
+	private oldestBackfillRow(
+		priority: number,
+		failures: 'any' | 'failed' | 'unfailed'
+	): ContinuationRow | undefined {
+		const table = schema.cachePurgeContinuations;
+		const failureFilter = {
+			any: undefined,
+			failed: gt(table.failedAttempts, 0),
+			unfailed: eq(table.failedAttempts, 0)
+		}[failures];
+
+		return this.context.db
+			.select()
+			.from(table)
+			.where(
+				and(
+					eq(table.kind, 'backfill'),
+					eq(table.priority, priority),
+					failureFilter
+				)
+			)
+			.orderBy(table.createdAt)
+			.get();
+	}
+
+	private async failingRowTurnAt(): Promise<number | undefined> {
+		const stored = await this.context.ctx.storage.get(failingRowTurnKey);
+
+		return stored === undefined
+			? undefined
+			: failingRowTurnSchema.parse(stored).notBefore;
 	}
 
 	private markRetrying(
@@ -1207,6 +1648,9 @@ export class SigningKeysService {
 					.run();
 			});
 
+			// A pass that ran while the previous rotation was aborted can have
+			// written its turn or its wait after the abort removed them.
+			await this.forgetBackfillWaits();
 			this.resetKeyCaches();
 			const keys = await this.loadedKeys();
 			const rotated = keys.find((key) => key.id === id);
@@ -1341,6 +1785,7 @@ export class SigningKeysService {
 					.where(eq(schema.signingKeys.id, id))
 					.run();
 			});
+			await this.forgetBackfillWaits();
 			this.resetKeyCaches();
 
 			return 'absent' as const;
@@ -1373,30 +1818,21 @@ export class SigningKeysService {
 	/**
 	Returns when the re-signing backfill next has work: `now` while a backfill
 	needs staging, the time of the next purge request while a queued cache-tag
-	purge waits, or `undefined` when nothing remains. A purge waits for its
-	retry time and for the deployment's backfill pace, as far as this object has
-	learned it.
+	purge waits, or `undefined` when nothing remains. A purge waits until the
+	row from {@link nextBackfillRow} is due, for the shared rate-limit wait and
+	the backfill's own wait after a failed attempt, and for the deployment's
+	backfill pace, as far as this object has learned it.
 
 	The alarm calls this before running the backfill. It reads only this
 	object's local storage, so it makes no D1 call.
 	*/
 	async backfillWorkAt(now: number): Promise<number | undefined> {
-		const continuation = this.context.db
-			.select({
-				nextAttemptAt: schema.cachePurgeContinuations.nextAttemptAt,
-				failedAttempts: schema.cachePurgeContinuations.failedAttempts
-			})
-			.from(schema.cachePurgeContinuations)
-			.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
-			.orderBy(
-				schema.cachePurgeContinuations.priority,
-				schema.cachePurgeContinuations.createdAt
-			)
-			.get();
+		const next = await this.nextBackfillRow(now);
 
-		if (continuation !== undefined) {
+		if (next !== undefined) {
 			return Math.max(
-				await this.purgeBackoff.dueAt(continuation, now),
+				next.dueAt,
+				await this.attemptDueAt(now),
 				(await this.purgePace.knownNextAt()) ?? now
 			);
 		}
@@ -1435,7 +1871,7 @@ export class SigningKeysService {
 
 		if (row === undefined || this.completeIfDrained(row)) {
 			// Rows that remain wait for the next request.
-			if (purge === 'partial') {
+			if (purge === 'partial' || purge === 'turn') {
 				await this.armBackfillAlarm();
 			}
 

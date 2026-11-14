@@ -713,6 +713,63 @@ export class WorkersCachePurgeError extends Error {
 	}
 }
 
+/**
+The part of a stored narinfo row that keeps the signing-key backfill from
+publishing the narinfo: a field that does not build or render, named as in
+the narinfo, a hash that does not parse, a cache that is missing from the
+cache registry, or a defect that the backfill cannot attribute to a field.
+*/
+export type BackfillEntryDefect =
+	| 'storePath'
+	| 'url'
+	| 'compression'
+	| 'fileHash'
+	| 'fileSize'
+	| 'narHash'
+	| 'narSize'
+	| 'references'
+	| 'deriver'
+	| 'ca'
+	| 'sigs'
+	| 'hash'
+	| 'cacheIdentity'
+	| 'unknown';
+
+const backfillEntryDefectText: Readonly<Record<BackfillEntryDefect, string>> = {
+	storePath: 'its store path is invalid',
+	url: 'its URL is invalid',
+	compression: 'its compression is invalid',
+	fileHash: 'its file hash is invalid',
+	fileSize: 'its file size is invalid',
+	narHash: 'its NAR hash is invalid',
+	narSize: 'its NAR size is invalid',
+	references: 'its references are invalid',
+	deriver: 'its deriver is invalid',
+	ca: 'its content address is invalid',
+	sigs: 'its signatures are invalid',
+	hash: 'a hash does not parse',
+	cacheIdentity: 'its cache is missing from the cache registry',
+	unknown: 'it does not render as a narinfo'
+};
+
+/**
+The signing-key backfill cannot publish the narinfo of `storePathHash` with
+the new signature, because of `defect` in its stored row. The message is built
+from these two fields only, so the backfill can record it as the failure that
+`cupboard key status --debug` shows.
+*/
+export class BackfillEntryInvalidError extends Error {
+	constructor(
+		public readonly storePathHash: StorePathHash,
+		public readonly defect: BackfillEntryDefect
+	) {
+		super(
+			`The narinfo of ${storePathHash} cannot be published: ${backfillEntryDefectText[defect]}`
+		);
+		this.name = 'BackfillEntryInvalidError';
+	}
+}
+
 export class StoredControlTrustInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

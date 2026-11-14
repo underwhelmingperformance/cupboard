@@ -522,7 +522,23 @@ export class NarInfoObjectsService {
 	async narInfoFromRow(
 		row: typeof schema.narInfos.$inferSelect
 	): Promise<NarInfo | undefined> {
-		const blob = await this.context.d1
+		const blob = await this.blobFields(row.narHash);
+
+		if (blob === undefined) {
+			return undefined;
+		}
+
+		return this.buildNarInfo(row, blob);
+	}
+
+	/**
+	Reads the fields of the shared blob row that a narinfo for `narHash` is
+	rendered from, or undefined after the shared blob state is removed.
+	*/
+	async blobFields(
+		narHash: NixSha256HashString
+	): Promise<NarInfoBlobFields | undefined> {
+		return this.context.d1
 			.select({
 				fileHash: d1Schema.blobState.fileHash,
 				fileSize: d1Schema.blobState.fileSize,
@@ -530,14 +546,8 @@ export class NarInfoObjectsService {
 				incarnation: d1Schema.blobState.incarnation
 			})
 			.from(d1Schema.blobState)
-			.where(eq(d1Schema.blobState.narHash, row.narHash))
+			.where(eq(d1Schema.blobState.narHash, narHash))
 			.get();
-
-		if (blob === undefined) {
-			return undefined;
-		}
-
-		return this.buildNarInfo(row, blob);
 	}
 
 	buildNarInfo(
