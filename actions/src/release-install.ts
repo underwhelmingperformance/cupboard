@@ -91,11 +91,14 @@ import {
 	ReleaseInstallationProcessIdentityError,
 	ReleaseInstallationRollbackError,
 	ReleaseInstallationStateError,
-	ReleaseRepositoryInvalidError,
-	UnsupportedPlatformError
+	ReleaseRepositoryInvalidError
 } from './errors.ts';
 import { type Environment, parseLines } from './inputs.ts';
 import { requestErrorStatus } from './octokit-request-error.ts';
+import {
+	assertReleasePlatformSupported,
+	assetNameFor
+} from './release-platform.ts';
 
 export interface ReleaseAsset {
 	readonly name: string;
@@ -128,16 +131,6 @@ export const fallbackReleaseRepository = 'cupboard/cupboard';
 export const minimumCompatibleRelease = 'v0.0.19';
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
-
-const releasePlatforms = new Map([
-	['darwin', 'macos'],
-	['linux', 'linux']
-]);
-
-const releaseArchitectures = new Map([
-	['arm64', 'arm64'],
-	['x64', 'x64']
-]);
 
 const githubHeaders: Readonly<Record<string, string>> = {
 	accept: 'application/vnd.github+json',
@@ -215,20 +208,6 @@ export function assertReleaseCompatible(tagName: string): void {
 	}
 
 	throw new ReleaseCompatibilityError(tagName, minimumCompatibleRelease);
-}
-
-export function assetNameFor(
-	runtimePlatform: string = platform,
-	runtimeArchitecture: string = arch
-): string {
-	const releasePlatform = releasePlatforms.get(runtimePlatform);
-	const releaseArchitecture = releaseArchitectures.get(runtimeArchitecture);
-
-	if (releasePlatform === undefined || releaseArchitecture === undefined) {
-		throw new UnsupportedPlatformError(runtimePlatform, runtimeArchitecture);
-	}
-
-	return `cupboard-${releasePlatform}-${releaseArchitecture}.tar.gz`;
 }
 
 /**
@@ -339,6 +318,8 @@ interface VerifyReleaseDependencies {
 
 interface InstallCupboardDependencies {
 	readonly fetch?: typeof fetch;
+	readonly platform?: string;
+	readonly architecture?: string;
 }
 
 type RenameFile = typeof rename;
@@ -500,6 +481,10 @@ export async function installCupboard(
 	dependencies: InstallCupboardDependencies = {}
 ): Promise<InstalledCupboard> {
 	options.signal?.throwIfAborted();
+	assertReleasePlatformSupported(
+		dependencies.platform,
+		dependencies.architecture
+	);
 
 	const expectedSourceCommit = expectedSourceCommitFor(
 		options.version,
@@ -519,7 +504,11 @@ export async function installCupboard(
 	assertReleaseCompatible(release.tagName);
 
 	const binaryPath = path.join(options.installDirectory, 'cupboard');
-	const asset = releaseAssetFor(release);
+	const asset = releaseAssetFor(
+		release,
+		dependencies.platform,
+		dependencies.architecture
+	);
 	const assetName = asset.name;
 	const checksumAsset = findReleaseAsset(release, 'checksums.txt');
 	const downloadDirectory = await mkdtemp(

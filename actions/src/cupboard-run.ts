@@ -39,6 +39,7 @@ import {
 	ReadUserVariableInvalidError
 } from './errors.ts';
 import { type Environment, requireEnvironment } from './inputs.ts';
+import { assertReleasePlatformSupported } from './release-platform.ts';
 
 export type CupboardResultProtocol = 'result-file' | 'legacy-stderr';
 export type CacheSelectionSyntax = 'url' | 'flag';
@@ -419,8 +420,11 @@ not accept `--debug`, so the option goes only to a CLI whose help lists it.
 export async function cupboardDebugArguments(
 	binaryPath: string,
 	environment: Environment,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	host: { readonly platform?: string; readonly architecture?: string } = {}
 ): Promise<readonly string[]> {
+	assertReleasePlatformSupported(host.platform, host.architecture);
+
 	const logFile = subprocessLogFile(environment);
 
 	if (logFile === undefined && environment.RUNNER_DEBUG !== '1') {

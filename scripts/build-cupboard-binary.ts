@@ -26,14 +26,10 @@ interface RunOptions {
 	readonly optional?: boolean;
 }
 
-const supportedPlatforms = new Map([
-	['darwin', 'macos'],
-	['linux', 'linux']
-]);
-
-const supportedArchitectures = new Map([
-	['arm64', 'arm64'],
-	['x64', 'x64']
+const releaseAssetSuffixes = new Map([
+	['linux-x64', 'linux-x64'],
+	['linux-arm64', 'linux-arm64'],
+	['darwin-arm64', 'macos-arm64']
 ]);
 
 const sentinelFuse = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
@@ -342,14 +338,15 @@ export function releaseAssetNameFor(
 	runtimePlatform: string,
 	runtimeArchitecture: string
 ): string {
-	const releasePlatform = supportedPlatforms.get(runtimePlatform);
-	const releaseArchitecture = supportedArchitectures.get(runtimeArchitecture);
+	const suffix = releaseAssetSuffixes.get(
+		`${runtimePlatform}-${runtimeArchitecture}`
+	);
 
-	if (releasePlatform === undefined || releaseArchitecture === undefined) {
+	if (suffix === undefined) {
 		throw new UnsupportedPlatformError(runtimePlatform, runtimeArchitecture);
 	}
 
-	return `cupboard-${releasePlatform}-${releaseArchitecture}.tar.gz`;
+	return `cupboard-${suffix}.tar.gz`;
 }
 
 if (

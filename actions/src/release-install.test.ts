@@ -42,6 +42,7 @@ import {
 	ExpectedSourceCommitInvalidError,
 	GithubApiError,
 	InstalledReleaseVersionMismatchError,
+	IntelMacOsUnsupportedError,
 	InvalidReleaseAssetUrlError,
 	MalformedReleaseResponseError,
 	NoReleaseFoundError,
@@ -62,7 +63,6 @@ import {
 	assertExpectedSourceCommit,
 	assertInstalledReleaseVersion,
 	assertReleaseCompatible,
-	assetNameFor,
 	assetNamesFor,
 	downloadAsset,
 	expectedSourceCommitFor,
@@ -81,6 +81,10 @@ import {
 	splitRepository,
 	verifyReleaseAttestation
 } from './release-install.ts';
+import {
+	assertReleasePlatformSupported,
+	assetNameFor
+} from './release-platform.ts';
 
 describe('normaliseVersion', () => {
 	it.each([
@@ -150,6 +154,35 @@ describe('assertReleaseCompatible', () => {
 });
 
 describe('installCupboard compatibility', () => {
+	it('refuses an x86_64 macOS host before any request to GitHub', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const requests: string[] = [];
+		const fetcher: typeof fetch = (input) => {
+			requests.push(new Request(input).url);
+
+			return Promise.resolve(Response.json({}));
+		};
+
+		await expect(
+			installCupboard(
+				{
+					installDirectory,
+					releaseRepository: 'owner/repo',
+					version: 'v0.0.50',
+					includePrereleases: true,
+					githubToken: '',
+					environment: {}
+				},
+				createGithubReporter(),
+				{ fetch: fetcher, platform: 'darwin', architecture: 'x64' }
+			)
+		).rejects.toBeInstanceOf(IntelMacOsUnsupportedError);
+
+		expect(requests).toStrictEqual([]);
+	});
+
 	it('rejects a historical release before requesting an asset', async () => {
 		const installDirectory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-release-install-')
@@ -2556,7 +2589,6 @@ describe('splitRepository', () => {
 describe('assetNameFor', () => {
 	it.each([
 		['darwin', 'arm64', 'cupboard-macos-arm64.tar.gz'],
-		['darwin', 'x64', 'cupboard-macos-x64.tar.gz'],
 		['linux', 'arm64', 'cupboard-linux-arm64.tar.gz'],
 		['linux', 'x64', 'cupboard-linux-x64.tar.gz']
 	])(
@@ -2569,6 +2601,15 @@ describe('assetNameFor', () => {
 	it('rejects an unsupported platform', () => {
 		expect(() => assetNameFor('sunos', 'sparc')).toThrow(
 			UnsupportedPlatformError
+		);
+	});
+
+	it('rejects x86_64 macOS with a dedicated error', () => {
+		expect(() => {
+			assertReleasePlatformSupported('darwin', 'x64');
+		}).toThrow(IntelMacOsUnsupportedError);
+		expect(() => assetNameFor('darwin', 'x64')).toThrow(
+			IntelMacOsUnsupportedError
 		);
 	});
 

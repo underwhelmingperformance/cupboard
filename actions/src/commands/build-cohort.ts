@@ -169,6 +169,7 @@ import {
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
+import { assertReleasePlatformSupported } from '../release-platform.ts';
 import { rootRetention } from '../root-retention.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
@@ -562,6 +563,8 @@ export function resolveBuildCohortInputs(
 	if (cupboardPath === undefined) {
 		throw new MissingInputError('cupboard-path');
 	}
+
+	assertReleasePlatformSupported();
 
 	const readUser = providedReadUser(options.readUser);
 	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';

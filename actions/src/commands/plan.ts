@@ -129,6 +129,7 @@ import {
 	type TargetEvaluation,
 	targetIdentityKey
 } from '../publish-plan.ts';
+import { assertReleasePlatformSupported } from '../release-platform.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
 import {
@@ -511,6 +512,8 @@ export function resolvePlanInputs(
 	if (cupboardPath === undefined) {
 		throw new MissingInputError('cupboard-path');
 	}
+
+	assertReleasePlatformSupported();
 
 	// Both credential halves are taken verbatim: surrounding whitespace is
 	// part of a credential, so only its complete absence means "not set".

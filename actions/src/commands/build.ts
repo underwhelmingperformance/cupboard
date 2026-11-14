@@ -75,6 +75,7 @@ import {
 	provided,
 	providedChoice
 } from '../options.ts';
+import { assertReleasePlatformSupported } from '../release-platform.ts';
 
 export interface BuildActivity {
 	readonly derivation: DerivationPath;
@@ -624,6 +625,10 @@ export async function buildAction(
 		['none', 'outputs', 'built', 'closure'],
 		'outputs'
 	);
+
+	if (provided(options.cupboardPath) !== undefined) {
+		assertReleasePlatformSupported();
+	}
 
 	const installables = [...(options.installables ?? [])];
 	const isInlinePaths = isEnabled('inline-paths', options.inlinePaths, true);

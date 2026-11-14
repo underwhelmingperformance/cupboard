@@ -600,6 +600,15 @@ export class RunRootPermanentRequiredError extends UsageError {
 	}
 }
 
+export class IntelMacOsUnsupportedError extends UsageError {
+	constructor() {
+		super(
+			'x86_64 macOS is not supported: this version of the action refuses it for every cupboard release. Use an arm64 macOS runner or a Linux runner, or pin an older ref of the cupboard action or workflow.'
+		);
+		this.name = 'IntelMacOsUnsupportedError';
+	}
+}
+
 export class UnsupportedPlatformError extends UsageError {
 	constructor(
 		public readonly runtimePlatform: string,

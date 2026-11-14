@@ -35,6 +35,7 @@ import {
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
+import { assertReleasePlatformSupported } from '../release-platform.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
 interface StatusOptions {
@@ -114,6 +115,8 @@ async function attestStatusAction(
 	if (cupboardPath === undefined) {
 		throw new MissingInputError('cupboard-path');
 	}
+
+	assertReleasePlatformSupported();
 	const receiptFile = provided(options.receiptFile);
 	if (receiptFile === undefined) {
 		throw new MissingInputError('receipt-file');

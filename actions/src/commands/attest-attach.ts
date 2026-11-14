@@ -42,6 +42,7 @@ import {
 	providedUrl
 } from '../options.ts';
 import { parseChecksums } from '../release-install.ts';
+import { assertReleasePlatformSupported } from '../release-platform.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
 export interface AttestAttachOptions {
@@ -143,6 +144,8 @@ export function resolveAttestAttachInputs(
 	if (cupboardPath === undefined) {
 		throw new MissingInputError('cupboard-path');
 	}
+
+	assertReleasePlatformSupported();
 
 	const receiptFile = provided(options.receiptFile);
 	if (receiptFile === undefined) {

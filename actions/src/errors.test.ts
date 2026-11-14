@@ -31,6 +31,7 @@ import {
 	DuplicateGroupKeyError,
 	ExactReleaseTagRequiredError,
 	GithubApiError,
+	IntelMacOsUnsupportedError,
 	InvalidChecksumLineError,
 	InvalidReleaseAssetUrlError,
 	LegacyPushSummaryError,
@@ -68,6 +69,11 @@ describe('action errors', () => {
 		[
 			'UnsupportedPlatformError',
 			new UnsupportedPlatformError('sunos', 'sparc'),
+			usageExitCode
+		],
+		[
+			'IntelMacOsUnsupportedError',
+			new IntelMacOsUnsupportedError(),
 			usageExitCode
 		],
 		['GithubApiError', new GithubApiError('boom'), genericExitCode],

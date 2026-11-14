@@ -21,6 +21,7 @@ import {
 	CupboardReleaseSelectionConflictError,
 	CupboardVersionOutputMissingError,
 	GraceWaitConflictError,
+	IntelMacOsUnsupportedError,
 	LegacyPushSummaryError,
 	MissingInputError,
 	PermanentRetentionConflictError,
@@ -765,6 +766,30 @@ describe('acquirePushCupboard', () => {
 			]
 		});
 	});
+
+	it.each([
+		['a supplied executable', inputs.cupboardPath],
+		['a release installation', '']
+	])(
+		'refuses an x86_64 macOS host for %s before running anything',
+		async (_name, cupboardPath) => {
+			const install = vi.fn();
+			const inspectVersion = vi.fn();
+
+			await expect(
+				acquirePushCupboard({ ...inputs, cupboardPath }, {}, reporter, {
+					install,
+					inspectVersion,
+					platform: 'darwin',
+					architecture: 'x64'
+				})
+			).rejects.toBeInstanceOf(IntelMacOsUnsupportedError);
+			expect({
+				installCalls: install.mock.calls,
+				inspectVersionCalls: inspectVersion.mock.calls
+			}).toStrictEqual({ installCalls: [], inspectVersionCalls: [] });
+		}
+	);
 
 	it('uses the release installer when no executable path is supplied', async () => {
 		const installDirectory = await mkdtemp(
