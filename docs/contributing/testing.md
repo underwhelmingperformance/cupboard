@@ -356,9 +356,8 @@ supported system. `pnpm check:conformance-oracle` checks that file against the
 generated settings tables, without running Nix. After you update the flake lock,
 run `pnpm update:conformance-oracle` to regenerate both.
 
-CI runs this suite on `x86_64-linux`, `aarch64-linux`, `x86_64-darwin` and
-`aarch64-darwin`. [The Nix conformance suite](./nix-conformance.md) describes it
-in more detail.
+CI runs this suite on `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`.
+[The Nix conformance suite](./nix-conformance.md) describes it in more detail.
 
 ## Publishing pipeline test
 
