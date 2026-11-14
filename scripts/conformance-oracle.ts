@@ -49,21 +49,7 @@ const nixVersionSchema = z.string().regex(/^nix \(Nix\) \S+$/u);
 const gitRevisionSchema = z.string().regex(/^[\da-f]{40}$/u);
 
 const oracleSystemSchema = nixSystemSchema;
-const oracleVersionsSchema = z
-	.record(oracleSystemSchema, nixVersionSchema)
-	.superRefine((versions, context) => {
-		for (const system of oracleSystems) {
-			if (Object.hasOwn(versions, system)) {
-				continue;
-			}
-
-			context.addIssue({
-				code: 'custom',
-				message: `missing Nix version for ${system}`,
-				path: [system]
-			});
-		}
-	});
+const oracleVersionsSchema = z.record(oracleSystemSchema, nixVersionSchema);
 
 const oracleRecordSchema = z
 	.object({ versions: oracleVersionsSchema })

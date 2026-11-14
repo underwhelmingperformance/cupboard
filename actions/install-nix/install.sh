@@ -8,7 +8,7 @@ nix_system() {
   case "$1-$2" in
     x86_64-Linux) echo x86_64-linux ;;
     aarch64-Linux) echo aarch64-linux ;;
-    x86_64-Darwin) echo x86_64-darwin ;;
+    x86_64-Darwin) echo '::error::x86_64 macOS is not supported. Use an arm64 macOS runner or a Linux runner, or pin an older ref of the cupboard action or workflow.' >&2; return 1 ;;
     arm64-Darwin) echo aarch64-darwin ;;
     *) echo "::error::Unsupported runner system: $1-$2" >&2; return 1 ;;
   esac

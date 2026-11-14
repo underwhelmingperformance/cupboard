@@ -2,16 +2,13 @@ import { z } from 'zod';
 
 import configuredSystems from './nix-systems.json' with { type: 'json' };
 
-const nixArchitectureSchema = z.enum(['x86_64', 'aarch64']);
-const nixOperatingSystemSchema = z.enum(['linux', 'darwin']);
-
 /**
 A Nix system supported by Cupboard's flake and generated settings.
 */
-export const nixSystemSchema = z.templateLiteral([
-	nixArchitectureSchema,
-	'-',
-	nixOperatingSystemSchema
+export const nixSystemSchema = z.enum([
+	'x86_64-linux',
+	'aarch64-linux',
+	'aarch64-darwin'
 ]);
 
 export type NixSystem = z.infer<typeof nixSystemSchema>;

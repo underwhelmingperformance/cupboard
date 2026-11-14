@@ -153,7 +153,6 @@ const releaseAssetBySystem: Record<
 > = {
 	'x86_64-linux': { 'asset-platform': 'linux', 'asset-arch': 'x64' },
 	'aarch64-linux': { 'asset-platform': 'linux', 'asset-arch': 'arm64' },
-	'x86_64-darwin': { 'asset-platform': 'macos', 'asset-arch': 'x64' },
 	'aarch64-darwin': { 'asset-platform': 'macos', 'asset-arch': 'arm64' }
 };
 
@@ -1929,7 +1928,6 @@ describe('pinned Nix client', () => {
 				archive_release: 'v35',
 				sha256_x86_64_linux: digest,
 				sha256_aarch64_linux: digest,
-				sha256_x86_64_darwin: digest,
 				sha256_aarch64_darwin: digest
 			},
 			otherInstallers: [],

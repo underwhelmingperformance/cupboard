@@ -128,8 +128,7 @@ const checksumsFileName = 'checksums.txt';
 export const releaseArchiveNames: readonly string[] = [
 	'cupboard-linux-arm64.tar.gz',
 	'cupboard-linux-x64.tar.gz',
-	'cupboard-macos-arm64.tar.gz',
-	'cupboard-macos-x64.tar.gz'
+	'cupboard-macos-arm64.tar.gz'
 ];
 
 export const releaseAssetNames: readonly string[] = [

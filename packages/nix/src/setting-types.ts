@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { arch, platform } from 'node:process';
 
-import type { NixSystem } from './nix-systems.ts';
+import { type NixSystem, nixSystemSchema } from './nix-systems.ts';
 import { nixSettingTables } from './setting-types.generated.ts';
 
 export interface NixSettingTable {
@@ -25,14 +25,15 @@ export function nixSystemFor(
 				? 'aarch64'
 				: undefined;
 
-	if (
-		systemArchitecture === undefined ||
-		(operatingSystem !== 'linux' && operatingSystem !== 'darwin')
-	) {
+	if (systemArchitecture === undefined) {
 		return undefined;
 	}
 
-	return `${systemArchitecture}-${operatingSystem}`;
+	const candidate = nixSystemSchema.safeParse(
+		`${systemArchitecture}-${operatingSystem}`
+	);
+
+	return candidate.success ? candidate.data : undefined;
 }
 
 const currentNixSystem = nixSystemFor(platform, arch);

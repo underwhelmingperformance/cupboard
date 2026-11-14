@@ -3,27 +3,15 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  # Nixpkgs 26.11 dropped Intel macOS. Keep the final supported branch as a
-  # narrow compatibility input so a workflow pinned to Cupboard source can
-  # still acquire the same platforms as a published release.
-  inputs.nixpkgs-x86_64-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
-
   outputs =
     {
       self,
       nixpkgs,
-      nixpkgs-x86_64-darwin,
     }:
     let
       systems = map (entry: entry.system) (nixpkgs.lib.importJSON ./packages/nix/src/nix-systems.json);
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      packageSets = forAllSystems (
-        system:
-        if system == "x86_64-darwin" then
-          nixpkgs-x86_64-darwin.legacyPackages.${system}
-        else
-          nixpkgs.legacyPackages.${system}
-      );
+      packageSets = forAllSystems (system: nixpkgs.legacyPackages.${system});
 
       # The package is built from this flake's own source, so its version is the
       # revision it was built from. A pinned input therefore yields the matching
