@@ -117,7 +117,11 @@ cat > ci-admin-rule.json <<'EOF'
 {
   "issuer": "https://token.actions.githubusercontent.com",
   "audience": "https://cache.example.com",
-  "claims": { "sub": "repo:acme/infra:ref:refs/heads/main" },
+  "claims": {
+    "sub": "repo:acme/infra:ref:refs/heads/main",
+    "repository_id": "123456789",
+    "repository_owner_id": "987654321"
+  },
   "permittedGrants": [{ "type": "cupboard_wildcard" }]
 }
 EOF
@@ -128,7 +132,15 @@ cupboard control-oidc-trust add https://cache.example.com \
 The audience is the deployment's current URL without a trailing slash, which is
 the audience that `init` requests by default. `--audience` requests another
 audience, and `init` refuses `--audience` without `--github-oidc`. The `sub`
-claim pins the repository and the branch that may deploy.
+claim pins the repository's name and the branch that may deploy. The
+repository's numeric IDs also pin the repository, so a new repository with the
+old name doesn't match the rule. The deployment refuses a GitHub Actions rule
+without an exact `repository_id` or `repository_owner_id`; see [GitHub rules
+must pin the repository][github-repository-pin]. To find the IDs, run
+`gh api repos/acme/infra --jq '.id, .owner.id'`.
+
+[github-repository-pin]:
+  ../ci/trust-rules.md#github-rules-must-pin-the-repository
 
 The job needs:
 

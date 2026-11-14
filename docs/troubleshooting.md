@@ -163,6 +163,28 @@ to an eligible rule. Grants can compose within the preferred identity group, but
 a less preferred rule cannot supply missing authority. See
 [When several rules match](./ci/trust-rules.md#when-several-rules-match).
 
+### "A trust rule for GitHub Actions must require an exact repository_id claim"
+
+The tenant or the control plane refused a trust rule for GitHub Actions because
+the rule doesn't require an exact `repository_id` or `repository_owner_id`. The
+error code is `OIDC_TRUST_REPOSITORY_PIN_REQUIRED`. Add `repository_id`, or
+`repository_owner_id` to trust every repository of one owner, as an exact claim.
+`gh api repos/acme/app --jq '.id, .owner.id'` prints both IDs.
+
+The same refusal stops an extension of an existing rule that has neither claim.
+Add a replacement rule that pins the repository and has all the grants, then
+remove the old rule. See
+[GitHub rules must pin the repository](./ci/trust-rules.md#github-rules-must-pin-the-repository).
+
+### "A tenant's owner must be a person who signs in with cupboard login"
+
+`cupboard tenant create` was given `https://token.actions.githubusercontent.com`
+as the owner's issuer, and the deployment refused it with the code
+`TENANT_OWNER_ISSUER_UNSUPPORTED`. Create the tenant with the identity of the
+person who will administer it. That person then lets the workflow publish with
+`cupboard github setup`. See
+[Creating a tenant](./operator/tenants.md#creating-a-tenant).
+
 ### The preset fails the run
 
 The `pull-request-and-branch` preset fails pull requests from forks. It also

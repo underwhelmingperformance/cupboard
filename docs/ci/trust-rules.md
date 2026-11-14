@@ -237,6 +237,62 @@ A rule for GitHub should pin:
   a branch.
 - Optionally, the workflow file, by `job_workflow_ref`.
 
+### GitHub rules must pin the repository
+
+By default, GitHub Actions signs the tokens of every repository on GitHub with
+the issuer `https://token.actions.githubusercontent.com`, and each job chooses
+the audience of its own token. The issuer and audience therefore don't restrict
+a rule to particular repositories. A rule whose only claim is
+`ref=refs/heads/main` would accept a token from the `main` branch of any
+repository.
+
+For this reason, cupboard refuses to add a rule with that issuer unless the rule
+has one of these claims as an exact value:
+
+- `repository_id`, which pins the rule to one repository;
+- `repository_owner_id`, which pins the rule to every repository of one user or
+  organisation. Use this only when you trust every repository of that owner,
+  including repositories created later.
+
+A pattern doesn't count as a pin. The refusal has status 400 and the code
+`OIDC_TRUST_REPOSITORY_PIN_REQUIRED`. The same check applies to control trust
+rules, to rules given with `--from-file`, and to the API. The `add-github-*`
+commands and `cupboard github setup` always pin both IDs.
+
+GitHub Enterprise Cloud can give an enterprise an issuer of its own, and GitHub
+Enterprise Server has the issuer of its own host. Only the repositories of that
+enterprise or that server receive tokens from such an issuer, so cupboard
+doesn't require a pin for it.
+
+cupboard doesn't check rules that are already stored, and still matches them.
+`cupboard oidc-trust list` and `cupboard oidc-trust show` mark such a rule with
+`Repository pin: None`, and `list` warns about each enabled one. Run `list` in
+each tenant, and `cupboard control-oidc-trust list` for the control plane, to
+find every such rule. The Worker also logs a warning, with the token's
+repository, whenever an exchange through one of them succeeds; see [Trust rules
+without a repository pin][unpinned-log]. An unused rule never produces that
+warning, and neither does a rule whose exchanges are all refused.
+
+A rule without a pin can accept tokens from more than one repository. For each
+repository that the rule is meant to accept, add a replacement rule with the
+same claims and grants that pins that repository, and check that its jobs still
+exchange tokens. Remove the old rule only after that. A tenant's owner rule
+can't be removed, so the only way to stop trusting an owner rule without a pin
+is to replace the tenant; see [the upgrade note][owner-rule]. The API refuses to
+add grants to a rule without a pin. `cupboard github check --fix` never extends
+such a rule. When it repairs a job, it adds a new rule that pins both IDs, and
+the unpinned rule stays enabled until you remove it.
+
+A tenant's owner can't be a GitHub Actions identity, and neither can the
+deployment's admin. Their rules can require only the `sub` claim, which contains
+at most the repository's name. See [Creating a tenant][creating-a-tenant] and
+[How the claim works][claim].
+
+[unpinned-log]: ../operator/running.md#trust-rules-without-a-repository-pin
+[owner-rule]: ../operator/upgrade-notes/github-repository-pins.md
+[creating-a-tenant]: ../operator/tenants.md#creating-a-tenant
+[claim]: ../operator/deploying.md#how-the-claim-works
+
 ## What a rule can grant
 
 `--allow` takes one of these names. Repeat the flag for each grant:

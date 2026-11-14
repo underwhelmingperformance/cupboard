@@ -232,6 +232,19 @@ tags. That rule accepts every future release, so anyone who can push such a tag
 to cupboard's repository is inside your tenant's trust boundary. See
 [Trusting a reusable workflow](./ci/trust-rules.md#trusting-a-reusable-workflow).
 
+By default, GitHub Actions signs the tokens of every repository with one issuer,
+and each job chooses the audience of its token. A trust rule for that issuer is
+therefore limited to your repositories only by its claims. cupboard refuses a
+new rule for that issuer, on a tenant or on the control plane, unless it
+requires an exact `repository_id`, or an exact `repository_owner_id` for every
+repository of one owner. It also refuses that issuer as a tenant's owner and as
+the deployment's admin in a claim. cupboard still matches stored rules without a
+pin. `cupboard oidc-trust list` and `cupboard control-oidc-trust list` warn
+about each enabled one. Each Worker also writes a warning to its log when a
+token exchange or a read acquisition through one of them succeeds. A refused
+exchange writes no warning, so the log can't show that no token matched. See
+[GitHub rules must pin the repository](./ci/trust-rules.md#github-rules-must-pin-the-repository).
+
 When a cache publishes a store path, it inherits the existing attestations of a
 public cache in the same tenant that serves the path with the same NAR, and of
 its own earlier generation of the path. Publishing by reference from a public
