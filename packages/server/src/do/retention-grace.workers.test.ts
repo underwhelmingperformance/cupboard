@@ -45,7 +45,10 @@ import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { UploadConfirmSubrequestsExhaustedError } from '../errors.ts';
+import {
+	UploadConfirmSubrequestsExhaustedError,
+	UploadedObjectNotFoundError
+} from '../errors.ts';
 import {
 	narInfoObjectKey,
 	narObjectKey,
@@ -69,6 +72,7 @@ import {
 	defaultCache,
 	deletePath,
 	drivenDirectly,
+	expectSingleCommitDecision,
 	expectSingleUploadDecision,
 	flakyD1,
 	issueServerSignedToken,
@@ -2248,7 +2252,195 @@ describe('retention grace at publication', () => {
 			deadlines: []
 		});
 	});
+
+	// The losing reuse commit fails materialisation because its stale facts say
+	// that the tenant does not own the NAR, and the winning commit charges the
+	// shared generation before the loser reads its reservation. Demotion then
+	// removes the path before that read, or between the read and the gate that
+	// decides the loser's outcome, or not at all.
+	it.each([
+		{ moment: 'none', isServed: true },
+		{ moment: 'before', isServed: false },
+		{ moment: 'after', isServed: false }
+	] as const)(
+		'concedes a failed reuse commit only to a served charge, with demotion $moment its reservation read',
+		async ({ moment, isServed }) => {
+			await useTestServer(`failed-reuse-demoted-${moment}`);
+			const { token } = await bootstrap();
+			await setDefaultCacheGrace(3600);
+
+			const nar = await verifiableNar(`failed-reuse-demoted-${moment}`);
+			const narFields = {
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			};
+			await pushPath(
+				token,
+				uploadMetadata({ ...narFields, storePathHash: repeated('3') }),
+				defaultCache(),
+				nar
+			);
+			const metadata = uploadMetadata({
+				...narFields,
+				storePathHash: repeated('8'),
+				name: 'demoted'
+			});
+			const loser = expectSingleCommitDecision(
+				await negotiateUploads(token, [metadata]),
+				metadata
+			);
+			const winner = expectSingleCommitDecision(
+				await negotiateUploads(token, [metadata]),
+				metadata
+			);
+			await setRoot(token, { name: 'run', targets: [] });
+
+			const outcomes = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const { context } = instance;
+					const cache = resolvedCache(context);
+					context.db
+						.update(schema.pendingUploads)
+						.set({ attachRootName: rootNameSchema.parse('run') })
+						.where(eq(schema.pendingUploads.id, loser.uploadId))
+						.run();
+					const narInfoObjects = new NarInfoObjectsService(context);
+					const pipeline = pipelineFor(context, narInfoObjects);
+					const driven = drivenDirectly(pipeline);
+					const authority = new ReuseAuthority({
+						destination: cache.scope,
+						grants: adminGrants(),
+						views: []
+					});
+					const account = await driven.readTenantAccount();
+					const { blob } = await driven.probeMaterialisation(
+						uploadPathNegotiation(metadata)
+					);
+					const gate = demotionAtNextGate(context, narInfoObjects, metadata);
+					let winning: Promise<unknown> = Promise.resolve();
+					const isCharged = vi
+						.spyOn(pipeline, 'isGenerationCharged')
+						.mockImplementationOnce(async (...parameters) => {
+							await winning;
+							// The winner applied its own grace decision. Remove the deadline
+							// so that the test can see whether the loser applies its own.
+							context.db.delete(schema.retentionGrace).run();
+							if (moment === 'before') {
+								await demote(context, narInfoObjects, metadata);
+							}
+							// Vitest removes a once implementation before calling it, so this
+							// call runs the real read.
+							const wasCharged = await pipeline.isGenerationCharged(
+								...parameters
+							);
+							if (moment === 'after') {
+								gate.arm();
+							}
+							return wasCharged;
+						});
+
+					try {
+						// Both commits read the path's row before either reserves it.
+						// The loser's stale facts say the tenant does not own the NAR.
+						const losing = driven.commit(
+							rootLogger(),
+							cache,
+							uploadIdSchema.parse(loser.uploadId),
+							authority,
+							{ account, prefetched: { blob, isOwned: false } }
+						);
+						winning = driven.commit(
+							rootLogger(),
+							cache,
+							uploadIdSchema.parse(winner.uploadId),
+							authority,
+							{ account }
+						);
+						const [lost, won] = await Promise.allSettled([losing, winning]);
+
+						return {
+							lost:
+								lost.status === 'rejected' &&
+								lost.reason instanceof UploadedObjectNotFoundError
+									? 'UploadedObjectNotFoundError'
+									: lost,
+							won
+						};
+					} finally {
+						isCharged.mockRestore();
+						gate.restore();
+					}
+				}
+			);
+
+			expect({
+				outcomes,
+				loser: await pendingUploadVerdict(loser.uploadId),
+				isNarInfoObjectPresent: await isNarInfoObjectPresent(
+					metadata.storePathHash
+				),
+				retention: await retainedPaths()
+			}).toStrictEqual({
+				outcomes: {
+					lost: isServed
+						? {
+								status: 'fulfilled',
+								value: {
+									kind: 'settled',
+									response: {
+										storePathHash: metadata.storePathHash,
+										narHash: metadata.narHash,
+										status: 'already-present'
+									}
+								}
+							}
+						: 'UploadedObjectNotFoundError',
+					won: {
+						status: 'fulfilled',
+						value: {
+							kind: 'settled',
+							response: {
+								storePathHash: metadata.storePathHash,
+								narHash: metadata.narHash,
+								status: 'committed'
+							}
+						}
+					}
+				},
+				loser: undefined,
+				isNarInfoObjectPresent: isServed,
+				retention: {
+					deadlines: isServed ? [metadata.storePathHash] : [],
+					rootTargets: isServed ? [metadata.storePathHash] : []
+				}
+			});
+		}
+	);
 });
+
+// The paths that a grace deadline or a root target of the default cache keeps.
+async function retainedPaths(): Promise<{
+	readonly deadlines: readonly string[];
+	readonly rootTargets: readonly string[];
+}> {
+	const deadlines = await graceDeadlineRows(defaultCache());
+	const rootTargets = await runInDurableObject(currentServer(), (instance) =>
+		Promise.resolve(
+			instance.context.db
+				.select({ storePathHash: schema.retentionRootTargets.storePathHash })
+				.from(schema.retentionRootTargets)
+				.all()
+				.map((row) => row.storePathHash)
+		)
+	);
+	return {
+		deadlines: deadlines.map((row) => row.storePathHash),
+		rootTargets
+	};
+}
 
 // Delete the path's NAR and demote its narinfo object after the first
 // servability probe returns, as the `blob-demote` scan does when it finds the
@@ -2264,6 +2456,46 @@ async function demote(
 		storePathHashSchema.parse(path.storePathHash),
 		path.narHash
 	);
+}
+
+/**
+Demotes the path when the code under test next enters a critical section after
+`arm` is called. Critical sections entered during a servability probe do not
+count, so the demotion comes after every check that precedes the gate.
+*/
+function demotionAtNextGate(
+	context: ServerContext,
+	narInfoObjects: NarInfoObjectsService,
+	path: UploadPathMetadata
+): { readonly arm: () => void; readonly restore: () => void } {
+	const enter = context.criticalSection.bind(context);
+	let isArmed = false;
+	// A probe's settled result stays `incomplete` until its promise settles.
+	const probes = vi.spyOn(
+		NarInfoObjectsService.prototype,
+		'servableNarInfoVersions'
+	);
+	const isProbing = (): boolean =>
+		probes.mock.settledResults.some((result) => result.type === 'incomplete');
+	const sections = vi
+		.spyOn(context, 'criticalSection')
+		.mockImplementation(async (run) => {
+			if (isArmed && !isProbing()) {
+				isArmed = false;
+				await demote(context, narInfoObjects, path);
+			}
+			return enter(run);
+		});
+
+	return {
+		arm: () => {
+			isArmed = true;
+		},
+		restore: () => {
+			sections.mockRestore();
+			probes.mockRestore();
+		}
+	};
 }
 
 function demotedAfterProbe(

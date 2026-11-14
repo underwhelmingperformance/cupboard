@@ -1313,6 +1313,15 @@ committed goes on with its own bytes and defers to verification, which restores
 the NAR. A commit that lost the reservation leaves its upload for verification.
 Neither reports the path as `already-present`.
 
+A reuse commit can fail to materialise after another commit of the same
+reservation was charged, for example when deletion has removed the tenant's
+ownership record for the NAR. The commit then applies its grace and root
+decisions to the charged generation and reports the path as `already-present`,
+but only when the cache serves that generation. The charge read in D1 cannot
+show that the NAR has gone, so the commit checks availability and watches the
+path for demotion until its gate decides. When the check fails, the commit
+fails, the charged row stays, and the client negotiates the path again.
+
 Unfinished recovery stops 24 hours after first acceptance. Push expiry does not
 cancel accepted work, but prevents new operations and new transfers. Claims,
 verification requests and the D1 publication fence enforce the recovery
