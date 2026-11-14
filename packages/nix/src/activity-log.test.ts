@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	builderFailures,
+	buildFailureStatuses,
 	copySources,
-	firstBuildFailure
+	firstBuildFailure,
+	unreachableBuilders
 } from './activity-log.ts';
 
 const appPath = storePathSchema.parse(
@@ -97,6 +99,185 @@ describe('copySources', () => {
 		}
 	])('extracts $name', ({ logs, expected }) => {
 		expect(copySources(logs)).toStrictEqual(expected);
+	});
+});
+
+function colour(text: string): string {
+	return `\u{1B}[35;1m${text}\u{1B}[0m`;
+}
+
+// Nix 2.34.8 logs an error from a local build with `msg`, which has the
+// `error: ` prefix and indents the lines after the first, and with `raw_msg`,
+// which has neither. A build through the daemon logs only `msg`.
+function localError(text: string): string {
+	return JSON.stringify({
+		action: 'msg',
+		level: 0,
+		msg: `\u{1B}[31;1merror:\u{1B}[0m ${text.replaceAll('\n', '\n       ')}`,
+		raw_msg: text
+	});
+}
+
+function daemonError(text: string): string {
+	return JSON.stringify({
+		action: 'msg',
+		level: 0,
+		msg: `\u{1B}[31;1merror:\u{1B}[0m ${text.replaceAll('\n', '\n       ')}`
+	});
+}
+
+const errorForms = [
+	{ form: 'a local build', error: localError },
+	{ form: 'a build through the daemon', error: daemonError }
+];
+
+const requiredFeatures = '{kvm}';
+const availableFeatures = '{benchmark}';
+const appDerivation = `${appPath}.drv`;
+const libraryDerivation = `${libraryPath}.drv`;
+
+describe('buildFailureStatuses', () => {
+	describe.each(errorForms)('in the log of $form', ({ error }) => {
+		it.each([
+			{
+				name: 'a non-deterministic build',
+				text: `derivation '${colour(appDerivation)}' may not be deterministic: output ${colour(`"${appPath}"`)} differs`,
+				expected: [{ kind: 'not-deterministic', derivation: appDerivation }]
+			},
+			{
+				name: 'missing system features',
+				text: `Cannot build '${colour(appDerivation)}'.\nReason: \u{1B}[31;1mmissing system features\u{1B}[0m\nRequired features: ${requiredFeatures}\nAvailable features: ${availableFeatures}`,
+				expected: [{ kind: 'input-rejected', derivation: appDerivation }]
+			},
+			{
+				name: 'a platform mismatch',
+				text: `Cannot build '${colour(appDerivation)}'.\nReason: \u{1B}[31;1mplatform mismatch\u{1B}[0m\nRequired system: '${colour('riscv64-linux')}'\nCurrent system: '${colour('aarch64-darwin')}'`,
+				expected: [{ kind: 'input-rejected', derivation: appDerivation }]
+			},
+			{
+				name: 'disabled local builds',
+				text: `Cannot build '${colour(appDerivation)}'.\nReason: \u{1B}[31;1mlocal builds are disabled\u{1B}[0m (max-jobs = 0)`,
+				expected: [{ kind: 'input-rejected', derivation: appDerivation }]
+			},
+			{
+				name: 'a failed dependency',
+				text: `Cannot build '${colour(appDerivation)}'.\nReason: \u{1B}[31;1m2 dependencies failed\u{1B}[0m.\nOutput paths:\n  ${colour(appPath)}`,
+				expected: [{ kind: 'dependency-failed', derivation: appDerivation }]
+			},
+			{
+				name: 'a timeout, which has no derivation',
+				text: 'timed out after 3600 seconds',
+				expected: [{ kind: 'timed-out' }]
+			},
+			{
+				name: 'a timeout that the build hook reports for a remote machine',
+				text: `build of '${colour(appDerivation)}' on '${colour('ssh-ng://builder.example')}' failed: timed out after 3600 seconds`,
+				expected: [{ kind: 'timed-out', derivation: appDerivation }]
+			},
+			{
+				name: 'a builder that wrote too much log output',
+				text: `building derivation '${colour(appDerivation)}' killed after writing more than 67108864 bytes of log output`,
+				expected: [{ kind: 'log-limit-exceeded', derivation: appDerivation }]
+			},
+			{
+				name: 'a hash mismatch in a fixed-output derivation',
+				text: `hash mismatch in fixed-output derivation '${colour(appDerivation)}':\n  specified: ${colour('sha256-AAAA')}\n     got:    ${colour('sha256-BBBB')}`,
+				expected: [{ kind: 'output-rejected', derivation: appDerivation }]
+			},
+			{
+				name: 'a hash mismatch that the build hook reports for a remote machine',
+				text: `build of '${colour(appDerivation)}' on '${colour('ssh-ng://builder.example')}' failed: hash mismatch in fixed-output derivation '${colour(appDerivation)}':\n  specified: ${colour('sha256-AAAA')}\n     got:    ${colour('sha256-BBBB')}`,
+				expected: [{ kind: 'output-rejected', derivation: appDerivation }]
+			},
+			{
+				name: 'a builder that produced no output',
+				text: `builder for '${colour(appDerivation)}' failed to produce output path for output '${colour('out')}' at ${colour(`"${appPath}"`)}`,
+				expected: [{ kind: 'output-rejected', derivation: appDerivation }]
+			},
+			{
+				name: 'an output with a reference that it may not have',
+				text: `output '${colour(appPath)}' is not allowed to refer to the following paths:\n  ${colour(libraryPath)}`,
+				expected: [{ kind: 'output-rejected' }]
+			},
+			{
+				name: 'a failed builder, which has no status of its own',
+				text: `Cannot build '${colour(appDerivation)}'.\nReason: \u{1B}[31;1mbuilder failed with exit code 1\u{1B}[0m.\nOutput paths:\n  ${colour(appPath)}`,
+				expected: []
+			},
+			{
+				name: 'a failed builder whose log tail quotes a timeout and a mismatch',
+				text: `Cannot build '${colour(appDerivation)}'.\nReason: \u{1B}[31;1mbuilder failed with exit code 1\u{1B}[0m.\nOutput paths:\n  ${colour(appPath)}\nLast 2 log lines:\n> timed out after 30 seconds\n> derivation '${libraryDerivation}' may not be deterministic: output "${libraryPath}" differs`,
+				expected: []
+			}
+		])('reads $name', ({ text, expected }) => {
+			expect(buildFailureStatuses(error(text))).toStrictEqual(expected);
+		});
+	});
+
+	it('lists the statuses in log order and ignores other records', () => {
+		expect(
+			buildFailureStatuses(
+				[
+					'malformed',
+					JSON.stringify({
+						action: 'msg',
+						level: 3,
+						msg: 'timed out after 1 seconds'
+					}),
+					daemonError(
+						`Cannot build '${libraryDerivation}'.\nReason: 1 dependency failed.`
+					),
+					daemonError('timed out after 1 seconds')
+				].join('\n')
+			)
+		).toStrictEqual([
+			{ kind: 'dependency-failed', derivation: libraryDerivation },
+			{ kind: 'timed-out' }
+		]);
+	});
+});
+
+describe('unreachableBuilders', () => {
+	it.each([
+		{
+			name: 'a remote builder that the hook failed to use',
+			lines: [
+				daemonError(
+					`cannot build on '${colour('ssh-ng://builder.example')}': failed to start SSH connection`
+				)
+			],
+			expected: ['ssh-ng://builder.example']
+		},
+		{
+			name: 'each remote builder in log order',
+			lines: [
+				localError("cannot build on 'ssh://first.example': connection refused"),
+				localError("cannot build on 'ssh://second.example': connection refused")
+			],
+			expected: ['ssh://first.example', 'ssh://second.example']
+		},
+		{
+			name: 'a log with only the hook warning that no machine matches',
+			lines: [
+				JSON.stringify({
+					action: 'msg',
+					level: 1,
+					msg: 'Failed to find a machine for remote build!\nderivation: app.drv'
+				})
+			],
+			expected: []
+		},
+		{
+			name: 'a builder log tail that quotes the message',
+			lines: [
+				daemonError(
+					`Cannot build '${appDerivation}'.\nReason: builder failed with exit code 1.\nLast 1 log lines:\n> cannot build on 'ssh://quoted.example': refused`
+				)
+			],
+			expected: []
+		}
+	])('reads $name', ({ lines, expected }) => {
+		expect(unreachableBuilders(lines.join('\n'))).toStrictEqual(expected);
 	});
 });
 

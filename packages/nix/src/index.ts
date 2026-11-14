@@ -1,8 +1,10 @@
 export {
 	activityLogRecords,
 	builderFailures,
+	buildFailureStatuses,
 	copySources,
-	firstBuildFailure
+	firstBuildFailure,
+	unreachableBuilders
 } from './activity-log.ts';
 export type {
 	DependencyOutput,
